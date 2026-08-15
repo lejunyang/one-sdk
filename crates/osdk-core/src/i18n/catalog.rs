@@ -359,6 +359,38 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.lock.about",
+        (
+            "Resolve exact project versions into osdk.lock",
+            "将项目工具解析为精确版本并写入 osdk.lock",
+        ),
+    );
+    m.insert(
+        "help.outdated.about",
+        (
+            "Show requested tools whose latest resolution is not installed",
+            "显示尚未安装最新匹配版本的工具",
+        ),
+    );
+    m.insert(
+        "help.upgrade.about",
+        (
+            "Install current remote resolutions and update osdk.lock",
+            "安装当前远端解析结果并更新 osdk.lock",
+        ),
+    );
+    m.insert(
+        "help.exec.about",
+        (
+            "Run a command with one or more managed tools",
+            "使用一个或多个托管工具运行命令",
+        ),
+    );
+    m.insert(
+        "help.completions.about",
+        ("Generate shell completion code", "生成 Shell 补全脚本"),
+    );
+    m.insert(
         "help.flag.lang",
         (
             "Output language (en|zh); overrides locale and OSDK_LANG",

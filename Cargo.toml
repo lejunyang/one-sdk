@@ -16,6 +16,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 # CLI
 clap = { version = "4", features = ["derive", "env", "string", "wrap_help"] }
+clap_complete = "4"
 # async runtime + http
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "sync"] }
 async-trait = "0.1"

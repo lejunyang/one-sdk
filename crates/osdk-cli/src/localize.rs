@@ -30,6 +30,7 @@ fn localize_global_args(cmd: Command) -> Command {
         .mut_arg("refresh_sources", |a| {
             a.help(h("help.flag.refresh_sources"))
         })
+        .mut_arg("offline", |a| a.help(h("help.flag.offline")))
         .mut_arg("lang", |a| a.help(h("help.flag.lang")))
 }
 
@@ -40,6 +41,19 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
             .mut_arg("opts", |a| a.help(h("help.opt")))
     })
+    .mut_subcommand("lock", |c| {
+        c.about(h("help.lock.about"))
+            .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
+            .mut_arg("opts", |a| a.help(h("help.opt")))
+    })
+    .mut_subcommand("outdated", |c| c.about(h("help.outdated.about")))
+    .mut_subcommand("upgrade", |c| {
+        c.about(h("help.upgrade.about"))
+            .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
+            .mut_arg("opts", |a| a.help(h("help.opt")))
+    })
+    .mut_subcommand("exec", |c| c.about(h("help.exec.about")))
+    .mut_subcommand("completions", |c| c.about(h("help.completions.about")))
     .mut_subcommand("list", |c| {
         c.about(h("help.list.about"))
             .mut_arg("tool", |a| a.help(h("help.list.arg.tool")))

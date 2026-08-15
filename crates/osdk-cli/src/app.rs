@@ -18,6 +18,7 @@ pub struct GlobalOverrides {
     pub quiet: bool,
     pub source: Option<String>,
     pub refresh_sources: bool,
+    pub offline: bool,
     pub lang: Option<String>,
 }
 
@@ -47,6 +48,9 @@ impl App {
         }
         if overrides.yes {
             config.settings.yes = true;
+        }
+        if overrides.offline {
+            config.settings.offline = true;
         }
 
         // Finalize language now that config is loaded. Precedence:

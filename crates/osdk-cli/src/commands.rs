@@ -1,6 +1,7 @@
 //! Command handlers.
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use osdk_core::backend::{Backend, InstallCtx};
 use osdk_core::source::select;
 use osdk_core::t;
@@ -24,21 +25,173 @@ fn apply_source_override(app: &mut App, tool: &str) {
 }
 
 pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let explicit = !tools.is_empty();
+    let use_lock = !explicit && opts.is_empty();
+    let requests = if use_lock {
+        requests_from_lock(app)?.unwrap_or(gather_requests(app, tools)?)
+    } else {
+        gather_requests(app, tools)?
+    };
+    install_requests(app, requests, opts).await?;
+    Ok(())
+}
+
+pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let requests = gather_requests(app, tools)?;
+    let resolved = resolve_requests(app, requests, opts).await?;
+    let cwd = std::env::current_dir()?;
+    let path = project_lock_path(app, &cwd);
+    crate::lockfile::merge_resolved(&path, app.ctx.platform, &resolved)?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
+    let requests = gather_requests(app, tools)?;
+    let resolved = resolve_requests(app, requests, Vec::new()).await?;
+    let mut any = false;
+    for (request, latest) in resolved {
+        let backend = app.registry.get(&request.backend)?;
+        let installed = backend.list_installed(&app.ctx)?;
+        let current = installed
+            .iter()
+            .max_by(|left, right| {
+                osdk_core::backend::python::cmp_versions(left, right).then_with(|| left.cmp(right))
+            })
+            .map(String::as_str)
+            .unwrap_or("-");
+        if !installed.iter().any(|version| version == &latest.version) {
+            any = true;
+            println!("{} {} -> {}", request.backend, current, latest.version);
+        }
+    }
+    if !any {
+        println!("all requested tools are up to date");
+    }
+    Ok(())
+}
+
+pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let requests = gather_requests(app, tools)?;
+    let resolved = install_requests(app, requests, opts).await?;
+    let cwd = std::env::current_dir()?;
+    let path = project_lock_path(app, &cwd);
+    crate::lockfile::merge_resolved(&path, app.ctx.platform, &resolved)?;
+    println!("updated {}", path.display());
+    Ok(())
+}
+
+pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
+    let requests = gather_requests(app, tools)?;
+    let resolved = install_requests(app, requests, Vec::new()).await?;
+    let mut paths = Vec::new();
+    let mut env = std::collections::BTreeMap::new();
+    for (_, version) in &resolved {
+        let backend = app.registry.get(&version.backend)?;
+        paths.extend(backend.bin_paths(&app.ctx, version)?);
+        env.extend(backend.exec_env(&app.ctx, version)?);
+    }
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    paths.extend(std::env::split_paths(&existing_path));
+    env.insert(
+        "PATH".into(),
+        std::env::join_paths(paths)?.to_string_lossy().into_owned(),
+    );
+
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow!("exec requires a command"))?;
+    let status = std::process::Command::new(program)
+        .args(args)
+        .envs(env)
+        .status()
+        .with_context(|| format!("running {program}"))?;
+    if !status.success() {
+        return Err(anyhow!("command exited with {status}"));
+    }
+    Ok(())
+}
+
+pub fn completions(shell: clap_complete::Shell) -> Result<()> {
+    use clap::CommandFactory;
+    let mut command = crate::cli::Cli::command();
+    clap_complete::generate(shell, &mut command, "osdk", &mut std::io::stdout());
+    Ok(())
+}
+
+async fn install_requests(
+    app: &mut App,
+    requests: Vec<ToolRequest>,
+    opts: Vec<String>,
+) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
-    let mut requests = gather_requests(app, tools)?;
+    let mut requests = requests;
     if requests.is_empty() {
         println!("{}", t!("msg.nothing_to_install"));
-        return Ok(());
+        return Ok(Vec::new());
     }
     for req in &mut requests {
         for (k, v) in &parsed_opts {
             req.options.insert(k.clone(), v.clone());
         }
+        apply_source_override(app, &req.backend);
     }
-    for req in requests {
-        install_one(app, &req).await?;
+    let jobs = app.ctx.config.settings.jobs.max(1);
+    let installed = stream::iter(requests.into_iter().map(|req| {
+        let app_ref: &App = app;
+        async move {
+            let installed = install_one_without_shims(app_ref, &req).await?;
+            Ok::<_, anyhow::Error>((req, installed))
+        }
+    }))
+    .buffer_unordered(jobs)
+    .try_collect::<Vec<_>>()
+    .await?;
+    let mut resolved = Vec::with_capacity(installed.len());
+    for (request, (backend, version)) in installed {
+        generate_shims_for(app, backend.as_ref(), &version)?;
+        resolved.push((request, version));
     }
-    Ok(())
+    resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
+    Ok(resolved)
+}
+
+async fn resolve_requests(
+    app: &mut App,
+    requests: Vec<ToolRequest>,
+    opts: Vec<String>,
+) -> Result<Vec<(ToolRequest, ToolVersion)>> {
+    let parsed_opts = parse_opts(&opts)?;
+    let mut resolved = Vec::new();
+    for mut request in requests {
+        for (key, value) in &parsed_opts {
+            request.options.insert(key.clone(), value.clone());
+        }
+        apply_source_override(app, &request.backend);
+        let backend = app.registry.get(&request.backend)?;
+        let version = backend.resolve_version(&app.ctx, &request).await?;
+        resolved.push((request, version));
+    }
+    resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
+    Ok(resolved)
+}
+
+fn requests_from_lock(app: &App) -> Result<Option<Vec<ToolRequest>>> {
+    let cwd = std::env::current_dir()?;
+    let Some(path) = crate::lockfile::find(&cwd) else {
+        return Ok(None);
+    };
+    crate::lockfile::locked_requests(&path, app.ctx.platform)
+}
+
+fn project_lock_path(app: &App, cwd: &std::path::Path) -> std::path::PathBuf {
+    app.ctx
+        .config
+        .project_config_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(|directory| directory.join(crate::lockfile::LOCKFILE_NAME))
+        .unwrap_or_else(|| crate::lockfile::default_path(cwd))
 }
 
 /// Parse repeated `key=value` option strings into pairs.
@@ -55,9 +208,18 @@ fn parse_opts(opts: &[String]) -> Result<Vec<(String, String)>> {
 /// Resolve, install, and shim a single request.
 async fn install_one(app: &mut App, req: &ToolRequest) -> Result<ToolVersion> {
     apply_source_override(app, &req.backend);
+    let (backend, version) = install_one_without_shims(app, req).await?;
+    generate_shims_for(app, backend.as_ref(), &version)?;
+    Ok(version)
+}
+
+async fn install_one_without_shims(
+    app: &App,
+    req: &ToolRequest,
+) -> Result<(std::sync::Arc<dyn Backend>, ToolVersion)> {
     if app.refresh_sources {
         let backend = app.registry.get(&req.backend)?;
-        let _ = select::refresh(&app.ctx, backend.as_ref()).await;
+        select::refresh(&app.ctx, backend.as_ref()).await?;
     }
     let backend = app.registry.get(&req.backend)?;
     let tv = backend
@@ -76,8 +238,7 @@ async fn install_one(app: &mut App, req: &ToolRequest) -> Result<ToolVersion> {
             .with_context(|| format!("installing {}", tv))?;
         println!("{}", t!("msg.installed", tool = tv));
     }
-    generate_shims_for(app, backend.as_ref(), &tv)?;
-    Ok(tv)
+    Ok((backend, tv))
 }
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
@@ -212,6 +373,7 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
     let backend = app.registry.get(&req.backend)?;
     let version = match &req.spec {
         VersionSpec::Exact(v) => v.clone(),
+        VersionSpec::Latest if backend.id() == "rust" => "stable".to_string(),
         VersionSpec::Prefix(p) => {
             // pick the installed version matching the prefix
             let installed = backend.list_installed(&app.ctx)?;
@@ -488,6 +650,8 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             println!("cache_dir    = {}", app.ctx.dirs.cache.display());
             println!("link_mode    = {}", s.link_mode);
             println!("jobs         = {}", s.jobs);
+            println!("offline      = {}", s.offline);
+            println!("verify_signatures = {}", s.verify_signatures);
             println!("selection    = {:?}", app.ctx.config.sources.selection);
             if !app.ctx.config.tools.is_empty() {
                 println!("tools:");

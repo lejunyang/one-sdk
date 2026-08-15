@@ -44,6 +44,10 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub refresh_sources: bool,
 
+    /// Disable network access and use cached metadata/artifacts only.
+    #[arg(long, global = true, env = "OSDK_OFFLINE")]
+    pub offline: bool,
+
     /// Output language (en|zh); overrides locale and OSDK_LANG.
     #[arg(long, global = true, value_name = "LANG")]
     pub lang: Option<String>,
@@ -61,6 +65,46 @@ pub enum Command {
         /// `-o distribution=zulu` (java). Applied to all listed tools.
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         opts: Vec<String>,
+    },
+
+    /// Resolve project tools and write exact versions to osdk.lock.
+    Lock {
+        /// Optional tool requests; empty resolves the current project config.
+        tools: Vec<String>,
+        /// Backend-specific option as key=value (repeatable).
+        #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
+        opts: Vec<String>,
+    },
+
+    /// Show installed versions that differ from the current remote resolution.
+    Outdated {
+        /// Optional tool requests; empty checks the current project config.
+        tools: Vec<String>,
+    },
+
+    /// Install the latest versions matching project or explicit requests.
+    Upgrade {
+        /// Optional tool requests; empty upgrades the current project config.
+        tools: Vec<String>,
+        /// Backend-specific option as key=value (repeatable).
+        #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
+        opts: Vec<String>,
+    },
+
+    /// Install tools if needed and run a command with their exact environment.
+    Exec {
+        /// Tool request to expose, repeatable (e.g. --tool node@20).
+        #[arg(short = 't', long = "tool", required = true)]
+        tools: Vec<String>,
+        /// Command and arguments after `--`.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Generate shell completion code.
+    Completions {
+        /// Target shell.
+        shell: clap_complete::Shell,
     },
 
     /// List installed versions.

@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod config_edit;
 mod localize;
+mod lockfile;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
@@ -36,6 +37,7 @@ fn main() {
         quiet: cli.global.quiet,
         source: cli.global.source.clone(),
         refresh_sources: cli.global.refresh_sources,
+        offline: cli.global.offline,
         lang: cli.global.lang.clone(),
     };
 
@@ -79,6 +81,11 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<()> {
 async fn dispatch(app: &mut App, command: Command) -> Result<()> {
     match command {
         Command::Install { tools, opts } => commands::install(app, tools, opts).await,
+        Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
+        Command::Outdated { tools } => commands::outdated(app, tools).await,
+        Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
+        Command::Exec { tools, command } => commands::exec_cmd(app, tools, command).await,
+        Command::Completions { shell } => commands::completions(shell),
         Command::List { tool } => commands::list(app, tool),
         Command::ListRemote { tool, filter } => commands::list_remote(app, tool, filter).await,
         Command::Use { tool, global, opts } => commands::use_cmd(app, tool, global, opts).await,
