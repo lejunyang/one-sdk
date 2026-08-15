@@ -1,0 +1,2 @@
+# One version per line; blank lines and comments are ignored.
+1.2.3

@@ -71,6 +71,7 @@ impl App {
 
         let client = http::client().context("building http client")?;
         let cas = Arc::new(Cas::new(dirs.store.clone()));
+        let registry = Registry::load(&dirs).context("loading declarative backend definitions")?;
 
         let ctx = Ctx {
             dirs,
@@ -83,7 +84,7 @@ impl App {
 
         Ok(App {
             ctx,
-            registry: Registry::new(),
+            registry,
             source_override: overrides.source,
             refresh_sources: overrides.refresh_sources,
         })

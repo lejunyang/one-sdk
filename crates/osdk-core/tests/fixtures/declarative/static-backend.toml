@@ -1,0 +1,18 @@
+schema = 1
+id = "acme"
+bin_paths = ["bin"]
+bin_names = ["acme", "acmectl"]
+idiomatic_files = [".acme-version"]
+
+[versions]
+values = ["1.0.0", "1.2.3"]
+
+[archive]
+url = "https://downloads.example.test/acme/{version}/{file}"
+file = "acme-{version}-{os}-{arch}.tar.gz"
+kind = "tar.gz"
+strip_root = true
+
+[archive.checksum]
+algorithm = "sha256"
+url = "{archive_url}.sha256"

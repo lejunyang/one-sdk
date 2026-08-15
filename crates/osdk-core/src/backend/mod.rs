@@ -16,6 +16,7 @@ use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub mod bun;
+pub mod declarative;
 pub mod deno;
 pub mod github;
 pub mod go;

@@ -52,7 +52,13 @@ fn real_main() -> i32 {
         }
     });
 
-    let registry = Registry::new();
+    let registry = match Registry::load(&dirs) {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("osdk-shim: {e}");
+            return 1;
+        }
+    };
 
     // Build the (sync) context up front; needed to resolve which backend owns
     // this tool name by scanning installed bin names.
