@@ -126,7 +126,15 @@ fn real_main() -> i32 {
         }
     };
 
-    exec(&exe, forward_args)
+    let exec_env = match backend.exec_env(&ctx, &tv) {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!("osdk-shim: {e}");
+            return 1;
+        }
+    };
+
+    exec(&exe, forward_args, &exec_env)
 }
 
 /// Determine the tool name and args to forward.
@@ -311,17 +319,17 @@ fn exe_candidates(name: &str) -> Vec<String> {
 }
 
 #[cfg(unix)]
-fn exec(exe: &PathBuf, args: &[String]) -> i32 {
+fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String, String>) -> i32 {
     use std::os::unix::process::CommandExt;
     // Replace the current process so signals/exit codes pass through cleanly.
-    let err = Command::new(exe).args(args).exec();
+    let err = Command::new(exe).args(args).envs(env).exec();
     eprintln!("osdk-shim: failed to exec {}: {err}", exe.display());
     126
 }
 
 #[cfg(not(unix))]
-fn exec(exe: &PathBuf, args: &[String]) -> i32 {
-    match Command::new(exe).args(args).status() {
+fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String, String>) -> i32 {
+    match Command::new(exe).args(args).envs(env).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("osdk-shim: failed to run {}: {e}", exe.display());

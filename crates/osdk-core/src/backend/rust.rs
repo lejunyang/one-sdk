@@ -10,6 +10,7 @@ use async_trait::async_trait;
 
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::{Error, Result};
+use crate::pipeline::{self, HashAlgo};
 use crate::process;
 use crate::source::Source;
 use crate::version::{ToolVersion, VersionInfo};
@@ -47,22 +48,109 @@ impl RustBackend {
         ctx.dirs.cargo_home().join("bin").join(exe)
     }
 
-    /// Ensure rustup is installed into osdk's cargo home. Uses an existing
-    /// rustup on PATH if present (via `rustup-init` style is skipped for now;
-    /// we require a rustup on PATH or previously bootstrapped).
-    fn ensure_rustup(ctx: &Ctx) -> Result<PathBuf> {
+    /// Ensure rustup is installed into osdk's isolated cargo home.
+    async fn ensure_rustup(ctx: &Ctx, sources: &[Source]) -> Result<PathBuf> {
         let local = Self::rustup_bin(ctx);
         if local.exists() {
             return Ok(local);
         }
-        // Fall back to a system rustup if available.
-        if let Ok(p) = which::which("rustup") {
-            return Ok(p);
+        let file_name = format!("rustup-init{}", ctx.platform.os.exe_suffix());
+        let triple = ctx.platform.llvm_triple();
+        let cached = ctx
+            .dirs
+            .downloads()
+            .join("rustup")
+            .join(&triple)
+            .join(&file_name);
+        if ctx.config.settings.offline && !cached.exists() {
+            return Err(Error::other(
+                "offline rustup bootstrap cache miss (install rust once without --offline)",
+            ));
         }
-        Err(Error::other(
-            "rustup not found. Install rustup first (https://rsproxy.cn/rustup-init.sh), \
-             or ensure `rustup` is on PATH; osdk will drive it.",
-        ))
+        let mut last_err = None;
+
+        for source in sources {
+            let update_root = source
+                .index_url
+                .clone()
+                .unwrap_or_else(|| crate::http::join_url(&source.download_url, "rustup"));
+            let url = crate::http::join_url(&update_root, &format!("dist/{triple}/{file_name}"));
+            let checksum_url = format!("{url}.sha256");
+            let checksum = match crate::http::get_cached_text(ctx, &checksum_url).await {
+                Ok(body) => match pipeline::verify::parse_sha256_token(&body) {
+                    Some(checksum) => checksum,
+                    None => {
+                        last_err = Some(Error::other(format!(
+                            "invalid rustup-init checksum from {checksum_url}"
+                        )));
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    last_err = Some(error);
+                    continue;
+                }
+            };
+            match pipeline::download::download(
+                &ctx.client,
+                &url,
+                &cached,
+                "rustup-init",
+                ctx.show_progress,
+            )
+            .await
+            {
+                Ok(()) => {
+                    if let Err(error) = pipeline::verify::verify_file(
+                        &cached,
+                        &checksum,
+                        HashAlgo::Sha256,
+                        &file_name,
+                    ) {
+                        let _ = std::fs::remove_file(&cached);
+                        last_err = Some(error);
+                        continue;
+                    }
+                }
+                Err(error) => {
+                    last_err = Some(error);
+                    continue;
+                }
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let permissions = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&cached, permissions)
+                    .map_err(|error| Error::io(&cached, error))?;
+            }
+            let env = Self::rustup_env(ctx, Some(source));
+            process::run(
+                &cached.display().to_string(),
+                &[
+                    "-y",
+                    "--no-modify-path",
+                    "--profile",
+                    "minimal",
+                    "--default-toolchain",
+                    "none",
+                ],
+                &env,
+                None,
+            )?;
+            if local.exists() {
+                return Ok(local);
+            }
+            last_err = Some(Error::other(format!(
+                "rustup-init completed but {} was not created",
+                local.display()
+            )));
+        }
+
+        Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
+            tool: "rust".to_string(),
+            tried: sources.len(),
+        }))
     }
 }
 
@@ -126,13 +214,20 @@ impl Backend for RustBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        let rustup = Self::ensure_rustup(ctx)?;
-        // Pick the fastest reachable dist server (probes under auto), so we never
-        // default to the slow official server when a mirror is available.
-        let source = crate::source::select::active_source(ctx, self).await.ok();
-        let env = Self::rustup_env(ctx, source.as_ref());
-        if let Some(s) = &source {
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let rustup = Self::ensure_rustup(ctx, &sources).await?;
+        let source = sources.first();
+        let env = Self::rustup_env(ctx, source);
+        if let Some(s) = source {
             tracing::info!(source = %s.id, dist = %s.download_url, "{}", crate::i18n::tr("log.rustup_dist_server"));
+        }
+        let toolchain_bin = Self::toolchain_dir(ctx, &tv.version).join("bin");
+        let rustc = toolchain_bin.join(format!("rustc{}", ctx.platform.os.exe_suffix()));
+        if ctx.config.settings.offline && !rustc.exists() {
+            return Err(Error::other(format!(
+                "offline rust toolchain cache miss for {}",
+                tv.version
+            )));
         }
 
         // Install the toolchain. Optional profile/components/targets via options.
@@ -165,16 +260,14 @@ impl Backend for RustBackend {
         // we point CARGO_HOME at osdk's dir (rustup expects to own it). That's
         // non-fatal for us: we generate our own shims to the toolchain bin dir.
         // So we tolerate a nonzero exit iff the toolchain dir materialized.
-        let run_res = process::run(&rustup.display().to_string(), &arg_refs, &env, None);
-        let toolchain_bin = Self::toolchain_dir(ctx, &tv.version).join("bin");
-        if let Err(e) = run_res {
-            if !toolchain_bin
-                .join(format!("rustc{}", ctx.platform.os.exe_suffix()))
-                .exists()
-            {
-                return Err(e);
+        if !rustc.exists() {
+            let run_res = process::run(&rustup.display().to_string(), &arg_refs, &env, None);
+            if let Err(e) = run_res {
+                if !rustc.exists() {
+                    return Err(e);
+                }
+                tracing::debug!("rustup returned an error but the toolchain installed; continuing");
             }
-            tracing::debug!("rustup returned an error but the toolchain installed; continuing");
         }
 
         // Record the install so list_installed/bin_paths work: rustup manages
@@ -187,10 +280,38 @@ impl Backend for RustBackend {
         Ok(())
     }
 
+    async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        let toolchain_dir = Self::toolchain_dir(ctx, &tv.version);
+        if toolchain_dir.exists() {
+            let rustup = Self::rustup_bin(ctx);
+            if !rustup.exists() {
+                return Err(Error::other(format!(
+                    "cannot uninstall rust toolchain {}: isolated rustup is missing",
+                    tv.version
+                )));
+            }
+            let env = Self::rustup_env(ctx, None);
+            process::run(
+                &rustup.display().to_string(),
+                &["toolchain", "uninstall", &tv.version],
+                &env,
+                None,
+            )?;
+        }
+        let marker_dir = ctx.dirs.install_path(self.id(), &tv.version);
+        if marker_dir.exists() {
+            std::fs::remove_dir_all(&marker_dir).map_err(|error| Error::io(&marker_dir, error))?;
+        }
+        Ok(())
+    }
+
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         // rustup toolchain bins live at RUSTUP_HOME/toolchains/<name>/bin.
         let toolchain_dir = Self::toolchain_dir(ctx, &tv.version);
-        Ok(vec![toolchain_dir.join("bin")])
+        Ok(vec![
+            toolchain_dir.join("bin"),
+            ctx.dirs.cargo_home().join("bin"),
+        ])
     }
 
     fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
@@ -246,5 +367,63 @@ impl RustBackend {
             }
         }
         exact
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_delegates_to_isolated_rustup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let log = temp.path().join("rustup.log");
+        let rustup = dirs.cargo_home().join("bin/rustup");
+        std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rustup,
+            format!("#!/bin/sh\nprintf '%s' \"$*\" > '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dirs.rustup_home().join("toolchains/stable/bin")).unwrap();
+        let marker = dirs.install_path("rust", "stable");
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(marker.join(".osdk-complete"), b"").unwrap();
+
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+        };
+        RustBackend
+            .uninstall(&ctx, &ToolVersion::new("rust", "stable"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap(),
+            "toolchain uninstall stable"
+        );
+        assert!(!marker.exists());
     }
 }

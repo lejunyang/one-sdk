@@ -72,6 +72,10 @@ pub async fn ranked_source_list(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<
         }
     }
 
+    if ctx.config.settings.offline {
+        return Ok(sources);
+    }
+
     match ctx.config.sources.selection {
         Selection::Ordered | Selection::Pinned => Ok(sources),
         Selection::Auto => {
@@ -220,6 +224,9 @@ fn save_cache(ctx: &Ctx, tool: &str, results: &[ProbeResult]) {
 /// Force a refresh of the probe cache for a backend (used by `osdk source test`
 /// and `--refresh-sources`). Returns the fresh results.
 pub async fn refresh(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<ProbeResult>> {
+    if ctx.config.settings.offline {
+        return Err(Error::other("cannot refresh sources while offline"));
+    }
     let sources = effective_sources(ctx, backend);
     let results = probe_all(ctx, backend, &sources).await;
     save_cache(ctx, backend.id(), &results);

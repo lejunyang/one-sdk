@@ -352,6 +352,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.flag.offline",
+        (
+            "Disable network access and use cached metadata/artifacts only",
+            "禁用网络，仅使用缓存的元数据和制品",
+        ),
+    );
+    m.insert(
         "help.flag.lang",
         (
             "Output language (en|zh); overrides locale and OSDK_LANG",

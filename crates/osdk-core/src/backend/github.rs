@@ -150,7 +150,7 @@ impl Backend for GithubBackend {
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let releases: Vec<GhRelease> =
-            http::get_github_json(&ctx.client, &self.releases_api()).await?;
+            http::get_cached_github_json(ctx, &self.releases_api()).await?;
         let mut out: Vec<VersionInfo> = releases
             .into_iter()
             .filter(|r| !r.draft)
@@ -191,7 +191,7 @@ impl Backend for GithubBackend {
         let ctx = ictx.ctx;
         // Find the release for this version (try both `v`-prefixed and bare tag).
         let releases: Vec<GhRelease> =
-            http::get_github_json(&ctx.client, &self.releases_api()).await?;
+            http::get_cached_github_json(ctx, &self.releases_api()).await?;
         let want = tv.version.trim_start_matches('v');
         let release = releases
             .into_iter()
@@ -238,26 +238,28 @@ impl Backend for GithubBackend {
         let proxied_dir = format!("https://gh-proxy.com/{asset_dir}");
 
         let mut checksum = None;
-        for dir in [asset_dir.as_str(), proxied_dir.as_str()] {
-            match pipeline::verify::signed_manifest_checksum(
-                &ctx.client,
-                &self.id,
-                dir,
-                &asset.name,
-            )
-            .await
-            {
-                Ok(Some(cs)) => {
-                    tracing::info!(source = %self.id, "{}", crate::i18n::tr("log.signature_verified"));
-                    checksum = Some(cs);
-                    break;
+        if ctx.config.settings.verify_signatures && !ctx.config.settings.offline {
+            for dir in [asset_dir.as_str(), proxied_dir.as_str()] {
+                match pipeline::verify::signed_manifest_checksum(
+                    &ctx.client,
+                    &self.id,
+                    dir,
+                    &asset.name,
+                )
+                .await
+                {
+                    Ok(Some(cs)) => {
+                        tracing::info!(source = %self.id, "{}", crate::i18n::tr("log.signature_verified"));
+                        checksum = Some(cs);
+                        break;
+                    }
+                    Ok(None) => {}
+                    // Invalid signature is a hard failure — do not silently proceed.
+                    Err(e) => return Err(e),
                 }
-                Ok(None) => {}
-                // Invalid signature is a hard failure — do not silently proceed.
-                Err(e) => return Err(e),
             }
         }
-        if checksum.is_none() {
+        if checksum.is_none() && !ctx.config.settings.offline {
             let mut found =
                 pipeline::verify::discover_asset_checksum(&ctx.client, &asset.browser_download_url)
                     .await;
@@ -288,6 +290,7 @@ impl Backend for GithubBackend {
                     cas: &ctx.cas,
                     link_mode: ctx.config.settings.link_mode,
                     show_progress: ctx.show_progress,
+                    offline: ctx.config.settings.offline,
                 };
                 pipeline::run(&plan, &pctx).await?;
             }
@@ -305,6 +308,7 @@ impl Backend for GithubBackend {
                     ctx.platform.os,
                     checksum.as_ref(),
                     ctx.show_progress,
+                    ctx.config.settings.offline,
                 )
                 .await?;
             }

@@ -123,7 +123,7 @@ impl Backend for NodeBackend {
                 .index_url
                 .clone()
                 .unwrap_or_else(|| http::join_url(&source.download_url, "index.json"));
-            let releases: Vec<NodeRelease> = match http::get_json(&ctx.client, &index_url).await {
+            let releases: Vec<NodeRelease> = match http::get_cached_json(ctx, &index_url).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.index_fetch_failover", &[("err", &e.to_string())]));
@@ -163,7 +163,7 @@ impl Backend for NodeBackend {
                     if official.id != source.id {
                         if let Some(idx) = &official.index_url {
                             if let Ok(rel) =
-                                http::get_json::<Vec<NodeRelease>>(&ctx.client, idx).await
+                                http::get_cached_json::<Vec<NodeRelease>>(ctx, idx).await
                             {
                                 for r in rel {
                                     if !(r.files.is_empty() || r.files.iter().any(|f| f == &token))
@@ -232,7 +232,7 @@ impl Backend for NodeBackend {
         for s in &sources {
             let base = http::join_url(&s.download_url, &format!("v{version}"));
             let shasums_url = http::join_url(&base, "SHASUMS256.txt");
-            if let Ok(body) = http::get_text(&ctx.client, &shasums_url).await {
+            if let Ok(body) = http::get_cached_text(ctx, &shasums_url).await {
                 if let Some(h) = pipeline::verify::find_shasum(&body, &file_name) {
                     checksum = Some(Checksum {
                         algo: HashAlgo::Sha256,
@@ -258,6 +258,7 @@ impl Backend for NodeBackend {
             cas: &ctx.cas,
             link_mode: ctx.config.settings.link_mode,
             show_progress: ctx.show_progress,
+            offline: ctx.config.settings.offline,
         };
         pipeline::run(&plan, &pctx).await?;
         Ok(())

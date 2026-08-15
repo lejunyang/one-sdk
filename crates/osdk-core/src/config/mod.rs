@@ -40,6 +40,8 @@ pub struct Settings {
     pub yes: bool,
     /// Whether to verify signatures when a backend provides them.
     pub verify_signatures: bool,
+    /// Never make network requests; use cached metadata and archives only.
+    pub offline: bool,
     /// Output language override (`en`/`zh`). None = auto-detect from locale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
@@ -52,6 +54,7 @@ impl Default for Settings {
             jobs: default_jobs(),
             yes: false,
             verify_signatures: true,
+            offline: false,
             lang: None,
         }
     }
@@ -190,6 +193,12 @@ impl Config {
         if let Some(v) = getenv("OSDK_YES") {
             self.settings.yes = truthy(&v);
         }
+        if let Some(v) = getenv("OSDK_VERIFY_SIGNATURES") {
+            self.settings.verify_signatures = truthy(&v);
+        }
+        if let Some(v) = getenv("OSDK_OFFLINE") {
+            self.settings.offline = truthy(&v);
+        }
         if let Some(v) = getenv("OSDK_SELECTION") {
             self.sources.selection = match v.to_ascii_lowercase().as_str() {
                 "pinned" => Selection::Pinned,
@@ -295,10 +304,14 @@ mod tests {
         cfg.apply_env(|k| match k {
             "OSDK_LINK_MODE" => Some("copy".to_string()),
             "OSDK_JOBS" => Some("3".to_string()),
+            "OSDK_VERIFY_SIGNATURES" => Some("false".to_string()),
+            "OSDK_OFFLINE" => Some("true".to_string()),
             _ => None,
         });
         assert_eq!(cfg.settings.link_mode, LinkMode::Copy);
         assert_eq!(cfg.settings.jobs, 3);
+        assert!(!cfg.settings.verify_signatures);
+        assert!(cfg.settings.offline);
     }
 
     #[test]

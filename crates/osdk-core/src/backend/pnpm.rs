@@ -51,7 +51,8 @@ impl Backend for PnpmBackend {
     }
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let versions = crate::npm::list_versions(ctx, "pnpm").await?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let versions = crate::npm::list_versions(ctx, &sources, "pnpm").await?;
         Ok(versions
             .into_iter()
             .map(|v| VersionInfo {
@@ -69,12 +70,13 @@ impl Backend for PnpmBackend {
             arch: format!("{:?}", ctx.platform.arch),
         })?;
         // Resolve the platform package's tarball + SRI integrity from the registry.
-        let dist = crate::npm::resolve_dist(ctx, pkg, &tv.version).await?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let dist = crate::npm::resolve_dist(ctx, &sources, pkg, &tv.version).await?;
 
         let plan = InstallPlan {
             tool: self.id().to_string(),
             version: tv.version.clone(),
-            urls: vec![dist.tarball],
+            urls: dist.urls,
             file_name: format!("pnpm-{}.tgz", tv.version),
             kind: ArchiveKind::TarGz,
             checksum: dist.checksum, // npm SRI (sha512/sha256)
@@ -86,6 +88,7 @@ impl Backend for PnpmBackend {
             cas: &ctx.cas,
             link_mode: ctx.config.settings.link_mode,
             show_progress: ctx.show_progress,
+            offline: ctx.config.settings.offline,
         };
         pipeline::run(&plan, &pctx).await?;
         // The tarball ships `package/pnpm` -> after strip, `pnpm` at install root.

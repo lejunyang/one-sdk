@@ -60,15 +60,16 @@ impl Backend for YarnBackend {
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         // Merge classic (`yarn`) and berry (`@yarnpkg/cli-dist`) version lines.
         use std::collections::BTreeSet;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut set: BTreeSet<String> = BTreeSet::new();
-        if let Ok(classic) = crate::npm::list_versions(ctx, "yarn").await {
+        if let Ok(classic) = crate::npm::list_versions(ctx, &sources, "yarn").await {
             for v in classic {
                 if v.starts_with('1') || v.starts_with('0') {
                     set.insert(v);
                 }
             }
         }
-        if let Ok(berry) = crate::npm::list_versions(ctx, "@yarnpkg/cli-dist").await {
+        if let Ok(berry) = crate::npm::list_versions(ctx, &sources, "@yarnpkg/cli-dist").await {
             for v in berry {
                 // stable berry tags only (skip git snapshots like 4.9.1-git.*)
                 if !v.contains('-') {
@@ -93,11 +94,12 @@ impl Backend for YarnBackend {
         let package = Self::npm_package(&tv.version);
 
         // Install the SRI-verified npm tarball via the pipeline.
-        let dist = crate::npm::resolve_dist(ctx, package, &tv.version).await?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let dist = crate::npm::resolve_dist(ctx, &sources, package, &tv.version).await?;
         let plan = InstallPlan {
             tool: self.id().to_string(),
             version: tv.version.clone(),
-            urls: vec![dist.tarball],
+            urls: dist.urls,
             file_name: format!("yarn-{}.tgz", tv.version),
             kind: ArchiveKind::TarGz,
             checksum: dist.checksum, // npm SRI
@@ -109,6 +111,7 @@ impl Backend for YarnBackend {
             cas: &ctx.cas,
             link_mode: ctx.config.settings.link_mode,
             show_progress: ctx.show_progress,
+            offline: ctx.config.settings.offline,
         };
         let install_dir = pipeline::run(&plan, &pctx).await?;
 

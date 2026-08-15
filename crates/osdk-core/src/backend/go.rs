@@ -83,7 +83,7 @@ impl Backend for GoBackend {
                 Some(u) => u.clone(),
                 None => continue,
             };
-            let releases: Vec<GoRelease> = match http::get_json(&ctx.client, &index_url).await {
+            let releases: Vec<GoRelease> = match http::get_cached_json(ctx, &index_url).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.go_index_fetch_failed", &[("err", &e.to_string())]));
@@ -150,6 +150,7 @@ impl Backend for GoBackend {
             cas: &ctx.cas,
             link_mode: ctx.config.settings.link_mode,
             show_progress: ctx.show_progress,
+            offline: ctx.config.settings.offline,
         };
         pipeline::run(&plan, &pctx).await?;
         Ok(())
@@ -201,7 +202,7 @@ impl GoBackend {
                 Some(u) => u.clone(),
                 None => continue,
             };
-            let releases: Vec<GoRelease> = match http::get_json(&ctx.client, &index_url).await {
+            let releases: Vec<GoRelease> = match http::get_cached_json(ctx, &index_url).await {
                 Ok(r) => r,
                 Err(e) => {
                     last_err = Some(e);

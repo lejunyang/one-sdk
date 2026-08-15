@@ -170,7 +170,7 @@ impl Backend for JavaBackend {
 
         // Query the exact package for this version.
         let url = Self::packages_url(ctx, &base_index, &distribution, Some(&tv.version));
-        let resp: DiscoResponse<Package> = http::get_json(&ctx.client, &url).await?;
+        let resp: DiscoResponse<Package> = http::get_cached_json(ctx, &url).await?;
         let pkg = resp
             .result
             .into_iter()
@@ -197,13 +197,15 @@ impl Backend for JavaBackend {
         // gh-proxy fallback for GitHub-hosted assets (Temurin etc.) in CN.
         let redirect = pkg.links.pkg_download_redirect.clone();
         let mut urls = Vec::new();
-        if let Ok(real) = resolve_redirect(&ctx.client, &redirect).await {
-            if real.contains("github.com") {
-                // Prefer a CN proxy first, then the direct GitHub URL.
-                urls.push(format!("https://gh-proxy.com/{real}"));
-                urls.push(real);
-            } else {
-                urls.push(real);
+        if !ctx.config.settings.offline {
+            if let Ok(real) = resolve_redirect(&ctx.client, &redirect).await {
+                if real.contains("github.com") {
+                    // Prefer a CN proxy first, then the direct GitHub URL.
+                    urls.push(format!("https://gh-proxy.com/{real}"));
+                    urls.push(real);
+                } else {
+                    urls.push(real);
+                }
             }
         }
         // Always keep the foojay redirect itself as a final fallback.
@@ -227,6 +229,7 @@ impl Backend for JavaBackend {
             cas: &ctx.cas,
             link_mode: ctx.config.settings.link_mode,
             show_progress: ctx.show_progress,
+            offline: ctx.config.settings.offline,
         };
         pipeline::run(&plan, &pctx).await?;
         Ok(())
@@ -282,7 +285,7 @@ impl JavaBackend {
             .map(|s| s.download_url.clone())
             .unwrap_or_else(|| "https://api.foojay.io/disco/v3.0/packages".to_string());
         let url = Self::packages_url(ctx, &base_index, distribution, None);
-        let resp: DiscoResponse<Package> = http::get_json(&ctx.client, &url).await?;
+        let resp: DiscoResponse<Package> = http::get_cached_json(ctx, &url).await?;
 
         use std::collections::BTreeSet;
         let mut set: BTreeSet<String> = BTreeSet::new();
@@ -324,7 +327,7 @@ impl JavaBackend {
         let base = base_index.trim_end_matches('/');
         let root = base.strip_suffix("/packages").unwrap_or(base);
         let url = format!("{}/ids/{}", root, id);
-        let resp: DiscoResponse<Package> = http::get_json(&ctx.client, &url).await.ok()?;
+        let resp: DiscoResponse<Package> = http::get_cached_json(ctx, &url).await.ok()?;
         let pkg = resp.result.into_iter().next()?;
         if pkg.checksum.is_empty() {
             return None;
