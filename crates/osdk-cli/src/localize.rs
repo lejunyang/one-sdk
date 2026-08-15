@@ -57,6 +57,7 @@ fn localize_subcommands(cmd: Command) -> Command {
     })
     .mut_subcommand("exec", |c| c.about(h("help.exec.about")))
     .mut_subcommand("completions", |c| c.about(h("help.completions.about")))
+    .mut_subcommand("alias", |c| c.about(h("help.alias.about")))
     .mut_subcommand("list", |c| {
         c.about(h("help.list.about"))
             .mut_arg("tool", |a| a.help(h("help.list.arg.tool")))

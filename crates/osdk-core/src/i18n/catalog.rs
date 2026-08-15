@@ -405,6 +405,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.alias.about",
+        (
+            "Manage user-defined version aliases",
+            "管理用户自定义版本别名",
+        ),
+    );
+    m.insert(
         "help.flag.lang",
         (
             "Output language (en|zh); overrides locale and OSDK_LANG",

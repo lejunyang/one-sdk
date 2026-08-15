@@ -360,12 +360,7 @@ end-to-end tests.
 
 ### Remaining roadmap
 
-1. Add aliases and deactivate support.
-2. Add a stable external backend or registry API only after the backend
-    contract test suite exists.
-3. Expand the verification policy with additional provenance mechanisms.
-4. Add live scheduled upstream smoke tests without putting them on the normal
-   pull-request critical path.
+1. Expand the verification policy with additional provenance mechanisms.
 
 ## Test isolation requirements
 

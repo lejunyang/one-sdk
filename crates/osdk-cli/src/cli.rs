@@ -111,6 +111,12 @@ pub enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Manage user-defined version aliases.
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
+
     /// List installed versions.
     #[command(alias = "ls")]
     List {
@@ -230,6 +236,20 @@ pub enum SourceCommand {
     Pin { tool: String, id: String },
     /// Remove a tool's source pin.
     Unpin { tool: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AliasCommand {
+    /// Set an alias for a tool, e.g. `node default 20`.
+    Set {
+        tool: String,
+        name: String,
+        target: String,
+    },
+    /// List aliases, optionally for one tool.
+    List { tool: Option<String> },
+    /// Remove an alias.
+    Unset { tool: String, name: String },
 }
 
 #[derive(Debug, Subcommand)]

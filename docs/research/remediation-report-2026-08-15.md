@@ -100,6 +100,10 @@ Related audit: `docs/research/sdk-manager-audit-2026-08-15.md`
 - Added `osdk exec --tool ... -- <command>` for one-shot managed environments.
 - Added shell completion generation for Bash, Zsh, Fish, Elvish, and
   PowerShell-compatible clap targets.
+- Added user-defined, chainable version aliases with cycle detection and
+  canonical backend names.
+- Added reversible shell activation state and `osdk deactivate` for Bash, Zsh,
+  Fish, and PowerShell.
 
 ## Isolated validation
 
@@ -151,7 +155,4 @@ Passed:
 The first remediation pass intentionally leaves larger product work for
 separate changes:
 
-1. Add aliases and deactivate support.
-2. Add a stable external backend or registry API.
-3. Add broader provenance/attestation verification.
-4. Add per-backend scheduled live upstream smoke tests.
+1. Add broader provenance/attestation verification.

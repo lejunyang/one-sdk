@@ -870,6 +870,7 @@ url = "{{archive_url}}.sha256"
                 settings,
                 sources,
                 tools: Default::default(),
+                aliases: Default::default(),
                 project_config_path: None,
             },
             client: reqwest::Client::new(),

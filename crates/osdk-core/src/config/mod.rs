@@ -25,6 +25,8 @@ pub struct Config {
     pub sources: SourcesConfig,
     /// Tool pins gathered from config files (backend id -> version spec string).
     pub tools: BTreeMap<String, String>,
+    /// User-defined version aliases: tool -> alias -> version spec.
+    pub aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Path of the project config that contributed pins, if any.
     pub project_config_path: Option<PathBuf>,
 }
@@ -121,6 +123,7 @@ struct ConfigFile {
     settings: Option<Settings>,
     sources: Option<SourcesConfig>,
     tools: BTreeMap<String, String>,
+    aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Config {
@@ -131,6 +134,7 @@ impl Config {
             settings: Settings::default(),
             sources: SourcesConfig::default(),
             tools: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             project_config_path: None,
         };
 
@@ -177,6 +181,9 @@ impl Config {
         for (k, v) in file.tools {
             self.tools.insert(k, v);
         }
+        for (tool, aliases) in file.aliases {
+            self.aliases.entry(tool).or_default().extend(aliases);
+        }
     }
 
     /// Apply `OSDK_*` env overrides. Exposed for testing.
@@ -217,6 +224,50 @@ impl Config {
     pub fn tool_sources(&self, tool: &str) -> Option<&ToolSources> {
         self.sources.per_tool.get(tool)
     }
+
+    pub fn expand_alias(&self, tool: &str, spec: &str) -> Result<String> {
+        let Some(aliases) = self.aliases.get(tool) else {
+            return Ok(spec.to_string());
+        };
+        expand_alias(aliases, spec)
+    }
+}
+
+pub fn validate_alias_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty()
+        || matches!(
+            name.to_ascii_lowercase().as_str(),
+            "latest" | "current" | "stable" | "system" | "lts" | "lts/*" | "lts-latest"
+        )
+        || name.starts_with("lts/")
+        || name.starts_with("lts-")
+    {
+        return Err(Error::config(format!(
+            "`{name}` is reserved and cannot be used as a version alias"
+        )));
+    }
+    if name.contains(char::is_whitespace) || name.contains('@') {
+        return Err(Error::config(format!("invalid version alias `{name}`")));
+    }
+    Ok(())
+}
+
+pub fn expand_alias(aliases: &BTreeMap<String, String>, spec: &str) -> Result<String> {
+    let mut current = spec.to_string();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(next) = aliases.get(&current) {
+        if !seen.insert(current.clone()) {
+            let mut chain = seen.into_iter().collect::<Vec<_>>();
+            chain.push(current);
+            return Err(Error::config(format!(
+                "version alias cycle: {}",
+                chain.join(" -> ")
+            )));
+        }
+        current = next.clone();
+    }
+    Ok(current)
 }
 
 fn truthy(s: &str) -> bool {
@@ -304,6 +355,7 @@ mod tests {
             settings: Settings::default(),
             sources: SourcesConfig::default(),
             tools: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             project_config_path: None,
         };
         cfg.settings.link_mode = LinkMode::Hardlink;
@@ -355,5 +407,26 @@ mod tests {
         assert_eq!(parse_duration_secs("45"), Some(45));
         assert_eq!(parse_duration_secs("1d"), Some(86400));
         assert_eq!(parse_duration_secs("bad"), None);
+    }
+
+    #[test]
+    fn aliases_expand_and_reject_cycles() {
+        let aliases = BTreeMap::from([
+            ("default".to_string(), "maintenance".to_string()),
+            ("maintenance".to_string(), "20".to_string()),
+        ]);
+        assert_eq!(expand_alias(&aliases, "default").unwrap(), "20");
+        assert_eq!(expand_alias(&aliases, "21").unwrap(), "21");
+
+        let cycle = BTreeMap::from([
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "a".to_string()),
+        ]);
+        assert!(expand_alias(&cycle, "a")
+            .unwrap_err()
+            .to_string()
+            .contains("cycle"));
+        assert!(validate_alias_name("latest").is_err());
+        assert!(validate_alias_name("default").is_ok());
     }
 }

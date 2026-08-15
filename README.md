@@ -77,6 +77,20 @@ osdk exec --tool python@3.12 -- python -c "print('ok')"
 
 Generate shell completions with `osdk completions bash|zsh|fish|powershell`.
 
+Define reusable version aliases in the user config:
+
+```bash
+osdk alias set node default 20
+osdk alias set node maintenance default
+osdk alias list node
+osdk use node@maintenance
+osdk alias unset node maintenance
+```
+
+Aliases may point to another alias; cycles and reserved names such as `latest`,
+`lts`, and `system` are rejected. Tool-name aliases are canonicalized, so
+`osdk alias set nodejs default 20` stores the alias under `node`.
+
 ## Sources / mirrors
 
 ```bash

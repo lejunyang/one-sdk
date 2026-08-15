@@ -162,6 +162,62 @@ fn deactivate_emits_shell_restoration_code() {
 }
 
 #[test]
+fn version_aliases_chain_canonicalize_and_unset() {
+    let temp = tempfile::tempdir().unwrap();
+    let install = temp.path().join("installs/node/20.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    for args in [
+        ["alias", "set", "nodejs", "default", "20.0.0"],
+        ["alias", "set", "node", "maintenance", "default"],
+    ] {
+        let output = run_isolated(temp.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let config = std::fs::read_to_string(temp.path().join("config/config.toml")).unwrap();
+    assert!(config.contains("[aliases.node]"));
+    assert!(config.contains("default = \"20.0.0\""));
+    assert!(config.contains("maintenance = \"default\""));
+
+    let output = run_isolated(temp.path(), &["--offline", "install", "node@maintenance"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = run_isolated(temp.path(), &["alias", "list", "node"]);
+    let stdout = String::from_utf8(list.stdout).unwrap();
+    assert!(stdout.contains("node default = 20.0.0"));
+    assert!(stdout.contains("node maintenance = default"));
+
+    let unset = run_isolated(temp.path(), &["alias", "unset", "node", "maintenance"]);
+    assert!(unset.status.success());
+    let config = std::fs::read_to_string(temp.path().join("config/config.toml")).unwrap();
+    assert!(!config.contains("maintenance"));
+}
+
+#[test]
+fn version_alias_cycles_and_reserved_names_are_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let reserved = run_isolated(temp.path(), &["alias", "set", "node", "latest", "20"]);
+    assert!(!reserved.status.success());
+    assert!(String::from_utf8_lossy(&reserved.stderr).contains("reserved"));
+
+    let first = run_isolated(temp.path(), &["alias", "set", "node", "a", "b"]);
+    assert!(first.status.success());
+    let cycle = run_isolated(temp.path(), &["alias", "set", "node", "b", "a"]);
+    assert!(!cycle.status.success());
+    assert!(String::from_utf8_lossy(&cycle.stderr).contains("cycle"));
+}
+
+#[test]
 fn upgrade_updates_lock_for_an_already_installed_exact_version() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

@@ -8,7 +8,7 @@ use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
-use crate::cli::{ConfigCommand, SourceCommand};
+use crate::cli::{AliasCommand, ConfigCommand, SourceCommand};
 
 /// Apply a one-shot `--source` override into the config for this run.
 fn apply_source_override(app: &mut App, tool: &str) {
@@ -169,7 +169,8 @@ async fn resolve_requests(
         }
         apply_source_override(app, &request.backend);
         let backend = app.registry.get(&request.backend)?;
-        let version = backend.resolve_version(&app.ctx, &request).await?;
+        let effective = expand_request_alias(app, backend.as_ref(), &request)?;
+        let version = backend.resolve_version(&app.ctx, &effective).await?;
         resolved.push((request, version));
     }
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
@@ -222,8 +223,9 @@ async fn install_one_without_shims(
         select::refresh(&app.ctx, backend.as_ref()).await?;
     }
     let backend = app.registry.get(&req.backend)?;
+    let effective = expand_request_alias(app, backend.as_ref(), req)?;
     let tv = backend
-        .resolve_version(&app.ctx, req)
+        .resolve_version(&app.ctx, &effective)
         .await
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
 
@@ -239,6 +241,63 @@ async fn install_one_without_shims(
         println!("{}", t!("msg.installed", tool = tv));
     }
     Ok((backend, tv))
+}
+
+fn expand_request_alias(
+    app: &App,
+    backend: &dyn Backend,
+    request: &ToolRequest,
+) -> Result<ToolRequest> {
+    let expanded = app
+        .ctx
+        .config
+        .expand_alias(backend.id(), &request.spec.to_string())?;
+    let mut effective = request.clone();
+    effective.backend = backend.id().to_string();
+    effective.spec = VersionSpec::parse(&expanded);
+    Ok(effective)
+}
+
+pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
+    match command {
+        AliasCommand::Set { tool, name, target } => {
+            let backend = app.registry.get(&tool)?;
+            osdk_core::config::validate_alias_name(&name)?;
+            let mut aliases = app
+                .ctx
+                .config
+                .aliases
+                .get(backend.id())
+                .cloned()
+                .unwrap_or_default();
+            aliases.insert(name.clone(), target.clone());
+            osdk_core::config::expand_alias(&aliases, &name)?;
+            crate::config_edit::set_version_alias(&app.ctx, backend.id(), &name, &target)?;
+            println!("{} {} = {}", backend.id(), name, target);
+        }
+        AliasCommand::List { tool } => {
+            if let Some(tool) = tool {
+                let backend = app.registry.get(&tool)?;
+                if let Some(aliases) = app.ctx.config.aliases.get(backend.id()) {
+                    for (name, version) in aliases {
+                        println!("{} {} = {}", backend.id(), name, version);
+                    }
+                }
+            } else {
+                for (tool, aliases) in &app.ctx.config.aliases {
+                    for (name, version) in aliases {
+                        println!("{tool} {name} = {version}");
+                    }
+                }
+            }
+        }
+        AliasCommand::Unset { tool, name } => {
+            let backend = app.registry.get(&tool)?;
+            crate::config_edit::remove_version_alias(&app.ctx, backend.id(), &name)?;
+            println!("removed {} {}", backend.id(), name);
+        }
+    }
+    Ok(())
 }
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
@@ -664,6 +723,14 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 println!("tools:");
                 for (k, v) in &app.ctx.config.tools {
                     println!("  {k} = {v}");
+                }
+            }
+            if !app.ctx.config.aliases.is_empty() {
+                println!("aliases:");
+                for (tool, aliases) in &app.ctx.config.aliases {
+                    for (name, version) in aliases {
+                        println!("  {tool} {name} = {version}");
+                    }
                 }
             }
         }

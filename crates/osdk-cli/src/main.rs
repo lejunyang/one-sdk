@@ -87,6 +87,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
         Command::Exec { tools, command } => commands::exec_cmd(app, tools, command).await,
         Command::Completions { shell } => commands::completions(shell),
+        Command::Alias { command } => commands::alias(app, command),
         Command::List { tool } => commands::list(app, tool),
         Command::ListRemote { tool, filter } => commands::list_remote(app, tool, filter).await,
         Command::Use { tool, global, opts } => commands::use_cmd(app, tool, global, opts).await,

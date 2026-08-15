@@ -48,6 +48,7 @@ fn real_main() -> i32 {
             settings: Default::default(),
             sources: Default::default(),
             tools: Default::default(),
+            aliases: Default::default(),
             project_config_path: None,
         }
     });
@@ -97,7 +98,14 @@ fn real_main() -> i32 {
     };
 
     // Resolve spec -> concrete installed version (offline: pick from installed).
-    let version = match resolve_installed(&ctx, backend.as_ref(), &spec) {
+    let expanded_spec = match ctx.config.expand_alias(backend.id(), &spec) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("osdk-shim: {e}");
+            return 1;
+        }
+    };
+    let version = match resolve_installed(&ctx, backend.as_ref(), &expanded_spec) {
         Some(v) => v,
         None => {
             eprintln!(

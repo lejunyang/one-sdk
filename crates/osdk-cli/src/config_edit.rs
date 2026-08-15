@@ -54,6 +54,42 @@ pub fn set_source_pin(ctx: &Ctx, tool: &str, id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn set_version_alias(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Result<()> {
+    let path = ctx.dirs.user_config_file();
+    let mut doc = load_doc(&path)?;
+    let aliases = doc
+        .entry("aliases")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let aliases = aliases
+        .as_table_mut()
+        .context("`aliases` is not a table in config")?;
+    aliases.set_implicit(true);
+    let tool_aliases = aliases
+        .entry(tool)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let tool_aliases = tool_aliases
+        .as_table_mut()
+        .context("`aliases.<tool>` is not a table")?;
+    tool_aliases.insert(name, toml_edit::value(version));
+    save_doc(&path, &doc)
+}
+
+pub fn remove_version_alias(ctx: &Ctx, tool: &str, name: &str) -> Result<bool> {
+    let path = ctx.dirs.user_config_file();
+    let mut doc = load_doc(&path)?;
+    let removed = doc
+        .get_mut("aliases")
+        .and_then(toml_edit::Item::as_table_mut)
+        .and_then(|aliases| aliases.get_mut(tool))
+        .and_then(toml_edit::Item::as_table_mut)
+        .map(|aliases| aliases.remove(name).is_some())
+        .unwrap_or(false);
+    if removed {
+        save_doc(&path, &doc)?;
+    }
+    Ok(removed)
+}
+
 /// Add a custom source to a tool's `[[sources.<tool>.custom]]` array.
 pub fn add_custom_source(
     ctx: &Ctx,

@@ -258,6 +258,7 @@ mod tests {
                 settings: Default::default(),
                 sources: Default::default(),
                 tools: Default::default(),
+                aliases: Default::default(),
                 project_config_path: None,
             },
             client: reqwest::Client::new(),

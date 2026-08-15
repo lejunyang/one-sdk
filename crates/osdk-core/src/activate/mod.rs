@@ -222,7 +222,11 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         if installed.is_empty() {
             continue;
         }
-        let spec = strip_distribution_prefix(&active.spec);
+        let expanded = ctx
+            .config
+            .expand_alias(backend.id(), &active.spec)
+            .unwrap_or(active.spec);
+        let spec = strip_distribution_prefix(&expanded);
         let parsed = VersionSpec::parse(spec);
         let version = match &parsed {
             VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => Some(v.clone()),
