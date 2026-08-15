@@ -1,7 +1,12 @@
-//! yarn (classic, 1.x) backend: installs the yarn npm package tarball, verified
-//! by the registry's Subresource Integrity (SRI). yarn is a JavaScript bundle
-//! that runs on Node, so we generate small launchers that run the extracted
-//! `lib/cli.js` with the active node. Berry (2+) is handled separately.
+//! yarn backend: installs both yarn lines natively (no corepack), verified by
+//! the npm registry's Subresource Integrity (SRI).
+//!
+//! - classic (1.x): the `yarn` npm package
+//! - berry (2+): the `@yarnpkg/cli-dist` npm package (the same packaged bundle
+//!   corepack uses)
+//!
+//! yarn is a JavaScript bundle that runs on Node, so we generate small launchers
+//! that run the extracted CLI entry with the active node.
 
 use std::path::PathBuf;
 
@@ -15,6 +20,23 @@ use crate::source::Source;
 use crate::version::{ToolVersion, VersionInfo};
 
 pub struct YarnBackend;
+
+impl YarnBackend {
+    /// The npm package a yarn version ships in: classic (1.x) -> `yarn`,
+    /// berry (2+) -> `@yarnpkg/cli-dist`.
+    fn npm_package(version: &str) -> &'static str {
+        let major = version
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1);
+        if major >= 2 {
+            "@yarnpkg/cli-dist"
+        } else {
+            "yarn"
+        }
+    }
+}
 
 #[async_trait]
 impl Backend for YarnBackend {
@@ -36,36 +58,42 @@ impl Backend for YarnBackend {
     }
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let versions = crate::npm::list_versions(ctx, "yarn").await?;
-        Ok(versions
+        // Merge classic (`yarn`) and berry (`@yarnpkg/cli-dist`) version lines.
+        use std::collections::BTreeSet;
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        if let Ok(classic) = crate::npm::list_versions(ctx, "yarn").await {
+            for v in classic {
+                if v.starts_with('1') || v.starts_with('0') {
+                    set.insert(v);
+                }
+            }
+        }
+        if let Ok(berry) = crate::npm::list_versions(ctx, "@yarnpkg/cli-dist").await {
+            for v in berry {
+                // stable berry tags only (skip git snapshots like 4.9.1-git.*)
+                if !v.contains('-') {
+                    set.insert(v);
+                }
+            }
+        }
+        let mut out: Vec<VersionInfo> = set
             .into_iter()
-            // classic line only; berry (2+) is a separate backend/path
-            .filter(|v| v.starts_with('1') || v.starts_with("0"))
             .map(|v| VersionInfo {
                 version: v,
                 stable: true,
                 lts: None,
             })
-            .collect())
+            .collect();
+        out.sort_by(|a, b| crate::backend::python::cmp_versions(&a.version, &b.version));
+        Ok(out)
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        let major = tv
-            .version
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1);
-        if major >= 2 {
-            return Err(Error::other(format!(
-                "yarn {} (berry) is managed separately; osdk yarn handles classic (1.x)",
-                tv.version
-            )));
-        }
+        let package = Self::npm_package(&tv.version);
 
         // Install the SRI-verified npm tarball via the pipeline.
-        let dist = crate::npm::resolve_dist(ctx, "yarn", &tv.version).await?;
+        let dist = crate::npm::resolve_dist(ctx, package, &tv.version).await?;
         let plan = InstallPlan {
             tool: self.id().to_string(),
             version: tv.version.clone(),
@@ -84,8 +112,8 @@ impl Backend for YarnBackend {
         };
         let install_dir = pipeline::run(&plan, &pctx).await?;
 
-        // Generate node launchers pointing at the extracted CLI entry.
-        // yarn classic ships `bin/yarn.js` and `lib/cli.js`; prefer bin/yarn.js.
+        // Generate node launchers pointing at the extracted CLI entry. Both
+        // `yarn` (classic) and `@yarnpkg/cli-dist` (berry) ship `bin/yarn.js`.
         let entry = if install_dir.join("bin/yarn.js").is_file() {
             install_dir.join("bin/yarn.js")
         } else {
@@ -129,4 +157,18 @@ fn write_launcher(bin_dir: &std::path::Path, js: &std::path::Path, _os: Os) -> R
         std::fs::write(&p, script).map_err(|e| Error::io(&p, e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_classic_vs_berry_to_npm_package() {
+        assert_eq!(YarnBackend::npm_package("1.22.22"), "yarn");
+        assert_eq!(YarnBackend::npm_package("2.4.3"), "@yarnpkg/cli-dist");
+        assert_eq!(YarnBackend::npm_package("4.10.3"), "@yarnpkg/cli-dist");
+        // malformed -> classic default
+        assert_eq!(YarnBackend::npm_package("weird"), "yarn");
+    }
 }
