@@ -110,17 +110,39 @@ impl Backend for PythonBackend {
     }
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let catalog = self.catalog(ctx).await?;
         let triple = ctx.platform.llvm_triple();
         use std::collections::BTreeSet;
         let mut versions: BTreeSet<String> = BTreeSet::new();
-        for a in &catalog.assets {
+
+        // Always include the latest catalog.
+        let latest = self.catalog(ctx).await?;
+        for a in &latest.assets {
             if Self::asset_is_install_only(&a.name, &triple) {
                 if let Some(v) = Self::version_from_asset(&a.name) {
                     versions.insert(v);
                 }
             }
         }
+
+        // Best-effort: merge recent historical tags so older versions show up
+        // too. Skipped silently if the GitHub API is rate-limited. Bounded to a
+        // few recent tags to keep listing fast.
+        let tags = self.list_release_tags(ctx, 6).await;
+        for tag in tags.into_iter().take(6) {
+            if tag == latest.tag {
+                continue;
+            }
+            if let Ok(cat) = self.fetch_catalog_for_tag(ctx, &tag).await {
+                for a in &cat.assets {
+                    if Self::asset_is_install_only(&a.name, &triple) {
+                        if let Some(v) = Self::version_from_asset(&a.name) {
+                            versions.insert(v);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut out: Vec<VersionInfo> = versions
             .into_iter()
             .map(|v| VersionInfo {
@@ -137,7 +159,13 @@ impl Backend for PythonBackend {
         let ctx = ictx.ctx;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let triple = ctx.platform.llvm_triple();
-        let catalog = self.catalog(ctx).await?;
+        // Resolve a catalog (latest, or an older historical tag) that has this
+        // version for the host triple. An explicit `-o tag=YYYYMMDD` pins the
+        // PBS release tag (deterministic, no GitHub API needed).
+        let catalog = match tv.options.get("tag") {
+            Some(tag) => self.fetch_catalog_for_tag(ctx, tag).await?,
+            None => self.catalog_with_version(ctx, &tv.version).await?,
+        };
 
         // Find the asset matching this exact python version for the host triple.
         let asset = catalog
@@ -319,6 +347,106 @@ impl PythonBackend {
             tool: self.id().to_string(),
             tried: sources.len(),
         }))
+    }
+
+    /// Build the SHA256SUMS URL for a specific dated tag, proxying through a
+    /// GitHub-proxy source when available (CN reachability).
+    fn sums_url_for_tag(&self, ctx: &Ctx, tag: &str) -> Vec<String> {
+        let base = format!(
+            "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/SHA256SUMS"
+        );
+        // direct, then any proxy source
+        let mut urls = vec![base.clone()];
+        urls.push(format!("https://gh-proxy.com/{base}"));
+        let _ = ctx;
+        urls
+    }
+
+    /// Fetch the catalog for a specific historical tag by reading its
+    /// SHA256SUMS (each dated release has its own).
+    async fn fetch_catalog_for_tag(&self, ctx: &Ctx, tag: &str) -> Result<Catalog> {
+        let prefix =
+            format!("https://github.com/astral-sh/python-build-standalone/releases/download/{tag}");
+        let mut last_err: Option<Error> = None;
+        for url in self.sums_url_for_tag(ctx, tag) {
+            match http::get_text(&ctx.client, &url).await {
+                Ok(body) => {
+                    let assets = parse_sha256sums(&body);
+                    if !assets.is_empty() {
+                        return Ok(Catalog {
+                            tag: tag.to_string(),
+                            asset_url_prefix: prefix,
+                            assets,
+                        });
+                    }
+                    last_err = Some(Error::other("empty SHA256SUMS"));
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::other(format!("no SHA256SUMS for tag {tag}"))))
+    }
+
+    /// List recent PBS release tags (dated, e.g. "20260814") via the GitHub
+    /// releases API. Token-aware; returns newest-first. Empty on rate-limit.
+    async fn list_release_tags(&self, ctx: &Ctx, max: usize) -> Vec<String> {
+        #[derive(serde::Deserialize)]
+        struct Rel {
+            tag_name: String,
+            #[serde(default)]
+            draft: bool,
+        }
+        let url = format!(
+            "https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page={}",
+            max.min(100)
+        );
+        match http::get_github_json::<Vec<Rel>>(&ctx.client, &url).await {
+            Ok(rels) => rels
+                .into_iter()
+                .filter(|r| !r.draft && !r.tag_name.is_empty())
+                .map(|r| r.tag_name)
+                .collect(),
+            Err(e) => {
+                tracing::debug!("pbs tag list unavailable (rate limit?): {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Resolve a Catalog that contains `version` for the host triple: the latest
+    /// catalog if it has it, otherwise scan recent historical tags.
+    async fn catalog_with_version(&self, ctx: &Ctx, version: &str) -> Result<Catalog> {
+        let triple = ctx.platform.llvm_triple();
+        let latest = self.catalog(ctx).await?;
+        if latest
+            .assets
+            .iter()
+            .any(|a| Self::asset_matches(&a.name, version, &triple))
+        {
+            return Ok(latest);
+        }
+        // Older version: scan recent tags (bounded) for one that has it.
+        for tag in self.list_release_tags(ctx, 30).await {
+            if tag == latest.tag {
+                continue;
+            }
+            if let Ok(cat) = self.fetch_catalog_for_tag(ctx, &tag).await {
+                if cat
+                    .assets
+                    .iter()
+                    .any(|a| Self::asset_matches(&a.name, version, &triple))
+                {
+                    return Ok(cat);
+                }
+            }
+        }
+        Err(Error::VersionResolve {
+            tool: self.id().to_string(),
+            spec: version.to_string(),
+            hint: Some(format!(
+                "no install_only asset for {triple} in recent releases"
+            )),
+        })
     }
 }
 

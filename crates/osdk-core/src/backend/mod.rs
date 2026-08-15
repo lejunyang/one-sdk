@@ -69,7 +69,9 @@ pub trait Backend: Send + Sync {
         // Default implementation: resolve against list_remote_versions.
         use crate::version::{select_version, VersionSpec};
         if let VersionSpec::Exact(v) = &req.spec {
-            return Ok(ToolVersion::new(self.id(), v.clone()));
+            let mut tv = ToolVersion::new(self.id(), v.clone());
+            tv.options = req.options.clone();
+            return Ok(tv);
         }
         let versions = self.list_remote_versions(ctx).await?;
         let chosen = select_version(&req.spec, &versions).ok_or_else(|| Error::VersionResolve {
@@ -192,4 +194,76 @@ fn exe_stem(path: &std::path::Path) -> Option<String> {
         }
     }
     Some(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::version::{ToolRequest, VersionSpec};
+
+    struct MockBackend;
+
+    #[async_trait]
+    impl Backend for MockBackend {
+        fn id(&self) -> &str {
+            "mock"
+        }
+        fn default_sources(&self) -> Vec<Source> {
+            vec![]
+        }
+        fn probe_url(&self, _ctx: &Ctx, _s: &Source) -> Option<String> {
+            None
+        }
+        async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
+            Ok(vec![VersionInfo::stable("1.2.3")])
+        }
+        async fn install(&self, _ctx: &InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
+            Ok(())
+        }
+        fn bin_paths(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<PathBuf>> {
+            Ok(vec![])
+        }
+        fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    // Regression: the default resolve_version must carry request options into
+    // the resolved ToolVersion for EXACT specs too (rust profile, java
+    // distribution, python tag). Previously the exact-version early return
+    // dropped them.
+    #[tokio::test]
+    async fn exact_resolve_preserves_options() {
+        let mut req = ToolRequest {
+            backend: "mock".into(),
+            spec: VersionSpec::Exact("1.2.3".into()),
+            options: Default::default(),
+        };
+        req.options.insert("tag".into(), "20240224".into());
+
+        // Build a minimal Ctx; list_remote_versions isn't hit for exact specs.
+        let dirs = crate::dirs::Dirs::resolve_from(|k| match k {
+            "OSDK_DATA_DIR" => Some("/tmp/osdk-mock/data".into()),
+            "OSDK_CACHE_DIR" => Some("/tmp/osdk-mock/cache".into()),
+            "OSDK_CONFIG_DIR" => Some("/tmp/osdk-mock/cfg".into()),
+            _ => None,
+        })
+        .unwrap();
+        let ctx = Ctx {
+            dirs,
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new("/tmp/osdk-mock/store")),
+            show_progress: false,
+        };
+        let tv = MockBackend.resolve_version(&ctx, &req).await.unwrap();
+        assert_eq!(tv.version, "1.2.3");
+        assert_eq!(tv.options.get("tag").map(|s| s.as_str()), Some("20240224"));
+    }
 }
