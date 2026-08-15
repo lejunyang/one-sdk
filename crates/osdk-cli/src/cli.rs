@@ -164,6 +164,12 @@ pub enum Command {
         shell: String,
     },
 
+    /// Print shell code that removes osdk integration and restores the environment.
+    Deactivate {
+        /// Target shell.
+        shell: String,
+    },
+
     /// Internal: emit env changes for the current directory (used by activate).
     #[command(hide = true)]
     HookEnv {

@@ -592,6 +592,12 @@ pub fn activate(app: &App, shell: String) -> Result<()> {
     Ok(())
 }
 
+pub fn deactivate(shell: String) -> Result<()> {
+    let shell: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
+    print!("{}", osdk_core::activate::deactivation_script(shell));
+    Ok(())
+}
+
 pub fn hook_env(app: &App, shell: String) -> Result<()> {
     let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
     let cwd = std::env::current_dir()?;

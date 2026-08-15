@@ -93,6 +93,104 @@ Invoke-OsdkHook
     }
 }
 
+/// Render shell code that removes osdk's hook and restores the environment
+/// captured by [`render_hook_env`].
+pub fn deactivation_script(shell: Shell) -> String {
+    match shell {
+        Shell::Bash => r#"# osdk shell deactivation (bash)
+if [ -n "${OSDK_MANAGED_ENV:-}" ]; then
+  _osdk_saved_ifs=$IFS
+  IFS=,
+  for _osdk_key in $OSDK_MANAGED_ENV; do
+    case "$_osdk_key" in
+      ''|*[!A-Za-z0-9_]*) continue ;;
+    esac
+    eval "_osdk_present=\${OSDK_ORIG_${_osdk_key}_PRESENT:-0}"
+    if [ "$_osdk_present" = 1 ]; then
+      eval "export ${_osdk_key}=\${OSDK_ORIG_${_osdk_key}}"
+    else
+      unset "$_osdk_key"
+    fi
+    unset "OSDK_ORIG_${_osdk_key}" "OSDK_ORIG_${_osdk_key}_PRESENT" "OSDK_ORIG_${_osdk_key}_SET"
+  done
+  IFS=$_osdk_saved_ifs
+  unset _osdk_saved_ifs _osdk_key _osdk_present
+fi
+if [ -n "${OSDK_ORIGINAL_PATH_SET+x}" ]; then export PATH="$OSDK_ORIGINAL_PATH"; fi
+PROMPT_COMMAND=";${PROMPT_COMMAND:-};"
+PROMPT_COMMAND="${PROMPT_COMMAND//;_osdk_hook;/;}"
+PROMPT_COMMAND="${PROMPT_COMMAND#;}"
+PROMPT_COMMAND="${PROMPT_COMMAND%;}"
+unset -f _osdk_hook 2>/dev/null || true
+unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET
+"#
+        .to_string(),
+        Shell::Zsh => r#"# osdk shell deactivation (zsh)
+if [[ -n ${OSDK_MANAGED_ENV:-} ]]; then
+  local _osdk_key
+  for _osdk_key in ${(s:,:)OSDK_MANAGED_ENV}; do
+    [[ $_osdk_key == [A-Za-z_][A-Za-z0-9_]# ]] || continue
+    local _osdk_present_var="OSDK_ORIG_${_osdk_key}_PRESENT"
+    local _osdk_original_var="OSDK_ORIG_${_osdk_key}"
+    if [[ ${(P)_osdk_present_var:-0} == 1 ]]; then
+      export "$_osdk_key=${(P)_osdk_original_var}"
+    else
+      unset "$_osdk_key"
+    fi
+    unset "OSDK_ORIG_${_osdk_key}" "OSDK_ORIG_${_osdk_key}_PRESENT" "OSDK_ORIG_${_osdk_key}_SET"
+  done
+fi
+if [[ -n ${OSDK_ORIGINAL_PATH_SET+x} ]]; then export PATH="$OSDK_ORIGINAL_PATH"; fi
+precmd_functions=(${precmd_functions:#_osdk_hook})
+unfunction _osdk_hook 2>/dev/null || true
+unset OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET
+"#
+        .to_string(),
+        Shell::Fish => r#"# osdk shell deactivation (fish)
+if set -q OSDK_MANAGED_ENV
+  for _osdk_key in (string split , -- $OSDK_MANAGED_ENV)
+    string match -rq '^[A-Za-z_][A-Za-z0-9_]*$' -- $_osdk_key; or continue
+    set _osdk_original OSDK_ORIG_$_osdk_key
+    set _osdk_present $_osdk_original"_PRESENT"
+    if test "$$_osdk_present" = 1
+      set -gx $_osdk_key "$$_osdk_original"
+    else
+      set -e $_osdk_key
+    end
+    set -e $_osdk_original $_osdk_present $_osdk_original"_SET"
+  end
+  set -e _osdk_key _osdk_original _osdk_present
+end
+if set -q OSDK_ORIGINAL_PATH_SET
+  set -gx PATH $OSDK_ORIGINAL_PATH
+end
+functions -e _osdk_hook
+set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET
+"#
+        .to_string(),
+        Shell::Powershell => r#"# osdk shell deactivation (powershell)
+if (Test-Path Env:OSDK_MANAGED_ENV) {
+  foreach ($osdkKey in ($env:OSDK_MANAGED_ENV -split ',')) {
+    if ($osdkKey -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+    $original = "OSDK_ORIG_${osdkKey}"
+    $present = "${original}_PRESENT"
+    if ([Environment]::GetEnvironmentVariable($present) -eq '1') {
+      [Environment]::SetEnvironmentVariable($osdkKey, [Environment]::GetEnvironmentVariable($original))
+    } else {
+      Remove-Item "Env:$osdkKey" -ErrorAction SilentlyContinue
+    }
+    Remove-Item "Env:$original","Env:$present","Env:${original}_SET" -ErrorAction SilentlyContinue
+  }
+}
+if (Test-Path Env:OSDK_ORIGINAL_PATH_SET) { $env:PATH = $env:OSDK_ORIGINAL_PATH }
+$ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = $null
+Remove-Item Function:Invoke-OsdkHook -ErrorAction SilentlyContinue
+Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET -ErrorAction SilentlyContinue
+"#
+        .to_string(),
+    }
+}
+
 /// The env changes to apply for the active toolset in `cwd`.
 pub struct EnvDelta {
     /// Directories to prepend to PATH (active tools' bin dirs).
@@ -356,6 +454,23 @@ mod tests {
         let s = activation_script(Shell::Bash, "osdk");
         assert!(s.contains("hook-env"));
         assert!(s.contains("PROMPT_COMMAND"));
+    }
+
+    #[test]
+    fn deactivation_snippets_remove_hooks_and_restore_path() {
+        let bash = deactivation_script(Shell::Bash);
+        assert!(bash.contains("unset -f _osdk_hook"));
+        assert!(bash.contains("PATH=\"$OSDK_ORIGINAL_PATH\""));
+
+        let zsh = deactivation_script(Shell::Zsh);
+        assert!(zsh.contains("precmd_functions"));
+        assert!(zsh.contains("unfunction _osdk_hook"));
+
+        let fish = deactivation_script(Shell::Fish);
+        assert!(fish.contains("functions -e _osdk_hook"));
+
+        let powershell = deactivation_script(Shell::Powershell);
+        assert!(powershell.contains("PostCommandLookupAction = $null"));
     }
 
     #[test]

@@ -85,6 +85,10 @@ fn localize_subcommands(cmd: Command) -> Command {
             .long_about(h("help.activate.long"))
             .mut_arg("shell", |a| a.help(h("help.activate.arg.shell")))
     })
+    .mut_subcommand("deactivate", |c| {
+        c.about(h("help.deactivate.about"))
+            .mut_arg("shell", |a| a.help(h("help.activate.arg.shell")))
+    })
     .mut_subcommand("source", |c| {
         c.about(h("help.source.about"))
             .long_about(h("help.source.long"))

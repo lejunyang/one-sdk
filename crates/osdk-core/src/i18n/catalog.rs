@@ -398,6 +398,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("Generate shell completion code", "生成 Shell 补全脚本"),
     );
     m.insert(
+        "help.deactivate.about",
+        (
+            "Remove shell integration and restore the original environment",
+            "移除 Shell 集成并恢复原始环境",
+        ),
+    );
+    m.insert(
         "help.flag.lang",
         (
             "Output language (en|zh); overrides locale and OSDK_LANG",

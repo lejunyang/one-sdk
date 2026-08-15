@@ -95,6 +95,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Where { tool } => commands::where_cmd(app, tool),
         Command::Reshim => commands::reshim(app),
         Command::Activate { shell } => commands::activate(app, shell),
+        Command::Deactivate { shell } => commands::deactivate(shell),
         Command::HookEnv { shell } => commands::hook_env(app, shell),
         Command::Source { command } => commands::source(app, command).await,
         Command::Config { command } => commands::config(app, command),

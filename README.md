@@ -39,6 +39,8 @@ node --version                  # runs the active version via shim
 
 # shell activation (alternative to shims — per-directory PATH + env)
 eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
+# later, remove the hook and restore PATH/env in the current shell:
+eval "$(osdk deactivate bash)"
 ```
 
 Downloads retry transient failures and safely resume validated partial files

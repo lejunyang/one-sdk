@@ -148,6 +148,20 @@ fn completions_emit_target_shell_script() {
 }
 
 #[test]
+fn deactivate_emits_shell_restoration_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run_isolated(temp.path(), &["deactivate", "bash"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("unset -f _osdk_hook"));
+    assert!(stdout.contains("OSDK_ORIGINAL_PATH"));
+}
+
+#[test]
 fn upgrade_updates_lock_for_an_already_installed_exact_version() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
