@@ -2,15 +2,32 @@ mod app;
 mod cli;
 mod commands;
 mod config_edit;
+mod localize;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use app::{App, GlobalOverrides};
 use cli::{Cli, Command};
+use osdk_core::i18n;
 
 fn main() {
-    let cli = Cli::parse();
+    // Phase 1: pick the language before building help, so `--help`/errors are
+    // already localized. `--lang` is scanned from raw args; otherwise fall back
+    // to OSDK_LANG / locale.
+    let raw: Vec<String> = std::env::args().collect();
+    let explicit = scan_lang_flag(&raw);
+    let lang = i18n::detect(explicit.as_deref(), |k| std::env::var(k).ok());
+    i18n::set_lang(lang);
+
+    // Phase 2: build a localized command tree and parse.
+    let cmd = localize::localize(Cli::command());
+    let matches = cmd.get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(c) => c,
+        Err(e) => e.exit(),
+    };
+
     init_tracing(cli.global.verbose);
 
     let overrides = GlobalOverrides {
@@ -19,12 +36,32 @@ fn main() {
         quiet: cli.global.quiet,
         source: cli.global.source.clone(),
         refresh_sources: cli.global.refresh_sources,
+        lang: cli.global.lang.clone(),
     };
 
     if let Err(e) = run(cli, overrides) {
-        eprintln!("error: {e:#}");
+        // Localize osdk-core errors; anyhow wrappers show their chain.
+        let msg = e
+            .downcast_ref::<osdk_core::Error>()
+            .map(|oe| oe.localized())
+            .unwrap_or_else(|| format!("{e:#}"));
+        eprintln!("{}: {}", i18n::tr("label.error"), msg);
         std::process::exit(1);
     }
+}
+
+/// Scan raw argv for `--lang <v>` or `--lang=<v>` (before clap parses).
+fn scan_lang_flag(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--lang" {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix("--lang=") {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 fn run(cli: Cli, overrides: GlobalOverrides) -> Result<()> {

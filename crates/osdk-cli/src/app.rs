@@ -18,6 +18,7 @@ pub struct GlobalOverrides {
     pub quiet: bool,
     pub source: Option<String>,
     pub refresh_sources: bool,
+    pub lang: Option<String>,
 }
 
 pub struct App {
@@ -46,6 +47,18 @@ impl App {
         }
         if overrides.yes {
             config.settings.yes = true;
+        }
+
+        // Finalize language now that config is loaded. Precedence:
+        // --lang / OSDK_LANG / locale (already applied in main) win; otherwise
+        // a config `lang` setting takes effect.
+        let explicit_or_env = overrides.lang.is_some() || std::env::var("OSDK_LANG").is_ok();
+        if !explicit_or_env {
+            if let Some(cfg_lang) = config.settings.lang.as_deref() {
+                if let Some(l) = osdk_core::i18n::Lang::parse(cfg_lang) {
+                    osdk_core::i18n::set_lang(l);
+                }
+            }
         }
 
         let client = http::client().context("building http client")?;

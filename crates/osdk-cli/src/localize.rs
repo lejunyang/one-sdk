@@ -1,0 +1,97 @@
+//! Runtime localization of the clap command tree.
+//!
+//! The derive macros bake English `///` docs in at compile time. To translate
+//! help output we take the generated `Command`, then walk it applying
+//! catalog-backed `about`/`long_about`/arg-help for the active language before
+//! parsing. English strings in the derive stay as the developer-facing fallback.
+
+use clap::Command;
+use osdk_core::i18n::tr;
+
+/// Apply localized help text to the whole command tree.
+pub fn localize(cmd: Command) -> Command {
+    let cmd = cmd
+        .about(tr("help.about"))
+        .long_about(tr("help.long_about"));
+    let cmd = localize_global_args(cmd);
+    localize_subcommands(cmd)
+}
+
+fn h(key: &str) -> String {
+    tr(key)
+}
+
+fn localize_global_args(cmd: Command) -> Command {
+    cmd.mut_arg("verbose", |a| a.help(h("help.flag.verbose")))
+        .mut_arg("quiet", |a| a.help(h("help.flag.quiet")))
+        .mut_arg("jobs", |a| a.help(h("help.flag.jobs")))
+        .mut_arg("yes", |a| a.help(h("help.flag.yes")))
+        .mut_arg("source", |a| a.help(h("help.flag.source")))
+        .mut_arg("refresh_sources", |a| {
+            a.help(h("help.flag.refresh_sources"))
+        })
+        .mut_arg("lang", |a| a.help(h("help.flag.lang")))
+}
+
+fn localize_subcommands(cmd: Command) -> Command {
+    cmd.mut_subcommand("install", |c| {
+        c.about(h("help.install.about"))
+            .long_about(h("help.install.long"))
+            .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
+            .mut_arg("opts", |a| a.help(h("help.opt")))
+    })
+    .mut_subcommand("list", |c| {
+        c.about(h("help.list.about"))
+            .mut_arg("tool", |a| a.help(h("help.list.arg.tool")))
+    })
+    .mut_subcommand("list-remote", |c| {
+        c.about(h("help.list_remote.about"))
+            .mut_arg("tool", |a| a.help(h("help.list_remote.arg.tool")))
+            .mut_arg("filter", |a| a.help(h("help.list_remote.arg.filter")))
+    })
+    .mut_subcommand("use", |c| {
+        c.about(h("help.use.about"))
+            .long_about(h("help.use.long"))
+            .mut_arg("tool", |a| a.help(h("help.use.arg.tool")))
+            .mut_arg("global", |a| a.help(h("help.use.flag.global")))
+            .mut_arg("opts", |a| a.help(h("help.opt")))
+    })
+    .mut_subcommand("uninstall", |c| {
+        c.about(h("help.uninstall.about"))
+            .mut_arg("tool", |a| a.help(h("help.uninstall.arg.tool")))
+    })
+    .mut_subcommand("current", |c| c.about(h("help.current.about")))
+    .mut_subcommand("where", |c| c.about(h("help.where.about")))
+    .mut_subcommand("reshim", |c| c.about(h("help.reshim.about")))
+    .mut_subcommand("activate", |c| {
+        c.about(h("help.activate.about"))
+            .long_about(h("help.activate.long"))
+            .mut_arg("shell", |a| a.help(h("help.activate.arg.shell")))
+    })
+    .mut_subcommand("source", |c| {
+        c.about(h("help.source.about"))
+            .long_about(h("help.source.long"))
+            .mut_subcommand("list", |s| s.about(h("help.source.list.about")))
+            .mut_subcommand("test", |s| s.about(h("help.source.test.about")))
+            .mut_subcommand("add", |s| s.about(h("help.source.add.about")))
+            .mut_subcommand("remove", |s| s.about(h("help.source.remove.about")))
+            .mut_subcommand("pin", |s| s.about(h("help.source.pin.about")))
+            .mut_subcommand("unpin", |s| s.about(h("help.source.unpin.about")))
+    })
+    .mut_subcommand("config", |c| {
+        c.about(h("help.config.about"))
+            .mut_subcommand("path", |s| s.about(h("help.config.path.about")))
+            .mut_subcommand("list", |s| s.about(h("help.config.list.about")))
+    })
+    .mut_subcommand("cache", |c| {
+        c.about(h("help.cache.about"))
+            .mut_subcommand("dir", |s| s.about(h("help.cache.dir.about")))
+            .mut_subcommand("env", |s| s.about(h("help.cache.env.about")))
+            .mut_subcommand("clean", |s| s.about(h("help.cache.clean.about")))
+    })
+    .mut_subcommand("prune", |c| {
+        c.about(h("help.prune.about"))
+            .mut_arg("dry_run", |a| a.help(h("help.prune.flag.dry_run")))
+    })
+    .mut_subcommand("doctor", |c| c.about(h("help.doctor.about")))
+}

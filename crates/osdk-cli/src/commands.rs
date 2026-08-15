@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use osdk_core::backend::{Backend, InstallCtx};
 use osdk_core::source::select;
+use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
@@ -26,7 +27,7 @@ pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
     let parsed_opts = parse_opts(&opts)?;
     let mut requests = gather_requests(app, tools)?;
     if requests.is_empty() {
-        println!("nothing to install (no tools given and no config pins found)");
+        println!("{}", t!("msg.nothing_to_install"));
         return Ok(());
     }
     for req in &mut requests {
@@ -46,7 +47,7 @@ fn parse_opts(opts: &[String]) -> Result<Vec<(String, String)>> {
         .map(|s| {
             s.split_once('=')
                 .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                .ok_or_else(|| anyhow!("invalid --opt `{s}` (expected key=value)"))
+                .ok_or_else(|| anyhow!(t!("err.invalid_opt", val = s)))
         })
         .collect()
 }
@@ -65,15 +66,15 @@ async fn install_one(app: &mut App, req: &ToolRequest) -> Result<ToolVersion> {
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
 
     if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version) {
-        println!("{} already installed", tv);
+        println!("{}", t!("msg.already_installed", tool = tv));
     } else {
-        println!("installing {} ...", tv);
+        println!("{}", t!("msg.installing", tool = tv));
         let ictx = InstallCtx { ctx: &app.ctx };
         backend
             .install(&ictx, &tv)
             .await
             .with_context(|| format!("installing {}", tv))?;
-        println!("installed {}", tv);
+        println!("{}", t!("msg.installed", tool = tv));
     }
     generate_shims_for(app, backend.as_ref(), &tv)?;
     Ok(tv)
@@ -118,7 +119,7 @@ pub fn list(app: &App, tool: Option<String>) -> Result<()> {
         }
     }
     if !any {
-        println!("no tools installed yet");
+        println!("{}", t!("msg.no_tools_installed"));
     }
     Ok(())
 }
@@ -170,7 +171,7 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
         count += 1;
     }
     if count == 0 {
-        println!("(no matching versions)");
+        println!("{}", t!("msg.no_matching_versions"));
     }
     Ok(())
 }
@@ -190,10 +191,18 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
     };
     if global {
         crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
-        println!("pinned {}@{} in user config", tv.backend, spec);
+        println!("{}", t!("msg.pinned_global", tool = tv.backend, ver = spec));
     } else {
         let path = crate::config_edit::set_project_tool(&tv.backend, &spec)?;
-        println!("pinned {}@{} in {}", tv.backend, spec, path.display());
+        println!(
+            "{}",
+            t!(
+                "msg.pinned_project",
+                tool = tv.backend,
+                ver = spec,
+                path = path.display()
+            )
+        );
     }
     Ok(())
 }
@@ -209,23 +218,25 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
             installed
                 .into_iter()
                 .rfind(|v| v.starts_with(p.as_str()))
-                .ok_or_else(|| anyhow!("no installed {} version matches `{p}`", req.backend))?
+                .ok_or_else(|| {
+                    anyhow!(t!("err.no_installed_match", tool = req.backend, spec = p))
+                })?
         }
-        other => {
-            return Err(anyhow!(
-                "specify an exact version to uninstall (got `{other}`)"
-            ))
-        }
+        other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
     };
     let tv = ToolVersion::new(&req.backend, &version);
     backend.uninstall(&app.ctx, &tv).await?;
-    println!("uninstalled {}", tv);
+    println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
     let (removed, bytes) = app.ctx.cas.gc(&app.ctx.dirs.installs)?;
     if removed > 0 {
         println!(
-            "pruned {removed} store object(s), {} freed",
-            human_bytes(bytes)
+            "{}",
+            t!(
+                "msg.pruned_store",
+                count = removed,
+                size = human_bytes(bytes)
+            )
         );
     }
     Ok(())
@@ -255,7 +266,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
         }
     }
     if !any {
-        println!("no active versions for this directory");
+        println!("{}", t!("msg.no_active"));
     }
     Ok(())
 }
@@ -289,7 +300,7 @@ pub fn reshim(app: &App) -> Result<()> {
             total += generate_shims_for(app, backend.as_ref(), &tv)?;
         }
     }
-    println!("regenerated {total} shim(s)");
+    println!("{}", t!("msg.reshimmed", count = total));
     Ok(())
 }
 
@@ -299,7 +310,7 @@ fn generate_shims_for(app: &App, backend: &dyn Backend, tv: &ToolVersion) -> Res
         Some(b) => b,
         None => {
             // Not fatal: warn once. Activation via PATH still works.
-            eprintln!("warning: osdk-shim binary not found; skipping shim generation");
+            eprintln!("{}", t!("msg.shim_bin_missing"));
             return Ok(0);
         }
     };
@@ -323,14 +334,18 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 .tool_sources(&tool)
                 .and_then(|t| t.pin.clone());
             println!(
-                "sources for {} (selection: {:?}):",
-                tool, app.ctx.config.sources.selection
+                "{}",
+                t!(
+                    "msg.sources_header",
+                    tool = tool,
+                    mode = format!("{:?}", app.ctx.config.sources.selection)
+                )
             );
             for s in sources {
                 let marker = if Some(&s.id) == pin.as_ref() {
-                    " [pinned]"
+                    format!(" {}", t!("label.pinned"))
                 } else {
-                    ""
+                    String::new()
                 };
                 println!(
                     "  {:12} {:8} {}{}",
@@ -343,7 +358,7 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
         }
         SourceCommand::Test { tool } => {
             let backend = app.registry.get(&tool)?;
-            println!("probing sources for {} ...", tool);
+            println!("{}", t!("msg.probing", tool = tool));
             let mut ranked = select::refresh(&app.ctx, backend.as_ref()).await?;
             ranked.sort_by(|a, b| b.score().total_cmp(&a.score()));
             for (i, r) in ranked.iter().enumerate() {
@@ -356,7 +371,7 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                         r.ttfb_ms
                     );
                 } else {
-                    println!("  -. {:12} unreachable", r.source_id);
+                    println!("  -. {:12} {}", r.source_id, t!("msg.unreachable"));
                 }
             }
         }
@@ -374,14 +389,14 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 &download_url,
                 index_url.as_deref(),
             )?;
-            println!("added custom source {} for {}", id, tool);
+            println!("{}", t!("msg.source_added", id = id, tool = tool));
         }
         SourceCommand::Remove { tool, id } => {
             let removed = crate::config_edit::remove_custom_source(&app.ctx, &tool, &id)?;
             if removed {
-                println!("removed custom source {} from {}", id, tool);
+                println!("{}", t!("msg.source_removed", id = id, tool = tool));
             } else {
-                println!("no custom source {} found for {}", id, tool);
+                println!("{}", t!("msg.source_not_found", id = id, tool = tool));
             }
         }
         SourceCommand::Pin { tool, id } => {
@@ -390,19 +405,14 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 .iter()
                 .any(|s| s.id == id);
             if !known {
-                return Err(anyhow!(
-                    "unknown source {} for {} (see `osdk source list {}`)",
-                    id,
-                    tool,
-                    tool
-                ));
+                return Err(anyhow!(t!("err.unknown_source", id = id, tool = tool)));
             }
             crate::config_edit::set_source_pin(&app.ctx, &tool, Some(&id))?;
-            println!("pinned {} to source {}", tool, id);
+            println!("{}", t!("msg.source_pinned", tool = tool, id = id));
         }
         SourceCommand::Unpin { tool } => {
             crate::config_edit::set_source_pin(&app.ctx, &tool, None)?;
-            println!("unpinned {}", tool);
+            println!("{}", t!("msg.source_unpinned", tool = tool));
         }
     }
     Ok(())
@@ -455,7 +465,7 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
                     .with_context(|| format!("removing {}", downloads.display()))?;
                 std::fs::create_dir_all(&downloads).ok();
             }
-            println!("cleared downloaded archives (CAS store + installs kept)");
+            println!("{}", t!("msg.cache_cleared"));
         }
     }
     Ok(())
@@ -492,17 +502,20 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
 
 pub fn prune(app: &App, dry_run: bool) -> Result<()> {
     if dry_run {
-        println!("(dry-run) prune does not delete; run `osdk prune` to reclaim space");
+        println!("{}", t!("msg.prune_dry_run"));
         return Ok(());
     }
     let (removed, bytes) = app.ctx.cas.gc(&app.ctx.dirs.installs)?;
-    println!("pruned {removed} object(s), {} freed", human_bytes(bytes));
+    println!(
+        "{}",
+        t!("msg.pruned", count = removed, size = human_bytes(bytes))
+    );
     Ok(())
 }
 
 pub fn doctor(app: &App) -> Result<()> {
     use osdk_core::store::link::same_filesystem;
-    println!("osdk doctor");
+    println!("{}", t!("doctor.title"));
     println!("  platform     : {}", app.ctx.platform);
     println!("  data_dir     : {}", app.ctx.dirs.data.display());
     println!("  store_dir    : {}", app.ctx.dirs.store.display());
@@ -512,9 +525,9 @@ pub fn doctor(app: &App) -> Result<()> {
         "  store/install same filesystem: {} ({})",
         same,
         if same {
-            "hardlinks OK"
+            t!("doctor.same_fs_ok")
         } else {
-            "will fall back to copy"
+            t!("doctor.same_fs_no")
         }
     );
     let shims = app.ctx.dirs.shims();

@@ -65,6 +65,18 @@ osdk cache dir                  # shared cache/store locations
 osdk cache env                  # the downstream package-cache redirections
 ```
 
+## Language (i18n)
+
+osdk speaks English and Chinese. It auto-detects from your locale
+(`LC_ALL`/`LC_MESSAGES`/`LANG`, e.g. `zh_CN.UTF-8` → Chinese) and localizes all
+messages, errors, and `-h/--help`. Override precedence (highest first):
+
+```bash
+osdk --lang zh install node@20   # per-invocation flag
+export OSDK_LANG=zh              # environment
+# or in config.toml:  [settings]\n lang = "zh"
+```
+
 ## Directories (override with env)
 
 | Purpose            | Default (Linux)              | Override            |

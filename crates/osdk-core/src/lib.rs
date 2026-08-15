@@ -20,6 +20,7 @@ pub mod config;
 pub mod dirs;
 pub mod error;
 pub mod http;
+pub mod i18n;
 pub mod lock;
 pub mod pipeline;
 pub mod platform;

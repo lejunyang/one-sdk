@@ -43,6 +43,10 @@ pub struct GlobalArgs {
     /// Re-probe sources, ignoring cached speed results.
     #[arg(long, global = true)]
     pub refresh_sources: bool,
+
+    /// Output language (en|zh); overrides locale and OSDK_LANG.
+    #[arg(long, global = true, value_name = "LANG")]
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

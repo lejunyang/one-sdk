@@ -84,4 +84,43 @@ impl Error {
             source,
         }
     }
+
+    /// A localized, user-facing message for this error in the active language.
+    ///
+    /// Structured variants map to catalog keys; free-form variants (`Other`,
+    /// `Config`, wrapped IO/HTTP errors) fall back to the Display text, which is
+    /// already meaningful.
+    pub fn localized(&self) -> String {
+        use crate::i18n::trf;
+        match self {
+            Error::UnknownBackend(name) => trf("err.unknown_backend", &[("name", name)]),
+            Error::NotInstalled { tool, version } => {
+                trf("err.not_installed", &[("tool", tool), ("ver", version)])
+            }
+            Error::NoUsableSource { tool, tried } => trf(
+                "err.no_usable_source",
+                &[("tool", tool), ("tried", &tried.to_string())],
+            ),
+            Error::ChecksumMismatch {
+                name,
+                expected,
+                actual,
+            } => trf(
+                "err.checksum_mismatch",
+                &[("name", name), ("expected", expected), ("actual", actual)],
+            ),
+            Error::VersionResolve { tool, spec, hint } => {
+                let base = trf("err.version_resolve", &[("tool", tool), ("spec", spec)]);
+                match hint {
+                    Some(h) => format!("{base}: {h}"),
+                    None => base,
+                }
+            }
+            Error::UnsupportedPlatform { os, arch } => {
+                trf("err.unsupported_platform", &[("os", os), ("arch", arch)])
+            }
+            // Free-form / wrapped: Display is already the best message.
+            _ => self.to_string(),
+        }
+    }
 }
