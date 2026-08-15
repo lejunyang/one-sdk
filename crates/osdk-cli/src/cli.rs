@@ -128,6 +128,21 @@ pub enum SourceCommand {
     List { tool: String },
     /// Probe sources for a tool now and print the speed ranking.
     Test { tool: String },
+    /// Add a custom source for a tool.
+    Add {
+        tool: String,
+        /// Unique source id.
+        #[arg(long)]
+        id: String,
+        /// Base URL for archive downloads.
+        #[arg(long = "download-url")]
+        download_url: String,
+        /// Version-index / metadata URL (if different from downloads).
+        #[arg(long = "index-url")]
+        index_url: Option<String>,
+    },
+    /// Remove a custom source from a tool.
+    Remove { tool: String, id: String },
     /// Pin a tool to a specific source id.
     Pin { tool: String, id: String },
     /// Remove a tool's source pin.

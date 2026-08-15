@@ -163,4 +163,16 @@ mod tests {
         assert!(s.index_url.is_some());
         assert!(s.enabled);
     }
+
+    #[test]
+    fn probe_results_rank_best_first() {
+        let mut results = vec![
+            ProbeResult { source_id: "slow".into(), throughput: 10.0, ttfb_ms: 500, ok: true, measured_at: 0 },
+            ProbeResult::failed("dead"),
+            ProbeResult { source_id: "fast".into(), throughput: 5000.0, ttfb_ms: 300, ok: true, measured_at: 0 },
+        ];
+        results.sort_by(|a, b| b.score().total_cmp(&a.score()));
+        let order: Vec<&str> = results.iter().map(|r| r.source_id.as_str()).collect();
+        assert_eq!(order, vec!["fast", "slow", "dead"]);
+    }
 }

@@ -21,8 +21,9 @@ pub use verify::HashAlgo;
 pub struct InstallPlan {
     pub tool: String,
     pub version: String,
-    /// Direct URL of the archive to download.
-    pub url: String,
+    /// Candidate archive URLs, best-first. The pipeline tries each until one
+    /// downloads successfully (source failover).
+    pub urls: Vec<String>,
     /// Filename to save the archive as (used for kind detection + naming).
     pub file_name: String,
     pub kind: ArchiveKind,
@@ -69,10 +70,37 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
         let _ = std::fs::remove_dir_all(&install_dir);
     }
 
-    // 1. Download to the shared downloads cache.
+    // 1. Download to the shared downloads cache, trying candidate URLs in order.
     let archive_path = ctx.dirs.downloads().join(&plan.file_name);
     let label = format!("{}@{}", plan.tool, plan.version);
-    download::download(ctx.client, &plan.url, &archive_path, &label, ctx.show_progress).await?;
+    if !archive_path.exists() {
+        let mut last_err: Option<Error> = None;
+        let mut downloaded = false;
+        for (i, url) in plan.urls.iter().enumerate() {
+            match download::download(ctx.client, url, &archive_path, &label, ctx.show_progress).await
+            {
+                Ok(()) => {
+                    downloaded = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        url = %url,
+                        attempt = i + 1,
+                        total = plan.urls.len(),
+                        "download failed, trying next source: {e}"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        if !downloaded {
+            return Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
+                tool: plan.tool.clone(),
+                tried: plan.urls.len(),
+            }));
+        }
+    }
 
     // 2. Verify checksum if provided.
     if let Some(cs) = &plan.checksum {

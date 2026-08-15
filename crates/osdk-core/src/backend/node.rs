@@ -107,62 +107,90 @@ impl Backend for NodeBackend {
     }
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let source = crate::source::select::active_source(ctx, self).await?;
-        let index_url = source
-            .index_url
-            .clone()
-            .unwrap_or_else(|| http::join_url(&source.download_url, "index.json"));
-        let releases: Vec<NodeRelease> = http::get_json(&ctx.client, &index_url).await?;
-
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         // Only offer releases that ship an asset for the current platform.
         let token = Self::file_token(ctx);
 
-        // index.json is newest-first; VersionInfo list should be oldest-first.
-        let mut out: Vec<VersionInfo> = releases
-            .into_iter()
-            .rev()
-            .filter(|r| r.files.is_empty() || r.files.iter().any(|f| f == &token))
-            .map(|r| {
-                let version = r.version.trim_start_matches('v').to_string();
-                let lts = match r.lts {
-                    LtsField::Named(s) => Some(s.to_lowercase()),
-                    LtsField::No => None,
-                };
-                VersionInfo {
-                    version,
-                    stable: true,
-                    lts,
+        // Try sources in ranked order until one serves a usable index (failover).
+        let mut last_err: Option<crate::error::Error> = None;
+        for source in &sources {
+            let index_url = source
+                .index_url
+                .clone()
+                .unwrap_or_else(|| http::join_url(&source.download_url, "index.json"));
+            let releases: Vec<NodeRelease> = match http::get_json(&ctx.client, &index_url).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(source = %source.id, "index fetch failed, trying next: {e}");
+                    last_err = Some(e);
+                    continue;
                 }
-            })
-            .collect();
-        out.retain(|v| !v.version.is_empty());
-        Ok(out)
+            };
+
+            // index.json is newest-first; VersionInfo list should be oldest-first.
+            let mut out: Vec<VersionInfo> = releases
+                .into_iter()
+                .rev()
+                .filter(|r| r.files.is_empty() || r.files.iter().any(|f| f == &token))
+                .map(|r| {
+                    let version = r.version.trim_start_matches('v').to_string();
+                    let lts = match r.lts {
+                        LtsField::Named(s) => Some(s.to_lowercase()),
+                        LtsField::No => None,
+                    };
+                    VersionInfo {
+                        version,
+                        stable: true,
+                        lts,
+                    }
+                })
+                .collect();
+            out.retain(|v| !v.version.is_empty());
+            return Ok(out);
+        }
+        Err(last_err.unwrap_or_else(|| crate::error::Error::NoUsableSource {
+            tool: self.id().to_string(),
+            tried: sources.len(),
+        }))
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        let source = crate::source::select::active_source(ctx, self).await?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let version = &tv.version;
         let (file_name, kind) = Self::archive_for(ctx, version);
 
-        // Download URL: <base>/v<version>/<file_name>
-        let base = http::join_url(&source.download_url, &format!("v{version}"));
-        let url = http::join_url(&base, &file_name);
+        // Build a download URL from every candidate source (best-first) so the
+        // pipeline can fail over: <base>/v<version>/<file_name>.
+        let urls: Vec<String> = sources
+            .iter()
+            .map(|s| {
+                let base = http::join_url(&s.download_url, &format!("v{version}"));
+                http::join_url(&base, &file_name)
+            })
+            .collect();
 
-        // Fetch SHASUMS256.txt for verification.
-        let shasums_url = http::join_url(&base, "SHASUMS256.txt");
-        let checksum = match http::get_text(&ctx.client, &shasums_url).await {
-            Ok(body) => pipeline::verify::find_shasum(&body, &file_name).map(|h| Checksum {
-                algo: HashAlgo::Sha256,
-                hex: h.to_string(),
-            }),
-            Err(_) => None,
-        };
+        // Fetch SHASUMS256.txt for verification from the best source (fall back
+        // through the others if needed).
+        let mut checksum = None;
+        for s in &sources {
+            let base = http::join_url(&s.download_url, &format!("v{version}"));
+            let shasums_url = http::join_url(&base, "SHASUMS256.txt");
+            if let Ok(body) = http::get_text(&ctx.client, &shasums_url).await {
+                if let Some(h) = pipeline::verify::find_shasum(&body, &file_name) {
+                    checksum = Some(Checksum {
+                        algo: HashAlgo::Sha256,
+                        hex: h.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
 
         let plan = InstallPlan {
             tool: self.id().to_string(),
             version: version.clone(),
-            url,
+            urls,
             file_name,
             kind,
             checksum,

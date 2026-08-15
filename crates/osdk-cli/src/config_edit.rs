@@ -54,6 +54,88 @@ pub fn set_source_pin(ctx: &Ctx, tool: &str, id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Add a custom source to a tool's `[[sources.<tool>.custom]]` array.
+pub fn add_custom_source(
+    ctx: &Ctx,
+    tool: &str,
+    id: &str,
+    download_url: &str,
+    index_url: Option<&str>,
+) -> Result<()> {
+    let path = ctx.dirs.user_config_file();
+    let mut doc = load_doc(&path)?;
+
+    let sources = doc
+        .entry("sources")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let sources_tbl = sources
+        .as_table_mut()
+        .context("`sources` is not a table in config")?;
+    sources_tbl.set_implicit(true);
+
+    let tool_item = sources_tbl
+        .entry(tool)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let tool_tbl = tool_item
+        .as_table_mut()
+        .context("`sources.<tool>` is not a table")?;
+
+    // Get or create the `custom` array-of-tables.
+    let custom_item = tool_tbl
+        .entry("custom")
+        .or_insert(toml_edit::Item::ArrayOfTables(
+            toml_edit::ArrayOfTables::new(),
+        ));
+    let array = custom_item
+        .as_array_of_tables_mut()
+        .context("`sources.<tool>.custom` is not an array of tables")?;
+
+    // Replace an existing entry with the same id.
+    let existing = array
+        .iter()
+        .position(|t| t.get("id").and_then(|v| v.as_str()) == Some(id));
+    if let Some(pos) = existing {
+        array.remove(pos);
+    }
+
+    let mut tbl = toml_edit::Table::new();
+    tbl.insert("id", toml_edit::value(id));
+    tbl.insert("kind", toml_edit::value("custom"));
+    tbl.insert("download_url", toml_edit::value(download_url));
+    if let Some(idx) = index_url {
+        tbl.insert("index_url", toml_edit::value(idx));
+    }
+    array.push(tbl);
+
+    save_doc(&path, &doc)?;
+    Ok(())
+}
+
+/// Remove a custom source by id from a tool. Returns whether one was removed.
+pub fn remove_custom_source(ctx: &Ctx, tool: &str, id: &str) -> Result<bool> {
+    let path = ctx.dirs.user_config_file();
+    let mut doc = load_doc(&path)?;
+    let removed = (|| {
+        let array = doc
+            .get_mut("sources")?
+            .as_table_mut()?
+            .get_mut(tool)?
+            .as_table_mut()?
+            .get_mut("custom")?
+            .as_array_of_tables_mut()?;
+        let pos = array
+            .iter()
+            .position(|t| t.get("id").and_then(|v| v.as_str()) == Some(id))?;
+        array.remove(pos);
+        Some(())
+    })()
+    .is_some();
+    if removed {
+        save_doc(&path, &doc)?;
+    }
+    Ok(removed)
+}
+
 fn edit_tool(path: &Path, tool: &str, spec: &str) -> Result<()> {
     let mut doc = load_doc(path)?;
     let tools = doc

@@ -36,6 +36,21 @@ pub fn effective_sources(ctx: &Ctx, backend: &dyn Backend) -> Vec<Source> {
 /// - `Selection::Auto` uses cached probe results when fresh, else probes.
 /// - `Selection::Ordered` returns the highest-priority enabled source.
 pub async fn active_source(ctx: &Ctx, backend: &dyn Backend) -> Result<Source> {
+    ranked_source_list(ctx, backend)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::NoUsableSource {
+            tool: backend.id().to_string(),
+            tried: 0,
+        })
+}
+
+/// The full list of candidate sources, best-first. Used for download failover:
+/// callers try each in order until one succeeds.
+///
+/// A config pin (or one-shot `--source`) moves that source to the front.
+pub async fn ranked_source_list(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
     let sources = effective_sources(ctx, backend);
     if sources.is_empty() {
         return Err(Error::NoUsableSource {
@@ -44,27 +59,37 @@ pub async fn active_source(ctx: &Ctx, backend: &dyn Backend) -> Result<Source> {
         });
     }
 
-    // Explicit pin wins.
+    // Explicit pin wins: put it first, keep the rest as fallbacks.
     if let Some(tool_cfg) = ctx.config.tool_sources(backend.id()) {
         if let Some(pin) = &tool_cfg.pin {
-            if let Some(s) = sources.iter().find(|s| &s.id == pin) {
-                return Ok(s.clone());
+            if let Some(idx) = sources.iter().position(|s| &s.id == pin) {
+                let mut ordered = sources.clone();
+                let pinned = ordered.remove(idx);
+                let mut out = vec![pinned];
+                out.extend(ordered);
+                return Ok(out);
             }
         }
     }
 
     match ctx.config.sources.selection {
-        Selection::Ordered => Ok(sources.into_iter().next().unwrap()),
-        Selection::Pinned => {
-            // No pin set (checked above) ⇒ fall back to ordered.
-            Ok(sources.into_iter().next().unwrap())
-        }
+        Selection::Ordered | Selection::Pinned => Ok(sources),
         Selection::Auto => {
-            let ranked = ranked_sources(ctx, backend, &sources).await;
-            match ranked.into_iter().next() {
-                Some(id) => Ok(sources.into_iter().find(|s| s.id == id).unwrap()),
-                None => Ok(sources.into_iter().next().unwrap()),
+            let ranked_ids = ranked_sources(ctx, backend, &sources).await;
+            // Reorder `sources` by the ranked id order; append any not ranked
+            // (e.g. failed probes) at the end so they can still be tried.
+            let mut out: Vec<Source> = Vec::with_capacity(sources.len());
+            for id in &ranked_ids {
+                if let Some(s) = sources.iter().find(|s| &s.id == id) {
+                    out.push(s.clone());
+                }
             }
+            for s in &sources {
+                if !out.iter().any(|o| o.id == s.id) {
+                    out.push(s.clone());
+                }
+            }
+            Ok(out)
         }
     }
 }

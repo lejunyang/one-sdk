@@ -269,8 +269,8 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 .tool_sources(&tool)
                 .and_then(|t| t.pin.clone());
             println!(
-                "sources for {tool} (selection: {:?}):",
-                app.ctx.config.sources.selection
+                "sources for {} (selection: {:?}):",
+                tool, app.ctx.config.sources.selection
             );
             for s in sources {
                 let marker = if Some(&s.id) == pin.as_ref() {
@@ -289,7 +289,7 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
         }
         SourceCommand::Test { tool } => {
             let backend = app.registry.get(&tool)?;
-            println!("probing sources for {tool} ...");
+            println!("probing sources for {} ...", tool);
             let mut ranked = select::refresh(&app.ctx, backend.as_ref()).await?;
             ranked.sort_by(|a, b| b.score().total_cmp(&a.score()));
             for (i, r) in ranked.iter().enumerate() {
@@ -306,13 +306,49 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 }
             }
         }
+        SourceCommand::Add {
+            tool,
+            id,
+            download_url,
+            index_url,
+        } => {
+            app.registry.get(&tool)?; // validate known backend
+            crate::config_edit::add_custom_source(
+                &app.ctx,
+                &tool,
+                &id,
+                &download_url,
+                index_url.as_deref(),
+            )?;
+            println!("added custom source {} for {}", id, tool);
+        }
+        SourceCommand::Remove { tool, id } => {
+            let removed = crate::config_edit::remove_custom_source(&app.ctx, &tool, &id)?;
+            if removed {
+                println!("removed custom source {} from {}", id, tool);
+            } else {
+                println!("no custom source {} found for {}", id, tool);
+            }
+        }
         SourceCommand::Pin { tool, id } => {
+            let backend = app.registry.get(&tool)?;
+            let known = select::effective_sources(&app.ctx, backend.as_ref())
+                .iter()
+                .any(|s| s.id == id);
+            if !known {
+                return Err(anyhow!(
+                    "unknown source {} for {} (see `osdk source list {}`)",
+                    id,
+                    tool,
+                    tool
+                ));
+            }
             crate::config_edit::set_source_pin(&app.ctx, &tool, Some(&id))?;
-            println!("pinned {tool} to source {id}");
+            println!("pinned {} to source {}", tool, id);
         }
         SourceCommand::Unpin { tool } => {
             crate::config_edit::set_source_pin(&app.ctx, &tool, None)?;
-            println!("unpinned {tool}");
+            println!("unpinned {}", tool);
         }
     }
     Ok(())
