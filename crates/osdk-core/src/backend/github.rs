@@ -225,6 +225,20 @@ impl Backend for GithubBackend {
             format!("https://gh-proxy.com/{}", asset.browser_download_url),
         ];
 
+        // Best-effort checksum discovery (per-asset sidecar or shared manifest).
+        // Try the direct asset URL first, then the proxy-prefixed variant, since
+        // the direct github.com host may be unreachable from some networks.
+        let checksum = {
+            let mut found =
+                pipeline::verify::discover_asset_checksum(&ctx.client, &asset.browser_download_url)
+                    .await;
+            if found.is_none() {
+                let proxied = format!("https://gh-proxy.com/{}", asset.browser_download_url);
+                found = pipeline::verify::discover_asset_checksum(&ctx.client, &proxied).await;
+            }
+            found
+        };
+
         // Archive vs bare binary.
         match ArchiveKind::from_name(&asset.name) {
             Ok(kind) => {
@@ -234,7 +248,7 @@ impl Backend for GithubBackend {
                     urls,
                     file_name: asset.name.clone(),
                     kind,
-                    checksum: None,
+                    checksum,
                     // Some archives have a top dir, some don't; strip only when a
                     // single root dir is present (extract handles the no-op).
                     strip_root: true,

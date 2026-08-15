@@ -68,9 +68,67 @@ pub fn find_shasum<'a>(body: &'a str, filename: &str) -> Option<&'a str> {
         let mut it = line.split_whitespace();
         let hash = it.next()?;
         let name = it.next()?;
+        // manifests may list a path; match on the basename too
         let name = name.trim_start_matches('*');
-        if name == filename {
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        if name == filename || base == filename {
             return Some(hash);
+        }
+    }
+    None
+}
+
+/// Extract the first 64-hex-char sha256 token from a sidecar body (a bare hash,
+/// or `<hex>  <filename>`).
+pub fn parse_sha256_token(body: &str) -> Option<String> {
+    let token = body.split_whitespace().next()?;
+    if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// Best-effort discovery of a sha256 checksum for a GitHub-style release asset.
+///
+/// Given the full asset download URL, tries (in order):
+/// 1. per-asset sidecars: `<url>.sha256`, `<url>.sha256sum`, `<url>.sha256.txt`
+/// 2. a shared manifest in the same directory: `SHASUMS256.txt`, `SHA256SUMS`,
+///    `checksums.txt` — matched by the asset's filename.
+///
+/// Returns `None` if nothing is found (caller proceeds without verification).
+pub async fn discover_asset_checksum(
+    client: &reqwest::Client,
+    asset_url: &str,
+) -> Option<super::Checksum> {
+    // 1. per-asset sidecars
+    for suffix in [".sha256", ".sha256sum", ".sha256.txt"] {
+        let url = format!("{asset_url}{suffix}");
+        if let Ok(body) = crate::http::get_text(client, &url).await {
+            if let Some(hex) = parse_sha256_token(&body) {
+                return Some(super::Checksum {
+                    algo: HashAlgo::Sha256,
+                    hex,
+                });
+            }
+        }
+    }
+    // 2. shared manifest in the same directory
+    let (dir, file) = asset_url.rsplit_once('/')?;
+    for manifest in [
+        "SHASUMS256.txt",
+        "SHA256SUMS",
+        "sha256sums.txt",
+        "checksums.txt",
+    ] {
+        let url = format!("{dir}/{manifest}");
+        if let Ok(body) = crate::http::get_text(client, &url).await {
+            if let Some(hex) = find_shasum(&body, file) {
+                return Some(super::Checksum {
+                    algo: HashAlgo::Sha256,
+                    hex: hex.to_string(),
+                });
+            }
         }
     }
     None
@@ -114,6 +172,25 @@ mod tests {
         let body = "aaaa  node-v20-linux-x64.tar.gz\nbbbb  node-v20-linux-x64.tar.xz\n";
         assert_eq!(find_shasum(body, "node-v20-linux-x64.tar.xz"), Some("bbbb"));
         assert_eq!(find_shasum(body, "missing"), None);
+    }
+
+    #[test]
+    fn shasums_matches_basename_in_path() {
+        // manifests sometimes list a path; match on the basename too
+        let body = "cccc  ./dist/bun-linux-x64.zip\n";
+        assert_eq!(find_shasum(body, "bun-linux-x64.zip"), Some("cccc"));
+    }
+
+    #[test]
+    fn sidecar_token_parsing() {
+        let hex = "b".repeat(64);
+        assert_eq!(parse_sha256_token(&hex).as_deref(), Some(hex.as_str()));
+        // `<hex>  <filename>` form
+        let body = format!("{hex}  deno-x86_64-unknown-linux-gnu.zip\n");
+        assert_eq!(parse_sha256_token(&body).as_deref(), Some(hex.as_str()));
+        // too short / non-hex -> None
+        assert_eq!(parse_sha256_token("nothex"), None);
+        assert_eq!(parse_sha256_token(""), None);
     }
 
     #[test]
