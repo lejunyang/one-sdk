@@ -64,9 +64,12 @@ osdk upgrade                      # install current resolutions + refresh lock
 
 `osdk.lock` keeps independent sections for Linux, macOS, and Windows, including
 the original request, exact resolved version, backend options, and—after the
-tool has been installed—the exact artifact URL, filename, and verified checksum.
-No-argument installs use this identity directly without re-querying an upstream
-registry. An explicit `osdk install node@20` still honors the explicit request.
+tool has been installed—the exact artifact URL, filename, verified checksum,
+and any authenticated Sigstore evidence. No-argument installs use the locked
+artifact identity without re-querying an upstream release registry. Evidence
+in the lock is an audit record, not a trust shortcut: an attestation-enabled
+locked reinstall verifies the cached bundle against the cached artifact again.
+An explicit `osdk install node@20` still honors the explicit request.
 
 Run a command with managed tools without changing project pins:
 
@@ -186,6 +189,29 @@ Set `OSDK_REQUIRE_CHECKSUMS=true` (or pass `--require-checksums`) to reject any
 artifact for which neither upstream metadata nor a lock/cache receipt provides
 a verifiable SHA-256/SHA-512/BLAKE3 value.
 
+The generic `github:owner/repo` backend can additionally verify GitHub artifact
+attestations:
+
+```bash
+osdk --attestations if-available install github:cli/cli@latest
+osdk --attestations required install github:cli/cli@latest
+```
+
+The same policy is configurable as `settings.attestations` or
+`OSDK_ATTESTATIONS=off|if-available|required`; the default is `off`.
+`if-available` permits a release with no attestation, but a malformed,
+mismatched, or cryptographically invalid bundle always fails. `required`
+also fails when no bundle is available. Verified bundles are cached by
+repository and artifact SHA-256, so `--offline` and locked reinstalls can
+reverify them without trusting lockfile evidence.
+
+Verification uses the embedded Sigstore public-good trust root, checks the
+Fulcio certificate chain and SCT, GitHub Actions OIDC issuer and repository,
+artifact signature, DSSE subject digest, Rekor body consistency, and signing
+time. The upstream `sigstore` 0.14 verifier does not yet verify the Rekor
+Merkle inclusion proof or Signed Entry Timestamp (SET); do not treat this mode
+as complete transparency-log proof verification.
+
 ## Architecture
 
 - `crates/osdk-core` — library: `Backend` trait, pipeline
@@ -211,7 +237,8 @@ cargo build --workspace --target x86_64-pc-windows-gnu
 CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
 ubuntu/macos/windows, plus a dedicated Linux→Windows cross-build that guards the
 `#[cfg(windows)]` paths (shim `.cmd`/bash generation, junctions, volume
-detection).
+detection). A separate Rust 1.88 job checks the declared MSRV against the
+locked dependency graph.
 
 ## License
 

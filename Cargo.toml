@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/lejunyang/one-sdk"
-rust-version = "1.80"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # CLI
@@ -39,6 +39,9 @@ blake3 = "1"
 hex = "0.4"
 # signatures
 minisign-verify = "0.2"
+sigstore = { version = "0.14", default-features = false, features = ["verify", "sigstore-trust-root"] }
+x509-cert = "0.2"
+snap = "1"
 # base64 (npm SRI integrity decoding)
 base64 = "0.22"
 # fs / dirs

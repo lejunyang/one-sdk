@@ -16,6 +16,7 @@ use crate::http;
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
 use crate::platform::{Arch, Os};
 use crate::source::Source;
+use crate::verification::GithubAttestation;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo, VersionSpec};
 
 /// A github backend bound to a specific `owner/repo`.
@@ -48,10 +49,15 @@ impl GithubBackend {
     /// doesn't carry a valid owner/repo.
     pub fn from_id(id: &str) -> Option<GithubBackend> {
         let rest = id.strip_prefix("github:")?;
-        let (owner, repo) = rest.split_once('/')?;
+        let mut components = rest.split('/');
+        let owner = components.next()?;
+        let repo = components.next()?;
+        if components.next().is_some() {
+            return None;
+        }
         let owner = owner.trim();
         let repo = repo.trim().trim_end_matches(".git");
-        if owner.is_empty() || repo.is_empty() {
+        if !valid_repository_component(owner) || !valid_repository_component(repo) {
             return None;
         }
         Some(GithubBackend {
@@ -66,6 +72,15 @@ impl GithubBackend {
             "https://api.github.com/repos/{}/{}/releases?per_page=30",
             self.owner, self.repo
         )
+    }
+
+    fn attestation(&self, ctx: &Ctx) -> Option<GithubAttestation> {
+        let policy = ctx.config.settings.attestations;
+        (policy != crate::config::AttestationPolicy::Off).then(|| GithubAttestation {
+            owner: self.owner.clone(),
+            repo: self.repo.clone(),
+            policy,
+        })
     }
 
     /// Score how well an asset name matches the host platform. Higher is better;
@@ -189,6 +204,7 @@ impl Backend for GithubBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
+        let attestation = self.attestation(ctx);
         if let Some(artifact) = pipeline::locked_artifact(tv)? {
             if let Ok(kind) = ArchiveKind::from_name(&artifact.file_name) {
                 let plan = InstallPlan {
@@ -213,7 +229,7 @@ impl Backend for GithubBackend {
                     offline: ctx.config.settings.offline,
                     require_checksums: ctx.config.settings.require_checksums,
                 };
-                pipeline::run(&plan, &pctx).await?;
+                pipeline::run_with_attestation(&plan, &pctx, attestation.as_ref()).await?;
             } else {
                 let checksum = artifact
                     .checksum
@@ -233,6 +249,7 @@ impl Backend for GithubBackend {
                     ctx.show_progress,
                     ctx.config.settings.offline,
                     ctx.config.settings.require_checksums,
+                    attestation.as_ref(),
                 )
                 .await?;
             }
@@ -342,7 +359,7 @@ impl Backend for GithubBackend {
                     offline: ctx.config.settings.offline,
                     require_checksums: ctx.config.settings.require_checksums,
                 };
-                pipeline::run(&plan, &pctx).await?;
+                pipeline::run_with_attestation(&plan, &pctx, attestation.as_ref()).await?;
             }
             Err(_) => {
                 // Treat as a bare executable named after the repo.
@@ -360,6 +377,7 @@ impl Backend for GithubBackend {
                     ctx.show_progress,
                     ctx.config.settings.offline,
                     ctx.config.settings.require_checksums,
+                    attestation.as_ref(),
                 )
                 .await?;
             }
@@ -387,6 +405,15 @@ impl Backend for GithubBackend {
             Ok(discovered)
         }
     }
+}
+
+fn valid_repository_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn mentions_other_os(name: &str, os: Os) -> bool {
@@ -420,5 +447,8 @@ mod tests {
         assert_eq!(b.id(), "github:cli/cli");
         assert!(GithubBackend::from_id("github:noslash").is_none());
         assert!(GithubBackend::from_id("node").is_none());
+        assert!(GithubBackend::from_id("github:cli/cli/extra").is_none());
+        assert!(GithubBackend::from_id("github:../cli").is_none());
+        assert!(GithubBackend::from_id("github:cli/repo?ref=bad").is_none());
     }
 }

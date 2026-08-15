@@ -366,6 +366,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.flag.attestations",
+        (
+            "GitHub artifact attestation policy: off|if-available|required",
+            "GitHub 制品证明策略：off|if-available|required",
+        ),
+    );
+    m.insert(
         "help.lock.about",
         (
             "Resolve exact project versions into osdk.lock",

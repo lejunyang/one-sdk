@@ -44,6 +44,8 @@ pub struct Settings {
     pub verify_signatures: bool,
     /// Reject artifacts when no checksum is available.
     pub require_checksums: bool,
+    /// GitHub artifact attestation verification policy.
+    pub attestations: AttestationPolicy,
     /// Never make network requests; use cached metadata and archives only.
     pub offline: bool,
     /// Output language override (`en`/`zh`). None = auto-detect from locale.
@@ -59,6 +61,7 @@ impl Default for Settings {
             yes: false,
             verify_signatures: true,
             require_checksums: false,
+            attestations: AttestationPolicy::Off,
             offline: false,
             lang: None,
         }
@@ -209,6 +212,11 @@ impl Config {
         if let Some(v) = getenv("OSDK_REQUIRE_CHECKSUMS") {
             self.settings.require_checksums = truthy(&v);
         }
+        if let Some(v) = getenv("OSDK_ATTESTATIONS") {
+            if let Ok(policy) = v.parse() {
+                self.settings.attestations = policy;
+            }
+        }
         if let Some(v) = getenv("OSDK_OFFLINE") {
             self.settings.offline = truthy(&v);
         }
@@ -230,6 +238,40 @@ impl Config {
             return Ok(spec.to_string());
         };
         expand_alias(aliases, spec)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttestationPolicy {
+    #[default]
+    Off,
+    IfAvailable,
+    Required,
+}
+
+impl std::str::FromStr for AttestationPolicy {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "0" => Ok(Self::Off),
+            "if-available" | "available" | "auto" => Ok(Self::IfAvailable),
+            "required" | "require" | "true" | "1" => Ok(Self::Required),
+            other => Err(Error::config(format!(
+                "invalid attestation policy `{other}` (expected off|if-available|required)"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for AttestationPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Off => "off",
+            Self::IfAvailable => "if-available",
+            Self::Required => "required",
+        })
     }
 }
 
@@ -364,6 +406,7 @@ mod tests {
             "OSDK_JOBS" => Some("3".to_string()),
             "OSDK_VERIFY_SIGNATURES" => Some("false".to_string()),
             "OSDK_REQUIRE_CHECKSUMS" => Some("true".to_string()),
+            "OSDK_ATTESTATIONS" => Some("required".to_string()),
             "OSDK_OFFLINE" => Some("true".to_string()),
             _ => None,
         });
@@ -371,6 +414,7 @@ mod tests {
         assert_eq!(cfg.settings.jobs, 3);
         assert!(!cfg.settings.verify_signatures);
         assert!(cfg.settings.require_checksums);
+        assert_eq!(cfg.settings.attestations, AttestationPolicy::Required);
         assert!(cfg.settings.offline);
     }
 
@@ -428,5 +472,18 @@ mod tests {
             .contains("cycle"));
         assert!(validate_alias_name("latest").is_err());
         assert!(validate_alias_name("default").is_ok());
+    }
+
+    #[test]
+    fn attestation_policy_parses() {
+        assert_eq!(
+            "if-available".parse::<AttestationPolicy>().unwrap(),
+            AttestationPolicy::IfAvailable
+        );
+        assert_eq!(
+            "required".parse::<AttestationPolicy>().unwrap(),
+            AttestationPolicy::Required
+        );
+        assert!("sometimes".parse::<AttestationPolicy>().is_err());
     }
 }

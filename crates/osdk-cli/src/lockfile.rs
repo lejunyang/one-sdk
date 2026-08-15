@@ -38,6 +38,8 @@ pub struct LockedArtifact {
     pub file_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<osdk_core::verification::VerificationEvidence>,
 }
 
 fn schema_version() -> u32 {
@@ -179,6 +181,7 @@ pub fn merge_resolved(
                     url: receipt.url,
                     file_name: receipt.file_name,
                     checksum: receipt.checksum,
+                    evidence: receipt.evidence,
                 }),
             },
         );
@@ -283,6 +286,84 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].spec, VersionSpec::Exact("stable".into()));
         assert_eq!(requests[0].options["profile"], "minimal");
+    }
+
+    #[test]
+    fn legacy_artifact_without_evidence_still_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(
+            &path,
+            r#"
+schema = 1
+
+[platforms.linux-x64.tools."github:cli/cli"]
+request = "2.96.0"
+version = "2.96.0"
+
+[platforms.linux-x64.tools."github:cli/cli".artifact]
+url = "https://example.test/gh.tar.gz"
+file_name = "gh.tar.gz"
+checksum = "sha256:00"
+"#,
+        )
+        .unwrap();
+
+        let lock = load(&path).unwrap();
+        assert!(lock.platforms["linux-x64"].tools["github:cli/cli"]
+            .artifact
+            .as_ref()
+            .unwrap()
+            .evidence
+            .is_empty());
+    }
+
+    #[test]
+    fn lock_persists_verification_evidence_without_trusting_it_as_an_option() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let install = dirs.install_path("github:cli/cli", "2.96.0");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(
+            install.join(".osdk-artifact.json"),
+            r#"{
+  "url": "https://example.test/gh.tar.gz",
+  "file_name": "gh.tar.gz",
+  "checksum": "sha256:00",
+  "evidence": [{
+    "kind": "sigstore-bundle",
+    "repository": "cli/cli",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "digest": "sha256:00"
+  }]
+}"#,
+        )
+        .unwrap();
+        merge_resolved(
+            &path,
+            linux(),
+            &dirs,
+            &[(
+                ToolRequest::parse("github:cli/cli@2.96.0").unwrap(),
+                ToolVersion::new("github:cli/cli", "2.96.0"),
+            )],
+        )
+        .unwrap();
+
+        let lock = load(&path).unwrap();
+        let artifact = lock.platforms["linux-x64"].tools["github:cli/cli"]
+            .artifact
+            .as_ref()
+            .unwrap();
+        assert_eq!(artifact.evidence.len(), 1);
+        assert_eq!(artifact.evidence[0].repository, "cli/cli");
+
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        assert!(requests[0]
+            .options
+            .keys()
+            .all(|key| !key.contains("evidence")));
     }
 
     fn test_dirs(root: &Path) -> osdk_core::dirs::Dirs {

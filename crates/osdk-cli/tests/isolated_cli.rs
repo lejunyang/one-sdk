@@ -83,6 +83,23 @@ fn config_list_uses_only_isolated_directories() {
 }
 
 #[test]
+fn attestation_policy_cli_override_is_reported() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run_isolated(
+        temp.path(),
+        &["--attestations", "required", "config", "list"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("attestations = required"));
+}
+
+#[test]
 fn doctor_creates_state_only_under_isolated_root() {
     let temp = tempfile::tempdir().unwrap();
     let output = run_isolated(temp.path(), &["doctor"]);
@@ -339,6 +356,57 @@ fn artifact_lock_reinstalls_offline_and_rejects_tampering() {
     let rejected = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("checksum mismatch"));
+}
+
+#[test]
+fn locked_evidence_is_not_trusted_without_cached_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let artifact = temp
+        .path()
+        .join("cache/downloads/github/example/tool/1.0.0/tool");
+    std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    std::fs::write(&artifact, b"locked tool fixture").unwrap();
+    let checksum =
+        osdk_core::pipeline::verify::hash_file(&artifact, osdk_core::pipeline::HashAlgo::Sha256)
+            .unwrap();
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            r#"schema = 1
+
+[platforms.{platform}.tools."github:example/tool"]
+request = "1.0.0"
+version = "1.0.0"
+
+[platforms.{platform}.tools."github:example/tool".artifact]
+url = "https://invalid.example/tool"
+file_name = "tool"
+checksum = "sha256:{checksum}"
+
+[[platforms.{platform}.tools."github:example/tool".artifact.evidence]]
+kind = "sigstore-bundle"
+repository = "example/tool"
+issuer = "https://token.actions.githubusercontent.com"
+digest = "sha256:{checksum}"
+"#,
+            platform = platform_key(),
+        ),
+    )
+    .unwrap();
+
+    let output = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "--attestations", "required", "install"],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no cached bundle"));
+    assert!(!temp
+        .path()
+        .join("installs/github/example/tool/1.0.0/.osdk-complete")
+        .exists());
 }
 
 #[cfg(unix)]

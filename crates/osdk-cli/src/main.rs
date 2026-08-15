@@ -39,6 +39,7 @@ fn main() {
         refresh_sources: cli.global.refresh_sources,
         offline: cli.global.offline,
         require_checksums: cli.global.require_checksums,
+        attestations: cli.global.attestations,
         lang: cli.global.lang.clone(),
     };
 

@@ -290,8 +290,16 @@ Compared with mise and aqua:
 - no multiple binaries or additional assets,
 - no platform override,
 - no static metadata service,
-- no SLSA, Sigstore, or GitHub artifact attestations,
 - only one trusted minisign key is currently registered.
+
+The remediation now supports GitHub artifact attestations for this backend.
+It verifies the downloaded artifact against cached or fetched Sigstore bundles,
+binds the Fulcio certificate to the GitHub Actions issuer and requested
+repository, and persists authenticated evidence in receipts and locks.
+`off`, `if-available`, and `required` policies are available. The upstream
+`sigstore` 0.14 verifier still has TODOs for Rekor Merkle inclusion-proof and
+Signed Entry Timestamp verification, so this does not yet establish complete
+transparency-log proof validation.
 
 ## Test audit
 
@@ -360,7 +368,8 @@ end-to-end tests.
 
 ### Remaining roadmap
 
-1. Expand the verification policy with additional provenance mechanisms.
+The selected remediation roadmap is complete. Track upstream Sigstore support
+for Rekor inclusion-proof and SET verification as a future hardening item.
 
 ## Test isolation requirements
 

@@ -34,6 +34,7 @@ fn localize_global_args(cmd: Command) -> Command {
         .mut_arg("require_checksums", |a| {
             a.help(h("help.flag.require_checksums"))
         })
+        .mut_arg("attestations", |a| a.help(h("help.flag.attestations")))
         .mut_arg("lang", |a| a.help(h("help.flag.lang")))
 }
 

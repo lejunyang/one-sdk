@@ -21,6 +21,15 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: check minimum supported Rust version
+        run: cargo check --locked --workspace
+
   # Lint + unit tests across the three supported platforms.
   test:
     name: test (${{ matrix.os }})

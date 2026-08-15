@@ -131,9 +131,10 @@ case "$backend" in
     version_command=(bun --version)
     ;;
   github)
-    list_tool=github:sharkdp/fd
-    request=github:sharkdp/fd@latest
-    version_command=(fd --version)
+    export OSDK_ATTESTATIONS=required
+    list_tool=github:cli/cli
+    request=github:cli/cli@latest
+    version_command=(gh --version)
     ;;
   *)
     printf 'unsupported live-smoke backend: %s\n' "$backend" >&2

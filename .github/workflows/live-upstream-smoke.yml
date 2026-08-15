@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  attestations: read
   contents: read
 
 concurrency:

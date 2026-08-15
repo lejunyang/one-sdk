@@ -73,6 +73,19 @@ Related audit: `docs/research/sdk-manager-audit-2026-08-15.md`
 - npm-backed SDKs use SHA-512/SHA-256 SRI.
 - Python uses upstream SHA-256 manifests.
 - Rust bootstrap uses upstream SHA-256 sidecars.
+- Added `--attestations` / `OSDK_ATTESTATIONS` /
+  `settings.attestations` with `off`, `if-available`, and `required` policies
+  for the generic GitHub backend.
+- GitHub API `bundle_url` payloads are Snappy-decoded with a bounded output
+  size; inline bundles remain a compatibility fallback.
+- Verified evidence records repository, GitHub Actions OIDC issuer, and
+  authenticated artifact SHA-256 in install receipts and project locks.
+- Locked and offline installs reverify cached bundles against cached artifact
+  bytes instead of trusting lockfile evidence.
+- Verification checks Fulcio chain/SCT, workflow repository and issuer,
+  artifact signature, DSSE subject digest, Rekor body consistency, and signing
+  time. The upstream `sigstore` 0.14 verifier does not yet validate Rekor
+  Merkle inclusion proofs or Signed Entry Timestamps (SET).
 
 ### Tests and documentation
 
@@ -83,6 +96,10 @@ Related audit: `docs/research/sdk-manager-audit-2026-08-15.md`
 - Added Rust isolated-uninstall coverage.
 - Added CLI subprocess tests with scrubbed environments and temporary
   `HOME`/`OSDK_*` directories.
+- Added offline tests using a real GitHub Actions Sigstore bundle and matching
+  GHCR OCI index, including wrong-repository and tampered-artifact failures.
+- Added Snappy bundle decoding, attestation policy, receipt, and lockfile
+  evidence tests.
 - Updated README source descriptions, offline behavior, concurrency, resume,
   signature settings, and GitHub API scope.
 - Updated CI comments and the original audit roadmap.
@@ -124,10 +141,11 @@ Passed:
 
 - `cargo fmt --all --check`
 - `cargo test --workspace`
-  - 70 `osdk-core` tests
-  - 2 lockfile unit tests
-  - 8 CLI integration tests
+  - 89 `osdk-core` tests
+  - 4 lockfile unit tests
+  - 14 CLI integration tests
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo +1.88.0 check --locked --workspace`
 - `cargo build --workspace --target x86_64-pc-windows-gnu`
 - `git diff --check`
 
@@ -152,7 +170,6 @@ Passed:
 
 ## Remaining roadmap
 
-The first remediation pass intentionally leaves larger product work for
-separate changes:
-
-1. Add broader provenance/attestation verification.
+All remediation items selected from the original audit are implemented. Future
+hardening should track upstream support for Rekor inclusion-proof and SET
+verification before claiming complete transparency-log proof validation.

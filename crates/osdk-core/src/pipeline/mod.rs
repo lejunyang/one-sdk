@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::lock::FileLock;
 use crate::store::link::LinkMode;
 use crate::store::Cas;
+use crate::verification::{GithubAttestation, VerificationEvidence};
 use crate::version::ToolVersion;
 
 pub mod download;
@@ -47,6 +48,8 @@ pub struct ArtifactReceipt {
     pub file_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<VerificationEvidence>,
 }
 
 const ARTIFACT_RECEIPT_FILE: &str = ".osdk-artifact.json";
@@ -104,6 +107,7 @@ pub fn locked_artifact(version: &ToolVersion) -> Result<Option<ArtifactReceipt>>
             .options
             .get(LOCKED_ARTIFACT_CHECKSUM_OPTION)
             .cloned(),
+        evidence: Vec::new(),
     }))
 }
 
@@ -112,7 +116,16 @@ const COMPLETE_MARKER: &str = ".osdk-complete";
 
 /// Run the full pipeline for one plan. Returns the install directory.
 pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
+    run_with_attestation(plan, ctx, None).await
+}
+
+pub async fn run_with_attestation(
+    plan: &InstallPlan,
+    ctx: &PipelineCtx<'_>,
+    attestation: Option<&GithubAttestation>,
+) -> Result<PathBuf> {
     let install_dir = ctx.dirs.install_path(&plan.tool, &plan.version);
+    let archive_path = artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name);
 
     // Serialize concurrent installs of the same tool@version.
     let lock_path = ctx
@@ -123,6 +136,17 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
 
     // Idempotency: already installed and marked complete.
     if install_dir.join(COMPLETE_MARKER).exists() {
+        if let Some(attestation) = attestation {
+            let evidence = crate::verification::verify_github_attestation(
+                ctx.client,
+                ctx.dirs,
+                ctx.offline,
+                &archive_path,
+                attestation,
+            )
+            .await?;
+            merge_artifact_evidence(&install_dir, evidence)?;
+        }
         return Ok(install_dir);
     }
     // Stale/partial dir from a previous failed run: clean it.
@@ -131,12 +155,6 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     }
 
     // 1. Download to the shared downloads cache, trying candidate URLs in order.
-    let archive_path = ctx
-        .dirs
-        .downloads()
-        .join(crate::dirs::sanitize_tool_id(&plan.tool))
-        .join(&plan.version)
-        .join(&plan.file_name);
     let label = format!("{}@{}", plan.tool, plan.version);
     if ctx.offline && !archive_path.exists() {
         return Err(Error::other(format!(
@@ -188,18 +206,42 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
         None
     };
     let verified_checksum = plan.checksum.as_ref().or(persisted_checksum.as_ref());
-    if ctx.require_checksums && verified_checksum.is_none() {
-        return Err(Error::other(format!(
-            "checksum required but unavailable for {}@{} ({})",
-            plan.tool, plan.version, plan.file_name
-        )));
-    }
     if let Some(cs) = verified_checksum {
         verify::verify_file(&archive_path, &cs.hex, cs.algo, &plan.file_name)?;
         write_cached_checksum(&archive_path, cs);
         tracing::info!(file = %plan.file_name, "{}", crate::i18n::tr("log.checksum_verified"));
     } else {
         tracing::debug!(file = %plan.file_name, "no checksum available; skipping verification");
+    }
+
+    let evidence = if let Some(attestation) = attestation {
+        crate::verification::verify_github_attestation(
+            ctx.client,
+            ctx.dirs,
+            ctx.offline,
+            &archive_path,
+            attestation,
+        )
+        .await?
+        .into_iter()
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let authenticated_checksum = evidence
+        .first()
+        .map(|item| parse_checksum(&item.digest))
+        .transpose()?;
+    if ctx.require_checksums && verified_checksum.is_none() && authenticated_checksum.is_none() {
+        return Err(Error::other(format!(
+            "checksum required but unavailable for {}@{} ({})",
+            plan.tool, plan.version, plan.file_name
+        )));
+    }
+    if verified_checksum.is_none() {
+        if let Some(checksum) = authenticated_checksum.as_ref() {
+            write_cached_checksum(&archive_path, checksum);
+        }
     }
 
     // 3. Extract into a scratch dir under the cache tmp.
@@ -231,7 +273,10 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
         &ArtifactReceipt {
             url: selected_url.unwrap_or_default(),
             file_name: plan.file_name.clone(),
-            checksum: verified_checksum.map(format_checksum),
+            checksum: verified_checksum
+                .map(format_checksum)
+                .or_else(|| authenticated_checksum.as_ref().map(format_checksum)),
+            evidence,
         },
     )?;
     std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
@@ -278,9 +323,22 @@ pub async fn install_single_binary(
     show_progress: bool,
     offline: bool,
     require_checksums: bool,
+    attestation: Option<&GithubAttestation>,
 ) -> Result<()> {
     let install_dir = dirs.install_path(tool, version);
+    let cached = artifact_cache_path(dirs, tool, version, download_name);
     if install_dir.join(COMPLETE_MARKER).exists() {
+        if let Some(attestation) = attestation {
+            let evidence = crate::verification::verify_github_attestation(
+                client,
+                dirs,
+                offline,
+                &cached,
+                attestation,
+            )
+            .await?;
+            merge_artifact_evidence(&install_dir, evidence)?;
+        }
         return Ok(());
     }
     if install_dir.exists() {
@@ -289,11 +347,6 @@ pub async fn install_single_binary(
     let bin_dir = install_dir.join("bin");
     create_dir_all(&bin_dir)?;
 
-    let cached = dirs
-        .downloads()
-        .join(crate::dirs::sanitize_tool_id(tool))
-        .join(version)
-        .join(download_name);
     if offline && !cached.exists() {
         return Err(Error::other(format!(
             "offline artifact cache miss for {tool}@{version}"
@@ -350,15 +403,32 @@ pub async fn install_single_binary(
         None
     };
     let verified_checksum = checksum.or(persisted_checksum.as_ref());
-    if require_checksums && verified_checksum.is_none() {
-        return Err(Error::other(format!(
-            "checksum required but unavailable for {tool}@{version} ({download_name})"
-        )));
-    }
     if let Some(cs) = verified_checksum {
         verify::verify_file(&cached, &cs.hex, cs.algo, download_name)?;
         write_cached_checksum(&cached, cs);
         tracing::info!(file = %download_name, "{}", crate::i18n::tr("log.checksum_verified"));
+    }
+    let evidence = if let Some(attestation) = attestation {
+        crate::verification::verify_github_attestation(client, dirs, offline, &cached, attestation)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let authenticated_checksum = evidence
+        .first()
+        .map(|item| parse_checksum(&item.digest))
+        .transpose()?;
+    if require_checksums && verified_checksum.is_none() && authenticated_checksum.is_none() {
+        return Err(Error::other(format!(
+            "checksum required but unavailable for {tool}@{version} ({download_name})"
+        )));
+    }
+    if verified_checksum.is_none() {
+        if let Some(checksum) = authenticated_checksum.as_ref() {
+            write_cached_checksum(&cached, checksum);
+        }
     }
 
     let exe_suffix = os.exe_suffix();
@@ -375,7 +445,10 @@ pub async fn install_single_binary(
         &ArtifactReceipt {
             url: selected_url.unwrap_or_default(),
             file_name: download_name.to_string(),
-            checksum: verified_checksum.map(format_checksum),
+            checksum: verified_checksum
+                .map(format_checksum)
+                .or_else(|| authenticated_checksum.as_ref().map(format_checksum)),
+            evidence,
         },
     )?;
     std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
@@ -387,6 +460,30 @@ fn write_artifact_receipt(install_dir: &std::path::Path, receipt: &ArtifactRecei
     let path = install_dir.join(ARTIFACT_RECEIPT_FILE);
     let bytes = serde_json::to_vec_pretty(receipt)?;
     std::fs::write(&path, bytes).map_err(|error| Error::io(path, error))
+}
+
+fn merge_artifact_evidence(
+    install_dir: &std::path::Path,
+    evidence: Option<VerificationEvidence>,
+) -> Result<()> {
+    let Some(evidence) = evidence else {
+        return Ok(());
+    };
+    let path = install_dir.join(ARTIFACT_RECEIPT_FILE);
+    let bytes = std::fs::read(&path).map_err(|error| Error::io(&path, error))?;
+    let mut receipt: ArtifactReceipt = serde_json::from_slice(&bytes)?;
+    if !receipt.evidence.contains(&evidence) {
+        receipt.evidence.push(evidence);
+        write_artifact_receipt(install_dir, &receipt)?;
+    }
+    Ok(())
+}
+
+pub fn artifact_cache_path(dirs: &Dirs, tool: &str, version: &str, file_name: &str) -> PathBuf {
+    dirs.downloads()
+        .join(crate::dirs::sanitize_tool_id(tool))
+        .join(version)
+        .join(file_name)
 }
 
 fn format_checksum(checksum: &Checksum) -> String {
@@ -542,6 +639,7 @@ mod tests {
                     "sha256:{}",
                     verify::hash_file(&archive, HashAlgo::Sha256).unwrap()
                 )),
+                evidence: Vec::new(),
             }
         );
     }

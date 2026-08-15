@@ -20,6 +20,7 @@ pub struct GlobalOverrides {
     pub refresh_sources: bool,
     pub offline: bool,
     pub require_checksums: bool,
+    pub attestations: Option<osdk_core::config::AttestationPolicy>,
     pub lang: Option<String>,
 }
 
@@ -55,6 +56,9 @@ impl App {
         }
         if overrides.require_checksums {
             config.settings.require_checksums = true;
+        }
+        if let Some(policy) = overrides.attestations {
+            config.settings.attestations = policy;
         }
 
         // Finalize language now that config is loaded. Precedence:

@@ -52,6 +52,10 @@ pub struct GlobalArgs {
     #[arg(long, global = true, env = "OSDK_REQUIRE_CHECKSUMS")]
     pub require_checksums: bool,
 
+    /// GitHub artifact attestation policy: off|if-available|required.
+    #[arg(long, global = true, env = "OSDK_ATTESTATIONS")]
+    pub attestations: Option<osdk_core::config::AttestationPolicy>,
+
     /// Output language (en|zh); overrides locale and OSDK_LANG.
     #[arg(long, global = true, value_name = "LANG")]
     pub lang: Option<String>,
