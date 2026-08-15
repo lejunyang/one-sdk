@@ -99,6 +99,8 @@ pub struct EnvDelta {
     pub path_prepend: Vec<PathBuf>,
     /// Variables to set (GOROOT, JAVA_HOME, ...).
     pub set_vars: BTreeMap<String, String>,
+    /// Variables managed by the previous hook invocation but no longer active.
+    pub unset_vars: Vec<String>,
 }
 
 /// Compute the env delta for the directory `cwd`: for each backend with an
@@ -150,76 +152,182 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         }
     }
 
+    let previous = std::env::var("OSDK_MANAGED_ENV").unwrap_or_default();
+    let unset_vars = previous
+        .split(',')
+        .filter(|key| !key.is_empty() && valid_env_name(key) && !set_vars.contains_key(*key))
+        .map(str::to_string)
+        .collect();
+
     EnvDelta {
         path_prepend,
         set_vars,
+        unset_vars,
     }
 }
 
 /// Render `hook-env` output: shell commands that prepend PATH and set vars.
 pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
     let mut out = String::new();
-    // PATH prepend.
-    if !delta.path_prepend.is_empty() {
-        let joined = delta
-            .path_prepend
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(path_sep(shell));
-        match shell {
-            Shell::Fish => {
+    render_path_reset(shell, &delta.path_prepend, &mut out);
+
+    for key in &delta.unset_vars {
+        if valid_env_name(key) {
+            render_restore_var(shell, key, &mut out);
+        }
+    }
+
+    for (k, v) in &delta.set_vars {
+        if valid_env_name(k) {
+            render_capture_var(shell, k, &mut out);
+            match shell {
+                Shell::Fish => out.push_str(&format!("set -gx {} {}\n", k, shell_quote(shell, v))),
+                Shell::Powershell => {
+                    out.push_str(&format!("$env:{} = {}\n", k, powershell_quote(v)))
+                }
+                _ => out.push_str(&format!("export {}={}\n", k, shell_quote(shell, v))),
+            }
+        }
+    }
+    let managed = delta
+        .set_vars
+        .keys()
+        .filter(|key| valid_env_name(key))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    match shell {
+        Shell::Fish if managed.is_empty() => out.push_str("set -e OSDK_MANAGED_ENV\n"),
+        Shell::Fish => out.push_str(&format!(
+            "set -gx OSDK_MANAGED_ENV {}\n",
+            shell_quote(shell, &managed)
+        )),
+        Shell::Powershell if managed.is_empty() => {
+            out.push_str("Remove-Item Env:OSDK_MANAGED_ENV -ErrorAction SilentlyContinue\n")
+        }
+        Shell::Powershell => out.push_str(&format!(
+            "$env:OSDK_MANAGED_ENV = {}\n",
+            powershell_quote(&managed)
+        )),
+        _ if managed.is_empty() => out.push_str("unset OSDK_MANAGED_ENV\n"),
+        _ => out.push_str(&format!(
+            "export OSDK_MANAGED_ENV={}\n",
+            shell_quote(shell, &managed)
+        )),
+    }
+    out
+}
+
+fn render_path_reset(shell: Shell, paths: &[PathBuf], out: &mut String) {
+    match shell {
+        Shell::Fish => {
+            out.push_str(
+                "if not set -q OSDK_ORIGINAL_PATH_SET\n  set -gx OSDK_ORIGINAL_PATH $PATH\n  set -gx OSDK_ORIGINAL_PATH_SET 1\nend\n",
+            );
+            if paths.is_empty() {
+                out.push_str("set -gx PATH $OSDK_ORIGINAL_PATH\n");
+            } else {
                 out.push_str(&format!(
-                    "set -gx PATH {} $PATH\n",
-                    delta
-                        .path_prepend
+                    "set -gx PATH {} $OSDK_ORIGINAL_PATH\n",
+                    paths
                         .iter()
-                        .map(|p| shell_quote(shell, &p.display().to_string()))
+                        .map(|path| shell_quote(shell, &path.display().to_string()))
                         .collect::<Vec<_>>()
                         .join(" ")
                 ));
             }
-            Shell::Powershell => {
+        }
+        Shell::Powershell => {
+            out.push_str(
+                "if (-not (Test-Path Env:OSDK_ORIGINAL_PATH_SET)) { $env:OSDK_ORIGINAL_PATH = $env:PATH; $env:OSDK_ORIGINAL_PATH_SET = '1' }\n",
+            );
+            if paths.is_empty() {
+                out.push_str("$env:PATH = $env:OSDK_ORIGINAL_PATH\n");
+            } else {
+                let joined = std::env::join_paths(paths)
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 out.push_str(&format!(
-                    "$env:PATH = \"{}\" + [IO.Path]::PathSeparator + $env:PATH\n",
-                    joined
+                    "$env:PATH = {} + [IO.Path]::PathSeparator + $env:OSDK_ORIGINAL_PATH\n",
+                    powershell_quote(&joined)
                 ));
             }
-            _ => {
+        }
+        _ => {
+            out.push_str(
+                "if [ -z \"${OSDK_ORIGINAL_PATH_SET+x}\" ]; then export OSDK_ORIGINAL_PATH=\"$PATH\"; export OSDK_ORIGINAL_PATH_SET=1; fi\n",
+            );
+            if paths.is_empty() {
+                out.push_str("export PATH=\"$OSDK_ORIGINAL_PATH\"\n");
+            } else {
+                let joined = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(":");
                 out.push_str(&format!(
-                    "export PATH={}:$PATH\n",
+                    "export PATH={}:\"$OSDK_ORIGINAL_PATH\"\n",
                     shell_quote(shell, &joined)
                 ));
             }
         }
     }
-    // set vars
-    for (k, v) in &delta.set_vars {
-        match shell {
-            Shell::Fish => out.push_str(&format!("set -gx {} {}\n", k, shell_quote(shell, v))),
-            Shell::Powershell => out.push_str(&format!("$env:{} = \"{}\"\n", k, v)),
-            _ => out.push_str(&format!("export {}={}\n", k, shell_quote(shell, v))),
-        }
-    }
-    out
 }
 
-fn path_sep(shell: Shell) -> &'static str {
+fn render_capture_var(shell: Shell, key: &str, out: &mut String) {
+    let original = format!("OSDK_ORIG_{key}");
+    let present = format!("{original}_PRESENT");
+    let set = format!("{original}_SET");
     match shell {
-        Shell::Powershell if cfg!(windows) => ";",
-        _ => ":",
+        Shell::Fish => out.push_str(&format!(
+            "if not set -q {set}\n  if set -q {key}\n    set -gx {original} \"${key}\"\n    set -gx {present} 1\n  else\n    set -e {original}\n    set -gx {present} 0\n  end\n  set -gx {set} 1\nend\n"
+        )),
+        Shell::Powershell => out.push_str(&format!(
+            "if (-not (Test-Path Env:{set})) {{ if (Test-Path Env:{key}) {{ $env:{original} = $env:{key}; $env:{present} = '1' }} else {{ Remove-Item Env:{original} -ErrorAction SilentlyContinue; $env:{present} = '0' }}; $env:{set} = '1' }}\n"
+        )),
+        _ => out.push_str(&format!(
+            "if [ -z \"${{{set}+x}}\" ]; then if [ -n \"${{{key}+x}}\" ]; then export {original}=\"${key}\"; export {present}=1; else unset {original}; export {present}=0; fi; export {set}=1; fi\n"
+        )),
     }
+}
+
+fn render_restore_var(shell: Shell, key: &str, out: &mut String) {
+    let original = format!("OSDK_ORIG_{key}");
+    let present = format!("{original}_PRESENT");
+    let set = format!("{original}_SET");
+    match shell {
+        Shell::Fish => out.push_str(&format!(
+            "if set -q {set}\n  if test \"${present}\" = 1\n    set -gx {key} \"${original}\"\n  else\n    set -e {key}\n  end\n  set -e {original} {present} {set}\nend\n"
+        )),
+        Shell::Powershell => out.push_str(&format!(
+            "if (Test-Path Env:{set}) {{ if ($env:{present} -eq '1') {{ $env:{key} = $env:{original} }} else {{ Remove-Item Env:{key} -ErrorAction SilentlyContinue }}; Remove-Item Env:{original},Env:{present},Env:{set} -ErrorAction SilentlyContinue }}\n"
+        )),
+        _ => out.push_str(&format!(
+            "if [ -n \"${{{set}+x}}\" ]; then if [ \"${{{present}:-0}}\" = 1 ]; then export {key}=\"${original}\"; else unset {key}; fi; unset {original} {present} {set}; fi\n"
+        )),
+    }
+}
+
+fn valid_env_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn shell_quote(shell: Shell, s: &str) -> String {
     match shell {
-        Shell::Powershell => s.to_string(),
+        Shell::Powershell => powershell_quote(s),
         _ => {
             // single-quote for POSIX/fish, escaping embedded quotes
             let escaped = s.replace('\'', r"'\''");
             format!("'{escaped}'")
         }
     }
+}
+
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Strip a leading `<word>-` distribution prefix (java's temurin-17).
@@ -257,13 +365,29 @@ mod tests {
         let delta = EnvDelta {
             path_prepend: vec![PathBuf::from("/x/go/bin")],
             set_vars,
+            unset_vars: vec!["JAVA_HOME".into()],
         };
         let out = render_hook_env(Shell::Bash, &delta);
-        assert!(out.contains("export PATH='/x/go/bin':$PATH"));
+        assert!(out.contains("export PATH='/x/go/bin':\"$OSDK_ORIGINAL_PATH\""));
         assert!(out.contains("export GOROOT='/x/go'"));
+        assert!(out.contains("unset JAVA_HOME"));
+        assert!(out.contains("export OSDK_MANAGED_ENV='GOROOT'"));
 
         let fish = render_hook_env(Shell::Fish, &delta);
         assert!(fish.contains("set -gx PATH"));
         assert!(fish.contains("set -gx GOROOT"));
+    }
+
+    #[test]
+    fn empty_delta_restores_original_path() {
+        let delta = EnvDelta {
+            path_prepend: Vec::new(),
+            set_vars: BTreeMap::new(),
+            unset_vars: vec!["GOROOT".into()],
+        };
+        let out = render_hook_env(Shell::Bash, &delta);
+        assert!(out.contains("export PATH=\"$OSDK_ORIGINAL_PATH\""));
+        assert!(out.contains("unset GOROOT"));
+        assert!(out.contains("unset OSDK_MANAGED_ENV"));
     }
 }
