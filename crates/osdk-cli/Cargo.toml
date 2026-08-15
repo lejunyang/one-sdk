@@ -1,0 +1,20 @@
+[package]
+name = "osdk-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "osdk"
+path = "src/main.rs"
+
+[dependencies]
+osdk-core = { path = "../osdk-core" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+indicatif.workspace = true

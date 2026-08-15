@@ -1,0 +1,17 @@
+[package]
+name = "osdk-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "osdk-shim"
+path = "src/main.rs"
+
+# The shim is a tiny, synchronous launcher. It links osdk-core but only touches
+# its sync resolution path (no tokio runtime, no reqwest) to keep per-invocation
+# overhead minimal.
+[dependencies]
+osdk-core = { path = "../osdk-core" }
