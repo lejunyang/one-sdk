@@ -24,6 +24,7 @@ pub fn generate_shim(dirs: &Dirs, name: &str, osdk_shim_bin: &Path) -> Result<()
 
 #[cfg(unix)]
 fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()> {
+    create_dir_all(shims)?;
     let link = shims.join(name);
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(osdk_shim_bin, &link).map_err(|e| Error::io(&link, e))?;
@@ -32,6 +33,7 @@ fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()
 
 #[cfg(windows)]
 fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()> {
+    create_dir_all(shims)?;
     // .cmd wrapper for cmd.exe / PowerShell
     let cmd_path = shims.join(format!("{name}.cmd"));
     let cmd = format!(

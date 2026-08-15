@@ -15,6 +15,7 @@ use crate::source::Source;
 use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
+pub mod node;
 pub mod registry;
 
 /// Read-only context available to every backend operation.

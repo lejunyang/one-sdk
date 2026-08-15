@@ -1,4 +1,261 @@
+//! `osdk-shim`: the tiny launcher every shim points at.
+//!
+//! It learns which tool to run from `argv[0]` (the shim's own name), resolves
+//! the active version for the current directory (walking up config files), then
+//! `exec`s the real binary from that version's install dir. Everything here is
+//! synchronous and avoids a tokio runtime / network to keep per-call overhead
+//! minimal.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use osdk_core::backend::registry::Registry;
+use osdk_core::config::Config;
+use osdk_core::dirs::Dirs;
+use osdk_core::platform::Platform;
+use osdk_core::version::resolver::resolve_active;
+use osdk_core::version::{select_version, ToolVersion, VersionSpec};
+
 fn main() {
-    // Placeholder; the real shim resolves the tool from argv[0] and execs the
-    // active version's binary. Implemented in M2.
+    let code = real_main();
+    std::process::exit(code);
+}
+
+fn real_main() -> i32 {
+    let args: Vec<String> = std::env::args().collect();
+    // The tool name is argv[0]'s basename (e.g. the shim named "node"), unless
+    // invoked directly as "osdk-shim <tool> <args...>" (windows .cmd wrapper).
+    let (tool_name, forward_args) = parse_invocation(&args);
+    let tool_name = match tool_name {
+        Some(t) => t,
+        None => {
+            eprintln!("osdk-shim: could not determine tool name from argv[0]");
+            return 1;
+        }
+    };
+
+    let dirs = match Dirs::resolve() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("osdk-shim: {e}");
+            return 1;
+        }
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = Config::load(&dirs.user_config_file(), &cwd).unwrap_or_else(|_| {
+        // Fall back to defaults if config fails to load; shims should be robust.
+        Config {
+            settings: Default::default(),
+            sources: Default::default(),
+            tools: Default::default(),
+            project_config_path: None,
+        }
+    });
+
+    let registry = Registry::new();
+
+    // Find which backend owns this tool name (either it's the backend id, or one
+    // of the executables a backend provides). For M2, node owns node/npm/npx.
+    let backend = match owning_backend(&registry, &tool_name) {
+        Some(b) => b,
+        None => {
+            eprintln!("osdk-shim: no backend provides `{tool_name}`");
+            return 127;
+        }
+    };
+
+    // Resolve the active version spec for this backend.
+    let active = resolve_active(
+        backend.id(),
+        &cwd,
+        &config.tools,
+        backend.idiomatic_files(),
+    );
+    let spec = match active {
+        Some(av) => av.spec,
+        None => {
+            eprintln!(
+                "osdk-shim: no version of `{}` selected (set one with `osdk use {}@<version>`)",
+                backend.id(),
+                backend.id()
+            );
+            return 1;
+        }
+    };
+
+    // Resolve spec -> concrete installed version (offline: pick from installed).
+    let platform = Platform::current();
+    let ctx = make_ctx(dirs.clone(), platform, config);
+    let version = match resolve_installed(&ctx, backend.as_ref(), &spec) {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "osdk-shim: `{}@{}` is not installed (run `osdk install {}@{}`)",
+                backend.id(),
+                spec,
+                backend.id(),
+                spec
+            );
+            return 1;
+        }
+    };
+
+    let tv = ToolVersion::new(backend.id(), &version);
+    let bin_dirs = match backend.bin_paths(&ctx, &tv) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("osdk-shim: {e}");
+            return 1;
+        }
+    };
+
+    let exe = match find_exe(&bin_dirs, &tool_name) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "osdk-shim: `{tool_name}` not found in {}@{}",
+                backend.id(),
+                version
+            );
+            return 127;
+        }
+    };
+
+    exec(&exe, forward_args)
+}
+
+/// Determine the tool name and args to forward.
+fn parse_invocation(args: &[String]) -> (Option<String>, &[String]) {
+    let argv0 = args.first().map(|s| s.as_str()).unwrap_or("");
+    let base = basename_no_ext(argv0);
+    if base == "osdk-shim" {
+        // Direct form: osdk-shim <tool> <args...>
+        let tool = args.get(1).map(|s| basename_no_ext(s));
+        let rest = if args.len() > 2 { &args[2..] } else { &[] };
+        (tool, rest)
+    } else if base.is_empty() {
+        (None, &[])
+    } else {
+        (Some(base), &args[1..])
+    }
+}
+
+fn basename_no_ext(p: &str) -> String {
+    let name = std::path::Path::new(p)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    #[cfg(windows)]
+    {
+        for ext in [".exe", ".cmd", ".bat"] {
+            if name.to_ascii_lowercase().ends_with(ext) {
+                return name[..name.len() - ext.len()].to_string();
+            }
+        }
+    }
+    name
+}
+
+/// Find the backend that owns a tool name. For now we check backend ids plus
+/// node's known executables (npm/npx). A future registry can index bin names.
+fn owning_backend(
+    registry: &Registry,
+    tool_name: &str,
+) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
+    if let Ok(b) = registry.get(tool_name) {
+        return Some(b);
+    }
+    // node provides npm/npx/corepack
+    if matches!(tool_name, "npm" | "npx" | "corepack") {
+        if let Ok(b) = registry.get("node") {
+            return Some(b);
+        }
+    }
+    None
+}
+
+fn make_ctx(dirs: Dirs, platform: Platform, config: Config) -> osdk_core::backend::Ctx {
+    use std::sync::Arc;
+    // A minimal client is required by Ctx; the shim never uses it for network.
+    let client = osdk_core::http::client().unwrap_or_default();
+    let cas = Arc::new(osdk_core::store::Cas::new(dirs.store.clone()));
+    osdk_core::backend::Ctx {
+        dirs,
+        platform,
+        config,
+        client,
+        cas,
+        show_progress: false,
+    }
+}
+
+/// Resolve a spec against locally installed versions (no network).
+fn resolve_installed(
+    ctx: &osdk_core::backend::Ctx,
+    backend: &dyn osdk_core::backend::Backend,
+    spec: &str,
+) -> Option<String> {
+    let installed = backend.list_installed(ctx).ok()?;
+    if installed.is_empty() {
+        return None;
+    }
+    let parsed = VersionSpec::parse(spec);
+    match &parsed {
+        VersionSpec::Exact(v) => installed.iter().find(|i| *i == v).cloned(),
+        _ => {
+            let infos: Vec<_> = installed
+                .iter()
+                .map(|v| osdk_core::version::VersionInfo::stable(v))
+                .collect();
+            select_version(&parsed, &infos).map(|vi| vi.version.clone())
+        }
+    }
+}
+
+fn find_exe(bin_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    let candidates = exe_candidates(name);
+    for dir in bin_dirs {
+        for cand in &candidates {
+            let p = dir.join(cand);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn exe_candidates(name: &str) -> Vec<String> {
+    vec![
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        format!("{name}.bat"),
+        name.to_string(),
+    ]
+}
+
+#[cfg(not(windows))]
+fn exe_candidates(name: &str) -> Vec<String> {
+    vec![name.to_string()]
+}
+
+#[cfg(unix)]
+fn exec(exe: &PathBuf, args: &[String]) -> i32 {
+    use std::os::unix::process::CommandExt;
+    // Replace the current process so signals/exit codes pass through cleanly.
+    let err = Command::new(exe).args(args).exec();
+    eprintln!("osdk-shim: failed to exec {}: {err}", exe.display());
+    126
+}
+
+#[cfg(not(unix))]
+fn exec(exe: &PathBuf, args: &[String]) -> i32 {
+    match Command::new(exe).args(args).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("osdk-shim: failed to run {}: {e}", exe.display());
+            126
+        }
+    }
 }

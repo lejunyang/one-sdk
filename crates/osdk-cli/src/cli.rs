@@ -1,0 +1,143 @@
+//! Clap command tree for the `osdk` binary.
+
+use clap::{Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "osdk",
+    version,
+    about = "One SDK manager: unified version, dependency, and cache management for many SDKs",
+    long_about = None,
+    propagate_version = true,
+)]
+pub struct Cli {
+    #[command(flatten)]
+    pub global: GlobalArgs,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct GlobalArgs {
+    /// Increase verbosity (repeatable).
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Suppress progress output.
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
+    /// Max concurrent downloads/installs.
+    #[arg(short = 'j', long, global = true, env = "OSDK_JOBS")]
+    pub jobs: Option<usize>,
+
+    /// Assume yes for prompts.
+    #[arg(short = 'y', long, global = true)]
+    pub yes: bool,
+
+    /// Force use of a specific source id for this invocation.
+    #[arg(long, global = true, value_name = "ID")]
+    pub source: Option<String>,
+
+    /// Re-probe sources, ignoring cached speed results.
+    #[arg(long, global = true)]
+    pub refresh_sources: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Install one or more tools (from args, or from resolved config).
+    #[command(alias = "i")]
+    Install {
+        /// e.g. `node@20`, `go@1.22`, `python@3.12`. Empty = install from config.
+        tools: Vec<String>,
+    },
+
+    /// List installed versions.
+    #[command(alias = "ls")]
+    List {
+        /// Restrict to a single tool.
+        tool: Option<String>,
+    },
+
+    /// List installable versions from the remote index.
+    #[command(alias = "lsr", name = "list-remote")]
+    ListRemote {
+        tool: String,
+        /// Only show versions matching this prefix (e.g. `20`).
+        filter: Option<String>,
+    },
+
+    /// Set the active version (installs if needed) and write a pin.
+    #[command(alias = "u")]
+    Use {
+        /// e.g. `node@20`.
+        tool: String,
+        /// Write the pin to the user global config instead of the project.
+        #[arg(short, long)]
+        global: bool,
+    },
+
+    /// Uninstall a tool version.
+    #[command(alias = "rm")]
+    Uninstall {
+        /// e.g. `node@20.11.1`.
+        tool: String,
+    },
+
+    /// Show the active version of each tool for the current directory.
+    Current {
+        tool: Option<String>,
+    },
+
+    /// Print the install directory of a tool version.
+    Where {
+        /// e.g. `node` or `node@20.11.1`.
+        tool: String,
+    },
+
+    /// Regenerate shim launchers for all installed tools.
+    Reshim,
+
+    /// Manage download sources.
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
+
+    /// Inspect or edit configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+
+    /// Garbage-collect unreferenced store objects.
+    Prune {
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Diagnostics: dirs, mirrors, same-fs, link mode.
+    Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceCommand {
+    /// List sources for a tool (with last-probe results if available).
+    List { tool: String },
+    /// Probe sources for a tool now and print the speed ranking.
+    Test { tool: String },
+    /// Pin a tool to a specific source id.
+    Pin { tool: String, id: String },
+    /// Remove a tool's source pin.
+    Unpin { tool: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Print the resolved config directory / file path.
+    Path,
+    /// Print resolved settings.
+    List,
+}

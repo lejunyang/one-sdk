@@ -5,6 +5,8 @@ use std::fmt;
 
 use crate::error::{Error, Result};
 
+pub mod resolver;
+
 /// What the user asked for, before resolution against remote versions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionSpec {

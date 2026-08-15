@@ -1,8 +1,10 @@
 //! Multi-source model: each SDK ships a default list of sources (official +
 //! authoritative mirrors); users can add custom sources or pin one. The
-//! selection strategy (auto/pinned/ordered) is applied by [`super::select`].
+//! selection strategy (auto/pinned/ordered) is applied by [`select`].
 
 use serde::{Deserialize, Serialize};
+
+pub mod select;
 
 /// A URL template with `{version}`, `{os}`, `{arch}`, `{file}`, `{ext}`
 /// placeholders that backends substitute at download time.

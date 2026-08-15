@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::backend::{Backend, Ctx, InstallCtx};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::http;
 use crate::pipeline::{self, ArchiveKind, Checksum, HashAlgo, InstallPlan, PipelineCtx};
 use crate::platform::Os;
@@ -40,10 +40,8 @@ impl<'de> Deserialize<'de> for LtsField {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Value;
         let v = serde_json::Value::deserialize(d)?;
         match v {
-            serde_json::Value::Bool(_) => Ok(LtsField::No),
             serde_json::Value::String(s) => Ok(LtsField::Named(s)),
             _ => Ok(LtsField::No),
         }
@@ -116,10 +114,14 @@ impl Backend for NodeBackend {
             .unwrap_or_else(|| http::join_url(&source.download_url, "index.json"));
         let releases: Vec<NodeRelease> = http::get_json(&ctx.client, &index_url).await?;
 
+        // Only offer releases that ship an asset for the current platform.
+        let token = Self::file_token(ctx);
+
         // index.json is newest-first; VersionInfo list should be oldest-first.
         let mut out: Vec<VersionInfo> = releases
             .into_iter()
             .rev()
+            .filter(|r| r.files.is_empty() || r.files.iter().any(|f| f == &token))
             .map(|r| {
                 let version = r.version.trim_start_matches('v').to_string();
                 let lts = match r.lts {
@@ -206,9 +208,4 @@ impl Backend for NodeBackend {
     fn idiomatic_files(&self) -> &[&str] {
         &[".nvmrc", ".node-version"]
     }
-}
-
-#[allow(dead_code)]
-fn _assert_token(ctx: &Ctx) -> String {
-    NodeBackend::file_token(ctx)
 }
