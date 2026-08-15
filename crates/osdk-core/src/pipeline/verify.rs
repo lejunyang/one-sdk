@@ -176,15 +176,84 @@ pub async fn discover_asset_checksum(
 /// minisign (osdk's own releases; some upstreams). Returns Ok(()) on a valid
 /// signature.
 pub fn verify_minisign(file: &Path, signature: &str, public_key_b64: &str) -> Result<()> {
+    let bytes = std::fs::read(file).map_err(|e| Error::io(file, e))?;
+    verify_minisign_bytes(&bytes, signature, public_key_b64)
+}
+
+/// Verify a detached minisign signature over in-memory `bytes`.
+pub fn verify_minisign_bytes(bytes: &[u8], signature: &str, public_key_b64: &str) -> Result<()> {
     let pk = minisign_verify::PublicKey::from_base64(public_key_b64.trim())
         .map_err(|e| Error::other(format!("invalid minisign public key: {e}")))?;
     let sig = minisign_verify::Signature::decode(signature)
         .map_err(|e| Error::other(format!("invalid minisign signature: {e}")))?;
-    let bytes = std::fs::read(file).map_err(|e| Error::io(file, e))?;
     // stream=false: verify the whole buffer (prehashed sigs are auto-detected).
-    pk.verify(&bytes, &sig, false)
+    pk.verify(bytes, &sig, false)
         .map_err(|e| Error::other(format!("minisign verification failed: {e}")))?;
     Ok(())
+}
+
+/// A trusted minisign public key for a source's signed checksums manifest.
+pub struct TrustedKey {
+    /// The minisign public key (base64 line, `RW...`).
+    pub public_key: &'static str,
+    /// Sibling signature file name for the manifest (e.g. `SHASUMS256.txt.minisig`).
+    pub manifest: &'static str,
+    pub signature: &'static str,
+}
+
+/// Built-in trusted minisign keys for well-known signed distributions, keyed by
+/// `github:owner/repo`. Verified against real releases.
+pub fn trusted_key(repo_id: &str) -> Option<TrustedKey> {
+    match repo_id {
+        // mise signs SHASUMS256.txt with this key (key id 64113EDF160FDEC2).
+        "github:jdx/mise" => Some(TrustedKey {
+            public_key: "RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ",
+            manifest: "SHASUMS256.txt",
+            signature: "SHASUMS256.txt.minisig",
+        }),
+        _ => None,
+    }
+}
+
+/// For a signed distribution: fetch the checksums manifest + its `.minisig`,
+/// verify the signature with the trusted key, and (only if valid) return the
+/// asset's sha256 from the verified manifest. `dir_url` is the release download
+/// directory (where the manifest lives); `filename` is the asset basename.
+///
+/// Returns Ok(Some(checksum)) on a verified match, Ok(None) if this repo has no
+/// trusted key / no matching entry, and Err if the signature is INVALID (a hard
+/// failure — never silently trust an unsigned/forged manifest here).
+pub async fn signed_manifest_checksum(
+    client: &reqwest::Client,
+    repo_id: &str,
+    dir_url: &str,
+    filename: &str,
+) -> Result<Option<super::Checksum>> {
+    let key = match trusted_key(repo_id) {
+        Some(k) => k,
+        None => return Ok(None),
+    };
+    let dir = dir_url.trim_end_matches('/');
+    let manifest_url = format!("{dir}/{}", key.manifest);
+    let sig_url = format!("{dir}/{}", key.signature);
+
+    let manifest = match crate::http::get_text(client, &manifest_url).await {
+        Ok(m) => m,
+        Err(_) => return Ok(None), // manifest not reachable; fall back to other paths
+    };
+    let signature = match crate::http::get_text(client, &sig_url).await {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+
+    // Verify the manifest's signature — hard-fail if invalid.
+    verify_minisign_bytes(manifest.as_bytes(), &signature, key.public_key)?;
+
+    // Signature valid: trust hashes from this manifest.
+    Ok(find_shasum(&manifest, filename).map(|hex| super::Checksum {
+        algo: HashAlgo::Sha256,
+        hex: hex.to_string(),
+    }))
 }
 
 #[cfg(test)]
@@ -264,5 +333,35 @@ mod tests {
         // valid-length key should also error (never panics).
         let fake_key = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
         assert!(verify_minisign(&f, "garbage", fake_key).is_err());
+    }
+
+    // Real mise minisign key + a real signature over its SHASUMS256.txt.
+    // (The positive verification against the exact 3520-byte manifest was
+    // confirmed live; here we assert the trusted key is wired and that verifying
+    // tampered bytes with the real signature FAILS — never silently passes.)
+    const MISE_KEY: &str = "RWTC3g8W3z4RZK3V3qv7fa1QY4JEWyBtqIHW+85QlJpZc5yG+uNYNBSZ";
+    const MISE_SIG: &str = "untrusted comment: signature from minisign secret key\n\
+        RUTC3g8W3z4RZPN3yrytMMxcrYyruSFMJw/fd1BsY9CWTb06OvLLpbNdRmdTfO9yqMBy4TcBu4ZiUr6e+WLWViNnRyT4J0pUAA4=\n\
+        trusted comment: timestamp:1735607189\tfile:SHASUMS256.txt\thashed\n\
+        rqyHRI2HBPZJQLqYOpdcB8g7aKcsOVA9+NY5Gn12aguvRokwIZhwHAg5z+xIvuu2iplosMcbP0lBhrhh+K2LCQ==\n";
+
+    #[test]
+    fn trusted_key_registered_for_mise() {
+        let k = trusted_key("github:jdx/mise").expect("mise key present");
+        assert_eq!(k.public_key, MISE_KEY);
+        assert_eq!(k.manifest, "SHASUMS256.txt");
+        assert!(trusted_key("github:unknown/repo").is_none());
+    }
+
+    #[test]
+    fn real_signature_rejects_tampered_content() {
+        // The signature is over the exact SHASUMS256.txt bytes; any other bytes
+        // must fail verification with the real key + real signature.
+        let tampered = b"this is not the signed manifest";
+        assert!(verify_minisign_bytes(tampered, MISE_SIG, MISE_KEY).is_err());
+        // Key parsing + signature decoding themselves must succeed (proves the
+        // material is well-formed; only the content mismatch causes failure).
+        assert!(minisign_verify::PublicKey::from_base64(MISE_KEY).is_ok());
+        assert!(minisign_verify::Signature::decode(MISE_SIG).is_ok());
     }
 }

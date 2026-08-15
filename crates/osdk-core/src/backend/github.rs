@@ -225,10 +225,39 @@ impl Backend for GithubBackend {
             format!("https://gh-proxy.com/{}", asset.browser_download_url),
         ];
 
-        // Best-effort checksum discovery (per-asset sidecar or shared manifest).
-        // Try the direct asset URL first, then the proxy-prefixed variant, since
-        // the direct github.com host may be unreachable from some networks.
-        let checksum = {
+        // Checksum discovery, strongest first:
+        // 1. a minisign-signed checksums manifest (trusted key) — the manifest's
+        //    signature is verified before its hashes are trusted;
+        // 2. per-asset sidecar / unsigned shared manifest.
+        // Try the direct asset dir first, then the gh-proxy variant.
+        let asset_dir = asset
+            .browser_download_url
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
+        let proxied_dir = format!("https://gh-proxy.com/{asset_dir}");
+
+        let mut checksum = None;
+        for dir in [asset_dir.as_str(), proxied_dir.as_str()] {
+            match pipeline::verify::signed_manifest_checksum(
+                &ctx.client,
+                &self.id,
+                dir,
+                &asset.name,
+            )
+            .await
+            {
+                Ok(Some(cs)) => {
+                    tracing::info!(source = %self.id, "{}", crate::i18n::tr("log.signature_verified"));
+                    checksum = Some(cs);
+                    break;
+                }
+                Ok(None) => {}
+                // Invalid signature is a hard failure — do not silently proceed.
+                Err(e) => return Err(e),
+            }
+        }
+        if checksum.is_none() {
             let mut found =
                 pipeline::verify::discover_asset_checksum(&ctx.client, &asset.browser_download_url)
                     .await;
@@ -236,8 +265,8 @@ impl Backend for GithubBackend {
                 let proxied = format!("https://gh-proxy.com/{}", asset.browser_download_url);
                 found = pipeline::verify::discover_asset_checksum(&ctx.client, &proxied).await;
             }
-            found
-        };
+            checksum = found;
+        }
 
         // Archive vs bare binary.
         match ArchiveKind::from_name(&asset.name) {

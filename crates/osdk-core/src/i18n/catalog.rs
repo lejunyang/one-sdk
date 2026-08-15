@@ -152,6 +152,10 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("checksum verified", "校验和已验证"),
     );
     m.insert(
+        "log.signature_verified",
+        ("signature verified (minisign)", "签名已验证（minisign）"),
+    );
+    m.insert(
         "log.rustup_dist_server",
         ("rustup dist server", "rustup 分发服务器"),
     );
