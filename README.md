@@ -17,7 +17,40 @@ together:
    fastest, with failover on both metadata and downloads. You can add custom
    sources or pin one.
 
-## Install (from source)
+## Install
+
+Download the latest prebuilt release on Linux or macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh | sh
+```
+
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
+```
+
+Both installers verify the release archive against `SHA256SUMS`. Download the
+script first when passing custom options:
+
+```bash
+curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
+sh install.sh --version 0.1.0 --install-dir "$HOME/bin"
+```
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
+```
+
+Use `--help` on Unix or `Get-Help .\install.ps1 -Detailed` on PowerShell for
+the complete parameter list. `OSDK_VERSION`, `OSDK_BIN_DIR`,
+`OSDK_REPOSITORY`, `OSDK_DOWNLOAD_BASE_URL`, and `OSDK_TARGET` provide
+environment-based overrides.
+
+### Build from source
 
 Rust is required. In mainland China, use a mirror (the official
 `static.rust-lang.org` is often unusably slow):
@@ -27,6 +60,11 @@ export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.
 curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
 cargo build --release        # binaries: target/release/{osdk,osdk-shim}
 ```
+
+Maintainers publish a new binary release by bumping
+`workspace.package.version` and pushing a commit to `main` whose commit message
+contains the exact marker `[publish]`. A normal commit never runs the binary
+release workflow.
 
 ## Quick start
 
