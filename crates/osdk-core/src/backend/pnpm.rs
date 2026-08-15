@@ -91,6 +91,7 @@ impl Backend for PnpmBackend {
             link_mode: ctx.config.settings.link_mode,
             show_progress: ctx.show_progress,
             offline: ctx.config.settings.offline,
+            require_checksums: ctx.config.settings.require_checksums,
         };
         pipeline::run(&plan, &pctx).await?;
         // The tarball ships `package/pnpm` -> after strip, `pnpm` at install root.

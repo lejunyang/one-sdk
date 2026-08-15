@@ -19,6 +19,7 @@ pub struct GlobalOverrides {
     pub source: Option<String>,
     pub refresh_sources: bool,
     pub offline: bool,
+    pub require_checksums: bool,
     pub lang: Option<String>,
 }
 
@@ -51,6 +52,9 @@ impl App {
         }
         if overrides.offline {
             config.settings.offline = true;
+        }
+        if overrides.require_checksums {
+            config.settings.require_checksums = true;
         }
 
         // Finalize language now that config is loaded. Precedence:

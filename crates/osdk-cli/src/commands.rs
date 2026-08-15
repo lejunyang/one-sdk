@@ -652,6 +652,7 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             println!("jobs         = {}", s.jobs);
             println!("offline      = {}", s.offline);
             println!("verify_signatures = {}", s.verify_signatures);
+            println!("require_checksums = {}", s.require_checksums);
             println!("selection    = {:?}", app.ctx.config.sources.selection);
             if !app.ctx.config.tools.is_empty() {
                 println!("tools:");

@@ -31,6 +31,9 @@ fn localize_global_args(cmd: Command) -> Command {
             a.help(h("help.flag.refresh_sources"))
         })
         .mut_arg("offline", |a| a.help(h("help.flag.offline")))
+        .mut_arg("require_checksums", |a| {
+            a.help(h("help.flag.require_checksums"))
+        })
         .mut_arg("lang", |a| a.help(h("help.flag.lang")))
 }
 

@@ -166,6 +166,9 @@ network. Source probing and source refresh are also disabled offline.
 
 Signature verification is enabled by default where a trusted key is available.
 Set `OSDK_VERIFY_SIGNATURES=false` only when intentionally opting out.
+Set `OSDK_REQUIRE_CHECKSUMS=true` (or pass `--require-checksums`) to reject any
+artifact for which neither upstream metadata nor a lock/cache receipt provides
+a verifiable SHA-256/SHA-512/BLAKE3 value.
 
 ## Architecture
 

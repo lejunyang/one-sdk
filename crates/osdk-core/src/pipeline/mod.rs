@@ -62,6 +62,7 @@ pub struct PipelineCtx<'a> {
     pub link_mode: LinkMode,
     pub show_progress: bool,
     pub offline: bool,
+    pub require_checksums: bool,
 }
 
 pub fn locked_install_plan(
@@ -187,6 +188,12 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
         None
     };
     let verified_checksum = plan.checksum.as_ref().or(persisted_checksum.as_ref());
+    if ctx.require_checksums && verified_checksum.is_none() {
+        return Err(Error::other(format!(
+            "checksum required but unavailable for {}@{} ({})",
+            plan.tool, plan.version, plan.file_name
+        )));
+    }
     if let Some(cs) = verified_checksum {
         verify::verify_file(&archive_path, &cs.hex, cs.algo, &plan.file_name)?;
         write_cached_checksum(&archive_path, cs);
@@ -270,6 +277,7 @@ pub async fn install_single_binary(
     checksum: Option<&Checksum>,
     show_progress: bool,
     offline: bool,
+    require_checksums: bool,
 ) -> Result<()> {
     let install_dir = dirs.install_path(tool, version);
     if install_dir.join(COMPLETE_MARKER).exists() {
@@ -342,6 +350,11 @@ pub async fn install_single_binary(
         None
     };
     let verified_checksum = checksum.or(persisted_checksum.as_ref());
+    if require_checksums && verified_checksum.is_none() {
+        return Err(Error::other(format!(
+            "checksum required but unavailable for {tool}@{version} ({download_name})"
+        )));
+    }
     if let Some(cs) = verified_checksum {
         verify::verify_file(&cached, &cs.hex, cs.algo, download_name)?;
         write_cached_checksum(&cached, cs);
@@ -510,6 +523,7 @@ mod tests {
             link_mode: LinkMode::Copy,
             show_progress: false,
             offline: true,
+            require_checksums: true,
         };
 
         let install = run(&plan, &ctx).await.unwrap();
@@ -530,5 +544,54 @@ mod tests {
                 )),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn required_checksum_rejects_unverified_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let archive = dirs
+            .downloads()
+            .join("fixture")
+            .join("2.0.0")
+            .join("fixture.tgz");
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        std::fs::write(&archive, b"not-read-before-checksum-gate").unwrap();
+        let cas = Cas::new(dirs.store.clone());
+        let client = reqwest::Client::new();
+        let plan = InstallPlan {
+            tool: "fixture".into(),
+            version: "2.0.0".into(),
+            urls: vec!["http://127.0.0.1:9/never-requested".into()],
+            file_name: "fixture.tgz".into(),
+            kind: ArchiveKind::TarGz,
+            checksum: None,
+            strip_root: true,
+        };
+        let strict = PipelineCtx {
+            client: &client,
+            dirs: &dirs,
+            cas: &cas,
+            link_mode: LinkMode::Copy,
+            show_progress: false,
+            offline: true,
+            require_checksums: true,
+        };
+        let error = run(&plan, &strict).await.unwrap_err();
+        assert!(error.to_string().contains("checksum required"));
+
+        let permissive = PipelineCtx {
+            require_checksums: false,
+            ..strict
+        };
+        let error = run(&plan, &permissive).await.unwrap_err();
+        assert!(!error.to_string().contains("checksum required"));
     }
 }

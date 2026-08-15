@@ -40,6 +40,8 @@ pub struct Settings {
     pub yes: bool,
     /// Whether to verify signatures when a backend provides them.
     pub verify_signatures: bool,
+    /// Reject artifacts when no checksum is available.
+    pub require_checksums: bool,
     /// Never make network requests; use cached metadata and archives only.
     pub offline: bool,
     /// Output language override (`en`/`zh`). None = auto-detect from locale.
@@ -54,6 +56,7 @@ impl Default for Settings {
             jobs: default_jobs(),
             yes: false,
             verify_signatures: true,
+            require_checksums: false,
             offline: false,
             lang: None,
         }
@@ -196,6 +199,9 @@ impl Config {
         if let Some(v) = getenv("OSDK_VERIFY_SIGNATURES") {
             self.settings.verify_signatures = truthy(&v);
         }
+        if let Some(v) = getenv("OSDK_REQUIRE_CHECKSUMS") {
+            self.settings.require_checksums = truthy(&v);
+        }
         if let Some(v) = getenv("OSDK_OFFLINE") {
             self.settings.offline = truthy(&v);
         }
@@ -305,12 +311,14 @@ mod tests {
             "OSDK_LINK_MODE" => Some("copy".to_string()),
             "OSDK_JOBS" => Some("3".to_string()),
             "OSDK_VERIFY_SIGNATURES" => Some("false".to_string()),
+            "OSDK_REQUIRE_CHECKSUMS" => Some("true".to_string()),
             "OSDK_OFFLINE" => Some("true".to_string()),
             _ => None,
         });
         assert_eq!(cfg.settings.link_mode, LinkMode::Copy);
         assert_eq!(cfg.settings.jobs, 3);
         assert!(!cfg.settings.verify_signatures);
+        assert!(cfg.settings.require_checksums);
         assert!(cfg.settings.offline);
     }
 

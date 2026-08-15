@@ -359,6 +359,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.flag.require_checksums",
+        (
+            "Reject artifacts that have no verifiable checksum",
+            "拒绝没有可验证校验值的制品",
+        ),
+    );
+    m.insert(
         "help.lock.about",
         (
             "Resolve exact project versions into osdk.lock",

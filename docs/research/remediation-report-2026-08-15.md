@@ -67,6 +67,9 @@ Related audit: `docs/research/sdk-manager-audit-2026-08-15.md`
 - `verify_signatures` and `OSDK_VERIFY_SIGNATURES` now control signed manifest
   verification in the generic GitHub backend.
 - Signature verification remains enabled by default.
+- `--require-checksums` / `OSDK_REQUIRE_CHECKSUMS` rejects archives and bare
+  binaries before extraction/materialization when no checksum is available.
+- Locked or persisted cache checksums satisfy the required-checksum policy.
 - npm-backed SDKs use SHA-512/SHA-256 SRI.
 - Python uses upstream SHA-256 manifests.
 - Rust bootstrap uses upstream SHA-256 sidecars.
@@ -150,5 +153,5 @@ separate changes:
 
 1. Add aliases and deactivate support.
 2. Add a stable external backend or registry API.
-3. Add required-checksum mode and broader provenance/attestation verification.
+3. Add broader provenance/attestation verification.
 4. Add per-backend scheduled live upstream smoke tests.

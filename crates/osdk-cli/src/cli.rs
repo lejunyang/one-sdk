@@ -48,6 +48,10 @@ pub struct GlobalArgs {
     #[arg(long, global = true, env = "OSDK_OFFLINE")]
     pub offline: bool,
 
+    /// Reject artifacts that have no verifiable checksum.
+    #[arg(long, global = true, env = "OSDK_REQUIRE_CHECKSUMS")]
+    pub require_checksums: bool,
+
     /// Output language (en|zh); overrides locale and OSDK_LANG.
     #[arg(long, global = true, value_name = "LANG")]
     pub lang: Option<String>,

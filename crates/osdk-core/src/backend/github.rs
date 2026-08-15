@@ -211,6 +211,7 @@ impl Backend for GithubBackend {
                     link_mode: ctx.config.settings.link_mode,
                     show_progress: ctx.show_progress,
                     offline: ctx.config.settings.offline,
+                    require_checksums: ctx.config.settings.require_checksums,
                 };
                 pipeline::run(&plan, &pctx).await?;
             } else {
@@ -231,6 +232,7 @@ impl Backend for GithubBackend {
                     checksum.as_ref(),
                     ctx.show_progress,
                     ctx.config.settings.offline,
+                    ctx.config.settings.require_checksums,
                 )
                 .await?;
             }
@@ -338,6 +340,7 @@ impl Backend for GithubBackend {
                     link_mode: ctx.config.settings.link_mode,
                     show_progress: ctx.show_progress,
                     offline: ctx.config.settings.offline,
+                    require_checksums: ctx.config.settings.require_checksums,
                 };
                 pipeline::run(&plan, &pctx).await?;
             }
@@ -356,6 +359,7 @@ impl Backend for GithubBackend {
                     checksum.as_ref(),
                     ctx.show_progress,
                     ctx.config.settings.offline,
+                    ctx.config.settings.require_checksums,
                 )
                 .await?;
             }
