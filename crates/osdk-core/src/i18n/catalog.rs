@@ -301,11 +301,11 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         "help.long_about",
         (
             "osdk installs and switches between versions of many SDKs (node, npm, pnpm, yarn, \
-             java, python, rust, go, and any github:owner/repo release) across Windows, macOS, \
-             and Linux.\n\nHighlights: content-addressed dedup across versions, unified downstream \
-             package caches, and automatic fastest-mirror selection with failover.",
+             java, python, rust, go, deno, bun, and any github:owner/repo release) across Windows, \
+             macOS, and Linux.\n\nHighlights: content-addressed dedup across versions, unified \
+             downstream package caches, and automatic fastest-mirror selection with failover.",
             "osdk 可在 Windows、macOS 与 Linux 上安装并切换多种 SDK 的版本（node、npm、pnpm、\
-             yarn、java、python、rust、go，以及任意 github:owner/repo 发布物）。\n\n特性：跨版本\
+             yarn、java、python、rust、go、deno、bun，以及任意 github:owner/repo 发布物）。\n\n特性：跨版本\
              内容寻址去重、统一的下游包缓存、自动选择最快镜像并支持故障转移。",
         ),
     );

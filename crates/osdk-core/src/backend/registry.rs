@@ -24,6 +24,7 @@ impl Registry {
             Arc::new(crate::backend::pnpm::PnpmBackend),
             Arc::new(crate::backend::yarn::YarnBackend),
             Arc::new(crate::backend::deno::DenoBackend),
+            Arc::new(crate::backend::bun::BunBackend),
         ];
         let mut by_name = HashMap::new();
         for (i, b) in backends.iter().enumerate() {

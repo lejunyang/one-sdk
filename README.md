@@ -1,7 +1,7 @@
 # osdk — one SDK manager
 
 A single cross-platform CLI (Windows/macOS/Linux) that manages many language
-SDKs and their versions: **node, npm, pnpm, yarn, java, python, rust, go** — with
+SDKs and their versions: **node, npm, pnpm, yarn, java, python, rust, go, deno, bun** — with
 three things existing single-purpose managers (nvm/fnm/uv/sdkman/rustup) don't do
 together:
 
@@ -101,6 +101,8 @@ back to copy across filesystems; `osdk doctor` warns).
 | rust         | delegated to rustup (self-contained home + mirror)               |
 | pnpm         | standalone binary (GitHub release, mirror/proxy failover)        |
 | yarn         | classic standalone bundle (berry → corepack)                     |
+| deno         | dl.deno.land CDN (no GitHub API), `.sha256sum` verified          |
+| bun          | oven-sh/bun GitHub release, `SHASUMS256.txt` verified            |
 | npm          | ships with node                                                  |
 | `github:owner/repo` | any GitHub release: host-matching asset auto-picked, archives extracted or bare binaries installed |
 
