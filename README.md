@@ -113,6 +113,24 @@ Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the API rate limit.
 - `crates/osdk-shim` — a tiny launcher; each shim resolves the active version
   from the cwd and execs the real binary.
 
+## Development
+
+```bash
+cargo test --workspace         # unit tests
+cargo clippy --workspace --all-targets   # lints (CI runs with -D warnings)
+cargo fmt --all --check        # formatting
+
+# Windows is validated by cross-compiling from Linux:
+rustup target add x86_64-pc-windows-gnu
+sudo apt-get install -y mingw-w64
+cargo build --workspace --target x86_64-pc-windows-gnu
+```
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
+ubuntu/macos/windows, plus a dedicated Linux→Windows cross-build that guards the
+`#[cfg(windows)]` paths (shim `.cmd`/bash generation, junctions, volume
+detection).
+
 ## License
 
 MIT

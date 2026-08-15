@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn probe_results_rank_best_first() {
-        let mut results = vec![
+        let mut results = [
             ProbeResult {
                 source_id: "slow".into(),
                 throughput: 10.0,

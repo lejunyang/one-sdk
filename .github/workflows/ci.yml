@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail the build on warnings so clippy/rustc lints stay clean.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Formatting is OS-independent; run it once.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Lint + unit tests across the three supported platforms.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+      - name: test
+        run: cargo test --workspace
+        env:
+          # Give the GitHub-backed backends (python/pnpm/yarn/github) a token so
+          # any networked tests aren't rate-limited. Unit tests don't require it.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Explicit Windows cross-compile check from Linux. This guards the
+  # #[cfg(windows)] code paths (shim .cmd/bash generation, junctions, volume
+  # detection) even if the Windows runner is unavailable.
+  cross-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: cross build (windows-gnu)
+        run: cargo build --workspace --target x86_64-pc-windows-gnu
