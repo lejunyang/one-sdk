@@ -1,0 +1,141 @@
+name: Live Upstream Smoke
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-upstream-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build isolated smoke binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Prepare isolated build directories
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/one-sdk-live-smoke-build"
+          mkdir -p \
+            "$root/home" \
+            "$root/cargo" \
+            "$root/rustup" \
+            "$root/target" \
+            "$root/tmp" \
+            "$root/logs"
+          {
+            printf 'HOME=%s\n' "$root/home"
+            printf 'CARGO_HOME=%s\n' "$root/cargo"
+            printf 'RUSTUP_HOME=%s\n' "$root/rustup"
+            printf 'CARGO_TARGET_DIR=%s\n' "$root/target"
+            printf 'TMPDIR=%s\n' "$root/tmp"
+          } >> "$GITHUB_ENV"
+          printf 'target=%s\n' "$root/target" > "$root/logs/setup.log"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build smoke binaries
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --locked --release \
+            --package osdk-cli \
+            --package osdk-shim \
+            2>&1 | tee "$RUNNER_TEMP/one-sdk-live-smoke-build/logs/build.log"
+      - name: Upload build log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-build-log
+          path: ${{ runner.temp }}/one-sdk-live-smoke-build/logs/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload smoke binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-binaries
+          path: |
+            ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk
+            ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk-shim
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    name: smoke (${{ matrix.backend }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        backend:
+          - node
+          - go
+          - python
+          - java
+          - rust
+          - pnpm
+          - yarn
+          - deno
+          - bun
+          - github
+    steps:
+      - name: Prepare isolated smoke directories
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/one-sdk-live-smoke/${{ matrix.backend }}"
+          mkdir -p "$root/home" "$root/tmp" "$root/logs"
+          {
+            printf 'LIVE_SMOKE_ROOT=%s\n' "$root"
+            printf 'HOME=%s\n' "$root/home"
+            printf 'XDG_CACHE_HOME=%s\n' "$root/xdg-cache"
+            printf 'XDG_CONFIG_HOME=%s\n' "$root/xdg-config"
+            printf 'XDG_DATA_HOME=%s\n' "$root/xdg-data"
+            printf 'OSDK_DATA_DIR=%s\n' "$root/osdk/data"
+            printf 'OSDK_CACHE_DIR=%s\n' "$root/osdk/cache"
+            printf 'OSDK_CONFIG_DIR=%s\n' "$root/osdk/config"
+            printf 'OSDK_STORE_DIR=%s\n' "$root/osdk/store"
+            printf 'OSDK_INSTALL_DIR=%s\n' "$root/osdk/installs"
+            printf 'CARGO_HOME=%s\n' "$root/cargo"
+            printf 'RUSTUP_HOME=%s\n' "$root/rustup"
+            printf 'CARGO_TARGET_DIR=%s\n' "$root/build"
+            printf 'TMPDIR=%s\n' "$root/tmp"
+          } >> "$GITHUB_ENV"
+          printf 'backend=%s\nroot=%s\n' \
+            "${{ matrix.backend }}" \
+            "$root" \
+            > "$root/logs/setup.log"
+      - uses: actions/checkout@v4
+      - name: Download smoke binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: live-smoke-binaries
+          path: ${{ runner.temp }}/one-sdk-live-smoke-bin
+      - name: Run isolated live smoke
+        shell: bash
+        env:
+          LIVE_SMOKE_COMMAND_TIMEOUT: 20m
+          OSDK_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x \
+            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk" \
+            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk-shim"
+          bash scripts/live-smoke/run.sh \
+            "${{ matrix.backend }}" \
+            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk"
+      - name: Upload smoke log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-smoke-${{ matrix.backend }}-log
+          path: ${{ runner.temp }}/one-sdk-live-smoke/${{ matrix.backend }}/logs/
+          if-no-files-found: error
+          retention-days: 14
