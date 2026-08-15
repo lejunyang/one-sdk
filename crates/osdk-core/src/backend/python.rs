@@ -1,34 +1,46 @@
 //! Python backend: installs prebuilt CPython from astral-sh/python-build-
-//! standalone (the same source uv/mise use). Picks the `install_only` archive
-//! for the host target triple. No source builds.
+//! standalone (the same source uv/mise use). Discovery uses the project's
+//! `latest-release.json` (tag + `asset_url_prefix`) plus the companion
+//! `SHA256SUMS` at that prefix — this lists every asset filename with its
+//! sha256, so we get both version discovery AND checksums without ever touching
+//! the rate-limited GitHub releases API. The catalog is cached (24h TTL) with a
+//! stale-cache fallback for offline/flaky networks.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::{Error, Result};
 use crate::http;
-use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
+use crate::pipeline::{self, ArchiveKind, Checksum, HashAlgo, InstallPlan, PipelineCtx};
 use crate::platform::Os;
 use crate::source::Source;
 use crate::version::{ToolVersion, VersionInfo};
 
 pub struct PythonBackend;
 
-/// A GitHub release with its assets.
+/// The `latest-release.json` metadata document.
 #[derive(Debug, Deserialize)]
-struct GhRelease {
-    tag_name: String,
-    #[serde(default)]
-    assets: Vec<GhAsset>,
+struct LatestRelease {
+    tag: String,
+    asset_url_prefix: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-struct GhAsset {
+/// A single asset parsed from `SHA256SUMS`: filename + sha256.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Asset {
     name: String,
-    browser_download_url: String,
+    sha256: String,
+}
+
+/// The cached catalog for one release tag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Catalog {
+    tag: String,
+    asset_url_prefix: String,
+    assets: Vec<Asset>,
 }
 
 impl PythonBackend {
@@ -40,6 +52,19 @@ impl PythonBackend {
             && name.contains(triple)
             && name.contains("install_only")
             && !name.contains("install_only_stripped")
+            // exclude the free-threaded ("freethreaded") variants by default
+            && !name.contains("freethreaded")
+            && (name.ends_with(".tar.gz") || name.ends_with(".tar.zst"))
+    }
+
+    /// Whether an asset is an `install_only` build for the host triple (any
+    /// version) — used to enumerate installable versions.
+    fn asset_is_install_only(name: &str, triple: &str) -> bool {
+        name.starts_with("cpython-")
+            && name.contains(triple)
+            && name.contains("install_only")
+            && !name.contains("install_only_stripped")
+            && !name.contains("freethreaded")
             && (name.ends_with(".tar.gz") || name.ends_with(".tar.zst"))
     }
 
@@ -67,16 +92,16 @@ impl Backend for PythonBackend {
     }
 
     fn default_sources(&self) -> Vec<Source> {
-        // The index is the GitHub releases API; downloads come from GitHub
-        // release asset URLs (which the asset carries in full). Mirrors here are
-        // GitHub proxy prefixes applied to the asset URL at download time.
+        // `index_url` points at the metadata JSON on raw.githubusercontent (no
+        // API rate limit). `download_url` is a prefix prepended to full GitHub
+        // asset URLs at download time (proxy for CN reachability).
         vec![
-            Source::official("github", "https://github.com/")
-                .with_index("https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=10"),
-            // A GitHub download proxy: download_url is a prefix prepended to the
-            // full asset URL. Kept for CN reachability; disabled paths fail over.
-            Source::mirror("ghproxy", "https://gh-proxy.com/", 10)
-                .with_index("https://api.github.com/repos/astral-sh/python-build-standalone/releases?per_page=10"),
+            Source::official("github", "https://github.com/").with_index(
+                "https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release/latest-release.json",
+            ),
+            Source::mirror("ghproxy", "https://gh-proxy.com/", 10).with_index(
+                "https://gh-proxy.com/https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release/latest-release.json",
+            ),
         ]
     }
 
@@ -85,23 +110,17 @@ impl Backend for PythonBackend {
     }
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let releases = self.fetch_releases(ctx).await?;
+        let catalog = self.catalog(ctx).await?;
         let triple = ctx.platform.llvm_triple();
         use std::collections::BTreeSet;
         let mut versions: BTreeSet<String> = BTreeSet::new();
-        for rel in &releases {
-            for asset in &rel.assets {
-                if asset.name.contains(&triple)
-                    && asset.name.contains("install_only")
-                    && !asset.name.contains("install_only_stripped")
-                {
-                    if let Some(v) = Self::version_from_asset(&asset.name) {
-                        versions.insert(v);
-                    }
+        for a in &catalog.assets {
+            if Self::asset_is_install_only(&a.name, &triple) {
+                if let Some(v) = Self::version_from_asset(&a.name) {
+                    versions.insert(v);
                 }
             }
         }
-        // Sort ascending by semver-ish ordering.
         let mut out: Vec<VersionInfo> = versions
             .into_iter()
             .map(|v| VersionInfo {
@@ -110,7 +129,7 @@ impl Backend for PythonBackend {
                 lts: None,
             })
             .collect();
-        out.sort_by(|a, b| crate::backend::python::cmp_versions(&a.version, &b.version));
+        out.sort_by(|a, b| cmp_versions(&a.version, &b.version));
         Ok(out)
     }
 
@@ -118,45 +137,48 @@ impl Backend for PythonBackend {
         let ctx = ictx.ctx;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let triple = ctx.platform.llvm_triple();
-        let releases = self.fetch_releases(ctx).await?;
+        let catalog = self.catalog(ctx).await?;
 
-        // Find the newest release asset matching this exact python version.
-        let mut chosen: Option<GhAsset> = None;
-        for rel in &releases {
-            for asset in &rel.assets {
-                if Self::asset_matches(&asset.name, &tv.version, &triple) {
-                    chosen = Some(asset.clone());
-                    break;
-                }
-            }
-            if chosen.is_some() {
-                break;
-            }
-        }
-        let asset = chosen.ok_or_else(|| Error::VersionResolve {
-            tool: self.id().to_string(),
-            spec: tv.version.clone(),
-            hint: Some(format!("no install_only asset for {triple}")),
-        })?;
+        // Find the asset matching this exact python version for the host triple.
+        let asset = catalog
+            .assets
+            .iter()
+            .find(|a| Self::asset_matches(&a.name, &tv.version, &triple))
+            .ok_or_else(|| Error::VersionResolve {
+                tool: self.id().to_string(),
+                spec: tv.version.clone(),
+                hint: Some(format!("no install_only asset for {triple}")),
+            })?;
 
-        // Build candidate URLs: the plain asset URL, plus any proxy-prefixed
-        // variants from mirror sources.
-        let mut urls = vec![asset.browser_download_url.clone()];
+        // Full GitHub asset URL, then proxy-prefixed fallbacks for CN.
+        let gh_url = format!(
+            "{}/{}",
+            catalog.asset_url_prefix.trim_end_matches('/'),
+            asset.name
+        );
+        let mut urls = vec![gh_url.clone()];
         for s in &sources {
-            if s.id == "github" || s.download_url == "https://github.com/" {
+            // Skip the direct/official source (already added) and npm-style
+            // registries; only real GitHub proxies help here.
+            if s.download_url == "https://github.com/" {
                 continue;
             }
             urls.push(http::join_url(
                 s.download_url.trim_end_matches('/'),
-                &asset.browser_download_url,
+                &gh_url,
             ));
         }
 
         let kind = ArchiveKind::from_name(&asset.name)?;
-
-        // PBS publishes a `<asset>.sha256` sidecar next to each archive. Fetch it
-        // best-effort (skip verification if absent) so installs stay resilient.
-        let checksum = fetch_sha256_sidecar(&ctx.client, &asset.browser_download_url).await;
+        // Checksum comes straight from SHA256SUMS — no extra request.
+        let checksum = if asset.sha256.len() == 64 {
+            Some(Checksum {
+                algo: HashAlgo::Sha256,
+                hex: asset.sha256.clone(),
+            })
+        } else {
+            None
+        };
 
         let plan = InstallPlan {
             tool: self.id().to_string(),
@@ -209,24 +231,48 @@ impl Backend for PythonBackend {
 }
 
 impl PythonBackend {
-    async fn fetch_releases(&self, ctx: &Ctx) -> Result<Vec<GhRelease>> {
-        let cache_file = ctx.dirs.remote_cache().join("python-releases.json");
-        // Serve fresh cache (24h) to avoid hammering the GitHub API (which
-        // rate-limits unauthenticated requests to 403).
+    /// Resolve the release catalog (tag + prefix + asset list w/ sha256),
+    /// preferring a fresh 24h cache, then the network, then a stale cache.
+    async fn catalog(&self, ctx: &Ctx) -> Result<Catalog> {
+        let cache_file = ctx.dirs.remote_cache().join("python-catalog.json");
         const TTL_SECS: u64 = 24 * 3600;
+
+        // 1. Fresh cache.
         if let Some(age) = file_age_secs(&cache_file) {
             if age <= TTL_SECS {
-                if let Ok(bytes) = std::fs::read(&cache_file) {
-                    if let Ok(rels) = serde_json::from_slice::<Vec<GhRelease>>(&bytes) {
-                        if !rels.is_empty() {
-                            tracing::debug!("using cached python-build-standalone release index");
-                            return Ok(rels);
-                        }
-                    }
+                if let Some(cat) = read_catalog(&cache_file) {
+                    tracing::debug!("using cached python catalog");
+                    return Ok(cat);
                 }
             }
         }
 
+        // 2. Network: metadata JSON -> SHA256SUMS at the prefix.
+        match self.fetch_catalog(ctx).await {
+            Ok(cat) => {
+                if let Some(parent) = cache_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(bytes) = serde_json::to_vec_pretty(&cat) {
+                    let _ = std::fs::write(&cache_file, bytes);
+                }
+                Ok(cat)
+            }
+            Err(e) => {
+                // 3. Stale cache fallback.
+                if let Some(cat) = read_catalog(&cache_file) {
+                    tracing::warn!("network failed; using stale cached python catalog");
+                    Ok(cat)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Fetch the metadata JSON, then its `SHA256SUMS`, trying each source in
+    /// ranked order (failover).
+    async fn fetch_catalog(&self, ctx: &Ctx) -> Result<Catalog> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut last_err: Option<Error> = None;
         for source in &sources {
@@ -234,42 +280,41 @@ impl PythonBackend {
                 Some(u) => u.clone(),
                 None => continue,
             };
-            // Fetch raw text so we can cache the exact bytes, then parse.
-            match http::get_text(&ctx.client, &index_url).await {
-                Ok(body) => match serde_json::from_str::<Vec<GhRelease>>(&body) {
-                    Ok(mut rels) => {
-                        rels.retain(|r| !r.tag_name.is_empty());
-                        // Best-effort cache write.
-                        if let Some(parent) = cache_file.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::write(&cache_file, body.as_bytes());
-                        return Ok(rels);
-                    }
-                    Err(e) => {
-                        tracing::warn!(source = %source.id, "pbs release parse failed: {e}");
-                        last_err = Some(Error::from(e));
-                    }
-                },
+            let meta: LatestRelease = match http::get_json(&ctx.client, &index_url).await {
+                Ok(m) => m,
                 Err(e) => {
-                    tracing::warn!(source = %source.id, "pbs releases fetch failed: {e}");
+                    tracing::warn!(source = %source.id, "pbs metadata fetch failed: {e}");
                     last_err = Some(e);
+                    continue;
                 }
-            }
-        }
-
-        // Network failed: fall back to a stale cache if we have one.
-        if cache_file.exists() {
-            if let Ok(bytes) = std::fs::read(&cache_file) {
-                if let Ok(rels) = serde_json::from_slice::<Vec<GhRelease>>(&bytes) {
-                    if !rels.is_empty() {
-                        tracing::warn!("network failed; using stale cached python release index");
-                        return Ok(rels);
-                    }
+            };
+            // SHA256SUMS lives at the asset prefix; proxy it through the same
+            // source host if this source is a proxy.
+            let sums_url = format!("{}/SHA256SUMS", meta.asset_url_prefix.trim_end_matches('/'));
+            let sums_url = if source.download_url != "https://github.com/" {
+                http::join_url(source.download_url.trim_end_matches('/'), &sums_url)
+            } else {
+                sums_url
+            };
+            let body = match http::get_text(&ctx.client, &sums_url).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(source = %source.id, "pbs SHA256SUMS fetch failed: {e}");
+                    last_err = Some(e);
+                    continue;
                 }
+            };
+            let assets = parse_sha256sums(&body);
+            if assets.is_empty() {
+                last_err = Some(Error::other("empty SHA256SUMS"));
+                continue;
             }
+            return Ok(Catalog {
+                tag: meta.tag,
+                asset_url_prefix: meta.asset_url_prefix,
+                assets,
+            });
         }
-
         Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
             tool: self.id().to_string(),
             tried: sources.len(),
@@ -277,24 +322,40 @@ impl PythonBackend {
     }
 }
 
-/// Fetch a `<asset>.sha256` sidecar and parse the hex digest. Best-effort:
-/// returns None if the sidecar is missing or unparseable. The sidecar body is
-/// either a bare hex string or `<hex>  <filename>`.
-async fn fetch_sha256_sidecar(
-    client: &reqwest::Client,
-    asset_url: &str,
-) -> Option<crate::pipeline::Checksum> {
-    let url = format!("{asset_url}.sha256");
-    let body = crate::http::get_text(client, &url).await.ok()?;
-    let token = body.split_whitespace().next()?;
-    // sha256 hex is 64 chars.
-    if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(crate::pipeline::Checksum {
-            algo: crate::pipeline::HashAlgo::Sha256,
-            hex: token.to_string(),
-        })
-    } else {
+/// Parse a `SHA256SUMS` body: each line is `<hex>  <filename>`.
+fn parse_sha256sums(body: &str) -> Vec<Asset> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let hash = match it.next() {
+            Some(h) => h,
+            None => continue,
+        };
+        let name = match it.next() {
+            Some(n) => n.trim_start_matches('*'),
+            None => continue,
+        };
+        if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            out.push(Asset {
+                name: name.to_string(),
+                sha256: hash.to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn read_catalog(path: &std::path::Path) -> Option<Catalog> {
+    let bytes = std::fs::read(path).ok()?;
+    let cat: Catalog = serde_json::from_slice(&bytes).ok()?;
+    if cat.assets.is_empty() {
         None
+    } else {
+        Some(cat)
     }
 }
 
@@ -305,8 +366,7 @@ pub fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
     pa.cmp(&pb)
 }
 
-/// Age of a file in seconds since last modification, or None if it doesn't
-/// exist / mtime is unavailable.
+/// Age of a file in seconds since last modification, or None if unavailable.
 fn file_age_secs(path: &std::path::Path) -> Option<u64> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?;
@@ -330,12 +390,19 @@ mod tests {
             "3.12.7",
             "aarch64-apple-darwin"
         ));
-        // stripped variant must not match
         let stripped =
             "cpython-3.12.7+20241016-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz";
         assert!(!PythonBackend::asset_matches(
             stripped,
             "3.12.7",
+            "x86_64-unknown-linux-gnu"
+        ));
+        // free-threaded variant excluded
+        let ft =
+            "cpython-3.13.1+20241016-x86_64-unknown-linux-gnu-freethreaded-install_only.tar.gz";
+        assert!(!PythonBackend::asset_matches(
+            ft,
+            "3.13.1",
             "x86_64-unknown-linux-gnu"
         ));
     }
@@ -347,6 +414,19 @@ mod tests {
             PythonBackend::version_from_asset(name).as_deref(),
             Some("3.12.7")
         );
+    }
+
+    #[test]
+    fn parse_sums_extracts_assets() {
+        let body = "\
+391e2bbe4da892fd7dd9f773f42ad8eae82f33d3d4fc8f0025af80b4dfa134b3  cpython-3.10.21+20260814-x86_64-unknown-linux-gnu-install_only.tar.gz
+3297691ae34f75fed81ac424e040145fccb0bafe8e581cd5cadbddfa1c0766c0  cpython-3.12.14+20260814-x86_64-unknown-linux-gnu-install_only.tar.gz
+not-a-hash  garbage-line
+";
+        let assets = parse_sha256sums(body);
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].sha256.len(), 64);
+        assert!(assets[1].name.contains("3.12.14"));
     }
 
     #[test]

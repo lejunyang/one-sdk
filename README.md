@@ -84,7 +84,7 @@ back to copy across filesystems; `osdk doctor` warns).
 |--------------|------------------------------------------------------------------|
 | node         | official nodejs.org prebuilt archives, `SHASUMS256` verified     |
 | go           | go.dev/dl JSON index, per-file sha256                            |
-| python       | astral-sh/python-build-standalone prebuilt CPython               |
+| python       | astral-sh/python-build-standalone (latest-release.json + SHA256SUMS; no GitHub API) |
 | java         | Foojay Disco API (Temurin default), multi-vendor                 |
 | rust         | delegated to rustup (self-contained home + mirror)               |
 | pnpm         | standalone binary (GitHub release, mirror/proxy failover)        |
