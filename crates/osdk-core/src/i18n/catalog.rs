@@ -144,6 +144,72 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("label.pinned", ("[pinned]", "[已固定]"));
     m.insert("label.error", ("error", "错误"));
 
+    // ---- user-visible tracing logs (info!/warn!) --------------------------
+    // Structured fields (url/source/attempt/...) stay as machine-readable
+    // fields; only the human message is localized. debug!/trace! stay English.
+    m.insert(
+        "log.checksum_verified",
+        ("checksum verified", "校验和已验证"),
+    );
+    m.insert(
+        "log.rustup_dist_server",
+        ("rustup dist server", "rustup 分发服务器"),
+    );
+    m.insert(
+        "log.download_failover",
+        (
+            "download failed, trying next source: {err}",
+            "下载失败，尝试下一个源：{err}",
+        ),
+    );
+    m.insert(
+        "log.yarn_download_failed",
+        ("yarn download failed: {err}", "yarn 下载失败：{err}"),
+    );
+    m.insert(
+        "log.index_fetch_failover",
+        (
+            "index fetch failed, trying next: {err}",
+            "索引获取失败，尝试下一个：{err}",
+        ),
+    );
+    m.insert(
+        "log.go_index_fetch_failed",
+        ("go index fetch failed: {err}", "go 索引获取失败：{err}"),
+    );
+    m.insert(
+        "log.pnpm_packument_failed",
+        (
+            "pnpm packument fetch failed: {err}",
+            "pnpm packument 获取失败：{err}",
+        ),
+    );
+    m.insert(
+        "log.binary_download_failed",
+        ("binary download failed: {err}", "二进制下载失败：{err}"),
+    );
+    m.insert(
+        "log.stale_python_cache",
+        (
+            "network failed; using stale cached python catalog",
+            "网络失败；改用过期的 python 目录缓存",
+        ),
+    );
+    m.insert(
+        "log.pbs_metadata_failed",
+        (
+            "pbs metadata fetch failed: {err}",
+            "PBS 元数据获取失败：{err}",
+        ),
+    );
+    m.insert(
+        "log.pbs_sha256sums_failed",
+        (
+            "pbs SHA256SUMS fetch failed: {err}",
+            "PBS SHA256SUMS 获取失败：{err}",
+        ),
+    );
+
     // ---- doctor -----------------------------------------------------------
     m.insert("doctor.title", ("osdk doctor", "osdk 诊断"));
     m.insert("doctor.same_fs_ok", ("hardlinks OK", "硬链接可用"));

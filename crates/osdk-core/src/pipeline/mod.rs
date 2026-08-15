@@ -89,7 +89,8 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
                         url = %url,
                         attempt = i + 1,
                         total = plan.urls.len(),
-                        "download failed, trying next source: {e}"
+                        "{}",
+                        crate::i18n::trf("log.download_failover", &[("err", &e.to_string())])
                     );
                     last_err = Some(e);
                 }
@@ -106,7 +107,7 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     // 2. Verify checksum if provided.
     if let Some(cs) = &plan.checksum {
         verify::verify_file(&archive_path, &cs.hex, cs.algo, &plan.file_name)?;
-        tracing::info!(file = %plan.file_name, "checksum verified");
+        tracing::info!(file = %plan.file_name, "{}", crate::i18n::tr("log.checksum_verified"));
     } else {
         tracing::debug!(file = %plan.file_name, "no checksum available; skipping verification");
     }

@@ -221,6 +221,30 @@ mod tests {
     }
 
     #[test]
+    fn log_keys_localized_both_langs() {
+        // User-visible log messages must exist in both languages and differ
+        // (i.e. actually translated, not just falling back to the key).
+        for key in [
+            "log.checksum_verified",
+            "log.download_failover",
+            "log.stale_python_cache",
+        ] {
+            let en = trl(Lang::En, key);
+            let zh = trl(Lang::Zh, key);
+            assert_ne!(en, key, "missing en for {key}");
+            assert_ne!(zh, key, "missing zh for {key}");
+            assert_ne!(en, zh, "zh not translated for {key}");
+        }
+        // Interpolation carries into the localized log message.
+        let msg = trl(Lang::Zh, "log.download_failover");
+        assert!(msg.contains("{err}"));
+        assert_eq!(
+            interpolate(&msg, &[("err", "boom")]),
+            msg.replace("{err}", "boom")
+        );
+    }
+
+    #[test]
     fn zh_falls_back_to_en_when_empty() {
         // 'pinned' has both; sanity that a known key differs by lang or falls back
         let en = trl(Lang::En, "msg.installed");

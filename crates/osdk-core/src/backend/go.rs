@@ -86,7 +86,7 @@ impl Backend for GoBackend {
             let releases: Vec<GoRelease> = match http::get_json(&ctx.client, &index_url).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(source = %source.id, "go index fetch failed: {e}");
+                    tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.go_index_fetch_failed", &[("err", &e.to_string())]));
                     last_err = Some(e);
                     continue;
                 }

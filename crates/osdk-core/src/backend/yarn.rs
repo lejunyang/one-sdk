@@ -133,7 +133,7 @@ impl Backend for YarnBackend {
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!(url = %url, attempt = i + 1, total = urls.len(), "yarn download failed: {e}");
+                    tracing::warn!(url = %url, attempt = i + 1, total = urls.len(), "{}", crate::i18n::trf("log.yarn_download_failed", &[("err", &e.to_string())]));
                     last_err = Some(e);
                 }
             }

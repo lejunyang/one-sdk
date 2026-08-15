@@ -93,7 +93,7 @@ impl Backend for PnpmBackend {
                     return Ok(out);
                 }
                 Err(e) => {
-                    tracing::warn!(source = %source.id, "pnpm packument fetch failed: {e}");
+                    tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.pnpm_packument_failed", &[("err", &e.to_string())]));
                     last_err = Some(e);
                 }
             }
@@ -198,7 +198,7 @@ pub(crate) async fn install_single_binary(
                 break;
             }
             Err(e) => {
-                tracing::warn!(url = %url, attempt = i + 1, total = urls.len(), "binary download failed: {e}");
+                tracing::warn!(url = %url, attempt = i + 1, total = urls.len(), "{}", crate::i18n::trf("log.binary_download_failed", &[("err", &e.to_string())]));
                 last_err = Some(e);
             }
         }

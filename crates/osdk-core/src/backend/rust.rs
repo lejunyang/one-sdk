@@ -132,7 +132,7 @@ impl Backend for RustBackend {
         let source = crate::source::select::active_source(ctx, self).await.ok();
         let env = Self::rustup_env(ctx, source.as_ref());
         if let Some(s) = &source {
-            tracing::info!(source = %s.id, dist = %s.download_url, "rustup dist server");
+            tracing::info!(source = %s.id, dist = %s.download_url, "{}", crate::i18n::tr("log.rustup_dist_server"));
         }
 
         // Install the toolchain. Optional profile/components/targets via options.

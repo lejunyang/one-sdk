@@ -126,7 +126,7 @@ impl Backend for NodeBackend {
             let releases: Vec<NodeRelease> = match http::get_json(&ctx.client, &index_url).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(source = %source.id, "index fetch failed, trying next: {e}");
+                    tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.index_fetch_failover", &[("err", &e.to_string())]));
                     last_err = Some(e);
                     continue;
                 }

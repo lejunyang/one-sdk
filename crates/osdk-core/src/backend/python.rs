@@ -261,7 +261,7 @@ impl PythonBackend {
             Err(e) => {
                 // 3. Stale cache fallback.
                 if let Some(cat) = read_catalog(&cache_file) {
-                    tracing::warn!("network failed; using stale cached python catalog");
+                    tracing::warn!("{}", crate::i18n::tr("log.stale_python_cache"));
                     Ok(cat)
                 } else {
                     Err(e)
@@ -283,7 +283,7 @@ impl PythonBackend {
             let meta: LatestRelease = match http::get_json(&ctx.client, &index_url).await {
                 Ok(m) => m,
                 Err(e) => {
-                    tracing::warn!(source = %source.id, "pbs metadata fetch failed: {e}");
+                    tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.pbs_metadata_failed", &[("err", &e.to_string())]));
                     last_err = Some(e);
                     continue;
                 }
@@ -299,7 +299,7 @@ impl PythonBackend {
             let body = match http::get_text(&ctx.client, &sums_url).await {
                 Ok(b) => b,
                 Err(e) => {
-                    tracing::warn!(source = %source.id, "pbs SHA256SUMS fetch failed: {e}");
+                    tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.pbs_sha256sums_failed", &[("err", &e.to_string())]));
                     last_err = Some(e);
                     continue;
                 }
