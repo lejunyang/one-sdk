@@ -61,11 +61,14 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
 
 fn init_tracing(verbose: u8) {
     use tracing_subscriber::{fmt, EnvFilter};
+    // Scope verbosity to osdk crates so -vv/OSDK_LOG=debug doesn't drown the
+    // user in reqwest/h2/rustls internals. A bare level still applies globally
+    // via OSDK_LOG (e.g. `OSDK_LOG=debug` for everything).
     let default = match verbose {
         0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
+        1 => "warn,osdk=info,osdk_core=info,osdk_cli=info",
+        2 => "warn,osdk=debug,osdk_core=debug,osdk_cli=debug",
+        _ => "info,osdk=trace,osdk_core=trace,osdk_cli=trace",
     };
     let filter = EnvFilter::try_from_env("OSDK_LOG").unwrap_or_else(|_| EnvFilter::new(default));
     let _ = fmt()

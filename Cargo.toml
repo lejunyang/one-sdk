@@ -36,6 +36,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 blake3 = "1"
 hex = "0.4"
+# signatures
+minisign-verify = "0.2"
 # fs / dirs
 directories = "5"
 dunce = "1"

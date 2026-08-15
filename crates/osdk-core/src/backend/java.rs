@@ -27,6 +27,8 @@ struct DiscoResponse<T> {
 #[derive(Debug, Deserialize, Clone)]
 struct Package {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     java_version: String,
     #[serde(default)]
     distribution_version: String,
@@ -40,6 +42,11 @@ struct Package {
     #[serde(default)]
     #[allow(dead_code)] // parsed from the API; retained for schema clarity
     distribution: String,
+    // Present on the /ids/<id> detail response, not the /packages list.
+    #[serde(default)]
+    checksum: String,
+    #[serde(default)]
+    checksum_type: String,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -202,13 +209,16 @@ impl Backend for JavaBackend {
         // Always keep the foojay redirect itself as a final fallback.
         urls.push(redirect);
 
+        // Fetch the per-id detail to get the vendor-published sha256 checksum.
+        let checksum = self.fetch_checksum(ctx, &base_index, &pkg.id).await;
+
         let plan = InstallPlan {
             tool: self.id().to_string(),
             version: tv.version.clone(),
             urls,
             file_name,
             kind,
-            checksum: None,
+            checksum,
             strip_root: true, // JDK archives wrap in jdk-<ver>/
         };
         let pctx = PipelineCtx {
@@ -296,6 +306,38 @@ impl JavaBackend {
             .collect();
         out.sort_by(|a, b| crate::backend::python::cmp_versions(&a.version, &b.version));
         Ok(out)
+    }
+
+    /// Fetch the vendor-published sha256 for a package id from the foojay
+    /// `/ids/<id>` detail endpoint. Best-effort: returns None on any failure so
+    /// installs still proceed (download failover/extraction remain the guard).
+    async fn fetch_checksum(
+        &self,
+        ctx: &Ctx,
+        base_index: &str,
+        id: &str,
+    ) -> Option<crate::pipeline::Checksum> {
+        if id.is_empty() {
+            return None;
+        }
+        // base_index is ".../disco/v3.0/packages"; the ids endpoint is a sibling.
+        let base = base_index.trim_end_matches('/');
+        let root = base.strip_suffix("/packages").unwrap_or(base);
+        let url = format!("{}/ids/{}", root, id);
+        let resp: DiscoResponse<Package> = http::get_json(&ctx.client, &url).await.ok()?;
+        let pkg = resp.result.into_iter().next()?;
+        if pkg.checksum.is_empty() {
+            return None;
+        }
+        // foojay currently publishes sha256; guard in case that changes.
+        if !pkg.checksum_type.is_empty() && !pkg.checksum_type.eq_ignore_ascii_case("sha256") {
+            tracing::debug!(kind = %pkg.checksum_type, "unsupported java checksum type; skipping");
+            return None;
+        }
+        Some(crate::pipeline::Checksum {
+            algo: crate::pipeline::HashAlgo::Sha256,
+            hex: pkg.checksum,
+        })
     }
 }
 

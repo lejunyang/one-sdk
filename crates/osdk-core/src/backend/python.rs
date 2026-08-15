@@ -23,8 +23,6 @@ struct GhRelease {
     tag_name: String,
     #[serde(default)]
     assets: Vec<GhAsset>,
-    #[serde(default)]
-    prerelease: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -155,13 +153,18 @@ impl Backend for PythonBackend {
         }
 
         let kind = ArchiveKind::from_name(&asset.name)?;
+
+        // PBS publishes a `<asset>.sha256` sidecar next to each archive. Fetch it
+        // best-effort (skip verification if absent) so installs stay resilient.
+        let checksum = fetch_sha256_sidecar(&ctx.client, &asset.browser_download_url).await;
+
         let plan = InstallPlan {
             tool: self.id().to_string(),
             version: tv.version.clone(),
             urls,
             file_name: asset.name.clone(),
             kind,
-            checksum: None,   // PBS publishes sha256 sidecars; add later
+            checksum,
             strip_root: true, // archives wrap in a `python/` dir
         };
         let pctx = PipelineCtx {
@@ -207,6 +210,23 @@ impl Backend for PythonBackend {
 
 impl PythonBackend {
     async fn fetch_releases(&self, ctx: &Ctx) -> Result<Vec<GhRelease>> {
+        let cache_file = ctx.dirs.remote_cache().join("python-releases.json");
+        // Serve fresh cache (24h) to avoid hammering the GitHub API (which
+        // rate-limits unauthenticated requests to 403).
+        const TTL_SECS: u64 = 24 * 3600;
+        if let Some(age) = file_age_secs(&cache_file) {
+            if age <= TTL_SECS {
+                if let Ok(bytes) = std::fs::read(&cache_file) {
+                    if let Ok(rels) = serde_json::from_slice::<Vec<GhRelease>>(&bytes) {
+                        if !rels.is_empty() {
+                            tracing::debug!("using cached python-build-standalone release index");
+                            return Ok(rels);
+                        }
+                    }
+                }
+            }
+        }
+
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut last_err: Option<Error> = None;
         for source in &sources {
@@ -214,24 +234,67 @@ impl PythonBackend {
                 Some(u) => u.clone(),
                 None => continue,
             };
-            match http::get_json::<Vec<GhRelease>>(&ctx.client, &index_url).await {
-                Ok(mut rels) => {
-                    // newest-first from GitHub; keep stable releases first but
-                    // don't drop prereleases entirely.
-                    rels.retain(|r| !r.tag_name.is_empty());
-                    let _ = &rels.iter().filter(|r| !r.prerelease).count();
-                    return Ok(rels);
-                }
+            // Fetch raw text so we can cache the exact bytes, then parse.
+            match http::get_text(&ctx.client, &index_url).await {
+                Ok(body) => match serde_json::from_str::<Vec<GhRelease>>(&body) {
+                    Ok(mut rels) => {
+                        rels.retain(|r| !r.tag_name.is_empty());
+                        // Best-effort cache write.
+                        if let Some(parent) = cache_file.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&cache_file, body.as_bytes());
+                        return Ok(rels);
+                    }
+                    Err(e) => {
+                        tracing::warn!(source = %source.id, "pbs release parse failed: {e}");
+                        last_err = Some(Error::from(e));
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(source = %source.id, "pbs releases fetch failed: {e}");
                     last_err = Some(e);
                 }
             }
         }
+
+        // Network failed: fall back to a stale cache if we have one.
+        if cache_file.exists() {
+            if let Ok(bytes) = std::fs::read(&cache_file) {
+                if let Ok(rels) = serde_json::from_slice::<Vec<GhRelease>>(&bytes) {
+                    if !rels.is_empty() {
+                        tracing::warn!("network failed; using stale cached python release index");
+                        return Ok(rels);
+                    }
+                }
+            }
+        }
+
         Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
             tool: self.id().to_string(),
             tried: sources.len(),
         }))
+    }
+}
+
+/// Fetch a `<asset>.sha256` sidecar and parse the hex digest. Best-effort:
+/// returns None if the sidecar is missing or unparseable. The sidecar body is
+/// either a bare hex string or `<hex>  <filename>`.
+async fn fetch_sha256_sidecar(
+    client: &reqwest::Client,
+    asset_url: &str,
+) -> Option<crate::pipeline::Checksum> {
+    let url = format!("{asset_url}.sha256");
+    let body = crate::http::get_text(client, &url).await.ok()?;
+    let token = body.split_whitespace().next()?;
+    // sha256 hex is 64 chars.
+    if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(crate::pipeline::Checksum {
+            algo: crate::pipeline::HashAlgo::Sha256,
+            hex: token.to_string(),
+        })
+    } else {
+        None
     }
 }
 
@@ -240,6 +303,14 @@ pub fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let pa: Vec<u64> = a.split('.').filter_map(|s| s.parse().ok()).collect();
     let pb: Vec<u64> = b.split('.').filter_map(|s| s.parse().ok()).collect();
     pa.cmp(&pb)
+}
+
+/// Age of a file in seconds since last modification, or None if it doesn't
+/// exist / mtime is unavailable.
+fn file_age_secs(path: &std::path::Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    modified.elapsed().ok().map(|d| d.as_secs())
 }
 
 #[cfg(test)]

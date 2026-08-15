@@ -23,6 +23,7 @@ zip.workspace = true
 sha2.workspace = true
 blake3.workspace = true
 hex.workspace = true
+minisign-verify.workspace = true
 directories.workspace = true
 dunce.workspace = true
 reflink-copy.workspace = true

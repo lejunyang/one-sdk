@@ -106,6 +106,9 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     // 2. Verify checksum if provided.
     if let Some(cs) = &plan.checksum {
         verify::verify_file(&archive_path, &cs.hex, cs.algo, &plan.file_name)?;
+        tracing::info!(file = %plan.file_name, "checksum verified");
+    } else {
+        tracing::debug!(file = %plan.file_name, "no checksum available; skipping verification");
     }
 
     // 3. Extract into a scratch dir under the cache tmp.
