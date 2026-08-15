@@ -164,6 +164,7 @@ fn basename_no_ext(p: &str) -> String {
 /// Find the backend that owns a tool name. First checks backend ids directly,
 /// then scans each backend's exposed bin names across installed versions so
 /// tools like `pip`, `npm`, `pnpx`, `gofmt`, `cargo` route to the right SDK.
+/// Also scans dynamically-installed `github:owner/repo` backends.
 fn owning_backend(
     registry: &Registry,
     ctx: &osdk_core::backend::Ctx,
@@ -172,7 +173,7 @@ fn owning_backend(
     if let Ok(b) = registry.get(tool_name) {
         return Some(b);
     }
-    // Scan installed versions' bin names.
+    // Scan compiled-in backends' installed versions' bin names.
     for backend in registry.all() {
         if let Ok(versions) = backend.list_installed(ctx) {
             for v in versions {
@@ -185,7 +186,47 @@ fn owning_backend(
             }
         }
     }
+    // Scan dynamically-installed github backends: installs/github/<owner>/<repo>.
+    for id in installed_github_ids(ctx) {
+        if let Ok(backend) = registry.get(&id) {
+            if let Ok(versions) = backend.list_installed(ctx) {
+                for v in versions {
+                    let tv = ToolVersion::new(backend.id(), &v);
+                    if let Ok(names) = backend.bin_names(ctx, &tv) {
+                        if names.iter().any(|n| n == tool_name) {
+                            return Some(backend);
+                        }
+                    }
+                }
+            }
+        }
+    }
     None
+}
+
+/// Enumerate installed `github:owner/repo` ids from the installs tree.
+fn installed_github_ids(ctx: &osdk_core::backend::Ctx) -> Vec<String> {
+    let mut out = Vec::new();
+    let base = ctx.dirs.installs.join("github");
+    let owners = match std::fs::read_dir(&base) {
+        Ok(rd) => rd,
+        Err(_) => return out,
+    };
+    for owner in owners.flatten() {
+        if !owner.path().is_dir() {
+            continue;
+        }
+        let owner_name = owner.file_name().to_string_lossy().to_string();
+        if let Ok(repos) = std::fs::read_dir(owner.path()) {
+            for repo in repos.flatten() {
+                if repo.path().is_dir() {
+                    let repo_name = repo.file_name().to_string_lossy().to_string();
+                    out.push(format!("github:{owner_name}/{repo_name}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn make_ctx(dirs: Dirs, platform: Platform, config: Config) -> osdk_core::backend::Ctx {

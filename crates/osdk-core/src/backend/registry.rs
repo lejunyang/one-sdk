@@ -35,6 +35,13 @@ impl Registry {
     }
 
     pub fn get(&self, name: &str) -> Result<Arc<dyn Backend>> {
+        // Dynamic namespaced backends: `github:owner/repo`.
+        if name.starts_with("github:") {
+            if let Some(gh) = crate::backend::github::GithubBackend::from_id(name) {
+                return Ok(Arc::new(gh));
+            }
+            return Err(Error::UnknownBackend(name.to_string()));
+        }
         self.by_name
             .get(name)
             .map(|&i| self.backends[i].clone())

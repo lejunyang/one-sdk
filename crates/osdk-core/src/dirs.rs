@@ -123,12 +123,12 @@ impl Dirs {
 
     /// Install directory for a specific tool version.
     pub fn install_path(&self, tool: &str, version: &str) -> PathBuf {
-        self.installs.join(tool).join(version)
+        self.installs.join(sanitize_tool_id(tool)).join(version)
     }
 
     /// Directory holding per-version install locks for a tool.
     pub fn lock_dir(&self, tool: &str) -> PathBuf {
-        self.installs.join(tool).join(".locks")
+        self.installs.join(sanitize_tool_id(tool)).join(".locks")
     }
 
     pub fn user_config_file(&self) -> PathBuf {
@@ -157,6 +157,24 @@ impl Dirs {
 
 pub(crate) fn create_dir_all(p: &Path) -> Result<()> {
     std::fs::create_dir_all(p).map_err(|e| Error::io(p, e))
+}
+
+/// Map a (possibly namespaced) tool id to a filesystem-safe nested path
+/// component. e.g. `github:owner/repo` -> `github/owner/repo`. `:` is replaced
+/// (invalid on Windows) and path traversal is neutralized.
+pub fn sanitize_tool_id(tool: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in tool.split([':', '/', '\\']) {
+        let part = part.trim();
+        if part.is_empty() || part == "." || part == ".." {
+            continue;
+        }
+        out.push(part);
+    }
+    if out.as_os_str().is_empty() {
+        out.push("_");
+    }
+    out
 }
 
 #[cfg(test)]

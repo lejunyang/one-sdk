@@ -90,6 +90,19 @@ back to copy across filesystems; `osdk doctor` warns).
 | pnpm         | standalone binary (GitHub release, mirror/proxy failover)        |
 | yarn         | classic standalone bundle (berry → corepack)                     |
 | npm          | ships with node                                                  |
+| `github:owner/repo` | any GitHub release: host-matching asset auto-picked, archives extracted or bare binaries installed |
+
+### GitHub-release tools
+
+Install arbitrary tools published as GitHub releases:
+
+```bash
+osdk use -g github:sharkdp/fd          # latest release, host asset auto-picked
+osdk install github:cli/cli@2.62.0     # a specific tag
+osdk list-remote github:sharkdp/fd     # available release tags
+```
+
+Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the API rate limit.
 
 ## Architecture
 

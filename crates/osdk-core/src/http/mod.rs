@@ -31,6 +31,39 @@ pub async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
     Ok(resp.text().await?)
 }
 
+/// Fetch JSON from the GitHub API with the recommended headers, honoring a
+/// `GITHUB_TOKEN`/`GH_TOKEN` env var to raise the rate limit when present.
+/// GitHub returns 403 for API requests missing an `Accept`/`X-GitHub-Api-Version`
+/// header under load, so we always send them.
+pub async fn get_github_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<T> {
+    let mut req = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = github_token() {
+        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let resp = req.send().await?.error_for_status()?;
+    let bytes = resp.bytes().await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Read a GitHub token from the usual env vars, if set and non-empty.
+pub fn github_token() -> Option<String> {
+    for key in ["OSDK_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 /// Substitute `{version}`, `{os}`, `{arch}`, `{file}`, `{ext}` placeholders in a
 /// URL template. Joins base + tail if the template ends with `/`.
 pub fn render_template(template: &str, vars: &[(&str, &str)]) -> String {

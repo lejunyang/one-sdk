@@ -15,6 +15,7 @@ use crate::source::Source;
 use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
+pub mod github;
 pub mod go;
 pub mod java;
 pub mod node;
@@ -93,7 +94,10 @@ pub trait Backend: Send + Sync {
 
     /// List locally installed versions (dirs with a complete marker).
     fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let base = ctx.dirs.installs.join(self.id());
+        let base = ctx
+            .dirs
+            .installs
+            .join(crate::dirs::sanitize_tool_id(self.id()));
         let mut out = Vec::new();
         if base.exists() {
             for entry in std::fs::read_dir(&base).map_err(|e| Error::io(&base, e))? {

@@ -103,7 +103,7 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
 pub fn list(app: &App, tool: Option<String>) -> Result<()> {
     let backends: Vec<_> = match tool {
         Some(t) => vec![app.registry.get(&t)?],
-        None => app.registry.all().to_vec(),
+        None => all_display_backends(app),
     };
     let mut any = false;
     for backend in backends {
@@ -121,6 +121,33 @@ pub fn list(app: &App, tool: Option<String>) -> Result<()> {
         println!("no tools installed yet");
     }
     Ok(())
+}
+
+/// All backends to display in list/current: compiled-in backends plus any
+/// dynamically-installed `github:owner/repo` backends found on disk.
+fn all_display_backends(app: &App) -> Vec<std::sync::Arc<dyn Backend>> {
+    let mut out: Vec<std::sync::Arc<dyn Backend>> = app.registry.all().to_vec();
+    let base = app.ctx.dirs.installs.join("github");
+    if let Ok(owners) = std::fs::read_dir(&base) {
+        for owner in owners.flatten() {
+            if !owner.path().is_dir() {
+                continue;
+            }
+            let owner_name = owner.file_name().to_string_lossy().to_string();
+            if let Ok(repos) = std::fs::read_dir(owner.path()) {
+                for repo in repos.flatten() {
+                    if repo.path().is_dir() {
+                        let repo_name = repo.file_name().to_string_lossy().to_string();
+                        let id = format!("github:{owner_name}/{repo_name}");
+                        if let Ok(b) = app.registry.get(&id) {
+                            out.push(b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) -> Result<()> {
@@ -208,7 +235,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backends: Vec<_> = match tool {
         Some(t) => vec![app.registry.get(&t)?],
-        None => app.registry.all().to_vec(),
+        None => all_display_backends(app),
     };
     let mut any = false;
     for backend in backends {
