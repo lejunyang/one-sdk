@@ -54,9 +54,16 @@ fn real_main() -> i32 {
 
     let registry = Registry::new();
 
-    // Find which backend owns this tool name (either it's the backend id, or one
-    // of the executables a backend provides). For M2, node owns node/npm/npx.
-    let backend = match owning_backend(&registry, &tool_name) {
+    // Build the (sync) context up front; needed to resolve which backend owns
+    // this tool name by scanning installed bin names.
+    let platform = Platform::current();
+    let tools = config.tools.clone();
+    let idiomatic_probe_cwd = cwd.clone();
+    let ctx = make_ctx(dirs.clone(), platform, config);
+
+    // Find which backend owns this tool name (its id, or one of the executables
+    // an installed version provides, e.g. pip -> python, npm -> node).
+    let backend = match owning_backend(&registry, &ctx, &tool_name) {
         Some(b) => b,
         None => {
             eprintln!("osdk-shim: no backend provides `{tool_name}`");
@@ -67,8 +74,8 @@ fn real_main() -> i32 {
     // Resolve the active version spec for this backend.
     let active = resolve_active(
         backend.id(),
-        &cwd,
-        &config.tools,
+        &idiomatic_probe_cwd,
+        &tools,
         backend.idiomatic_files(),
     );
     let spec = match active {
@@ -84,8 +91,6 @@ fn real_main() -> i32 {
     };
 
     // Resolve spec -> concrete installed version (offline: pick from installed).
-    let platform = Platform::current();
-    let ctx = make_ctx(dirs.clone(), platform, config);
     let version = match resolve_installed(&ctx, backend.as_ref(), &spec) {
         Some(v) => v,
         None => {
@@ -156,19 +161,28 @@ fn basename_no_ext(p: &str) -> String {
     name
 }
 
-/// Find the backend that owns a tool name. For now we check backend ids plus
-/// node's known executables (npm/npx). A future registry can index bin names.
+/// Find the backend that owns a tool name. First checks backend ids directly,
+/// then scans each backend's exposed bin names across installed versions so
+/// tools like `pip`, `npm`, `pnpx`, `gofmt`, `cargo` route to the right SDK.
 fn owning_backend(
     registry: &Registry,
+    ctx: &osdk_core::backend::Ctx,
     tool_name: &str,
 ) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
     if let Ok(b) = registry.get(tool_name) {
         return Some(b);
     }
-    // node provides npm/npx/corepack
-    if matches!(tool_name, "npm" | "npx" | "corepack") {
-        if let Ok(b) = registry.get("node") {
-            return Some(b);
+    // Scan installed versions' bin names.
+    for backend in registry.all() {
+        if let Ok(versions) = backend.list_installed(ctx) {
+            for v in versions {
+                let tv = ToolVersion::new(backend.id(), &v);
+                if let Ok(names) = backend.bin_names(ctx, &tv) {
+                    if names.iter().any(|n| n == tool_name) {
+                        return Some(backend.clone());
+                    }
+                }
+            }
         }
     }
     None
@@ -199,6 +213,9 @@ fn resolve_installed(
     if installed.is_empty() {
         return None;
     }
+    // Strip a leading distribution prefix like `temurin-` (java) so the version
+    // part matches the installed dir names (e.g. `17.0.20+8`).
+    let spec = strip_distribution_prefix(spec);
     let parsed = VersionSpec::parse(spec);
     match &parsed {
         VersionSpec::Exact(v) => installed.iter().find(|i| *i == v).cloned(),
@@ -210,6 +227,18 @@ fn resolve_installed(
             select_version(&parsed, &infos).map(|vi| vi.version.clone())
         }
     }
+}
+
+/// Strip a leading `<word>-` distribution prefix (e.g. `temurin-17` -> `17`).
+/// Only strips when the left side is purely alphabetic, so real versions like
+/// `1.22` or prereleases are untouched.
+fn strip_distribution_prefix(spec: &str) -> &str {
+    if let Some((left, right)) = spec.split_once('-') {
+        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
+            return right;
+        }
+    }
+    spec
 }
 
 fn find_exe(bin_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {

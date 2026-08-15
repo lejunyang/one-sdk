@@ -12,7 +12,8 @@ use crate::error::{Error, Result};
 /// Download `url` to `dest`, showing a progress bar labeled `label`.
 ///
 /// Downloads to a `.partial` sibling then atomically renames on success. If a
-/// complete file already exists at `dest`, returns early.
+/// complete file already exists at `dest`, returns early. Retries a few times on
+/// transient errors (connect/timeout) with backoff.
 pub async fn download(
     client: &reqwest::Client,
     url: &str,
@@ -23,6 +24,41 @@ pub async fn download(
     if dest.exists() {
         return Ok(());
     }
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err: Option<Error> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match download_once(client, url, dest, label, show_progress).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt < MAX_ATTEMPTS && is_transient(&e) {
+                    let backoff = std::time::Duration::from_millis(400 * attempt as u64);
+                    tracing::debug!(url = %url, attempt, "transient download error, retrying: {e}");
+                    tokio::time::sleep(backoff).await;
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| Error::other("download failed")))
+}
+
+/// Whether an error looks transient (worth retrying).
+fn is_transient(e: &Error) -> bool {
+    match e {
+        Error::Http(re) => re.is_timeout() || re.is_connect() || re.is_request(),
+        _ => false,
+    }
+}
+
+async fn download_once(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    label: &str,
+    show_progress: bool,
+) -> Result<()> {
     if let Some(parent) = dest.parent() {
         create_dir_all(parent)?;
     }

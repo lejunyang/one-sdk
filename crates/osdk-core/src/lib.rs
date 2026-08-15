@@ -21,6 +21,7 @@ pub mod http;
 pub mod lock;
 pub mod pipeline;
 pub mod platform;
+pub mod process;
 pub mod shim;
 pub mod source;
 pub mod store;

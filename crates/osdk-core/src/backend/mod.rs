@@ -15,8 +15,14 @@ use crate::source::Source;
 use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
+pub mod go;
+pub mod java;
 pub mod node;
+pub mod pnpm;
+pub mod python;
 pub mod registry;
+pub mod rust;
+pub mod yarn;
 
 /// Read-only context available to every backend operation.
 pub struct Ctx {

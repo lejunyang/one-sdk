@@ -15,7 +15,15 @@ pub struct Registry {
 impl Registry {
     /// Build the registry with all compiled-in backends.
     pub fn new() -> Registry {
-        let backends: Vec<Arc<dyn Backend>> = vec![Arc::new(crate::backend::node::NodeBackend)];
+        let backends: Vec<Arc<dyn Backend>> = vec![
+            Arc::new(crate::backend::node::NodeBackend),
+            Arc::new(crate::backend::go::GoBackend),
+            Arc::new(crate::backend::python::PythonBackend),
+            Arc::new(crate::backend::java::JavaBackend),
+            Arc::new(crate::backend::rust::RustBackend),
+            Arc::new(crate::backend::pnpm::PnpmBackend),
+            Arc::new(crate::backend::yarn::YarnBackend),
+        ];
         let mut by_name = HashMap::new();
         for (i, b) in backends.iter().enumerate() {
             by_name.insert(b.id().to_string(), i);
