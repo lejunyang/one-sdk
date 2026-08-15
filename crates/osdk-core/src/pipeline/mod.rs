@@ -4,11 +4,14 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::dirs::{create_dir_all, Dirs};
 use crate::error::{Error, Result};
 use crate::lock::FileLock;
 use crate::store::link::LinkMode;
 use crate::store::Cas;
+use crate::version::ToolVersion;
 
 pub mod download;
 pub mod extract;
@@ -38,6 +41,19 @@ pub struct Checksum {
     pub hex: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactReceipt {
+    pub url: String,
+    pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+}
+
+const ARTIFACT_RECEIPT_FILE: &str = ".osdk-artifact.json";
+pub const LOCKED_ARTIFACT_URL_OPTION: &str = "__osdk_artifact_url";
+pub const LOCKED_ARTIFACT_FILE_OPTION: &str = "__osdk_artifact_file";
+pub const LOCKED_ARTIFACT_CHECKSUM_OPTION: &str = "__osdk_artifact_checksum";
+
 /// Context passed into the pipeline run.
 pub struct PipelineCtx<'a> {
     pub client: &'a reqwest::Client,
@@ -46,6 +62,48 @@ pub struct PipelineCtx<'a> {
     pub link_mode: LinkMode,
     pub show_progress: bool,
     pub offline: bool,
+}
+
+pub fn locked_install_plan(
+    tool: &str,
+    version: &ToolVersion,
+    strip_root: bool,
+) -> Result<Option<InstallPlan>> {
+    let Some(artifact) = locked_artifact(version)? else {
+        return Ok(None);
+    };
+    Ok(Some(InstallPlan {
+        tool: tool.to_string(),
+        version: version.version.clone(),
+        urls: vec![artifact.url],
+        kind: ArchiveKind::from_name(&artifact.file_name)?,
+        file_name: artifact.file_name,
+        checksum: artifact
+            .checksum
+            .as_deref()
+            .map(parse_checksum)
+            .transpose()?,
+        strip_root,
+    }))
+}
+
+pub fn locked_artifact(version: &ToolVersion) -> Result<Option<ArtifactReceipt>> {
+    let Some(url) = version.options.get(LOCKED_ARTIFACT_URL_OPTION) else {
+        return Ok(None);
+    };
+    let file_name = version
+        .options
+        .get(LOCKED_ARTIFACT_FILE_OPTION)
+        .ok_or_else(|| Error::other("locked artifact is missing its file name"))?
+        .clone();
+    Ok(Some(ArtifactReceipt {
+        url: url.clone(),
+        file_name,
+        checksum: version
+            .options
+            .get(LOCKED_ARTIFACT_CHECKSUM_OPTION)
+            .cloned(),
+    }))
 }
 
 /// Marker file written at the install root once an install is complete.
@@ -85,6 +143,8 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
             plan.tool, plan.version
         )));
     }
+    let mut selected_url =
+        read_cached_source_url(&archive_path).or_else(|| plan.urls.first().cloned());
     if !archive_path.exists() {
         let mut last_err: Option<Error> = None;
         let mut downloaded = false;
@@ -94,6 +154,8 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
             {
                 Ok(()) => {
                     downloaded = true;
+                    selected_url = Some(url.clone());
+                    write_cached_source_url(&archive_path, url);
                     break;
                 }
                 Err(e) => {
@@ -124,7 +186,8 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     } else {
         None
     };
-    if let Some(cs) = plan.checksum.as_ref().or(persisted_checksum.as_ref()) {
+    let verified_checksum = plan.checksum.as_ref().or(persisted_checksum.as_ref());
+    if let Some(cs) = verified_checksum {
         verify::verify_file(&archive_path, &cs.hex, cs.algo, &plan.file_name)?;
         write_cached_checksum(&archive_path, cs);
         tracing::info!(file = %plan.file_name, "{}", crate::i18n::tr("log.checksum_verified"));
@@ -156,6 +219,14 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     let _ = std::fs::remove_dir_all(&scratch);
 
     // 5. Finalize.
+    write_artifact_receipt(
+        &install_dir,
+        &ArtifactReceipt {
+            url: selected_url.unwrap_or_default(),
+            file_name: plan.file_name.clone(),
+            checksum: verified_checksum.map(format_checksum),
+        },
+    )?;
     std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
         .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
 
@@ -175,6 +246,12 @@ pub fn is_installed(dirs: &Dirs, tool: &str, version: &str) -> bool {
     dirs.install_path(tool, version)
         .join(COMPLETE_MARKER)
         .exists()
+}
+
+pub fn artifact_receipt(dirs: &Dirs, tool: &str, version: &str) -> Option<ArtifactReceipt> {
+    let path = dirs.install_path(tool, version).join(ARTIFACT_RECEIPT_FILE);
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Download a single executable into `<install>/bin/<exe_name>` and mark the
@@ -219,6 +296,7 @@ pub async fn install_single_binary(
     }
     let mut last_err: Option<Error> = None;
     let mut ok = false;
+    let mut selected_url = read_cached_source_url(&cached).or_else(|| urls.first().cloned());
     if cached.exists() {
         ok = true;
     } else {
@@ -234,6 +312,8 @@ pub async fn install_single_binary(
             {
                 Ok(()) => {
                     ok = true;
+                    selected_url = Some(url.clone());
+                    write_cached_source_url(&cached, url);
                     break;
                 }
                 Err(e) => {
@@ -261,7 +341,8 @@ pub async fn install_single_binary(
     } else {
         None
     };
-    if let Some(cs) = checksum.or(persisted_checksum.as_ref()) {
+    let verified_checksum = checksum.or(persisted_checksum.as_ref());
+    if let Some(cs) = verified_checksum {
         verify::verify_file(&cached, &cs.hex, cs.algo, download_name)?;
         write_cached_checksum(&cached, cs);
         tracing::info!(file = %download_name, "{}", crate::i18n::tr("log.checksum_verified"));
@@ -276,15 +357,74 @@ pub async fn install_single_binary(
         let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
     }
 
+    write_artifact_receipt(
+        &install_dir,
+        &ArtifactReceipt {
+            url: selected_url.unwrap_or_default(),
+            file_name: download_name.to_string(),
+            checksum: verified_checksum.map(format_checksum),
+        },
+    )?;
     std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
         .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
     Ok(())
+}
+
+fn write_artifact_receipt(install_dir: &std::path::Path, receipt: &ArtifactReceipt) -> Result<()> {
+    let path = install_dir.join(ARTIFACT_RECEIPT_FILE);
+    let bytes = serde_json::to_vec_pretty(receipt)?;
+    std::fs::write(&path, bytes).map_err(|error| Error::io(path, error))
+}
+
+fn format_checksum(checksum: &Checksum) -> String {
+    let algorithm = match checksum.algo {
+        HashAlgo::Sha256 => "sha256",
+        HashAlgo::Sha512 => "sha512",
+        HashAlgo::Blake3 => "blake3",
+    };
+    format!("{algorithm}:{}", checksum.hex)
+}
+
+pub fn parse_checksum(value: &str) -> Result<Checksum> {
+    let (algorithm, hex) = value
+        .split_once(':')
+        .ok_or_else(|| Error::other(format!("invalid locked checksum `{value}`")))?;
+    let algo = match algorithm {
+        "sha256" => HashAlgo::Sha256,
+        "sha512" => HashAlgo::Sha512,
+        "blake3" => HashAlgo::Blake3,
+        _ => {
+            return Err(Error::other(format!(
+                "unsupported locked checksum `{algorithm}`"
+            )))
+        }
+    };
+    Ok(Checksum {
+        algo,
+        hex: hex.to_string(),
+    })
 }
 
 fn checksum_cache_path(archive: &std::path::Path) -> PathBuf {
     let mut path = archive.as_os_str().to_os_string();
     path.push(".checksum");
     PathBuf::from(path)
+}
+
+fn source_url_cache_path(archive: &std::path::Path) -> PathBuf {
+    let mut path = archive.as_os_str().to_os_string();
+    path.push(".source-url");
+    PathBuf::from(path)
+}
+
+fn write_cached_source_url(archive: &std::path::Path, url: &str) {
+    let _ = std::fs::write(source_url_cache_path(archive), url);
+}
+
+fn read_cached_source_url(archive: &std::path::Path) -> Option<String> {
+    let value = std::fs::read_to_string(source_url_cache_path(archive)).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn write_cached_checksum(archive: &std::path::Path, checksum: &Checksum) {
@@ -379,5 +519,16 @@ mod tests {
         );
         assert!(install.join(COMPLETE_MARKER).is_file());
         assert!(checksum_cache_path(&archive).is_file());
+        assert_eq!(
+            artifact_receipt(&dirs, "fixture", "1.0.0").unwrap(),
+            ArtifactReceipt {
+                url: "http://127.0.0.1:9/never-requested".into(),
+                file_name: "fixture.tgz".into(),
+                checksum: Some(format!(
+                    "sha256:{}",
+                    verify::hash_file(&archive, HashAlgo::Sha256).unwrap()
+                )),
+            }
+        );
     }
 }

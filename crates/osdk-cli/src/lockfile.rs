@@ -28,6 +28,16 @@ pub struct LockedTool {
     pub version: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<LockedArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedArtifact {
+    pub url: String,
+    pub file_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
 }
 
 fn schema_version() -> u32 {
@@ -49,6 +59,7 @@ impl Default for LockedTool {
             request: "latest".into(),
             version: String::new(),
             options: BTreeMap::new(),
+            artifact: None,
         }
     }
 }
@@ -105,10 +116,29 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
     let requests = platform_lock
         .tools
         .iter()
-        .map(|(backend, locked)| ToolRequest {
-            backend: backend.clone(),
-            spec: VersionSpec::Exact(locked.version.clone()),
-            options: locked.options.clone(),
+        .map(|(backend, locked)| {
+            let mut options = locked.options.clone();
+            if let Some(artifact) = &locked.artifact {
+                options.insert(
+                    osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                    artifact.url.clone(),
+                );
+                options.insert(
+                    osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                    artifact.file_name.clone(),
+                );
+                if let Some(checksum) = &artifact.checksum {
+                    options.insert(
+                        osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                        checksum.clone(),
+                    );
+                }
+            }
+            ToolRequest {
+                backend: backend.clone(),
+                spec: VersionSpec::Exact(locked.version.clone()),
+                options,
+            }
         })
         .collect();
     Ok(Some(requests))
@@ -117,6 +147,7 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
 pub fn merge_resolved(
     path: &Path,
     platform: Platform,
+    dirs: &osdk_core::dirs::Dirs,
     resolved: &[(ToolRequest, ToolVersion)],
 ) -> Result<()> {
     let mut lockfile = if path.is_file() {
@@ -138,11 +169,29 @@ pub fn merge_resolved(
             LockedTool {
                 request: request.spec.to_string(),
                 version: version.version.clone(),
-                options: version.options.clone(),
+                options: public_options(&version.options),
+                artifact: osdk_core::pipeline::artifact_receipt(
+                    dirs,
+                    &version.backend,
+                    &version.version,
+                )
+                .map(|receipt| LockedArtifact {
+                    url: receipt.url,
+                    file_name: receipt.file_name,
+                    checksum: receipt.checksum,
+                }),
             },
         );
     }
     save(path, &lockfile)
+}
+
+fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    options
+        .iter()
+        .filter(|(key, _)| !key.starts_with("__osdk_"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
@@ -186,6 +235,7 @@ mod tests {
                         request: "20".into(),
                         version: "20.19.0".into(),
                         options: BTreeMap::new(),
+                        artifact: None,
                     },
                 )]),
             },
@@ -195,6 +245,7 @@ mod tests {
         merge_resolved(
             &path,
             linux(),
+            &test_dirs(temp.path()),
             &[(
                 ToolRequest::parse("node@20").unwrap(),
                 ToolVersion::new("node", "20.20.0"),
@@ -219,9 +270,11 @@ mod tests {
         let path = temp.path().join(LOCKFILE_NAME);
         let mut version = ToolVersion::new("rust", "stable");
         version.options.insert("profile".into(), "minimal".into());
+        let dirs = test_dirs(temp.path());
         merge_resolved(
             &path,
             linux(),
+            &dirs,
             &[(ToolRequest::parse("rust@stable").unwrap(), version)],
         )
         .unwrap();
@@ -230,5 +283,15 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].spec, VersionSpec::Exact("stable".into()));
         assert_eq!(requests[0].options["profile"], "minimal");
+    }
+
+    fn test_dirs(root: &Path) -> osdk_core::dirs::Dirs {
+        osdk_core::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap()
     }
 }

@@ -212,6 +212,18 @@ impl Backend for NodeBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
+        if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
+            let pctx = PipelineCtx {
+                client: &ctx.client,
+                dirs: &ctx.dirs,
+                cas: &ctx.cas,
+                link_mode: ctx.config.settings.link_mode,
+                show_progress: ctx.show_progress,
+                offline: ctx.config.settings.offline,
+            };
+            pipeline::run(&plan, &pctx).await?;
+            return Ok(());
+        }
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let version = &tv.version;
         let (file_name, kind) = Self::archive_for(ctx, version);

@@ -360,13 +360,12 @@ end-to-end tests.
 
 ### Remaining roadmap
 
-1. Add artifact identity/checksum fields to the new platform-aware lockfile.
-2. Add aliases and deactivate support.
-3. Add a stable external backend or registry API only after the backend
+1. Add aliases and deactivate support.
+2. Add a stable external backend or registry API only after the backend
     contract test suite exists.
-4. Expand the verification policy with required-checksum mode and additional
+3. Expand the verification policy with required-checksum mode and additional
    provenance mechanisms.
-5. Add live scheduled upstream smoke tests without putting them on the normal
+4. Add live scheduled upstream smoke tests without putting them on the normal
    pull-request critical path.
 
 ## Test isolation requirements

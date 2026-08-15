@@ -189,6 +189,53 @@ impl Backend for GithubBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
+        if let Some(artifact) = pipeline::locked_artifact(tv)? {
+            if let Ok(kind) = ArchiveKind::from_name(&artifact.file_name) {
+                let plan = InstallPlan {
+                    tool: self.id().to_string(),
+                    version: tv.version.clone(),
+                    urls: vec![artifact.url],
+                    file_name: artifact.file_name,
+                    kind,
+                    checksum: artifact
+                        .checksum
+                        .as_deref()
+                        .map(pipeline::parse_checksum)
+                        .transpose()?,
+                    strip_root: true,
+                };
+                let pctx = PipelineCtx {
+                    client: &ctx.client,
+                    dirs: &ctx.dirs,
+                    cas: &ctx.cas,
+                    link_mode: ctx.config.settings.link_mode,
+                    show_progress: ctx.show_progress,
+                    offline: ctx.config.settings.offline,
+                };
+                pipeline::run(&plan, &pctx).await?;
+            } else {
+                let checksum = artifact
+                    .checksum
+                    .as_deref()
+                    .map(pipeline::parse_checksum)
+                    .transpose()?;
+                pipeline::install_single_binary(
+                    &ctx.client,
+                    &ctx.dirs,
+                    self.id(),
+                    &tv.version,
+                    &[artifact.url],
+                    &self.repo,
+                    &artifact.file_name,
+                    ctx.platform.os,
+                    checksum.as_ref(),
+                    ctx.show_progress,
+                    ctx.config.settings.offline,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
         // Find the release for this version (try both `v`-prefixed and bare tag).
         let releases: Vec<GhRelease> =
             http::get_cached_github_json(ctx, &self.releases_api()).await?;

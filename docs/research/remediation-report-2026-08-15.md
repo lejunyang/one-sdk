@@ -88,6 +88,9 @@ Related audit: `docs/research/sdk-manager-audit-2026-08-15.md`
 
 - Added a platform-aware `osdk.lock` format that preserves other platform
   entries while updating the current one.
+- Installed tools contribute their exact artifact URL, filename, and verified
+  checksum to the lock; locked installs consume those values directly and
+  reject checksum tampering.
 - No-argument `osdk install` consumes the matching platform lock.
 - Added `osdk outdated` and `osdk upgrade`; upgrade refreshes the lock after
   installation.
@@ -145,8 +148,7 @@ Passed:
 The first remediation pass intentionally leaves larger product work for
 separate changes:
 
-1. Include resolved artifact identity and checksum directly in `osdk.lock`.
-2. Add aliases and deactivate support.
-3. Add a stable external backend or registry API.
-4. Add required-checksum mode and broader provenance/attestation verification.
-5. Add per-backend scheduled live upstream smoke tests.
+1. Add aliases and deactivate support.
+2. Add a stable external backend or registry API.
+3. Add required-checksum mode and broader provenance/attestation verification.
+4. Add per-backend scheduled live upstream smoke tests.

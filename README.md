@@ -61,9 +61,10 @@ osdk upgrade                      # install current resolutions + refresh lock
 ```
 
 `osdk.lock` keeps independent sections for Linux, macOS, and Windows, including
-the original request, exact resolved version, and backend options. An explicit
-`osdk install node@20` still honors the explicit request; lock consumption is
-used for no-argument project installs.
+the original request, exact resolved version, backend options, and—after the
+tool has been installed—the exact artifact URL, filename, and verified checksum.
+No-argument installs use this identity directly without re-querying an upstream
+registry. An explicit `osdk install node@20` still honors the explicit request.
 
 Run a command with managed tools without changing project pins:
 

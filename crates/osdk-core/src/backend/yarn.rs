@@ -91,19 +91,21 @@ impl Backend for YarnBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        let package = Self::npm_package(&tv.version);
-
-        // Install the SRI-verified npm tarball via the pipeline.
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let dist = crate::npm::resolve_dist(ctx, &sources, package, &tv.version).await?;
-        let plan = InstallPlan {
-            tool: self.id().to_string(),
-            version: tv.version.clone(),
-            urls: dist.urls,
-            file_name: format!("yarn-{}.tgz", tv.version),
-            kind: ArchiveKind::TarGz,
-            checksum: dist.checksum, // npm SRI
-            strip_root: true,        // npm tarballs wrap files in package/
+        let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
+            plan
+        } else {
+            let package = Self::npm_package(&tv.version);
+            let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+            let dist = crate::npm::resolve_dist(ctx, &sources, package, &tv.version).await?;
+            InstallPlan {
+                tool: self.id().to_string(),
+                version: tv.version.clone(),
+                urls: dist.urls,
+                file_name: format!("yarn-{}.tgz", tv.version),
+                kind: ArchiveKind::TarGz,
+                checksum: dist.checksum,
+                strip_root: true,
+            }
         };
         let pctx = PipelineCtx {
             client: &ctx.client,

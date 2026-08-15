@@ -65,22 +65,24 @@ impl Backend for PnpmBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        let pkg = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
-            os: format!("{:?}", ctx.platform.os),
-            arch: format!("{:?}", ctx.platform.arch),
-        })?;
-        // Resolve the platform package's tarball + SRI integrity from the registry.
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let dist = crate::npm::resolve_dist(ctx, &sources, pkg, &tv.version).await?;
-
-        let plan = InstallPlan {
-            tool: self.id().to_string(),
-            version: tv.version.clone(),
-            urls: dist.urls,
-            file_name: format!("pnpm-{}.tgz", tv.version),
-            kind: ArchiveKind::TarGz,
-            checksum: dist.checksum, // npm SRI (sha512/sha256)
-            strip_root: true,        // npm tarballs wrap files in package/
+        let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
+            plan
+        } else {
+            let pkg = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
+                os: format!("{:?}", ctx.platform.os),
+                arch: format!("{:?}", ctx.platform.arch),
+            })?;
+            let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+            let dist = crate::npm::resolve_dist(ctx, &sources, pkg, &tv.version).await?;
+            InstallPlan {
+                tool: self.id().to_string(),
+                version: tv.version.clone(),
+                urls: dist.urls,
+                file_name: format!("pnpm-{}.tgz", tv.version),
+                kind: ArchiveKind::TarGz,
+                checksum: dist.checksum,
+                strip_root: true,
+            }
         };
         let pctx = PipelineCtx {
             client: &ctx.client,

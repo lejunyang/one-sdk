@@ -196,6 +196,83 @@ fn install_without_arguments_consumes_matching_platform_lock() {
 
 #[cfg(unix)]
 #[test]
+fn artifact_lock_reinstalls_offline_and_rejects_tampering() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\nnode = \"1.0.0\"\n").unwrap();
+
+    let archive = temp
+        .path()
+        .join("cache/downloads/node/1.0.0/node-fixture.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    {
+        let file = std::fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut tar = tar::Builder::new(encoder);
+        let contents = b"#!/bin/sh\nprintf 'locked-node\\n'\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "node-fixture/bin/node", &contents[..])
+            .unwrap();
+        tar.finish().unwrap();
+    }
+    let checksum =
+        osdk_core::pipeline::verify::hash_file(&archive, osdk_core::pipeline::HashAlgo::Sha256)
+            .unwrap();
+    let install = temp.path().join("installs/node/1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    std::fs::write(
+        install.join(".osdk-artifact.json"),
+        format!(
+            "{{\"url\":\"https://invalid.example/node-fixture.tar.gz\",\"file_name\":\"node-fixture.tar.gz\",\"checksum\":\"sha256:{checksum}\"}}"
+        ),
+    )
+    .unwrap();
+
+    let lock = run_isolated_in(temp.path(), &project, &["--offline", "lock"]);
+    assert!(
+        lock.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+    let lock_path = project.join("osdk.lock");
+    let lockfile = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(lockfile.contains("file_name = \"node-fixture.tar.gz\""));
+    assert!(lockfile.contains(&format!("checksum = \"sha256:{checksum}\"")));
+
+    std::fs::remove_dir_all(&install).unwrap();
+    let reinstall = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
+    assert!(
+        reinstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reinstall.stderr)
+    );
+    let node = install.join("bin/node");
+    assert!(node.is_file());
+    assert_ne!(
+        std::fs::metadata(&node).unwrap().permissions().mode() & 0o111,
+        0
+    );
+
+    std::fs::remove_dir_all(&install).unwrap();
+    let tampered = lockfile.replace(
+        &format!("sha256:{checksum}"),
+        &format!("sha256:{}", "0".repeat(64)),
+    );
+    std::fs::write(&lock_path, tampered).unwrap();
+    let rejected = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("checksum mismatch"));
+}
+
+#[cfg(unix)]
+#[test]
 fn exec_runs_with_exact_managed_tool_environment() {
     use std::os::unix::fs::PermissionsExt;
 

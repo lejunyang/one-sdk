@@ -41,7 +41,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
     let resolved = resolve_requests(app, requests, opts).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
-    crate::lockfile::merge_resolved(&path, app.ctx.platform, &resolved)?;
+    crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &resolved)?;
     println!("wrote {}", path.display());
     Ok(())
 }
@@ -76,7 +76,7 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
     let resolved = install_requests(app, requests, opts).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
-    crate::lockfile::merge_resolved(&path, app.ctx.platform, &resolved)?;
+    crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &resolved)?;
     println!("updated {}", path.display());
     Ok(())
 }
