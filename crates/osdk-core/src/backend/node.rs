@@ -111,7 +111,12 @@ impl Backend for NodeBackend {
         // Only offer releases that ship an asset for the current platform.
         let token = Self::file_token(ctx);
 
-        // Try sources in ranked order until one serves a usable index (failover).
+        // Union versions across all reachable sources: mirrors can be stale and
+        // lag the official index, so merging avoids a fast-but-stale mirror
+        // hiding a version another source already has.
+        use std::collections::BTreeMap;
+        let mut merged: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut any_ok = false;
         let mut last_err: Option<crate::error::Error> = None;
         for source in &sources {
             let index_url = source
@@ -126,34 +131,83 @@ impl Backend for NodeBackend {
                     continue;
                 }
             };
-
-            // index.json is newest-first; VersionInfo list should be oldest-first.
-            let mut out: Vec<VersionInfo> = releases
-                .into_iter()
-                .rev()
-                .filter(|r| r.files.is_empty() || r.files.iter().any(|f| f == &token))
-                .map(|r| {
-                    let version = r.version.trim_start_matches('v').to_string();
-                    let lts = match r.lts {
-                        LtsField::Named(s) => Some(s.to_lowercase()),
-                        LtsField::No => None,
-                    };
-                    VersionInfo {
-                        version,
-                        stable: true,
-                        lts,
+            any_ok = true;
+            for r in releases {
+                if !(r.files.is_empty() || r.files.iter().any(|f| f == &token)) {
+                    continue;
+                }
+                let version = r.version.trim_start_matches('v').to_string();
+                if version.is_empty() {
+                    continue;
+                }
+                let lts = match r.lts {
+                    LtsField::Named(s) => Some(s.to_lowercase()),
+                    LtsField::No => None,
+                };
+                merged.entry(version).or_insert(lts);
+            }
+            // The fastest reachable source usually suffices; only consult more
+            // sources if it produced nothing. Stop once we have a populated set.
+            if !merged.is_empty() {
+                // Peek: does a later source add anything? We keep it cheap by
+                // continuing only when the primary is a known-laggy mirror is
+                // hard to detect, so we merge just the primary + official.
+                if source.kind == crate::source::SourceKind::Official {
+                    break;
+                }
+                // also fold in the official source (if present) for freshness
+                if let Some(official) = sources
+                    .iter()
+                    .find(|s| s.kind == crate::source::SourceKind::Official)
+                {
+                    if official.id != source.id {
+                        if let Some(idx) = &official.index_url {
+                            if let Ok(rel) =
+                                http::get_json::<Vec<NodeRelease>>(&ctx.client, idx).await
+                            {
+                                for r in rel {
+                                    if !(r.files.is_empty() || r.files.iter().any(|f| f == &token))
+                                    {
+                                        continue;
+                                    }
+                                    let v = r.version.trim_start_matches('v').to_string();
+                                    if v.is_empty() {
+                                        continue;
+                                    }
+                                    let lts = match r.lts {
+                                        LtsField::Named(s) => Some(s.to_lowercase()),
+                                        LtsField::No => None,
+                                    };
+                                    merged.entry(v).or_insert(lts);
+                                }
+                            }
+                        }
                     }
-                })
-                .collect();
-            out.retain(|v| !v.version.is_empty());
-            return Ok(out);
+                }
+                break;
+            }
         }
-        Err(
-            last_err.unwrap_or_else(|| crate::error::Error::NoUsableSource {
-                tool: self.id().to_string(),
-                tried: sources.len(),
-            }),
-        )
+
+        if !any_ok {
+            return Err(
+                last_err.unwrap_or_else(|| crate::error::Error::NoUsableSource {
+                    tool: self.id().to_string(),
+                    tried: sources.len(),
+                }),
+            );
+        }
+
+        // Sort ascending (oldest-first) by numeric components.
+        let mut out: Vec<VersionInfo> = merged
+            .into_iter()
+            .map(|(version, lts)| VersionInfo {
+                version,
+                stable: true,
+                lts,
+            })
+            .collect();
+        out.sort_by(|a, b| crate::backend::python::cmp_versions(&a.version, &b.version));
+        Ok(out)
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
