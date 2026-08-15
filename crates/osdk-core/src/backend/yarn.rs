@@ -98,10 +98,13 @@ impl Backend for YarnBackend {
                 tv.version
             )));
         }
-        let url = format!(
+        let gh_url = format!(
             "https://github.com/yarnpkg/yarn/releases/download/v{v}/yarn-{v}.js",
             v = tv.version
         );
+        // Candidate URLs (best-first) with a CN GitHub-proxy fallback, mirroring
+        // the pnpm/python/java download-failover pattern.
+        let urls = [gh_url.clone(), format!("https://gh-proxy.com/{gh_url}")];
 
         let install_dir = ctx.dirs.install_path(self.id(), &tv.version);
         if install_dir.join(".osdk-complete").exists() {
@@ -113,14 +116,34 @@ impl Backend for YarnBackend {
         let libexec = install_dir.join("libexec");
         crate::dirs::create_dir_all(&libexec)?;
         let js = libexec.join("yarn.js");
-        pipeline::download::download(
-            &ctx.client,
-            &url,
-            &js,
-            &format!("yarn@{}", tv.version),
-            ctx.show_progress,
-        )
-        .await?;
+        let mut last_err: Option<Error> = None;
+        let mut ok = false;
+        for (i, url) in urls.iter().enumerate() {
+            match pipeline::download::download(
+                &ctx.client,
+                url,
+                &js,
+                &format!("yarn@{}", tv.version),
+                ctx.show_progress,
+            )
+            .await
+            {
+                Ok(()) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(url = %url, attempt = i + 1, total = urls.len(), "yarn download failed: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+        if !ok {
+            return Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
+                tool: self.id().to_string(),
+                tried: urls.len(),
+            }));
+        }
 
         // Generate a launcher in bin/ that runs the bundle with node.
         let bin_dir = install_dir.join("bin");

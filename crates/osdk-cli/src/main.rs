@@ -41,10 +41,10 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<()> {
 
 async fn dispatch(app: &mut App, command: Command) -> Result<()> {
     match command {
-        Command::Install { tools } => commands::install(app, tools).await,
+        Command::Install { tools, opts } => commands::install(app, tools, opts).await,
         Command::List { tool } => commands::list(app, tool),
         Command::ListRemote { tool, filter } => commands::list_remote(app, tool, filter).await,
-        Command::Use { tool, global } => commands::use_cmd(app, tool, global).await,
+        Command::Use { tool, global, opts } => commands::use_cmd(app, tool, global, opts).await,
         Command::Uninstall { tool } => commands::uninstall(app, tool).await,
         Command::Current { tool } => commands::current(app, tool),
         Command::Where { tool } => commands::where_cmd(app, tool),

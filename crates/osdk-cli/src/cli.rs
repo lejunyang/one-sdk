@@ -52,6 +52,11 @@ pub enum Command {
     Install {
         /// e.g. `node@20`, `go@1.22`, `python@3.12`. Empty = install from config.
         tools: Vec<String>,
+        /// Backend-specific option as key=value (repeatable), e.g.
+        /// `-o profile=minimal -o components=clippy,rustfmt` (rust),
+        /// `-o distribution=zulu` (java). Applied to all listed tools.
+        #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
+        opts: Vec<String>,
     },
 
     /// List installed versions.
@@ -77,6 +82,9 @@ pub enum Command {
         /// Write the pin to the user global config instead of the project.
         #[arg(short, long)]
         global: bool,
+        /// Backend-specific option as key=value (repeatable). See `install`.
+        #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
+        opts: Vec<String>,
     },
 
     /// Uninstall a tool version.

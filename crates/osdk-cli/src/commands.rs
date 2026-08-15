@@ -22,16 +22,33 @@ fn apply_source_override(app: &mut App, tool: &str) {
     }
 }
 
-pub async fn install(app: &mut App, tools: Vec<String>) -> Result<()> {
-    let requests = gather_requests(app, tools)?;
+pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let parsed_opts = parse_opts(&opts)?;
+    let mut requests = gather_requests(app, tools)?;
     if requests.is_empty() {
         println!("nothing to install (no tools given and no config pins found)");
         return Ok(());
+    }
+    for req in &mut requests {
+        for (k, v) in &parsed_opts {
+            req.options.insert(k.clone(), v.clone());
+        }
     }
     for req in requests {
         install_one(app, &req).await?;
     }
     Ok(())
+}
+
+/// Parse repeated `key=value` option strings into pairs.
+fn parse_opts(opts: &[String]) -> Result<Vec<(String, String)>> {
+    opts.iter()
+        .map(|s| {
+            s.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                .ok_or_else(|| anyhow!("invalid --opt `{s}` (expected key=value)"))
+        })
+        .collect()
 }
 
 /// Resolve, install, and shim a single request.
@@ -131,11 +148,19 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
     Ok(())
 }
 
-pub async fn use_cmd(app: &mut App, tool: String, global: bool) -> Result<()> {
-    let req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
+pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
+    let mut req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
+    for (k, v) in parse_opts(&opts)? {
+        req.options.insert(k, v);
+    }
     let tv = install_one(app, &req).await?;
-    // Write the pin.
-    let spec = req.spec.to_string();
+    // Pin the exact spec string the user typed (verbatim after `@`), so
+    // channels like `stable` or `temurin-17` are preserved rather than being
+    // normalized to `latest`. Bare `tool` (no `@`) pins the resolved version.
+    let spec = match tool.split_once('@') {
+        Some((_, v)) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => tv.version.clone(),
+    };
     if global {
         crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
         println!("pinned {}@{} in user config", tv.backend, spec);

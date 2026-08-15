@@ -106,7 +106,55 @@ fn read_project_tool(path: &Path, tool: &str) -> Option<String> {
 /// Read a simple idiomatic version file (`.nvmrc`, `.python-version`, ...).
 /// Takes the first non-empty, non-comment line and trims a leading `v`.
 fn read_idiomatic(path: &Path) -> Option<String> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let text = std::fs::read_to_string(path).ok()?;
+
+    // Structured files need real parsing, not first-line heuristics.
+    match name {
+        // rust-toolchain.toml: [toolchain] channel = "1.79.0" | "stable"
+        "rust-toolchain.toml" => {
+            if let Ok(v) = toml::from_str::<toml::Value>(&text) {
+                if let Some(ch) = v
+                    .get("toolchain")
+                    .and_then(|t| t.get("channel"))
+                    .and_then(|c| c.as_str())
+                {
+                    return Some(ch.to_string());
+                }
+            }
+            // legacy `rust-toolchain` may itself be TOML or a bare string;
+            // fall through to plain handling.
+        }
+        // legacy `rust-toolchain` (no extension): a bare channel string, but
+        // could also be TOML. Try TOML first.
+        "rust-toolchain" => {
+            if let Ok(v) = toml::from_str::<toml::Value>(&text) {
+                if let Some(ch) = v
+                    .get("toolchain")
+                    .and_then(|t| t.get("channel"))
+                    .and_then(|c| c.as_str())
+                {
+                    return Some(ch.to_string());
+                }
+            }
+        }
+        // go.mod: the `go 1.22` directive.
+        "go.mod" => {
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("go ") {
+                    let v = rest.trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+            return None;
+        }
+        _ => {}
+    }
+
+    // Plain single-value files (.nvmrc, .python-version, .java-version, ...).
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -175,5 +223,31 @@ mod tests {
         let av = resolve_active("node", td.path(), &global, &[]).unwrap();
         assert_eq!(av.spec, "18");
         assert_eq!(av.source, VersionOrigin::GlobalConfig);
+    }
+
+    #[test]
+    fn rust_toolchain_toml_channel_parsed() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(
+            td.path().join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.79.0\"\ncomponents = [\"clippy\"]\n",
+        )
+        .unwrap();
+        let global = BTreeMap::new();
+        let av = resolve_active("rust", td.path(), &global, &["rust-toolchain.toml"]).unwrap();
+        assert_eq!(av.spec, "1.79.0");
+    }
+
+    #[test]
+    fn go_mod_directive_parsed() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(
+            td.path().join("go.mod"),
+            "module example.com/x\n\ngo 1.22\n\nrequire foo v1.0.0\n",
+        )
+        .unwrap();
+        let global = BTreeMap::new();
+        let av = resolve_active("go", td.path(), &global, &["go.mod"]).unwrap();
+        assert_eq!(av.spec, "1.22");
     }
 }

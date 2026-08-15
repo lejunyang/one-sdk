@@ -18,7 +18,8 @@ pub struct RustBackend;
 
 impl RustBackend {
     /// Env for driving rustup within osdk's self-contained homes + mirror.
-    fn rustup_env(ctx: &Ctx) -> BTreeMap<String, String> {
+    /// `source` is the chosen dist server (fastest under auto, or the pin).
+    fn rustup_env(ctx: &Ctx, source: Option<&Source>) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();
         env.insert(
             "RUSTUP_HOME".to_string(),
@@ -28,33 +29,13 @@ impl RustBackend {
             "CARGO_HOME".to_string(),
             ctx.dirs.cargo_home().display().to_string(),
         );
-        // Fastest mirror wins for the dist server.
-        if let Some(src) = Self::pick_source(ctx) {
+        if let Some(src) = source {
             env.insert("RUSTUP_DIST_SERVER".to_string(), src.download_url.clone());
             if let Some(update_root) = &src.index_url {
                 env.insert("RUSTUP_UPDATE_ROOT".to_string(), update_root.clone());
             }
         }
         env
-    }
-
-    /// Choose a source synchronously by priority (no async probe here to keep the
-    /// delegate path simple; auto-probe still informs ordering via config).
-    fn pick_source(ctx: &Ctx) -> Option<Source> {
-        let mut sources = crate::source::select::effective_sources(ctx, &RustBackend);
-        // honor an explicit pin
-        if let Some(tc) = ctx.config.tool_sources("rust") {
-            if let Some(pin) = &tc.pin {
-                if let Some(s) = sources.iter().find(|s| &s.id == pin) {
-                    return Some(s.clone());
-                }
-            }
-        }
-        if sources.is_empty() {
-            None
-        } else {
-            Some(sources.remove(0))
-        }
     }
 
     fn rustup_bin(ctx: &Ctx) -> PathBuf {
@@ -146,7 +127,13 @@ impl Backend for RustBackend {
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let rustup = Self::ensure_rustup(ctx)?;
-        let env = Self::rustup_env(ctx);
+        // Pick the fastest reachable dist server (probes under auto), so we never
+        // default to the slow official server when a mirror is available.
+        let source = crate::source::select::active_source(ctx, self).await.ok();
+        let env = Self::rustup_env(ctx, source.as_ref());
+        if let Some(s) = &source {
+            tracing::info!(source = %s.id, dist = %s.download_url, "rustup dist server");
+        }
 
         // Install the toolchain. Optional profile/components/targets via options.
         let profile = tv
@@ -174,7 +161,21 @@ impl Backend for RustBackend {
             }
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        process::run(&rustup.display().to_string(), &arg_refs, &env, None)?;
+        // rustup may fail at the final "link proxies into CARGO_HOME" step when
+        // we point CARGO_HOME at osdk's dir (rustup expects to own it). That's
+        // non-fatal for us: we generate our own shims to the toolchain bin dir.
+        // So we tolerate a nonzero exit iff the toolchain dir materialized.
+        let run_res = process::run(&rustup.display().to_string(), &arg_refs, &env, None);
+        let toolchain_bin = Self::toolchain_dir(ctx, &tv.version).join("bin");
+        if let Err(e) = run_res {
+            if !toolchain_bin
+                .join(format!("rustc{}", ctx.platform.os.exe_suffix()))
+                .exists()
+            {
+                return Err(e);
+            }
+            tracing::debug!("rustup returned an error but the toolchain installed; continuing");
+        }
 
         // Record the install so list_installed/bin_paths work: rustup manages
         // toolchains under RUSTUP_HOME/toolchains/<name>. We create a marker
