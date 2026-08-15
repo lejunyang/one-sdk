@@ -93,9 +93,9 @@ fn same_device(a: &Path, b: &Path) -> bool {
 #[cfg(windows)]
 fn same_device(a: &Path, b: &Path) -> bool {
     fn volume(p: &Path) -> Option<String> {
-        p.components().next().map(|c| {
-            c.as_os_str().to_string_lossy().to_ascii_uppercase()
-        })
+        p.components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_ascii_uppercase())
     }
     match (volume(a), volume(b)) {
         (Some(x), Some(y)) => x == y,

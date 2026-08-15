@@ -295,15 +295,27 @@ mod tests {
         let ex_a = td.path().join("ex_a");
         write(&ex_a.join("bin/node"), b"BINARY");
         write(&ex_a.join("README.md"), b"same-doc");
-        cas.ingest_tree(&ex_a, &installs.join("node/20.11.0"), "node", "20.11.0", LinkMode::Copy)
-            .unwrap();
+        cas.ingest_tree(
+            &ex_a,
+            &installs.join("node/20.11.0"),
+            "node",
+            "20.11.0",
+            LinkMode::Copy,
+        )
+        .unwrap();
 
         // version B: README identical, binary different
         let ex_b = td.path().join("ex_b");
         write(&ex_b.join("bin/node"), b"BINARY-v2");
         write(&ex_b.join("README.md"), b"same-doc");
         let rep_b = cas
-            .ingest_tree(&ex_b, &installs.join("node/20.11.1"), "node", "20.11.1", LinkMode::Copy)
+            .ingest_tree(
+                &ex_b,
+                &installs.join("node/20.11.1"),
+                "node",
+                "20.11.1",
+                LinkMode::Copy,
+            )
             .unwrap();
 
         // README was already in store ⇒ only the new binary is a new object.
@@ -327,7 +339,8 @@ mod tests {
         let ex = td.path().join("ex");
         write(&ex.join("bin/tool"), b"unique-bytes");
         let inst = installs.join("go/1.22.0");
-        cas.ingest_tree(&ex, &inst, "go", "1.22.0", LinkMode::Copy).unwrap();
+        cas.ingest_tree(&ex, &inst, "go", "1.22.0", LinkMode::Copy)
+            .unwrap();
 
         // simulate uninstall: remove the install dir (and its manifest)
         std::fs::remove_dir_all(&inst).unwrap();

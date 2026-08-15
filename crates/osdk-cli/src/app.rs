@@ -35,8 +35,8 @@ impl App {
         dirs.ensure().context("creating osdk directories")?;
 
         let cwd = std::env::current_dir().context("getting current dir")?;
-        let mut config = Config::load(&dirs.user_config_file(), &cwd)
-            .context("loading configuration")?;
+        let mut config =
+            Config::load(&dirs.user_config_file(), &cwd).context("loading configuration")?;
 
         // Overlay CLI flags (highest precedence).
         if let Some(j) = overrides.jobs {

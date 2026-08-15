@@ -143,22 +143,44 @@ mod tests {
 
     #[test]
     fn score_prefers_higher_throughput() {
-        let a = ProbeResult { source_id: "a".into(), throughput: 100.0, ttfb_ms: 50, ok: true, measured_at: 0 };
-        let b = ProbeResult { source_id: "b".into(), throughput: 200.0, ttfb_ms: 60, ok: true, measured_at: 0 };
+        let a = ProbeResult {
+            source_id: "a".into(),
+            throughput: 100.0,
+            ttfb_ms: 50,
+            ok: true,
+            measured_at: 0,
+        };
+        let b = ProbeResult {
+            source_id: "b".into(),
+            throughput: 200.0,
+            ttfb_ms: 60,
+            ok: true,
+            measured_at: 0,
+        };
         assert!(b.score() > a.score());
     }
 
     #[test]
     fn failed_probe_scores_lowest() {
         let f = ProbeResult::failed("x");
-        let ok = ProbeResult { source_id: "y".into(), throughput: 1.0, ttfb_ms: 999, ok: true, measured_at: 0 };
+        let ok = ProbeResult {
+            source_id: "y".into(),
+            throughput: 1.0,
+            ttfb_ms: 999,
+            ok: true,
+            measured_at: 0,
+        };
         assert!(ok.score() > f.score());
     }
 
     #[test]
     fn source_builders() {
-        let s = Source::mirror("tuna", "https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/", 10)
-            .with_index("https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/index.json");
+        let s = Source::mirror(
+            "tuna",
+            "https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/",
+            10,
+        )
+        .with_index("https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/index.json");
         assert_eq!(s.kind, SourceKind::Mirror);
         assert!(s.index_url.is_some());
         assert!(s.enabled);
@@ -167,9 +189,21 @@ mod tests {
     #[test]
     fn probe_results_rank_best_first() {
         let mut results = vec![
-            ProbeResult { source_id: "slow".into(), throughput: 10.0, ttfb_ms: 500, ok: true, measured_at: 0 },
+            ProbeResult {
+                source_id: "slow".into(),
+                throughput: 10.0,
+                ttfb_ms: 500,
+                ok: true,
+                measured_at: 0,
+            },
             ProbeResult::failed("dead"),
-            ProbeResult { source_id: "fast".into(), throughput: 5000.0, ttfb_ms: 300, ok: true, measured_at: 0 },
+            ProbeResult {
+                source_id: "fast".into(),
+                throughput: 5000.0,
+                ttfb_ms: 300,
+                ok: true,
+                measured_at: 0,
+            },
         ];
         results.sort_by(|a, b| b.score().total_cmp(&a.score()));
         let order: Vec<&str> = results.iter().map(|r| r.source_id.as_str()).collect();

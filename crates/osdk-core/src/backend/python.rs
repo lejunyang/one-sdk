@@ -161,7 +161,7 @@ impl Backend for PythonBackend {
             urls,
             file_name: asset.name.clone(),
             kind,
-            checksum: None, // PBS publishes sha256 sidecars; add later
+            checksum: None,   // PBS publishes sha256 sidecars; add later
             strip_root: true, // archives wrap in a `python/` dir
         };
         let pctx = PipelineCtx {
@@ -189,7 +189,12 @@ impl Backend for PythonBackend {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
         if discovered.is_empty() {
-            Ok(vec!["python".into(), "python3".into(), "pip".into(), "pip3".into()])
+            Ok(vec![
+                "python".into(),
+                "python3".into(),
+                "pip".into(),
+                "pip3".into(),
+            ])
         } else {
             Ok(discovered)
         }
@@ -244,17 +249,33 @@ mod tests {
     #[test]
     fn asset_matching() {
         let name = "cpython-3.12.7+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz";
-        assert!(PythonBackend::asset_matches(name, "3.12.7", "x86_64-unknown-linux-gnu"));
-        assert!(!PythonBackend::asset_matches(name, "3.12.7", "aarch64-apple-darwin"));
+        assert!(PythonBackend::asset_matches(
+            name,
+            "3.12.7",
+            "x86_64-unknown-linux-gnu"
+        ));
+        assert!(!PythonBackend::asset_matches(
+            name,
+            "3.12.7",
+            "aarch64-apple-darwin"
+        ));
         // stripped variant must not match
-        let stripped = "cpython-3.12.7+20241016-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz";
-        assert!(!PythonBackend::asset_matches(stripped, "3.12.7", "x86_64-unknown-linux-gnu"));
+        let stripped =
+            "cpython-3.12.7+20241016-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz";
+        assert!(!PythonBackend::asset_matches(
+            stripped,
+            "3.12.7",
+            "x86_64-unknown-linux-gnu"
+        ));
     }
 
     #[test]
     fn version_from_asset_name() {
         let name = "cpython-3.12.7+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz";
-        assert_eq!(PythonBackend::version_from_asset(name).as_deref(), Some("3.12.7"));
+        assert_eq!(
+            PythonBackend::version_from_asset(name).as_deref(),
+            Some("3.12.7")
+        );
     }
 
     #[test]

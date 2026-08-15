@@ -158,7 +158,10 @@ impl Backend for GoBackend {
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         // Archive contains `go/bin`, and we strip the `go/` root, so bin is at
         // <install>/bin.
-        Ok(vec![ctx.dirs.install_path(self.id(), &tv.version).join("bin")])
+        Ok(vec![ctx
+            .dirs
+            .install_path(self.id(), &tv.version)
+            .join("bin")])
     }
 
     fn exec_env(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {

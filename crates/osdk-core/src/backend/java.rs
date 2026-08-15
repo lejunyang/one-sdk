@@ -82,7 +82,12 @@ impl JavaBackend {
             .unwrap_or_else(|| DEFAULT_DISTRIBUTION.to_string())
     }
 
-    fn packages_url(ctx: &Ctx, base_index: &str, distribution: &str, version_filter: Option<&str>) -> String {
+    fn packages_url(
+        ctx: &Ctx,
+        base_index: &str,
+        distribution: &str,
+        version_filter: Option<&str>,
+    ) -> String {
         let os = Self::os_token(ctx.platform.os);
         let arch = Self::arch_token(ctx);
         let at = Self::archive_type(ctx.platform.os);
@@ -112,8 +117,10 @@ impl Backend for JavaBackend {
     }
 
     fn default_sources(&self) -> Vec<Source> {
-        vec![Source::official("foojay", "https://api.foojay.io/disco/v3.0/packages")
-            .with_index("https://api.foojay.io/disco/v3.0/packages")]
+        vec![
+            Source::official("foojay", "https://api.foojay.io/disco/v3.0/packages")
+                .with_index("https://api.foojay.io/disco/v3.0/packages"),
+        ]
     }
 
     fn probe_url(&self, _ctx: &Ctx, _source: &Source) -> Option<String> {
@@ -168,7 +175,12 @@ impl Backend for JavaBackend {
             })?;
 
         let file_name = if pkg.filename.is_empty() {
-            format!("{}-{}.{}", distribution, tv.version, Self::archive_type(ctx.platform.os))
+            format!(
+                "{}-{}.{}",
+                distribution,
+                tv.version,
+                Self::archive_type(ctx.platform.os)
+            )
         } else {
             pkg.filename.clone()
         };
@@ -178,17 +190,14 @@ impl Backend for JavaBackend {
         // gh-proxy fallback for GitHub-hosted assets (Temurin etc.) in CN.
         let redirect = pkg.links.pkg_download_redirect.clone();
         let mut urls = Vec::new();
-        match resolve_redirect(&ctx.client, &redirect).await {
-            Ok(real) => {
-                if real.contains("github.com") {
-                    // Prefer a CN proxy first, then the direct GitHub URL.
-                    urls.push(format!("https://gh-proxy.com/{real}"));
-                    urls.push(real);
-                } else {
-                    urls.push(real);
-                }
+        if let Ok(real) = resolve_redirect(&ctx.client, &redirect).await {
+            if real.contains("github.com") {
+                // Prefer a CN proxy first, then the direct GitHub URL.
+                urls.push(format!("https://gh-proxy.com/{real}"));
+                urls.push(real);
+            } else {
+                urls.push(real);
             }
-            Err(_) => {}
         }
         // Always keep the foojay redirect itself as a final fallback.
         urls.push(redirect);
@@ -252,7 +261,11 @@ impl Backend for JavaBackend {
 }
 
 impl JavaBackend {
-    async fn list_for_distribution(&self, ctx: &Ctx, distribution: &str) -> Result<Vec<VersionInfo>> {
+    async fn list_for_distribution(
+        &self,
+        ctx: &Ctx,
+        distribution: &str,
+    ) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let base_index = sources
             .first()
@@ -309,7 +322,12 @@ async fn resolve_redirect(_client: &reqwest::Client, url: &str) -> Result<String
 fn split_distribution(spec: &VersionSpec) -> (String, VersionSpec) {
     if let VersionSpec::Prefix(p) | VersionSpec::Exact(p) = spec {
         if let Some((dist, ver)) = p.split_once('-') {
-            if dist.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+            if dist
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+            {
                 return (dist.to_string(), VersionSpec::parse(ver));
             }
         }

@@ -99,7 +99,8 @@ impl Backend for RustBackend {
         vec![
             Source::official("official", "https://static.rust-lang.org")
                 .with_index("https://static.rust-lang.org/rustup"),
-            Source::mirror("rsproxy", "https://rsproxy.cn", 5).with_index("https://rsproxy.cn/rustup"),
+            Source::mirror("rsproxy", "https://rsproxy.cn", 5)
+                .with_index("https://rsproxy.cn/rustup"),
             Source::mirror("tuna", "https://mirrors.tuna.tsinghua.edu.cn/rustup", 10)
                 .with_index("https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup"),
         ]
@@ -148,7 +149,11 @@ impl Backend for RustBackend {
         let env = Self::rustup_env(ctx);
 
         // Install the toolchain. Optional profile/components/targets via options.
-        let profile = tv.options.get("profile").map(|s| s.as_str()).unwrap_or("default");
+        let profile = tv
+            .options
+            .get("profile")
+            .map(|s| s.as_str())
+            .unwrap_or("default");
         let mut args: Vec<String> = vec![
             "toolchain".into(),
             "install".into(),

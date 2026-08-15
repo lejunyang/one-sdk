@@ -166,7 +166,10 @@ fn is_executable(path: &std::path::Path) -> bool {
         return false;
     }
     matches!(
-        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
         Some("exe") | Some("cmd") | Some("bat")
     )
 }

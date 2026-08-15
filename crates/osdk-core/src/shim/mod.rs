@@ -36,10 +36,7 @@ fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()
     create_dir_all(shims)?;
     // .cmd wrapper for cmd.exe / PowerShell
     let cmd_path = shims.join(format!("{name}.cmd"));
-    let cmd = format!(
-        "@echo off\r\n\"{}\" %~n0 %*\r\n",
-        osdk_shim_bin.display()
-    );
+    let cmd = format!("@echo off\r\n\"{}\" %~n0 %*\r\n", osdk_shim_bin.display());
     std::fs::write(&cmd_path, cmd).map_err(|e| Error::io(&cmd_path, e))?;
 
     // extension-less bash wrapper for Git-Bash / MSYS

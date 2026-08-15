@@ -49,8 +49,11 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Current { tool } => commands::current(app, tool),
         Command::Where { tool } => commands::where_cmd(app, tool),
         Command::Reshim => commands::reshim(app),
+        Command::Activate { shell } => commands::activate(app, shell),
+        Command::HookEnv { shell } => commands::hook_env(app, shell),
         Command::Source { command } => commands::source(app, command).await,
         Command::Config { command } => commands::config(app, command),
+        Command::Cache { command } => commands::cache(app, command),
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor => commands::doctor(app),
     }

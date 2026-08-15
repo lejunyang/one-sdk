@@ -57,14 +57,25 @@ mod tests {
         let t = "https://host/v{version}/node-v{version}-{os}-{arch}.{ext}";
         let got = render_template(
             t,
-            &[("version", "20.11.1"), ("os", "linux"), ("arch", "x64"), ("ext", "tar.gz")],
+            &[
+                ("version", "20.11.1"),
+                ("os", "linux"),
+                ("arch", "x64"),
+                ("ext", "tar.gz"),
+            ],
         );
         assert_eq!(got, "https://host/v20.11.1/node-v20.11.1-linux-x64.tar.gz");
     }
 
     #[test]
     fn url_join() {
-        assert_eq!(join_url("https://h/dist/", "/index.json"), "https://h/dist/index.json");
-        assert_eq!(join_url("https://h/dist", "index.json"), "https://h/dist/index.json");
+        assert_eq!(
+            join_url("https://h/dist/", "/index.json"),
+            "https://h/dist/index.json"
+        );
+        assert_eq!(
+            join_url("https://h/dist", "index.json"),
+            "https://h/dist/index.json"
+        );
     }
 }

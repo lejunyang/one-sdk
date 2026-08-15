@@ -113,8 +113,14 @@ impl Backend for YarnBackend {
         let libexec = install_dir.join("libexec");
         crate::dirs::create_dir_all(&libexec)?;
         let js = libexec.join("yarn.js");
-        pipeline::download::download(&ctx.client, &url, &js, &format!("yarn@{}", tv.version), ctx.show_progress)
-            .await?;
+        pipeline::download::download(
+            &ctx.client,
+            &url,
+            &js,
+            &format!("yarn@{}", tv.version),
+            ctx.show_progress,
+        )
+        .await?;
 
         // Generate a launcher in bin/ that runs the bundle with node.
         let bin_dir = install_dir.join("bin");
@@ -127,7 +133,10 @@ impl Backend for YarnBackend {
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        Ok(vec![ctx.dirs.install_path(self.id(), &tv.version).join("bin")])
+        Ok(vec![ctx
+            .dirs
+            .install_path(self.id(), &tv.version)
+            .join("bin")])
     }
 
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {

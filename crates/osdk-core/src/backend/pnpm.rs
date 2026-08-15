@@ -41,9 +41,7 @@ impl PnpmBackend {
             _ => return None,
         };
         let file = format!("pnpm-{os}-{arch}{ext}");
-        let url = format!(
-            "https://github.com/pnpm/pnpm/releases/download/v{version}/{file}"
-        );
+        let url = format!("https://github.com/pnpm/pnpm/releases/download/v{version}/{file}");
         Some((url, file))
     }
 }
@@ -124,18 +122,32 @@ impl Backend for PnpmBackend {
             if s.download_url.contains("registry.") {
                 continue; // npm registry can't serve GH release binaries
             }
-            urls.push(http::join_url(s.download_url.trim_end_matches('/'), &gh_url));
+            urls.push(http::join_url(
+                s.download_url.trim_end_matches('/'),
+                &gh_url,
+            ));
         }
         // Always include the well-known gh-proxy as a fallback.
         urls.push(format!("https://gh-proxy.com/{gh_url}"));
 
-        install_single_binary(ctx, self.id(), &tv.version, &urls, "pnpm", &file, ctx.platform.os)
-            .await?;
+        install_single_binary(
+            ctx,
+            self.id(),
+            &tv.version,
+            &urls,
+            "pnpm",
+            &file,
+            ctx.platform.os,
+        )
+        .await?;
         Ok(())
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        Ok(vec![ctx.dirs.install_path(self.id(), &tv.version).join("bin")])
+        Ok(vec![ctx
+            .dirs
+            .install_path(self.id(), &tv.version)
+            .join("bin")])
     }
 
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {

@@ -148,10 +148,12 @@ impl Backend for NodeBackend {
             out.retain(|v| !v.version.is_empty());
             return Ok(out);
         }
-        Err(last_err.unwrap_or_else(|| crate::error::Error::NoUsableSource {
-            tool: self.id().to_string(),
-            tried: sources.len(),
-        }))
+        Err(
+            last_err.unwrap_or_else(|| crate::error::Error::NoUsableSource {
+                tool: self.id().to_string(),
+                tried: sources.len(),
+            }),
+        )
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {

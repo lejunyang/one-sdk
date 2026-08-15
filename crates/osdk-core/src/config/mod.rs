@@ -315,7 +315,9 @@ mod tests {
 
     #[test]
     fn tool_versions_parse() {
-        let m = parse_tool_versions("# comment\nnode 20.11.1\npython 3.12.4 # trailing\n\ngo   1.22.5\n");
+        let m = parse_tool_versions(
+            "# comment\nnode 20.11.1\npython 3.12.4 # trailing\n\ngo   1.22.5\n",
+        );
         assert_eq!(m.get("node").unwrap(), "20.11.1");
         assert_eq!(m.get("python").unwrap(), "3.12.4");
         assert_eq!(m.get("go").unwrap(), "1.22.5");

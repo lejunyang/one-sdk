@@ -151,8 +151,8 @@ fn edit_tool(path: &Path, tool: &str, spec: &str) -> Result<()> {
 
 fn load_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
     if path.exists() {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         text.parse::<toml_edit::DocumentMut>()
             .with_context(|| format!("parsing {}", path.display()))
     } else {
@@ -165,8 +165,7 @@ fn save_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    std::fs::write(path, doc.to_string())
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 

@@ -222,7 +222,7 @@ fn resolve_installed(
         _ => {
             let infos: Vec<_> = installed
                 .iter()
-                .map(|v| osdk_core::version::VersionInfo::stable(v))
+                .map(osdk_core::version::VersionInfo::stable)
                 .collect();
             select_version(&parsed, &infos).map(|vi| vi.version.clone())
         }

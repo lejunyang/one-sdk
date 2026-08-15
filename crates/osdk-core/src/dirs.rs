@@ -175,8 +175,10 @@ mod tests {
         assert_eq!(d.store, PathBuf::from("/x/data/store"));
         assert_eq!(d.installs, PathBuf::from("/x/data/installs"));
         assert_eq!(d.shims(), PathBuf::from("/x/data/shims"));
-        assert_eq!(d.install_path("node", "20.1.0"),
-                   PathBuf::from("/x/data/installs/node/20.1.0"));
+        assert_eq!(
+            d.install_path("node", "20.1.0"),
+            PathBuf::from("/x/data/installs/node/20.1.0")
+        );
     }
 
     #[test]

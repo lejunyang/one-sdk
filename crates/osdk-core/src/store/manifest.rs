@@ -36,7 +36,11 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    pub fn new(tool: impl Into<String>, version: impl Into<String>, link_mode: impl Into<String>) -> Manifest {
+    pub fn new(
+        tool: impl Into<String>,
+        version: impl Into<String>,
+        link_mode: impl Into<String>,
+    ) -> Manifest {
         Manifest {
             tool: tool.into(),
             version: version.into(),

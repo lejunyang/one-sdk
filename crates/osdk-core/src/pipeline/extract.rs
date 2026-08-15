@@ -116,7 +116,8 @@ fn unpack_zip(archive: &Path, dest: &Path) -> Result<()> {
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = entry.unix_mode() {
-                    let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+                    let _ =
+                        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
                 }
             }
         }
@@ -183,9 +184,18 @@ mod tests {
 
     #[test]
     fn kind_from_name() {
-        assert_eq!(ArchiveKind::from_name("x.tar.gz").unwrap(), ArchiveKind::TarGz);
-        assert_eq!(ArchiveKind::from_name("x.tar.xz").unwrap(), ArchiveKind::TarXz);
-        assert_eq!(ArchiveKind::from_name("x.tar.zst").unwrap(), ArchiveKind::TarZst);
+        assert_eq!(
+            ArchiveKind::from_name("x.tar.gz").unwrap(),
+            ArchiveKind::TarGz
+        );
+        assert_eq!(
+            ArchiveKind::from_name("x.tar.xz").unwrap(),
+            ArchiveKind::TarXz
+        );
+        assert_eq!(
+            ArchiveKind::from_name("x.tar.zst").unwrap(),
+            ArchiveKind::TarZst
+        );
         assert_eq!(ArchiveKind::from_name("x.zip").unwrap(), ArchiveKind::Zip);
         assert!(ArchiveKind::from_name("x.rar").is_err());
     }

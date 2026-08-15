@@ -53,7 +53,10 @@ fn is_exact_semver(s: &str) -> bool {
     // exact = at least major.minor.patch numeric
     let numeric_core = s.split(['-', '+']).next().unwrap_or(s);
     let parts: Vec<&str> = numeric_core.split('.').collect();
-    parts.len() >= 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    parts.len() >= 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 impl fmt::Display for VersionSpec {
@@ -133,10 +136,12 @@ pub fn select_version<'a>(
         VersionSpec::System => None,
         VersionSpec::Latest => candidates.iter().rev().find(|v| v.stable),
         VersionSpec::Lts(None) => candidates.iter().rev().find(|v| v.lts.is_some()),
-        VersionSpec::Lts(Some(line)) => candidates
-            .iter()
-            .rev()
-            .find(|v| v.lts.as_deref().map(|l| l.eq_ignore_ascii_case(line)).unwrap_or(false)),
+        VersionSpec::Lts(Some(line)) => candidates.iter().rev().find(|v| {
+            v.lts
+                .as_deref()
+                .map(|l| l.eq_ignore_ascii_case(line))
+                .unwrap_or(false)
+        }),
         VersionSpec::Exact(want) => candidates.iter().find(|v| v.version == *want),
         VersionSpec::Prefix(pfx) => {
             // match versions whose dotted components start with the prefix
@@ -188,10 +193,19 @@ mod tests {
     fn parse_specs() {
         assert_eq!(VersionSpec::parse("latest"), VersionSpec::Latest);
         assert_eq!(VersionSpec::parse("lts"), VersionSpec::Lts(None));
-        assert_eq!(VersionSpec::parse("lts/iron"), VersionSpec::Lts(Some("iron".into())));
+        assert_eq!(
+            VersionSpec::parse("lts/iron"),
+            VersionSpec::Lts(Some("iron".into()))
+        );
         assert_eq!(VersionSpec::parse("20"), VersionSpec::Prefix("20".into()));
-        assert_eq!(VersionSpec::parse("20.11"), VersionSpec::Prefix("20.11".into()));
-        assert_eq!(VersionSpec::parse("v20.11.1"), VersionSpec::Exact("20.11.1".into()));
+        assert_eq!(
+            VersionSpec::parse("20.11"),
+            VersionSpec::Prefix("20.11".into())
+        );
+        assert_eq!(
+            VersionSpec::parse("v20.11.1"),
+            VersionSpec::Exact("20.11.1".into())
+        );
         assert_eq!(VersionSpec::parse("system"), VersionSpec::System);
     }
 
@@ -207,7 +221,11 @@ mod tests {
     }
 
     fn vi(v: &str, stable: bool, lts: Option<&str>) -> VersionInfo {
-        VersionInfo { version: v.into(), stable, lts: lts.map(String::from) }
+        VersionInfo {
+            version: v.into(),
+            stable,
+            lts: lts.map(String::from),
+        }
     }
 
     #[test]
@@ -232,10 +250,18 @@ mod tests {
             vi("21.6.0", true, None),
             vi("22.0.0-nightly", false, None),
         ];
-        assert_eq!(select_version(&VersionSpec::Latest, &c).unwrap().version, "21.6.0");
-        assert_eq!(select_version(&VersionSpec::Lts(None), &c).unwrap().version, "20.11.1");
         assert_eq!(
-            select_version(&VersionSpec::Lts(Some("hydrogen".into())), &c).unwrap().version,
+            select_version(&VersionSpec::Latest, &c).unwrap().version,
+            "21.6.0"
+        );
+        assert_eq!(
+            select_version(&VersionSpec::Lts(None), &c).unwrap().version,
+            "20.11.1"
+        );
+        assert_eq!(
+            select_version(&VersionSpec::Lts(Some("hydrogen".into())), &c)
+                .unwrap()
+                .version,
             "18.20.0"
         );
     }

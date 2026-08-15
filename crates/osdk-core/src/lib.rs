@@ -13,7 +13,9 @@
 //! - [`shim`]     — shim launcher generation.
 //! - [`lock`]     — cross-process file locks.
 
+pub mod activate;
 pub mod backend;
+pub mod cache;
 pub mod config;
 pub mod dirs;
 pub mod error;
@@ -27,6 +29,6 @@ pub mod source;
 pub mod store;
 pub mod version;
 
-pub use backend::{Backend, Ctx, InstallCtx};
 pub use backend::registry::Registry;
+pub use backend::{Backend, Ctx, InstallCtx};
 pub use error::{Error, Result};

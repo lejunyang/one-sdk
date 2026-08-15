@@ -77,7 +77,8 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
         let mut last_err: Option<Error> = None;
         let mut downloaded = false;
         for (i, url) in plan.urls.iter().enumerate() {
-            match download::download(ctx.client, url, &archive_path, &label, ctx.show_progress).await
+            match download::download(ctx.client, url, &archive_path, &label, ctx.show_progress)
+                .await
             {
                 Ok(()) => {
                     downloaded = true;
@@ -108,10 +109,12 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     }
 
     // 3. Extract into a scratch dir under the cache tmp.
-    let scratch = ctx
-        .dirs
-        .tmp()
-        .join(format!("{}-{}-{}", plan.tool, plan.version, std::process::id()));
+    let scratch = ctx.dirs.tmp().join(format!(
+        "{}-{}-{}",
+        plan.tool,
+        plan.version,
+        std::process::id()
+    ));
     if scratch.exists() {
         let _ = std::fs::remove_dir_all(&scratch);
     }
@@ -119,9 +122,13 @@ pub async fn run(plan: &InstallPlan, ctx: &PipelineCtx<'_>) -> Result<PathBuf> {
     extract::extract(&archive_path, &scratch, plan.kind, plan.strip_root)?;
 
     // 4. Ingest into CAS + materialize into the install dir.
-    let report = ctx
-        .cas
-        .ingest_tree(&scratch, &install_dir, &plan.tool, &plan.version, ctx.link_mode)?;
+    let report = ctx.cas.ingest_tree(
+        &scratch,
+        &install_dir,
+        &plan.tool,
+        &plan.version,
+        ctx.link_mode,
+    )?;
     let _ = std::fs::remove_dir_all(&scratch);
 
     // 5. Finalize.

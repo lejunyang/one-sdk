@@ -95,7 +95,9 @@ async fn download_once(
     let mut downloaded: u64 = 0;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        file.write_all(&chunk).await.map_err(|e| Error::io(&partial, e))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| Error::io(&partial, e))?;
         downloaded += chunk.len() as u64;
         if let Some(pb) = &pb {
             pb.set_position(downloaded);

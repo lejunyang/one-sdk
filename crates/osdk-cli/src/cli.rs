@@ -87,9 +87,7 @@ pub enum Command {
     },
 
     /// Show the active version of each tool for the current directory.
-    Current {
-        tool: Option<String>,
-    },
+    Current { tool: Option<String> },
 
     /// Print the install directory of a tool version.
     Where {
@@ -99,6 +97,19 @@ pub enum Command {
 
     /// Regenerate shim launchers for all installed tools.
     Reshim,
+
+    /// Print shell integration to eval, e.g. `eval "$(osdk activate bash)"`.
+    Activate {
+        /// Target shell.
+        shell: String,
+    },
+
+    /// Internal: emit env changes for the current directory (used by activate).
+    #[command(hide = true)]
+    HookEnv {
+        #[arg(long, default_value = "bash")]
+        shell: String,
+    },
 
     /// Manage download sources.
     Source {
@@ -110,6 +121,12 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+
+    /// Manage the shared caches (SDK store + downstream package caches).
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
     },
 
     /// Garbage-collect unreferenced store objects.
@@ -155,4 +172,14 @@ pub enum ConfigCommand {
     Path,
     /// Print resolved settings.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Print the shared cache directories.
+    Dir,
+    /// Print the downstream package-manager cache redirections.
+    Env,
+    /// Remove downloaded archives (keeps the CAS store + installs).
+    Clean,
 }

@@ -156,8 +156,7 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
             let installed = backend.list_installed(&app.ctx)?;
             installed
                 .into_iter()
-                .filter(|v| v.starts_with(p.as_str()))
-                .last()
+                .rfind(|v| v.starts_with(p.as_str()))
                 .ok_or_else(|| anyhow!("no installed {} version matches `{p}`", req.backend))?
         }
         other => {
@@ -172,7 +171,10 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
     // Reclaim now-unreferenced store objects.
     let (removed, bytes) = app.ctx.cas.gc(&app.ctx.dirs.installs)?;
     if removed > 0 {
-        println!("pruned {removed} store object(s), {} freed", human_bytes(bytes));
+        println!(
+            "pruned {removed} store object(s), {} freed",
+            human_bytes(bytes)
+        );
     }
     Ok(())
 }
@@ -354,14 +356,64 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
     Ok(())
 }
 
+pub fn activate(app: &App, shell: String) -> Result<()> {
+    let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
+    // Reference the osdk binary by its current path so the snippet is portable.
+    let bin = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "osdk".to_string());
+    print!("{}", osdk_core::activate::activation_script(sh, &bin));
+    let _ = app; // app unused beyond validation
+    Ok(())
+}
+
+pub fn hook_env(app: &App, shell: String) -> Result<()> {
+    let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
+    let cwd = std::env::current_dir()?;
+    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, &cwd);
+    // Layer 2: downstream package caches (only vars the user hasn't set).
+    let cache_vars = osdk_core::cache::cache_env(&app.ctx.dirs.cache, |k| std::env::var(k).ok());
+    delta.set_vars.extend(cache_vars);
+    print!("{}", osdk_core::activate::render_hook_env(sh, &delta));
+    Ok(())
+}
+
+pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
+    use crate::cli::CacheCommand;
+    match command {
+        CacheCommand::Dir => {
+            println!("cache_dir     = {}", app.ctx.dirs.cache.display());
+            println!("downloads     = {}", app.ctx.dirs.downloads().display());
+            println!("store (CAS)   = {}", app.ctx.dirs.store.display());
+            println!(
+                "downstream    = {}",
+                osdk_core::cache::downstream_root(&app.ctx.dirs.cache).display()
+            );
+        }
+        CacheCommand::Env => {
+            for (k, v) in osdk_core::cache::describe(&app.ctx.dirs.cache) {
+                println!("{k}={v}");
+            }
+        }
+        CacheCommand::Clean => {
+            let downloads = app.ctx.dirs.downloads();
+            if downloads.exists() {
+                std::fs::remove_dir_all(&downloads)
+                    .with_context(|| format!("removing {}", downloads.display()))?;
+                std::fs::create_dir_all(&downloads).ok();
+            }
+            println!("cleared downloaded archives (CAS store + installs kept)");
+        }
+    }
+    Ok(())
+}
+
 pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Path => {
             println!("config dir:  {}", app.ctx.dirs.config.display());
-            println!(
-                "config file: {}",
-                app.ctx.dirs.user_config_file().display()
-            );
+            println!("config file: {}", app.ctx.dirs.user_config_file().display());
             if let Some(p) = &app.ctx.config.project_config_path {
                 println!("project:     {}", p.display());
             }
@@ -417,7 +469,11 @@ pub fn doctor(app: &App) -> Result<()> {
     let on_path = std::env::var("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d == shims))
         .unwrap_or(false);
-    println!("  shims dir    : {} (on PATH: {})", shims.display(), on_path);
+    println!(
+        "  shims dir    : {} (on PATH: {})",
+        shims.display(),
+        on_path
+    );
     println!("  backends     : {}", app.registry.ids().join(", "));
     Ok(())
 }

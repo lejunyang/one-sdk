@@ -108,7 +108,11 @@ async fn ranked_sources(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) ->
         if fresh {
             let mut results = cache.results.clone();
             results.sort_by(|a, b| b.score().total_cmp(&a.score()));
-            return results.into_iter().filter(|r| r.ok).map(|r| r.source_id).collect();
+            return results
+                .into_iter()
+                .filter(|r| r.ok)
+                .map(|r| r.source_id)
+                .collect();
         }
     }
 
@@ -138,9 +142,8 @@ pub async fn probe_all(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) -> 
     }
     let mut out = Vec::new();
     for h in handles {
-        match h.await {
-            Ok(r) => out.push(r),
-            Err(_) => {}
+        if let Ok(r) = h.await {
+            out.push(r)
         }
     }
     out
