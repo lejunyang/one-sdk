@@ -32,6 +32,7 @@ cargo build --release        # binaries: target/release/{osdk,osdk-shim}
 
 ```bash
 osdk install node@20            # install (auto-picks fastest mirror)
+osdk --jobs 4 install node@20 go@1.22 python@3.12
 osdk use -g node@20             # install + set global default + generate shims
 osdk use node@18                # pin in the current project (osdk.toml)
 node --version                  # runs the active version via shim
@@ -40,9 +41,38 @@ node --version                  # runs the active version via shim
 eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
 ```
 
+Downloads retry transient failures and safely resume validated partial files
+with HTTP `Range`/`If-Range`. Use `--offline` after a successful online run to
+resolve metadata and reinstall artifacts entirely from the osdk cache.
+
 Project version files are honored (walk-up): `osdk.toml`, `.tool-versions`
 (asdf-compatible), and idiomatic files (`.nvmrc`, `.node-version`,
 `.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`).
+
+## Reproducible projects and execution
+
+Resolve the current project to exact, platform-specific versions:
+
+```bash
+osdk lock                         # writes/merges osdk.lock
+osdk install                      # consumes the matching platform lock
+osdk outdated                     # compare installed vs current resolution
+osdk upgrade                      # install current resolutions + refresh lock
+```
+
+`osdk.lock` keeps independent sections for Linux, macOS, and Windows, including
+the original request, exact resolved version, and backend options. An explicit
+`osdk install node@20` still honors the explicit request; lock consumption is
+used for no-argument project installs.
+
+Run a command with managed tools without changing project pins:
+
+```bash
+osdk exec --tool node@20 -- node --version
+osdk exec --tool python@3.12 -- python -c "print('ok')"
+```
+
+Generate shell completions with `osdk completions bash|zsh|fish|powershell`.
 
 ## Sources / mirrors
 
@@ -96,13 +126,13 @@ back to copy across filesystems; `osdk doctor` warns).
 |--------------|------------------------------------------------------------------|
 | node         | official nodejs.org prebuilt archives, `SHASUMS256` verified     |
 | go           | go.dev/dl JSON index, per-file sha256                            |
-| python       | astral-sh/python-build-standalone (latest-release.json + SHA256SUMS; no GitHub API) |
+| python       | static PBS release index + Astral release mirror, `SHA256SUMS` verified (no GitHub API) |
 | java         | Foojay Disco API (Temurin default), multi-vendor                 |
-| rust         | delegated to rustup (self-contained home + mirror)               |
-| pnpm         | standalone binary (GitHub release, mirror/proxy failover)        |
-| yarn         | classic standalone bundle (berry → corepack)                     |
-| deno         | dl.deno.land CDN (no GitHub API), `.sha256sum` verified          |
-| bun          | oven-sh/bun GitHub release, `SHASUMS256.txt` verified            |
+| rust         | isolated rustup bootstrap + toolchain home, mirror-selected and sha256 verified |
+| pnpm         | official npm platform package, npm SRI verified                  |
+| yarn         | `yarn` / `@yarnpkg/cli-dist` npm packages, npm SRI verified      |
+| deno         | official `@deno/<platform>` npm package, npm SRI verified        |
+| bun          | official `@oven/bun-<platform>` npm package, npm SRI verified    |
 | npm          | ships with node                                                  |
 | `github:owner/repo` | any GitHub release: host-matching asset auto-picked, archives extracted or bare binaries installed |
 
@@ -116,7 +146,25 @@ osdk install github:cli/cli@2.62.0     # a specific tag
 osdk list-remote github:sharkdp/fd     # available release tags
 ```
 
-Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the API rate limit.
+Only the generic `github:owner/repo` backend requires the GitHub Releases API.
+Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise its API rate limit.
+
+## Offline mode
+
+Successful online metadata requests and downloaded archives are cached by URL
+and tool version. Later commands can prohibit network access:
+
+```bash
+osdk install bun@1.3.14
+osdk uninstall bun@1.3.14
+osdk --offline install bun@1.3.14
+```
+
+An offline cache miss fails explicitly instead of silently attempting the
+network. Source probing and source refresh are also disabled offline.
+
+Signature verification is enabled by default where a trusted key is available.
+Set `OSDK_VERIFY_SIGNATURES=false` only when intentionally opting out.
 
 ## Architecture
 
