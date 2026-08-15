@@ -156,3 +156,85 @@ pub fn is_installed(dirs: &Dirs, tool: &str, version: &str) -> bool {
         .join(COMPLETE_MARKER)
         .exists()
 }
+
+/// Download a single executable into `<install>/bin/<exe_name>` and mark the
+/// install complete. Tries each URL in order (failover), optionally verifying a
+/// checksum. Used for standalone binaries (e.g. github: bare binaries).
+#[allow(clippy::too_many_arguments)]
+pub async fn install_single_binary(
+    client: &reqwest::Client,
+    dirs: &Dirs,
+    tool: &str,
+    version: &str,
+    urls: &[String],
+    exe_name: &str,
+    download_name: &str,
+    os: crate::platform::Os,
+    checksum: Option<&Checksum>,
+    show_progress: bool,
+) -> Result<()> {
+    let install_dir = dirs.install_path(tool, version);
+    if install_dir.join(COMPLETE_MARKER).exists() {
+        return Ok(());
+    }
+    if install_dir.exists() {
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+    let bin_dir = install_dir.join("bin");
+    create_dir_all(&bin_dir)?;
+
+    let cached = dirs.downloads().join(download_name);
+    let _ = std::fs::remove_file(&cached);
+    let mut last_err: Option<Error> = None;
+    let mut ok = false;
+    for (i, url) in urls.iter().enumerate() {
+        match download::download(
+            client,
+            url,
+            &cached,
+            &format!("{tool}@{version}"),
+            show_progress,
+        )
+        .await
+        {
+            Ok(()) => {
+                ok = true;
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    url = %url,
+                    attempt = i + 1,
+                    total = urls.len(),
+                    "{}",
+                    crate::i18n::trf("log.binary_download_failed", &[("err", &e.to_string())])
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    if !ok {
+        return Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
+            tool: tool.to_string(),
+            tried: urls.len(),
+        }));
+    }
+
+    if let Some(cs) = checksum {
+        verify::verify_file(&cached, &cs.hex, cs.algo, download_name)?;
+        tracing::info!(file = %download_name, "{}", crate::i18n::tr("log.checksum_verified"));
+    }
+
+    let exe_suffix = os.exe_suffix();
+    let dest = bin_dir.join(format!("{exe_name}{exe_suffix}"));
+    std::fs::copy(&cached, &dest).map_err(|e| Error::io(&dest, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
+
+    std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
+        .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
+    Ok(())
+}

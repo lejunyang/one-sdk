@@ -3,13 +3,14 @@
 use std::io::Read;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgo {
     Sha256,
+    Sha512,
     Blake3,
 }
 
@@ -20,6 +21,17 @@ pub fn hash_file(path: &Path, algo: HashAlgo) -> Result<String> {
     match algo {
         HashAlgo::Sha256 => {
             let mut h = Sha256::new();
+            loop {
+                let n = f.read(&mut buf).map_err(|e| Error::io(path, e))?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            Ok(hex::encode(h.finalize()))
+        }
+        HashAlgo::Sha512 => {
+            let mut h = Sha512::new();
             loop {
                 let n = f.read(&mut buf).map_err(|e| Error::io(path, e))?;
                 if n == 0 {
@@ -87,6 +99,31 @@ pub fn parse_sha256_token(body: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Parse an npm-style Subresource Integrity string (`sha512-<base64>` or
+/// `sha256-<base64>`, possibly space-separated multiples) into a hex Checksum.
+/// Prefers sha512. Returns None if unparseable.
+pub fn parse_sri(integrity: &str) -> Option<super::Checksum> {
+    use base64::Engine;
+    let mut best: Option<super::Checksum> = None;
+    for token in integrity.split_whitespace() {
+        let (algo_str, b64) = token.split_once('-')?;
+        let algo = match algo_str {
+            "sha512" => HashAlgo::Sha512,
+            "sha256" => HashAlgo::Sha256,
+            _ => continue,
+        };
+        let raw = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+        let hex = hex::encode(raw);
+        let cs = super::Checksum { algo, hex };
+        // prefer the strongest (sha512 > sha256)
+        match &best {
+            Some(b) if b.algo == HashAlgo::Sha512 => {}
+            _ => best = Some(cs),
+        }
+    }
+    best
 }
 
 /// Best-effort discovery of a sha256 checksum for a GitHub-style release asset.
@@ -191,6 +228,29 @@ mod tests {
         // too short / non-hex -> None
         assert_eq!(parse_sha256_token("nothex"), None);
         assert_eq!(parse_sha256_token(""), None);
+    }
+
+    #[test]
+    fn sri_parsing_prefers_sha512() {
+        use base64::Engine;
+        // sha256 of "abc"
+        let sha256_hex = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let sha256_b64 =
+            base64::engine::general_purpose::STANDARD.encode(hex::decode(sha256_hex).unwrap());
+        let cs = parse_sri(&format!("sha256-{sha256_b64}")).unwrap();
+        assert_eq!(cs.algo, HashAlgo::Sha256);
+        assert_eq!(cs.hex, sha256_hex);
+
+        // when both present, sha512 wins
+        let sha512_hex = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+                          2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
+        let sha512_b64 =
+            base64::engine::general_purpose::STANDARD.encode(hex::decode(sha512_hex).unwrap());
+        let cs = parse_sri(&format!("sha256-{sha256_b64} sha512-{sha512_b64}")).unwrap();
+        assert_eq!(cs.algo, HashAlgo::Sha512);
+        assert_eq!(cs.hex, sha512_hex);
+
+        assert!(parse_sri("md5-xxxx").is_none());
     }
 
     #[test]

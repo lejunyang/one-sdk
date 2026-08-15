@@ -38,6 +38,8 @@ blake3 = "1"
 hex = "0.4"
 # signatures
 minisign-verify = "0.2"
+# base64 (npm SRI integrity decoding)
+base64 = "0.22"
 # fs / dirs
 directories = "5"
 dunce = "1"

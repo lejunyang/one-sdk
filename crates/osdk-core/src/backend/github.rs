@@ -265,14 +265,17 @@ impl Backend for GithubBackend {
             Err(_) => {
                 // Treat as a bare executable named after the repo.
                 let exe_name = self.repo.clone();
-                crate::backend::pnpm::install_single_binary(
-                    ctx,
+                pipeline::install_single_binary(
+                    &ctx.client,
+                    &ctx.dirs,
                     self.id(),
                     &tv.version,
                     &urls,
                     &exe_name,
                     &asset.name,
                     ctx.platform.os,
+                    checksum.as_ref(),
+                    ctx.show_progress,
                 )
                 .await?;
             }
