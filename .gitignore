@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+/site/node_modules
+/site/.vitepress/cache
+/site/.vitepress/dist

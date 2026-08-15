@@ -1,0 +1,262 @@
+# 详细功能
+
+本页按日常工作流介绍 osdk 的命令与配置。
+
+## 安装与并发
+
+版本请求统一使用 `<工具>@<版本>`：
+
+```bash
+osdk install node@20
+osdk install python@3.12
+osdk --jobs 4 install node@20 go@1.22 python@3.12
+```
+
+`latest`、`stable`、`lts` 和版本前缀会解析为当前可用的精确版本。不同工具可以
+并发安装；下载失败会重试，服务器支持时会安全续传。
+
+部分后端支持额外参数：
+
+```bash
+osdk install rust@stable -o profile=minimal -o components=clippy,rustfmt
+osdk install java@21 -o distribution=zulu
+```
+
+## 项目版本与全局版本
+
+```bash
+osdk use node@20       # 写入当前项目 osdk.toml
+osdk use -g node@20    # 写入用户全局配置
+osdk current           # 查看当前目录生效版本
+osdk where node        # 输出安装目录
+```
+
+项目配置示例：
+
+```toml
+[tools]
+node = "20"
+python = "3.12"
+go = "1.22"
+```
+
+osdk 从当前目录向上查找最近的配置，因此同一仓库的子目录可以继承工具版本。
+
+## Shim 与 Shell 激活
+
+`osdk use` 会生成 shims，执行 `node`、`python` 等命令时，shim 根据当前目录
+解析项目或全局版本。
+
+也可以安装 shell hook，让 osdk 在切换目录时更新 `PATH` 和工具专属环境变量：
+
+```bash
+eval "$(osdk activate bash)"
+eval "$(osdk activate zsh)"
+osdk activate fish | source
+osdk activate powershell | Invoke-Expression
+```
+
+撤销当前 shell 的激活状态：
+
+```bash
+eval "$(osdk deactivate bash)"
+```
+
+安装目录发生变化后可运行 `osdk reshim` 重新生成全部 shims。
+
+## 可复现锁文件
+
+```bash
+osdk lock
+osdk install
+osdk outdated
+osdk upgrade
+```
+
+`osdk.lock` 为 Linux、macOS 和 Windows 保存独立区段，记录：
+
+- 原始版本请求与精确解析版本；
+- 后端选项；
+- 实际下载 URL 和文件名；
+- 已验证的校验和；
+- 已验证的 GitHub attestation 证据。
+
+无参数 `osdk install` 优先使用当前平台锁定的归档身份，不重新查询上游。锁文件
+中的证据是审计记录，不是跳过验证的理由；重新安装仍会验证缓存的归档。
+
+## 临时执行
+
+无需修改项目 pin，就能以指定工具环境运行命令：
+
+```bash
+osdk exec --tool node@20 -- node --version
+osdk exec --tool python@3.12 -- python -c "print('ok')"
+osdk exec --tool node@20 --tool pnpm@latest -- pnpm install
+```
+
+## 版本别名
+
+```bash
+osdk alias set node maintenance 20
+osdk alias set node default maintenance
+osdk alias list node
+osdk use node@default
+osdk alias unset node maintenance
+```
+
+别名可以引用另一个别名。osdk 会拒绝循环引用，以及 `latest`、`lts`、`stable`
+等保留名称。
+
+## 多源与镜像选择
+
+```bash
+osdk source list node
+osdk source test node
+osdk source pin node tuna
+osdk source unpin node
+```
+
+默认情况下，osdk 对候选源执行轻量探测并缓存排名，在元数据请求或归档下载失败
+时继续尝试后续来源。
+
+添加企业或私有镜像：
+
+```bash
+osdk source add node \
+  --id mycorp \
+  --download-url https://mirror.example.com/node/ \
+  --index-url https://mirror.example.com/node/index.json
+
+osdk --source mycorp install node@20
+osdk source remove node mycorp
+```
+
+## 内容去重
+
+归档验证和解压后，每个文件会按 BLAKE3 内容哈希写入共享存储。安装目录不再
+保留重复副本，而是按能力使用：
+
+1. 硬链接；
+2. reflink；
+3. 普通复制。
+
+```bash
+osdk doctor
+osdk prune --dry-run
+osdk prune
+```
+
+`prune` 只清理没有任何安装版本引用的存储对象。
+
+## 下游包缓存
+
+osdk 为常见包管理器提供共享缓存环境，避免 SDK 版本之间重复下载依赖：
+
+```bash
+osdk cache dir
+osdk cache env
+osdk cache clean
+```
+
+覆盖 npm/pnpm/Yarn、pip、Go、Cargo 和 Gradle 等生态。`cache clean` 清理下载
+归档，不删除已安装 SDK 或内容存储。
+
+## 离线模式
+
+成功的元数据请求和下载包会按 URL 与工具版本缓存：
+
+```bash
+osdk install bun@latest
+osdk uninstall bun@1.3.14
+osdk --offline install bun@1.3.14
+```
+
+离线模式禁止网络请求。缓存缺失会明确报错，不会静默联网；源探测和源刷新也会
+停止。
+
+## 完整性、签名与 Attestation
+
+osdk 会使用后端提供的 SHA-256、SHA-512、BLAKE3 或 npm SRI 验证归档。
+
+```bash
+osdk --require-checksums install node@20
+export OSDK_REQUIRE_CHECKSUMS=true
+```
+
+严格模式会拒绝没有可验证校验和的归档。签名验证默认开启，可通过
+`OSDK_VERIFY_SIGNATURES=false` 显式关闭。
+
+GitHub Release 通用后端还支持 GitHub Artifact Attestations：
+
+```bash
+osdk --attestations if-available install github:cli/cli@latest
+osdk --attestations required install github:cli/cli@latest
+```
+
+策略也可写入 `settings.attestations` 或环境变量 `OSDK_ATTESTATIONS`：
+
+- `off`：默认，不查询 attestation；
+- `if-available`：允许没有 attestation，但发现的无效证明一定失败；
+- `required`：必须存在且通过验证。
+
+当前实现验证 Fulcio 证书链、SCT、GitHub Actions OIDC 颁发者与仓库、归档
+签名、DSSE subject digest、Rekor body 一致性和签名时间。上游 `sigstore`
+0.14 尚不验证 Rekor Merkle inclusion proof 或 Signed Entry Timestamp。
+
+## 任意 GitHub Release 工具
+
+```bash
+osdk use -g github:sharkdp/fd
+osdk install github:cli/cli@2.62.0
+osdk list-remote github:sharkdp/fd
+```
+
+osdk 会按当前操作系统与架构选择匹配的 Release asset，并处理归档或单文件
+二进制。可设置 `GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 提升 API 限额。
+
+## 声明式后端
+
+除内置后端外，osdk 可以从隔离的用户配置/数据插件目录加载 schema 1 TOML
+后端。声明式后端定义版本索引、平台映射、下载模板、可执行文件和校验和规则，
+仍然走同一套验证、解压和内容存储管线。
+
+## 国际化
+
+CLI 自动根据 `LC_ALL`、`LC_MESSAGES` 或 `LANG` 选择中文或英文。覆盖优先级：
+
+```bash
+osdk --lang zh install node@20
+export OSDK_LANG=zh
+```
+
+也可以写入用户配置：
+
+```toml
+[settings]
+lang = "zh"
+```
+
+## 补全与诊断
+
+```bash
+osdk completions bash
+osdk completions zsh
+osdk completions fish
+osdk completions powershell
+osdk doctor
+osdk config path
+osdk config list
+```
+
+## 目录覆盖
+
+| 用途 | Linux 默认位置 | 环境变量 |
+| --- | --- | --- |
+| 数据根目录 | `~/.local/share/osdk` | `OSDK_DATA_DIR` |
+| 内容存储 | `<data>/store` | `OSDK_STORE_DIR` |
+| SDK 安装 | `<data>/installs` | `OSDK_INSTALL_DIR` |
+| 下载缓存 | `~/.cache/osdk` | `OSDK_CACHE_DIR` |
+| 配置 | `~/.config/osdk` | `OSDK_CONFIG_DIR` |
+
+内容存储与安装目录位于同一文件系统时才能使用硬链接。`osdk doctor` 会报告当前
+链接模式和跨文件系统问题。

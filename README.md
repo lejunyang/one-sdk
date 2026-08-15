@@ -1,5 +1,9 @@
 # osdk — one SDK manager
 
+[Website](https://lejunyang.github.io/one-sdk/) ·
+[中文文档](https://lejunyang.github.io/one-sdk/) ·
+[English docs](https://lejunyang.github.io/one-sdk/en/)
+
 A single cross-platform CLI (Windows/macOS/Linux) that manages many language
 SDKs and their versions: **node, npm, pnpm, yarn, java, python, rust, go, deno, bun** — with
 three things existing single-purpose managers (nvm/fnm/uv/sdkman/rustup) don't do

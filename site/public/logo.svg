@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="osdk">
+  <defs>
+    <linearGradient id="bg" x1="38" y1="30" x2="220" y2="226" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4a9b80"/>
+      <stop offset="1" stop-color="#22443a"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="72" y1="64" x2="185" y2="194" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff8e8"/>
+      <stop offset="1" stop-color="#f2bd73"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="64" fill="url(#bg)"/>
+  <path
+    fill="url(#mark)"
+    fill-rule="evenodd"
+    d="M128 48c44.18 0 80 35.82 80 80s-35.82 80-80 80-80-35.82-80-80 35.82-80 80-80Zm0 35c-24.85 0-45 20.15-45 45s20.15 45 45 45 45-20.15 45-45-20.15-45-45-45Z"
+  />
+  <path fill="#fff8e8" d="M120 63h16v49h-16zM120 144h16v49h-16zM63 120h49v16H63zM144 120h49v16h-49z"/>
+</svg>
