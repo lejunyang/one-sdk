@@ -1,5 +1,6 @@
 # osdk — one SDK manager
 
+[简体中文](README.zh-CN.md) · **English** ·
 [Website](https://lejunyang.github.io/one-sdk/) ·
 [中文文档](https://lejunyang.github.io/one-sdk/) ·
 [English docs](https://lejunyang.github.io/one-sdk/en/)

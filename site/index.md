@@ -45,7 +45,8 @@ features:
 ```bash
 # 安装 osdk
 curl --proto '=https' --tlsv1.2 -sSf \
-  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh | sh
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh |
+  OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
 
 # 安装并设为全局默认
 osdk use -g node@20

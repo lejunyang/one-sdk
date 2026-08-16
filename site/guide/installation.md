@@ -9,7 +9,8 @@ osdk 提供 Windows、macOS 和 Linux 的预编译二进制。安装包同时包
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf \
-  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh | sh
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh |
+  OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
 ```
 
 默认安装到 `~/.local/bin`。请确认该目录已加入 `PATH`：
@@ -25,8 +26,12 @@ export PATH="$HOME/.local/bin:$PATH"
 在 PowerShell 中运行：
 
 ```powershell
-irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
+$env:OSDK_DOWNLOAD_BASE_URL = "https://gh-proxy.com/https://github.com"
+irm https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
+
+这些示例既代理 Raw 安装脚本，也通过 `OSDK_DOWNLOAD_BASE_URL` 代理脚本后续
+下载的 GitHub Release 二进制和 `SHA256SUMS`。
 
 默认安装到 `%LOCALAPPDATA%\Programs\osdk\bin`。如果安装器提示该目录不在
 `PATH`，请将它加入当前用户的 `PATH`。
@@ -38,9 +43,12 @@ irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ### Unix 参数
 
 ```bash
-curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
+curl -sSfL \
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh \
+  -o install.sh
 
 sh install.sh \
+  --base-url https://gh-proxy.com/https://github.com \
   --version 0.1.0 \
   --install-dir "$HOME/bin" \
   --repository lejunyang/one-sdk \
@@ -62,10 +70,11 @@ sh install.sh \
 
 ```powershell
 Invoke-WebRequest `
-  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
   -OutFile install.ps1
 
 .\install.ps1 `
+  -BaseUrl https://gh-proxy.com/https://github.com `
   -Version 0.1.0 `
   -InstallDir "$HOME\bin" `
   -Repository lejunyang/one-sdk `

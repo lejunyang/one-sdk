@@ -1,0 +1,306 @@
+# osdk — 一站式 SDK 管理器
+
+**简体中文** · [English](README.md) ·
+[官方网站](https://lejunyang.github.io/one-sdk/) ·
+[中文文档](https://lejunyang.github.io/one-sdk/) ·
+[English docs](https://lejunyang.github.io/one-sdk/en/)
+
+osdk 是一个跨平台（Windows / macOS / Linux）CLI，用统一方式管理多种语言 SDK
+及其版本：**Node.js、npm、pnpm、Yarn、Java、Python、Rust、Go、Deno、Bun**。
+它把现有单语言管理器（nvm/fnm/uv/SDKMAN/rustup）通常无法同时提供的三类能力
+组合在一起：
+
+1. **跨版本内容去重。** 基于 BLAKE3 的内容寻址存储只保留一份相同文件；各安装
+   版本通过硬链接、reflink 或复制从存储中物化。两个 Node.js 次版本若共享文件，
+   磁盘只保存一次。
+2. **统一下游包缓存。** npm/pnpm/Yarn/pip/Go/Cargo/Gradle 的全局缓存统一指向
+   共享目录，让不同项目和 SDK 版本复用已下载依赖。
+3. **多源与最快镜像自动选择。** 每个 SDK 都提供官方源和可用镜像；osdk 会探测
+   速度并选择最快来源，元数据或下载失败时自动切换。也支持添加自定义源或固定
+   指定来源。
+
+## 安装
+
+Linux 或 macOS 可通过 gh-proxy 下载并执行最新版一键安装脚本：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh |
+  OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
+```
+
+Windows PowerShell：
+
+```powershell
+$env:OSDK_DOWNLOAD_BASE_URL = "https://gh-proxy.com/https://github.com"
+irm https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
+```
+
+以上示例既通过 gh-proxy 获取 Raw 安装脚本，也通过
+`OSDK_DOWNLOAD_BASE_URL` 代理脚本后续下载的 GitHub Release 二进制与
+`SHA256SUMS`。
+
+两个安装器都会使用 Release 中的 `SHA256SUMS` 校验归档。需要传入自定义参数时，
+先下载脚本再执行：
+
+```bash
+curl -sSfL \
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh \
+  -o install.sh
+sh install.sh \
+  --base-url https://gh-proxy.com/https://github.com \
+  --version 0.1.0 \
+  --install-dir "$HOME/bin"
+```
+
+```powershell
+Invoke-WebRequest `
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
+  -OutFile install.ps1
+.\install.ps1 `
+  -BaseUrl https://gh-proxy.com/https://github.com `
+  -Version 0.1.0 `
+  -InstallDir "$HOME\bin"
+```
+
+Unix 使用 `sh install.sh --help`，PowerShell 使用
+`Get-Help .\install.ps1 -Detailed` 查看完整参数。安装器支持
+`OSDK_VERSION`、`OSDK_BIN_DIR`、`OSDK_REPOSITORY`、
+`OSDK_DOWNLOAD_BASE_URL` 和 `OSDK_TARGET` 环境变量覆盖。
+
+### 从源码构建
+
+需要 Rust。中国大陆建议使用镜像，避免 `static.rust-lang.org` 访问缓慢：
+
+```bash
+export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
+cargo build --release        # 二进制：target/release/{osdk,osdk-shim}
+```
+
+维护者发布新版本时，需要先更新 `workspace.package.version`，再向 `main` 推送一条
+提交信息明确包含 `[publish]` 的 commit。普通提交不会触发二进制发布 workflow。
+
+## 快速开始
+
+```bash
+osdk install node@20            # 安装，并自动选择最快镜像
+osdk --jobs 4 install node@20 go@1.22 python@3.12
+osdk use -g node@20             # 安装 + 设为全局默认 + 生成 shim
+osdk use node@18                # 固定到当前项目（osdk.toml）
+node --version                  # 通过 shim 执行当前生效版本
+
+# Shell 激活（shim 的替代方案：按目录更新 PATH 与环境变量）
+eval "$(osdk activate bash)"    # 加入 ~/.bashrc；也支持 zsh|fish|powershell
+# 后续移除 hook，并恢复当前 shell 的 PATH/环境变量：
+eval "$(osdk deactivate bash)"
+```
+
+下载会重试瞬时故障，并使用 HTTP `Range` / `If-Range` 安全续传经过验证的部分文件。
+成功联网一次后，可使用 `--offline` 完全从 osdk 缓存解析元数据并重新安装归档。
+
+osdk 会从当前目录向上查找项目版本文件：`osdk.toml`、兼容 asdf 的
+`.tool-versions`，以及生态原生文件（`.nvmrc`、`.node-version`、
+`.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`）。
+
+## 可复现项目与命令执行
+
+把当前项目解析为精确、按平台区分的版本：
+
+```bash
+osdk lock                         # 写入/合并 osdk.lock
+osdk install                      # 使用当前平台对应的 lock
+osdk outdated                     # 对比已安装版本与当前解析结果
+osdk upgrade                      # 安装当前解析版本并刷新 lock
+```
+
+`osdk.lock` 为 Linux、macOS 和 Windows 保存独立区段，其中包含原始请求、精确解析
+版本、backend 参数，以及工具安装后使用的精确 artifact URL、文件名、已验证校验和
+与 Sigstore 认证证据。无参数安装直接使用锁定的 artifact identity，不重新查询上游
+release registry。
+
+lock 中的证据是审计记录，不是绕过信任校验的捷径：启用 attestation 的锁定重装
+仍会用缓存 bundle 重新验证缓存 artifact。显式执行
+`osdk install node@20` 时仍以显式请求为准。
+
+无需修改项目 pin，即可在指定的受管工具环境中运行命令：
+
+```bash
+osdk exec --tool node@20 -- node --version
+osdk exec --tool python@3.12 -- python -c "print('ok')"
+```
+
+生成 Shell 补全：
+
+```bash
+osdk completions bash|zsh|fish|powershell
+```
+
+在用户配置中定义可复用的版本别名：
+
+```bash
+osdk alias set node default 20
+osdk alias set node maintenance default
+osdk alias list node
+osdk use node@maintenance
+osdk alias unset node maintenance
+```
+
+别名可以指向另一个别名；循环引用以及 `latest`、`lts`、`system` 等保留名称会被
+拒绝。工具名别名会规范化，例如 `osdk alias set nodejs default 20` 会把别名保存
+到 `node` 下。
+
+## 下载源与镜像
+
+```bash
+osdk source list node                 # 查看源及固定状态
+osdk source test node                 # 探测速率并输出排名
+osdk source pin node tuna             # 固定使用指定源
+osdk source add node --id mycorp \
+  --download-url https://mirror.corp/node/ \
+  --index-url    https://mirror.corp/node/index.json
+osdk --source official install go@1.22 # 单次覆盖
+```
+
+Go 内置 `go.dev`、阿里云和 `golang.google.cn` 三个来源。
+
+`github:owner/repo` 的 GitHub Releases API 元数据、Release 资产、Raw 文件、校验和/
+签名文件和 attestation bundle 都遵循同一 source 顺序。内置 `ghproxy` 会把这些
+GitHub URL 全部改写到 `https://gh-proxy.com/`。GitHub token 只发送给官方
+`api.github.com`，不会转发给第三方代理。
+
+## 内容去重与缓存
+
+```bash
+osdk doctor                     # 目录、同文件系统检查、链接模式、backend
+osdk prune                      # 清理未被任何安装引用的存储对象
+osdk cache dir                  # 共享缓存和存储目录
+osdk cache env                  # 下游包管理器缓存环境变量
+```
+
+## 语言（i18n）
+
+osdk 支持中文和英文。它会根据 locale 自动选择语言
+（`LC_ALL` / `LC_MESSAGES` / `LANG`，例如 `zh_CN.UTF-8` 选择中文），并本地化
+全部消息、错误和 `-h` / `--help`。覆盖优先级从高到低为：
+
+```bash
+osdk --lang zh install node@20   # 单次命令参数
+export OSDK_LANG=zh              # 环境变量
+# 或在 config.toml 中设置：[settings]\n lang = "zh"
+```
+
+## 目录（可通过环境变量覆盖）
+
+| 用途 | Linux 默认位置 | 环境变量 |
+| --- | --- | --- |
+| 数据（安装） | `~/.local/share/osdk` | `OSDK_DATA_DIR` |
+| CAS 存储 | `<data>/store` | `OSDK_STORE_DIR` |
+| SDK 安装目录 | `<data>/installs` | `OSDK_INSTALL_DIR` |
+| 下载缓存 | `~/.cache/osdk` | `OSDK_CACHE_DIR` |
+| 配置 | `~/.config/osdk/config.toml` | `OSDK_CONFIG_DIR` |
+
+内容存储和安装目录位于同一文件系统时才能使用硬链接；跨文件系统时 osdk 自动回退
+到复制，`osdk doctor` 会给出警告。
+
+## 各 SDK 的获取方式
+
+| SDK | 获取方式 |
+| --- | --- |
+| Node.js | nodejs.org 官方预编译归档，验证 `SHASUMS256` |
+| Go | go.dev/dl JSON 索引，逐文件 SHA-256 |
+| Python | 静态 PBS release 索引 + Astral release 镜像，验证 `SHA256SUMS`，不依赖 GitHub API |
+| Java | Foojay Disco API（默认 Temurin），支持多个发行版 |
+| Rust | 隔离 rustup bootstrap 和 toolchain home，选择镜像并验证 SHA-256 |
+| pnpm | 官方 npm 平台包，验证 npm SRI |
+| Yarn | `yarn` / `@yarnpkg/cli-dist` npm 包，验证 npm SRI |
+| Deno | 官方 `@deno/<platform>` npm 包，验证 npm SRI |
+| Bun | 官方 `@oven/bun-<platform>` npm 包，验证 npm SRI |
+| npm | 随 Node.js 提供 |
+| `github:owner/repo` | 任意 GitHub Release；自动匹配 host asset，支持归档和裸二进制 |
+
+### GitHub Release 工具
+
+安装任意通过 GitHub Releases 发布的工具：
+
+```bash
+osdk use -g github:sharkdp/fd          # 最新 release，自动选择 host asset
+osdk install github:cli/cli@2.62.0     # 指定 tag
+osdk list-remote github:sharkdp/fd     # 可用 release tag
+```
+
+只有通用 `github:owner/repo` backend 需要 GitHub Releases API。设置
+`GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 可提高直连 API 限额。API 元数据、Raw
+文件、Release 资产、校验文件和 attestation bundle 都可通过 gh-proxy 失败转移，
+且 token 不会被转发给代理。
+
+## 离线模式
+
+成功的在线元数据请求和下载归档会按 URL 与工具版本缓存。后续命令可以完全禁止
+网络访问：
+
+```bash
+osdk install bun@1.3.14
+osdk uninstall bun@1.3.14
+osdk --offline install bun@1.3.14
+```
+
+离线缓存缺失会明确失败，不会静默联网。离线模式下也会禁用 source 探测和刷新。
+
+能获得可信 key 时，签名验证默认开启。仅在明确需要时才设置
+`OSDK_VERIFY_SIGNATURES=false`。设置 `OSDK_REQUIRE_CHECKSUMS=true`（或传入
+`--require-checksums`）可拒绝任何既没有上游校验和，也没有 lock/cache receipt
+可验证 SHA-256/SHA-512/BLAKE3 的 artifact。
+
+通用 `github:owner/repo` backend 还支持 GitHub Artifact Attestations：
+
+```bash
+osdk --attestations if-available install github:cli/cli@latest
+osdk --attestations required install github:cli/cli@latest
+```
+
+同一策略也可通过 `settings.attestations` 或
+`OSDK_ATTESTATIONS=off|if-available|required` 配置，默认是 `off`。
+`if-available` 允许 release 没有 attestation，但发现格式错误、身份不匹配或密码学
+验证失败的 bundle 时一定失败；`required` 在没有 bundle 时也会失败。
+
+已验证 bundle 按仓库和 artifact SHA-256 缓存，因此 `--offline` 和锁定重装无需
+信任 lockfile 中的证据，也能重新验证。
+
+验证使用内置 Sigstore public-good trust root，检查 Fulcio certificate chain 和
+SCT、GitHub Actions OIDC issuer 与仓库、artifact signature、DSSE subject digest、
+Rekor body 一致性和 signing time。上游 `sigstore` 0.14 verifier 尚未验证 Rekor
+Merkle inclusion proof 或 Signed Entry Timestamp（SET），不要把该模式视为完整
+transparency-log proof 验证。
+
+## 架构
+
+- `crates/osdk-core`：库，包括 `Backend` trait、统一管线
+  （download → verify → extract → CAS ingest → materialize）、CAS 存储和链接模式、
+  source 选择、配置/目录、shim 和 shell 激活。
+- `crates/osdk-cli`：`osdk` 二进制。
+- `crates/osdk-shim`：轻量启动器；每个 shim 从当前工作目录解析生效版本，并执行
+  对应真实二进制。
+
+## 开发
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets   # CI 使用 -D warnings
+cargo fmt --all --check
+
+# 在 Linux 上交叉验证 Windows：
+rustup target add x86_64-pc-windows-gnu
+sudo apt-get install -y mingw-w64
+cargo clippy --locked --workspace --all-targets \
+  --target x86_64-pc-windows-gnu -- -D warnings
+```
+
+CI（`.github/workflows/ci.yml`）在 Ubuntu、macOS 和 Windows 上运行格式检查、
+Clippy 与测试，并通过 Linux → Windows 全 targets 交叉 Clippy 保护
+`#[cfg(windows)]` 路径（shim `.cmd` / Bash 生成、junction、volume detection）。
+另有 Rust 1.88 job 检查声明的最低 Rust 版本与锁定依赖图。
+
+## 许可证
+
+MIT
