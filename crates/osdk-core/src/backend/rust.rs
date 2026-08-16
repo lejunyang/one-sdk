@@ -372,11 +372,10 @@ impl RustBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(unix)]
     #[tokio::test]
     async fn uninstall_delegates_to_isolated_rustup() {
+        use super::*;
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();

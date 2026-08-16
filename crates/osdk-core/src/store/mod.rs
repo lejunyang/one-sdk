@@ -266,10 +266,8 @@ fn recreate_symlink(target: &Path, dst: &Path) -> Result<()> {
     }
     let _ = std::fs::remove_file(dst);
     // Best effort; may require privilege. Fall back to copying the target file.
-    if std::os::windows::fs::symlink_file(target, dst).is_err() {
-        if target.exists() {
-            std::fs::copy(target, dst).map_err(|e| Error::io(dst, e))?;
-        }
+    if std::os::windows::fs::symlink_file(target, dst).is_err() && target.exists() {
+        std::fs::copy(target, dst).map_err(|e| Error::io(dst, e))?;
     }
     Ok(())
 }

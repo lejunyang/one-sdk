@@ -82,11 +82,11 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[cfg(unix)]
     #[test]
     fn unix_shim_is_symlink() {
+        use super::*;
+
         let td = tempfile::tempdir().unwrap();
         let shims = td.path().join("shims");
         let fake_bin = td.path().join("osdk-shim");
