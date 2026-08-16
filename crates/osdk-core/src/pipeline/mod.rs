@@ -252,12 +252,7 @@ pub async fn run_with_attestation(
     }
 
     // 3. Extract into a scratch dir under the cache tmp.
-    let scratch = ctx.dirs.tmp().join(format!(
-        "{}-{}-{}",
-        plan.tool,
-        plan.version,
-        std::process::id()
-    ));
+    let scratch = scratch_path(ctx.dirs, &plan.tool, &plan.version);
     if scratch.exists() {
         let _ = std::fs::remove_dir_all(&scratch);
     }
@@ -302,6 +297,12 @@ pub async fn run_with_attestation(
     );
 
     Ok(install_dir)
+}
+
+fn scratch_path(dirs: &Dirs, tool: &str, version: &str) -> PathBuf {
+    dirs.tmp()
+        .join(crate::dirs::sanitize_tool_id(tool))
+        .join(format!("{version}-{}", std::process::id()))
 }
 
 fn safe_subdir(root: &std::path::Path, subdir: &std::path::Path) -> Result<PathBuf> {
@@ -599,6 +600,27 @@ fn read_cached_checksum(archive: &std::path::Path) -> Option<Checksum> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_paths_sanitize_namespaced_tool_ids() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            scratch_path(&dirs, "github:example/tool", "1.2.3"),
+            dirs.tmp()
+                .join("github")
+                .join("example")
+                .join("tool")
+                .join(format!("1.2.3-{}", std::process::id()))
+        );
+    }
 
     #[tokio::test]
     async fn offline_install_uses_cached_archive() {

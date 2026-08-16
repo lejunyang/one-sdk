@@ -548,10 +548,12 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
 ubuntu/macos/windows. The Windows runner additionally executes `.cmd`,
 PowerShell, and Git Bash shims, PowerShell activation/deactivation, symlink
 fallbacks, actual NTFS volume detection, stdio/arguments/exit codes, and
-space/Chinese/long paths entirely offline under temporary state directories. A
-dedicated Linux→Windows cross-Clippy guards every `#[cfg(windows)]` target even
-before that runtime check. A separate Rust 1.88 job checks the declared MSRV
-against the locked dependency graph.
+space/Chinese/long paths entirely offline under temporary state directories.
+Namespaced backend IDs such as `github:owner/repo` are also covered so cache,
+lock, install, and extraction scratch paths remain valid on Windows. A dedicated
+Linux→Windows cross-Clippy guards every `#[cfg(windows)]` target even before that
+runtime check. A separate Rust 1.88 job checks the declared MSRV against the
+locked dependency graph.
 
 ## License
 

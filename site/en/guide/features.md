@@ -495,8 +495,10 @@ drift detection.
 The Windows runner adds an offline runtime matrix for `.cmd`, PowerShell, and
 Git Bash wrappers, actual activation/deactivation, symlink permission
 fallbacks, NTFS volume detection, stdio/arguments/exit codes, and paths with
-spaces, Chinese characters, and long segments. Linux cross-Clippy remains a
-required check for every Windows cfg path.
+spaces, Chinese characters, and long segments. Namespaced backend IDs such as
+`github:owner/repo` are covered as well, keeping cache, lock, install, and
+extraction scratch paths valid on Windows. Linux cross-Clippy remains a required
+check for every Windows cfg path.
 
 ## Completions and diagnostics
 

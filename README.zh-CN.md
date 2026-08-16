@@ -510,8 +510,10 @@ CI（`.github/workflows/ci.yml`）在 Ubuntu、macOS 和 Windows 上运行格式
 Clippy 与测试。Windows runner 还会在临时隔离状态下、完全离线地执行 `.cmd`、
 PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、真实 NTFS
 volume detection、stdin/stdout/stderr、参数和退出码，并覆盖空格、中文及长路径。
-Linux → Windows 全 targets 交叉 Clippy 则提前保护所有 `#[cfg(windows)]` 路径。
-另有 Rust 1.88 job 检查声明的最低 Rust 版本与锁定依赖图。
+`github:owner/repo` 等带命名空间的 backend ID 也在覆盖范围内，确保缓存、锁、
+安装和解压临时目录在 Windows 上均为合法路径。Linux → Windows 全 targets 交叉
+Clippy 则提前保护所有 `#[cfg(windows)]` 路径。另有 Rust 1.88 job 检查声明的
+最低 Rust 版本与锁定依赖图。
 
 ## 许可证
 
