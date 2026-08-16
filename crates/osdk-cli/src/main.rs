@@ -113,6 +113,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Untrust { path } => commands::untrust(app, path),
         Command::Node { command } => commands::node(app, command),
         Command::Python { command } => commands::python(app, command),
+        Command::Model { command } => commands::model(app, command).await,
         Command::Rust { command } => commands::rust(app, command),
         Command::Cache { command } => commands::cache(app, command),
         Command::Prune { dry_run } => commands::prune(app, dry_run),

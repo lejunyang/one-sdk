@@ -31,13 +31,35 @@ pub async fn download(
     label: &str,
     show_progress: bool,
 ) -> Result<()> {
+    download_with_headers(
+        client,
+        url,
+        dest,
+        label,
+        show_progress,
+        &reqwest::header::HeaderMap::new(),
+    )
+    .await
+}
+
+/// Download with caller-supplied headers. Sensitive headers are attached only
+/// to the initial request; reqwest's redirect policy removes them when the
+/// redirect crosses hosts.
+pub async fn download_with_headers(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    label: &str,
+    show_progress: bool,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<()> {
     if dest.exists() {
         return Ok(());
     }
     const MAX_ATTEMPTS: u32 = 3;
     let mut last_err: Option<Error> = None;
     for attempt in 1..=MAX_ATTEMPTS {
-        match download_once(client, url, dest, label, show_progress).await {
+        match download_once(client, url, dest, label, show_progress, headers).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 if attempt < MAX_ATTEMPTS && is_transient(&e) {
@@ -90,6 +112,7 @@ async fn download_once(
     dest: &Path,
     label: &str,
     show_progress: bool,
+    headers: &reqwest::header::HeaderMap,
 ) -> Result<()> {
     if let Some(parent) = dest.parent() {
         create_dir_all(parent)?;
@@ -117,7 +140,7 @@ async fn download_once(
         0
     };
 
-    let mut request = client.get(url);
+    let mut request = client.get(url).headers(headers.clone());
     if resume_from > 0 {
         request = request
             .header(RANGE, format!("bytes={resume_from}-"))
@@ -132,6 +155,7 @@ async fn download_once(
         let _ = std::fs::remove_file(&metadata_path);
         resp = client
             .get(url)
+            .headers(headers.clone())
             .send()
             .await
             .map_err(|error| Error::network(url, error))?;

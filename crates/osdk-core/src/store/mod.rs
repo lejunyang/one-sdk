@@ -89,6 +89,34 @@ impl Cas {
         self.ingest_file(src)
     }
 
+    /// Ingest one file without consuming the source cache entry.
+    pub fn ingest_preserve(&self, src: &Path) -> Result<(String, bool, u64)> {
+        let hash = hash_file(src)?;
+        let object = self.object_path(&hash);
+        let size = std::fs::metadata(src)
+            .map_err(|error| Error::io(src, error))?
+            .len();
+        if object.exists() {
+            return Ok((hash, false, size));
+        }
+        if let Some(parent) = object.parent() {
+            create_dir_all(parent)?;
+        }
+        let temporary = object.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::copy(src, &temporary).map_err(|error| Error::io(&temporary, error))?;
+        match std::fs::rename(&temporary, &object) {
+            Ok(()) => Ok((hash, true, size)),
+            Err(_) if object.exists() => {
+                let _ = std::fs::remove_file(&temporary);
+                Ok((hash, false, size))
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                Err(Error::io(&object, error))
+            }
+        }
+    }
+
     /// Materialize one existing CAS object at `destination`.
     pub fn materialize_object(&self, hash: &str, destination: &Path, mode: LinkMode) -> Result<()> {
         let object = self.object_path(hash);

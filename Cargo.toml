@@ -59,6 +59,7 @@ libc = "0.2"
 # versions
 semver = "1"
 regex = "1"
+globset = "0.4"
 # errors / logging
 thiserror = "1"
 anyhow = "1"

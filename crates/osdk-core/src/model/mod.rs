@@ -13,6 +13,9 @@ use crate::store::link::LinkMode;
 use crate::store::manifest::{FileEntry, Manifest};
 use crate::store::Cas;
 
+pub mod provider;
+pub mod pull;
+
 const MODEL_MANIFEST_FILE: &str = ".osdk-model.json";
 const CURRENT_FILE: &str = "current.json";
 const COMPLETE_MARKER: &str = ".osdk-complete";
@@ -70,7 +73,6 @@ impl ModelRef {
         let provider = provider.parse()?;
         let (repository, revision) = rest
             .rsplit_once('@')
-            .map(|(repository, revision)| (repository, revision))
             .unwrap_or((rest, default_revision(provider)));
         validate_repository(repository)?;
         if revision.trim().is_empty() {
@@ -169,18 +171,22 @@ impl ModelStore {
     pub fn publish(
         &self,
         identity: SnapshotIdentity,
-        files: Vec<DownloadedModelFile>,
+        mut files: Vec<DownloadedModelFile>,
     ) -> Result<InstalledModel> {
         validate_model_name(&identity.name)?;
         validate_repository(&identity.repository)?;
         if files.is_empty() {
             return Err(Error::other("model snapshot contains no files"));
         }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        if files.windows(2).any(|pair| pair[0].path == pair[1].path) {
+            return Err(Error::other("model snapshot contains duplicate file paths"));
+        }
 
         let model_root = self.model_root(&identity.name);
         let snapshots = model_root.join("snapshots");
         create_dir_all(&snapshots)?;
-        let snapshot = snapshot_key(&identity);
+        let snapshot = snapshot_key(&identity, &files);
         let destination = snapshots.join(&snapshot);
         let lock_path = model_root.join(".locks").join(format!("{snapshot}.lock"));
         let _lock = FileLock::acquire(&lock_path)?;
@@ -222,7 +228,7 @@ impl ModelStore {
                         &file.path,
                     )?;
                 }
-                let (cas_hash, _, _) = self.cas.ingest(&file.source)?;
+                let (cas_hash, _, _) = self.cas.ingest_preserve(&file.source)?;
                 let destination_file = temporary.join(&relative);
                 self.cas
                     .materialize_object(&cas_hash, &destination_file, self.link_mode)?;
@@ -429,15 +435,29 @@ pub fn safe_relative_path(value: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn snapshot_key(identity: &SnapshotIdentity) -> String {
-    let value = format!(
-        "{}\0{}\0{}\0{}",
-        identity.provider,
-        identity.repository,
-        identity.revision,
-        identity.variant.as_deref().unwrap_or_default()
+fn snapshot_key(identity: &SnapshotIdentity, files: &[DownloadedModelFile]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(
+        format!(
+            "{}\0{}\0{}\0{}",
+            identity.provider,
+            identity.repository,
+            identity.revision,
+            identity.variant.as_deref().unwrap_or_default()
+        )
+        .as_bytes(),
     );
-    blake3::hash(value.as_bytes()).to_hex()[..24].to_string()
+    for file in files {
+        hasher.update(file.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.size.to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.sha256.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.etag.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex()[..24].to_string()
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -559,5 +579,51 @@ mod tests {
             .gc_roots(&[&store.dirs.installs, &store.dirs.models()])
             .unwrap();
         assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn file_selection_is_part_of_snapshot_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = temporary.path().join("first.bin");
+        let second = temporary.path().join("second.bin");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let store = store(temporary.path());
+        let identity = SnapshotIdentity {
+            name: "fixture".into(),
+            provider: ProviderId::HuggingFace,
+            repository: "owner/repo".into(),
+            requested_revision: "main".into(),
+            revision: "abc123".into(),
+            endpoint: "https://example.test".into(),
+            variant: None,
+        };
+        let first_snapshot = store
+            .publish(
+                identity.clone(),
+                vec![DownloadedModelFile {
+                    path: "first.bin".into(),
+                    source: first,
+                    size: 5,
+                    sha256: None,
+                    etag: None,
+                }],
+            )
+            .unwrap();
+        let second_snapshot = store
+            .publish(
+                identity,
+                vec![DownloadedModelFile {
+                    path: "second.bin".into(),
+                    source: second,
+                    size: 6,
+                    sha256: None,
+                    etag: None,
+                }],
+            )
+            .unwrap();
+        assert_ne!(first_snapshot.path, second_snapshot.path);
+        assert!(second_snapshot.path.join("second.bin").is_file());
+        assert!(!second_snapshot.path.join("first.bin").exists());
     }
 }

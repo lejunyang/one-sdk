@@ -44,6 +44,42 @@ go = "1.22"
 osdk walks upward from the current directory and uses the nearest project
 configuration, so subdirectories can inherit repository-wide versions.
 
+## Hugging Face model snapshots
+
+Models are managed as multi-file repository snapshots instead of SDK archives:
+
+```bash
+export HF_TOKEN=... # optional for private or gated models
+osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors' \
+  --exclude 'original/*' --variant safetensors-fp16
+osdk model list
+osdk model path qwen25
+osdk model verify qwen25
+osdk model remove qwen25
+```
+
+`pull` resolves a branch or tag to an immutable commit, then downloads files
+concurrently with Range/ETag resume and SHA-256 verification. Hugging Face LFS
+SHA-256 is used when metadata provides it; otherwise osdk computes a local
+SHA-256. Files enter the same CAS as SDKs and are atomically materialized as a
+snapshot. `prune` scans both SDK and model manifests, so live model objects are
+not removed.
+
+By default, a top-level `[models]` entry is added to the nearest project
+`osdk.lock`, recording the provider, repository, requested and immutable
+revision, endpoint, variant, and every file path, size, and SHA-256. Tokens and
+short-lived signed download URLs are never persisted. Pass `--no-lock` when a
+lock update is not wanted. `--offline` can rebuild a removed snapshot from
+cached metadata and files.
+
+Authentication accepts `OSDK_HF_TOKEN`, `HF_TOKEN`, and
+`HUGGING_FACE_HUB_TOKEN`. Authorization is attached only to requests for the
+configured Hugging Face endpoint and is not proactively forwarded to another
+host. Use `--endpoint` or the current process's `HF_ENDPOINT` for a custom
+endpoint.
+
 ### Node project versions, architecture, and Corepack
 
 Node also reads `package.json#engines.node` and `devEngines.runtime`, selecting

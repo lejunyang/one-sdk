@@ -229,6 +229,12 @@ pub enum Command {
         command: PythonCommand,
     },
 
+    /// Manage local large-model snapshots.
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+
     /// Manage Rust components, targets, status, overrides, and linked toolchains.
     Rust {
         #[command(subcommand)]
@@ -329,6 +335,40 @@ pub enum PythonCommand {
         /// Optional Python request, e.g. `pypy-3.11` or `3.14+freethreaded`.
         request: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelCommand {
+    /// Resolve and download an immutable model snapshot.
+    Pull {
+        /// Local logical name for the model.
+        name: String,
+        /// Provider reference, e.g. hf:Qwen/Qwen2.5-7B-Instruct@main.
+        reference: String,
+        /// Override the provider endpoint.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Include files matching a glob (repeatable).
+        #[arg(long)]
+        include: Vec<String>,
+        /// Exclude files matching a glob (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Optional format or quantization label.
+        #[arg(long)]
+        variant: Option<String>,
+        /// Do not update the nearest project osdk.lock.
+        #[arg(long)]
+        no_lock: bool,
+    },
+    /// List locally materialized model snapshots.
+    List,
+    /// Print the current local snapshot path.
+    Path { name: String },
+    /// Verify all files in a local snapshot.
+    Verify { name: String },
+    /// Remove all local snapshots for a logical model name.
+    Remove { name: String },
 }
 
 #[derive(Debug, Subcommand)]

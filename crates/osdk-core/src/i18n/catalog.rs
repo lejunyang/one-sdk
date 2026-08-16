@@ -817,6 +817,85 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("Manage Python-specific workflows", "管理 Python 专属工作流"),
     );
     m.insert(
+        "help.model.about",
+        (
+            "Manage immutable local large-model snapshots",
+            "管理不可变的本地大模型快照",
+        ),
+    );
+    m.insert(
+        "help.model.pull.about",
+        (
+            "Resolve and download an immutable model snapshot",
+            "解析并下载不可变模型快照",
+        ),
+    );
+    m.insert(
+        "help.model.pull.arg.name",
+        ("Local logical model name", "本地逻辑模型名称"),
+    );
+    m.insert(
+        "help.model.pull.arg.reference",
+        (
+            "Provider reference such as hf:Qwen/Qwen2.5-7B-Instruct@main",
+            "模型源引用，例如 hf:Qwen/Qwen2.5-7B-Instruct@main",
+        ),
+    );
+    m.insert(
+        "help.model.pull.flag.endpoint",
+        ("Override the provider endpoint", "覆盖模型源 endpoint"),
+    );
+    m.insert(
+        "help.model.pull.flag.include",
+        (
+            "Include files matching a glob (repeatable)",
+            "包含匹配 glob 的文件（可重复）",
+        ),
+    );
+    m.insert(
+        "help.model.pull.flag.exclude",
+        (
+            "Exclude files matching a glob (repeatable)",
+            "排除匹配 glob 的文件（可重复）",
+        ),
+    );
+    m.insert(
+        "help.model.pull.flag.variant",
+        (
+            "Optional format or quantization label",
+            "可选的格式或量化变体标签",
+        ),
+    );
+    m.insert(
+        "help.model.pull.flag.no_lock",
+        (
+            "Do not update the nearest project osdk.lock",
+            "不更新最近的项目 osdk.lock",
+        ),
+    );
+    m.insert(
+        "help.model.list.about",
+        ("List local model snapshots", "列出本地模型快照"),
+    );
+    m.insert(
+        "help.model.path.about",
+        ("Print a model snapshot path", "打印模型快照路径"),
+    );
+    m.insert(
+        "help.model.verify.about",
+        (
+            "Verify every file in a model snapshot",
+            "验证模型快照中的每个文件",
+        ),
+    );
+    m.insert(
+        "help.model.remove.about",
+        (
+            "Remove local snapshots for a model",
+            "移除某个模型的本地快照",
+        ),
+    );
+    m.insert(
         "help.python.find.about",
         (
             "Find managed, PATH, and system Python interpreters",

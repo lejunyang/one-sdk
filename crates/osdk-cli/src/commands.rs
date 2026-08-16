@@ -9,8 +9,8 @@ use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
 use crate::cli::{
-    AliasCommand, ConfigCommand, NodeCommand, PythonCommand, RustCommand, RustItemCommand,
-    RustOverrideCommand, RustToolchainCommand, SourceCommand, TrustCommand,
+    AliasCommand, ConfigCommand, ModelCommand, NodeCommand, PythonCommand, RustCommand,
+    RustItemCommand, RustOverrideCommand, RustToolchainCommand, SourceCommand, TrustCommand,
 };
 
 /// Apply a one-shot `--source` override into the config for this run.
@@ -913,6 +913,109 @@ pub fn python(app: &App, command: PythonCommand) -> Result<()> {
     match command {
         PythonCommand::Find { request } => find_python(app, request.as_deref()),
     }
+}
+
+pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
+    let store = osdk_core::model::ModelStore::new(
+        app.ctx.dirs.clone(),
+        app.ctx.cas.clone(),
+        app.ctx.config.settings.link_mode,
+    );
+    match command {
+        ModelCommand::Pull {
+            name,
+            reference,
+            endpoint,
+            include,
+            exclude,
+            variant,
+            no_lock,
+        } => {
+            let reference = osdk_core::model::ModelRef::parse(&reference)?;
+            let endpoint = endpoint
+                .or_else(|| match reference.provider {
+                    osdk_core::model::ProviderId::HuggingFace => std::env::var("HF_ENDPOINT").ok(),
+                    osdk_core::model::ProviderId::ModelScope => None,
+                })
+                .unwrap_or_else(|| match reference.provider {
+                    osdk_core::model::ProviderId::HuggingFace => {
+                        "https://huggingface.co".to_string()
+                    }
+                    osdk_core::model::ProviderId::ModelScope => "https://modelscope.cn".to_string(),
+                });
+            let provider: Box<dyn osdk_core::model::provider::ModelProvider> =
+                match reference.provider {
+                    osdk_core::model::ProviderId::HuggingFace => {
+                        Box::new(osdk_core::model::provider::huggingface::HuggingFace::default())
+                    }
+                    osdk_core::model::ProviderId::ModelScope => {
+                        return Err(anyhow!("ModelScope provider is not implemented yet"))
+                    }
+                };
+            let installed = osdk_core::model::pull::pull(
+                &app.ctx,
+                provider.as_ref(),
+                &name,
+                &reference,
+                &endpoint,
+                &osdk_core::model::pull::PullOptions {
+                    include,
+                    exclude,
+                    variant,
+                },
+            )
+            .await?;
+            if !no_lock {
+                let cwd = std::env::current_dir()?;
+                let path = project_lock_path(app, &cwd);
+                crate::lockfile::merge_model(&path, &installed.manifest)?;
+                println!("updated {}", path.display());
+            }
+            println!(
+                "{} {}@{} -> {}",
+                installed.manifest.name,
+                installed.manifest.repository,
+                installed.manifest.revision,
+                installed.path.display()
+            );
+        }
+        ModelCommand::List => {
+            for installed in store.list()? {
+                println!(
+                    "{}  {}:{}@{}  {}",
+                    installed.manifest.name,
+                    installed.manifest.provider,
+                    installed.manifest.repository,
+                    installed.manifest.revision,
+                    installed.path.display()
+                );
+            }
+        }
+        ModelCommand::Path { name } => println!("{}", store.current(&name)?.path.display()),
+        ModelCommand::Verify { name } => {
+            let manifest = store.verify(&name)?;
+            println!(
+                "verified {}: {} file(s), revision {}",
+                manifest.name,
+                manifest.files.len(),
+                manifest.revision
+            );
+        }
+        ModelCommand::Remove { name } => {
+            if store.remove(&name)? {
+                let models = app.ctx.dirs.models();
+                let (removed, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+                println!(
+                    "removed model {name}; pruned {} object(s), {} freed",
+                    removed,
+                    human_bytes(bytes)
+                );
+            } else {
+                println!("model {name} is not installed");
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn rust(app: &App, command: RustCommand) -> Result<()> {

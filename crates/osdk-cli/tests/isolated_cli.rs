@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::{io::Read, io::Write, net::TcpListener};
 
 fn osdk() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_osdk"))
@@ -109,6 +110,82 @@ fn attestation_policy_cli_override_is_reported() {
     assert!(String::from_utf8(output.stdout)
         .unwrap()
         .contains("attestations = required"));
+}
+
+#[test]
+fn huggingface_model_pull_materializes_and_locks_snapshot() {
+    let payload = br#"{"model":"fixture"}"#.to_vec();
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_payload = payload.clone();
+    let server = std::thread::spawn(move || {
+        for request_number in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            if request_number == 0 {
+                let body = format!(
+                    r#"{{"sha":"abc123","siblings":[{{"rfilename":"config.json","lfs":{{"sha256":"{digest}","size":{}}}}}]}}"#,
+                    server_payload.len()
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .unwrap();
+                stream.write_all(&server_payload).unwrap();
+            }
+        }
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let endpoint = format!("http://{address}");
+    let output = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "pull",
+            "fixture",
+            "hf:owner/repo@main",
+            "--endpoint",
+            &endpoint,
+        ],
+    );
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
+    assert!(path.status.success());
+    let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
+    assert_eq!(
+        std::fs::read(snapshot.join("config.json")).unwrap(),
+        payload
+    );
+    let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
+    assert!(lock.contains("[models.fixture]"));
+    assert!(lock.contains("revision = \"abc123\""));
+    assert!(lock.contains("sha256 ="));
 }
 
 #[test]

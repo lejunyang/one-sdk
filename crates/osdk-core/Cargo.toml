@@ -40,6 +40,7 @@ walkdir.workspace = true
 windows-sys.workspace = true
 semver.workspace = true
 regex.workspace = true
+globset.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

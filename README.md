@@ -21,6 +21,10 @@ managers (nvm/fnm/uv/sdkman/rustup) don't do together:
    official source plus authoritative mirrors; `osdk` probes them and uses the
    fastest, with failover on both metadata and downloads. You can add custom
    sources or pin one.
+4. **Immutable model snapshots.** Hugging Face repositories can be resolved to
+   an exact commit, downloaded with file-level resume and SHA-256 verification,
+   deduplicated in the same CAS, and recorded independently under `[models]` in
+   `osdk.lock`.
 
 ## Install
 
@@ -84,6 +88,12 @@ node --version                  # runs the active version via shim
 eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
 # later, remove the hook and restore PATH/env in the current shell:
 eval "$(osdk deactivate bash)"
+
+# immutable Hugging Face model snapshot
+osdk model pull qwen25 \
+  hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors'
+osdk model path qwen25
 ```
 
 PowerShell activation guards its command-lookup callback against re-entry.
@@ -100,6 +110,34 @@ Project version files are honored (walk-up): `osdk.toml`, `.tool-versions`
 reads `package.json#engines.node` and `devEngines.runtime` as npm semver ranges.
 Priority is global across the walk-up tree: `osdk.toml` > `.tool-versions` >
 `.nvmrc` > `.node-version` > `package.json` > user-global config.
+
+## Model snapshots
+
+`osdk model pull` treats a model as a multi-file repository snapshot rather
+than an SDK archive:
+
+```bash
+export HF_TOKEN=... # optional for private or gated repositories
+osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model list
+osdk model verify qwen25
+osdk model path qwen25
+osdk model remove qwen25
+```
+
+The requested branch or tag is resolved to an immutable commit. Each selected
+file is resumably cached, SHA-256 verified (using the upstream LFS digest when
+available, otherwise a locally computed digest), ingested into the shared CAS,
+and materialized atomically. The exact repository, commit, endpoint, variant,
+file size, and SHA-256 are written to the top-level `[models]` section in
+`osdk.lock`; short-lived signed download URLs and tokens are never persisted.
+
+Use repeatable `--include` and `--exclude` globs to avoid downloading formats
+you do not need, and `--variant` to label formats or quantizations such as
+`safetensors-fp16`. `--offline` rebuilds a removed snapshot from cached metadata
+and files without network access. `OSDK_HF_TOKEN`, `HF_TOKEN`, and
+`HUGGING_FACE_HUB_TOKEN` are accepted for authentication; authorization is
+attached only to requests for the configured Hugging Face endpoint.
 
 ## Node workflows
 

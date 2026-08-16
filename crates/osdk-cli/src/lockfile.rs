@@ -14,6 +14,8 @@ pub struct Lockfile {
     pub schema: u32,
     #[serde(default)]
     pub platforms: BTreeMap<String, PlatformLock>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, LockedModel>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +46,25 @@ pub struct LockedArtifact {
     pub evidence: Vec<osdk_core::verification::VerificationEvidence>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedModel {
+    pub provider: osdk_core::model::ProviderId,
+    pub repository: String,
+    pub requested_revision: String,
+    pub revision: String,
+    pub endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    pub files: Vec<LockedModelFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedModelFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 fn schema_version() -> u32 {
     1
 }
@@ -53,6 +74,7 @@ impl Default for Lockfile {
         Lockfile {
             schema: schema_version(),
             platforms: BTreeMap::new(),
+            models: BTreeMap::new(),
         }
     }
 }
@@ -183,6 +205,7 @@ pub fn merge_resolved(
         Lockfile {
             schema: schema_version(),
             platforms: BTreeMap::new(),
+            models: BTreeMap::new(),
         }
     };
     let platform_lock = lockfile
@@ -235,6 +258,39 @@ pub fn merge_resolved(
     save(path, &lockfile)
 }
 
+pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -> Result<()> {
+    let mut lockfile = if path.is_file() {
+        load(path)?
+    } else {
+        Lockfile::default()
+    };
+    lockfile.models.insert(
+        manifest.name.clone(),
+        LockedModel {
+            provider: manifest.provider,
+            repository: manifest.repository.clone(),
+            requested_revision: manifest.requested_revision.clone(),
+            revision: manifest.revision.clone(),
+            endpoint: manifest.endpoint.clone(),
+            variant: manifest.variant.clone(),
+            files: manifest
+                .files
+                .iter()
+                .map(|file| {
+                    Ok(LockedModelFile {
+                        path: file.path.clone(),
+                        size: file.size,
+                        sha256: file.sha256.clone().ok_or_else(|| {
+                            anyhow::anyhow!("model lock requires SHA-256 for {}", file.path)
+                        })?,
+                    })
+                })
+                .collect::<Result<_>>()?,
+        },
+    );
+    save(path, &lockfile)
+}
+
 fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     options
         .iter()
@@ -274,6 +330,7 @@ mod tests {
         let mut initial = Lockfile {
             schema: 1,
             platforms: BTreeMap::new(),
+            models: BTreeMap::new(),
         };
         initial.platforms.insert(
             "windows-x64".into(),
@@ -311,6 +368,46 @@ mod tests {
             lockfile.platforms["windows-x64"].tools["node"].version,
             "20.19.0"
         );
+    }
+
+    #[test]
+    fn model_lock_preserves_platforms_and_records_file_digests() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        merge_resolved(
+            &path,
+            linux(),
+            &dirs,
+            &[(
+                ToolRequest::parse("node@20").unwrap(),
+                ToolVersion::new("node", "20.20.0"),
+            )],
+        )
+        .unwrap();
+        let manifest = osdk_core::model::SnapshotManifest {
+            schema: 1,
+            name: "qwen".into(),
+            provider: osdk_core::model::ProviderId::HuggingFace,
+            repository: "Qwen/Qwen2.5-7B-Instruct".into(),
+            requested_revision: "main".into(),
+            revision: "abc123".into(),
+            endpoint: "https://huggingface.co".into(),
+            variant: Some("safetensors".into()),
+            files: vec![osdk_core::model::ModelFile {
+                path: "config.json".into(),
+                size: 10,
+                cas_hash: "blake3".into(),
+                sha256: Some("sha256".into()),
+                etag: None,
+            }],
+            created_at: 0,
+        };
+        merge_model(&path, &manifest).unwrap();
+        let lock = load(&path).unwrap();
+        assert!(lock.platforms["linux-x64"].tools.contains_key("node"));
+        assert_eq!(lock.models["qwen"].revision, "abc123");
+        assert_eq!(lock.models["qwen"].files[0].sha256, "sha256");
     }
 
     #[test]

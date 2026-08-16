@@ -42,6 +42,36 @@ go = "1.22"
 
 osdk 从当前目录向上查找最近的配置，因此同一仓库的子目录可以继承工具版本。
 
+## Hugging Face 模型快照
+
+模型按多文件仓库快照管理，不会套用 SDK 的单归档安装语义：
+
+```bash
+export HF_TOKEN=... # 私有或 gated 模型可选
+osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors' \
+  --exclude 'original/*' --variant safetensors-fp16
+osdk model list
+osdk model path qwen25
+osdk model verify qwen25
+osdk model remove qwen25
+```
+
+`pull` 会把 branch/tag 解析为不可变 commit，再按文件执行并发下载、Range/ETag
+续传和 SHA-256 验证。若 Hugging Face metadata 提供 LFS SHA-256，则使用上游
+digest；否则计算本地 SHA-256。文件进入与 SDK 共用的 CAS，并以原子快照形式
+物化。`prune` 会同时扫描 SDK 与模型 manifest，不会误删模型仍在引用的对象。
+
+默认会在最近项目的 `osdk.lock` 顶层 `[models]` 记录 provider、repository、
+请求 revision、不可变 revision、endpoint、variant，以及每个文件的路径、大小与
+SHA-256。不会持久化 token 或短期签名下载 URL；不需要 lock 时可传 `--no-lock`。
+`--offline` 可以从已缓存 metadata 与文件重建已删除快照。
+
+认证变量支持 `OSDK_HF_TOKEN`、`HF_TOKEN` 和 `HUGGING_FACE_HUB_TOKEN`。
+Authorization 只附加到配置的 Hugging Face endpoint 请求，不会主动转发给其他
+host。自定义 endpoint 使用 `--endpoint`，或当前进程的 `HF_ENDPOINT`。
+
 ### Node 项目版本、架构与 Corepack
 
 Node 还会读取 `package.json#engines.node` 和 `devEngines.runtime`，并按 npm

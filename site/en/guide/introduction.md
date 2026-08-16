@@ -12,7 +12,7 @@ toolchains at the same time. Each ecosystem brings a different version manager,
 mirror setup, cache location, and activation mechanism. The result is repeated
 downloads, wasted disk space, and environments that are difficult to reproduce.
 
-osdk focuses on three problems:
+osdk focuses on four problems:
 
 1. **One interface:** install, switch, lock, upgrade, remove, and execute tools
    with consistent commands.
@@ -20,6 +20,8 @@ osdk focuses on three problems:
    content-addressed store.
 3. **Speed with trust:** automatically choose fast sources while retaining
    checksum, signature, and optional GitHub Artifact Attestation verification.
+4. **Unified model assets:** resolve Hugging Face repositories into immutable,
+   file-verified, cached, deduplicated, and locked snapshots.
 
 ## Supported platforms and tools
 
@@ -40,6 +42,7 @@ backends:
 | Deno | Official npm platform package |
 | Bun | Official npm platform package |
 | GitHub Release | Generic `github:owner/repo` backend |
+| Hugging Face models | Immutable commits, per-file SHA-256, shared CAS, and `[models]` locks |
 
 ## How it works
 

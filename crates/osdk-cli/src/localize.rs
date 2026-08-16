@@ -131,6 +131,23 @@ fn localize_subcommands(cmd: Command) -> Command {
                 .mut_arg("request", |a| a.help(h("help.python.find.arg.request")))
         })
     })
+    .mut_subcommand("model", |c| {
+        c.about(h("help.model.about"))
+            .mut_subcommand("pull", |s| {
+                s.about(h("help.model.pull.about"))
+                    .mut_arg("name", |a| a.help(h("help.model.pull.arg.name")))
+                    .mut_arg("reference", |a| a.help(h("help.model.pull.arg.reference")))
+                    .mut_arg("endpoint", |a| a.help(h("help.model.pull.flag.endpoint")))
+                    .mut_arg("include", |a| a.help(h("help.model.pull.flag.include")))
+                    .mut_arg("exclude", |a| a.help(h("help.model.pull.flag.exclude")))
+                    .mut_arg("variant", |a| a.help(h("help.model.pull.flag.variant")))
+                    .mut_arg("no_lock", |a| a.help(h("help.model.pull.flag.no_lock")))
+            })
+            .mut_subcommand("list", |s| s.about(h("help.model.list.about")))
+            .mut_subcommand("path", |s| s.about(h("help.model.path.about")))
+            .mut_subcommand("verify", |s| s.about(h("help.model.verify.about")))
+            .mut_subcommand("remove", |s| s.about(h("help.model.remove.about")))
+    })
     .mut_subcommand("rust", |c| c.about(h("help.rust.about")))
     .mut_subcommand("cache", |c| {
         c.about(h("help.cache.about"))

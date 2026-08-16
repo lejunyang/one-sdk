@@ -8,7 +8,7 @@
 osdk 是一个跨平台（Windows / macOS / Linux）CLI，用统一方式管理多种语言 SDK
 及其版本：**Node.js、npm、pnpm、Yarn、Java、Maven、Gradle、Kotlin、Python、
 Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/rustup）
-通常无法同时提供的三类能力组合在一起：
+通常无法同时提供的四类能力组合在一起：
 
 1. **跨版本内容去重。** 基于 BLAKE3 的内容寻址存储只保留一份相同文件；各安装
    版本通过硬链接、reflink 或复制从存储中物化。两个 Node.js 次版本若共享文件，
@@ -18,6 +18,8 @@ Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/ru
 3. **多源与最快镜像自动选择。** 每个 SDK 都提供官方源和可用镜像；osdk 会探测
    速度并选择最快来源，元数据或下载失败时自动切换。也支持添加自定义源或固定
    指定来源。
+4. **不可变模型快照。** Hugging Face 仓库会解析为精确 commit，按文件断点续传
+   与验证 SHA-256，复用同一个 CAS，并在 `osdk.lock` 的独立 `[models]` 中记录。
 
 ## 安装
 
@@ -94,6 +96,12 @@ node --version                  # 通过 shim 执行当前生效版本
 eval "$(osdk activate bash)"    # 加入 ~/.bashrc；也支持 zsh|fish|powershell
 # 后续移除 hook，并恢复当前 shell 的 PATH/环境变量：
 eval "$(osdk deactivate bash)"
+
+# 不可变 Hugging Face 模型快照
+osdk model pull qwen25 \
+  hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors'
+osdk model path qwen25
 ```
 
 PowerShell 激活会防止命令查找回调重入。Windows shim 也会显式通过 `ComSpec`
@@ -108,6 +116,28 @@ osdk 会从当前目录向上查找项目版本文件：`osdk.toml`、兼容 asd
 把 `package.json#engines.node` 和 `devEngines.runtime` 解析为 npm semver range。
 跨目录统一优先级为：`osdk.toml` > `.tool-versions` > `.nvmrc` >
 `.node-version` > `package.json` > 用户全局配置。
+
+## 模型快照
+
+`osdk model pull` 把模型作为多文件仓库快照管理，而不是 SDK 单归档：
+
+```bash
+export HF_TOKEN=... # 私有或 gated 仓库可选
+osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model list
+osdk model verify qwen25
+osdk model path qwen25
+osdk model remove qwen25
+```
+
+branch/tag 会先解析为不可变 commit。每个选中文件支持断点续传和 SHA-256 验证，
+随后进入共享 CAS 并原子物化。精确仓库、commit、endpoint、variant、文件大小和
+SHA-256 会写入 `osdk.lock` 顶层 `[models]`；token 和短期签名下载 URL 不会落盘。
+可重复使用 `--include` / `--exclude` 选择文件，使用 `--variant` 标记格式或量化，
+并用 `--offline` 从已缓存 metadata 与文件重建快照。
+
+认证支持 `OSDK_HF_TOKEN`、`HF_TOKEN` 和 `HUGGING_FACE_HUB_TOKEN`；
+Authorization 只附加到配置的 Hugging Face endpoint 请求。
 
 ## Node 工作流
 
