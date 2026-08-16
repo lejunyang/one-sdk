@@ -457,7 +457,9 @@ shim I/O/退出码/递归/命令冲突。公网 live smoke 只用于发现上游
 
 Windows runner 还会离线执行 `.cmd`、PowerShell 和 Git Bash wrapper、真实
 activation/deactivation、symlink 权限回退、NTFS volume detection、
-stdin/stdout/stderr、参数、退出码，以及含空格、中文和长路径的场景。
+stdin/stdout/stderr、参数、退出码，以及含空格、中文的路径。受管 SDK 状态目录
+会超过传统 260 字符限制，而可执行文件和工作目录保持在 Shell 自身的进程启动
+长度限制内。
 `github:owner/repo` 等带命名空间的 backend ID 也在覆盖范围内，确保缓存、锁、
 安装和解压临时目录在 Windows 上均为合法路径。Linux job 会交叉 lint 所有
 Windows cfg 路径，并通过固定版本且校验 SHA-256 的 Wine 执行完整 Windows GNU

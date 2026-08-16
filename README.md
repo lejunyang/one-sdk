@@ -551,7 +551,9 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
 ubuntu/macos/windows. The Windows runner additionally executes `.cmd`,
 PowerShell, and Git Bash shims, PowerShell activation/deactivation, symlink
 fallbacks, actual NTFS volume detection, stdio/arguments/exit codes, and
-space/Chinese/long paths entirely offline under temporary state directories.
+space/Chinese paths plus managed SDK state beyond the legacy 260-character
+limit, entirely offline under temporary directories. The executable and working
+directory stay below the shell's own process-launch limit.
 Namespaced backend IDs such as `github:owner/repo` are also covered so cache,
 lock, install, and extraction scratch paths remain valid on Windows. A dedicated
 Linux job cross-lints every `#[cfg(windows)]` target and executes the full

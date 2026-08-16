@@ -495,7 +495,9 @@ drift detection.
 The Windows runner adds an offline runtime matrix for `.cmd`, PowerShell, and
 Git Bash wrappers, actual activation/deactivation, symlink permission
 fallbacks, NTFS volume detection, stdio/arguments/exit codes, and paths with
-spaces, Chinese characters, and long segments. Namespaced backend IDs such as
+spaces and Chinese characters. Managed SDK state also lives beyond the legacy
+260-character limit while the executable and working directory remain within
+the shell's process-launch limit. Namespaced backend IDs such as
 `github:owner/repo` are covered as well, keeping cache, lock, install, and
 extraction scratch paths valid on Windows. A Linux job cross-lints every Windows
 cfg path and runs the complete Windows GNU workspace through a SHA-256-pinned

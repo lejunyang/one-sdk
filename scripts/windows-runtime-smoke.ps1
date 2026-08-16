@@ -38,32 +38,33 @@ $sourceShim = Join-Path $bin "osdk-shim.exe"
 Assert-True (Test-Path -LiteralPath $sourceOsdk -PathType Leaf) "missing $sourceOsdk"
 Assert-True (Test-Path -LiteralPath $sourceShim -PathType Leaf) "missing $sourceShim"
 
-$longSegments = 1..8 | ForEach-Object { "segment-$($_)-abcdefghijklmnopqrstuvwxyz" }
 $root = Join-Path ([IO.Path]::GetTempPath()) "one sdk 中文 runtime"
+$longSegments = 1..8 | ForEach-Object { "segment-$($_)-abcdefghijklmnopqrstuvwxyz" }
+$longStateRoot = $root
 foreach ($segment in $longSegments) {
-    $root = Join-Path $root $segment
+    $longStateRoot = Join-Path $longStateRoot $segment
 }
-Assert-True ($root.Length -gt 260) "runtime fixture path does not exceed legacy MAX_PATH"
+Assert-True ($longStateRoot.Length -gt 260) "runtime state path does not exceed legacy MAX_PATH"
 
 try {
     $programDir = Join-Path $root "program files 中文"
     $project = Join-Path $root "project with spaces 中文"
-    $install = Join-Path $root "installed SDKs"
+    $install = Join-Path $longStateRoot "installed SDKs"
     $data = Join-Path $root "data"
     $runtime = Join-Path $install "node\1.0.0"
     $stateDirectories = @{
-        HOME = Join-Path $root "home"
-        USERPROFILE = Join-Path $root "home"
+        HOME = Join-Path $longStateRoot "home"
+        USERPROFILE = Join-Path $longStateRoot "home"
         OSDK_DATA_DIR = $data
-        OSDK_CACHE_DIR = Join-Path $root "cache"
-        OSDK_CONFIG_DIR = Join-Path $root "config"
-        OSDK_STORE_DIR = Join-Path $root "store"
+        OSDK_CACHE_DIR = Join-Path $longStateRoot "cache"
+        OSDK_CONFIG_DIR = Join-Path $longStateRoot "config"
+        OSDK_STORE_DIR = Join-Path $longStateRoot "store"
         OSDK_INSTALL_DIR = $install
-        CARGO_HOME = Join-Path $root "cargo home"
-        RUSTUP_HOME = Join-Path $root "rustup home"
-        CARGO_TARGET_DIR = Join-Path $root "build output"
-        TEMP = Join-Path $root "temp"
-        TMP = Join-Path $root "temp"
+        CARGO_HOME = Join-Path $longStateRoot "cargo home"
+        RUSTUP_HOME = Join-Path $longStateRoot "rustup home"
+        CARGO_TARGET_DIR = Join-Path $longStateRoot "build output"
+        TEMP = Join-Path $longStateRoot "temp"
+        TMP = Join-Path $longStateRoot "temp"
     }
     foreach ($entry in $stateDirectories.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
@@ -160,7 +161,7 @@ exit /b 23
         Pop-Location
     }
 
-    Write-Host "Windows runtime smoke passed under $root"
+    Write-Host "Windows runtime smoke passed with SDK state under $longStateRoot"
 }
 finally {
     if ($ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction) {
