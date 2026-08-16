@@ -459,8 +459,9 @@ Windows runner 还会离线执行 `.cmd`、PowerShell 和 Git Bash wrapper、真
 activation/deactivation、symlink 权限回退、NTFS volume detection、
 stdin/stdout/stderr、参数、退出码，以及含空格、中文和长路径的场景。
 `github:owner/repo` 等带命名空间的 backend ID 也在覆盖范围内，确保缓存、锁、
-安装和解压临时目录在 Windows 上均为合法路径。Linux cross-Clippy 仍是所有
-Windows cfg 路径的必需门禁。
+安装和解压临时目录在 Windows 上均为合法路径。Linux job 会交叉 lint 所有
+Windows cfg 路径，并通过固定版本且校验 SHA-256 的 Wine 执行完整 Windows GNU
+workspace；原生 Windows/MSVC runner 仍是最终平台门禁。
 
 ## 补全与诊断
 

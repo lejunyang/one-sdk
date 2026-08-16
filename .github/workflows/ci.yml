@@ -74,9 +74,9 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}\osdk-ci-target
         run: ./scripts/windows-runtime-smoke.ps1 -BinDir "$env:CARGO_TARGET_DIR\debug"
 
-  # Explicit Windows cross-compile check from Linux. This guards the
-  # #[cfg(windows)] code paths (shim .cmd/bash generation, junctions, volume
-  # detection) even if the Windows runner is unavailable.
+  # Explicit Windows cross-checks from Linux. Clippy guards every cfg path,
+  # while Wine executes the Windows GNU test binaries against Win32 APIs even
+  # before the native Windows/MSVC runner finishes.
   cross-windows:
     runs-on: ubuntu-latest
     steps:
@@ -92,3 +92,7 @@ jobs:
         run: >-
           cargo clippy --locked --workspace --all-targets
           --target x86_64-pc-windows-gnu -- -D warnings
+      - name: run windows tests under Wine
+        env:
+          OSDK_WINE_CACHE_DIR: ${{ runner.temp }}/one-sdk-wine-cache
+        run: ./scripts/windows-wine-tests.sh

@@ -542,6 +542,9 @@ rustup target add x86_64-pc-windows-gnu
 sudo apt-get install -y mingw-w64
 cargo clippy --locked --workspace --all-targets \
   --target x86_64-pc-windows-gnu -- -D warnings
+
+# Execute the complete Windows GNU test workspace through a pinned Wine build:
+./scripts/windows-wine-tests.sh
 ```
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
@@ -551,9 +554,10 @@ fallbacks, actual NTFS volume detection, stdio/arguments/exit codes, and
 space/Chinese/long paths entirely offline under temporary state directories.
 Namespaced backend IDs such as `github:owner/repo` are also covered so cache,
 lock, install, and extraction scratch paths remain valid on Windows. A dedicated
-Linux→Windows cross-Clippy guards every `#[cfg(windows)]` target even before that
-runtime check. A separate Rust 1.88 job checks the declared MSRV against the
-locked dependency graph.
+Linux job cross-lints every `#[cfg(windows)]` target and executes the full
+Windows GNU workspace through a SHA-256-pinned Wine build before the native
+Windows/MSVC runner finishes. A separate Rust 1.88 job checks the declared MSRV
+against the locked dependency graph.
 
 ## License
 
