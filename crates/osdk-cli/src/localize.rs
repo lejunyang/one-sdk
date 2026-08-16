@@ -106,6 +106,15 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_subcommand("path", |s| s.about(h("help.config.path.about")))
             .mut_subcommand("list", |s| s.about(h("help.config.list.about")))
     })
+    .mut_subcommand("trust", |c| {
+        c.about(h("help.trust.about"))
+            .mut_arg("path", |a| a.help(h("help.trust.arg.path")))
+            .mut_subcommand("list", |s| s.about(h("help.trust.list.about")))
+    })
+    .mut_subcommand("untrust", |c| {
+        c.about(h("help.untrust.about"))
+            .mut_arg("path", |a| a.help(h("help.trust.arg.path")))
+    })
     .mut_subcommand("cache", |c| {
         c.about(h("help.cache.about"))
             .mut_subcommand("dir", |s| s.about(h("help.cache.dir.about")))

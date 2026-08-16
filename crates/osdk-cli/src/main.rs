@@ -76,7 +76,13 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        let mut app = App::init(overrides)?;
+        let bypass_trust_check =
+            matches!(cli.command, Command::Trust { .. } | Command::Untrust { .. });
+        let mut app = if bypass_trust_check {
+            App::init_without_trust_check(overrides)?
+        } else {
+            App::init(overrides)?
+        };
         dispatch(&mut app, cli.command).await
     })
 }
@@ -102,6 +108,8 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::HookEnv { shell } => commands::hook_env(app, shell),
         Command::Source { command } => commands::source(app, command).await,
         Command::Config { command } => commands::config(app, command),
+        Command::Trust { path, command } => commands::trust(app, path, command),
+        Command::Untrust { path } => commands::untrust(app, path),
         Command::Cache { command } => commands::cache(app, command),
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor => commands::doctor(app),

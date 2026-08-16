@@ -42,6 +42,24 @@ go = "1.22"
 
 osdk 从当前目录向上查找最近的配置，因此同一仓库的子目录可以继承工具版本。
 
+## 项目配置信任
+
+项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。
+其他项目级配置可能改变执行行为或下载源，osdk 会在读取任何这类字段前要求显式
+信任：
+
+```bash
+osdk --yes trust                 # 信任最近的 osdk.toml
+osdk --yes trust ./osdk.toml     # 信任指定文件
+osdk trust list                  # 查看有效或已失效记录
+osdk untrust                     # 取消最近项目配置的信任
+```
+
+信任记录同时绑定规范路径和规范化 TOML 内容的 BLAKE3 哈希。文件内容变化或仓库
+移动后信任自动失效；软链接按真实目标记录，路径穿越不会产生另一个身份。CI 可用
+`OSDK_TRUSTED_CONFIG_PATHS` 提供由系统路径分隔符连接的已审阅文件或目录，而不
+持久化本地信任。trust 命令只加载用户配置，因此未信任项目不能影响自己的批准。
+
 ## Shim 与 Shell 激活
 
 `osdk use` 会生成 shims，执行 `node`、`python` 等命令时，shim 根据当前目录

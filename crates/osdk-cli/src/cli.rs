@@ -199,6 +199,20 @@ pub enum Command {
         command: ConfigCommand,
     },
 
+    /// Trust project configuration that can affect execution or download sources.
+    Trust {
+        /// Project config file or directory; defaults to the nearest project config.
+        path: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        command: Option<TrustCommand>,
+    },
+
+    /// Remove trust for a project configuration.
+    Untrust {
+        /// Project config file or directory; defaults to the nearest project config.
+        path: Option<std::path::PathBuf>,
+    },
+
     /// Manage the shared caches (SDK store + downstream package caches).
     Cache {
         #[command(subcommand)]
@@ -261,6 +275,12 @@ pub enum ConfigCommand {
     /// Print the resolved config directory / file path.
     Path,
     /// Print resolved settings.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrustCommand {
+    /// List content-bound trusted project configurations.
     List,
 }
 

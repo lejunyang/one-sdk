@@ -171,6 +171,98 @@ fn non_interactive_confirmation_error_is_localized() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("非交互模式需要确认"));
 }
 
+#[test]
+fn safe_project_pins_do_not_require_trust() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\nnode = \"20\"\n[aliases.node]\ndefault = \"20\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("node = 20"));
+}
+
+#[test]
+fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = project.join("osdk.toml");
+    std::fs::write(
+        &config,
+        "[tools]\nnode = \"20\"\n[sources]\nselection = \"ordered\"\n",
+    )
+    .unwrap();
+
+    let rejected = run_isolated_in(temp.path(), &project, &["--yes", "config", "list"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("is not trusted"));
+
+    let trusted = run_isolated_in(temp.path(), &project, &["--yes", "trust"]);
+    assert!(
+        trusted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trusted.stderr)
+    );
+    let accepted = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(accepted.status.success());
+
+    std::fs::write(
+        &config,
+        "[tools]\nnode = \"22\"\n[sources]\nselection = \"ordered\"\n",
+    )
+    .unwrap();
+    let changed = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("is not trusted"));
+
+    let config_value = config.to_string_lossy().into_owned();
+    let retrusted = run_isolated_in(temp.path(), &project, &["--yes", "trust", &config_value]);
+    assert!(retrusted.status.success());
+    let listed = run_isolated_in(temp.path(), &project, &["trust", "list"]);
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("trusted"));
+
+    let removed = run_isolated_in(temp.path(), &project, &["untrust"]);
+    assert!(removed.status.success());
+    let rejected_again = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(!rejected_again.status.success());
+}
+
+#[test]
+fn trusted_config_path_whitelist_allows_ci_without_persisted_trust() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[settings]\nyes = true\n[tools]\nnode = \"20\"\n",
+    )
+    .unwrap();
+
+    let project_value = project.to_string_lossy().into_owned();
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["config", "list"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &project_value)],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn terminal_prompt_accepts_interactive_confirmation() {

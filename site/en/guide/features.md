@@ -44,6 +44,27 @@ go = "1.22"
 osdk walks upward from the current directory and uses the nearest project
 configuration, so subdirectories can inherit repository-wide versions.
 
+## Project configuration trust
+
+Project `[tools]` pins and `[aliases]` are safe data and load without trust.
+Other project-level sections may affect execution or download sources, so osdk
+requires explicit trust before loading any of those fields:
+
+```bash
+osdk --yes trust                 # Trust the nearest osdk.toml
+osdk --yes trust ./osdk.toml     # Trust a specific file
+osdk trust list                  # Show active or stale records
+osdk untrust                     # Revoke the nearest project config
+```
+
+Records bind the canonical path and a BLAKE3 hash of normalized TOML content.
+Editing or moving the file invalidates trust; symlinks resolve to their real
+target, and path traversal cannot create another identity. CI can provide an
+OS path-list of reviewed files or directories through
+`OSDK_TRUSTED_CONFIG_PATHS` instead of persisting local trust. Trust commands
+load only user configuration, so an untrusted project cannot influence its own
+approval.
+
 ## Shims and shell activation
 
 `osdk use` generates shims. When you run `node`, `python`, or another tool, the

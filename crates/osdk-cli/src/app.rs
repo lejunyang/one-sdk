@@ -38,12 +38,41 @@ pub struct App {
 impl App {
     /// Build the app: resolve dirs, load config, overlay CLI flags, build ctx.
     pub fn init(overrides: GlobalOverrides) -> Result<App> {
+        Self::init_with_trust(overrides, true)
+    }
+
+    pub fn init_without_trust_check(overrides: GlobalOverrides) -> Result<App> {
+        Self::init_with_trust(overrides, false)
+    }
+
+    fn init_with_trust(overrides: GlobalOverrides, check_trust: bool) -> Result<App> {
         let dirs = Dirs::resolve().context("resolving osdk directories")?;
         dirs.ensure().context("creating osdk directories")?;
 
         let cwd = std::env::current_dir().context("getting current dir")?;
-        let mut config =
-            Config::load(&dirs.user_config_file(), &cwd).context("loading configuration")?;
+        if check_trust {
+            if let Some(project_config) = osdk_core::trust::project_config(&cwd)? {
+                let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
+                if osdk_core::trust::requires_trust(&project_config)?
+                    && !osdk_core::trust::is_trusted(
+                        &dirs.config,
+                        &project_config,
+                        trusted_paths.as_ref(),
+                    )?
+                {
+                    return Err(anyhow::anyhow!(osdk_core::t!(
+                        "err.untrusted_config",
+                        path = project_config.display()
+                    )));
+                }
+            }
+        }
+        let mut config = if check_trust {
+            Config::load(&dirs.user_config_file(), &cwd)
+        } else {
+            Config::load_user(&dirs.user_config_file())
+        }
+        .context("loading configuration")?;
 
         // Overlay CLI flags (highest precedence).
         if let Some(j) = overrides.jobs {

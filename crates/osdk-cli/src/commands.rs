@@ -8,7 +8,7 @@ use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
-use crate::cli::{AliasCommand, ConfigCommand, SourceCommand};
+use crate::cli::{AliasCommand, ConfigCommand, SourceCommand, TrustCommand};
 
 /// Apply a one-shot `--source` override into the config for this run.
 fn apply_source_override(app: &mut App, tool: &str) {
@@ -744,6 +744,58 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+pub fn trust(
+    app: &App,
+    path: Option<std::path::PathBuf>,
+    command: Option<TrustCommand>,
+) -> Result<()> {
+    if matches!(command, Some(TrustCommand::List)) {
+        for record in osdk_core::trust::list(&app.ctx.dirs.config)? {
+            let state = if record.path.is_file()
+                && osdk_core::trust::is_trusted(&app.ctx.dirs.config, &record.path, None)?
+            {
+                t!("label.trusted")
+            } else {
+                t!("label.stale")
+            };
+            println!("{}  {}  {}", state, record.hash, record.path.display());
+        }
+        return Ok(());
+    }
+
+    let cwd = std::env::current_dir()?;
+    let config = osdk_core::trust::resolve_config(path.as_deref(), &cwd)?;
+    let question = t!("prompt.trust_config", path = config.display());
+    if !app.prompt.confirm(&question)? {
+        println!("{}", t!("msg.cancelled"));
+        return Ok(());
+    }
+    let record = osdk_core::trust::trust(&app.ctx.dirs.config, &config)?;
+    println!(
+        "{}",
+        t!(
+            "msg.config_trusted",
+            path = record.path.display(),
+            hash = record.hash
+        )
+    );
+    Ok(())
+}
+
+pub fn untrust(app: &App, path: Option<std::path::PathBuf>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let config = osdk_core::trust::resolve_config(path.as_deref(), &cwd)?;
+    if osdk_core::trust::untrust(&app.ctx.dirs.config, &config)? {
+        println!("{}", t!("msg.config_untrusted", path = config.display()));
+    } else {
+        println!(
+            "{}",
+            t!("msg.config_was_not_trusted", path = config.display())
+        );
     }
     Ok(())
 }

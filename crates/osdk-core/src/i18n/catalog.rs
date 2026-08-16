@@ -23,6 +23,27 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("msg.uninstalled", ("uninstalled {tool}", "已卸载 {tool}"));
     m.insert("msg.cancelled", ("cancelled", "已取消"));
     m.insert(
+        "msg.config_trusted",
+        (
+            "trusted project config {path} ({hash})",
+            "已信任项目配置 {path}（{hash}）",
+        ),
+    );
+    m.insert(
+        "msg.config_untrusted",
+        (
+            "removed trust for project config {path}",
+            "已取消信任项目配置 {path}",
+        ),
+    );
+    m.insert(
+        "msg.config_was_not_trusted",
+        (
+            "project config was not trusted: {path}",
+            "项目配置原本未受信任：{path}",
+        ),
+    );
+    m.insert(
         "msg.nothing_to_install",
         (
             "nothing to install (no tools given and no config pins found)",
@@ -163,9 +184,18 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "要删除内容存储中所有未引用的对象吗？",
         ),
     );
+    m.insert(
+        "prompt.trust_config",
+        (
+            "Trust project config {path} until its normalized content or path changes?",
+            "要信任项目配置 {path}，直到其规范化内容或路径发生变化吗？",
+        ),
+    );
     m.insert("prompt.yes_no", ("[y/N]:", "[是/否]："));
     m.insert("label.pinned", ("[pinned]", "[已固定]"));
     m.insert("label.error", ("error", "错误"));
+    m.insert("label.trusted", ("trusted", "已信任"));
+    m.insert("label.stale", ("stale", "已失效"));
 
     // ---- user-visible tracing logs (info!/warn!) --------------------------
     // Structured fields (url/source/attempt/...) stay as machine-readable
@@ -288,6 +318,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "confirmation required in non-interactive mode for: {question}; rerun with --yes or OSDK_YES=true",
             "非交互模式需要确认：{question}；请使用 --yes 或 OSDK_YES=true 重新运行",
+        ),
+    );
+    m.insert(
+        "err.untrusted_config",
+        (
+            "project config contains trust-required fields and is not trusted: {path}; review it, then run `osdk --yes trust {path}` or configure OSDK_TRUSTED_CONFIG_PATHS",
+            "项目配置包含需信任字段但尚未受信任：{path}；请审阅后运行 `osdk --yes trust {path}`，或配置 OSDK_TRUSTED_CONFIG_PATHS",
         ),
     );
     m.insert(
@@ -625,6 +662,34 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.config.about",
         ("Inspect or edit configuration", "查看或编辑配置"),
+    );
+    m.insert(
+        "help.trust.about",
+        (
+            "Trust a project's execution-affecting configuration",
+            "信任会影响执行行为的项目配置",
+        ),
+    );
+    m.insert(
+        "help.trust.arg.path",
+        (
+            "Project config file or directory (default: nearest config)",
+            "项目配置文件或目录（默认：最近的配置）",
+        ),
+    );
+    m.insert(
+        "help.trust.list.about",
+        (
+            "List content-bound trusted project configurations",
+            "列出绑定配置内容的受信任项目配置",
+        ),
+    );
+    m.insert(
+        "help.untrust.about",
+        (
+            "Remove trust for a project configuration",
+            "取消对项目配置的信任",
+        ),
     );
     m.insert(
         "help.cache.about",

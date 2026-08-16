@@ -29,6 +29,7 @@ pub mod process;
 pub mod shim;
 pub mod source;
 pub mod store;
+pub mod trust;
 pub mod verification;
 pub mod version;
 

@@ -114,6 +114,26 @@ in the lock is an audit record, not a trust shortcut: an attestation-enabled
 locked reinstall verifies the cached bundle against the cached artifact again.
 An explicit `osdk install node@20` still honors the explicit request.
 
+## Project configuration trust
+
+Plain project `[tools]` pins and `[aliases]` are safe data and load without a
+trust prompt. Any other project-level section can affect behavior or download
+sources and must be explicitly trusted before osdk loads any of it:
+
+```bash
+osdk --yes trust                 # trust nearest osdk.toml
+osdk --yes trust ./osdk.toml     # trust a specific file
+osdk trust list                  # show active/stale trust records
+osdk untrust                     # revoke nearest project config
+```
+
+Trust records bind both the canonical path and a BLAKE3 hash of normalized TOML
+content. Editing or moving the file invalidates trust; symlinks resolve to
+their real target, and path traversal cannot create another identity. CI may
+set `OSDK_TRUSTED_CONFIG_PATHS` to an OS path-list of reviewed files or
+directories instead of persisting local trust. Trust commands load only the
+user configuration, so an untrusted project cannot influence its own approval.
+
 Run a command with managed tools without changing project pins:
 
 ```bash

@@ -133,6 +133,17 @@ impl Config {
     /// Load config by merging user global + project files, then env overrides.
     /// `start_dir` is where project-config discovery begins (usually cwd).
     pub fn load(user_config_file: &Path, start_dir: &Path) -> Result<Config> {
+        Self::load_layers(user_config_file, Some(start_dir))
+    }
+
+    /// Load only user-global configuration and environment overrides. Trust
+    /// management uses this so an untrusted project cannot influence the
+    /// decision to trust itself.
+    pub fn load_user(user_config_file: &Path) -> Result<Config> {
+        Self::load_layers(user_config_file, None)
+    }
+
+    fn load_layers(user_config_file: &Path, start_dir: Option<&Path>) -> Result<Config> {
         let mut cfg = Config {
             settings: Settings::default(),
             sources: SourcesConfig::default(),
@@ -148,13 +159,15 @@ impl Config {
         }
 
         // 2. project config (nearest ancestor). Also read .tool-versions pins.
-        if let Some((path, file)) = find_project_config(start_dir)? {
-            cfg.apply_file(file);
-            cfg.project_config_path = Some(path);
-        }
-        if let Some(tv) = find_tool_versions(start_dir)? {
-            for (k, v) in tv {
-                cfg.tools.entry(k).or_insert(v);
+        if let Some(start_dir) = start_dir {
+            if let Some((path, file)) = find_project_config(start_dir)? {
+                cfg.apply_file(file);
+                cfg.project_config_path = Some(path);
+            }
+            if let Some(tv) = find_tool_versions(start_dir)? {
+                for (k, v) in tv {
+                    cfg.tools.entry(k).or_insert(v);
+                }
             }
         }
 
