@@ -148,6 +148,13 @@ osdk source add node --id mycorp \
 osdk --source official install go@1.22 # one-shot override
 ```
 
+The built-in Go sources are `go.dev`, Aliyun, and `golang.google.cn`.
+`github:owner/repo` uses the same ordered source list for GitHub Releases API
+metadata, release assets, raw files, checksum/signature files, and attestation
+bundles. Its built-in `ghproxy` source rewrites all of these through
+`https://gh-proxy.com/`. GitHub tokens are sent only to the official
+`api.github.com` host and are never forwarded to third-party proxies.
+
 ## Dedup & caches
 
 ```bash
@@ -209,7 +216,9 @@ osdk list-remote github:sharkdp/fd     # available release tags
 ```
 
 Only the generic `github:owner/repo` backend requires the GitHub Releases API.
-Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise its API rate limit.
+Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the direct API rate limit.
+The backend can fail over API metadata, raw files, release assets, checksums,
+and attestation bundles through gh-proxy without forwarding the token.
 
 ## Offline mode
 

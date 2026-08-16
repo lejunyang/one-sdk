@@ -136,6 +136,13 @@ osdk --source mycorp install node@20
 osdk source remove node mycorp
 ```
 
+The built-in Go sources are `go.dev`, Aliyun, and `golang.google.cn`.
+`github:owner/repo` applies the same source order to GitHub Releases API
+metadata, release assets, raw files, checksum/signature files, and attestation
+bundles. The built-in `ghproxy` source rewrites all of these GitHub URLs through
+`https://gh-proxy.com/`. `GITHUB_TOKEN` is sent only to the official
+`api.github.com` host and is never forwarded to a third-party proxy.
+
 ## Content deduplication
 
 After verification and extraction, every file is placed in a shared store by
@@ -224,7 +231,9 @@ osdk list-remote github:sharkdp/fd
 
 osdk chooses a Release asset matching the host OS and architecture, handling
 both archives and bare binaries. Set `GITHUB_TOKEN` or `OSDK_GITHUB_TOKEN` to
-raise GitHub API rate limits.
+raise the direct GitHub API rate limit. API metadata, raw files, release assets,
+checksum files, and attestation bundles can all fail over through gh-proxy
+without forwarding the token.
 
 ## Declarative backends
 

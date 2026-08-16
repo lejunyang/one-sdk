@@ -66,8 +66,6 @@ impl Backend for GoBackend {
                 .with_index("https://go.dev/dl/?mode=json&include=all"),
             Source::mirror("google-cn", "https://golang.google.cn/dl/", 20)
                 .with_index("https://golang.google.cn/dl/?mode=json&include=all"),
-            Source::mirror("ustc", "https://mirrors.ustc.edu.cn/golang/", 30)
-                .with_index("https://go.dev/dl/?mode=json&include=all"),
         ]
     }
 
@@ -246,3 +244,20 @@ fn normalize_go_version(v: &str) -> String {
 /// beyond the shared `bin` join is needed.
 #[allow(dead_code)]
 fn _windows_note(_os: Os) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_sources_exclude_unavailable_ustc_mirror() {
+        let sources = GoBackend.default_sources();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>(),
+            ["official", "aliyun", "google-cn"]
+        );
+    }
+}

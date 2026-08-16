@@ -131,6 +131,12 @@ osdk --source mycorp install node@20
 osdk source remove node mycorp
 ```
 
+Go 内置 `go.dev`、阿里云和 `golang.google.cn` 三个来源。
+`github:owner/repo` 会让 GitHub Releases API、Release 资产、Raw 文件、校验和/
+签名文件和 attestation bundle 统一遵循 source 顺序。内置 `ghproxy` 会把这些
+GitHub URL 全部改写到 `https://gh-proxy.com/`；`GITHUB_TOKEN` 只发送给官方
+`api.github.com`，不会转发给第三方代理。
+
 ## 内容去重
 
 归档验证和解压后，每个文件会按 BLAKE3 内容哈希写入共享存储。安装目录不再
@@ -212,7 +218,9 @@ osdk list-remote github:sharkdp/fd
 ```
 
 osdk 会按当前操作系统与架构选择匹配的 Release asset，并处理归档或单文件
-二进制。可设置 `GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 提升 API 限额。
+二进制。可设置 `GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 提升直连 API 限额；
+API 元数据、Raw 文件、Release 资产、校验文件和 attestation bundle 均可回退
+ghproxy，且不会把 token 转发给代理。
 
 ## 声明式后端
 

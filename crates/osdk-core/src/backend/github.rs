@@ -74,13 +74,20 @@ impl GithubBackend {
         )
     }
 
-    fn attestation(&self, ctx: &Ctx) -> Option<GithubAttestation> {
+    fn attestation(&self, ctx: &Ctx, sources: &[Source]) -> Option<GithubAttestation> {
         let policy = ctx.config.settings.attestations;
         (policy != crate::config::AttestationPolicy::Off).then(|| GithubAttestation {
             owner: self.owner.clone(),
             repo: self.repo.clone(),
             policy,
+            sources: sources.to_vec(),
         })
+    }
+
+    async fn releases(&self, ctx: &Ctx, sources: &[Source]) -> Result<Vec<GhRelease>> {
+        let api = self.releases_api();
+        let urls = http::github_url_candidates(sources, &api);
+        http::get_cached_github_json_from_urls(ctx, &api, &urls).await
     }
 
     /// Score how well an asset name matches the host platform. Higher is better;
@@ -153,8 +160,8 @@ impl Backend for GithubBackend {
     fn default_sources(&self) -> Vec<Source> {
         vec![
             Source::official("github", "https://github.com/").with_index("https://api.github.com/"),
-            Source::mirror("ghproxy", "https://gh-proxy.com/", 10)
-                .with_index("https://api.github.com/"),
+            Source::mirror("ghproxy", "https://gh-proxy.com/https://github.com/", 10)
+                .with_index("https://gh-proxy.com/https://api.github.com/"),
         ]
     }
 
@@ -164,8 +171,8 @@ impl Backend for GithubBackend {
     }
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let releases: Vec<GhRelease> =
-            http::get_cached_github_json(ctx, &self.releases_api()).await?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let releases = self.releases(ctx, &sources).await?;
         let mut out: Vec<VersionInfo> = releases
             .into_iter()
             .filter(|r| !r.draft)
@@ -204,13 +211,15 @@ impl Backend for GithubBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        let attestation = self.attestation(ctx);
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let attestation = self.attestation(ctx, &sources);
         if let Some(artifact) = pipeline::locked_artifact(tv)? {
+            let urls = http::github_url_candidates(&sources, &artifact.url);
             if let Ok(kind) = ArchiveKind::from_name(&artifact.file_name) {
                 let plan = InstallPlan {
                     tool: self.id().to_string(),
                     version: tv.version.clone(),
-                    urls: vec![artifact.url],
+                    urls,
                     file_name: artifact.file_name,
                     kind,
                     checksum: artifact
@@ -241,7 +250,7 @@ impl Backend for GithubBackend {
                     &ctx.dirs,
                     self.id(),
                     &tv.version,
-                    &[artifact.url],
+                    &urls,
                     &self.repo,
                     &artifact.file_name,
                     ctx.platform.os,
@@ -256,8 +265,7 @@ impl Backend for GithubBackend {
             return Ok(());
         }
         // Find the release for this version (try both `v`-prefixed and bare tag).
-        let releases: Vec<GhRelease> =
-            http::get_cached_github_json(ctx, &self.releases_api()).await?;
+        let releases = self.releases(ctx, &sources).await?;
         let want = tv.version.trim_start_matches('v');
         let release = releases
             .into_iter()
@@ -285,27 +293,19 @@ impl Backend for GithubBackend {
             ))
         })?;
 
-        // Candidate URLs with a CN proxy fallback.
-        let urls = vec![
-            asset.browser_download_url.clone(),
-            format!("https://gh-proxy.com/{}", asset.browser_download_url),
-        ];
+        let urls = http::github_url_candidates(&sources, &asset.browser_download_url);
 
         // Checksum discovery, strongest first:
         // 1. a minisign-signed checksums manifest (trusted key) — the manifest's
         //    signature is verified before its hashes are trusted;
         // 2. per-asset sidecar / unsigned shared manifest.
-        // Try the direct asset dir first, then the gh-proxy variant.
-        let asset_dir = asset
-            .browser_download_url
-            .rsplit_once('/')
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default();
-        let proxied_dir = format!("https://gh-proxy.com/{asset_dir}");
-
         let mut checksum = None;
         if ctx.config.settings.verify_signatures && !ctx.config.settings.offline {
-            for dir in [asset_dir.as_str(), proxied_dir.as_str()] {
+            for url in &urls {
+                let dir = url
+                    .rsplit_once('/')
+                    .map(|(directory, _)| directory)
+                    .unwrap_or("");
                 match pipeline::verify::signed_manifest_checksum(
                     &ctx.client,
                     &self.id,
@@ -326,14 +326,14 @@ impl Backend for GithubBackend {
             }
         }
         if checksum.is_none() && !ctx.config.settings.offline {
-            let mut found =
-                pipeline::verify::discover_asset_checksum(&ctx.client, &asset.browser_download_url)
-                    .await;
-            if found.is_none() {
-                let proxied = format!("https://gh-proxy.com/{}", asset.browser_download_url);
-                found = pipeline::verify::discover_asset_checksum(&ctx.client, &proxied).await;
+            for url in &urls {
+                if let Some(found) =
+                    pipeline::verify::discover_asset_checksum(&ctx.client, url).await
+                {
+                    checksum = Some(found);
+                    break;
+                }
             }
-            checksum = found;
         }
 
         // Archive vs bare binary.
@@ -450,5 +450,21 @@ mod tests {
         assert!(GithubBackend::from_id("github:cli/cli/extra").is_none());
         assert!(GithubBackend::from_id("github:../cli").is_none());
         assert!(GithubBackend::from_id("github:cli/repo?ref=bad").is_none());
+    }
+
+    #[test]
+    fn default_sources_cover_direct_and_full_ghproxy_routes() {
+        let backend = GithubBackend::from_id("github:cli/cli").unwrap();
+        let sources = backend.default_sources();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].download_url, "https://github.com/");
+        assert_eq!(
+            sources[1].download_url,
+            "https://gh-proxy.com/https://github.com/"
+        );
+        assert_eq!(
+            sources[1].index_url.as_deref(),
+            Some("https://gh-proxy.com/https://api.github.com/")
+        );
     }
 }

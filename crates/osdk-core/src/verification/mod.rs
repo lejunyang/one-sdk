@@ -21,6 +21,7 @@ use sigstore::trust::sigstore::SigstoreTrustRoot;
 use crate::config::AttestationPolicy;
 use crate::dirs::Dirs;
 use crate::error::{Error, Result};
+use crate::source::Source;
 
 const GITHUB_OIDC_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const MAX_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
@@ -40,6 +41,7 @@ pub struct GithubAttestation {
     pub owner: String,
     pub repo: String,
     pub policy: AttestationPolicy,
+    pub sources: Vec<Source>,
 }
 
 struct GithubRepositoryPolicy {
@@ -105,8 +107,15 @@ pub async fn verify_github_attestation(
         if offline {
             return missing_attestation(request, &digest, true);
         }
-        let response = fetch_attestations(client, &request.owner, &request.repo, &digest).await?;
-        let bundles = materialize_bundles(client, response.attestations).await?;
+        let response = fetch_attestations(
+            client,
+            &request.owner,
+            &request.repo,
+            &digest,
+            &request.sources,
+        )
+        .await?;
+        let bundles = materialize_bundles(client, response.attestations, &request.sources).await?;
         if !bundles.is_empty() {
             write_cached_bundles(&cache_path, &bundles)?;
         }
@@ -186,21 +195,25 @@ async fn fetch_attestations(
     owner: &str,
     repo: &str,
     digest: &str,
+    sources: &[Source],
 ) -> Result<AttestationResponse> {
     let url = format!(
         "https://api.github.com/repos/{owner}/{repo}/attestations/sha256:{digest}?per_page=30"
     );
-    crate::http::get_github_json(client, &url).await
+    let urls = crate::http::github_url_candidates(sources, &url);
+    crate::http::get_github_json_from_urls(client, &urls).await
 }
 
 async fn materialize_bundles(
     client: &reqwest::Client,
     entries: Vec<AttestationEntry>,
+    sources: &[Source],
 ) -> Result<Vec<Vec<u8>>> {
     let mut bundles = Vec::new();
     for entry in entries {
         if let Some(url) = entry.bundle_url {
-            bundles.push(fetch_bundle_url(client, &url).await?);
+            let urls = crate::http::github_url_candidates(sources, &url);
+            bundles.push(fetch_bundle_urls(client, &urls).await?);
         } else if let Some(bundle) = entry.bundle {
             bundles.push(serde_json::to_vec(&bundle)?);
         } else {
@@ -212,13 +225,27 @@ async fn materialize_bundles(
     Ok(bundles)
 }
 
+async fn fetch_bundle_urls(client: &reqwest::Client, urls: &[String]) -> Result<Vec<u8>> {
+    let mut last_error = None;
+    for url in urls {
+        match fetch_bundle_url(client, url).await {
+            Ok(bundle) => return Ok(bundle),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| Error::other("no attestation bundle URL candidates")))
+}
+
 async fn fetch_bundle_url(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|error| Error::other(format!("invalid attestation bundle URL: {error}")))?;
     if parsed.scheme() != "https" {
         return Err(Error::other("attestation bundle URL must use HTTPS"));
     }
-    let response = client.get(parsed).send().await?.error_for_status()?;
+    let response = crate::http::github_request(client, parsed.as_str())
+        .send()
+        .await?
+        .error_for_status()?;
     if response.url().scheme() != "https" {
         return Err(Error::other(
             "attestation bundle redirect must remain on HTTPS",
@@ -357,6 +384,7 @@ mod tests {
             owner: owner.into(),
             repo: repo.into(),
             policy: AttestationPolicy::Required,
+            sources: Vec::new(),
         };
         verify_github_attestation(&reqwest::Client::new(), &dirs, true, &path, &request)
             .await?
@@ -385,6 +413,7 @@ mod tests {
                 bundle: None,
                 bundle_url: None,
             }],
+            &[],
         )
         .await
         .unwrap_err();
@@ -432,6 +461,7 @@ mod tests {
             owner: "kubewarden".into(),
             repo: "kubewarden-controller".into(),
             policy: AttestationPolicy::Required,
+            sources: Vec::new(),
         };
 
         crate::pipeline::install_single_binary(
@@ -483,6 +513,7 @@ mod tests {
             owner: "prefix-dev".into(),
             repo: "sigstore-example".into(),
             policy: AttestationPolicy::Required,
+            sources: Vec::new(),
         };
         let error = missing_attestation(&request, "00", true).unwrap_err();
         assert!(error.to_string().contains("no cached bundle"));

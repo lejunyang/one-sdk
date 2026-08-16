@@ -36,7 +36,6 @@ Attestations 等能力。但“首轮选定整改项完成”不等于原审计�
 | --- | --- | --- |
 | P0 | `--yes` 没有实际消费方 | 参数已存在，但没有确认流程 |
 | P0 | 项目配置缺少显式信任模型 | 当前配置能力较安全，但扩展后会形成风险 |
-| P0 | 通用 GitHub backend 的 source 语义不完整 | source 可展示，下载链路未统一消费 |
 | P1 | Node `package.json` 解析、架构覆盖和 Corepack | 未实现 |
 | P1 | Python 多实现、多变体和可刷新 catalog | 仅稳定 CPython 默认变体 |
 | P1 | Java 离线 catalog、JRE 和 JVM 工具生态 | 仅 Foojay 在线 JDK |
@@ -119,52 +118,9 @@ hook、插件或可执行逻辑，进入陌生仓库就可能影响下载来源�
 - 文件修改后原信任失效；
 - 软链接、路径穿越和仓库移动有测试。
 
-### 3. 通用 GitHub backend 的 source 语义不完整
-
-#### 问题
-
-`github:owner/repo` 会显示 GitHub direct 和 gh-proxy 两个 source，但当前代码的：
-
-- Releases API；
-- release asset；
-- checksum/signature sidecar；
-- attestation API 和 `bundle_url`
-
-没有全部通过同一 source 排序与 failover 模型。用户执行 `source pin` 或
-`source add` 后，显示结果和真实网络行为可能不一致。
-
-#### 修复方案
-
-- 为 GitHub source 定义三类端点：`api_base`、`download_base`、`raw_base`；
-- source 排序同时驱动 API、asset、raw/sidecar 和 attestation 获取；
-- direct 请求可携带 `GITHUB_TOKEN`；
-- 第三方代理默认不转发 token，避免凭据泄露；
-- 每个原始 URL 都通过统一 `rewrite_github_url(source, url)` 生成候选 URL；
-- 缓存 key 使用原始资源身份，避免 direct/proxy 生成两份逻辑缓存；
-- API、Raw、Release、attestation 分别有本地 mock failover 测试。
-
-#### 开源实现参考
-
-- mise 的 URL replacement 可对 URL 使用正则替换，统一应用下载代理；
-- aqua 把元数据、asset、checksum 和 provenance 都放进 registry 描述；
-- gh-proxy 支持完整 GitHub URL 代理，包括 `api.github.com`、
-  `raw.githubusercontent.com` 和 release assets。
-
-参考：
-
-- <https://mise.en.dev/url-replacements.html>
-- <https://gh-proxy.com/>
-
-#### 验收标准
-
-- `source pin github:owner/repo ghproxy` 后不再尝试 direct；
-- direct 失败时 API、raw 和 asset 都能回退代理；
-- token 只发送给明确受信的 GitHub host；
-- offline 和 stale cache 行为保持不变。
-
 ## P1：核心 SDK 管理能力
 
-### 4. Node 项目解析、架构覆盖、Corepack 和全局包迁移
+### 3. Node 项目解析、架构覆盖、Corepack 和全局包迁移
 
 #### 问题
 
@@ -212,7 +168,7 @@ Node backend 已支持 `.nvmrc`、`.node-version`、别名和 `osdk exec`，但�
 - 锁文件能区分 host 与显式目标架构；
 - 迁移命令有 dry-run 和失败回滚。
 
-### 5. Python 多实现、多变体和可刷新 catalog
+### 4. Python 多实现、多变体和可刷新 catalog
 
 #### 问题
 
@@ -252,7 +208,7 @@ CPython `install_only` 资产。仍缺少：
 - prerelease 不会被 `latest` 意外选中；
 - catalog 更新失败不破坏旧缓存。
 
-### 6. Java 离线 catalog、JRE 和 JVM 工具生态
+### 5. Java 离线 catalog、JRE 和 JVM 工具生态
 
 #### 问题
 
@@ -291,7 +247,7 @@ vendor checksum，但：
 - Foojay 不可用时已缓存安装仍正常；
 - 每个新增 JVM 工具有独立 checksum 和 smoke test。
 
-### 7. Rust 独立 component、target、override 和 linked toolchain 管理
+### 6. Rust 独立 component、target、override 和 linked toolchain 管理
 
 #### 问题
 
@@ -329,7 +285,7 @@ osdk 已能隔离 bootstrap rustup，并可在安装时通过 `-o components=...
 - linked toolchain 不进入远程 lock artifact；
 - Windows GNU/MSVC target 都有编译覆盖。
 
-### 8. `packageManager` 自动识别和独立 npm
+### 7. `packageManager` 自动识别和独立 npm
 
 #### 问题
 
@@ -359,7 +315,7 @@ pnpm 和 Yarn 已有独立 backend，npm 仍随 Node 安装。osdk 不读取
 - npm 版本可独立于 Node 升级和卸载；
 - package manager shim 不调用用户全局 Node。
 
-### 9. GitHub backend 的可配置资产选择
+### 8. GitHub backend 的可配置资产选择
 
 #### 问题
 
@@ -414,7 +370,7 @@ release 容易选错或无法表达：
 
 ## P2：生态覆盖与测试
 
-### 10. Deno/Bun prerelease、canary 和 nightly
+### 9. Deno/Bun prerelease、canary 和 nightly
 
 #### 问题
 
@@ -442,7 +398,7 @@ release 容易选错或无法表达：
 - 显式 channel 可解析且锁定为精确版本；
 - channel 消失时 locked install 仍可离线复现。
 
-### 11. 统一 backend contract 与网络故障矩阵
+### 10. 统一 backend contract 与网络故障矩阵
 
 #### 问题
 
@@ -483,7 +439,7 @@ smoke，但仍缺少可复用的 backend 合约。不同 backend 对同一种错
 - 失败后不存在 complete marker 或半成品 install；
 - CI 不依赖公网即可覆盖全部故障。
 
-### 12. Windows 运行时行为测试
+### 11. Windows 运行时行为测试
 
 #### 问题
 
@@ -521,7 +477,7 @@ Windows runner 也运行 Rust 测试。但以下行为仍缺少专门的端到�
 
 ## P3：上游安全能力
 
-### 13. 完整 Rekor transparency-log 证明
+### 12. 完整 Rekor transparency-log 证明
 
 #### 问题
 
@@ -561,10 +517,9 @@ Entry Timestamp（SET），因此不能宣称完成透明日志证明。
 
 ### 阶段 A：行为一致性和安全
 
-1. GitHub 全链路 source/failover；
-2. 统一 prompt/`--yes`；
-3. trust 数据模型和危险字段边界；
-4. 网络故障 matrix 基础设施。
+1. 统一 prompt/`--yes`；
+2. trust 数据模型和危险字段边界；
+3. 网络故障 matrix 基础设施。
 
 ### 阶段 B：项目自动发现
 

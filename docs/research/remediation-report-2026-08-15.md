@@ -26,6 +26,14 @@ Related audit: `docs/research/sdk-manager-audit-2026-08-15.md`
 - Bun, Deno, pnpm, and Yarn honor custom and pinned sources for metadata and
   artifact resolution.
 - Multiple registry tarball URLs are preserved for download failover.
+- The generic GitHub backend now applies source order to Releases and
+  attestation APIs, raw files, release assets, checksum/signature files, and
+  attestation bundles.
+- The built-in gh-proxy route covers `api.github.com`, GitHub release assets,
+  `raw.githubusercontent.com`, and gist raw content. GitHub tokens are sent only
+  to the official API host, never to third-party proxies.
+- Removed the unavailable USTC Go mirror; Go retains go.dev, Aliyun, and
+  `golang.google.cn`.
 
 ### Installation reliability
 
