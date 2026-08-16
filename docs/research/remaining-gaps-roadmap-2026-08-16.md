@@ -1,8 +1,10 @@
-# osdk 剩余能力缺口与修复路线
+# osdk 剩余能力缺口与修复完成记录
 
 日期：2026-08-16
 
 项目：`github.com/lejunyang/one-sdk`
+
+状态：**全部完成**
 
 关联文档：
 
@@ -11,17 +13,16 @@
 
 ## 目的与边界
 
-首轮整改已经完成并交付了并发安装、断点续传、离线模式、隔离 rustup、
-锁文件、升级、一次性执行、别名、声明式后端、校验策略和 GitHub Artifact
-Attestations 等能力。但“首轮选定整改项完成”不等于原审计列出的所有能力缺口
-已经关闭。
-
-本文只记录当前仍未完整实现的事项，并为每项给出：
+本文最初记录首轮整改后仍未完整实现的事项，并为每项给出：
 
 1. 当前问题和用户影响；
 2. 推荐的实现方案；
 3. 可借鉴的开源 SDK 管理器做法；
 4. 可验证的完成标准。
+
+截至 2026-08-16，本文列出的 12 项缺口均已实现、验证并按独立 Git commit
+交付。下文保留原始问题、方案和验收标准作为决策记录；“总览”与“实施结果”
+记录当前完成状态和对应证据。
 
 优先级定义：
 
@@ -32,20 +33,39 @@ Attestations 等能力。但“首轮选定整改项完成”不等于原审计�
 
 ## 总览
 
-| 优先级 | 事项 | 当前状态 |
-| --- | --- | --- |
-| P0 | `--yes` 没有实际消费方 | 参数已存在，但没有确认流程 |
-| P0 | 项目配置缺少显式信任模型 | 当前配置能力较安全，但扩展后会形成风险 |
-| P1 | Node `package.json` 解析、架构覆盖和 Corepack | 未实现 |
-| P1 | Python 多实现、多变体和可刷新 catalog | 仅稳定 CPython 默认变体 |
-| P1 | Java 离线 catalog、JRE 和 JVM 工具生态 | 仅 Foojay 在线 JDK |
-| P1 | Rust 独立 component/target/override 管理 | 安装参数可用，独立生命周期命令缺失 |
-| P1 | `packageManager` 自动识别和独立 npm | 未实现 |
-| P1 | GitHub backend 可配置资产选择 | 仅启发式自动匹配 |
-| P2 | Deno/Bun prerelease、canary、nightly | 默认只暴露稳定版本 |
-| P2 | 统一 backend contract 和故障矩阵测试 | 部分覆盖 |
-| P2 | Windows 运行时行为测试 | 可交叉编译，运行时覆盖不足 |
-| P3 | 完整 Rekor transparency-log 证明 | 受 `sigstore` 上游能力限制 |
+| 优先级 | 事项 | 当前状态 | 交付提交 |
+| --- | --- | --- | --- |
+| P0 | 统一确认与 `--yes` | ✅ 完成 | `dd15a97` |
+| P0 | 项目配置显式信任模型 | ✅ 完成 | `d5d7821` |
+| P1 | Node `package.json`、架构、Corepack、迁移 | ✅ 完成 | `891a8c6` |
+| P1 | Python 多实现、多变体和可刷新 catalog | ✅ 完成 | `3caa1c3` |
+| P1 | Java 离线 catalog、JRE 和 JVM 工具生态 | ✅ 完成 | `810bcd9` |
+| P1 | Rust component/target/override/linked toolchain | ✅ 完成 | `1cee1ed` |
+| P1 | `packageManager` 自动识别和独立 npm | ✅ 完成 | `54144c5` |
+| P1 | GitHub backend 可配置资产选择 | ✅ 完成 | `5a30f9c` |
+| P2 | Deno/Bun prerelease、canary、nightly | ✅ 完成 | `d87460f` |
+| P2 | 统一 backend contract 和故障矩阵 | ✅ 完成 | `0de1a71` |
+| P2 | Windows 运行时行为测试 | ✅ 完成 | `9799e46` |
+| P3 | 完整 Rekor transparency-log 证明 | ✅ 完成 | `46cbc21` |
+
+## 实施结果
+
+- 统一 prompt 支持 TTY、非 TTY、`--yes`、`OSDK_YES`，并接入卸载、缓存清理
+  和非演练 prune 等破坏性操作。
+- trust 记录绑定规范化配置内容与 canonical path，覆盖修改失效、软链接、仓库移动
+  和 CI 白名单。
+- Node、Python、Java/JVM、Rust、npm/package manager、GitHub asset 和 prerelease
+  能力均完成离线 fixture、锁文件和 source 行为验证。
+- 全部内置 backend 与 generic GitHub 共享离线生命周期 contract；本地故障矩阵覆盖
+  网络错误、缓存污染、并发、失败清理、跨文件系统 fallback 和 shim 合约。
+- Windows runner 真实执行 PowerShell、cmd 和 Git Bash，覆盖 activation/deactivation、
+  symlink 权限回退、NTFS volume、stdio/参数/退出码及空格、中文、长路径。
+- GitHub Artifact Attestation 现会离线验证 Rekor SET、signed checkpoint、
+  root/tree-size 绑定和 Merkle inclusion path；缺失或篡改任一证明都会失败。
+- 用户能力文档已同步到 `README.md`、`README.zh-CN.md`、`site/guide/` 和
+  `site/en/guide/`。
+- 所有测试均使用临时 `HOME`、`OSDK_*`、`CARGO_HOME`、`RUSTUP_HOME` 和 build
+  目录；最终验证结果记录在本文末尾。
 
 ## P0：全局行为与安全
 
@@ -552,6 +572,38 @@ Entry Timestamp（SET），因此不能宣称完成透明日志证明。
 - Windows/macOS/Linux 影响已评估；
 - 使用临时 `HOME`、`OSDK_*`、`CARGO_HOME`、`RUSTUP_HOME` 和构建目录验证；
 - 以独立 Git commit 交付。
+
+## 最终验证
+
+最终验证在 Linux 上使用完全隔离的临时状态目录执行：
+
+```bash
+cargo fmt --all --check
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets \
+  --target x86_64-pc-windows-gnu -- -D warnings
+pnpm --dir site build
+```
+
+Windows CI 另外执行：
+
+```powershell
+./scripts/windows-runtime-smoke.ps1 -BinDir "$env:CARGO_TARGET_DIR\debug"
+```
+
+本地最终结果：
+
+- `osdk-core`：141 项通过；
+- `osdk-cli` unit：8 项通过；
+- `osdk-cli` subprocess：35 项通过；
+- `osdk-shim` contract：3 项通过；
+- native Clippy：通过；
+- `x86_64-pc-windows-gnu` 全 targets Clippy：通过；
+- VitePress 中英文站点构建：通过。
+
+本轮没有访问或修改用户真实 SDK manager、Cargo 或 rustup 状态。公网 live smoke
+继续只用于监测上游生态漂移，不承担本地正确性证明。
 
 ## 竞品资料索引
 
