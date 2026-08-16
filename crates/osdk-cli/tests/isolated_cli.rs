@@ -327,17 +327,39 @@ fn terminal_prompt_accepts_interactive_confirmation() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    use std::io::Write;
-    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
-    let output = child.wait_with_output().unwrap();
+    use std::io::{Read, Write};
+    let mut stdout = child.stdout.take().unwrap();
+    let mut captured = Vec::new();
+    let prompt_marker = b"[y/N]:";
+    while !captured
+        .windows(prompt_marker.len())
+        .any(|window| window == prompt_marker)
+    {
+        let mut byte = [0];
+        let count = stdout.read(&mut byte).unwrap();
+        assert!(count > 0, "prompt stream ended before confirmation");
+        captured.extend_from_slice(&byte[..count]);
+    }
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"y\n").unwrap();
+    drop(stdin);
+    stdout.read_to_end(&mut captured).unwrap();
+    let status = child.wait().unwrap();
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
     assert!(
-        output.status.success(),
+        status.success(),
         "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&captured),
+        String::from_utf8_lossy(&stderr)
     );
     assert!(!archive.exists());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("[y/N]:"));
+    assert!(String::from_utf8_lossy(&captured).contains("[y/N]:"));
 }
 
 #[test]

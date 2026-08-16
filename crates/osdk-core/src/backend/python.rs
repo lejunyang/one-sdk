@@ -626,9 +626,8 @@ not-a-hash  garbage-line
         ));
     }
 
-    fn write_fixture_archive(path: &std::path::Path, subdir: Option<&str>, executable: &str) {
-        let file = std::fs::File::create(path).unwrap();
-        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    fn fixture_archive(subdir: Option<&str>, executable: &str) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         let mut archive = tar::Builder::new(encoder);
         let archive_path = match subdir {
             Some(subdir) => format!("root/{subdir}/{executable}"),
@@ -643,7 +642,7 @@ not-a-hash  garbage-line
             .append_data(&mut header, archive_path, &contents[..])
             .unwrap();
         archive.finish().unwrap();
-        archive.into_inner().unwrap().finish().unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
     }
 
     fn fixture_ctx(root: &std::path::Path, catalog_path: &std::path::Path, digest: &str) -> Ctx {
@@ -702,13 +701,16 @@ not-a-hash  garbage-line
             ),
         ];
         let mut entries = Vec::new();
+        let mut archives = std::collections::BTreeMap::new();
         for (index, (implementation, version, variant, subdir, executable)) in
             fixtures.iter().enumerate()
         {
             let file_name = format!("{implementation}-{index}.tar.gz");
             let archive = temp.path().join(&file_name);
-            write_fixture_archive(&archive, *subdir, executable);
-            let sha256 = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
+            let archive_bytes = fixture_archive(*subdir, executable);
+            let sha256 = pipeline::verify::hash_bytes(&archive_bytes, HashAlgo::Sha256);
+            archives.insert(file_name.clone(), archive_bytes);
+            let url = reqwest::Url::from_file_path(&archive).unwrap().to_string();
             entries.push(serde_json::json!({
                 "implementation": implementation,
                 "version": version,
@@ -716,7 +718,7 @@ not-a-hash  garbage-line
                 "os": if *implementation == "pyodide" { "emscripten" } else { "linux" },
                 "arch": if *implementation == "pyodide" { "wasm32" } else { "x86_64" },
                 "libc": if *implementation == "pyodide" { "musl" } else { "gnu" },
-                "url": format!("file://{}", archive.display()),
+                "url": url,
                 "sha256": sha256,
                 "subdir": subdir,
             }));
@@ -750,16 +752,13 @@ not-a-hash  garbage-line
             let (_, entry) =
                 super::super::python_catalog::resolve_catalog(&catalog, &parsed, &ctx).unwrap();
             let entry = entry.unwrap();
-            let file_name = entry
-                .url
-                .split('/')
-                .next_back()
+            let file_name = super::super::python_catalog::install_plan(&resolved.version, &entry)
                 .unwrap()
-                .replace("%2B", "+");
+                .file_name;
             let cached =
                 pipeline::artifact_cache_path(&ctx.dirs, "python", &resolved.version, &file_name);
             std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
-            std::fs::copy(entry.url.trim_start_matches("file://"), &cached).unwrap();
+            std::fs::write(&cached, archives.get(&file_name).unwrap()).unwrap();
             PythonBackend
                 .install(&InstallCtx { ctx: &ctx }, &resolved)
                 .await
