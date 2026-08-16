@@ -24,6 +24,7 @@ pub mod java;
 pub mod node;
 pub mod pnpm;
 pub mod python;
+mod python_catalog;
 mod python_releases;
 pub mod registry;
 pub mod rust;

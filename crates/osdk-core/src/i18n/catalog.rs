@@ -381,6 +381,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.python_not_found",
+        (
+            "no matching Python interpreter found",
+            "未找到匹配的 Python 解释器",
+        ),
+    );
+    m.insert(
         "err.invalid_opt",
         (
             "invalid --opt `{val}` (expected key=value)",
@@ -490,6 +497,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "GitHub artifact attestation policy: off|if-available|required",
             "GitHub 制品证明策略：off|if-available|required",
+        ),
+    );
+    m.insert(
+        "help.flag.prerelease",
+        (
+            "Pre-release policy: never|if-explicit|allow",
+            "预发布版本策略：never|if-explicit|allow",
         ),
     );
     m.insert(
@@ -768,6 +782,24 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Apply the migration instead of printing a plan",
             "执行迁移，而不是只打印计划",
+        ),
+    );
+    m.insert(
+        "help.python.about",
+        ("Manage Python-specific workflows", "管理 Python 专属工作流"),
+    );
+    m.insert(
+        "help.python.find.about",
+        (
+            "Find managed, PATH, and system Python interpreters",
+            "发现受管、PATH 和系统 Python 解释器",
+        ),
+    );
+    m.insert(
+        "help.python.find.arg.request",
+        (
+            "Optional request such as pypy-3.11 or 3.14+freethreaded",
+            "可选请求，例如 pypy-3.11 或 3.14+freethreaded",
         ),
     );
     m.insert(

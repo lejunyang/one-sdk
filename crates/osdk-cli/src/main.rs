@@ -41,6 +41,7 @@ fn main() {
         offline: cli.global.offline,
         require_checksums: cli.global.require_checksums,
         attestations: cli.global.attestations,
+        prerelease: cli.global.prerelease,
         lang: cli.global.lang.clone(),
     };
 
@@ -111,6 +112,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Trust { path, command } => commands::trust(app, path, command),
         Command::Untrust { path } => commands::untrust(app, path),
         Command::Node { command } => commands::node(app, command),
+        Command::Python { command } => commands::python(app, command),
         Command::Cache { command } => commands::cache(app, command),
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor => commands::doctor(app),

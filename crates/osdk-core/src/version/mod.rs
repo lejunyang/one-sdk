@@ -43,7 +43,7 @@ impl VersionSpec {
         // A fully-specified semver (x.y.z, possibly with pre/build) is exact;
         // anything shorter is treated as a prefix.
         let core = s.strip_prefix('v').unwrap_or(s);
-        if is_exact_semver(core) {
+        if semver::Version::parse(core).is_ok() {
             VersionSpec::Exact(core.to_string())
         } else {
             VersionSpec::Prefix(core.to_string())
@@ -80,16 +80,6 @@ fn normalize_npm_comparators(input: &str) -> Result<String> {
     } else {
         Ok(input.to_string())
     }
-}
-
-fn is_exact_semver(s: &str) -> bool {
-    // exact = at least major.minor.patch numeric
-    let numeric_core = s.split(['-', '+']).next().unwrap_or(s);
-    let parts: Vec<&str> = numeric_core.split('.').collect();
-    parts.len() >= 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 impl fmt::Display for VersionSpec {

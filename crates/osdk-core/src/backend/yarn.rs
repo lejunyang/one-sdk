@@ -105,6 +105,7 @@ impl Backend for YarnBackend {
                 kind: ArchiveKind::TarGz,
                 checksum: dist.checksum,
                 strip_root: true,
+                subdir: None,
             }
         };
         let pctx = PipelineCtx {

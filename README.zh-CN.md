@@ -130,6 +130,44 @@ osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
 只调用目标 Node 的受管 npm，并把目标 bin 目录放在 `PATH` 首位；失败时恢复目标
 原有的全局包集合。
 
+## Python 实现与 Catalog
+
+简写仍表示 CPython：
+
+```bash
+osdk install python@3.14
+osdk install python@cpython-3.14+freethreaded
+osdk install python@cpython-3.14+debug
+osdk install python@pypy-3.11
+osdk install python@graalpy-3.12
+osdk install python@pyodide-3.14
+osdk python find pypy-3.11
+```
+
+完整 identity 为 `python@<implementation>-<version>+<variant>`；实现和变体会写入
+`osdk.lock`，普通与 free-threaded CPython 可以并存。`python find` 按受管、
+`PATH`、系统解释器的顺序输出。
+
+内置 known-good catalog 固定来自 uv 的指定 commit，每个条目都有 SHA-256。配置
+更完整的内网或刷新 catalog 时必须同时提供：
+
+```toml
+[settings.python]
+catalog_url = "https://example.test/python-catalog.json"
+catalog_sha256 = "0123456789abcdef..."
+```
+
+也支持本地路径和 `file://` URL。新 catalog 只有在精确 digest、schema、实现、
+变体和每个 artifact checksum 全部通过后才替换 last-good 缓存；失败先回退
+last-good，再回退内置 catalog。预发布策略默认是 `if-explicit`：
+
+```bash
+osdk --prerelease never install python@3.15.0rc1
+osdk --prerelease allow install python@latest
+```
+
+除非策略为 `allow`，`latest` 不会选择预发布版本；`never` 也会拒绝显式 RC。
+
 ## 可复现项目与命令执行
 
 把当前项目解析为精确、按平台区分的版本：

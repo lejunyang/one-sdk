@@ -228,6 +228,7 @@ impl Backend for GithubBackend {
                         .map(pipeline::parse_checksum)
                         .transpose()?,
                     strip_root: true,
+                    subdir: None,
                 };
                 let pctx = PipelineCtx {
                     client: &ctx.client,
@@ -349,6 +350,7 @@ impl Backend for GithubBackend {
                     // Some archives have a top dir, some don't; strip only when a
                     // single root dir is present (extract handles the no-op).
                     strip_root: true,
+                    subdir: None,
                 };
                 let pctx = PipelineCtx {
                     client: &ctx.client,

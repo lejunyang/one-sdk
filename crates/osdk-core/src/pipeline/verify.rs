@@ -14,6 +14,14 @@ pub enum HashAlgo {
     Blake3,
 }
 
+pub fn hash_bytes(bytes: &[u8], algo: HashAlgo) -> String {
+    match algo {
+        HashAlgo::Sha256 => hex::encode(Sha256::digest(bytes)),
+        HashAlgo::Sha512 => hex::encode(Sha512::digest(bytes)),
+        HashAlgo::Blake3 => blake3::hash(bytes).to_hex().to_string(),
+    }
+}
+
 /// Compute the hex digest of a file with the given algorithm.
 pub fn hash_file(path: &Path, algo: HashAlgo) -> Result<String> {
     let mut f = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;

@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "source": "https://github.com/astral-sh/uv/blob/f1a42680ff5272232d65748acf338b19778dde24/crates/uv-python/download-metadata.json",
+  "source_sha256": "3c517040d06a37f47e9ee01a538242428a217f04d9f55310411dcac58b73472c",
+  "entries": [
+    {
+      "implementation": "cpython",
+      "version": "3.14.7",
+      "variant": "default",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "cefba034445d2875408d1fd4d5700ae6731563aeb54dcb39fd8164ab5c457533"
+    },
+    {
+      "implementation": "cpython",
+      "version": "3.14.7",
+      "variant": "freethreaded",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-freethreaded-install_only_stripped.tar.gz",
+      "sha256": "301a3326f279ca7d97d531fc8f50bc27c94a5b80c48e9f5ffcc7499bddb60ae1"
+    },
+    {
+      "implementation": "cpython",
+      "version": "3.14.7",
+      "variant": "debug",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-debug-full.tar.zst",
+      "sha256": "6e72bf42ec3c58933cd3395c6a5119e1a4f4b4259e92765d5a6971417486c973",
+      "subdir": "install"
+    },
+    {
+      "implementation": "cpython",
+      "version": "3.14.7",
+      "variant": "freethreaded+debug",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.14.7%2B20260814-x86_64-unknown-linux-gnu-freethreaded%2Bdebug-full.tar.zst",
+      "sha256": "469d95fc7f43eb69e19ecaa766a09749f2514fb99298f3d468c7ce07f86daaa7",
+      "subdir": "install"
+    },
+    {
+      "implementation": "cpython",
+      "version": "3.15.0rc1",
+      "variant": "default",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.15.0rc1%2B20260814-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "fb9ab27055be979c3298f0b5edf5a995dc087cfb365de627b3ceaa2c292f473b"
+    },
+    {
+      "implementation": "pypy",
+      "version": "3.11.15",
+      "variant": "default",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://downloads.python.org/pypy/pypy3.11-v7.3.23-linux64.tar.gz",
+      "sha256": "2bcab031cef7a37fe1930b51f7091e78a191ae63f80eca00a265d3378c3a645b"
+    },
+    {
+      "implementation": "graalpy",
+      "version": "3.12.0",
+      "variant": "default",
+      "os": "linux",
+      "arch": "x86_64",
+      "libc": "gnu",
+      "url": "https://github.com/oracle/graalpython/releases/download/graal-25.2.4/graalpy3.12-25.2.4-linux-amd64.tar.gz",
+      "sha256": "b3d0766ae6d55daa15f0db1f6c884383d7eec506b186d0ba2f702523a78ff28d"
+    },
+    {
+      "implementation": "pyodide",
+      "version": "3.14.2",
+      "variant": "default",
+      "os": "emscripten",
+      "arch": "wasm32",
+      "libc": "musl",
+      "url": "https://github.com/pyodide/pyodide/releases/download/314.0.4/xbuildenv-314.0.4.tar.gz",
+      "sha256": "257ceae085eaa1423c2ab49794d7a72bf36ddad475d126fa929791b9a8ab7289",
+      "subdir": "pyodide-root/dist"
+    }
+  ]
+}

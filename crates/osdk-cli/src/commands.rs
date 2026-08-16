@@ -8,7 +8,9 @@ use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
-use crate::cli::{AliasCommand, ConfigCommand, NodeCommand, SourceCommand, TrustCommand};
+use crate::cli::{
+    AliasCommand, ConfigCommand, NodeCommand, PythonCommand, SourceCommand, TrustCommand,
+};
 
 /// Apply a one-shot `--source` override into the config for this run.
 fn apply_source_override(app: &mut App, tool: &str) {
@@ -752,6 +754,11 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             println!("verify_signatures = {}", s.verify_signatures);
             println!("require_checksums = {}", s.require_checksums);
             println!("attestations = {}", s.attestations);
+            println!("prerelease  = {}", s.prerelease);
+            println!(
+                "python_catalog = {}",
+                s.python.catalog_url.as_deref().unwrap_or("built-in")
+            );
             println!("selection    = {:?}", app.ctx.config.sources.selection);
             if !app.ctx.config.tools.is_empty() {
                 println!("tools:");
@@ -829,6 +836,104 @@ pub fn node(app: &App, command: NodeCommand) -> Result<()> {
         NodeCommand::MigratePackages { from, to, apply } => {
             migrate_node_packages(app, &from, &to, apply)
         }
+    }
+}
+
+pub fn python(app: &App, command: PythonCommand) -> Result<()> {
+    match command {
+        PythonCommand::Find { request } => find_python(app, request.as_deref()),
+    }
+}
+
+fn find_python(app: &App, request: Option<&str>) -> Result<()> {
+    let backend = app.registry.get("python")?;
+    let installed = backend.list_installed(&app.ctx)?;
+    let selected = request
+        .map(|request| osdk_core::backend::python::select_installed(request, &installed))
+        .unwrap_or(None);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut found = false;
+
+    for identity in installed {
+        if selected
+            .as_deref()
+            .is_some_and(|selected| selected != identity)
+        {
+            continue;
+        }
+        let version = ToolVersion::new("python", &identity);
+        for directory in backend.bin_paths(&app.ctx, &version)? {
+            for name in python_executable_names() {
+                let path = directory.join(name);
+                if path.is_file() && seen.insert(canonical_or_original(&path)) {
+                    println!("managed\t{}\t{}", identity, path.display());
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            for name in python_executable_names() {
+                let candidate = directory.join(name);
+                if candidate.is_file() && seen.insert(canonical_or_original(&candidate)) {
+                    println!("path\t-\t{}", candidate.display());
+                    found = true;
+                }
+            }
+        }
+    }
+
+    for candidate in system_python_candidates() {
+        if candidate.is_file() && seen.insert(canonical_or_original(&candidate)) {
+            println!("system\t-\t{}", candidate.display());
+            found = true;
+        }
+    }
+    if !found {
+        return Err(anyhow!(t!("err.python_not_found")));
+    }
+    Ok(())
+}
+
+fn python_executable_names() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &[
+            "python.exe",
+            "python3.exe",
+            "pypy.exe",
+            "pypy3.exe",
+            "graalpy.exe",
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        &["python", "python3", "pypy", "pypy3", "graalpy"]
+    }
+}
+
+fn canonical_or_original(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn system_python_candidates() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut candidates = Vec::new();
+        if let Some(directory) = std::env::var_os("SystemRoot") {
+            candidates.push(std::path::PathBuf::from(directory).join("py.exe"));
+        }
+        candidates
+    }
+    #[cfg(not(windows))]
+    {
+        vec![
+            "/usr/bin/python3".into(),
+            "/usr/local/bin/python3".into(),
+            "/opt/homebrew/bin/python3".into(),
+        ]
     }
 }
 

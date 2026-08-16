@@ -227,16 +227,21 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
             .expand_alias(backend.id(), &active.spec)
             .unwrap_or(active.spec);
         let spec = strip_distribution_prefix(&expanded);
-        let parsed = if active.is_range {
-            VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
+        let version = if backend.id() == "python" {
+            crate::backend::python::select_installed(spec, &installed)
         } else {
-            VersionSpec::parse(spec)
-        };
-        let version = match &parsed {
-            VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => Some(v.clone()),
-            _ => {
-                let infos: Vec<VersionInfo> = installed.iter().map(VersionInfo::stable).collect();
-                select_version(&parsed, &infos).map(|vi| vi.version.clone())
+            let parsed = if active.is_range {
+                VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
+            } else {
+                VersionSpec::parse(spec)
+            };
+            match &parsed {
+                VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => Some(v.clone()),
+                _ => {
+                    let infos: Vec<VersionInfo> =
+                        installed.iter().map(VersionInfo::stable).collect();
+                    select_version(&parsed, &infos).map(|vi| vi.version.clone())
+                }
             }
         };
         let version = match version {

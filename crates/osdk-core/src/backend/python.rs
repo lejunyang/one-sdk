@@ -14,9 +14,13 @@ use crate::http;
 use crate::pipeline::{self, ArchiveKind, Checksum, HashAlgo, InstallPlan, PipelineCtx};
 use crate::platform::Os;
 use crate::source::Source;
-use crate::version::{ToolVersion, VersionInfo};
+use crate::version::{select_version, ToolRequest, ToolVersion, VersionInfo};
 
 pub struct PythonBackend;
+
+pub fn select_installed(spec: &str, installed: &[String]) -> Option<String> {
+    super::python_catalog::select_installed(spec, installed)
+}
 
 /// A single asset parsed from `SHA256SUMS`: filename + sha256.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +114,58 @@ impl Backend for PythonBackend {
         Ok(out)
     }
 
+    async fn resolve_version(&self, ctx: &Ctx, request: &ToolRequest) -> Result<ToolVersion> {
+        if request
+            .options
+            .contains_key(pipeline::LOCKED_ARTIFACT_URL_OPTION)
+        {
+            if let crate::version::VersionSpec::Exact(identity) = &request.spec {
+                let mut resolved = ToolVersion::new(self.id(), identity);
+                resolved.options = request.options.clone();
+                return Ok(resolved);
+            }
+        }
+        let parsed = super::python_catalog::PythonRequest::parse(request)?;
+        if parsed.implementation == "cpython"
+            && parsed.variant == "default"
+            && !parsed.explicit_prerelease
+            && ctx.config.settings.python.catalog_url.is_none()
+            && !matches!(
+                ctx.config.settings.prerelease,
+                crate::config::PrereleasePolicy::Allow
+            )
+        {
+            let versions = self.list_remote_versions(ctx).await?;
+            let chosen =
+                select_version(&parsed.spec, &versions).ok_or_else(|| Error::VersionResolve {
+                    tool: self.id().into(),
+                    spec: parsed.spec.to_string(),
+                    hint: Some("no matching stable CPython version found".into()),
+                })?;
+            if super::python_catalog::is_prerelease(&chosen.version)
+                && matches!(
+                    ctx.config.settings.prerelease,
+                    crate::config::PrereleasePolicy::Never
+                )
+            {
+                return Err(Error::VersionResolve {
+                    tool: self.id().into(),
+                    spec: parsed.spec.to_string(),
+                    hint: Some("pre-release Python versions are disabled".into()),
+                });
+            }
+            let mut resolved = ToolVersion::new(self.id(), &chosen.version);
+            resolved.options = super::python_catalog::resolved_options(&parsed, &chosen.version);
+            resolved.options.extend(request.options.clone());
+            return Ok(resolved);
+        }
+
+        let catalog = super::python_catalog::load(ctx).await?;
+        let (mut resolved, _) = super::python_catalog::resolve_catalog(&catalog, &parsed, ctx)?;
+        resolved.options.extend(request.options.clone());
+        Ok(resolved)
+    }
+
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
@@ -123,6 +179,58 @@ impl Backend for PythonBackend {
                 require_checksums: ctx.config.settings.require_checksums,
             };
             pipeline::run(&plan, &pctx).await?;
+            if let Err(error) = ensure_python_aliases(ctx, tv) {
+                let _ = std::fs::remove_dir_all(ctx.dirs.install_path(self.id(), &tv.version));
+                return Err(error);
+            }
+            return Ok(());
+        }
+        let implementation = tv
+            .options
+            .get("implementation")
+            .map(String::as_str)
+            .unwrap_or("cpython");
+        let variant = tv
+            .options
+            .get("variant")
+            .map(String::as_str)
+            .unwrap_or("default");
+        let python_version = tv
+            .options
+            .get("python-version")
+            .cloned()
+            .unwrap_or_else(|| tv.version.clone());
+        if implementation != "cpython"
+            || variant != "default"
+            || super::python_catalog::is_prerelease(&python_version)
+            || tv.options.get("catalog").map(String::as_str) == Some("true")
+        {
+            let request = ToolRequest {
+                backend: self.id().into(),
+                spec: crate::version::VersionSpec::Exact(format!(
+                    "{implementation}-{python_version}+{variant}"
+                )),
+                options: tv.options.clone(),
+            };
+            let parsed = super::python_catalog::PythonRequest::parse(&request)?;
+            let catalog = super::python_catalog::load(ctx).await?;
+            let (_, entry) = super::python_catalog::resolve_catalog(&catalog, &parsed, ctx)?;
+            let entry = entry.ok_or_else(|| Error::other("python catalog entry missing"))?;
+            let plan = super::python_catalog::install_plan(&tv.version, &entry)?;
+            let pctx = PipelineCtx {
+                client: &ctx.client,
+                dirs: &ctx.dirs,
+                cas: &ctx.cas,
+                link_mode: ctx.config.settings.link_mode,
+                show_progress: ctx.show_progress,
+                offline: ctx.config.settings.offline,
+                require_checksums: true,
+            };
+            pipeline::run(&plan, &pctx).await?;
+            if let Err(error) = ensure_python_aliases(ctx, tv) {
+                let _ = std::fs::remove_dir_all(ctx.dirs.install_path(self.id(), &tv.version));
+                return Err(error);
+            }
             return Ok(());
         }
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
@@ -184,6 +292,7 @@ impl Backend for PythonBackend {
             kind,
             checksum,
             strip_root: true, // archives wrap in a `python/` dir
+            subdir: None,
         };
         let pctx = PipelineCtx {
             client: &ctx.client,
@@ -200,6 +309,9 @@ impl Backend for PythonBackend {
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         let root = ctx.dirs.install_path(self.id(), &tv.version);
+        if tv.version.starts_with("pyodide-") {
+            return Ok(vec![root]);
+        }
         // PBS layout after stripping `python/`: bin/ on unix, root on windows.
         let dir = match ctx.platform.os {
             Os::Windows => root,
@@ -212,12 +324,22 @@ impl Backend for PythonBackend {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
         if discovered.is_empty() {
-            Ok(vec![
-                "python".into(),
-                "python3".into(),
-                "pip".into(),
-                "pip3".into(),
-            ])
+            if tv.version.starts_with("pypy-") {
+                Ok(vec!["pypy".into(), "pypy3".into(), "python".into()])
+            } else if tv.version.starts_with("graalpy-") {
+                Ok(vec!["graalpy".into(), "python".into(), "python3".into()])
+            } else if tv.version.starts_with("pyodide-") {
+                Ok(vec!["python".into()])
+            } else if tv.version.contains("+freethreaded") {
+                Ok(vec!["pythont".into(), "python3t".into()])
+            } else {
+                Ok(vec![
+                    "python".into(),
+                    "python3".into(),
+                    "pip".into(),
+                    "pip3".into(),
+                ])
+            }
         } else {
             Ok(discovered)
         }
@@ -267,6 +389,52 @@ impl PythonBackend {
         }
         Err(last_err.unwrap_or_else(|| Error::other(format!("no SHA256SUMS for tag {tag}"))))
     }
+}
+
+fn ensure_python_aliases(ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+    let paths = PythonBackend.bin_paths(ctx, tv)?;
+    let Some(directory) = paths.first() else {
+        return Ok(());
+    };
+    let candidates: &[&str] = if tv.version.starts_with("pypy-") {
+        &["pypy3", "pypy"]
+    } else if tv.version.starts_with("graalpy-") {
+        &["graalpy"]
+    } else if tv.version.starts_with("pyodide-") {
+        &["python"]
+    } else {
+        return Ok(());
+    };
+    let Some(source) = candidates
+        .iter()
+        .map(|name| directory.join(format!("{name}{}", ctx.platform.os.exe_suffix())))
+        .find(|path| path.is_file())
+    else {
+        return Err(Error::other(format!(
+            "installed Python identity {} has no executable in {}",
+            tv.version,
+            directory.display()
+        )));
+    };
+    for name in ["python", "python3"] {
+        let destination = directory.join(format!("{name}{}", ctx.platform.os.exe_suffix()));
+        if destination.exists() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = source
+                .file_name()
+                .ok_or_else(|| Error::other("python alias source has no filename"))?;
+            symlink(target, &destination).map_err(|error| Error::io(&destination, error))?;
+        }
+        #[cfg(windows)]
+        {
+            std::fs::copy(&source, &destination).map_err(|error| Error::io(&destination, error))?;
+        }
+    }
+    Ok(())
 }
 
 fn version_available_on_platform(version: &str, triple: &str) -> bool {
@@ -373,7 +541,13 @@ pub fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::config::{Config, PrereleasePolicy, PythonSettings, Settings, SourcesConfig};
+    use crate::dirs::Dirs;
+    use crate::platform::{Arch, Libc, Platform};
+    use crate::store::Cas;
 
     #[test]
     fn asset_matching() {
@@ -446,5 +620,176 @@ not-a-hash  garbage-line
             "3.12.9",
             "x86_64-unknown-linux-musl"
         ));
+    }
+
+    fn write_fixture_archive(path: &std::path::Path, subdir: Option<&str>, executable: &str) {
+        let file = std::fs::File::create(path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut archive = tar::Builder::new(encoder);
+        let archive_path = match subdir {
+            Some(subdir) => format!("root/{subdir}/{executable}"),
+            None => format!("root/{executable}"),
+        };
+        let contents = b"#!/bin/sh\nexit 0\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, archive_path, &contents[..])
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    fn fixture_ctx(root: &std::path::Path, catalog_path: &std::path::Path, digest: &str) -> Ctx {
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        Ctx {
+            cas: Arc::new(Cas::new(dirs.store.clone())),
+            dirs,
+            platform: Platform {
+                os: Os::Linux,
+                arch: Arch::X64,
+                libc: Libc::Glibc,
+            },
+            config: Config {
+                settings: Settings {
+                    offline: true,
+                    prerelease: PrereleasePolicy::Allow,
+                    python: PythonSettings {
+                        catalog_url: Some(catalog_path.display().to_string()),
+                        catalog_sha256: Some(digest.into()),
+                    },
+                    ..Default::default()
+                },
+                sources: SourcesConfig::default(),
+                tools: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_implementations_and_variants_install_offline_and_coexist() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixtures = [
+            ("cpython", "3.14.7", "default", None, "bin/python3"),
+            ("cpython", "3.14.7", "freethreaded", None, "bin/python3t"),
+            ("pypy", "3.11.15", "default", None, "bin/pypy3"),
+            ("graalpy", "3.12.0", "default", None, "bin/graalpy"),
+            (
+                "pyodide",
+                "3.14.2",
+                "default",
+                Some("pyodide-root/dist"),
+                "python",
+            ),
+        ];
+        let mut entries = Vec::new();
+        for (index, (implementation, version, variant, subdir, executable)) in
+            fixtures.iter().enumerate()
+        {
+            let file_name = format!("{implementation}-{index}.tar.gz");
+            let archive = temp.path().join(&file_name);
+            write_fixture_archive(&archive, *subdir, executable);
+            let sha256 = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
+            entries.push(serde_json::json!({
+                "implementation": implementation,
+                "version": version,
+                "variant": variant,
+                "os": if *implementation == "pyodide" { "emscripten" } else { "linux" },
+                "arch": if *implementation == "pyodide" { "wasm32" } else { "x86_64" },
+                "libc": if *implementation == "pyodide" { "musl" } else { "gnu" },
+                "url": format!("file://{}", archive.display()),
+                "sha256": sha256,
+                "subdir": subdir,
+            }));
+        }
+        let catalog = serde_json::json!({
+            "schema": 1,
+            "source": "offline fixture",
+            "source_sha256": "fixture",
+            "entries": entries,
+        });
+        let catalog_bytes = serde_json::to_vec_pretty(&catalog).unwrap();
+        let catalog_path = temp.path().join("catalog.json");
+        std::fs::write(&catalog_path, &catalog_bytes).unwrap();
+        let digest = pipeline::verify::hash_bytes(&catalog_bytes, HashAlgo::Sha256);
+        let ctx = fixture_ctx(temp.path(), &catalog_path, &digest);
+
+        for (implementation, version, variant, _, _) in fixtures {
+            let request_value = if implementation == "cpython" {
+                if variant == "default" {
+                    format!("python@{version}")
+                } else {
+                    format!("python@cpython-{version}+{variant}")
+                }
+            } else {
+                format!("python@{implementation}-{version}")
+            };
+            let request = ToolRequest::parse(&request_value).unwrap();
+            let resolved = PythonBackend.resolve_version(&ctx, &request).await.unwrap();
+            let catalog = super::super::python_catalog::load(&ctx).await.unwrap();
+            let parsed = super::super::python_catalog::PythonRequest::parse(&request).unwrap();
+            let (_, entry) =
+                super::super::python_catalog::resolve_catalog(&catalog, &parsed, &ctx).unwrap();
+            let entry = entry.unwrap();
+            let file_name = entry
+                .url
+                .split('/')
+                .next_back()
+                .unwrap()
+                .replace("%2B", "+");
+            let cached =
+                pipeline::artifact_cache_path(&ctx.dirs, "python", &resolved.version, &file_name);
+            std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            std::fs::copy(entry.url.trim_start_matches("file://"), &cached).unwrap();
+            PythonBackend
+                .install(&InstallCtx { ctx: &ctx }, &resolved)
+                .await
+                .unwrap();
+            assert!(pipeline::is_installed(
+                &ctx.dirs,
+                "python",
+                &resolved.version
+            ));
+        }
+
+        assert!(ctx
+            .dirs
+            .install_path("python", "3.14.7")
+            .join("bin/python3")
+            .is_file());
+        assert!(ctx
+            .dirs
+            .install_path("python", "cpython-3.14.7+freethreaded")
+            .join("bin/python3t")
+            .is_file());
+        assert!(ctx
+            .dirs
+            .install_path("python", "pypy-3.11.15")
+            .join("bin/pypy3")
+            .is_file());
+        assert!(ctx
+            .dirs
+            .install_path("python", "graalpy-3.12.0")
+            .join("bin/graalpy")
+            .is_file());
+        assert!(ctx
+            .dirs
+            .install_path("python", "pyodide-3.14.2")
+            .join("python")
+            .is_file());
     }
 }

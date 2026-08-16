@@ -69,6 +69,44 @@ osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
 迁移排除 npm 自身和带原生构建或安装脚本的包。apply 只使用受管 npm，失败时恢复
 目标版本原有的全局包集合。
 
+## Python 多实现、变体与 Catalog
+
+`python@3.14` 仍是 CPython 简写。完整请求为：
+
+```bash
+osdk install python@cpython-3.14+freethreaded
+osdk install python@cpython-3.14+debug
+osdk install python@pypy-3.11
+osdk install python@graalpy-3.12
+osdk install python@pyodide-3.14
+```
+
+实现、精确版本和变体都写入 lock；普通 CPython 与 free-threaded/debug 变体使用
+不同 identity 并可共存。发现本机解释器：
+
+```bash
+osdk python find
+osdk python find pypy-3.11
+```
+
+输出按 managed、PATH、system 分层并去重。内置 known-good catalog 固定来自 uv
+download metadata 的指定 commit，所有条目都有 SHA-256。自定义远程或本地
+catalog 必须同时配置 digest：
+
+```toml
+[settings.python]
+catalog_url = "/approved/python-catalog.json"
+catalog_sha256 = "0123456789abcdef..."
+```
+
+只有 digest、schema 和每条 artifact checksum 全部通过后才更新 last-good；失败
+不会破坏旧缓存。预发布默认 `if-explicit`，`latest` 不会意外选择 RC：
+
+```bash
+osdk --prerelease never install python@3.15.0rc1
+osdk --prerelease allow install python@latest
+```
+
 ## 项目配置信任
 
 项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。

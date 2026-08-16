@@ -416,6 +416,7 @@ impl Backend for DeclarativeBackend {
             kind: self.archive.kind.into(),
             checksum: Some(checksum),
             strip_root: self.archive.strip_root,
+            subdir: None,
         };
         let pipeline_ctx = PipelineCtx {
             client: &ctx.client,

@@ -123,6 +123,48 @@ install scripts are skipped. `--apply` uses the target Node's managed npm with
 its bin directory first on `PATH`; on failure, the target's previous global
 package set is restored.
 
+## Python implementations and catalogs
+
+The short form remains CPython:
+
+```bash
+osdk install python@3.14
+osdk install python@cpython-3.14+freethreaded
+osdk install python@cpython-3.14+debug
+osdk install python@pypy-3.11
+osdk install python@graalpy-3.12
+osdk install python@pyodide-3.14
+osdk python find pypy-3.11
+```
+
+The full identity is
+`python@<implementation>-<version>+<variant>`; implementation and variant are
+persisted in `osdk.lock`, so regular and free-threaded CPython can coexist.
+`python find` reports managed, `PATH`, and system interpreters in that order.
+
+The built-in known-good catalog is derived from uv download metadata at a fixed
+commit and every entry has a SHA-256. Configure a larger internal or refreshed
+catalog only with both fields:
+
+```toml
+[settings.python]
+catalog_url = "https://example.test/python-catalog.json"
+catalog_sha256 = "0123456789abcdef..."
+```
+
+Local paths and `file://` URLs are supported. A new catalog replaces last-good
+cache only after its exact digest, schema, implementation, variant, and every
+artifact checksum validate; failure falls back to last-good, then built-in.
+Pre-release policy is `if-explicit` by default:
+
+```bash
+osdk --prerelease never install python@3.15.0rc1
+osdk --prerelease allow install python@latest
+```
+
+`latest` does not select a pre-release unless policy is `allow`; `never` rejects
+pre-releases even when explicitly requested.
+
 ## Reproducible projects and execution
 
 Resolve the current project to exact, platform-specific versions:

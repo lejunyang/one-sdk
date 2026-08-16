@@ -74,6 +74,46 @@ Migration excludes npm itself and packages with native builds or install
 scripts. Apply uses only managed npm and restores the target's previous global
 package set after failure.
 
+## Python implementations, variants, and catalogs
+
+`python@3.14` remains the CPython shorthand. Full requests include:
+
+```bash
+osdk install python@cpython-3.14+freethreaded
+osdk install python@cpython-3.14+debug
+osdk install python@pypy-3.11
+osdk install python@graalpy-3.12
+osdk install python@pyodide-3.14
+```
+
+Implementation, exact version, and variant are persisted in the lockfile.
+Regular, free-threaded, and debug CPython use distinct identities and can
+coexist. Discover local interpreters with:
+
+```bash
+osdk python find
+osdk python find pypy-3.11
+```
+
+Output is layered and deduplicated as managed, `PATH`, then system. The embedded
+known-good catalog is pinned to a uv download-metadata commit and every entry
+has SHA-256. A remote or local catalog must include a pinned digest:
+
+```toml
+[settings.python]
+catalog_url = "/approved/python-catalog.json"
+catalog_sha256 = "0123456789abcdef..."
+```
+
+Only a catalog whose digest, schema, and every artifact checksum validate can
+replace last-good cache. Failure leaves old cache intact. Pre-release behavior
+defaults to `if-explicit`, so `latest` never selects an RC unexpectedly:
+
+```bash
+osdk --prerelease never install python@3.15.0rc1
+osdk --prerelease allow install python@latest
+```
+
 ## Project configuration trust
 
 Project `[tools]` pins and `[aliases]` are safe data and load without trust.

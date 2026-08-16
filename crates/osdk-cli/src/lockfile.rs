@@ -38,6 +38,8 @@ pub struct LockedArtifact {
     pub file_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<osdk_core::verification::VerificationEvidence>,
 }
@@ -152,6 +154,12 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
                         checksum.clone(),
                     );
                 }
+                if let Some(subdir) = &artifact.subdir {
+                    options.insert(
+                        osdk_core::pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION.into(),
+                        subdir.clone(),
+                    );
+                }
             }
             ToolRequest {
                 backend: backend.clone(),
@@ -183,6 +191,14 @@ pub fn merge_resolved(
         .or_default();
     platform_lock.tools.clear();
     for (request, version) in resolved {
+        let resolved_artifact =
+            osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
+                url: receipt.url,
+                file_name: receipt.file_name,
+                checksum: receipt.checksum,
+                subdir: version.options.get("catalog-subdir").cloned(),
+                evidence: receipt.evidence,
+            });
         platform_lock.tools.insert(
             request.backend.clone(),
             LockedTool {
@@ -198,8 +214,10 @@ pub fn merge_resolved(
                     url: receipt.url,
                     file_name: receipt.file_name,
                     checksum: receipt.checksum,
+                    subdir: version.options.get("catalog-subdir").cloned(),
                     evidence: receipt.evidence,
-                }),
+                })
+                .or(resolved_artifact),
             },
         );
     }
@@ -316,6 +334,47 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_catalog_artifact_is_persisted_with_subdir() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let request = ToolRequest::parse("python@pyodide-3.14.2").unwrap();
+        let mut version = ToolVersion::new("python", "pyodide-3.14.2");
+        version.options.extend(BTreeMap::from([
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                "https://example.test/pyodide.tar.gz".into(),
+            ),
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                "pyodide.tar.gz".into(),
+            ),
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{}", "a".repeat(64)),
+            ),
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION.into(),
+                "pyodide-root/dist".into(),
+            ),
+            ("catalog-subdir".into(), "pyodide-root/dist".into()),
+        ]));
+        merge_resolved(&path, linux(), &dirs, &[(request, version)]).unwrap();
+        let lock = load(&path).unwrap();
+        let artifact = lock.platforms["linux-x64"].tools["python"]
+            .artifact
+            .as_ref()
+            .unwrap();
+        assert_eq!(artifact.file_name, "pyodide.tar.gz");
+        assert_eq!(artifact.subdir.as_deref(), Some("pyodide-root/dist"));
+        let restored = locked_requests(&path, linux()).unwrap().unwrap();
+        assert_eq!(
+            restored[0].options[osdk_core::pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION],
+            "pyodide-root/dist"
+        );
+    }
+
+    #[test]
     fn legacy_artifact_without_evidence_still_loads() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
@@ -332,6 +391,7 @@ version = "2.96.0"
 url = "https://example.test/gh.tar.gz"
 file_name = "gh.tar.gz"
 checksum = "sha256:00"
+subdir = "install"
 "#,
         )
         .unwrap();
@@ -343,6 +403,15 @@ checksum = "sha256:00"
             .unwrap()
             .evidence
             .is_empty());
+        assert_eq!(
+            lock.platforms["linux-x64"].tools["github:cli/cli"]
+                .artifact
+                .as_ref()
+                .unwrap()
+                .subdir
+                .as_deref(),
+            Some("install")
+        );
     }
 
     #[test]

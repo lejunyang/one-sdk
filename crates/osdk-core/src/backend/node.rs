@@ -420,6 +420,7 @@ impl Backend for NodeBackend {
             kind,
             checksum,
             strip_root: true,
+            subdir: None,
         };
         let pctx = PipelineCtx {
             client: &ctx.client,

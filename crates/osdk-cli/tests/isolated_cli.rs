@@ -379,6 +379,47 @@ fn package_json_node_range_is_discovered_with_documented_priority() {
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid semver range"));
 }
 
+#[cfg(unix)]
+#[test]
+fn python_find_reports_managed_path_and_system_layers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let managed = temp.path().join("installs/python/pypy-3.11.15/bin/pypy3");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        temp.path()
+            .join("installs/python/pypy-3.11.15/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+
+    let path_bin = temp.path().join("path-bin");
+    std::fs::create_dir_all(&path_bin).unwrap();
+    let path_python = path_bin.join("python3");
+    std::fs::write(&path_python, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path_python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path_value = path_bin.to_string_lossy().into_owned();
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        temp.path(),
+        &["python", "find", "pypy-3.11"],
+        &[("PATH", &path_value)],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("managed\tpypy-3.11.15"));
+    assert!(stdout.contains(&managed.display().to_string()));
+    assert!(stdout.contains("path\t-\t"));
+    assert!(stdout.contains(&path_python.display().to_string()));
+}
+
 #[test]
 fn node_cross_arch_lock_uses_target_platform_and_install_rejects_execution() {
     let temp = tempfile::tempdir().unwrap();

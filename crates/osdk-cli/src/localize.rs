@@ -35,6 +35,7 @@ fn localize_global_args(cmd: Command) -> Command {
             a.help(h("help.flag.require_checksums"))
         })
         .mut_arg("attestations", |a| a.help(h("help.flag.attestations")))
+        .mut_arg("prerelease", |a| a.help(h("help.flag.prerelease")))
         .mut_arg("lang", |a| a.help(h("help.flag.lang")))
 }
 
@@ -123,6 +124,12 @@ fn localize_subcommands(cmd: Command) -> Command {
                     .mut_arg("to", |a| a.help(h("help.node.migrate.arg.to")))
                     .mut_arg("apply", |a| a.help(h("help.node.migrate.flag.apply")))
             })
+    })
+    .mut_subcommand("python", |c| {
+        c.about(h("help.python.about")).mut_subcommand("find", |s| {
+            s.about(h("help.python.find.about"))
+                .mut_arg("request", |a| a.help(h("help.python.find.arg.request")))
+        })
     })
     .mut_subcommand("cache", |c| {
         c.about(h("help.cache.about"))

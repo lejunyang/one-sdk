@@ -35,6 +35,8 @@ pub struct InstallPlan {
     pub checksum: Option<Checksum>,
     /// Whether to strip a single top-level directory during extraction.
     pub strip_root: bool,
+    /// Optional safe relative subdirectory to materialize after extraction.
+    pub subdir: Option<PathBuf>,
 }
 
 pub struct Checksum {
@@ -56,6 +58,7 @@ const ARTIFACT_RECEIPT_FILE: &str = ".osdk-artifact.json";
 pub const LOCKED_ARTIFACT_URL_OPTION: &str = "__osdk_artifact_url";
 pub const LOCKED_ARTIFACT_FILE_OPTION: &str = "__osdk_artifact_file";
 pub const LOCKED_ARTIFACT_CHECKSUM_OPTION: &str = "__osdk_artifact_checksum";
+pub const LOCKED_ARTIFACT_SUBDIR_OPTION: &str = "__osdk_artifact_subdir";
 
 /// Context passed into the pipeline run.
 pub struct PipelineCtx<'a> {
@@ -88,6 +91,10 @@ pub fn locked_install_plan(
             .map(parse_checksum)
             .transpose()?,
         strip_root,
+        subdir: version
+            .options
+            .get(LOCKED_ARTIFACT_SUBDIR_OPTION)
+            .map(PathBuf::from),
     }))
 }
 
@@ -256,10 +263,14 @@ pub async fn run_with_attestation(
     }
     create_dir_all(&scratch)?;
     extract::extract(&archive_path, &scratch, plan.kind, plan.strip_root)?;
+    let materialize_root = match plan.subdir.as_deref() {
+        Some(subdir) => safe_subdir(&scratch, subdir)?,
+        None => scratch.clone(),
+    };
 
     // 4. Ingest into CAS + materialize into the install dir.
     let report = ctx.cas.ingest_tree(
-        &scratch,
+        &materialize_root,
         &install_dir,
         &plan.tool,
         &plan.version,
@@ -291,6 +302,27 @@ pub async fn run_with_attestation(
     );
 
     Ok(install_dir)
+}
+
+fn safe_subdir(root: &std::path::Path, subdir: &std::path::Path) -> Result<PathBuf> {
+    if subdir.is_absolute()
+        || subdir
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(Error::config(format!(
+            "unsafe archive subdirectory `{}`",
+            subdir.display()
+        )));
+    }
+    let selected = root.join(subdir);
+    if !selected.is_dir() {
+        return Err(Error::other(format!(
+            "archive subdirectory does not exist: {}",
+            subdir.display()
+        )));
+    }
+    Ok(selected)
 }
 
 /// Whether a tool@version is installed (complete marker present).
@@ -611,6 +643,7 @@ mod tests {
             kind: ArchiveKind::TarGz,
             checksum: Some(checksum),
             strip_root: true,
+            subdir: None,
         };
         let client = reqwest::Client::new();
         let ctx = PipelineCtx {
@@ -672,6 +705,7 @@ mod tests {
             kind: ArchiveKind::TarGz,
             checksum: None,
             strip_root: true,
+            subdir: None,
         };
         let strict = PipelineCtx {
             client: &client,

@@ -56,6 +56,10 @@ pub struct GlobalArgs {
     #[arg(long, global = true, env = "OSDK_ATTESTATIONS")]
     pub attestations: Option<osdk_core::config::AttestationPolicy>,
 
+    /// Pre-release policy: never|if-explicit|allow.
+    #[arg(long, global = true, env = "OSDK_PRERELEASE")]
+    pub prerelease: Option<osdk_core::config::PrereleasePolicy>,
+
     /// Output language (en|zh); overrides locale and OSDK_LANG.
     #[arg(long, global = true, value_name = "LANG")]
     pub lang: Option<String>,
@@ -219,6 +223,12 @@ pub enum Command {
         command: NodeCommand,
     },
 
+    /// Manage Python-specific workflows.
+    Python {
+        #[command(subcommand)]
+        command: PythonCommand,
+    },
+
     /// Manage the shared caches (SDK store + downstream package caches).
     Cache {
         #[command(subcommand)]
@@ -303,6 +313,15 @@ pub enum NodeCommand {
         /// Apply the plan. Without this flag, no packages are changed.
         #[arg(long)]
         apply: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PythonCommand {
+    /// Find managed, PATH, and system Python interpreters.
+    Find {
+        /// Optional Python request, e.g. `pypy-3.11` or `3.14+freethreaded`.
+        request: Option<String>,
     },
 }
 

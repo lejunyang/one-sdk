@@ -277,6 +277,9 @@ fn resolve_installed(
     if installed.is_empty() {
         return None;
     }
+    if backend.id() == "python" {
+        return osdk_core::backend::python::select_installed(spec, &installed);
+    }
     // Strip a leading distribution prefix like `temurin-` (java) so the version
     // part matches the installed dir names (e.g. `17.0.20+8`).
     let spec = strip_distribution_prefix(spec);

@@ -235,6 +235,7 @@ impl Backend for JavaBackend {
             kind,
             checksum,
             strip_root: true, // JDK archives wrap in jdk-<ver>/
+            subdir: None,
         };
         let pctx = PipelineCtx {
             client: &ctx.client,

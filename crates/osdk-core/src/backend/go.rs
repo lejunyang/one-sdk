@@ -154,6 +154,7 @@ impl Backend for GoBackend {
             kind,
             checksum,
             strip_root: true, // archives wrap everything in a `go/` dir
+            subdir: None,
         };
         let pctx = PipelineCtx {
             client: &ctx.client,

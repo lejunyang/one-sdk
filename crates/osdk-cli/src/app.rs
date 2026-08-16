@@ -23,6 +23,7 @@ pub struct GlobalOverrides {
     pub offline: bool,
     pub require_checksums: bool,
     pub attestations: Option<osdk_core::config::AttestationPolicy>,
+    pub prerelease: Option<osdk_core::config::PrereleasePolicy>,
     pub lang: Option<String>,
 }
 
@@ -91,6 +92,9 @@ impl App {
         }
         if let Some(policy) = overrides.attestations {
             config.settings.attestations = policy;
+        }
+        if let Some(policy) = overrides.prerelease {
+            config.settings.prerelease = policy;
         }
 
         // Finalize language now that config is loaded. Precedence:

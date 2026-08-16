@@ -53,6 +53,10 @@ pub struct Settings {
     pub lang: Option<String>,
     /// Node-specific installation behavior.
     pub node: NodeSettings,
+    /// Python catalog refresh and verification.
+    pub python: PythonSettings,
+    /// Pre-release resolution policy shared by supporting backends.
+    pub prerelease: PrereleasePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,6 +64,49 @@ pub struct Settings {
 pub struct NodeSettings {
     /// Run the installed Node's own `corepack enable` after installation.
     pub corepack: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PythonSettings {
+    /// Optional JSON catalog URL or local path.
+    pub catalog_url: Option<String>,
+    /// Required SHA-256 for the exact catalog bytes.
+    pub catalog_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrereleasePolicy {
+    #[default]
+    IfExplicit,
+    Never,
+    Allow,
+}
+
+impl std::str::FromStr for PrereleasePolicy {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "never" => Ok(Self::Never),
+            "if-explicit" | "explicit" | "auto" => Ok(Self::IfExplicit),
+            "allow" | "always" => Ok(Self::Allow),
+            other => Err(Error::config(format!(
+                "invalid prerelease policy `{other}` (expected never|if-explicit|allow)"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for PrereleasePolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Never => "never",
+            Self::IfExplicit => "if-explicit",
+            Self::Allow => "allow",
+        })
+    }
 }
 
 impl Default for Settings {
@@ -74,6 +121,8 @@ impl Default for Settings {
             offline: false,
             lang: None,
             node: NodeSettings::default(),
+            python: PythonSettings::default(),
+            prerelease: PrereleasePolicy::default(),
         }
     }
 }
@@ -242,6 +291,17 @@ impl Config {
         }
         if let Some(v) = getenv("OSDK_OFFLINE") {
             self.settings.offline = truthy(&v);
+        }
+        if let Some(v) = getenv("OSDK_PRERELEASE") {
+            if let Ok(policy) = v.parse() {
+                self.settings.prerelease = policy;
+            }
+        }
+        if let Some(v) = getenv("OSDK_PYTHON_CATALOG_URL") {
+            self.settings.python.catalog_url = Some(v);
+        }
+        if let Some(v) = getenv("OSDK_PYTHON_CATALOG_SHA256") {
+            self.settings.python.catalog_sha256 = Some(v);
         }
         if let Some(v) = getenv("OSDK_SELECTION") {
             self.sources.selection = match v.to_ascii_lowercase().as_str() {
