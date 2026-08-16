@@ -438,6 +438,21 @@ osdk lock github:owner/repo@latest \
 Schema 1 assets include URL, checksum, OS, architecture, and optional libc.
 Digest, selected asset, and rules are persisted in the lockfile.
 
+## Pre-release policy and channels
+
+```bash
+osdk install bun@canary
+osdk install deno@beta
+osdk --prerelease allow install bun@latest
+osdk --prerelease never install bun@canary
+```
+
+`if-explicit` is the default for Python, Bun, Deno, and GitHub. Explicit
+`canary|nightly|beta` maps a dist-tag or prerelease tag, while the lock stores
+the original channel and exact version. `never` rejects all prereleases; only
+`allow` lets latest/prefix/range select one implicitly. Default lists remain
+stable-only.
+
 ## Declarative backends
 
 In addition to built-in backends, osdk can load schema 1 TOML backends from

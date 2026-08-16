@@ -409,6 +409,20 @@ osdk lock github:owner/repo@latest \
 schema 1 asset 包含 URL、checksum、os、arch 和可选 libc；digest、最终 asset
 与规则都会写入 lock。
 
+## 预发布策略与通道
+
+```bash
+osdk install bun@canary
+osdk install deno@beta
+osdk --prerelease allow install bun@latest
+osdk --prerelease never install bun@canary
+```
+
+`if-explicit` 是 Python、Bun、Deno 和 GitHub 的默认策略。显式
+`canary|nightly|beta` 映射 dist-tag 或 prerelease tag；lock 保存原始 channel
+和精确版本。`never` 拒绝所有预发布，只有 `allow` 才允许 latest/prefix/range
+隐式选择预发布。默认列表不混入预发布。
+
 ## 声明式后端
 
 除内置后端外，osdk 可以从隔离的用户配置/数据插件目录加载 schema 1 TOML

@@ -413,6 +413,24 @@ osdk lock github:owner/repo@latest \
 schema 1 asset 包含 `name`、`url`、`checksum`、`os`、`arch` 和可选 `libc`。
 catalog digest、最终 asset 与规则都会写入 lock。
 
+## 预发布通道
+
+统一的 `--prerelease never|if-explicit|allow` 策略适用于 Python、Bun、Deno 和
+GitHub Release。默认值是 `if-explicit`：
+
+```bash
+osdk install bun@canary
+osdk install deno@beta
+osdk install github:owner/repo@1.2.0-beta.1
+osdk --prerelease allow install bun@latest
+osdk --prerelease never install bun@canary
+```
+
+显式 `canary`、`nightly`、`beta` 会把 npm dist-tag 或匹配的 GitHub prerelease
+tag 解析为精确版本。`never` 拒绝所有预发布；只有 `allow` 才允许
+latest/prefix/range 隐式选择预发布。远程列表默认仍只显示稳定版。lock 同时保留
+原始 channel 和精确版本，因此 dist-tag 消失也不影响离线复现。
+
 ## 离线模式
 
 成功的在线元数据请求和下载归档会按 URL 与工具版本缓存。后续命令可以完全禁止

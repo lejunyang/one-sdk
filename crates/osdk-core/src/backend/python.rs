@@ -22,6 +22,10 @@ pub fn select_installed(spec: &str, installed: &[String]) -> Option<String> {
     super::python_catalog::select_installed(spec, installed)
 }
 
+pub fn is_prerelease(version: &str) -> bool {
+    super::python_catalog::is_prerelease(version)
+}
+
 /// A single asset parsed from `SHA256SUMS`: filename + sha256.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Asset {

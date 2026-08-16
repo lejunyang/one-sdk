@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
 use crate::platform::{Arch, Libc, Os};
 use crate::source::Source;
-use crate::version::{ToolVersion, VersionInfo};
+use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub struct DenoBackend;
 
@@ -52,16 +52,23 @@ impl Backend for DenoBackend {
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let versions = crate::npm::list_versions(ctx, &sources, "deno").await?;
-        Ok(versions
+        let packument = crate::npm::packument(ctx, &sources, "deno").await?;
+        Ok(packument
+            .versions
             .into_iter()
-            .filter(|version| {
-                semver::Version::parse(version)
+            .map(|version| VersionInfo {
+                stable: semver::Version::parse(&version)
                     .map(|version| version.pre.is_empty())
-                    .unwrap_or(false)
+                    .unwrap_or(false),
+                version,
+                lts: None,
             })
-            .map(VersionInfo::stable)
             .collect())
+    }
+
+    async fn resolve_version(&self, ctx: &Ctx, request: &ToolRequest) -> Result<ToolVersion> {
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        crate::npm::resolve_package_version(ctx, &sources, "deno", self.id(), request).await
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {

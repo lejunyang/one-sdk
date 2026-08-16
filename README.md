@@ -442,6 +442,25 @@ osdk lock github:owner/repo@latest \
 Schema 1 catalog assets include `name`, `url`, `checksum`, `os`, `arch`, and
 optional `libc`. The catalog digest, selected asset, and rules are locked.
 
+## Pre-release channels
+
+The shared `--prerelease never|if-explicit|allow` policy applies to Python,
+Bun, Deno, and GitHub releases. The default is `if-explicit`:
+
+```bash
+osdk install bun@canary
+osdk install deno@beta
+osdk install github:owner/repo@1.2.0-beta.1
+osdk --prerelease allow install bun@latest
+osdk --prerelease never install bun@canary
+```
+
+Explicit `canary`, `nightly`, and `beta` resolve npm dist-tags or matching
+GitHub prerelease tags to exact versions. `never` rejects all prereleases;
+only `allow` lets latest/prefix/range select one implicitly. Remote lists stay
+stable-only. Locks retain the original channel and exact resolved version, so a
+disappearing dist-tag does not break offline reproduction.
+
 ## Offline mode
 
 Successful online metadata requests and downloaded archives are cached by URL

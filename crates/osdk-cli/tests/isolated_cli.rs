@@ -1241,6 +1241,41 @@ fn package_manager_current_and_invalid_field_are_explicit() {
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("exact semver"));
 }
 
+#[test]
+fn prerelease_channel_lock_preserves_request_and_exact_version_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            r#"schema = 1
+
+[platforms.{platform}.tools.bun]
+request = "canary"
+version = "1.3.13-canary.20260425.1"
+"#,
+            platform = platform_key()
+        ),
+    )
+    .unwrap();
+    let install = temp
+        .path()
+        .join("installs/bun/1.3.13-canary.20260425.1");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(lock.contains("request = \"canary\""));
+    assert!(lock.contains("version = \"1.3.13-canary.20260425.1\""));
+}
+
 #[cfg(unix)]
 #[test]
 fn explicit_npm_exec_places_independent_manager_before_managed_node() {

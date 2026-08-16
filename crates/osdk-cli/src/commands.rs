@@ -469,6 +469,9 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
     let versions = backend.list_remote_versions(&app.ctx).await?;
     let mut count = 0;
     for v in &versions {
+        if !v.stable {
+            continue;
+        }
         if let Some(f) = &filter {
             if !v.version.starts_with(f.as_str()) {
                 continue;

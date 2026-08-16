@@ -200,15 +200,7 @@ impl GithubBackend {
         if arch.as_deref().is_some_and(|value| {
             !matches!(
                 value,
-                "x64"
-                    | "x86_64"
-                    | "amd64"
-                    | "arm64"
-                    | "aarch64"
-                    | "x86"
-                    | "i686"
-                    | "arm"
-                    | "armv7"
+                "x64" | "x86_64" | "amd64" | "arm64" | "aarch64" | "x86" | "i686" | "arm" | "armv7"
             )
         }) {
             return Err(Error::config("invalid GitHub target arch"));
@@ -417,6 +409,25 @@ impl Backend for GithubBackend {
     }
 
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
+        let prerelease_request = match &req.spec {
+            VersionSpec::Exact(version) => crate::backend::python::is_prerelease(version),
+            VersionSpec::Prefix(channel) => {
+                matches!(channel.as_str(), "canary" | "nightly" | "beta")
+            }
+            _ => false,
+        };
+        if prerelease_request
+            && matches!(
+                ctx.config.settings.prerelease,
+                crate::config::PrereleasePolicy::Never
+            )
+        {
+            return Err(Error::VersionResolve {
+                tool: self.id().into(),
+                spec: req.spec.to_string(),
+                hint: Some("pre-release versions are disabled".into()),
+            });
+        }
         if req
             .options
             .contains_key(pipeline::LOCKED_ARTIFACT_URL_OPTION)
@@ -433,7 +444,19 @@ impl Backend for GithubBackend {
                 VersionSpec::Exact(version) => versions
                     .iter()
                     .find(|candidate| candidate.version == *version),
-                _ => crate::version::select_version(&req.spec, &versions),
+                VersionSpec::Prefix(channel)
+                    if matches!(channel.as_str(), "canary" | "nightly" | "beta") =>
+                {
+                    versions.iter().rev().find(|candidate| {
+                        !candidate.stable
+                            && candidate.version.to_ascii_lowercase().contains(channel)
+                    })
+                }
+                _ => crate::version::select_version_with_prerelease(
+                    &req.spec,
+                    &versions,
+                    ctx.config.settings.prerelease,
+                ),
             }
             .ok_or_else(|| Error::VersionResolve {
                 tool: self.id().into(),
@@ -482,17 +505,41 @@ impl Backend for GithubBackend {
         // For github, an exact tag passes through; otherwise resolve against the
         // release list (latest/prefix).
         if let VersionSpec::Exact(v) = &req.spec {
+            if crate::backend::python::is_prerelease(v)
+                && matches!(
+                    ctx.config.settings.prerelease,
+                    crate::config::PrereleasePolicy::Never
+                )
+            {
+                return Err(Error::VersionResolve {
+                    tool: self.id().into(),
+                    spec: v.clone(),
+                    hint: Some("pre-release versions are disabled".into()),
+                });
+            }
             let mut tv = ToolVersion::new(self.id(), v.clone());
             tv.options = req.options.clone();
             return Ok(tv);
         }
         let versions = self.list_remote_versions(ctx).await?;
-        let chosen = crate::version::select_version(&req.spec, &versions).ok_or_else(|| {
-            Error::VersionResolve {
-                tool: self.id().to_string(),
-                spec: req.spec.to_string(),
-                hint: Some("no matching release".into()),
+        let chosen = match &req.spec {
+            VersionSpec::Prefix(channel)
+                if matches!(channel.as_str(), "canary" | "nightly" | "beta") =>
+            {
+                versions.iter().rev().find(|candidate| {
+                    !candidate.stable && candidate.version.to_ascii_lowercase().contains(channel)
+                })
             }
+            _ => crate::version::select_version_with_prerelease(
+                &req.spec,
+                &versions,
+                ctx.config.settings.prerelease,
+            ),
+        }
+        .ok_or_else(|| Error::VersionResolve {
+            tool: self.id().to_string(),
+            spec: req.spec.to_string(),
+            hint: Some("no matching release under prerelease policy".into()),
         })?;
         let mut tv = ToolVersion::new(self.id(), chosen.version.clone());
         tv.options = req.options.clone();
@@ -814,9 +861,10 @@ fn render_asset_template_version(
 fn static_asset_matches(asset: &StaticAsset, ctx: &Ctx, rules: &AssetRules) -> bool {
     asset.os == rules.os.as_deref().unwrap_or_else(|| os_token(ctx))
         && asset.arch == rules.arch.as_deref().unwrap_or_else(|| arch_token(ctx))
-        && asset.libc.as_deref().is_none_or(|libc| {
-            libc == rules.libc.as_deref().unwrap_or_else(|| libc_token(ctx))
-        })
+        && asset
+            .libc
+            .as_deref()
+            .is_none_or(|libc| libc == rules.libc.as_deref().unwrap_or_else(|| libc_token(ctx)))
 }
 
 fn static_versions(catalog: &StaticCatalog) -> Vec<VersionInfo> {
@@ -1224,7 +1272,10 @@ mod tests {
             let file = std::fs::File::create(&archive).unwrap();
             let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
             let mut builder = tar::Builder::new(encoder);
-            for (path, contents) in [("release/pkg/a", b"a".as_slice()), ("release/pkg/b", b"b".as_slice())] {
+            for (path, contents) in [
+                ("release/pkg/a", b"a".as_slice()),
+                ("release/pkg/b", b"b".as_slice()),
+            ] {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(contents.len() as u64);
                 header.set_mode(0o644);
@@ -1238,8 +1289,7 @@ mod tests {
         let mut ctx = test_ctx(temp.path());
         ctx.config.settings.offline = true;
         let file_name = "tool.tar.gz";
-        let cached =
-            pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name);
+        let cached = pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name);
         std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::copy(&archive, &cached).unwrap();
         let mut version = ToolVersion::new(backend.id(), "1.2.3");

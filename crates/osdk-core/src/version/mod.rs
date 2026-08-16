@@ -191,6 +191,62 @@ pub fn select_version<'a>(
     }
 }
 
+pub fn select_version_with_prerelease<'a>(
+    spec: &VersionSpec,
+    candidates: &'a [VersionInfo],
+    policy: crate::config::PrereleasePolicy,
+) -> Option<&'a VersionInfo> {
+    use crate::config::PrereleasePolicy;
+    let exact_prerelease = matches!(
+        spec,
+        VersionSpec::Exact(version)
+            if semver::Version::parse(version)
+                .map(|version| !version.pre.is_empty())
+                .unwrap_or(false)
+    );
+    match policy {
+        PrereleasePolicy::Never if exact_prerelease => None,
+        PrereleasePolicy::Allow => match spec {
+            VersionSpec::Latest => candidates.last(),
+            VersionSpec::Prefix(prefix) => {
+                let want = prefix.trim_end_matches('.');
+                candidates
+                    .iter()
+                    .rev()
+                    .find(|version| version_has_prefix(&version.version, want))
+            }
+            VersionSpec::Range(requirement) => {
+                let requirements = npm_range_requirements(requirement).ok()?;
+                candidates.iter().rev().find(|candidate| {
+                    semver::Version::parse(candidate.version.trim_start_matches('v'))
+                        .map(|version| {
+                            requirements
+                                .iter()
+                                .any(|requirement| requirement.matches(&version))
+                        })
+                        .unwrap_or(false)
+                })
+            }
+            _ => select_version(spec, candidates),
+        },
+        PrereleasePolicy::Never | PrereleasePolicy::IfExplicit => {
+            if exact_prerelease {
+                select_version(spec, candidates)
+            } else {
+                let stable = candidates
+                    .iter()
+                    .filter(|candidate| candidate.stable)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let selected = select_version(spec, &stable)?;
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.version == selected.version)
+            }
+        }
+    }
+}
+
 fn version_has_prefix(version: &str, prefix: &str) -> bool {
     if version == prefix {
         return true;
@@ -299,6 +355,37 @@ mod tests {
             "24.1.0"
         );
         assert!(VersionSpec::parse_range("not a range").is_err());
+    }
+
+    #[test]
+    fn prerelease_policy_controls_implicit_and_explicit_selection() {
+        let candidates = vec![vi("1.0.0", true, None), vi("1.1.0-beta.1", false, None)];
+        assert_eq!(
+            select_version_with_prerelease(
+                &VersionSpec::Latest,
+                &candidates,
+                crate::config::PrereleasePolicy::IfExplicit,
+            )
+            .unwrap()
+            .version,
+            "1.0.0"
+        );
+        assert_eq!(
+            select_version_with_prerelease(
+                &VersionSpec::Latest,
+                &candidates,
+                crate::config::PrereleasePolicy::Allow,
+            )
+            .unwrap()
+            .version,
+            "1.1.0-beta.1"
+        );
+        assert!(select_version_with_prerelease(
+            &VersionSpec::Exact("1.1.0-beta.1".into()),
+            &candidates,
+            crate::config::PrereleasePolicy::Never,
+        )
+        .is_none());
     }
 
     #[test]
