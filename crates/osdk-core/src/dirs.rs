@@ -7,6 +7,7 @@
 //! $OSDK_DATA_DIR (default ~/.local/share/osdk)
 //! ├── store/                 content-addressed blobs   (OSDK_STORE_DIR)
 //! ├── installs/<tool>/<ver>/ materialized tool versions (OSDK_INSTALL_DIR)
+//! ├── models/<name>/          materialized model snapshots
 //! ├── shims/                 shim launchers + osdk-shim
 //! ├── rustup/  cargo/        self-contained homes for delegate backends
 //! └── plugins/               future external backends
@@ -97,6 +98,10 @@ impl Dirs {
     pub fn plugins(&self) -> PathBuf {
         self.data.join("plugins")
     }
+    /// Materialized model snapshots and per-model current-revision markers.
+    pub fn models(&self) -> PathBuf {
+        self.data.join("models")
+    }
     /// Self-contained rustup home for the delegate rust backend.
     pub fn rustup_home(&self) -> PathBuf {
         self.data.join("rustup")
@@ -143,6 +148,7 @@ impl Dirs {
             &self.config,
             &self.store,
             &self.installs,
+            &self.models(),
             &self.shims(),
             &self.downloads(),
             &self.tmp(),
@@ -193,6 +199,7 @@ mod tests {
         assert_eq!(d.store, PathBuf::from("/x/data/store"));
         assert_eq!(d.installs, PathBuf::from("/x/data/installs"));
         assert_eq!(d.shims(), PathBuf::from("/x/data/shims"));
+        assert_eq!(d.models(), PathBuf::from("/x/data/models"));
         assert_eq!(
             d.install_path("node", "20.1.0"),
             PathBuf::from("/x/data/installs/node/20.1.0")

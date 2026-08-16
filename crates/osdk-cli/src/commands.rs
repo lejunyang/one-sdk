@@ -549,7 +549,8 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
     backend.uninstall(&app.ctx, &tv).await?;
     println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
-    let (removed, bytes) = app.ctx.cas.gc(&app.ctx.dirs.installs)?;
+    let models = app.ctx.dirs.models();
+    let (removed, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
     if removed > 0 {
         println!(
             "{}",
@@ -1370,7 +1371,8 @@ pub fn prune(app: &App, dry_run: bool) -> Result<()> {
         println!("{}", t!("msg.cancelled"));
         return Ok(());
     }
-    let (removed, bytes) = app.ctx.cas.gc(&app.ctx.dirs.installs)?;
+    let models = app.ctx.dirs.models();
+    let (removed, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
     println!(
         "{}",
         t!("msg.pruned", count = removed, size = human_bytes(bytes))

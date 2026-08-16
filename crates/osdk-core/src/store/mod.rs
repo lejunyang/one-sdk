@@ -83,6 +83,23 @@ impl Cas {
         Ok((hash, true, size))
     }
 
+    /// Ingest one file and return its content hash, whether the object was new,
+    /// and its size. The source may be moved into the store.
+    pub fn ingest(&self, src: &Path) -> Result<(String, bool, u64)> {
+        self.ingest_file(src)
+    }
+
+    /// Materialize one existing CAS object at `destination`.
+    pub fn materialize_object(&self, hash: &str, destination: &Path, mode: LinkMode) -> Result<()> {
+        let object = self.object_path(hash);
+        if !object.is_file() {
+            return Err(Error::other(format!(
+                "content-addressed object is missing: {hash}"
+            )));
+        }
+        materialize(&object, destination, mode).map(|_| ())
+    }
+
     /// Ingest an extracted directory tree into the store and materialize it at
     /// `install_dir` using `mode`. Writes and returns the manifest.
     pub fn ingest_tree(
@@ -155,10 +172,18 @@ impl Cas {
     /// Garbage-collect: delete store objects not referenced by any manifest in
     /// `installs_root`. Returns (objects_removed, bytes_removed).
     pub fn gc(&self, installs_root: &Path) -> Result<(usize, u64)> {
+        self.gc_roots(&[installs_root])
+    }
+
+    /// Garbage-collect objects not referenced by a manifest below any root.
+    pub fn gc_roots(&self, roots: &[&Path]) -> Result<(usize, u64)> {
         use std::collections::HashSet;
         let mut live: HashSet<String> = HashSet::new();
-        if installs_root.exists() {
-            for entry in WalkDir::new(installs_root).follow_links(false) {
+        for root in roots {
+            if !root.exists() {
+                continue;
+            }
+            for entry in WalkDir::new(root).follow_links(false) {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(_) => continue,
