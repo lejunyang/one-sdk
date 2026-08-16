@@ -107,6 +107,37 @@ osdk --prerelease never install python@3.15.0rc1
 osdk --prerelease allow install python@latest
 ```
 
+## Java JDK/JRE 与 JVM 工具
+
+```bash
+osdk install java@21
+osdk install java@21 -o package-type=jre
+osdk install java@21 -o distribution=zulu
+```
+
+`package-type=jdk|jre` 会进入 lock；JRE 使用 `jre-<version>` identity，因此可与
+同版本 JDK 并存。Foojay package 会按 type 与 host libc 过滤。内置 Temurin LTS
+版本 8/11/17/21/25 支持空缓存离线解析，已有 locked artifact 在 Foojay 不可用时
+仍可安装。
+
+可把 metadata 切换到兼容 Foojay 的镜像或静态 endpoint：
+
+```toml
+[settings.java]
+catalog_url = "https://mirror.example.test/disco/v3.0/packages"
+```
+
+JVM 工具以独立 backend 管理：
+
+```bash
+osdk install maven@3.9.16
+osdk install gradle@9.7.0
+osdk install kotlin@2.4.10
+```
+
+三者分别拥有独立版本、目录和 shim，并验证 Apache SHA-512、Gradle SHA-256 与
+Kotlin SHA-256。离线安装和 lock 行为与其他 backend 一致。
+
 ## 项目配置信任
 
 项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。

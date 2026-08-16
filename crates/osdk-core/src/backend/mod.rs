@@ -21,6 +21,7 @@ pub mod deno;
 pub mod github;
 pub mod go;
 pub mod java;
+pub mod jvm_tools;
 pub mod node;
 pub mod pnpm;
 pub mod python;

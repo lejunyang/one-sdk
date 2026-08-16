@@ -6,9 +6,9 @@
 [English docs](https://lejunyang.github.io/one-sdk/en/)
 
 osdk 是一个跨平台（Windows / macOS / Linux）CLI，用统一方式管理多种语言 SDK
-及其版本：**Node.js、npm、pnpm、Yarn、Java、Python、Rust、Go、Deno、Bun**。
-它把现有单语言管理器（nvm/fnm/uv/SDKMAN/rustup）通常无法同时提供的三类能力
-组合在一起：
+及其版本：**Node.js、npm、pnpm、Yarn、Java、Maven、Gradle、Kotlin、Python、
+Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/rustup）
+通常无法同时提供的三类能力组合在一起：
 
 1. **跨版本内容去重。** 基于 BLAKE3 的内容寻址存储只保留一份相同文件；各安装
    版本通过硬链接、reflink 或复制从存储中物化。两个 Node.js 次版本若共享文件，
@@ -167,6 +167,37 @@ osdk --prerelease allow install python@latest
 ```
 
 除非策略为 `allow`，`latest` 不会选择预发布版本；`never` 也会拒绝显式 RC。
+
+## Java 运行时与 JVM 工具
+
+Java 默认安装 Temurin JDK，package type 会显式写入 lock：
+
+```bash
+osdk install java@21
+osdk install java@21 -o package-type=jre
+osdk install java@21 -o distribution=zulu -o package-type=jdk
+```
+
+JRE identity 带 `jre-` 前缀，所以同一 Java 版本的 JDK 与 JRE 可以并存。Foojay
+结果会按运行时类型和 host libc 过滤。内置 Temurin LTS catalog（8、11、17、21、
+25）在空缓存离线模式也能解析；已有 verified lock artifact 无需访问 Foojay 即可
+安装。需要时可配置兼容 Foojay 的镜像或静态 endpoint：
+
+```toml
+[settings.java]
+catalog_url = "https://mirror.example.test/disco/v3.0/packages"
+```
+
+Maven、Gradle 和 Kotlin 是独立 candidate，不是 Java option：
+
+```bash
+osdk install maven@3.9.16
+osdk install gradle@9.7.0
+osdk install kotlin@2.4.10
+```
+
+它们拥有独立安装 identity、shim 和内置稳定候选，并分别验证上游 SHA-512 或
+SHA-256。所有工具统一使用离线/cache/lock pipeline，安装时不会调用用户全局 Java。
 
 ## 可复现项目与命令执行
 

@@ -55,6 +55,8 @@ pub struct Settings {
     pub node: NodeSettings,
     /// Python catalog refresh and verification.
     pub python: PythonSettings,
+    /// Java runtime metadata endpoint.
+    pub java: JavaSettings,
     /// Pre-release resolution policy shared by supporting backends.
     pub prerelease: PrereleasePolicy,
 }
@@ -73,6 +75,13 @@ pub struct PythonSettings {
     pub catalog_url: Option<String>,
     /// Required SHA-256 for the exact catalog bytes.
     pub catalog_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JavaSettings {
+    /// Foojay-compatible `/packages` endpoint or static mirror.
+    pub catalog_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -122,6 +131,7 @@ impl Default for Settings {
             lang: None,
             node: NodeSettings::default(),
             python: PythonSettings::default(),
+            java: JavaSettings::default(),
             prerelease: PrereleasePolicy::default(),
         }
     }
@@ -302,6 +312,9 @@ impl Config {
         }
         if let Some(v) = getenv("OSDK_PYTHON_CATALOG_SHA256") {
             self.settings.python.catalog_sha256 = Some(v);
+        }
+        if let Some(v) = getenv("OSDK_JAVA_CATALOG_URL") {
+            self.settings.java.catalog_url = Some(v);
         }
         if let Some(v) = getenv("OSDK_SELECTION") {
             self.sources.selection = match v.to_ascii_lowercase().as_str() {

@@ -28,7 +28,8 @@ osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 | pnpm | npm 官方平台包，验证 SRI |
 | Yarn | `yarn` / `@yarnpkg/cli-dist` npm 包 |
 | Python | python-build-standalone 发布索引与 Astral 镜像 |
-| Java | Foojay Disco API，多发行版支持 |
+| Java | Foojay JDK/JRE + 内置 Temurin LTS catalog |
+| Maven / Gradle / Kotlin | 独立 JVM 工具 backend 与上游 checksum |
 | Go | go.dev 下载索引与 SHA-256 |
 | Rust | 隔离的 rustup 工具链目录 |
 | Deno | 官方 npm 平台包 |

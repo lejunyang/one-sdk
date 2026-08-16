@@ -33,7 +33,8 @@ backends:
 | pnpm | Official npm platform package with SRI verification |
 | Yarn | `yarn` / `@yarnpkg/cli-dist` npm packages |
 | Python | python-build-standalone release index and Astral mirror |
-| Java | Foojay Disco API with multiple distributions |
+| Java | Foojay JDK/JRE plus embedded Temurin LTS catalog |
+| Maven / Gradle / Kotlin | Independent JVM tool backends with upstream checksums |
 | Go | go.dev download index and SHA-256 |
 | Rust | Isolated rustup toolchain home |
 | Deno | Official npm platform package |

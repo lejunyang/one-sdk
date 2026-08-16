@@ -6,9 +6,9 @@
 [English docs](https://lejunyang.github.io/one-sdk/en/)
 
 A single cross-platform CLI (Windows/macOS/Linux) that manages many language
-SDKs and their versions: **node, npm, pnpm, yarn, java, python, rust, go, deno, bun** — with
-three things existing single-purpose managers (nvm/fnm/uv/sdkman/rustup) don't do
-together:
+SDKs and their versions: **node, npm, pnpm, yarn, java, maven, gradle, kotlin,
+python, rust, go, deno, bun** — with three things existing single-purpose
+managers (nvm/fnm/uv/sdkman/rustup) don't do together:
 
 1. **Cross-version content dedup.** A content-addressed store (blake3) keeps one
    copy of every identical file; each installed version is materialized from the
@@ -165,6 +165,39 @@ osdk --prerelease allow install python@latest
 `latest` does not select a pre-release unless policy is `allow`; `never` rejects
 pre-releases even when explicitly requested.
 
+## Java runtimes and JVM tools
+
+Java defaults to a Temurin JDK, while package type is explicit and locked:
+
+```bash
+osdk install java@21
+osdk install java@21 -o package-type=jre
+osdk install java@21 -o distribution=zulu -o package-type=jdk
+```
+
+JRE identities use the `jre-` prefix, so the same Java version can coexist as
+JDK and JRE. Foojay results are filtered by runtime type and host libc. A
+built-in Temurin LTS catalog (8, 11, 17, 21, and 25) resolves with an empty
+offline cache; verified locked artifacts install without contacting Foojay.
+Set a Foojay-compatible packages mirror or static endpoint when needed:
+
+```toml
+[settings.java]
+catalog_url = "https://mirror.example.test/disco/v3.0/packages"
+```
+
+Maven, Gradle, and Kotlin are independent candidates rather than Java options:
+
+```bash
+osdk install maven@3.9.16
+osdk install gradle@9.7.0
+osdk install kotlin@2.4.10
+```
+
+Each has its own install identity, shims, built-in stable candidate, and
+upstream SHA-512 or SHA-256 checksum. All use the shared offline/cache/lock
+pipeline and never call a user-global Java installation during install.
+
 ## Reproducible projects and execution
 
 Resolve the current project to exact, platform-specific versions:
@@ -296,7 +329,10 @@ back to copy across filesystems; `osdk doctor` warns).
 | node         | official nodejs.org prebuilt archives, `SHASUMS256` verified     |
 | go           | go.dev/dl JSON index, per-file sha256                            |
 | python       | static PBS release index + Astral release mirror, `SHA256SUMS` verified (no GitHub API) |
-| java         | Foojay Disco API (Temurin default), multi-vendor                 |
+| java         | Foojay JDK/JRE metadata + embedded Temurin LTS catalog           |
+| maven        | Apache binary archive, SHA-512 verified                           |
+| gradle       | Gradle distribution, SHA-256 verified                             |
+| kotlin       | Kotlin compiler distribution, SHA-256 verified                    |
 | rust         | isolated rustup bootstrap + toolchain home, mirror-selected and sha256 verified |
 | pnpm         | official npm platform package, npm SRI verified                  |
 | yarn         | `yarn` / `@yarnpkg/cli-dist` npm packages, npm SRI verified      |

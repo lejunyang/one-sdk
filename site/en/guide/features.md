@@ -114,6 +114,39 @@ osdk --prerelease never install python@3.15.0rc1
 osdk --prerelease allow install python@latest
 ```
 
+## Java JDK/JRE and JVM tools
+
+```bash
+osdk install java@21
+osdk install java@21 -o package-type=jre
+osdk install java@21 -o distribution=zulu
+```
+
+`package-type=jdk|jre` is persisted in the lockfile. JRE uses a
+`jre-<version>` identity, so it can coexist with the same JDK version. Foojay
+packages are filtered by type and host libc. Embedded Temurin LTS versions
+8/11/17/21/25 resolve with an empty offline cache, and an existing locked
+artifact installs while Foojay is unavailable.
+
+Point metadata at a Foojay-compatible mirror or static endpoint:
+
+```toml
+[settings.java]
+catalog_url = "https://mirror.example.test/disco/v3.0/packages"
+```
+
+JVM tools are managed as independent backends:
+
+```bash
+osdk install maven@3.9.16
+osdk install gradle@9.7.0
+osdk install kotlin@2.4.10
+```
+
+Each has an independent version, directory, and shim, with Apache SHA-512,
+Gradle SHA-256, or Kotlin SHA-256 verification. Offline and lock behavior is
+the same as other backends.
+
 ## Project configuration trust
 
 Project `[tools]` pins and `[aliases]` are safe data and load without trust.
