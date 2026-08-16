@@ -96,6 +96,9 @@ eval "$(osdk activate bash)"    # 加入 ~/.bashrc；也支持 zsh|fish|powershe
 eval "$(osdk deactivate bash)"
 ```
 
+PowerShell 激活会防止命令查找回调重入。Windows shim 也会显式通过 `ComSpec`
+启动 `.cmd` / `.bat` 工具，保持批处理参数、标准输入输出和退出码。
+
 下载会重试瞬时故障，并使用 HTTP `Range` / `If-Range` 安全续传经过验证的部分文件。
 成功联网一次后，可使用 `--offline` 完全从 osdk 缓存解析元数据并重新安装归档。
 
@@ -512,15 +515,16 @@ cargo clippy --locked --workspace --all-targets \
 CI（`.github/workflows/ci.yml`）在 Ubuntu、macOS 和 Windows 上运行格式检查、
 Clippy 与测试。独立的原生 macOS terminal 门禁会同时在 Apple Silicon 和 Intel
 runner 上执行交互 PTY 合约。Windows runner 还会在临时隔离状态下、完全离线地
-执行 `.cmd`、PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、真实 NTFS
-volume detection、stdin/stdout/stderr、参数和退出码，并覆盖空格、中文路径以及
+执行 `.cmd`、PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、
+真实 NTFS volume detection、stdin/stdout/stderr、参数和退出码，并覆盖空格、中文路径以及
 超过传统 260 字符限制的受管 SDK 状态目录；可执行文件和工作目录保持在 Shell
 自身的进程启动长度限制内。
 `github:owner/repo` 等带命名空间的 backend ID 也在覆盖范围内，确保缓存、锁、
 安装和解压临时目录在 Windows 上均为合法路径。Linux job 会先交叉 lint 所有
 `#[cfg(windows)]` 路径，再通过固定版本并校验 SHA-256 的 Wine 执行完整 Windows
 GNU workspace；原生 Windows/MSVC runner 仍是最终平台门禁。另有 Rust 1.88 job
-检查声明的最低 Rust 版本与锁定依赖图。
+检查声明的最低 Rust 版本与锁定依赖图。CI job 和 Windows runtime matrix 都有
+硬超时；runtime 脚本会为每个 Shell 合约输出独立日志分组，阻塞点不再无限等待。
 
 ## 许可证
 

@@ -86,6 +86,10 @@ eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
 eval "$(osdk deactivate bash)"
 ```
 
+PowerShell activation guards its command-lookup callback against re-entry.
+Windows shims also launch `.cmd` and `.bat` tools explicitly through `ComSpec`,
+preserving batch arguments, stdio, and exit codes.
+
 Downloads retry transient failures and safely resume validated partial files
 with HTTP `Range`/`If-Range`. Use `--offline` after a successful online run to
 resolve metadata and reinstall artifacts entirely from the osdk cache.
@@ -561,7 +565,9 @@ lock, install, and extraction scratch paths remain valid on Windows. A dedicated
 Linux job cross-lints every `#[cfg(windows)]` target and executes the full
 Windows GNU workspace through a SHA-256-pinned Wine build before the native
 Windows/MSVC runner finishes. A separate Rust 1.88 job checks the declared MSRV
-against the locked dependency graph.
+against the locked dependency graph. CI jobs and the Windows runtime matrix have
+hard time limits, and the runtime script emits one log group per shell contract
+so a blocked process is visible instead of running indefinitely.
 
 ## License
 

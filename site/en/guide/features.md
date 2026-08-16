@@ -230,6 +230,10 @@ osdk activate fish | source
 osdk activate powershell | Invoke-Expression
 ```
 
+The PowerShell hook guards its command-lookup callback against re-entry.
+Windows shims explicitly launch `.cmd` and `.bat` targets through `ComSpec`, so
+batch arguments, standard I/O, and exit codes remain intact.
+
 Undo activation in the current shell:
 
 ```bash
@@ -506,6 +510,8 @@ Wine build; the native Windows/MSVC runner remains the final platform gate.
 A separate native macOS terminal job runs the interactive PTY contract on both
 Apple Silicon and Intel GitHub-hosted runners. This avoids relying on a
 cross-compiled binary or an unsupported macOS virtual machine on Linux.
+Platform jobs have hard time limits, and each Windows runtime shell contract is
+reported as a separate log group.
 
 ## Completions and diagnostics
 

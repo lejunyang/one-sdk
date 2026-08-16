@@ -81,12 +81,17 @@ end
         ),
         Shell::Powershell => format!(
             r#"# osdk shell integration (powershell)
+$script:OsdkHookRunning = $false
 function Invoke-OsdkHook {{
   $out = & {bin} hook-env --shell powershell 2>$null
   if ($out) {{ Invoke-Expression ($out -join "`n") }}
 }}
-$ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = {{ Invoke-OsdkHook }}
 Invoke-OsdkHook
+$ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = {{
+  if ($script:OsdkHookRunning) {{ return }}
+  $script:OsdkHookRunning = $true
+  try {{ Invoke-OsdkHook }} finally {{ $script:OsdkHookRunning = $false }}
+}}
 "#,
             bin = powershell_quote(osdk_bin)
         ),
@@ -185,6 +190,7 @@ if (Test-Path Env:OSDK_MANAGED_ENV) {
 if (Test-Path Env:OSDK_ORIGINAL_PATH_SET) { $env:PATH = $env:OSDK_ORIGINAL_PATH }
 $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = $null
 Remove-Item Function:Invoke-OsdkHook -ErrorAction SilentlyContinue
+Remove-Variable OsdkHookRunning -Scope Script -ErrorAction SilentlyContinue
 Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET -ErrorAction SilentlyContinue
 "#
         .to_string(),
@@ -490,6 +496,12 @@ mod tests {
         let powershell =
             activation_script(Shell::Powershell, r"C:\Program Files\中文 osdk\osdk.exe");
         assert!(powershell.contains(r"& 'C:\Program Files\中文 osdk\osdk.exe' hook-env"));
+        assert!(powershell.contains("$script:OsdkHookRunning"));
+        assert!(powershell.contains("finally"));
+        assert!(
+            powershell.find("Invoke-OsdkHook\n").unwrap()
+                < powershell.find("PostCommandLookupAction").unwrap()
+        );
     }
 
     #[test]
@@ -507,6 +519,7 @@ mod tests {
 
         let powershell = deactivation_script(Shell::Powershell);
         assert!(powershell.contains("PostCommandLookupAction = $null"));
+        assert!(powershell.contains("Remove-Variable OsdkHookRunning"));
     }
 
     #[test]

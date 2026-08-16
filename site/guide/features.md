@@ -214,6 +214,9 @@ osdk activate fish | source
 osdk activate powershell | Invoke-Expression
 ```
 
+PowerShell hook 会防止命令查找回调重入。Windows shim 也会显式通过 `ComSpec`
+启动 `.cmd` / `.bat` 目标，保持批处理参数、标准输入输出和退出码。
+
 撤销当前 shell 的激活状态：
 
 ```bash
@@ -468,6 +471,7 @@ workspace；原生 Windows/MSVC runner 仍是最终平台门禁。
 独立的原生 macOS terminal job 会同时在 Apple Silicon 与 Intel GitHub runner
 上执行交互 PTY 合约，不依赖交叉编译产物，也不在 Linux 上维护不受支持的
 macOS 虚拟机。
+平台 job 都有硬超时，Windows runtime 的每个 Shell 合约也会输出独立日志分组。
 
 ## 补全与诊断
 

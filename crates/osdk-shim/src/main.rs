@@ -395,11 +395,54 @@ fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String,
 
 #[cfg(not(unix))]
 fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String, String>) -> i32 {
-    match Command::new(exe).args(args).envs(env).status() {
+    let extension = exe
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    let mut command =
+        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+            let mut command = Command::new(
+                std::env::var_os("ComSpec").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe")),
+            );
+            command.args(["/D", "/S", "/C", "call"]).arg(exe);
+            command
+        } else {
+            Command::new(exe)
+        };
+    match command.args(args).envs(env).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("osdk-shim: failed to run {}: {e}", exe.display());
             126
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_targets_run_through_comspec() {
+        let temporary = tempfile::tempdir().unwrap();
+        let script = temporary.path().join("fixture with spaces.cmd");
+        let output = temporary.path().join("output.txt");
+        std::fs::write(
+            &script,
+            "@echo off\r\n> \"%~dp0output.txt\" echo %~1\r\nexit /b 23\r\n",
+        )
+        .unwrap();
+
+        let code = exec(
+            &script,
+            &["forwarded value".into()],
+            &std::collections::BTreeMap::new(),
+        );
+
+        assert_eq!(code, 23);
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap().trim(),
+            "forwarded value"
+        );
     }
 }
