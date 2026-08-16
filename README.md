@@ -548,7 +548,9 @@ cargo clippy --locked --workspace --all-targets \
 ```
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
-ubuntu/macos/windows. The Windows runner additionally executes `.cmd`,
+ubuntu/macos/windows. A separate native macOS terminal gate runs the interactive
+PTY contract on both Apple Silicon and Intel runners. The Windows runner
+additionally executes `.cmd`,
 PowerShell, and Git Bash shims, PowerShell activation/deactivation, symlink
 fallbacks, actual NTFS volume detection, stdio/arguments/exit codes, and
 space/Chinese paths plus managed SDK state beyond the legacy 260-character

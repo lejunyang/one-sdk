@@ -465,6 +465,10 @@ stdin/stdout/stderr、参数、退出码，以及含空格、中文的路径。�
 Windows cfg 路径，并通过固定版本且校验 SHA-256 的 Wine 执行完整 Windows GNU
 workspace；原生 Windows/MSVC runner 仍是最终平台门禁。
 
+独立的原生 macOS terminal job 会同时在 Apple Silicon 与 Intel GitHub runner
+上执行交互 PTY 合约，不依赖交叉编译产物，也不在 Linux 上维护不受支持的
+macOS 虚拟机。
+
 ## 补全与诊断
 
 ```bash

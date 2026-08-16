@@ -30,6 +30,28 @@ jobs:
       - name: check minimum supported Rust version
         run: cargo check --locked --workspace
 
+  # Keep the interactive terminal contract visible on both macOS architectures.
+  # This uses native GitHub-hosted macOS machines rather than emulation.
+  macos-terminal:
+    name: macOS terminal (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-latest
+          - arch: x64
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: interactive prompt through native PTY
+        run: >-
+          cargo test --locked -p osdk-cli --test isolated_cli
+          terminal_prompt_accepts_interactive_confirmation -- --exact
+
   # Lint + unit tests across the three supported platforms.
   test:
     name: test (${{ matrix.os }})

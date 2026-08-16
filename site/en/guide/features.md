@@ -503,6 +503,10 @@ extraction scratch paths valid on Windows. A Linux job cross-lints every Windows
 cfg path and runs the complete Windows GNU workspace through a SHA-256-pinned
 Wine build; the native Windows/MSVC runner remains the final platform gate.
 
+A separate native macOS terminal job runs the interactive PTY contract on both
+Apple Silicon and Intel GitHub-hosted runners. This avoids relying on a
+cross-compiled binary or an unsupported macOS virtual machine on Linux.
+
 ## Completions and diagnostics
 
 ```bash

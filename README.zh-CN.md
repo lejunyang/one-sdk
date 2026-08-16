@@ -510,8 +510,9 @@ cargo clippy --locked --workspace --all-targets \
 ```
 
 CI（`.github/workflows/ci.yml`）在 Ubuntu、macOS 和 Windows 上运行格式检查、
-Clippy 与测试。Windows runner 还会在临时隔离状态下、完全离线地执行 `.cmd`、
-PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、真实 NTFS
+Clippy 与测试。独立的原生 macOS terminal 门禁会同时在 Apple Silicon 和 Intel
+runner 上执行交互 PTY 合约。Windows runner 还会在临时隔离状态下、完全离线地
+执行 `.cmd`、PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、真实 NTFS
 volume detection、stdin/stdout/stderr、参数和退出码，并覆盖空格、中文路径以及
 超过传统 260 字符限制的受管 SDK 状态目录；可执行文件和工作目录保持在 Shell
 自身的进程启动长度限制内。
