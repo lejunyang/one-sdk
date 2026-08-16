@@ -121,13 +121,13 @@ exit /b 23
         $shimBash = Join-Path $data "shims\node"
         Assert-True (Test-Path -LiteralPath $shimCmd -PathType Leaf) "missing cmd/PowerShell shim"
         Assert-True (Test-Path -LiteralPath $shimBash -PathType Leaf) "missing Git Bash shim"
-        $input = Join-Path $root "input.txt"
-        Set-Content -LiteralPath $input -Encoding ascii -NoNewline -Value "input"
+        $inputPath = Join-Path $root "input.txt"
+        Set-Content -LiteralPath $inputPath -Encoding ascii -NoNewline -Value "input"
 
         Invoke-Stage "PowerShell shim contract" {
             $stdout = Join-Path $root "powershell.stdout"
             $stderr = Join-Path $root "powershell.stderr"
-            Get-Content -LiteralPath $input -Raw |
+            Get-Content -LiteralPath $inputPath -Raw |
                 & $shimCmd "first arg" "second arg" 1> $stdout 2> $stderr
             $exitCode = $LASTEXITCODE
             Assert-ContractOutput "PowerShell" $exitCode $stdout $stderr
@@ -137,7 +137,7 @@ exit /b 23
             $stdout = Join-Path $root "cmd.stdout"
             $stderr = Join-Path $root "cmd.stderr"
             $cmdLine = '""{0}" "first arg" "second arg" < "{1}" > "{2}" 2> "{3}""' -f `
-                $shimCmd, $input, $stdout, $stderr
+                $shimCmd, $inputPath, $stdout, $stderr
             & $env:ComSpec /D /S /C $cmdLine
             $exitCode = $LASTEXITCODE
             Assert-ContractOutput "cmd.exe" $exitCode $stdout $stderr
@@ -158,7 +158,7 @@ exit /b 23
                 $Path.Replace("\", "/")
             }
             $bashCommand = "'$(& $toBashPath $shimBash)' 'first arg' 'second arg' < " +
-                "'$(& $toBashPath $input)' > '$(& $toBashPath $stdout)' 2> '$(& $toBashPath $stderr)'"
+                "'$(& $toBashPath $inputPath)' > '$(& $toBashPath $stdout)' 2> '$(& $toBashPath $stderr)'"
             & $bashPath --noprofile --norc -c $bashCommand
             $exitCode = $LASTEXITCODE
             Assert-ContractOutput "Git Bash" $exitCode $stdout $stderr
