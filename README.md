@@ -530,17 +530,24 @@ cargo test --workspace         # unit tests
 cargo clippy --workspace --all-targets   # lints (CI runs with -D warnings)
 cargo fmt --all --check        # formatting
 
-# Windows is validated by cross-compiling from Linux:
+# Windows runtime matrix (run on Windows after building the binaries):
+pwsh -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug
+
+# Windows cfgs are also validated by cross-compiling from Linux:
 rustup target add x86_64-pc-windows-gnu
 sudo apt-get install -y mingw-w64
-cargo build --workspace --target x86_64-pc-windows-gnu
+cargo clippy --locked --workspace --all-targets \
+  --target x86_64-pc-windows-gnu -- -D warnings
 ```
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
-ubuntu/macos/windows, plus a dedicated Linux→Windows cross-build that guards the
-`#[cfg(windows)]` paths (shim `.cmd`/bash generation, junctions, volume
-detection). A separate Rust 1.88 job checks the declared MSRV against the
-locked dependency graph.
+ubuntu/macos/windows. The Windows runner additionally executes `.cmd`,
+PowerShell, and Git Bash shims, PowerShell activation/deactivation, symlink
+fallbacks, actual NTFS volume detection, stdio/arguments/exit codes, and
+space/Chinese/long paths entirely offline under temporary state directories. A
+dedicated Linux→Windows cross-Clippy guards every `#[cfg(windows)]` target even
+before that runtime check. A separate Rust 1.88 job checks the declared MSRV
+against the locked dependency graph.
 
 ## License
 

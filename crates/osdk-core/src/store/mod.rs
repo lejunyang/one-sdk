@@ -116,7 +116,7 @@ impl Cas {
                 create_dir_all(&dst)?;
             } else if ft.is_symlink() {
                 let target = std::fs::read_link(path).map_err(|e| Error::io(path, e))?;
-                recreate_symlink(&target, &dst)?;
+                recreate_symlink(path, &target, &dst)?;
                 manifest.files.push(FileEntry {
                     path: rel_str,
                     hash: None,
@@ -256,7 +256,7 @@ fn apply_mode(path: &Path, mode: u32) {
 fn apply_mode(_path: &Path, _mode: u32) {}
 
 #[cfg(unix)]
-fn recreate_symlink(target: &Path, dst: &Path) -> Result<()> {
+fn recreate_symlink(_source_link: &Path, target: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         create_dir_all(parent)?;
     }
@@ -265,14 +265,70 @@ fn recreate_symlink(target: &Path, dst: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn recreate_symlink(target: &Path, dst: &Path) -> Result<()> {
+fn recreate_symlink(source_link: &Path, target: &Path, dst: &Path) -> Result<()> {
+    recreate_windows_symlink(source_link, target, dst, |target, dst, is_directory| {
+        if is_directory {
+            std::os::windows::fs::symlink_dir(target, dst)
+        } else {
+            std::os::windows::fs::symlink_file(target, dst)
+        }
+    })
+}
+
+#[cfg(windows)]
+fn recreate_windows_symlink(
+    source_link: &Path,
+    target: &Path,
+    dst: &Path,
+    create: impl FnOnce(&Path, &Path, bool) -> std::io::Result<()>,
+) -> Result<()> {
     if let Some(parent) = dst.parent() {
         create_dir_all(parent)?;
     }
-    let _ = std::fs::remove_file(dst);
-    // Best effort; may require privilege. Fall back to copying the target file.
-    if std::os::windows::fs::symlink_file(target, dst).is_err() && target.exists() {
-        std::fs::copy(target, dst).map_err(|e| Error::io(dst, e))?;
+    if dst.symlink_metadata().is_ok() {
+        if dst.is_dir() {
+            let _ = std::fs::remove_dir_all(dst);
+        } else {
+            let _ = std::fs::remove_file(dst);
+        }
+    }
+    let source = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        source_link
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(target)
+    };
+    let is_directory = source.is_dir();
+    if create(target, dst, is_directory).is_err() {
+        if is_directory {
+            copy_directory(&source, dst)?;
+        } else {
+            std::fs::copy(&source, dst).map_err(|e| Error::io(&source, e))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    create_dir_all(destination)?;
+    for entry in WalkDir::new(source).min_depth(1) {
+        let entry = entry.map_err(|error| Error::other(format!("walkdir: {error}")))?;
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(|_| Error::other("strip_prefix failed"))?;
+        let target = destination.join(relative);
+        if entry.file_type().is_dir() {
+            create_dir_all(&target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), &target).map_err(|error| Error::io(&target, error))?;
+        }
     }
     Ok(())
 }
@@ -373,6 +429,59 @@ mod tests {
                 .filter(|entry| entry.file_type().is_file())
                 .count(),
             1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_symlink_is_preserved_when_available() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source_link = temporary.path().join("extracted/bin/alias.exe");
+        let destination = temporary.path().join("installed/bin/alias.exe");
+        let target = Path::new("real.exe");
+        std::fs::create_dir_all(source_link.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(source_link.parent().unwrap().join(target), b"runtime").unwrap();
+
+        recreate_symlink(&source_link, target, &destination).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"runtime");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_and_directory_symlinks_copy_when_permission_is_denied() {
+        let temporary = tempfile::tempdir().unwrap();
+        let extracted = temporary.path().join("extracted");
+        let installed = temporary.path().join("installed");
+        let denied = |_: &Path, _: &Path, _: bool| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "fixture",
+            ))
+        };
+
+        let file_link = extracted.join("bin/alias.exe");
+        std::fs::create_dir_all(file_link.parent().unwrap()).unwrap();
+        std::fs::write(extracted.join("bin/real.exe"), b"runtime").unwrap();
+        let file_destination = installed.join("bin/alias.exe");
+        recreate_windows_symlink(&file_link, Path::new("real.exe"), &file_destination, denied)
+            .unwrap();
+        assert_eq!(std::fs::read(file_destination).unwrap(), b"runtime");
+
+        let directory_link = extracted.join("current");
+        std::fs::create_dir_all(extracted.join("versions/1/bin")).unwrap();
+        std::fs::write(extracted.join("versions/1/bin/tool.exe"), b"directory").unwrap();
+        let directory_destination = installed.join("current");
+        recreate_windows_symlink(
+            &directory_link,
+            Path::new("versions/1"),
+            &directory_destination,
+            denied,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(directory_destination.join("bin/tool.exe")).unwrap(),
+            b"directory"
         );
     }
 }

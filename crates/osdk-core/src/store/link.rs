@@ -92,10 +92,31 @@ fn same_device(a: &Path, b: &Path) -> bool {
 
 #[cfg(windows)]
 fn same_device(a: &Path, b: &Path) -> bool {
-    fn volume(p: &Path) -> Option<String> {
-        p.components()
-            .next()
-            .map(|c| c.as_os_str().to_string_lossy().to_ascii_uppercase())
+    fn volume(p: &Path) -> Option<Vec<u16>> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+
+        let path = p
+            .canonicalize()
+            .unwrap_or_else(|_| p.to_path_buf())
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut volume = vec![0u16; 32_768];
+        let ok = unsafe {
+            GetVolumePathNameW(
+                path.as_ptr(),
+                volume.as_mut_ptr(),
+                u32::try_from(volume.len()).ok()?,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let length = volume.iter().position(|character| *character == 0)?;
+        volume.truncate(length);
+        Some(volume)
     }
     match (volume(a), volume(b)) {
         (Some(x), Some(y)) => x == y,
@@ -242,6 +263,18 @@ mod tests {
         let used = materialize(&src, &dst, LinkMode::Copy).unwrap();
         assert_eq!(used, LinkMode::Copy);
         assert_eq!(std::fs::read(&dst).unwrap(), b"data");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_volume_detection_uses_actual_volume_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let destination = temporary.path().join("nested/destination");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        write(&source, b"volume");
+
+        assert!(same_filesystem(&source, &destination));
     }
 
     #[cfg(target_os = "linux")]

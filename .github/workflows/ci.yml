@@ -52,6 +52,27 @@ jobs:
           # Only the generic github: backend needs this. Current tests use local
           # fixture servers and do not require network access.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: build windows runtime binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}\osdk-ci-target
+        run: cargo build --locked --workspace --bins
+      - name: windows runtime matrix
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          HOME: ${{ runner.temp }}\osdk-ci-home
+          USERPROFILE: ${{ runner.temp }}\osdk-ci-home
+          OSDK_DATA_DIR: ${{ runner.temp }}\osdk-ci-data
+          OSDK_CACHE_DIR: ${{ runner.temp }}\osdk-ci-cache
+          OSDK_CONFIG_DIR: ${{ runner.temp }}\osdk-ci-config
+          OSDK_STORE_DIR: ${{ runner.temp }}\osdk-ci-store
+          OSDK_INSTALL_DIR: ${{ runner.temp }}\osdk-ci-installs
+          CARGO_HOME: ${{ runner.temp }}\osdk-ci-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\osdk-ci-rustup
+          CARGO_TARGET_DIR: ${{ runner.temp }}\osdk-ci-target
+        run: ./scripts/windows-runtime-smoke.ps1 -BinDir "$env:CARGO_TARGET_DIR\debug"
 
   # Explicit Windows cross-compile check from Linux. This guards the
   # #[cfg(windows)] code paths (shim .cmd/bash generation, junctions, volume

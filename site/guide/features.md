@@ -453,6 +453,11 @@ resolve/install/execute/uninstall 生命周期，并用本地 HTTP fixture 注�
 失败后无 complete marker、损坏 receipt/manifest、跨文件系统 copy fallback、
 shim I/O/退出码/递归/命令冲突。公网 live smoke 只用于发现上游漂移。
 
+Windows runner 还会离线执行 `.cmd`、PowerShell 和 Git Bash wrapper、真实
+activation/deactivation、symlink 权限回退、NTFS volume detection、
+stdin/stdout/stderr、参数、退出码，以及含空格、中文和长路径的场景。Linux
+cross-Clippy 仍是所有 Windows cfg 路径的必需门禁。
+
 ## 补全与诊断
 
 ```bash

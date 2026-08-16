@@ -2202,6 +2202,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "which 6.0.3",
+ "windows-sys 0.59.0",
  "x509-cert",
  "xz2",
  "zip",

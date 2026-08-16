@@ -494,7 +494,10 @@ cargo test --workspace
 cargo clippy --workspace --all-targets   # CI 使用 -D warnings
 cargo fmt --all --check
 
-# 在 Linux 上交叉验证 Windows：
+# 在 Windows 构建二进制后运行运行时矩阵：
+pwsh -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug
+
+# 同时从 Linux 交叉验证 Windows cfg：
 rustup target add x86_64-pc-windows-gnu
 sudo apt-get install -y mingw-w64
 cargo clippy --locked --workspace --all-targets \
@@ -502,8 +505,10 @@ cargo clippy --locked --workspace --all-targets \
 ```
 
 CI（`.github/workflows/ci.yml`）在 Ubuntu、macOS 和 Windows 上运行格式检查、
-Clippy 与测试，并通过 Linux → Windows 全 targets 交叉 Clippy 保护
-`#[cfg(windows)]` 路径（shim `.cmd` / Bash 生成、junction、volume detection）。
+Clippy 与测试。Windows runner 还会在临时隔离状态下、完全离线地执行 `.cmd`、
+PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、真实 NTFS
+volume detection、stdin/stdout/stderr、参数和退出码，并覆盖空格、中文及长路径。
+Linux → Windows 全 targets 交叉 Clippy 则提前保护所有 `#[cfg(windows)]` 路径。
 另有 Rust 1.88 job 检查声明的最低 Rust 版本与锁定依赖图。
 
 ## 许可证

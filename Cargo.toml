@@ -53,6 +53,7 @@ same-file = "1"
 which = "6"
 tempfile = "3"
 walkdir = "2"
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 # versions
 semver = "1"
 regex = "1"

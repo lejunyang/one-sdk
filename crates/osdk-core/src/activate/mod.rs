@@ -56,7 +56,7 @@ if [[ ";${{PROMPT_COMMAND:-}};" != *";_osdk_hook;"* ]]; then
   PROMPT_COMMAND="_osdk_hook${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
 fi
 "#,
-            bin = osdk_bin
+            bin = shell_quote(Shell::Bash, osdk_bin)
         ),
         Shell::Zsh => format!(
             r#"# osdk shell integration (zsh)
@@ -69,7 +69,7 @@ if [[ -z ${{precmd_functions[(r)_osdk_hook]}} ]]; then
   precmd_functions+=(_osdk_hook)
 fi
 "#,
-            bin = osdk_bin
+            bin = shell_quote(Shell::Zsh, osdk_bin)
         ),
         Shell::Fish => format!(
             r#"# osdk shell integration (fish)
@@ -77,7 +77,7 @@ function _osdk_hook --on-variable PWD --on-event fish_prompt
   {bin} hook-env --shell fish 2>/dev/null | source
 end
 "#,
-            bin = osdk_bin
+            bin = shell_quote(Shell::Fish, osdk_bin)
         ),
         Shell::Powershell => format!(
             r#"# osdk shell integration (powershell)
@@ -88,7 +88,7 @@ function Invoke-OsdkHook {{
 $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = {{ Invoke-OsdkHook }}
 Invoke-OsdkHook
 "#,
-            bin = osdk_bin
+            bin = powershell_quote(osdk_bin)
         ),
     }
 }
@@ -486,6 +486,10 @@ mod tests {
         let s = activation_script(Shell::Bash, "osdk");
         assert!(s.contains("hook-env"));
         assert!(s.contains("PROMPT_COMMAND"));
+
+        let powershell =
+            activation_script(Shell::Powershell, r"C:\Program Files\中文 osdk\osdk.exe");
+        assert!(powershell.contains(r"& 'C:\Program Files\中文 osdk\osdk.exe' hook-env"));
     }
 
     #[test]
