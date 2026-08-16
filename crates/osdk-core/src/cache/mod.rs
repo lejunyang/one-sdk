@@ -66,9 +66,18 @@ mod tests {
     fn maps_known_managers() {
         let cache = PathBuf::from("/x/cache");
         let env = cache_env(&cache, |_| None);
-        assert_eq!(env.get("PIP_CACHE_DIR").unwrap(), "/x/cache/pkg/pip");
-        assert_eq!(env.get("GOMODCACHE").unwrap(), "/x/cache/pkg/go-mod");
-        assert_eq!(env.get("npm_config_cache").unwrap(), "/x/cache/pkg/npm");
+        assert_eq!(
+            PathBuf::from(env.get("PIP_CACHE_DIR").unwrap()),
+            cache.join("pkg/pip")
+        );
+        assert_eq!(
+            PathBuf::from(env.get("GOMODCACHE").unwrap()),
+            cache.join("pkg/go-mod")
+        );
+        assert_eq!(
+            PathBuf::from(env.get("npm_config_cache").unwrap()),
+            cache.join("pkg/npm")
+        );
     }
 
     #[test]

@@ -643,6 +643,7 @@ not-a-hash  garbage-line
             .append_data(&mut header, archive_path, &contents[..])
             .unwrap();
         archive.finish().unwrap();
+        archive.into_inner().unwrap().finish().unwrap();
     }
 
     fn fixture_ctx(root: &std::path::Path, catalog_path: &std::path::Path, digest: &str) -> Ctx {

@@ -442,6 +442,7 @@ mod tests {
         std::fs::create_dir_all(source_link.parent().unwrap()).unwrap();
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::write(source_link.parent().unwrap().join(target), b"runtime").unwrap();
+        std::fs::write(destination.parent().unwrap().join(target), b"runtime").unwrap();
 
         recreate_symlink(&source_link, target, &destination).unwrap();
         assert_eq!(std::fs::read(destination).unwrap(), b"runtime");

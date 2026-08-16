@@ -273,18 +273,55 @@ fn terminal_prompt_accepts_interactive_confirmation() {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    let shell_command = format!(
-        "env -i HOME={} PATH=/usr/bin:/bin LANG=C OSDK_DATA_DIR={} OSDK_CACHE_DIR={} OSDK_CONFIG_DIR={} OSDK_STORE_DIR={} OSDK_INSTALL_DIR={} {} cache clean",
-        home.display(),
-        temp.path().join("data").display(),
-        temp.path().join("cache").display(),
-        temp.path().join("config").display(),
-        temp.path().join("store").display(),
-        temp.path().join("installs").display(),
-        osdk().display()
-    );
-    let mut child = Command::new("script")
-        .args(["-qec", &shell_command, "/dev/null"])
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("script");
+        command
+            .args(["-q", "/dev/null", "env", "-i"])
+            .arg(format!("HOME={}", home.display()))
+            .arg("PATH=/usr/bin:/bin")
+            .arg("LANG=C")
+            .arg(format!(
+                "OSDK_DATA_DIR={}",
+                temp.path().join("data").display()
+            ))
+            .arg(format!(
+                "OSDK_CACHE_DIR={}",
+                temp.path().join("cache").display()
+            ))
+            .arg(format!(
+                "OSDK_CONFIG_DIR={}",
+                temp.path().join("config").display()
+            ))
+            .arg(format!(
+                "OSDK_STORE_DIR={}",
+                temp.path().join("store").display()
+            ))
+            .arg(format!(
+                "OSDK_INSTALL_DIR={}",
+                temp.path().join("installs").display()
+            ))
+            .arg(osdk())
+            .args(["cache", "clean"]);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut command = {
+        let shell_command = format!(
+            "env -i HOME={} PATH=/usr/bin:/bin LANG=C OSDK_DATA_DIR={} OSDK_CACHE_DIR={} OSDK_CONFIG_DIR={} OSDK_STORE_DIR={} OSDK_INSTALL_DIR={} {} cache clean",
+            home.display(),
+            temp.path().join("data").display(),
+            temp.path().join("cache").display(),
+            temp.path().join("config").display(),
+            temp.path().join("store").display(),
+            temp.path().join("installs").display(),
+            osdk().display()
+        );
+        let mut command = Command::new("script");
+        command.args(["-qec", &shell_command, "/dev/null"]);
+        command
+    };
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
