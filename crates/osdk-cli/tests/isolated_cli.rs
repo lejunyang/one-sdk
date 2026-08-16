@@ -1,6 +1,13 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::{io::Read, io::Write, net::TcpListener};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+#[cfg(not(windows))]
+use std::{io::Write, net::TcpListener, net::TcpStream};
+
+const ISOLATED_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
+const FIXTURE_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn osdk() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_osdk"))
@@ -71,7 +78,77 @@ fn run_isolated_in_with_env(
     for (key, value) in env {
         command.env(key, value);
     }
-    command.output().unwrap()
+    run_with_timeout(command, ISOLATED_COMMAND_TIMEOUT)
+}
+
+fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let deadline = Instant::now() + timeout;
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break (status, false);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break (child.wait().unwrap(), true);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = Output {
+        status,
+        stdout: stdout_reader.join().unwrap(),
+        stderr: stderr_reader.join().unwrap(),
+    };
+    if timed_out {
+        panic!(
+            "isolated command timed out after {timeout:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    output
+}
+
+#[cfg(not(windows))]
+fn accept_fixture_connection(listener: &TcpListener, context: &str) -> TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + FIXTURE_SERVER_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_read_timeout(Some(FIXTURE_SERVER_TIMEOUT))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(FIXTURE_SERVER_TIMEOUT))
+                    .unwrap();
+                return stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    panic!(
+                        "{context}: no loopback request arrived within {:?}",
+                        FIXTURE_SERVER_TIMEOUT
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("{context}: accepting loopback request failed: {error}"),
+        }
+    }
 }
 
 #[test]
@@ -251,6 +328,10 @@ fn activation_scripts_refresh_environment_immediately() {
         .contains("Invoke-OsdkHook"));
 }
 
+// Windows runners can block a child process from connecting back to a listener
+// owned by the test process. The same provider/pull contract runs in-process in
+// osdk-core on Windows; keep this cross-process CLI topology on Unix.
+#[cfg(not(windows))]
 #[test]
 fn huggingface_model_pull_materializes_and_locks_snapshot() {
     let payload = br#"{"model":"fixture"}"#.to_vec();
@@ -261,7 +342,8 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
     let server_payload = payload.clone();
     let server = std::thread::spawn(move || {
         for request_number in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream =
+                accept_fixture_connection(&listener, "Hugging Face pull fixture server");
             let mut request = Vec::new();
             let mut buffer = [0u8; 2048];
             while !request.ends_with(b"\r\n\r\n") {
@@ -308,12 +390,12 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
             &endpoint,
         ],
     );
-    server.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    server.join().unwrap();
     let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
     assert!(path.status.success());
     let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
@@ -327,6 +409,8 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
     assert!(lock.contains("sha256 ="));
 }
 
+// See `huggingface_model_pull_materializes_and_locks_snapshot`.
+#[cfg(not(windows))]
 #[test]
 fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
     let payload = br#"{"model":"modelscope-fixture"}"#.to_vec();
@@ -337,7 +421,7 @@ fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
     let server_payload = payload.clone();
     let server = std::thread::spawn(move || {
         for request_number in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_fixture_connection(&listener, "ModelScope pull fixture server");
             let mut request = Vec::new();
             let mut buffer = [0u8; 2048];
             while !request.ends_with(b"\r\n\r\n") {
@@ -384,12 +468,12 @@ fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
             &endpoint,
         ],
     );
-    server.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    server.join().unwrap();
     let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
     let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
     assert_eq!(
@@ -401,13 +485,16 @@ fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
     assert!(lock.contains("revision = \"master+manifest-"));
 }
 
+// See `huggingface_model_pull_materializes_and_locks_snapshot`.
+#[cfg(not(windows))]
 #[test]
 fn model_source_test_probes_target_file_and_prints_ranking() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         for request_number in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream =
+                accept_fixture_connection(&listener, "model source probe fixture server");
             let mut request = Vec::new();
             let mut buffer = [0u8; 2048];
             while !request.ends_with(b"\r\n\r\n") {
@@ -485,21 +572,24 @@ download_url = "{endpoint}"
         ],
         &[("HF_TOKEN", "must-not-leak")],
     );
-    server.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    server.join().unwrap();
     assert!(String::from_utf8_lossy(&output.stdout).contains("fixture"));
 }
 
+// See `huggingface_model_pull_materializes_and_locks_snapshot`.
+#[cfg(not(windows))]
 #[test]
 fn model_pull_fails_over_within_provider() {
     let failing = TcpListener::bind("127.0.0.1:0").unwrap();
     let failing_address = failing.local_addr().unwrap();
     let failing_server = std::thread::spawn(move || {
-        let (mut stream, _) = failing.accept().unwrap();
+        let mut stream =
+            accept_fixture_connection(&failing, "failing model endpoint fixture server");
         let mut request = [0u8; 2048];
         let _ = stream.read(&mut request);
         stream
@@ -517,7 +607,8 @@ fn model_pull_fails_over_within_provider() {
     let server_payload = payload.clone();
     let healthy_server = std::thread::spawn(move || {
         for request_number in 0..2 {
-            let (mut stream, _) = healthy.accept().unwrap();
+            let mut stream =
+                accept_fixture_connection(&healthy, "healthy model endpoint fixture server");
             let mut request = [0u8; 2048];
             let _ = stream.read(&mut request);
             if request_number == 0 {
@@ -572,13 +663,13 @@ priority = 1
         temporary.path(),
         &["model", "pull", "fixture", "hf:owner/repo@main"],
     );
-    failing_server.join().unwrap();
-    healthy_server.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    failing_server.join().unwrap();
+    healthy_server.join().unwrap();
     let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
     let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
     assert_eq!(
