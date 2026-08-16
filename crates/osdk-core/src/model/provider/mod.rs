@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::ModelRef;
 
 pub mod huggingface;
+pub mod modelscope;
 
 #[derive(Debug, Clone)]
 pub struct RemoteModelFile {

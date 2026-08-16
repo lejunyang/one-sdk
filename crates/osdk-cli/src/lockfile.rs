@@ -411,6 +411,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_model_provider_spelling_remains_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(
+            &path,
+            r#"
+schema = 1
+
+[models.fixture]
+provider = "hugging-face"
+repository = "owner/repo"
+requested_revision = "main"
+revision = "abc123"
+endpoint = "https://huggingface.co"
+files = []
+"#,
+        )
+        .unwrap();
+        let lock = load(&path).unwrap();
+        assert_eq!(
+            lock.models["fixture"].provider,
+            osdk_core::model::ProviderId::HuggingFace
+        );
+    }
+
+    #[test]
     fn locked_requests_restore_exact_versions_and_options() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);

@@ -648,8 +648,13 @@ fn generate_shims_for(app: &App, backend: &dyn Backend, tv: &ToolVersion) -> Res
 pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
     match command {
         SourceCommand::List { tool } => {
-            let backend = app.registry.get(&tool)?;
-            let sources = select::effective_sources(&app.ctx, backend.as_ref());
+            let tool = canonical_source_tool(app, &tool)?;
+            let sources = if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
+                osdk_core::model::source::effective_sources(&app.ctx, provider)
+            } else {
+                let backend = app.registry.get(&tool)?;
+                select::effective_sources(&app.ctx, backend.as_ref())
+            };
             let pin = app
                 .ctx
                 .config
@@ -678,10 +683,22 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 );
             }
         }
-        SourceCommand::Test { tool } => {
-            let backend = app.registry.get(&tool)?;
+        SourceCommand::Test { tool, model } => {
+            let tool = canonical_source_tool(app, &tool)?;
             println!("{}", t!("msg.probing", tool = tool));
-            let mut ranked = select::refresh(&app.ctx, backend.as_ref()).await?;
+            let mut ranked = if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
+                let model = model.ok_or_else(|| {
+                    anyhow!("`osdk source test {tool}` requires --model owner/repo@revision")
+                })?;
+                let reference = model_reference(provider, &model)?;
+                osdk_core::model::source::refresh(&app.ctx, &reference).await?
+            } else {
+                if model.is_some() {
+                    return Err(anyhow!("--model is only valid for model providers"));
+                }
+                let backend = app.registry.get(&tool)?;
+                select::refresh(&app.ctx, backend.as_ref()).await?
+            };
             ranked.sort_by(|a, b| b.score().total_cmp(&a.score()));
             for (i, r) in ranked.iter().enumerate() {
                 if r.ok {
@@ -702,18 +719,21 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
             id,
             download_url,
             index_url,
+            forward_credentials,
         } => {
-            app.registry.get(&tool)?; // validate known backend
+            let tool = canonical_source_tool(app, &tool)?;
             crate::config_edit::add_custom_source(
                 &app.ctx,
                 &tool,
                 &id,
                 &download_url,
                 index_url.as_deref(),
+                forward_credentials,
             )?;
             println!("{}", t!("msg.source_added", id = id, tool = tool));
         }
         SourceCommand::Remove { tool, id } => {
+            let tool = canonical_source_tool(app, &tool)?;
             let removed = crate::config_edit::remove_custom_source(&app.ctx, &tool, &id)?;
             if removed {
                 println!("{}", t!("msg.source_removed", id = id, tool = tool));
@@ -722,10 +742,17 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
             }
         }
         SourceCommand::Pin { tool, id } => {
-            let backend = app.registry.get(&tool)?;
-            let known = select::effective_sources(&app.ctx, backend.as_ref())
-                .iter()
-                .any(|s| s.id == id);
+            let tool = canonical_source_tool(app, &tool)?;
+            let known = if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
+                osdk_core::model::source::effective_sources(&app.ctx, provider)
+                    .iter()
+                    .any(|source| source.id == id)
+            } else {
+                let backend = app.registry.get(&tool)?;
+                select::effective_sources(&app.ctx, backend.as_ref())
+                    .iter()
+                    .any(|source| source.id == id)
+            };
             if !known {
                 return Err(anyhow!(t!("err.unknown_source", id = id, tool = tool)));
             }
@@ -733,11 +760,19 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
             println!("{}", t!("msg.source_pinned", tool = tool, id = id));
         }
         SourceCommand::Unpin { tool } => {
+            let tool = canonical_source_tool(app, &tool)?;
             crate::config_edit::set_source_pin(&app.ctx, &tool, None)?;
             println!("{}", t!("msg.source_unpinned", tool = tool));
         }
     }
     Ok(())
+}
+
+fn canonical_source_tool(app: &App, tool: &str) -> Result<String> {
+    match tool.parse::<osdk_core::model::ProviderId>() {
+        Ok(provider) => Ok(provider.as_str().to_string()),
+        Err(_) => Ok(app.registry.get(tool)?.id().to_string()),
+    }
 }
 
 pub fn activate(app: &App, shell: String) -> Result<()> {
@@ -926,45 +961,84 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
             name,
             reference,
             endpoint,
+            forward_credentials,
             include,
             exclude,
             variant,
             no_lock,
         } => {
             let reference = osdk_core::model::ModelRef::parse(&reference)?;
-            let endpoint = endpoint
-                .or_else(|| match reference.provider {
-                    osdk_core::model::ProviderId::HuggingFace => std::env::var("HF_ENDPOINT").ok(),
-                    osdk_core::model::ProviderId::ModelScope => None,
-                })
-                .unwrap_or_else(|| match reference.provider {
-                    osdk_core::model::ProviderId::HuggingFace => {
-                        "https://huggingface.co".to_string()
+            let explicit_endpoint = endpoint.or_else(|| provider_endpoint_env(reference.provider));
+            let sources = if let Some(endpoint) = explicit_endpoint {
+                let mut source = osdk_core::source::Source::mirror("explicit", &endpoint, i32::MIN);
+                source.kind = osdk_core::source::SourceKind::Custom;
+                source.forward_credentials =
+                    forward_credentials || official_model_endpoint(reference.provider, &endpoint);
+                vec![source]
+            } else {
+                let mut sources = osdk_core::model::source::ranked_sources(
+                    &app.ctx,
+                    &reference,
+                    app.refresh_sources,
+                )
+                .await?;
+                if let Some(id) = app.source_override.as_deref() {
+                    let index = sources
+                        .iter()
+                        .position(|source| source.id == id)
+                        .ok_or_else(|| {
+                            anyhow!(t!("err.unknown_source", id = id, tool = reference.provider))
+                        })?;
+                    let selected = sources.remove(index);
+                    sources.insert(0, selected);
+                }
+                sources
+            };
+            let options = osdk_core::model::pull::PullOptions {
+                include,
+                exclude,
+                variant,
+            };
+            let mut installed = None;
+            let mut last_error = None;
+            for source in sources {
+                let provider = osdk_core::model::source::provider(
+                    reference.provider,
+                    source.forward_credentials,
+                );
+                match osdk_core::model::pull::pull(
+                    &app.ctx,
+                    provider.as_ref(),
+                    &name,
+                    &reference,
+                    &source.download_url,
+                    &options,
+                )
+                .await
+                {
+                    Ok(model) => {
+                        installed = Some(model);
+                        break;
                     }
-                    osdk_core::model::ProviderId::ModelScope => "https://modelscope.cn".to_string(),
-                });
-            let provider: Box<dyn osdk_core::model::provider::ModelProvider> =
-                match reference.provider {
-                    osdk_core::model::ProviderId::HuggingFace => {
-                        Box::new(osdk_core::model::provider::huggingface::HuggingFace::default())
+                    Err(error) => {
+                        tracing::warn!(
+                            source = %source.id,
+                            endpoint = %source.download_url,
+                            error = %error,
+                            "model source failed, trying next endpoint"
+                        );
+                        last_error = Some(error);
                     }
-                    osdk_core::model::ProviderId::ModelScope => {
-                        return Err(anyhow!("ModelScope provider is not implemented yet"))
-                    }
-                };
-            let installed = osdk_core::model::pull::pull(
-                &app.ctx,
-                provider.as_ref(),
-                &name,
-                &reference,
-                &endpoint,
-                &osdk_core::model::pull::PullOptions {
-                    include,
-                    exclude,
-                    variant,
-                },
-            )
-            .await?;
+                }
+            }
+            let installed = installed.ok_or_else(|| {
+                anyhow!(
+                    "{}",
+                    last_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "no model source candidates".into())
+                )
+            })?;
             if !no_lock {
                 let cwd = std::env::current_dir()?;
                 let path = project_lock_path(app, &cwd);
@@ -1016,6 +1090,47 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn model_reference(
+    provider: osdk_core::model::ProviderId,
+    value: &str,
+) -> Result<osdk_core::model::ModelRef> {
+    if value.contains(':') {
+        let reference = osdk_core::model::ModelRef::parse(value)?;
+        if reference.provider != provider {
+            return Err(anyhow!(
+                "model reference provider {} does not match {}",
+                reference.provider,
+                provider
+            ));
+        }
+        Ok(reference)
+    } else {
+        osdk_core::model::ModelRef::parse(&format!("{provider}:{value}")).map_err(Into::into)
+    }
+}
+
+fn provider_endpoint_env(provider: osdk_core::model::ProviderId) -> Option<String> {
+    match provider {
+        osdk_core::model::ProviderId::HuggingFace => std::env::var("HF_ENDPOINT").ok(),
+        osdk_core::model::ProviderId::ModelScope => std::env::var("MODELSCOPE_ENDPOINT")
+            .ok()
+            .or_else(|| std::env::var("MODELSCOPE_DOMAIN").ok()),
+    }
+}
+
+fn official_model_endpoint(provider: osdk_core::model::ProviderId, endpoint: &str) -> bool {
+    let endpoint = endpoint.trim().trim_end_matches('/').to_ascii_lowercase();
+    match provider {
+        osdk_core::model::ProviderId::HuggingFace => endpoint == "https://huggingface.co",
+        osdk_core::model::ProviderId::ModelScope => {
+            matches!(
+                endpoint.as_str(),
+                "https://modelscope.cn" | "https://www.modelscope.ai"
+            )
+        }
+    }
 }
 
 pub fn rust(app: &App, command: RustCommand) -> Result<()> {

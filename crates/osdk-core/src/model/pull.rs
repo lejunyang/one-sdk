@@ -110,12 +110,17 @@ async fn download_file(
     }
     let sha256 = match file.sha256 {
         Some(expected) => {
-            crate::pipeline::verify::verify_file(
+            if let Err(error) = crate::pipeline::verify::verify_file(
                 &destination,
                 &expected,
                 HashAlgo::Sha256,
                 &file.path,
-            )?;
+            ) {
+                if !ctx.config.settings.offline {
+                    let _ = std::fs::remove_file(&destination);
+                }
+                return Err(error);
+            }
             Some(expected)
         }
         None => Some(hash_file(&destination, HashAlgo::Sha256)?),
@@ -201,6 +206,7 @@ mod tests {
     use crate::config::{Config, Settings};
     use crate::dirs::Dirs;
     use crate::model::provider::huggingface::HuggingFace;
+    use crate::model::provider::modelscope::ModelScope;
     use crate::model::provider::RemoteSnapshot;
     use crate::platform::Platform;
     use crate::store::link::LinkMode;
@@ -308,6 +314,99 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rebuilt.manifest.revision, "abc123");
+    }
+
+    #[tokio::test]
+    async fn modelscope_pull_verifies_manifest_and_rebuilds_offline() {
+        let config_bytes = br#"{"model":"modelscope-fixture"}"#.to_vec();
+        let digest = crate::pipeline::verify::hash_bytes(&config_bytes, HashAlgo::Sha256);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_digest = digest.clone();
+        let server_bytes = config_bytes.clone();
+        let server = std::thread::spawn(move || {
+            for request_number in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let lower = request.to_ascii_lowercase();
+                assert!(lower.contains("authorization: bearer fixture-token"));
+                assert!(lower.contains("cookie: m_session_id=fixture-token"));
+                if request_number == 0 {
+                    assert!(request.contains("/repo/files?Revision=master&Recursive=true"));
+                    let body = format!(
+                        r#"{{"Code":200,"Success":true,"Message":"success","Data":{{"Files":[{{"Path":"config.json","Size":{},"Sha256":"{}","Type":"blob"}}]}}}}"#,
+                        server_bytes.len(),
+                        server_digest
+                    );
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                } else {
+                    assert!(request.contains("/repo?Revision=master&FilePath=config.json"));
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
+                        server_bytes.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&server_bytes).unwrap();
+                }
+            }
+        });
+
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temporary.path(), false);
+        let reference = ModelRef::parse("ms:owner/repo@master").unwrap();
+        let endpoint = format!("http://{address}");
+        let installed = pull(
+            &ctx,
+            &ModelScope::with_token("fixture-token"),
+            "modelscope-fixture",
+            &reference,
+            &endpoint,
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert!(installed.manifest.revision.starts_with("master+manifest-"));
+        assert_eq!(
+            std::fs::read(installed.path.join("config.json")).unwrap(),
+            config_bytes
+        );
+
+        ModelStore::new(
+            ctx.dirs.clone(),
+            ctx.cas.clone(),
+            ctx.config.settings.link_mode,
+        )
+        .remove("modelscope-fixture")
+        .unwrap();
+        ctx.config.settings.offline = true;
+        let rebuilt = pull(
+            &ctx,
+            &ModelScope::default(),
+            "modelscope-fixture",
+            &reference,
+            &endpoint,
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rebuilt.manifest.revision, installed.manifest.revision);
     }
 
     struct EmptyProvider;

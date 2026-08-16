@@ -44,13 +44,14 @@ go = "1.22"
 osdk walks upward from the current directory and uses the nearest project
 configuration, so subdirectories can inherit repository-wide versions.
 
-## Hugging Face model snapshots
+## Hugging Face and ModelScope snapshots
 
 Models are managed as multi-file repository snapshots instead of SDK archives:
 
 ```bash
 export HF_TOKEN=... # optional for private or gated models
 osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
 osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' \
   --exclude 'original/*' --variant safetensors-fp16
@@ -60,12 +61,13 @@ osdk model verify qwen25
 osdk model remove qwen25
 ```
 
-`pull` resolves a branch or tag to an immutable commit, then downloads files
-concurrently with Range/ETag resume and SHA-256 verification. Hugging Face LFS
-SHA-256 is used when metadata provides it; otherwise osdk computes a local
-SHA-256. Files enter the same CAS as SDKs and are atomically materialized as a
-snapshot. `prune` scans both SDK and model manifests, so live model objects are
-not removed.
+Hugging Face branches and tags resolve to an immutable commit. The ModelScope
+file API exposes per-file revisions, so osdk derives an immutable snapshot
+identity from the requested revision plus the sorted path, size, and SHA-256
+manifest. Files are then downloaded concurrently with Range/ETag resume and
+SHA-256 verification, placed in the same CAS as SDKs, and atomically
+materialized. `prune` scans both SDK and model manifests, so live model objects
+are not removed.
 
 By default, a top-level `[models]` entry is added to the nearest project
 `osdk.lock`, recording the provider, repository, requested and immutable
@@ -74,11 +76,28 @@ short-lived signed download URLs are never persisted. Pass `--no-lock` when a
 lock update is not wanted. `--offline` can rebuild a removed snapshot from
 cached metadata and files.
 
-Authentication accepts `OSDK_HF_TOKEN`, `HF_TOKEN`, and
-`HUGGING_FACE_HUB_TOKEN`. Authorization is attached only to requests for the
-configured Hugging Face endpoint and is not proactively forwarded to another
-host. Use `--endpoint` or the current process's `HF_ENDPOINT` for a custom
-endpoint.
+Hugging Face authentication accepts `OSDK_HF_TOKEN`, `HF_TOKEN`, and
+`HUGGING_FACE_HUB_TOKEN`. ModelScope accepts `OSDK_MODELSCOPE_TOKEN` and
+`MODELSCOPE_API_TOKEN`.
+
+Model endpoints reuse source configuration, pinning, TTL, and ranking:
+
+```bash
+osdk source list huggingface
+osdk source list modelscope
+osdk source test modelscope --model Qwen/Qwen2.5-0.5B-Instruct@master
+osdk source pin modelscope modelscope-cn
+osdk source add huggingface --id corp \
+  --download-url https://hub.example.com
+```
+
+A model probe fetches target-repository metadata and performs a bounded 1 MiB
+Range download against an actual model file, ranking TTFB and throughput.
+Official endpoints may receive their provider token. Custom endpoints are
+anonymous by default; use `source add --forward-credentials`, or explicit
+`model pull --endpoint ... --forward-credentials`, only after trusting that
+host. Automatic failover stays within a provider; Hugging Face and ModelScope
+repositories are never implicitly treated as interchangeable.
 
 ### Node project versions, architecture, and Corepack
 

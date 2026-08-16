@@ -189,6 +189,266 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
 }
 
 #[test]
+fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
+    let payload = br#"{"model":"modelscope-fixture"}"#.to_vec();
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_payload = payload.clone();
+    let server = std::thread::spawn(move || {
+        for request_number in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            if request_number == 0 {
+                let body = format!(
+                    r#"{{"Code":200,"Success":true,"Message":"success","Data":{{"Files":[{{"Path":"config.json","Size":{},"Sha256":"{digest}","Type":"blob"}}]}}}}"#,
+                    server_payload.len()
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .unwrap();
+                stream.write_all(&server_payload).unwrap();
+            }
+        }
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let endpoint = format!("http://{address}");
+    let output = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "pull",
+            "fixture",
+            "ms:owner/repo@master",
+            "--endpoint",
+            &endpoint,
+        ],
+    );
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
+    let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
+    assert_eq!(
+        std::fs::read(snapshot.join("config.json")).unwrap(),
+        payload
+    );
+    let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
+    assert!(lock.contains("provider = \"modelscope\""));
+    assert!(lock.contains("revision = \"master+manifest-"));
+}
+
+#[test]
+fn model_source_test_probes_target_file_and_prints_ranking() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for request_number in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(!request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer"));
+            if request_number == 0 {
+                assert!(request.contains("/api/models/owner/repo/revision/main"));
+                let body = r#"{"sha":"abc123","siblings":[{"rfilename":"weights.bin","size":4}]}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("range: bytes=0-1048575"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\ndata",
+                    )
+                    .unwrap();
+            }
+        }
+    });
+    let temporary = tempfile::tempdir().unwrap();
+    let endpoint = format!("http://{address}");
+    let added = run_isolated(
+        temporary.path(),
+        &[
+            "source",
+            "add",
+            "huggingface",
+            "--id",
+            "fixture",
+            "--download-url",
+            &endpoint,
+        ],
+    );
+    assert!(added.status.success());
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        format!(
+            r#"
+[sources.huggingface]
+disable = ["official"]
+
+[[sources.huggingface.custom]]
+id = "fixture"
+kind = "custom"
+download_url = "{endpoint}"
+"#
+        ),
+    )
+    .unwrap();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "source",
+            "test",
+            "huggingface",
+            "--model",
+            "owner/repo@main",
+        ],
+        &[("HF_TOKEN", "must-not-leak")],
+    );
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fixture"));
+}
+
+#[test]
+fn model_pull_fails_over_within_provider() {
+    let failing = TcpListener::bind("127.0.0.1:0").unwrap();
+    let failing_address = failing.local_addr().unwrap();
+    let failing_server = std::thread::spawn(move || {
+        let (mut stream, _) = failing.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request);
+        stream
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+    });
+
+    let payload = br#"{"model":"fallback"}"#.to_vec();
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
+    let healthy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let healthy_address = healthy.local_addr().unwrap();
+    let server_payload = payload.clone();
+    let healthy_server = std::thread::spawn(move || {
+        for request_number in 0..2 {
+            let (mut stream, _) = healthy.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            if request_number == 0 {
+                let body = format!(
+                    r#"{{"sha":"abc123","siblings":[{{"rfilename":"config.json","lfs":{{"sha256":"{digest}","size":{}}}}}]}}"#,
+                    server_payload.len()
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .unwrap();
+                stream.write_all(&server_payload).unwrap();
+            }
+        }
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let config = format!(
+        r#"
+[sources]
+selection = "ordered"
+
+[sources.huggingface]
+disable = ["official"]
+
+[[sources.huggingface.custom]]
+id = "failing"
+kind = "custom"
+download_url = "http://{failing_address}"
+priority = 0
+
+[[sources.huggingface.custom]]
+id = "healthy"
+kind = "custom"
+download_url = "http://{healthy_address}"
+priority = 1
+"#
+    );
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(temporary.path().join("config/config.toml"), config).unwrap();
+    let output = run_isolated(
+        temporary.path(),
+        &["model", "pull", "fixture", "hf:owner/repo@main"],
+    );
+    failing_server.join().unwrap();
+    healthy_server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
+    let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
+    assert_eq!(
+        std::fs::read(snapshot.join("config.json")).unwrap(),
+        payload
+    );
+}
+
+#[test]
 fn destructive_commands_require_explicit_non_interactive_confirmation() {
     let temp = tempfile::tempdir().unwrap();
     let archive = temp.path().join("cache/downloads/archive.tar.gz");

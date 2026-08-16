@@ -18,8 +18,9 @@ Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/ru
 3. **多源与最快镜像自动选择。** 每个 SDK 都提供官方源和可用镜像；osdk 会探测
    速度并选择最快来源，元数据或下载失败时自动切换。也支持添加自定义源或固定
    指定来源。
-4. **不可变模型快照。** Hugging Face 仓库会解析为精确 commit，按文件断点续传
-   与验证 SHA-256，复用同一个 CAS，并在 `osdk.lock` 的独立 `[models]` 中记录。
+4. **不可变模型快照。** Hugging Face 与 ModelScope 仓库会解析为不可变快照，
+   按文件断点续传与验证 SHA-256，复用同一个 CAS，并在 `osdk.lock` 的独立
+   `[models]` 中记录。
 
 ## 安装
 
@@ -97,9 +98,12 @@ eval "$(osdk activate bash)"    # 加入 ~/.bashrc；也支持 zsh|fish|powershe
 # 后续移除 hook，并恢复当前 shell 的 PATH/环境变量：
 eval "$(osdk deactivate bash)"
 
-# 不可变 Hugging Face 模型快照
+# 不可变模型快照
 osdk model pull qwen25 \
   hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors'
+osdk model pull qwen25-ms \
+  ms:Qwen/Qwen2.5-7B-Instruct@master \
   --include '*.json' --include '*.safetensors'
 osdk model path qwen25
 ```
@@ -124,20 +128,42 @@ osdk 会从当前目录向上查找项目版本文件：`osdk.toml`、兼容 asd
 ```bash
 export HF_TOKEN=... # 私有或 gated 仓库可选
 osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
 osdk model list
 osdk model verify qwen25
 osdk model path qwen25
 osdk model remove qwen25
 ```
 
-branch/tag 会先解析为不可变 commit。每个选中文件支持断点续传和 SHA-256 验证，
-随后进入共享 CAS 并原子物化。精确仓库、commit、endpoint、variant、文件大小和
-SHA-256 会写入 `osdk.lock` 顶层 `[models]`；token 和短期签名下载 URL 不会落盘。
+Hugging Face branch/tag 会先解析为不可变 commit。ModelScope 文件 API 暴露的是
+每个文件的 revision，而不是单一 snapshot commit，因此 osdk 会使用请求 revision
+与排序后的路径、大小、SHA-256 manifest 推导不可变 snapshot identity。每个选中
+文件支持断点续传和 SHA-256 验证，随后进入共享 CAS 并原子物化。精确仓库、
+snapshot revision、endpoint、variant、文件大小和 SHA-256 会写入 `osdk.lock`
+顶层 `[models]`；token 和短期签名下载 URL 不会落盘。
 可重复使用 `--include` / `--exclude` 选择文件，使用 `--variant` 标记格式或量化，
 并用 `--offline` 从已缓存 metadata 与文件重建快照。
 
 认证支持 `OSDK_HF_TOKEN`、`HF_TOKEN` 和 `HUGGING_FACE_HUB_TOKEN`；
 Authorization 只附加到配置的 Hugging Face endpoint 请求。
+ModelScope 认证支持 `OSDK_MODELSCOPE_TOKEN` 与 `MODELSCOPE_API_TOKEN`。
+
+模型 endpoint 复用 SDK 镜像的 source 配置、pin、TTL 和吞吐排名，但探测时会
+指定真实目标模型：
+
+```bash
+osdk source list modelscope
+osdk source test modelscope --model Qwen/Qwen2.5-0.5B-Instruct@master
+osdk source pin modelscope modelscope-cn
+osdk source add huggingface --id corp \
+  --download-url https://hub.example.com
+```
+
+探测会先验证目标仓库 metadata，再对实际模型文件执行有上限的 Range 下载。
+官方 endpoint 可接收对应 Provider token；自定义 endpoint 默认匿名，只有确认
+host 可信后才使用 `source add --forward-credentials`，或在显式 `model pull
+--endpoint` 时添加 `--forward-credentials`。自动 failover 只发生在同一
+Provider 内，不会假设 Hugging Face 与 ModelScope 的仓库身份可互换。
 
 ## Node 工作流
 

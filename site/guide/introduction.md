@@ -16,8 +16,8 @@ osdk 重点解决四个问题：
 2. **减少重复占用**：相同内容只在 BLAKE3 内容寻址存储中保留一份。
 3. **兼顾速度与可信度**：自动选择最快来源，同时执行校验和、签名与可选的
    GitHub Artifact Attestation 验证。
-4. **统一模型资产**：把 Hugging Face 仓库解析为不可变快照，按文件校验、缓存、
-   去重和锁定。
+4. **统一模型资产**：把 Hugging Face 与 ModelScope 仓库解析为不可变快照，
+   按文件校验、缓存、去重和锁定。
 
 ## 支持的平台与工具
 
@@ -37,7 +37,7 @@ osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 | Deno | 官方 npm 平台包 |
 | Bun | 官方 npm 平台包 |
 | GitHub Release | `github:owner/repo` 通用后端 |
-| Hugging Face 模型 | 不可变 commit、多文件 SHA-256、共享 CAS 与 `[models]` lock |
+| Hugging Face / ModelScope 模型 | 不可变快照、多文件 SHA-256、共享 CAS 与 `[models]` lock |
 
 ## 工作原理
 

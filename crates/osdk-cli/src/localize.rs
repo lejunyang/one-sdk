@@ -96,8 +96,16 @@ fn localize_subcommands(cmd: Command) -> Command {
         c.about(h("help.source.about"))
             .long_about(h("help.source.long"))
             .mut_subcommand("list", |s| s.about(h("help.source.list.about")))
-            .mut_subcommand("test", |s| s.about(h("help.source.test.about")))
-            .mut_subcommand("add", |s| s.about(h("help.source.add.about")))
+            .mut_subcommand("test", |s| {
+                s.about(h("help.source.test.about"))
+                    .mut_arg("model", |a| a.help(h("help.source.test.flag.model")))
+            })
+            .mut_subcommand("add", |s| {
+                s.about(h("help.source.add.about"))
+                    .mut_arg("forward_credentials", |a| {
+                        a.help(h("help.source.add.flag.forward_credentials"))
+                    })
+            })
             .mut_subcommand("remove", |s| s.about(h("help.source.remove.about")))
             .mut_subcommand("pin", |s| s.about(h("help.source.pin.about")))
             .mut_subcommand("unpin", |s| s.about(h("help.source.unpin.about")))
@@ -138,6 +146,9 @@ fn localize_subcommands(cmd: Command) -> Command {
                     .mut_arg("name", |a| a.help(h("help.model.pull.arg.name")))
                     .mut_arg("reference", |a| a.help(h("help.model.pull.arg.reference")))
                     .mut_arg("endpoint", |a| a.help(h("help.model.pull.flag.endpoint")))
+                    .mut_arg("forward_credentials", |a| {
+                        a.help(h("help.model.pull.flag.forward_credentials"))
+                    })
                     .mut_arg("include", |a| a.help(h("help.model.pull.flag.include")))
                     .mut_arg("exclude", |a| a.help(h("help.model.pull.flag.exclude")))
                     .mut_arg("variant", |a| a.help(h("help.model.pull.flag.variant")))

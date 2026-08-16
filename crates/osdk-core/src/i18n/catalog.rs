@@ -462,10 +462,12 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "osdk installs and switches between versions of many SDKs (node, npm, pnpm, yarn, \
              java, python, rust, go, deno, bun, and any github:owner/repo release) across Windows, \
              macOS, and Linux.\n\nHighlights: content-addressed dedup across versions, unified \
-             downstream package caches, and automatic fastest-mirror selection with failover.",
+             downstream package caches, automatic fastest-mirror selection with failover, and \
+             immutable Hugging Face / ModelScope model snapshots.",
             "osdk 可在 Windows、macOS 与 Linux 上安装并切换多种 SDK 的版本（node、npm、pnpm、\
              yarn、java、python、rust、go、deno、bun，以及任意 github:owner/repo 发布物）。\n\n特性：跨版本\
-             内容寻址去重、统一的下游包缓存、自动选择最快镜像并支持故障转移。",
+             内容寻址去重、统一的下游包缓存、自动选择最快镜像并支持故障转移，以及不可变的 Hugging Face / \
+             ModelScope 模型快照。",
         ),
     );
 
@@ -745,13 +747,14 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.source.long",
         (
-            "Manage per-tool download sources. osdk ships an official source plus authoritative \
-             mirrors, auto-selecting the fastest with failover; you can add custom sources or pin \
-             one.\n\nEXAMPLES:\n  osdk source list node\n  osdk source test node\n  osdk source \
-             pin node tuna\n  osdk source add node --id mycorp --download-url https://m/ --index-url https://m/index.json",
-            "管理各工具的下载源。osdk 内置官方源与权威镜像，自动选择最快者并支持故障转移；你也可\
-             添加自定义源或固定某个源。\n\n示例：\n  osdk source list node\n  osdk source test node\n  \
-             osdk source pin node tuna\n  osdk source add node --id mycorp --download-url https://m/ --index-url https://m/index.json",
+            "Manage SDK and model-provider download sources. osdk auto-selects fast endpoints with \
+             failover; model probes use a real target repository and bounded file download.\n\nEXAMPLES:\n  \
+             osdk source list node\n  osdk source test node\n  osdk source test modelscope --model \
+             Qwen/Qwen2.5-0.5B-Instruct@master\n  osdk source pin modelscope modelscope-cn",
+            "管理 SDK 与模型 Provider 下载源。osdk 自动选择快速 endpoint 并支持故障转移；模型探测会使用\
+             真实目标仓库与有界文件下载。\n\n示例：\n  osdk source list node\n  osdk source test node\n  \
+             osdk source test modelscope --model Qwen/Qwen2.5-0.5B-Instruct@master\n  \
+             osdk source pin modelscope modelscope-cn",
         ),
     );
     m.insert(
@@ -844,6 +847,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.model.pull.flag.endpoint",
         ("Override the provider endpoint", "覆盖模型源 endpoint"),
+    );
+    m.insert(
+        "help.model.pull.flag.forward_credentials",
+        (
+            "Allow an explicit custom endpoint to receive provider credentials",
+            "允许显式自定义 endpoint 接收模型源凭据",
+        ),
     );
     m.insert(
         "help.model.pull.flag.include",
@@ -953,13 +963,27 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.source.test.about",
         (
-            "Probe sources and print the speed ranking",
-            "探测源并打印测速排名",
+            "Probe sources and print the speed ranking; model providers require --model",
+            "探测源并打印测速排名；模型源需要 --model",
+        ),
+    );
+    m.insert(
+        "help.source.test.flag.model",
+        (
+            "Target model repository for huggingface/modelscope probes",
+            "huggingface/modelscope 探测使用的目标模型仓库",
         ),
     );
     m.insert(
         "help.source.add.about",
         ("Add a custom source", "添加自定义源"),
+    );
+    m.insert(
+        "help.source.add.flag.forward_credentials",
+        (
+            "Allow this custom endpoint to receive provider credentials",
+            "允许该自定义 endpoint 接收模型源凭据",
+        ),
     );
     m.insert(
         "help.source.remove.about",

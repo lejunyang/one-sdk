@@ -15,15 +15,17 @@ use crate::store::Cas;
 
 pub mod provider;
 pub mod pull;
+pub mod source;
 
 const MODEL_MANIFEST_FILE: &str = ".osdk-model.json";
 const CURRENT_FILE: &str = "current.json";
 const COMPLETE_MARKER: &str = ".osdk-complete";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum ProviderId {
+    #[serde(rename = "huggingface", alias = "hugging-face", alias = "hf")]
     HuggingFace,
+    #[serde(rename = "modelscope", alias = "model-scope", alias = "ms")]
     ModelScope,
 }
 

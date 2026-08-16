@@ -97,6 +97,7 @@ pub fn add_custom_source(
     id: &str,
     download_url: &str,
     index_url: Option<&str>,
+    forward_credentials: bool,
 ) -> Result<()> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
@@ -140,6 +141,9 @@ pub fn add_custom_source(
     tbl.insert("download_url", toml_edit::value(download_url));
     if let Some(idx) = index_url {
         tbl.insert("index_url", toml_edit::value(idx));
+    }
+    if forward_credentials {
+        tbl.insert("forward_credentials", toml_edit::value(true));
     }
     array.push(tbl);
 

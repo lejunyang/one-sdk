@@ -261,8 +261,13 @@ pub enum Command {
 pub enum SourceCommand {
     /// List sources for a tool (with last-probe results if available).
     List { tool: String },
-    /// Probe sources for a tool now and print the speed ranking.
-    Test { tool: String },
+    /// Probe sources for a tool or model provider now and print the speed ranking.
+    Test {
+        tool: String,
+        /// Target model repository for huggingface/modelscope probes.
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Add a custom source for a tool.
     Add {
         tool: String,
@@ -275,6 +280,9 @@ pub enum SourceCommand {
         /// Version-index / metadata URL (if different from downloads).
         #[arg(long = "index-url")]
         index_url: Option<String>,
+        /// Allow this custom endpoint to receive provider credentials.
+        #[arg(long)]
+        forward_credentials: bool,
     },
     /// Remove a custom source from a tool.
     Remove { tool: String, id: String },
@@ -348,6 +356,9 @@ pub enum ModelCommand {
         /// Override the provider endpoint.
         #[arg(long)]
         endpoint: Option<String>,
+        /// Allow an explicit custom endpoint to receive provider credentials.
+        #[arg(long)]
+        forward_credentials: bool,
         /// Include files matching a glob (repeatable).
         #[arg(long)]
         include: Vec<String>,

@@ -20,8 +20,8 @@ osdk focuses on four problems:
    content-addressed store.
 3. **Speed with trust:** automatically choose fast sources while retaining
    checksum, signature, and optional GitHub Artifact Attestation verification.
-4. **Unified model assets:** resolve Hugging Face repositories into immutable,
-   file-verified, cached, deduplicated, and locked snapshots.
+4. **Unified model assets:** resolve Hugging Face and ModelScope repositories
+   into immutable, file-verified, cached, deduplicated, and locked snapshots.
 
 ## Supported platforms and tools
 
@@ -42,7 +42,7 @@ backends:
 | Deno | Official npm platform package |
 | Bun | Official npm platform package |
 | GitHub Release | Generic `github:owner/repo` backend |
-| Hugging Face models | Immutable commits, per-file SHA-256, shared CAS, and `[models]` locks |
+| Hugging Face / ModelScope models | Immutable snapshots, per-file SHA-256, shared CAS, and `[models]` locks |
 
 ## How it works
 

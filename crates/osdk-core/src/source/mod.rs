@@ -34,6 +34,9 @@ pub struct Source {
     /// Extra request headers (e.g. a GitHub token for python-build-standalone).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
+    /// Whether provider credentials may be forwarded to this endpoint.
+    #[serde(default)]
+    pub forward_credentials: bool,
     /// Lower is preferred when strategy is `ordered` and no probe data exists.
     #[serde(default)]
     pub priority: i32,
@@ -53,6 +56,7 @@ impl Source {
             index_url: None,
             download_url: download_url.to_string(),
             headers: Vec::new(),
+            forward_credentials: true,
             priority: 0,
             enabled: true,
         }
@@ -65,6 +69,7 @@ impl Source {
             index_url: None,
             download_url: download_url.to_string(),
             headers: Vec::new(),
+            forward_credentials: false,
             priority,
             enabled: true,
         }

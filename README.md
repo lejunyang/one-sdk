@@ -21,10 +21,10 @@ managers (nvm/fnm/uv/sdkman/rustup) don't do together:
    official source plus authoritative mirrors; `osdk` probes them and uses the
    fastest, with failover on both metadata and downloads. You can add custom
    sources or pin one.
-4. **Immutable model snapshots.** Hugging Face repositories can be resolved to
-   an exact commit, downloaded with file-level resume and SHA-256 verification,
-   deduplicated in the same CAS, and recorded independently under `[models]` in
-   `osdk.lock`.
+4. **Immutable model snapshots.** Hugging Face and ModelScope repositories can
+   be resolved to immutable snapshots, downloaded with file-level resume and
+   SHA-256 verification, deduplicated in the same CAS, and recorded
+   independently under `[models]` in `osdk.lock`.
 
 ## Install
 
@@ -89,9 +89,12 @@ eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
 # later, remove the hook and restore PATH/env in the current shell:
 eval "$(osdk deactivate bash)"
 
-# immutable Hugging Face model snapshot
+# immutable model snapshot
 osdk model pull qwen25 \
   hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors'
+osdk model pull qwen25-ms \
+  ms:Qwen/Qwen2.5-7B-Instruct@master \
   --include '*.json' --include '*.safetensors'
 osdk model path qwen25
 ```
@@ -119,18 +122,22 @@ than an SDK archive:
 ```bash
 export HF_TOKEN=... # optional for private or gated repositories
 osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
 osdk model list
 osdk model verify qwen25
 osdk model path qwen25
 osdk model remove qwen25
 ```
 
-The requested branch or tag is resolved to an immutable commit. Each selected
-file is resumably cached, SHA-256 verified (using the upstream LFS digest when
-available, otherwise a locally computed digest), ingested into the shared CAS,
-and materialized atomically. The exact repository, commit, endpoint, variant,
-file size, and SHA-256 are written to the top-level `[models]` section in
-`osdk.lock`; short-lived signed download URLs and tokens are never persisted.
+For Hugging Face, the requested branch or tag is resolved to an immutable
+commit. ModelScope's file API exposes per-file revisions rather than one
+snapshot commit, so osdk derives an immutable snapshot identity from the
+requested revision plus the sorted path, size, and SHA-256 manifest. Each
+selected file is resumably cached, SHA-256 verified, ingested into the shared
+CAS, and materialized atomically. The exact repository, snapshot revision,
+endpoint, variant, file size, and SHA-256 are written to the top-level
+`[models]` section in `osdk.lock`; short-lived signed download URLs and tokens
+are never persisted.
 
 Use repeatable `--include` and `--exclude` globs to avoid downloading formats
 you do not need, and `--variant` to label formats or quantizations such as
@@ -138,6 +145,26 @@ you do not need, and `--variant` to label formats or quantizations such as
 and files without network access. `OSDK_HF_TOKEN`, `HF_TOKEN`, and
 `HUGGING_FACE_HUB_TOKEN` are accepted for authentication; authorization is
 attached only to requests for the configured Hugging Face endpoint.
+ModelScope accepts `OSDK_MODELSCOPE_TOKEN` or `MODELSCOPE_API_TOKEN`.
+
+Model endpoints use the same source configuration, pinning, TTL, and
+throughput ranking as SDK mirrors, but probes target a real model repository:
+
+```bash
+osdk source list modelscope
+osdk source test modelscope --model Qwen/Qwen2.5-0.5B-Instruct@master
+osdk source pin modelscope modelscope-cn
+osdk source add huggingface --id corp \
+  --download-url https://hub.example.com
+```
+
+The probe verifies repository metadata and performs a bounded Range download
+against an actual model file. Official endpoints may receive their provider
+token. Custom endpoints are anonymous by default; use
+`--forward-credentials` on `source add` or on an explicit `model pull
+--endpoint` only after trusting that host. Automatic failover stays within one
+provider. Hugging Face and ModelScope repository identities are never assumed
+to be interchangeable.
 
 ## Node workflows
 

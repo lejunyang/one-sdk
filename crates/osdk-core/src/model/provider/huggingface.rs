@@ -6,17 +6,31 @@ use crate::error::{Error, Result};
 use crate::model::provider::{get_cached_json, ModelProvider, RemoteModelFile, RemoteSnapshot};
 use crate::model::{ModelRef, ProviderId};
 
-#[derive(Default)]
 pub struct HuggingFace {
     token: Option<String>,
+    allow_auth: bool,
 }
 
 impl HuggingFace {
+    pub fn new(allow_auth: bool) -> Self {
+        Self {
+            token: None,
+            allow_auth,
+        }
+    }
+
     #[cfg(test)]
     pub fn with_token(token: impl Into<String>) -> Self {
         Self {
             token: Some(token.into()),
+            allow_auth: true,
         }
+    }
+}
+
+impl Default for HuggingFace {
+    fn default() -> Self {
+        Self::new(true)
     }
 }
 
@@ -60,7 +74,11 @@ impl ModelProvider for HuggingFace {
         }
         let endpoint = endpoint.trim_end_matches('/');
         let metadata_url = metadata_url(endpoint, &reference.repository, &reference.revision)?;
-        let headers = auth_headers(self.token.as_deref());
+        let headers = if self.allow_auth {
+            auth_headers(self.token.as_deref())
+        } else {
+            Vec::new()
+        };
         let cache_identity = format!(
             "{}:{}:{}@{}",
             reference.provider, endpoint, reference.repository, reference.revision
