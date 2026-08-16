@@ -98,16 +98,8 @@ fn independent_npm_backend_wins_over_bundled_node_npm() {
     ] {
         let executable = temporary.path().join(path);
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        std::fs::write(
-            &executable,
-            format!("#!/bin/sh\nprintf '{output}\\n'\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            &executable,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::write(&executable, format!("#!/bin/sh\nprintf '{output}\\n'\n")).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     for marker in [
         temporary.path().join("installs/node/1.0.0/.osdk-complete"),

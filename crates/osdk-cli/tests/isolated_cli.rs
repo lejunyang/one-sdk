@@ -1259,9 +1259,7 @@ version = "1.3.13-canary.20260425.1"
         ),
     )
     .unwrap();
-    let install = temp
-        .path()
-        .join("installs/bun/1.3.13-canary.20260425.1");
+    let install = temp.path().join("installs/bun/1.3.13-canary.20260425.1");
     std::fs::create_dir_all(&install).unwrap();
     std::fs::write(install.join(".osdk-complete"), b"").unwrap();
 
