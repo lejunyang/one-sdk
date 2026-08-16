@@ -515,6 +515,16 @@ as complete transparency-log proof verification.
 
 ## Development
 
+The offline backend contract is the primary correctness gate. It runs the same
+resolve → install → execute → uninstall assertions for every built-in backend
+and generic GitHub, plus real locked-fixture installs for each registry backend.
+Local fault injection covers 403, 429, 5xx, timeout, connection interruption,
+malformed metadata, stale cache, interrupted downloads, concurrent installs,
+failed-marker cleanup, corrupt receipts/manifests, cross-filesystem copy
+fallback, and shim stdio/exit-code/recursion/conflict behavior. The scheduled
+live upstream smoke only detects ecosystem drift; it is not the correctness
+proof.
+
 ```bash
 cargo test --workspace         # unit tests
 cargo clippy --workspace --all-targets   # lints (CI runs with -D warnings)

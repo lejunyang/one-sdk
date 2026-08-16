@@ -19,6 +19,13 @@ pub enum Error {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("network {kind}: {url}{status}", status = .status.map(|status| format!(" ({status})")).unwrap_or_default())]
+    Network {
+        kind: NetworkErrorKind,
+        url: String,
+        status: Option<u16>,
+    },
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -68,6 +75,31 @@ pub enum Error {
     Other(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkErrorKind {
+    Forbidden,
+    RateLimited,
+    Server,
+    Timeout,
+    Interrupted,
+    Connect,
+    InvalidMetadata,
+}
+
+impl std::fmt::Display for NetworkErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Forbidden => "forbidden",
+            Self::RateLimited => "rate-limited",
+            Self::Server => "server-error",
+            Self::Timeout => "timeout",
+            Self::Interrupted => "interrupted",
+            Self::Connect => "connect-error",
+            Self::InvalidMetadata => "invalid-metadata",
+        })
+    }
+}
+
 impl Error {
     pub fn other(msg: impl Into<String>) -> Self {
         Error::Other(msg.into())
@@ -82,6 +114,23 @@ impl Error {
         Error::Io {
             path: path.into(),
             source,
+        }
+    }
+
+    pub fn network(url: &str, error: reqwest::Error) -> Self {
+        let status = error.status().map(|status| status.as_u16());
+        let kind = match error.status() {
+            Some(reqwest::StatusCode::FORBIDDEN) => NetworkErrorKind::Forbidden,
+            Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => NetworkErrorKind::RateLimited,
+            Some(status) if status.is_server_error() => NetworkErrorKind::Server,
+            _ if error.is_timeout() => NetworkErrorKind::Timeout,
+            _ if error.is_body() || error.is_decode() => NetworkErrorKind::Interrupted,
+            _ => NetworkErrorKind::Connect,
+        };
+        Error::Network {
+            kind,
+            url: url.into(),
+            status,
         }
     }
 

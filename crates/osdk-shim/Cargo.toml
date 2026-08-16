@@ -15,3 +15,6 @@ path = "src/main.rs"
 # overhead minimal.
 [dependencies]
 osdk-core = { path = "../osdk-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

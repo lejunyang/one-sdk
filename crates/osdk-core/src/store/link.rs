@@ -244,6 +244,28 @@ mod tests {
         assert_eq!(std::fs::read(&dst).unwrap(), b"data");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn auto_mode_falls_back_across_filesystems() {
+        let source_root = tempfile::tempdir().unwrap();
+        let Some(shared_memory) = std::path::Path::new("/dev/shm")
+            .is_dir()
+            .then(|| tempfile::tempdir_in("/dev/shm").ok())
+            .flatten()
+        else {
+            return;
+        };
+        let source = source_root.path().join("source");
+        let destination = shared_memory.path().join("destination");
+        std::fs::write(&source, b"cross-filesystem").unwrap();
+        if same_filesystem(source_root.path(), shared_memory.path()) {
+            return;
+        }
+
+        materialize(&source, &destination, LinkMode::Auto).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"cross-filesystem");
+    }
+
     #[test]
     fn parse_link_mode() {
         assert_eq!("auto".parse::<LinkMode>().unwrap(), LinkMode::Auto);

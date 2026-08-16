@@ -33,6 +33,10 @@ fn real_main() -> i32 {
             return 1;
         }
     };
+    if std::env::var_os("OSDK_SHIM_ACTIVE").is_some() {
+        eprintln!("osdk-shim: recursive shim invocation for `{tool_name}`");
+        return 126;
+    }
 
     let dirs = match Dirs::resolve() {
         Ok(d) => d,
@@ -174,6 +178,7 @@ fn real_main() -> i32 {
         }
     }
 
+    exec_env.insert("OSDK_SHIM_ACTIVE".into(), tool_name);
     exec(&exe, forward_args, &exec_env)
 }
 

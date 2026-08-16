@@ -478,6 +478,16 @@ Or set it in the user configuration:
 lang = "en"
 ```
 
+## Reliability contract
+
+CI's local backend contract runs a shared resolve/install/execute/uninstall
+lifecycle across every built-in backend and generic GitHub. Local HTTP fixtures
+inject 403, 429, 5xx, timeout, disconnect, malformed metadata, and stale cache.
+It also verifies concurrent install locks, no complete marker after failure,
+corrupt receipts/manifests, cross-filesystem copy fallback, and shim I/O, exit
+codes, recursion, and command conflicts. Public live smoke is only for upstream
+drift detection.
+
 ## Completions and diagnostics
 
 ```bash

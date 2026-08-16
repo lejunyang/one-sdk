@@ -164,10 +164,15 @@ impl Cas {
                     Err(_) => continue,
                 };
                 if entry.file_name() == manifest::MANIFEST_FILE {
-                    if let Ok(m) = Manifest::load(entry.path().parent().unwrap()) {
-                        for h in m.referenced_hashes() {
-                            live.insert(h.to_string());
-                        }
+                    let install = entry.path().parent().unwrap();
+                    let manifest = Manifest::load(install).map_err(|error| {
+                        Error::other(format!(
+                            "refusing store GC because manifest is corrupt at {}: {error}",
+                            install.display()
+                        ))
+                    })?;
+                    for hash in manifest.referenced_hashes() {
+                        live.insert(hash.to_string());
                     }
                 }
             }
@@ -345,5 +350,29 @@ mod tests {
 
         let (removed, _) = cas.gc(&installs).unwrap();
         assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn gc_refuses_to_delete_when_an_install_manifest_is_corrupt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cas = Cas::new(temporary.path().join("store"));
+        let installs = temporary.path().join("installs");
+        let extracted = temporary.path().join("extracted");
+        write(&extracted.join("bin/tool"), b"preserve-me");
+        let install = installs.join("tool/1.0.0");
+        cas.ingest_tree(&extracted, &install, "tool", "1.0.0", LinkMode::Copy)
+            .unwrap();
+        std::fs::write(install.join(manifest::MANIFEST_FILE), b"{broken").unwrap();
+
+        let error = cas.gc(&installs).unwrap_err();
+        assert!(error.to_string().contains("refusing store GC"));
+        assert_eq!(
+            WalkDir::new(cas.root())
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_file())
+                .count(),
+            1
+        );
     }
 }

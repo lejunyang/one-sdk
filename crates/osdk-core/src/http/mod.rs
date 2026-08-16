@@ -157,11 +157,19 @@ async fn get_cached_json_inner<T: serde::de::DeserializeOwned>(
             }
             Ok(value)
         }
-        Err(error) if fresh => {
-            let stale = std::fs::read(&cache_file).map_err(|_| Error::Json(error))?;
+        Err(_) if fresh => {
+            let stale = std::fs::read(&cache_file).map_err(|_| Error::Network {
+                kind: crate::error::NetworkErrorKind::InvalidMetadata,
+                url: url.into(),
+                status: None,
+            })?;
             Ok(serde_json::from_slice(&stale)?)
         }
-        Err(error) => Err(Error::Json(error)),
+        Err(_) => Err(Error::Network {
+            kind: crate::error::NetworkErrorKind::InvalidMetadata,
+            url: url.into(),
+            status: None,
+        }),
     }
 }
 
@@ -187,20 +195,26 @@ async fn get_cached_bytes(ctx: &Ctx, url: &str, github: bool) -> Result<(Vec<u8>
         Ok(response) => match response.error_for_status() {
             Ok(response) => match response.bytes().await {
                 Ok(bytes) => Ok((bytes.to_vec(), true)),
-                Err(error) => read_stale_or_error(&cache_file, Error::from(error)),
+                Err(error) => read_stale_or_error(&cache_file, Error::network(url, error)),
             },
-            Err(error) => read_stale_or_error(&cache_file, Error::from(error)),
+            Err(error) => read_stale_or_error(&cache_file, Error::network(url, error)),
         },
-        Err(error) => read_stale_or_error(&cache_file, Error::from(error)),
+        Err(error) => read_stale_or_error(&cache_file, Error::network(url, error)),
     }
 }
 
 async fn fetch_github_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     let response = github_request(client, url)
         .send()
-        .await?
-        .error_for_status()?;
-    Ok(response.bytes().await?.to_vec())
+        .await
+        .map_err(|error| Error::network(url, error))?
+        .error_for_status()
+        .map_err(|error| Error::network(url, error))?;
+    Ok(response
+        .bytes()
+        .await
+        .map_err(|error| Error::network(url, error))?
+        .to_vec())
 }
 
 pub(crate) fn github_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
@@ -413,6 +427,130 @@ mod tests {
             join_url("https://h/dist", "index.json"),
             "https://h/dist/index.json"
         );
+    }
+
+    #[tokio::test]
+    async fn network_failure_matrix_has_stable_error_kinds_and_stale_fallback() {
+        use crate::error::NetworkErrorKind;
+
+        for (status, expected) in [
+            ("403 Forbidden", NetworkErrorKind::Forbidden),
+            ("429 Too Many Requests", NetworkErrorKind::RateLimited),
+            ("503 Service Unavailable", NetworkErrorKind::Server),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            });
+            let temp = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(temp.path(), false);
+            let url = format!("http://{address}/metadata");
+            let error = get_cached_json::<serde_json::Value>(&ctx, &url)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Network { kind, .. } if kind == expected
+            ));
+            server.join().unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path(), false);
+        let url = "http://127.0.0.1:9/unreachable";
+        let error = get_cached_json::<serde_json::Value>(&ctx, url)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Network {
+                kind: NetworkErrorKind::Connect,
+                ..
+            }
+        ));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let body = "not-json";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let malformed_url = format!("http://{address}/metadata");
+        let malformed = get_cached_json::<serde_json::Value>(&ctx, &malformed_url)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            malformed,
+            Error::Network {
+                kind: NetworkErrorKind::InvalidMetadata,
+                ..
+            }
+        ));
+        server.join().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let stale_url = format!("http://{address}/stale");
+        let stale_path = metadata_cache_path(&ctx, &stale_url);
+        write_metadata_cache(&stale_path, br#"{"cached":true}"#);
+        let stale: serde_json::Value = get_cached_json(&ctx, &stale_url).await.unwrap();
+        assert_eq!(stale["cached"], true);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_timeout_is_classified() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temp.path(), false);
+        ctx.client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(30))
+            .build()
+            .unwrap();
+        let url = format!("http://{address}/slow");
+        let error = get_cached_json::<serde_json::Value>(&ctx, &url)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Network {
+                kind: crate::error::NetworkErrorKind::Timeout,
+                ..
+            }
+        ));
+        server.join().unwrap();
     }
 
     #[test]

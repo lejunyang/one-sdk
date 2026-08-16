@@ -481,6 +481,14 @@ transparency-log proof 验证。
 
 ## 开发
 
+离线 backend contract 是主要正确性门禁。它对每个内置 backend 和 generic
+GitHub 运行同一套 resolve → install → execute → uninstall 断言，并让 registry
+中的真实 backend 消费本地 locked fixture。故障注入覆盖 403、429、5xx、timeout、
+连接中断、畸形 metadata、stale cache、下载中断、并发安装、失败 marker 清理、
+损坏 receipt/manifest、跨文件系统 copy fallback，以及 shim 的
+stdin/stdout/stderr、退出码、递归和冲突。定时公网 smoke 只监测上游漂移，不承担
+主要正确性证明。
+
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets   # CI 使用 -D warnings

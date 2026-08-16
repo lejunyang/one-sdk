@@ -57,6 +57,14 @@ pub async fn download(
 /// Whether an error looks transient (worth retrying).
 fn is_transient(e: &Error) -> bool {
     match e {
+        Error::Network { kind, .. } => matches!(
+            kind,
+            crate::error::NetworkErrorKind::RateLimited
+                | crate::error::NetworkErrorKind::Server
+                | crate::error::NetworkErrorKind::Timeout
+                | crate::error::NetworkErrorKind::Interrupted
+                | crate::error::NetworkErrorKind::Connect
+        ),
         Error::Http(re) => {
             re.is_timeout()
                 || re.is_connect()
@@ -115,11 +123,18 @@ async fn download_once(
             .header(RANGE, format!("bytes={resume_from}-"))
             .header(IF_RANGE, validator.as_deref().unwrap_or_default());
     }
-    let mut resp = request.send().await?;
+    let mut resp = request
+        .send()
+        .await
+        .map_err(|error| Error::network(url, error))?;
     if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
         let _ = std::fs::remove_file(&partial);
         let _ = std::fs::remove_file(&metadata_path);
-        resp = client.get(url).send().await?;
+        resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| Error::network(url, error))?;
     }
     let status = resp.status();
     let appending = resume_from > 0
@@ -130,7 +145,9 @@ async fn download_once(
             "invalid Content-Range while resuming {url}"
         )));
     }
-    let resp = resp.error_for_status()?;
+    let resp = resp
+        .error_for_status()
+        .map_err(|error| Error::network(url, error))?;
     let downloaded_before = if appending { resume_from } else { 0 };
     let total = resp
         .content_length()
@@ -175,7 +192,7 @@ async fn download_once(
     let mut stream = resp.bytes_stream();
     let mut downloaded = downloaded_before;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|error| Error::network(url, error))?;
         file.write_all(&chunk)
             .await
             .map_err(|e| Error::io(&partial, e))?;
@@ -280,5 +297,34 @@ mod tests {
 
         assert_eq!(std::fs::read(dest).unwrap(), b"abcdefghij");
         assert!(!sibling_with_suffix(&temp.path().join("artifact.bin"), ".partial").exists());
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_never_publishes_final_artifact() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nETag: \"v1\"\r\nConnection: close\r\n\r\npartial",
+                    )
+                    .unwrap();
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("artifact.bin");
+        let url = format!("http://{address}/artifact.bin");
+        assert!(
+            download(&reqwest::Client::new(), &url, &destination, "test", false)
+                .await
+                .is_err()
+        );
+        server.join().unwrap();
+        assert!(!destination.exists());
+        assert!(sibling_with_suffix(&destination, ".partial").is_file());
     }
 }

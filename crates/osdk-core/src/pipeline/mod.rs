@@ -726,4 +726,124 @@ mod tests {
         let error = run(&plan, &permissive).await.unwrap_err();
         assert!(!error.to_string().contains("checksum required"));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_install_commits_once_and_failure_never_marks_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let archive = artifact_cache_path(&dirs, "contract", "1.0.0", "contract.tgz");
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let contents = b"contract";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "root/bin/tool", &contents[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let checksum = verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
+        let plan = std::sync::Arc::new(InstallPlan {
+            tool: "contract".into(),
+            version: "1.0.0".into(),
+            urls: vec!["https://invalid.example/contract.tgz".into()],
+            file_name: "contract.tgz".into(),
+            kind: ArchiveKind::TarGz,
+            checksum: Some(Checksum {
+                algo: HashAlgo::Sha256,
+                hex: checksum,
+            }),
+            strip_root: true,
+            subdir: None,
+        });
+        let client = reqwest::Client::new();
+        let cas = std::sync::Arc::new(Cas::new(dirs.store.clone()));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let plan = plan.clone();
+            let dirs = dirs.clone();
+            let client = client.clone();
+            let cas = cas.clone();
+            handles.push(tokio::spawn(async move {
+                let context = PipelineCtx {
+                    client: &client,
+                    dirs: &dirs,
+                    cas: &cas,
+                    link_mode: LinkMode::Copy,
+                    show_progress: false,
+                    offline: true,
+                    require_checksums: true,
+                };
+                run(&plan, &context).await
+            }));
+        }
+        for handle in handles {
+            assert!(handle.await.unwrap().is_ok());
+        }
+        let install = dirs.install_path("contract", "1.0.0");
+        assert!(install.join(COMPLETE_MARKER).is_file());
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"contract"
+        );
+
+        let bad_archive = artifact_cache_path(&dirs, "contract", "2.0.0", "bad.tgz");
+        std::fs::create_dir_all(bad_archive.parent().unwrap()).unwrap();
+        std::fs::write(&bad_archive, b"not an archive").unwrap();
+        let bad = InstallPlan {
+            tool: "contract".into(),
+            version: "2.0.0".into(),
+            urls: vec!["https://invalid.example/bad.tgz".into()],
+            file_name: "bad.tgz".into(),
+            kind: ArchiveKind::TarGz,
+            checksum: Some(Checksum {
+                algo: HashAlgo::Sha256,
+                hex: verify::hash_file(&bad_archive, HashAlgo::Sha256).unwrap(),
+            }),
+            strip_root: true,
+            subdir: None,
+        };
+        let context = PipelineCtx {
+            client: &client,
+            dirs: &dirs,
+            cas: &cas,
+            link_mode: LinkMode::Copy,
+            show_progress: false,
+            offline: true,
+            require_checksums: true,
+        };
+        assert!(run(&bad, &context).await.is_err());
+        assert!(!dirs
+            .install_path("contract", "2.0.0")
+            .join(COMPLETE_MARKER)
+            .exists());
+    }
+
+    #[test]
+    fn corrupt_receipt_is_not_trusted_as_artifact_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let install = dirs.install_path("tool", "1.0.0");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join(ARTIFACT_RECEIPT_FILE), b"{broken").unwrap();
+        assert!(artifact_receipt(&dirs, "tool", "1.0.0").is_none());
+    }
 }

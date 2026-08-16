@@ -445,6 +445,14 @@ export OSDK_LANG=zh
 lang = "zh"
 ```
 
+## 可靠性合约
+
+CI 的本地 backend contract 对全部内置 backend 与 generic GitHub 运行统一的
+resolve/install/execute/uninstall 生命周期，并用本地 HTTP fixture 注入 403、
+429、5xx、timeout、断流、畸形 metadata 和 stale cache。它还验证并发安装锁、
+失败后无 complete marker、损坏 receipt/manifest、跨文件系统 copy fallback、
+shim I/O/退出码/递归/命令冲突。公网 live smoke 只用于发现上游漂移。
+
 ## 补全与诊断
 
 ```bash
