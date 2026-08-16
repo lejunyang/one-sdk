@@ -55,6 +55,7 @@ tempfile = "3"
 walkdir = "2"
 # versions
 semver = "1"
+regex = "1"
 # errors / logging
 thiserror = "1"
 anyhow = "1"

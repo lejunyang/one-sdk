@@ -385,6 +385,30 @@ osdk 会按当前操作系统与架构选择匹配的 Release asset，并处理�
 API 元数据、Raw 文件、Release 资产、校验文件和 attestation bundle 均可回退
 ghproxy，且不会把 token 转发给代理。
 
+Release API 支持分页（上限 1,000）。复杂 release 可用显式规则：
+
+```bash
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-regex=^tool-.*-linux-x64\.tar\.gz$' \
+  -o bins=dist/tool,dist/toolctl -o strip-components=1
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-template=tool-{version}-{os}-{arch}.zip' \
+  -o bin=tool.exe -o rename=mytool -o os=windows -o arch=x64
+```
+
+0 或多命中都会失败。多 binary 物化是原子的，Windows 自动规范 `.exe`。
+
+静态 catalog 模式完全不访问 GitHub API：
+
+```bash
+osdk lock github:owner/repo@latest \
+  -o catalog-url=/approved/github-catalog.json \
+  -o catalog-sha256=0123456789abcdef...
+```
+
+schema 1 asset 包含 URL、checksum、os、arch 和可选 libc；digest、最终 asset
+与规则都会写入 lock。
+
 ## 声明式后端
 
 除内置后端外，osdk 可以从隔离的用户配置/数据插件目录加载 schema 1 TOML

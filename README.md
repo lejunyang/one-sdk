@@ -413,6 +413,34 @@ Only the generic `github:owner/repo` backend requires the GitHub Releases API.
 Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the direct API rate limit.
 The backend can fail over API metadata, raw files, release assets, checksums,
 and attestation bundles through gh-proxy without forwarding the token.
+Release listing follows pagination, up to 1,000 releases.
+
+Override heuristic asset selection with explicit options:
+
+```bash
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-regex=^tool-.*-linux-x64\.tar\.gz$' \
+  -o bins=dist/tool,dist/toolctl -o strip-components=1
+
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-template=tool-{version}-{os}-{arch}.zip' \
+  -o bin=tool.exe -o rename=mytool -o os=windows -o arch=x64
+```
+
+Regex/template rules must match exactly one asset. `bin`/`bins` selects files
+from archives; `rename` requires one selected binary. Missing files remove the
+whole install rather than leaving a complete marker. Windows normalizes `.exe`.
+
+Digest-pinned static catalogs bypass Releases API entirely:
+
+```bash
+osdk lock github:owner/repo@latest \
+  -o catalog-url=/approved/github-catalog.json \
+  -o catalog-sha256=0123456789abcdef...
+```
+
+Schema 1 catalog assets include `name`, `url`, `checksum`, `os`, `arch`, and
+optional `libc`. The catalog digest, selected asset, and rules are locked.
 
 ## Offline mode
 

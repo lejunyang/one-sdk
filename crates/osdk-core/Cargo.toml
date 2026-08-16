@@ -37,6 +37,7 @@ which.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
 semver.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

@@ -317,8 +317,9 @@ fn doctor_creates_state_only_under_isolated_root() {
     assert!(temp.path().join("cache/downloads").is_dir());
     assert!(temp.path().join("config").is_dir());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout
-        .contains("node, npm, go, python, java, maven, gradle, kotlin, rust, pnpm, yarn, deno, bun"));
+    assert!(stdout.contains(
+        "node, npm, go, python, java, maven, gradle, kotlin, rust, pnpm, yarn, deno, bun"
+    ));
 }
 
 #[test]
@@ -1291,7 +1292,9 @@ fn explicit_npm_exec_places_independent_manager_before_managed_node() {
         .find(|line| line.starts_with(&npm_bin.display().to_string()))
         .unwrap();
     assert!(path.starts_with(&npm_bin.display().to_string()));
-    assert!(stdout.lines().any(|line| line == node.display().to_string()));
+    assert!(stdout
+        .lines()
+        .any(|line| line == node.display().to_string()));
 }
 
 #[cfg(unix)]

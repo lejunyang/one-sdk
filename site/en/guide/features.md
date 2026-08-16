@@ -412,6 +412,32 @@ raise the direct GitHub API rate limit. API metadata, raw files, release assets,
 checksum files, and attestation bundles can all fail over through gh-proxy
 without forwarding the token.
 
+Release API pagination covers up to 1,000 releases. Complex releases can use
+explicit rules:
+
+```bash
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-regex=^tool-.*-linux-x64\.tar\.gz$' \
+  -o bins=dist/tool,dist/toolctl -o strip-components=1
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-template=tool-{version}-{os}-{arch}.zip' \
+  -o bin=tool.exe -o rename=mytool -o os=windows -o arch=x64
+```
+
+Zero or multiple matches fail. Multi-binary materialization is atomic, and
+Windows normalizes `.exe`.
+
+Static catalog mode never calls GitHub API:
+
+```bash
+osdk lock github:owner/repo@latest \
+  -o catalog-url=/approved/github-catalog.json \
+  -o catalog-sha256=0123456789abcdef...
+```
+
+Schema 1 assets include URL, checksum, OS, architecture, and optional libc.
+Digest, selected asset, and rules are persisted in the lockfile.
+
 ## Declarative backends
 
 In addition to built-in backends, osdk can load schema 1 TOML backends from

@@ -384,6 +384,34 @@ osdk list-remote github:sharkdp/fd     # 可用 release tag
 `GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 可提高直连 API 限额。API 元数据、Raw
 文件、Release 资产、校验文件和 attestation bundle 都可通过 gh-proxy 失败转移，
 且 token 不会被转发给代理。
+Release 列表支持分页，最多读取 1,000 个 release。
+
+可用显式 option 覆盖启发式 asset 选择：
+
+```bash
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-regex=^tool-.*-linux-x64\.tar\.gz$' \
+  -o bins=dist/tool,dist/toolctl -o strip-components=1
+
+osdk install github:owner/repo@1.2.3 \
+  -o 'asset-template=tool-{version}-{os}-{arch}.zip' \
+  -o bin=tool.exe -o rename=mytool -o os=windows -o arch=x64
+```
+
+regex/template 必须恰好命中一个 asset。`bin`/`bins` 从归档选择文件，`rename`
+要求只选一个 binary。文件缺失会删除整个安装，不留下 complete marker；Windows
+会规范 `.exe`。
+
+固定 digest 的静态 catalog 可完全绕过 Releases API：
+
+```bash
+osdk lock github:owner/repo@latest \
+  -o catalog-url=/approved/github-catalog.json \
+  -o catalog-sha256=0123456789abcdef...
+```
+
+schema 1 asset 包含 `name`、`url`、`checksum`、`os`、`arch` 和可选 `libc`。
+catalog digest、最终 asset 与规则都会写入 lock。
 
 ## 离线模式
 
