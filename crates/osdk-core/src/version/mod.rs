@@ -18,6 +18,8 @@ pub enum VersionSpec {
     Prefix(String),
     /// An exact version, e.g. `20.11.1`.
     Exact(String),
+    /// A semver requirement from structured project metadata.
+    Range(String),
     /// Use whatever is already on PATH (no management).
     System,
 }
@@ -47,6 +49,37 @@ impl VersionSpec {
             VersionSpec::Prefix(core.to_string())
         }
     }
+
+    pub fn parse_range(s: &str) -> Result<VersionSpec> {
+        npm_range_requirements(s)?
+            .first()
+            .ok_or_else(|| Error::config("empty semver range"))?;
+        Ok(VersionSpec::Range(s.trim().to_string()))
+    }
+}
+
+fn npm_range_requirements(input: &str) -> Result<Vec<semver::VersionReq>> {
+    input
+        .split("||")
+        .map(|alternative| {
+            let normalized = normalize_npm_comparators(alternative)?;
+            semver::VersionReq::parse(&normalized)
+                .map_err(|error| Error::config(format!("invalid semver range `{input}`: {error}")))
+        })
+        .collect()
+}
+
+fn normalize_npm_comparators(input: &str) -> Result<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(Error::config("empty semver range alternative"));
+    }
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    if tokens.len() > 1 {
+        Ok(tokens.join(", "))
+    } else {
+        Ok(input.to_string())
+    }
 }
 
 fn is_exact_semver(s: &str) -> bool {
@@ -67,6 +100,7 @@ impl fmt::Display for VersionSpec {
             VersionSpec::Lts(Some(n)) => write!(f, "lts/{n}"),
             VersionSpec::Prefix(p) => write!(f, "{p}"),
             VersionSpec::Exact(v) => write!(f, "{v}"),
+            VersionSpec::Range(requirement) => write!(f, "{requirement}"),
             VersionSpec::System => write!(f, "system"),
         }
     }
@@ -143,6 +177,19 @@ pub fn select_version<'a>(
                 .unwrap_or(false)
         }),
         VersionSpec::Exact(want) => candidates.iter().find(|v| v.version == *want),
+        VersionSpec::Range(requirement) => {
+            let requirements = npm_range_requirements(requirement).ok()?;
+            candidates.iter().rev().find(|candidate| {
+                candidate.stable
+                    && semver::Version::parse(candidate.version.trim_start_matches('v'))
+                        .map(|version| {
+                            requirements
+                                .iter()
+                                .any(|requirement| requirement.matches(&version))
+                        })
+                        .unwrap_or(false)
+            })
+        }
         VersionSpec::Prefix(pfx) => {
             // match versions whose dotted components start with the prefix
             let want = pfx.trim_end_matches('.');
@@ -240,6 +287,28 @@ mod tests {
         assert_eq!(sel.version, "20.11.1");
         let sel = select_version(&VersionSpec::Prefix("20".into()), &c).unwrap();
         assert_eq!(sel.version, "20.11.1");
+    }
+
+    #[test]
+    fn npm_semver_ranges_select_the_highest_stable_match() {
+        let candidates = vec![
+            vi("18.20.0", true, None),
+            vi("20.10.0", true, None),
+            vi("22.4.1", true, None),
+            vi("23.0.0-beta.1", false, None),
+            vi("24.1.0", true, None),
+        ];
+        let range = VersionSpec::parse_range(">=20 <23").unwrap();
+        assert_eq!(
+            select_version(&range, &candidates).unwrap().version,
+            "22.4.1"
+        );
+        let alternative = VersionSpec::parse_range("^18.0.0 || >=24").unwrap();
+        assert_eq!(
+            select_version(&alternative, &candidates).unwrap().version,
+            "24.1.0"
+        );
+        assert!(VersionSpec::parse_range("not a range").is_err());
     }
 
     #[test]

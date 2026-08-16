@@ -84,6 +84,23 @@ pub fn platform_key(platform: Platform) -> String {
     }
 }
 
+pub fn platform_for_resolved(host: Platform, resolved: &[(ToolRequest, ToolVersion)]) -> Platform {
+    let mut platform = host;
+    for (request, version) in resolved {
+        if request.backend != "node" {
+            continue;
+        }
+        if let Some(arch) = version
+            .options
+            .get("arch")
+            .and_then(|value| Arch::parse_node(value))
+        {
+            platform.arch = arch;
+        }
+    }
+    platform
+}
+
 pub fn find(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
@@ -286,6 +303,16 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].spec, VersionSpec::Exact("stable".into()));
         assert_eq!(requests[0].options["profile"], "minimal");
+    }
+
+    #[test]
+    fn node_arch_option_selects_the_target_platform_lock() {
+        let host = linux();
+        let request = ToolRequest::parse("node@20").unwrap();
+        let mut version = ToolVersion::new("node", "20.20.0");
+        version.options.insert("arch".into(), "arm64".into());
+        let target = platform_for_resolved(host, &[(request, version)]);
+        assert_eq!(platform_key(target), "linux-arm64");
     }
 
     #[test]

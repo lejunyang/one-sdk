@@ -115,6 +115,15 @@ fn localize_subcommands(cmd: Command) -> Command {
         c.about(h("help.untrust.about"))
             .mut_arg("path", |a| a.help(h("help.trust.arg.path")))
     })
+    .mut_subcommand("node", |c| {
+        c.about(h("help.node.about"))
+            .mut_subcommand("migrate-packages", |s| {
+                s.about(h("help.node.migrate.about"))
+                    .mut_arg("from", |a| a.help(h("help.node.migrate.arg.from")))
+                    .mut_arg("to", |a| a.help(h("help.node.migrate.arg.to")))
+                    .mut_arg("apply", |a| a.help(h("help.node.migrate.flag.apply")))
+            })
+    })
     .mut_subcommand("cache", |c| {
         c.about(h("help.cache.about"))
             .mut_subcommand("dir", |s| s.about(h("help.cache.dir.about")))

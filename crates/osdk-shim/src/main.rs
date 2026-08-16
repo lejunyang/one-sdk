@@ -85,8 +85,8 @@ fn real_main() -> i32 {
         &tools,
         backend.idiomatic_files(),
     );
-    let spec = match active {
-        Some(av) => av.spec,
+    let (spec, is_range) = match active {
+        Some(av) => (av.spec, av.is_range),
         None => {
             eprintln!(
                 "osdk-shim: no version of `{}` selected (set one with `osdk use {}@<version>`)",
@@ -105,7 +105,7 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    let version = match resolve_installed(&ctx, backend.as_ref(), &expanded_spec) {
+    let version = match resolve_installed(&ctx, backend.as_ref(), &expanded_spec, is_range) {
         Some(v) => v,
         None => {
             eprintln!(
@@ -271,6 +271,7 @@ fn resolve_installed(
     ctx: &osdk_core::backend::Ctx,
     backend: &dyn osdk_core::backend::Backend,
     spec: &str,
+    is_range: bool,
 ) -> Option<String> {
     let installed = backend.list_installed(ctx).ok()?;
     if installed.is_empty() {
@@ -279,7 +280,11 @@ fn resolve_installed(
     // Strip a leading distribution prefix like `temurin-` (java) so the version
     // part matches the installed dir names (e.g. `17.0.20+8`).
     let spec = strip_distribution_prefix(spec);
-    let parsed = VersionSpec::parse(spec);
+    let parsed = if is_range {
+        VersionSpec::parse_range(spec).ok()?
+    } else {
+        VersionSpec::parse(spec)
+    };
     match &parsed {
         VersionSpec::Exact(v) => installed.iter().find(|i| *i == v).cloned(),
         _ => {

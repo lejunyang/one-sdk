@@ -2155,6 +2155,7 @@ dependencies = [
  "indicatif",
  "osdk-core",
  "serde",
+ "serde_json",
  "tar",
  "tempfile",
  "tokio",

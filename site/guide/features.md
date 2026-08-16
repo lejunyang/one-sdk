@@ -42,6 +42,33 @@ go = "1.22"
 
 osdk 从当前目录向上查找最近的配置，因此同一仓库的子目录可以继承工具版本。
 
+### Node 项目版本、架构与 Corepack
+
+Node 还会读取 `package.json#engines.node` 和 `devEngines.runtime`，并按 npm
+semver range 选择最高匹配稳定版。跨目录统一优先级为：
+`osdk.toml` > `.tool-versions` > `.nvmrc` > `.node-version` >
+`package.json` > 用户全局配置。无效 range 会明确报错。
+
+```bash
+osdk lock node@20 -o arch=arm64
+osdk install node@20 -o corepack=true
+```
+
+`arch=x64|arm64|x86|arm` 会写入目标平台 lock 区段。osdk 暂无仅下载模式，因此
+安装会拒绝不能在当前 host 执行的架构。Corepack 也可通过
+`[settings.node] corepack = true` 配置；osdk 只调用目标 Node 自带的 Corepack，
+失败时不会保留完成 marker。
+
+全局包迁移默认只生成计划：
+
+```bash
+osdk node migrate-packages --from 20.19.0 --to 22.17.0
+osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
+```
+
+迁移排除 npm 自身和带原生构建或安装脚本的包。apply 只使用受管 npm，失败时恢复
+目标版本原有的全局包集合。
+
 ## 项目配置信任
 
 项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。

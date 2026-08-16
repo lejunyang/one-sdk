@@ -89,6 +89,11 @@ pub trait Backend: Send + Sync {
     /// Install a concrete version.
     async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
 
+    /// Apply idempotent post-install actions to an already installed version.
+    fn ensure_post_install(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<()> {
+        Ok(())
+    }
+
     /// Remove an installed version. Default removes the install dir.
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let dir = ctx.dirs.install_path(self.id(), &tv.version);

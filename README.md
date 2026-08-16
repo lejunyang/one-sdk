@@ -92,7 +92,36 @@ resolve metadata and reinstall artifacts entirely from the osdk cache.
 
 Project version files are honored (walk-up): `osdk.toml`, `.tool-versions`
 (asdf-compatible), and idiomatic files (`.nvmrc`, `.node-version`,
-`.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`).
+`.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`). Node also
+reads `package.json#engines.node` and `devEngines.runtime` as npm semver ranges.
+Priority is global across the walk-up tree: `osdk.toml` > `.tool-versions` >
+`.nvmrc` > `.node-version` > `package.json` > user-global config.
+
+## Node workflows
+
+Override the Node artifact architecture while resolving a lock:
+
+```bash
+osdk lock node@20 -o arch=arm64
+```
+
+The target architecture is saved in the matching platform lock section.
+Install and execution reject cross-architecture artifacts because osdk has no
+download-only mode. Enable Corepack with `-o corepack=true` or persist
+`corepack = true` under `[settings.node]`; osdk invokes only that installation's
+Corepack and rolls the install back if enabling shims fails.
+
+Migrate portable global npm packages between managed Node versions:
+
+```bash
+osdk node migrate-packages --from 20.19.0 --to 22.17.0
+osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
+```
+
+The default is a dry-run. npm itself and packages marked with native build or
+install scripts are skipped. `--apply` uses the target Node's managed npm with
+its bin directory first on `PATH`; on failure, the target's previous global
+package set is restored.
 
 ## Reproducible projects and execution
 

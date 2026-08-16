@@ -123,6 +123,16 @@ impl Arch {
         }
     }
 
+    pub fn parse_node(value: &str) -> Option<Arch> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "x64" | "amd64" | "x86_64" => Some(Arch::X64),
+            "arm64" | "aarch64" => Some(Arch::Arm64),
+            "x86" | "ia32" | "i386" | "i686" => Some(Arch::X86),
+            "arm" | "armv7" | "armv7l" => Some(Arch::Arm),
+            _ => None,
+        }
+    }
+
     /// go's arch token, e.g. `amd64`, `arm64`.
     pub fn go_token(self) -> &'static str {
         match self {

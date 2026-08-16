@@ -204,6 +204,7 @@ impl Backend for RustBackend {
             VersionSpec::Latest => "stable".to_string(),
             VersionSpec::Exact(v) => v.clone(),
             VersionSpec::Prefix(p) => p.clone(),
+            VersionSpec::Range(requirement) => requirement.clone(),
             VersionSpec::Lts(_) => "stable".to_string(),
             VersionSpec::System => "stable".to_string(),
         };

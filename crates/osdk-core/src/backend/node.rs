@@ -12,9 +12,9 @@ use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::Result;
 use crate::http;
 use crate::pipeline::{self, ArchiveKind, Checksum, HashAlgo, InstallPlan, PipelineCtx};
-use crate::platform::Os;
+use crate::platform::{Arch, Os};
 use crate::source::Source;
-use crate::version::{ToolVersion, VersionInfo};
+use crate::version::{select_version, ToolRequest, ToolVersion, VersionInfo, VersionSpec};
 
 pub struct NodeBackend;
 
@@ -51,8 +51,19 @@ impl<'de> Deserialize<'de> for LtsField {
 impl NodeBackend {
     /// The node file token for the current platform, e.g. `linux-x64`,
     /// `osx-arm64-tar`, `win-x64-zip`.
-    fn file_token(ctx: &Ctx) -> String {
-        let arch = ctx.platform.arch.node_token();
+    fn target_arch(ctx: &Ctx, options: &BTreeMap<String, String>) -> Result<Arch> {
+        let Some(value) = options.get("arch") else {
+            return Ok(ctx.platform.arch);
+        };
+        Arch::parse_node(value).ok_or_else(|| {
+            crate::error::Error::config(format!(
+                "unsupported Node architecture `{value}` (expected x64|arm64|x86|arm)"
+            ))
+        })
+    }
+
+    fn file_token(ctx: &Ctx, arch: Arch) -> String {
+        let arch = arch.node_token();
         match ctx.platform.os {
             Os::Linux => format!("linux-{arch}"),
             Os::Macos => format!("osx-{arch}-tar"),
@@ -61,9 +72,9 @@ impl NodeBackend {
     }
 
     /// The archive filename + kind for a version on the current platform.
-    fn archive_for(ctx: &Ctx, version: &str) -> (String, ArchiveKind) {
+    fn archive_for(ctx: &Ctx, arch: Arch, version: &str) -> (String, ArchiveKind) {
         let os = ctx.platform.os.node_token();
-        let arch = ctx.platform.arch.node_token();
+        let arch = arch.node_token();
         match ctx.platform.os {
             Os::Windows => (format!("node-v{version}-{os}-{arch}.zip"), ArchiveKind::Zip),
             _ => (
@@ -71,6 +82,84 @@ impl NodeBackend {
                 ArchiveKind::TarGz,
             ),
         }
+    }
+
+    fn corepack_enabled(ctx: &Ctx, tv: &ToolVersion) -> Result<bool> {
+        match tv.options.get("corepack").map(String::as_str) {
+            Some("true" | "1" | "yes" | "on") => Ok(true),
+            Some("false" | "0" | "no" | "off") => Ok(false),
+            Some(value) => Err(crate::error::Error::config(format!(
+                "invalid Node corepack option `{value}` (expected true|false)"
+            ))),
+            None => Ok(ctx.config.settings.node.corepack),
+        }
+    }
+
+    fn enable_corepack(ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        if !Self::corepack_enabled(ctx, tv)? {
+            return Ok(());
+        }
+        let bin_dir = match ctx.platform.os {
+            Os::Windows => ctx.dirs.install_path("node", &tv.version),
+            _ => ctx.dirs.install_path("node", &tv.version).join("bin"),
+        };
+        let executable = match ctx.platform.os {
+            Os::Windows => bin_dir.join("corepack.cmd"),
+            _ => bin_dir.join("corepack"),
+        };
+        if !executable.is_file() {
+            return Err(crate::error::Error::other(format!(
+                "Node {} does not include Corepack at {}",
+                tv.version,
+                executable.display()
+            )));
+        }
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin_dir.clone()];
+        paths.extend(std::env::split_paths(&inherited));
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PATH".into(),
+            std::env::join_paths(paths)
+                .map_err(|error| crate::error::Error::other(error.to_string()))?
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let install_directory = bin_dir.display().to_string();
+        match ctx.platform.os {
+            Os::Windows => {
+                let script = executable.display().to_string();
+                crate::process::run(
+                    "cmd",
+                    &[
+                        "/D",
+                        "/S",
+                        "/C",
+                        &script,
+                        "enable",
+                        "--install-directory",
+                        &install_directory,
+                    ],
+                    &env,
+                    Some(&bin_dir),
+                )
+            }
+            _ => crate::process::run(
+                &executable.display().to_string(),
+                &["enable", "--install-directory", &install_directory],
+                &env,
+                Some(&bin_dir),
+            ),
+        }
+    }
+
+    fn complete_install(ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        if let Err(error) = Self::enable_corepack(ctx, tv) {
+            let install = ctx.dirs.install_path("node", &tv.version);
+            let _ = std::fs::remove_dir_all(install);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -109,7 +198,7 @@ impl Backend for NodeBackend {
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         // Only offer releases that ship an asset for the current platform.
-        let token = Self::file_token(ctx);
+        let token = Self::file_token(ctx, ctx.platform.arch);
 
         // Union versions across all reachable sources: mirrors can be stale and
         // lag the official index, so merging avoids a fast-but-stale mirror
@@ -210,8 +299,74 @@ impl Backend for NodeBackend {
         Ok(out)
     }
 
+    async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
+        let target_arch = Self::target_arch(ctx, &req.options)?;
+        let corepack = match req.options.get("corepack") {
+            Some(value) => match value.as_str() {
+                "true" | "1" | "yes" | "on" => true,
+                "false" | "0" | "no" | "off" => false,
+                _ => {
+                    return Err(crate::error::Error::config(format!(
+                        "invalid Node corepack option `{value}` (expected true|false)"
+                    )))
+                }
+            },
+            None => ctx.config.settings.node.corepack,
+        };
+        if let VersionSpec::Exact(version) = &req.spec {
+            let mut resolved = ToolVersion::new(self.id(), version);
+            resolved.options = req.options.clone();
+            resolved
+                .options
+                .insert("arch".into(), target_arch.node_token().into());
+            resolved
+                .options
+                .insert("corepack".into(), corepack.to_string());
+            return Ok(resolved);
+        }
+        let target_ctx = Ctx {
+            dirs: ctx.dirs.clone(),
+            platform: crate::platform::Platform {
+                arch: target_arch,
+                ..ctx.platform
+            },
+            config: ctx.config.clone(),
+            client: ctx.client.clone(),
+            cas: ctx.cas.clone(),
+            show_progress: ctx.show_progress,
+        };
+        let versions = self.list_remote_versions(&target_ctx).await?;
+        let chosen = select_version(&req.spec, &versions).ok_or_else(|| {
+            crate::error::Error::VersionResolve {
+                tool: self.id().to_string(),
+                spec: req.spec.to_string(),
+                hint: Some(format!(
+                    "no matching version ships a {} asset",
+                    target_arch.node_token()
+                )),
+            }
+        })?;
+        let mut resolved = ToolVersion::new(self.id(), &chosen.version);
+        resolved.options = req.options.clone();
+        resolved
+            .options
+            .insert("arch".into(), target_arch.node_token().into());
+        resolved
+            .options
+            .insert("corepack".into(), corepack.to_string());
+        Ok(resolved)
+    }
+
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
+        let target_arch = Self::target_arch(ctx, &tv.options)?;
+        if target_arch != ctx.platform.arch {
+            return Err(crate::error::Error::config(format!(
+                "cannot execute Node {} artifacts on host {}; cross-architecture download-only mode is not available",
+                target_arch.node_token(),
+                ctx.platform.arch.node_token()
+            )));
+        }
         if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
             let pctx = PipelineCtx {
                 client: &ctx.client,
@@ -223,11 +378,12 @@ impl Backend for NodeBackend {
                 require_checksums: ctx.config.settings.require_checksums,
             };
             pipeline::run(&plan, &pctx).await?;
+            Self::complete_install(ctx, tv)?;
             return Ok(());
         }
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let version = &tv.version;
-        let (file_name, kind) = Self::archive_for(ctx, version);
+        let (file_name, kind) = Self::archive_for(ctx, target_arch, version);
 
         // Build a download URL from every candidate source (best-first) so the
         // pipeline can fail over: <base>/v<version>/<file_name>.
@@ -275,7 +431,12 @@ impl Backend for NodeBackend {
             require_checksums: ctx.config.settings.require_checksums,
         };
         pipeline::run(&plan, &pctx).await?;
+        Self::complete_install(ctx, tv)?;
         Ok(())
+    }
+
+    fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        Self::enable_corepack(ctx, tv)
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
@@ -306,5 +467,101 @@ impl Backend for NodeBackend {
 
     fn idiomatic_files(&self) -> &[&str] {
         &[".nvmrc", ".node-version"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::{Config, Settings, SourcesConfig};
+    use crate::dirs::Dirs;
+    use crate::platform::{Libc, Platform};
+    use crate::store::Cas;
+
+    fn test_ctx(root: &std::path::Path) -> Ctx {
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        Ctx {
+            cas: Arc::new(Cas::new(dirs.store.clone())),
+            dirs,
+            platform: Platform {
+                os: Os::Linux,
+                arch: Arch::X64,
+                libc: Libc::Glibc,
+            },
+            config: Config {
+                settings: Settings::default(),
+                sources: SourcesConfig::default(),
+                tools: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolution_records_effective_arch_and_corepack() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temp.path());
+        ctx.config.settings.node.corepack = true;
+        let request = ToolRequest::parse("node@20.11.1").unwrap();
+        let resolved = NodeBackend.resolve_version(&ctx, &request).await.unwrap();
+        assert_eq!(resolved.options["arch"], "x64");
+        assert_eq!(resolved.options["corepack"], "true");
+
+        let mut cross = ToolRequest::parse("node@20.11.1").unwrap();
+        cross.options.insert("arch".into(), "arm64".into());
+        let resolved = NodeBackend.resolve_version(&ctx, &cross).await.unwrap();
+        assert_eq!(resolved.options["arch"], "arm64");
+        let error = NodeBackend
+            .install(&InstallCtx { ctx: &ctx }, &resolved)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cross-architecture"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corepack_uses_managed_binary_and_failure_removes_install() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let mut version = ToolVersion::new("node", "20.11.1");
+        version.options.insert("corepack".into(), "true".into());
+        let install = ctx.dirs.install_path("node", &version.version);
+        let bin = install.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("corepack");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s\\n' \"$PATH\" \"$*\" > '{}'\n",
+                temp.path().join("corepack.log").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        NodeBackend::complete_install(&ctx, &version).unwrap();
+        let log = std::fs::read_to_string(temp.path().join("corepack.log")).unwrap();
+        assert!(log.starts_with(&bin.display().to_string()));
+        assert!(log.contains("enable --install-directory"));
+
+        std::fs::write(&script, "#!/bin/sh\nexit 7\n").unwrap();
+        let error = NodeBackend::complete_install(&ctx, &version).unwrap_err();
+        assert!(error.to_string().contains("failed"));
+        assert!(!install.exists());
     }
 }

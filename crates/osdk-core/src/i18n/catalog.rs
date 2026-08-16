@@ -44,6 +44,45 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.node_migrate_skip_npm",
+        (
+            "skip npm itself (managed by the target Node installation)",
+            "跳过 npm 自身（由目标 Node 安装管理）",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_skip_native",
+        (
+            "skip native or install-script package {package}",
+            "跳过原生或含安装脚本的包 {package}",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_nothing",
+        (
+            "no global npm packages need migration",
+            "没有需要迁移的全局 npm 包",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_plan",
+        ("would install {package}", "将安装 {package}"),
+    );
+    m.insert(
+        "msg.node_migrate_dry_run",
+        (
+            "dry-run only; rerun with --apply to migrate",
+            "当前仅演练；使用 --apply 重新运行以执行迁移",
+        ),
+    );
+    m.insert(
+        "msg.node_migrate_applied",
+        (
+            "migrated {count} global package(s) to Node {version}",
+            "已将 {count} 个全局包迁移到 Node {version}",
+        ),
+    );
+    m.insert(
         "msg.nothing_to_install",
         (
             "nothing to install (no tools given and no config pins found)",
@@ -325,6 +364,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "project config contains trust-required fields and is not trusted: {path}; review it, then run `osdk --yes trust {path}` or configure OSDK_TRUSTED_CONFIG_PATHS",
             "项目配置包含需信任字段但尚未受信任：{path}；请审阅后运行 `osdk --yes trust {path}`，或配置 OSDK_TRUSTED_CONFIG_PATHS",
+        ),
+    );
+    m.insert(
+        "err.node_migrate_rolled_back",
+        (
+            "global package migration failed; restored the target Node package set",
+            "全局包迁移失败；已恢复目标 Node 原有包集合",
+        ),
+    );
+    m.insert(
+        "err.node_migrate_rollback_failed",
+        (
+            "global package migration failed and rollback also failed",
+            "全局包迁移失败，且回滚也失败",
         ),
     );
     m.insert(
@@ -689,6 +742,32 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Remove trust for a project configuration",
             "取消对项目配置的信任",
+        ),
+    );
+    m.insert(
+        "help.node.about",
+        ("Manage Node-specific workflows", "管理 Node 专属工作流"),
+    );
+    m.insert(
+        "help.node.migrate.about",
+        (
+            "Plan or apply global npm package migration",
+            "规划或执行全局 npm 包迁移",
+        ),
+    );
+    m.insert(
+        "help.node.migrate.arg.from",
+        ("Source managed Node version", "来源受管 Node 版本"),
+    );
+    m.insert(
+        "help.node.migrate.arg.to",
+        ("Target managed Node version", "目标受管 Node 版本"),
+    );
+    m.insert(
+        "help.node.migrate.flag.apply",
+        (
+            "Apply the migration instead of printing a plan",
+            "执行迁移，而不是只打印计划",
         ),
     );
     m.insert(

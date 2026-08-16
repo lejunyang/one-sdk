@@ -101,7 +101,34 @@ eval "$(osdk deactivate bash)"
 
 osdk 会从当前目录向上查找项目版本文件：`osdk.toml`、兼容 asdf 的
 `.tool-versions`，以及生态原生文件（`.nvmrc`、`.node-version`、
-`.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`）。
+`.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`）。Node 还会
+把 `package.json#engines.node` 和 `devEngines.runtime` 解析为 npm semver range。
+跨目录统一优先级为：`osdk.toml` > `.tool-versions` > `.nvmrc` >
+`.node-version` > `package.json` > 用户全局配置。
+
+## Node 工作流
+
+解析 lock 时可覆盖 Node artifact 架构：
+
+```bash
+osdk lock node@20 -o arch=arm64
+```
+
+目标架构会写入对应的平台 lock 区段。osdk 暂无仅下载模式，因此安装和执行会拒绝
+跨架构 artifact。可用 `-o corepack=true` 启用 Corepack，或在
+`[settings.node]` 中持久配置 `corepack = true`；osdk 只调用该 Node 安装自带的
+Corepack，启用 shim 失败时会回滚这次安装。
+
+在受管 Node 版本之间迁移可移植的全局 npm 包：
+
+```bash
+osdk node migrate-packages --from 20.19.0 --to 22.17.0
+osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
+```
+
+默认仅输出演练计划；npm 自身和标记了原生构建或安装脚本的包会跳过。`--apply`
+只调用目标 Node 的受管 npm，并把目标 bin 目录放在 `PATH` 首位；失败时恢复目标
+原有的全局包集合。
 
 ## 可复现项目与命令执行
 

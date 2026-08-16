@@ -51,6 +51,15 @@ pub struct Settings {
     /// Output language override (`en`/`zh`). None = auto-detect from locale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+    /// Node-specific installation behavior.
+    pub node: NodeSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct NodeSettings {
+    /// Run the installed Node's own `corepack enable` after installation.
+    pub corepack: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +73,7 @@ impl Default for Settings {
             attestations: AttestationPolicy::Off,
             offline: false,
             lang: None,
+            node: NodeSettings::default(),
         }
     }
 }

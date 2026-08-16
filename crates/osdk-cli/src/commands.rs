@@ -8,7 +8,7 @@ use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
-use crate::cli::{AliasCommand, ConfigCommand, SourceCommand, TrustCommand};
+use crate::cli::{AliasCommand, ConfigCommand, NodeCommand, SourceCommand, TrustCommand};
 
 /// Apply a one-shot `--source` override into the config for this run.
 fn apply_source_override(app: &mut App, tool: &str) {
@@ -41,7 +41,8 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
     let resolved = resolve_requests(app, requests, opts).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
-    crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &resolved)?;
+    let target_platform = crate::lockfile::platform_for_resolved(app.ctx.platform, &resolved);
+    crate::lockfile::merge_resolved(&path, target_platform, &app.ctx.dirs, &resolved)?;
     println!("wrote {}", path.display());
     Ok(())
 }
@@ -230,6 +231,7 @@ async fn install_one_without_shims(
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
 
     if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version) {
+        backend.ensure_post_install(&app.ctx, &tv)?;
         println!("{}", t!("msg.already_installed", tool = tv));
     } else {
         println!("{}", t!("msg.installing", tool = tv));
@@ -310,6 +312,9 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     // From config pins.
     let mut out = Vec::new();
     for (tool, spec) in &app.ctx.config.tools {
+        if tool == "node" {
+            continue;
+        }
         if app.registry.get(tool).is_ok() {
             out.push(ToolRequest {
                 backend: tool.clone(),
@@ -317,6 +322,25 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
                 options: Default::default(),
             });
         }
+    }
+    let cwd = std::env::current_dir()?;
+    let backend = app.registry.get("node")?;
+    if let Some(active) = osdk_core::version::resolver::resolve_active(
+        backend.id(),
+        &cwd,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    ) {
+        let spec = if active.is_range {
+            VersionSpec::parse_range(&active.spec)?
+        } else {
+            VersionSpec::parse(&active.spec)
+        };
+        out.push(ToolRequest {
+            backend: backend.id().to_string(),
+            spec,
+            options: Default::default(),
+        });
     }
     Ok(out)
 }
@@ -800,6 +824,211 @@ pub fn untrust(app: &App, path: Option<std::path::PathBuf>) -> Result<()> {
     Ok(())
 }
 
+pub fn node(app: &App, command: NodeCommand) -> Result<()> {
+    match command {
+        NodeCommand::MigratePackages { from, to, apply } => {
+            migrate_node_packages(app, &from, &to, apply)
+        }
+    }
+}
+
+fn migrate_node_packages(app: &App, from: &str, to: &str, apply: bool) -> Result<()> {
+    let source = managed_node_tools(app, from)?;
+    let target = managed_node_tools(app, to)?;
+    let source_packages = list_global_npm_packages(&source)?;
+    let target_packages = list_global_npm_packages(&target)?;
+    let target_names: std::collections::BTreeSet<_> = target_packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect();
+    let mut planned = Vec::new();
+    for package in source_packages {
+        if package.name == "npm" {
+            println!("{}", t!("msg.node_migrate_skip_npm"));
+            continue;
+        }
+        if package.native {
+            println!(
+                "{}",
+                t!("msg.node_migrate_skip_native", package = package.spec())
+            );
+            continue;
+        }
+        if !target_names.contains(package.name.as_str()) {
+            planned.push(package);
+        }
+    }
+
+    if planned.is_empty() {
+        println!("{}", t!("msg.node_migrate_nothing"));
+        return Ok(());
+    }
+    for package in &planned {
+        println!("{}", t!("msg.node_migrate_plan", package = package.spec()));
+    }
+    if !apply {
+        println!("{}", t!("msg.node_migrate_dry_run"));
+        return Ok(());
+    }
+
+    let before = target_packages;
+    let specs: Vec<String> = planned.iter().map(NpmPackage::spec).collect();
+    if let Err(error) = npm_install_global(&target, &specs) {
+        return match restore_global_npm_packages(&target, &before) {
+            Ok(()) => Err(error.context(t!("err.node_migrate_rolled_back"))),
+            Err(rollback) => Err(error.context(format!(
+                "{}: {rollback:#}",
+                t!("err.node_migrate_rollback_failed")
+            ))),
+        };
+    }
+    println!(
+        "{}",
+        t!(
+            "msg.node_migrate_applied",
+            count = planned.len(),
+            version = to
+        )
+    );
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ManagedNodeTools {
+    bin: std::path::PathBuf,
+    npm: std::path::PathBuf,
+}
+
+fn managed_node_tools(app: &App, version: &str) -> Result<ManagedNodeTools> {
+    let install = app.ctx.dirs.install_path("node", version);
+    if !osdk_core::pipeline::is_installed(&app.ctx.dirs, "node", version) {
+        return Err(anyhow!(t!(
+            "err.not_installed",
+            tool = "node",
+            ver = version
+        )));
+    }
+    let bin = match app.ctx.platform.os {
+        osdk_core::platform::Os::Windows => install,
+        _ => install.join("bin"),
+    };
+    let npm = if matches!(app.ctx.platform.os, osdk_core::platform::Os::Windows) {
+        bin.join("npm.cmd")
+    } else {
+        bin.join("npm")
+    };
+    if !npm.is_file() {
+        return Err(anyhow!(
+            "managed npm executable not found at {}",
+            npm.display()
+        ));
+    }
+    Ok(ManagedNodeTools { bin, npm })
+}
+
+#[derive(Debug, Clone)]
+struct NpmPackage {
+    name: String,
+    version: String,
+    native: bool,
+}
+
+impl NpmPackage {
+    fn spec(&self) -> String {
+        format!("{}@{}", self.name, self.version)
+    }
+}
+
+fn list_global_npm_packages(tools: &ManagedNodeTools) -> Result<Vec<NpmPackage>> {
+    let output = npm_command(tools, &["ls", "-g", "--depth=0", "--json", "--long"])?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parsing managed npm package list")?;
+    let mut packages = Vec::new();
+    if let Some(dependencies) = value
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, metadata) in dependencies {
+            let Some(version) = metadata.get("version").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let native = metadata
+                .get("hasInstallScript")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || metadata
+                    .get("gypfile")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+            packages.push(NpmPackage {
+                name: name.clone(),
+                version: version.to_string(),
+                native,
+            });
+        }
+    }
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(packages)
+}
+
+fn npm_install_global(tools: &ManagedNodeTools, specs: &[String]) -> Result<()> {
+    let mut args = vec!["install", "-g"];
+    args.extend(specs.iter().map(String::as_str));
+    npm_command(tools, &args).map(|_| ())
+}
+
+fn restore_global_npm_packages(tools: &ManagedNodeTools, packages: &[NpmPackage]) -> Result<()> {
+    let current = list_global_npm_packages(tools)?;
+    let removable: Vec<String> = current
+        .iter()
+        .filter(|package| package.name != "npm")
+        .map(|package| package.name.clone())
+        .collect();
+    if !removable.is_empty() {
+        let mut args = vec!["uninstall", "-g"];
+        args.extend(removable.iter().map(String::as_str));
+        npm_command(tools, &args)?;
+    }
+    let desired: Vec<String> = packages
+        .iter()
+        .filter(|package| package.name != "npm")
+        .map(NpmPackage::spec)
+        .collect();
+    if !desired.is_empty() {
+        npm_install_global(tools, &desired)?;
+    }
+    Ok(())
+}
+
+fn npm_command(tools: &ManagedNodeTools, args: &[&str]) -> Result<std::process::Output> {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![tools.bin.clone()];
+    paths.extend(std::env::split_paths(&inherited));
+    let path = std::env::join_paths(paths)?;
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/D", "/S", "/C"]).arg(&tools.npm);
+        command
+    } else {
+        std::process::Command::new(&tools.npm)
+    };
+    let output = command
+        .args(args)
+        .env("PATH", path)
+        .output()
+        .with_context(|| format!("running managed npm at {}", tools.npm.display()))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(anyhow!(
+            "managed npm {} failed with {}:\n{}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 pub fn prune(app: &App, dry_run: bool) -> Result<()> {
     if dry_run {
         println!("{}", t!("msg.prune_dry_run"));
@@ -853,6 +1082,7 @@ fn describe_origin(origin: &osdk_core::version::resolver::VersionOrigin) -> Stri
         ProjectConfig(p) => format!("project {}", p.display()),
         ToolVersions(p) => format!(".tool-versions {}", p.display()),
         IdiomaticFile(p) => format!("{}", p.display()),
+        ProjectMetadata(p) => format!("{}", p.display()),
         GlobalConfig => "global config".to_string(),
     }
 }

@@ -213,6 +213,12 @@ pub enum Command {
         path: Option<std::path::PathBuf>,
     },
 
+    /// Manage Node-specific workflows.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
+
     /// Manage the shared caches (SDK store + downstream package caches).
     Cache {
         #[command(subcommand)]
@@ -282,6 +288,22 @@ pub enum ConfigCommand {
 pub enum TrustCommand {
     /// List content-bound trusted project configurations.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCommand {
+    /// Plan or apply migration of global npm packages between managed Node versions.
+    MigratePackages {
+        /// Source managed Node version.
+        #[arg(long)]
+        from: String,
+        /// Target managed Node version.
+        #[arg(long)]
+        to: String,
+        /// Apply the plan. Without this flag, no packages are changed.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

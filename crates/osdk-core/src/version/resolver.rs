@@ -4,7 +4,8 @@
 //! 1. project config (`osdk.toml`) `[tools]` entry
 //! 2. `.tool-versions` entry
 //! 3. idiomatic version files (`.nvmrc`, `.node-version`, ...) — per backend
-//! 4. user global config `[tools]` entry
+//! 4. structured project metadata (`package.json` for Node)
+//! 5. user global config `[tools]` entry
 //!
 //! This module is intentionally synchronous and dependency-light so the
 //! `osdk-shim` launcher can use it on the hot path without a tokio runtime.
@@ -21,6 +22,7 @@ pub struct ActiveVersion {
     /// The raw version spec string (e.g. "20", "lts", "20.11.1").
     pub spec: String,
     pub source: VersionOrigin,
+    pub is_range: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,7 @@ pub enum VersionOrigin {
     ProjectConfig(PathBuf),
     ToolVersions(PathBuf),
     IdiomaticFile(PathBuf),
+    ProjectMetadata(PathBuf),
     GlobalConfig,
 }
 
@@ -40,9 +43,10 @@ pub fn resolve_active(
     global_tools: &BTreeMap<String, String>,
     idiomatic_files: &[&str],
 ) -> Option<ActiveVersion> {
-    let mut cur = Some(start_dir);
-    while let Some(dir) = cur {
-        // 1. project config
+    let ancestors: Vec<&Path> = start_dir.ancestors().collect();
+
+    // 1. project config
+    for dir in &ancestors {
         for name in PROJECT_CONFIG_NAMES {
             let p = dir.join(name);
             if p.is_file() {
@@ -51,11 +55,15 @@ pub fn resolve_active(
                         tool: tool.to_string(),
                         spec,
                         source: VersionOrigin::ProjectConfig(p),
+                        is_range: false,
                     });
                 }
             }
         }
-        // 2. .tool-versions
+    }
+
+    // 2. .tool-versions
+    for dir in &ancestors {
         let tv = dir.join(".tool-versions");
         if tv.is_file() {
             if let Ok(text) = std::fs::read_to_string(&tv) {
@@ -65,12 +73,16 @@ pub fn resolve_active(
                         tool: tool.to_string(),
                         spec: spec.clone(),
                         source: VersionOrigin::ToolVersions(tv),
+                        is_range: false,
                     });
                 }
             }
         }
-        // 3. idiomatic files
-        for name in idiomatic_files {
+    }
+
+    // 3. idiomatic files, preserving each backend's declared priority.
+    for name in idiomatic_files {
+        for dir in &ancestors {
             let p = dir.join(name);
             if p.is_file() {
                 if let Some(spec) = read_idiomatic(&p) {
@@ -78,18 +90,36 @@ pub fn resolve_active(
                         tool: tool.to_string(),
                         spec,
                         source: VersionOrigin::IdiomaticFile(p),
+                        is_range: false,
                     });
                 }
             }
         }
-        cur = dir.parent();
     }
 
-    // 4. global config
+    // 4. structured project metadata.
+    if tool == "node" {
+        for dir in &ancestors {
+            let package = dir.join("package.json");
+            if package.is_file() {
+                if let Some(spec) = read_node_package(&package) {
+                    return Some(ActiveVersion {
+                        tool: tool.to_string(),
+                        spec,
+                        source: VersionOrigin::ProjectMetadata(package),
+                        is_range: true,
+                    });
+                }
+            }
+        }
+    }
+
+    // 5. global config
     global_tools.get(tool).map(|spec| ActiveVersion {
         tool: tool.to_string(),
         spec: spec.clone(),
         source: VersionOrigin::GlobalConfig,
+        is_range: false,
     })
 }
 
@@ -168,6 +198,38 @@ fn read_idiomatic(path: &Path) -> Option<String> {
     None
 }
 
+fn read_node_package(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("engines")
+        .and_then(|engines| engines.get("node"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            let runtime = value.get("devEngines")?.get("runtime")?;
+            let runtime = runtime
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("name").and_then(serde_json::Value::as_str) == Some("node")
+                    })
+                })
+                .unwrap_or(runtime);
+            let name = runtime
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("node");
+            if name != "node" {
+                return None;
+            }
+            runtime
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +265,52 @@ mod tests {
     }
 
     #[test]
+    fn node_package_engines_and_dev_engines_are_resolved_last() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path().join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"engines":{"node":">=20 <23"},"devEngines":{"runtime":{"name":"node","version":"^22.0.0"}}}"#,
+        )
+        .unwrap();
+
+        let global = BTreeMap::new();
+        let active = resolve_active("node", &dir, &global, &[".nvmrc", ".node-version"]).unwrap();
+        assert_eq!(active.spec, ">=20 <23");
+        assert!(matches!(active.source, VersionOrigin::ProjectMetadata(_)));
+
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":"^22.0.0"}}}"#,
+        )
+        .unwrap();
+        let active = resolve_active("node", &dir, &global, &[".nvmrc", ".node-version"]).unwrap();
+        assert_eq!(active.spec, "^22.0.0");
+    }
+
+    #[test]
+    fn node_version_files_beat_package_json_and_invalid_ranges_are_preserved_for_validation() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(td.path().join(".node-version"), "21.7.3\n").unwrap();
+        std::fs::write(
+            td.path().join("package.json"),
+            r#"{"engines":{"node":"definitely-not-semver"}}"#,
+        )
+        .unwrap();
+        let global = BTreeMap::new();
+        let active =
+            resolve_active("node", td.path(), &global, &[".nvmrc", ".node-version"]).unwrap();
+        assert_eq!(active.spec, "21.7.3");
+
+        std::fs::remove_file(td.path().join(".node-version")).unwrap();
+        let active =
+            resolve_active("node", td.path(), &global, &[".nvmrc", ".node-version"]).unwrap();
+        assert_eq!(active.spec, "definitely-not-semver");
+        assert!(active.is_range);
+    }
+
+    #[test]
     fn walks_up_to_parent() {
         let td = tempfile::tempdir().unwrap();
         std::fs::write(td.path().join(".tool-versions"), "go 1.22.5\n").unwrap();
@@ -213,6 +321,26 @@ mod tests {
         let av = resolve_active("go", &nested, &global, &[]).unwrap();
         assert_eq!(av.spec, "1.22.5");
         assert!(matches!(av.source, VersionOrigin::ToolVersions(_)));
+    }
+
+    #[test]
+    fn higher_priority_parent_file_beats_lower_priority_child_file() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(td.path().join("osdk.toml"), "[tools]\nnode = \"22\"\n").unwrap();
+        let nested = td.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".nvmrc"), "20\n").unwrap();
+        std::fs::write(nested.join("package.json"), r#"{"engines":{"node":"18"}}"#).unwrap();
+
+        let active = resolve_active(
+            "node",
+            &nested,
+            &BTreeMap::new(),
+            &[".nvmrc", ".node-version"],
+        )
+        .unwrap();
+        assert_eq!(active.spec, "22");
+        assert!(matches!(active.source, VersionOrigin::ProjectConfig(_)));
     }
 
     #[test]

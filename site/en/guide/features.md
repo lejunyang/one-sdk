@@ -44,6 +44,36 @@ go = "1.22"
 osdk walks upward from the current directory and uses the nearest project
 configuration, so subdirectories can inherit repository-wide versions.
 
+### Node project versions, architecture, and Corepack
+
+Node also reads `package.json#engines.node` and `devEngines.runtime`, selecting
+the highest stable version matching the npm semver range. Priority is global
+across the walk-up tree: `osdk.toml` > `.tool-versions` > `.nvmrc` >
+`.node-version` > `package.json` > user-global config. Invalid ranges fail
+explicitly.
+
+```bash
+osdk lock node@20 -o arch=arm64
+osdk install node@20 -o corepack=true
+```
+
+`arch=x64|arm64|x86|arm` is saved under the target platform lock section. Since
+osdk has no download-only mode, install rejects an architecture that cannot run
+on the current host. Corepack can also be enabled with
+`corepack = true` under `[settings.node]`; osdk invokes only the selected
+Node's Corepack and does not leave a complete marker after failure.
+
+Global package migration is a dry-run by default:
+
+```bash
+osdk node migrate-packages --from 20.19.0 --to 22.17.0
+osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
+```
+
+Migration excludes npm itself and packages with native builds or install
+scripts. Apply uses only managed npm and restores the target's previous global
+package set after failure.
+
 ## Project configuration trust
 
 Project `[tools]` pins and `[aliases]` are safe data and load without trust.

@@ -227,7 +227,11 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
             .expand_alias(backend.id(), &active.spec)
             .unwrap_or(active.spec);
         let spec = strip_distribution_prefix(&expanded);
-        let parsed = VersionSpec::parse(spec);
+        let parsed = if active.is_range {
+            VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
+        } else {
+            VersionSpec::parse(spec)
+        };
         let version = match &parsed {
             VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => Some(v.clone()),
             _ => {

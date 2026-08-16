@@ -340,6 +340,103 @@ fn lock_resolves_static_python_versions_offline() {
 }
 
 #[test]
+fn package_json_node_range_is_discovered_with_documented_priority() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"engines":{"node":">=20 <23"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    std::fs::write(
+        temp.path().join("config/config.toml"),
+        "[tools]\nnode = \"18\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join(".node-version"), "21.7.3\n").unwrap();
+    let install = temp.path().join("installs/node/21.7.3");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let current = run_isolated_in(temp.path(), &project, &["current", "node"]);
+    assert!(current.status.success());
+    assert!(String::from_utf8_lossy(&current.stdout).contains("21.7.3"));
+
+    std::fs::remove_file(project.join(".node-version")).unwrap();
+    let current = run_isolated_in(temp.path(), &project, &["current", "node"]);
+    assert!(current.status.success());
+    assert!(String::from_utf8_lossy(&current.stdout).contains(">=20 <23"));
+
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"engines":{"node":"not-a-range"}}"#,
+    )
+    .unwrap();
+    let invalid = run_isolated_in(temp.path(), &project, &["lock"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid semver range"));
+}
+
+#[test]
+fn node_cross_arch_lock_uses_target_platform_and_install_rejects_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let target_arch = if cfg!(target_arch = "aarch64") {
+        "x64"
+    } else {
+        "arm64"
+    };
+    let target_key = platform_key().replacen(
+        if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else if cfg!(target_arch = "x86_64") {
+            "x64"
+        } else if cfg!(target_arch = "x86") {
+            "x86"
+        } else {
+            "arm"
+        },
+        target_arch,
+        1,
+    );
+    let lock = run_isolated_in(
+        temp.path(),
+        &project,
+        &[
+            "--offline",
+            "lock",
+            "node@20.11.1",
+            "-o",
+            &format!("arch={target_arch}"),
+        ],
+    );
+    assert!(
+        lock.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+    let lockfile = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(lockfile.contains(&format!("[platforms.{target_key}.tools.node]")));
+    assert!(lockfile.contains(&format!("arch = \"{target_arch}\"")));
+
+    let install = run_isolated(
+        temp.path(),
+        &[
+            "--offline",
+            "install",
+            "node@20.11.1",
+            "-o",
+            &format!("arch={target_arch}"),
+        ],
+    );
+    assert!(!install.status.success());
+    assert!(String::from_utf8_lossy(&install.stderr).contains("cross-architecture"));
+}
+
+#[test]
 fn outdated_reports_missing_static_resolution() {
     let temp = tempfile::tempdir().unwrap();
     let output = run_isolated(temp.path(), &["--offline", "outdated", "python@3.14"]);
@@ -611,6 +708,172 @@ digest = "sha256:{checksum}"
         .path()
         .join("installs/github/example/tool/1.0.0/.osdk-complete")
         .exists());
+}
+
+#[cfg(unix)]
+fn write_fake_managed_npm(root: &Path, version: &str, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = root.join(format!("installs/node/{version}/bin"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.parent().unwrap().join(".osdk-complete"), b"").unwrap();
+    let node = bin.join("node");
+    std::fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let npm = bin.join("npm");
+    std::fs::write(&npm, script).unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn node_package_migration_dry_run_uses_managed_npm_and_filters_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("npm.log");
+    let source_script = format!(
+        r#"#!/bin/sh
+printf '%s|%s\n' "$PATH" "$*" >> '{}'
+printf '%s\n' '{{"dependencies":{{"npm":{{"version":"10.0.0"}},"eslint":{{"version":"9.1.0"}},"native-addon":{{"version":"1.0.0","gypfile":true}}}}}}'
+"#,
+        log.display()
+    );
+    let target_script = format!(
+        r#"#!/bin/sh
+printf '%s|%s\n' "$PATH" "$*" >> '{}'
+printf '%s\n' '{{"dependencies":{{}}}}'
+"#,
+        log.display()
+    );
+    write_fake_managed_npm(temp.path(), "20.0.0", &source_script);
+    write_fake_managed_npm(temp.path(), "22.0.0", &target_script);
+
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to",
+            "22.0.0",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("would install eslint@9.1.0"));
+    assert!(stdout.contains("skip npm itself"));
+    assert!(stdout.contains("skip native"));
+    assert!(stdout.contains("dry-run only"));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(calls.contains("installs/node/20.0.0/bin"));
+    assert!(calls.contains("installs/node/22.0.0/bin"));
+    assert!(!calls.contains("install -g"));
+}
+
+#[cfg(unix)]
+#[test]
+fn node_package_migration_apply_installs_the_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let installed = temp.path().join("installed-specs");
+    let source_script = r#"#!/bin/sh
+printf '{"dependencies":{"eslint":{"version":"9.1.0"}}}\n'
+"#;
+    let target_script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "ls" ]; then
+  printf '{{"dependencies":{{}}}}\n'
+elif [ "$1" = "install" ]; then
+  printf '%s\n' "$3" > '{}'
+fi
+"#,
+        installed.display()
+    );
+    write_fake_managed_npm(temp.path(), "20.0.0", source_script);
+    write_fake_managed_npm(temp.path(), "22.0.0", &target_script);
+
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to",
+            "22.0.0",
+            "--apply",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(installed).unwrap().trim(),
+        "eslint@9.1.0"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("migrated 1 global package"));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_node_package_migration_restores_target_packages() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("target-state");
+    let calls = temp.path().join("target-calls");
+    std::fs::write(&state, "before").unwrap();
+    let source_script = r#"#!/bin/sh
+printf '{"dependencies":{"eslint":{"version":"9.1.0"}}}\n'
+"#;
+    let target_script = format!(
+        r#"#!/bin/sh
+state='{}'
+calls='{}'
+printf '%s\n' "$*" >> "$calls"
+if [ "$1" = "ls" ]; then
+  IFS= read -r current < "$state"
+  if [ "$current" = "before" ]; then
+    printf '{{"dependencies":{{"typescript":{{"version":"5.5.0"}}}}}}\n'
+  else
+    printf '{{"dependencies":{{"broken":{{"version":"1.0.0"}}}}}}\n'
+  fi
+elif [ "$1" = "install" ] && [ "$3" = "eslint@9.1.0" ]; then
+  printf changed > "$state"
+  exit 9
+elif [ "$1" = "uninstall" ]; then
+  printf empty > "$state"
+elif [ "$1" = "install" ] && [ "$3" = "typescript@5.5.0" ]; then
+  printf before > "$state"
+fi
+"#,
+        state.display(),
+        calls.display()
+    );
+    write_fake_managed_npm(temp.path(), "20.0.0", source_script);
+    write_fake_managed_npm(temp.path(), "22.0.0", &target_script);
+
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "node",
+            "migrate-packages",
+            "--from",
+            "20.0.0",
+            "--to",
+            "22.0.0",
+            "--apply",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("restored"));
+    assert_eq!(std::fs::read_to_string(state).unwrap(), "before");
+    let calls = std::fs::read_to_string(calls).unwrap();
+    assert!(calls.contains("uninstall -g broken"));
+    assert!(calls.contains("install -g typescript@5.5.0"));
 }
 
 #[cfg(unix)]
