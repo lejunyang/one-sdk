@@ -9,8 +9,9 @@ use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
 use crate::cli::{
-    AliasCommand, ConfigCommand, ModelCommand, NodeCommand, PythonCommand, RustCommand,
-    RustItemCommand, RustOverrideCommand, RustToolchainCommand, SourceCommand, TrustCommand,
+    AliasCommand, ConfigCommand, ModelCommand, ModelEnvCommand, NodeCommand, PythonCommand,
+    RustCommand, RustItemCommand, RustOverrideCommand, RustToolchainCommand, SourceCommand,
+    TrustCommand,
 };
 
 /// Apply a one-shot `--source` override into the config for this run.
@@ -800,6 +801,12 @@ pub fn hook_env(app: &App, shell: String) -> Result<()> {
     // Layer 2: downstream package caches (only vars the user hasn't set).
     let cache_vars = osdk_core::cache::cache_env(&app.ctx.dirs.cache, |k| std::env::var(k).ok());
     delta.set_vars.extend(cache_vars);
+    // Layer 3: globally-enabled model provider adapters.
+    let model_vars = osdk_core::model::env::configured_env(&app.ctx, |key| std::env::var(key).ok());
+    delta.set_vars.extend(model_vars);
+    delta
+        .unset_vars
+        .retain(|key| !delta.set_vars.contains_key(key));
     print!("{}", osdk_core::activate::render_hook_env(sh, &delta));
     Ok(())
 }
@@ -865,6 +872,19 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 s.python.catalog_url.as_deref().unwrap_or("built-in")
             );
             println!("selection    = {:?}", app.ctx.config.sources.selection);
+            for provider in [
+                osdk_core::model::ProviderId::HuggingFace,
+                osdk_core::model::ProviderId::ModelScope,
+            ] {
+                if let Some(config) = app.ctx.config.tool_sources(provider.as_str()) {
+                    println!(
+                        "model_env.{} = {}{}",
+                        provider,
+                        config.env,
+                        if config.env_force { " (force)" } else { "" }
+                    );
+                }
+            }
             if !app.ctx.config.tools.is_empty() {
                 println!("tools:");
                 for (k, v) in &app.ctx.config.tools {
@@ -1088,8 +1108,88 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
                 println!("model {name} is not installed");
             }
         }
+        ModelCommand::Env { command } => model_env(app, command)?,
     }
     Ok(())
+}
+
+fn model_env(app: &App, command: ModelEnvCommand) -> Result<()> {
+    match command {
+        ModelEnvCommand::Enable { provider, force } => {
+            for provider in selected_providers(provider) {
+                crate::config_edit::set_model_env(&app.ctx, provider, true, force)?;
+                println!(
+                    "{}",
+                    t!(
+                        "msg.model_env_enabled",
+                        provider = provider,
+                        mode = if force {
+                            t!("label.force")
+                        } else {
+                            String::new()
+                        }
+                    )
+                );
+            }
+            println!("{}", t!("msg.model_env_refresh"));
+        }
+        ModelEnvCommand::Disable { provider } => {
+            for provider in selected_providers(provider) {
+                crate::config_edit::set_model_env(&app.ctx, provider, false, false)?;
+                println!("{}", t!("msg.model_env_disabled", provider = provider));
+            }
+            println!("{}", t!("msg.model_env_refresh"));
+        }
+        ModelEnvCommand::List => {
+            for provider in [
+                osdk_core::model::ProviderId::HuggingFace,
+                osdk_core::model::ProviderId::ModelScope,
+            ] {
+                let config = app.ctx.config.tool_sources(provider.as_str());
+                let enabled = config.is_some_and(|config| config.env);
+                let force = config.is_some_and(|config| config.env_force);
+                println!(
+                    "{}: {}{}",
+                    provider,
+                    if enabled {
+                        t!("label.enabled")
+                    } else {
+                        t!("label.disabled")
+                    },
+                    if force {
+                        t!("label.force")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            let environment =
+                osdk_core::model::env::configured_env(&app.ctx, |key| std::env::var(key).ok());
+            for (key, value) in environment {
+                let display = if key.contains("TOKEN") && value.is_empty() {
+                    "<disabled>"
+                } else {
+                    &value
+                };
+                println!("  {key}={display}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn selected_providers(
+    provider: Option<osdk_core::model::ProviderId>,
+) -> Vec<osdk_core::model::ProviderId> {
+    provider.map_or_else(
+        || {
+            vec![
+                osdk_core::model::ProviderId::HuggingFace,
+                osdk_core::model::ProviderId::ModelScope,
+            ]
+        },
+        |provider| vec![provider],
+    )
 }
 
 fn model_reference(

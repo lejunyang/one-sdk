@@ -13,6 +13,7 @@ use crate::store::link::LinkMode;
 use crate::store::manifest::{FileEntry, Manifest};
 use crate::store::Cas;
 
+pub mod env;
 pub mod provider;
 pub mod pull;
 pub mod source;

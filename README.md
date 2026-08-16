@@ -147,6 +147,36 @@ and files without network access. `OSDK_HF_TOKEN`, `HF_TOKEN`, and
 attached only to requests for the configured Hugging Face endpoint.
 ModelScope accepts `OSDK_MODELSCOPE_TOKEN` or `MODELSCOPE_API_TOKEN`.
 
+### Global model environment
+
+Provider settings can be persisted globally instead of being scoped to
+`osdk exec`. Install shell activation once, then enable one or both adapters:
+
+```bash
+eval "$(osdk activate bash)" # add to ~/.bashrc; zsh/fish/powershell also work
+
+osdk model env enable                    # Hugging Face + ModelScope
+osdk model env enable huggingface
+osdk model env enable modelscope --force
+osdk model env list
+osdk model env disable huggingface
+```
+
+Active osdk shells refresh on the next prompt, and newly activated shells apply
+the settings immediately. The Hugging Face adapter exports `HF_ENDPOINT`,
+`HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE`, and `HF_ASSETS_CACHE`; `--offline`
+also exports the officially supported `HF_HUB_OFFLINE=1`. The ModelScope
+adapter exports `MODELSCOPE_ENDPOINT` and `MODELSCOPE_CACHE`. ModelScope has no
+equivalent global offline environment variable, so osdk does not invent one.
+
+By default, an existing user variable wins. `--force` persists an explicit
+override. Disabling an adapter or running `osdk deactivate` restores every
+captured original value. Tokens are never stored in osdk configuration. When a
+global custom endpoint does not opt into credential forwarding, osdk also
+suppresses environment and implicit client tokens for that endpoint. Anonymous
+custom endpoints also use isolated `HF_HOME` / `MODELSCOPE_HOME` directories,
+so persisted login tokens or cookies cannot leak to a mirror.
+
 Model endpoints use the same source configuration, pinning, TTL, and
 throughput ranking as SDK mirrors, but probes target a real model repository:
 

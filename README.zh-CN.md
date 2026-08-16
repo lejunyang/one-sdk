@@ -148,6 +148,34 @@ snapshot revision、endpoint、variant、文件大小和 SHA-256 会写入 `osdk
 Authorization 只附加到配置的 Hugging Face endpoint 请求。
 ModelScope 认证支持 `OSDK_MODELSCOPE_TOKEN` 与 `MODELSCOPE_API_TOKEN`。
 
+### 全局模型环境
+
+Provider 设置可持久化为全局环境，不需要只在 `osdk exec` 内生效。先安装一次
+shell activation，再启用一个或两个 adapter：
+
+```bash
+eval "$(osdk activate bash)" # 加入 ~/.bashrc；也支持 zsh/fish/powershell
+
+osdk model env enable                    # Hugging Face + ModelScope
+osdk model env enable huggingface
+osdk model env enable modelscope --force
+osdk model env list
+osdk model env disable huggingface
+```
+
+已激活 osdk 的 shell 会在下一个提示符自动刷新，新 activation 会立即应用设置。
+Hugging Face adapter 导出 `HF_ENDPOINT`、`HF_HOME`、`HF_HUB_CACHE`、
+`HF_XET_CACHE` 和 `HF_ASSETS_CACHE`；`--offline` 还会导出官方支持的
+`HF_HUB_OFFLINE=1`。ModelScope adapter 导出 `MODELSCOPE_ENDPOINT` 与
+`MODELSCOPE_CACHE`。ModelScope 没有等价的全局 offline 环境变量，因此 osdk
+不会虚构一个无效变量。
+
+默认保留用户已有变量；`--force` 才持久化显式覆盖。停用 adapter 或执行
+`osdk deactivate` 会恢复所有捕获的原值。token 永远不会写入 osdk 配置。若全局
+自定义 endpoint 未显式允许转发凭据，osdk 还会屏蔽环境 token 与客户端隐式
+token，避免误发给镜像。匿名自定义 endpoint 还会切到隔离的
+`HF_HOME` / `MODELSCOPE_HOME`，防止已持久化的登录 token 或 cookie 泄漏给镜像。
+
 模型 endpoint 复用 SDK 镜像的 source 配置、pin、TTL 和吞吐排名，但探测时会
 指定真实目标模型：
 

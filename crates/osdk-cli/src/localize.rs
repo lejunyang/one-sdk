@@ -158,6 +158,23 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_subcommand("path", |s| s.about(h("help.model.path.about")))
             .mut_subcommand("verify", |s| s.about(h("help.model.verify.about")))
             .mut_subcommand("remove", |s| s.about(h("help.model.remove.about")))
+            .mut_subcommand("env", |s| {
+                s.about(h("help.model.env.about"))
+                    .mut_subcommand("enable", |e| {
+                        e.about(h("help.model.env.enable.about"))
+                            .mut_arg("provider", |a| {
+                                a.help(h("help.model.env.enable.arg.provider"))
+                            })
+                            .mut_arg("force", |a| a.help(h("help.model.env.enable.flag.force")))
+                    })
+                    .mut_subcommand("disable", |e| {
+                        e.about(h("help.model.env.disable.about"))
+                            .mut_arg("provider", |a| {
+                                a.help(h("help.model.env.enable.arg.provider"))
+                            })
+                    })
+                    .mut_subcommand("list", |e| e.about(h("help.model.env.list.about")))
+            })
     })
     .mut_subcommand("rust", |c| c.about(h("help.rust.about")))
     .mut_subcommand("cache", |c| {

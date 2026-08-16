@@ -55,6 +55,7 @@ _osdk_hook() {{
 if [[ ";${{PROMPT_COMMAND:-}};" != *";_osdk_hook;"* ]]; then
   PROMPT_COMMAND="_osdk_hook${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
 fi
+_osdk_hook
 "#,
             bin = shell_quote(Shell::Bash, osdk_bin)
         ),
@@ -68,6 +69,7 @@ typeset -ag precmd_functions
 if [[ -z ${{precmd_functions[(r)_osdk_hook]}} ]]; then
   precmd_functions+=(_osdk_hook)
 fi
+_osdk_hook
 "#,
             bin = shell_quote(Shell::Zsh, osdk_bin)
         ),
@@ -76,6 +78,7 @@ fi
 function _osdk_hook --on-variable PWD --on-event fish_prompt
   {bin} hook-env --shell fish 2>/dev/null | source
 end
+_osdk_hook
 "#,
             bin = shell_quote(Shell::Fish, osdk_bin)
         ),

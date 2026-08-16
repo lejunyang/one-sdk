@@ -74,6 +74,31 @@ Hugging Face 认证支持 `OSDK_HF_TOKEN`、`HF_TOKEN` 和
 `HUGGING_FACE_HUB_TOKEN`；ModelScope 支持 `OSDK_MODELSCOPE_TOKEN` 与
 `MODELSCOPE_API_TOKEN`。
 
+### 全局模型环境
+
+模型 Provider 设置可全局持久化，不限于 `osdk exec`：
+
+```bash
+eval "$(osdk activate bash)" # 加入 shell rc；也支持 zsh/fish/powershell
+osdk model env enable
+osdk model env enable huggingface
+osdk model env enable modelscope --force
+osdk model env list
+osdk model env disable huggingface
+```
+
+已激活 osdk 的 shell 在下一个提示符自动刷新；新 activation 立即应用。Hugging
+Face adapter 导出 `HF_ENDPOINT`、`HF_HOME`、`HF_HUB_CACHE`、
+`HF_XET_CACHE`、`HF_ASSETS_CACHE`，offline 时还导出官方
+`HF_HUB_OFFLINE=1`。ModelScope adapter 导出 `MODELSCOPE_ENDPOINT` 与
+`MODELSCOPE_CACHE`；因为官方客户端没有等价的全局 offline 变量，osdk 不会虚构
+一个。
+
+默认保留用户已有变量，`--force` 才覆盖。停用 adapter 或 `osdk deactivate` 会
+恢复原值。token 不写入配置；未允许凭据转发的自定义 endpoint 还会屏蔽环境 token
+和 Hugging Face 隐式 token。匿名自定义 endpoint 还会使用隔离的
+`HF_HOME` / `MODELSCOPE_HOME`，避免持久登录 token 或 cookie 泄漏。
+
 模型 endpoint 复用 source 配置、pin、TTL 和排名：
 
 ```bash

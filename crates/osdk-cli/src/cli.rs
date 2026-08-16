@@ -380,6 +380,30 @@ pub enum ModelCommand {
     Verify { name: String },
     /// Remove all local snapshots for a logical model name.
     Remove { name: String },
+    /// Manage provider environment exported by shell activation.
+    Env {
+        #[command(subcommand)]
+        command: ModelEnvCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelEnvCommand {
+    /// Persistently export provider endpoint/cache variables.
+    Enable {
+        /// Provider to enable; omit to enable both.
+        provider: Option<osdk_core::model::ProviderId>,
+        /// Override provider variables already set by the user.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop exporting provider variables and restore original values.
+    Disable {
+        /// Provider to disable; omit to disable both.
+        provider: Option<osdk_core::model::ProviderId>,
+    },
+    /// Show persisted adapter state and the variables it would export.
+    List,
 }
 
 #[derive(Debug, Subcommand)]

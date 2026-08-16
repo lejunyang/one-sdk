@@ -1219,6 +1219,7 @@ mod tests {
                 disable: vec!["github".into(), "ghproxy".into()],
                 custom: vec![Source::official("fixture", &format!("http://{address}/"))
                     .with_index(&format!("http://{address}/"))],
+                ..Default::default()
             },
         );
         let backend = GithubBackend::from_id("github:example/tool").unwrap();

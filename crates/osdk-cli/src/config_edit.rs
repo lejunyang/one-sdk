@@ -54,6 +54,41 @@ pub fn set_source_pin(ctx: &Ctx, tool: &str, id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn set_model_env(
+    ctx: &Ctx,
+    provider: osdk_core::model::ProviderId,
+    enabled: bool,
+    force: bool,
+) -> Result<()> {
+    let path = ctx.dirs.user_config_file();
+    let mut doc = load_doc(&path)?;
+    let sources = doc
+        .entry("sources")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let sources = sources
+        .as_table_mut()
+        .context("`sources` is not a table in config")?;
+    sources.set_implicit(true);
+    let provider_item = sources
+        .entry(provider.as_str())
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let provider_table = provider_item
+        .as_table_mut()
+        .context("`sources.<provider>` is not a table")?;
+    if enabled {
+        provider_table.insert("env", toml_edit::value(true));
+        if force {
+            provider_table.insert("env_force", toml_edit::value(true));
+        } else {
+            provider_table.remove("env_force");
+        }
+    } else {
+        provider_table.remove("env");
+        provider_table.remove("env_force");
+    }
+    save_doc(&path, &doc)
+}
+
 pub fn set_version_alias(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Result<()> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;

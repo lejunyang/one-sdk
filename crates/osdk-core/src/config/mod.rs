@@ -186,6 +186,12 @@ pub struct ToolSources {
     /// User-added custom sources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom: Vec<Source>,
+    /// Export this model provider's endpoint/cache through shell activation.
+    #[serde(default)]
+    pub env: bool,
+    /// Override pre-existing provider environment variables.
+    #[serde(default)]
+    pub env_force: bool,
 }
 
 /// On-disk config file shape (a subset that users edit).
@@ -224,13 +230,13 @@ impl Config {
         // 1. user global config
         if user_config_file.exists() {
             let file = read_config_file(user_config_file)?;
-            cfg.apply_file(file);
+            cfg.apply_file(file, true);
         }
 
         // 2. project config (nearest ancestor). Also read .tool-versions pins.
         if let Some(start_dir) = start_dir {
             if let Some((path, file)) = find_project_config(start_dir)? {
-                cfg.apply_file(file);
+                cfg.apply_file(file, false);
                 cfg.project_config_path = Some(path);
             }
             if let Some(tv) = find_tool_versions(start_dir)? {
@@ -246,14 +252,19 @@ impl Config {
         Ok(cfg)
     }
 
-    fn apply_file(&mut self, file: ConfigFile) {
+    fn apply_file(&mut self, file: ConfigFile, allow_model_env: bool) {
         if let Some(s) = file.settings {
             self.settings = s;
         }
         if let Some(src) = file.sources {
             // merge: file replaces top-level knobs, per-tool maps merge
             let mut merged = self.sources.per_tool.clone();
-            for (k, v) in src.per_tool {
+            for (k, mut v) in src.per_tool {
+                if !allow_model_env {
+                    let global = merged.get(&k);
+                    v.env = global.is_some_and(|config| config.env);
+                    v.env_force = global.is_some_and(|config| config.env_force);
+                }
                 merged.insert(k, v);
             }
             self.sources = SourcesConfig {
@@ -530,6 +541,42 @@ mod tests {
         let (path, file) = found.unwrap();
         assert_eq!(path, cfg_path);
         assert_eq!(file.tools.get("node").map(|s| s.as_str()), Some("20"));
+    }
+
+    #[test]
+    fn project_sources_cannot_override_global_model_env_switches() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_dir = temporary.path().join("config");
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = config_dir.join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[sources.huggingface]
+env = true
+env_force = true
+pin = "global"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("osdk.toml"),
+            r#"
+[sources.huggingface]
+env = false
+env_force = false
+pin = "project"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&user_config, &project).unwrap();
+        let huggingface = config.tool_sources("huggingface").unwrap();
+        assert!(huggingface.env);
+        assert!(huggingface.env_force);
+        assert_eq!(huggingface.pin.as_deref(), Some("project"));
     }
 
     #[test]

@@ -21,6 +21,30 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("{tool} already installed", "{tool} 已安装"),
     );
     m.insert("msg.uninstalled", ("uninstalled {tool}", "已卸载 {tool}"));
+    m.insert(
+        "msg.model_env_enabled",
+        (
+            "enabled global {provider} model environment{mode}",
+            "已启用全局 {provider} 模型环境{mode}",
+        ),
+    );
+    m.insert(
+        "msg.model_env_disabled",
+        (
+            "disabled global {provider} model environment",
+            "已停用全局 {provider} 模型环境",
+        ),
+    );
+    m.insert(
+        "msg.model_env_refresh",
+        (
+            "active osdk shells refresh on the next prompt",
+            "已激活 osdk 的 shell 会在下一个提示符自动刷新",
+        ),
+    );
+    m.insert("label.enabled", ("enabled", "已启用"));
+    m.insert("label.disabled", ("disabled", "已停用"));
+    m.insert("label.force", (" (force)", "（强制覆盖）"));
     m.insert("msg.cancelled", ("cancelled", "已取消"));
     m.insert(
         "msg.config_trusted",
@@ -903,6 +927,48 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Remove local snapshots for a model",
             "移除某个模型的本地快照",
+        ),
+    );
+    m.insert(
+        "help.model.env.about",
+        (
+            "Manage provider environment exported by shell activation",
+            "管理由 shell activation 导出的模型 Provider 环境",
+        ),
+    );
+    m.insert(
+        "help.model.env.enable.about",
+        (
+            "Persistently export provider endpoint and cache variables",
+            "持久导出模型 Provider endpoint 与缓存变量",
+        ),
+    );
+    m.insert(
+        "help.model.env.enable.arg.provider",
+        (
+            "Provider to enable; omit to enable both",
+            "要启用的 Provider；省略则同时启用两个",
+        ),
+    );
+    m.insert(
+        "help.model.env.enable.flag.force",
+        (
+            "Override provider variables already set by the user",
+            "覆盖用户已设置的模型 Provider 变量",
+        ),
+    );
+    m.insert(
+        "help.model.env.disable.about",
+        (
+            "Stop exporting provider variables and restore original values",
+            "停止导出模型 Provider 变量并恢复原值",
+        ),
+    );
+    m.insert(
+        "help.model.env.list.about",
+        (
+            "Show persisted adapter state and effective exports",
+            "显示持久 adapter 状态与生效导出变量",
         ),
     );
     m.insert(

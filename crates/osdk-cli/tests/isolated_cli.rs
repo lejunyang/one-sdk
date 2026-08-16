@@ -113,6 +113,145 @@ fn attestation_policy_cli_override_is_reported() {
 }
 
 #[test]
+fn global_model_env_enable_force_and_disable_round_trip() {
+    let temporary = tempfile::tempdir().unwrap();
+    let enabled = run_isolated(temporary.path(), &["model", "env", "enable", "huggingface"]);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    let config = std::fs::read_to_string(temporary.path().join("config/config.toml")).unwrap();
+    assert!(config.contains("[sources.huggingface]"));
+    assert!(config.contains("env = true"));
+
+    let hook = run_isolated(temporary.path(), &["hook-env", "--shell", "bash"]);
+    let hook = String::from_utf8(hook.stdout).unwrap();
+    assert!(hook.contains("export HF_ENDPOINT='https://huggingface.co'"));
+    assert!(hook.contains("export HF_HOME="));
+    assert!(hook.contains("export HF_HUB_CACHE="));
+
+    let repeated = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["hook-env", "--shell", "bash"],
+        &[
+            ("HF_ENDPOINT", "https://huggingface.co"),
+            ("OSDK_MANAGED_ENV", "HF_ENDPOINT"),
+            ("OSDK_ORIG_HF_ENDPOINT", "https://user.example"),
+            ("OSDK_ORIG_HF_ENDPOINT_PRESENT", "1"),
+            ("OSDK_ORIG_HF_ENDPOINT_SET", "1"),
+        ],
+    );
+    let repeated = String::from_utf8(repeated.stdout).unwrap();
+    assert!(repeated.contains("export HF_ENDPOINT='https://huggingface.co'"));
+    assert!(!repeated.contains("export HF_ENDPOINT=\"$OSDK_ORIG_HF_ENDPOINT\""));
+
+    let preserved = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["hook-env", "--shell", "bash"],
+        &[("HF_ENDPOINT", "https://user.example")],
+    );
+    let preserved = String::from_utf8(preserved.stdout).unwrap();
+    assert!(!preserved.contains("export HF_ENDPOINT='https://huggingface.co'"));
+
+    let forced = run_isolated(
+        temporary.path(),
+        &["model", "env", "enable", "huggingface", "--force"],
+    );
+    assert!(forced.status.success());
+    let overridden = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["hook-env", "--shell", "bash"],
+        &[("HF_ENDPOINT", "https://user.example")],
+    );
+    assert!(String::from_utf8(overridden.stdout)
+        .unwrap()
+        .contains("export HF_ENDPOINT='https://huggingface.co'"));
+
+    let disabled = run_isolated(
+        temporary.path(),
+        &["model", "env", "disable", "huggingface"],
+    );
+    assert!(disabled.status.success());
+    let restore = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["hook-env", "--shell", "bash"],
+        &[
+            ("HF_ENDPOINT", "https://huggingface.co"),
+            ("OSDK_MANAGED_ENV", "HF_ENDPOINT"),
+            ("OSDK_ORIG_HF_ENDPOINT", "https://user.example"),
+            ("OSDK_ORIG_HF_ENDPOINT_PRESENT", "1"),
+            ("OSDK_ORIG_HF_ENDPOINT_SET", "1"),
+        ],
+    );
+    let restore = String::from_utf8(restore.stdout).unwrap();
+    assert!(restore.contains("export HF_ENDPOINT=\"$OSDK_ORIG_HF_ENDPOINT\""));
+}
+
+#[test]
+fn global_custom_model_endpoint_suppresses_tokens_by_default() {
+    let temporary = tempfile::tempdir().unwrap();
+    let added = run_isolated(
+        temporary.path(),
+        &[
+            "source",
+            "add",
+            "huggingface",
+            "--id",
+            "corp",
+            "--download-url",
+            "https://hub.example.test",
+        ],
+    );
+    assert!(added.status.success());
+    assert!(
+        run_isolated(temporary.path(), &["source", "pin", "huggingface", "corp"])
+            .status
+            .success()
+    );
+    assert!(
+        run_isolated(temporary.path(), &["model", "env", "enable", "huggingface"])
+            .status
+            .success()
+    );
+    let hook = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["hook-env", "--shell", "bash"],
+        &[("HF_TOKEN", "secret")],
+    );
+    let hook = String::from_utf8(hook.stdout).unwrap();
+    assert!(hook.contains("export HF_ENDPOINT='https://hub.example.test'"));
+    assert!(hook.contains("export HF_TOKEN=''"));
+    assert!(hook.contains("export HF_HUB_DISABLE_IMPLICIT_TOKEN='1'"));
+    let config = std::fs::read_to_string(temporary.path().join("config/config.toml")).unwrap();
+    assert!(!config.contains("secret"));
+}
+
+#[test]
+fn activation_scripts_refresh_environment_immediately() {
+    let temporary = tempfile::tempdir().unwrap();
+    for shell in ["bash", "zsh", "fish"] {
+        let output = run_isolated(temporary.path(), &["activate", shell]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let script = String::from_utf8(output.stdout).unwrap();
+        assert!(script.lines().any(|line| line == "_osdk_hook"));
+    }
+    let powershell = run_isolated(temporary.path(), &["activate", "powershell"]);
+    assert!(String::from_utf8(powershell.stdout)
+        .unwrap()
+        .contains("Invoke-OsdkHook"));
+}
+
+#[test]
 fn huggingface_model_pull_materializes_and_locks_snapshot() {
     let payload = br#"{"model":"fixture"}"#.to_vec();
     let digest =
