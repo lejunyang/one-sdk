@@ -199,6 +199,34 @@ osdk install kotlin@2.4.10
 它们拥有独立安装 identity、shim 和内置稳定候选，并分别验证上游 SHA-512 或
 SHA-256。所有工具统一使用离线/cache/lock pipeline，安装时不会调用用户全局 Java。
 
+## Rust 生命周期管理
+
+Rust 仍委托 rustup，但每个生命周期命令都会注入 osdk 隔离的 `RUSTUP_HOME` 和
+`CARGO_HOME`：
+
+```bash
+osdk rust component add rustfmt --toolchain stable
+osdk rust component remove rustfmt --toolchain stable
+osdk rust component list --toolchain stable
+osdk rust target add x86_64-pc-windows-gnu --toolchain stable
+osdk rust target remove x86_64-pc-windows-gnu --toolchain stable
+osdk rust target list --toolchain stable
+osdk rust check --repair
+```
+
+`check` 输出隔离 rustup 的更新状态；`--repair` 对齐真实 rustup 工具链和 osdk
+marker。目录选择默认继续使用 osdk 项目 pin；rustup override 兼容必须显式执行：
+
+```bash
+osdk rust override import [path]
+osdk rust override export [path]
+osdk rust toolchain link local-dev /absolute/toolchain
+```
+
+import 把隔离 rustup override 写入 `osdk.toml`；export 把当前 osdk pin 写回隔离
+rustup。linked toolchain 会暴露本地 `bin`，但禁止作为可复现远程 artifact 写入
+lock。
+
 ## 可复现项目与命令执行
 
 把当前项目解析为精确、按平台区分的版本：

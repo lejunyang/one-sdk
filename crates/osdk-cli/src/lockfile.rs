@@ -191,6 +191,17 @@ pub fn merge_resolved(
         .or_default();
     platform_lock.tools.clear();
     for (request, version) in resolved {
+        if version.backend == "rust"
+            && dirs
+                .install_path("rust", &version.version)
+                .join(".osdk-linked")
+                .is_file()
+        {
+            anyhow::bail!(
+                "linked Rust toolchain `{}` is local-only and cannot be written as a reproducible lock artifact",
+                version.version
+            );
+        }
         let resolved_artifact =
             osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
                 url: receipt.url,
@@ -372,6 +383,28 @@ mod tests {
             restored[0].options[osdk_core::pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION],
             "pyodide-root/dist"
         );
+    }
+
+    #[test]
+    fn linked_rust_toolchain_is_rejected_from_reproducible_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let marker = dirs.install_path("rust", "local-dev");
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(marker.join(".osdk-linked"), "/local/toolchain").unwrap();
+        let error = merge_resolved(
+            &path,
+            linux(),
+            &dirs,
+            &[(
+                ToolRequest::parse("rust@local-dev").unwrap(),
+                ToolVersion::new("rust", "local-dev"),
+            )],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("local-only"));
+        assert!(!path.exists());
     }
 
     #[test]

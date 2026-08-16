@@ -131,6 +131,7 @@ fn localize_subcommands(cmd: Command) -> Command {
                 .mut_arg("request", |a| a.help(h("help.python.find.arg.request")))
         })
     })
+    .mut_subcommand("rust", |c| c.about(h("help.rust.about")))
     .mut_subcommand("cache", |c| {
         c.about(h("help.cache.about"))
             .mut_subcommand("dir", |s| s.about(h("help.cache.dir.about")))

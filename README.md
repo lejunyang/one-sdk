@@ -198,6 +198,35 @@ Each has its own install identity, shims, built-in stable candidate, and
 upstream SHA-512 or SHA-256 checksum. All use the shared offline/cache/lock
 pipeline and never call a user-global Java installation during install.
 
+## Rust lifecycle management
+
+Rust remains delegated to rustup, but every lifecycle command injects osdk's
+isolated `RUSTUP_HOME` and `CARGO_HOME`:
+
+```bash
+osdk rust component add rustfmt --toolchain stable
+osdk rust component remove rustfmt --toolchain stable
+osdk rust component list --toolchain stable
+osdk rust target add x86_64-pc-windows-gnu --toolchain stable
+osdk rust target remove x86_64-pc-windows-gnu --toolchain stable
+osdk rust target list --toolchain stable
+osdk rust check --repair
+```
+
+`check` prints isolated rustup update status; `--repair` reconciles real rustup
+toolchains with osdk markers. osdk project pins remain the default directory
+selection mechanism. Compatibility with rustup overrides is explicit:
+
+```bash
+osdk rust override import [path]
+osdk rust override export [path]
+osdk rust toolchain link local-dev /absolute/toolchain
+```
+
+Import writes the isolated rustup override to `osdk.toml`; export writes the
+active osdk pin to isolated rustup. Linked toolchains expose their local `bin`
+directory but are rejected from reproducible remote lock artifacts.
+
 ## Reproducible projects and execution
 
 Resolve the current project to exact, platform-specific versions:

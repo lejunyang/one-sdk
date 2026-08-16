@@ -48,6 +48,87 @@ impl RustBackend {
         ctx.dirs.cargo_home().join("bin").join(exe)
     }
 
+    pub fn run_rustup(
+        ctx: &Ctx,
+        args: &[&str],
+        cwd: Option<&std::path::Path>,
+    ) -> Result<std::process::Output> {
+        let rustup = Self::rustup_bin(ctx);
+        if !rustup.is_file() {
+            return Err(Error::other(format!(
+                "isolated rustup is missing at {}; install Rust first",
+                rustup.display()
+            )));
+        }
+        let env = Self::rustup_env(ctx, None);
+        process::output(&rustup.display().to_string(), args, &env, cwd)
+    }
+
+    pub fn reconcile_markers(ctx: &Ctx) -> Result<(usize, usize)> {
+        let toolchains = ctx.dirs.rustup_home().join("toolchains");
+        let marker_root = ctx.dirs.installs.join("rust");
+        crate::dirs::create_dir_all(&marker_root)?;
+        let mut created = 0usize;
+        let mut removed = 0usize;
+        let mut actual = std::collections::BTreeSet::new();
+        if toolchains.is_dir() {
+            for entry in
+                std::fs::read_dir(&toolchains).map_err(|error| Error::io(&toolchains, error))?
+            {
+                let entry = entry.map_err(|error| Error::io(&toolchains, error))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|error| Error::io(entry.path(), error))?;
+                if !file_type.is_dir() && !file_type.is_symlink() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                actual.insert(name.clone());
+                let marker = marker_root.join(&name);
+                if !marker.join(".osdk-complete").is_file() {
+                    crate::dirs::create_dir_all(&marker)?;
+                    std::fs::write(marker.join(".osdk-complete"), b"")
+                        .map_err(|error| Error::io(marker.join(".osdk-complete"), error))?;
+                    created += 1;
+                }
+            }
+        }
+        if marker_root.is_dir() {
+            for entry in
+                std::fs::read_dir(&marker_root).map_err(|error| Error::io(&marker_root, error))?
+            {
+                let entry = entry.map_err(|error| Error::io(&marker_root, error))?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || actual.contains(&name) {
+                    continue;
+                }
+                if entry.path().is_dir() {
+                    std::fs::remove_dir_all(entry.path())
+                        .map_err(|error| Error::io(entry.path(), error))?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok((created, removed))
+    }
+
+    pub fn record_linked_toolchain(ctx: &Ctx, name: &str, path: &std::path::Path) -> Result<()> {
+        let marker = ctx.dirs.install_path("rust", name);
+        crate::dirs::create_dir_all(&marker)?;
+        let canonical = dunce::canonicalize(path).map_err(|error| Error::io(path, error))?;
+        std::fs::write(marker.join(".osdk-linked"), canonical.display().to_string())
+            .map_err(|error| Error::io(marker.join(".osdk-linked"), error))?;
+        std::fs::write(marker.join(".osdk-complete"), b"")
+            .map_err(|error| Error::io(marker.join(".osdk-complete"), error))
+    }
+
+    pub fn linked_path(ctx: &Ctx, name: &str) -> Option<PathBuf> {
+        let marker = ctx.dirs.install_path("rust", name).join(".osdk-linked");
+        let value = std::fs::read_to_string(marker).ok()?;
+        let path = PathBuf::from(value.trim());
+        path.is_dir().then_some(path)
+    }
+
     /// Ensure rustup is installed into osdk's isolated cargo home.
     async fn ensure_rustup(ctx: &Ctx, sources: &[Source]) -> Result<PathBuf> {
         let local = Self::rustup_bin(ctx);
@@ -307,6 +388,9 @@ impl Backend for RustBackend {
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
+        if let Some(linked) = Self::linked_path(ctx, &tv.version) {
+            return Ok(vec![linked.join("bin"), ctx.dirs.cargo_home().join("bin")]);
+        }
         // rustup toolchain bins live at RUSTUP_HOME/toolchains/<name>/bin.
         let toolchain_dir = Self::toolchain_dir(ctx, &tv.version);
         Ok(vec![

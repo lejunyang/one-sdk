@@ -9,7 +9,8 @@ use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 
 use crate::app::App;
 use crate::cli::{
-    AliasCommand, ConfigCommand, NodeCommand, PythonCommand, SourceCommand, TrustCommand,
+    AliasCommand, ConfigCommand, NodeCommand, PythonCommand, RustCommand, RustItemCommand,
+    RustOverrideCommand, RustToolchainCommand, SourceCommand, TrustCommand,
 };
 
 /// Apply a one-shot `--source` override into the config for this run.
@@ -843,6 +844,164 @@ pub fn python(app: &App, command: PythonCommand) -> Result<()> {
     match command {
         PythonCommand::Find { request } => find_python(app, request.as_deref()),
     }
+}
+
+pub fn rust(app: &App, command: RustCommand) -> Result<()> {
+    match command {
+        RustCommand::Component { command } => rust_item(app, "component", command),
+        RustCommand::Target { command } => rust_item(app, "target", command),
+        RustCommand::Check { repair } => rust_check(app, repair),
+        RustCommand::Override { command } => rust_override(app, command),
+        RustCommand::Toolchain { command } => rust_toolchain(app, command),
+    }
+}
+
+fn rust_item(app: &App, kind: &str, command: RustItemCommand) -> Result<()> {
+    let (operation, name, toolchain) = match command {
+        RustItemCommand::Add { name, toolchain } => ("add", Some(name), toolchain),
+        RustItemCommand::Remove { name, toolchain } => ("remove", Some(name), toolchain),
+        RustItemCommand::List { toolchain } => ("list", None, toolchain),
+    };
+    let mut args = vec![kind, operation];
+    if let Some(name) = name.as_deref() {
+        args.push(name);
+    }
+    args.extend(["--toolchain", &toolchain]);
+    let output = osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &args, None)?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
+}
+
+fn rust_check(app: &App, repair: bool) -> Result<()> {
+    let output = osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &["check"], None)?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    if repair {
+        let (created, removed) =
+            osdk_core::backend::rust::RustBackend::reconcile_markers(&app.ctx)?;
+        println!(
+            "{}",
+            t!(
+                "msg.rust_markers_repaired",
+                created = created,
+                removed = removed
+            )
+        );
+    }
+    Ok(())
+}
+
+fn rust_override(app: &App, command: RustOverrideCommand) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    match command {
+        RustOverrideCommand::Import { path } => {
+            let directory = path.unwrap_or(cwd);
+            let output = osdk_core::backend::rust::RustBackend::run_rustup(
+                &app.ctx,
+                &["override", "list"],
+                None,
+            )?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let canonical = dunce_path(&directory)?;
+            let toolchain = parse_rustup_override(&text, &canonical).ok_or_else(|| {
+                anyhow!(
+                    "no isolated rustup override found for {}",
+                    canonical.display()
+                )
+            })?;
+            let path = crate::config_edit::set_project_tool("rust", &toolchain)?;
+            println!(
+                "{}",
+                t!(
+                    "msg.rust_override_imported",
+                    toolchain = toolchain,
+                    path = path.display()
+                )
+            );
+        }
+        RustOverrideCommand::Export { path } => {
+            let directory = path.unwrap_or(cwd);
+            let active = osdk_core::version::resolver::resolve_active(
+                "rust",
+                &directory,
+                &app.ctx.config.tools,
+                &["rust-toolchain.toml", "rust-toolchain"],
+            )
+            .ok_or_else(|| anyhow!("no active osdk Rust version for {}", directory.display()))?;
+            let canonical = dunce_path(&directory)?;
+            let path_arg = canonical.display().to_string();
+            osdk_core::backend::rust::RustBackend::run_rustup(
+                &app.ctx,
+                &["override", "set", &active.spec, "--path", &path_arg],
+                None,
+            )?;
+            println!(
+                "{}",
+                t!(
+                    "msg.rust_override_exported",
+                    toolchain = active.spec,
+                    path = canonical.display()
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
+fn rust_toolchain(app: &App, command: RustToolchainCommand) -> Result<()> {
+    match command {
+        RustToolchainCommand::Link { name, path } => {
+            validate_rust_link_name(&name)?;
+            let canonical = dunce_path(&path)?;
+            if !canonical.join("bin").is_dir() {
+                return Err(anyhow!(
+                    "linked Rust toolchain must contain bin/: {}",
+                    canonical.display()
+                ));
+            }
+            let path_arg = canonical.display().to_string();
+            osdk_core::backend::rust::RustBackend::run_rustup(
+                &app.ctx,
+                &["toolchain", "link", &name, &path_arg],
+                None,
+            )?;
+            osdk_core::backend::rust::RustBackend::record_linked_toolchain(
+                &app.ctx, &name, &canonical,
+            )?;
+            println!(
+                "{}",
+                t!(
+                    "msg.rust_toolchain_linked",
+                    name = name,
+                    path = canonical.display()
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
+fn dunce_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    dunce::canonicalize(path).with_context(|| format!("canonicalizing {}", path.display()))
+}
+
+fn parse_rustup_override(text: &str, path: &std::path::Path) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (directory, toolchain) = line.rsplit_once(char::is_whitespace)?;
+        (dunce::canonicalize(directory).ok().as_deref() == Some(path))
+            .then(|| toolchain.trim().to_string())
+    })
+}
+
+fn validate_rust_link_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.contains(['/', '\\'])
+        || name == "."
+        || name == ".."
+        || name.chars().any(char::is_whitespace)
+    {
+        return Err(anyhow!("invalid linked Rust toolchain name `{name}`"));
+    }
+    Ok(())
 }
 
 fn find_python(app: &App, request: Option<&str>) -> Result<()> {

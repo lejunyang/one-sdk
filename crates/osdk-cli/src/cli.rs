@@ -229,6 +229,12 @@ pub enum Command {
         command: PythonCommand,
     },
 
+    /// Manage Rust components, targets, status, overrides, and linked toolchains.
+    Rust {
+        #[command(subcommand)]
+        command: RustCommand,
+    },
+
     /// Manage the shared caches (SDK store + downstream package caches).
     Cache {
         #[command(subcommand)]
@@ -322,6 +328,74 @@ pub enum PythonCommand {
     Find {
         /// Optional Python request, e.g. `pypy-3.11` or `3.14+freethreaded`.
         request: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RustCommand {
+    /// Manage installed rustup components.
+    Component {
+        #[command(subcommand)]
+        command: RustItemCommand,
+    },
+    /// Manage installed rustup targets.
+    Target {
+        #[command(subcommand)]
+        command: RustItemCommand,
+    },
+    /// Check updates and repair osdk markers from isolated rustup state.
+    Check {
+        /// Repair stale or missing osdk marker directories.
+        #[arg(long)]
+        repair: bool,
+    },
+    /// Explicitly import or export rustup directory overrides.
+    Override {
+        #[command(subcommand)]
+        command: RustOverrideCommand,
+    },
+    /// Manage linked/custom Rust toolchains.
+    Toolchain {
+        #[command(subcommand)]
+        command: RustToolchainCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RustItemCommand {
+    /// Install a component or target.
+    Add {
+        name: String,
+        #[arg(long, default_value = "stable")]
+        toolchain: String,
+    },
+    /// Uninstall a component or target.
+    Remove {
+        name: String,
+        #[arg(long, default_value = "stable")]
+        toolchain: String,
+    },
+    /// List installed and available components or targets.
+    List {
+        #[arg(long, default_value = "stable")]
+        toolchain: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RustOverrideCommand {
+    /// Import the rustup override for a directory into osdk.toml.
+    Import { path: Option<std::path::PathBuf> },
+    /// Export the active osdk Rust pin as an explicit rustup override.
+    Export { path: Option<std::path::PathBuf> },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RustToolchainCommand {
+    /// Link a local toolchain path under an osdk/rustup name.
+    Link {
+        name: String,
+        path: std::path::PathBuf,
     },
 }
 

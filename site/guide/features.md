@@ -138,6 +138,32 @@ osdk install kotlin@2.4.10
 三者分别拥有独立版本、目录和 shim，并验证 Apache SHA-512、Gradle SHA-256 与
 Kotlin SHA-256。离线安装和 lock 行为与其他 backend 一致。
 
+## Rust 组件、目标与工具链
+
+以下命令全部使用 osdk 隔离的 `RUSTUP_HOME` / `CARGO_HOME`：
+
+```bash
+osdk rust component add rustfmt --toolchain stable
+osdk rust component remove rustfmt --toolchain stable
+osdk rust component list --toolchain stable
+osdk rust target add x86_64-pc-windows-gnu --toolchain stable
+osdk rust target remove x86_64-pc-windows-gnu --toolchain stable
+osdk rust target list --toolchain stable
+osdk rust check --repair
+```
+
+`check` 解析隔离 rustup 状态；repair 会补建缺失 marker 并清理没有真实工具链的
+marker。osdk 项目配置是默认目录选择机制；需要与 rustup override 互操作时必须
+显式 import/export：
+
+```bash
+osdk rust override import ./repo
+osdk rust override export ./repo
+osdk rust toolchain link local-dev /absolute/toolchain
+```
+
+linked toolchain 可本地执行，但会被可复现 lock 明确拒绝。
+
 ## 项目配置信任
 
 项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。

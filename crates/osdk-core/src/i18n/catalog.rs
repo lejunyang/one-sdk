@@ -83,6 +83,34 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.rust_markers_repaired",
+        (
+            "Rust markers repaired: {created} created, {removed} removed",
+            "Rust 标记已修复：创建 {created} 个，移除 {removed} 个",
+        ),
+    );
+    m.insert(
+        "msg.rust_override_imported",
+        (
+            "imported rustup override {toolchain} into {path}",
+            "已将 rustup override {toolchain} 导入 {path}",
+        ),
+    );
+    m.insert(
+        "msg.rust_override_exported",
+        (
+            "exported Rust {toolchain} override for {path}",
+            "已为 {path} 导出 Rust {toolchain} override",
+        ),
+    );
+    m.insert(
+        "msg.rust_toolchain_linked",
+        (
+            "linked Rust toolchain {name} -> {path}",
+            "已链接 Rust 工具链 {name} -> {path}",
+        ),
+    );
+    m.insert(
         "msg.nothing_to_install",
         (
             "nothing to install (no tools given and no config pins found)",
@@ -800,6 +828,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Optional request such as pypy-3.11 or 3.14+freethreaded",
             "可选请求，例如 pypy-3.11 或 3.14+freethreaded",
+        ),
+    );
+    m.insert(
+        "help.rust.about",
+        (
+            "Manage isolated Rust components, targets, overrides, and linked toolchains",
+            "管理隔离的 Rust 组件、目标、override 和链接工具链",
         ),
     );
     m.insert(

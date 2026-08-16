@@ -147,6 +147,34 @@ Each has an independent version, directory, and shim, with Apache SHA-512,
 Gradle SHA-256, or Kotlin SHA-256 verification. Offline and lock behavior is
 the same as other backends.
 
+## Rust components, targets, and toolchains
+
+All commands below use osdk's isolated `RUSTUP_HOME` and `CARGO_HOME`:
+
+```bash
+osdk rust component add rustfmt --toolchain stable
+osdk rust component remove rustfmt --toolchain stable
+osdk rust component list --toolchain stable
+osdk rust target add x86_64-pc-windows-gnu --toolchain stable
+osdk rust target remove x86_64-pc-windows-gnu --toolchain stable
+osdk rust target list --toolchain stable
+osdk rust check --repair
+```
+
+`check` parses isolated rustup status. Repair creates missing markers and
+removes markers without a real toolchain. osdk project configuration remains
+the default directory-selection mechanism; rustup override compatibility is
+explicit:
+
+```bash
+osdk rust override import ./repo
+osdk rust override export ./repo
+osdk rust toolchain link local-dev /absolute/toolchain
+```
+
+Linked toolchains can execute locally but are explicitly rejected from
+reproducible lock artifacts.
+
 ## Project configuration trust
 
 Project `[tools]` pins and `[aliases]` are safe data and load without trust.

@@ -39,6 +39,34 @@ pub fn run(
     }
 }
 
+pub fn output(
+    program: &str,
+    args: &[&str],
+    env: &BTreeMap<String, String>,
+    cwd: Option<&Path>,
+) -> Result<std::process::Output> {
+    let mut command = Command::new(program);
+    command.args(args);
+    command.envs(env);
+    if let Some(directory) = cwd {
+        command.current_dir(directory);
+    }
+    let output = command.output().map_err(|error| Error::Command {
+        cmd: format!("{program} {}", args.join(" ")),
+        status: format!("failed to spawn: {error}"),
+        stderr: None,
+    })?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(Error::Command {
+            cmd: format!("{program} {}", args.join(" ")),
+            status: output.status.to_string(),
+            stderr: Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+        })
+    }
+}
+
 /// Whether `program` is resolvable on PATH.
 pub fn exists(program: &str) -> bool {
     which::which(program).is_ok()

@@ -317,9 +317,8 @@ fn doctor_creates_state_only_under_isolated_root() {
     assert!(temp.path().join("cache/downloads").is_dir());
     assert!(temp.path().join("config").is_dir());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(
-        "node, go, python, java, maven, gradle, kotlin, rust, pnpm, yarn, deno, bun"
-    ));
+    assert!(stdout
+        .contains("node, go, python, java, maven, gradle, kotlin, rust, pnpm, yarn, deno, bun"));
 }
 
 #[test]
@@ -917,6 +916,161 @@ fi
     let calls = std::fs::read_to_string(calls).unwrap();
     assert!(calls.contains("uninstall -g broken"));
     assert!(calls.contains("install -g typescript@5.5.0"));
+}
+
+#[cfg(unix)]
+fn write_fake_rustup(root: &Path, project: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rustup = root.join("data/cargo/bin/rustup");
+    std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
+    let log = root.join("rustup-calls.log");
+    std::fs::write(
+        &rustup,
+        format!(
+            r#"#!/bin/sh
+printf '%s|%s|%s\n' "$RUSTUP_HOME" "$CARGO_HOME" "$*" >> '{}'
+case "$1 $2" in
+  "component list") printf 'rustfmt-x86_64-unknown-linux-gnu (installed)\n' ;;
+  "target list") printf 'x86_64-unknown-linux-gnu (installed)\n' ;;
+  "check ") printf 'stable - Up to date\n' ;;
+  "override list") printf '{} stable-x86_64-unknown-linux-gnu\n' ;;
+esac
+"#,
+            log.display(),
+            project.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+    rustup
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_lifecycle_commands_use_isolated_rustup_and_repair_markers() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    write_fake_rustup(temp.path(), &project);
+    std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
+    let stale = temp.path().join("installs/rust/stale");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join(".osdk-complete"), b"").unwrap();
+
+    for args in [
+        vec![
+            "rust",
+            "component",
+            "add",
+            "rustfmt",
+            "--toolchain",
+            "stable",
+        ],
+        vec![
+            "rust",
+            "component",
+            "remove",
+            "rustfmt",
+            "--toolchain",
+            "stable",
+        ],
+        vec!["rust", "component", "list", "--toolchain", "stable"],
+        vec![
+            "rust",
+            "target",
+            "add",
+            "x86_64-pc-windows-gnu",
+            "--toolchain",
+            "stable",
+        ],
+        vec![
+            "rust",
+            "target",
+            "remove",
+            "x86_64-pc-windows-gnu",
+            "--toolchain",
+            "stable",
+        ],
+        vec!["rust", "target", "list", "--toolchain", "stable"],
+        vec!["rust", "check", "--repair"],
+    ] {
+        let output = run_isolated_in(temp.path(), &project, &args);
+        assert!(
+            output.status.success(),
+            "args={args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let calls = std::fs::read_to_string(temp.path().join("rustup-calls.log")).unwrap();
+    let rustup_home = temp.path().join("data/rustup").display().to_string();
+    let cargo_home = temp.path().join("data/cargo").display().to_string();
+    for line in calls.lines() {
+        assert!(line.starts_with(&format!("{rustup_home}|{cargo_home}|")));
+    }
+    assert!(calls.contains("component add rustfmt --toolchain stable"));
+    assert!(calls.contains("target add x86_64-pc-windows-gnu --toolchain stable"));
+    assert!(calls.contains("|check"));
+    assert!(temp
+        .path()
+        .join("installs/rust/stable/.osdk-complete")
+        .is_file());
+    assert!(!stale.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_override_import_export_and_toolchain_link_are_explicit() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    write_fake_rustup(temp.path(), &project);
+
+    let import = run_isolated_in(temp.path(), &project, &["rust", "override", "import"]);
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
+    assert!(config.contains("rust = \"stable-x86_64-unknown-linux-gnu\""));
+
+    let export = run_isolated_in(temp.path(), &project, &["rust", "override", "export"]);
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+
+    let linked = temp.path().join("custom-rust");
+    std::fs::create_dir_all(linked.join("bin")).unwrap();
+    let link = run_isolated_in(
+        temp.path(),
+        &project,
+        &[
+            "rust",
+            "toolchain",
+            "link",
+            "local-dev",
+            &linked.to_string_lossy(),
+        ],
+    );
+    assert!(
+        link.status.success(),
+        "{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("installs/rust/local-dev/.osdk-linked")).unwrap(),
+        std::fs::canonicalize(&linked)
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    let calls = std::fs::read_to_string(temp.path().join("rustup-calls.log")).unwrap();
+    assert!(calls.contains("override list"));
+    assert!(calls.contains("override set stable-x86_64-unknown-linux-gnu --path"));
+    assert!(calls.contains("toolchain link local-dev"));
 }
 
 #[cfg(unix)]
