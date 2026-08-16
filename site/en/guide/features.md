@@ -395,8 +395,12 @@ The policy is also available as `settings.attestations` or
 
 The implementation checks the Fulcio certificate chain and SCT, GitHub Actions
 OIDC issuer and repository, artifact signature, DSSE subject digest, Rekor body
-consistency, and signing time. Upstream `sigstore` 0.14 does not yet verify the
-Rekor Merkle inclusion proof or Signed Entry Timestamp.
+consistency, and signing time. It also verifies the Rekor Signed Entry
+Timestamp with the trusted log key, the signed checkpoint, the root/tree-size
+binding, and the Merkle inclusion path. Missing, tampered, or mismatched proofs
+fail offline verification. New evidence is recorded as
+`sigstore-bundle+rekor`; legacy `sigstore-bundle` records remain readable but
+are audit data only.
 
 ## Arbitrary GitHub Release tools
 

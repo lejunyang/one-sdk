@@ -461,7 +461,7 @@ subdir = "install"
   "file_name": "gh.tar.gz",
   "checksum": "sha256:00",
   "evidence": [{
-    "kind": "sigstore-bundle",
+    "kind": "sigstore-bundle+rekor",
     "repository": "cli/cli",
     "issuer": "https://token.actions.githubusercontent.com",
     "digest": "sha256:00"
@@ -486,6 +486,7 @@ subdir = "install"
             .as_ref()
             .unwrap();
         assert_eq!(artifact.evidence.len(), 1);
+        assert_eq!(artifact.evidence[0].kind, "sigstore-bundle+rekor");
         assert_eq!(artifact.evidence[0].repository, "cli/cli");
 
         let requests = locked_requests(&path, linux()).unwrap().unwrap();

@@ -500,9 +500,13 @@ reverify them without trusting lockfile evidence.
 Verification uses the embedded Sigstore public-good trust root, checks the
 Fulcio certificate chain and SCT, GitHub Actions OIDC issuer and repository,
 artifact signature, DSSE subject digest, Rekor body consistency, and signing
-time. The upstream `sigstore` 0.14 verifier does not yet verify the Rekor
-Merkle inclusion proof or Signed Entry Timestamp (SET); do not treat this mode
-as complete transparency-log proof verification.
+time. It also verifies the Rekor Signed Entry Timestamp against the trusted log
+key, the signed checkpoint, the proof's root/tree-size binding, and the Merkle
+path for the canonical log entry. All proof checks are offline and any missing,
+tampered, or mismatched transparency material fails verification. Newly written
+receipt and lock evidence uses the `sigstore-bundle+rekor` kind; legacy
+`sigstore-bundle` evidence remains readable but is never used as a trust
+shortcut.
 
 ## Architecture
 

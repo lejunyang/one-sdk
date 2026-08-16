@@ -466,9 +466,11 @@ osdk --attestations required install github:cli/cli@latest
 
 验证使用内置 Sigstore public-good trust root，检查 Fulcio certificate chain 和
 SCT、GitHub Actions OIDC issuer 与仓库、artifact signature、DSSE subject digest、
-Rekor body 一致性和 signing time。上游 `sigstore` 0.14 verifier 尚未验证 Rekor
-Merkle inclusion proof 或 Signed Entry Timestamp（SET），不要把该模式视为完整
-transparency-log proof 验证。
+Rekor body 一致性和 signing time。它还会使用受信任日志 key 验证 Rekor Signed
+Entry Timestamp（SET）、signed checkpoint、proof 的 root/tree-size 绑定和
+canonical log entry 的 Merkle path。全部 proof 检查均可离线完成；proof 缺失、
+篡改或不匹配都会失败。新 receipt/lock 证据使用 `sigstore-bundle+rekor` kind；
+旧 `sigstore-bundle` 证据仍可读取，但绝不会成为跳过信任校验的捷径。
 
 ## 架构
 

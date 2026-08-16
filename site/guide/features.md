@@ -369,8 +369,10 @@ osdk --attestations required install github:cli/cli@latest
 - `required`：必须存在且通过验证。
 
 当前实现验证 Fulcio 证书链、SCT、GitHub Actions OIDC 颁发者与仓库、归档
-签名、DSSE subject digest、Rekor body 一致性和签名时间。上游 `sigstore`
-0.14 尚不验证 Rekor Merkle inclusion proof 或 Signed Entry Timestamp。
+签名、DSSE subject digest、Rekor body 一致性和签名时间。它还会使用受信任日志
+key 验证 Rekor Signed Entry Timestamp、signed checkpoint、root/tree-size 绑定
+和 Merkle inclusion path。proof 缺失、篡改或不匹配都会让离线验证失败。新证据
+记录为 `sigstore-bundle+rekor`；旧 `sigstore-bundle` 仍可读取，但只作为审计数据。
 
 ## 任意 GitHub Release 工具
 

@@ -1,12 +1,13 @@
 //! GitHub artifact-attestation acquisition, caching, and Sigstore verification.
 //!
-//! The upstream `sigstore` 0.14 bundle verifier validates the Fulcio chain and
-//! SCT, certificate policy, artifact signature, DSSE digest, Rekor body
-//! consistency, and signing time. Its bundle verifier does not yet validate
-//! Rekor Merkle inclusion proofs or Signed Entry Timestamps.
+//! Verification includes the Fulcio chain and SCT, certificate policy,
+//! artifact signature, DSSE digest, Rekor body consistency, Signed Entry
+//! Timestamp, checkpoint signature, Merkle inclusion proof, and signing time.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sigstore::bundle::verify::{
@@ -16,7 +17,12 @@ use sigstore::bundle::verify::{
     Verifier,
 };
 use sigstore::bundle::Bundle;
+use sigstore::crypto::{CosignVerificationKey, Signature};
+use sigstore::rekor::models::{
+    checkpoint::SignedCheckpoint, inclusion_proof::InclusionProof as RekorInclusionProof,
+};
 use sigstore::trust::sigstore::SigstoreTrustRoot;
+use sigstore::trust::TrustRoot;
 
 use crate::config::AttestationPolicy;
 use crate::dirs::Dirs;
@@ -152,6 +158,7 @@ async fn verify_bundles_for_repository(
 ) -> Result<Option<VerificationEvidence>> {
     let trust_root = SigstoreTrustRoot::from_trusted_root_json_unchecked(TRUSTED_ROOT)
         .map_err(|error| Error::other(format!("invalid embedded Sigstore trust root: {error}")))?;
+    let rekor_keys = load_rekor_keys(&trust_root)?;
     let verifier = Verifier::new(Default::default(), trust_root)
         .map_err(|error| Error::other(format!("building Sigstore verifier: {error}")))?;
     let repository = format!("{owner}/{repo}");
@@ -169,13 +176,17 @@ async fn verify_bundles_for_repository(
                 continue;
             }
         };
+        if let Err(error) = verify_rekor_transparency(&bundle, &rekor_keys) {
+            errors.push(error.to_string());
+            continue;
+        }
         let file = tokio::fs::File::open(artifact)
             .await
             .map_err(|error| Error::io(artifact, error))?;
         match verifier.verify(file, bundle, &policy, true).await {
             Ok(()) => {
                 return Ok(Some(VerificationEvidence {
-                    kind: "sigstore-bundle".into(),
+                    kind: "sigstore-bundle+rekor".into(),
                     repository,
                     issuer: GITHUB_OIDC_ISSUER.into(),
                     digest: format!("sha256:{digest}"),
@@ -188,6 +199,129 @@ async fn verify_bundles_for_repository(
         "GitHub artifact attestation verification failed: {}",
         errors.join("; ")
     )))
+}
+
+fn load_rekor_keys(trust_root: &impl TrustRoot) -> Result<BTreeMap<String, CosignVerificationKey>> {
+    trust_root
+        .rekor_keys()
+        .map_err(|error| Error::other(format!("loading Rekor trust root keys: {error}")))?
+        .into_iter()
+        .map(|(id, bytes)| {
+            CosignVerificationKey::try_from_der(bytes)
+                .map_err(|error| Error::other(format!("invalid Rekor public key `{id}`: {error}")))
+                .map(|key| (id, key))
+        })
+        .collect()
+}
+
+fn verify_rekor_transparency(
+    bundle: &Bundle,
+    rekor_keys: &BTreeMap<String, CosignVerificationKey>,
+) -> Result<()> {
+    let material = bundle
+        .verification_material
+        .as_ref()
+        .ok_or_else(|| Error::other("Sigstore bundle missing verification material"))?;
+    let [entry] = material.tlog_entries.as_slice() else {
+        return Err(Error::other(format!(
+            "Sigstore bundle requires exactly one transparency log entry, got {}",
+            material.tlog_entries.len()
+        )));
+    };
+    let log_id = entry
+        .log_id
+        .as_ref()
+        .ok_or_else(|| Error::other("Sigstore bundle transparency entry missing log ID"))?;
+    let key_id = hex::encode(&log_id.key_id);
+    if key_id.is_empty() {
+        return Err(Error::other(
+            "Sigstore bundle transparency entry has empty log ID",
+        ));
+    }
+    let rekor_key = rekor_keys
+        .get(&key_id)
+        .ok_or_else(|| Error::other(format!("untrusted Rekor log ID `{key_id}`")))?;
+    if entry.log_index < 0 || entry.integrated_time < 0 {
+        return Err(Error::other(
+            "Sigstore bundle transparency entry has negative index or time",
+        ));
+    }
+    if entry.canonicalized_body.is_empty() {
+        return Err(Error::other(
+            "Sigstore bundle transparency entry has empty canonical body",
+        ));
+    }
+
+    let promise = entry
+        .inclusion_promise
+        .as_ref()
+        .ok_or_else(|| Error::other("Sigstore bundle missing Rekor Signed Entry Timestamp"))?;
+    if promise.signed_entry_timestamp.is_empty() {
+        return Err(Error::other(
+            "Sigstore bundle has empty Rekor Signed Entry Timestamp",
+        ));
+    }
+    let set_payload = serde_json::json!({
+        "body": base64::engine::general_purpose::STANDARD.encode(&entry.canonicalized_body),
+        "integratedTime": entry.integrated_time,
+        "logIndex": entry.log_index,
+        "logID": key_id,
+    });
+    let canonical_set = serde_json_canonicalizer::to_vec(&set_payload)
+        .map_err(|error| Error::other(format!("canonicalizing Rekor SET payload: {error}")))?;
+    rekor_key
+        .verify_signature(
+            Signature::Raw(&promise.signed_entry_timestamp),
+            &canonical_set,
+        )
+        .map_err(|error| Error::other(format!("Rekor SET verification failed: {error}")))?;
+
+    let proof = entry
+        .inclusion_proof
+        .as_ref()
+        .ok_or_else(|| Error::other("Sigstore bundle missing Rekor inclusion proof"))?;
+    if proof.log_index < 0 {
+        return Err(Error::other(format!(
+            "invalid Rekor proof index {}",
+            proof.log_index
+        )));
+    }
+    let root_hash = fixed_sha256(&proof.root_hash, "root hash")?;
+    let hashes = proof
+        .hashes
+        .iter()
+        .enumerate()
+        .map(|(index, hash)| fixed_sha256(hash, &format!("path hash {index}")))
+        .collect::<Result<Vec<_>>>()?;
+    let checkpoint = proof
+        .checkpoint
+        .as_ref()
+        .ok_or_else(|| Error::other("Sigstore bundle inclusion proof missing checkpoint"))?;
+    let signed_checkpoint: SignedCheckpoint =
+        serde_json::from_value(serde_json::Value::String(checkpoint.envelope.clone()))
+            .map_err(|error| Error::other(format!("invalid Rekor checkpoint: {error}")))?;
+    let tree_size = u64::try_from(proof.tree_size)
+        .map_err(|_| Error::other(format!("invalid Rekor tree size {}", proof.tree_size)))?;
+    let proof = RekorInclusionProof::new(
+        proof.log_index,
+        root_hash,
+        tree_size,
+        hashes,
+        Some(signed_checkpoint),
+    );
+    proof
+        .verify(&entry.canonicalized_body, rekor_key)
+        .map_err(|error| {
+            Error::other(format!(
+                "Rekor inclusion proof verification failed: {error}"
+            ))
+        })
+}
+
+fn fixed_sha256(bytes: &[u8], field: &str) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| Error::other(format!("Rekor {field} must contain exactly 32 bytes")))
 }
 
 async fn fetch_attestations(
@@ -358,6 +492,20 @@ mod tests {
         bundle
     }
 
+    fn fixture_bundle_value() -> serde_json::Value {
+        serde_json::from_slice(&fixture_bundle()).unwrap()
+    }
+
+    fn fixture_rekor_keys() -> BTreeMap<String, CosignVerificationKey> {
+        let trust_root = SigstoreTrustRoot::from_trusted_root_json_unchecked(TRUSTED_ROOT).unwrap();
+        load_rekor_keys(&trust_root).unwrap()
+    }
+
+    fn verify_fixture_transparency(bundle: serde_json::Value) -> Result<()> {
+        let bundle: Bundle = serde_json::from_value(bundle)?;
+        verify_rekor_transparency(&bundle, &fixture_rekor_keys())
+    }
+
     fn test_dirs(root: &Path) -> Dirs {
         let dirs = Dirs::resolve_from(|key| match key {
             "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
@@ -433,13 +581,93 @@ mod tests {
         assert_eq!(
             evidence,
             VerificationEvidence {
-                kind: "sigstore-bundle".into(),
+                kind: "sigstore-bundle+rekor".into(),
                 repository: "kubewarden/kubewarden-controller".into(),
                 issuer: GITHUB_OIDC_ISSUER.into(),
                 digest: "sha256:c811d58de79c92f03214e63aa339484e488d694ae8a6283b5f3f17a9faf50172"
                     .into(),
             }
         );
+    }
+
+    #[test]
+    fn rejects_bundle_without_rekor_inclusion_proof() {
+        let mut bundle = fixture_bundle_value();
+        bundle["verificationMaterial"]["tlogEntries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("inclusionProof");
+
+        let error = verify_fixture_transparency(bundle).unwrap_err();
+        assert!(error.to_string().contains("missing Rekor inclusion proof"));
+    }
+
+    #[test]
+    fn rejects_tampered_rekor_inclusion_proof() {
+        let mut bundle = fixture_bundle_value();
+        let encoded = bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["hashes"]
+            [0]
+        .as_str()
+        .unwrap();
+        let mut hash = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        hash[0] ^= 0xff;
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["hashes"][0] =
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(hash));
+
+        let error = verify_fixture_transparency(bundle).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Rekor inclusion proof verification failed"));
+    }
+
+    #[test]
+    fn rejects_tampered_rekor_checkpoint() {
+        let mut bundle = fixture_bundle_value();
+        let envelope = bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]
+            ["checkpoint"]["envelope"]
+            .as_str()
+            .unwrap();
+        let (note, signatures) = envelope.split_once("\n\n").unwrap();
+        let mut parts = signatures.trim().splitn(3, ' ');
+        let dash = parts.next().unwrap();
+        let name = parts.next().unwrap();
+        let encoded = parts.next().unwrap();
+        let mut signature = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        signature[4] ^= 0xff;
+        let checkpoint = format!(
+            "{note}\n\n{dash} {name} {}\n",
+            base64::engine::general_purpose::STANDARD.encode(signature)
+        );
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionProof"]["checkpoint"]
+            ["envelope"] = serde_json::Value::String(checkpoint);
+
+        let error = verify_fixture_transparency(bundle).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Rekor inclusion proof verification failed"));
+    }
+
+    #[test]
+    fn rejects_invalid_rekor_signed_entry_timestamp() {
+        let mut bundle = fixture_bundle_value();
+        let encoded = bundle["verificationMaterial"]["tlogEntries"][0]["inclusionPromise"]
+            ["signedEntryTimestamp"]
+            .as_str()
+            .unwrap();
+        let mut signature = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        signature[0] ^= 0xff;
+        bundle["verificationMaterial"]["tlogEntries"][0]["inclusionPromise"]
+            ["signedEntryTimestamp"] =
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(signature));
+
+        let error = verify_fixture_transparency(bundle).unwrap_err();
+        assert!(error.to_string().contains("Rekor SET verification failed"));
     }
 
     #[tokio::test]
@@ -528,7 +756,7 @@ mod tests {
     #[test]
     fn receipt_evidence_round_trips() {
         let evidence = VerificationEvidence {
-            kind: "sigstore-bundle".into(),
+            kind: "sigstore-bundle+rekor".into(),
             repository: "cli/cli".into(),
             issuer: GITHUB_OIDC_ISSUER.into(),
             digest: "sha256:00".into(),
