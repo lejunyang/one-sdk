@@ -370,6 +370,9 @@ end-to-end tests.
 
 The selected remediation roadmap is complete. Track upstream Sigstore support
 for Rekor inclusion-proof and SET verification as a future hardening item.
+The broader feature gaps that were not part of the selected remediation are
+tracked in
+[`remaining-gaps-roadmap-2026-08-16.md`](./remaining-gaps-roadmap-2026-08-16.md).
 
 ## Test isolation requirements
 

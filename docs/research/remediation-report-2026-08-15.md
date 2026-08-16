@@ -173,3 +173,5 @@ Passed:
 All remediation items selected from the original audit are implemented. Future
 hardening should track upstream support for Rekor inclusion-proof and SET
 verification before claiming complete transparency-log proof validation.
+Items outside the selected remediation scope are documented in
+[`remaining-gaps-roadmap-2026-08-16.md`](./remaining-gaps-roadmap-2026-08-16.md).
