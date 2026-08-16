@@ -140,15 +140,54 @@ fn real_main() -> i32 {
         }
     };
 
-    let exec_env = match backend.exec_env(&ctx, &tv) {
+    let mut exec_env = match backend.exec_env(&ctx, &tv) {
         Ok(env) => env,
         Err(e) => {
             eprintln!("osdk-shim: {e}");
             return 1;
         }
     };
+    if matches!(backend.id(), "npm" | "pnpm" | "yarn") {
+        let node_backend = registry.get("node").unwrap();
+        let active_node = resolve_active(
+            "node",
+            &idiomatic_probe_cwd,
+            &tools,
+            &[".nvmrc", ".node-version"],
+        );
+        let node_version = active_node
+            .as_ref()
+            .and_then(|active| {
+                resolve_installed(&ctx, &*node_backend, &active.spec, active.is_range)
+            })
+            .or_else(|| node_backend.list_installed(&ctx).ok()?.into_iter().last());
+        let Some(node_version) = node_version else {
+            eprintln!(
+                "osdk-shim: `{}` requires a managed Node installation",
+                backend.id()
+            );
+            return 1;
+        };
+        let node = ToolVersion::new("node", node_version);
+        if let Ok(paths) = node_backend.bin_paths(&ctx, &node) {
+            prepend_env_path(&mut exec_env, paths);
+        }
+    }
 
     exec(&exe, forward_args, &exec_env)
+}
+
+fn prepend_env_path(env: &mut std::collections::BTreeMap<String, String>, paths: Vec<PathBuf>) {
+    let existing = env
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let mut combined = paths;
+    combined.extend(std::env::split_paths(&existing));
+    if let Ok(value) = std::env::join_paths(combined) {
+        env.insert("PATH".into(), value.to_string_lossy().into_owned());
+    }
 }
 
 /// Determine the tool name and args to forward.

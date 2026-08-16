@@ -227,6 +227,35 @@ Import writes the isolated rustup override to `osdk.toml`; export writes the
 active osdk pin to isolated rustup. Linked toolchains expose their local `bin`
 directory but are rejected from reproducible remote lock artifacts.
 
+## Project package managers
+
+osdk reads exact Corepack-style selections from `package.json#packageManager`
+and `devEngines.packageManager`:
+
+```json
+{
+  "engines": { "node": ">=20 <23" },
+  "packageManager": "pnpm@9.15.0"
+}
+```
+
+`npm`, `pnpm`, and `yarn` are supported. Priority is `osdk.toml [tools]` >
+`packageManager` > `devEngines.packageManager`. Missing versions, unsupported
+managers, URLs, and hash/build suffixes fail explicitly.
+
+The npm backend installs the `npm` registry package independently from Node and
+verifies npm SRI:
+
+```bash
+osdk install npm@11.5.2
+osdk uninstall npm@11.5.2
+```
+
+Selecting npm/pnpm/Yarn automatically adds managed Node. Runtime PATH places
+the package-manager bin first and exact managed Node second, never user-global
+Node. Locks persist both exact versions and support metadata-free offline
+reinstall.
+
 ## Reproducible projects and execution
 
 Resolve the current project to exact, platform-specific versions:
@@ -367,7 +396,7 @@ back to copy across filesystems; `osdk doctor` warns).
 | yarn         | `yarn` / `@yarnpkg/cli-dist` npm packages, npm SRI verified      |
 | deno         | official `@deno/<platform>` npm package, npm SRI verified        |
 | bun          | official `@oven/bun-<platform>` npm package, npm SRI verified    |
-| npm          | ships with node                                                  |
+| npm          | independent npm registry package, npm SRI verified                |
 | `github:owner/repo` | any GitHub release: host-matching asset auto-picked, archives extracted or bare binaries installed |
 
 ### GitHub-release tools

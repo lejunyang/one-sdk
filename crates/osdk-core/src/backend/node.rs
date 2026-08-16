@@ -455,12 +455,16 @@ impl Backend for NodeBackend {
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        // node ships node, npm, npx, and (recent versions) corepack.
+        // npm/npx are managed by the independent npm backend; do not claim
+        // ownership here even when Node's archive includes bundled launchers.
         let paths = self.bin_paths(ctx, tv)?;
-        let discovered = crate::backend::bin_names_in_dirs(&paths);
+        let discovered = crate::backend::bin_names_in_dirs(&paths)
+            .into_iter()
+            .filter(|name| name != "npm" && name != "npx")
+            .collect::<Vec<_>>();
         if discovered.is_empty() {
             // Fallback to the canonical set if the dir isn't populated yet.
-            Ok(vec!["node".into(), "npm".into(), "npx".into()])
+            Ok(vec!["node".into(), "corepack".into()])
         } else {
             Ok(discovered)
         }

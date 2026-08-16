@@ -95,6 +95,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         paths.extend(backend.bin_paths(&app.ctx, version)?);
         env.extend(backend.exec_env(&app.ctx, version)?);
     }
+    paths.sort_by_key(|path| managed_runtime_path_priority(path));
     let existing_path = std::env::var_os("PATH").unwrap_or_default();
     paths.extend(std::env::split_paths(&existing_path));
     env.insert(
@@ -114,6 +115,23 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         return Err(anyhow!("command exited with {status}"));
     }
     Ok(())
+}
+
+fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
+    let components: std::collections::BTreeSet<_> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    if ["npm", "pnpm", "yarn"]
+        .iter()
+        .any(|backend| components.contains(backend))
+    {
+        0
+    } else if components.contains("node") {
+        1
+    } else {
+        2
+    }
 }
 
 pub fn completions(shell: clap_complete::Shell) -> Result<()> {
@@ -307,10 +325,11 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
-        return tools
+        let requests = tools
             .iter()
             .map(|s| ToolRequest::parse(s).map_err(|e| anyhow!("{e}")))
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
+        return inject_node_dependency(app, requests);
     }
     // From config pins.
     let mut out = Vec::new();
@@ -327,6 +346,20 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
         }
     }
     let cwd = std::env::current_dir()?;
+    if let Some(package_manager) =
+        osdk_core::version::resolver::resolve_package_manager(&cwd).map_err(anyhow::Error::msg)?
+    {
+        if out
+            .iter()
+            .all(|request| request.backend != package_manager.manager)
+        {
+            out.push(ToolRequest {
+                backend: package_manager.manager,
+                spec: VersionSpec::Exact(package_manager.version),
+                options: Default::default(),
+            });
+        }
+    }
     let backend = app.registry.get("node")?;
     if let Some(active) = osdk_core::version::resolver::resolve_active(
         backend.id(),
@@ -345,7 +378,39 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
             options: Default::default(),
         });
     }
-    Ok(out)
+    inject_node_dependency(app, out)
+}
+
+fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
+    let has_package_manager = requests
+        .iter()
+        .any(|request| matches!(request.backend.as_str(), "npm" | "pnpm" | "yarn"));
+    if !has_package_manager || requests.iter().any(|request| request.backend == "node") {
+        return Ok(requests);
+    }
+    let cwd = std::env::current_dir()?;
+    let backend = app.registry.get("node")?;
+    let spec = osdk_core::version::resolver::resolve_active(
+        "node",
+        &cwd,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    )
+    .map(|active| {
+        if active.is_range {
+            VersionSpec::parse_range(&active.spec)
+        } else {
+            Ok(VersionSpec::parse(&active.spec))
+        }
+    })
+    .transpose()?
+    .unwrap_or(VersionSpec::Latest);
+    requests.push(ToolRequest {
+        backend: "node".into(),
+        spec,
+        options: Default::default(),
+    });
+    Ok(requests)
 }
 
 pub fn list(app: &App, tool: Option<String>) -> Result<()> {

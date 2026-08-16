@@ -18,6 +18,7 @@ impl Registry {
     pub fn new() -> Registry {
         Self::from_backends(vec![
             Arc::new(crate::backend::node::NodeBackend),
+            Arc::new(crate::backend::npm_cli::NpmBackend),
             Arc::new(crate::backend::go::GoBackend),
             Arc::new(crate::backend::python::PythonBackend),
             Arc::new(crate::backend::java::JavaBackend),

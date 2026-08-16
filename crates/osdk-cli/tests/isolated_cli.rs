@@ -318,7 +318,7 @@ fn doctor_creates_state_only_under_isolated_root() {
     assert!(temp.path().join("config").is_dir());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout
-        .contains("node, go, python, java, maven, gradle, kotlin, rust, pnpm, yarn, deno, bun"));
+        .contains("node, npm, go, python, java, maven, gradle, kotlin, rust, pnpm, yarn, deno, bun"));
 }
 
 #[test]
@@ -1071,6 +1071,227 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     assert!(calls.contains("override list"));
     assert!(calls.contains("override set stable-x86_64-unknown-linux-gnu --path"));
     assert!(calls.contains("toolchain link local-dev"));
+}
+
+#[cfg(unix)]
+#[test]
+fn locked_npm_installs_independently_and_launcher_uses_managed_node() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"npm@11.5.2","engines":{"node":"20.0.0"}}"#,
+    )
+    .unwrap();
+
+    let archive = temp.path().join("npm-11.5.2.tgz");
+    {
+        let file = std::fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, contents) in [
+            (
+                "package/bin/npm-cli.js",
+                b"process.stdout.write('npm-managed\\n');\n".as_slice(),
+            ),
+            (
+                "package/bin/npx-cli.js",
+                b"process.stdout.write('npx-managed\\n');\n".as_slice(),
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, contents).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+    let checksum =
+        osdk_core::pipeline::verify::hash_file(&archive, osdk_core::pipeline::HashAlgo::Sha256)
+            .unwrap();
+    let cached = temp
+        .path()
+        .join("cache/downloads/npm/11.5.2/npm-11.5.2.tgz");
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::copy(&archive, &cached).unwrap();
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            r#"schema = 1
+
+[platforms.{platform}.tools.node]
+request = "20.0.0"
+version = "20.0.0"
+
+[platforms.{platform}.tools.npm]
+request = "11.5.2"
+version = "11.5.2"
+
+[platforms.{platform}.tools.npm.artifact]
+url = "https://invalid.example/npm-11.5.2.tgz"
+file_name = "npm-11.5.2.tgz"
+checksum = "sha256:{checksum}"
+"#,
+            platform = platform_key(),
+        ),
+    )
+    .unwrap();
+    let node_bin = temp.path().join("installs/node/20.0.0/bin");
+    std::fs::create_dir_all(&node_bin).unwrap();
+    let node = node_bin.join("node");
+    std::fs::write(
+        &node,
+        "#!/bin/sh\nprintf '%s\\n' \"$0\" > \"$OSDK_NODE_LOG\"\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(temp.path().join("installs/node/20.0.0/.osdk-complete"), b"").unwrap();
+
+    let install = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let npm = temp.path().join("installs/npm/11.5.2/bin/npm");
+    assert!(npm.is_file());
+    assert!(std::fs::read_to_string(&npm).unwrap().contains("exec node"));
+
+    let node_log = temp.path().join("node-used.log");
+    let path_value = format!(
+        "{}:{}",
+        temp.path().join("installs/npm/11.5.2/bin").display(),
+        node_bin.display()
+    );
+    let output = std::process::Command::new(&npm)
+        .env_clear()
+        .env("PATH", path_value)
+        .env("OSDK_NODE_LOG", &node_log)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(node_log).unwrap().trim(),
+        node.display().to_string()
+    );
+
+    let uninstall = run_isolated(temp.path(), &["--yes", "uninstall", "npm@11.5.2"]);
+    assert!(uninstall.status.success());
+    assert!(!temp.path().join("installs/npm/11.5.2").exists());
+    assert!(temp.path().join("installs/node/20.0.0").exists());
+}
+
+#[test]
+fn package_manager_field_auto_selects_exact_manager_and_node_in_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"npm@11.5.2","engines":{"node":"20.0.0"}}"#,
+    )
+    .unwrap();
+    let npm = temp.path().join("installs/npm/11.5.2");
+    let node = temp.path().join("installs/node/20.0.0");
+    for install in [&npm, &node] {
+        std::fs::create_dir_all(install).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    }
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "lock"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lock = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(lock.contains(".tools.npm]"));
+    assert!(lock.contains("request = \"11.5.2\""));
+    assert!(lock.contains(".tools.node]"));
+    assert!(lock.contains("request = \"20.0.0\""));
+}
+
+#[test]
+fn package_manager_current_and_invalid_field_are_explicit() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"pnpm@9.15.0"}"#,
+    )
+    .unwrap();
+    let current = run_isolated_in(temp.path(), &project, &["current", "pnpm"]);
+    assert!(current.status.success());
+    let stdout = String::from_utf8(current.stdout).unwrap();
+    assert!(stdout.contains("pnpm 9.15.0"));
+    assert!(stdout.contains("package.json"));
+
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"pnpm@https://example.test/pnpm.tgz"}"#,
+    )
+    .unwrap();
+    let invalid = run_isolated_in(temp.path(), &project, &["lock"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("exact semver"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_npm_exec_places_independent_manager_before_managed_node() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let npm_bin = temp.path().join("installs/npm/11.5.2/bin");
+    let node_bin = temp.path().join("installs/node/20.0.0/bin");
+    std::fs::create_dir_all(&npm_bin).unwrap();
+    std::fs::create_dir_all(&node_bin).unwrap();
+    let npm = npm_bin.join("npm");
+    std::fs::write(
+        &npm,
+        "#!/bin/sh\nprintf '%s\n' \"$PATH\"\ncommand -v node\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let node = node_bin.join("node");
+    std::fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for marker in [
+        temp.path().join("installs/npm/11.5.2/.osdk-complete"),
+        temp.path().join("installs/node/20.0.0/.osdk-complete"),
+    ] {
+        std::fs::write(marker, b"").unwrap();
+    }
+
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "--offline",
+            "exec",
+            "--tool",
+            "npm@11.5.2",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let path = stdout
+        .lines()
+        .find(|line| line.starts_with(&npm_bin.display().to_string()))
+        .unwrap();
+    assert!(path.starts_with(&npm_bin.display().to_string()));
+    assert!(stdout.lines().any(|line| line == node.display().to_string()));
 }
 
 #[cfg(unix)]

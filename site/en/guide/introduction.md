@@ -29,7 +29,7 @@ backends:
 | Tool | Distribution mechanism |
 | --- | --- |
 | Node.js | Prebuilt nodejs.org archives with `SHASUMS256` |
-| npm | Installed with Node.js |
+| npm | Independent npm registry package with SRI |
 | pnpm | Official npm platform package with SRI verification |
 | Yarn | `yarn` / `@yarnpkg/cli-dist` npm packages |
 | Python | python-build-standalone release index and Astral mirror |

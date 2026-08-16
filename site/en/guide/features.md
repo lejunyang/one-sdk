@@ -175,6 +175,25 @@ osdk rust toolchain link local-dev /absolute/toolchain
 Linked toolchains can execute locally but are explicitly rejected from
 reproducible lock artifacts.
 
+## packageManager and independent npm
+
+```json
+{
+  "engines": { "node": ">=20 <23" },
+  "packageManager": "npm@11.5.2"
+}
+```
+
+osdk supports exact `npm|pnpm|yarn@version` values from `packageManager` and
+`devEngines.packageManager`. Priority is `osdk.toml [tools]` >
+`packageManager` > `devEngines.packageManager`. Missing versions, URL/hash
+suffixes, and unsupported managers fail explicitly.
+
+The independent npm backend downloads the registry `npm` package and verifies
+SRI. Selecting any manager automatically adds managed Node; manager bins
+precede exact Node on PATH, so launchers never use user-global Node. Both exact
+versions are locked and support offline reinstall.
+
 ## Project configuration trust
 
 Project `[tools]` pins and `[aliases]` are safe data and load without trust.

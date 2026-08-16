@@ -164,6 +164,24 @@ osdk rust toolchain link local-dev /absolute/toolchain
 
 linked toolchain 可本地执行，但会被可复现 lock 明确拒绝。
 
+## packageManager 与独立 npm
+
+```json
+{
+  "engines": { "node": ">=20 <23" },
+  "packageManager": "npm@11.5.2"
+}
+```
+
+osdk 支持 `packageManager` 和 `devEngines.packageManager` 中的
+`npm|pnpm|yarn@精确版本`。优先级为 `osdk.toml [tools]` >
+`packageManager` > `devEngines.packageManager`。无版本、URL/hash 后缀与非法
+manager 都会明确报错。
+
+独立 npm backend 从 registry 下载 `npm` 包并验证 SRI。选择任一包管理器都会
+自动加入受管 Node；PATH 中 manager bin 在前、目标 Node 在后，所以 launcher
+不会调用用户全局 Node。两个精确版本都会写入 lock 并支持离线重装。
+
 ## 项目配置信任
 
 项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。

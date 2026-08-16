@@ -23,6 +23,7 @@ pub mod go;
 pub mod java;
 pub mod jvm_tools;
 pub mod node;
+pub mod npm_cli;
 pub mod pnpm;
 pub mod python;
 mod python_catalog;

@@ -263,6 +263,8 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         }
     }
 
+    path_prepend.sort_by_key(|path| managed_runtime_path_priority(path));
+
     let previous = std::env::var("OSDK_MANAGED_ENV").unwrap_or_default();
     let unset_vars = previous
         .split(',')
@@ -274,6 +276,23 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         path_prepend,
         set_vars,
         unset_vars,
+    }
+}
+
+fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
+    let components: std::collections::BTreeSet<_> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    if ["npm", "pnpm", "yarn"]
+        .iter()
+        .any(|backend| components.contains(backend))
+    {
+        0
+    } else if components.contains("node") {
+        1
+    } else {
+        2
     }
 }
 

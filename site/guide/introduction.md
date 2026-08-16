@@ -24,7 +24,7 @@ osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 | 工具 | 获取方式 |
 | --- | --- |
 | Node.js | nodejs.org 预编译包，验证 `SHASUMS256` |
-| npm | 随 Node.js 一同安装 |
+| npm | 独立 npm registry 包，验证 SRI |
 | pnpm | npm 官方平台包，验证 SRI |
 | Yarn | `yarn` / `@yarnpkg/cli-dist` npm 包 |
 | Python | python-build-standalone 发布索引与 Astral 镜像 |

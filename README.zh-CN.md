@@ -227,6 +227,33 @@ import 把隔离 rustup override 写入 `osdk.toml`；export 把当前 osdk pin 
 rustup。linked toolchain 会暴露本地 `bin`，但禁止作为可复现远程 artifact 写入
 lock。
 
+## 项目包管理器
+
+osdk 会读取 `package.json#packageManager` 和 `devEngines.packageManager` 中
+Corepack 风格的精确版本：
+
+```json
+{
+  "engines": { "node": ">=20 <23" },
+  "packageManager": "pnpm@9.15.0"
+}
+```
+
+支持 `npm`、`pnpm`、`yarn`。优先级为 `osdk.toml [tools]` >
+`packageManager` > `devEngines.packageManager`。不带版本、非法 manager、URL
+与 hash/build 后缀都会明确失败。
+
+npm backend 独立安装 npm registry 的 `npm` 包并验证 npm SRI：
+
+```bash
+osdk install npm@11.5.2
+osdk uninstall npm@11.5.2
+```
+
+选择 npm/pnpm/Yarn 会自动加入受管 Node。运行时 PATH 固定为包管理器 bin 在前、
+精确受管 Node 在后，绝不调用用户全局 Node。lock 保存两者精确版本并支持不查
+metadata 的离线重装。
+
 ## 可复现项目与命令执行
 
 把当前项目解析为精确、按平台区分的版本：
@@ -340,7 +367,7 @@ export OSDK_LANG=zh              # 环境变量
 | Yarn | `yarn` / `@yarnpkg/cli-dist` npm 包，验证 npm SRI |
 | Deno | 官方 `@deno/<platform>` npm 包，验证 npm SRI |
 | Bun | 官方 `@oven/bun-<platform>` npm 包，验证 npm SRI |
-| npm | 随 Node.js 提供 |
+| npm | 独立 npm registry 包，验证 npm SRI |
 | `github:owner/repo` | 任意 GitHub Release；自动匹配 host asset，支持归档和裸二进制 |
 
 ### GitHub Release 工具

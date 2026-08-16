@@ -34,6 +34,120 @@ pub enum VersionOrigin {
     GlobalConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageManagerRequest {
+    pub manager: String,
+    pub version: String,
+    pub source: PathBuf,
+}
+
+pub fn resolve_package_manager(start_dir: &Path) -> Result<Option<PackageManagerRequest>, String> {
+    for directory in start_dir.ancestors() {
+        for name in PROJECT_CONFIG_NAMES {
+            let path = directory.join(name);
+            if path.is_file() {
+                if let Some((manager, version)) = read_project_package_manager(&path) {
+                    return parse_package_manager(&manager, &version, path).map(Some);
+                }
+            }
+        }
+    }
+    for directory in start_dir.ancestors() {
+        let path = directory.join("package.json");
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("reading {}: {error}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("parsing {}: {error}", path.display()))?;
+        if let Some(raw) = value
+            .get("packageManager")
+            .and_then(serde_json::Value::as_str)
+        {
+            return parse_package_manager_field(raw, path).map(Some);
+        }
+        if let Some(package_manager) = value
+            .get("devEngines")
+            .and_then(|value| value.get("packageManager"))
+        {
+            let package_manager = package_manager
+                .as_array()
+                .and_then(|items| items.first())
+                .unwrap_or(package_manager);
+            let manager = package_manager
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "{} devEngines.packageManager is missing name",
+                        path.display()
+                    )
+                })?;
+            let version = package_manager
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "{} devEngines.packageManager is missing version",
+                        path.display()
+                    )
+                })?;
+            return parse_package_manager(manager, version, path).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn read_project_package_manager(path: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    let tools = value.get("tools")?;
+    for manager in ["npm", "pnpm", "yarn"] {
+        if let Some(version) = tools.get(manager).and_then(toml::Value::as_str) {
+            return Some((manager.into(), version.into()));
+        }
+    }
+    None
+}
+
+fn parse_package_manager_field(
+    raw: &str,
+    source: PathBuf,
+) -> Result<PackageManagerRequest, String> {
+    let Some((manager, version)) = raw.split_once('@') else {
+        return Err(format!(
+            "{} packageManager must be `<npm|pnpm|yarn>@<exact-version>`",
+            source.display()
+        ));
+    };
+    parse_package_manager(manager, version, source)
+}
+
+fn parse_package_manager(
+    manager: &str,
+    version: &str,
+    source: PathBuf,
+) -> Result<PackageManagerRequest, String> {
+    if !matches!(manager, "npm" | "pnpm" | "yarn") {
+        return Err(format!(
+            "{} has unsupported package manager `{manager}`",
+            source.display()
+        ));
+    }
+    if version.contains(['#', '+', '/', '\\']) || semver::Version::parse(version).is_err() {
+        return Err(format!(
+            "{} package manager `{manager}` requires an exact semver without URL/hash suffix: `{version}`",
+            source.display()
+        ));
+    }
+    Ok(PackageManagerRequest {
+        manager: manager.into(),
+        version: version.into(),
+        source,
+    })
+}
+
 /// Resolve the active spec for `tool`, walking up from `start_dir`. Global
 /// config pins are consulted last. `idiomatic` maps a tool to its idiomatic
 /// filenames.
@@ -43,6 +157,18 @@ pub fn resolve_active(
     global_tools: &BTreeMap<String, String>,
     idiomatic_files: &[&str],
 ) -> Option<ActiveVersion> {
+    if matches!(tool, "npm" | "pnpm" | "yarn") {
+        if let Ok(Some(package_manager)) = resolve_package_manager(start_dir) {
+            if package_manager.manager == tool {
+                return Some(ActiveVersion {
+                    tool: tool.into(),
+                    spec: package_manager.version,
+                    source: VersionOrigin::ProjectMetadata(package_manager.source),
+                    is_range: false,
+                });
+            }
+        }
+    }
     let ancestors: Vec<&Path> = start_dir.ancestors().collect();
 
     // 1. project config
@@ -287,6 +413,57 @@ mod tests {
         .unwrap();
         let active = resolve_active("node", &dir, &global, &[".nvmrc", ".node-version"]).unwrap();
         assert_eq!(active.spec, "^22.0.0");
+    }
+
+    #[test]
+    fn package_manager_field_and_dev_engines_parse_exact_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.15.0","devEngines":{"packageManager":{"name":"yarn","version":"4.10.3"}}}"#,
+        )
+        .unwrap();
+        let selected = resolve_package_manager(temp.path()).unwrap().unwrap();
+        assert_eq!(selected.manager, "pnpm");
+        assert_eq!(selected.version, "9.15.0");
+
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"4.10.3"}}}"#,
+        )
+        .unwrap();
+        let selected = resolve_package_manager(temp.path()).unwrap().unwrap();
+        assert_eq!(selected.manager, "yarn");
+        assert_eq!(selected.version, "4.10.3");
+    }
+
+    #[test]
+    fn project_tools_beat_package_manager_and_invalid_values_fail() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("osdk.toml"), "[tools]\nnpm = \"11.5.2\"\n").unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9.15.0"}"#,
+        )
+        .unwrap();
+        let selected = resolve_package_manager(temp.path()).unwrap().unwrap();
+        assert_eq!(selected.manager, "npm");
+        assert_eq!(selected.version, "11.5.2");
+
+        std::fs::remove_file(temp.path().join("osdk.toml")).unwrap();
+        for value in [
+            "pnpm",
+            "bun@1.2.3",
+            "npm@https://example.test/npm.tgz",
+            "yarn@4.0.0+sha",
+        ] {
+            std::fs::write(
+                temp.path().join("package.json"),
+                format!(r#"{{"packageManager":"{value}"}}"#),
+            )
+            .unwrap();
+            assert!(resolve_package_manager(temp.path()).is_err(), "{value}");
+        }
     }
 
     #[test]
