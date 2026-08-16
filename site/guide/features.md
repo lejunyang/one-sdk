@@ -149,7 +149,7 @@ GitHub URL 全部改写到 `https://gh-proxy.com/`；`GITHUB_TOKEN` 只发送给
 ```bash
 osdk doctor
 osdk prune --dry-run
-osdk prune
+osdk --yes prune
 ```
 
 `prune` 只清理没有任何安装版本引用的存储对象。
@@ -161,11 +161,16 @@ osdk 为常见包管理器提供共享缓存环境，避免 SDK 版本之间重�
 ```bash
 osdk cache dir
 osdk cache env
-osdk cache clean
+osdk --yes cache clean
 ```
 
 覆盖 npm/pnpm/Yarn、pip、Go、Cargo 和 Gradle 等生态。`cache clean` 清理下载
 归档，不删除已安装 SDK 或内容存储。
+
+`uninstall`、`cache clean` 和非演练 `prune` 统一使用确认策略：交互终端显示中文
+或英文提示；非交互环境不会等待 stdin，而是明确失败。CI 和脚本应传
+`--yes`、设置 `OSDK_YES=true`，或在 `[settings]` 中配置 `yes = true`。
+`--quiet` 只关闭进度输出，不代表同意删除。
 
 ## 离线模式
 

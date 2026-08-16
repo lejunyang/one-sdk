@@ -37,6 +37,15 @@ fn run_isolated(root: &Path, args: &[&str]) -> Output {
 }
 
 fn run_isolated_in(root: &Path, cwd: &Path, args: &[&str]) -> Output {
+    run_isolated_in_with_env(root, cwd, args, &[])
+}
+
+fn run_isolated_in_with_env(
+    root: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     let home = root.join("home");
     let data = root.join("data");
     let cache = root.join("cache");
@@ -45,7 +54,8 @@ fn run_isolated_in(root: &Path, cwd: &Path, args: &[&str]) -> Output {
     let installs = root.join("installs");
     std::fs::create_dir_all(&home).unwrap();
 
-    Command::new(osdk())
+    let mut command = Command::new(osdk());
+    command
         .args(args)
         .current_dir(cwd)
         .env_clear()
@@ -56,9 +66,11 @@ fn run_isolated_in(root: &Path, cwd: &Path, args: &[&str]) -> Output {
         .env("OSDK_CACHE_DIR", &cache)
         .env("OSDK_CONFIG_DIR", &config)
         .env("OSDK_STORE_DIR", &store)
-        .env("OSDK_INSTALL_DIR", &installs)
-        .output()
-        .unwrap()
+        .env("OSDK_INSTALL_DIR", &installs);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().unwrap()
 }
 
 #[test]
@@ -97,6 +109,106 @@ fn attestation_policy_cli_override_is_reported() {
     assert!(String::from_utf8(output.stdout)
         .unwrap()
         .contains("attestations = required"));
+}
+
+#[test]
+fn destructive_commands_require_explicit_non_interactive_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"fixture").unwrap();
+
+    let output = run_isolated(temp.path(), &["--quiet", "cache", "clean"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("rerun with --yes"));
+    assert!(archive.is_file());
+}
+
+#[test]
+fn yes_flag_confirms_cache_clean() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"fixture").unwrap();
+
+    let output = run_isolated(temp.path(), &["--yes", "cache", "clean"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!archive.exists());
+    assert!(temp.path().join("cache/downloads").is_dir());
+}
+
+#[test]
+fn yes_environment_confirms_prune() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        temp.path(),
+        &["prune"],
+        &[("OSDK_YES", "true")],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("pruned 0 object"));
+}
+
+#[test]
+fn non_interactive_confirmation_error_is_localized() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        temp.path(),
+        &["cache", "clean"],
+        &[("OSDK_LANG", "zh")],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("非交互模式需要确认"));
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_prompt_accepts_interactive_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("cache/downloads/archive.tar.gz");
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    std::fs::write(&archive, b"fixture").unwrap();
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let shell_command = format!(
+        "env -i HOME={} PATH=/usr/bin:/bin LANG=C OSDK_DATA_DIR={} OSDK_CACHE_DIR={} OSDK_CONFIG_DIR={} OSDK_STORE_DIR={} OSDK_INSTALL_DIR={} {} cache clean",
+        home.display(),
+        temp.path().join("data").display(),
+        temp.path().join("cache").display(),
+        temp.path().join("config").display(),
+        temp.path().join("store").display(),
+        temp.path().join("installs").display(),
+        osdk().display()
+    );
+    let mut child = Command::new("script")
+        .args(["-qec", &shell_command, "/dev/null"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!archive.exists());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("[y/N]:"));
 }
 
 #[test]

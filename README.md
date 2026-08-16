@@ -160,10 +160,18 @@ bundles. Its built-in `ghproxy` source rewrites all of these through
 
 ```bash
 osdk doctor                     # dirs, same-filesystem check, link mode, backends
-osdk prune                      # GC store objects no install references
+osdk prune --dry-run            # inspect GC without deleting
+osdk --yes prune                # confirm GC non-interactively
 osdk cache dir                  # shared cache/store locations
 osdk cache env                  # the downstream package-cache redirections
+osdk --yes cache clean          # remove downloaded archives
 ```
+
+Destructive operations (`uninstall`, `cache clean`, and non-dry-run `prune`)
+share one confirmation policy. Interactive terminals prompt with a localized
+question. Non-interactive runs fail instead of waiting for input unless
+`--yes`, `OSDK_YES=true`, or `settings.yes = true` explicitly confirms them.
+`--quiet` never implies consent.
 
 ## Language (i18n)
 

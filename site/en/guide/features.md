@@ -155,7 +155,7 @@ its BLAKE3 content hash. Installation directories avoid duplicate copies using:
 ```bash
 osdk doctor
 osdk prune --dry-run
-osdk prune
+osdk --yes prune
 ```
 
 `prune` removes only store objects not referenced by any installed version.
@@ -168,12 +168,18 @@ repeated dependency downloads across SDK versions:
 ```bash
 osdk cache dir
 osdk cache env
-osdk cache clean
+osdk --yes cache clean
 ```
 
 This covers npm/pnpm/Yarn, pip, Go, Cargo, Gradle, and other ecosystems.
 `cache clean` removes downloaded archives, not installed SDKs or the content
 store.
+
+`uninstall`, `cache clean`, and non-dry-run `prune` share one confirmation
+policy. Interactive terminals show a localized prompt; non-interactive runs
+fail instead of waiting on stdin. CI and scripts should pass `--yes`, set
+`OSDK_YES=true`, or configure `yes = true` under `[settings]`. `--quiet` only
+suppresses progress and never grants consent.
 
 ## Offline mode
 

@@ -4,6 +4,7 @@ mod commands;
 mod config_edit;
 mod localize;
 mod lockfile;
+mod prompt;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};

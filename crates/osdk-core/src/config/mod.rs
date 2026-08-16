@@ -404,6 +404,7 @@ mod tests {
         cfg.apply_env(|k| match k {
             "OSDK_LINK_MODE" => Some("copy".to_string()),
             "OSDK_JOBS" => Some("3".to_string()),
+            "OSDK_YES" => Some("true".to_string()),
             "OSDK_VERIFY_SIGNATURES" => Some("false".to_string()),
             "OSDK_REQUIRE_CHECKSUMS" => Some("true".to_string()),
             "OSDK_ATTESTATIONS" => Some("required".to_string()),
@@ -412,6 +413,7 @@ mod tests {
         });
         assert_eq!(cfg.settings.link_mode, LinkMode::Copy);
         assert_eq!(cfg.settings.jobs, 3);
+        assert!(cfg.settings.yes);
         assert!(!cfg.settings.verify_signatures);
         assert!(cfg.settings.require_checksums);
         assert_eq!(cfg.settings.attestations, AttestationPolicy::Required);

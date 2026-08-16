@@ -10,6 +10,8 @@ use osdk_core::platform::Platform;
 use osdk_core::store::Cas;
 use osdk_core::{http, Registry};
 
+use crate::prompt::{Prompt, TerminalPrompt};
+
 /// Global flags that overlay config (highest precedence).
 #[derive(Debug, Default, Clone)]
 pub struct GlobalOverrides {
@@ -27,6 +29,7 @@ pub struct GlobalOverrides {
 pub struct App {
     pub ctx: Ctx,
     pub registry: Registry,
+    pub prompt: Arc<dyn Prompt>,
     /// A one-shot source id override from `--source`.
     pub source_override: Option<String>,
     pub refresh_sources: bool,
@@ -76,6 +79,7 @@ impl App {
         let client = http::client().context("building http client")?;
         let cas = Arc::new(Cas::new(dirs.store.clone()));
         let registry = Registry::load(&dirs).context("loading declarative backend definitions")?;
+        let prompt = Arc::new(TerminalPrompt::new(config.settings.yes));
 
         let ctx = Ctx {
             dirs,
@@ -89,6 +93,7 @@ impl App {
         Ok(App {
             ctx,
             registry,
+            prompt,
             source_override: overrides.source,
             refresh_sources: overrides.refresh_sources,
         })

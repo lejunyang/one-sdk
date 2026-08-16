@@ -21,6 +21,7 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("{tool} already installed", "{tool} 已安装"),
     );
     m.insert("msg.uninstalled", ("uninstalled {tool}", "已卸载 {tool}"));
+    m.insert("msg.cancelled", ("cancelled", "已取消"));
     m.insert(
         "msg.nothing_to_install",
         (
@@ -141,6 +142,28 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "已清理下载的归档（保留 CAS 存储区与已安装内容）",
         ),
     );
+    m.insert(
+        "prompt.uninstall",
+        (
+            "Uninstall {tool} and reclaim its unreferenced store objects?",
+            "要卸载 {tool} 并回收其未引用的存储对象吗？",
+        ),
+    );
+    m.insert(
+        "prompt.cache_clean",
+        (
+            "Remove all downloaded archives from the shared cache?",
+            "要从共享缓存中删除所有下载归档吗？",
+        ),
+    );
+    m.insert(
+        "prompt.prune",
+        (
+            "Delete all unreferenced objects from the content store?",
+            "要删除内容存储中所有未引用的对象吗？",
+        ),
+    );
+    m.insert("prompt.yes_no", ("[y/N]:", "[是/否]："));
     m.insert("label.pinned", ("[pinned]", "[已固定]"));
     m.insert("label.error", ("error", "错误"));
 
@@ -258,6 +281,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "unsupported platform: os={os}, arch={arch}",
             "不支持的平台：os={os}，arch={arch}",
+        ),
+    );
+    m.insert(
+        "err.confirmation_non_interactive",
+        (
+            "confirmation required in non-interactive mode for: {question}; rerun with --yes or OSDK_YES=true",
+            "非交互模式需要确认：{question}；请使用 --yes 或 OSDK_YES=true 重新运行",
         ),
     );
     m.insert(

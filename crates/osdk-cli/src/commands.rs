@@ -446,6 +446,11 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
         other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
     };
     let tv = ToolVersion::new(&req.backend, &version);
+    let question = t!("prompt.uninstall", tool = tv);
+    if !app.prompt.confirm(&question)? {
+        println!("{}", t!("msg.cancelled"));
+        return Ok(());
+    }
     backend.uninstall(&app.ctx, &tv).await?;
     println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
@@ -686,6 +691,10 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             }
         }
         CacheCommand::Clean => {
+            if !app.prompt.confirm(&t!("prompt.cache_clean"))? {
+                println!("{}", t!("msg.cancelled"));
+                return Ok(());
+            }
             let downloads = app.ctx.dirs.downloads();
             if downloads.exists() {
                 std::fs::remove_dir_all(&downloads)
@@ -742,6 +751,10 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
 pub fn prune(app: &App, dry_run: bool) -> Result<()> {
     if dry_run {
         println!("{}", t!("msg.prune_dry_run"));
+        return Ok(());
+    }
+    if !app.prompt.confirm(&t!("prompt.prune"))? {
+        println!("{}", t!("msg.cancelled"));
         return Ok(());
     }
     let (removed, bytes) = app.ctx.cas.gc(&app.ctx.dirs.installs)?;
