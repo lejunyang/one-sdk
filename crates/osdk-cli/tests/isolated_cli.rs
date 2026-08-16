@@ -266,6 +266,7 @@ fn trusted_config_path_whitelist_allows_ci_without_persisted_trust() {
 #[cfg(unix)]
 #[test]
 fn terminal_prompt_accepts_interactive_confirmation() {
+    use std::fs::File;
     let temp = tempfile::tempdir().unwrap();
     let archive = temp.path().join("cache/downloads/archive.tar.gz");
     std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
@@ -273,91 +274,103 @@ fn terminal_prompt_accepts_interactive_confirmation() {
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("script");
-        command
-            .args(["-q", "/dev/null", "env", "-i"])
-            .arg(format!("HOME={}", home.display()))
-            .arg("PATH=/usr/bin:/bin")
-            .arg("LANG=C")
-            .arg(format!(
-                "OSDK_DATA_DIR={}",
-                temp.path().join("data").display()
-            ))
-            .arg(format!(
-                "OSDK_CACHE_DIR={}",
-                temp.path().join("cache").display()
-            ))
-            .arg(format!(
-                "OSDK_CONFIG_DIR={}",
-                temp.path().join("config").display()
-            ))
-            .arg(format!(
-                "OSDK_STORE_DIR={}",
-                temp.path().join("store").display()
-            ))
-            .arg(format!(
-                "OSDK_INSTALL_DIR={}",
-                temp.path().join("installs").display()
-            ))
-            .arg(osdk())
-            .args(["cache", "clean"]);
-        command
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    let result = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
     };
-    #[cfg(not(target_os = "macos"))]
-    let mut command = {
-        let shell_command = format!(
-            "env -i HOME={} PATH=/usr/bin:/bin LANG=C OSDK_DATA_DIR={} OSDK_CACHE_DIR={} OSDK_CONFIG_DIR={} OSDK_STORE_DIR={} OSDK_INSTALL_DIR={} {} cache clean",
-            home.display(),
-            temp.path().join("data").display(),
-            temp.path().join("cache").display(),
-            temp.path().join("config").display(),
-            temp.path().join("store").display(),
-            temp.path().join("installs").display(),
-            osdk().display()
-        );
-        let mut command = Command::new("script");
-        command.args(["-qec", &shell_command, "/dev/null"]);
-        command
-    };
-    let mut child = command
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    assert_eq!(
+        result,
+        0,
+        "openpty failed: {}",
+        std::io::Error::last_os_error()
+    );
+    use std::os::fd::FromRawFd;
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    let slave = unsafe { File::from_raw_fd(slave_fd) };
+    let flags = unsafe { libc::fcntl(master_fd, libc::F_GETFL) };
+    assert_ne!(
+        flags,
+        -1,
+        "F_GETFL failed: {}",
+        std::io::Error::last_os_error()
+    );
+    assert_ne!(
+        unsafe { libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        -1,
+        "F_SETFL failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut command = Command::new(osdk());
+    command
+        .args(["cache", "clean"])
+        .current_dir(temp.path())
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "")
+        .env("LANG", "C")
+        .env("OSDK_DATA_DIR", temp.path().join("data"))
+        .env("OSDK_CACHE_DIR", temp.path().join("cache"))
+        .env("OSDK_CONFIG_DIR", temp.path().join("config"))
+        .env("OSDK_STORE_DIR", temp.path().join("store"))
+        .env("OSDK_INSTALL_DIR", temp.path().join("installs"))
+        .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stdout(std::process::Stdio::from(slave.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(slave));
+    let mut child = command.spawn().unwrap();
     use std::io::{Read, Write};
-    let mut stdout = child.stdout.take().unwrap();
     let mut captured = Vec::new();
     let prompt_marker = b"[y/N]:";
-    while !captured
-        .windows(prompt_marker.len())
-        .any(|window| window == prompt_marker)
-    {
-        let mut byte = [0];
-        let count = stdout.read(&mut byte).unwrap();
-        assert!(count > 0, "prompt stream ended before confirmation");
-        captured.extend_from_slice(&byte[..count]);
+    let mut answered = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status;
+    loop {
+        loop {
+            let mut bytes = [0; 256];
+            match master.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(count) => {
+                    captured.extend_from_slice(&bytes[..count]);
+                    if !answered
+                        && captured
+                            .windows(prompt_marker.len())
+                            .any(|window| window == prompt_marker)
+                    {
+                        master.write_all(b"y\n").unwrap();
+                        master.flush().unwrap();
+                        answered = true;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.raw_os_error() == Some(5) => break,
+                Err(error) => panic!("reading PTY failed: {error}"),
+            }
+        }
+        if let Some(exit_status) = child.try_wait().unwrap() {
+            status = exit_status;
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!(
+                "terminal command timed out: {}",
+                String::from_utf8_lossy(&captured)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"y\n").unwrap();
-    drop(stdin);
-    stdout.read_to_end(&mut captured).unwrap();
-    let status = child.wait().unwrap();
-    let mut stderr = Vec::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_end(&mut stderr)
-        .unwrap();
     assert!(
         status.success(),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&captured),
-        String::from_utf8_lossy(&stderr)
+        "terminal output={}",
+        String::from_utf8_lossy(&captured)
     );
+    assert!(answered, "confirmation prompt was not observed");
     assert!(!archive.exists());
     assert!(String::from_utf8_lossy(&captured).contains("[y/N]:"));
 }

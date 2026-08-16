@@ -2154,6 +2154,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "indicatif",
+ "libc",
  "osdk-core",
  "serde",
  "serde_json",
