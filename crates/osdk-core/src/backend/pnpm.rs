@@ -29,6 +29,16 @@ impl PnpmBackend {
             _ => return None,
         })
     }
+
+    fn version_info(version: String) -> VersionInfo {
+        VersionInfo {
+            stable: semver::Version::parse(&version)
+                .map(|version| version.pre.is_empty())
+                .unwrap_or(false),
+            version,
+            lts: None,
+        }
+    }
 }
 
 #[async_trait]
@@ -53,14 +63,7 @@ impl Backend for PnpmBackend {
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let versions = crate::npm::list_versions(ctx, &sources, "pnpm").await?;
-        Ok(versions
-            .into_iter()
-            .map(|v| VersionInfo {
-                version: v,
-                stable: true,
-                lts: None,
-            })
-            .collect())
+        Ok(versions.into_iter().map(Self::version_info).collect())
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
@@ -136,5 +139,26 @@ fn ensure_executable(install_dir: &std::path::Path, os: Os) {
     #[cfg(not(unix))]
     {
         let _ = install_dir;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::version::{select_version, VersionSpec};
+
+    #[test]
+    fn latest_ignores_newer_prerelease_versions() {
+        let versions = ["11.22.0", "12.0.0-alpha.21"]
+            .into_iter()
+            .map(|version| PnpmBackend::version_info(version.into()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_version(&VersionSpec::Latest, &versions)
+                .unwrap()
+                .version,
+            "11.22.0"
+        );
     }
 }
