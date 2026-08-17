@@ -481,14 +481,16 @@ The policy is also available as `settings.attestations` or
 - `if-available`: absence is allowed, but any discovered invalid bundle fails;
 - `required`: a valid bundle must exist.
 
-The implementation checks the Fulcio certificate chain and SCT, GitHub Actions
-OIDC issuer and repository, artifact signature, DSSE subject digest, Rekor body
-consistency, and signing time. It also verifies the Rekor Signed Entry
-Timestamp with the trusted log key, the signed checkpoint, the root/tree-size
-binding, and the Merkle inclusion path. Missing, tampered, or mismatched proofs
-fail offline verification. New evidence is recorded as
-`sigstore-bundle+rekor`; legacy `sigstore-bundle` records remain readable but
-are audit data only.
+Public-good Sigstore bundles verify the Fulcio certificate chain and SCT,
+GitHub Actions OIDC issuer and repository, artifact signature, DSSE subject
+digest, Rekor body consistency, signing time, Signed Entry Timestamp, signed
+checkpoint, root/tree-size binding, and Merkle inclusion path. GitHub v0.3
+bundles with an RFC 3161 timestamp and no Rekor entry instead use the embedded
+GitHub trust root to verify the TSA timestamp, certificate chain, artifact
+signature, DSSE subject digest, and signed repository claim. Missing, tampered,
+or mismatched trust material fails offline verification. Evidence is recorded
+as `sigstore-bundle+rekor` or `sigstore-bundle+github-tsa`; legacy
+`sigstore-bundle` records remain readable but are audit data only.
 
 ## Arbitrary GitHub Release tools
 

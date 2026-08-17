@@ -26,6 +26,7 @@ blake3.workspace = true
 hex.workspace = true
 minisign-verify.workspace = true
 sigstore.workspace = true
+sigstore-verify.workspace = true
 x509-cert.workspace = true
 snap.workspace = true
 base64.workspace = true

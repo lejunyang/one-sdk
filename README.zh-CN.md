@@ -551,13 +551,16 @@ osdk --attestations required install github:cli/cli@latest
 已验证 bundle 按仓库和 artifact SHA-256 缓存，因此 `--offline` 和锁定重装无需
 信任 lockfile 中的证据，也能重新验证。
 
-验证使用内置 Sigstore public-good trust root，检查 Fulcio certificate chain 和
-SCT、GitHub Actions OIDC issuer 与仓库、artifact signature、DSSE subject digest、
-Rekor body 一致性和 signing time。它还会使用受信任日志 key 验证 Rekor Signed
-Entry Timestamp（SET）、signed checkpoint、proof 的 root/tree-size 绑定和
-canonical log entry 的 Merkle path。全部 proof 检查均可离线完成；proof 缺失、
-篡改或不匹配都会失败。新 receipt/lock 证据使用 `sigstore-bundle+rekor` kind；
-旧 `sigstore-bundle` 证据仍可读取，但绝不会成为跳过信任校验的捷径。
+Sigstore public-good bundle 使用内置 public-good trust root 验证：Fulcio
+certificate chain 与 SCT、GitHub Actions OIDC issuer 与仓库、artifact
+signature、DSSE subject digest、Rekor body 一致性、signing time、Signed Entry
+Timestamp、signed checkpoint、root/tree-size 绑定和 canonical log entry 的
+Merkle path。对不含 Rekor entry、改用 RFC 3161 timestamp 的 GitHub v0.3
+bundle，则使用内置 GitHub trust root 验证 TSA timestamp、certificate chain、
+artifact signature、DSSE subject digest 和已签名的仓库声明。bundle 缓存后全部
+检查均可离线完成；信任材料缺失、篡改或不匹配都会失败。证据按验证路径记录为
+`sigstore-bundle+rekor` 或 `sigstore-bundle+github-tsa`；旧
+`sigstore-bundle` 证据仍可读取，但绝不会成为跳过信任校验的捷径。
 
 ## 架构
 

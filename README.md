@@ -596,16 +596,19 @@ also fails when no bundle is available. Verified bundles are cached by
 repository and artifact SHA-256, so `--offline` and locked reinstalls can
 reverify them without trusting lockfile evidence.
 
-Verification uses the embedded Sigstore public-good trust root, checks the
-Fulcio certificate chain and SCT, GitHub Actions OIDC issuer and repository,
-artifact signature, DSSE subject digest, Rekor body consistency, and signing
-time. It also verifies the Rekor Signed Entry Timestamp against the trusted log
-key, the signed checkpoint, the proof's root/tree-size binding, and the Merkle
-path for the canonical log entry. All proof checks are offline and any missing,
-tampered, or mismatched transparency material fails verification. Newly written
-receipt and lock evidence uses the `sigstore-bundle+rekor` kind; legacy
-`sigstore-bundle` evidence remains readable but is never used as a trust
-shortcut.
+Public-good Sigstore bundles are verified with the embedded public-good trust
+root: Fulcio certificate chain and SCT, GitHub Actions OIDC issuer and
+repository, artifact signature, DSSE subject digest, Rekor body consistency,
+signing time, Signed Entry Timestamp, signed checkpoint, root/tree-size
+binding, and the canonical log entry's Merkle path. GitHub v0.3 bundles that
+use an RFC 3161 timestamp instead of a Rekor entry are verified against the
+embedded GitHub trust root, including the TSA timestamp, certificate chain,
+artifact signature, DSSE subject digest, and signed repository claim. All
+checks are offline after the bundle is cached; missing, tampered, or mismatched
+trust material fails verification. Evidence records use
+`sigstore-bundle+rekor` or `sigstore-bundle+github-tsa` for the verified trust
+path. Legacy `sigstore-bundle` evidence remains readable but is never used as a
+trust shortcut.
 
 ## Architecture
 

@@ -23,6 +23,9 @@ use sigstore::rekor::models::{
 };
 use sigstore::trust::sigstore::SigstoreTrustRoot;
 use sigstore::trust::TrustRoot;
+use sigstore_verify::trust_root::{SigstoreInstance, TrustedRoot};
+use sigstore_verify::types::{Bundle as VerifiedBundle, Sha256Hash, SignatureContent};
+use sigstore_verify::VerificationPolicy as SigstoreVerificationPolicy;
 
 use crate::config::AttestationPolicy;
 use crate::dirs::Dirs;
@@ -176,6 +179,26 @@ async fn verify_bundles_for_repository(
                 continue;
             }
         };
+        if bundle
+            .verification_material
+            .as_ref()
+            .is_some_and(|material| material.tlog_entries.is_empty())
+        {
+            match verify_github_timestamp_bundle(&bundle_json, &repository, digest) {
+                Ok(()) => {
+                    return Ok(Some(VerificationEvidence {
+                        kind: "sigstore-bundle+github-tsa".into(),
+                        repository,
+                        issuer: "https://github.com".into(),
+                        digest: format!("sha256:{digest}"),
+                    }));
+                }
+                Err(error) => {
+                    errors.push(error.to_string());
+                    continue;
+                }
+            }
+        }
         if let Err(error) = verify_rekor_transparency(&bundle, &rekor_keys) {
             errors.push(error.to_string());
             continue;
@@ -199,6 +222,57 @@ async fn verify_bundles_for_repository(
         "GitHub artifact attestation verification failed: {}",
         errors.join("; ")
     )))
+}
+
+fn verify_github_timestamp_bundle(
+    bundle_json: &[u8],
+    repository: &str,
+    digest: &str,
+) -> Result<()> {
+    let bundle_json = std::str::from_utf8(bundle_json)
+        .map_err(|error| Error::other(format!("invalid UTF-8 Sigstore bundle: {error}")))?;
+    let bundle = VerifiedBundle::from_json(bundle_json)
+        .map_err(|error| Error::other(format!("invalid GitHub Sigstore bundle: {error}")))?;
+    verify_signed_repository_claim(&bundle, repository)?;
+    let digest = Sha256Hash::from_hex(digest)
+        .map_err(|error| Error::other(format!("invalid artifact SHA-256 digest: {error}")))?;
+    let trust_root = TrustedRoot::from_embedded(SigstoreInstance::GitHub)
+        .map_err(|error| Error::other(format!("invalid embedded GitHub trust root: {error}")))?;
+    let policy = SigstoreVerificationPolicy::default().skip_tlog().skip_sct();
+    sigstore_verify::verify(digest, &bundle, &policy, &trust_root).map_err(|error| {
+        Error::other(format!(
+            "GitHub timestamp bundle verification failed: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn verify_signed_repository_claim(bundle: &VerifiedBundle, repository: &str) -> Result<()> {
+    let SignatureContent::DsseEnvelope(envelope) = &bundle.content else {
+        return Err(Error::other(
+            "GitHub timestamp bundle must contain a DSSE statement",
+        ));
+    };
+    let payload = envelope.decode_payload();
+    let statement: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|error| Error::other(format!("invalid GitHub attestation statement: {error}")))?;
+    let claimed = statement
+        .pointer("/predicate/repository")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            statement
+                .pointer("/predicate/buildDefinition/externalParameters/workflow/repository")
+                .and_then(serde_json::Value::as_str)
+        });
+    match claimed {
+        Some(claimed) if claimed.eq_ignore_ascii_case(repository) => Ok(()),
+        Some(claimed) => Err(Error::other(format!(
+            "GitHub attestation repository mismatch: expected `{repository}`, got `{claimed}`"
+        ))),
+        None => Err(Error::other(
+            "GitHub attestation statement is missing a supported repository claim",
+        )),
+    }
 }
 
 fn load_rekor_keys(trust_root: &impl TrustRoot) -> Result<BTreeMap<String, CosignVerificationKey>> {
@@ -496,6 +570,17 @@ mod tests {
         serde_json::from_slice(&fixture_bundle()).unwrap()
     }
 
+    fn github_timestamp_bundle() -> Vec<u8> {
+        let encoded: String =
+            include_str!("../../tests/fixtures/attestation/github-tsa-bundle.json.b64")
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap()
+    }
+
     fn fixture_rekor_keys() -> BTreeMap<String, CosignVerificationKey> {
         let trust_root = SigstoreTrustRoot::from_trusted_root_json_unchecked(TRUSTED_ROOT).unwrap();
         load_rekor_keys(&trust_root).unwrap()
@@ -588,6 +673,27 @@ mod tests {
                     .into(),
             }
         );
+    }
+
+    #[test]
+    fn verifies_github_timestamp_bundle_without_rekor_entry() {
+        verify_github_timestamp_bundle(
+            &github_timestamp_bundle(),
+            "jdx/communique",
+            "b958c6046bab52febf958c94974e1ffcc450bff78c28d7233e179bfd73828912",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_wrong_repository_for_github_timestamp_bundle() {
+        let error = verify_github_timestamp_bundle(
+            &github_timestamp_bundle(),
+            "jdx/other",
+            "b958c6046bab52febf958c94974e1ffcc450bff78c28d7233e179bfd73828912",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("repository mismatch"));
     }
 
     #[test]

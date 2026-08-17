@@ -41,6 +41,7 @@ hex = "0.4"
 # signatures
 minisign-verify = "0.2"
 sigstore = { version = "0.14", default-features = false, features = ["verify", "sigstore-trust-root"] }
+sigstore-verify = { version = "0.11", default-features = false }
 x509-cert = "0.2"
 snap = "1"
 # base64 (npm SRI integrity decoding)
