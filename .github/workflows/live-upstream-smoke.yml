@@ -125,6 +125,7 @@ jobs:
         env:
           LIVE_SMOKE_COMMAND_TIMEOUT: 20m
           OSDK_GITHUB_TOKEN: ${{ github.token }}
+          OSDK_YES: "true"
         run: |
           chmod +x \
             "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk" \
