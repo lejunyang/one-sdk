@@ -9,3 +9,4 @@
 
 - Run the narrowest relevant tests before each commit. Run the full workspace validation before declaring a multi-commit initiative complete.
 - Tests and smoke checks must use temporary `HOME`, `OSDK_*`, `CARGO_HOME`, `RUSTUP_HOME`, and build directories where applicable. Do not modify or rely on the user's real SDK-manager state.
+- When validating Rust code, tests, build scripts, installers, or CI from Linux, run the full Windows GNU workspace test suite with `./scripts/windows-wine-tests.sh` before declaring the task complete. Install the script prerequisites (including the `x86_64-pc-windows-gnu` Rust target and `mingw-w64`) when missing; the script downloads and verifies its pinned Wine build. A Windows cross-compile or Clippy check alone does not satisfy this runtime-test requirement. Documentation-only changes are exempt.
