@@ -349,7 +349,11 @@ fn package_cache_hook_refreshes_managed_values_and_preserves_user_overrides() {
     let install = temporary.path().join("installs/npm/11.5.2");
     std::fs::create_dir_all(&install).unwrap();
     std::fs::write(install.join(".osdk-complete"), b"").unwrap();
-    let expected = temporary.path().join("cache/pkg/npm");
+    // Build every component separately so the expected string uses the
+    // target platform's separator. `Path::join("cache/pkg/npm")` keeps the
+    // embedded forward slashes on Windows, while the CLI constructs this path
+    // one component at a time and prints backslashes.
+    let expected = temporary.path().join("cache").join("pkg").join("npm");
 
     let initial = run_isolated_in(temporary.path(), &project, &["hook-env", "--shell", "bash"]);
     let initial = String::from_utf8(initial.stdout).unwrap();
@@ -765,10 +769,11 @@ fn cache_env_lists_both_pnpm_store_variable_generations() {
     let output = run_isolated(temporary.path(), &["cache", "env"]);
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let store = temporary.path().join("cache/pkg/pnpm-store");
+    let package_cache = temporary.path().join("cache").join("pkg");
+    let store = package_cache.join("pnpm-store");
     assert!(stdout.contains(&format!(
         "PNPM_HOME={}",
-        temporary.path().join("cache/pkg/pnpm").display()
+        package_cache.join("pnpm").display()
     )));
     assert!(stdout.contains(&format!("npm_config_store_dir={}", store.display())));
     assert!(stdout.contains(&format!("pnpm_config_store_dir={}", store.display())));

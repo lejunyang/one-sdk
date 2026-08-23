@@ -2000,24 +2000,24 @@ npmRegistries:
     #[test]
     fn native_home_discovery_is_platform_ordered_and_deduplicated() {
         let cwd = Path::new("/work");
+        let windows_home = PathBuf::from(r"C:\Users\person");
         let getenv = |key: &str| match key {
             "HOME" => Some("/posix-home".into()),
             "USERPROFILE" => Some("C:\\Users\\person".into()),
             _ => None,
         };
+        let non_windows_userprofile = if windows_home.is_absolute() {
+            windows_home.clone()
+        } else {
+            cwd.join(&windows_home)
+        };
         assert_eq!(
             native_home_directories(cwd, getenv, false),
-            [
-                PathBuf::from("/posix-home"),
-                PathBuf::from("/work/C:\\Users\\person")
-            ]
+            [PathBuf::from("/posix-home"), non_windows_userprofile]
         );
         assert_eq!(
             native_home_directories(cwd, getenv, true),
-            [
-                PathBuf::from("C:\\Users\\person"),
-                PathBuf::from("/posix-home")
-            ]
+            [windows_home, PathBuf::from("/posix-home")]
         );
         assert_eq!(
             native_home_directories(
@@ -2576,6 +2576,11 @@ npmRegistries:
     }
 
     fn read_request(stream: &mut TcpStream) -> String {
+        // Accepted sockets can inherit the listener's nonblocking mode on
+        // Windows/Wine. Return to blocking I/O before applying the bounded
+        // read timeout so a transient WouldBlock is not treated as a broken
+        // registry response.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
