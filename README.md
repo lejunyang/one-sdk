@@ -14,9 +14,9 @@ managers (nvm/fnm/uv/sdkman/rustup) don't do together:
    copy of every identical file; each installed version is materialized from the
    store via hardlink / reflink / copy. Two node minors that share files cost
    disk once, not twice.
-2. **Unified downstream package caches.** npm/pnpm/yarn/pip/go/cargo/gradle
-   global caches are pointed at one shared root so different projects and SDK
-   versions reuse already-downloaded dependencies.
+2. **Manager-native dependency caches.** npm/pnpm/Yarn/pip/Go/Cargo/Gradle
+   keep their own cache or store format under one osdk-managed root, so projects
+   and SDK versions can reuse downloads within the same manager.
 3. **Multi-source with automatic fastest-mirror selection.** Every SDK ships an
    official source plus authoritative mirrors; `osdk` probes them and uses the
    fastest, with failover on both metadata and downloads. You can add custom
@@ -450,6 +450,28 @@ osdk cache dir                  # shared cache/store locations
 osdk cache env                  # the downstream package-cache redirections
 osdk --yes cache clean          # remove downloaded archives
 ```
+
+These are separate storage layers:
+
+- `<cache>/downloads` is the tool archive cache used while installing SDKs and
+  package-manager binaries. `osdk --yes cache clean` clears this layer.
+- `<data>/store` is the BLAKE3 CAS for verified, extracted SDK files. Installed
+  versions are materialized from it; `osdk prune` reclaims unreferenced objects.
+- `<cache>/pkg` contains manager-native project dependency caches and stores.
+  `osdk cache env` prints their redirections. npm uses its native
+  content-addressable cache (`npm_config_cache`); pnpm uses its native store
+  (`npm_config_store_dir` through pnpm 10, `pnpm_config_store_dir` from pnpm
+  11). `PNPM_HOME` remains a separate global executable/state home. Yarn
+  Classic uses `YARN_CACHE_FOLDER`; Yarn 2+ uses `YARN_GLOBAL_FOLDER`. Yarn 4
+  uses that global cache by default, while Yarn 2/3 reuse it only when the
+  project enables `enableGlobalCache`; osdk does not force that setting so
+  Zero-Install and project-local cache choices remain intact.
+
+The active manager receives these values through shell activation, `osdk exec`,
+and direct osdk shims. Explicit user environment variables always win. osdk
+does not install project dependencies or parse dependency lockfiles to create a
+universal package CAS; run npm, pnpm, or Yarn normally. Their formats remain
+separate, so there is no npm-vs-pnpm-vs-Yarn cross-manager blob deduplication.
 
 Destructive operations (`uninstall`, `cache clean`, and non-dry-run `prune`)
 share one confirmation policy. Interactive terminals prompt with a localized

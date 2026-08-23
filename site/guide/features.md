@@ -391,10 +391,14 @@ osdk --yes prune
 ```
 
 `prune` 只清理没有任何安装版本引用的存储对象。
+该 CAS 用于已验证、解压后的 SDK 文件（以及模型快照文件），不是通用的项目依赖
+存储。工具归档单独缓存在 `<cache>/downloads`，`osdk --yes cache clean` 清理的就是
+这一归档缓存。
 
 ## 下游包缓存
 
-osdk 为常见包管理器提供共享缓存环境，避免 SDK 版本之间重复下载依赖：
+osdk 将常见包管理器重定向到稳定的原生缓存或 store 目录，让同一包管理器的不同
+项目和 SDK 版本复用下载：
 
 ```bash
 osdk cache dir
@@ -402,8 +406,27 @@ osdk cache env
 osdk --yes cache clean
 ```
 
-覆盖 npm/pnpm/Yarn、pip、Go、Cargo 和 Gradle 等生态。`cache clean` 清理下载
-归档，不删除已安装 SDK 或内容存储。
+JavaScript 包管理器映射如下：
+
+| 包管理器 | 原生设置 | osdk 路径 |
+| --- | --- | --- |
+| npm | `npm_config_cache` | `<cache>/pkg/npm` |
+| pnpm 10 及以下 | `npm_config_store_dir` | `<cache>/pkg/pnpm-store` |
+| pnpm 11 及以上 | `pnpm_config_store_dir` | `<cache>/pkg/pnpm-store` |
+| 所有 pnpm 版本 | `PNPM_HOME`（全局可执行文件/状态目录，不是依赖 store） | `<cache>/pkg/pnpm` |
+| Yarn Classic | `YARN_CACHE_FOLDER` | `<cache>/pkg/yarn-classic` |
+| Yarn 2+ | `YARN_GLOBAL_FOLDER` | `<cache>/pkg/yarn` |
+
+因此 npm 继续使用自身的内容寻址缓存，pnpm 使用自身的 store。Yarn 4 默认使用
+全局缓存；Yarn 2/3 只有在项目启用 `enableGlobalCache` 时才会复用所配置的全局目录。
+osdk 不强制修改该设置，以保留 Zero-Install 和项目本地缓存选择。变量在 shell
+activation、`osdk exec` 和 osdk 直接 shim 三条路径中生效，用户已有值保持优先。
+
+其他原生映射还覆盖 pip、Go、Cargo 与 Gradle。osdk 只重定向缓存/store 位置；它
+本身不安装项目依赖，也不把依赖 lockfile 解析成通用 CAS，请照常运行 npm、pnpm 或
+Yarn。各自格式和目录保持独立，npm、pnpm 与 Yarn 之间没有跨管理器 blob 去重。
+`cache clean` 只清理独立的工具归档缓存，不清理包管理器原生依赖缓存、已安装 SDK
+或解压文件内容存储。
 
 `uninstall`、`cache clean` 和非演练 `prune` 统一使用确认策略：交互终端显示中文
 或英文提示；非交互环境不会等待 stdin，而是明确失败。CI 和脚本应传

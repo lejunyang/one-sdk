@@ -13,8 +13,9 @@ Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/ru
 1. **跨版本内容去重。** 基于 BLAKE3 的内容寻址存储只保留一份相同文件；各安装
    版本通过硬链接、reflink 或复制从存储中物化。两个 Node.js 次版本若共享文件，
    磁盘只保存一次。
-2. **统一下游包缓存。** npm/pnpm/Yarn/pip/Go/Cargo/Gradle 的全局缓存统一指向
-   共享目录，让不同项目和 SDK 版本复用已下载依赖。
+2. **包管理器原生依赖缓存。** npm/pnpm/Yarn/pip/Go/Cargo/Gradle 各自保留
+   原生缓存或 store 格式，并放在 osdk 管理的统一根目录下，让同一包管理器的不同
+   项目和 SDK 版本复用下载。
 3. **多源与最快镜像自动选择。** 每个 SDK 都提供官方源和可用镜像；osdk 会探测
    速度并选择最快来源，元数据或下载失败时自动切换。也支持添加自定义源或固定
    指定来源。
@@ -417,6 +418,25 @@ osdk prune                      # 清理未被任何安装引用的存储对象
 osdk cache dir                  # 共享缓存和存储目录
 osdk cache env                  # 下游包管理器缓存环境变量
 ```
+
+这里包含彼此独立的存储层：
+
+- `<cache>/downloads` 是安装 SDK 和包管理器二进制时使用的工具归档缓存；
+  `osdk --yes cache clean` 只清理这一层。
+- `<data>/store` 是已验证、解压后的 SDK 文件所使用的 BLAKE3 CAS。安装版本从这里
+  物化，`osdk prune` 回收未引用对象。
+- `<cache>/pkg` 保存各包管理器原生的项目依赖缓存和 store；`osdk cache env` 可查看
+  重定向。npm 使用自身的内容寻址缓存（`npm_config_cache`）；pnpm 使用自身的 store
+  （pnpm 10 及以下为 `npm_config_store_dir`，pnpm 11 起为
+  `pnpm_config_store_dir`）。`PNPM_HOME` 仍是单独的全局可执行文件/状态目录。Yarn
+  Classic 使用 `YARN_CACHE_FOLDER`；Yarn 2+ 使用 `YARN_GLOBAL_FOLDER`。Yarn 4
+  默认使用全局缓存，Yarn 2/3 只有在项目启用 `enableGlobalCache` 时才会跨项目复用；
+  osdk 不强制修改该设置，以保留 Zero-Install 和项目本地缓存选择。
+
+当前包管理器通过 shell activation、`osdk exec` 和 osdk 直接 shim 三条路径获得这些
+变量；用户显式设置的环境变量始终优先。osdk 本身不安装项目依赖，也不解析依赖
+lockfile 来构建通用包 CAS；请照常运行 npm、pnpm 或 Yarn。三者格式彼此独立，不会
+在 npm、pnpm 与 Yarn 之间做跨管理器 blob 去重。
 
 ## 语言（i18n）
 

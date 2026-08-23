@@ -139,8 +139,34 @@ impl Backend for YarnBackend {
             .join("bin")])
     }
 
+    fn exec_env(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let mapping = cache_mapping(&tv.version);
+        Ok(crate::cache::manager_exec_env(&ctx.dirs.cache, &[mapping]))
+    }
+
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {
         Ok(vec!["yarn".into(), "yarnpkg".into()])
+    }
+}
+
+fn yarn_major(version: &str) -> u64 {
+    version
+        .trim_start_matches('v')
+        .split('.')
+        .next()
+        .and_then(|part| part.parse().ok())
+        .unwrap_or(1)
+}
+
+fn cache_mapping(version: &str) -> (&'static str, &'static str) {
+    if yarn_major(version) >= 2 {
+        ("YARN_GLOBAL_FOLDER", "yarn")
+    } else {
+        ("YARN_CACHE_FOLDER", "yarn-classic")
     }
 }
 
@@ -177,5 +203,10 @@ mod tests {
         assert_eq!(YarnBackend::npm_package("4.10.3"), "@yarnpkg/cli-dist");
         // malformed -> classic default
         assert_eq!(YarnBackend::npm_package("weird"), "yarn");
+        assert_eq!(
+            cache_mapping("1.22.22"),
+            ("YARN_CACHE_FOLDER", "yarn-classic")
+        );
+        assert_eq!(cache_mapping("4.10.3"), ("YARN_GLOBAL_FOLDER", "yarn"));
     }
 }

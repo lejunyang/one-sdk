@@ -421,11 +421,15 @@ osdk --yes prune
 ```
 
 `prune` removes only store objects not referenced by any installed version.
+The CAS is for verified, extracted SDK files (and model snapshot files); it is
+not a universal project-package store. Tool archives are cached separately in
+`<cache>/downloads`, and `osdk --yes cache clean` clears that archive cache.
 
 ## Downstream package caches
 
-osdk provides shared cache environments for common package managers, avoiding
-repeated dependency downloads across SDK versions:
+osdk redirects common package managers to stable, manager-native cache or store
+directories. This lets projects and SDK versions reuse downloads within the
+same manager:
 
 ```bash
 osdk cache dir
@@ -433,9 +437,31 @@ osdk cache env
 osdk --yes cache clean
 ```
 
-This covers npm/pnpm/Yarn, pip, Go, Cargo, Gradle, and other ecosystems.
-`cache clean` removes downloaded archives, not installed SDKs or the content
-store.
+For the JavaScript managers, the mappings are:
+
+| Manager | Native setting | osdk path |
+| --- | --- | --- |
+| npm | `npm_config_cache` | `<cache>/pkg/npm` |
+| pnpm 10 and earlier | `npm_config_store_dir` | `<cache>/pkg/pnpm-store` |
+| pnpm 11 and later | `pnpm_config_store_dir` | `<cache>/pkg/pnpm-store` |
+| pnpm all versions | `PNPM_HOME` (global executable/state home, not the dependency store) | `<cache>/pkg/pnpm` |
+| Yarn Classic | `YARN_CACHE_FOLDER` | `<cache>/pkg/yarn-classic` |
+| Yarn 2+ | `YARN_GLOBAL_FOLDER` | `<cache>/pkg/yarn` |
+
+npm therefore keeps using its native content-addressable cache and pnpm its
+native store. Yarn 4 uses its global cache by default; Yarn 2/3 reuse the
+configured global folder only when the project enables `enableGlobalCache`.
+osdk does not force that setting, preserving Zero-Install and project-local
+cache choices. The values apply through shell activation, `osdk exec`, and
+direct osdk shims. Existing user values are preserved.
+
+Other supported native mappings include pip, Go, Cargo, and Gradle. osdk only
+redirects cache/store locations: it does not install project dependencies or
+parse dependency lockfiles into a universal CAS. Run npm, pnpm, or Yarn normally.
+Their formats and directories stay separate, so there is no cross-manager blob
+deduplication between npm, pnpm, and Yarn. `cache clean` removes the separate
+tool archive cache, not manager-native dependency caches, installed SDKs, or the
+extracted-file content store.
 
 `uninstall`, `cache clean`, and non-dry-run `prune` share one confirmation
 policy. Interactive terminals show a localized prompt; non-interactive runs

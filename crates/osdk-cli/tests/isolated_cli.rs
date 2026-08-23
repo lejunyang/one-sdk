@@ -328,6 +328,49 @@ fn activation_scripts_refresh_environment_immediately() {
         .contains("Invoke-OsdkHook"));
 }
 
+#[test]
+fn package_cache_hook_refreshes_managed_values_and_preserves_user_overrides() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"npm@11.5.2"}"#,
+    )
+    .unwrap();
+    let install = temporary.path().join("installs/npm/11.5.2");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    let expected = temporary.path().join("cache/pkg/npm");
+
+    let initial = run_isolated_in(temporary.path(), &project, &["hook-env", "--shell", "bash"]);
+    let initial = String::from_utf8(initial.stdout).unwrap();
+    assert!(initial.contains(&format!("export npm_config_cache='{}'", expected.display())));
+
+    let preserved = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["hook-env", "--shell", "bash"],
+        &[("npm_config_cache", "/custom/npm")],
+    );
+    assert!(!String::from_utf8(preserved.stdout)
+        .unwrap()
+        .contains("export npm_config_cache="));
+
+    let managed = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["hook-env", "--shell", "bash"],
+        &[
+            ("npm_config_cache", "/old/osdk/pkg/npm"),
+            ("OSDK_ORIG_npm_config_cache_SET", "1"),
+        ],
+    );
+    assert!(String::from_utf8(managed.stdout)
+        .unwrap()
+        .contains(&format!("export npm_config_cache='{}'", expected.display())));
+}
+
 // Windows runners can block a child process from connecting back to a listener
 // owned by the test process. The same provider/pull contract runs in-process in
 // osdk-core on Windows; keep this cross-process CLI topology on Unix.
@@ -706,6 +749,21 @@ fn yes_flag_confirms_cache_clean() {
     );
     assert!(!archive.exists());
     assert!(temp.path().join("cache/downloads").is_dir());
+}
+
+#[test]
+fn cache_env_lists_both_pnpm_store_variable_generations() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_isolated(temporary.path(), &["cache", "env"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let store = temporary.path().join("cache/pkg/pnpm-store");
+    assert!(stdout.contains(&format!(
+        "PNPM_HOME={}",
+        temporary.path().join("cache/pkg/pnpm").display()
+    )));
+    assert!(stdout.contains(&format!("npm_config_store_dir={}", store.display())));
+    assert!(stdout.contains(&format!("pnpm_config_store_dir={}", store.display())));
 }
 
 #[test]
@@ -2011,4 +2069,194 @@ fn exec_runs_with_exact_managed_tool_environment() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("node:hello"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let node_bin = temp.path().join("installs/node/20.0.0/bin");
+    std::fs::create_dir_all(&node_bin).unwrap();
+    std::fs::write(node_bin.join("node"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(
+        node_bin.join("node"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("installs/node/20.0.0/.osdk-complete"), b"").unwrap();
+
+    let cases = [
+        (
+            "npm",
+            "11.5.2",
+            "bin/npm",
+            "${npm_config_cache-unset}",
+            "npm",
+            "npm_config_cache",
+        ),
+        (
+            "pnpm",
+            "10.15.0",
+            "pnpm",
+            "${PNPM_HOME-unset}|${npm_config_store_dir-unset}|${pnpm_config_store_dir-unset}",
+            "pnpm|pnpm-store|unset",
+            "npm_config_store_dir",
+        ),
+        (
+            "pnpm",
+            "11.0.0",
+            "pnpm",
+            "${PNPM_HOME-unset}|${npm_config_store_dir-unset}|${pnpm_config_store_dir-unset}",
+            "pnpm|unset|pnpm-store",
+            "pnpm_config_store_dir",
+        ),
+        (
+            "yarn",
+            "1.22.22",
+            "bin/yarn",
+            "${YARN_CACHE_FOLDER-unset}|${YARN_GLOBAL_FOLDER-unset}|${YARN_ENABLE_GLOBAL_CACHE-unset}",
+            "yarn-classic|unset|unset",
+            "YARN_CACHE_FOLDER",
+        ),
+        (
+            "yarn",
+            "4.10.3",
+            "bin/yarn",
+            "${YARN_CACHE_FOLDER-unset}|${YARN_GLOBAL_FOLDER-unset}|${YARN_ENABLE_GLOBAL_CACHE-unset}",
+            "unset|yarn|unset",
+            "YARN_GLOBAL_FOLDER",
+        ),
+    ];
+
+    for (manager, version, relative_executable, shell_value, expected_suffix, override_key) in cases
+    {
+        let install = temp.path().join(format!("installs/{manager}/{version}"));
+        let executable = install.join(relative_executable);
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf '%s\n' \"{shell_value}\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+        let request = format!("{manager}@{version}");
+        let output = run_isolated(
+            temp.path(),
+            &[
+                "--offline",
+                "exec",
+                "--tool",
+                &request,
+                "--tool",
+                "node@20.0.0",
+                "--",
+                manager,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{manager}@{version}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = expected_suffix
+            .split('|')
+            .map(|part| {
+                if part == "unset" {
+                    part.to_string()
+                } else {
+                    temp.path()
+                        .join("cache/pkg")
+                        .join(part)
+                        .display()
+                        .to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == expected),
+            "{manager}@{version} did not receive {expected}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let custom = format!("/custom/{manager}-{version}");
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            temp.path(),
+            &[
+                "--offline",
+                "exec",
+                "--tool",
+                &request,
+                "--tool",
+                "node@20.0.0",
+                "--",
+                manager,
+            ],
+            &[(override_key, &custom)],
+        );
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&custom),
+            "{manager}@{version} did not preserve {override_key}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        if manager == "pnpm" {
+            let output = run_isolated_in_with_env(
+                temp.path(),
+                temp.path(),
+                &[
+                    "--offline",
+                    "exec",
+                    "--tool",
+                    &request,
+                    "--tool",
+                    "node@20.0.0",
+                    "--",
+                    manager,
+                ],
+                &[("PNPM_HOME", "/custom/pnpm-home")],
+            );
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("/custom/pnpm-home"));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn node_only_exec_provides_cache_for_bundled_npm() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let node_bin = temp.path().join("installs/node/20.0.0/bin");
+    std::fs::create_dir_all(&node_bin).unwrap();
+    let npm = node_bin.join("npm");
+    std::fs::write(
+        &npm,
+        "#!/bin/sh\nprintf '%s\n' \"${npm_config_cache-unset}\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(temp.path().join("installs/node/20.0.0/.osdk-complete"), b"").unwrap();
+
+    let output = run_isolated(
+        temp.path(),
+        &["--offline", "exec", "--tool", "node@20.0.0", "--", "npm"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expected = temp.path().join("cache/pkg/npm").display().to_string();
+    assert!(stdout.lines().any(|line| line == expected));
 }

@@ -111,6 +111,18 @@ impl Backend for PnpmBackend {
         Ok(vec![ctx.dirs.install_path(self.id(), &tv.version)])
     }
 
+    fn exec_env(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let mapping = cache_mapping(&tv.version);
+        Ok(crate::cache::manager_exec_env(
+            &ctx.dirs.cache,
+            &[("PNPM_HOME", "pnpm"), mapping],
+        ))
+    }
+
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
@@ -119,6 +131,23 @@ impl Backend for PnpmBackend {
         } else {
             Ok(discovered)
         }
+    }
+}
+
+fn major_version(version: &str) -> u64 {
+    version
+        .trim_start_matches('v')
+        .split('.')
+        .next()
+        .and_then(|part| part.parse().ok())
+        .unwrap_or(0)
+}
+
+fn cache_mapping(version: &str) -> (&'static str, &'static str) {
+    if major_version(version) >= 11 {
+        ("pnpm_config_store_dir", "pnpm-store")
+    } else {
+        ("npm_config_store_dir", "pnpm-store")
     }
 }
 
@@ -159,6 +188,22 @@ mod tests {
                 .unwrap()
                 .version,
             "11.22.0"
+        );
+    }
+
+    #[test]
+    fn selects_version_specific_store_environment_key() {
+        assert_eq!(
+            cache_mapping("10.15.0"),
+            ("npm_config_store_dir", "pnpm-store")
+        );
+        assert_eq!(
+            cache_mapping("11.0.0-rc.1"),
+            ("pnpm_config_store_dir", "pnpm-store")
+        );
+        assert_eq!(
+            cache_mapping("v12.1.0"),
+            ("pnpm_config_store_dir", "pnpm-store")
         );
     }
 }

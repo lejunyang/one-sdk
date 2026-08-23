@@ -91,6 +91,17 @@ impl Backend for NpmBackend {
             .join("bin")])
     }
 
+    fn exec_env(
+        &self,
+        ctx: &Ctx,
+        _tv: &ToolVersion,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(crate::cache::manager_exec_env(
+            &ctx.dirs.cache,
+            &[("npm_config_cache", "npm")],
+        ))
+    }
+
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {
         Ok(vec!["npm".into(), "npx".into()])
     }

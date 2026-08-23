@@ -450,8 +450,11 @@ impl Backend for NodeBackend {
         Ok(vec![dir])
     }
 
-    fn exec_env(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
-        Ok(BTreeMap::new())
+    fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
+        Ok(crate::cache::manager_exec_env(
+            &ctx.dirs.cache,
+            &[("npm_config_cache", "npm")],
+        ))
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
@@ -535,6 +538,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("cross-architecture"));
+    }
+
+    #[test]
+    fn bundled_npm_uses_the_shared_npm_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let env = NodeBackend
+            .exec_env(&ctx, &ToolVersion::new("node", "20.11.1"))
+            .unwrap();
+        assert_eq!(
+            PathBuf::from(env.get("npm_config_cache").unwrap()),
+            ctx.dirs.cache.join("pkg/npm")
+        );
     }
 
     #[cfg(unix)]
