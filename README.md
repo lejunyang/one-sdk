@@ -1,49 +1,40 @@
 # osdk — one SDK manager
 
-[简体中文](README.zh-CN.md) · **English** ·
-[Website](https://lejunyang.github.io/one-sdk/) ·
-[中文文档](https://lejunyang.github.io/one-sdk/) ·
-[English docs](https://lejunyang.github.io/one-sdk/en/)
+**English** · [简体中文](README.zh-CN.md) ·
+[Documentation](https://lejunyang.github.io/one-sdk/en/) ·
+[Releases](https://github.com/lejunyang/one-sdk/releases)
 
-A single cross-platform CLI (Windows/macOS/Linux) that manages many language
-SDKs and their versions: **node, npm, pnpm, yarn, java, maven, gradle, kotlin,
-python, rust, go, deno, bun** — with three things existing single-purpose
-managers (nvm/fnm/uv/sdkman/rustup) don't do together:
+osdk gives Windows, macOS, and Linux projects one CLI for language runtimes,
+package managers, developer tools, and model snapshots. Use it to:
 
-1. **Cross-version content dedup.** A content-addressed store (blake3) keeps one
-   copy of every identical file; each installed version is materialized from the
-   store via hardlink / reflink / copy. Two node minors that share files cost
-   disk once, not twice.
-2. **Manager-native dependency caches.** npm/pnpm/Yarn/Bun/Deno and the
-   pip/Go/Cargo/Gradle ecosystems keep their own cache or store format under one
-   osdk-managed root, so projects and SDK versions can reuse downloads within
-   the same tool.
-3. **Multi-source with automatic fastest-mirror selection.** Every SDK ships an
-   official source plus authoritative mirrors; `osdk` probes them and uses the
-   fastest, with failover on both metadata and downloads. You can add custom
-   sources or pin one.
-4. **Immutable model snapshots.** Hugging Face and ModelScope repositories can
-   be resolved to immutable snapshots, downloaded with file-level resume and
-   SHA-256 verification, deduplicated in the same CAS, and recorded
-   independently under `[models]` in `osdk.lock`.
+- install and switch complete project toolchains with one command style;
+- keep platform-aware project locks that teammates and CI can reuse;
+- choose responsive SDK mirrors and dependency registries automatically;
+- work from downloaded metadata and artifacts when the network is unavailable;
+- manage Hugging Face and ModelScope snapshots alongside development tools;
+- inspect storage, caches, active versions, and environment health in English or
+  Chinese.
+
+Start with the [getting-started guide](site/en/guide/getting-started.md), or see
+the [complete feature overview](site/en/guide/features.md).
 
 ## Install
 
-Download the latest prebuilt release on Linux or macOS:
+Linux and macOS:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh | sh
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
-Both installers verify the release archive against `SHA256SUMS`. Download the
-script first when passing custom options:
+The installers download the latest release and verify it against
+`SHA256SUMS`. To choose a version or destination, download the script first:
 
 ```bash
 curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
@@ -51,715 +42,285 @@ sh install.sh --version 0.1.0 --install-dir "$HOME/bin"
 ```
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 -OutFile install.ps1
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
+  -OutFile install.ps1
 .\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
 ```
 
-Use `--help` on Unix or `Get-Help .\install.ps1 -Detailed` on PowerShell for
-the complete parameter list. `OSDK_VERSION`, `OSDK_BIN_DIR`,
-`OSDK_REPOSITORY`, `OSDK_DOWNLOAD_BASE_URL`, and `OSDK_TARGET` provide
-environment-based overrides.
-
-### Build from source
-
-Rust is required. In mainland China, use a mirror (the official
-`static.rust-lang.org` is often unusably slow):
+If GitHub downloads are slow, route both the installer and release downloads
+through a trusted proxy:
 
 ```bash
-export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
-cargo build --release        # binaries: target/release/{osdk,osdk-shim}
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh |
+  OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
 ```
 
-Maintainers publish a new binary release by bumping
-`workspace.package.version` and pushing a commit to `main` whose commit message
-contains the exact marker `[publish]`. A normal commit never runs the binary
-release workflow.
+See [Installation](site/en/guide/installation.md) for PATH setup, installer
+options, source builds, and verification.
 
 ## Quick start
 
 ```bash
-osdk install node@20            # install (auto-picks fastest mirror)
-osdk --jobs 4 install node@20 go@1.22 python@3.12
-osdk use -g node@20             # install + set global default + generate shims
-osdk use node@18                # pin in the current project (osdk.toml)
-node --version                  # runs the active version via shim
+# Install several runtimes; downloads can run concurrently.
+osdk --jobs 4 install node@20 python@3.12 go@1.22
 
-# shell activation (per-directory shim-first PATH + env)
-eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
-# later, remove the hook and restore PATH/env in the current shell:
-eval "$(osdk deactivate bash)"
+# Choose a user-wide default.
+osdk use -g node@20
 
-# immutable model snapshot
+# Pin a version for the current project.
+osdk use python@3.12
+
+# See what this directory will use.
+osdk current
+
+# Enable automatic per-directory switching.
+eval "$(osdk activate bash)"
+
+node --version
+python --version
+```
+
+Activation also supports zsh, fish, and PowerShell. Run `osdk --help` or
+`osdk <command> --help` whenever you need the full command reference.
+
+## Scenario: make a project toolchain reproducible
+
+Pin tools in the repository, resolve them, and install the matching lock for
+the current platform:
+
+```bash
+osdk use node@20
+osdk use python@3.12
+osdk use go@1.22
+osdk lock
+osdk install
+```
+
+Check for newer matching versions or run a command without changing project
+pins:
+
+```bash
+osdk outdated
+osdk upgrade
+osdk exec --tool node@20 -- node --version
+```
+
+For immutable Rust reproduction, pin an explicit or dated toolchain. Floating
+rustup channels such as `stable`, `beta`, and `nightly` remain floating when
+written to the lock.
+
+osdk can also follow existing `.tool-versions`, `.nvmrc`, `.node-version`,
+`.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`, and Node
+version declarations in `package.json`.
+
+Guides: [Project toolchains](site/en/guide/projects.md) ·
+[Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
+
+## Scenario: use package managers with an available registry
+
+Install npm, pnpm, or Yarn independently, or let an exact
+`package.json#packageManager` selection join the project toolchain:
+
+```bash
+osdk install npm@11.5.2
+osdk install pnpm@9.15.0
+osdk install yarn@4.9.1
+```
+
+Before a package-manager process starts, osdk can select a healthy configured
+registry for npm, pnpm, Yarn, Bun, and Deno. Inspect the current choice with:
+
+```bash
+osdk registry test
+osdk registry test pnpm
+```
+
+Explicit registry flags, environment variables, private registries, and native
+package-manager configuration remain under your control.
+
+Guide: [Package managers and registry selection](site/en/guide/package-managers.md)
+
+## Scenario: work in each language ecosystem
+
+The same install, use, lock, source, cache, and offline commands apply across
+ecosystems. The runtime-specific commands cover the workflows that need them.
+
+### Node.js
+
+```bash
+osdk install node@20 -o corepack=true
+osdk lock node@20 -o arch=arm64
+osdk node migrate-packages --from 20.19.0 --to 22.17.0
+osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
+```
+
+### Python
+
+```bash
+osdk install python@3.14
+osdk install python@cpython-3.14+freethreaded
+osdk install python@pypy-3.11
+osdk python find
+osdk python find pypy-3.11
+```
+
+### Java and JVM tools
+
+```bash
+osdk install java@21
+osdk install java@21 -o package-type=jre
+osdk install java@21 -o distribution=zulu -o package-type=jdk
+osdk install maven@3.9.16 gradle@9.7.0 kotlin@2.4.10
+```
+
+### Go
+
+```bash
+osdk install go@1.22
+osdk use go@1.22
+osdk exec --tool go@1.22 -- go version
+```
+
+### Rust
+
+```bash
+osdk install rust@stable -o profile=minimal -o components=clippy,rustfmt
+osdk rust component add rustfmt --toolchain stable
+osdk rust target add x86_64-pc-windows-gnu --toolchain stable
+osdk rust check --repair
+```
+
+Guide: [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
+
+## Scenario: pin a model snapshot
+
+Pull selected files from Hugging Face or ModelScope, verify the local snapshot,
+and obtain its path:
+
+```bash
+export HF_TOKEN=... # optional for private or gated repositories
+
 osdk model pull qwen25 \
   hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors'
 osdk model pull qwen25-ms \
   ms:Qwen/Qwen2.5-7B-Instruct@master \
   --include '*.json' --include '*.safetensors'
-osdk model path qwen25
-```
-
-PowerShell activation guards its command-lookup callback against re-entry.
-Windows shims also launch `.cmd` and `.bat` tools explicitly through `ComSpec`,
-preserving batch arguments, stdio, and exit codes.
-
-Downloads retry transient failures and safely resume validated partial files
-with HTTP `Range`/`If-Range`. Use `--offline` after a successful online run to
-resolve metadata and reinstall artifacts entirely from the osdk cache.
-
-Project version files are honored (walk-up): `osdk.toml`, `.tool-versions`
-(asdf-compatible), and idiomatic files (`.nvmrc`, `.node-version`,
-`.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`). Node also
-reads `package.json#engines.node` and `devEngines.runtime` as npm semver ranges.
-Priority is global across the walk-up tree: `osdk.toml` > `.tool-versions` >
-`.nvmrc` > `.node-version` > `package.json` > user-global config.
-
-## Model snapshots
-
-`osdk model pull` treats a model as a multi-file repository snapshot rather
-than an SDK archive:
-
-```bash
-export HF_TOKEN=... # optional for private or gated repositories
-osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
-osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
-osdk model list
 osdk model verify qwen25
 osdk model path qwen25
-osdk model remove qwen25
+osdk model list
 ```
 
-For Hugging Face, the requested branch or tag is resolved to an immutable
-commit. ModelScope's file API exposes per-file revisions rather than one
-snapshot commit, so osdk derives an immutable snapshot identity from the
-requested revision plus the sorted path, size, and SHA-256 manifest. Each
-selected file is resumably cached, SHA-256 verified, ingested into the shared
-CAS, and materialized atomically. The exact repository, snapshot revision,
-endpoint, variant, file size, and SHA-256 are written to the top-level
-`[models]` section in `osdk.lock`; short-lived signed download URLs and tokens
-are never persisted.
-
-Use repeatable `--include` and `--exclude` globs to avoid downloading formats
-you do not need, and `--variant` to label formats or quantizations such as
-`safetensors-fp16`. `--offline` rebuilds a removed snapshot from cached metadata
-and files without network access. `OSDK_HF_TOKEN`, `HF_TOKEN`, and
-`HUGGING_FACE_HUB_TOKEN` are accepted for authentication; authorization is
-attached only to requests for the configured Hugging Face endpoint.
-ModelScope accepts `OSDK_MODELSCOPE_TOKEN` or `MODELSCOPE_API_TOKEN`.
-
-### Global model environment
-
-Provider settings can be persisted globally instead of being scoped to
-`osdk exec`. Install shell activation once, then enable one or both adapters:
+Enable provider endpoint and cache variables for activated shells when model
+tools should share the osdk environment:
 
 ```bash
-eval "$(osdk activate bash)" # add to ~/.bashrc; zsh/fish/powershell also work
-
-osdk model env enable                    # Hugging Face + ModelScope
-osdk model env enable huggingface
-osdk model env enable modelscope --force
+osdk model env enable
 osdk model env list
 osdk model env disable huggingface
 ```
 
-Active osdk shells refresh on the next prompt, and newly activated shells apply
-the settings immediately. The Hugging Face adapter exports `HF_ENDPOINT`,
-`HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE`, and `HF_ASSETS_CACHE`; `--offline`
-also exports the officially supported `HF_HUB_OFFLINE=1`. The ModelScope
-adapter exports `MODELSCOPE_ENDPOINT` and `MODELSCOPE_CACHE`. ModelScope has no
-equivalent global offline environment variable, so osdk does not invent one.
+Guide: [Model snapshots](site/en/guide/models.md)
 
-By default, an existing user variable wins. `--force` persists an explicit
-override. Disabling an adapter or running `osdk deactivate` restores every
-captured original value. Tokens are never stored in osdk configuration. When a
-global custom endpoint does not opt into credential forwarding, osdk also
-suppresses environment and implicit client tokens for that endpoint. Anonymous
-custom endpoints also use isolated `HF_HOME` / `MODELSCOPE_HOME` directories,
-so persisted login tokens or cookies cannot leak to a mirror.
+## Scenario: control sources, offline use, and trust
 
-Model endpoints use the same source configuration, pinning, TTL, and
-throughput ranking as SDK mirrors, but probes target a real model repository:
+Let osdk rank available sources, pin a preferred mirror, add a trusted internal
+source, or override the source for one command:
 
 ```bash
-osdk source list modelscope
-osdk source test modelscope --model Qwen/Qwen2.5-0.5B-Instruct@master
-osdk source pin modelscope modelscope-cn
-osdk source add huggingface --id corp \
-  --download-url https://hub.example.com
-```
-
-The probe verifies repository metadata and performs a bounded Range download
-against an actual model file. Official endpoints may receive their provider
-token. Custom endpoints are anonymous by default; use
-`--forward-credentials` on `source add` or on an explicit `model pull
---endpoint` only after trusting that host. Automatic failover stays within one
-provider. Hugging Face and ModelScope repository identities are never assumed
-to be interchangeable.
-
-## Node workflows
-
-Override the Node artifact architecture while resolving a lock:
-
-```bash
-osdk lock node@20 -o arch=arm64
-```
-
-The target architecture is saved in the matching platform lock section.
-Install and execution reject cross-architecture artifacts because osdk has no
-download-only mode. Enable Corepack with `-o corepack=true` or persist
-`corepack = true` under `[settings.node]`; osdk invokes only that installation's
-Corepack and rolls the install back if enabling shims fails.
-
-Migrate portable global npm packages between managed Node versions:
-
-```bash
-osdk node migrate-packages --from 20.19.0 --to 22.17.0
-osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
-```
-
-The default is a dry-run. npm itself and packages marked with native build or
-install scripts are skipped. `--apply` uses the target Node's managed npm with
-its bin directory first on `PATH`; on failure, the target's previous global
-package set is restored.
-
-## Python implementations and catalogs
-
-The short form remains CPython:
-
-```bash
-osdk install python@3.14
-osdk install python@cpython-3.14+freethreaded
-osdk install python@cpython-3.14+debug
-osdk install python@pypy-3.11
-osdk install python@graalpy-3.12
-osdk install python@pyodide-3.14
-osdk python find pypy-3.11
-```
-
-The full identity is
-`python@<implementation>-<version>+<variant>`; implementation and variant are
-persisted in `osdk.lock`, so regular and free-threaded CPython can coexist.
-`python find` reports managed, `PATH`, and system interpreters in that order.
-
-The built-in known-good catalog is derived from uv download metadata at a fixed
-commit and every entry has a SHA-256. Configure a larger internal or refreshed
-catalog only with both fields:
-
-```toml
-[settings.python]
-catalog_url = "https://example.test/python-catalog.json"
-catalog_sha256 = "0123456789abcdef..."
-```
-
-Local paths and `file://` URLs are supported. A new catalog replaces last-good
-cache only after its exact digest, schema, implementation, variant, and every
-artifact checksum validate; failure falls back to last-good, then built-in.
-Pre-release policy is `if-explicit` by default:
-
-```bash
-osdk --prerelease never install python@3.15.0rc1
-osdk --prerelease allow install python@latest
-```
-
-`latest` does not select a pre-release unless policy is `allow`; `never` rejects
-pre-releases even when explicitly requested.
-
-## Java runtimes and JVM tools
-
-Java defaults to a Temurin JDK, while package type is explicit and locked:
-
-```bash
-osdk install java@21
-osdk install java@21 -o package-type=jre
-osdk install java@21 -o distribution=zulu -o package-type=jdk
-```
-
-JRE identities use the `jre-` prefix, so the same Java version can coexist as
-JDK and JRE. Foojay results are filtered by runtime type and host libc. A
-built-in Temurin LTS catalog (8, 11, 17, 21, and 25) resolves with an empty
-offline cache; verified locked artifacts install without contacting Foojay.
-Set a Foojay-compatible packages mirror or static endpoint when needed:
-
-```toml
-[settings.java]
-catalog_url = "https://mirror.example.test/disco/v3.0/packages"
-```
-
-Maven, Gradle, and Kotlin are independent candidates rather than Java options:
-
-```bash
-osdk install maven@3.9.16
-osdk install gradle@9.7.0
-osdk install kotlin@2.4.10
-```
-
-Each has its own install identity, shims, built-in stable candidate, and
-upstream SHA-512 or SHA-256 checksum. All use the shared offline/cache/lock
-pipeline and never call a user-global Java installation during install.
-
-## Rust lifecycle management
-
-Rust remains delegated to rustup, but every lifecycle command injects osdk's
-isolated `RUSTUP_HOME` and `CARGO_HOME`:
-
-```bash
-osdk rust component add rustfmt --toolchain stable
-osdk rust component remove rustfmt --toolchain stable
-osdk rust component list --toolchain stable
-osdk rust target add x86_64-pc-windows-gnu --toolchain stable
-osdk rust target remove x86_64-pc-windows-gnu --toolchain stable
-osdk rust target list --toolchain stable
-osdk rust check --repair
-```
-
-`check` prints isolated rustup update status; `--repair` reconciles real rustup
-toolchains with osdk markers. osdk project pins remain the default directory
-selection mechanism. Compatibility with rustup overrides is explicit:
-
-```bash
-osdk rust override import [path]
-osdk rust override export [path]
-osdk rust toolchain link local-dev /absolute/toolchain
-```
-
-Import writes the isolated rustup override to `osdk.toml`; export writes the
-active osdk pin to isolated rustup. Linked toolchains expose their local `bin`
-directory but are rejected from reproducible remote lock artifacts.
-
-## Project package managers
-
-osdk reads exact Corepack-style selections from `package.json#packageManager`
-and `devEngines.packageManager`:
-
-```json
-{
-  "engines": { "node": ">=20 <23" },
-  "packageManager": "pnpm@9.15.0"
-}
-```
-
-`npm`, `pnpm`, and `yarn` are supported. Priority is `osdk.toml [tools]` >
-`packageManager` > `devEngines.packageManager`. Missing versions, unsupported
-managers, URLs, and hash/build suffixes fail explicitly.
-
-The npm backend installs the `npm` registry package independently from Node and
-verifies npm SRI:
-
-```bash
-osdk install npm@11.5.2
-osdk uninstall npm@11.5.2
-```
-
-Selecting npm/pnpm/Yarn automatically adds managed Node. Runtime PATH places
-the package-manager bin first and exact managed Node second, never user-global
-Node. Locks persist both exact versions and support metadata-free offline
-reinstall.
-
-### Automatic dependency registries
-
-Before a command that may fetch npm packages, osdk probes anonymous registry
-candidates and selects a healthy endpoint for that one process. This covers
-`npm`/`npx`, `pnpm`/`pnpx`, Yarn Classic and Berry, `bun`/`bunx`, and Deno npm
-dependencies through direct shims and `osdk exec`. Shell activation keeps osdk
-shims ahead of the real manager bins so the same preflight also applies there.
-The manager is started exactly once; if every candidate is unavailable, it is
-not started. A failure after startup is returned without retrying the install.
-
-Without configuration, the built-in npmjs and npmmirror endpoints are probed
-concurrently and the fastest healthy endpoint wins. To make order a project
-policy, use a trusted project `osdk.toml` (or the user config):
-
-```toml
-[registries.npm]
-urls = [
-  "https://registry.npmmirror.com/",
-  "https://registry.npmjs.org/",
-]
-probe_timeout_ms = 1500
-```
-
-Configured URLs retain their order: osdk picks the first healthy candidate and
-uses later entries only as pre-start fallback. Project configuration replaces
-the user-global list. Inspect the effective plan with:
-
-```bash
-osdk registry test              # all manager strategies
-osdk registry test pnpm         # one manager
-osdk registry test yarn         # both Yarn strategies if its major is unknown
-```
-
-Explicit manager registry arguments or environment variables always win. If a
-native `.npmrc`, `.yarnrc`, `.yarnrc.yml`, or `bunfig.toml` contains a private
-or unknown registry, a scoped registry, authentication/TLS policy, or a native
-proxy setting, osdk leaves it untouched and does not probe that endpoint.
-Ordinary `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` settings are honored by the
-anonymous probe. Manager-supported strict offline flags bypass preflight
-(`--offline`, or Deno `--cached-only` where that command supports it);
-`--prefer-offline`, frozen-lockfile modes, and immutable-cache modes may still
-use the network. Absolute tarball
-URLs already stored in metadata or lockfiles may
-bypass the selected default registry; osdk does not rewrite lockfiles or rerun
-lifecycle scripts. See `docs/package-registry-design.md` for the security and
-future shared-tarball-cache boundaries.
-
-## Reproducible projects and execution
-
-Resolve the current project to exact, platform-specific versions:
-
-```bash
-osdk lock                         # writes/merges osdk.lock
-osdk install                      # consumes the matching platform lock
-osdk outdated                     # compare installed vs current resolution
-osdk upgrade                      # install current resolutions + refresh lock
-```
-
-`osdk.lock` keeps independent sections for Linux, macOS, and Windows, including
-the original request, exact resolved version, backend options, and—after the
-tool has been installed—the exact artifact URL, filename, verified checksum,
-and any authenticated Sigstore evidence. No-argument installs use the locked
-artifact identity without re-querying an upstream release registry. Evidence
-in the lock is an audit record, not a trust shortcut: an attestation-enabled
-locked reinstall verifies the cached bundle against the cached artifact again.
-An explicit `osdk install node@20` still honors the explicit request.
-
-## Project configuration trust
-
-Plain project `[tools]` pins and `[aliases]` are safe data and load without a
-trust prompt. Any other project-level section can affect behavior or download
-sources and must be explicitly trusted before osdk loads any of it:
-
-```bash
-osdk --yes trust                 # trust nearest osdk.toml
-osdk --yes trust ./osdk.toml     # trust a specific file
-osdk trust list                  # show active/stale trust records
-osdk untrust                     # revoke nearest project config
-```
-
-Trust records bind both the canonical path and a BLAKE3 hash of normalized TOML
-content. Editing or moving the file invalidates trust; symlinks resolve to
-their real target, and path traversal cannot create another identity. CI may
-set `OSDK_TRUSTED_CONFIG_PATHS` to an OS path-list of reviewed files or
-directories instead of persisting local trust. Trust commands load only the
-user configuration, so an untrusted project cannot influence its own approval.
-
-Run a command with managed tools without changing project pins:
-
-```bash
-osdk exec --tool node@20 -- node --version
-osdk exec --tool python@3.12 -- python -c "print('ok')"
-```
-
-Generate shell completions with `osdk completions bash|zsh|fish|powershell`.
-
-Define reusable version aliases in the user config:
-
-```bash
-osdk alias set node default 20
-osdk alias set node maintenance default
-osdk alias list node
-osdk use node@maintenance
-osdk alias unset node maintenance
-```
-
-Aliases may point to another alias; cycles and reserved names such as `latest`,
-`lts`, and `system` are rejected. Tool-name aliases are canonicalized, so
-`osdk alias set nodejs default 20` stores the alias under `node`.
-
-## Sources / mirrors
-
-```bash
-osdk source list node                 # show sources + which is pinned
-osdk source test node                 # probe throughput, print ranking
-osdk source pin node tuna             # always use a given source
+osdk source list node
+osdk source test node
+osdk source pin node tuna
 osdk source add node --id mycorp \
   --download-url https://mirror.corp/node/ \
-  --index-url    https://mirror.corp/node/index.json
-osdk --source official install go@1.22 # one-shot override
+  --index-url https://mirror.corp/node/index.json
+osdk --source official install go@1.22
 ```
 
-The built-in Go sources are `go.dev`, Aliyun, and `golang.google.cn`.
-`github:owner/repo` uses the same ordered source list for GitHub Releases API
-metadata, release assets, raw files, checksum/signature files, and attestation
-bundles. Its built-in `ghproxy` source rewrites all of these through
-`https://gh-proxy.com/`. GitHub tokens are sent only to the official
-`api.github.com` host and are never forwarded to third-party proxies.
-If anonymous API quota is exhausted, generic GitHub tools fall back to
-GitHub's public Atom feed and expanded-assets pages. This token-free fallback
-is best-effort, public-only, and limited to recent feed entries.
-
-## Dedup & caches
+After a successful online download, require cache-only operation with
+`--offline`. Tighten artifact policy when your environment requires it:
 
 ```bash
-osdk doctor                     # dirs, same-filesystem check, link mode, backends
-osdk prune --dry-run            # inspect GC without deleting
-osdk --yes prune                # confirm GC non-interactively
-osdk cache dir                  # shared cache/store locations
-osdk cache env                  # the downstream package-cache redirections
-osdk --yes cache clean          # remove downloaded archives
-```
-
-These are separate storage layers:
-
-- `<cache>/downloads` is the tool archive cache used while installing SDKs and
-  package-manager binaries. `osdk --yes cache clean` clears this layer.
-- `<data>/store` is the BLAKE3 CAS for verified, extracted SDK files. Installed
-  versions are materialized from it; `osdk prune` reclaims unreferenced objects.
-- `<cache>/pkg` contains manager- or runtime-native project dependency caches
-  and stores. `osdk cache env` prints all supported redirections.
-
-| Tool | Native cache format | osdk mapping |
-| --- | --- | --- |
-| npm | npm `cacache` content and metadata | `npm_config_cache=<cache>/pkg/npm` |
-| pnpm | content-addressable package-file store | `npm_config_store_dir` (pnpm <=10) or `pnpm_config_store_dir` (pnpm >=11) = `<cache>/pkg/pnpm-store`; `PNPM_HOME=<cache>/pkg/pnpm` remains the executable/state home |
-| Yarn | Classic's native cache; Berry's normalized zip archives | `YARN_CACHE_FOLDER=<cache>/pkg/yarn-classic` (Classic); `YARN_GLOBAL_FOLDER=<cache>/pkg/yarn` (2+) |
-| Bun | registry packages in Bun's native global cache | `BUN_INSTALL_CACHE_DIR=<cache>/pkg/bun` |
-| Deno | URL/npm dependencies, compiled artifacts, and some runtime state | `DENO_DIR=<cache>/pkg/deno` |
-
-Yarn 2/3 keeps its active cache project-local by default (`.yarn/cache`), but
-the default `enableMirror: true` also reads and writes
-`${YARN_GLOBAL_FOLDER}/cache`. The osdk mapping therefore provides a
-cross-project mirror without replacing project-local or Zero-Install caches.
-Yarn 4 enables `enableGlobalCache` by default, so the same global directory is
-its active cache. osdk does not force `enableGlobalCache` or `cacheFolder`.
-
-For managed Bun and Deno, the backend-specific variables are set only while
-that tool is active. `DENO_DIR` covers more than downloaded packages, including
-compiled artifacts and some runtime state; it is not treated as a disposable
-package-only cache.
-
-The active manager receives these values through shell activation, `osdk exec`,
-and direct osdk shims. Explicit user environment variables always win. Native
-cache formats aren't interchangeable and must not share a directory. A future
-cross-manager layer could only safely deduplicate original registry tarballs by
-verified SRI; even then, manager metadata and transformed or unpacked artifacts
-mean it couldn't guarantee one physical copy across the whole disk. osdk does
-not implement that tarball CAS today. Run each manager normally.
-
-Destructive operations (`uninstall`, `cache clean`, and non-dry-run `prune`)
-share one confirmation policy. Interactive terminals prompt with a localized
-question. Non-interactive runs fail instead of waiting for input unless
-`--yes`, `OSDK_YES=true`, or `settings.yes = true` explicitly confirms them.
-`--quiet` never implies consent.
-
-## Language (i18n)
-
-osdk speaks English and Chinese. It auto-detects from your locale
-(`LC_ALL`/`LC_MESSAGES`/`LANG`, e.g. `zh_CN.UTF-8` → Chinese) and localizes all
-messages, errors, and `-h/--help`. Override precedence (highest first):
-
-```bash
-osdk --lang zh install node@20   # per-invocation flag
-export OSDK_LANG=zh              # environment
-# or in config.toml:  [settings]\n lang = "zh"
-```
-
-## Directories (override with env)
-
-| Purpose            | Default (Linux)              | Override            |
-|--------------------|------------------------------|---------------------|
-| Data (installs)    | `~/.local/share/osdk`        | `OSDK_DATA_DIR`     |
-| CAS store          | `<data>/store`               | `OSDK_STORE_DIR`    |
-| Installs           | `<data>/installs`            | `OSDK_INSTALL_DIR`  |
-| Cache (downloads)  | `~/.cache/osdk`              | `OSDK_CACHE_DIR`    |
-| Config             | `~/.config/osdk/config.toml` | `OSDK_CONFIG_DIR`   |
-
-Keep the store and installs on the same filesystem for hardlinks (osdk falls
-back to copy across filesystems; `osdk doctor` warns).
-
-## How each SDK is obtained
-
-| SDK          | Mechanism                                                        |
-|--------------|------------------------------------------------------------------|
-| node         | official nodejs.org prebuilt archives, `SHASUMS256` verified     |
-| go           | go.dev/dl JSON index, per-file sha256                            |
-| python       | static PBS release index + Astral release mirror, `SHA256SUMS` verified (no GitHub API) |
-| java         | Foojay JDK/JRE metadata + embedded Temurin LTS catalog           |
-| maven        | Apache binary archive, SHA-512 verified                           |
-| gradle       | Gradle distribution, SHA-256 verified                             |
-| kotlin       | Kotlin compiler distribution, SHA-256 verified                    |
-| rust         | isolated rustup bootstrap + toolchain home, mirror-selected and sha256 verified |
-| pnpm         | official npm platform package, npm SRI verified                  |
-| yarn         | `yarn` / `@yarnpkg/cli-dist` npm packages, npm SRI verified      |
-| deno         | official `@deno/<platform>` npm package, npm SRI verified        |
-| bun          | official `@oven/bun-<platform>` npm package, npm SRI verified    |
-| npm          | independent npm registry package, npm SRI verified                |
-| `github:owner/repo` | any GitHub release: host-matching asset auto-picked, archives extracted or bare binaries installed |
-
-### GitHub-release tools
-
-Install arbitrary tools published as GitHub releases:
-
-```bash
-osdk use -g github:sharkdp/fd          # latest release, host asset auto-picked
-osdk install github:cli/cli@2.62.0     # a specific tag
-osdk list-remote github:sharkdp/fd     # available release tags
-```
-
-The generic `github:owner/repo` backend prefers the GitHub Releases API. Set
-`GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the direct API rate limit; a
-token is sent only to the exact `api.github.com` host. Without a token, an
-exhausted API quota automatically falls back to the public `releases.atom` feed
-for recent version discovery and `releases/expanded_assets/<tag>` for assets.
-That fallback sends no token and exposes only public, recent releases; it is a
-best-effort continuity path, not a complete API replacement. If it cannot
-produce valid metadata, osdk reports the original API rate-limit message, reset
-time, and retry guidance. Normal API listing follows pagination up to 1,000
-releases. API metadata, public pages, release assets, raw files, checksums, and
-attestation bundles retain source/proxy failover without forwarding the token.
-
-Override heuristic asset selection with explicit options:
-
-```bash
-osdk install github:owner/repo@1.2.3 \
-  -o 'asset-regex=^tool-.*-linux-x64\.tar\.gz$' \
-  -o bins=dist/tool,dist/toolctl -o strip-components=1
-
-osdk install github:owner/repo@1.2.3 \
-  -o 'asset-template=tool-{version}-{os}-{arch}.zip' \
-  -o bin=tool.exe -o rename=mytool -o os=windows -o arch=x64
-```
-
-Regex/template rules must match exactly one asset. `bin`/`bins` selects files
-from archives; `rename` requires one selected binary. Missing files remove the
-whole install rather than leaving a complete marker. Windows normalizes `.exe`.
-
-Digest-pinned static catalogs bypass Releases API entirely:
-
-```bash
-osdk lock github:owner/repo@latest \
-  -o catalog-url=/approved/github-catalog.json \
-  -o catalog-sha256=0123456789abcdef...
-```
-
-Schema 1 catalog assets include `name`, `url`, `checksum`, `os`, `arch`, and
-optional `libc`. The catalog digest, selected asset, and rules are locked.
-
-## Pre-release channels
-
-The shared `--prerelease never|if-explicit|allow` policy applies to Python,
-Bun, Deno, and GitHub releases. The default is `if-explicit`:
-
-```bash
-osdk install bun@canary
-osdk install deno@beta
-osdk install github:owner/repo@1.2.0-beta.1
-osdk --prerelease allow install bun@latest
-osdk --prerelease never install bun@canary
-```
-
-Explicit `canary`, `nightly`, and `beta` resolve npm dist-tags or matching
-GitHub prerelease tags to exact versions. `never` rejects all prereleases;
-only `allow` lets latest/prefix/range select one implicitly. Remote lists stay
-stable-only. Locks retain the original channel and exact resolved version, so a
-disappearing dist-tag does not break offline reproduction.
-
-## Offline mode
-
-Successful online metadata requests and downloaded archives are cached by URL
-and tool version. Later commands can prohibit network access:
-
-```bash
-osdk install bun@1.3.14
-osdk uninstall bun@1.3.14
-osdk --offline install bun@1.3.14
-```
-
-An offline cache miss fails explicitly instead of silently attempting the
-network. Source probing and source refresh are also disabled offline.
-
-Signature verification is enabled by default where a trusted key is available.
-Set `OSDK_VERIFY_SIGNATURES=false` only when intentionally opting out.
-Set `OSDK_REQUIRE_CHECKSUMS=true` (or pass `--require-checksums`) to reject any
-artifact for which neither upstream metadata nor a lock/cache receipt provides
-a verifiable SHA-256/SHA-512/BLAKE3 value.
-
-The generic `github:owner/repo` backend can additionally verify GitHub artifact
-attestations:
-
-```bash
-osdk --attestations if-available install github:cli/cli@latest
+osdk --offline install node@20
+osdk --require-checksums install github:sharkdp/fd
 osdk --attestations required install github:cli/cli@latest
 ```
 
-The same policy is configurable as `settings.attestations` or
-`OSDK_ATTESTATIONS=off|if-available|required`; the default is `off`.
-`if-available` permits a release with no attestation, but a malformed,
-mismatched, or cryptographically invalid bundle always fails. `required`
-also fails when no bundle is available. Verified bundles are cached by
-repository and artifact SHA-256, so `--offline` and locked reinstalls can
-reverify them without trusting lockfile evidence.
-
-Public-good Sigstore bundles are verified with the embedded public-good trust
-root: Fulcio certificate chain and SCT, GitHub Actions OIDC issuer and
-repository, artifact signature, DSSE subject digest, Rekor body consistency,
-signing time, Signed Entry Timestamp, signed checkpoint, root/tree-size
-binding, and the canonical log entry's Merkle path. GitHub v0.3 bundles that
-use an RFC 3161 timestamp instead of a Rekor entry are verified against the
-embedded GitHub trust root, including the TSA timestamp, certificate chain,
-artifact signature, DSSE subject digest, and signed repository claim. All
-checks are offline after the bundle is cached; missing, tampered, or mismatched
-trust material fails verification. Evidence records use
-`sigstore-bundle+rekor` or `sigstore-bundle+github-tsa` for the verified trust
-path. Legacy `sigstore-bundle` evidence remains readable but is never used as a
-trust shortcut.
-
-## Architecture
-
-- `crates/osdk-core` — library: `Backend` trait, pipeline
-  (download→verify→extract→CAS ingest→materialize), CAS store + link modes,
-  source selection, config/dirs, shim + activation.
-- `crates/osdk-cli` — the `osdk` binary.
-- `crates/osdk-shim` — a tiny launcher; each shim resolves the active version
-  from the cwd and execs the real binary.
-
-## Development
-
-The offline backend contract is the primary correctness gate. It runs the same
-resolve → install → execute → uninstall assertions for every built-in backend
-and generic GitHub, plus real locked-fixture installs for each registry backend.
-Local fault injection covers 403, 429, 5xx, timeout, connection interruption,
-malformed metadata, stale cache, interrupted downloads, concurrent installs,
-failed-marker cleanup, corrupt receipts/manifests, cross-filesystem copy
-fallback, and shim stdio/exit-code/recursion/conflict behavior. The scheduled
-live upstream smoke only detects ecosystem drift; it is not the correctness
-proof.
+Review and explicitly trust project configuration that changes sources or
+execution behavior:
 
 ```bash
-cargo test --workspace         # unit tests
-cargo clippy --workspace --all-targets   # lints (CI runs with -D warnings)
-cargo fmt --all --check        # formatting
-
-# Windows runtime matrix (run on Windows after building the binaries):
-pwsh -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug
-
-# Windows cfgs are also validated by cross-compiling from Linux:
-rustup target add x86_64-pc-windows-gnu
-sudo apt-get install -y mingw-w64
-cargo clippy --locked --workspace --all-targets \
-  --target x86_64-pc-windows-gnu -- -D warnings
-
-# Execute the complete Windows GNU test workspace through a pinned Wine build:
-./scripts/windows-wine-tests.sh
+osdk --yes trust ./osdk.toml
+osdk trust list
+osdk untrust ./osdk.toml
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy + tests on
-ubuntu/macos/windows. A separate native macOS terminal gate runs the interactive
-PTY contract on both Apple Silicon and Intel runners. The Windows runner
-additionally executes `.cmd`,
-PowerShell, and Git Bash shims, PowerShell activation/deactivation, symlink
-fallbacks, actual NTFS volume detection, stdio/arguments/exit codes, and
-space/Chinese paths plus managed SDK state beyond the legacy 260-character
-limit, entirely offline under temporary directories. The executable and working
-directory stay below the shell's own process-launch limit.
-Namespaced backend IDs such as `github:owner/repo` are also covered so cache,
-lock, install, and extraction scratch paths remain valid on Windows. A dedicated
-Linux job cross-lints every `#[cfg(windows)]` target and executes the full
-Windows GNU workspace through a SHA-256-pinned Wine build before the native
-Windows/MSVC runner finishes. A separate Rust 1.88 job checks the declared MSRV
-against the locked dependency graph. CI jobs and the Windows runtime matrix have
-hard time limits, and the runtime script emits one log group per shell contract
-so a blocked process is visible instead of running indefinitely.
+Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
+
+## Scenario: inspect caches and reclaim storage
+
+```bash
+osdk cache dir
+osdk cache env
+osdk --yes cache clean
+osdk prune --dry-run
+osdk --yes prune
+```
+
+`cache clean` removes downloaded archives. `prune` reclaims unreferenced shared
+content; `prune --dry-run` does not delete anything.
+
+Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
+
+## Scenario: diagnose an environment or switch language
+
+```bash
+osdk doctor
+osdk current
+osdk where node
+osdk config path
+osdk config list
+osdk --lang zh doctor
+OSDK_LANG=en osdk --help
+osdk completions bash > osdk.bash
+```
+
+osdk localizes commands, help, prompts, errors, and diagnostics in English and
+Chinese. `--lang` overrides the locale for one command; `OSDK_LANG` sets the
+session preference.
+
+Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
+
+## Support matrix
+
+| Area | Supported |
+| --- | --- |
+| Platforms | Windows, macOS, Linux |
+| Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
+| Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
+| Other developer tools | Public GitHub Releases through `github:owner/repo` |
+| Model providers | Hugging Face, ModelScope |
+| Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
+| Shells | Bash, zsh, fish, PowerShell |
+| CLI languages | English, Chinese |
+
+## Documentation
+
+- [Feature overview](site/en/guide/features.md)
+- [Getting started](site/en/guide/getting-started.md)
+- [Project toolchains](site/en/guide/projects.md)
+- [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
+- [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
+- [Package managers and registry selection](site/en/guide/package-managers.md)
+- [Model snapshots](site/en/guide/models.md)
+- [Sources, offline use, and security](site/en/guide/sources-security.md)
+- [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
+- [Implementation docs](site/en/guide/implementation/index.md)
+
+Contributions are welcome through
+[issues](https://github.com/lejunyang/one-sdk/issues) and pull requests.
 
 ## License
 

@@ -5,13 +5,15 @@ const github = 'https://github.com/lejunyang/one-sdk'
 const zhNav: DefaultTheme.NavItem[] = [
   { text: '介绍', link: '/guide/introduction' },
   { text: '安装', link: '/guide/installation' },
-  { text: '功能', link: '/guide/features' }
+  { text: '使用指南', link: '/guide/features' },
+  { text: '实现方式', link: '/guide/implementation/' }
 ]
 
 const enNav: DefaultTheme.NavItem[] = [
   { text: 'Introduction', link: '/en/guide/introduction' },
   { text: 'Installation', link: '/en/guide/installation' },
-  { text: 'Features', link: '/en/guide/features' }
+  { text: 'Guides', link: '/en/guide/features' },
+  { text: 'Internals', link: '/en/guide/implementation/' }
 ]
 
 const zhSidebar: DefaultTheme.Sidebar = [
@@ -24,7 +26,31 @@ const zhSidebar: DefaultTheme.Sidebar = [
   },
   {
     text: '使用指南',
-    items: [{ text: '详细功能', link: '/guide/features' }]
+    items: [
+      { text: '功能总览', link: '/guide/features' },
+      { text: '开始使用与通用命令', link: '/guide/getting-started' },
+      { text: '项目配置与信任', link: '/guide/projects' },
+      { text: '锁文件与环境复现', link: '/guide/lockfiles' },
+      { text: '语言与运行时', link: '/guide/runtimes' },
+      { text: 'JavaScript 包管理器', link: '/guide/package-managers' },
+      { text: '模型快照', link: '/guide/models' },
+      { text: '来源、离线与安全', link: '/guide/sources-security' },
+      { text: '存储、Shell 与诊断', link: '/guide/storage-shell' }
+    ]
+  },
+  {
+    text: '实现方式',
+    items: [
+      { text: '实现总览', link: '/guide/implementation/' },
+      { text: '项目发现与版本解析', link: '/guide/implementation/resolution' },
+      { text: '安装管线与并发', link: '/guide/implementation/installation' },
+      { text: 'Shim、激活与锁文件', link: '/guide/implementation/activation-lockfile' },
+      { text: 'SDK 来源与依赖 Registry', link: '/guide/implementation/sources-registries' },
+      { text: '内容存储与原生缓存', link: '/guide/implementation/storage-cache' },
+      { text: '完整性与来源验证', link: '/guide/implementation/verification' },
+      { text: 'Backend 与模型快照', link: '/guide/implementation/backends-models' },
+      { text: '可靠性与跨平台', link: '/guide/implementation/reliability' }
+    ]
   }
 ]
 
@@ -38,7 +64,31 @@ const enSidebar: DefaultTheme.Sidebar = [
   },
   {
     text: 'Guide',
-    items: [{ text: 'Feature Reference', link: '/en/guide/features' }]
+    items: [
+      { text: 'Feature Overview', link: '/en/guide/features' },
+      { text: 'Getting Started and Commands', link: '/en/guide/getting-started' },
+      { text: 'Projects, Configuration, and Trust', link: '/en/guide/projects' },
+      { text: 'Lockfiles and Reproducibility', link: '/en/guide/lockfiles' },
+      { text: 'Languages and Runtimes', link: '/en/guide/runtimes' },
+      { text: 'JavaScript Package Managers', link: '/en/guide/package-managers' },
+      { text: 'Model Snapshots', link: '/en/guide/models' },
+      { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
+      { text: 'Storage, Shell, and Diagnostics', link: '/en/guide/storage-shell' }
+    ]
+  },
+  {
+    text: 'Internals',
+    items: [
+      { text: 'Implementation Overview', link: '/en/guide/implementation/' },
+      { text: 'Project Discovery and Resolution', link: '/en/guide/implementation/resolution' },
+      { text: 'Install Pipeline and Concurrency', link: '/en/guide/implementation/installation' },
+      { text: 'Shims, Activation, and Lockfiles', link: '/en/guide/implementation/activation-lockfile' },
+      { text: 'SDK Sources and Registries', link: '/en/guide/implementation/sources-registries' },
+      { text: 'Content Store and Native Caches', link: '/en/guide/implementation/storage-cache' },
+      { text: 'Integrity and Provenance', link: '/en/guide/implementation/verification' },
+      { text: 'Backends and Model Snapshots', link: '/en/guide/implementation/backends-models' },
+      { text: 'Reliability and Portability', link: '/en/guide/implementation/reliability' }
+    ]
   }
 ]
 

@@ -16,66 +16,54 @@ osdk focuses on four problems:
 
 1. **One interface:** install, switch, lock, upgrade, remove, and execute tools
    with consistent commands.
-2. **Less duplication:** keep identical content once in a BLAKE3
-   content-addressed store.
-3. **Speed with trust:** automatically choose fast sources while retaining
-   checksum, signature, and optional GitHub Artifact Attestation verification.
-4. **Unified model assets:** resolve Hugging Face and ModelScope repositories
-   into immutable, file-verified, cached, deduplicated, and locked snapshots.
+2. **Less duplication:** let installed versions reuse identical files and keep
+   ecosystem caches in managed locations.
+3. **Speed with trust:** automatically choose available sources, verify upstream
+   checksums, verify signatures where a backend supports them, and optionally
+   enforce GitHub Artifact Attestations.
+4. **Unified model assets:** download, verify, cache, and lock Hugging Face and
+   ModelScope snapshots.
 
 ## Supported platforms and tools
 
 osdk runs natively on Windows, macOS, and Linux. It currently includes these
 backends:
 
-| Tool | Distribution mechanism |
+| Category | Supported today |
 | --- | --- |
-| Node.js | Prebuilt nodejs.org archives with `SHASUMS256` |
-| npm | Independent npm registry package with SRI |
-| pnpm | Official npm platform package with SRI verification |
-| Yarn | `yarn` / `@yarnpkg/cli-dist` npm packages |
-| Python | python-build-standalone release index and Astral mirror |
-| Java | Foojay JDK/JRE plus embedded Temurin LTS catalog |
-| Maven / Gradle / Kotlin | Independent JVM tool backends with upstream checksums |
-| Go | go.dev download index and SHA-256 |
-| Rust | Isolated rustup toolchain home |
-| Deno | Official npm platform package |
-| Bun | Official npm platform package |
-| GitHub Release | Generic `github:owner/repo` backend |
-| Hugging Face / ModelScope models | Immutable snapshots, per-file SHA-256, shared CAS, and `[models]` locks |
-
-## How it works
-
-Every installation passes through one pipeline:
-
-1. Resolve the version request and user aliases.
-2. Probe and select a source.
-3. Download the artifact or reuse the cache.
-4. Verify checksums, signatures, or attestations.
-5. Extract safely.
-6. Ingest files into the content-addressed store.
-7. Materialize the installation with hardlinks, reflinks, or copies.
-8. Generate shims so the project or global version is directly executable.
-
-When the version directory and content store share a filesystem, osdk prefers
-hardlinks. It automatically falls back when they are unavailable without
-sacrificing correctness.
+| Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
+| Package managers and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
+| Other developer tools | Public GitHub Releases through `github:owner/repo` |
+| Model providers | Hugging Face, ModelScope |
+| Project inputs | `osdk.toml`, `.tool-versions`, and common ecosystem version files |
+| Shells | Bash, Zsh, Fish, PowerShell |
 
 ## Configuration precedence
 
-Configuration is merged in this order, with earlier sources taking precedence:
+The overall precedence is, from highest to lowest:
 
-1. Command-line flags
-2. `OSDK_*` environment variables
-3. The nearest `osdk.toml` or `.osdk.toml`
-4. User-level `config.toml`
-5. Built-in defaults
+1. command-line options;
+2. `OSDK_*` environment variables;
+3. the discovered `osdk.toml` or `.osdk.toml`;
+4. user-level `config.toml`;
+5. built-in defaults.
 
-osdk also reads `.tool-versions` and ecosystem files such as `.nvmrc`,
-`.python-version`, `go.mod`, and `rust-toolchain.toml`.
+The file layers are not recursively deep-merged. A project `[settings]` section
+replaces the entire lower-precedence settings value, so omitted keys return to
+built-in defaults. The top-level source selection, probe timeout, and TTL are
+also replaced as a group; source entries merge by tool, but a same-tool entry is
+replaced wholesale. `[registries]` replaces the lower section as a unit.
+`[tools]` and `[aliases]` merge by key. See [Projects and Configuration](./projects)
+for the complete schema and exact rules.
+
+osdk also reads `.tool-versions` and native files such as `.nvmrc`,
+`.python-version`, `go.mod`, and `rust-toolchain.toml`. Commands do not all
+enumerate those files in the same way; see [Project version discovery](./projects#project-version-discovery).
 
 ## Next steps
 
 - [Install osdk](/en/guide/installation)
-- [Explore the feature reference](/en/guide/features)
+- [Get started](/en/guide/getting-started)
+- [Browse the feature guide](/en/guide/features)
+- [Read the implementation guide](/en/guide/implementation/)
 - [Browse the source](https://github.com/lejunyang/one-sdk)

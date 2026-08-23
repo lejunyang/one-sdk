@@ -1,0 +1,248 @@
+# Storage, Shell, and Extensions
+
+This page explains osdk's directories, CAS and cache boundaries, shims, shell
+hooks, temporary execution, completions, diagnostics, and data-only declarative
+backends.
+
+## Directory layout and overrides
+
+| Purpose | Linux default | Environment variable |
+| --- | --- | --- |
+| Data root | `~/.local/share/osdk` | `OSDK_DATA_DIR` |
+| Content store | `<data>/store` | `OSDK_STORE_DIR` |
+| SDK installations | `<data>/installs` | `OSDK_INSTALL_DIR` |
+| Cache root | `~/.cache/osdk` | `OSDK_CACHE_DIR` |
+| Configuration directory | `~/.config/osdk` | `OSDK_CONFIG_DIR` |
+
+Derived directories are:
+
+```text
+<data>/models                model snapshots
+<data>/shims                 command shims
+<data>/rustup                isolated RUSTUP_HOME
+<data>/cargo                 isolated CARGO_HOME for the Rust backend
+<data>/plugins               declarative backends
+<cache>/downloads            SDK/model downloads
+<cache>/tmp                  extraction scratch space
+<cache>/remote               metadata and proof cache
+<cache>/sources              source probe rankings
+<cache>/pkg                  downstream tools' native caches
+```
+
+`OSDK_BIN_DIR` belongs to the osdk executable installer; it is not an SDK state
+directory and must not be confused with `OSDK_INSTALL_DIR`.
+
+## CAS and materialization
+
+After verification and extraction, SDK and model files enter the BLAKE3 CAS at
+paths such as `store/<first-2>/<next-2>/<full-hash>`. Installation/snapshot
+manifests record relative paths, hashes, Unix modes, and symlink targets before
+materializing objects into a version directory.
+
+`settings.link_mode` and `OSDK_LINK_MODE` accept:
+
+| Mode | Behavior |
+| --- | --- |
+| `auto` | On one filesystem, try hardlink, reflink, then copy; across filesystems, try reflink then copy |
+| `hardlink` / `hard` | Prefer hardlink and fall back to copy |
+| `reflink` / `clone` / `cow` | Prefer copy-on-write cloning and fall back to copy |
+| `copy` | Regular byte copy |
+| `symlink` / `sym` | Explicit symbolic links; failure does not fall back, and `auto` never selects this |
+
+The SDK/model CAS does not contain package managers' native caches; those formats
+are incompatible. See [Native cache semantics](./package-managers#native-cache-semantics).
+
+## Cache layers and commands
+
+```text
+osdk cache dir
+osdk cache env
+osdk cache clean
+osdk prune [--dry-run]
+```
+
+| Command | Current behavior |
+| --- | --- |
+| `cache dir` | Print cache root, downloads, CAS, and downstream-cache root |
+| `cache env` | Print all supported downstream native-cache environment mappings |
+| `cache clean` | Remove and recreate only `<cache>/downloads` |
+| `prune --dry-run` | Currently print a dry-run notice without computing or listing candidate objects |
+| `prune` | Use SDK-install and model-snapshot manifests as roots and remove unreferenced CAS objects |
+
+`cache clean` does not remove the CAS, installations, models, remote/source
+metadata, or `<cache>/pkg`. GC refuses to continue when it encounters a corrupt
+manifest, preventing deletion of objects that may still be referenced.
+
+When the user has not set them, the general shell hook also maps
+`npm_config_cache`, `PIP_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `CARGO_HOME`, and
+`GRADLE_USER_HOME`. There is no Maven `M2_HOME`/`maven.repo.local` redirection.
+Direct Rust shims and `exec` override the general `<cache>/pkg/cargo` mapping
+with `<data>/cargo`.
+
+## Deletion and confirmations
+
+```text
+osdk uninstall|rm TOOL@VERSION
+osdk cache clean
+osdk prune [--dry-run]
+osdk model remove NAME
+```
+
+`uninstall`, `cache clean`, and non-dry-run `prune` require confirmation. An
+interactive terminal displays a prompt; non-interactive use must pass `--yes`,
+set `OSDK_YES=true`, or configure `settings.yes=true`, otherwise it fails.
+`--quiet` hides progress but never grants consent. `model remove` currently asks
+for no confirmation.
+
+## Shims and shell activation
+
+Installation and `use` generate shims. Regenerate them after moving installation
+directories with:
+
+```text
+osdk reshim
+```
+
+Each shim resolves the version for the current directory at execution time, so
+project pins also work in IDEs, CI, and processes without a prompt hook. Shims
+avoid recursively invoking themselves. On Windows, `.cmd`/`.bat` targets run via
+`%ComSpec% /D /S /C call` to preserve arguments, standard I/O, and status.
+
+Shell activation syntax is:
+
+```text
+osdk activate bash|zsh|fish|powershell|pwsh
+osdk deactivate bash|zsh|fish|powershell|pwsh
+```
+
+Common setup forms are:
+
+```bash
+eval "$(osdk activate bash)"
+eval "$(osdk activate zsh)"
+osdk activate fish | source
+osdk activate powershell | Invoke-Expression
+```
+
+The hook recomputes the environment at prompts/directory changes. `PATH` order is:
+
+```text
+generated shims > independent npm/pnpm/yarn > Node > other backends > original PATH
+```
+
+It also exports backend environment, downstream caches, and enabled model
+adapters. osdk stores the original value of every managed variable; `deactivate`
+removes the hook and restores that environment. The PowerShell hook prevents
+re-entrant command lookup.
+
+## Temporary execution
+
+```text
+osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
+```
+
+At least one `-t/--tool` is required, and the option is repeatable. osdk installs
+the requested versions, then exposes their bins and environment to one child
+process. It neither changes project pins nor reads the lock.
+
+```bash
+osdk exec --tool node@20 -- node --version
+osdk exec --tool node@20 --tool pnpm@10 -- pnpm test
+osdk exec -t bun@latest -- bunx vite
+```
+
+`pnpx` routes to managed `pnpm dlx` and `bunx` to managed `bun x`; omitting the
+corresponding backend is an error. A package-manager invocation may run registry
+preflight before startup. Child failure makes osdk return an error, but exact
+numeric exit-code pass-through is not currently guaranteed.
+
+## Completions
+
+```text
+osdk completions bash|elvish|fish|powershell|zsh
+```
+
+The command writes completion code to stdout; save or source it according to the
+shell's conventions. For example:
+
+```bash
+osdk completions bash > ~/.local/share/bash-completion/completions/osdk
+osdk completions zsh > ~/.zfunc/_osdk
+osdk completions fish > ~/.config/fish/completions/osdk.fish
+```
+
+## Diagnostics
+
+```text
+osdk doctor
+osdk config path
+osdk config list
+osdk source list TOOL
+osdk registry test [MANAGER]
+```
+
+| Command | Output |
+| --- | --- |
+| `doctor` | Platform, data/store/install directories, whether store and installs share a filesystem, shim path and PATH presence, and backend IDs |
+| `config path` | Config directory, user file, and current project configuration |
+| `config list` | Selected effective settings/directories, registry, model environment, tools, and aliases |
+| `source list` | Sources and pin for one backend/provider; `doctor` does not list mirrors |
+| `registry test` | Anonymous npm-compatible registry probe and selection plan |
+
+`doctor` currently does not print `link_mode`; use `config list` to inspect it.
+
+## Declarative backends
+
+At startup, osdk automatically loads direct `*.toml` children from these
+directories; there is no separate installation command:
+
+```text
+<config>/plugins/*.toml
+<data>/plugins/*.toml
+```
+
+The config directory loads first, followed by the data directory. Any invalid
+definition or ID/alias collision with a built-in or another backend aborts
+registry loading; definitions cannot shadow each other. Loading is non-recursive,
+regular files only, with a 1 MiB limit per file.
+
+### Schema 1 example
+
+```toml
+schema = 1
+id = "acme"
+bin_paths = ["bin"]
+bin_names = ["acme", "acmectl"]
+idiomatic_files = [".acme-version"]
+
+[versions]
+values = ["1.0.0", "1.2.3"]
+# Or: url = "https://example.test/{os}/{arch}/versions.txt"
+
+[archive]
+url = "https://example.test/{version}/{file}"
+file = "acme-{version}-{os}-{arch}.tar.gz"
+kind = "tar.gz"          # tar.gz|tar.xz|tar.zst|zip
+strip_root = true
+
+[archive.checksum]
+algorithm = "sha256"     # sha256|sha512|blake3
+url = "{archive_url}.sha256"
+# Or: value = "<fixed hexadecimal digest>"
+```
+
+### Validation and security boundaries
+
+- Exactly one of `versions.values` and `versions.url` is required; at most 10,000 versions are accepted.
+- An ID starts with a lowercase ASCII letter or digit and then uses only lowercase letters, digits, `-`, and `_`; the `github` namespace is reserved.
+- `bin_paths` and `bin_names` cannot be empty, and every path/name must stay safely inside the installation root.
+- Either the archive URL or filename must vary with `{version}`.
+- Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip`.
+- Exactly one checksum `value` or `url` is required, with digest length matching the algorithm.
+- Versions/archive URLs accept only HTTP(S); a checksum URL may additionally derive from `{archive_url}`.
+- Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail.
+- The schema rejects unknown fields, so it cannot contain hooks or install scripts.
+
+Declarative backends describe data and cannot execute custom code. Installation
+still uses the shared download, checksum, safe-extraction, and CAS-materialization
+pipeline.

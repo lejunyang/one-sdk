@@ -16,6 +16,9 @@ hero:
       text: 了解功能
       link: /guide/features
     - theme: alt
+      text: 实现方式
+      link: /guide/implementation/
+    - theme: alt
       text: GitHub
       link: https://github.com/lejunyang/one-sdk
 
@@ -25,7 +28,7 @@ features:
     details: 用一致的命令管理 Node.js、Python、Java、Go、Rust、pnpm、Yarn、Deno、Bun 和 GitHub Release 工具。
   - icon: ⧉
     title: 跨版本内容去重
-    details: 基于 BLAKE3 的内容寻址存储只保留一份相同文件，并通过硬链接、reflink 或复制安全物化版本。
+    details: 多个已安装版本可复用相同文件，减少重复磁盘占用；具体存储方式见实现说明。
   - icon: ⇄
     title: 自动选择最快镜像
     details: 探测官方源和权威镜像，按速度选择并在元数据或下载失败时自动切换。
@@ -36,8 +39,8 @@ features:
     title: 完整性与来源验证
     details: 支持上游校验和、严格校验策略，以及 GitHub Artifact Attestations 的 Sigstore 验证。
   - icon: ⬡
-    title: 离线优先与共享缓存
-    details: 缓存元数据和下载包，并统一 npm、pip、Cargo、Go、Gradle 等下游包缓存。
+    title: 离线重装与共享缓存
+    details: 缓存元数据和下载包，并集中管理 npm、pip、Cargo、Go、Gradle 等下游包缓存。
 ---
 
 ## 三步开始

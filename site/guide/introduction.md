@@ -13,51 +13,27 @@ osdk（one SDK manager）是一个面向 Windows、macOS 和 Linux 的多语言 
 osdk 重点解决四个问题：
 
 1. **统一操作界面**：安装、切换、锁定、升级、卸载和执行命令都使用相同语法。
-2. **减少重复占用**：相同内容只在 BLAKE3 内容寻址存储中保留一份。
-3. **兼顾速度与可信度**：自动选择最快来源，同时执行校验和、签名与可选的
-   GitHub Artifact Attestation 验证。
-4. **统一模型资产**：把 Hugging Face 与 ModelScope 仓库解析为不可变快照，
-   按文件校验、缓存、去重和锁定。
+2. **减少重复占用**：让多个已安装版本复用相同文件，并集中管理各生态缓存。
+3. **兼顾速度与可信度**：自动选择可用来源，校验上游 checksum；在 backend
+   支持时验证签名，并可按策略验证 GitHub Artifact Attestation。
+4. **统一模型资产**：下载、校验、缓存并锁定 Hugging Face 与 ModelScope 模型快照。
 
 ## 支持的平台与工具
 
 osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 
-| 工具 | 获取方式 |
+| 类别 | 当前支持 |
 | --- | --- |
-| Node.js | nodejs.org 预编译包，验证 `SHASUMS256` |
-| npm | 独立 npm registry 包，验证 SRI |
-| pnpm | npm 官方平台包，验证 SRI |
-| Yarn | `yarn` / `@yarnpkg/cli-dist` npm 包 |
-| Python | python-build-standalone 发布索引与 Astral 镜像 |
-| Java | Foojay JDK/JRE + 内置 Temurin LTS catalog |
-| Maven / Gradle / Kotlin | 独立 JVM 工具 backend 与上游 checksum |
-| Go | go.dev 下载索引与 SHA-256 |
-| Rust | 隔离的 rustup 工具链目录 |
-| Deno | 官方 npm 平台包 |
-| Bun | 官方 npm 平台包 |
-| GitHub Release | `github:owner/repo` 通用后端 |
-| Hugging Face / ModelScope 模型 | 不可变快照、多文件 SHA-256、共享 CAS 与 `[models]` lock |
-
-## 工作原理
-
-一次安装会经过统一管线：
-
-1. 解析版本请求和用户别名；
-2. 探测并选择下载来源；
-3. 下载或复用缓存的归档；
-4. 验证校验和、签名或 attestation；
-5. 安全解压；
-6. 将文件写入内容寻址存储；
-7. 用硬链接、reflink 或复制物化安装目录；
-8. 生成 shim，让项目或全局版本可以直接执行。
-
-版本目录和内容存储位于同一文件系统时，osdk 优先使用硬链接；不可用时自动
-回退，不会牺牲正确性。
+| 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
+| 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
+| 其他开发工具 | 通过 `github:owner/repo` 安装公开 GitHub Release |
+| 模型平台 | Hugging Face、ModelScope |
+| 项目输入 | `osdk.toml`、`.tool-versions` 和常见生态版本文件 |
+| Shell | Bash、Zsh、Fish、PowerShell |
 
 ## 配置优先级
 
-配置按以下优先级合并，前者覆盖后者：
+配置的总体优先级如下，前者优先：
 
 1. 命令行参数；
 2. `OSDK_*` 环境变量；
@@ -65,11 +41,20 @@ osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 4. 用户级 `config.toml`；
 5. 内置默认值。
 
+覆盖粒度不是所有字段逐项合并：高优先级文件只要出现 `[settings]`，就整段替换
+低优先级设置，未写字段回到内置默认值；`[sources]` 的顶层选择、探测超时和 TTL
+同样整段替换，但 `sources.<tool>` 按工具键合并；`[registries.npm]` 整段替换。
+`[tools]` 与 `[aliases]` 则按键合并。完整字段和精确规则见
+[项目与配置](./projects)。
+
 osdk 还会读取 `.tool-versions` 以及 `.nvmrc`、`.python-version`、
-`go.mod`、`rust-toolchain.toml` 等生态原生文件。
+`go.mod`、`rust-toolchain.toml` 等生态原生文件；不同命令对这些文件的使用范围见
+[项目发现](./projects#项目版本发现)。
 
 ## 下一步
 
 - [安装 osdk](/guide/installation)
-- [查看详细功能](/guide/features)
+- [开始使用](/guide/getting-started)
+- [浏览功能指南](/guide/features)
+- [阅读实现说明](/guide/implementation/)
 - [浏览源代码](https://github.com/lejunyang/one-sdk)

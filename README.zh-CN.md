@@ -1,31 +1,53 @@
 # osdk — 一站式 SDK 管理器
 
 **简体中文** · [English](README.md) ·
-[官方网站](https://lejunyang.github.io/one-sdk/) ·
 [中文文档](https://lejunyang.github.io/one-sdk/) ·
-[English docs](https://lejunyang.github.io/one-sdk/en/)
+[版本发布](https://github.com/lejunyang/one-sdk/releases)
 
-osdk 是一个跨平台（Windows / macOS / Linux）CLI，用统一方式管理多种语言 SDK
-及其版本：**Node.js、npm、pnpm、Yarn、Java、Maven、Gradle、Kotlin、Python、
-Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/rustup）
-通常无法同时提供的四类能力组合在一起：
+osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时、包管理器、
+开发工具与模型快照的 CLI。你可以用它：
 
-1. **跨版本内容去重。** 基于 BLAKE3 的内容寻址存储只保留一份相同文件；各安装
-   版本通过硬链接、reflink 或复制从存储中物化。两个 Node.js 次版本若共享文件，
-   磁盘只保存一次。
-2. **包管理器原生依赖缓存。** npm/pnpm/Yarn/Bun/Deno 以及
-   pip/Go/Cargo/Gradle 生态各自保留原生缓存或 store 格式，并放在 osdk 管理的统一
-   根目录下，让同一工具的不同项目和 SDK 版本复用下载。
-3. **多源与最快镜像自动选择。** 每个 SDK 都提供官方源和可用镜像；osdk 会探测
-   速度并选择最快来源，元数据或下载失败时自动切换。也支持添加自定义源或固定
-   指定来源。
-4. **不可变模型快照。** Hugging Face 与 ModelScope 仓库会解析为不可变快照，
-   按文件断点续传与验证 SHA-256，复用同一个 CAS，并在 `osdk.lock` 的独立
-   `[models]` 中记录。
+- 用一套命令安装并切换完整的项目工具链；
+- 为团队和 CI 保存区分平台且可复用的项目锁定结果；
+- 自动选择响应更快的 SDK 镜像和依赖 Registry；
+- 在网络不可用时复用已下载的元数据与产物；
+- 像管理开发工具一样管理 Hugging Face 和 ModelScope 模型快照；
+- 使用中文或英文查看存储、缓存、生效版本和环境诊断。
+
+从[快速上手](site/guide/getting-started.md)开始，或查看
+[完整功能概览](site/guide/features.md)。
 
 ## 安装
 
-Linux 或 macOS 可通过 gh-proxy 下载并执行最新版一键安装脚本：
+Linux 和 macOS：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
+```
+
+安装器会下载最新版本，并使用 `SHA256SUMS` 校验。需要指定版本或安装目录时，
+先下载脚本再执行：
+
+```bash
+curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
+sh install.sh --version 0.1.0 --install-dir "$HOME/bin"
+```
+
+```powershell
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
+  -OutFile install.ps1
+.\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
+```
+
+如果 GitHub 下载较慢，可以通过可信代理同时获取安装脚本和 Release：
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf \
@@ -33,664 +55,262 @@ curl --proto '=https' --tlsv1.2 -sSf \
   OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
 ```
 
-Windows PowerShell：
-
-```powershell
-$env:OSDK_DOWNLOAD_BASE_URL = "https://gh-proxy.com/https://github.com"
-irm https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
-```
-
-以上示例既通过 gh-proxy 获取 Raw 安装脚本，也通过
-`OSDK_DOWNLOAD_BASE_URL` 代理脚本后续下载的 GitHub Release 二进制与
-`SHA256SUMS`。
-
-两个安装器都会使用 Release 中的 `SHA256SUMS` 校验归档。需要传入自定义参数时，
-先下载脚本再执行：
-
-```bash
-curl -sSfL \
-  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh \
-  -o install.sh
-sh install.sh \
-  --base-url https://gh-proxy.com/https://github.com \
-  --version 0.1.0 \
-  --install-dir "$HOME/bin"
-```
-
-```powershell
-Invoke-WebRequest `
-  https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
-  -OutFile install.ps1
-.\install.ps1 `
-  -BaseUrl https://gh-proxy.com/https://github.com `
-  -Version 0.1.0 `
-  -InstallDir "$HOME\bin"
-```
-
-Unix 使用 `sh install.sh --help`，PowerShell 使用
-`Get-Help .\install.ps1 -Detailed` 查看完整参数。安装器支持
-`OSDK_VERSION`、`OSDK_BIN_DIR`、`OSDK_REPOSITORY`、
-`OSDK_DOWNLOAD_BASE_URL` 和 `OSDK_TARGET` 环境变量覆盖。
-
-### 从源码构建
-
-需要 Rust。中国大陆建议使用镜像，避免 `static.rust-lang.org` 访问缓慢：
-
-```bash
-export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
-cargo build --release        # 二进制：target/release/{osdk,osdk-shim}
-```
-
-维护者发布新版本时，需要先更新 `workspace.package.version`，再向 `main` 推送一条
-提交信息明确包含 `[publish]` 的 commit。普通提交不会触发二进制发布 workflow。
+PATH 设置、安装器参数、源码构建和校验方式见
+[安装指南](site/guide/installation.md)。
 
 ## 快速开始
 
 ```bash
-osdk install node@20            # 安装，并自动选择最快镜像
-osdk --jobs 4 install node@20 go@1.22 python@3.12
-osdk use -g node@20             # 安装 + 设为全局默认 + 生成 shim
-osdk use node@18                # 固定到当前项目（osdk.toml）
-node --version                  # 通过 shim 执行当前生效版本
+# 安装多个运行时，并发执行下载。
+osdk --jobs 4 install node@20 python@3.12 go@1.22
 
-# Shell 激活（按目录更新 shim 优先的 PATH 与环境变量）
-eval "$(osdk activate bash)"    # 加入 ~/.bashrc；也支持 zsh|fish|powershell
-# 后续移除 hook，并恢复当前 shell 的 PATH/环境变量：
-eval "$(osdk deactivate bash)"
+# 设置用户级默认版本。
+osdk use -g node@20
 
-# 不可变模型快照
+# 为当前项目固定版本。
+osdk use python@3.12
+
+# 查看当前目录实际使用的版本。
+osdk current
+
+# 启用按目录自动切换。
+eval "$(osdk activate bash)"
+
+node --version
+python --version
+```
+
+Shell 激活也支持 zsh、fish 和 PowerShell。需要完整命令说明时，运行
+`osdk --help` 或 `osdk <command> --help`。
+
+## 场景：让项目工具链可复现
+
+在仓库中固定工具、解析版本，再安装当前平台对应的锁定结果：
+
+```bash
+osdk use node@20
+osdk use python@3.12
+osdk use go@1.22
+osdk lock
+osdk install
+```
+
+检查符合约束的新版本，或者临时运行命令而不修改项目固定版本：
+
+```bash
+osdk outdated
+osdk upgrade
+osdk exec --tool node@20 -- node --version
+```
+
+需要不可变的 Rust 环境时，请固定明确版本或带日期的 toolchain；`stable`、`beta`、
+`nightly` 等 rustup 浮动 channel 写入 lock 后仍会随上游更新。
+
+osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
+`.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`，以及
+`package.json` 中的 Node 版本声明。
+
+指南：[项目工具链](site/guide/projects.md) ·
+[锁文件与环境复现](site/guide/lockfiles.md)
+
+## 场景：使用包管理器并自动选择可用 Registry
+
+可以独立安装 npm、pnpm 或 Yarn，也可以让 `package.json#packageManager` 中的
+精确版本自动加入项目工具链：
+
+```bash
+osdk install npm@11.5.2
+osdk install pnpm@9.15.0
+osdk install yarn@4.9.1
+```
+
+在包管理器进程启动前，osdk 可以为 npm、pnpm、Yarn、Bun 和 Deno 选择健康的
+已配置 Registry。用以下命令检查当前选择：
+
+```bash
+osdk registry test
+osdk registry test pnpm
+```
+
+显式 Registry 参数、环境变量、私有 Registry 和包管理器原生配置始终由你控制。
+
+指南：[包管理器与 Registry 选择](site/guide/package-managers.md)
+
+## 场景：使用各语言生态
+
+安装、切换、锁定、下载源、缓存和离线命令在各生态保持一致；需要生态专属操作时，
+使用对应的扩展命令。
+
+### Node.js
+
+```bash
+osdk install node@20 -o corepack=true
+osdk lock node@20 -o arch=arm64
+osdk node migrate-packages --from 20.19.0 --to 22.17.0
+osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
+```
+
+### Python
+
+```bash
+osdk install python@3.14
+osdk install python@cpython-3.14+freethreaded
+osdk install python@pypy-3.11
+osdk python find
+osdk python find pypy-3.11
+```
+
+### Java 与 JVM 工具
+
+```bash
+osdk install java@21
+osdk install java@21 -o package-type=jre
+osdk install java@21 -o distribution=zulu -o package-type=jdk
+osdk install maven@3.9.16 gradle@9.7.0 kotlin@2.4.10
+```
+
+### Go
+
+```bash
+osdk install go@1.22
+osdk use go@1.22
+osdk exec --tool go@1.22 -- go version
+```
+
+### Rust
+
+```bash
+osdk install rust@stable -o profile=minimal -o components=clippy,rustfmt
+osdk rust component add rustfmt --toolchain stable
+osdk rust target add x86_64-pc-windows-gnu --toolchain stable
+osdk rust check --repair
+```
+
+指南：[运行时与生态工作流](site/guide/runtimes.md)
+
+## 场景：固定模型快照
+
+从 Hugging Face 或 ModelScope 拉取指定文件、校验本地快照，并获取快照路径：
+
+```bash
+export HF_TOKEN=... # 私有或 gated 仓库可选
+
 osdk model pull qwen25 \
   hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors'
 osdk model pull qwen25-ms \
   ms:Qwen/Qwen2.5-7B-Instruct@master \
   --include '*.json' --include '*.safetensors'
-osdk model path qwen25
-```
-
-PowerShell 激活会防止命令查找回调重入。Windows shim 也会显式通过 `ComSpec`
-启动 `.cmd` / `.bat` 工具，保持批处理参数、标准输入输出和退出码。
-
-下载会重试瞬时故障，并使用 HTTP `Range` / `If-Range` 安全续传经过验证的部分文件。
-成功联网一次后，可使用 `--offline` 完全从 osdk 缓存解析元数据并重新安装归档。
-
-osdk 会从当前目录向上查找项目版本文件：`osdk.toml`、兼容 asdf 的
-`.tool-versions`，以及生态原生文件（`.nvmrc`、`.node-version`、
-`.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`）。Node 还会
-把 `package.json#engines.node` 和 `devEngines.runtime` 解析为 npm semver range。
-跨目录统一优先级为：`osdk.toml` > `.tool-versions` > `.nvmrc` >
-`.node-version` > `package.json` > 用户全局配置。
-
-## 模型快照
-
-`osdk model pull` 把模型作为多文件仓库快照管理，而不是 SDK 单归档：
-
-```bash
-export HF_TOKEN=... # 私有或 gated 仓库可选
-osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
-osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
-osdk model list
 osdk model verify qwen25
 osdk model path qwen25
-osdk model remove qwen25
+osdk model list
 ```
 
-Hugging Face branch/tag 会先解析为不可变 commit。ModelScope 文件 API 暴露的是
-每个文件的 revision，而不是单一 snapshot commit，因此 osdk 会使用请求 revision
-与排序后的路径、大小、SHA-256 manifest 推导不可变 snapshot identity。每个选中
-文件支持断点续传和 SHA-256 验证，随后进入共享 CAS 并原子物化。精确仓库、
-snapshot revision、endpoint、variant、文件大小和 SHA-256 会写入 `osdk.lock`
-顶层 `[models]`；token 和短期签名下载 URL 不会落盘。
-可重复使用 `--include` / `--exclude` 选择文件，使用 `--variant` 标记格式或量化，
-并用 `--offline` 从已缓存 metadata 与文件重建快照。
-
-认证支持 `OSDK_HF_TOKEN`、`HF_TOKEN` 和 `HUGGING_FACE_HUB_TOKEN`；
-Authorization 只附加到配置的 Hugging Face endpoint 请求。
-ModelScope 认证支持 `OSDK_MODELSCOPE_TOKEN` 与 `MODELSCOPE_API_TOKEN`。
-
-### 全局模型环境
-
-Provider 设置可持久化为全局环境，不需要只在 `osdk exec` 内生效。先安装一次
-shell activation，再启用一个或两个 adapter：
+需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用
+Provider 环境：
 
 ```bash
-eval "$(osdk activate bash)" # 加入 ~/.bashrc；也支持 zsh/fish/powershell
-
-osdk model env enable                    # Hugging Face + ModelScope
-osdk model env enable huggingface
-osdk model env enable modelscope --force
+osdk model env enable
 osdk model env list
 osdk model env disable huggingface
 ```
 
-已激活 osdk 的 shell 会在下一个提示符自动刷新，新 activation 会立即应用设置。
-Hugging Face adapter 导出 `HF_ENDPOINT`、`HF_HOME`、`HF_HUB_CACHE`、
-`HF_XET_CACHE` 和 `HF_ASSETS_CACHE`；`--offline` 还会导出官方支持的
-`HF_HUB_OFFLINE=1`。ModelScope adapter 导出 `MODELSCOPE_ENDPOINT` 与
-`MODELSCOPE_CACHE`。ModelScope 没有等价的全局 offline 环境变量，因此 osdk
-不会虚构一个无效变量。
+指南：[模型快照](site/guide/models.md)
 
-默认保留用户已有变量；`--force` 才持久化显式覆盖。停用 adapter 或执行
-`osdk deactivate` 会恢复所有捕获的原值。token 永远不会写入 osdk 配置。若全局
-自定义 endpoint 未显式允许转发凭据，osdk 还会屏蔽环境 token 与客户端隐式
-token，避免误发给镜像。匿名自定义 endpoint 还会切到隔离的
-`HF_HOME` / `MODELSCOPE_HOME`，防止已持久化的登录 token 或 cookie 泄漏给镜像。
+## 场景：控制下载源、离线与安全策略
 
-模型 endpoint 复用 SDK 镜像的 source 配置、pin、TTL 和吞吐排名，但探测时会
-指定真实目标模型：
+让 osdk 排序可用下载源、固定首选镜像、添加可信内网源，或只为一条命令覆盖来源：
 
 ```bash
-osdk source list modelscope
-osdk source test modelscope --model Qwen/Qwen2.5-0.5B-Instruct@master
-osdk source pin modelscope modelscope-cn
-osdk source add huggingface --id corp \
-  --download-url https://hub.example.com
-```
-
-探测会先验证目标仓库 metadata，再对实际模型文件执行有上限的 Range 下载。
-官方 endpoint 可接收对应 Provider token；自定义 endpoint 默认匿名，只有确认
-host 可信后才使用 `source add --forward-credentials`，或在显式 `model pull
---endpoint` 时添加 `--forward-credentials`。自动 failover 只发生在同一
-Provider 内，不会假设 Hugging Face 与 ModelScope 的仓库身份可互换。
-
-## Node 工作流
-
-解析 lock 时可覆盖 Node artifact 架构：
-
-```bash
-osdk lock node@20 -o arch=arm64
-```
-
-目标架构会写入对应的平台 lock 区段。osdk 暂无仅下载模式，因此安装和执行会拒绝
-跨架构 artifact。可用 `-o corepack=true` 启用 Corepack，或在
-`[settings.node]` 中持久配置 `corepack = true`；osdk 只调用该 Node 安装自带的
-Corepack，启用 shim 失败时会回滚这次安装。
-
-在受管 Node 版本之间迁移可移植的全局 npm 包：
-
-```bash
-osdk node migrate-packages --from 20.19.0 --to 22.17.0
-osdk node migrate-packages --from 20.19.0 --to 22.17.0 --apply
-```
-
-默认仅输出演练计划；npm 自身和标记了原生构建或安装脚本的包会跳过。`--apply`
-只调用目标 Node 的受管 npm，并把目标 bin 目录放在 `PATH` 首位；失败时恢复目标
-原有的全局包集合。
-
-## Python 实现与 Catalog
-
-简写仍表示 CPython：
-
-```bash
-osdk install python@3.14
-osdk install python@cpython-3.14+freethreaded
-osdk install python@cpython-3.14+debug
-osdk install python@pypy-3.11
-osdk install python@graalpy-3.12
-osdk install python@pyodide-3.14
-osdk python find pypy-3.11
-```
-
-完整 identity 为 `python@<implementation>-<version>+<variant>`；实现和变体会写入
-`osdk.lock`，普通与 free-threaded CPython 可以并存。`python find` 按受管、
-`PATH`、系统解释器的顺序输出。
-
-内置 known-good catalog 固定来自 uv 的指定 commit，每个条目都有 SHA-256。配置
-更完整的内网或刷新 catalog 时必须同时提供：
-
-```toml
-[settings.python]
-catalog_url = "https://example.test/python-catalog.json"
-catalog_sha256 = "0123456789abcdef..."
-```
-
-也支持本地路径和 `file://` URL。新 catalog 只有在精确 digest、schema、实现、
-变体和每个 artifact checksum 全部通过后才替换 last-good 缓存；失败先回退
-last-good，再回退内置 catalog。预发布策略默认是 `if-explicit`：
-
-```bash
-osdk --prerelease never install python@3.15.0rc1
-osdk --prerelease allow install python@latest
-```
-
-除非策略为 `allow`，`latest` 不会选择预发布版本；`never` 也会拒绝显式 RC。
-
-## Java 运行时与 JVM 工具
-
-Java 默认安装 Temurin JDK，package type 会显式写入 lock：
-
-```bash
-osdk install java@21
-osdk install java@21 -o package-type=jre
-osdk install java@21 -o distribution=zulu -o package-type=jdk
-```
-
-JRE identity 带 `jre-` 前缀，所以同一 Java 版本的 JDK 与 JRE 可以并存。Foojay
-结果会按运行时类型和 host libc 过滤。内置 Temurin LTS catalog（8、11、17、21、
-25）在空缓存离线模式也能解析；已有 verified lock artifact 无需访问 Foojay 即可
-安装。需要时可配置兼容 Foojay 的镜像或静态 endpoint：
-
-```toml
-[settings.java]
-catalog_url = "https://mirror.example.test/disco/v3.0/packages"
-```
-
-Maven、Gradle 和 Kotlin 是独立 candidate，不是 Java option：
-
-```bash
-osdk install maven@3.9.16
-osdk install gradle@9.7.0
-osdk install kotlin@2.4.10
-```
-
-它们拥有独立安装 identity、shim 和内置稳定候选，并分别验证上游 SHA-512 或
-SHA-256。所有工具统一使用离线/cache/lock pipeline，安装时不会调用用户全局 Java。
-
-## Rust 生命周期管理
-
-Rust 仍委托 rustup，但每个生命周期命令都会注入 osdk 隔离的 `RUSTUP_HOME` 和
-`CARGO_HOME`：
-
-```bash
-osdk rust component add rustfmt --toolchain stable
-osdk rust component remove rustfmt --toolchain stable
-osdk rust component list --toolchain stable
-osdk rust target add x86_64-pc-windows-gnu --toolchain stable
-osdk rust target remove x86_64-pc-windows-gnu --toolchain stable
-osdk rust target list --toolchain stable
-osdk rust check --repair
-```
-
-`check` 输出隔离 rustup 的更新状态；`--repair` 对齐真实 rustup 工具链和 osdk
-marker。目录选择默认继续使用 osdk 项目 pin；rustup override 兼容必须显式执行：
-
-```bash
-osdk rust override import [path]
-osdk rust override export [path]
-osdk rust toolchain link local-dev /absolute/toolchain
-```
-
-import 把隔离 rustup override 写入 `osdk.toml`；export 把当前 osdk pin 写回隔离
-rustup。linked toolchain 会暴露本地 `bin`，但禁止作为可复现远程 artifact 写入
-lock。
-
-## 项目包管理器
-
-osdk 会读取 `package.json#packageManager` 和 `devEngines.packageManager` 中
-Corepack 风格的精确版本：
-
-```json
-{
-  "engines": { "node": ">=20 <23" },
-  "packageManager": "pnpm@9.15.0"
-}
-```
-
-支持 `npm`、`pnpm`、`yarn`。优先级为 `osdk.toml [tools]` >
-`packageManager` > `devEngines.packageManager`。不带版本、非法 manager、URL
-与 hash/build 后缀都会明确失败。
-
-npm backend 独立安装 npm registry 的 `npm` 包并验证 npm SRI：
-
-```bash
-osdk install npm@11.5.2
-osdk uninstall npm@11.5.2
-```
-
-选择 npm/pnpm/Yarn 会自动加入受管 Node。运行时 PATH 固定为包管理器 bin 在前、
-精确受管 Node 在后，绝不调用用户全局 Node。lock 保存两者精确版本并支持不查
-metadata 的离线重装。
-
-### 项目依赖 Registry 自动选择
-
-在可能下载 npm 包的命令启动前，osdk 会匿名探测候选 Registry，并为该次进程选择
-健康端点。覆盖 `npm`/`npx`、`pnpm`/`pnpx`、Yarn Classic/Berry、`bun`/`bunx`
-以及 Deno 的 npm 依赖，直接 shim 与 `osdk exec` 都会执行；Shell activation 会把
-osdk shim 放在真实 manager bin 前，因此同样生效。manager 只启动一次；所有候选都
-不可用时不会启动，启动后的失败也不会切源重跑安装。
-
-未配置时，内置 npmjs 与 npmmirror 会并发探测，由最快的健康端点胜出。若要把顺序
-作为项目策略，可在已信任的项目 `osdk.toml`（或用户配置）中写：
-
-```toml
-[registries.npm]
-urls = [
-  "https://registry.npmmirror.com/",
-  "https://registry.npmjs.org/",
-]
-probe_timeout_ms = 1500
-```
-
-显式列表保持声明顺序：选择第一个健康候选，后续项只作启动前回退；项目列表整体
-覆盖用户全局列表。可查看实际选择方案：
-
-```bash
-osdk registry test              # 检查所有 manager 策略
-osdk registry test pnpm         # 检查单个 manager
-osdk registry test yarn         # major 未知时分别检查两类 Yarn
-```
-
-manager 命令行或环境变量中的显式 Registry 始终优先。若原生 `.npmrc`、`.yarnrc`、
-`.yarnrc.yml` 或 `bunfig.toml` 含私有/未知 Registry、scope Registry、认证/TLS 策略
-或原生代理设置，osdk 会完全透传且不探测该端点；匿名探测会遵守常规的
-`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 环境变量。manager 真正支持的严格离线参数会跳过预检
-（`--offline`，或 Deno 命令支持位置上的 `--cached-only`）；`--prefer-offline`、
-frozen-lockfile 和 immutable-cache 模式仍可能联网。metadata 或 lockfile 中
-已经保存的绝对 tarball URL 仍可能绕过所选默认 Registry；osdk 不重写 lockfile，也不
-重复执行 lifecycle script。安全边界和未来共享 tarball cache 方案详见
-`docs/package-registry-design.md`。
-
-## 可复现项目与命令执行
-
-把当前项目解析为精确、按平台区分的版本：
-
-```bash
-osdk lock                         # 写入/合并 osdk.lock
-osdk install                      # 使用当前平台对应的 lock
-osdk outdated                     # 对比已安装版本与当前解析结果
-osdk upgrade                      # 安装当前解析版本并刷新 lock
-```
-
-`osdk.lock` 为 Linux、macOS 和 Windows 保存独立区段，其中包含原始请求、精确解析
-版本、backend 参数，以及工具安装后使用的精确 artifact URL、文件名、已验证校验和
-与 Sigstore 认证证据。无参数安装直接使用锁定的 artifact identity，不重新查询上游
-release registry。
-
-lock 中的证据是审计记录，不是绕过信任校验的捷径：启用 attestation 的锁定重装
-仍会用缓存 bundle 重新验证缓存 artifact。显式执行
-`osdk install node@20` 时仍以显式请求为准。
-
-无需修改项目 pin，即可在指定的受管工具环境中运行命令：
-
-```bash
-osdk exec --tool node@20 -- node --version
-osdk exec --tool python@3.12 -- python -c "print('ok')"
-```
-
-生成 Shell 补全：
-
-```bash
-osdk completions bash|zsh|fish|powershell
-```
-
-在用户配置中定义可复用的版本别名：
-
-```bash
-osdk alias set node default 20
-osdk alias set node maintenance default
-osdk alias list node
-osdk use node@maintenance
-osdk alias unset node maintenance
-```
-
-别名可以指向另一个别名；循环引用以及 `latest`、`lts`、`system` 等保留名称会被
-拒绝。工具名别名会规范化，例如 `osdk alias set nodejs default 20` 会把别名保存
-到 `node` 下。
-
-## 下载源与镜像
-
-```bash
-osdk source list node                 # 查看源及固定状态
-osdk source test node                 # 探测速率并输出排名
-osdk source pin node tuna             # 固定使用指定源
+osdk source list node
+osdk source test node
+osdk source pin node tuna
 osdk source add node --id mycorp \
   --download-url https://mirror.corp/node/ \
-  --index-url    https://mirror.corp/node/index.json
-osdk --source official install go@1.22 # 单次覆盖
+  --index-url https://mirror.corp/node/index.json
+osdk --source official install go@1.22
 ```
 
-Go 内置 `go.dev`、阿里云和 `golang.google.cn` 三个来源。
-
-`github:owner/repo` 的 GitHub Releases API 元数据、Release 资产、Raw 文件、校验和/
-签名文件和 attestation bundle 都遵循同一 source 顺序。内置 `ghproxy` 会把这些
-GitHub URL 全部改写到 `https://gh-proxy.com/`。GitHub token 只发送给官方
-`api.github.com`，不会转发给第三方代理。
-匿名 API 配额耗尽时，通用 GitHub 工具会回退到 GitHub 公开 Atom feed 与
-expanded-assets 页面。该回退不会发送 token，只能尽力读取公开且近期的 Release。
-
-## 内容去重与缓存
+成功联网下载后，可以用 `--offline` 强制只使用缓存。安全要求更严格时，可收紧
+产物校验策略：
 
 ```bash
-osdk doctor                     # 目录、同文件系统检查、链接模式、backend
-osdk prune                      # 清理未被任何安装引用的存储对象
-osdk cache dir                  # 共享缓存和存储目录
-osdk cache env                  # 下游包管理器缓存环境变量
-```
-
-这里包含彼此独立的存储层：
-
-- `<cache>/downloads` 是安装 SDK 和包管理器二进制时使用的工具归档缓存；
-  `osdk --yes cache clean` 只清理这一层。
-- `<data>/store` 是已验证、解压后的 SDK 文件所使用的 BLAKE3 CAS。安装版本从这里
-  物化，`osdk prune` 回收未引用对象。
-- `<cache>/pkg` 保存各包管理器或 runtime 原生的项目依赖缓存和 store；
-  `osdk cache env` 会显示全部受支持的重定向。
-
-| 工具 | 原生缓存格式 | osdk 映射 |
-| --- | --- | --- |
-| npm | npm `cacache` 内容与元数据 | `npm_config_cache=<cache>/pkg/npm` |
-| pnpm | 内容寻址的包文件 store | pnpm 10 及以下使用 `npm_config_store_dir`，pnpm 11 起使用 `pnpm_config_store_dir`，均指向 `<cache>/pkg/pnpm-store`；`PNPM_HOME=<cache>/pkg/pnpm` 仍是可执行文件/状态目录 |
-| Yarn | Classic 原生缓存；Berry 标准化 zip 归档 | Classic 使用 `YARN_CACHE_FOLDER=<cache>/pkg/yarn-classic`；2+ 使用 `YARN_GLOBAL_FOLDER=<cache>/pkg/yarn` |
-| Bun | Bun 原生全局缓存中的 registry 包 | `BUN_INSTALL_CACHE_DIR=<cache>/pkg/bun` |
-| Deno | URL/npm 依赖、编译产物和部分运行时状态 | `DENO_DIR=<cache>/pkg/deno` |
-
-Yarn 2/3 的 active cache 默认仍在项目内（`.yarn/cache`），但默认开启的
-`enableMirror: true` 还会读写 `${YARN_GLOBAL_FOLDER}/cache`。因此 osdk 的映射会提供
-跨项目 mirror，而不会替换项目本地或 Zero-Install 缓存。Yarn 4 默认开启
-`enableGlobalCache`，所以同一个全局目录会成为 active cache。osdk 不强制修改
-`enableGlobalCache` 或 `cacheFolder`。
-
-对受管 Bun 和 Deno，backend 专属变量只在对应工具生效时注入。`DENO_DIR` 不只包含
-下载的包，还包含编译产物和部分运行时状态，因此不能把它当作可随意删除的纯包缓存。
-
-当前包管理器通过 shell activation、`osdk exec` 和 osdk 直接 shim 三条路径获得这些
-变量；用户显式设置的环境变量始终优先。各工具的原生缓存格式不兼容，不能共用同一
-目录。未来的跨 manager 层最多只能按已验证 SRI 对原始 registry tarball 做内容寻址
-去重；即使如此，各 manager 仍会保存元数据、转换后归档或解包产物，无法保证整个
-磁盘只保留一份。osdk 当前尚未实现这种 tarball CAS，请照常运行各 manager。
-
-## 语言（i18n）
-
-osdk 支持中文和英文。它会根据 locale 自动选择语言
-（`LC_ALL` / `LC_MESSAGES` / `LANG`，例如 `zh_CN.UTF-8` 选择中文），并本地化
-全部消息、错误和 `-h` / `--help`。覆盖优先级从高到低为：
-
-```bash
-osdk --lang zh install node@20   # 单次命令参数
-export OSDK_LANG=zh              # 环境变量
-# 或在 config.toml 中设置：[settings]\n lang = "zh"
-```
-
-## 目录（可通过环境变量覆盖）
-
-| 用途 | Linux 默认位置 | 环境变量 |
-| --- | --- | --- |
-| 数据（安装） | `~/.local/share/osdk` | `OSDK_DATA_DIR` |
-| CAS 存储 | `<data>/store` | `OSDK_STORE_DIR` |
-| SDK 安装目录 | `<data>/installs` | `OSDK_INSTALL_DIR` |
-| 下载缓存 | `~/.cache/osdk` | `OSDK_CACHE_DIR` |
-| 配置 | `~/.config/osdk/config.toml` | `OSDK_CONFIG_DIR` |
-
-内容存储和安装目录位于同一文件系统时才能使用硬链接；跨文件系统时 osdk 自动回退
-到复制，`osdk doctor` 会给出警告。
-
-## 各 SDK 的获取方式
-
-| SDK | 获取方式 |
-| --- | --- |
-| Node.js | nodejs.org 官方预编译归档，验证 `SHASUMS256` |
-| Go | go.dev/dl JSON 索引，逐文件 SHA-256 |
-| Python | 静态 PBS release 索引 + Astral release 镜像，验证 `SHA256SUMS`，不依赖 GitHub API |
-| Java | Foojay Disco API（默认 Temurin），支持多个发行版 |
-| Rust | 隔离 rustup bootstrap 和 toolchain home，选择镜像并验证 SHA-256 |
-| pnpm | 官方 npm 平台包，验证 npm SRI |
-| Yarn | `yarn` / `@yarnpkg/cli-dist` npm 包，验证 npm SRI |
-| Deno | 官方 `@deno/<platform>` npm 包，验证 npm SRI |
-| Bun | 官方 `@oven/bun-<platform>` npm 包，验证 npm SRI |
-| npm | 独立 npm registry 包，验证 npm SRI |
-| `github:owner/repo` | 任意 GitHub Release；自动匹配 host asset，支持归档和裸二进制 |
-
-### GitHub Release 工具
-
-安装任意通过 GitHub Releases 发布的工具：
-
-```bash
-osdk use -g github:sharkdp/fd          # 最新 release，自动选择 host asset
-osdk install github:cli/cli@2.62.0     # 指定 tag
-osdk list-remote github:sharkdp/fd     # 可用 release tag
-```
-
-通用 `github:owner/repo` backend 优先使用 GitHub Releases API。设置
-`GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 可提高直连 API 限额；token 只会发送到
-精确的 `api.github.com` host。未配置 token 且 API 配额耗尽时，osdk 会自动使用
-公开 `releases.atom` feed 发现近期版本，并通过
-`releases/expanded_assets/<tag>` 查找资产。该回退不发送 token，仅覆盖公开、近期
-Release，是尽力而为的连续性方案，不能完整替代 API。如果公开页面无法提供有效
-元数据，osdk 会保留并报告原始 API 限流信息、重置时间与重试建议。正常 API
-列表支持分页，最多读取 1,000 个 Release；API 元数据、公开页面、Raw 文件、
-Release 资产、校验文件和 attestation bundle 仍支持 source/proxy 失败转移，且
-token 不会被转发给代理。
-
-可用显式 option 覆盖启发式 asset 选择：
-
-```bash
-osdk install github:owner/repo@1.2.3 \
-  -o 'asset-regex=^tool-.*-linux-x64\.tar\.gz$' \
-  -o bins=dist/tool,dist/toolctl -o strip-components=1
-
-osdk install github:owner/repo@1.2.3 \
-  -o 'asset-template=tool-{version}-{os}-{arch}.zip' \
-  -o bin=tool.exe -o rename=mytool -o os=windows -o arch=x64
-```
-
-regex/template 必须恰好命中一个 asset。`bin`/`bins` 从归档选择文件，`rename`
-要求只选一个 binary。文件缺失会删除整个安装，不留下 complete marker；Windows
-会规范 `.exe`。
-
-固定 digest 的静态 catalog 可完全绕过 Releases API：
-
-```bash
-osdk lock github:owner/repo@latest \
-  -o catalog-url=/approved/github-catalog.json \
-  -o catalog-sha256=0123456789abcdef...
-```
-
-schema 1 asset 包含 `name`、`url`、`checksum`、`os`、`arch` 和可选 `libc`。
-catalog digest、最终 asset 与规则都会写入 lock。
-
-## 预发布通道
-
-统一的 `--prerelease never|if-explicit|allow` 策略适用于 Python、Bun、Deno 和
-GitHub Release。默认值是 `if-explicit`：
-
-```bash
-osdk install bun@canary
-osdk install deno@beta
-osdk install github:owner/repo@1.2.0-beta.1
-osdk --prerelease allow install bun@latest
-osdk --prerelease never install bun@canary
-```
-
-显式 `canary`、`nightly`、`beta` 会把 npm dist-tag 或匹配的 GitHub prerelease
-tag 解析为精确版本。`never` 拒绝所有预发布；只有 `allow` 才允许
-latest/prefix/range 隐式选择预发布。远程列表默认仍只显示稳定版。lock 同时保留
-原始 channel 和精确版本，因此 dist-tag 消失也不影响离线复现。
-
-## 离线模式
-
-成功的在线元数据请求和下载归档会按 URL 与工具版本缓存。后续命令可以完全禁止
-网络访问：
-
-```bash
-osdk install bun@1.3.14
-osdk uninstall bun@1.3.14
-osdk --offline install bun@1.3.14
-```
-
-离线缓存缺失会明确失败，不会静默联网。离线模式下也会禁用 source 探测和刷新。
-
-能获得可信 key 时，签名验证默认开启。仅在明确需要时才设置
-`OSDK_VERIFY_SIGNATURES=false`。设置 `OSDK_REQUIRE_CHECKSUMS=true`（或传入
-`--require-checksums`）可拒绝任何既没有上游校验和，也没有 lock/cache receipt
-可验证 SHA-256/SHA-512/BLAKE3 的 artifact。
-
-通用 `github:owner/repo` backend 还支持 GitHub Artifact Attestations：
-
-```bash
-osdk --attestations if-available install github:cli/cli@latest
+osdk --offline install node@20
+osdk --require-checksums install github:sharkdp/fd
 osdk --attestations required install github:cli/cli@latest
 ```
 
-同一策略也可通过 `settings.attestations` 或
-`OSDK_ATTESTATIONS=off|if-available|required` 配置，默认是 `off`。
-`if-available` 允许 release 没有 attestation，但发现格式错误、身份不匹配或密码学
-验证失败的 bundle 时一定失败；`required` 在没有 bundle 时也会失败。
-
-已验证 bundle 按仓库和 artifact SHA-256 缓存，因此 `--offline` 和锁定重装无需
-信任 lockfile 中的证据，也能重新验证。
-
-Sigstore public-good bundle 使用内置 public-good trust root 验证：Fulcio
-certificate chain 与 SCT、GitHub Actions OIDC issuer 与仓库、artifact
-signature、DSSE subject digest、Rekor body 一致性、signing time、Signed Entry
-Timestamp、signed checkpoint、root/tree-size 绑定和 canonical log entry 的
-Merkle path。对不含 Rekor entry、改用 RFC 3161 timestamp 的 GitHub v0.3
-bundle，则使用内置 GitHub trust root 验证 TSA timestamp、certificate chain、
-artifact signature、DSSE subject digest 和已签名的仓库声明。bundle 缓存后全部
-检查均可离线完成；信任材料缺失、篡改或不匹配都会失败。证据按验证路径记录为
-`sigstore-bundle+rekor` 或 `sigstore-bundle+github-tsa`；旧
-`sigstore-bundle` 证据仍可读取，但绝不会成为跳过信任校验的捷径。
-
-## 架构
-
-- `crates/osdk-core`：库，包括 `Backend` trait、统一管线
-  （download → verify → extract → CAS ingest → materialize）、CAS 存储和链接模式、
-  source 选择、配置/目录、shim 和 shell 激活。
-- `crates/osdk-cli`：`osdk` 二进制。
-- `crates/osdk-shim`：轻量启动器；每个 shim 从当前工作目录解析生效版本，并执行
-  对应真实二进制。
-
-## 开发
-
-离线 backend contract 是主要正确性门禁。它对每个内置 backend 和 generic
-GitHub 运行同一套 resolve → install → execute → uninstall 断言，并让 registry
-中的真实 backend 消费本地 locked fixture。故障注入覆盖 403、429、5xx、timeout、
-连接中断、畸形 metadata、stale cache、下载中断、并发安装、失败 marker 清理、
-损坏 receipt/manifest、跨文件系统 copy fallback，以及 shim 的
-stdin/stdout/stderr、退出码、递归和冲突。定时公网 smoke 只监测上游漂移，不承担
-主要正确性证明。
+会影响下载源或执行行为的项目配置，需要先审阅并显式信任：
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets   # CI 使用 -D warnings
-cargo fmt --all --check
-
-# 在 Windows 构建二进制后运行运行时矩阵：
-pwsh -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug
-
-# 同时从 Linux 交叉验证 Windows cfg：
-rustup target add x86_64-pc-windows-gnu
-sudo apt-get install -y mingw-w64
-cargo clippy --locked --workspace --all-targets \
-  --target x86_64-pc-windows-gnu -- -D warnings
-
-# 通过固定版本并校验 SHA-256 的 Wine 执行完整 Windows GNU 测试：
-./scripts/windows-wine-tests.sh
+osdk --yes trust ./osdk.toml
+osdk trust list
+osdk untrust ./osdk.toml
 ```
 
-CI（`.github/workflows/ci.yml`）在 Ubuntu、macOS 和 Windows 上运行格式检查、
-Clippy 与测试。独立的原生 macOS terminal 门禁会同时在 Apple Silicon 和 Intel
-runner 上执行交互 PTY 合约。Windows runner 还会在临时隔离状态下、完全离线地
-执行 `.cmd`、PowerShell、Git Bash shim、PowerShell 激活/撤销、symlink 权限回退、
-真实 NTFS volume detection、stdin/stdout/stderr、参数和退出码，并覆盖空格、中文路径以及
-超过传统 260 字符限制的受管 SDK 状态目录；可执行文件和工作目录保持在 Shell
-自身的进程启动长度限制内。
-`github:owner/repo` 等带命名空间的 backend ID 也在覆盖范围内，确保缓存、锁、
-安装和解压临时目录在 Windows 上均为合法路径。Linux job 会先交叉 lint 所有
-`#[cfg(windows)]` 路径，再通过固定版本并校验 SHA-256 的 Wine 执行完整 Windows
-GNU workspace；原生 Windows/MSVC runner 仍是最终平台门禁。另有 Rust 1.88 job
-检查声明的最低 Rust 版本与锁定依赖图。CI job 和 Windows runtime matrix 都有
-硬超时；runtime 脚本会为每个 Shell 合约输出独立日志分组，阻塞点不再无限等待。
+指南：[下载源、离线与安全](site/guide/sources-security.md)
+
+## 场景：检查缓存并回收空间
+
+```bash
+osdk cache dir
+osdk cache env
+osdk --yes cache clean
+osdk prune --dry-run
+osdk --yes prune
+```
+
+`cache clean` 删除已下载的归档；`prune` 回收不再引用的共享内容；
+`prune --dry-run` 不会删除任何数据。
+
+指南：[存储、缓存与 Shell 集成](site/guide/storage-shell.md)
+
+## 场景：诊断环境或切换语言
+
+```bash
+osdk doctor
+osdk current
+osdk where node
+osdk config path
+osdk config list
+osdk --lang en doctor
+OSDK_LANG=zh osdk --help
+osdk completions bash > osdk.bash
+```
+
+osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lang` 覆盖单次命令的
+语言，`OSDK_LANG` 设置当前会话偏好。
+
+指南：[存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
+
+## 支持范围
+
+| 类别 | 当前支持 |
+| --- | --- |
+| 平台 | Windows、macOS、Linux |
+| 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
+| 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
+| 其他开发工具 | 通过 `github:owner/repo` 安装公开 GitHub Release |
+| 模型平台 | Hugging Face、ModelScope |
+| 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
+| Shell | Bash、zsh、fish、PowerShell |
+| CLI 语言 | 中文、英文 |
+
+## 文档
+
+- [功能概览](site/guide/features.md)
+- [快速上手](site/guide/getting-started.md)
+- [项目工具链](site/guide/projects.md)
+- [锁文件与环境复现](site/guide/lockfiles.md)
+- [运行时与生态工作流](site/guide/runtimes.md)
+- [包管理器与 Registry 选择](site/guide/package-managers.md)
+- [模型快照](site/guide/models.md)
+- [下载源、离线与安全](site/guide/sources-security.md)
+- [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
+- [实现文档](site/guide/implementation/index.md)
+
+欢迎通过 [issues](https://github.com/lejunyang/one-sdk/issues) 和 Pull Request
+参与贡献。
 
 ## 许可证
 

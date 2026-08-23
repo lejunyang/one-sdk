@@ -16,6 +16,9 @@ hero:
       text: Explore Features
       link: /en/guide/features
     - theme: alt
+      text: Internals
+      link: /en/guide/implementation/
+    - theme: alt
       text: GitHub
       link: https://github.com/lejunyang/one-sdk
 
@@ -25,7 +28,7 @@ features:
     details: Manage Node.js, Python, Java, Go, Rust, pnpm, Yarn, Deno, Bun, and GitHub Release tools with one command model.
   - icon: ⧉
     title: Cross-Version Deduplication
-    details: A BLAKE3 content-addressed store keeps one copy of identical files and safely materializes versions with hardlinks, reflinks, or copies.
+    details: Installed versions can reuse identical files to reduce duplicate disk use; the implementation guide covers the storage strategy.
   - icon: ⇄
     title: Automatic Fastest Mirrors
     details: Probe official sources and authoritative mirrors, select by speed, and fail over when metadata or artifact downloads fail.
@@ -36,8 +39,8 @@ features:
     title: Integrity and Provenance
     details: Verify upstream checksums, enforce strict checksum policies, and validate GitHub Artifact Attestations with Sigstore.
   - icon: ⬡
-    title: Offline-First Shared Caches
-    details: Cache metadata and artifacts while sharing downstream npm, pip, Cargo, Go, Gradle, and other package caches.
+    title: Offline Reinstall and Shared Caches
+    details: Cache metadata and artifacts while centralizing npm, pip, Cargo, Go, Gradle, and other downstream package caches.
 ---
 
 ## Start in three steps
