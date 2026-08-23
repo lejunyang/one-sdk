@@ -94,7 +94,7 @@ osdk use -g node@20             # 安装 + 设为全局默认 + 生成 shim
 osdk use node@18                # 固定到当前项目（osdk.toml）
 node --version                  # 通过 shim 执行当前生效版本
 
-# Shell 激活（shim 的替代方案：按目录更新 PATH 与环境变量）
+# Shell 激活（按目录更新 shim 优先的 PATH 与环境变量）
 eval "$(osdk activate bash)"    # 加入 ~/.bashrc；也支持 zsh|fish|powershell
 # 后续移除 hook，并恢复当前 shell 的 PATH/环境变量：
 eval "$(osdk deactivate bash)"
@@ -341,6 +341,45 @@ osdk uninstall npm@11.5.2
 选择 npm/pnpm/Yarn 会自动加入受管 Node。运行时 PATH 固定为包管理器 bin 在前、
 精确受管 Node 在后，绝不调用用户全局 Node。lock 保存两者精确版本并支持不查
 metadata 的离线重装。
+
+### 项目依赖 Registry 自动选择
+
+在可能下载 npm 包的命令启动前，osdk 会匿名探测候选 Registry，并为该次进程选择
+健康端点。覆盖 `npm`/`npx`、`pnpm`/`pnpx`、Yarn Classic/Berry、`bun`/`bunx`
+以及 Deno 的 npm 依赖，直接 shim 与 `osdk exec` 都会执行；Shell activation 会把
+osdk shim 放在真实 manager bin 前，因此同样生效。manager 只启动一次；所有候选都
+不可用时不会启动，启动后的失败也不会切源重跑安装。
+
+未配置时，内置 npmjs 与 npmmirror 会并发探测，由最快的健康端点胜出。若要把顺序
+作为项目策略，可在已信任的项目 `osdk.toml`（或用户配置）中写：
+
+```toml
+[registries.npm]
+urls = [
+  "https://registry.npmmirror.com/",
+  "https://registry.npmjs.org/",
+]
+probe_timeout_ms = 1500
+```
+
+显式列表保持声明顺序：选择第一个健康候选，后续项只作启动前回退；项目列表整体
+覆盖用户全局列表。可查看实际选择方案：
+
+```bash
+osdk registry test              # 检查所有 manager 策略
+osdk registry test pnpm         # 检查单个 manager
+osdk registry test yarn         # major 未知时分别检查两类 Yarn
+```
+
+manager 命令行或环境变量中的显式 Registry 始终优先。若原生 `.npmrc`、`.yarnrc`、
+`.yarnrc.yml` 或 `bunfig.toml` 含私有/未知 Registry、scope Registry、认证/TLS 策略
+或原生代理设置，osdk 会完全透传且不探测该端点；匿名探测会遵守常规的
+`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 环境变量。manager 真正支持的严格离线参数会跳过预检
+（`--offline`，或 Deno 命令支持位置上的 `--cached-only`）；`--prefer-offline`、
+frozen-lockfile 和 immutable-cache 模式仍可能联网。metadata 或 lockfile 中
+已经保存的绝对 tarball URL 仍可能绕过所选默认 Registry；osdk 不重写 lockfile，也不
+重复执行 lifecycle script。安全边界和未来共享 tarball cache 方案详见
+`docs/package-registry-design.md`。
 
 ## 可复现项目与命令执行
 

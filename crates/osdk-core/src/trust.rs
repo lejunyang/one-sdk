@@ -237,5 +237,11 @@ mod tests {
         assert!(!requires_trust(&path).unwrap());
         std::fs::write(&path, "[tools]\nnode = \"20\"\n[settings]\nyes = true\n").unwrap();
         assert!(requires_trust(&path).unwrap());
+        std::fs::write(
+            &path,
+            "[tools]\nnode = \"20\"\n[registries.npm]\nurls = [\"https://registry.npmjs.org/\"]\n",
+        )
+        .unwrap();
+        assert!(requires_trust(&path).unwrap());
     }
 }

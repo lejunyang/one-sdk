@@ -24,6 +24,7 @@ pub mod i18n;
 pub mod lock;
 pub mod model;
 pub mod npm;
+pub mod package_registry;
 pub mod pipeline;
 pub mod platform;
 pub mod process;

@@ -154,6 +154,12 @@ pub struct SourcesConfig {
     /// Per-tool source overrides.
     #[serde(flatten)]
     pub per_tool: BTreeMap<String, ToolSources>,
+    /// Package-registry configuration is persisted under the top-level
+    /// `[registries]` table. It lives here internally so adding it does not
+    /// break callers that construct [`Config`] directly.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub registries: RegistriesConfig,
 }
 
 impl Default for SourcesConfig {
@@ -163,6 +169,7 @@ impl Default for SourcesConfig {
             probe_timeout_ms: 1500,
             cache_ttl: "6h".to_string(),
             per_tool: BTreeMap::new(),
+            registries: RegistriesConfig::default(),
         }
     }
 }
@@ -171,6 +178,33 @@ impl SourcesConfig {
     /// Parse the cache TTL string into seconds. Defaults to 6h on parse error.
     pub fn cache_ttl_secs(&self) -> u64 {
         parse_duration_secs(&self.cache_ttl).unwrap_or(6 * 3600)
+    }
+}
+
+/// Registry preflight settings. Package registry URLs are deliberately kept
+/// separate from SDK download sources because they affect delegated package
+/// manager commands rather than osdk's own downloads.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RegistriesConfig {
+    pub npm: NpmRegistryConfig,
+}
+
+/// Candidate registries for npm-compatible package managers. An empty list
+/// means to use osdk's built-in public candidates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NpmRegistryConfig {
+    pub urls: Vec<String>,
+    pub probe_timeout_ms: u64,
+}
+
+impl Default for NpmRegistryConfig {
+    fn default() -> Self {
+        Self {
+            urls: Vec::new(),
+            probe_timeout_ms: 1500,
+        }
     }
 }
 
@@ -200,6 +234,7 @@ pub struct ToolSources {
 struct ConfigFile {
     settings: Option<Settings>,
     sources: Option<SourcesConfig>,
+    registries: Option<RegistriesConfig>,
     tools: BTreeMap<String, String>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -272,7 +307,12 @@ impl Config {
                 probe_timeout_ms: src.probe_timeout_ms,
                 cache_ttl: src.cache_ttl,
                 per_tool: merged,
+                registries: self.sources.registries.clone(),
             };
+        }
+        if let Some(registries) = file.registries {
+            // Registry sections replace the lower-precedence layer as a unit.
+            self.sources.registries = registries;
         }
         for (k, v) in file.tools {
             self.tools.insert(k, v);
@@ -338,6 +378,11 @@ impl Config {
 
     pub fn tool_sources(&self, tool: &str) -> Option<&ToolSources> {
         self.sources.per_tool.get(tool)
+    }
+
+    /// Effective package-registry configuration after user/project layering.
+    pub fn registries(&self) -> &RegistriesConfig {
+        &self.sources.registries
     }
 
     pub fn expand_alias(&self, tool: &str, spec: &str) -> Result<String> {
@@ -425,8 +470,47 @@ fn truthy(s: &str) -> bool {
 
 fn read_config_file(path: &Path) -> Result<ConfigFile> {
     let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    let file: ConfigFile = toml::from_str(&text)?;
+    let mut file: ConfigFile = toml::from_str(&text)?;
+    if let Some(registries) = &mut file.registries {
+        normalize_registry_urls(&mut registries.npm.urls)?;
+    }
     Ok(file)
+}
+
+fn normalize_registry_urls(urls: &mut Vec<String>) -> Result<()> {
+    let mut normalized = Vec::with_capacity(urls.len());
+    for value in urls.iter() {
+        let value = normalize_registry_url(value)?;
+        if !normalized.contains(&value) {
+            normalized.push(value);
+        }
+    }
+    *urls = normalized;
+    Ok(())
+}
+
+/// Validate and canonicalize an npm-compatible registry base URL. Credentials,
+/// query strings, and fragments are rejected.
+pub fn normalize_registry_url(value: &str) -> Result<String> {
+    let original = value.trim();
+    let mut url =
+        reqwest::Url::parse(original).map_err(|_| Error::config("invalid registry URL"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(Error::config(
+            "registry URL must use http or https and include a host",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::config("registry URL must not contain credentials"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(Error::config(
+            "registry URL must not contain a query string or fragment",
+        ));
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{path}/"));
+    Ok(url.to_string())
 }
 
 /// Walk up from `start_dir` looking for a project config file.
@@ -577,6 +661,88 @@ pin = "project"
         assert!(huggingface.env);
         assert!(huggingface.env_force);
         assert_eq!(huggingface.pin.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn project_registry_replaces_user_registry_and_load_user_excludes_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project/nested");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[registries.npm]
+urls = ["https://registry.npmjs.org"]
+probe_timeout_ms = 900
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("project/osdk.toml"),
+            r#"
+[registries.npm]
+urls = ["https://registry.npmmirror.com/path/"]
+probe_timeout_ms = 125
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&user_config, &project).unwrap();
+        assert_eq!(
+            config.registries().npm.urls,
+            ["https://registry.npmmirror.com/path/"]
+        );
+        assert_eq!(config.registries().npm.probe_timeout_ms, 125);
+
+        let user = Config::load_user(&user_config).unwrap();
+        assert_eq!(user.registries().npm.urls, ["https://registry.npmjs.org/"]);
+        assert_eq!(user.registries().npm.probe_timeout_ms, 900);
+    }
+
+    #[test]
+    fn registry_urls_normalize_and_reject_unsafe_values() {
+        assert_eq!(
+            normalize_registry_url("https://example.test/team").unwrap(),
+            "https://example.test/team/"
+        );
+        let query_error = normalize_registry_url("https://example.test/team?x=1").unwrap_err();
+        assert_eq!(
+            query_error.to_string(),
+            "config error: registry URL must not contain a query string or fragment"
+        );
+        let fragment_error =
+            normalize_registry_url("https://example.test/team#fragment").unwrap_err();
+        assert_eq!(
+            fragment_error.to_string(),
+            "config error: registry URL must not contain a query string or fragment"
+        );
+        assert!(normalize_registry_url("file:///tmp/registry").is_err());
+        assert!(normalize_registry_url("https://token@example.test/").is_err());
+        assert!(normalize_registry_url("relative/path").is_err());
+    }
+
+    #[test]
+    fn registry_config_rejects_query_and_fragment() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+
+        for url in [
+            "https://registry.npmjs.org/?write=true",
+            "https://registry.npmjs.org/#scope",
+        ] {
+            std::fs::write(
+                &config_file,
+                format!("[registries.npm]\nurls = [{url:?}]\n"),
+            )
+            .unwrap();
+
+            let error = Config::load_user(&config_file).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "config error: registry URL must not contain a query string or fragment"
+            );
+        }
     }
 
     #[test]

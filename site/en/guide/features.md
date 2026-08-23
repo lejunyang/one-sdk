@@ -278,6 +278,38 @@ SRI. Selecting any manager automatically adds managed Node; manager bins
 precede exact Node on PATH, so launchers never use user-global Node. Both exact
 versions are locked and support offline reinstall.
 
+### Automatic dependency registries
+
+Before a command may fetch npm packages, osdk anonymously probes candidate
+registries and selects a healthy endpoint for that single process. It covers
+npm/npx, pnpm/pnpx, both Yarn families, Bun/bunx, and Deno npm dependencies in
+direct shims, shell activation, and `osdk exec`. The manager starts exactly
+once; all candidates failing prevents startup, while a failure after startup is
+returned without replaying scripts or modifying the project twice.
+
+Built-in npmjs and npmmirror candidates use fastest-healthy selection. A trusted
+project can instead define ordered policy (project replaces user-global):
+
+```toml
+[registries.npm]
+urls = [
+  "https://registry.npmmirror.com/",
+  "https://registry.npmjs.org/",
+]
+probe_timeout_ms = 1500
+```
+
+Use `osdk registry test [manager]` to inspect health and selection; omitting the
+manager checks all strategies. Explicit manager options/environment variables
+win. Private, unknown, scoped, authenticated, TLS-customized, or native-proxy
+configuration is passed through without probing or override. Anonymous probes
+honor ordinary `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables.
+Manager-supported strict offline flags pass through (`--offline`, or Deno
+`--cached-only` where supported). Prefer-offline, frozen-lockfile, and
+immutable-cache modes may still use the network and keep preflight enabled.
+Absolute artifact URLs in metadata or lockfiles can bypass a default registry;
+osdk neither rewrites lockfiles nor performs in-process failover.
+
 ## Project configuration trust
 
 Project `[tools]` pins and `[aliases]` are safe data and load without trust.
@@ -313,6 +345,10 @@ eval "$(osdk activate zsh)"
 osdk activate fish | source
 osdk activate powershell | Invoke-Expression
 ```
+
+The hook keeps osdk shims first on `PATH`, followed by the selected tools' real
+bin directories. This preserves per-command dispatch and dependency-registry
+preflight while retaining direct-bin fallback for executables without a shim.
 
 The PowerShell hook guards its command-lookup callback against re-entry.
 Windows shims explicitly launch `.cmd` and `.bat` targets through `ComSpec`, so

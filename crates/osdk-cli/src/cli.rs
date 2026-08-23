@@ -197,6 +197,12 @@ pub enum Command {
         command: SourceCommand,
     },
 
+    /// Inspect project dependency registry selection.
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommand,
+    },
+
     /// Inspect or edit configuration.
     Config {
         #[command(subcommand)]
@@ -290,6 +296,15 @@ pub enum SourceCommand {
     Pin { tool: String, id: String },
     /// Remove a tool's source pin.
     Unpin { tool: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RegistryCommand {
+    /// Probe dependency registries and show the selection plan.
+    Test {
+        /// Package manager to test; omit to test all supported managers.
+        manager: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

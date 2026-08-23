@@ -45,6 +45,16 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("label.enabled", ("enabled", "已启用"));
     m.insert("label.disabled", ("disabled", "已停用"));
     m.insert("label.force", (" (force)", "（强制覆盖）"));
+    m.insert("msg.registry_manager_header", ("{manager}:", "{manager}："));
+    m.insert("label.registry_pass_through", ("pass-through", "透传"));
+    m.insert("label.registry_healthy", ("healthy", "健康"));
+    m.insert("label.registry_unavailable", ("unavailable", "不可用"));
+    m.insert("label.registry_selected", ("selected", "已选择"));
+    m.insert("label.registry_ok", ("ok", "正常"));
+    m.insert(
+        "msg.registry_no_healthy_candidate",
+        ("no healthy candidate", "没有健康候选"),
+    );
     m.insert("msg.cancelled", ("cancelled", "已取消"));
     m.insert(
         "msg.config_trusted",
@@ -426,6 +436,55 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.registry_command_not_started",
+        (
+            "no dependency registry is available for {manager}; command was not started",
+            "{manager} 没有可用的依赖 Registry；命令未启动",
+        ),
+    );
+    m.insert(
+        "err.registry_command_not_started_details",
+        (
+            "no dependency registry is available for {manager}; command was not started: {details}",
+            "{manager} 没有可用的依赖 Registry；命令未启动：{details}",
+        ),
+    );
+    m.insert(
+        "err.registry_test_unavailable",
+        (
+            "no dependency registry is available for {managers}",
+            "以下包管理器没有可用的依赖 Registry：{managers}",
+        ),
+    );
+    m.insert(
+        "err.registry_preflight_runtime",
+        (
+            "creating registry preflight runtime: {error}",
+            "创建 Registry 预检运行时失败：{error}",
+        ),
+    );
+    m.insert(
+        "err.registry_preflight",
+        (
+            "registry preflight failed: {error}",
+            "Registry 预检失败：{error}",
+        ),
+    );
+    m.insert(
+        "err.registry_unavailable",
+        (
+            "no reachable package registry for `{executable}`",
+            "`{executable}` 没有可达的包 Registry",
+        ),
+    );
+    m.insert(
+        "err.registry_unavailable_details",
+        (
+            "no reachable package registry for `{executable}` ({details})",
+            "`{executable}` 没有可达的包 Registry（{details}）",
+        ),
+    );
+    m.insert(
         "err.node_migrate_rolled_back",
         (
             "global package migration failed; restored the target Node package set",
@@ -789,6 +848,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.registry.about",
+        (
+            "Inspect project dependency registry selection",
+            "查看项目依赖 Registry 的选择",
+        ),
+    );
+    m.insert(
         "help.config.about",
         ("Inspect or edit configuration", "查看或编辑配置"),
     );
@@ -1069,6 +1135,22 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.source.unpin.about",
         ("Remove a tool's source pin", "取消某个工具的源固定"),
+    );
+
+    // dependency-registry subcommands
+    m.insert(
+        "help.registry.test.about",
+        (
+            "Probe dependency registries and show the selection plan",
+            "探测项目依赖 Registry 并显示选择方案",
+        ),
+    );
+    m.insert(
+        "help.registry.test.arg.manager",
+        (
+            "Package manager to test; omit to test all supported managers",
+            "要测试的包管理器；省略则测试所有支持的包管理器",
+        ),
     );
 
     // config subcommands

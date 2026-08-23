@@ -85,7 +85,7 @@ osdk use -g node@20             # install + set global default + generate shims
 osdk use node@18                # pin in the current project (osdk.toml)
 node --version                  # runs the active version via shim
 
-# shell activation (alternative to shims — per-directory PATH + env)
+# shell activation (per-directory shim-first PATH + env)
 eval "$(osdk activate bash)"    # add to ~/.bashrc  (zsh|fish|powershell too)
 # later, remove the hook and restore PATH/env in the current shell:
 eval "$(osdk deactivate bash)"
@@ -355,6 +355,53 @@ Selecting npm/pnpm/Yarn automatically adds managed Node. Runtime PATH places
 the package-manager bin first and exact managed Node second, never user-global
 Node. Locks persist both exact versions and support metadata-free offline
 reinstall.
+
+### Automatic dependency registries
+
+Before a command that may fetch npm packages, osdk probes anonymous registry
+candidates and selects a healthy endpoint for that one process. This covers
+`npm`/`npx`, `pnpm`/`pnpx`, Yarn Classic and Berry, `bun`/`bunx`, and Deno npm
+dependencies through direct shims and `osdk exec`. Shell activation keeps osdk
+shims ahead of the real manager bins so the same preflight also applies there.
+The manager is started exactly once; if every candidate is unavailable, it is
+not started. A failure after startup is returned without retrying the install.
+
+Without configuration, the built-in npmjs and npmmirror endpoints are probed
+concurrently and the fastest healthy endpoint wins. To make order a project
+policy, use a trusted project `osdk.toml` (or the user config):
+
+```toml
+[registries.npm]
+urls = [
+  "https://registry.npmmirror.com/",
+  "https://registry.npmjs.org/",
+]
+probe_timeout_ms = 1500
+```
+
+Configured URLs retain their order: osdk picks the first healthy candidate and
+uses later entries only as pre-start fallback. Project configuration replaces
+the user-global list. Inspect the effective plan with:
+
+```bash
+osdk registry test              # all manager strategies
+osdk registry test pnpm         # one manager
+osdk registry test yarn         # both Yarn strategies if its major is unknown
+```
+
+Explicit manager registry arguments or environment variables always win. If a
+native `.npmrc`, `.yarnrc`, `.yarnrc.yml`, or `bunfig.toml` contains a private
+or unknown registry, a scoped registry, authentication/TLS policy, or a native
+proxy setting, osdk leaves it untouched and does not probe that endpoint.
+Ordinary `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` settings are honored by the
+anonymous probe. Manager-supported strict offline flags bypass preflight
+(`--offline`, or Deno `--cached-only` where that command supports it);
+`--prefer-offline`, frozen-lockfile modes, and immutable-cache modes may still
+use the network. Absolute tarball
+URLs already stored in metadata or lockfiles may
+bypass the selected default registry; osdk does not rewrite lockfiles or rerun
+lifecycle scripts. See `docs/package-registry-design.md` for the security and
+future shared-tarball-cache boundaries.
 
 ## Reproducible projects and execution
 

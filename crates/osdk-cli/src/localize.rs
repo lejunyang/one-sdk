@@ -110,6 +110,13 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_subcommand("pin", |s| s.about(h("help.source.pin.about")))
             .mut_subcommand("unpin", |s| s.about(h("help.source.unpin.about")))
     })
+    .mut_subcommand("registry", |c| {
+        c.about(h("help.registry.about"))
+            .mut_subcommand("test", |s| {
+                s.about(h("help.registry.test.about"))
+                    .mut_arg("manager", |a| a.help(h("help.registry.test.arg.manager")))
+            })
+    })
     .mut_subcommand("config", |c| {
         c.about(h("help.config.about"))
             .mut_subcommand("path", |s| s.about(h("help.config.path.about")))

@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use osdk_core::backend::{Backend, InstallCtx};
+use osdk_core::package_registry::{self, PackageManager, RegistryPlan, RegistryProbe};
 use osdk_core::source::select;
 use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
@@ -10,8 +11,8 @@ use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 use crate::app::App;
 use crate::cli::{
     AliasCommand, ConfigCommand, ModelCommand, ModelEnvCommand, NodeCommand, PythonCommand,
-    RustCommand, RustItemCommand, RustOverrideCommand, RustToolchainCommand, SourceCommand,
-    TrustCommand,
+    RegistryCommand, RustCommand, RustItemCommand, RustOverrideCommand, RustToolchainCommand,
+    SourceCommand, TrustCommand,
 };
 
 /// Apply a one-shot `--source` override into the config for this run.
@@ -107,15 +108,180 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
     let (program, args) = command
         .split_first()
         .ok_or_else(|| anyhow!("exec requires a command"))?;
-    let status = std::process::Command::new(program)
-        .args(args)
+    let (managed_program, managed_args) =
+        resolve_managed_launcher_alias(app, &resolved, program, args)?;
+    apply_package_registry_plan(app, &resolved, program, args, &mut env).await?;
+    let status = command_for_program(&managed_program)
+        .args(&managed_args)
         .envs(env)
         .status()
-        .with_context(|| format!("running {program}"))?;
+        .with_context(|| format!("running {}", managed_program.display()))?;
     if !status.success() {
         return Err(anyhow!("command exited with {status}"));
     }
     Ok(())
+}
+
+fn resolve_managed_launcher_alias(
+    app: &App,
+    resolved: &[(ToolRequest, ToolVersion)],
+    program: &str,
+    args: &[String],
+) -> Result<(std::path::PathBuf, Vec<String>)> {
+    let alias = executable_basename(program);
+    let (backend_id, canonical, subcommand) = match alias.as_str() {
+        "pnpx" => ("pnpm", "pnpm", "dlx"),
+        "bunx" => ("bun", "bun", "x"),
+        _ => return Ok((program.into(), args.to_vec())),
+    };
+    let version = resolved
+        .iter()
+        .find_map(|(_, version)| (version.backend == backend_id).then_some(version))
+        .ok_or_else(|| {
+            anyhow!("`{alias}` requires a managed {backend_id} tool in this `osdk exec` invocation")
+        })?;
+    let backend = app.registry.get(backend_id)?;
+    let executable = find_managed_executable(&backend.bin_paths(&app.ctx, version)?, canonical)
+        .ok_or_else(|| {
+            anyhow!(
+                "managed {backend_id} executable `{canonical}` not found for {}@{}",
+                version.backend,
+                version.version
+            )
+        })?;
+    let rewritten = std::iter::once(subcommand.to_string())
+        .chain(args.iter().cloned())
+        .collect();
+    Ok((executable, rewritten))
+}
+
+fn find_managed_executable(
+    directories: &[std::path::PathBuf],
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let candidates = [
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        format!("{name}.bat"),
+        name.to_string(),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [name.to_string()];
+
+    directories.iter().find_map(|directory| {
+        candidates
+            .iter()
+            .map(|candidate| directory.join(candidate))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+fn command_for_program(program: &std::path::Path) -> std::process::Command {
+    #[cfg(windows)]
+    if program
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+    {
+        let mut command = std::process::Command::new(
+            std::env::var_os("ComSpec").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe")),
+        );
+        command.args(["/D", "/S", "/C", "call"]).arg(program);
+        return command;
+    }
+    std::process::Command::new(program)
+}
+
+async fn apply_package_registry_plan(
+    app: &App,
+    resolved: &[(ToolRequest, ToolVersion)],
+    program: &str,
+    args: &[String],
+    env: &mut std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let executable_alias = executable_basename(program);
+    let cwd = std::env::current_dir().context("getting current dir for registry preflight")?;
+    let project_yarn_version = project_yarn_version(&cwd);
+    let yarn_version = resolved
+        .iter()
+        .find(|(_, version)| version.backend == "yarn")
+        .map(|(_, version)| version.version.as_str())
+        .or(project_yarn_version.as_deref());
+    let Some(manager) = package_registry::manager_for_command(&executable_alias, yarn_version)
+    else {
+        if matches!(executable_alias.as_str(), "yarn" | "yarnpkg") {
+            tracing::info!(
+                executable = %executable_alias,
+                "dependency registry pass-through: Yarn major is unknown; use --tool yarn@<version> or declare packageManager"
+            );
+        }
+        return Ok(());
+    };
+    if !package_registry::should_plan(manager, &executable_alias, args) {
+        return Ok(());
+    }
+    let registry_env = package_registry::registry_env(manager);
+    match package_registry::plan(&app.ctx, &cwd, manager, &executable_alias, args, |key| {
+        std::env::var(key).ok()
+    })
+    .await?
+    {
+        RegistryPlan::PassThrough { reason } => {
+            tracing::info!(manager = %manager, %reason, "dependency registry pass-through");
+        }
+        RegistryPlan::Selected { url, .. } => {
+            env.insert(registry_env.to_string(), url);
+        }
+        RegistryPlan::Unavailable { probes } => {
+            return Err(unavailable_registry_error(manager, &probes));
+        }
+    }
+    Ok(())
+}
+
+fn executable_basename(program: &str) -> String {
+    let basename = std::path::Path::new(program)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or(program);
+    let basename = basename.to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat"] {
+        if let Some(stem) = basename.strip_suffix(suffix) {
+            return stem.to_string();
+        }
+    }
+    basename
+}
+
+fn project_yarn_version(cwd: &std::path::Path) -> Option<String> {
+    osdk_core::version::resolver::resolve_package_manager(cwd)
+        .ok()
+        .flatten()
+        .filter(|request| request.manager == "yarn")
+        .map(|request| request.version)
+}
+
+fn unavailable_registry_error(manager: PackageManager, probes: &[RegistryProbe]) -> anyhow::Error {
+    let details = probes
+        .iter()
+        .map(|probe| {
+            let reason = probe.error.as_deref().unwrap_or("unreachable");
+            format!("{} ({reason})", probe.url)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if details.is_empty() {
+        anyhow!(t!("err.registry_command_not_started", manager = manager))
+    } else {
+        anyhow!(t!(
+            "err.registry_command_not_started_details",
+            manager = manager,
+            details = details
+        ))
+    }
 }
 
 fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
@@ -140,6 +306,127 @@ pub fn completions(shell: clap_complete::Shell) -> Result<()> {
     let mut command = crate::cli::Cli::command();
     clap_complete::generate(shell, &mut command, "osdk", &mut std::io::stdout());
     Ok(())
+}
+
+pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
+    match command {
+        RegistryCommand::Test { manager } => {
+            let cwd = std::env::current_dir().context("getting current dir for registry test")?;
+            let managers = registry_test_managers(manager.as_deref(), &cwd)?;
+            let mut unavailable = Vec::new();
+            for manager in managers {
+                let (executable, args) = registry_test_invocation(manager);
+                let plan =
+                    package_registry::plan(&app.ctx, &cwd, manager, executable, &args, |key| {
+                        std::env::var(key).ok()
+                    })
+                    .await?;
+                print_registry_plan(manager, &plan);
+                if matches!(plan, RegistryPlan::Unavailable { .. }) {
+                    unavailable.push(manager.to_string());
+                }
+            }
+            if unavailable.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!(t!(
+                    "err.registry_test_unavailable",
+                    managers = unavailable.join(", ")
+                )))
+            }
+        }
+    }
+}
+
+fn registry_test_managers(
+    requested: Option<&str>,
+    cwd: &std::path::Path,
+) -> Result<Vec<PackageManager>> {
+    let project_yarn = project_yarn_version(cwd);
+    let yarn_manager = project_yarn
+        .as_deref()
+        .and_then(|version| package_registry::manager_for_command("yarn", Some(version)));
+    match requested.map(|value| value.to_ascii_lowercase()) {
+        None => {
+            let mut managers = vec![PackageManager::Npm, PackageManager::Pnpm];
+            if let Some(manager) = yarn_manager {
+                managers.push(manager);
+            } else {
+                managers.extend([PackageManager::YarnClassic, PackageManager::YarnBerry]);
+            }
+            managers.extend([PackageManager::Bun, PackageManager::Deno]);
+            Ok(managers)
+        }
+        Some(value) if matches!(value.as_str(), "yarn" | "yarnpkg") => Ok(yarn_manager
+            .map_or_else(
+                || vec![PackageManager::YarnClassic, PackageManager::YarnBerry],
+                |manager| vec![manager],
+            )),
+        Some(value) => value
+            .parse::<PackageManager>()
+            .map(|manager| vec![manager])
+            .map_err(|error| anyhow!(error)),
+    }
+}
+
+fn registry_test_invocation(manager: PackageManager) -> (&'static str, Vec<String>) {
+    match manager {
+        PackageManager::Npm => ("npm", vec!["install".into()]),
+        PackageManager::Pnpm => ("pnpm", vec!["install".into()]),
+        PackageManager::YarnClassic | PackageManager::YarnBerry => ("yarn", vec!["install".into()]),
+        PackageManager::Bun => ("bun", vec!["install".into()]),
+        PackageManager::Deno => ("deno", vec!["add".into(), "npm:probe".into()]),
+    }
+}
+
+fn print_registry_plan(manager: PackageManager, plan: &RegistryPlan) {
+    println!("{}", t!("msg.registry_manager_header", manager = manager));
+    let probes = match plan {
+        RegistryPlan::PassThrough { reason } => {
+            println!("  {}: {reason}", t!("label.registry_pass_through"));
+            return;
+        }
+        RegistryPlan::Selected { probes, .. } | RegistryPlan::Unavailable { probes } => probes,
+    };
+    for probe in probes {
+        if probe.ok {
+            let latency = probe
+                .latency_ms
+                .map(|latency| format!("{latency} ms"))
+                .unwrap_or_else(|| t!("label.registry_ok"));
+            println!(
+                "  {:<12} {latency:>8}  {}",
+                t!("label.registry_healthy"),
+                probe.url
+            );
+        } else {
+            println!(
+                "  {:<12}          {}{}",
+                t!("label.registry_unavailable"),
+                probe.url,
+                probe
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    match plan {
+        RegistryPlan::Selected { url, .. } => {
+            println!(
+                "  {:<12} {url} ({})",
+                t!("label.registry_selected"),
+                package_registry::registry_env(manager)
+            );
+        }
+        RegistryPlan::Unavailable { .. } => println!(
+            "  {:<12} {}",
+            t!("label.registry_unavailable"),
+            t!("msg.registry_no_healthy_candidate")
+        ),
+        RegistryPlan::PassThrough { .. } => unreachable!(),
+    }
 }
 
 async fn install_requests(
@@ -548,6 +835,9 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
         return Ok(());
     }
     backend.uninstall(&app.ctx, &tv).await?;
+    if matches!(backend.id(), "node" | "npm") {
+        reconcile_npm_routing_shims(app)?;
+    }
     println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
     let models = app.ctx.dirs.models();
@@ -623,7 +913,29 @@ pub fn reshim(app: &App) -> Result<()> {
             total += generate_shims_for(app, backend.as_ref(), &tv)?;
         }
     }
+    reconcile_npm_routing_shims(app)?;
     println!("{}", t!("msg.reshimmed", count = total));
+    Ok(())
+}
+
+fn reconcile_npm_routing_shims(app: &App) -> Result<()> {
+    let mut routed = std::collections::BTreeSet::new();
+    for backend_id in ["node", "npm"] {
+        let backend = app.registry.get(backend_id)?;
+        for version in backend.list_installed(&app.ctx)? {
+            let version = ToolVersion::new(backend.id(), version);
+            routed.extend(
+                osdk_core::shim::routed_bin_names(&app.ctx, backend.as_ref(), &version)?
+                    .into_iter()
+                    .filter(|name| matches!(name.as_str(), "npm" | "npx")),
+            );
+        }
+    }
+    for name in ["npm", "npx"] {
+        if !routed.contains(name) {
+            osdk_core::shim::remove_managed_shim(&app.ctx.dirs, name)?;
+        }
+    }
     Ok(())
 }
 
@@ -637,7 +949,7 @@ fn generate_shims_for(app: &App, backend: &dyn Backend, tv: &ToolVersion) -> Res
             return Ok(0);
         }
     };
-    let names = backend.bin_names(&app.ctx, tv)?;
+    let names = osdk_core::shim::routed_bin_names(&app.ctx, backend, tv)?;
     let mut count = 0;
     for name in names {
         osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim_bin)?;
@@ -872,6 +1184,19 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 s.python.catalog_url.as_deref().unwrap_or("built-in")
             );
             println!("selection    = {:?}", app.ctx.config.sources.selection);
+            let npm_registries = &app.ctx.config.registries().npm;
+            println!(
+                "registries.npm.urls = {}",
+                if npm_registries.urls.is_empty() {
+                    "built-in (npmjs + npmmirror)".to_string()
+                } else {
+                    npm_registries.urls.join(", ")
+                }
+            );
+            println!(
+                "registries.npm.probe_timeout_ms = {}",
+                npm_registries.probe_timeout_ms
+            );
             for provider in [
                 osdk_core::model::ProviderId::HuggingFace,
                 osdk_core::model::ProviderId::ModelScope,

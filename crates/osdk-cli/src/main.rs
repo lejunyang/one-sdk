@@ -108,6 +108,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Deactivate { shell } => commands::deactivate(shell),
         Command::HookEnv { shell } => commands::hook_env(app, shell),
         Command::Source { command } => commands::source(app, command).await,
+        Command::Registry { command } => commands::registry(app, command).await,
         Command::Config { command } => commands::config(app, command),
         Command::Trust { path, command } => commands::trust(app, path, command),
         Command::Untrust { path } => commands::untrust(app, path),

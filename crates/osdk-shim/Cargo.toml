@@ -10,11 +10,12 @@ rust-version.workspace = true
 name = "osdk-shim"
 path = "src/main.rs"
 
-# The shim is a tiny, synchronous launcher. It links osdk-core but only touches
-# its sync resolution path (no tokio runtime, no reqwest) to keep per-invocation
-# overhead minimal.
+# The shim stays synchronous for ordinary tools. Dependency-fetching package
+# manager commands create a current-thread runtime for their fresh registry
+# preflight only.
 [dependencies]
 osdk-core = { path = "../osdk-core" }
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

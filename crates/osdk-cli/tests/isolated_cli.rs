@@ -170,6 +170,14 @@ fn config_list_uses_only_isolated_directories() {
     }
     assert!(!stdout.contains("/.local/share/osdk"));
     assert!(!stdout.contains("/.cache/osdk"));
+    assert!(
+        stdout.contains("registries.npm.urls = built-in (npmjs + npmmirror)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("registries.npm.probe_timeout_ms = 1500"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -2259,4 +2267,557 @@ fn node_only_exec_provides_cache_for_bundled_npm() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let expected = temp.path().join("cache/pkg/npm").display().to_string();
     assert!(stdout.lines().any(|line| line == expected));
+}
+
+#[cfg(unix)]
+fn write_fake_registry_manager(
+    root: &Path,
+    manager: &str,
+    version: &str,
+    alias: &str,
+    script: &str,
+) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let relative = match manager {
+        "npm" | "yarn" => format!("bin/{alias}"),
+        "bun" => format!("bin/{alias}"),
+        "pnpm" | "deno" => alias.to_string(),
+        other => panic!("unsupported fixture manager {other}"),
+    };
+    let install = root.join(format!("installs/{manager}/{version}"));
+    let executable = install.join(relative);
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    if matches!(manager, "npm" | "pnpm" | "yarn") {
+        let node_install = root.join("installs/node/20.0.0");
+        let node = node_install.join("bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(node_install.join(".osdk-complete"), b"").unwrap();
+    }
+}
+
+#[cfg(not(windows))]
+fn registry_fixture(requests: usize, healthy: bool) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..requests {
+            let mut stream = accept_fixture_connection(&listener, "dependency registry fixture");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /npm/latest "), "{request}");
+            let lowercase = request.to_ascii_lowercase();
+            assert!(!lowercase.contains("authorization:"), "{request}");
+            assert!(!lowercase.contains("cookie:"), "{request}");
+            if healthy {
+                let body = r#"{"name":"npm","version":"1.0.0"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+        }
+    });
+    (format!("http://{address}/"), server)
+}
+
+#[cfg(not(windows))]
+fn unused_loopback_registry() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{address}/")
+}
+
+#[cfg(not(windows))]
+fn write_registry_config(root: &Path, urls: &[&str]) {
+    let directory = root.join("config");
+    std::fs::create_dir_all(&directory).unwrap();
+    let urls = urls
+        .iter()
+        .map(|url| format!("\"{url}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        directory.join("config.toml"),
+        format!("[registries.npm]\nurls = [{urls}]\nprobe_timeout_ms = 500\n"),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_registry_fallback_injects_only_the_manager_variable_and_runs_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cases = [
+        ("npm", "10.0.0", "npm", "install", 0usize),
+        ("pnpm", "10.0.0", "pnpm", "add", 1usize),
+        ("yarn", "1.22.22", "yarn", "install", 2usize),
+        ("yarn", "4.10.3", "yarnpkg", "up", 3usize),
+        ("bun", "1.2.3", "bun", "install", 4usize),
+        ("deno", "2.4.0", "deno", "add", 5usize),
+    ];
+    let (unavailable, failing_server) = registry_fixture(cases.len(), false);
+    let (healthy, healthy_server) = registry_fixture(cases.len(), true);
+    write_registry_config(temporary.path(), &[&unavailable, &healthy]);
+    let script = r#"#!/bin/sh
+printf 'call\n' >> "$OSDK_TEST_MARKER"
+printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_registry-unset}" "${YARN_REGISTRY-unset}" "${YARN_NPM_REGISTRY_SERVER-unset}" "${BUN_CONFIG_REGISTRY-unset}" "${NPM_CONFIG_REGISTRY-unset}"
+"#;
+
+    for (manager, version, alias, subcommand, selected_index) in cases {
+        write_fake_registry_manager(temporary.path(), manager, version, alias, script);
+        let marker = temporary.path().join(format!("{manager}-{version}.calls"));
+        let marker_value = marker.display().to_string();
+        let request = format!("{manager}@{version}");
+        let mut arguments = vec!["exec", "--tool", request.as_str()];
+        if matches!(manager, "npm" | "pnpm" | "yarn") {
+            arguments.extend(["--tool", "node@20.0.0"]);
+        }
+        arguments.extend(["--", alias, subcommand]);
+        if manager == "deno" {
+            arguments.push("npm:fixture");
+        }
+        let output = run_isolated_in_with_env(
+            temporary.path(),
+            temporary.path(),
+            &arguments,
+            &[("OSDK_TEST_MARKER", &marker_value)],
+        );
+        assert!(
+            output.status.success(),
+            "{manager}@{version}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "call\n");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let registry_line = stdout
+            .lines()
+            .find(|line| line.matches('|').count() == 5)
+            .unwrap_or_else(|| panic!("missing registry environment line: {stdout}"));
+        let values = registry_line
+            .split('|')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 6);
+        for (index, value) in values.iter().enumerate() {
+            if index == selected_index {
+                assert_eq!(value, &healthy, "{manager}@{version}");
+            } else {
+                assert_eq!(value, "unset", "{manager}@{version}");
+            }
+        }
+    }
+    failing_server.join().unwrap();
+    healthy_server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_launcher_aliases_use_managed_canonical_binaries_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (manager, version, alias, canonical, subcommand, registry_index) in [
+        ("pnpm", "10.0.0", "pnpx", "pnpm", "dlx", 1usize),
+        ("bun", "1.2.3", "bunx", "bun", "x", 4usize),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let (healthy, server) = registry_fixture(1, true);
+        write_registry_config(temporary.path(), &[&healthy]);
+
+        let managed_log = temporary.path().join("managed.calls");
+        let managed_log_value = managed_log.display().to_string();
+        write_fake_registry_manager(
+            temporary.path(),
+            manager,
+            version,
+            canonical,
+            r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_registry-unset}" "${YARN_REGISTRY-unset}" "${YARN_NPM_REGISTRY_SERVER-unset}" "${BUN_CONFIG_REGISTRY-unset}" "${NPM_CONFIG_REGISTRY-unset}" "$*" >> "$OSDK_TEST_MARKER"
+"#,
+        );
+
+        let global_log = temporary.path().join("global.calls");
+        let global_bin = temporary.path().join("global-bin");
+        std::fs::create_dir_all(&global_bin).unwrap();
+        let global_alias = global_bin.join(alias);
+        std::fs::write(
+            &global_alias,
+            format!(
+                "#!/bin/sh\nprintf 'global\n' >> {}\nexit 88\n",
+                global_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&global_alias, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = global_bin.display().to_string();
+        let request = format!("{manager}@{version}");
+        let mut arguments = vec!["exec", "--tool", request.as_str()];
+        if manager == "pnpm" {
+            arguments.extend(["--tool", "node@20.0.0"]);
+        }
+        arguments.extend(["--", alias, "fixture-package", "--registry", "child-value"]);
+
+        let output = run_isolated_in_with_env(
+            temporary.path(),
+            temporary.path(),
+            &arguments,
+            &[("PATH", &path), ("OSDK_TEST_MARKER", &managed_log_value)],
+        );
+
+        assert!(
+            output.status.success(),
+            "{alias}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let line = std::fs::read_to_string(&managed_log).unwrap();
+        let fields = line.trim_end().split('|').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 7, "{alias}: {line}");
+        for (index, value) in fields[..6].iter().enumerate() {
+            if index == registry_index {
+                assert_eq!(*value, healthy, "{alias}");
+            } else {
+                assert_eq!(*value, "unset", "{alias}");
+            }
+        }
+        assert_eq!(
+            fields[6],
+            format!("{subcommand} fixture-package --registry child-value"),
+            "{alias}"
+        );
+        assert!(!global_log.exists(), "{alias} escaped to the user PATH");
+        server.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_registry_never_retries_a_failed_manager_command() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (healthy, server) = registry_fixture(1, true);
+    write_registry_config(temporary.path(), &[&healthy]);
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        "#!/bin/sh\nprintf 'call\n' >> \"$OSDK_TEST_MARKER\"\nexit 42\n",
+    );
+    let marker = temporary.path().join("calls");
+    let marker_value = marker.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "install",
+        ],
+        &[("OSDK_TEST_MARKER", &marker_value)],
+    );
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "call\n");
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_registry_all_unavailable_starts_no_manager_process() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (unavailable, server) = registry_fixture(1, false);
+    write_registry_config(temporary.path(), &[&unavailable]);
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        "#!/bin/sh\nprintf 'call\n' >> \"$OSDK_TEST_MARKER\"\n",
+    );
+    let marker = temporary.path().join("calls");
+    let marker_value = marker.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "install",
+        ],
+        &[("OSDK_TEST_MARKER", &marker_value)],
+    );
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("command was not started"));
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_registry_respects_explicit_env_and_cli_registry_without_probing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let dead = unused_loopback_registry();
+    write_registry_config(temporary.path(), &[&dead]);
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        r#"#!/bin/sh
+printf 'call\n' >> "$OSDK_TEST_MARKER"
+printf '%s\n' "${npm_config_registry-unset}"
+"#,
+    );
+
+    let env_marker = temporary.path().join("env.calls");
+    let env_marker_value = env_marker.display().to_string();
+    let explicit = "https://private.example.test/";
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "install",
+        ],
+        &[
+            ("OSDK_TEST_MARKER", &env_marker_value),
+            ("npm_config_registry", explicit),
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(std::fs::read_to_string(env_marker).unwrap(), "call\n");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == explicit),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let cli_marker = temporary.path().join("cli.calls");
+    let cli_marker_value = cli_marker.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "install",
+            "--registry",
+            explicit,
+        ],
+        &[("OSDK_TEST_MARKER", &cli_marker_value)],
+    );
+    assert!(output.status.success());
+    assert_eq!(std::fs::read_to_string(cli_marker).unwrap(), "call\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_registry_passes_through_non_fetch_commands_without_probing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let dead = unused_loopback_registry();
+    write_registry_config(temporary.path(), &[&dead]);
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        r#"#!/bin/sh
+printf 'call\n' >> "$OSDK_TEST_MARKER"
+printf '%s\n' "${npm_config_registry-unset}"
+"#,
+    );
+    let marker = temporary.path().join("calls");
+    let marker_value = marker.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "--version",
+        ],
+        &[("OSDK_TEST_MARKER", &marker_value)],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "call\n");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == "unset"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_registry_passes_through_when_yarn_major_is_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let dead = unused_loopback_registry();
+    write_registry_config(temporary.path(), &[&dead]);
+    let node_install = temporary.path().join("installs/node/20.0.0");
+    let yarn = node_install.join("bin/yarn");
+    std::fs::create_dir_all(yarn.parent().unwrap()).unwrap();
+    std::fs::write(
+        &yarn,
+        r#"#!/bin/sh
+printf 'call\n' >> "$OSDK_TEST_MARKER"
+printf '%s|%s\n' "${YARN_REGISTRY-unset}" "${YARN_NPM_REGISTRY_SERVER-unset}"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&yarn, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(node_install.join(".osdk-complete"), b"").unwrap();
+    let marker = temporary.path().join("calls");
+    let marker_value = marker.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "--verbose",
+            "exec",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "yarn",
+            "install",
+        ],
+        &[("OSDK_TEST_MARKER", &marker_value)],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "call\n");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == "unset|unset"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Yarn major is unknown"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_test_reports_candidate_health_and_selection() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (unavailable, failing_server) = registry_fixture(1, false);
+    let (healthy, healthy_server) = registry_fixture(1, true);
+    write_registry_config(temporary.path(), &[&unavailable, &healthy]);
+    let output = run_isolated(temporary.path(), &["registry", "test", "npm"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    failing_server.join().unwrap();
+    healthy_server.join().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("npm:"), "{stdout}");
+    assert!(stdout.contains("unavailable"), "{stdout}");
+    assert!(stdout.contains("healthy"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains("selected") && line.contains(&healthy)),
+        "{stdout}"
+    );
+    assert!(stdout.contains("npm_config_registry"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_test_without_manager_checks_every_supported_mode() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (healthy, server) = registry_fixture(6, true);
+    write_registry_config(temporary.path(), &[&healthy]);
+    let output = run_isolated(temporary.path(), &["registry", "test"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for manager in [
+        "npm:",
+        "pnpm:",
+        "yarn-classic:",
+        "yarn-berry:",
+        "bun:",
+        "deno:",
+    ] {
+        assert!(stdout.contains(manager), "missing {manager} in {stdout}");
+    }
+}
+
+#[test]
+fn registry_help_is_localized() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["registry", "test", "--help"],
+        &[("OSDK_LANG", "zh")],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("探测项目依赖 Registry"), "{stdout}");
+    assert!(stdout.contains("要测试的包管理器"), "{stdout}");
+    assert!(!stdout.contains("help.registry"), "{stdout}");
 }

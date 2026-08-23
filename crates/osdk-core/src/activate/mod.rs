@@ -4,8 +4,9 @@
 //! - Shims (default): the shims dir on PATH; robust in IDEs/CI. Set up by
 //!   `osdk` itself when tools are installed.
 //! - Shell activation (`osdk activate <shell>`): injects a hook that runs
-//!   `osdk hook-env` on each prompt / dir change, rewriting PATH to the active
-//!   versions' bin dirs and exporting their env (GOROOT/JAVA_HOME/...).
+//!   `osdk hook-env` on each prompt / dir change, putting shims before the
+//!   active versions' real bin dirs and exporting their env
+//!   (GOROOT/JAVA_HOME/...).
 //!
 //! This module renders the per-shell snippets and computes the env delta.
 
@@ -202,7 +203,7 @@ Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_S
 
 /// The env changes to apply for the active toolset in `cwd`.
 pub struct EnvDelta {
-    /// Directories to prepend to PATH (active tools' bin dirs).
+    /// Directories to prepend to PATH (shims first, then active tools' bin dirs).
     pub path_prepend: Vec<PathBuf>,
     /// Variables to set (GOROOT, JAVA_HOME, ...).
     pub set_vars: BTreeMap<String, String>,
@@ -215,6 +216,7 @@ pub struct EnvDelta {
 pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) -> EnvDelta {
     let mut path_prepend = Vec::new();
     let mut set_vars = BTreeMap::new();
+    let mut has_generated_shim = false;
 
     for backend in registry.all() {
         let active = match resolve_active(
@@ -258,6 +260,13 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
             None => continue,
         };
         let tv = ToolVersion::new(backend.id(), &version);
+        if crate::shim::routed_bin_names(ctx, backend.as_ref(), &tv).is_ok_and(|names| {
+            names
+                .into_iter()
+                .any(|name| shim_exists(&ctx.dirs.shims(), &name))
+        }) {
+            has_generated_shim = true;
+        }
         if let Ok(bins) = backend.bin_paths(ctx, &tv) {
             for b in bins {
                 if b.exists() {
@@ -272,7 +281,7 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         }
     }
 
-    path_prepend.sort_by_key(|path| managed_runtime_path_priority(path));
+    prioritize_managed_paths(&mut path_prepend, &ctx.dirs.shims(), has_generated_shim);
 
     let previous = std::env::var("OSDK_MANAGED_ENV").unwrap_or_default();
     let unset_vars = previous
@@ -286,6 +295,29 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         set_vars,
         unset_vars,
     }
+}
+
+fn prioritize_managed_paths(
+    paths: &mut Vec<PathBuf>,
+    shims: &std::path::Path,
+    has_generated_shim: bool,
+) {
+    // Shell activation must not bypass the shim launchers: package-manager
+    // shims perform the registry preflight before entering the real binary.
+    // Keep the real backend dirs behind shims so executables without a
+    // generated shim remain available. Package managers still precede Node's
+    // bin dir there, preventing Node's bundled npm/corepack launchers from
+    // shadowing independently managed package managers. Once a shim starts,
+    // it removes the shim dir and constructs its own lifecycle-safe PATH.
+    paths.retain(|path| path != shims);
+    paths.sort_by_key(|path| managed_runtime_path_priority(path));
+    if has_generated_shim && !paths.is_empty() {
+        paths.insert(0, shims.to_path_buf());
+    }
+}
+
+fn shim_exists(shims: &std::path::Path, name: &str) -> bool {
+    shims.join(name).is_file() || (cfg!(windows) && shims.join(format!("{name}.cmd")).is_file())
 }
 
 fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
@@ -481,7 +513,51 @@ fn strip_distribution_prefix(spec: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::config::{Config, Settings, SourcesConfig};
+    use crate::dirs::Dirs;
+    use crate::platform::Platform;
+    use crate::store::Cas;
+
+    fn test_ctx(root: &std::path::Path, tools: &[(&str, &str)]) -> Ctx {
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        Ctx {
+            cas: Arc::new(Cas::new(dirs.store.clone())),
+            dirs,
+            platform: Platform::current(),
+            config: Config {
+                settings: Settings::default(),
+                sources: SourcesConfig::default(),
+                tools: tools
+                    .iter()
+                    .map(|(tool, version)| (tool.to_string(), version.to_string()))
+                    .collect(),
+                aliases: BTreeMap::new(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
+
+    fn mark_installed(ctx: &Ctx, tool: &str, version: &str, bin_dir: &str) -> PathBuf {
+        let install = ctx.dirs.install_path(tool, version);
+        let bin = install.join(bin_dir);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        bin
+    }
 
     #[test]
     fn parse_shell() {
@@ -543,6 +619,81 @@ mod tests {
         let fish = render_hook_env(Shell::Fish, &delta);
         assert!(fish.contains("set -gx PATH"));
         assert!(fish.contains("set -gx GOROOT"));
+    }
+
+    #[test]
+    fn activation_path_prefers_shims_and_keeps_real_bin_fallbacks() {
+        let shims = PathBuf::from("/osdk/shims");
+        let npm = PathBuf::from("/osdk/installs/npm/10.9.0/bin");
+        let pnpm = PathBuf::from("/osdk/installs/pnpm/9.15.0");
+        let node = PathBuf::from("/osdk/installs/node/22.14.0/bin");
+        let go = PathBuf::from("/osdk/installs/go/1.24.0/bin");
+        let mut paths = vec![
+            node.clone(),
+            go.clone(),
+            npm.clone(),
+            shims.clone(),
+            pnpm.clone(),
+        ];
+
+        prioritize_managed_paths(&mut paths, &shims, true);
+
+        assert_eq!(paths, vec![shims, npm, pnpm, node, go]);
+    }
+
+    #[test]
+    fn computed_activation_path_routes_node_bundled_npm_through_shims() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temporary.path(), &[("node", "22.14.0")]);
+        let node = mark_installed(
+            &ctx,
+            "node",
+            "22.14.0",
+            if cfg!(windows) { "" } else { "bin" },
+        );
+        let (node_name, npm_name, shim_name) = if cfg!(windows) {
+            ("node.exe", "npm.cmd", "npm.cmd")
+        } else {
+            ("node", "npm", "npm")
+        };
+        let node_executable = node.join(node_name);
+        let npm_executable = node.join(npm_name);
+        std::fs::write(&node_executable, b"node").unwrap();
+        std::fs::write(&npm_executable, b"npm").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for executable in [&node_executable, &npm_executable] {
+                std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+        let shim = ctx.dirs.shims().join(shim_name);
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, b"shim").unwrap();
+
+        let delta = compute_env_delta(&ctx, &Registry::new(), temporary.path());
+
+        assert_eq!(delta.path_prepend, vec![ctx.dirs.shims(), node]);
+    }
+
+    #[test]
+    fn activation_path_does_not_add_shims_without_an_active_runtime() {
+        let mut no_active_bins = Vec::new();
+        prioritize_managed_paths(
+            &mut no_active_bins,
+            std::path::Path::new("/osdk/shims"),
+            false,
+        );
+        assert!(no_active_bins.is_empty());
+    }
+
+    #[test]
+    fn activation_path_does_not_add_missing_shims() {
+        let node = PathBuf::from("/osdk/installs/node/22.14.0/bin");
+        let mut paths = vec![node.clone()];
+        prioritize_managed_paths(&mut paths, std::path::Path::new("/osdk/shims"), false);
+        assert_eq!(paths, vec![node]);
     }
 
     #[test]

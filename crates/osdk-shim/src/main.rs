@@ -2,9 +2,9 @@
 //!
 //! It learns which tool to run from `argv[0]` (the shim's own name), resolves
 //! the active version for the current directory (walking up config files), then
-//! `exec`s the real binary from that version's install dir. Everything here is
-//! synchronous and avoids a tokio runtime / network to keep per-call overhead
-//! minimal.
+//! `exec`s the real binary from that version's install dir. Ordinary tools stay
+//! on a synchronous hot path; dependency-fetching package-manager commands
+//! create a short-lived current-thread runtime for a fresh registry preflight.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -12,6 +12,9 @@ use std::process::Command;
 use osdk_core::backend::registry::Registry;
 use osdk_core::config::Config;
 use osdk_core::dirs::Dirs;
+use osdk_core::package_registry::{
+    manager_for_command, plan, registry_env, should_plan, PackageManager, RegistryPlan,
+};
 use osdk_core::platform::Platform;
 use osdk_core::version::resolver::resolve_active;
 use osdk_core::version::{select_version, ToolVersion, VersionSpec};
@@ -46,16 +49,21 @@ fn real_main() -> i32 {
         }
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = Config::load(&dirs.user_config_file(), &cwd).unwrap_or_else(|_| {
-        // Fall back to defaults if config fails to load; shims should be robust.
-        Config {
-            settings: Default::default(),
-            sources: Default::default(),
-            tools: Default::default(),
-            aliases: Default::default(),
-            project_config_path: None,
+    if let Err(error) = ensure_project_config_trusted(&dirs, &cwd) {
+        eprintln!("osdk-shim: {error}");
+        return 1;
+    }
+    let config = match Config::load(&dirs.user_config_file(), &cwd) {
+        Ok(config) => config,
+        Err(error) => {
+            // A malformed configuration may contain execution-affecting
+            // registry policy. Silently replacing it with public defaults
+            // would make the shim behave differently from `osdk exec` and
+            // could send requests to an unintended endpoint.
+            eprintln!("osdk-shim: {error}");
+            return 1;
         }
-    });
+    };
 
     let registry = match Registry::load(&dirs) {
         Ok(registry) => registry,
@@ -74,7 +82,7 @@ fn real_main() -> i32 {
 
     // Find which backend owns this tool name (its id, or one of the executables
     // an installed version provides, e.g. pip -> python, npm -> node).
-    let backend = match owning_backend(&registry, &ctx, &tool_name) {
+    let backend = match owning_backend(&registry, &ctx, &idiomatic_probe_cwd, &tool_name) {
         Some(b) => b,
         None => {
             eprintln!("osdk-shim: no backend provides `{tool_name}`");
@@ -132,11 +140,12 @@ fn real_main() -> i32 {
         }
     };
 
-    let exe = match find_exe(&bin_dirs, &tool_name) {
+    let (executable_name, alias_subcommand) = routed_launcher(&tool_name, backend.id());
+    let exe = match find_exe(&bin_dirs, executable_name) {
         Some(p) => p,
         None => {
             eprintln!(
-                "osdk-shim: `{tool_name}` not found in {}@{}",
+                "osdk-shim: `{executable_name}` not found in {}@{}",
                 backend.id(),
                 version
             );
@@ -151,6 +160,12 @@ fn real_main() -> i32 {
             return 1;
         }
     };
+    // Activated shells put the shim directory on PATH. Never let lifecycle
+    // subprocesses re-enter the shim: expose the owning backend's real bins
+    // (plus Node for JavaScript launchers) ahead of the inherited PATH.
+    // Remove both lexical and canonical matches so symlinked activation paths
+    // cannot retain the shim directory under a different spelling.
+    remove_env_path(&mut exec_env, &ctx.dirs.shims());
     if matches!(backend.id(), "npm" | "pnpm" | "yarn") {
         let node_backend = registry.get("node").unwrap();
         let active_node = resolve_active(
@@ -177,9 +192,133 @@ fn real_main() -> i32 {
             prepend_env_path(&mut exec_env, paths);
         }
     }
+    prepend_env_path(&mut exec_env, bin_dirs);
+
+    if let Some(manager) = package_manager_for_backend(backend.id(), &tool_name, &version) {
+        if should_plan(manager, &tool_name, forward_args) {
+            if let Err(error) = apply_registry_preflight(
+                &ctx,
+                &cwd,
+                manager,
+                &tool_name,
+                forward_args,
+                &mut exec_env,
+            ) {
+                eprintln!("osdk-shim: {error}");
+                return 1;
+            }
+        }
+    }
 
     exec_env.insert("OSDK_SHIM_ACTIVE".into(), tool_name);
-    exec(&exe, forward_args, &exec_env)
+    let routed_args;
+    let exec_args = if let Some(subcommand) = alias_subcommand {
+        routed_args = std::iter::once(subcommand.to_string())
+            .chain(forward_args.iter().cloned())
+            .collect::<Vec<_>>();
+        routed_args.as_slice()
+    } else {
+        forward_args
+    };
+    exec(&exe, exec_args, &exec_env)
+}
+
+fn routed_launcher<'a>(tool_name: &'a str, backend: &str) -> (&'a str, Option<&'static str>) {
+    match (backend, tool_name) {
+        ("pnpm", "pnpx") => ("pnpm", Some("dlx")),
+        ("bun", "bunx") => ("bun", Some("x")),
+        _ => (tool_name, None),
+    }
+}
+
+fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(), String> {
+    let Some(project_config) = osdk_core::trust::project_config(cwd).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    if !osdk_core::trust::requires_trust(&project_config).map_err(|e| e.to_string())? {
+        return Ok(());
+    }
+    let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
+    if osdk_core::trust::is_trusted(&dirs.config, &project_config, trusted_paths.as_ref())
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
+    Err(osdk_core::t!(
+        "err.untrusted_config",
+        path = project_config.display()
+    ))
+}
+
+fn package_manager_for_backend(
+    backend: &str,
+    executable_alias: &str,
+    backend_version: &str,
+) -> Option<PackageManager> {
+    let belongs_to_manager = match backend {
+        // npm/npx may be supplied by the independent npm backend or by a Node
+        // installation. npm registry behavior is version-independent.
+        "npm" | "node" => matches!(executable_alias, "npm" | "npx"),
+        "pnpm" => matches!(executable_alias, "pnpm" | "pnpx"),
+        "yarn" => matches!(executable_alias, "yarn" | "yarnpkg"),
+        "bun" => matches!(executable_alias, "bun" | "bunx"),
+        "deno" => executable_alias == "deno",
+        _ => false,
+    };
+    belongs_to_manager
+        .then(|| manager_for_command(executable_alias, Some(backend_version)))
+        .flatten()
+}
+
+fn apply_registry_preflight(
+    ctx: &osdk_core::backend::Ctx,
+    cwd: &std::path::Path,
+    manager: PackageManager,
+    executable_alias: &str,
+    args: &[String],
+    exec_env: &mut std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| osdk_core::t!("err.registry_preflight_runtime", error = error))?;
+    let registry_plan = runtime
+        .block_on(plan(ctx, cwd, manager, executable_alias, args, |key| {
+            std::env::var(key).ok()
+        }))
+        .map_err(|error| osdk_core::t!("err.registry_preflight", error = error))?;
+    match registry_plan {
+        RegistryPlan::PassThrough { .. } => Ok(()),
+        RegistryPlan::Selected { url, .. } => {
+            exec_env.insert(registry_env(manager).into(), url);
+            Ok(())
+        }
+        RegistryPlan::Unavailable { probes } => {
+            let details = probes
+                .iter()
+                .map(|probe| {
+                    probe.error.as_deref().map_or_else(
+                        || probe.url.clone(),
+                        |error| format!("{}: {error}", probe.url),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            if details.is_empty() {
+                Err(osdk_core::t!(
+                    "err.registry_unavailable",
+                    executable = executable_alias
+                ))
+            } else {
+                Err(osdk_core::t!(
+                    "err.registry_unavailable_details",
+                    executable = executable_alias,
+                    details = details
+                ))
+            }
+        }
+    }
 }
 
 fn prepend_env_path(env: &mut std::collections::BTreeMap<String, String>, paths: Vec<PathBuf>) {
@@ -191,6 +330,28 @@ fn prepend_env_path(env: &mut std::collections::BTreeMap<String, String>, paths:
     let mut combined = paths;
     combined.extend(std::env::split_paths(&existing));
     if let Ok(value) = std::env::join_paths(combined) {
+        env.insert("PATH".into(), value.to_string_lossy().into_owned());
+    }
+}
+
+fn remove_env_path(env: &mut std::collections::BTreeMap<String, String>, remove: &std::path::Path) {
+    let existing = env
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let remove_canonical = std::fs::canonicalize(remove).ok();
+    let retained = std::env::split_paths(&existing)
+        .filter(|path| {
+            path != remove
+                && remove_canonical.as_ref().is_none_or(|canonical| {
+                    std::fs::canonicalize(path)
+                        .map(|path| path != *canonical)
+                        .unwrap_or(true)
+                })
+        })
+        .collect::<Vec<_>>();
+    if let Ok(value) = std::env::join_paths(retained) {
         env.insert("PATH".into(), value.to_string_lossy().into_owned());
     }
 }
@@ -234,8 +395,42 @@ fn basename_no_ext(p: &str) -> String {
 fn owning_backend(
     registry: &Registry,
     ctx: &osdk_core::backend::Ctx,
+    cwd: &std::path::Path,
     tool_name: &str,
 ) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
+    if matches!(tool_name, "npm" | "npx") {
+        let npm = registry.get("npm").ok()?;
+        // An explicit independent npm selection is authoritative, including
+        // when its selected version is missing: do not silently fall back to
+        // the bundled copy and hide a broken project pin.
+        if resolve_active("npm", cwd, &ctx.config.tools, npm.idiomatic_files()).is_some() {
+            return Some(npm);
+        }
+
+        // Node intentionally does not claim npm/npx in `bin_names`, because
+        // the independent npm backend owns those public tool IDs. A routing
+        // shim may still dispatch to the selected Node installation's bundled
+        // launcher when no independent npm version is selected.
+        let node = registry.get("node").ok()?;
+        if let Some(active) = resolve_active("node", cwd, &ctx.config.tools, node.idiomatic_files())
+        {
+            if let Some(version) =
+                resolve_installed(ctx, node.as_ref(), &active.spec, active.is_range)
+            {
+                let version = ToolVersion::new("node", version);
+                if node
+                    .bin_paths(ctx, &version)
+                    .ok()
+                    .and_then(|paths| find_exe(&paths, tool_name))
+                    .is_some()
+                {
+                    return Some(node);
+                }
+            }
+        }
+
+        return (tool_name == "npm").then_some(npm);
+    }
     if let Ok(b) = registry.get(tool_name) {
         return Some(b);
     }

@@ -125,13 +125,16 @@ impl Backend for PnpmBackend {
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let paths = self.bin_paths(ctx, tv)?;
-        let discovered = crate::backend::bin_names_in_dirs(&paths);
-        if discovered.is_empty() {
-            Ok(vec!["pnpm".into()])
-        } else {
-            Ok(discovered)
-        }
+        Ok(exposed_bin_names(crate::backend::bin_names_in_dirs(&paths)))
     }
+}
+
+fn exposed_bin_names(discovered: Vec<String>) -> Vec<String> {
+    let mut names = discovered
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    names.extend(["pnpm".into(), "pnpx".into()]);
+    names.into_iter().collect()
 }
 
 fn major_version(version: &str) -> u64 {
@@ -204,6 +207,14 @@ mod tests {
         assert_eq!(
             cache_mapping("v12.1.0"),
             ("pnpm_config_store_dir", "pnpm-store")
+        );
+    }
+
+    #[test]
+    fn exposes_pnpx_as_a_routing_alias() {
+        assert_eq!(
+            exposed_bin_names(vec!["pnpm".into()]),
+            vec!["pnpm".to_string(), "pnpx".to_string()]
         );
     }
 }

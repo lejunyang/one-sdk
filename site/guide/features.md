@@ -256,6 +256,33 @@ manager 都会明确报错。
 自动加入受管 Node；PATH 中 manager bin 在前、目标 Node 在后，所以 launcher
 不会调用用户全局 Node。两个精确版本都会写入 lock 并支持离线重装。
 
+### 项目依赖 Registry 自动选择
+
+在可能下载 npm 包的命令启动前，osdk 会匿名探测候选 Registry，并为本次进程选择
+健康端点。覆盖 npm/npx、pnpm/pnpx、两类 Yarn、Bun/bunx 和 Deno npm 依赖，
+直接 shim、Shell activation 与 `osdk exec` 都会执行。manager 只启动一次：所有候选
+失败时不启动；启动后失败也不会重放脚本或重复修改项目。
+
+内置 npmjs 与 npmmirror 使用“最快健康端点”策略。已信任项目可声明有序策略（项目
+配置整体覆盖用户配置）：
+
+```toml
+[registries.npm]
+urls = [
+  "https://registry.npmmirror.com/",
+  "https://registry.npmjs.org/",
+]
+probe_timeout_ms = 1500
+```
+
+用 `osdk registry test [manager]` 查看健康状态和最终选择；省略 manager 会检查全部
+策略。manager 的显式参数/环境变量优先。原生配置含私有、未知、scope Registry 或
+认证/TLS 策略/原生代理时，osdk 不探测也不覆盖；匿名探测会遵守常规的
+`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 环境变量。manager 真正支持的严格离线参数同样透传
+（`--offline`，或 Deno 命令支持位置上的 `--cached-only`）；prefer-offline、
+frozen-lockfile 和 immutable-cache 模式仍可能联网，因此继续预检。metadata 或 lockfile 中的绝对
+artifact URL 可能绕过默认 Registry；osdk 不重写 lockfile，也不做运行中切源。
+
 ## 项目配置信任
 
 项目配置中的 `[tools]` 版本固定和 `[aliases]` 只是安全数据，无需信任即可读取。
@@ -287,6 +314,9 @@ eval "$(osdk activate zsh)"
 osdk activate fish | source
 osdk activate powershell | Invoke-Expression
 ```
+
+hook 会把 osdk shim 放在 `PATH` 首位，随后才是真实工具 bin。这样既保留每次命令的
+版本分派和依赖 Registry 预检，也让没有 shim 的可执行文件继续从真实 bin 回退。
 
 PowerShell hook 会防止命令查找回调重入。Windows shim 也会显式通过 `ComSpec`
 启动 `.cmd` / `.bat` 目标，保持批处理参数、标准输入输出和退出码。

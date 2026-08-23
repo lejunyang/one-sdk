@@ -131,17 +131,20 @@ impl Backend for BunBackend {
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let paths = self.bin_paths(ctx, tv)?;
-        let discovered = crate::backend::bin_names_in_dirs(&paths);
-        if discovered.is_empty() {
-            Ok(vec!["bun".into()])
-        } else {
-            Ok(discovered)
-        }
+        Ok(exposed_bin_names(crate::backend::bin_names_in_dirs(&paths)))
     }
 
     fn idiomatic_files(&self) -> &[&str] {
         &[".bun-version"]
     }
+}
+
+fn exposed_bin_names(discovered: Vec<String>) -> Vec<String> {
+    let mut names = discovered
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    names.extend(["bun".into(), "bunx".into()]);
+    names.into_iter().collect()
 }
 
 fn ensure_executable(install_dir: &std::path::Path, os: Os) {
@@ -207,6 +210,14 @@ mod tests {
             (key == "BUN_INSTALL_CACHE_DIR").then(|| "/custom/bun-cache".into())
         });
         assert!(!user.contains_key("BUN_INSTALL_CACHE_DIR"));
+    }
+
+    #[test]
+    fn exposes_bunx_as_a_routing_alias() {
+        assert_eq!(
+            exposed_bin_names(vec!["bun".into()]),
+            vec!["bun".to_string(), "bunx".to_string()]
+        );
     }
 
     type CtxPlatform = Platform;
