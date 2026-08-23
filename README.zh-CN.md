@@ -406,6 +406,8 @@ Go 内置 `go.dev`、阿里云和 `golang.google.cn` 三个来源。
 签名文件和 attestation bundle 都遵循同一 source 顺序。内置 `ghproxy` 会把这些
 GitHub URL 全部改写到 `https://gh-proxy.com/`。GitHub token 只发送给官方
 `api.github.com`，不会转发给第三方代理。
+匿名 API 配额耗尽时，通用 GitHub 工具会回退到 GitHub 公开 Atom feed 与
+expanded-assets 页面。该回退不会发送 token，只能尽力读取公开且近期的 Release。
 
 ## 内容去重与缓存
 
@@ -467,11 +469,16 @@ osdk install github:cli/cli@2.62.0     # 指定 tag
 osdk list-remote github:sharkdp/fd     # 可用 release tag
 ```
 
-只有通用 `github:owner/repo` backend 需要 GitHub Releases API。设置
-`GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 可提高直连 API 限额。API 元数据、Raw
-文件、Release 资产、校验文件和 attestation bundle 都可通过 gh-proxy 失败转移，
-且 token 不会被转发给代理。
-Release 列表支持分页，最多读取 1,000 个 release。
+通用 `github:owner/repo` backend 优先使用 GitHub Releases API。设置
+`GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 可提高直连 API 限额；token 只会发送到
+精确的 `api.github.com` host。未配置 token 且 API 配额耗尽时，osdk 会自动使用
+公开 `releases.atom` feed 发现近期版本，并通过
+`releases/expanded_assets/<tag>` 查找资产。该回退不发送 token，仅覆盖公开、近期
+Release，是尽力而为的连续性方案，不能完整替代 API。如果公开页面无法提供有效
+元数据，osdk 会保留并报告原始 API 限流信息、重置时间与重试建议。正常 API
+列表支持分页，最多读取 1,000 个 Release；API 元数据、公开页面、Raw 文件、
+Release 资产、校验文件和 attestation bundle 仍支持 source/proxy 失败转移，且
+token 不会被转发给代理。
 
 可用显式 option 覆盖启发式 asset 选择：
 

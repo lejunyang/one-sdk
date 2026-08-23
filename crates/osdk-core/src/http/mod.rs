@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use crate::backend::Ctx;
-use crate::error::{Error, Result};
+use crate::error::{Error, GithubRateLimitInfo, Result};
 use crate::source::Source;
 
 /// Build the shared reqwest client (rustls, gzip, redirects, sane timeouts).
@@ -79,16 +79,22 @@ pub async fn get_github_json_from_urls<T: serde::de::DeserializeOwned>(
     urls: &[String],
 ) -> Result<T> {
     let mut last_error = None;
+    let mut rate_limit_error = None;
+    let token_configured =
+        github_token().is_some() && urls.iter().any(|url| should_send_github_token(url));
     for url in urls {
         match fetch_github_bytes(client, url).await {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(value) => return Ok(value),
                 Err(error) => last_error = Some(Error::Json(error)),
             },
+            Err(error) if matches!(error, Error::GithubRateLimited { .. }) => {
+                remember_rate_limit(&mut rate_limit_error, error, token_configured);
+            }
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| Error::other("no GitHub API URL candidates")))
+    Err(select_github_error(rate_limit_error, last_error))
 }
 
 /// GitHub API variant of [`get_cached_json`], preserving GitHub headers and
@@ -118,6 +124,9 @@ pub async fn get_cached_github_json_from_urls<T: serde::de::DeserializeOwned>(
     }
 
     let mut last_error = None;
+    let mut rate_limit_error = None;
+    let token_configured =
+        github_token().is_some() && urls.iter().any(|url| should_send_github_token(url));
     for url in urls {
         match fetch_github_bytes(&ctx.client, url).await {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -127,6 +136,9 @@ pub async fn get_cached_github_json_from_urls<T: serde::de::DeserializeOwned>(
                 }
                 Err(error) => last_error = Some(Error::Json(error)),
             },
+            Err(error) if matches!(error, Error::GithubRateLimited { .. }) => {
+                remember_rate_limit(&mut rate_limit_error, error, token_configured);
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -139,7 +151,111 @@ pub async fn get_cached_github_json_from_urls<T: serde::de::DeserializeOwned>(
             );
             Ok(serde_json::from_slice(&bytes)?)
         }
-        Err(_) => Err(last_error.unwrap_or_else(|| Error::other("no GitHub API URL candidates"))),
+        Err(_) => Err(select_github_error(rate_limit_error, last_error)),
+    }
+}
+
+fn remember_rate_limit(slot: &mut Option<Error>, error: Error, token_configured: bool) {
+    let authenticated = matches!(
+        error,
+        Error::GithubRateLimited {
+            authenticated: true,
+            ..
+        }
+    );
+    if (authenticated || !token_configured) && (authenticated || slot.is_none()) {
+        *slot = Some(error);
+    }
+}
+
+fn select_github_error(rate_limit_error: Option<Error>, last_error: Option<Error>) -> Error {
+    match (rate_limit_error, last_error) {
+        (Some(rate_limit), Some(last))
+            if matches!(
+                rate_limit,
+                Error::GithubRateLimited {
+                    authenticated: false,
+                    ..
+                }
+            ) && last.status() == Some(403) =>
+        {
+            last
+        }
+        (Some(rate_limit), _) => rate_limit,
+        (None, Some(last)) => last,
+        (None, None) => Error::other("no GitHub API URL candidates"),
+    }
+}
+
+/// Fetch public GitHub Web metadata through ordered transports, sharing one
+/// canonical cache entry and retaining stale/offline behavior. Unlike API
+/// requests this deliberately sends neither API headers nor authorization.
+pub async fn get_cached_text_from_urls(
+    ctx: &Ctx,
+    cache_identity: &str,
+    urls: &[String],
+    validator: impl Fn(&str) -> bool,
+) -> Result<String> {
+    let cache_file = metadata_cache_path(ctx, cache_identity);
+    if ctx.config.settings.offline {
+        let bytes = std::fs::read(&cache_file).map_err(|_| {
+            Error::other(format!(
+                "offline metadata cache miss for {cache_identity} (run once without --offline)"
+            ))
+        })?;
+        let text = String::from_utf8(bytes).map_err(|error| {
+            Error::other(format!(
+                "invalid cached UTF-8 for {cache_identity}: {error}"
+            ))
+        })?;
+        return validator(&text)
+            .then_some(text)
+            .ok_or_else(|| invalid_metadata(cache_identity));
+    }
+
+    let mut last_error = None;
+    for url in urls {
+        match fetch_public_bytes(&ctx.client, url).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) if validator(&text) => {
+                    write_metadata_cache(&cache_file, text.as_bytes());
+                    return Ok(text);
+                }
+                Ok(_) => last_error = Some(invalid_metadata(url)),
+                Err(error) => {
+                    last_error = Some(Error::other(format!("invalid UTF-8 from {url}: {error}")))
+                }
+            },
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    match std::fs::read(&cache_file) {
+        Ok(bytes) => {
+            tracing::warn!(
+                path = %cache_file.display(),
+                "using stale cached metadata after all public GitHub transports failed"
+            );
+            let text = String::from_utf8(bytes).map_err(|error| {
+                Error::other(format!(
+                    "invalid cached UTF-8 for {cache_identity}: {error}"
+                ))
+            })?;
+            validator(&text)
+                .then_some(text)
+                .ok_or_else(|| last_error.unwrap_or_else(|| invalid_metadata(cache_identity)))
+        }
+        Err(_) => {
+            Err(last_error.unwrap_or_else(|| Error::other("no public GitHub URL candidates")))
+        }
+    }
+}
+
+fn invalid_metadata(url: &str) -> Error {
+    Error::Network {
+        kind: crate::error::NetworkErrorKind::InvalidMetadata,
+        url: url.into(),
+        status: None,
     }
 }
 
@@ -207,6 +323,27 @@ async fn fetch_github_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u
     let response = github_request(client, url)
         .send()
         .await
+        .map_err(|error| Error::network(url, error))?;
+    if !response.status().is_success() {
+        return Err(github_response_error(
+            url,
+            should_send_github_token(url) && github_token().is_some(),
+            response,
+        )
+        .await);
+    }
+    Ok(response
+        .bytes()
+        .await
+        .map_err(|error| Error::network(url, error))?
+        .to_vec())
+}
+
+async fn fetch_public_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let response = client
+        .get(url)
+        .send()
+        .await
         .map_err(|error| Error::network(url, error))?
         .error_for_status()
         .map_err(|error| Error::network(url, error))?;
@@ -215,6 +352,89 @@ async fn fetch_github_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u
         .await
         .map_err(|error| Error::network(url, error))?
         .to_vec())
+}
+
+async fn github_response_error(
+    url: &str,
+    authenticated: bool,
+    mut response: reqwest::Response,
+) -> Error {
+    const MAX_ERROR_BODY: usize = 64 * 1024;
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body = Vec::new();
+    while body.len() < MAX_ERROR_BODY {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_ERROR_BODY - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let body_text = String::from_utf8_lossy(&body);
+    let body_json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let message = body_json
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let documentation = body_json
+        .as_ref()
+        .and_then(|value| value.get("documentation_url"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let lower_body = body_text.to_ascii_lowercase();
+    let retry_after = header_text(&headers, reqwest::header::RETRY_AFTER);
+    let remaining_is_zero =
+        header_text(&headers, "x-ratelimit-remaining").is_some_and(|value| value.trim() == "0");
+    let github_api_response = should_send_github_token(url)
+        || headers.contains_key("x-github-request-id")
+        || headers.contains_key("x-ratelimit-resource")
+        || (headers.contains_key("x-ratelimit-limit")
+            && headers.contains_key("x-ratelimit-remaining")
+            && headers.contains_key("x-ratelimit-reset"));
+    let rate_limited = github_api_response
+        && (status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || (status == reqwest::StatusCode::FORBIDDEN
+                && (retry_after.is_some()
+                    || remaining_is_zero
+                    || lower_body.contains("api rate limit exceeded")
+                    || lower_body.contains("secondary rate limit")
+                    || lower_body.contains("abuse detection mechanism")
+                    || documentation.to_ascii_lowercase().contains("rate-limit")
+                    || documentation.to_ascii_lowercase().contains("rate_limits"))));
+
+    if rate_limited {
+        return Error::GithubRateLimited {
+            url: url.into(),
+            status: status.as_u16(),
+            authenticated,
+            info: GithubRateLimitInfo {
+                message,
+                reset: header_text(&headers, "x-ratelimit-reset"),
+                retry_after,
+            },
+        };
+    }
+
+    response
+        .error_for_status()
+        .map(|_| unreachable!("non-success GitHub response became successful"))
+        .unwrap_or_else(|error| Error::network(url, error))
+}
+
+fn header_text(
+    headers: &reqwest::header::HeaderMap,
+    name: impl reqwest::header::AsHeaderName,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn github_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
@@ -312,7 +532,7 @@ fn github_proxy_prefix(source: &Source) -> Option<&str> {
     None
 }
 
-fn metadata_cache_path(ctx: &Ctx, url: &str) -> std::path::PathBuf {
+pub(crate) fn metadata_cache_path(ctx: &Ctx, url: &str) -> std::path::PathBuf {
     let hash = blake3::hash(url.as_bytes()).to_hex().to_string();
     ctx.dirs.remote_cache().join("http").join(hash)
 }
@@ -736,6 +956,176 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(value["versions"][0], "2.0.0");
+    }
+
+    #[tokio::test]
+    async fn github_403_distinguishes_rate_limit_from_forbidden() {
+        for (headers, body, rate_limited) in [
+            (
+                "X-RateLimit-Limit: 60\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1787446800\r\nRetry-After: 60\r\n",
+                r#"{"message":"API rate limit exceeded for 203.0.113.10."}"#,
+                true,
+            ),
+            (
+                "X-RateLimit-Remaining: 4998\r\n",
+                r#"{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/releases/releases"}"#,
+                false,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                write!(
+                    stream,
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                )
+                .unwrap();
+            });
+            let url = format!("http://{address}/repos/example/tool/releases");
+            let error =
+                get_github_json_from_urls::<serde_json::Value>(&reqwest::Client::new(), &[url])
+                    .await
+                    .unwrap_err();
+            if rate_limited {
+                match error {
+                    Error::GithubRateLimited {
+                        authenticated,
+                        info,
+                        ..
+                    } => {
+                        assert!(!authenticated);
+                        assert_eq!(info.reset.as_deref(), Some("1787446800"));
+                        assert_eq!(info.retry_after.as_deref(), Some("60"));
+                        assert!(info.message.unwrap().contains("rate limit exceeded"));
+                    }
+                    other => panic!("expected rate-limit error, got {other}"),
+                }
+            } else {
+                assert!(matches!(
+                    error,
+                    Error::Network {
+                        kind: crate::error::NetworkErrorKind::Forbidden,
+                        status: Some(403),
+                        ..
+                    }
+                ));
+            }
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn third_party_429_is_not_treated_as_anonymous_github_quota() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = r#"{"message":"proxy quota exhausted"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 60\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            )
+            .unwrap();
+        });
+        let url = format!("http://{address}/proxy");
+        let error = get_github_json_from_urls::<serde_json::Value>(&reqwest::Client::new(), &[url])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Network {
+                kind: crate::error::NetworkErrorKind::RateLimited,
+                ..
+            }
+        ));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn github_rate_limit_survives_a_later_proxy_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, headers, body) in [
+                (
+                    "403 Forbidden",
+                    "X-RateLimit-Limit: 60\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1787446800\r\n",
+                    r#"{"message":"API rate limit exceeded"}"#,
+                ),
+                (
+                    "503 Service Unavailable",
+                    "",
+                    r#"{"message":"proxy unavailable"}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                )
+                .unwrap();
+            }
+        });
+        let urls = vec![
+            format!("http://{address}/official"),
+            format!("http://{address}/proxy"),
+        ];
+        let error = get_github_json_from_urls::<serde_json::Value>(&reqwest::Client::new(), &urls)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::GithubRateLimited { .. }));
+        assert!(error.to_string().contains("1787446800"));
+        assert!(error.to_string().contains("OSDK_GITHUB_TOKEN"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_metadata_skips_invalid_success_and_caches_only_valid_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for body in ["<html>proxy error</html>", "<feed><entry/></feed>"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                )
+                .unwrap();
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let identity = "https://github.com/example/tool/releases.atom";
+        let urls = vec![
+            format!("http://{address}/bad-proxy"),
+            format!("http://{address}/valid-direct"),
+        ];
+        let online = test_ctx(temp.path(), false);
+        let text =
+            get_cached_text_from_urls(&online, identity, &urls, |text| text.contains("<feed>"))
+                .await
+                .unwrap();
+        assert_eq!(text, "<feed><entry/></feed>");
+        server.join().unwrap();
+
+        let offline = test_ctx(temp.path(), true);
+        let text =
+            get_cached_text_from_urls(&offline, identity, &urls, |text| text.contains("<feed>"))
+                .await
+                .unwrap();
+        assert_eq!(text, "<feed><entry/></feed>");
     }
 
     #[tokio::test]

@@ -371,6 +371,9 @@ Go 内置 `go.dev`、阿里云和 `golang.google.cn` 三个来源。
 签名文件和 attestation bundle 统一遵循 source 顺序。内置 `ghproxy` 会把这些
 GitHub URL 全部改写到 `https://gh-proxy.com/`；`GITHUB_TOKEN` 只发送给官方
 `api.github.com`，不会转发给第三方代理。
+匿名 API 配额耗尽时，osdk 可无 token 读取公开 `releases.atom` feed 和
+`releases/expanded_assets/<tag>` 页面。该回退仅覆盖公开、近期 Release，属于
+尽力而为的连续性方案。
 
 ## 内容去重
 
@@ -463,9 +466,14 @@ osdk list-remote github:sharkdp/fd
 ```
 
 osdk 会按当前操作系统与架构选择匹配的 Release asset，并处理归档或单文件
-二进制。可设置 `GITHUB_TOKEN` 或 `OSDK_GITHUB_TOKEN` 提升直连 API 限额；
-API 元数据、Raw 文件、Release 资产、校验文件和 attestation bundle 均可回退
-ghproxy，且不会把 token 转发给代理。
+二进制。它优先使用 Releases API；可设置 `GITHUB_TOKEN` 或
+`OSDK_GITHUB_TOKEN` 提升直连限额，Authorization 只会发送到精确的
+`api.github.com` host。未配置 token 且匿名配额耗尽时，osdk 使用公开 Atom feed
+发现近期版本，并通过公开 expanded-assets fragment 获取所选 tag 的资产。该回退
+绝不发送 token，只覆盖公开、近期 Release，是尽力而为的连续性方案，不能替代
+完整 API 历史。如果回退失败，原始限流信息、重置时间和重试建议仍会显示。API
+元数据、公开页面、Raw 文件、Release 资产、校验文件和 attestation bundle 均
+保留 source 顺序失败转移，且不会把 token 转发给代理。
 
 Release API 支持分页（上限 1,000）。复杂 release 可用显式规则：
 

@@ -401,6 +401,9 @@ metadata, release assets, raw files, checksum/signature files, and attestation
 bundles. The built-in `ghproxy` source rewrites all of these GitHub URLs through
 `https://gh-proxy.com/`. `GITHUB_TOKEN` is sent only to the official
 `api.github.com` host and is never forwarded to a third-party proxy.
+If anonymous API quota is exhausted, osdk can read GitHub's public
+`releases.atom` feed and `releases/expanded_assets/<tag>` pages without a
+token. This best-effort fallback sees only public, recent releases.
 
 ## Content deduplication
 
@@ -501,10 +504,15 @@ osdk list-remote github:sharkdp/fd
 ```
 
 osdk chooses a Release asset matching the host OS and architecture, handling
-both archives and bare binaries. Set `GITHUB_TOKEN` or `OSDK_GITHUB_TOKEN` to
-raise the direct GitHub API rate limit. API metadata, raw files, release assets,
-checksum files, and attestation bundles can all fail over through gh-proxy
-without forwarding the token.
+both archives and bare binaries. It prefers the Releases API; set
+`GITHUB_TOKEN` or `OSDK_GITHUB_TOKEN` to raise the direct limit. Authorization
+is sent only to the exact `api.github.com` host. If anonymous quota is
+exhausted, osdk uses the public Atom feed for recent version discovery and the
+public expanded-assets fragment for the selected tag. The fallback never sends
+a token and is public-only, recent, and best-effort rather than a complete API
+history. If it fails, the original rate-limit message, reset, and retry guidance
+remain visible. API metadata, public pages, raw files, release assets, checksum
+files, and attestations retain source-order failover without token forwarding.
 
 Release API pagination covers up to 1,000 releases. Complex releases can use
 explicit rules:

@@ -357,6 +357,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "PBS SHA256SUMS 获取失败：{err}",
         ),
     );
+    m.insert(
+        "log.github_public_fallback",
+        (
+            "GitHub API quota exhausted; using best-effort public release metadata (recent, public releases only)",
+            "GitHub API 配额已耗尽；改用尽力而为的公开 Release 元数据（仅近期公开 Release）",
+        ),
+    );
 
     // ---- doctor -----------------------------------------------------------
     m.insert("doctor.title", ("osdk doctor", "osdk 诊断"));

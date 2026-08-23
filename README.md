@@ -436,6 +436,9 @@ metadata, release assets, raw files, checksum/signature files, and attestation
 bundles. Its built-in `ghproxy` source rewrites all of these through
 `https://gh-proxy.com/`. GitHub tokens are sent only to the official
 `api.github.com` host and are never forwarded to third-party proxies.
+If anonymous API quota is exhausted, generic GitHub tools fall back to
+GitHub's public Atom feed and expanded-assets pages. This token-free fallback
+is best-effort, public-only, and limited to recent feed entries.
 
 ## Dedup & caches
 
@@ -508,11 +511,17 @@ osdk install github:cli/cli@2.62.0     # a specific tag
 osdk list-remote github:sharkdp/fd     # available release tags
 ```
 
-Only the generic `github:owner/repo` backend requires the GitHub Releases API.
-Set `GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the direct API rate limit.
-The backend can fail over API metadata, raw files, release assets, checksums,
-and attestation bundles through gh-proxy without forwarding the token.
-Release listing follows pagination, up to 1,000 releases.
+The generic `github:owner/repo` backend prefers the GitHub Releases API. Set
+`GITHUB_TOKEN` (or `OSDK_GITHUB_TOKEN`) to raise the direct API rate limit; a
+token is sent only to the exact `api.github.com` host. Without a token, an
+exhausted API quota automatically falls back to the public `releases.atom` feed
+for recent version discovery and `releases/expanded_assets/<tag>` for assets.
+That fallback sends no token and exposes only public, recent releases; it is a
+best-effort continuity path, not a complete API replacement. If it cannot
+produce valid metadata, osdk reports the original API rate-limit message, reset
+time, and retry guidance. Normal API listing follows pagination up to 1,000
+releases. API metadata, public pages, release assets, raw files, checksums, and
+attestation bundles retain source/proxy failover without forwarding the token.
 
 Override heuristic asset selection with explicit options:
 

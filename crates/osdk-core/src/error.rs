@@ -1,5 +1,6 @@
 //! Error types for osdk-core.
 
+use std::fmt;
 use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -24,6 +25,21 @@ pub enum Error {
         kind: NetworkErrorKind,
         url: String,
         status: Option<u16>,
+    },
+
+    #[error(
+        "GitHub API rate limit exceeded for {url} ({status}){info}; {guidance}",
+        guidance = if *authenticated {
+            "retry later or check the configured GitHub token's quota and permissions"
+        } else {
+            "retry later or set OSDK_GITHUB_TOKEN (or GITHUB_TOKEN/GH_TOKEN) for a higher API quota"
+        }
+    )]
+    GithubRateLimited {
+        url: String,
+        status: u16,
+        authenticated: bool,
+        info: GithubRateLimitInfo,
     },
 
     #[error("config error: {0}")]
@@ -86,6 +102,28 @@ pub enum NetworkErrorKind {
     InvalidMetadata,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GithubRateLimitInfo {
+    pub message: Option<String>,
+    pub reset: Option<String>,
+    pub retry_after: Option<String>,
+}
+
+impl fmt::Display for GithubRateLimitInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(message) = &self.message {
+            write!(formatter, "; {message}")?;
+        }
+        if let Some(reset) = &self.reset {
+            write!(formatter, "; resets at Unix time {reset}")?;
+        }
+        if let Some(retry_after) = &self.retry_after {
+            write!(formatter, "; retry after {retry_after}")?;
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for NetworkErrorKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -131,6 +169,24 @@ impl Error {
             kind,
             url: url.into(),
             status,
+        }
+    }
+
+    pub fn is_anonymous_github_rate_limit(&self) -> bool {
+        matches!(
+            self,
+            Error::GithubRateLimited {
+                authenticated: false,
+                ..
+            }
+        )
+    }
+
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Error::Network { status, .. } => *status,
+            Error::GithubRateLimited { status, .. } => Some(*status),
+            _ => None,
         }
     }
 
