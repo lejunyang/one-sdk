@@ -14,6 +14,8 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub struct BunBackend;
 
+const CACHE_ENV: &[(&str, &str)] = &[("BUN_INSTALL_CACHE_DIR", "bun")];
+
 impl BunBackend {
     fn platform_package(ctx: &Ctx) -> Option<&'static str> {
         Some(
@@ -119,6 +121,14 @@ impl Backend for BunBackend {
             .join("bin")])
     }
 
+    fn exec_env(
+        &self,
+        ctx: &Ctx,
+        _tv: &ToolVersion,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(crate::cache::manager_exec_env(&ctx.dirs.cache, CACHE_ENV))
+    }
+
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
@@ -178,6 +188,25 @@ mod tests {
             BunBackend::platform_package(&ctx(musl)),
             Some("@oven/bun-linux-x64-musl")
         );
+    }
+
+    #[test]
+    fn uses_shared_bun_package_cache_without_overriding_user_value() {
+        let ctx = ctx(Platform {
+            os: Os::Linux,
+            arch: Arch::X64,
+            libc: Libc::Glibc,
+        });
+        let managed = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, |_| None);
+        assert_eq!(
+            PathBuf::from(managed.get("BUN_INSTALL_CACHE_DIR").unwrap()),
+            ctx.dirs.cache.join("pkg/bun")
+        );
+
+        let user = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, |key| {
+            (key == "BUN_INSTALL_CACHE_DIR").then(|| "/custom/bun-cache".into())
+        });
+        assert!(!user.contains_key("BUN_INSTALL_CACHE_DIR"));
     }
 
     type CtxPlatform = Platform;

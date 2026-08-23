@@ -14,9 +14,10 @@ managers (nvm/fnm/uv/sdkman/rustup) don't do together:
    copy of every identical file; each installed version is materialized from the
    store via hardlink / reflink / copy. Two node minors that share files cost
    disk once, not twice.
-2. **Manager-native dependency caches.** npm/pnpm/Yarn/pip/Go/Cargo/Gradle
-   keep their own cache or store format under one osdk-managed root, so projects
-   and SDK versions can reuse downloads within the same manager.
+2. **Manager-native dependency caches.** npm/pnpm/Yarn/Bun/Deno and the
+   pip/Go/Cargo/Gradle ecosystems keep their own cache or store format under one
+   osdk-managed root, so projects and SDK versions can reuse downloads within
+   the same tool.
 3. **Multi-source with automatic fastest-mirror selection.** Every SDK ships an
    official source plus authoritative mirrors; `osdk` probes them and uses the
    fastest, with failover on both metadata and downloads. You can add custom
@@ -457,21 +458,36 @@ These are separate storage layers:
   package-manager binaries. `osdk --yes cache clean` clears this layer.
 - `<data>/store` is the BLAKE3 CAS for verified, extracted SDK files. Installed
   versions are materialized from it; `osdk prune` reclaims unreferenced objects.
-- `<cache>/pkg` contains manager-native project dependency caches and stores.
-  `osdk cache env` prints their redirections. npm uses its native
-  content-addressable cache (`npm_config_cache`); pnpm uses its native store
-  (`npm_config_store_dir` through pnpm 10, `pnpm_config_store_dir` from pnpm
-  11). `PNPM_HOME` remains a separate global executable/state home. Yarn
-  Classic uses `YARN_CACHE_FOLDER`; Yarn 2+ uses `YARN_GLOBAL_FOLDER`. Yarn 4
-  uses that global cache by default, while Yarn 2/3 reuse it only when the
-  project enables `enableGlobalCache`; osdk does not force that setting so
-  Zero-Install and project-local cache choices remain intact.
+- `<cache>/pkg` contains manager- or runtime-native project dependency caches
+  and stores. `osdk cache env` prints all supported redirections.
+
+| Tool | Native cache format | osdk mapping |
+| --- | --- | --- |
+| npm | npm `cacache` content and metadata | `npm_config_cache=<cache>/pkg/npm` |
+| pnpm | content-addressable package-file store | `npm_config_store_dir` (pnpm <=10) or `pnpm_config_store_dir` (pnpm >=11) = `<cache>/pkg/pnpm-store`; `PNPM_HOME=<cache>/pkg/pnpm` remains the executable/state home |
+| Yarn | Classic's native cache; Berry's normalized zip archives | `YARN_CACHE_FOLDER=<cache>/pkg/yarn-classic` (Classic); `YARN_GLOBAL_FOLDER=<cache>/pkg/yarn` (2+) |
+| Bun | registry packages in Bun's native global cache | `BUN_INSTALL_CACHE_DIR=<cache>/pkg/bun` |
+| Deno | URL/npm dependencies, compiled artifacts, and some runtime state | `DENO_DIR=<cache>/pkg/deno` |
+
+Yarn 2/3 keeps its active cache project-local by default (`.yarn/cache`), but
+the default `enableMirror: true` also reads and writes
+`${YARN_GLOBAL_FOLDER}/cache`. The osdk mapping therefore provides a
+cross-project mirror without replacing project-local or Zero-Install caches.
+Yarn 4 enables `enableGlobalCache` by default, so the same global directory is
+its active cache. osdk does not force `enableGlobalCache` or `cacheFolder`.
+
+For managed Bun and Deno, the backend-specific variables are set only while
+that tool is active. `DENO_DIR` covers more than downloaded packages, including
+compiled artifacts and some runtime state; it is not treated as a disposable
+package-only cache.
 
 The active manager receives these values through shell activation, `osdk exec`,
-and direct osdk shims. Explicit user environment variables always win. osdk
-does not install project dependencies or parse dependency lockfiles to create a
-universal package CAS; run npm, pnpm, or Yarn normally. Their formats remain
-separate, so there is no npm-vs-pnpm-vs-Yarn cross-manager blob deduplication.
+and direct osdk shims. Explicit user environment variables always win. Native
+cache formats aren't interchangeable and must not share a directory. A future
+cross-manager layer could only safely deduplicate original registry tarballs by
+verified SRI; even then, manager metadata and transformed or unpacked artifacts
+mean it couldn't guarantee one physical copy across the whole disk. osdk does
+not implement that tarball CAS today. Run each manager normally.
 
 Destructive operations (`uninstall`, `cache clean`, and non-dry-run `prune`)
 share one confirmation policy. Interactive terminals prompt with a localized

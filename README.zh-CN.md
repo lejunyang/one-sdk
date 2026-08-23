@@ -13,9 +13,9 @@ Rust、Go、Deno、Bun**。它把现有单语言管理器（nvm/fnm/uv/SDKMAN/ru
 1. **跨版本内容去重。** 基于 BLAKE3 的内容寻址存储只保留一份相同文件；各安装
    版本通过硬链接、reflink 或复制从存储中物化。两个 Node.js 次版本若共享文件，
    磁盘只保存一次。
-2. **包管理器原生依赖缓存。** npm/pnpm/Yarn/pip/Go/Cargo/Gradle 各自保留
-   原生缓存或 store 格式，并放在 osdk 管理的统一根目录下，让同一包管理器的不同
-   项目和 SDK 版本复用下载。
+2. **包管理器原生依赖缓存。** npm/pnpm/Yarn/Bun/Deno 以及
+   pip/Go/Cargo/Gradle 生态各自保留原生缓存或 store 格式，并放在 osdk 管理的统一
+   根目录下，让同一工具的不同项目和 SDK 版本复用下载。
 3. **多源与最快镜像自动选择。** 每个 SDK 都提供官方源和可用镜像；osdk 会探测
    速度并选择最快来源，元数据或下载失败时自动切换。也支持添加自定义源或固定
    指定来源。
@@ -425,18 +425,31 @@ osdk cache env                  # 下游包管理器缓存环境变量
   `osdk --yes cache clean` 只清理这一层。
 - `<data>/store` 是已验证、解压后的 SDK 文件所使用的 BLAKE3 CAS。安装版本从这里
   物化，`osdk prune` 回收未引用对象。
-- `<cache>/pkg` 保存各包管理器原生的项目依赖缓存和 store；`osdk cache env` 可查看
-  重定向。npm 使用自身的内容寻址缓存（`npm_config_cache`）；pnpm 使用自身的 store
-  （pnpm 10 及以下为 `npm_config_store_dir`，pnpm 11 起为
-  `pnpm_config_store_dir`）。`PNPM_HOME` 仍是单独的全局可执行文件/状态目录。Yarn
-  Classic 使用 `YARN_CACHE_FOLDER`；Yarn 2+ 使用 `YARN_GLOBAL_FOLDER`。Yarn 4
-  默认使用全局缓存，Yarn 2/3 只有在项目启用 `enableGlobalCache` 时才会跨项目复用；
-  osdk 不强制修改该设置，以保留 Zero-Install 和项目本地缓存选择。
+- `<cache>/pkg` 保存各包管理器或 runtime 原生的项目依赖缓存和 store；
+  `osdk cache env` 会显示全部受支持的重定向。
+
+| 工具 | 原生缓存格式 | osdk 映射 |
+| --- | --- | --- |
+| npm | npm `cacache` 内容与元数据 | `npm_config_cache=<cache>/pkg/npm` |
+| pnpm | 内容寻址的包文件 store | pnpm 10 及以下使用 `npm_config_store_dir`，pnpm 11 起使用 `pnpm_config_store_dir`，均指向 `<cache>/pkg/pnpm-store`；`PNPM_HOME=<cache>/pkg/pnpm` 仍是可执行文件/状态目录 |
+| Yarn | Classic 原生缓存；Berry 标准化 zip 归档 | Classic 使用 `YARN_CACHE_FOLDER=<cache>/pkg/yarn-classic`；2+ 使用 `YARN_GLOBAL_FOLDER=<cache>/pkg/yarn` |
+| Bun | Bun 原生全局缓存中的 registry 包 | `BUN_INSTALL_CACHE_DIR=<cache>/pkg/bun` |
+| Deno | URL/npm 依赖、编译产物和部分运行时状态 | `DENO_DIR=<cache>/pkg/deno` |
+
+Yarn 2/3 的 active cache 默认仍在项目内（`.yarn/cache`），但默认开启的
+`enableMirror: true` 还会读写 `${YARN_GLOBAL_FOLDER}/cache`。因此 osdk 的映射会提供
+跨项目 mirror，而不会替换项目本地或 Zero-Install 缓存。Yarn 4 默认开启
+`enableGlobalCache`，所以同一个全局目录会成为 active cache。osdk 不强制修改
+`enableGlobalCache` 或 `cacheFolder`。
+
+对受管 Bun 和 Deno，backend 专属变量只在对应工具生效时注入。`DENO_DIR` 不只包含
+下载的包，还包含编译产物和部分运行时状态，因此不能把它当作可随意删除的纯包缓存。
 
 当前包管理器通过 shell activation、`osdk exec` 和 osdk 直接 shim 三条路径获得这些
-变量；用户显式设置的环境变量始终优先。osdk 本身不安装项目依赖，也不解析依赖
-lockfile 来构建通用包 CAS；请照常运行 npm、pnpm 或 Yarn。三者格式彼此独立，不会
-在 npm、pnpm 与 Yarn 之间做跨管理器 blob 去重。
+变量；用户显式设置的环境变量始终优先。各工具的原生缓存格式不兼容，不能共用同一
+目录。未来的跨 manager 层最多只能按已验证 SRI 对原始 registry tarball 做内容寻址
+去重；即使如此，各 manager 仍会保存元数据、转换后归档或解包产物，无法保证整个
+磁盘只保留一份。osdk 当前尚未实现这种 tarball CAS，请照常运行各 manager。
 
 ## 语言（i18n）
 

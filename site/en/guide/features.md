@@ -437,31 +437,37 @@ osdk cache env
 osdk --yes cache clean
 ```
 
-For the JavaScript managers, the mappings are:
+The primary package/runtime mappings are:
 
-| Manager | Native setting | osdk path |
-| --- | --- | --- |
-| npm | `npm_config_cache` | `<cache>/pkg/npm` |
-| pnpm 10 and earlier | `npm_config_store_dir` | `<cache>/pkg/pnpm-store` |
-| pnpm 11 and later | `pnpm_config_store_dir` | `<cache>/pkg/pnpm-store` |
-| pnpm all versions | `PNPM_HOME` (global executable/state home, not the dependency store) | `<cache>/pkg/pnpm` |
-| Yarn Classic | `YARN_CACHE_FOLDER` | `<cache>/pkg/yarn-classic` |
-| Yarn 2+ | `YARN_GLOBAL_FOLDER` | `<cache>/pkg/yarn` |
+| Tool | Native cache format | Native setting | osdk path |
+| --- | --- | --- | --- |
+| npm | npm `cacache` content and metadata | `npm_config_cache` | `<cache>/pkg/npm` |
+| pnpm | content-addressable package-file store | `npm_config_store_dir` (<=10) / `pnpm_config_store_dir` (>=11) | `<cache>/pkg/pnpm-store` |
+| Yarn | Classic cache / Berry normalized zip archives | `YARN_CACHE_FOLDER` (Classic) / `YARN_GLOBAL_FOLDER` (2+) | `<cache>/pkg/yarn-classic` / `<cache>/pkg/yarn` |
+| Bun | registry packages in Bun's native global cache | `BUN_INSTALL_CACHE_DIR` | `<cache>/pkg/bun` |
+| Deno | URL/npm dependencies, compiled artifacts, and some runtime state | `DENO_DIR` | `<cache>/pkg/deno` |
 
-npm therefore keeps using its native content-addressable cache and pnpm its
-native store. Yarn 4 uses its global cache by default; Yarn 2/3 reuse the
-configured global folder only when the project enables `enableGlobalCache`.
-osdk does not force that setting, preserving Zero-Install and project-local
-cache choices. The values apply through shell activation, `osdk exec`, and
-direct osdk shims. Existing user values are preserved.
+`PNPM_HOME=<cache>/pkg/pnpm` is also set as pnpm's global executable/state
+home, separate from its dependency store. Yarn 2/3 keeps its active cache
+project-local by default (`.yarn/cache`), but the default `enableMirror: true`
+also reads and writes `${YARN_GLOBAL_FOLDER}/cache`. The osdk mapping therefore
+provides a cross-project mirror without replacing project-local or Zero-Install
+caches. Yarn 4 enables `enableGlobalCache` by default, so that global directory
+becomes its active cache. osdk doesn't force `enableGlobalCache` or
+`cacheFolder`.
 
-Other supported native mappings include pip, Go, Cargo, and Gradle. osdk only
-redirects cache/store locations: it does not install project dependencies or
-parse dependency lockfiles into a universal CAS. Run npm, pnpm, or Yarn normally.
-Their formats and directories stay separate, so there is no cross-manager blob
-deduplication between npm, pnpm, and Yarn. `cache clean` removes the separate
-tool archive cache, not manager-native dependency caches, installed SDKs, or the
-extracted-file content store.
+For managed Bun and Deno, the backend-specific values are applied through shell
+activation, `osdk exec`, and direct osdk shims; existing user values are
+preserved. `DENO_DIR` isn't package-only: it also contains compiled artifacts
+and some runtime state. `cache clean` doesn't remove this directory.
+
+Other supported native mappings include pip, Go, Cargo, and Gradle. Native
+formats aren't interchangeable and must not share a directory. A future
+cross-manager layer could only safely deduplicate original registry tarballs by
+verified SRI; manager metadata and transformed or unpacked artifacts mean it
+still couldn't guarantee one physical copy across the whole disk. osdk doesn't
+implement that tarball CAS today. `cache clean` removes the separate tool archive
+cache, not manager-native caches, installed SDKs, or the extracted-file store.
 
 `uninstall`, `cache clean`, and non-dry-run `prune` share one confirmation
 policy. Interactive terminals show a localized prompt; non-interactive runs

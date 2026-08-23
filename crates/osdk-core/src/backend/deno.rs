@@ -15,6 +15,8 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub struct DenoBackend;
 
+const CACHE_ENV: &[(&str, &str)] = &[("DENO_DIR", "deno")];
+
 impl DenoBackend {
     fn platform_package(ctx: &Ctx) -> Option<&'static str> {
         Some(
@@ -118,6 +120,14 @@ impl Backend for DenoBackend {
         Ok(vec![ctx.dirs.install_path(self.id(), &tv.version)])
     }
 
+    fn exec_env(
+        &self,
+        ctx: &Ctx,
+        _tv: &ToolVersion,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(crate::cache::manager_exec_env(&ctx.dirs.cache, CACHE_ENV))
+    }
+
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
@@ -177,6 +187,25 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn uses_shared_deno_cache_without_overriding_user_value() {
+        let ctx = ctx(Platform {
+            os: Os::Linux,
+            arch: Arch::X64,
+            libc: Libc::Glibc,
+        });
+        let managed = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, |_| None);
+        assert_eq!(
+            PathBuf::from(managed.get("DENO_DIR").unwrap()),
+            ctx.dirs.cache.join("pkg/deno")
+        );
+
+        let user = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, |key| {
+            (key == "DENO_DIR").then(|| "/custom/deno".into())
+        });
+        assert!(!user.contains_key("DENO_DIR"));
     }
 
     fn ctx(platform: Platform) -> Ctx {

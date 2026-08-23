@@ -406,27 +406,32 @@ osdk cache env
 osdk --yes cache clean
 ```
 
-JavaScript 包管理器映射如下：
+主要包管理器/runtime 映射如下：
 
-| 包管理器 | 原生设置 | osdk 路径 |
-| --- | --- | --- |
-| npm | `npm_config_cache` | `<cache>/pkg/npm` |
-| pnpm 10 及以下 | `npm_config_store_dir` | `<cache>/pkg/pnpm-store` |
-| pnpm 11 及以上 | `pnpm_config_store_dir` | `<cache>/pkg/pnpm-store` |
-| 所有 pnpm 版本 | `PNPM_HOME`（全局可执行文件/状态目录，不是依赖 store） | `<cache>/pkg/pnpm` |
-| Yarn Classic | `YARN_CACHE_FOLDER` | `<cache>/pkg/yarn-classic` |
-| Yarn 2+ | `YARN_GLOBAL_FOLDER` | `<cache>/pkg/yarn` |
+| 工具 | 原生缓存格式 | 原生设置 | osdk 路径 |
+| --- | --- | --- | --- |
+| npm | npm `cacache` 内容与元数据 | `npm_config_cache` | `<cache>/pkg/npm` |
+| pnpm | 内容寻址的包文件 store | `npm_config_store_dir`（<=10）/ `pnpm_config_store_dir`（>=11） | `<cache>/pkg/pnpm-store` |
+| Yarn | Classic 缓存 / Berry 标准化 zip 归档 | `YARN_CACHE_FOLDER`（Classic）/ `YARN_GLOBAL_FOLDER`（2+） | `<cache>/pkg/yarn-classic` / `<cache>/pkg/yarn` |
+| Bun | Bun 原生全局缓存中的 registry 包 | `BUN_INSTALL_CACHE_DIR` | `<cache>/pkg/bun` |
+| Deno | URL/npm 依赖、编译产物和部分运行时状态 | `DENO_DIR` | `<cache>/pkg/deno` |
 
-因此 npm 继续使用自身的内容寻址缓存，pnpm 使用自身的 store。Yarn 4 默认使用
-全局缓存；Yarn 2/3 只有在项目启用 `enableGlobalCache` 时才会复用所配置的全局目录。
-osdk 不强制修改该设置，以保留 Zero-Install 和项目本地缓存选择。变量在 shell
-activation、`osdk exec` 和 osdk 直接 shim 三条路径中生效，用户已有值保持优先。
+此外，`PNPM_HOME=<cache>/pkg/pnpm` 是 pnpm 的全局可执行文件/状态目录，与依赖
+store 分开。Yarn 2/3 的 active cache 默认仍在项目内（`.yarn/cache`），但默认开启的
+`enableMirror: true` 还会读写 `${YARN_GLOBAL_FOLDER}/cache`。因此 osdk 的映射会提供
+跨项目 mirror，而不会替换项目本地或 Zero-Install 缓存。Yarn 4 默认开启
+`enableGlobalCache`，所以该全局目录会成为 active cache。osdk 不强制修改
+`enableGlobalCache` 或 `cacheFolder`。
 
-其他原生映射还覆盖 pip、Go、Cargo 与 Gradle。osdk 只重定向缓存/store 位置；它
-本身不安装项目依赖，也不把依赖 lockfile 解析成通用 CAS，请照常运行 npm、pnpm 或
-Yarn。各自格式和目录保持独立，npm、pnpm 与 Yarn 之间没有跨管理器 blob 去重。
-`cache clean` 只清理独立的工具归档缓存，不清理包管理器原生依赖缓存、已安装 SDK
-或解压文件内容存储。
+对受管 Bun 和 Deno，这些 backend 专属变量通过 shell activation、`osdk exec` 和 osdk
+直接 shim 生效，用户已有值保持优先。`DENO_DIR` 不只是包缓存，还包含编译产物和部分
+运行时状态；`cache clean` 不会删除此目录。
+
+其他原生映射还覆盖 pip、Go、Cargo 与 Gradle。各工具格式不兼容，不能共用同一目录。
+未来的跨 manager 层最多只能按已验证 SRI 对原始 registry tarball 做内容寻址去重；
+各 manager 仍会保存元数据、转换后归档或解包产物，因此无法保证整个磁盘只保留一份。
+osdk 当前尚未实现这种 tarball CAS。`cache clean` 只清理独立的工具归档缓存，不清理
+manager 原生缓存、已安装 SDK 或解压文件内容存储。
 
 `uninstall`、`cache clean` 和非演练 `prune` 统一使用确认策略：交互终端显示中文
 或英文提示；非交互环境不会等待 stdin，而是明确失败。CI 和脚本应传

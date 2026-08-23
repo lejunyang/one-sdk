@@ -94,6 +94,8 @@ pub fn describe(cache_dir: &Path) -> Vec<(String, String)> {
             ("pnpm_config_store_dir", "pnpm-store"),
             ("YARN_CACHE_FOLDER", "yarn-classic"),
             ("YARN_GLOBAL_FOLDER", "yarn"),
+            ("BUN_INSTALL_CACHE_DIR", "bun"),
+            ("DENO_DIR", "deno"),
         ],
         |_| None,
     ) {
@@ -170,6 +172,20 @@ mod tests {
         assert_eq!(
             PathBuf::from(managed.get("npm_config_cache").unwrap()),
             cache.join("pkg/npm")
+        );
+    }
+
+    #[test]
+    fn describe_includes_bun_and_deno_manager_caches() {
+        let cache = PathBuf::from("/x/cache");
+        let described = describe(&cache).into_iter().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            PathBuf::from(described.get("BUN_INSTALL_CACHE_DIR").unwrap()),
+            cache.join("pkg/bun")
+        );
+        assert_eq!(
+            PathBuf::from(described.get("DENO_DIR").unwrap()),
+            cache.join("pkg/deno")
         );
     }
 }
