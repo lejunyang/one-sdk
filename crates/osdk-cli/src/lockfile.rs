@@ -2,11 +2,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use osdk_core::backend::npm_package::{
+    LOCKED_NPM_LOCKFILE_OPTION, LOCKED_NPM_LOCK_FORMAT_OPTION, LOCKED_NPM_LOCK_SHA256_OPTION,
+    LOCKED_NPM_PACKAGE_OPTION,
+};
+use osdk_core::pipeline::HashAlgo;
 use osdk_core::platform::{Arch, Libc, Os, Platform};
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 use serde::{Deserialize, Serialize};
 
 pub const LOCKFILE_NAME: &str = "osdk.lock";
+const NPM_LOCK_FORMAT: &str = "aube-v9";
+const NPM_LOCKFILE_PATH: &str = "project/aube-lock.yaml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lockfile {
@@ -32,6 +39,16 @@ pub struct LockedTool {
     pub options: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact: Option<LockedArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm: Option<LockedNpmGraph>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedNpmGraph {
+    pub package: String,
+    pub lock_format: String,
+    pub lock_sha256: String,
+    pub lockfile: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,7 +83,7 @@ pub struct LockedModelFile {
 }
 
 fn schema_version() -> u32 {
-    1
+    2
 }
 
 impl Default for Lockfile {
@@ -86,6 +103,7 @@ impl Default for LockedTool {
             version: String::new(),
             options: BTreeMap::new(),
             artifact: None,
+            npm: None,
         }
     }
 }
@@ -141,7 +159,7 @@ pub fn load(path: &Path) -> Result<Lockfile> {
         .with_context(|| format!("reading lockfile {}", path.display()))?;
     let lockfile: Lockfile =
         toml::from_str(&text).with_context(|| format!("parsing lockfile {}", path.display()))?;
-    if lockfile.schema != schema_version() {
+    if !(1..=schema_version()).contains(&lockfile.schema) {
         anyhow::bail!(
             "unsupported lockfile schema {} in {}",
             lockfile.schema,
@@ -182,6 +200,18 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
                         subdir.clone(),
                     );
                 }
+            }
+            if let Some(npm) = &locked.npm {
+                options.insert(LOCKED_NPM_PACKAGE_OPTION.into(), npm.package.clone());
+                options.insert(
+                    LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
+                    npm.lock_format.clone(),
+                );
+                options.insert(
+                    LOCKED_NPM_LOCK_SHA256_OPTION.into(),
+                    npm.lock_sha256.clone(),
+                );
+                options.insert(LOCKED_NPM_LOCKFILE_OPTION.into(), npm.lockfile.clone());
             }
             ToolRequest {
                 backend: backend.clone(),
@@ -233,6 +263,7 @@ pub fn merge_resolved(
                 subdir: version.options.get("catalog-subdir").cloned(),
                 evidence: receipt.evidence,
             });
+        let npm = locked_npm_graph(dirs, version)?;
         platform_lock.tools.insert(
             request.backend.clone(),
             LockedTool {
@@ -252,6 +283,7 @@ pub fn merge_resolved(
                     evidence: receipt.evidence,
                 })
                 .or(resolved_artifact),
+                npm,
             },
         );
     }
@@ -299,12 +331,37 @@ fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String
         .collect()
 }
 
+fn locked_npm_graph(
+    dirs: &osdk_core::dirs::Dirs,
+    version: &ToolVersion,
+) -> Result<Option<LockedNpmGraph>> {
+    let Some(package) = version.backend.strip_prefix("npm:") else {
+        return Ok(None);
+    };
+    let lock_path = dirs
+        .install_path(&version.backend, &version.version)
+        .join(NPM_LOCKFILE_PATH);
+    let bytes = std::fs::read(&lock_path)
+        .with_context(|| format!("reading npm lock payload {}", lock_path.display()))?;
+    let lock_sha256 = osdk_core::pipeline::verify::hash_bytes(&bytes, HashAlgo::Sha256);
+    let lockfile = String::from_utf8(bytes)
+        .with_context(|| format!("npm lock payload {} is not UTF-8", lock_path.display()))?;
+    Ok(Some(LockedNpmGraph {
+        package: package.to_string(),
+        lock_format: NPM_LOCK_FORMAT.into(),
+        lock_sha256,
+        lockfile,
+    }))
+}
+
 fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let text = toml::to_string_pretty(lockfile)?;
+    let mut lockfile = lockfile.clone();
+    lockfile.schema = schema_version();
+    let text = toml::to_string_pretty(&lockfile)?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
     std::fs::write(&temporary, text).with_context(|| format!("writing {}", temporary.display()))?;
     std::fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
@@ -342,6 +399,7 @@ mod tests {
                         version: "20.19.0".into(),
                         options: BTreeMap::new(),
                         artifact: None,
+                        npm: None,
                     },
                 )]),
             },
@@ -359,6 +417,7 @@ mod tests {
         )
         .unwrap();
         let lockfile = load(&path).unwrap();
+        assert_eq!(lockfile.schema, schema_version());
         assert_eq!(lockfile.platforms.len(), 2);
         assert_eq!(
             lockfile.platforms["linux-x64"].tools["node"].version,
@@ -368,6 +427,166 @@ mod tests {
             lockfile.platforms["windows-x64"].tools["node"].version,
             "20.19.0"
         );
+    }
+
+    #[test]
+    fn schema_one_non_npm_lock_is_read_and_migrated_on_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(
+            &path,
+            r#"
+schema = 1
+
+[platforms.linux-x64.tools.node]
+request = "20"
+version = "20.19.0"
+"#,
+        )
+        .unwrap();
+
+        let legacy = load(&path).unwrap();
+        assert_eq!(legacy.schema, 1);
+        assert!(legacy.platforms["linux-x64"].tools["node"].npm.is_none());
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].backend, "node");
+        assert_eq!(requests[0].spec, VersionSpec::Exact("20.19.0".into()));
+
+        merge_resolved(
+            &path,
+            linux(),
+            &test_dirs(temp.path()),
+            &[(
+                ToolRequest::parse("node@20").unwrap(),
+                ToolVersion::new("node", "20.20.0"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(load(&path).unwrap().schema, schema_version());
+    }
+
+    #[test]
+    fn unsupported_schema_versions_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        for schema in [0, schema_version() + 1] {
+            std::fs::write(&path, format!("schema = {schema}\n")).unwrap();
+            let error = load(&path).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(&format!("unsupported lockfile schema {schema}")));
+        }
+    }
+
+    #[test]
+    fn saving_a_schema_one_lock_without_merging_upgrades_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let legacy = Lockfile {
+            schema: 1,
+            platforms: BTreeMap::new(),
+            models: BTreeMap::new(),
+        };
+        save(&path, &legacy).unwrap();
+        assert_eq!(load(&path).unwrap().schema, schema_version());
+    }
+
+    #[test]
+    fn scoped_npm_graph_round_trips_exact_payload_and_injects_private_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let backend = "npm:@antfu/ni";
+        let version_number = "0.21.12";
+        let lockfile = "lockfileVersion: '9.0'\r\nimporters:\r\n  .:\r\n    dependencies:\r\n      '@antfu/ni':\r\n        version: 0.21.12\r\n# caf\u{e9}\r\n";
+        let installed_lock = dirs
+            .install_path(backend, version_number)
+            .join(NPM_LOCKFILE_PATH);
+        std::fs::create_dir_all(installed_lock.parent().unwrap()).unwrap();
+        std::fs::write(&installed_lock, lockfile.as_bytes()).unwrap();
+
+        merge_resolved(
+            &path,
+            linux(),
+            &dirs,
+            &[(
+                ToolRequest::parse("npm:@antfu/ni@0.21.12").unwrap(),
+                ToolVersion::new(backend, version_number),
+            )],
+        )
+        .unwrap();
+
+        let expected_sha256 =
+            osdk_core::pipeline::verify::hash_bytes(lockfile.as_bytes(), HashAlgo::Sha256);
+        assert_eq!(
+            expected_sha256,
+            "23c7efec1baea86b6efc78164c175fc6cfe3458e5f70f2ec018a94045f94d7b3"
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.schema, schema_version());
+        let npm = loaded.platforms["linux-x64"].tools[backend]
+            .npm
+            .as_ref()
+            .unwrap();
+        assert_eq!(npm.package, "@antfu/ni");
+        assert_eq!(npm.lock_format, NPM_LOCK_FORMAT);
+        assert_eq!(npm.lock_sha256, expected_sha256);
+        assert_eq!(npm.lockfile.as_bytes(), lockfile.as_bytes());
+
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        let options = &requests[0].options;
+        assert_eq!(options[LOCKED_NPM_PACKAGE_OPTION], "@antfu/ni");
+        assert_eq!(options[LOCKED_NPM_LOCK_FORMAT_OPTION], NPM_LOCK_FORMAT);
+        assert_eq!(options[LOCKED_NPM_LOCK_SHA256_OPTION], expected_sha256);
+        assert_eq!(
+            options[LOCKED_NPM_LOCKFILE_OPTION].as_bytes(),
+            lockfile.as_bytes()
+        );
+    }
+
+    #[test]
+    fn npm_merge_requires_an_installed_graph_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let error = merge_resolved(
+            &path,
+            linux(),
+            &test_dirs(temp.path()),
+            &[(
+                ToolRequest::parse("npm:prettier@3.6.2").unwrap(),
+                ToolVersion::new("npm:prettier", "3.6.2"),
+            )],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("reading npm lock payload"));
+        assert!(error.to_string().contains("aube-lock.yaml"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn npm_merge_rejects_non_utf8_graph_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let installed_lock = dirs
+            .install_path("npm:prettier", "3.6.2")
+            .join(NPM_LOCKFILE_PATH);
+        std::fs::create_dir_all(installed_lock.parent().unwrap()).unwrap();
+        std::fs::write(&installed_lock, [0xff, 0xfe]).unwrap();
+
+        let error = merge_resolved(
+            &path,
+            linux(),
+            &dirs,
+            &[(
+                ToolRequest::parse("npm:prettier@3.6.2").unwrap(),
+                ToolVersion::new("npm:prettier", "3.6.2"),
+            )],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("is not UTF-8"));
+        assert!(!path.exists());
     }
 
     #[test]

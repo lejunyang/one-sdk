@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::backend::aube_host::{self, EmbeddedInstallRequest};
+use crate::backend::aube_host::{
+    self, EmbeddedFrozenInstallRequest, EmbeddedInstallRequest, EmbeddedLockGraphRequest,
+};
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::{Error, Result};
 use crate::inventory::{DynamicToolBin, DynamicToolManifest};
@@ -21,10 +23,22 @@ const METADATA_RUNTIME: &str = "runtime";
 const METADATA_RECEIPT_URL: &str = "artifact_receipt_url";
 const METADATA_RECEIPT_FILE: &str = "artifact_receipt_file";
 const METADATA_RECEIPT_CHECKSUM: &str = "artifact_receipt_checksum";
+const AUBE_LOCKFILE_NAME: &str = "aube-lock.yaml";
+const AUBE_LOCK_FORMAT: &str = "aube-v9";
+
+pub const LOCKED_NPM_PACKAGE_OPTION: &str = "__osdk_npm_package";
+pub const LOCKED_NPM_LOCK_FORMAT_OPTION: &str = "__osdk_npm_lock_format";
+pub const LOCKED_NPM_LOCK_SHA256_OPTION: &str = "__osdk_npm_lock_sha256";
+pub const LOCKED_NPM_LOCKFILE_OPTION: &str = "__osdk_npm_lockfile";
 
 pub struct NpmPackageBackend {
     id: String,
     package: String,
+}
+
+#[derive(Debug)]
+struct LockedNpmGraph<'a> {
+    lockfile: &'a str,
 }
 
 impl NpmPackageBackend {
@@ -100,12 +114,26 @@ impl NpmPackageBackend {
         Ok(BuildPolicy::Packages(packages))
     }
 
-    fn write_project_manifest(project_dir: &Path, build_policy: &BuildPolicy) -> Result<()> {
+    fn write_project_manifest(
+        project_dir: &Path,
+        dependency: Option<(&str, &str)>,
+        build_policy: &BuildPolicy,
+    ) -> Result<()> {
         std::fs::create_dir_all(project_dir).map_err(|error| Error::io(project_dir, error))?;
         let mut manifest = serde_json::json!({
             "name": "osdk-dynamic-npm-tool",
             "private": true
         });
+        if let Some((package, version)) = dependency {
+            manifest["dependencies"] = serde_json::Value::Object(
+                [(
+                    package.to_string(),
+                    serde_json::Value::String(version.to_string()),
+                )]
+                .into_iter()
+                .collect(),
+            );
+        }
         if let BuildPolicy::Packages(packages) = build_policy {
             let allow_builds = packages
                 .iter()
@@ -116,6 +144,123 @@ impl NpmPackageBackend {
         let package_json = project_dir.join("package.json");
         let bytes = serde_json::to_vec_pretty(&manifest)?;
         std::fs::write(&package_json, bytes).map_err(|error| Error::io(&package_json, error))
+    }
+
+    fn locked_graph<'a>(&self, tv: &'a ToolVersion) -> Result<Option<LockedNpmGraph<'a>>> {
+        let values = [
+            tv.options.get(LOCKED_NPM_PACKAGE_OPTION),
+            tv.options.get(LOCKED_NPM_LOCK_FORMAT_OPTION),
+            tv.options.get(LOCKED_NPM_LOCK_SHA256_OPTION),
+            tv.options.get(LOCKED_NPM_LOCKFILE_OPTION),
+        ];
+        if values.iter().all(|value| value.is_none()) {
+            return Ok(None);
+        }
+
+        let required = |key, value: Option<&'a String>| {
+            value.map(String::as_str).ok_or_else(|| {
+                Error::other(format!(
+                    "locked npm graph is missing private option `{key}`"
+                ))
+            })
+        };
+        let package = required(LOCKED_NPM_PACKAGE_OPTION, values[0])?;
+        let format = required(LOCKED_NPM_LOCK_FORMAT_OPTION, values[1])?;
+        let sha256 = required(LOCKED_NPM_LOCK_SHA256_OPTION, values[2])?;
+        let lockfile = required(LOCKED_NPM_LOCKFILE_OPTION, values[3])?;
+
+        if tv.backend != self.id || package != self.package {
+            return Err(Error::other(format!(
+                "locked npm graph identity mismatch: expected {} for package {}, got {} for package {}",
+                self.id, self.package, tv.backend, package
+            )));
+        }
+        if format != AUBE_LOCK_FORMAT {
+            return Err(Error::other(format!(
+                "unsupported locked npm graph format `{format}` for {}; expected {AUBE_LOCK_FORMAT}",
+                self.id
+            )));
+        }
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::other(format!(
+                "locked npm graph for {} has an invalid SHA-256 digest",
+                self.id
+            )));
+        }
+        let actual = pipeline::verify::hash_bytes(lockfile.as_bytes(), pipeline::HashAlgo::Sha256);
+        if actual != sha256 {
+            return Err(Error::ChecksumMismatch {
+                name: format!("locked npm graph for {}", self.id),
+                expected: sha256.to_string(),
+                actual,
+            });
+        }
+
+        Ok(Some(LockedNpmGraph { lockfile }))
+    }
+
+    fn restore_locked_project(
+        &self,
+        project_dir: &Path,
+        tv: &ToolVersion,
+        build_policy: &BuildPolicy,
+        graph: &LockedNpmGraph<'_>,
+    ) -> Result<()> {
+        Self::write_project_manifest(
+            project_dir,
+            Some((&self.package, &tv.version)),
+            build_policy,
+        )?;
+        let lockfile_path = project_dir.join(AUBE_LOCKFILE_NAME);
+        std::fs::write(&lockfile_path, graph.lockfile.as_bytes())
+            .map_err(|error| Error::io(lockfile_path, error))
+    }
+
+    pub async fn prepare_lock_graph(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<PathBuf> {
+        if tv.backend != self.id {
+            return Err(Error::other(format!(
+                "cannot prepare npm lock graph for {} using resolved tool {}",
+                self.id, tv.backend
+            )));
+        }
+        let lock_path = ctx
+            .dirs
+            .lock_dir(self.id())
+            .join(format!("{}.lock", tv.version));
+        let _lock = crate::lock::FileLock::acquire(lock_path)?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let source = sources.first().ok_or_else(|| Error::NoUsableSource {
+            tool: self.id().to_string(),
+            tried: 0,
+        })?;
+        let project_dir = self.project_dir(ctx, &tv.version);
+        let build_policy = Self::build_policy(tv)?;
+        Self::write_project_manifest(
+            &project_dir,
+            Some((&self.package, &tv.version)),
+            &build_policy,
+        )?;
+        Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
+        aube_host::prepare_lock_graph(EmbeddedLockGraphRequest {
+            project_dir: &project_dir,
+            cache_dir: self.aube_cache_dir(ctx, &tv.version),
+            store_dir: self.aube_store_dir(ctx, &tv.version),
+            node_bin_dir: managed_node_bin_dir(ctx)?,
+            offline: ctx.config.settings.offline,
+        })
+        .await?;
+        let lockfile_path = project_dir.join(AUBE_LOCKFILE_NAME);
+        if !lockfile_path.is_file() {
+            return Err(Error::other(format!(
+                "aube did not produce a lock graph for {}@{}",
+                self.package, tv.version
+            )));
+        }
+        Ok(lockfile_path)
     }
 
     fn write_project_npmrc(project_dir: &Path, url: Option<&str>) -> Result<()> {
@@ -236,14 +381,31 @@ impl Backend for NpmPackageBackend {
         if install_root.join(".osdk-complete").is_file() {
             return Ok(());
         }
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let dist = crate::npm::resolve_dist(ctx, &sources, &self.package, &tv.version).await?;
-        if dist.checksum.is_none() {
+        let locked_graph = self.locked_graph(tv)?;
+        let locked_receipt = if locked_graph.is_some() {
+            pipeline::locked_artifact(tv)?
+        } else {
+            None
+        };
+        if ctx.config.settings.offline && locked_graph.is_none() {
             return Err(Error::other(format!(
-                "npm package {}@{} has no supported SRI checksum",
-                self.package, tv.version
+                "cannot install {}@{} offline without a locked npm dependency graph; run `osdk lock` online first",
+                self.id, tv.version
             )));
         }
+        let unlocked_resolution = if locked_graph.is_none() {
+            let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+            let dist = crate::npm::resolve_dist(ctx, &sources, &self.package, &tv.version).await?;
+            if dist.checksum.is_none() {
+                return Err(Error::other(format!(
+                    "npm package {}@{} has no supported SRI checksum",
+                    self.package, tv.version
+                )));
+            }
+            Some((sources, dist))
+        } else {
+            None
+        };
         if install_root.exists() {
             let _ = std::fs::remove_dir_all(&install_root);
         }
@@ -251,45 +413,71 @@ impl Backend for NpmPackageBackend {
 
         let build_policy = Self::build_policy(tv)?;
         let node_bin_dir = managed_node_bin_dir(ctx)?;
-        let package_spec = self.package_spec(tv);
-        let mut last_error = None;
-        let mut selected_registry = None;
-        for source in &sources {
-            if install_root.exists() {
-                let _ = std::fs::remove_dir_all(&install_root);
-            }
-            std::fs::create_dir_all(&install_root)
-                .map_err(|error| Error::io(&install_root, error))?;
-            Self::write_project_manifest(&project_dir, &build_policy)?;
-            Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
-            let request = EmbeddedInstallRequest {
+        let receipt = if let Some(graph) = locked_graph {
+            self.restore_locked_project(&project_dir, tv, &build_policy, &graph)?;
+            Self::write_project_npmrc(&project_dir, None)?;
+            let request = EmbeddedFrozenInstallRequest {
                 project_dir: &project_dir,
-                packages: std::slice::from_ref(&package_spec),
                 cache_dir: self.aube_cache_dir(ctx, &tv.version),
                 store_dir: self.aube_store_dir(ctx, &tv.version),
-                node_bin_dir: node_bin_dir.clone(),
+                node_bin_dir,
                 scripts_enabled: !matches!(build_policy, BuildPolicy::Deny),
                 dangerously_allow_all_builds: matches!(build_policy, BuildPolicy::AllowAll),
                 offline: ctx.config.settings.offline,
             };
-            match aube_host::install_packages(request).await {
-                Ok(()) => {
-                    last_error = None;
-                    selected_registry = Some(source.download_url.clone());
-                    break;
+            if let Err(error) = aube_host::install_frozen(request).await {
+                let _ = std::fs::remove_dir_all(&install_root);
+                return Err(error);
+            }
+            locked_receipt
+        } else {
+            let (sources, dist) = unlocked_resolution
+                .expect("unlocked npm resolution is prepared before mutating the install root");
+            let package_spec = self.package_spec(tv);
+            let mut last_error = None;
+            let mut selected_registry = None;
+            for source in &sources {
+                if install_root.exists() {
+                    let _ = std::fs::remove_dir_all(&install_root);
                 }
-                Err(error) => {
-                    last_error = Some(error);
-                    if ctx.config.settings.offline {
+                std::fs::create_dir_all(&install_root)
+                    .map_err(|error| Error::io(&install_root, error))?;
+                Self::write_project_manifest(&project_dir, None, &build_policy)?;
+                Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
+                let request = EmbeddedInstallRequest {
+                    project_dir: &project_dir,
+                    packages: std::slice::from_ref(&package_spec),
+                    cache_dir: self.aube_cache_dir(ctx, &tv.version),
+                    store_dir: self.aube_store_dir(ctx, &tv.version),
+                    node_bin_dir: node_bin_dir.clone(),
+                    scripts_enabled: !matches!(build_policy, BuildPolicy::Deny),
+                    dangerously_allow_all_builds: matches!(build_policy, BuildPolicy::AllowAll),
+                    offline: false,
+                };
+                match aube_host::install_packages(request).await {
+                    Ok(()) => {
+                        last_error = None;
+                        selected_registry = Some(source.download_url.clone());
                         break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
                     }
                 }
             }
-        }
-        if let Some(error) = last_error {
-            let _ = std::fs::remove_dir_all(&install_root);
-            return Err(error);
-        }
+            if let Some(error) = last_error {
+                let _ = std::fs::remove_dir_all(&install_root);
+                return Err(error);
+            }
+            Some(pipeline::ArtifactReceipt {
+                // Root package identity reported by registries. The complete,
+                // integrity-checked transitive graph remains in aube-lock.yaml.
+                url: selected_registry.unwrap_or_else(|| dist.urls[0].clone()),
+                file_name: format!("{}-{}.tgz", self.package.replace('/', "__"), tv.version),
+                checksum: dist.checksum.as_ref().map(format_checksum),
+                evidence: Vec::new(),
+            })
+        };
 
         let bin_dir = match Self::validate_install_layout(&project_dir, &self.package) {
             Ok(bin_dir) => bin_dir,
@@ -298,15 +486,7 @@ impl Backend for NpmPackageBackend {
                 return Err(error);
             }
         };
-        let receipt = pipeline::ArtifactReceipt {
-            // Root package identity reported by registries. The complete,
-            // integrity-checked transitive graph remains in aube-lock.yaml.
-            url: selected_registry.unwrap_or_else(|| dist.urls[0].clone()),
-            file_name: format!("{}-{}.tgz", self.package.replace('/', "__"), tv.version),
-            checksum: dist.checksum.as_ref().map(format_checksum),
-            evidence: Vec::new(),
-        };
-        let manifest = match self.build_manifest(ctx, tv, &bin_dir, Some(&receipt)) {
+        let manifest = match self.build_manifest(ctx, tv, &bin_dir, receipt.as_ref()) {
             Ok(manifest) => manifest,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&install_root);
@@ -314,10 +494,12 @@ impl Backend for NpmPackageBackend {
             }
         };
         manifest.write_atomic(&install_root)?;
-        let receipt_path = install_root.join(".osdk-artifact.json");
-        let receipt_bytes = serde_json::to_vec_pretty(&receipt)?;
-        std::fs::write(&receipt_path, receipt_bytes)
-            .map_err(|error| Error::io(&receipt_path, error))?;
+        if let Some(receipt) = &receipt {
+            let receipt_path = install_root.join(".osdk-artifact.json");
+            let receipt_bytes = serde_json::to_vec_pretty(receipt)?;
+            std::fs::write(&receipt_path, receipt_bytes)
+                .map_err(|error| Error::io(&receipt_path, error))?;
+        }
         std::fs::write(install_root.join(".osdk-complete"), b"")
             .map_err(|error| Error::io(install_root.join(".osdk-complete"), error))?;
         Ok(())
@@ -589,6 +771,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         NpmPackageBackend::write_project_manifest(
             temporary.path(),
+            None,
             &BuildPolicy::Packages(vec!["esbuild".into(), "sharp".into()]),
         )
         .unwrap();
@@ -598,6 +781,177 @@ mod tests {
         assert_eq!(manifest["aube"]["allowBuilds"]["esbuild"], true);
         assert_eq!(manifest["aube"]["allowBuilds"]["sharp"], true);
         assert!(manifest.get("dependencies").is_none());
+    }
+
+    fn locked_version(backend: &str, package: &str, version: &str, lockfile: &str) -> ToolVersion {
+        let mut tool = ToolVersion::new(backend, version);
+        tool.options
+            .insert(LOCKED_NPM_PACKAGE_OPTION.into(), package.into());
+        tool.options.insert(
+            LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
+            AUBE_LOCK_FORMAT.into(),
+        );
+        tool.options.insert(
+            LOCKED_NPM_LOCK_SHA256_OPTION.into(),
+            pipeline::verify::hash_bytes(lockfile.as_bytes(), pipeline::HashAlgo::Sha256),
+        );
+        tool.options
+            .insert(LOCKED_NPM_LOCKFILE_OPTION.into(), lockfile.into());
+        tool
+    }
+
+    #[test]
+    fn locked_graph_validates_identity_format_and_exact_bytes() {
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let lockfile = "lockfileVersion: '9.0'\n# preserve trailing newline\n";
+        let version = locked_version("npm:prettier", "prettier", "3.6.2", lockfile);
+        assert_eq!(
+            backend.locked_graph(&version).unwrap().unwrap().lockfile,
+            lockfile
+        );
+
+        let mut mismatched_package = version.clone();
+        mismatched_package
+            .options
+            .insert(LOCKED_NPM_PACKAGE_OPTION.into(), "typescript".into());
+        assert!(backend
+            .locked_graph(&mismatched_package)
+            .unwrap_err()
+            .to_string()
+            .contains("identity mismatch"));
+
+        let mut unsupported_format = version.clone();
+        unsupported_format
+            .options
+            .insert(LOCKED_NPM_LOCK_FORMAT_OPTION.into(), "pnpm-v8".into());
+        assert!(backend
+            .locked_graph(&unsupported_format)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported locked npm graph format"));
+
+        let mut tampered = version;
+        tampered.options.insert(
+            LOCKED_NPM_LOCKFILE_OPTION.into(),
+            "lockfileVersion: '9.0'\n# changed\n".into(),
+        );
+        assert!(matches!(
+            backend.locked_graph(&tampered),
+            Err(Error::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn locked_graph_rejects_partial_and_noncanonical_digests() {
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let mut partial = ToolVersion::new("npm:prettier", "3.6.2");
+        partial
+            .options
+            .insert(LOCKED_NPM_PACKAGE_OPTION.into(), "prettier".into());
+        assert!(backend
+            .locked_graph(&partial)
+            .unwrap_err()
+            .to_string()
+            .contains(LOCKED_NPM_LOCK_FORMAT_OPTION));
+
+        let lockfile = "lockfileVersion: '9.0'\n";
+        let mut uppercase = locked_version("npm:prettier", "prettier", "3.6.2", lockfile);
+        let digest = uppercase.options[LOCKED_NPM_LOCK_SHA256_OPTION].to_uppercase();
+        uppercase
+            .options
+            .insert(LOCKED_NPM_LOCK_SHA256_OPTION.into(), digest);
+        assert!(backend
+            .locked_graph(&uppercase)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid SHA-256"));
+    }
+
+    #[test]
+    fn restoring_locked_project_preserves_lock_bytes_and_exact_manifest_policy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let backend = NpmPackageBackend::from_id("npm:@antfu/ni").unwrap();
+        let lockfile = "lockfileVersion: '9.0'\nimporters: {}\n";
+        let version = locked_version("npm:@antfu/ni", "@antfu/ni", "0.21.12", lockfile);
+        let graph = backend.locked_graph(&version).unwrap().unwrap();
+        backend
+            .restore_locked_project(
+                temporary.path(),
+                &version,
+                &BuildPolicy::Packages(vec!["esbuild".into()]),
+                &graph,
+            )
+            .unwrap();
+
+        let package_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path().join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(package_json["dependencies"]["@antfu/ni"], "0.21.12");
+        assert_eq!(package_json["aube"]["allowBuilds"]["esbuild"], true);
+        assert_eq!(
+            std::fs::read(temporary.path().join(AUBE_LOCKFILE_NAME)).unwrap(),
+            lockfile.as_bytes()
+        );
+    }
+
+    fn offline_test_ctx(root: &Path) -> Ctx {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let mut settings = crate::config::Settings::default();
+        settings.offline = true;
+        Ctx {
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            dirs,
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings,
+                sources: Default::default(),
+                tools: Default::default(),
+                tool_configs: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_install_without_graph_fails_before_metadata_or_node_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let version = ToolVersion::new("npm:prettier", "3.6.2");
+
+        let error = backend
+            .install(&InstallCtx { ctx: &ctx }, &version)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("without a locked npm dependency graph"));
+        assert!(!backend.install_root(&ctx, &version.version).exists());
+    }
+
+    #[tokio::test]
+    async fn already_installed_offline_tool_does_not_require_graph() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let version = ToolVersion::new("npm:prettier", "3.6.2");
+        let install_root = backend.install_root(&ctx, &version.version);
+        std::fs::create_dir_all(&install_root).unwrap();
+        std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+
+        backend
+            .install(&InstallCtx { ctx: &ctx }, &version)
+            .await
+            .unwrap();
     }
 
     #[test]

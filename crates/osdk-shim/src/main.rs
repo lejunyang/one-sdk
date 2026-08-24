@@ -272,7 +272,6 @@ fn package_manager_for_backend(
         "yarn" => matches!(executable_alias, "yarn" | "yarnpkg"),
         "bun" => matches!(executable_alias, "bun" | "bunx"),
         "deno" => executable_alias == "deno",
-        _ if backend.starts_with("npm:") => true,
         _ => false,
     };
     belongs_to_manager
