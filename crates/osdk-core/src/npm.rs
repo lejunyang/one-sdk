@@ -28,6 +28,7 @@ struct Dist {
 }
 
 /// Resolved distribution for one package version.
+#[derive(Debug, Clone)]
 pub struct NpmDist {
     pub urls: Vec<String>,
     pub checksum: Option<Checksum>,
@@ -51,7 +52,8 @@ pub async fn resolve_dist(
 ) -> Result<NpmDist> {
     let mut last_err: Option<Error> = None;
     let mut urls = Vec::new();
-    let mut checksum = None;
+    let mut checksum: Option<Checksum> = None;
+    let mut checksum_source: Option<String> = None;
     for source in sources {
         let url = package_url(&source.download_url, package, Some(version));
         match http::get_cached_json::<VersionDoc>(ctx, &url).await {
@@ -65,8 +67,21 @@ pub async fn resolve_dist(
                 }
                 let source_checksum = crate::pipeline::verify::parse_sri(&doc.dist.integrity);
                 let has_source_checksum = source_checksum.is_some();
-                if checksum.is_none() {
-                    checksum = source_checksum;
+                if let Some(source_checksum) = source_checksum {
+                    if let Some(expected) = &checksum {
+                        if expected.algo != source_checksum.algo
+                            || expected.hex != source_checksum.hex
+                        {
+                            return Err(Error::other(format!(
+                                "npm registry integrity mismatch for {package}@{version}: {} disagrees with {}",
+                                source.id,
+                                checksum_source.as_deref().unwrap_or("another source")
+                            )));
+                        }
+                    } else {
+                        checksum_source = Some(source.id.clone());
+                        checksum = Some(source_checksum);
+                    }
                 }
                 if !has_source_checksum && !doc.dist.shasum.is_empty() {
                     tracing::debug!(
@@ -221,6 +236,31 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    fn test_ctx(root: &std::path::Path) -> Ctx {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                tool_configs: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store)),
+            show_progress: false,
+        }
+    }
+
     #[test]
     fn builds_scoped_registry_urls() {
         assert_eq!(
@@ -314,6 +354,52 @@ mod tests {
             ]
         );
         assert!(dist.checksum.is_some());
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_integrity_disagreement_between_registries() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let integrity = if index == 0 {
+                    "sha512-AQID"
+                } else {
+                    "sha512-BAUG"
+                };
+                let body = format!(
+                    r#"{{"dist":{{"tarball":"https://example.invalid/tool.tgz","integrity":"{integrity}"}}}}"#
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let sources = vec![
+            Source::official("first", &format!("http://{address}/first")),
+            Source::mirror("second", &format!("http://{address}/second"), 10),
+        ];
+        let error = resolve_dist(&ctx, &sources, "tool", "1.0.0")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("integrity mismatch"));
         server.join().unwrap();
     }
 

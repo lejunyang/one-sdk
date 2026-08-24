@@ -39,6 +39,7 @@ pub struct InstallPlan {
     pub subdir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checksum {
     pub algo: HashAlgo,
     pub hex: String,

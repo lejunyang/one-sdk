@@ -446,8 +446,26 @@ async fn install_requests(
         }
         apply_source_override(app, &req.backend);
     }
+    // Package-backed JavaScript tools must never race their managed Node
+    // dependency. Resolve and install Node before scheduling the remaining
+    // independent requests concurrently.
+    let mut node_requests = Vec::new();
+    let mut remaining_requests = Vec::new();
+    for request in requests {
+        if request.backend == "node" {
+            node_requests.push(request);
+        } else {
+            remaining_requests.push(request);
+        }
+    }
+    let mut resolved = Vec::new();
+    for request in node_requests {
+        let (backend, version) = install_one_without_shims(app, &request).await?;
+        generate_shims_for(app, backend.as_ref(), &version)?;
+        resolved.push((request, version));
+    }
     let jobs = app.ctx.config.settings.jobs.max(1);
-    let installed = stream::iter(requests.into_iter().map(|req| {
+    let installed = stream::iter(remaining_requests.into_iter().map(|req| {
         let app_ref: &App = app;
         async move {
             let installed = install_one_without_shims(app_ref, &req).await?;
@@ -457,7 +475,6 @@ async fn install_requests(
     .buffer_unordered(jobs)
     .try_collect::<Vec<_>>()
     .await?;
-    let mut resolved = Vec::with_capacity(installed.len());
     for (request, (backend, version)) in installed {
         generate_shims_for(app, backend.as_ref(), &version)?;
         resolved.push((request, version));

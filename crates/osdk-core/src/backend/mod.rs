@@ -15,6 +15,7 @@ use crate::source::Source;
 use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
+pub mod aube_host;
 pub mod bun;
 #[cfg(test)]
 mod contract;
@@ -26,6 +27,7 @@ pub mod java;
 pub mod jvm_tools;
 pub mod node;
 pub mod npm_cli;
+pub mod npm_package;
 pub mod pnpm;
 pub mod python;
 mod python_catalog;

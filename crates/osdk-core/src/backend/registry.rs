@@ -1,15 +1,10 @@
 //! Backend registry: maps tool ids / aliases to backend instances.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
-
-use async_trait::async_trait;
 
 use crate::dirs::Dirs;
 use crate::error::{Error, Result};
-use crate::source::Source;
-use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 use super::Backend;
 
@@ -76,7 +71,7 @@ impl Registry {
             return Err(Error::UnknownBackend(name.to_string()));
         }
         if name.starts_with("npm:") {
-            if let Some(package) = NpmPackageBackend::from_id(name) {
+            if let Some(package) = crate::backend::npm_package::NpmPackageBackend::from_id(name) {
                 return Ok(Arc::new(package));
             }
             return Err(Error::UnknownBackend(name.to_string()));
@@ -109,92 +104,6 @@ fn insert_name(by_name: &mut HashMap<String, usize>, name: &str, index: usize) -
         )));
     }
     Ok(())
-}
-
-struct NpmPackageBackend {
-    id: String,
-    package: String,
-}
-
-impl NpmPackageBackend {
-    fn from_id(id: &str) -> Option<Self> {
-        let package = id.strip_prefix("npm:")?;
-        validate_npm_package_name(package)?;
-        Some(Self {
-            id: format!("npm:{package}"),
-            package: package.to_string(),
-        })
-    }
-}
-
-#[async_trait]
-impl Backend for NpmPackageBackend {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn default_sources(&self) -> Vec<Source> {
-        crate::backend::npm_cli::NpmBackend.default_sources()
-    }
-
-    fn probe_url(&self, ctx: &super::Ctx, source: &Source) -> Option<String> {
-        crate::backend::npm_cli::NpmBackend.probe_url(ctx, source)
-    }
-
-    async fn list_remote_versions(&self, ctx: &super::Ctx) -> Result<Vec<VersionInfo>> {
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let versions = crate::npm::list_versions(ctx, &sources, &self.package).await?;
-        Ok(versions
-            .into_iter()
-            .map(|version| VersionInfo {
-                stable: !version.contains('-'),
-                version,
-                lts: None,
-            })
-            .collect())
-    }
-
-    async fn resolve_version(&self, ctx: &super::Ctx, req: &ToolRequest) -> Result<ToolVersion> {
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req).await
-    }
-
-    async fn install(&self, _ctx: &super::InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
-        Err(Error::other(format!(
-            "dynamic npm package installs are not implemented yet for `{}`",
-            self.id
-        )))
-    }
-
-    fn bin_paths(&self, _ctx: &super::Ctx, _tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        Ok(vec![])
-    }
-
-    fn bin_names(&self, _ctx: &super::Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-}
-
-fn validate_npm_package_name(package: &str) -> Option<()> {
-    if let Some(rest) = package.strip_prefix('@') {
-        let (scope, name) = rest.split_once('/')?;
-        if !valid_npm_segment(scope) || !valid_npm_segment(name) || name.contains('/') {
-            return None;
-        }
-        return Some(());
-    }
-    if !valid_npm_segment(package) {
-        return None;
-    }
-    Some(())
-}
-
-fn valid_npm_segment(value: &str) -> bool {
-    !value.is_empty()
-        && !value.contains('/')
-        && !value.contains('\\')
-        && !value.contains('@')
-        && !value.chars().any(char::is_whitespace)
 }
 
 #[cfg(test)]
