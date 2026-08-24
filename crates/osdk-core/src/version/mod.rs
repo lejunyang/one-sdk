@@ -109,6 +109,9 @@ impl ToolRequest {
     /// Parse `node`, `node@20`, `node@lts`, `java@temurin-21` (distribution
     /// carried as an option is backend-specific; here we keep the raw spec).
     pub fn parse(s: &str) -> Result<ToolRequest> {
+        if let Some(request) = parse_npm_package_request(s)? {
+            return Ok(request);
+        }
         let (backend, ver) = match s.split_once('@') {
             Some((b, v)) => (b.trim(), v.trim()),
             None => (s.trim(), ""),
@@ -122,6 +125,57 @@ impl ToolRequest {
             options: BTreeMap::new(),
         })
     }
+}
+
+fn parse_npm_package_request(input: &str) -> Result<Option<ToolRequest>> {
+    let raw = input.trim();
+    let Some(rest) = raw.strip_prefix("npm:") else {
+        return Ok(None);
+    };
+    let (package, version) = split_npm_package_request(rest)
+        .ok_or_else(|| Error::other(format!("invalid tool request `{input}`")))?;
+    Ok(Some(ToolRequest {
+        backend: format!("npm:{package}"),
+        spec: VersionSpec::parse(version.unwrap_or("")),
+        options: BTreeMap::new(),
+    }))
+}
+
+fn split_npm_package_request(input: &str) -> Option<(String, Option<&str>)> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    if let Some(rest) = input.strip_prefix('@') {
+        let (scope, package_and_version) = rest.split_once('/')?;
+        if !valid_npm_name_part(scope) {
+            return None;
+        }
+        let (name, version) = match package_and_version.split_once('@') {
+            Some((name, version)) => (name, Some(version.trim())),
+            None => (package_and_version, None),
+        };
+        if !valid_npm_name_part(name) {
+            return None;
+        }
+        return Some((format!("@{scope}/{name}"), version));
+    }
+    let (name, version) = match input.split_once('@') {
+        Some((name, version)) => (name.trim(), Some(version.trim())),
+        None => (input, None),
+    };
+    if !valid_npm_name_part(name) {
+        return None;
+    }
+    Some((name.to_string(), version))
+}
+
+fn valid_npm_name_part(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('@')
+        && !value.chars().any(char::is_whitespace)
 }
 
 /// A resolved concrete version, ready to install/activate.
@@ -311,6 +365,39 @@ mod tests {
         let r = ToolRequest::parse("go").unwrap();
         assert_eq!(r.backend, "go");
         assert_eq!(r.spec, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn parse_namespaced_npm_tool_requests() {
+        let r = ToolRequest::parse("npm:prettier@3").unwrap();
+        assert_eq!(r.backend, "npm:prettier");
+        assert_eq!(r.spec, VersionSpec::Prefix("3".into()));
+
+        let r = ToolRequest::parse("npm:@antfu/ni@0.21.12").unwrap();
+        assert_eq!(r.backend, "npm:@antfu/ni");
+        assert_eq!(r.spec, VersionSpec::Exact("0.21.12".into()));
+
+        let r = ToolRequest::parse("npm:@antfu/ni").unwrap();
+        assert_eq!(r.backend, "npm:@antfu/ni");
+        assert_eq!(r.spec, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn namespaced_npm_parser_keeps_bare_npm_as_the_cli_backend() {
+        let cli = ToolRequest::parse("npm").unwrap();
+        assert_eq!(cli.backend, "npm");
+        assert_eq!(cli.spec, VersionSpec::Latest);
+
+        let package = ToolRequest::parse("npm:npm").unwrap();
+        assert_eq!(package.backend, "npm:npm");
+        assert_eq!(package.spec, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn rejects_invalid_namespaced_npm_requests() {
+        assert!(ToolRequest::parse("npm:").is_err());
+        assert!(ToolRequest::parse("npm:@antfu").is_err());
+        assert!(ToolRequest::parse("npm:@antfu/ni/extra").is_err());
     }
 
     fn vi(v: &str, stable: bool, lts: Option<&str>) -> VersionInfo {
