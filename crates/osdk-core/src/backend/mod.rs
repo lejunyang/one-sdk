@@ -127,8 +127,8 @@ pub trait Backend: Send + Sync {
                 if name.starts_with('.') {
                     continue;
                 }
-                if crate::pipeline::is_installed(&ctx.dirs, self.id(), &name) {
-                    out.push(name);
+                if entry.path().join(".osdk-complete").is_file() {
+                    out.push(crate::dirs::decode_version_component(&name));
                 }
             }
         }
@@ -281,5 +281,45 @@ mod tests {
         let tv = MockBackend.resolve_version(&ctx, &req).await.unwrap();
         assert_eq!(tv.version, "1.2.3");
         assert_eq!(tv.options.get("tag").map(|s| s.as_str()), Some("20240224"));
+    }
+
+    #[test]
+    fn list_installed_decodes_encoded_versions_and_preserves_legacy_names() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        for version in ["1.2.3", "release/2026", "Release-2026"] {
+            let install = dirs.install_path("mock", version);
+            std::fs::create_dir_all(&install).unwrap();
+            std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        }
+        let legacy = dirs.installs.join("mock").join("release%2F2026");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(".osdk-complete"), b"").unwrap();
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                tool_configs: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+        };
+
+        assert_eq!(
+            MockBackend.list_installed(&ctx).unwrap(),
+            vec!["1.2.3", "Release-2026", "release%2F2026", "release/2026"]
+        );
     }
 }

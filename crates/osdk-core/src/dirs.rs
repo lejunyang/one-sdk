@@ -163,53 +163,87 @@ impl Dirs {
     }
 }
 
+const ENCODED_VERSION_PREFIX: &str = "~v1~";
+
 /// Encode a version label as one collision-resistant, portable filesystem
-/// component. Common lowercase semver labels remain readable; every other UTF-8
-/// byte is percent-encoded. The escape marker is encoded too, so distinct input
-/// labels cannot alias each other.
+/// component. Common lowercase semver labels remain readable. Other labels use
+/// a self-identifying prefix followed by percent-encoded UTF-8 bytes, avoiding
+/// ambiguity with legacy names that contain literal percent escapes.
 pub fn sanitize_version_component(version: &str) -> String {
-    if version.is_empty() {
-        return "%EMPTY".to_string();
+    let portable = !version.is_empty()
+        && version.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'-' | b'_' | b'+')
+        })
+        && version != "."
+        && version != ".."
+        && !version.ends_with('.')
+        && !is_windows_reserved_name(version);
+    if portable {
+        return version.to_string();
     }
 
-    let mut out = String::with_capacity(version.len());
+    let mut out = String::with_capacity(ENCODED_VERSION_PREFIX.len() + version.len() * 3);
+    out.push_str(ENCODED_VERSION_PREFIX);
     for byte in version.bytes() {
-        if byte.is_ascii_lowercase()
-            || byte.is_ascii_digit()
-            || matches!(byte, b'.' | b'-' | b'_' | b'+')
-        {
-            out.push(char::from(byte));
-        } else {
-            use std::fmt::Write as _;
-            write!(&mut out, "%{byte:02X}").expect("writing to String cannot fail");
-        }
+        use std::fmt::Write as _;
+        write!(&mut out, "%{byte:02X}").expect("writing to String cannot fail");
     }
+    out
+}
 
-    // Dot components, trailing dots, and DOS device basenames are not portable
-    // Windows filenames. Escape their first or final byte without introducing
-    // aliases because literal '%' bytes were encoded above.
-    if out == "." {
-        return "%2E".to_string();
+/// Decode a component produced by [`sanitize_version_component`]. Unprefixed,
+/// malformed, non-UTF-8, and non-canonical values are treated as legacy names
+/// and returned unchanged.
+pub fn decode_version_component(component: &str) -> String {
+    let Some(encoded) = component.strip_prefix(ENCODED_VERSION_PREFIX) else {
+        return component.to_string();
+    };
+    if encoded.len() % 3 != 0 {
+        return component.to_string();
     }
-    if out == ".." {
-        return "%2E%2E".to_string();
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len() / 3);
+    for chunk in bytes.as_chunks::<3>().0 {
+        if chunk[0] != b'%' {
+            return component.to_string();
+        }
+        let Some(high) = hex_value(chunk[1]) else {
+            return component.to_string();
+        };
+        let Some(low) = hex_value(chunk[2]) else {
+            return component.to_string();
+        };
+        decoded.push(high * 16 + low);
     }
-    if out.ends_with('.') {
-        out.pop();
-        out.push_str("%2E");
+    let Ok(decoded) = String::from_utf8(decoded) else {
+        return component.to_string();
+    };
+    if sanitize_version_component(&decoded) == component {
+        decoded
+    } else {
+        component.to_string()
     }
-    let stem = out.split('.').next().unwrap_or_default();
-    let reserved = matches!(stem, "con" | "prn" | "aux" | "nul")
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_windows_reserved_name(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or_default();
+    matches!(stem, "con" | "prn" | "aux" | "nul")
         || stem.strip_prefix("com").is_some_and(|suffix| {
             matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
         })
         || stem.strip_prefix("lpt").is_some_and(|suffix| {
             matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-        });
-    if reserved {
-        out.replace_range(..1, "%63");
-    }
-    out
+        })
 }
 
 pub(crate) fn create_dir_all(p: &Path) -> Result<()> {
@@ -273,11 +307,9 @@ mod tests {
         assert_eq!(sanitize_version_component("20.1.0"), "20.1.0");
         assert_eq!(
             sanitize_version_component("../../victim"),
-            "..%2F..%2Fvictim"
+            "~v1~%2E%2E%2F%2E%2E%2F%76%69%63%74%69%6D"
         );
-        assert_eq!(sanitize_version_component("a\\b/c"), "a%5Cb%2Fc");
-        assert_eq!(sanitize_version_component(".."), "%2E%2E");
-        assert_eq!(sanitize_version_component(""), "%EMPTY");
+        assert_eq!(sanitize_version_component(".."), "~v1~%2E%2E");
     }
 
     #[test]
@@ -298,5 +330,26 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(encoded.len(), values.len());
         assert!(encoded.iter().all(|value| !value.contains(['/', '\\'])));
+    }
+
+    #[test]
+    fn version_encoding_round_trips_without_literal_percent_ambiguity() {
+        for version in [
+            "20.1.0",
+            "release/2026",
+            "Release-2026",
+            r"release\2026",
+            "release%2F2026",
+            "版本/二〇二六",
+            "",
+        ] {
+            assert_eq!(
+                decode_version_component(&sanitize_version_component(version)),
+                version
+            );
+        }
+        for legacy in ["release%2F2026", "~v1~broken", "~v1~%FF", "~v1~%2f"] {
+            assert_eq!(decode_version_component(legacy), legacy);
+        }
     }
 }
