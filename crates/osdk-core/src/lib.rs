@@ -21,6 +21,7 @@ pub mod dirs;
 pub mod error;
 pub mod http;
 pub mod i18n;
+pub mod inventory;
 pub mod lock;
 pub mod model;
 pub mod npm;
