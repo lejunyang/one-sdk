@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/lejunyang/one-sdk"
-rust-version = "1.88"
+rust-version = "1.91"
 
 [workspace.dependencies]
 # CLI
@@ -70,6 +70,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ui
 indicatif = "0.17"
 once_cell = "1"
+aube = { version = "2.1.0", default-features = false, features = ["rustls"] }
 
 [profile.release]
 opt-level = 3

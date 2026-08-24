@@ -84,7 +84,7 @@ through another trusted channel.
 
 ## Build from source
 
-Rust 1.88 or newer is required:
+Rust 1.91.1 or newer is required; the repository pins Rust 1.98.0 by default:
 
 ```bash
 git clone https://github.com/lejunyang/one-sdk.git

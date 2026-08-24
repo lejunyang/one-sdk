@@ -91,7 +91,7 @@ PowerShell 参数为 `-Version`、`-InstallDir`、`-Repository`、`-BaseUrl`、
 
 ## 从源码构建
 
-需要 Rust 1.88 或更新版本：
+需要 Rust 1.91.1 或更新版本；仓库默认固定 Rust 1.98.0：
 
 ```bash
 git clone https://github.com/lejunyang/one-sdk.git
