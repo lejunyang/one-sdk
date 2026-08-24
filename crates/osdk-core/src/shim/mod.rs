@@ -10,13 +10,15 @@
 //!   extension-less bash wrapper `shims/<name>` so cmd.exe/PowerShell and
 //!   Git-Bash both work, each invoking `osdk-shim.exe`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::backend::{Backend, Ctx};
 use crate::dirs::{create_dir_all, Dirs};
 use crate::error::{Error, Result};
+use crate::inventory::{self, BinOwnerCandidate, DynamicToolManifest, ScanOptions, ScanReport};
 use crate::version::ToolVersion;
+use crate::version::{ToolRequest, VersionSpec};
 
 /// Executable names that should route through the shim for an installed
 /// backend version. These are deliberately separate from backend ownership:
@@ -39,6 +41,175 @@ pub fn routed_bin_names(
         }
     }
     Ok(names.into_iter().collect())
+}
+
+/// Scan all persisted dynamic-tool manifests under the installs tree.
+pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
+    inventory::scan_installs(&ctx.dirs.installs, &ScanOptions::default())
+}
+
+/// Dynamic backend ids referenced by the current config, plus any ids that an
+/// installed manifest says can be addressed through one of its recorded
+/// `config_keys`.
+pub fn configured_dynamic_ids(ctx: &Ctx, report: &ScanReport) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    ids.extend(
+        ctx.config
+            .tools
+            .keys()
+            .filter_map(|key| inventory::canonical_dynamic_id(key).ok()),
+    );
+
+    let configured_values = ctx
+        .config
+        .tools
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let config_keys = report
+        .installs
+        .iter()
+        .flat_map(|install| install.manifest.config_keys.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !config_keys.is_empty() {
+        ids.extend(inventory::configured_dynamic_ids(
+            configured_values.iter().copied(),
+            &config_keys,
+        ));
+    }
+    ids.into_iter().collect()
+}
+
+/// Dynamic backend ids relevant to lifecycle operations that survive restarts:
+/// configured ids plus anything found on disk through inventory scanning.
+pub fn configured_and_installed_dynamic_ids(ctx: &Ctx, report: &ScanReport) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    ids.extend(configured_dynamic_ids(ctx, report));
+    ids.extend(report.installed_ids());
+    ids.into_iter().collect()
+}
+
+/// Resolve a dynamic backend request from the merged config, supporting both a
+/// direct dynamic backend key (`"npm:@scope/pkg" = "1.2.3"`) and an indirection
+/// key whose value is the dynamic request (`tool.ni = "npm:@scope/pkg@1.2.3"`).
+pub fn dynamic_request_from_config(ctx: &Ctx, backend_id: &str) -> Option<ToolRequest> {
+    if !backend_id.contains(':') {
+        return None;
+    }
+    for (key, value) in &ctx.config.tools {
+        if inventory::canonical_dynamic_id(key).ok().as_deref() == Some(backend_id) {
+            return Some(ToolRequest {
+                backend: backend_id.to_string(),
+                spec: VersionSpec::parse(value),
+                options: ctx
+                    .config
+                    .tool_configs
+                    .get(key)
+                    .map(|entry| entry.to_request_options())
+                    .unwrap_or_default(),
+            });
+        }
+        if let Ok(request) = ToolRequest::parse(value) {
+            if request.backend == backend_id {
+                return Some(request);
+            }
+        }
+    }
+    None
+}
+
+/// Deterministic manifest-backed bin ownership used after a process restart,
+/// even when the dynamic backend implementation itself does not expose
+/// `bin_names` yet.
+pub fn dynamic_bin_ownership(report: &ScanReport) -> BTreeMap<String, Vec<BinOwnerCandidate>> {
+    inventory::build_bin_ownership_candidates(&report.installs)
+}
+
+/// Load the dynamic manifest recorded for one installed backend version.
+pub fn dynamic_manifest_for_version(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &str,
+) -> Result<Option<DynamicToolManifest>> {
+    if !backend_id.contains(':') {
+        return Ok(None);
+    }
+    let install_root = ctx.dirs.install_path(backend_id, version);
+    let manifest_path = DynamicToolManifest::manifest_path(&install_root);
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(DynamicToolManifest::load(&install_root)?))
+}
+
+/// Bin names exported by a manifest-backed dynamic install.
+pub fn dynamic_manifest_bin_names(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &str,
+) -> Result<Vec<String>> {
+    let Some(manifest) = dynamic_manifest_for_version(ctx, backend_id, version)? else {
+        return Ok(Vec::new());
+    };
+    Ok(manifest
+        .bins
+        .into_iter()
+        .map(|bin| bin.name)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+/// PATH directories contributed by a manifest-backed dynamic install.
+pub fn dynamic_manifest_bin_paths(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &str,
+) -> Result<Vec<std::path::PathBuf>> {
+    let install_root = ctx.dirs.install_path(backend_id, version);
+    let Some(manifest) = dynamic_manifest_for_version(ctx, backend_id, version)? else {
+        return Ok(Vec::new());
+    };
+    Ok(manifest_bin_paths(&install_root, &manifest))
+}
+
+/// Resolve one executable path directly from the manifest instead of relying on
+/// backend `bin_paths`.
+pub fn dynamic_manifest_executable(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &str,
+    executable_name: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    let install_root = ctx.dirs.install_path(backend_id, version);
+    let Some(manifest) = dynamic_manifest_for_version(ctx, backend_id, version)? else {
+        return Ok(None);
+    };
+    Ok(manifest
+        .bins
+        .into_iter()
+        .find(|bin| bin.name == executable_name)
+        .map(|bin| install_root.join(bin.path)))
+}
+
+fn manifest_bin_paths(
+    install_root: &std::path::Path,
+    manifest: &DynamicToolManifest,
+) -> Vec<std::path::PathBuf> {
+    manifest
+        .bins
+        .iter()
+        .filter_map(|bin| {
+            install_root
+                .join(&bin.path)
+                .parent()
+                .map(|path| path.to_path_buf())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Generate a shim named `name` in the shims dir pointing at `osdk_shim_bin`.

@@ -122,6 +122,15 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     output
 }
 
+#[cfg(unix)]
+fn write_executable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[cfg(not(windows))]
 fn accept_fixture_connection(listener: &TcpListener, context: &str) -> TcpStream {
     listener.set_nonblocking(true).unwrap();
@@ -2825,4 +2834,76 @@ fn registry_help_is_localized() {
     assert!(stdout.contains("探测项目依赖 Registry"), "{stdout}");
     assert!(stdout.contains("要测试的包管理器"), "{stdout}");
     assert!(!stdout.contains("help.registry"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"tool.ni\" = \"npm:@antfu/ni@1.1.0\"\nnode = \"1.0.0\"\n",
+    )
+    .unwrap();
+
+    let shim_bin_dir = temporary.path().join("bin");
+    write_executable(
+        &shim_bin_dir.join("osdk-shim"),
+        "#!/bin/sh\nprintf 'shim placeholder\\n'\n",
+    );
+    let data_bin = temporary.path().join("data/bin");
+    std::fs::create_dir_all(&data_bin).unwrap();
+    std::os::unix::fs::symlink(shim_bin_dir.join("osdk-shim"), data_bin.join("osdk-shim")).unwrap();
+
+    for version in ["1.0.0", "1.1.0"] {
+        let install_root = temporary
+            .path()
+            .join("installs")
+            .join("npm")
+            .join("@antfu")
+            .join("ni")
+            .join(version);
+        write_executable(
+            &install_root.join("project/node_modules/.bin/ni"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        let manifest = osdk_core::inventory::DynamicToolManifest {
+            schema: 1,
+            id: "npm:@antfu/ni".into(),
+            version: Some(version.into()),
+            config_keys: vec!["tool.ni".into()],
+            bins: vec![osdk_core::inventory::DynamicToolBin {
+                name: "ni".into(),
+                path: "project/node_modules/.bin/ni".into(),
+            }],
+            metadata: Default::default(),
+        }
+        .normalize()
+        .unwrap();
+        manifest.write_atomic(&install_root).unwrap();
+        std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+    }
+    let node_install = temporary.path().join("installs/node/1.0.0/bin/node");
+    write_executable(&node_install, "#!/bin/sh\nexit 0\n");
+    std::fs::write(
+        temporary.path().join("installs/node/1.0.0/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["reshim"],
+        &[("PATH", shim_bin_dir.to_str().unwrap())],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shim_path = temporary.path().join("data/shims/ni");
+    assert!(shim_path.exists(), "{}", shim_path.display());
 }

@@ -63,6 +63,50 @@ fn install_npm_fixture(root: &Path, project: &Path, npm_script: &str, node_scrip
 }
 
 #[cfg(unix)]
+fn install_dynamic_npm_fixture(
+    root: &Path,
+    project: &Path,
+    tool_key: &str,
+    backend_id: &str,
+    version: &str,
+    executable_name: &str,
+    executable_script: &str,
+    node_script: &str,
+) {
+    std::fs::create_dir_all(project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!("[tools]\n{tool_key:?} = \"{backend_id}@{version}\"\nnode = \"1.0.0\"\n"),
+    )
+    .unwrap();
+    let install_root = root
+        .join("installs")
+        .join(osdk_core::dirs::sanitize_tool_id(backend_id).join(version));
+    write_executable(
+        &install_root.join(format!("node_modules/.bin/{executable_name}")),
+        executable_script,
+    );
+    let manifest = osdk_core::inventory::DynamicToolManifest {
+        schema: 1,
+        id: backend_id.into(),
+        version: Some(version.into()),
+        config_keys: vec![tool_key.into()],
+        bins: vec![osdk_core::inventory::DynamicToolBin {
+            name: executable_name.into(),
+            path: format!("node_modules/.bin/{executable_name}"),
+        }],
+        metadata: Default::default(),
+    }
+    .normalize()
+    .unwrap();
+    manifest.write_atomic(&install_root).unwrap();
+    std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+
+    write_executable(&root.join("installs/node/1.0.0/bin/node"), node_script);
+    std::fs::write(root.join("installs/node/1.0.0/.osdk-complete"), b"").unwrap();
+}
+
+#[cfg(unix)]
 fn configure_registry(root: &Path, url: &str) {
     let config = root.join("config/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -243,7 +287,6 @@ fn dependency_fetch_selects_registry_and_executes_manager_once() {
     );
     let server = ProbeServer::start("200 OK");
     configure_registry(temporary.path(), server.url());
-
     let output = isolated_command(temporary.path(), &project)
         .args(["npm", "install", "fixture-package"])
         .output()
@@ -290,7 +333,6 @@ fn npx_alias_preflights_and_uses_the_npm_backend_version() {
     );
     let server = ProbeServer::start("200 OK");
     configure_registry(temporary.path(), server.url());
-
     let output = isolated_command(temporary.path(), &project)
         .args(["npx", "fixture-package"])
         .output()
@@ -306,6 +348,59 @@ fn npx_alias_preflights_and_uses_the_npm_backend_version() {
     assert_eq!(
         std::fs::read_to_string(&log).unwrap(),
         format!("{}|fixture-package\n", server.url())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!(
+            "#!/bin/sh\nprintf '%s|%s|%s|%s\n' \"$npm_config_registry\" \"$*\" \"$(command -v node)\" \"$(command -v ni)\" > {}\nexit 0\n",
+            log.display()
+        ),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let output = isolated_command(temporary.path(), &project)
+        .args(["ni", "fixture-package"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = std::fs::read_to_string(&log).unwrap();
+    assert!(line.starts_with("|fixture-package|"), "{line}");
+    assert!(
+        line.contains(
+            &temporary
+                .path()
+                .join("installs/node/1.0.0/bin/node")
+                .display()
+                .to_string()
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains(
+            &temporary
+                .path()
+                .join("installs/npm/@antfu/ni/1.0.0/node_modules/.bin/ni")
+                .display()
+                .to_string()
+        ),
+        "{line}"
     );
 }
 

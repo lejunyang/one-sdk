@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use osdk_core::backend::{Backend, InstallCtx};
+use osdk_core::inventory::ScanReport;
 use osdk_core::package_registry::{self, PackageManager, RegistryPlan, RegistryProbe};
 use osdk_core::source::select;
 use osdk_core::t;
@@ -43,7 +44,51 @@ pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 
 pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let requests = gather_requests(app, tools)?;
-    let resolved = resolve_requests(app, requests, opts).await?;
+    let mut resolved = resolve_requests(app, requests, opts).await?;
+    // A reproducible npm tool lock includes aube's exact transitive graph.
+    // Ensure managed Node is present first, then ask each npm package backend
+    // to generate its lockfile-only graph before serializing osdk.lock.
+    if resolved
+        .iter()
+        .any(|(_, version)| version.backend.starts_with("npm:"))
+    {
+        let node_request = inject_node_dependency(
+            app,
+            resolved
+                .iter()
+                .map(|(request, _)| request.clone())
+                .collect(),
+        )?
+        .into_iter()
+        .find(|request| request.backend == "node");
+        if !resolved
+            .iter()
+            .any(|(request, _)| request.backend == "node")
+        {
+            let node_request = node_request
+                .ok_or_else(|| anyhow!("npm tools require a managed Node dependency"))?;
+            let (backend, version) = install_one_without_shims(app, &node_request).await?;
+            generate_shims_for(app, backend.as_ref(), &version)?;
+            resolved.push((node_request, version));
+        } else {
+            let node = resolved
+                .iter()
+                .find(|(request, _)| request.backend == "node")
+                .map(|(request, _)| request.clone())
+                .expect("checked above");
+            let (backend, version) = install_one_without_shims(app, &node).await?;
+            generate_shims_for(app, backend.as_ref(), &version)?;
+        }
+        for (_, version) in &resolved {
+            if let Some(npm) = version.backend.strip_prefix("npm:") {
+                let backend =
+                    osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend)
+                        .ok_or_else(|| anyhow!("invalid npm package backend `{npm}`"))?;
+                backend.prepare_lock_graph(&app.ctx, version).await?;
+            }
+        }
+        resolved.sort_by(|left, right| left.0.backend.cmp(&right.0.backend));
+    }
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     let target_platform = crate::lockfile::platform_for_resolved(app.ctx.platform, &resolved);
@@ -94,7 +139,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
     let mut env = std::collections::BTreeMap::new();
     for (_, version) in &resolved {
         let backend = app.registry.get(&version.backend)?;
-        paths.extend(backend.bin_paths(&app.ctx, version)?);
+        paths.extend(managed_bin_paths(&app.ctx, backend.as_ref(), version)?);
         env.extend(backend.exec_env(&app.ctx, version)?);
     }
     paths.sort_by_key(|path| managed_runtime_path_priority(path));
@@ -141,14 +186,17 @@ fn resolve_managed_launcher_alias(
             anyhow!("`{alias}` requires a managed {backend_id} tool in this `osdk exec` invocation")
         })?;
     let backend = app.registry.get(backend_id)?;
-    let executable = find_managed_executable(&backend.bin_paths(&app.ctx, version)?, canonical)
-        .ok_or_else(|| {
-            anyhow!(
-                "managed {backend_id} executable `{canonical}` not found for {}@{}",
-                version.backend,
-                version.version
-            )
-        })?;
+    let executable = find_managed_executable(
+        &managed_bin_paths(&app.ctx, backend.as_ref(), version)?,
+        canonical,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "managed {backend_id} executable `{canonical}` not found for {}@{}",
+            version.backend,
+            version.version
+        )
+    })?;
     let rewritten = std::iter::once(subcommand.to_string())
         .chain(args.iter().cloned())
         .collect();
@@ -754,7 +802,7 @@ fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<V
 pub fn list(app: &App, tool: Option<String>) -> Result<()> {
     let backends: Vec<_> = match tool {
         Some(t) => vec![app.registry.get(&t)?],
-        None => all_display_backends(app),
+        None => all_display_backends(app)?,
     };
     let mut any = false;
     for backend in backends {
@@ -775,30 +823,17 @@ pub fn list(app: &App, tool: Option<String>) -> Result<()> {
 }
 
 /// All backends to display in list/current: compiled-in backends plus any
-/// dynamically-installed `github:owner/repo` backends found on disk.
-fn all_display_backends(app: &App) -> Vec<std::sync::Arc<dyn Backend>> {
+/// dynamically-installed inventory-backed backends found on disk or in the
+/// merged config.
+fn all_display_backends(app: &App) -> Result<Vec<std::sync::Arc<dyn Backend>>> {
     let mut out: Vec<std::sync::Arc<dyn Backend>> = app.registry.all().to_vec();
-    let base = app.ctx.dirs.installs.join("github");
-    if let Ok(owners) = std::fs::read_dir(&base) {
-        for owner in owners.flatten() {
-            if !owner.path().is_dir() {
-                continue;
-            }
-            let owner_name = owner.file_name().to_string_lossy().to_string();
-            if let Ok(repos) = std::fs::read_dir(owner.path()) {
-                for repo in repos.flatten() {
-                    if repo.path().is_dir() {
-                        let repo_name = repo.file_name().to_string_lossy().to_string();
-                        let id = format!("github:{owner_name}/{repo_name}");
-                        if let Ok(b) = app.registry.get(&id) {
-                            out.push(b);
-                        }
-                    }
-                }
-            }
-        }
+    let report = dynamic_scan_report(app)?;
+    for id in osdk_core::shim::configured_and_installed_dynamic_ids(&app.ctx, &report) {
+        out.push(app.registry.get(&id)?);
     }
-    out
+    out.sort_by(|left, right| left.id().cmp(right.id()));
+    out.dedup_by(|left, right| left.id() == right.id());
+    Ok(out)
 }
 
 pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) -> Result<()> {
@@ -834,16 +869,32 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
     for (k, v) in parse_opts(&opts)? {
         req.options.insert(k, v);
     }
+    let persisted_options = req.options.clone();
     let tv = install_one(app, &req).await?;
     // Pin the exact spec string the user typed (verbatim after `@`), so
     // channels like `stable` or `temurin-17` are preserved rather than being
     // normalized to `latest`. Bare `tool` (no `@`) pins the resolved version.
     let spec = requested_spec_literal(&tool).unwrap_or_else(|| tv.version.clone());
     if global {
-        crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
+        if persisted_options.is_empty() {
+            crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
+        } else {
+            crate::config_edit::set_global_tool_config(
+                &app.ctx,
+                &tv.backend,
+                &structured_tool_config(&spec, &persisted_options),
+            )?;
+        }
         println!("{}", t!("msg.pinned_global", tool = tv.backend, ver = spec));
     } else {
-        let path = crate::config_edit::set_project_tool(&tv.backend, &spec)?;
+        let path = if persisted_options.is_empty() {
+            crate::config_edit::set_project_tool(&tv.backend, &spec)?
+        } else {
+            crate::config_edit::set_project_tool_config(
+                &tv.backend,
+                &structured_tool_config(&spec, &persisted_options),
+            )?
+        };
         println!(
             "{}",
             t!(
@@ -857,19 +908,22 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
     Ok(())
 }
 
-fn requested_spec_literal(tool: &str) -> Option<String> {
-    let raw = tool.trim();
-    if let Some(rest) = raw.strip_prefix("npm:") {
-        if let Some(scoped) = rest.strip_prefix('@') {
-            let (_, name_and_version) = scoped.split_once('/')?;
-            let (_, version) = name_and_version.split_once('@')?;
-            return (!version.trim().is_empty()).then(|| version.trim().to_string());
-        }
-        let (_, version) = rest.split_once('@')?;
-        return (!version.trim().is_empty()).then(|| version.trim().to_string());
+fn structured_tool_config(
+    version: &str,
+    options: &std::collections::BTreeMap<String, String>,
+) -> osdk_core::config::StructuredToolConfig {
+    osdk_core::config::StructuredToolConfig {
+        version: version.to_string(),
+        options: options
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    osdk_core::config::ToolConfigValue::String(value.clone()),
+                )
+            })
+            .collect(),
     }
-    raw.split_once('@')
-        .and_then(|(_, version)| (!version.trim().is_empty()).then(|| version.trim().to_string()))
 }
 
 pub async fn uninstall(app: &App, tool: String) -> Result<()> {
@@ -897,9 +951,7 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
         return Ok(());
     }
     backend.uninstall(&app.ctx, &tv).await?;
-    if matches!(backend.id(), "node" | "npm") {
-        reconcile_npm_routing_shims(app)?;
-    }
+    reconcile_managed_shims(app)?;
     println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
     let models = app.ctx.dirs.models();
@@ -921,7 +973,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let backends: Vec<_> = match tool {
         Some(t) => vec![app.registry.get(&t)?],
-        None => all_display_backends(app),
+        None => all_display_backends(app)?,
     };
     let mut any = false;
     for backend in backends {
@@ -930,13 +982,20 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
             &cwd,
             &app.ctx.config.tools,
             backend.idiomatic_files(),
-        ) {
+        )
+        .map(|active| (active.spec, Some(active.source)))
+        .or_else(|| {
+            osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
+                .map(|request| (request.spec.to_string(), None))
+        }) {
             any = true;
             println!(
                 "{} {} ({})",
                 backend.id(),
-                av.spec,
-                describe_origin(&av.source)
+                av.0,
+                av.1.as_ref()
+                    .map(describe_origin)
+                    .unwrap_or_else(|| "config value".to_string())
             );
         }
     }
@@ -952,11 +1011,52 @@ pub fn where_cmd(app: &App, tool: String) -> Result<()> {
     let version = match &req.spec {
         VersionSpec::Exact(v) => v.clone(),
         _ => {
+            let cwd = std::env::current_dir()?;
             let installed = backend.list_installed(&app.ctx)?;
-            installed
-                .into_iter()
-                .last()
-                .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+            let dynamic_request =
+                osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
+            let resolved = osdk_core::version::resolver::resolve_active(
+                backend.id(),
+                &cwd,
+                &app.ctx.config.tools,
+                backend.idiomatic_files(),
+            )
+            .map(|active| (active.spec, active.is_range))
+            .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
+            match resolved {
+                Some((spec, _is_range)) if backend.id() == "python" => {
+                    osdk_core::backend::python::select_installed(&spec, &installed)
+                        .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+                }
+                Some((spec, is_range)) => {
+                    let parsed = if is_range {
+                        VersionSpec::parse_range(&spec)
+                            .unwrap_or_else(|_| VersionSpec::parse(&spec))
+                    } else {
+                        VersionSpec::parse(&spec)
+                    };
+                    match &parsed {
+                        VersionSpec::Exact(version)
+                            if installed.iter().any(|installed| installed == version) =>
+                        {
+                            version.clone()
+                        }
+                        _ => {
+                            let infos: Vec<_> = installed
+                                .iter()
+                                .map(|version| osdk_core::version::VersionInfo::stable(version))
+                                .collect();
+                            osdk_core::version::select_version(&parsed, &infos)
+                                .map(|version| version.version.clone())
+                                .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+                        }
+                    }
+                }
+                None => installed
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
+            }
         }
     };
     let dir = app.ctx.dirs.install_path(backend.id(), &version);
@@ -969,33 +1069,41 @@ pub fn where_cmd(app: &App, tool: String) -> Result<()> {
 
 pub fn reshim(app: &App) -> Result<()> {
     let mut total = 0;
-    for backend in app.registry.all() {
+    for backend in all_display_backends(app)? {
         for version in backend.list_installed(&app.ctx)? {
             let tv = ToolVersion::new(backend.id(), &version);
             total += generate_shims_for(app, backend.as_ref(), &tv)?;
         }
     }
-    reconcile_npm_routing_shims(app)?;
+    reconcile_managed_shims(app)?;
     println!("{}", t!("msg.reshimmed", count = total));
     Ok(())
 }
 
-fn reconcile_npm_routing_shims(app: &App) -> Result<()> {
-    let mut routed = std::collections::BTreeSet::new();
-    for backend_id in ["node", "npm"] {
-        let backend = app.registry.get(backend_id)?;
-        for version in backend.list_installed(&app.ctx)? {
-            let version = ToolVersion::new(backend.id(), version);
-            routed.extend(
-                osdk_core::shim::routed_bin_names(&app.ctx, backend.as_ref(), &version)?
-                    .into_iter()
-                    .filter(|name| matches!(name.as_str(), "npm" | "npx")),
-            );
+fn reconcile_managed_shims(app: &App) -> Result<()> {
+    let owners = installed_shim_owners(app)?;
+    let expected = owners
+        .into_iter()
+        .filter_map(|(name, owner_ids)| (!is_real_shim_conflict(&name, &owner_ids)).then_some(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    let shims = app.ctx.dirs.shims();
+    let read_dir = match std::fs::read_dir(&shims) {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(anyhow::Error::new(osdk_core::Error::io(&shims, error))),
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for entry in read_dir {
+        let entry =
+            entry.map_err(|error| anyhow::Error::new(osdk_core::Error::io(&shims, error)))?;
+        if !entry.path().is_file() && !entry.path().symlink_metadata()?.file_type().is_symlink() {
+            continue;
         }
+        names.insert(executable_basename(&entry.file_name().to_string_lossy()));
     }
-    for name in ["npm", "npx"] {
-        if !routed.contains(name) {
-            osdk_core::shim::remove_managed_shim(&app.ctx.dirs, name)?;
+    for name in names {
+        if !expected.contains(&name) {
+            osdk_core::shim::remove_managed_shim(&app.ctx.dirs, &name)?;
         }
     }
     Ok(())
@@ -1011,7 +1119,8 @@ fn generate_shims_for(app: &App, backend: &dyn Backend, tv: &ToolVersion) -> Res
             return Ok(0);
         }
     };
-    let names = osdk_core::shim::routed_bin_names(&app.ctx, backend, tv)?;
+    let names = routed_bin_names_for_version(&app.ctx, backend, tv)?;
+    ensure_no_shim_conflicts(app, backend.id(), &names)?;
     let mut count = 0;
     for name in names {
         osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim_bin)?;
@@ -2124,6 +2233,168 @@ fn describe_origin(origin: &osdk_core::version::resolver::VersionOrigin) -> Stri
         ProjectMetadata(p) => format!("{}", p.display()),
         GlobalConfig => "global config".to_string(),
     }
+}
+
+fn dynamic_scan_report(app: &App) -> Result<ScanReport> {
+    Ok(osdk_core::shim::scan_dynamic_installs(&app.ctx)?)
+}
+
+fn routed_bin_names_for_version(
+    ctx: &osdk_core::backend::Ctx,
+    backend: &dyn Backend,
+    version: &ToolVersion,
+) -> Result<Vec<String>> {
+    let mut names = osdk_core::shim::routed_bin_names(ctx, backend, version)?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if version.backend.contains(':') {
+        names.extend(osdk_core::shim::dynamic_manifest_bin_names(
+            ctx,
+            &version.backend,
+            &version.version,
+        )?);
+    }
+    Ok(names.into_iter().collect())
+}
+
+fn managed_bin_paths(
+    ctx: &osdk_core::backend::Ctx,
+    backend: &dyn Backend,
+    version: &ToolVersion,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths = backend.bin_paths(ctx, version)?;
+    if version.backend.contains(':') {
+        paths.extend(osdk_core::shim::dynamic_manifest_bin_paths(
+            ctx,
+            &version.backend,
+            &version.version,
+        )?);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn requested_spec_literal(tool: &str) -> Option<String> {
+    let raw = tool.trim();
+    if let Some(rest) = raw.strip_prefix("npm:") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        if let Some(package) = rest.strip_prefix('@') {
+            let (_scope, package_and_version) = package.split_once('/')?;
+            let (_name, version) = package_and_version.split_once('@')?;
+            return (!version.trim().is_empty()).then(|| version.trim().to_string());
+        }
+        let (_name, version) = rest.split_once('@')?;
+        return (!version.trim().is_empty()).then(|| version.trim().to_string());
+    }
+    match raw.split_once('@') {
+        Some((_, version)) if !version.trim().is_empty() => Some(version.trim().to_string()),
+        _ => None,
+    }
+}
+
+fn installed_shim_owners(
+    app: &App,
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
+    let mut owners =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let cwd = std::env::current_dir()?;
+    for backend in all_display_backends(app)? {
+        let mut selected_versions = std::collections::BTreeSet::new();
+        let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
+        if let Some((active_spec, active_is_range)) = osdk_core::version::resolver::resolve_active(
+            backend.id(),
+            &cwd,
+            &app.ctx.config.tools,
+            backend.idiomatic_files(),
+        )
+        .map(|active| (active.spec, active.is_range))
+        .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)))
+        {
+            let expanded = app
+                .ctx
+                .config
+                .expand_alias(backend.id(), &active_spec)
+                .unwrap_or(active_spec);
+            let installed = backend.list_installed(&app.ctx)?;
+            let selected = if backend.id() == "python" {
+                osdk_core::backend::python::select_installed(&expanded, &installed)
+            } else {
+                let spec = if active_is_range {
+                    VersionSpec::parse_range(&expanded)
+                        .unwrap_or_else(|_| VersionSpec::parse(&expanded))
+                } else {
+                    VersionSpec::parse(&expanded)
+                };
+                match &spec {
+                    VersionSpec::Exact(version)
+                        if installed.iter().any(|installed| installed == version) =>
+                    {
+                        Some(version.clone())
+                    }
+                    _ => {
+                        let infos: Vec<_> = installed
+                            .iter()
+                            .map(|version| osdk_core::version::VersionInfo::stable(version))
+                            .collect();
+                        osdk_core::version::select_version(&spec, &infos)
+                            .map(|version| version.version.clone())
+                    }
+                }
+            };
+            if let Some(version) = selected {
+                selected_versions.insert(version);
+            }
+        } else {
+            selected_versions.extend(backend.list_installed(&app.ctx)?);
+        }
+        for version in selected_versions {
+            let version = ToolVersion::new(backend.id(), version);
+            for name in routed_bin_names_for_version(&app.ctx, backend.as_ref(), &version)? {
+                owners
+                    .entry(name)
+                    .or_default()
+                    .insert(backend.id().to_string());
+            }
+        }
+    }
+    Ok(owners)
+}
+
+fn ensure_no_shim_conflicts(app: &App, backend_id: &str, names: &[String]) -> Result<()> {
+    let owners = installed_shim_owners(app)?;
+    for name in names {
+        let owner_ids = owners.get(name).cloned().unwrap_or_else(|| {
+            let mut owner_ids = std::collections::BTreeSet::new();
+            owner_ids.insert(backend_id.to_string());
+            owner_ids
+        });
+        if is_real_shim_conflict(name, &owner_ids) {
+            osdk_core::shim::remove_managed_shim(&app.ctx.dirs, name)?;
+            return Err(anyhow!(
+                "refusing to generate managed shim `{name}` because it is provided by multiple installed tools: {}",
+                owner_ids.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_real_shim_conflict(name: &str, owner_ids: &std::collections::BTreeSet<String>) -> bool {
+    if owner_ids.len() <= 1 {
+        return false;
+    }
+    if matches!(name, "npm" | "npx")
+        && owner_ids
+            .iter()
+            .all(|owner_id| matches!(owner_id.as_str(), "node" | "npm"))
+    {
+        return false;
+    }
+    true
 }
 
 pub fn human_bytes(n: u64) -> String {

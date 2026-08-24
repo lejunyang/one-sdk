@@ -12,6 +12,7 @@ use std::process::Command;
 use osdk_core::backend::registry::Registry;
 use osdk_core::config::Config;
 use osdk_core::dirs::Dirs;
+use osdk_core::inventory::ScanReport;
 use osdk_core::package_registry::{
     manager_for_command, plan, registry_env, should_plan, PackageManager, RegistryPlan,
 };
@@ -79,10 +80,17 @@ fn real_main() -> i32 {
     let tools = config.tools.clone();
     let idiomatic_probe_cwd = cwd.clone();
     let ctx = make_ctx(dirs.clone(), platform, config);
+    let dynamic_report = osdk_core::shim::scan_dynamic_installs(&ctx).ok();
 
     // Find which backend owns this tool name (its id, or one of the executables
     // an installed version provides, e.g. pip -> python, npm -> node).
-    let backend = match owning_backend(&registry, &ctx, &idiomatic_probe_cwd, &tool_name) {
+    let backend = match owning_backend(
+        &registry,
+        &ctx,
+        &idiomatic_probe_cwd,
+        &tool_name,
+        dynamic_report.as_ref(),
+    ) {
         Some(b) => b,
         None => {
             eprintln!("osdk-shim: no backend provides `{tool_name}`");
@@ -96,9 +104,14 @@ fn real_main() -> i32 {
         &idiomatic_probe_cwd,
         &tools,
         backend.idiomatic_files(),
-    );
+    )
+    .map(|active| (active.spec, active.is_range))
+    .or_else(|| {
+        osdk_core::shim::dynamic_request_from_config(&ctx, backend.id())
+            .map(|request| (request.spec.to_string(), false))
+    });
     let (spec, is_range) = match active {
-        Some(av) => (av.spec, av.is_range),
+        Some(active) => active,
         None => {
             eprintln!(
                 "osdk-shim: no version of `{}` selected (set one with `osdk use {}@<version>`)",
@@ -132,16 +145,10 @@ fn real_main() -> i32 {
     };
 
     let tv = ToolVersion::new(backend.id(), &version);
-    let bin_dirs = match backend.bin_paths(&ctx, &tv) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("osdk-shim: {e}");
-            return 1;
-        }
-    };
+    let bin_dirs = managed_bin_paths(&ctx, backend.as_ref(), &tv);
 
     let (executable_name, alias_subcommand) = routed_launcher(&tool_name, backend.id());
-    let exe = match find_exe(&bin_dirs, executable_name) {
+    let exe = match managed_executable_path(&ctx, backend.as_ref(), &tv, executable_name) {
         Some(p) => p,
         None => {
             eprintln!(
@@ -166,7 +173,7 @@ fn real_main() -> i32 {
     // Remove both lexical and canonical matches so symlinked activation paths
     // cannot retain the shim directory under a different spelling.
     remove_env_path(&mut exec_env, &ctx.dirs.shims());
-    if matches!(backend.id(), "npm" | "pnpm" | "yarn") {
+    if backend.id() == "pnpm" || backend.id() == "yarn" || backend.id().starts_with("npm:") {
         let node_backend = registry.get("node").unwrap();
         let active_node = resolve_active(
             "node",
@@ -188,9 +195,10 @@ fn real_main() -> i32 {
             return 1;
         };
         let node = ToolVersion::new("node", node_version);
-        if let Ok(paths) = node_backend.bin_paths(&ctx, &node) {
-            prepend_env_path(&mut exec_env, paths);
-        }
+        prepend_env_path(
+            &mut exec_env,
+            managed_bin_paths(&ctx, &*node_backend, &node),
+        );
     }
     prepend_env_path(&mut exec_env, bin_dirs);
 
@@ -264,6 +272,7 @@ fn package_manager_for_backend(
         "yarn" => matches!(executable_alias, "yarn" | "yarnpkg"),
         "bun" => matches!(executable_alias, "bun" | "bunx"),
         "deno" => executable_alias == "deno",
+        _ if backend.starts_with("npm:") => true,
         _ => false,
     };
     belongs_to_manager
@@ -397,6 +406,7 @@ fn owning_backend(
     ctx: &osdk_core::backend::Ctx,
     cwd: &std::path::Path,
     tool_name: &str,
+    dynamic_report: Option<&ScanReport>,
 ) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
     if matches!(tool_name, "npm" | "npx") {
         let npm = registry.get("npm").ok()?;
@@ -434,6 +444,11 @@ fn owning_backend(
     if let Ok(b) = registry.get(tool_name) {
         return Some(b);
     }
+    if let Some(report) = dynamic_report {
+        if let Some(backend) = dynamic_backend_for_bin(registry, ctx, report, tool_name) {
+            return Some(backend);
+        }
+    }
     // Scan compiled-in backends' installed versions' bin names.
     for backend in registry.all() {
         if let Ok(versions) = backend.list_installed(ctx) {
@@ -447,47 +462,49 @@ fn owning_backend(
             }
         }
     }
-    // Scan dynamically-installed github backends: installs/github/<owner>/<repo>.
-    for id in installed_github_ids(ctx) {
-        if let Ok(backend) = registry.get(&id) {
-            if let Ok(versions) = backend.list_installed(ctx) {
-                for v in versions {
-                    let tv = ToolVersion::new(backend.id(), &v);
-                    if let Ok(names) = backend.bin_names(ctx, &tv) {
-                        if names.iter().any(|n| n == tool_name) {
-                            return Some(backend);
-                        }
-                    }
-                }
-            }
-        }
-    }
     None
 }
 
-/// Enumerate installed `github:owner/repo` ids from the installs tree.
-fn installed_github_ids(ctx: &osdk_core::backend::Ctx) -> Vec<String> {
-    let mut out = Vec::new();
-    let base = ctx.dirs.installs.join("github");
-    let owners = match std::fs::read_dir(&base) {
-        Ok(rd) => rd,
-        Err(_) => return out,
-    };
-    for owner in owners.flatten() {
-        if !owner.path().is_dir() {
-            continue;
-        }
-        let owner_name = owner.file_name().to_string_lossy().to_string();
-        if let Ok(repos) = std::fs::read_dir(owner.path()) {
-            for repo in repos.flatten() {
-                if repo.path().is_dir() {
-                    let repo_name = repo.file_name().to_string_lossy().to_string();
-                    out.push(format!("github:{owner_name}/{repo_name}"));
-                }
-            }
-        }
+fn dynamic_backend_for_bin(
+    registry: &Registry,
+    ctx: &osdk_core::backend::Ctx,
+    report: &ScanReport,
+    tool_name: &str,
+) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
+    let owners = osdk_core::shim::dynamic_bin_ownership(report);
+    let candidates = owners.get(tool_name)?;
+    let owner_ids = candidates
+        .iter()
+        .map(|candidate| candidate.canonical_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let configured = osdk_core::shim::configured_dynamic_ids(ctx, report);
+    let matching_configured = owner_ids
+        .iter()
+        .filter(|owner_id| {
+            configured
+                .iter()
+                .any(|configured_id| configured_id == *owner_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if matching_configured.len() == 1 {
+        return registry.get(&matching_configured[0]).ok();
     }
-    out
+    if owner_ids.len() == 1 {
+        return registry.get(owner_ids.iter().next()?).ok();
+    }
+    let conflicting = if matching_configured.is_empty() {
+        owner_ids.into_iter().collect::<Vec<_>>()
+    } else {
+        matching_configured
+    };
+    let owners = conflicting.join(", ");
+    if !owners.is_empty() {
+        eprintln!(
+            "osdk-shim: refusing to route `{tool_name}` because multiple installed tools provide it: {owners}"
+        );
+    }
+    None
 }
 
 fn make_ctx(dirs: Dirs, platform: Platform, config: Config) -> osdk_core::backend::Ctx {
@@ -537,6 +554,45 @@ fn resolve_installed(
             select_version(&parsed, &infos).map(|vi| vi.version.clone())
         }
     }
+}
+
+fn managed_bin_paths(
+    ctx: &osdk_core::backend::Ctx,
+    backend: &dyn osdk_core::backend::Backend,
+    version: &ToolVersion,
+) -> Vec<PathBuf> {
+    let mut paths = backend.bin_paths(ctx, version).unwrap_or_default();
+    if version.backend.contains(':') {
+        if let Ok(dynamic_paths) =
+            osdk_core::shim::dynamic_manifest_bin_paths(ctx, &version.backend, &version.version)
+        {
+            paths.extend(dynamic_paths);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn managed_executable_path(
+    ctx: &osdk_core::backend::Ctx,
+    backend: &dyn osdk_core::backend::Backend,
+    version: &ToolVersion,
+    executable_name: &str,
+) -> Option<PathBuf> {
+    if version.backend.contains(':') {
+        if let Ok(path) = osdk_core::shim::dynamic_manifest_executable(
+            ctx,
+            &version.backend,
+            &version.version,
+            executable_name,
+        ) {
+            if path.is_some() {
+                return path;
+            }
+        }
+    }
+    find_exe(&managed_bin_paths(ctx, backend, version), executable_name)
 }
 
 /// Strip a leading `<word>-` distribution prefix (e.g. `temurin-17` -> `17`).

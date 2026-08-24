@@ -217,16 +217,36 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
     let mut path_prepend = Vec::new();
     let mut set_vars = BTreeMap::new();
     let mut has_generated_shim = false;
+    let dynamic_report = crate::shim::scan_dynamic_installs(ctx).ok();
+    let mut backend_ids = registry
+        .all()
+        .iter()
+        .map(|backend| backend.id().to_string())
+        .collect::<Vec<_>>();
+    if let Some(report) = &dynamic_report {
+        backend_ids.extend(crate::shim::configured_and_installed_dynamic_ids(
+            ctx, report,
+        ));
+        backend_ids.sort();
+        backend_ids.dedup();
+    }
 
-    for backend in registry.all() {
+    for backend_id in backend_ids {
+        let Ok(backend) = registry.get(&backend_id) else {
+            continue;
+        };
+        let dynamic_request = crate::shim::dynamic_request_from_config(ctx, backend.id());
         let active = match resolve_active(
             backend.id(),
             cwd,
             &ctx.config.tools,
             backend.idiomatic_files(),
         ) {
-            Some(a) => a,
-            None => continue,
+            Some(a) => Some((a.spec, a.is_range)),
+            None => dynamic_request.map(|request| (request.spec.to_string(), false)),
+        };
+        let Some((active_spec, active_is_range)) = active else {
+            continue;
         };
         // Resolve to an installed version.
         let installed = backend.list_installed(ctx).unwrap_or_default();
@@ -235,13 +255,13 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         }
         let expanded = ctx
             .config
-            .expand_alias(backend.id(), &active.spec)
-            .unwrap_or(active.spec);
+            .expand_alias(backend.id(), &active_spec)
+            .unwrap_or(active_spec);
         let spec = strip_distribution_prefix(&expanded);
         let version = if backend.id() == "python" {
             crate::backend::python::select_installed(spec, &installed)
         } else {
-            let parsed = if active.is_range {
+            let parsed = if active_is_range {
                 VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
             } else {
                 VersionSpec::parse(spec)
@@ -267,11 +287,21 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         }) {
             has_generated_shim = true;
         }
-        if let Ok(bins) = backend.bin_paths(ctx, &tv) {
-            for b in bins {
-                if b.exists() {
-                    path_prepend.push(b);
-                }
+        let bins = backend
+            .bin_paths(ctx, &tv)
+            .ok()
+            .into_iter()
+            .flatten()
+            .chain(
+                crate::shim::dynamic_manifest_bin_paths(ctx, backend.id(), &version)
+                    .ok()
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect::<std::collections::BTreeSet<_>>();
+        for b in bins {
+            if b.exists() {
+                path_prepend.push(b);
             }
         }
         if let Ok(env) = backend.exec_env(ctx, &tv) {
