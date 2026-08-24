@@ -872,7 +872,10 @@ mod tests {
             &format!("npm:@scope/{}", "b".repeat(215)),
         ] {
             let error = canonical_dynamic_id(invalid).unwrap_err();
-            assert!(error.to_string().contains("invalid npm package id"), "{invalid}");
+            assert!(
+                error.to_string().contains("invalid npm package id"),
+                "{invalid}"
+            );
         }
     }
 
