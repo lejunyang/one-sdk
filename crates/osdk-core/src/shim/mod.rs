@@ -232,6 +232,7 @@ mod tests {
                 settings: Settings::default(),
                 sources: SourcesConfig::default(),
                 tools: Default::default(),
+                tool_configs: Default::default(),
                 aliases: Default::default(),
                 project_config_path: None,
             },

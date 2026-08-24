@@ -519,9 +519,17 @@ fn parse_opts(opts: &[String]) -> Result<Vec<(String, String)>> {
 /// Resolve, install, and shim a single request.
 async fn install_one(app: &mut App, req: &ToolRequest) -> Result<ToolVersion> {
     apply_source_override(app, &req.backend);
-    let (backend, version) = install_one_without_shims(app, req).await?;
-    generate_shims_for(app, backend.as_ref(), &version)?;
-    Ok(version)
+    let mut requests = inject_node_dependency(app, vec![req.clone()])?;
+    requests.sort_by_key(|request| (request.backend != "node", request.backend.clone()));
+    let mut requested = None;
+    for request in requests {
+        let (backend, version) = install_one_without_shims(app, &request).await?;
+        generate_shims_for(app, backend.as_ref(), &version)?;
+        if request.backend == req.backend {
+            requested = Some(version);
+        }
+    }
+    requested.ok_or_else(|| anyhow!("requested tool was not installed"))
 }
 
 async fn install_one_without_shims(
@@ -629,7 +637,13 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
             out.push(ToolRequest {
                 backend: tool.clone(),
                 spec: VersionSpec::parse(spec),
-                options: Default::default(),
+                options: app
+                    .ctx
+                    .config
+                    .tool_configs
+                    .get(tool)
+                    .map(|entry| entry.to_request_options())
+                    .unwrap_or_default(),
             });
         }
     }
@@ -642,9 +656,15 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
             .all(|request| request.backend != package_manager.manager)
         {
             out.push(ToolRequest {
-                backend: package_manager.manager,
+                backend: package_manager.manager.clone(),
                 spec: VersionSpec::Exact(package_manager.version),
-                options: Default::default(),
+                options: app
+                    .ctx
+                    .config
+                    .tool_configs
+                    .get(&package_manager.manager)
+                    .map(|entry| entry.to_request_options())
+                    .unwrap_or_default(),
             });
         }
     }
@@ -663,16 +683,23 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
         out.push(ToolRequest {
             backend: backend.id().to_string(),
             spec,
-            options: Default::default(),
+            options: app
+                .ctx
+                .config
+                .tool_configs
+                .get(backend.id())
+                .map(|entry| entry.to_request_options())
+                .unwrap_or_default(),
         });
     }
     inject_node_dependency(app, out)
 }
 
 fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
-    let has_package_manager = requests
-        .iter()
-        .any(|request| matches!(request.backend.as_str(), "npm" | "pnpm" | "yarn"));
+    let has_package_manager = requests.iter().any(|request| {
+        matches!(request.backend.as_str(), "npm" | "pnpm" | "yarn")
+            || request.backend.starts_with("npm:")
+    });
     if !has_package_manager || requests.iter().any(|request| request.backend == "node") {
         return Ok(requests);
     }
@@ -696,7 +723,13 @@ fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<V
     requests.push(ToolRequest {
         backend: "node".into(),
         spec,
-        options: Default::default(),
+        options: app
+            .ctx
+            .config
+            .tool_configs
+            .get("node")
+            .map(|entry| entry.to_request_options())
+            .unwrap_or_default(),
     });
     Ok(requests)
 }
@@ -788,10 +821,7 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
     // Pin the exact spec string the user typed (verbatim after `@`), so
     // channels like `stable` or `temurin-17` are preserved rather than being
     // normalized to `latest`. Bare `tool` (no `@`) pins the resolved version.
-    let spec = match tool.split_once('@') {
-        Some((_, v)) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => tv.version.clone(),
-    };
+    let spec = requested_spec_literal(&tool).unwrap_or_else(|| tv.version.clone());
     if global {
         crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
         println!("{}", t!("msg.pinned_global", tool = tv.backend, ver = spec));
@@ -808,6 +838,21 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
         );
     }
     Ok(())
+}
+
+fn requested_spec_literal(tool: &str) -> Option<String> {
+    let raw = tool.trim();
+    if let Some(rest) = raw.strip_prefix("npm:") {
+        if let Some(scoped) = rest.strip_prefix('@') {
+            let (_, name_and_version) = scoped.split_once('/')?;
+            let (_, version) = name_and_version.split_once('@')?;
+            return (!version.trim().is_empty()).then(|| version.trim().to_string());
+        }
+        let (_, version) = rest.split_once('@')?;
+        return (!version.trim().is_empty()).then(|| version.trim().to_string());
+    }
+    raw.split_once('@')
+        .and_then(|(_, version)| (!version.trim().is_empty()).then(|| version.trim().to_string()))
 }
 
 pub async fn uninstall(app: &App, tool: String) -> Result<()> {

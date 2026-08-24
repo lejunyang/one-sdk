@@ -104,8 +104,10 @@ fn read_project_package_manager(path: &Path) -> Option<(String, String)> {
     let value: toml::Value = toml::from_str(&text).ok()?;
     let tools = value.get("tools")?;
     for manager in ["npm", "pnpm", "yarn"] {
-        if let Some(version) = tools.get(manager).and_then(toml::Value::as_str) {
-            return Some((manager.into(), version.into()));
+        if let Some(value) = tools.get(manager) {
+            if let Some(version) = read_tool_value(value) {
+                return Some((manager.into(), version));
+            }
         }
     }
     None
@@ -252,11 +254,14 @@ pub fn resolve_active(
 fn read_project_tool(path: &Path, tool: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
+    read_tool_value(value.get("tools")?.get(tool)?)
+}
+
+fn read_tool_value(value: &toml::Value) -> Option<String> {
     value
-        .get("tools")?
-        .get(tool)?
         .as_str()
-        .map(|s| s.to_string())
+        .map(str::to_string)
+        .or_else(|| value.get("version").and_then(toml::Value::as_str).map(str::to_string))
 }
 
 /// Read a simple idiomatic version file (`.nvmrc`, `.python-version`, ...).
@@ -464,6 +469,26 @@ mod tests {
             .unwrap();
             assert!(resolve_package_manager(temp.path()).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn structured_project_tool_version_is_resolved() {
+        let td = tempfile::tempdir().unwrap();
+        let dir = td.path().join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("osdk.toml"),
+            "[tools]\nnode = { version = \"20.11.1\", engine = \"node\" }\nnpm = { version = \"11.5.2\", allow_builds = [\"esbuild\"] }\n",
+        )
+        .unwrap();
+
+        let global = BTreeMap::new();
+        let active = resolve_active("node", &dir, &global, &[".nvmrc"]).unwrap();
+        assert_eq!(active.spec, "20.11.1");
+
+        let package_manager = resolve_package_manager(&dir).unwrap().unwrap();
+        assert_eq!(package_manager.manager, "npm");
+        assert_eq!(package_manager.version, "11.5.2");
     }
 
     #[test]

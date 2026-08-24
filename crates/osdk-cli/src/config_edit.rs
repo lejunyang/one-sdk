@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use osdk_core::backend::Ctx;
 use osdk_core::config::PROJECT_CONFIG_NAMES;
+use osdk_core::config::{StructuredToolConfig, ToolConfigValue};
 
 /// Write a `[tools] <tool> = <spec>` pin to the user global config.
 pub fn set_global_tool(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
     let path = ctx.dirs.user_config_file();
-    edit_tool(&path, tool, spec)?;
+    edit_tool_version(&path, tool, spec)?;
     Ok(())
 }
 
@@ -18,7 +19,26 @@ pub fn set_global_tool(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
 pub fn set_project_tool(tool: &str, spec: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
-    edit_tool(&path, tool, spec)?;
+    edit_tool_version(&path, tool, spec)?;
+    Ok(path)
+}
+
+/// Write a structured `[tools] <tool> = { version = ..., ... }` entry to the
+/// user global config.
+#[allow(dead_code)]
+pub fn set_global_tool_config(ctx: &Ctx, tool: &str, config: &StructuredToolConfig) -> Result<()> {
+    let path = ctx.dirs.user_config_file();
+    edit_tool_config(&path, tool, config)?;
+    Ok(())
+}
+
+/// Write a structured `[tools]` entry to the nearest project config, creating
+/// `osdk.toml` in the current dir if none exists. Returns the file path written.
+#[allow(dead_code)]
+pub fn set_project_tool_config(tool: &str, config: &StructuredToolConfig) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
+    edit_tool_config(&path, tool, config)?;
     Ok(path)
 }
 
@@ -211,7 +231,7 @@ pub fn remove_custom_source(ctx: &Ctx, tool: &str, id: &str) -> Result<bool> {
     Ok(removed)
 }
 
-fn edit_tool(path: &Path, tool: &str, spec: &str) -> Result<()> {
+fn edit_tool_version(path: &Path, tool: &str, spec: &str) -> Result<()> {
     let mut doc = load_doc(path)?;
     let tools = doc
         .entry("tools")
@@ -219,9 +239,61 @@ fn edit_tool(path: &Path, tool: &str, spec: &str) -> Result<()> {
     let tools_tbl = tools
         .as_table_mut()
         .context("`tools` is not a table in config")?;
-    tools_tbl.insert(tool, toml_edit::value(spec));
+
+    match tools_tbl.get_mut(tool) {
+        Some(item) if item.is_inline_table() => {
+            let inline = item
+                .as_inline_table_mut()
+                .context("`tools.<tool>` is not an inline table")?;
+            inline.insert("version", toml_edit::Value::from(spec));
+        }
+        Some(item) if item.is_table() => {
+            let table = item
+                .as_table_mut()
+                .context("`tools.<tool>` is not a table")?;
+            table.insert("version", toml_edit::value(spec));
+        }
+        _ => {
+            tools_tbl.insert(tool, toml_edit::value(spec));
+        }
+    }
     save_doc(path, &doc)?;
     Ok(())
+}
+
+fn edit_tool_config(path: &Path, tool: &str, config: &StructuredToolConfig) -> Result<()> {
+    let mut doc = load_doc(path)?;
+    let tools = doc
+        .entry("tools")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let tools_tbl = tools
+        .as_table_mut()
+        .context("`tools` is not a table in config")?;
+
+    let mut inline = toml_edit::InlineTable::default();
+    inline.insert("version", toml_edit::Value::from(config.version.as_str()));
+    for (key, value) in &config.options {
+        inline.insert(key, to_toml_value(value)?);
+    }
+    inline.fmt();
+    tools_tbl.insert(tool, toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)));
+    save_doc(path, &doc)?;
+    Ok(())
+}
+
+fn to_toml_value(value: &ToolConfigValue) -> Result<toml_edit::Value> {
+    Ok(match value {
+        ToolConfigValue::String(value) => toml_edit::Value::from(value.as_str()),
+        ToolConfigValue::Bool(value) => toml_edit::Value::from(*value),
+        ToolConfigValue::Array(values) => {
+            let mut array = toml_edit::Array::default();
+            for value in values {
+                array.push(toml_edit::Value::from(value.as_str()));
+            }
+            array.fmt();
+            toml_edit::Value::Array(array)
+        }
+    })
 }
 
 fn load_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
@@ -256,4 +328,122 @@ fn find_project_config(start: &Path) -> Option<PathBuf> {
         cur = dir.parent();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn structured(
+        version: &str,
+        options: impl IntoIterator<Item = (&'static str, ToolConfigValue)>,
+    ) -> StructuredToolConfig {
+        StructuredToolConfig {
+            version: version.to_string(),
+            options: options
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn legacy_string_update_preserves_inline_table_options() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tools]\nnpm = { version = \"11.5.1\", allow_builds = [\"esbuild\"], engine = \"node\" }\n",
+        )
+        .unwrap();
+
+        edit_tool_version(&path, "npm", "11.5.2").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("npm = { version = \"11.5.2\", allow_builds = [\"esbuild\"], engine = \"node\" }"));
+    }
+
+    #[test]
+    fn legacy_string_update_preserves_table_options() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tools.npm]\nversion = \"11.5.1\"\nallow_builds = [\"esbuild\"]\nengine = \"node\"\n",
+        )
+        .unwrap();
+
+        edit_tool_version(&path, "npm", "11.5.2").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[tools.npm]"));
+        assert!(text.contains("version = \"11.5.2\""));
+        assert!(text.contains("allow_builds = [\"esbuild\"]"));
+        assert!(text.contains("engine = \"node\""));
+    }
+
+    #[test]
+    fn structured_write_round_trips_options_and_scoped_keys() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+
+        edit_tool_config(
+            &path,
+            "@scope/tool",
+            &structured(
+                "1.2.3",
+                [
+                    (
+                        "allow_builds",
+                        ToolConfigValue::Array(vec!["esbuild".to_string(), "sharp".to_string()]),
+                    ),
+                    ("engine", ToolConfigValue::String("node".to_string())),
+                    ("frozen", ToolConfigValue::Bool(true)),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"@scope/tool\" = {"));
+        assert!(text.contains("version = \"1.2.3\""));
+        assert!(text.contains("allow_builds = [\"esbuild\", \"sharp\"]"));
+        assert!(text.contains("engine = \"node\""));
+        assert!(text.contains("frozen = true"));
+
+        let parsed: toml::Value = text.parse().unwrap();
+        let tool = &parsed["tools"]["@scope/tool"];
+        assert_eq!(tool["version"].as_str(), Some("1.2.3"));
+        assert_eq!(tool["engine"].as_str(), Some("node"));
+        assert_eq!(tool["frozen"].as_bool(), Some(true));
+        assert_eq!(tool["allow_builds"][0].as_str(), Some("esbuild"));
+        assert_eq!(tool["allow_builds"][1].as_str(), Some("sharp"));
+    }
+
+    #[test]
+    fn writing_new_structured_entry_preserves_other_sections() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        std::fs::write(&path, "[settings]\nyes = true\n").unwrap();
+
+        edit_tool_config(
+            &path,
+            "npm",
+            &structured(
+                "11.5.2",
+                [(
+                    "allow_builds",
+                    ToolConfigValue::Array(vec!["sharp".to_string()]),
+                )],
+            ),
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[settings]"));
+        assert!(text.contains("yes = true"));
+        assert!(text.contains("[tools]"));
+        assert!(text.contains("npm = { version = \"11.5.2\", allow_builds = [\"sharp\"] }"));
+    }
 }

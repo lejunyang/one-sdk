@@ -25,6 +25,8 @@ pub struct Config {
     pub sources: SourcesConfig,
     /// Tool pins gathered from config files (backend id -> version spec string).
     pub tools: BTreeMap<String, String>,
+    /// Merged tool config entries with structured options preserved.
+    pub tool_configs: BTreeMap<String, ToolConfigEntry>,
     /// User-defined version aliases: tool -> alias -> version spec.
     pub aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Path of the project config that contributed pins, if any.
@@ -228,6 +230,110 @@ pub struct ToolSources {
     pub env_force: bool,
 }
 
+/// Persisted `[tools]` entry. Legacy strings remain supported, while structured
+/// objects can carry extra backend-specific options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolConfigEntry {
+    Legacy(String),
+    Structured(StructuredToolConfig),
+}
+
+impl ToolConfigEntry {
+    pub fn legacy(version: impl Into<String>) -> Self {
+        Self::Legacy(version.into())
+    }
+
+    pub fn structured(
+        version: impl Into<String>,
+        options: BTreeMap<String, ToolConfigValue>,
+    ) -> Self {
+        Self::Structured(StructuredToolConfig {
+            version: version.into(),
+            options,
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        match self {
+            Self::Legacy(version) => version,
+            Self::Structured(config) => &config.version,
+        }
+    }
+
+    pub fn options(&self) -> Option<&BTreeMap<String, ToolConfigValue>> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Structured(config) => Some(&config.options),
+        }
+    }
+
+    pub fn structured_config(&self) -> Option<&StructuredToolConfig> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Structured(config) => Some(config),
+        }
+    }
+
+    pub fn to_cli_option_strings(&self) -> Vec<String> {
+        match self {
+            Self::Legacy(_) => Vec::new(),
+            Self::Structured(config) => config.to_cli_option_strings(),
+        }
+    }
+
+    pub fn to_request_options(&self) -> BTreeMap<String, String> {
+        match self {
+            Self::Legacy(_) => BTreeMap::new(),
+            Self::Structured(config) => config.to_request_options(),
+        }
+    }
+}
+
+/// Structured `[tools.<tool>]` object with a required version plus arbitrary
+/// backend-specific options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredToolConfig {
+    pub version: String,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, ToolConfigValue>,
+}
+
+impl StructuredToolConfig {
+    pub fn to_cli_option_strings(&self) -> Vec<String> {
+        self.options
+            .iter()
+            .map(|(key, value)| format!("{key}={}", value.as_cli_value()))
+            .collect()
+    }
+
+    pub fn to_request_options(&self) -> BTreeMap<String, String> {
+        self.options
+            .iter()
+            .map(|(key, value)| (key.clone(), value.as_cli_value()))
+            .collect()
+    }
+}
+
+/// Arbitrary structured tool option value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolConfigValue {
+    String(String),
+    Bool(bool),
+    Array(Vec<String>),
+}
+
+impl ToolConfigValue {
+    pub fn as_cli_value(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Bool(value) => value.to_string(),
+            Self::Array(values) => values.join(","),
+        }
+    }
+}
+
 /// On-disk config file shape (a subset that users edit).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -235,7 +341,7 @@ struct ConfigFile {
     settings: Option<Settings>,
     sources: Option<SourcesConfig>,
     registries: Option<RegistriesConfig>,
-    tools: BTreeMap<String, String>,
+    tools: BTreeMap<String, ToolConfigEntry>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
 
@@ -243,48 +349,14 @@ impl Config {
     /// Load config by merging user global + project files, then env overrides.
     /// `start_dir` is where project-config discovery begins (usually cwd).
     pub fn load(user_config_file: &Path, start_dir: &Path) -> Result<Config> {
-        Self::load_layers(user_config_file, Some(start_dir))
+        load_layers_internal(user_config_file, Some(start_dir))
     }
 
     /// Load only user-global configuration and environment overrides. Trust
     /// management uses this so an untrusted project cannot influence the
     /// decision to trust itself.
     pub fn load_user(user_config_file: &Path) -> Result<Config> {
-        Self::load_layers(user_config_file, None)
-    }
-
-    fn load_layers(user_config_file: &Path, start_dir: Option<&Path>) -> Result<Config> {
-        let mut cfg = Config {
-            settings: Settings::default(),
-            sources: SourcesConfig::default(),
-            tools: BTreeMap::new(),
-            aliases: BTreeMap::new(),
-            project_config_path: None,
-        };
-
-        // 1. user global config
-        if user_config_file.exists() {
-            let file = read_config_file(user_config_file)?;
-            cfg.apply_file(file, true);
-        }
-
-        // 2. project config (nearest ancestor). Also read .tool-versions pins.
-        if let Some(start_dir) = start_dir {
-            if let Some((path, file)) = find_project_config(start_dir)? {
-                cfg.apply_file(file, false);
-                cfg.project_config_path = Some(path);
-            }
-            if let Some(tv) = find_tool_versions(start_dir)? {
-                for (k, v) in tv {
-                    cfg.tools.entry(k).or_insert(v);
-                }
-            }
-        }
-
-        // 3. env overrides
-        cfg.apply_env(|k| std::env::var(k).ok());
-
-        Ok(cfg)
+        load_layers_internal(user_config_file, None)
     }
 
     fn apply_file(&mut self, file: ConfigFile, allow_model_env: bool) {
@@ -314,11 +386,16 @@ impl Config {
             // Registry sections replace the lower-precedence layer as a unit.
             self.sources.registries = registries;
         }
-        for (k, v) in file.tools {
-            self.tools.insert(k, v);
-        }
+        self.apply_tool_configs(&file.tools);
         for (tool, aliases) in file.aliases {
             self.aliases.entry(tool).or_default().extend(aliases);
+        }
+    }
+
+    fn apply_tool_configs(&mut self, tools: &BTreeMap<String, ToolConfigEntry>) {
+        for (tool, entry) in tools {
+            self.tools.insert(tool.clone(), entry.version().to_string());
+            self.tool_configs.insert(tool.clone(), entry.clone());
         }
     }
 
@@ -477,6 +554,41 @@ fn read_config_file(path: &Path) -> Result<ConfigFile> {
     Ok(file)
 }
 
+fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Result<Config> {
+    let mut cfg = Config {
+        settings: Settings::default(),
+        sources: SourcesConfig::default(),
+        tools: BTreeMap::new(),
+        tool_configs: BTreeMap::new(),
+        aliases: BTreeMap::new(),
+        project_config_path: None,
+    };
+
+    if user_config_file.exists() {
+        let file = read_config_file(user_config_file)?;
+        cfg.apply_file(file, true);
+    }
+
+    if let Some(start_dir) = start_dir {
+        if let Some((path, file)) = find_project_config(start_dir)? {
+            cfg.apply_file(file, false);
+            cfg.project_config_path = Some(path);
+        }
+        if let Some(tv) = find_tool_versions(start_dir)? {
+            for (tool, version) in tv {
+                cfg.tools.entry(tool.clone()).or_insert_with(|| version.clone());
+                cfg.tool_configs
+                    .entry(tool)
+                    .or_insert_with(|| ToolConfigEntry::legacy(version));
+            }
+        }
+    }
+
+    cfg.apply_env(|k| std::env::var(k).ok());
+
+    Ok(cfg)
+}
+
 fn normalize_registry_urls(urls: &mut Vec<String>) -> Result<()> {
     let mut normalized = Vec::with_capacity(urls.len());
     for value in urls.iter() {
@@ -588,6 +700,7 @@ mod tests {
             settings: Settings::default(),
             sources: SourcesConfig::default(),
             tools: BTreeMap::new(),
+            tool_configs: BTreeMap::new(),
             aliases: BTreeMap::new(),
             project_config_path: None,
         };
@@ -624,7 +737,127 @@ mod tests {
         assert!(found.is_some());
         let (path, file) = found.unwrap();
         assert_eq!(path, cfg_path);
-        assert_eq!(file.tools.get("node").map(|s| s.as_str()), Some("20"));
+        assert_eq!(file.tools.get("node").map(ToolConfigEntry::version), Some("20"));
+    }
+
+    #[test]
+    fn structured_tool_configs_support_legacy_inline_table_and_scoped_keys() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project/nested");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[tools]
+node = "20"
+npm = { version = "11.5.2", allow_builds = ["esbuild", "sharp"], engine = "node", frozen = true }
+"@scope/tool" = { version = "1.2.3", allow_builds = ["pkg-a"] }
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&user_config, &project).unwrap();
+        let tools = &config.tool_configs;
+        assert_eq!(tools["node"].version(), "20");
+        assert_eq!(tools["npm"].version(), "11.5.2");
+        assert_eq!(
+            tools["@scope/tool"]
+                .structured_config()
+                .unwrap()
+                .options
+                .get("allow_builds"),
+            Some(&ToolConfigValue::Array(vec!["pkg-a".to_string()]))
+        );
+        assert_eq!(
+            tools["npm"].structured_config().unwrap().options.get("engine"),
+            Some(&ToolConfigValue::String("node".to_string()))
+        );
+        assert_eq!(
+            tools["npm"].structured_config().unwrap().options.get("frozen"),
+            Some(&ToolConfigValue::Bool(true))
+        );
+        assert_eq!(
+            tools["@scope/tool"].to_cli_option_strings(),
+            vec!["allow_builds=pkg-a".to_string()]
+        );
+        assert_eq!(
+            tools["npm"].to_request_options().get("allow_builds"),
+            Some(&"esbuild,sharp".to_string())
+        );
+    }
+
+    #[test]
+    fn project_tool_configs_override_global_and_tool_versions_only_fill_missing() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project/nested");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[tools]
+node = "20"
+npm = { version = "11.5.1", allow_builds = ["esbuild"] }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("project/osdk.toml"),
+            r#"
+[tools]
+npm = { version = "11.5.2", allow_builds = ["sharp"], engine = "node" }
+pnpm = "9.0.0"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("project/.tool-versions"),
+            "node 22.0.0\nbun 1.1.0\n",
+        )
+        .unwrap();
+
+        let config = Config::load(&user_config, &project).unwrap();
+        let tools = &config.tool_configs;
+        assert_eq!(tools["node"].version(), "20");
+        assert_eq!(tools["npm"].version(), "11.5.2");
+        assert_eq!(tools["pnpm"].version(), "9.0.0");
+        assert_eq!(tools["bun"].version(), "1.1.0");
+        assert_eq!(
+            tools["npm"].structured_config().unwrap().options.get("allow_builds"),
+            Some(&ToolConfigValue::Array(vec!["sharp".to_string()]))
+        );
+        assert_eq!(
+            tools["npm"].structured_config().unwrap().options.get("engine"),
+            Some(&ToolConfigValue::String("node".to_string()))
+        );
+    }
+
+    #[test]
+    fn structured_tool_config_requires_version_and_rejects_non_scalar_options() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+
+        std::fs::write(
+            &config_file,
+            r#"
+[tools.npm]
+allow_builds = ["esbuild"]
+"#,
+        )
+        .unwrap();
+        assert!(Config::load_user(&config_file).is_err());
+
+        std::fs::write(
+            &config_file,
+            r#"
+[tools.npm]
+version = "11.5.2"
+nested = { enabled = true }
+"#,
+        )
+        .unwrap();
+        assert!(Config::load_user(&config_file).is_err());
     }
 
     #[test]

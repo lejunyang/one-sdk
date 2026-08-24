@@ -543,6 +543,7 @@ mod tests {
                     .iter()
                     .map(|(tool, version)| (tool.to_string(), version.to_string()))
                     .collect(),
+                tool_configs: BTreeMap::new(),
                 aliases: BTreeMap::new(),
                 project_config_path: None,
             },
