@@ -3,6 +3,11 @@
 osdk 把 npm、pnpm 和 Yarn 当作可独立锁定的 backend，也直接管理 Bun、Deno。
 它同时为可能获取 npm 包的命令做启动前 Registry 选择，但不会重写项目 lockfile。
 
+::: tip npm 包管理器与 npm 工具不是同一个 backend
+`npm@11.5.2` 安装 npm CLI；`npm:prettier@3` 安装 npm Registry 中的 Prettier
+开发工具。后者的完整生命周期、安全策略和离线行为见 [npm 开发工具](./npm-tools)。
+:::
+
 ## 安装与命令
 
 所有 manager 使用通用生命周期命令：

@@ -60,6 +60,7 @@ node = "20"
 python = "3.12"
 go = "1.22"
 pnpm = "10.15.0"
+"npm:prettier" = "3"
 
 [aliases.node]
 maintenance = "20"
@@ -71,8 +72,9 @@ default = "maintenance"
 
 ## 完整配置参考
 
-以下示例覆盖当前可编辑 schema。省略的字段使用该文件层反序列化时的默认值；
-下一节解释这为何不等于继承低优先级层。
+以下示例覆盖当前可编辑 schema。`[tools]` 的值既可以是版本字符串，也可以是带
+backend 选项的结构化对象；包含 `:`、`@` 或 `/` 的 key 要用引号。省略的字段使用
+该文件层反序列化时的默认值；下一节解释这为何不等于继承低优先级层。
 
 ```toml
 [settings]
@@ -128,6 +130,11 @@ probe_timeout_ms = 1500
 node = "20"
 python = "3.12"
 pnpm = "10.15.0"
+"npm:prettier" = "3"
+
+[tools."npm:@scope/native-tool"]
+version = "1.2.3"
+allow_builds = ["@scope/native-tool", "esbuild"]
 
 [aliases.node]
 default = "20"
@@ -136,6 +143,9 @@ default = "20"
 Registry URL 会去重并补尾部 `/`。只允许带 host 的 HTTP(S) URL；credentials、
 query 和 fragment 都会被拒绝。来源的选择语义见[下载源与供应链安全](./sources-security)，
 Registry 的选择语义见[JavaScript 包管理器](./package-managers)。
+结构化工具对象要求 `version`，其他 option 可以是字符串、布尔值或字符串数组；数组
+传给 backend 时会转成逗号分隔值。上例 `allow_builds` 只允许列出的 npm 依赖执行构建
+脚本；完整安全边界见 [npm 开发工具](./npm-tools#项目配置与构建脚本)。
 
 ## 精确的覆盖与合并语义
 

@@ -136,6 +136,26 @@ osdk registry test pnpm
 
 指南：[包管理器与 Registry 选择](site/guide/package-managers.md)
 
+## 场景：安装 npm 发布的开发工具
+
+给包名加上 `npm:` 前缀，即可独立管理 npm 包提供的命令行工具，而不是管理 npm
+包管理器本身。osdk 会先安装受管 Node，从该包的私有安装中发现命令，再通过 shim
+暴露它们：
+
+```bash
+osdk use npm:prettier@3
+osdk exec --tool npm:prettier@3 -- prettier --check .
+osdk install 'npm:@antfu/ni@0.21.12'
+osdk current 'npm:@antfu/ni'
+```
+
+包的生命周期脚本默认全部禁用；确有原生构建需要时，可以只放行已经审阅过的包。
+schema 2 `osdk.lock` 会引用按内容寻址的
+`osdk.lock.d/npm/<sha256>.yaml` npm graph sidecar；两者都应提交到仓库，用于冻结
+重装，Aube 缓存预热后也能离线重装。
+
+指南：[npm 开发工具](site/guide/npm-tools.md)
+
 ## 场景：使用各语言生态
 
 安装、切换、锁定、下载源、缓存和离线命令在各生态保持一致；需要生态专属操作时，
@@ -290,7 +310,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 平台 | Windows、macOS、Linux |
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
-| 其他开发工具 | 通过 `github:owner/repo` 安装公开 GitHub Release |
+| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包，或通过 `github:owner/repo` 安装公开 GitHub Release |
 | 模型平台 | Hugging Face、ModelScope |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
 | Shell | Bash、zsh、fish、PowerShell |
@@ -304,6 +324,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [锁文件与环境复现](site/guide/lockfiles.md)
 - [运行时与生态工作流](site/guide/runtimes.md)
 - [包管理器与 Registry 选择](site/guide/package-managers.md)
+- [npm 开发工具](site/guide/npm-tools.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)
 - [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)

@@ -6,7 +6,16 @@ osdk combines bounded concurrency, source probing and failover, resumable downlo
 
 `settings.jobs` bounds tool installations and model-file downloads within one command. Its default is the detected logical parallelism capped at 8, or 4 when detection fails. A configured or environment value of zero is ignored, and execution still applies `max(1)`. See [`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs), [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs), and [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs).
 
-Multi-tool installation uses `buffer_unordered(jobs)`. Completion order is unspecified. Shims are generated in that completion order; only the returned resolution records are sorted by backend name afterward. A failed task makes the batch return an error, but already completed independent installs are not rolled back. This is bounded concurrency with per-item commits, not an all-or-nothing batch transaction.
+Multi-tool installation first applies a Node-first barrier. If requests contain
+npm, pnpm, Yarn, or a dynamic `npm:<package>` tool without Node, the CLI injects
+Node. Every Node request completes serially and receives its shims before the
+remaining requests enter `buffer_unordered(jobs)`, preventing an Aube npm tool
+from racing its managed runtime. Completion order after the barrier is
+unspecified. Shims are generated in that order; only returned resolution records
+are sorted by backend name afterward. A failed task makes the batch return an
+error, but completed independent installs are not rolled back. This is a
+dependency barrier plus bounded concurrency and per-item commits, not an
+all-or-nothing batch transaction.
 
 Source speed tests probe all candidates concurrently and are not bounded by `jobs`. Each probe defaults to a 1500 ms deadline, reads at most about 1 MB, and scores time to first byte plus throughput. Successful rankings are cached for 6 hours by default. `auto` uses probe ranking, `ordered` uses configured priority, and a pin moves one source first while retaining the others as fallback. See [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 

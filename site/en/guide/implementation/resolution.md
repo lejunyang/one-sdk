@@ -4,7 +4,12 @@ This page describes how `osdk` turns project declarations or CLI input into an i
 
 ## From request to exact version
 
-The entry point is [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs). Explicit arguments such as `node@20` are parsed by [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs). With no explicit tools, the CLI combines `[tools]` configuration, project package-manager declarations, and Node project metadata. Selecting npm, pnpm, or Yarn makes [`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) include Node in the same operation; it uses `latest` when the project has no Node declaration.
+The entry point is [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs). Explicit arguments such as `node@20` are parsed by [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs). With no explicit tools, the CLI combines `[tools]` configuration, project package-manager declarations, and Node project metadata. Selecting npm, pnpm, Yarn, or a dynamic `npm:<package>` tool makes [`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) include Node in the same operation; it uses `latest` when the project has no Node declaration.
+
+`npm:<package>` is parsed before the generic `tool@version` split so scoped
+`npm:@scope/name@version` requests remain intact. Its dynamic backend ID is
+canonicalized to `npm:<package>`, while bare `npm` remains the package-manager
+backend. See [npm developer tool implementation](./npm-tools#identity-resolution-and-lifecycle-orchestration).
 
 [`version/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) defines `VersionSpec`:
 

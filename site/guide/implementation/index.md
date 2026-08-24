@@ -32,6 +32,7 @@ CLI 与分层配置
 | [存储与缓存](./storage-cache) | SDK/模型 CAS、物化回退、下载缓存和各 manager 原生缓存 |
 | [校验与供应链边界](./verification) | checksum、Minisign、GitHub Artifact Attestation 与归档安全边界 |
 | [Backend 与模型 Provider](./backends-models) | 内置/声明式/GitHub backend，以及 Hugging Face、ModelScope 模型快照 |
+| [npm 开发工具](./npm-tools) | `npm:<package>` 身份、Aube 安装、脚本策略、依赖图、inventory 与冲突拒绝 |
 | [可靠性与并发](./reliability) | 锁、原子发布、重试、离线回退、幂等性和 GC 边界 |
 
 ## 需要先记住的边界

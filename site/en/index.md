@@ -25,7 +25,7 @@ hero:
 features:
   - icon: ◈
     title: One CLI, Many SDKs
-    details: Manage Node.js, Python, Java, Go, Rust, pnpm, Yarn, Deno, Bun, and GitHub Release tools with one command model.
+    details: Manage Node.js, Python, Java, Go, Rust, package managers, `npm:<package>` developer tools, and GitHub Release tools with one command model.
   - icon: ⧉
     title: Cross-Version Deduplication
     details: Installed versions can reuse identical files to reduce duplicate disk use; the implementation guide covers the storage strategy.
@@ -34,13 +34,13 @@ features:
     details: Probe official sources and authoritative mirrors, select by speed, and fail over when metadata or artifact downloads fail.
   - icon: ⌁
     title: Reproducible Projects
-    details: Read project version files and generate a platform-aware osdk.lock with exact versions, URLs, and verification data.
+    details: Generate a platform-aware osdk.lock with exact versions and backend-specific reproduction data; npm tools reference committed content-addressed graph sidecars.
   - icon: ✓
     title: Integrity and Provenance
     details: Verify upstream checksums, enforce strict checksum policies, and validate GitHub Artifact Attestations with Sigstore.
   - icon: ⬡
     title: Offline Reinstall and Shared Caches
-    details: Cache metadata and artifacts while centralizing npm, pip, Cargo, Go, Gradle, and other downstream package caches.
+    details: Reuse metadata, artifacts, and native package caches; npm tools can reinstall offline with committed graph sidecars and a warmed Aube cache.
 ---
 
 ## Start in three steps

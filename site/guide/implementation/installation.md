@@ -5,6 +5,9 @@
 ## CLI 编排
 
 [`install_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 合并 `-o key=value` 选项，并按 `[settings].jobs` 使用有界并发安装不同工具。每个请求进入 [`install_one_without_shims`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)：
+若请求中包含 npm、pnpm、Yarn 或 `npm:<package>` 且缺少 Node，CLI 会先注入 Node；
+安装调度把所有 Node 请求串行完成后，才让其余请求进入有界并发，避免动态 npm 工具
+与其 runtime 竞态。
 
 1. 安装类调用可选执行 `--refresh-sources`；该开关不在 `lock`、`outdated`、`list-remote` 的纯解析路径执行；
 2. 查找 backend、展开版本 alias、解析精确版本；
@@ -12,7 +15,7 @@
 4. 否则调用 backend 的 `install`；
 5. 所有安装完成后生成 shim，并按 backend 名排序结果。
 
-这意味着不同工具可以并发，同一个 `tool@version` 的写入仍由 pipeline 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。
+这意味着除上述 Node 前置依赖外，不同工具可以并发；同一个 `tool@version` 的写入仍由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。动态 npm 工具不走下面的归档 CAS pipeline，而使用 embedded Aube 与独立 cache/store，见 [npm 开发工具实现](./npm-tools)。
 
 ## Backend 生成计划
 
@@ -37,6 +40,9 @@
 ## 下载恢复与缓存
 
 [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs) 先写同级 `.partial` 文件，成功后原子 rename。只有 partial metadata 中保存了同一 URL 的 ETag 或 Last-Modified 时才发送 `Range` + `If-Range`；服务端忽略 range、对象变化或返回不匹配的 `Content-Range` 时会安全重启或失败，不会盲目拼接。敏感请求头只附加在初始请求，跨 host redirect 不继承。
+这里描述的是通用 artifact download plan 携带的下载 header。`Source.headers` 另用于
+osdk metadata/source probe，并按 origin 约束；动态 npm 工具的 embedded Aube package
+fetch 当前不转发任意 `Source.headers`，认证应走 Aube/npm 原生可信配置或环境变量。
 
 在实际进入 pipeline 的安装或重装中，artifact cache 命中仍会执行适用的 checksum/attestation 逻辑，而不是把“文件存在”当作验证成功。离线重装可以使用先前持久化的 checksum；但没有缓存 artifact 时不会联网降级。普通 `osdk install` 若发现完整安装，会在 pipeline 之前复用它，不重新校验 receipt、checksum 或已安装字节。
 
@@ -47,6 +53,6 @@
 - checksum 是可选策略，除非 backend 本身提供、attestation 提供认证 digest，或配置启用 `require_checksums`。各 backend 的真实保证不同。
 - `ensure_post_install` 可能有额外副作用。全新 Node 安装若 Corepack 后处理失败会删除安装树；在已安装快路径上，`ensure_post_install` 仍可能失败而现有完成标记继续保留。
 - Rust 等 delegate backend 不经过完整归档 pipeline，其幂等性和验证边界应以 backend 实现为准。
-- lockfile 中的 artifact URL 固定来源身份并支持 metadata-free 重装。重新安装会执行当前可用或策略要求的 checksum/attestation；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。
+- 对支持通用 artifact receipt 的 backend，lockfile 中的 artifact URL 固定来源身份并支持 metadata-free 重装。重新安装会执行当前可用或策略要求的 checksum/attestation；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。动态 npm 工具改用 [npm 开发工具实现](./npm-tools) 所述的已提交 graph sidecar。
 
 核心测试位于 [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs)、[`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs)、[`backend/contract.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/contract.rs) 和端到端 [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs)。

@@ -33,7 +33,7 @@ backends:
 | --- | --- |
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
 | Package managers and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
-| Other developer tools | Public GitHub Releases through `github:owner/repo` |
+| Other developer tools | npm CLI packages through `npm:<package>`, or public GitHub Releases through `github:owner/repo` |
 | Model providers | Hugging Face, ModelScope |
 | Project inputs | `osdk.toml`, `.tool-versions`, and common ecosystem version files |
 | Shells | Bash, Zsh, Fish, PowerShell |

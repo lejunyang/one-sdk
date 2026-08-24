@@ -25,6 +25,13 @@
 
 shim 启动时重新加载配置并按当前工作目录选择已安装版本，不访问网络。它会从子进程 PATH 中移除 shim 目录以阻止递归，加入真实 backend bin；JavaScript 包管理器还会加入受管 Node。npm、pnpm、Yarn、Bun 和 Deno 的依赖获取命令在真正执行前运行 registry preflight。Node 自带的 npm/npx 可被路由，但 Node backend 不取得独立 npm backend 的所有权，详见 [`routed_bin_names`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/shim/mod.rs#L25) 与 [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs#L27)。
 
+动态 `npm:<package>` 安装会把合成项目 `.bin` 中发现的命令和相对路径写入 inventory。shim
+启动时扫描 inventory 以恢复 backend ownership，并为其 PATH 追加受管 Node。若多个
+backend 导出同名 bin，运行时仅在当前配置能唯一选出 owner 时路由，否则拒绝任选一个；
+CLI 生成或 `reshim` 则始终对多个已安装 backend owner 移除歧义的受管 shim 并报错。
+同一 backend 的多个版本由活跃版本选择处理，不构成 owner 冲突。详见
+[npm 开发工具实现](./npm-tools)。
+
 ## 信任边界
 
 CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]` 与 `[aliases]` 的项目文件无需显式信任；出现 settings、sources、registries 等可影响执行或网络的顶层键时，配置必须被信任。信任身份是规范化文件路径加规范化 TOML 内容的 BLAKE3，因此内容修改或仓库移动会使记录失效；`OSDK_TRUSTED_CONFIG_PATHS` 可按规范化路径授权文件或目录。实现见 [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs)。
@@ -33,7 +40,7 @@ CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]`
 
 `osdk.lock` 是项目 lockfile，没有单独的全局 lockfile。[`find`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L128) 从当前目录向祖先查找最近的现有 `osdk.lock`。无参数且无 `-o` 的 `osdk install` 才尝试读取它；显式工具或任何 `-o` 都绕过 lock，改从配置/参数收集请求。
 
-读取时完整解析 TOML 并要求 schema 为 1。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。每个锁定工具被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum 或 manifest；只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model pull` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。
+读取时完整解析 TOML，并接受 schema 1 或当前 schema 2；其他版本会被拒绝。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。带通用 artifact 子表的非 npm 工具会被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；npm 工具明确不能带通用 artifact receipt。schema 2 的 npm 工具会根据主 lock 中的 package、Node 版本、格式、摘要和规范路径读取 `osdk.lock.d/npm/<sha256>.yaml`；sidecar 通过大小、symlink、UTF-8 与 SHA-256 校验后，完整 graph 才作为内部 option 注入。含 npm 条目的 schema 1 lock 不会被消费，必须重新生成。大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。对带通用 artifact receipt 的 backend，全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum 或 manifest；只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model pull` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。npm graph sidecar 的生成、hash 与 frozen install 边界见 [npm 开发工具实现](./npm-tools)。
 
 平台键是 `os-arch`，Linux musl 额外带 `-musl`。`osdk lock` 对 Node 的 `arch` 选项使用目标架构键；普通 `upgrade` 使用当前 host 平台键。
 
@@ -41,7 +48,7 @@ CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]`
 
 写入目标由 [`project_lock_path`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs#L498) 决定：如果加载过项目配置，就固定写在该配置旁；否则复用向上找到的最近 lockfile；两者都没有时写当前目录的 `osdk.lock`。
 
-[`merge_resolved`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L196) 先读取整个现有文件，保留其他平台区段与顶层模型记录，但**清空并整体替换目标平台的 tools 表**。因此 `osdk lock node@20` 不是只合并一个 Node 条目：它会移除目标平台原先未包含在本次 resolved 集合里的工具。内部 `__osdk_*` 选项不会写出；本地链接的 Rust toolchain 被拒绝，因为它不能形成可复现远程 artifact。模型 pull 则由 `merge_model` 只插入或替换同名 `[models]` 项，并保留平台表与其他模型。
+[`merge_resolved`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L492) 先读取整个现有文件，保留其他平台区段与顶层模型记录，但**清空并整体替换目标平台的 tools 表**。因此 `osdk lock node@20` 不是只合并一个 Node 条目：它会移除目标平台原先未包含在本次 resolved 集合里的工具。写出时统一使用 schema 2；不含 npm 条目的 schema 1 会在下次成功写入时升级，含 npm 条目的 schema 1 则拒绝消费或写入，要求重新生成。npm graph sidecar 先原子写入并回读校验，主 lock 最后原子替换；两者必须一起提交。内部 `__osdk_*` 选项不会写出；本地链接的 Rust toolchain 被拒绝，因为它不能形成可复现远程 artifact。模型 pull 则由 `merge_model` 只插入或替换同名 `[models]` 项，并保留平台表与其他模型，但同样不会迁移 schema 1 npm 条目。
 
 保存过程先序列化完整文档，写同目录的 `osdk.tmp-<pid>`，再 rename 到 `osdk.lock`。这提供临时写入再发布的边界，但没有 fsync/durability 保证，也不保证所有平台都能以 rename 原子替换已有目标。read-modify-write 周围同样**没有进程锁**：两个并发 writer 可以都读到旧状态，最后一次成功 rename 可能覆盖另一方的合并结果；同一进程 PID 下针对同一路径的并发写还会共享临时文件名。读取也不持有共享锁。
 

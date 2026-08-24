@@ -6,7 +6,12 @@ osdk 通过有限并发、源探测与故障转移、可恢复下载、跨进程
 
 `settings.jobs` 控制一条命令中工具安装和模型文件下载的最大并发数。默认取逻辑可用并行度、最多 8；无法检测时为 4。环境变量或配置中的 0 会被忽略，命令执行处仍使用 `max(1)`。实现见 [`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs)、[`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 和 [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs)。
 
-多工具安装使用 `buffer_unordered(jobs)`；完成顺序不固定，shim 按该完成顺序生成，只有返回的解析记录随后按 backend 名称排序。任何任务失败会使批次返回错误，但已完成的独立安装不会回滚，因此它是“有界并发 + 每项提交”，不是全批事务。
+多工具安装先应用 Node-first barrier：若请求包含 npm、pnpm、Yarn 或动态
+`npm:<package>` 且没有 Node，CLI 自动注入 Node；所有 Node 请求先串行完成并生成 shim，
+其余请求才进入 `buffer_unordered(jobs)`。这避免 Aube npm 工具与其受管 runtime 竞态。
+barrier 之后的完成顺序不固定，shim 按该完成顺序生成，只有返回的解析记录随后按
+backend 名称排序。任何任务失败会使批次返回错误，但已完成的独立安装不会回滚，因此
+它是“依赖 barrier + 有界并发 + 每项提交”，不是全批事务。
 
 源测速会并发探测全部候选，不受 `jobs` 限制。单次探测默认超时 1500 ms，最多读取约 1 MB，按首字节时间和吞吐量评分；成功结果默认缓存 6 小时。`auto` 使用测速排名，`ordered` 使用配置优先级，pin 会被放在首位，但其余源仍作为 fallback。详见 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)。
 

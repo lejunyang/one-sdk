@@ -15,7 +15,7 @@ This page is for maintainers who need to understand or extend osdk's download ca
 5. ingest content into the BLAKE3 CAS and materialize with hardlink, reflink, or copy;
 6. write an artifact receipt and `.osdk-complete` marker for idempotent and offline reinstall behavior.
 
-The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo` dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
+The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo` and `npm:<package>` dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
 
 ## Built-in backend matrix
 
@@ -34,9 +34,12 @@ The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core
 | `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then delegated to isolated rustup | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument plus `@deno/<platform>` | npm SRI | Platform package; exports `DENO_DIR` |
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
+| `npm:<package>` | npm packument plus full dependency resolution through embedded Aube | The Aube graph carries transitive integrity; scripts denied by default | Discovers `.bin` dynamically, adds managed Node, and records a committed content-addressed graph sidecar in schema 2 |
 | `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
 
 These implementations live under [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/). The npm-backed implementations share packument, version, and SRI handling in [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs). Generic source ranking is in [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
+See [npm developer tool implementation](./npm-tools) for the complete dynamic
+backend installation, cache, graph-sidecar, and shim boundaries.
 
 ## Declarative and GitHub backends
 

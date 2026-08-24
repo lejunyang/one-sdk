@@ -4,7 +4,7 @@ osdk has two independent network-selection mechanisms. They must not be conflate
 
 | Mechanism | What it obtains | Configuration | Decision point | Consumer retries |
 | --- | --- | --- | --- | --- |
-| SDK source | SDK artifacts and release metadata for Node, Go, Python, manager binaries, and others | `[sources]`, `[sources.<tool>]`, `--source` | before backend resolution and installation | artifact URLs may fail over; an external manager that has started is never rerun |
+| SDK/tool source | Artifacts and release metadata for Node, Go, Python, manager binaries, `npm:<package>`, and others | `[sources]`, `[sources.<tool>]`, `--source` | before backend resolution and installation | artifact URLs may fail over; an external manager that has started is never rerun |
 | Project dependency registry | npm-compatible packages resolved by npm/pnpm/Yarn/Bun/Deno project commands | `[registries.npm]` plus native manager configuration | before `osdk exec` or a shim starts the manager | an eligible invocation makes at most one launch attempt after selection; if every candidate is unhealthy, no launch is attempted |
 
 The source for `osdk install pnpm@11` determines where pnpm itself comes from. The registry for a later `pnpm install` determines where project dependencies are resolved. `--source` never rewrites the project registry.
@@ -16,13 +16,23 @@ The source for `osdk install pnpm@11` determines where pnpm itself comes from. T
 [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) then applies this algorithm:
 
 1. A configured pin or one-shot `--source` moves the matching source first while keeping the others as fallbacks. The one-shot key currently uses the user-supplied tool name, so the invocation must use the canonical backend ID; aliases do not receive that override.
-2. Offline mode skips probes and uses priority order.
+2. Offline mode skips probes; it reuses a cached order only when the candidate-set fingerprint matches, otherwise it uses priority order.
 3. `ordered` and `pinned` selection also use that order directly.
-4. `auto` first reads the per-tool probe cache; it is usable only when every cached result is within the TTL. Freshness does not validate a candidate-set fingerprint, so sources added or removed within the TTL are not re-probed, and current sources absent from the cached ranking are appended in priority order.
+4. `auto` first reads the per-tool probe cache; it is usable only when every cached result is within the TTL. Cache schema 2 also validates a candidate-set fingerprint, so URL, order, priority, enabled-state, credential-forwarding, or header changes cannot reuse stale results; header values are stored only as hashes.
 5. When stale, all sources are probed concurrently, each bounded by `probe_timeout_ms`, reading at most about 1 MiB.
 6. Successful probes are sorted by the composite score `throughput - ttfb_ms` in descending order. Failed probes are appended, so real downloads can still use them as final fallbacks.
 
 Each backend owns metadata lookup and artifact URL construction, so a source must actually implement that backend's expected layout. The shared pipeline downloads in URL order; one URL gets up to three transient-error attempts before failover. A successful probe is not an integrity result: checksum or attestation verification remains a separate post-download step. See [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) and [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs).
+
+Explicit `Source.headers` applies to metadata requests and source probes made by
+osdk and is independent of `forward_credentials`. Headers are attached only when
+the initial URL has the configured index/download origin, survive same-origin
+redirects, and are permanently stripped after the first cross-origin redirect.
+Only hashes of header values participate in metadata/probe cache identity; clear
+values are not persisted. Aube 2.1's embedded API cannot safely accept arbitrary
+source headers, so `npm:<package>` Aube package fetches do not forward
+`Source.headers`; authenticated registries must use Aube/npm's native trusted
+configuration or environment path.
 
 ## Project registry preflight
 

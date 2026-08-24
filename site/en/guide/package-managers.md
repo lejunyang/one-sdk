@@ -4,6 +4,12 @@ osdk treats npm, pnpm, and Yarn as independently lockable backends and also
 manages Bun and Deno directly. Before commands that may fetch npm packages, it
 can select a registry without rewriting the project's lockfile.
 
+::: tip The npm manager and npm tools are different backends
+`npm@11.5.2` installs the npm CLI. `npm:prettier@3` installs the Prettier
+developer tool from the npm registry. See [npm Developer Tools](./npm-tools)
+for its lifecycle, security policy, and offline behavior.
+:::
+
 ## Install and commands
 
 All managers use the common lifecycle commands:

@@ -4,7 +4,7 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 
 | 机制 | 获取内容 | 配置 | 生效点 | 是否重跑消费者 |
 | --- | --- | --- | --- | --- |
-| SDK source | Node、Go、Python、manager 二进制等 SDK artifact 和版本 metadata | `[sources]`、`[sources.<tool>]`、`--source` | backend 解析及安装前 | 下载 URL 可 failover；不会重跑已启动的外部 manager |
+| SDK/tool source | Node、Go、Python、manager 二进制、`npm:<package>` 等 artifact 和版本 metadata | `[sources]`、`[sources.<tool>]`、`--source` | backend 解析及安装前 | 下载 URL 可 failover；不会重跑已启动的外部 manager |
 | 项目依赖 registry | npm/pnpm/Yarn/Bun/Deno 执行项目命令时解析的 npm-compatible 包 | `[registries.npm]` 与 manager 原生配置 | `osdk exec` / shim 启动 manager 前 | eligible 调用在选中候选后最多尝试启动一次；全部候选不健康时不启动 |
 
 `osdk install pnpm@11` 的 source 决定从哪里取得 pnpm 本身；之后 `pnpm install` 的 registry 决定项目依赖从哪里解析。`--source` 不会改写项目 registry。
@@ -16,13 +16,20 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) 的算法是：
 
 1. 显式 pin 或一次性 `--source` 命中时移到首位，其余 source 仍作为 fallback；当前一次性覆盖先按用户输入工具名写入，因此调用必须使用规范 backend ID，别名不会收到该覆盖；
-2. offline 时不探测，直接使用 priority 顺序；
+2. offline 时不探测；有候选集合指纹匹配的缓存时复用其排序，否则使用 priority 顺序；
 3. `ordered` / `pinned` 策略也直接使用该顺序；
-4. `auto` 优先读取按工具缓存的 probe 结果；全部缓存结果都在 TTL 内才算有效。缓存不校验候选集合指纹，因此 TTL 内新增或移除 source 时不会重新探测，未出现在缓存排序中的当前 source 会按 priority 追加；
+4. `auto` 优先读取按工具缓存的 probe 结果；全部缓存结果都在 TTL 内才算有效。cache schema 2 同时校验候选集合指纹，因此 URL、顺序、priority、enabled、凭据转发或 header 变化后不会沿用旧结果；header 值只保存 hash；
 5. 缓存过期时并发探测所有 source，每个探测受 `probe_timeout_ms` 限制，最多读取约 1 MiB；
 6. 成功结果按 `throughput - ttfb_ms` 的组合分数降序排列；失败项追加到尾部，仍保留为真实下载的最后 fallback。
 
 版本 metadata 查询和 artifact URL 构造由各 backend 完成，所以不同 source 必须真正兼容对应 backend。共享 pipeline 随后按 URL 顺序下载；每个 URL 内的瞬时失败最多重试三次，失败后才切下一个 URL。probe 成功不是 artifact 完整性证明，checksum/attestation 在下载后独立执行。实现见 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) 与 [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs)。
+
+显式 `Source.headers` 用于 osdk 自己发起的 metadata 请求与 source probe，并独立于
+`forward_credentials`。只有初始 URL 与配置的 index/download URL 同 origin 时才附加；
+同源 redirect 继续携带，第一次跨源 redirect 后永久移除。header 值只以 hash 参与
+metadata/probe cache identity，不明文写入 cache。Aube 2.1 embedded API 无法安全接收
+任意 source header，因此 `npm:<package>` 的 Aube package fetch 不转发
+`Source.headers`；认证 Registry 应走 Aube/npm 原生可信配置或环境变量路径。
 
 ## 项目 registry 启动前预检
 

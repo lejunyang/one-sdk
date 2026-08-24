@@ -68,6 +68,13 @@ enabled = true
 来源，`enabled=false` 被过滤，较小 `priority` 排在前面。项目中的 source 设置需要
 [显式信任](./projects#项目配置信任)。
 
+`headers` 是显式 source 配置，与 `forward_credentials` 不同。osdk 自己发起的 metadata
+请求和 source probe 只在初始 URL 与该 source 的 index/download URL 同 origin 时附加
+这些 header；同源 redirect 保留，第一次跨源 redirect 后永久移除，header 值也不会
+明文写入 cache。当前 Aube 2.1 embedded API 无法安全接收任意 `Source.headers`，因此
+`npm:<package>` 的实际 package fetch 不转发这里的 header；认证 npm Registry 应通过
+Aube/npm 原生可信配置或环境变量提供凭据。
+
 ## 选择、探测与故障转移
 
 | `selection` | 行为 |
@@ -97,8 +104,10 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
 - 自动 source probe 被跳过；`source test` 及 SDK 安装类命令中的 `--refresh-sources`
   会失败，`model pull` 不会刷新，本就不支持该参数的命令仍忽略它；
 - 缺少缓存时明确报错，不会偷偷联网；
-- lock 中的 artifact URL/checksum 可支持离线重装；pipeline 实际重装且有 checksum
-  时重新校验字节，已有完整安装则直接复用；
+- 对支持通用 artifact receipt 的 backend，lock 中的 artifact URL/checksum 可支持离线
+  重装；pipeline 实际重装且有 checksum 时重新校验字节，已有完整安装则直接复用；
+- `npm:<package>` 不使用通用 artifact URL；它需要随 `osdk.lock` 提交且校验通过的
+  graph sidecar，以及预热的 Aube cache/store；
 - `attestations=required` 还要求按 artifact SHA-256 缓存的证明 bundle，lock evidence
   不能代替重新验证。
 

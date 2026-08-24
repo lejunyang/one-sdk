@@ -142,6 +142,28 @@ package-manager configuration remain under your control.
 
 Guide: [Package managers and registry selection](site/en/guide/package-managers.md)
 
+## Scenario: install an npm-published developer tool
+
+Prefix a package with `npm:` to manage its command-line tools independently of
+the npm package manager itself. osdk installs a managed Node first, discovers
+commands in the package's private installation, and makes them available through
+shims:
+
+```bash
+osdk use npm:prettier@3
+osdk exec --tool npm:prettier@3 -- prettier --check .
+osdk install 'npm:@antfu/ni@0.21.12'
+osdk current 'npm:@antfu/ni'
+```
+
+Package lifecycle scripts are disabled by default. Projects that need a native
+build can allow only the packages they have reviewed. A schema 2 `osdk.lock`
+references a committed, content-addressed `osdk.lock.d/npm/<sha256>.yaml` graph
+sidecar; keep both with the repository for frozen reinstall and, once the Aube
+cache is warm, offline use.
+
+Guide: [npm developer tools](site/en/guide/npm-tools.md)
+
 ## Scenario: work in each language ecosystem
 
 The same install, use, lock, source, cache, and offline commands apply across
@@ -300,7 +322,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Platforms | Windows, macOS, Linux |
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
-| Other developer tools | Public GitHub Releases through `github:owner/repo` |
+| Other developer tools | npm packages through `npm:<package>` and public GitHub Releases through `github:owner/repo` |
 | Model providers | Hugging Face, ModelScope |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
 | Shells | Bash, zsh, fish, PowerShell |
@@ -314,6 +336,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
 - [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
 - [Package managers and registry selection](site/en/guide/package-managers.md)
+- [npm developer tools](site/en/guide/npm-tools.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
 - [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)

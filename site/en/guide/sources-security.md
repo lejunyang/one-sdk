@@ -73,6 +73,16 @@ with the same ID overrides a built-in, `enabled=false` entries are filtered, and
 smaller `priority` values come first. Project source settings require
 [explicit trust](./projects#project-configuration-trust).
 
+`headers` is explicit source configuration and is separate from
+`forward_credentials`. Metadata requests and source probes made by osdk attach
+these headers only when the initial URL has the source's configured
+index/download origin. They survive same-origin redirects, are permanently
+removed after the first cross-origin redirect, and their clear values are not
+written to cache. Aube 2.1's embedded API cannot safely receive arbitrary
+`Source.headers`, so actual `npm:<package>` package fetches do not forward them;
+authenticated npm registries must use Aube/npm's native trusted configuration or
+environment path.
+
 ## Selection, probing, and failover
 
 | `selection` | Behavior |
@@ -106,9 +116,11 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
   SDK-installing commands fail, `model pull` does not refresh, and commands that
   do not support the flag continue to ignore it;
 - a cache miss fails explicitly instead of going online;
-- a lock's artifact URL/checksum can support offline reinstall; bytes are
-  reverified when the pipeline actually reinstalls with a checksum, while an
-  existing complete installation is reused;
+- for backends with a generic artifact receipt, a lock's artifact URL/checksum
+  can support offline reinstall; bytes are reverified when the pipeline actually
+  reinstalls with a checksum, while an existing complete installation is reused;
+- `npm:<package>` does not use a generic artifact URL; it needs a validated
+  graph sidecar committed with `osdk.lock` plus a warmed Aube cache/store;
 - `attestations=required` additionally needs the proof bundle cached by artifact SHA-256; lock evidence cannot replace verification.
 
 `OSDK_OFFLINE` controls osdk and compatible environment values managed by its

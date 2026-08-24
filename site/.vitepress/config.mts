@@ -33,6 +33,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: '锁文件与环境复现', link: '/guide/lockfiles' },
       { text: '语言与运行时', link: '/guide/runtimes' },
       { text: 'JavaScript 包管理器', link: '/guide/package-managers' },
+      { text: 'npm 开发工具', link: '/guide/npm-tools' },
       { text: '模型快照', link: '/guide/models' },
       { text: '来源、离线与安全', link: '/guide/sources-security' },
       { text: '存储、Shell 与诊断', link: '/guide/storage-shell' }
@@ -49,6 +50,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: '内容存储与原生缓存', link: '/guide/implementation/storage-cache' },
       { text: '完整性与来源验证', link: '/guide/implementation/verification' },
       { text: 'Backend 与模型快照', link: '/guide/implementation/backends-models' },
+      { text: 'npm 开发工具实现', link: '/guide/implementation/npm-tools' },
       { text: '可靠性与跨平台', link: '/guide/implementation/reliability' }
     ]
   }
@@ -71,6 +73,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'Lockfiles and Reproducibility', link: '/en/guide/lockfiles' },
       { text: 'Languages and Runtimes', link: '/en/guide/runtimes' },
       { text: 'JavaScript Package Managers', link: '/en/guide/package-managers' },
+      { text: 'npm Developer Tools', link: '/en/guide/npm-tools' },
       { text: 'Model Snapshots', link: '/en/guide/models' },
       { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
       { text: 'Storage, Shell, and Diagnostics', link: '/en/guide/storage-shell' }
@@ -87,6 +90,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'Content Store and Native Caches', link: '/en/guide/implementation/storage-cache' },
       { text: 'Integrity and Provenance', link: '/en/guide/implementation/verification' },
       { text: 'Backends and Model Snapshots', link: '/en/guide/implementation/backends-models' },
+      { text: 'npm Developer Tool Implementation', link: '/en/guide/implementation/npm-tools' },
       { text: 'Reliability and Portability', link: '/en/guide/implementation/reliability' }
     ]
   }

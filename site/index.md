@@ -25,7 +25,7 @@ hero:
 features:
   - icon: ◈
     title: 一个命令，多种 SDK
-    details: 用一致的命令管理 Node.js、Python、Java、Go、Rust、pnpm、Yarn、Deno、Bun 和 GitHub Release 工具。
+    details: 用一致的命令管理 Node.js、Python、Java、Go、Rust、包管理器、`npm:<package>` 开发工具和 GitHub Release 工具。
   - icon: ⧉
     title: 跨版本内容去重
     details: 多个已安装版本可复用相同文件，减少重复磁盘占用；具体存储方式见实现说明。
@@ -34,13 +34,13 @@ features:
     details: 探测官方源和权威镜像，按速度选择并在元数据或下载失败时自动切换。
   - icon: ⌁
     title: 可复现的项目环境
-    details: 读取项目版本文件并生成按平台分区的 osdk.lock，固定精确版本、下载地址和校验信息。
+    details: 生成按平台分区的 osdk.lock，保存精确版本和各 backend 的复现信息；npm 工具引用随 lock 提交的内容寻址 graph sidecar。
   - icon: ✓
     title: 完整性与来源验证
     details: 支持上游校验和、严格校验策略，以及 GitHub Artifact Attestations 的 Sigstore 验证。
   - icon: ⬡
     title: 离线重装与共享缓存
-    details: 缓存元数据和下载包，并集中管理 npm、pip、Cargo、Go、Gradle 等下游包缓存。
+    details: 复用元数据、制品和原生包缓存；npm 工具可结合已提交的 graph sidecar 与预热的 Aube 缓存离线重装。
 ---
 
 ## 三步开始

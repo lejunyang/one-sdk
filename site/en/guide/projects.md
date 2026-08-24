@@ -63,6 +63,7 @@ node = "20"
 python = "3.12"
 go = "1.22"
 pnpm = "10.15.0"
+"npm:prettier" = "3"
 
 [aliases.node]
 maintenance = "20"
@@ -74,9 +75,11 @@ the current directory. `osdk use --global node@20` updates user configuration.
 
 ## Complete configuration reference
 
-The following example covers the current editable schema. Missing fields use
-the defaults of the file layer being deserialized; the next section explains
-why that is not always inheritance from the lower layer.
+The following example covers the current editable schema. Values in `[tools]`
+may be version strings or structured objects with backend options; quote keys
+containing `:`, `@`, or `/`. Missing fields use the defaults of the file layer
+being deserialized; the next section explains why that is not always inheritance
+from the lower layer.
 
 ```toml
 [settings]
@@ -132,6 +135,11 @@ probe_timeout_ms = 1500
 node = "20"
 python = "3.12"
 pnpm = "10.15.0"
+"npm:prettier" = "3"
+
+[tools."npm:@scope/native-tool"]
+version = "1.2.3"
+allow_builds = ["@scope/native-tool", "esbuild"]
 
 [aliases.node]
 default = "20"
@@ -141,6 +149,11 @@ Registry URLs are deduplicated and normalized with a trailing `/`. Only HTTP(S)
 URLs with a host are accepted; credentials, query strings, and fragments are
 rejected. See [Sources and Supply-chain Security](./sources-security) and
 [JavaScript Package Managers](./package-managers) for runtime selection.
+Structured tool objects require `version`; other options may be strings,
+booleans, or string arrays. Arrays become comma-separated values when passed to
+the backend. The `allow_builds` example permits build scripts only for the named
+npm dependencies; see [npm Developer Tools](./npm-tools#project-configuration-and-build-scripts)
+for the complete security boundary.
 
 ## Exact override and merge semantics
 

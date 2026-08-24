@@ -4,7 +4,12 @@
 
 ## 从请求到精确版本
 
-入口位于 [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)。显式参数（如 `node@20`）由 [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 解析；没有显式工具时，CLI 汇总配置中的 `[tools]`、项目包管理器声明和 Node 项目元数据。选择 npm、pnpm 或 Yarn 时，[`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 会确保同一次操作包含 Node；若项目没有 Node 声明，则使用 `latest`。
+入口位于 [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)。显式参数（如 `node@20`）由 [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 解析；没有显式工具时，CLI 汇总配置中的 `[tools]`、项目包管理器声明和 Node 项目元数据。选择 npm、pnpm、Yarn 或动态 `npm:<package>` 工具时，[`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 会确保同一次操作包含 Node；若项目没有 Node 声明，则使用 `latest`。
+
+`npm:<package>` 在通用 `tool@version` 分割前单独解析，以保留 scoped 包的
+`npm:@scope/name@version` 语法。其动态 backend id 会规范为
+`npm:<package>`；裸 `npm` 仍是包管理器 backend。细节见
+[npm 开发工具实现](./npm-tools#身份解析与生命周期编排)。
 
 `VersionSpec` 的语义在 [`version/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 中定义：
 
