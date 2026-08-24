@@ -258,10 +258,12 @@ fn read_project_tool(path: &Path, tool: &str) -> Option<String> {
 }
 
 fn read_tool_value(value: &toml::Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| value.get("version").and_then(toml::Value::as_str).map(str::to_string))
+    value.as_str().map(str::to_string).or_else(|| {
+        value
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 /// Read a simple idiomatic version file (`.nvmrc`, `.python-version`, ...).

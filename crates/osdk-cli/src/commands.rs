@@ -66,7 +66,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
             .any(|(request, _)| request.backend == "node")
         {
             let node_request = node_request
-                .ok_or_else(|| anyhow!("npm tools require a managed Node dependency"))?;
+                .ok_or_else(|| anyhow!(t!("err.npm_managed_node_dependency_required")))?;
             let (backend, version) = install_one_without_shims(app, &node_request).await?;
             generate_shims_for(app, backend.as_ref(), &version)?;
             resolved.push((node_request, version));
@@ -79,11 +79,13 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
             let (backend, version) = install_one_without_shims(app, &node).await?;
             generate_shims_for(app, backend.as_ref(), &version)?;
         }
+        bind_resolved_node_version(&mut resolved);
         for (_, version) in &resolved {
             if let Some(npm) = version.backend.strip_prefix("npm:") {
-                let backend =
-                    osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend)
-                        .ok_or_else(|| anyhow!("invalid npm package backend `{npm}`"))?;
+                let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(
+                    &version.backend,
+                )
+                .ok_or_else(|| anyhow!(t!("err.npm_package_backend_invalid", package = npm)))?;
                 backend.prepare_lock_graph(&app.ctx, version).await?;
             }
         }
@@ -483,7 +485,7 @@ async fn install_requests(
     opts: Vec<String>,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
-    let mut requests = requests;
+    let mut requests = inject_node_dependency(app, requests)?;
     if requests.is_empty() {
         println!("{}", t!("msg.nothing_to_install"));
         return Ok(Vec::new());
@@ -512,6 +514,7 @@ async fn install_requests(
         generate_shims_for(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
+    bind_request_node_version(&mut remaining_requests, &resolved);
     let jobs = app.ctx.config.settings.jobs.max(1);
     let installed = stream::iter(remaining_requests.into_iter().map(|req| {
         let app_ref: &App = app;
@@ -529,6 +532,43 @@ async fn install_requests(
     }
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
     Ok(resolved)
+}
+
+fn resolved_node_version(resolved: &[(ToolRequest, ToolVersion)]) -> Option<String> {
+    resolved
+        .iter()
+        .find_map(|(_, version)| (version.backend == "node").then_some(version.version.clone()))
+}
+
+fn bind_request_node_version(
+    requests: &mut [ToolRequest],
+    resolved: &[(ToolRequest, ToolVersion)],
+) {
+    let Some(node_version) = resolved_node_version(resolved) else {
+        return;
+    };
+    for request in requests {
+        if request.backend.starts_with("npm:") {
+            request.options.insert(
+                osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+                node_version.clone(),
+            );
+        }
+    }
+}
+
+fn bind_resolved_node_version(resolved: &mut [(ToolRequest, ToolVersion)]) {
+    let Some(node_version) = resolved_node_version(resolved) else {
+        return;
+    };
+    for (_, version) in resolved {
+        if version.backend.starts_with("npm:") {
+            version.options.insert(
+                osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+                node_version.clone(),
+            );
+        }
+    }
 }
 
 async fn resolve_requests(
@@ -584,17 +624,11 @@ fn parse_opts(opts: &[String]) -> Result<Vec<(String, String)>> {
 /// Resolve, install, and shim a single request.
 async fn install_one(app: &mut App, req: &ToolRequest) -> Result<ToolVersion> {
     apply_source_override(app, &req.backend);
-    let mut requests = inject_node_dependency(app, vec![req.clone()])?;
-    requests.sort_by_key(|request| (request.backend != "node", request.backend.clone()));
-    let mut requested = None;
-    for request in requests {
-        let (backend, version) = install_one_without_shims(app, &request).await?;
-        generate_shims_for(app, backend.as_ref(), &version)?;
-        if request.backend == req.backend {
-            requested = Some(version);
-        }
-    }
-    requested.ok_or_else(|| anyhow!("requested tool was not installed"))
+    install_requests(app, vec![req.clone()], Vec::new())
+        .await?
+        .into_iter()
+        .find_map(|(request, version)| (request.backend == req.backend).then_some(version))
+        .ok_or_else(|| anyhow!("requested tool was not installed"))
 }
 
 async fn install_one_without_shims(
@@ -612,7 +646,9 @@ async fn install_one_without_shims(
         .await
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
 
-    if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version) {
+    if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
+        && !backend.id().starts_with("npm:")
+    {
         backend.ensure_post_install(&app.ctx, &tv)?;
         println!("{}", t!("msg.already_installed", tool = tv));
     } else {
@@ -686,10 +722,13 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
-        let requests = tools
+        let mut requests = tools
             .iter()
             .map(|s| ToolRequest::parse(s).map_err(|e| anyhow!("{e}")))
             .collect::<Result<Vec<_>>>()?;
+        for request in &mut requests {
+            inherit_configured_options(app, request);
+        }
         return inject_node_dependency(app, requests);
     }
     // From config pins.
@@ -710,6 +749,14 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
                     .map(|entry| entry.to_request_options())
                     .unwrap_or_default(),
             });
+        } else if let Ok(mut request) = ToolRequest::parse(spec) {
+            if !request.backend.contains(':') || app.registry.get(&request.backend).is_err() {
+                continue;
+            }
+            if let Some(entry) = app.ctx.config.tool_configs.get(tool) {
+                request.options.extend(entry.to_request_options());
+            }
+            out.push(request);
         }
     }
     let cwd = std::env::current_dir()?;
@@ -758,6 +805,27 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
         });
     }
     inject_node_dependency(app, out)
+}
+
+fn inherit_configured_options(app: &App, request: &mut ToolRequest) {
+    let configured = app
+        .ctx
+        .config
+        .tool_configs
+        .get(&request.backend)
+        .or_else(|| {
+            app.ctx.config.tools.iter().find_map(|(key, value)| {
+                ToolRequest::parse(value)
+                    .ok()
+                    .filter(|configured| configured.backend == request.backend)
+                    .and_then(|_| app.ctx.config.tool_configs.get(key))
+            })
+        })
+        .map(|entry| entry.to_request_options())
+        .unwrap_or_default();
+    let explicit = std::mem::take(&mut request.options);
+    request.options = configured;
+    request.options.extend(explicit);
 }
 
 fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
@@ -866,6 +934,7 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
     let mut req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
+    inherit_configured_options(app, &mut req);
     for (k, v) in parse_opts(&opts)? {
         req.options.insert(k, v);
     }
@@ -916,14 +985,27 @@ fn structured_tool_config(
         version: version.to_string(),
         options: options
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    osdk_core::config::ToolConfigValue::String(value.clone()),
-                )
-            })
+            .map(|(key, value)| (key.clone(), structured_tool_option(key, value)))
             .collect(),
     }
+}
+
+fn structured_tool_option(key: &str, value: &str) -> osdk_core::config::ToolConfigValue {
+    if key == "allow_builds" {
+        let lower = value.to_ascii_lowercase();
+        if matches!(lower.as_str(), "true" | "false") {
+            return osdk_core::config::ToolConfigValue::Bool(lower == "true");
+        }
+        return osdk_core::config::ToolConfigValue::Array(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect(),
+        );
+    }
+    osdk_core::config::ToolConfigValue::String(value.to_string())
 }
 
 pub async fn uninstall(app: &App, tool: String) -> Result<()> {
@@ -1044,7 +1126,7 @@ pub fn where_cmd(app: &App, tool: String) -> Result<()> {
                         _ => {
                             let infos: Vec<_> = installed
                                 .iter()
-                                .map(|version| osdk_core::version::VersionInfo::stable(version))
+                                .map(osdk_core::version::VersionInfo::stable)
                                 .collect();
                             osdk_core::version::select_version(&parsed, &infos)
                                 .map(|version| version.version.clone())
@@ -2338,7 +2420,7 @@ fn installed_shim_owners(
                     _ => {
                         let infos: Vec<_> = installed
                             .iter()
-                            .map(|version| osdk_core::version::VersionInfo::stable(version))
+                            .map(osdk_core::version::VersionInfo::stable)
                             .collect();
                         osdk_core::version::select_version(&spec, &infos)
                             .map(|version| version.version.clone())
@@ -2374,10 +2456,11 @@ fn ensure_no_shim_conflicts(app: &App, backend_id: &str, names: &[String]) -> Re
         });
         if is_real_shim_conflict(name, &owner_ids) {
             osdk_core::shim::remove_managed_shim(&app.ctx.dirs, name)?;
-            return Err(anyhow!(
-                "refusing to generate managed shim `{name}` because it is provided by multiple installed tools: {}",
-                owner_ids.into_iter().collect::<Vec<_>>().join(", ")
-            ));
+            return Err(anyhow!(t!(
+                "err.shim_generation_conflict",
+                name = name,
+                owners = owner_ids.into_iter().collect::<Vec<_>>().join(", ")
+            )));
         }
     }
     Ok(())
@@ -2409,5 +2492,53 @@ pub fn human_bytes(n: u64) -> String {
         format!("{n} {}", U[0])
     } else {
         format!("{f:.1} {}", U[i])
+    }
+}
+
+#[cfg(test)]
+mod command_flow_tests {
+    use super::*;
+
+    #[test]
+    fn exact_resolved_node_is_bound_to_npm_requests() {
+        let resolved = vec![(
+            ToolRequest::parse("node@20.10.0").unwrap(),
+            ToolVersion::new("node", "20.10.0"),
+        )];
+        let mut requests = vec![
+            ToolRequest::parse("npm:prettier@3.6.2").unwrap(),
+            ToolRequest::parse("python@3.12.0").unwrap(),
+        ];
+
+        bind_request_node_version(&mut requests, &resolved);
+
+        assert_eq!(
+            requests[0].options[osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION],
+            "20.10.0"
+        );
+        assert!(requests[1].options.is_empty());
+    }
+
+    #[test]
+    fn lock_tuple_uses_the_same_exact_node_as_graph_generation() {
+        let mut npm = ToolVersion::new("npm:prettier", "3.6.2");
+        npm.options.insert(
+            osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            "24.0.0".into(),
+        );
+        let mut resolved = vec![
+            (ToolRequest::parse("npm:prettier@3.6.2").unwrap(), npm),
+            (
+                ToolRequest::parse("node@20.10.0").unwrap(),
+                ToolVersion::new("node", "20.10.0"),
+            ),
+        ];
+
+        bind_resolved_node_version(&mut resolved);
+
+        assert_eq!(
+            resolved[0].1.options[osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION],
+            "20.10.0"
+        );
     }
 }

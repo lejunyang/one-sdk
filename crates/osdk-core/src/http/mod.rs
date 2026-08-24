@@ -2,19 +2,25 @@
 
 use std::time::Duration;
 
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION};
+
 use crate::backend::Ctx;
 use crate::error::{Error, GithubRateLimitInfo, Result};
 use crate::source::Source;
 
 /// Build the shared reqwest client (rustls, gzip, redirects, sane timeouts).
 pub fn client() -> Result<reqwest::Client> {
+    client_builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(Error::from)
+}
+
+fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!("osdk/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .pool_idle_timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(Error::from)
 }
 
 /// Fetch a URL and deserialize the JSON body.
@@ -36,13 +42,30 @@ pub async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
 /// Fetch JSON with a persistent URL-keyed cache. Online requests refresh the
 /// cache; failures fall back to stale data. Offline mode never makes a request.
 pub async fn get_cached_json<T: serde::de::DeserializeOwned>(ctx: &Ctx, url: &str) -> Result<T> {
-    get_cached_json_inner(ctx, url, false).await
+    get_cached_json_inner(ctx, url, false, None).await
+}
+
+/// Fetch cached JSON with explicitly configured source headers.
+///
+/// These headers are independent of `Source::forward_credentials`: that flag
+/// controls ambient/provider credentials, while `Source::headers` is explicit
+/// user configuration. Explicit headers are sent only when the initial request
+/// has the exact origin of the source's configured index or download URL. They
+/// survive same-origin redirects and are permanently removed after the first
+/// cross-origin redirect. Header values are represented in the cache key only
+/// by a hash and are never written to the metadata cache.
+pub async fn get_cached_source_json<T: serde::de::DeserializeOwned>(
+    ctx: &Ctx,
+    source: &Source,
+    url: &str,
+) -> Result<T> {
+    get_cached_json_inner(ctx, url, false, Some(source)).await
 }
 
 /// Fetch text with the same stale-cache behavior as [`get_cached_json`].
 pub async fn get_cached_text(ctx: &Ctx, url: &str) -> Result<String> {
     let cache_file = metadata_cache_path(ctx, url);
-    let (bytes, fresh) = get_cached_bytes(ctx, url, false).await?;
+    let (bytes, fresh) = get_cached_bytes(ctx, url, false, None).await?;
     match String::from_utf8(bytes) {
         Ok(text) => {
             if fresh {
@@ -263,9 +286,14 @@ async fn get_cached_json_inner<T: serde::de::DeserializeOwned>(
     ctx: &Ctx,
     url: &str,
     github: bool,
+    source: Option<&Source>,
 ) -> Result<T> {
-    let cache_file = metadata_cache_path(ctx, url);
-    let (bytes, fresh) = get_cached_bytes(ctx, url, github).await?;
+    let cache_identity = match source {
+        Some(source) => source_metadata_cache_identity(url, source)?,
+        None => url.to_string(),
+    };
+    let cache_file = metadata_cache_path(ctx, &cache_identity);
+    let (bytes, fresh) = get_cached_bytes(ctx, url, github, source).await?;
     match serde_json::from_slice(&bytes) {
         Ok(value) => {
             if fresh {
@@ -289,8 +317,17 @@ async fn get_cached_json_inner<T: serde::de::DeserializeOwned>(
     }
 }
 
-async fn get_cached_bytes(ctx: &Ctx, url: &str, github: bool) -> Result<(Vec<u8>, bool)> {
-    let cache_file = metadata_cache_path(ctx, url);
+async fn get_cached_bytes(
+    ctx: &Ctx,
+    url: &str,
+    github: bool,
+    source: Option<&Source>,
+) -> Result<(Vec<u8>, bool)> {
+    let cache_identity = match source {
+        Some(source) => source_metadata_cache_identity(url, source)?,
+        None => url.to_string(),
+    };
+    let cache_file = metadata_cache_path(ctx, &cache_identity);
     if ctx.config.settings.offline {
         return std::fs::read(&cache_file)
             .map(|bytes| (bytes, false))
@@ -301,10 +338,19 @@ async fn get_cached_bytes(ctx: &Ctx, url: &str, github: bool) -> Result<(Vec<u8>
             });
     }
 
-    let result = if github {
-        github_request(&ctx.client, url).send().await
+    let result: Result<reqwest::Response> = if let Some(source) = source {
+        send_source_get(&ctx.client, source, url).await
+    } else if github {
+        github_request(&ctx.client, url)
+            .send()
+            .await
+            .map_err(|error| Error::network(url, error))
     } else {
-        ctx.client.get(url).send().await
+        ctx.client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| Error::network(url, error))
     };
 
     match result {
@@ -315,8 +361,177 @@ async fn get_cached_bytes(ctx: &Ctx, url: &str, github: bool) -> Result<(Vec<u8>
             },
             Err(error) => read_stale_or_error(&cache_file, Error::network(url, error)),
         },
-        Err(error) => read_stale_or_error(&cache_file, Error::network(url, error)),
+        Err(error @ Error::Config(_)) => Err(error),
+        Err(error) => read_stale_or_error(&cache_file, error),
     }
+}
+
+/// Send a GET with source headers constrained to configured source origins.
+///
+/// A no-redirect client is used so arbitrary header names can be removed at
+/// the origin boundary. Reqwest's default redirect handling strips standard
+/// credentials such as `Authorization`, but deliberately does not know that a
+/// user-defined header such as `X-Api-Key` may also contain a secret.
+async fn send_source_get(
+    base_client: &reqwest::Client,
+    source: &Source,
+    url: &str,
+) -> Result<reqwest::Response> {
+    let Some(source_headers) = source_headers_for_url(source, url)? else {
+        return base_client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| Error::network(url, error));
+    };
+    send_get_with_redirect_headers(source_client()?, url, source_headers, true).await
+}
+
+fn source_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: once_cell::sync::OnceCell<reqwest::Client> = once_cell::sync::OnceCell::new();
+    CLIENT.get_or_try_init(|| {
+        client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(Error::from)
+    })
+}
+
+fn source_headers_for_url(source: &Source, url: &str) -> Result<Option<HeaderMap>> {
+    let headers = source_header_map(source)?;
+    if headers.is_empty() {
+        return Ok(None);
+    }
+    let url = reqwest::Url::parse(url)
+        .map_err(|error| Error::config(format!("invalid source URL `{url}`: {error}")))?;
+    let origin = url_origin(&url);
+    Ok(origin
+        .as_ref()
+        .is_some_and(|origin| {
+            source_origins(source)
+                .iter()
+                .any(|allowed| allowed == origin)
+        })
+        .then_some(headers))
+}
+
+/// Fetch a source URL with the same origin-bound header policy used for
+/// metadata. This is exposed for source probes, which need to stream the body.
+pub(crate) async fn get_source_response(
+    client: &reqwest::Client,
+    source: &Source,
+    url: &str,
+) -> Result<reqwest::Response> {
+    send_source_get(client, source, url).await
+}
+
+async fn send_get_with_redirect_headers(
+    client: &reqwest::Client,
+    url: &str,
+    headers: HeaderMap,
+    mut attach_headers: bool,
+) -> Result<reqwest::Response> {
+    let mut current = reqwest::Url::parse(url)
+        .map_err(|error| Error::config(format!("invalid URL `{url}`: {error}")))?;
+    for redirect_count in 0..=10 {
+        let mut request = client.get(current.clone());
+        if attach_headers {
+            request = request.headers(headers.clone());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| Error::network(current.as_str(), error))?;
+        if !matches!(
+            response.status(),
+            reqwest::StatusCode::MOVED_PERMANENTLY
+                | reqwest::StatusCode::FOUND
+                | reqwest::StatusCode::SEE_OTHER
+                | reqwest::StatusCode::TEMPORARY_REDIRECT
+                | reqwest::StatusCode::PERMANENT_REDIRECT
+        ) {
+            return Ok(response);
+        }
+        let Some(location) = response.headers().get(LOCATION) else {
+            return Ok(response);
+        };
+        let Ok(location) = location.to_str() else {
+            return Ok(response);
+        };
+        let Ok(next) = current.join(location) else {
+            return Ok(response);
+        };
+        if !matches!(next.scheme(), "http" | "https") {
+            return Ok(response);
+        }
+        if redirect_count == 10 {
+            return Err(Error::other(format!(
+                "too many redirects while requesting {url}"
+            )));
+        }
+        attach_headers = attach_headers && url_origin(&current) == url_origin(&next);
+        current = next;
+    }
+    unreachable!("bounded redirect loop always returns")
+}
+
+/// Parse configured headers into a request map. Callers must still enforce the
+/// source-origin boundary; successful parsing never grants a destination.
+fn source_header_map(source: &Source) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in &source.headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| Error::config(format!("invalid HTTP header `{name}`: {error}")))?;
+        let mut value = HeaderValue::from_str(value)
+            .map_err(|error| Error::config(format!("invalid HTTP header value: {error}")))?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+fn source_origins(source: &Source) -> Vec<(String, String, u16)> {
+    [
+        source.index_url.as_deref(),
+        Some(source.download_url.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|url| reqwest::Url::parse(url).ok())
+    .filter_map(|url| url_origin(&url))
+    .fold(Vec::new(), |mut origins, origin| {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+        origins
+    })
+}
+
+fn url_origin(url: &reqwest::Url) -> Option<(String, String, u16)> {
+    Some((
+        url.scheme().to_ascii_lowercase(),
+        url.host_str()?.to_ascii_lowercase(),
+        url.port_or_known_default()?,
+    ))
+}
+
+fn source_metadata_cache_identity(url: &str, source: &Source) -> Result<String> {
+    if source_headers_for_url(source, url)?.is_none() {
+        return Ok(url.to_string());
+    }
+    let mut headers = source
+        .headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_ascii_lowercase(),
+                blake3::hash(value.as_bytes()).to_hex().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    headers.sort();
+    let encoded = serde_json::to_vec(&(url, headers)).unwrap_or_default();
+    Ok(format!("source:{}", blake3::hash(&encoded).to_hex()))
 }
 
 async fn fetch_github_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
@@ -648,6 +863,136 @@ mod tests {
             join_url("https://h/dist", "index.json"),
             "https://h/dist/index.json"
         );
+    }
+
+    #[test]
+    fn source_cache_identity_hashes_headers_without_persisting_values() {
+        let mut source = Source::mirror("private", "https://registry.example.test/", 1);
+        source.headers = vec![("X-Api-Key".into(), "secret-one".into())];
+        let first =
+            source_metadata_cache_identity("https://registry.example.test/tool", &source).unwrap();
+        source.headers[0].1 = "secret-two".into();
+        let second =
+            source_metadata_cache_identity("https://registry.example.test/tool", &source).unwrap();
+
+        assert_ne!(first, second);
+        assert!(!first.contains("secret-one"));
+        assert!(!second.contains("secret-two"));
+        assert_eq!(
+            source_metadata_cache_identity("https://other.example.test/tool", &source).unwrap(),
+            "https://other.example.test/tool"
+        );
+    }
+
+    #[test]
+    fn source_headers_are_explicit_and_validate_independently_of_credentials() {
+        let mut source = Source::mirror("private", "https://registry.example.test/", 1);
+        source.forward_credentials = false;
+        source.headers = vec![("X-Api-Key".into(), "secret".into())];
+        assert!(
+            source_headers_for_url(&source, "https://registry.example.test/tool")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            source_headers_for_url(&source, "https://other.example.test/tool")
+                .unwrap()
+                .is_none()
+        );
+
+        source.headers = vec![("invalid header".into(), "value".into())];
+        assert!(matches!(
+            source_headers_for_url(&source, "https://registry.example.test/tool"),
+            Err(Error::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn source_headers_survive_same_origin_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                assert!(request.to_ascii_lowercase().contains("x-api-key: secret"));
+                if index == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .unwrap();
+                }
+            }
+        });
+        let url = format!("http://{address}/start");
+        let mut source = Source::mirror("private", &format!("http://{address}/"), 1);
+        source.headers = vec![("X-Api-Key".into(), "secret".into())];
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let response = send_source_get(&client, &source, &url).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_headers_are_removed_after_cross_origin_redirect() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_server = std::thread::spawn(move || {
+            let (mut stream, _) = target.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(!request.to_ascii_lowercase().contains("x-api-key:"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let origin_server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(request.to_ascii_lowercase().contains("x-api-key: secret"));
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let url = format!("http://{origin_address}/start");
+        let mut source = Source::mirror("private", &format!("http://{origin_address}/"), 1);
+        source.headers = vec![("X-Api-Key".into(), "secret".into())];
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let response = send_source_get(&client, &source, &url).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        origin_server.join().unwrap();
+        target_server.join().unwrap();
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !request.ends_with(b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8(request).unwrap()
     }
 
     #[tokio::test]

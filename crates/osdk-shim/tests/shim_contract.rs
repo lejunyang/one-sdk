@@ -63,6 +63,7 @@ fn install_npm_fixture(root: &Path, project: &Path, npm_script: &str, node_scrip
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn install_dynamic_npm_fixture(
     root: &Path,
     project: &Path,
@@ -95,7 +96,9 @@ fn install_dynamic_npm_fixture(
             name: executable_name.into(),
             path: format!("node_modules/.bin/{executable_name}"),
         }],
-        metadata: Default::default(),
+        metadata: [("node_version".into(), "1.0.0".into())]
+            .into_iter()
+            .collect(),
     }
     .normalize()
     .unwrap();
@@ -370,8 +373,30 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
         ),
         "#!/bin/sh\nexit 0\n",
     );
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"tool.ni\" = \"npm:@antfu/ni@1.0.0\"\nnode = \"2.0.0\"\n",
+    )
+    .unwrap();
+    write_executable(
+        &temporary.path().join("installs/node/2.0.0/bin/node"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::write(
+        temporary.path().join("installs/node/2.0.0/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+    write_executable(
+        &temporary
+            .path()
+            .join("installs/npm/@antfu/ni/1.0.0/node_modules/.bin/node"),
+        "#!/bin/sh\nexit 99\n",
+    );
+    let server = ProbeServer::start("200 OK");
+    configure_registry(temporary.path(), server.url());
     let output = isolated_command(temporary.path(), &project)
-        .args(["ni", "fixture-package"])
+        .args(["ni", "install", "fixture-package"])
         .output()
         .unwrap();
 
@@ -380,27 +405,232 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(server.request_count(), 0);
     let line = std::fs::read_to_string(&log).unwrap();
-    assert!(line.starts_with("|fixture-package|"), "{line}");
-    assert!(
-        line.contains(
-            &temporary
+    assert_eq!(
+        line,
+        format!(
+            "|install fixture-package|{}|{}\n",
+            temporary
                 .path()
                 .join("installs/node/1.0.0/bin/node")
-                .display()
-                .to_string()
-        ),
-        "{line}"
-    );
-    assert!(
-        line.contains(
-            &temporary
+                .display(),
+            temporary
                 .path()
                 .join("installs/npm/@antfu/ni/1.0.0/node_modules/.bin/ni")
                 .display()
-                .to_string()
-        ),
-        "{line}"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_does_not_fall_back_when_recorded_node_is_missing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::remove_dir_all(temporary.path().join("installs/node/1.0.0")).unwrap();
+    write_executable(
+        &temporary.path().join("installs/node/2.0.0/bin/node"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::write(
+        temporary.path().join("installs/node/2.0.0/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"tool.ni\" = \"npm:@antfu/ni@1.0.0\"\nnode = \"2.0.0\"\n",
+    )
+    .unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .arg("ni")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("`npm:@antfu/ni` requires a managed Node installation"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!log.exists(), "dynamic npm CLI ran with a fallback Node");
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_rejects_legacy_manifest_without_node_identity() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+    osdk_core::inventory::remove_manifest_metadata(&install_root, "node_version").unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .arg("ni")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        !log.exists(),
+        "legacy manifest unexpectedly launched the CLI"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_rejects_non_exact_manifest_node_identity() {
+    for recorded in ["", "latest", "1", "definitely-not-semver", " 1.0.0 "] {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let log = temporary.path().join("dynamic.log");
+        install_dynamic_npm_fixture(
+            temporary.path(),
+            &project,
+            "tool.ni",
+            "npm:@antfu/ni",
+            "1.0.0",
+            "ni",
+            &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+            "#!/bin/sh\nexit 0\n",
+        );
+        let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+        osdk_core::inventory::update_manifest_metadata(&install_root, |metadata| {
+            metadata.insert("node_version".into(), recorded.into());
+        })
+        .unwrap();
+
+        let output = isolated_command(temporary.path(), &project)
+            .arg("ni")
+            .output()
+            .unwrap();
+
+        assert!(
+            !output.status.success(),
+            "accepted node_version={recorded:?}"
+        );
+        assert!(
+            !log.exists(),
+            "CLI ran with invalid node_version={recorded:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_rejects_recorded_node_without_executable() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::remove_file(temporary.path().join("installs/node/1.0.0/bin/node")).unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .arg("ni")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        !log.exists(),
+        "dynamic npm CLI ran without its recorded Node executable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_localizes_missing_managed_node_from_environment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        "#!/bin/sh\nexit 0\n",
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::remove_dir_all(temporary.path().join("installs/node")).unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .args(["ni"])
+        .env("OSDK_LANG", "zh")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`npm:@antfu/ni` 需要受管的 Node 安装"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_localizes_missing_managed_node_from_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        "#!/bin/sh\nexit 0\n",
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::remove_dir_all(temporary.path().join("installs/node")).unwrap();
+    let config = temporary.path().join("config/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(config, "[settings]\nlang = \"zh\"\n").unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .args(["ni"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`npm:@antfu/ni` 需要受管的 Node 安装"),
+        "{stderr}"
     );
 }
 

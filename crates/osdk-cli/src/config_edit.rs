@@ -276,7 +276,10 @@ fn edit_tool_config(path: &Path, tool: &str, config: &StructuredToolConfig) -> R
         inline.insert(key, to_toml_value(value)?);
     }
     inline.fmt();
-    tools_tbl.insert(tool, toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)));
+    tools_tbl.insert(
+        tool,
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)),
+    );
     save_doc(path, &doc)?;
     Ok(())
 }
@@ -361,7 +364,9 @@ mod tests {
         edit_tool_version(&path, "npm", "11.5.2").unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("npm = { version = \"11.5.2\", allow_builds = [\"esbuild\"], engine = \"node\" }"));
+        assert!(text.contains(
+            "npm = { version = \"11.5.2\", allow_builds = [\"esbuild\"], engine = \"node\" }"
+        ));
     }
 
     #[test]

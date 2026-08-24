@@ -245,6 +245,104 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_npm_keys_are_bilingual_with_matching_placeholders() {
+        for key in [
+            "label.npm_lock_graph",
+            "err.npm_managed_node_dependency_required",
+            "err.npm_package_backend_invalid",
+            "err.shim_generation_conflict",
+            "err.shim_managed_node_required",
+            "err.shim_dynamic_route_conflict",
+            "err.npm_allow_builds_invalid",
+            "err.npm_lock_graph_option_missing",
+            "err.npm_lock_graph_identity_mismatch",
+            "err.npm_lock_graph_format_unsupported",
+            "err.npm_lock_graph_digest_invalid",
+            "err.npm_lock_graph_tool_mismatch",
+            "err.npm_lock_graph_not_produced",
+            "err.npm_install_package_missing",
+            "err.npm_install_bin_dir_missing",
+            "err.npm_offline_lock_graph_required",
+            "err.npm_package_sri_missing",
+            "err.npm_dynamic_no_validated_executables",
+            "err.npm_dynamic_managed_node_required",
+            "err.managed_node_bin_dir_missing",
+            "err.npm_bin_outside_install_root",
+            "err.npm_bins_not_discovered",
+            "err.npm_bin_target_unresolved",
+            "err.npm_lock_payload_read",
+            "err.npm_lock_payload_not_utf8",
+            "err.npm_project_manifest_identity_mismatch",
+            "err.npm_project_manifest_build_policy_mismatch",
+            "err.npm_graph_parse_invalid",
+            "err.npm_graph_root_missing",
+            "err.npm_graph_root_version_mismatch",
+            "err.npm_graph_resolved_root_missing",
+            "err.npm_graph_root_integrity_missing",
+            "err.npm_graph_root_integrity_invalid",
+            "err.npm_graph_root_source_mismatch",
+            "err.lock_npm_legacy_inline_regenerate",
+            "err.lockfile_not_utf8",
+            "err.lock_schema2_npm_artifact_forbidden",
+            "err.lock_npm_package_mismatch",
+            "err.lock_npm_graph_format_unsupported",
+            "err.lock_npm_graph_path_unsafe_platform",
+            "err.lock_npm_node_entry_required",
+            "err.lock_npm_node_version_mismatch",
+            "err.lock_npm_graph_missing",
+            "err.lock_schema2_npm_legacy_inline",
+            "err.lock_non_npm_graph_metadata",
+            "err.lock_npm_graph_sha256_invalid",
+            "err.lock_npm_graph_path_unsafe",
+            "err.lock_npm_sidecar_read",
+            "err.lock_npm_sidecar_checksum_mismatch",
+            "err.lock_npm_sidecar_not_utf8",
+            "err.lock_npm_graph_path_symlink",
+            "err.lock_npm_sidecar_symlink",
+            "err.file_size_limit_exceeded",
+            "err.lock_backend_id_unsafe",
+            "err.lock_version_unsafe",
+            "err.lock_artifact_filename_unsafe",
+            "err.lock_artifact_subdir_unsafe",
+            "err.lock_schema1_npm_migration_requires_graph",
+            "err.lock_npm_resolved_node_required",
+            "err.lockfile_size_limit_exceeded",
+            "err.lock_atomic_path_filename_missing",
+            "err.fs_directory_create",
+            "err.fs_file_create",
+            "err.fs_file_write",
+            "err.fs_file_sync",
+            "err.fs_file_replace",
+        ] {
+            let en = trl(Lang::En, key);
+            let zh = trl(Lang::Zh, key);
+            assert_ne!(en, key, "missing en for {key}");
+            assert_ne!(zh, key, "missing zh for {key}");
+            assert_ne!(en, zh, "zh not translated for {key}");
+            assert_eq!(
+                placeholders(&en),
+                placeholders(&zh),
+                "placeholder mismatch for {key}"
+            );
+        }
+    }
+
+    fn placeholders(message: &str) -> Vec<&str> {
+        let mut placeholders = Vec::new();
+        let mut rest = message;
+        while let Some(open) = rest.find('{') {
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find('}') else {
+                break;
+            };
+            placeholders.push(&rest[..close]);
+            rest = &rest[close + 1..];
+        }
+        placeholders.sort_unstable();
+        placeholders
+    }
+
+    #[test]
     fn zh_falls_back_to_en_when_empty() {
         // 'pinned' has both; sanity that a known key differs by lang or falls back
         let en = trl(Lang::En, "msg.installed");

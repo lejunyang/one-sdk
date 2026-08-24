@@ -297,6 +297,10 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("label.error", ("error", "错误"));
     m.insert("label.trusted", ("trusted", "已信任"));
     m.insert("label.stale", ("stale", "已失效"));
+    m.insert(
+        "label.npm_lock_graph",
+        ("locked npm graph for {tool}", "{tool} 的 npm 锁定依赖图"),
+    );
 
     // ---- user-visible tracing logs (info!/warn!) --------------------------
     // Structured fields (url/source/attempt/...) stay as machine-readable
@@ -536,6 +540,434 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "unknown source {id} for {tool} (see `osdk source list {tool}`)",
             "{tool} 的未知源 {id}（参见 `osdk source list {tool}`）",
         ),
+    );
+    m.insert(
+        "err.npm_managed_node_dependency_required",
+        (
+            "npm tools require a managed Node dependency",
+            "npm 工具需要受管的 Node 依赖",
+        ),
+    );
+    m.insert(
+        "err.npm_package_backend_invalid",
+        (
+            "invalid npm package backend `{package}`",
+            "无效的 npm 包后端 `{package}`",
+        ),
+    );
+    m.insert(
+        "err.shim_generation_conflict",
+        (
+            "refusing to generate managed shim `{name}` because it is provided by multiple installed tools: {owners}",
+            "拒绝生成受管 shim `{name}`，因为多个已安装工具均提供该命令：{owners}",
+        ),
+    );
+    m.insert(
+        "err.shim_managed_node_required",
+        (
+            "`{tool}` requires a managed Node installation",
+            "`{tool}` 需要受管的 Node 安装",
+        ),
+    );
+    m.insert(
+        "err.shim_dynamic_route_conflict",
+        (
+            "refusing to route `{tool}` because multiple installed tools provide it: {owners}",
+            "拒绝路由 `{tool}`，因为多个已安装工具均提供该命令：{owners}",
+        ),
+    );
+    m.insert(
+        "err.npm_allow_builds_invalid",
+        (
+            "allow_builds must be a boolean or a non-empty package list",
+            "allow_builds 必须是布尔值或非空包列表",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_graph_option_missing",
+        (
+            "locked npm graph is missing private option `{key}`",
+            "npm 锁定依赖图缺少内部选项 `{key}`",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_graph_identity_mismatch",
+        (
+            "locked npm graph identity mismatch: expected {expected_tool} for package {expected_package}, got {actual_tool} for package {actual_package}",
+            "npm 锁定依赖图身份不匹配：期望工具 {expected_tool} 对应包 {expected_package}，实际为工具 {actual_tool} 对应包 {actual_package}",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_graph_format_unsupported",
+        (
+            "unsupported locked npm graph format `{format}` for {tool}; expected {expected}",
+            "{tool} 使用了不支持的 npm 锁定依赖图格式 `{format}`；期望 {expected}",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_graph_digest_invalid",
+        (
+            "locked npm graph for {tool} has an invalid SHA-256 digest",
+            "{tool} 的 npm 锁定依赖图包含无效的 SHA-256 摘要",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_graph_tool_mismatch",
+        (
+            "cannot prepare npm lock graph for {expected} using resolved tool {actual}",
+            "无法使用已解析工具 {actual} 为 {expected} 准备 npm 锁定依赖图",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_graph_not_produced",
+        (
+            "aube did not produce a lock graph for {package}@{version}",
+            "aube 未能为 {package}@{version} 生成锁定依赖图",
+        ),
+    );
+    m.insert(
+        "err.npm_install_package_missing",
+        (
+            "embedded npm install did not materialize {package} under {path}",
+            "嵌入式 npm 安装未在 {path} 下生成 {package}",
+        ),
+    );
+    m.insert(
+        "err.npm_install_bin_dir_missing",
+        (
+            "embedded npm install did not produce node_modules/.bin for {package}",
+            "嵌入式 npm 安装未为 {package} 生成 node_modules/.bin",
+        ),
+    );
+    m.insert(
+        "err.npm_offline_lock_graph_required",
+        (
+            "cannot install {tool}@{version} offline without a locked npm dependency graph; run `osdk lock` online first",
+            "没有 npm 锁定依赖图，无法离线安装 {tool}@{version}；请先联网运行 `osdk lock`",
+        ),
+    );
+    m.insert(
+        "err.npm_package_sri_missing",
+        (
+            "npm package {package}@{version} has no supported SRI checksum",
+            "npm 包 {package}@{version} 没有受支持的 SRI 校验和",
+        ),
+    );
+    m.insert(
+        "err.npm_dynamic_no_validated_executables",
+        (
+            "dynamic npm tool {tool} exposes no validated executables",
+            "动态 npm 工具 {tool} 未提供任何已验证的可执行文件",
+        ),
+    );
+    m.insert(
+        "err.npm_dynamic_managed_node_required",
+        (
+            "dynamic npm tools require a managed Node installation",
+            "动态 npm 工具需要受管的 Node 安装",
+        ),
+    );
+    m.insert(
+        "err.managed_node_bin_dir_missing",
+        (
+            "managed Node {version} has no executable bin directory",
+            "受管 Node {version} 没有可执行文件目录",
+        ),
+    );
+    m.insert(
+        "err.npm_bin_outside_install_root",
+        (
+            "bin `{name}` resolves outside install root {path}",
+            "可执行文件 `{name}` 解析到了安装根目录 {path} 之外",
+        ),
+    );
+    m.insert(
+        "err.npm_bins_not_discovered",
+        (
+            "no executable bins discovered under {path}",
+            "未在 {path} 下发现可执行文件",
+        ),
+    );
+    m.insert(
+        "err.npm_bin_target_unresolved",
+        (
+            "unable to resolve executable target for `{name}` in {path}",
+            "无法解析 {path} 中 `{name}` 的可执行文件目标",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_payload_read",
+        (
+            "reading npm lock payload {path}",
+            "读取 npm 锁定载荷 {path}",
+        ),
+    );
+    m.insert(
+        "err.npm_lock_payload_not_utf8",
+        (
+            "npm lock payload {path} is not UTF-8",
+            "npm 锁定载荷 {path} 不是 UTF-8 编码",
+        ),
+    );
+    m.insert(
+        "err.npm_project_manifest_identity_mismatch",
+        (
+            "npm project manifest does not pin {package}@{version}",
+            "npm 项目清单未固定 {package}@{version}",
+        ),
+    );
+    m.insert(
+        "err.npm_project_manifest_build_policy_mismatch",
+        (
+            "npm project manifest build policy mismatch for {package}",
+            "npm 项目清单中 {package} 的构建策略不匹配",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_parse_invalid",
+        (
+            "invalid npm dependency graph at {path}: {error}",
+            "{path} 中的 npm 依赖图无效：{error}",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_root_missing",
+        (
+            "npm dependency graph is missing requested root package {package}",
+            "npm 依赖图缺少请求的根包 {package}",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_root_version_mismatch",
+        (
+            "npm dependency graph root version mismatch for {package}: expected {expected}, got {actual}",
+            "npm 依赖图中根包 {package} 的版本不匹配：期望 {expected}，实际为 {actual}",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_resolved_root_missing",
+        (
+            "npm dependency graph is missing resolved root package {package}@{version}",
+            "npm 依赖图缺少已解析的根包 {package}@{version}",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_root_integrity_missing",
+        (
+            "npm dependency graph root package {package}@{version} has no integrity value",
+            "npm 依赖图中的根包 {package}@{version} 缺少完整性校验值",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_root_integrity_invalid",
+        (
+            "npm dependency graph root package {package}@{version} has invalid integrity",
+            "npm 依赖图中根包 {package}@{version} 的完整性校验值无效",
+        ),
+    );
+    m.insert(
+        "err.npm_graph_root_source_mismatch",
+        (
+            "npm dependency graph root package {package}@{version} uses an unexpected source",
+            "npm 依赖图中的根包 {package}@{version} 使用了非预期来源",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_legacy_inline_regenerate",
+        (
+            "npm entry `{backend}` uses a legacy inline graph and must be regenerated",
+            "npm 条目 `{backend}` 使用旧版内联依赖图，必须重新生成",
+        ),
+    );
+    m.insert(
+        "err.lockfile_not_utf8",
+        (
+            "lockfile {path} is not UTF-8",
+            "锁文件 {path} 不是 UTF-8 编码",
+        ),
+    );
+    m.insert(
+        "err.lock_schema2_npm_artifact_forbidden",
+        (
+            "schema 2 npm entry `{backend}` for platform `{platform}` cannot carry a generic artifact receipt",
+            "平台 `{platform}` 的 schema 2 npm 条目 `{backend}` 不能包含通用制品收据",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_package_mismatch",
+        (
+            "npm graph package mismatch for `{backend}` on `{platform}`: expected `{expected}`, got `{actual}`",
+            "平台 `{platform}` 上 `{backend}` 的 npm 依赖图包不匹配：期望 `{expected}`，实际为 `{actual}`",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_graph_format_unsupported",
+        (
+            "unsupported npm graph format `{format}` for `{backend}` on `{platform}`; expected `{expected}`",
+            "平台 `{platform}` 上 `{backend}` 的 npm 依赖图格式 `{format}` 不受支持；期望 `{expected}`",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_graph_path_unsafe_platform",
+        (
+            "unsafe npm graph path `{graph}` for `{backend}` on `{platform}`; expected `{expected}`",
+            "平台 `{platform}` 上 `{backend}` 的 npm 依赖图路径 `{graph}` 不安全；期望 `{expected}`",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_node_entry_required",
+        (
+            "npm entry `{backend}` on `{platform}` requires a locked `node` entry",
+            "平台 `{platform}` 上的 npm 条目 `{backend}` 需要锁定的 `node` 条目",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_node_version_mismatch",
+        (
+            "npm graph node version mismatch for `{backend}` on `{platform}`: expected `{expected}`, got `{actual}`",
+            "平台 `{platform}` 上 `{backend}` 的 npm 依赖图 Node 版本不匹配：期望 `{expected}`，实际为 `{actual}`",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_graph_missing",
+        (
+            "npm entry `{backend}` on `{platform}` is missing its dependency graph",
+            "平台 `{platform}` 上的 npm 条目 `{backend}` 缺少依赖图",
+        ),
+    );
+    m.insert(
+        "err.lock_schema2_npm_legacy_inline",
+        (
+            "schema 2 npm entry `{backend}` on `{platform}` uses the legacy inline graph representation",
+            "平台 `{platform}` 上的 schema 2 npm 条目 `{backend}` 使用了旧版内联依赖图表示",
+        ),
+    );
+    m.insert(
+        "err.lock_non_npm_graph_metadata",
+        (
+            "non-npm entry `{backend}` on `{platform}` cannot carry npm graph metadata",
+            "平台 `{platform}` 上的非 npm 条目 `{backend}` 不能包含 npm 依赖图元数据",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_graph_sha256_invalid",
+        (
+            "npm graph for `{backend}` has invalid SHA-256 `{sha256}`; expected exactly 64 lowercase hexadecimal characters",
+            "`{backend}` 的 npm 依赖图包含无效的 SHA-256 `{sha256}`；应为恰好 64 个小写十六进制字符",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_graph_path_unsafe",
+        (
+            "unsafe npm graph path `{graph}` for `{backend}`; expected `{expected}`",
+            "`{backend}` 的 npm 依赖图路径 `{graph}` 不安全；期望 `{expected}`",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_sidecar_read",
+        (
+            "reading npm graph sidecar {path}",
+            "读取 npm 依赖图 sidecar {path}",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_sidecar_checksum_mismatch",
+        (
+            "npm graph sidecar checksum mismatch for `{backend}`: expected {expected}, got {actual}",
+            "`{backend}` 的 npm 依赖图 sidecar 校验和不匹配：期望 {expected}，实际为 {actual}",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_sidecar_not_utf8",
+        (
+            "npm graph sidecar {path} is not UTF-8",
+            "npm 依赖图 sidecar {path} 不是 UTF-8 编码",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_graph_path_symlink",
+        (
+            "npm graph path contains symlink {path}",
+            "npm 依赖图路径包含符号链接 {path}",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_sidecar_symlink",
+        (
+            "npm graph sidecar cannot be a symlink: {path}",
+            "npm 依赖图 sidecar 不能是符号链接：{path}",
+        ),
+    );
+    m.insert(
+        "err.file_size_limit_exceeded",
+        (
+            "file exceeds maximum size of {maximum} bytes",
+            "文件超过 {maximum} 字节的大小上限",
+        ),
+    );
+    m.insert(
+        "err.lock_backend_id_unsafe",
+        (
+            "unsafe backend id `{backend}` in lockfile",
+            "锁文件中的后端 id `{backend}` 不安全",
+        ),
+    );
+    m.insert(
+        "err.lock_version_unsafe",
+        (
+            "unsafe version `{version}` for `{backend}` in lockfile",
+            "锁文件中 `{backend}` 的版本 `{version}` 不安全",
+        ),
+    );
+    m.insert(
+        "err.lock_artifact_filename_unsafe",
+        (
+            "unsafe artifact file name `{file_name}` for `{backend}` in lockfile",
+            "锁文件中 `{backend}` 的制品文件名 `{file_name}` 不安全",
+        ),
+    );
+    m.insert(
+        "err.lock_artifact_subdir_unsafe",
+        (
+            "unsafe artifact subdirectory `{subdir}` for `{backend}` in lockfile",
+            "锁文件中 `{backend}` 的制品子目录 `{subdir}` 不安全",
+        ),
+    );
+    m.insert(
+        "err.lock_schema1_npm_migration_requires_graph",
+        (
+            "schema 1 npm entry `{backend}` on `{platform}` cannot be migrated without a dependency graph; regenerate the lock",
+            "平台 `{platform}` 上的 schema 1 npm 条目 `{backend}` 缺少依赖图，无法迁移；请重新生成锁文件",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_resolved_node_required",
+        (
+            "cannot lock `{backend}` without a resolved `node` entry",
+            "缺少已解析的 `node` 条目，无法锁定 `{backend}`",
+        ),
+    );
+    m.insert(
+        "err.lockfile_size_limit_exceeded",
+        (
+            "lockfile exceeds maximum size of {maximum} bytes",
+            "锁文件超过 {maximum} 字节的大小上限",
+        ),
+    );
+    m.insert(
+        "err.lock_atomic_path_filename_missing",
+        ("path has no file name: {path}", "路径缺少文件名：{path}"),
+    );
+    m.insert(
+        "err.fs_directory_create",
+        ("creating {path}", "创建目录 {path}"),
+    );
+    m.insert("err.fs_file_create", ("creating {path}", "创建文件 {path}"));
+    m.insert("err.fs_file_write", ("writing {path}", "写入文件 {path}"));
+    m.insert("err.fs_file_sync", ("syncing {path}", "同步文件 {path}"));
+    m.insert(
+        "err.fs_file_replace",
+        ("replacing {path}", "替换文件 {path}"),
     );
 
     // ---- top-level help ---------------------------------------------------

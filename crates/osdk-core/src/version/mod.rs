@@ -135,7 +135,7 @@ fn parse_npm_package_request(input: &str) -> Result<Option<ToolRequest>> {
     let (package, version) = split_npm_package_request(rest)
         .ok_or_else(|| Error::other(format!("invalid tool request `{input}`")))?;
     Ok(Some(ToolRequest {
-        backend: format!("npm:{package}"),
+        backend: format!("npm:{}", package.to_ascii_lowercase()),
         spec: VersionSpec::parse(version.unwrap_or("")),
         options: BTreeMap::new(),
     }))
@@ -171,11 +171,53 @@ fn split_npm_package_request(input: &str) -> Option<(String, Option<&str>)> {
 }
 
 fn valid_npm_name_part(value: &str) -> bool {
-    !value.is_empty()
-        && !value.contains('/')
-        && !value.contains('\\')
-        && !value.contains('@')
-        && !value.chars().any(char::is_whitespace)
+    if value.is_empty() || value.len() > 214 {
+        return false;
+    }
+    if value == "." || value == ".." || is_windows_reserved_component(value) {
+        return false;
+    }
+    value.chars().all(valid_npm_name_char)
+}
+
+fn valid_npm_name_char(ch: char) -> bool {
+    ch.is_ascii_lowercase()
+        || ch.is_ascii_uppercase()
+        || ch.is_ascii_digit()
+        || matches!(ch, '-' | '_' | '.')
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let trimmed = value.trim_end_matches([' ', '.']);
+    if trimmed.is_empty() {
+        return true;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 /// A resolved concrete version, ready to install/activate.
@@ -383,6 +425,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_namespaced_npm_tool_requests_canonicalizes_case() {
+        let r = ToolRequest::parse("npm:Prettier@3").unwrap();
+        assert_eq!(r.backend, "npm:prettier");
+        assert_eq!(r.spec, VersionSpec::Prefix("3".into()));
+
+        let r = ToolRequest::parse("npm:@Antfu/Ni").unwrap();
+        assert_eq!(r.backend, "npm:@antfu/ni");
+        assert_eq!(r.spec, VersionSpec::Latest);
+    }
+
+    #[test]
     fn namespaced_npm_parser_keeps_bare_npm_as_the_cli_backend() {
         let cli = ToolRequest::parse("npm").unwrap();
         assert_eq!(cli.backend, "npm");
@@ -398,6 +451,34 @@ mod tests {
         assert!(ToolRequest::parse("npm:").is_err());
         assert!(ToolRequest::parse("npm:@antfu").is_err());
         assert!(ToolRequest::parse("npm:@antfu/ni/extra").is_err());
+        assert!(ToolRequest::parse("npm:foo#bar").is_err());
+        assert!(ToolRequest::parse("npm:foo?bar").is_err());
+        assert!(ToolRequest::parse("npm:foo%2fbar").is_err());
+        assert!(ToolRequest::parse("npm:foo bar").is_err());
+        assert!(ToolRequest::parse("npm:foo\tbar").is_err());
+        assert!(ToolRequest::parse("npm:foo/bar").is_err());
+        assert!(ToolRequest::parse("npm:foo\\bar").is_err());
+        assert!(ToolRequest::parse("npm:.").is_err());
+        assert!(ToolRequest::parse("npm:..").is_err());
+        assert!(ToolRequest::parse("npm:CON").is_err());
+        assert!(ToolRequest::parse("npm:@scope/AUX").is_err());
+        assert!(ToolRequest::parse(&format!("npm:{}", "a".repeat(215))).is_err());
+    }
+
+    #[test]
+    fn accepts_safe_scoped_names_and_normalizes_case() {
+        let request = ToolRequest::parse("npm:@Scope/Package_Name-1.2").unwrap();
+        assert_eq!(request.backend, "npm:@scope/package_name-1.2");
+        assert_eq!(request.spec, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn accepted_npm_names_map_to_safe_inventory_paths() {
+        let request = ToolRequest::parse("npm:@Antfu/Ni").unwrap();
+        assert_eq!(
+            crate::dirs::sanitize_tool_id(&request.backend),
+            std::path::PathBuf::from("npm/@antfu/ni")
+        );
     }
 
     fn vi(v: &str, stable: bool, lts: Option<&str>) -> VersionInfo {

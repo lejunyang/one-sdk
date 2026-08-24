@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Ctx};
 use crate::error::{Error, Result};
-use crate::source::{candidate_fingerprint, ProbeCache, ProbeResult, Selection, Source, SourceKind};
+use crate::source::{
+    candidate_fingerprint, ProbeCache, ProbeResult, Selection, Source, SourceKind,
+};
 
 const SOURCE_CACHE_SCHEMA_VERSION: u32 = 2;
 
@@ -188,12 +190,12 @@ pub async fn probe_all(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) -> 
     for s in sources {
         let url = backend.probe_url(ctx, s);
         let client = ctx.client.clone();
-        let id = s.id.clone();
+        let source = s.clone();
         let to = timeout;
         handles.push(tokio::spawn(async move {
             match url {
-                Some(u) => probe_one(&client, &id, &u, to).await,
-                None => ProbeResult::failed(&id),
+                Some(u) => probe_one(&client, &source, &u, to).await,
+                None => ProbeResult::failed(&source.id),
             }
         }));
     }
@@ -210,7 +212,7 @@ pub async fn probe_all(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) -> 
 /// window, downloading at most ~1MB.
 async fn probe_one(
     client: &reqwest::Client,
-    id: &str,
+    source: &Source,
     url: &str,
     timeout: Duration,
 ) -> ProbeResult {
@@ -218,7 +220,11 @@ async fn probe_one(
 
     let start = Instant::now();
     let fut = async {
-        let resp = client.get(url).send().await.ok()?.error_for_status().ok()?;
+        let resp = crate::http::get_source_response(client, source, url)
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
         let ttfb = start.elapsed();
         let mut stream = resp.bytes_stream();
         let mut downloaded: u64 = 0;
@@ -241,18 +247,21 @@ async fn probe_one(
 
     match tokio::time::timeout(timeout, fut).await {
         Ok(Some((ttfb, throughput, downloaded))) if downloaded > 0 => ProbeResult {
-            source_id: id.to_string(),
+            source_id: source.id.clone(),
             throughput,
             ttfb_ms: ttfb.as_millis() as u64,
             ok: true,
             measured_at: crate::source::now_secs(),
         },
-        _ => ProbeResult::failed(id),
+        _ => ProbeResult::failed(&source.id),
     }
 }
 
 fn cache_path(ctx: &Ctx, tool: &str) -> PathBuf {
-    let mut path = ctx.dirs.sources_cache().join(crate::dirs::sanitize_tool_id(tool));
+    let mut path = ctx
+        .dirs
+        .sources_cache()
+        .join(crate::dirs::sanitize_tool_id(tool));
     path.set_extension("json");
     path
 }
@@ -341,7 +350,11 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn install(&self, _ctx: &crate::backend::InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
+        async fn install(
+            &self,
+            _ctx: &crate::backend::InstallCtx<'_>,
+            _tv: &ToolVersion,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -501,6 +514,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_probe_applies_explicit_headers_without_forward_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains("x-probe-key: source-secret"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata")
+                .unwrap();
+        });
+
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temporary.path(), false);
+        let mut source = Source::mirror("fixture", &format!("http://{address}/"), 1);
+        source.forward_credentials = false;
+        source.headers = vec![("X-Probe-Key".into(), "source-secret".into())];
+        let backend = FixtureBackend {
+            id: "tool",
+            sources: vec![source.clone()],
+        };
+
+        let results = probe_all(&ctx, &backend, &[source]).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ok);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn offline_ranked_source_list_reuses_compatible_probe_cache() {
         let temporary = tempfile::tempdir().unwrap();
         let online_ctx = test_ctx(temporary.path(), false);
@@ -553,8 +604,10 @@ mod tests {
         })
         .unwrap();
         dirs.ensure().unwrap();
-        let mut settings = Settings::default();
-        settings.offline = offline;
+        let settings = Settings {
+            offline,
+            ..Default::default()
+        };
         Ctx {
             dirs: dirs.clone(),
             platform: Platform::current(),

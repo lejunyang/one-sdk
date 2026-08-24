@@ -151,8 +151,12 @@ impl DynamicToolManifest {
     pub fn load(install_root: &Path) -> Result<Self> {
         let path = Self::manifest_path(install_root);
         let bytes = std::fs::read(&path).map_err(|error| Error::io(&path, error))?;
-        Self::from_slice(&bytes)
-            .map_err(|error| Error::other(format!("invalid tool inventory at {}: {error}", path.display())))
+        Self::from_slice(&bytes).map_err(|error| {
+            Error::other(format!(
+                "invalid tool inventory at {}: {error}",
+                path.display()
+            ))
+        })
     }
 
     pub fn write_atomic(&self, install_root: &Path) -> Result<()> {
@@ -191,7 +195,11 @@ impl DynamicToolManifest {
 
 impl ScanReport {
     pub fn installed_ids(&self) -> Vec<String> {
-        deduped_ids(self.installs.iter().map(|install| install.canonical_id.as_str()))
+        deduped_ids(
+            self.installs
+                .iter()
+                .map(|install| install.canonical_id.as_str()),
+        )
     }
 }
 
@@ -204,10 +212,7 @@ pub fn update_manifest_metadata(
     Ok(manifest)
 }
 
-pub fn remove_manifest_metadata(
-    install_root: &Path,
-    key: &str,
-) -> Result<DynamicToolManifest> {
+pub fn remove_manifest_metadata(install_root: &Path, key: &str) -> Result<DynamicToolManifest> {
     update_manifest_metadata(install_root, |metadata| {
         metadata.remove(key);
     })
@@ -241,9 +246,11 @@ pub fn configured_dynamic_ids<'a>(
     config_keys: &[&str],
 ) -> Vec<String> {
     let relevant_keys: BTreeSet<&str> = config_keys.iter().copied().collect();
-    deduped_ids(configured_values.into_iter().filter_map(|(key, value)| {
-        relevant_keys.contains(key).then_some(value)
-    }))
+    deduped_ids(
+        configured_values
+            .into_iter()
+            .filter_map(|(key, value)| relevant_keys.contains(key).then_some(value)),
+    )
 }
 
 pub fn configured_and_installed_dynamic_ids<'a>(
@@ -263,12 +270,15 @@ pub fn build_bin_ownership_candidates(
     let mut owners: BTreeMap<String, Vec<BinOwnerCandidate>> = BTreeMap::new();
     for install in installs {
         for bin in &install.manifest.bins {
-            owners.entry(bin.name.clone()).or_default().push(BinOwnerCandidate {
-                bin_name: bin.name.clone(),
-                canonical_id: install.canonical_id.clone(),
-                install_root: install.install_root.clone(),
-                relative_path: bin.path.clone(),
-            });
+            owners
+                .entry(bin.name.clone())
+                .or_default()
+                .push(BinOwnerCandidate {
+                    bin_name: bin.name.clone(),
+                    canonical_id: install.canonical_id.clone(),
+                    install_root: install.install_root.clone(),
+                    relative_path: bin.path.clone(),
+                });
         }
     }
     for candidates in owners.values_mut() {
@@ -339,7 +349,8 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
 
     let mut installs = Vec::new();
     for manifest_path in manifest_paths {
-        let metadata = std::fs::metadata(&manifest_path).map_err(|error| Error::io(&manifest_path, error))?;
+        let metadata =
+            std::fs::metadata(&manifest_path).map_err(|error| Error::io(&manifest_path, error))?;
         if metadata.len() > options.max_manifest_bytes {
             handle_scan_problem(
                 &mut diagnostics,
@@ -398,7 +409,12 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
         };
         let install_root = manifest_path
             .parent()
-            .ok_or_else(|| Error::other(format!("manifest path has no parent: {}", manifest_path.display())))?
+            .ok_or_else(|| {
+                Error::other(format!(
+                    "manifest path has no parent: {}",
+                    manifest_path.display()
+                ))
+            })?
             .to_path_buf();
         installs.push(InstalledDynamicTool {
             canonical_id: manifest.id.clone(),
@@ -442,7 +458,7 @@ fn normalize_config_keys(keys: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn normalize_bins(bins: &mut Vec<DynamicToolBin>) -> Result<()> {
+fn normalize_bins(bins: &mut [DynamicToolBin]) -> Result<()> {
     for bin in bins.iter_mut() {
         bin.name = normalize_bin_name(&bin.name)?;
         bin.path = normalize_relative_bin_path(&bin.path)?;
@@ -466,7 +482,9 @@ fn normalize_metadata(metadata: &mut BTreeMap<String, String>) -> Result<()> {
     for (key, value) in std::mem::take(metadata) {
         let key = key.trim().to_string();
         if key.is_empty() {
-            return Err(Error::config("dynamic tool metadata keys must not be empty"));
+            return Err(Error::config(
+                "dynamic tool metadata keys must not be empty",
+            ));
         }
         normalized.insert(key, value);
     }
@@ -534,29 +552,73 @@ fn canonical_backend_name(value: &str) -> Result<String> {
 }
 
 fn canonical_npm_package(value: &str) -> Result<String> {
-    let value = value.trim().to_ascii_lowercase();
-    if let Some(rest) = value.strip_prefix('@') {
-        let (scope, name) = rest.split_once('/').ok_or_else(|| {
-            Error::config(format!("invalid npm package id `{value}`"))
-        })?;
+    let normalized = value.trim().to_ascii_lowercase();
+    if let Some(rest) = normalized.strip_prefix('@') {
+        let (scope, name) = rest
+            .split_once('/')
+            .ok_or_else(|| Error::config(format!("invalid npm package id `{normalized}`")))?;
         if !valid_npm_segment(scope) || !valid_npm_segment(name) || name.contains('/') {
-            return Err(Error::config(format!("invalid npm package id `{value}`")));
+            return Err(Error::config(format!(
+                "invalid npm package id `{normalized}`"
+            )));
         }
         return Ok(format!("@{scope}/{name}"));
     }
-    if !valid_npm_segment(&value) {
-        return Err(Error::config(format!("invalid npm package id `{value}`")));
+    if !valid_npm_segment(&normalized) {
+        return Err(Error::config(format!(
+            "invalid npm package id `{normalized}`"
+        )));
     }
-    Ok(value)
+    Ok(normalized)
 }
 
 fn valid_npm_segment(value: &str) -> bool {
-    !value.is_empty()
-        && !value.contains('/')
-        && !value.contains('\\')
-        && !value.contains('@')
-        && !value.contains(':')
-        && !value.chars().any(char::is_whitespace)
+    if value.is_empty() || value.len() > 214 {
+        return false;
+    }
+    if value == "." || value == ".." || is_windows_reserved_component(value) {
+        return false;
+    }
+    value.chars().all(valid_npm_segment_char)
+}
+
+fn valid_npm_segment_char(ch: char) -> bool {
+    ch.is_ascii_lowercase()
+        || ch.is_ascii_uppercase()
+        || ch.is_ascii_digit()
+        || matches!(ch, '-' | '_' | '.')
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let trimmed = value.trim_end_matches([' ', '.']);
+    if trimmed.is_empty() {
+        return true;
+    }
+    matches!(
+        trimmed.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn canonical_github_repository(value: &str) -> Result<String> {
@@ -564,7 +626,8 @@ fn canonical_github_repository(value: &str) -> Result<String> {
     let (owner, repo) = value
         .split_once('/')
         .ok_or_else(|| Error::config(format!("invalid GitHub repository id `{value}`")))?;
-    if !valid_repository_component(owner) || !valid_repository_component(repo) || repo.contains('/') {
+    if !valid_repository_component(owner) || !valid_repository_component(repo) || repo.contains('/')
+    {
         return Err(Error::config(format!(
             "invalid GitHub repository id `{value}`"
         )));
@@ -599,11 +662,7 @@ fn canonical_generic_namespaced_body(value: &str) -> Result<String> {
     }
     let mut parts = Vec::new();
     for part in normalized.split('/') {
-        if part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.chars().any(char::is_whitespace)
-        {
+        if part.is_empty() || part == "." || part == ".." || part.chars().any(char::is_whitespace) {
             return Err(Error::config(format!(
                 "dynamic tool id must stay relative and slash-separated: `{value}`"
             )));
@@ -675,7 +734,8 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
             .map_err(|error| Error::io(&temporary, error))?;
         file.write_all(&bytes)
             .map_err(|error| Error::io(&temporary, error))?;
-        file.sync_all().map_err(|error| Error::io(&temporary, error))?;
+        file.sync_all()
+            .map_err(|error| Error::io(&temporary, error))?;
     }
     if let Err(error) = atomic_replace(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
@@ -696,10 +756,7 @@ fn unique_temporary_path(parent: &Path, file_name: &std::ffi::OsStr) -> PathBuf 
             return candidate;
         }
     }
-    parent.join(format!(
-        ".{file_name}.tmp-{}-fallback",
-        std::process::id()
-    ))
+    parent.join(format!(".{file_name}.tmp-{}-fallback", std::process::id()))
 }
 
 #[cfg(not(windows))]
@@ -721,8 +778,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
         .chain(Some(0))
         .collect();
     let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    let result =
-        unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
+    let result = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
     if result == 0 {
         return Err(Error::io(destination, std::io::Error::last_os_error()));
     }
@@ -762,6 +818,10 @@ mod tests {
             canonical_dynamic_id("github:Cli/CLI.git").unwrap(),
             "github:cli/cli"
         );
+        assert_eq!(
+            canonical_dynamic_id("npm:Prettier").unwrap(),
+            "npm:prettier"
+        );
     }
 
     #[test]
@@ -793,6 +853,27 @@ mod tests {
         ];
         let error = duplicate.normalize().unwrap_err();
         assert!(error.to_string().contains("duplicate dynamic tool bin"));
+    }
+
+    #[test]
+    fn rejects_invalid_npm_package_segments_per_current_policy() {
+        for invalid in [
+            "npm:foo#bar",
+            "npm:foo?bar",
+            "npm:foo%2fbar",
+            "npm:.",
+            "npm:..",
+            "npm:CON",
+            "npm:prn",
+            "npm:Com1",
+            "npm:@scope/AUX",
+            "npm:@scope/Lpt9",
+            &format!("npm:{}", "a".repeat(215)),
+            &format!("npm:@scope/{}", "b".repeat(215)),
+        ] {
+            let error = canonical_dynamic_id(invalid).unwrap_err();
+            assert!(error.to_string().contains("invalid npm package id"), "{invalid}");
+        }
     }
 
     #[test]
@@ -846,7 +927,9 @@ mod tests {
         .unwrap();
 
         let error = scan_installs(temporary.path(), &ScanOptions::default()).unwrap_err();
-        assert!(error.to_string().contains("refusing dynamic tool inventory scan"));
+        assert!(error
+            .to_string()
+            .contains("refusing dynamic tool inventory scan"));
 
         let report = scan_installs(
             temporary.path(),

@@ -220,7 +220,8 @@ mod tests {
             write_fixture_archive(&archive, binary);
             let checksum = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
             let cached =
-                pipeline::artifact_cache_path(&ctx.dirs, backend.id(), release.version, &file_name);
+                pipeline::artifact_cache_path(&ctx.dirs, backend.id(), release.version, &file_name)
+                    .unwrap();
             std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
             std::fs::copy(&archive, &cached).unwrap();
             let mut version = ToolVersion::new(backend.id(), release.version);

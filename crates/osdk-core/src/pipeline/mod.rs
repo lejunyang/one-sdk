@@ -2,7 +2,7 @@
 //! materialize. Shared by all archive-based backends (node/go/python/java,
 //! standalone pnpm/yarn).
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -133,13 +133,10 @@ pub async fn run_with_attestation(
     attestation: Option<&GithubAttestation>,
 ) -> Result<PathBuf> {
     let install_dir = ctx.dirs.install_path(&plan.tool, &plan.version);
-    let archive_path = artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name);
+    let archive_path = artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name)?;
 
     // Serialize concurrent installs of the same tool@version.
-    let lock_path = ctx
-        .dirs
-        .lock_dir(&plan.tool)
-        .join(format!("{}.lock", plan.version));
+    let lock_path = install_lock_path(ctx.dirs, &plan.tool, &plan.version);
     let _lock = FileLock::acquire(&lock_path)?;
 
     // Idempotency: already installed and marked complete.
@@ -303,7 +300,18 @@ pub async fn run_with_attestation(
 fn scratch_path(dirs: &Dirs, tool: &str, version: &str) -> PathBuf {
     dirs.tmp()
         .join(crate::dirs::sanitize_tool_id(tool))
-        .join(format!("{version}-{}", std::process::id()))
+        .join(format!(
+            "{}-{}",
+            crate::dirs::sanitize_version_component(version),
+            std::process::id()
+        ))
+}
+
+fn install_lock_path(dirs: &Dirs, tool: &str, version: &str) -> PathBuf {
+    dirs.lock_dir(tool).join(format!(
+        "{}.lock",
+        crate::dirs::sanitize_version_component(version)
+    ))
 }
 
 fn safe_subdir(root: &std::path::Path, subdir: &std::path::Path) -> Result<PathBuf> {
@@ -360,7 +368,8 @@ pub async fn install_single_binary(
     attestation: Option<&GithubAttestation>,
 ) -> Result<()> {
     let install_dir = dirs.install_path(tool, version);
-    let cached = artifact_cache_path(dirs, tool, version, download_name);
+    validate_safe_filename("executable name", exe_name)?;
+    let cached = artifact_cache_path(dirs, tool, version, download_name)?;
     if install_dir.join(COMPLETE_MARKER).exists() {
         if let Some(attestation) = attestation {
             let evidence = crate::verification::verify_github_attestation(
@@ -513,11 +522,33 @@ fn merge_artifact_evidence(
     Ok(())
 }
 
-pub fn artifact_cache_path(dirs: &Dirs, tool: &str, version: &str, file_name: &str) -> PathBuf {
-    dirs.downloads()
+pub fn artifact_cache_path(
+    dirs: &Dirs,
+    tool: &str,
+    version: &str,
+    file_name: &str,
+) -> Result<PathBuf> {
+    validate_safe_filename("artifact file name", file_name)?;
+    Ok(dirs
+        .downloads()
         .join(crate::dirs::sanitize_tool_id(tool))
-        .join(version)
-        .join(file_name)
+        .join(crate::dirs::sanitize_version_component(version))
+        .join(file_name))
+}
+
+/// Reject filesystem-facing names that are not exactly one ordinary path
+/// component on either Unix or Windows. Callers should reject rather than
+/// sanitize these names because aliases could otherwise collide in the cache.
+pub fn validate_safe_filename(label: &str, value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.contains(['/', '\\', ':'])
+        || path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(Error::config(format!("unsafe {label} `{value}`")));
+    }
+    Ok(())
 }
 
 fn format_checksum(checksum: &Checksum) -> String {
@@ -621,6 +652,75 @@ mod tests {
                 .join("tool")
                 .join(format!("1.2.3-{}", std::process::id()))
         );
+    }
+
+    #[test]
+    fn version_derived_scratch_and_lock_paths_stay_under_managed_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        for version in ["../../outside", "/outside", r"..\..\outside"] {
+            assert!(scratch_path(&dirs, "tool", version).starts_with(dirs.tmp().join("tool")));
+            assert!(install_lock_path(&dirs, "tool", version).starts_with(dirs.lock_dir("tool")));
+        }
+
+        for (left, right) in [
+            ("release/2026", "release_2026"),
+            (r"release\2026", "release_2026"),
+            ("release%2F2026", "release/2026"),
+        ] {
+            assert_ne!(
+                dirs.install_path("tool", left),
+                dirs.install_path("tool", right)
+            );
+            assert_ne!(
+                scratch_path(&dirs, "tool", left),
+                scratch_path(&dirs, "tool", right)
+            );
+            assert_ne!(
+                install_lock_path(&dirs, "tool", left),
+                install_lock_path(&dirs, "tool", right)
+            );
+            assert_ne!(
+                artifact_cache_path(&dirs, "tool", left, "tool.tar.gz").unwrap(),
+                artifact_cache_path(&dirs, "tool", right, "tool.tar.gz").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_cache_rejects_unsafe_filenames_without_touching_sentinels() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let sentinel = temporary.path().join("outside.tar.gz");
+        std::fs::write(&sentinel, b"keep").unwrap();
+
+        for name in [
+            "../../outside.tar.gz",
+            "/outside.tar.gz",
+            r"..\outside.tar.gz",
+            r"C:\outside.tar.gz",
+            ".",
+            "..",
+        ] {
+            assert!(artifact_cache_path(&dirs, "tool", "1.0.0", name).is_err());
+        }
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+        assert!(artifact_cache_path(&dirs, "tool", "1.0.0", "tool.tar.gz")
+            .unwrap()
+            .starts_with(dirs.downloads()));
     }
 
     #[tokio::test]
@@ -761,7 +861,7 @@ mod tests {
         })
         .unwrap();
         dirs.ensure().unwrap();
-        let archive = artifact_cache_path(&dirs, "contract", "1.0.0", "contract.tgz");
+        let archive = artifact_cache_path(&dirs, "contract", "1.0.0", "contract.tgz").unwrap();
         std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
         {
             let file = std::fs::File::create(&archive).unwrap();
@@ -822,7 +922,7 @@ mod tests {
             b"contract"
         );
 
-        let bad_archive = artifact_cache_path(&dirs, "contract", "2.0.0", "bad.tgz");
+        let bad_archive = artifact_cache_path(&dirs, "contract", "2.0.0", "bad.tgz").unwrap();
         std::fs::create_dir_all(bad_archive.parent().unwrap()).unwrap();
         std::fs::write(&bad_archive, b"not an archive").unwrap();
         let bad = InstallPlan {

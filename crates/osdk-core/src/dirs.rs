@@ -128,7 +128,9 @@ impl Dirs {
 
     /// Install directory for a specific tool version.
     pub fn install_path(&self, tool: &str, version: &str) -> PathBuf {
-        self.installs.join(sanitize_tool_id(tool)).join(version)
+        self.installs
+            .join(sanitize_tool_id(tool))
+            .join(sanitize_version_component(version))
     }
 
     /// Directory holding per-version install locks for a tool.
@@ -159,6 +161,55 @@ impl Dirs {
         }
         Ok(())
     }
+}
+
+/// Encode a version label as one collision-resistant, portable filesystem
+/// component. Common lowercase semver labels remain readable; every other UTF-8
+/// byte is percent-encoded. The escape marker is encoded too, so distinct input
+/// labels cannot alias each other.
+pub fn sanitize_version_component(version: &str) -> String {
+    if version.is_empty() {
+        return "%EMPTY".to_string();
+    }
+
+    let mut out = String::with_capacity(version.len());
+    for byte in version.bytes() {
+        if byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || matches!(byte, b'.' | b'-' | b'_' | b'+')
+        {
+            out.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut out, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+    }
+
+    // Dot components, trailing dots, and DOS device basenames are not portable
+    // Windows filenames. Escape their first or final byte without introducing
+    // aliases because literal '%' bytes were encoded above.
+    if out == "." {
+        return "%2E".to_string();
+    }
+    if out == ".." {
+        return "%2E%2E".to_string();
+    }
+    if out.ends_with('.') {
+        out.pop();
+        out.push_str("%2E");
+    }
+    let stem = out.split('.').next().unwrap_or_default();
+    let reserved = matches!(stem, "con" | "prn" | "aux" | "nul")
+        || stem.strip_prefix("com").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || stem.strip_prefix("lpt").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        });
+    if reserved {
+        out.replace_range(..1, "%63");
+    }
+    out
 }
 
 pub(crate) fn create_dir_all(p: &Path) -> Result<()> {
@@ -215,5 +266,37 @@ mod tests {
         env.insert(env_keys::STORE_DIR.to_string(), "/big/store".to_string());
         let d = Dirs::resolve_from(|k| env.get(k).cloned()).unwrap();
         assert_eq!(d.store, PathBuf::from("/big/store"));
+    }
+
+    #[test]
+    fn version_components_cannot_escape_install_root() {
+        assert_eq!(sanitize_version_component("20.1.0"), "20.1.0");
+        assert_eq!(
+            sanitize_version_component("../../victim"),
+            "..%2F..%2Fvictim"
+        );
+        assert_eq!(sanitize_version_component("a\\b/c"), "a%5Cb%2Fc");
+        assert_eq!(sanitize_version_component(".."), "%2E%2E");
+        assert_eq!(sanitize_version_component(""), "%EMPTY");
+    }
+
+    #[test]
+    fn version_encoding_is_collision_resistant_and_portable() {
+        let values = [
+            "release/2026",
+            "release_2026",
+            r"release\2026",
+            "release%2F2026",
+            "Release/2026",
+            "con",
+            "con.txt",
+            "version.",
+        ];
+        let encoded = values
+            .iter()
+            .map(|value| sanitize_version_component(value))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(encoded.len(), values.len());
+        assert!(encoded.iter().all(|value| !value.contains(['/', '\\'])));
     }
 }

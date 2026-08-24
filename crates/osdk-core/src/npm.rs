@@ -56,7 +56,7 @@ pub async fn resolve_dist(
     let mut checksum_source: Option<String> = None;
     for source in sources {
         let url = package_url(&source.download_url, package, Some(version));
-        match http::get_cached_json::<VersionDoc>(ctx, &url).await {
+        match http::get_cached_source_json::<VersionDoc>(ctx, source, &url).await {
             Ok(doc) => {
                 if doc.dist.tarball.is_empty() {
                     last_err = Some(Error::other(format!("no tarball for {package}@{version}")));
@@ -119,7 +119,7 @@ pub async fn packument(ctx: &Ctx, sources: &[Source], package: &str) -> Result<N
     let mut last_err: Option<Error> = None;
     for source in sources {
         let url = package_url(&source.download_url, package, None);
-        match http::get_cached_json::<Packument>(ctx, &url).await {
+        match http::get_cached_source_json::<Packument>(ctx, source, &url).await {
             Ok(p) => {
                 let mut versions: Vec<String> = p.versions.into_keys().collect();
                 versions.sort_by(|a, b| crate::backend::python::cmp_versions(a, b));
@@ -354,6 +354,44 @@ mod tests {
             ]
         );
         assert!(dist.checksum.is_some());
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn npm_metadata_applies_the_selected_sources_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(request.contains("x-registry-key: source-secret"));
+            let body = r#"{"versions":{"1.0.0":{}}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let mut source = Source::mirror("private", &format!("http://{address}/"), 1);
+        source.forward_credentials = false;
+        source.headers = vec![("X-Registry-Key".into(), "source-secret".into())];
+
+        let versions = list_versions(&ctx, &[source], "tool").await.unwrap();
+        assert_eq!(versions, vec!["1.0.0"]);
         server.join().unwrap();
     }
 

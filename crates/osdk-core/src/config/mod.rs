@@ -576,7 +576,9 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
         }
         if let Some(tv) = find_tool_versions(start_dir)? {
             for (tool, version) in tv {
-                cfg.tools.entry(tool.clone()).or_insert_with(|| version.clone());
+                cfg.tools
+                    .entry(tool.clone())
+                    .or_insert_with(|| version.clone());
                 cfg.tool_configs
                     .entry(tool)
                     .or_insert_with(|| ToolConfigEntry::legacy(version));
@@ -737,7 +739,10 @@ mod tests {
         assert!(found.is_some());
         let (path, file) = found.unwrap();
         assert_eq!(path, cfg_path);
-        assert_eq!(file.tools.get("node").map(ToolConfigEntry::version), Some("20"));
+        assert_eq!(
+            file.tools.get("node").map(ToolConfigEntry::version),
+            Some("20")
+        );
     }
 
     #[test]
@@ -770,11 +775,19 @@ npm = { version = "11.5.2", allow_builds = ["esbuild", "sharp"], engine = "node"
             Some(&ToolConfigValue::Array(vec!["pkg-a".to_string()]))
         );
         assert_eq!(
-            tools["npm"].structured_config().unwrap().options.get("engine"),
+            tools["npm"]
+                .structured_config()
+                .unwrap()
+                .options
+                .get("engine"),
             Some(&ToolConfigValue::String("node".to_string()))
         );
         assert_eq!(
-            tools["npm"].structured_config().unwrap().options.get("frozen"),
+            tools["npm"]
+                .structured_config()
+                .unwrap()
+                .options
+                .get("frozen"),
             Some(&ToolConfigValue::Bool(true))
         );
         assert_eq!(
@@ -824,11 +837,19 @@ pnpm = "9.0.0"
         assert_eq!(tools["pnpm"].version(), "9.0.0");
         assert_eq!(tools["bun"].version(), "1.1.0");
         assert_eq!(
-            tools["npm"].structured_config().unwrap().options.get("allow_builds"),
+            tools["npm"]
+                .structured_config()
+                .unwrap()
+                .options
+                .get("allow_builds"),
             Some(&ToolConfigValue::Array(vec!["sharp".to_string()]))
         );
         assert_eq!(
-            tools["npm"].structured_config().unwrap().options.get("engine"),
+            tools["npm"]
+                .structured_config()
+                .unwrap()
+                .options
+                .get("engine"),
             Some(&ToolConfigValue::String("node".to_string()))
         );
     }

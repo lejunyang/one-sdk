@@ -757,7 +757,8 @@ not-a-hash  garbage-line
                 .unwrap()
                 .file_name;
             let cached =
-                pipeline::artifact_cache_path(&ctx.dirs, "python", &resolved.version, &file_name);
+                pipeline::artifact_cache_path(&ctx.dirs, "python", &resolved.version, &file_name)
+                    .unwrap();
             std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
             std::fs::write(&cached, archives.get(&file_name).unwrap()).unwrap();
             PythonBackend

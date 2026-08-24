@@ -386,11 +386,15 @@ impl GithubBackend {
         {
             return Err(Error::config("invalid GitHub target libc"));
         }
+        let rename = options.get("rename").cloned();
+        if let Some(name) = rename.as_deref() {
+            pipeline::validate_safe_filename("GitHub executable rename", name)?;
+        }
         Ok(AssetRules {
             regex,
             template: options.get("asset-template").cloned(),
             bins,
-            rename: options.get("rename").cloned(),
+            rename,
             strip_components,
             os,
             arch,
@@ -1535,6 +1539,29 @@ mod tests {
     }
 
     #[test]
+    fn executable_rename_must_be_a_single_safe_filename() {
+        for rename in [
+            "../../outside",
+            "/outside",
+            r"..\outside",
+            r"C:\outside.exe",
+            ".",
+            "..",
+        ] {
+            let options = std::collections::BTreeMap::from([("rename".into(), rename.into())]);
+            assert!(GithubBackend::rules(&options).is_err(), "{rename}");
+        }
+
+        for rename in ["tool", "tool.exe"] {
+            let options = std::collections::BTreeMap::from([("rename".into(), rename.into())]);
+            assert_eq!(
+                GithubBackend::rules(&options).unwrap().rename.as_deref(),
+                Some(rename)
+            );
+        }
+    }
+
+    #[test]
     fn public_metadata_parsers_keep_only_repository_scoped_release_links() {
         let atom = r#"
             <feed xmlns='http://www.w3.org/2005/Atom'>
@@ -1846,7 +1873,8 @@ mod tests {
         let mut ctx = test_ctx(temp.path());
         ctx.config.settings.offline = true;
         let file_name = "tool.tar.gz";
-        let cached = pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name);
+        let cached =
+            pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name).unwrap();
         std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::copy(&archive, &cached).unwrap();
         let mut version = ToolVersion::new(backend.id(), "1.2.3");

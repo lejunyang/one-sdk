@@ -159,7 +159,7 @@ async fn all_builtin_backend_ids_satisfy_the_lifecycle_contract() {
         assert_eq!(resolved.version, "1.0.0");
 
         let file_name = "contract.tgz";
-        let archive = pipeline::artifact_cache_path(&ctx.dirs, id, "1.0.0", file_name);
+        let archive = pipeline::artifact_cache_path(&ctx.dirs, id, "1.0.0", file_name).unwrap();
         std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
         fixture_archive(&archive);
         let checksum = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
@@ -216,7 +216,8 @@ async fn real_builtin_backends_install_and_uninstall_locked_fixtures() {
             _ => "1.0.0",
         };
         let file_name = format!("{id}.tgz");
-        let archive = pipeline::artifact_cache_path(&ctx.dirs, id, fixture_version, &file_name);
+        let archive =
+            pipeline::artifact_cache_path(&ctx.dirs, id, fixture_version, &file_name).unwrap();
         std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
         real_backend_fixture(id, &archive);
         let checksum = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();

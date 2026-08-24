@@ -783,7 +783,8 @@ mod tests {
         let tool = "github:kubewarden/kubewarden-controller";
         let version = "1.34.0";
         let file_name = "manifest.json";
-        let artifact = crate::pipeline::artifact_cache_path(&dirs, tool, version, file_name);
+        let artifact =
+            crate::pipeline::artifact_cache_path(&dirs, tool, version, file_name).unwrap();
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
         std::fs::write(&artifact, fixture_artifact()).unwrap();
         let digest =

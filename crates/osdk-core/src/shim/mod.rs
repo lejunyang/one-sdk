@@ -111,8 +111,11 @@ pub fn dynamic_request_from_config(ctx: &Ctx, backend_id: &str) -> Option<ToolRe
                     .unwrap_or_default(),
             });
         }
-        if let Ok(request) = ToolRequest::parse(value) {
+        if let Ok(mut request) = ToolRequest::parse(value) {
             if request.backend == backend_id {
+                if let Some(entry) = ctx.config.tool_configs.get(key) {
+                    request.options.extend(entry.to_request_options());
+                }
                 return Some(request);
             }
         }
@@ -331,6 +334,52 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn indirect_dynamic_request_preserves_structured_options() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use super::*;
+        use crate::config::{Config, Settings, SourcesConfig, ToolConfigEntry, ToolConfigValue};
+        use crate::platform::Platform;
+        use crate::store::Cas;
+
+        let td = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(td.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(td.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(td.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let options = BTreeMap::from([(
+            "allow_builds".into(),
+            ToolConfigValue::Array(vec!["esbuild".into()]),
+        )]);
+        let ctx = Ctx {
+            cas: Arc::new(Cas::new(dirs.store.clone())),
+            dirs,
+            platform: Platform::current(),
+            config: Config {
+                settings: Settings::default(),
+                sources: SourcesConfig::default(),
+                tools: BTreeMap::from([("ni".into(), "npm:@antfu/ni@0.21.12".into())]),
+                tool_configs: BTreeMap::from([(
+                    "ni".into(),
+                    ToolConfigEntry::structured("npm:@antfu/ni@0.21.12", options),
+                )]),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        };
+
+        let request = dynamic_request_from_config(&ctx, "npm:@antfu/ni").unwrap();
+        assert_eq!(request.spec.to_string(), "0.21.12");
+        assert_eq!(request.options["allow_builds"], "esbuild");
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_shim_is_symlink() {

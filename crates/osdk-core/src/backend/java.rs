@@ -636,7 +636,8 @@ mod tests {
             "java",
             "jre-21.0.12+8",
             "java-fixture.tar.gz",
-        );
+        )
+        .unwrap();
         std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
         std::fs::copy(&archive, &cached).unwrap();
         let mut version = ToolVersion::new("java", "jre-21.0.12+8");

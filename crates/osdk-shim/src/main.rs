@@ -27,6 +27,8 @@ fn main() {
 
 fn real_main() -> i32 {
     let args: Vec<String> = std::env::args().collect();
+    let lang = osdk_core::i18n::detect(None, |key| std::env::var(key).ok());
+    osdk_core::i18n::set_lang(lang);
     // The tool name is argv[0]'s basename (e.g. the shim named "node"), unless
     // invoked directly as "osdk-shim <tool> <args...>" (windows .cmd wrapper).
     let (tool_name, forward_args) = parse_invocation(&args);
@@ -65,6 +67,16 @@ fn real_main() -> i32 {
             return 1;
         }
     };
+    if std::env::var_os("OSDK_LANG").is_none() {
+        if let Some(lang) = config
+            .settings
+            .lang
+            .as_deref()
+            .and_then(osdk_core::i18n::Lang::parse)
+        {
+            osdk_core::i18n::set_lang(lang);
+        }
+    }
 
     let registry = match Registry::load(&dirs) {
         Ok(registry) => registry,
@@ -173,7 +185,20 @@ fn real_main() -> i32 {
     // Remove both lexical and canonical matches so symlinked activation paths
     // cannot retain the shim directory under a different spelling.
     remove_env_path(&mut exec_env, &ctx.dirs.shims());
-    if backend.id() == "pnpm" || backend.id() == "yarn" || backend.id().starts_with("npm:") {
+    if backend.id().starts_with("npm:") {
+        let node_backend = registry.get("node").unwrap();
+        let node_bin_paths =
+            match manifest_bound_node_bin_paths(&ctx, backend.id(), &version, &*node_backend) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("osdk-shim: {error}");
+                    return 1;
+                }
+            };
+        let mut exact_runtime_path = node_bin_paths;
+        exact_runtime_path.extend(bin_dirs.clone());
+        prepend_env_path(&mut exec_env, exact_runtime_path);
+    } else if backend.id() == "pnpm" || backend.id() == "yarn" {
         let node_backend = registry.get("node").unwrap();
         let active_node = resolve_active(
             "node",
@@ -189,8 +214,8 @@ fn real_main() -> i32 {
             .or_else(|| node_backend.list_installed(&ctx).ok()?.into_iter().last());
         let Some(node_version) = node_version else {
             eprintln!(
-                "osdk-shim: `{}` requires a managed Node installation",
-                backend.id()
+                "osdk-shim: {}",
+                osdk_core::t!("err.shim_managed_node_required", tool = backend.id())
             );
             return 1;
         };
@@ -199,8 +224,10 @@ fn real_main() -> i32 {
             &mut exec_env,
             managed_bin_paths(&ctx, &*node_backend, &node),
         );
+        prepend_env_path(&mut exec_env, bin_dirs);
+    } else {
+        prepend_env_path(&mut exec_env, bin_dirs);
     }
-    prepend_env_path(&mut exec_env, bin_dirs);
 
     if let Some(manager) = package_manager_for_backend(backend.id(), &tool_name, &version) {
         if should_plan(manager, &tool_name, forward_args) {
@@ -229,6 +256,39 @@ fn real_main() -> i32 {
         forward_args
     };
     exec(&exe, exec_args, &exec_env)
+}
+
+fn manifest_bound_node_bin_paths(
+    ctx: &osdk_core::backend::Ctx,
+    npm_backend: &str,
+    npm_version: &str,
+    node_backend: &dyn osdk_core::backend::Backend,
+) -> Result<Vec<PathBuf>, String> {
+    let required = || osdk_core::t!("err.shim_managed_node_required", tool = npm_backend);
+    let manifest = osdk_core::shim::dynamic_manifest_for_version(ctx, npm_backend, npm_version)
+        .map_err(|_| required())?
+        .ok_or_else(&required)?;
+    let recorded = manifest
+        .metadata
+        .get("node_version")
+        .ok_or_else(&required)?;
+    let node_version = match VersionSpec::parse(recorded) {
+        // The manifest records the concrete runtime identity selected during
+        // installation. Reject aliases, ranges, prefixes, and even textual
+        // normalization so execution cannot drift to another installed Node.
+        VersionSpec::Exact(version) if version == recorded.as_str() => version,
+        _ => return Err(required()),
+    };
+    let installed = node_backend.list_installed(ctx).map_err(|_| required())?;
+    if !installed.iter().any(|version| version == &node_version) {
+        return Err(required());
+    }
+    let node = ToolVersion::new("node", node_version);
+    let bin_paths = managed_bin_paths(ctx, node_backend, &node);
+    if find_exe(&bin_paths, "node").is_none() {
+        return Err(required());
+    }
+    Ok(bin_paths)
 }
 
 fn routed_launcher<'a>(tool_name: &'a str, backend: &str) -> (&'a str, Option<&'static str>) {
@@ -500,7 +560,12 @@ fn dynamic_backend_for_bin(
     let owners = conflicting.join(", ");
     if !owners.is_empty() {
         eprintln!(
-            "osdk-shim: refusing to route `{tool_name}` because multiple installed tools provide it: {owners}"
+            "osdk-shim: {}",
+            osdk_core::t!(
+                "err.shim_dynamic_route_conflict",
+                tool = tool_name,
+                owners = owners
+            )
         );
     }
     None

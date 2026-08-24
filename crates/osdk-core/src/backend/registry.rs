@@ -71,7 +71,10 @@ impl Registry {
             return Err(Error::UnknownBackend(name.to_string()));
         }
         if name.starts_with("npm:") {
-            if let Some(package) = crate::backend::npm_package::NpmPackageBackend::from_id(name) {
+            let canonical = canonicalize_npm_dynamic_id(name).unwrap_or_else(|| name.to_string());
+            if let Some(package) =
+                crate::backend::npm_package::NpmPackageBackend::from_id(&canonical)
+            {
                 return Ok(Arc::new(package));
             }
             return Err(Error::UnknownBackend(name.to_string()));
@@ -104,6 +107,11 @@ fn insert_name(by_name: &mut HashMap<String, usize>, name: &str, index: usize) -
         )));
     }
     Ok(())
+}
+
+fn canonicalize_npm_dynamic_id(id: &str) -> Option<String> {
+    let package = id.strip_prefix("npm:")?;
+    Some(format!("npm:{}", package.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -148,6 +156,25 @@ mod tests {
         assert_eq!(registry.get("npm:prettier").unwrap().id(), "npm:prettier");
         assert_eq!(registry.get("npm:@antfu/ni").unwrap().id(), "npm:@antfu/ni");
         assert_eq!(registry.get("npm:npm").unwrap().id(), "npm:npm");
+    }
+
+    #[test]
+    fn resolves_dynamic_namespaced_backends_with_lowercase_canonical_ids_and_paths() {
+        let registry = Registry::new();
+
+        let prettier = registry.get("npm:Prettier").unwrap();
+        assert_eq!(prettier.id(), "npm:prettier");
+        assert_eq!(
+            crate::dirs::sanitize_tool_id(prettier.id()),
+            std::path::PathBuf::from("npm/prettier")
+        );
+
+        let scoped = registry.get("npm:@Antfu/Ni").unwrap();
+        assert_eq!(scoped.id(), "npm:@antfu/ni");
+        assert_eq!(
+            crate::dirs::sanitize_tool_id(scoped.id()),
+            std::path::PathBuf::from("npm/@antfu/ni")
+        );
     }
 
     #[test]
