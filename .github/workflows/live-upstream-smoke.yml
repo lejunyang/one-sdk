@@ -41,7 +41,7 @@ jobs:
           } >> "$GITHUB_ENV"
           printf 'target=%s\n' "$root/target" > "$root/logs/setup.log"
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - name: Build smoke binaries
         shell: bash
         run: |
