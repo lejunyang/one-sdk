@@ -48,6 +48,25 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Serialize)]
+struct SourceFingerprint<'a> {
+    ordinal: usize,
+    id: &'a str,
+    kind: SourceKind,
+    index_url: Option<&'a str>,
+    download_url: &'a str,
+    priority: i32,
+    enabled: bool,
+    forward_credentials: bool,
+    headers: Vec<HeaderFingerprint>,
+}
+
+#[derive(Serialize)]
+struct HeaderFingerprint {
+    name: String,
+    value_hash: String,
+}
+
 impl Source {
     pub fn official(id: &str, download_url: &str) -> Source {
         Source {
@@ -79,6 +98,42 @@ impl Source {
         self.index_url = Some(index_url.to_string());
         self
     }
+}
+
+/// A deterministic, secret-safe identity for a concrete source candidate set.
+///
+/// The fingerprint includes the fields that affect which endpoints are probed
+/// and how they are ordered, while hashing header values so secrets are never
+/// persisted in plain text.
+pub(crate) fn candidate_fingerprint(sources: &[Source]) -> String {
+    let encoded = sources
+        .iter()
+        .enumerate()
+        .map(|(ordinal, source)| {
+            let mut headers: Vec<HeaderFingerprint> = source
+                .headers
+                .iter()
+                .map(|(name, value)| HeaderFingerprint {
+                    name: name.to_ascii_lowercase(),
+                    value_hash: blake3::hash(value.as_bytes()).to_hex().to_string(),
+                })
+                .collect();
+            headers.sort_by(|a, b| a.name.cmp(&b.name).then(a.value_hash.cmp(&b.value_hash)));
+            SourceFingerprint {
+                ordinal,
+                id: &source.id,
+                kind: source.kind,
+                index_url: source.index_url.as_deref(),
+                download_url: &source.download_url,
+                priority: source.priority,
+                enabled: source.enabled,
+                forward_credentials: source.forward_credentials,
+                headers,
+            }
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&encoded).unwrap_or_default();
+    blake3::hash(&bytes).to_hex().to_string()
 }
 
 /// How to pick among sources.
@@ -213,5 +268,19 @@ mod tests {
         results.sort_by(|a, b| b.score().total_cmp(&a.score()));
         let order: Vec<&str> = results.iter().map(|r| r.source_id.as_str()).collect();
         assert_eq!(order, vec!["fast", "slow", "dead"]);
+    }
+
+    #[test]
+    fn candidate_fingerprint_changes_when_hashed_headers_change() {
+        let mut source = Source::mirror("mirror", "https://mirror.example.test", 1);
+        source.headers = vec![("Authorization".into(), "Bearer secret-a".into())];
+        let first = candidate_fingerprint(&[source.clone()]);
+
+        source.headers = vec![("Authorization".into(), "Bearer secret-b".into())];
+        let second = candidate_fingerprint(&[source]);
+
+        assert_ne!(first, second);
+        assert!(!first.contains("secret-a"));
+        assert!(!second.contains("secret-b"));
     }
 }
