@@ -79,9 +79,13 @@ fn localize_subcommands(cmd: Command) -> Command {
     .mut_subcommand("uninstall", |c| {
         c.about(h("help.uninstall.about"))
             .mut_arg("tool", |a| a.help(h("help.uninstall.arg.tool")))
+            .mut_arg("global", |a| a.help(h("help.uninstall.flag.global")))
     })
     .mut_subcommand("current", |c| c.about(h("help.current.about")))
-    .mut_subcommand("where", |c| c.about(h("help.where.about")))
+    .mut_subcommand("where", |c| {
+        c.about(h("help.where.about"))
+            .mut_arg("global", |a| a.help(h("help.where.flag.global")))
+    })
     .mut_subcommand("reshim", |c| c.about(h("help.reshim.about")))
     .mut_subcommand("activate", |c| {
         c.about(h("help.activate.about"))
@@ -228,5 +232,22 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(!install_option_help.contains("allow_builds"));
+    }
+
+    #[test]
+    fn npm_lifecycle_global_flags_are_localized() {
+        let command = localize(crate::cli::Cli::command());
+        for subcommand in ["uninstall", "where"] {
+            let help = command
+                .find_subcommand(subcommand)
+                .unwrap()
+                .get_arguments()
+                .find(|argument| argument.get_id() == "global")
+                .and_then(|argument| argument.get_help())
+                .unwrap()
+                .to_string();
+            assert!(help.contains("global"), "{subcommand}: {help}");
+            assert!(help.contains("npm"), "{subcommand}: {help}");
+        }
     }
 }

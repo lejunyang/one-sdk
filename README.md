@@ -161,6 +161,8 @@ osdk use npm:eslint@9 -o installer=pnpm
 
 # Install a user-wide tool without changing the current project.
 osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
+osdk where --global 'npm:@antfu/ni'
+osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
 Automatic project installs prefer Aube when the existing lock format is
@@ -171,6 +173,10 @@ dependency graph. Without a `package.json`, local `use` retains the isolated
 osdk-managed installation and shim behavior. The generated
 `.osdk/npm-bin/` directory is local derived state and should normally be ignored
 by version control.
+`where --global` and `uninstall --global` explicitly target the user-wide npm
+installation. Without that flag, the existing project/isolated behavior is
+preserved; a global uninstall also removes its user config, lock entry, and
+now-unowned shims.
 
 Guide: [npm developer tools](site/en/guide/npm-tools.md)
 

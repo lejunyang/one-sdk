@@ -265,7 +265,7 @@ async fn apply_package_registry_plan_at(
     cwd: &std::path::Path,
 ) -> Result<()> {
     let executable_alias = executable_basename(program);
-    let project_yarn_version = project_yarn_version(&cwd);
+    let project_yarn_version = project_yarn_version(cwd);
     let yarn_version = resolved
         .iter()
         .find(|(_, version)| version.backend == "yarn")
@@ -507,6 +507,10 @@ async fn install_requests(
         }
         apply_source_override(app, &req.backend);
     }
+    // The compatibility install/exec/lock paths always target the isolated
+    // npm package root, even when the merged config has a global selection for
+    // the same package and version.
+    mark_isolated_npm_scope(&mut requests);
     // Package-backed JavaScript tools must never race their managed Node
     // dependency. Resolve and install Node before scheduling the remaining
     // independent requests concurrently.
@@ -582,6 +586,17 @@ fn bind_resolved_node_version(resolved: &mut [(ToolRequest, ToolVersion)]) {
     }
 }
 
+fn mark_isolated_npm_scope(requests: &mut [ToolRequest]) {
+    for request in requests {
+        if request.backend.starts_with("npm:") {
+            request.options.insert(
+                osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION.into(),
+                osdk_core::npm_tools::ToolScope::Project.as_str().into(),
+            );
+        }
+    }
+}
+
 async fn resolve_requests(
     app: &mut App,
     requests: Vec<ToolRequest>,
@@ -593,6 +608,7 @@ async fn resolve_requests(
         for (key, value) in &parsed_opts {
             request.options.insert(key.clone(), value.clone());
         }
+        mark_isolated_npm_scope(std::slice::from_mut(&mut request));
         apply_source_override(app, &request.backend);
         let backend = app.registry.get(&request.backend)?;
         let effective = expand_request_alias(app, backend.as_ref(), &request)?;
@@ -963,7 +979,7 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
             osdk_core::npm_tools::ToolScope::Project,
         )?;
         if let Some(project) = plan.project {
-            return use_project_npm(app, req, requested_spec, project, plan.installer).await;
+            return use_project_npm(app, req, requested_spec, project, requested_installer).await;
         }
     }
     use_legacy_cmd(app, req, requested_spec, global).await
@@ -1027,14 +1043,13 @@ async fn use_project_npm(
     request: ToolRequest,
     requested_spec: Option<String>,
     project: osdk_core::npm_tools::NpmProject,
-    installer: osdk_core::npm_tools::NpmInstaller,
+    requested_installer: osdk_core::npm_tools::NpmInstaller,
 ) -> Result<()> {
     let package = request
         .backend
         .strip_prefix("npm:")
         .ok_or_else(|| anyhow!("project npm install requires an npm: package request"))?
         .to_string();
-    let section = project_dependency_section(&project.package_json, &package)?;
     let node_request = project_node_request(app, &project.root)?;
     let (node_backend, node_version) = install_one_without_shims(app, &node_request).await?;
     generate_shims_for(app, node_backend.as_ref(), &node_version)?;
@@ -1060,95 +1075,139 @@ async fn use_project_npm(
         .await
         .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
     let package_spec = project_package_spec(&package, requested_spec.as_deref(), &version.version);
-
-    match installer {
-        osdk_core::npm_tools::NpmInstaller::Aube => {
-            osdk_core::backend::aube_host::add_to_project(
-                osdk_core::backend::aube_host::EmbeddedProjectAddRequest {
-                    project_dir: &project.root,
-                    packages: std::slice::from_ref(&package_spec),
-                    cache_dir: osdk_core::backend::npm_package::NpmPackageBackend::aube_cache_dir(
-                        &app.ctx,
-                    ),
-                    store_dir: osdk_core::backend::npm_package::NpmPackageBackend::aube_store_dir(
-                        &app.ctx,
-                    ),
-                    node_bin_dir: node_bin_dir.clone(),
-                    save_dev: matches!(
-                        section,
-                        ProjectDependencySection::DevDependencies
-                            | ProjectDependencySection::PeerDependencies { also_dev: true }
-                    ),
-                    save_optional: matches!(
-                        section,
-                        ProjectDependencySection::OptionalDependencies
-                    ),
-                    save_peer: matches!(section, ProjectDependencySection::PeerDependencies { .. }),
-                    offline: app.ctx.config.settings.offline,
-                },
-            )
-            .await?;
-        }
-        osdk_core::npm_tools::NpmInstaller::Npm | osdk_core::npm_tools::NpmInstaller::Pnpm => {
-            run_project_native_installer(
-                app,
-                installer,
-                &project.root,
-                &package_spec,
-                section,
-                &node_bin_dir,
-            )
-            .await?;
-        }
-        osdk_core::npm_tools::NpmInstaller::Auto => {
-            unreachable!("npm installer planning always returns a concrete installer")
-        }
-    }
-
-    osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
-        .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?
-        .validate_project_package_bins(&project.root, &version.version)?;
-    let installed_project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
-        .ok_or_else(|| anyhow!("project package.json disappeared during npm install"))?;
-    let native_lock = installed_project.native_lock.ok_or_else(|| {
-        anyhow!(
-            "installer `{installer}` did not write a recognized native lockfile in {}",
-            project.root.display()
-        )
-    })?;
-    if installer != osdk_core::npm_tools::NpmInstaller::Aube && native_lock.installer() != installer
-    {
-        anyhow::bail!(
-            "installer `{installer}` wrote {} owned by `{}`",
-            native_lock.path.display(),
-            native_lock.installer()
-        );
-    }
-    record_project_npm_metadata(&mut version, installer, &native_lock, &node_version.version)?;
-
-    let lock_path = project.root.join(crate::lockfile::LOCKFILE_NAME);
-    crate::lockfile::upsert_resolved_many_with_scope(
-        &lock_path,
-        app.ctx.platform,
-        &app.ctx.dirs,
-        &[
-            (node_request.clone(), node_version.clone()),
-            (request.clone(), version.clone()),
-        ],
-        crate::lockfile::LockScope::Project,
-    )?;
-
-    let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
+    // Re-open and re-plan after taking the project lock below. Another osdk
+    // process may have changed the manifest or incumbent native lock while
+    // Node/package resolution was running.
     let config_path = project_config_path(app, &project.root);
-    let mut config_options = request.options.clone();
-    config_options.insert("installer".into(), installer.as_str().into());
-    crate::config_edit::set_project_npm_tool_at(
+    let metadata_rollback = ProjectNpmMetadataRollback::begin(
+        &app.ctx.dirs,
+        &project.root,
+        &project.package_json,
         &config_path,
-        &node_version.version,
-        &request.backend,
-        &structured_tool_config(&persisted_spec, &config_options),
     )?;
-    osdk_core::trust::trust(&app.ctx.dirs.config, &config_path)?;
+    let project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
+        .ok_or_else(|| anyhow!("project package.json disappeared before npm install"))?;
+    let installer = osdk_core::npm_tools::plan_npm_installer(
+        &project.root,
+        requested_installer,
+        osdk_core::npm_tools::ToolScope::Project,
+    )?
+    .installer;
+    let section = project_dependency_section(&project.package_json, &package)?;
+    let expected_native_lock = expected_project_native_lock(&project, installer);
+    let aube_registry = if installer == osdk_core::npm_tools::NpmInstaller::Aube {
+        plan_project_aube_registry(app, &project.root, &package_spec).await?
+    } else {
+        None
+    };
+
+    let result: Result<(String, std::path::PathBuf)> = async {
+        match installer {
+            osdk_core::npm_tools::NpmInstaller::Aube => {
+                osdk_core::backend::aube_host::add_to_project(
+                    osdk_core::backend::aube_host::EmbeddedProjectAddRequest {
+                        project_dir: &project.root,
+                        packages: std::slice::from_ref(&package_spec),
+                        cache_dir:
+                            osdk_core::backend::npm_package::NpmPackageBackend::aube_cache_dir(
+                                &app.ctx,
+                            ),
+                        store_dir:
+                            osdk_core::backend::npm_package::NpmPackageBackend::aube_store_dir(
+                                &app.ctx,
+                            ),
+                        node_bin_dir: node_bin_dir.clone(),
+                        save_dev: matches!(
+                            section,
+                            ProjectDependencySection::DevDependencies
+                                | ProjectDependencySection::PeerDependencies { also_dev: true }
+                        ),
+                        save_optional: matches!(
+                            section,
+                            ProjectDependencySection::OptionalDependencies
+                        ),
+                        save_peer: matches!(
+                            section,
+                            ProjectDependencySection::PeerDependencies { .. }
+                        ),
+                        offline: app.ctx.config.settings.offline,
+                        registry: aube_registry,
+                    },
+                )
+                .await?;
+            }
+            osdk_core::npm_tools::NpmInstaller::Npm | osdk_core::npm_tools::NpmInstaller::Pnpm => {
+                run_project_native_installer(
+                    app,
+                    installer,
+                    &project.root,
+                    &package_spec,
+                    section,
+                    &node_bin_dir,
+                )
+                .await?;
+            }
+            osdk_core::npm_tools::NpmInstaller::Auto => {
+                unreachable!("npm installer planning always returns a concrete installer")
+            }
+        }
+
+        osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
+            .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?
+            .validate_project_package_bins(&project.root, &version.version)?;
+        let installed_project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
+            .ok_or_else(|| anyhow!("project package.json disappeared during npm install"))?;
+        let native_lock = installed_project.native_lock.ok_or_else(|| {
+            anyhow!(
+                "installer `{installer}` did not write a recognized native lockfile in {}",
+                project.root.display()
+            )
+        })?;
+        validate_installed_project_native_lock(installer, &expected_native_lock, &native_lock)?;
+        record_project_npm_metadata(&mut version, installer, &native_lock, &node_version.version)?;
+
+        let lock_path = project.root.join(crate::lockfile::LOCKFILE_NAME);
+        crate::lockfile::upsert_resolved_many_with_scope(
+            &lock_path,
+            app.ctx.platform,
+            &app.ctx.dirs,
+            &[
+                (node_request.clone(), node_version.clone()),
+                (request.clone(), version.clone()),
+            ],
+            crate::lockfile::LockScope::Project,
+        )?;
+
+        let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
+        let mut configured_specs = project_npm_configured_specs(app, &config_path)?;
+        configured_specs.insert(request.backend.clone(), persisted_spec.clone());
+        osdk_core::backend::npm_package::publish_project_bin_generation(
+            &project.root,
+            &osdk_core::backend::npm_package::ProjectNpmBinSelection {
+                backend: request.backend.clone(),
+                configured_spec: persisted_spec.clone(),
+                version: version.version.clone(),
+            },
+            &configured_specs,
+        )?;
+        let mut config_options = request.options.clone();
+        config_options.insert("installer".into(), installer.as_str().into());
+        crate::config_edit::set_project_npm_tool_at(
+            &config_path,
+            &node_version.version,
+            &request.backend,
+            &structured_tool_config(&persisted_spec, &config_options),
+        )?;
+        osdk_core::trust::trust(&app.ctx.dirs.config, &config_path)?;
+        Ok((persisted_spec, config_path.clone()))
+    }
+    .await;
+
+    let (persisted_spec, config_path) = match result {
+        Ok(result) => result,
+        Err(error) => return Err(metadata_rollback.rollback(error)),
+    };
+    metadata_rollback.commit();
     println!(
         "{}",
         t!(
@@ -1159,6 +1218,279 @@ async fn use_project_npm(
         )
     );
     Ok(())
+}
+
+fn project_npm_configured_specs(
+    app: &App,
+    config_path: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let project_root = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?;
+    let config = osdk_core::config::Config::load(&app.ctx.dirs.user_config_file(), project_root)?;
+    Ok(config
+        .tools
+        .iter()
+        .filter(|(backend, _)| backend.starts_with("npm:"))
+        .filter(|(backend, _)| {
+            matches!(
+                config.tool_origins.get(*backend),
+                Some(osdk_core::config::ToolConfigOrigin::ProjectConfig(path))
+                    if same_config_path(path, config_path)
+            )
+        })
+        .map(|(backend, spec)| (backend.clone(), spec.clone()))
+        .collect())
+}
+
+fn expected_project_native_lock(
+    project: &osdk_core::npm_tools::NpmProject,
+    installer: osdk_core::npm_tools::NpmInstaller,
+) -> (osdk_core::npm_tools::NativeLockKind, std::path::PathBuf) {
+    if let Some(lock) = &project.native_lock {
+        return (lock.kind, lock.path.clone());
+    }
+    let kind = match installer {
+        osdk_core::npm_tools::NpmInstaller::Aube => osdk_core::npm_tools::NativeLockKind::Aube,
+        osdk_core::npm_tools::NpmInstaller::Npm => {
+            osdk_core::npm_tools::NativeLockKind::PackageLock
+        }
+        osdk_core::npm_tools::NpmInstaller::Pnpm => osdk_core::npm_tools::NativeLockKind::Pnpm,
+        osdk_core::npm_tools::NpmInstaller::Auto => {
+            unreachable!("npm installer planning always returns a concrete installer")
+        }
+    };
+    (kind, project.root.join(kind.file_name()))
+}
+
+fn validate_installed_project_native_lock(
+    installer: osdk_core::npm_tools::NpmInstaller,
+    expected: &(osdk_core::npm_tools::NativeLockKind, std::path::PathBuf),
+    actual: &osdk_core::npm_tools::NativeLock,
+) -> Result<()> {
+    if actual.kind != expected.0 || actual.path != expected.1 {
+        anyhow::bail!(
+            "installer `{installer}` changed native lock identity: expected {}, got {}",
+            expected.1.display(),
+            actual.path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Roll back user-authored manifests and osdk publication metadata. Package
+/// manager materialization is intentionally outside this bounded snapshot;
+/// activation never exposes it unless a validated curated generation commits.
+struct ProjectNpmMetadataRollback {
+    _lock: osdk_core::lock::FileLock,
+    snapshots: Vec<ProjectFileSnapshot>,
+}
+
+struct ProjectFileSnapshot {
+    path: std::path::PathBuf,
+    bytes: Option<Vec<u8>>,
+}
+
+impl ProjectNpmMetadataRollback {
+    fn begin(
+        dirs: &osdk_core::dirs::Dirs,
+        project_root: &std::path::Path,
+        package_json: &std::path::Path,
+        config_path: &std::path::Path,
+    ) -> Result<Self> {
+        let canonical_root = dunce::canonicalize(project_root)
+            .with_context(|| format!("canonicalizing {}", project_root.display()))?;
+        let project_key = osdk_core::pipeline::verify::hash_bytes(
+            canonical_root.to_string_lossy().as_bytes(),
+            osdk_core::pipeline::HashAlgo::Sha256,
+        );
+        let lock = osdk_core::lock::FileLock::acquire(
+            dirs.data
+                .join("locks/project-npm")
+                .join(format!("{project_key}.lock")),
+        )?;
+        let mut paths = vec![
+            package_json.to_path_buf(),
+            project_root.join("aube-lock.yaml"),
+            project_root.join("pnpm-lock.yaml"),
+            project_root.join("package-lock.json"),
+            project_root.join("npm-shrinkwrap.json"),
+            project_root.join(crate::lockfile::LOCKFILE_NAME),
+            config_path.to_path_buf(),
+            osdk_core::backend::npm_package::project_bin_current_path(project_root),
+        ];
+        paths.sort();
+        paths.dedup();
+        let snapshots = paths
+            .into_iter()
+            .map(ProjectFileSnapshot::capture)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            _lock: lock,
+            snapshots,
+        })
+    }
+
+    fn rollback(&self, error: anyhow::Error) -> anyhow::Error {
+        let failures = self
+            .snapshots
+            .iter()
+            .rev()
+            .filter_map(|snapshot| snapshot.restore().err())
+            .map(|failure| failure.to_string())
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            error
+        } else {
+            error.context(format!("project rollback failed: {}", failures.join("; ")))
+        }
+    }
+
+    fn commit(self) {}
+}
+
+impl ProjectFileSnapshot {
+    fn capture(path: std::path::PathBuf) -> Result<Self> {
+        let bytes = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                Some(std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?)
+            }
+            Ok(_) => anyhow::bail!(
+                "project transaction path must be a regular file: {}",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspecting {}", path.display()))
+            }
+        };
+        Ok(Self { path, bytes })
+    }
+
+    fn restore(&self) -> Result<()> {
+        match &self.bytes {
+            Some(bytes) => atomic_restore_project_file(&self.path, bytes),
+            None => match std::fs::symlink_metadata(&self.path) {
+                Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(&self.path)
+                    .with_context(|| format!("removing {} during rollback", self.path.display())),
+                Ok(_) => anyhow::bail!(
+                    "refusing to remove non-file rollback target {}",
+                    self.path.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error)
+                    .with_context(|| format!("inspecting {} during rollback", self.path.display())),
+            },
+        }
+    }
+}
+
+fn atomic_restore_project_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("rollback path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating rollback directory {}", parent.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("rollback path has no file name: {}", path.display()))?
+        .to_string_lossy();
+    let temporary = (0..1024u32)
+        .map(|attempt| {
+            parent.join(format!(
+                ".{name}.osdk-rollback-{}-{attempt}",
+                std::process::id()
+            ))
+        })
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| anyhow!("could not allocate rollback path for {}", path.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .with_context(|| format!("creating rollback file {}", temporary.display()))?;
+    use std::io::Write as _;
+    file.write_all(bytes)
+        .with_context(|| format!("writing rollback file {}", temporary.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing rollback file {}", temporary.display()))?;
+    drop(file);
+    if let Err(error) = replace_project_file(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn snapshot_project_file(path: &std::path::Path) -> Result<ProjectFileSnapshot> {
+    ProjectFileSnapshot::capture(path.to_path_buf())
+}
+
+#[cfg(not(windows))]
+fn replace_project_file(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    std::fs::rename(source, destination)
+        .with_context(|| format!("restoring {}", destination.display()))
+}
+
+#[cfg(windows)]
+fn replace_project_file(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+    const REPLACE_EXISTING: u32 = 0x1;
+    const WRITE_THROUGH: u32 = 0x8;
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination_wide.as_ptr(),
+            REPLACE_EXISTING | WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("restoring {}", destination.display()));
+    }
+    Ok(())
+}
+
+async fn plan_project_aube_registry(
+    app: &App,
+    project_root: &std::path::Path,
+    package_spec: &str,
+) -> Result<Option<String>> {
+    let args = vec!["install".to_string(), package_spec.to_string()];
+    match package_registry::plan(
+        &app.ctx,
+        project_root,
+        PackageManager::Npm,
+        "npm",
+        &args,
+        |key| std::env::var(key).ok(),
+    )
+    .await?
+    {
+        RegistryPlan::PassThrough { reason } => {
+            tracing::info!(manager = %PackageManager::Npm, %reason, "dependency registry pass-through");
+            Ok(None)
+        }
+        RegistryPlan::Selected { url, .. } => Ok(Some(url)),
+        RegistryPlan::Unavailable { probes } => {
+            Err(unavailable_registry_error(PackageManager::Npm, &probes))
+        }
+    }
 }
 
 fn project_dependency_section(
@@ -1174,16 +1506,14 @@ fn project_dependency_section(
             .and_then(serde_json::Value::as_object)
             .is_some_and(|dependencies| dependencies.contains_key(package))
     };
-    Ok(if contains("dependencies") {
-        ProjectDependencySection::Dependencies
-    } else if contains("optionalDependencies") {
+    Ok(if contains("optionalDependencies") {
         ProjectDependencySection::OptionalDependencies
+    } else if contains("dependencies") {
+        ProjectDependencySection::Dependencies
     } else if contains("peerDependencies") {
         ProjectDependencySection::PeerDependencies {
             also_dev: contains("devDependencies"),
         }
-    } else if contains("devDependencies") {
-        ProjectDependencySection::DevDependencies
     } else {
         ProjectDependencySection::DevDependencies
     })
@@ -1467,23 +1797,43 @@ fn structured_tool_option(key: &str, value: &str) -> osdk_core::config::ToolConf
     osdk_core::config::ToolConfigValue::String(value.to_string())
 }
 
-pub async fn uninstall(app: &App, tool: String) -> Result<()> {
+pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     let req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
     let backend = app.registry.get(&req.backend)?;
-    let version = match &req.spec {
-        VersionSpec::Exact(v) => v.clone(),
-        VersionSpec::Latest if backend.id() == "rust" => "stable".to_string(),
-        VersionSpec::Prefix(p) => {
-            // pick the installed version matching the prefix
-            let installed = backend.list_installed(&app.ctx)?;
-            installed
-                .into_iter()
-                .rfind(|v| v.starts_with(p.as_str()))
-                .ok_or_else(|| {
-                    anyhow!(t!("err.no_installed_match", tool = req.backend, spec = p))
-                })?
+    if global && !req.backend.starts_with("npm:") {
+        anyhow::bail!("--global is only supported for npm:<package> uninstall requests");
+    }
+    let version = if global {
+        select_global_npm_version(app, &req, requested_spec_literal(&tool).is_some())?
+    } else if let Some(npm) =
+        osdk_core::backend::npm_package::NpmPackageBackend::from_id(&req.backend)
+    {
+        let hint = npm_scope_hint(&req.backend, false);
+        let installed = npm.list_installed_for(&app.ctx, &hint)?;
+        match &req.spec {
+            VersionSpec::Exact(version) => {
+                select_installed_version(&req.backend, &req.spec, installed)?;
+                version.clone()
+            }
+            VersionSpec::Prefix(_) => select_installed_version(&req.backend, &req.spec, installed)?,
+            other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
         }
-        other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
+    } else {
+        match &req.spec {
+            VersionSpec::Exact(v) => v.clone(),
+            VersionSpec::Latest if backend.id() == "rust" => "stable".to_string(),
+            VersionSpec::Prefix(p) => {
+                // pick the installed version matching the prefix
+                let installed = backend.list_installed(&app.ctx)?;
+                installed
+                    .into_iter()
+                    .rfind(|v| v.starts_with(p.as_str()))
+                    .ok_or_else(|| {
+                        anyhow!(t!("err.no_installed_match", tool = req.backend, spec = p))
+                    })?
+            }
+            other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
+        }
     };
     let tv = ToolVersion::new(&req.backend, &version);
     let question = t!("prompt.uninstall", tool = tv);
@@ -1491,8 +1841,12 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
         println!("{}", t!("msg.cancelled"));
         return Ok(());
     }
-    backend.uninstall(&app.ctx, &tv).await?;
-    reconcile_managed_shims(app)?;
+    if global {
+        uninstall_global_npm(app, &tv)?;
+    } else {
+        backend.uninstall(&app.ctx, &tv).await?;
+        reconcile_managed_shims(app)?;
+    }
     println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
     let models = app.ctx.dirs.models();
@@ -1508,6 +1862,427 @@ pub async fn uninstall(app: &App, tool: String) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn npm_scope_hint(backend: &str, global: bool) -> ToolVersion {
+    let mut hint = ToolVersion::new(backend, "scope-selection");
+    if global {
+        hint.options.insert(
+            osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION.into(),
+            osdk_core::npm_tools::ToolScope::Global.as_str().into(),
+        );
+    }
+    hint
+}
+
+fn select_global_npm_version(
+    app: &App,
+    request: &ToolRequest,
+    explicit_spec: bool,
+) -> Result<String> {
+    let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
+        .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?;
+    let hint = npm_scope_hint(&request.backend, true);
+    let installed = backend.list_installed_for(&app.ctx, &hint)?;
+    let spec = global_npm_selection_spec(app, request, explicit_spec)?;
+    select_installed_version(&request.backend, &spec, installed)
+}
+
+fn global_npm_selection_spec(
+    app: &App,
+    request: &ToolRequest,
+    explicit_spec: bool,
+) -> Result<VersionSpec> {
+    let config = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+    let spec = if explicit_spec {
+        request.spec.clone()
+    } else {
+        let configured = config
+            .global_tool_configs
+            .get(&request.backend)
+            .map(|entry| VersionSpec::parse(entry.version()));
+        match configured {
+            Some(VersionSpec::Exact(version)) => VersionSpec::Exact(version),
+            Some(spec) => {
+                let lock_path = app.ctx.dirs.user_lock_file();
+                if lock_path.is_file() {
+                    if let Some(locked) =
+                        crate::lockfile::locked_requests(&lock_path, app.ctx.platform)?
+                            .unwrap_or_default()
+                            .into_iter()
+                            .find(|locked| {
+                                locked.backend == request.backend
+                                    && locked
+                                        .options
+                                        .get(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION)
+                                        .map(String::as_str)
+                                        == Some(osdk_core::npm_tools::ToolScope::Global.as_str())
+                            })
+                    {
+                        locked.spec
+                    } else {
+                        spec
+                    }
+                } else {
+                    spec
+                }
+            }
+            None => request.spec.clone(),
+        }
+    };
+    let expanded = config.expand_alias(&request.backend, &spec.to_string())?;
+    Ok(VersionSpec::parse(&expanded))
+}
+
+fn select_installed_version(
+    backend: &str,
+    spec: &VersionSpec,
+    installed: Vec<String>,
+) -> Result<String> {
+    if let VersionSpec::Exact(version) = spec {
+        if installed.iter().any(|candidate| candidate == version) {
+            return Ok(version.clone());
+        }
+        anyhow::bail!("{backend}@{version} is not installed");
+    }
+    let infos = installed
+        .iter()
+        .map(osdk_core::version::VersionInfo::stable)
+        .collect::<Vec<_>>();
+    osdk_core::version::select_version(spec, &infos)
+        .map(|version| version.version.clone())
+        .ok_or_else(|| anyhow!("{backend} is not installed"))
+}
+
+fn uninstall_global_npm(app: &App, version: &ToolVersion) -> Result<()> {
+    let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend)
+        .ok_or_else(|| anyhow!("invalid npm package backend `{}`", version.backend))?;
+    crate::global_npm_use::with_global_npm_state_lock(&app.ctx.dirs, || {
+        let roots = global_npm_install_roots(&app.ctx, &backend, version)?;
+        if roots.is_empty() {
+            anyhow::bail!("{} is not installed in global scope", version);
+        }
+        let bin_names = roots
+            .iter()
+            .map(|root| osdk_core::inventory::DynamicToolManifest::load(root))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .flat_map(|manifest| manifest.bins.into_iter().map(|bin| bin.name))
+            .collect::<std::collections::BTreeSet<_>>();
+        let installed_before =
+            backend.list_installed_for(&app.ctx, &npm_scope_hint(&version.backend, true))?;
+        let remove_config = global_config_selects_version(app, version, &installed_before)?;
+        let remove_lock = global_lock_selects_version(app, version)?;
+        let snapshots = global_npm_metadata_snapshots(app, &bin_names)?;
+        let mut moved = Vec::new();
+        for root in &roots {
+            let backup = unused_sibling_path(root, "uninstall-backup")?;
+            if let Err(error) = std::fs::rename(root, &backup) {
+                let rollback = restore_moved_global_npm_roots(&moved);
+                return Err(with_uninstall_rollback(
+                    anyhow!(error).context(format!("staging removal of {}", root.display())),
+                    rollback.err(),
+                ));
+            }
+            moved.push((root.clone(), backup));
+        }
+        let metadata_result = (|| {
+            if remove_config {
+                crate::config_edit::remove_global_tool_unlocked(&app.ctx, &version.backend)?;
+            }
+            if remove_lock {
+                crate::lockfile::remove_tool(
+                    &app.ctx.dirs.user_lock_file(),
+                    app.ctx.platform,
+                    &version.backend,
+                )?;
+            }
+            remove_unowned_global_npm_shims(app, &bin_names)
+        })();
+        if let Err(error) = metadata_result {
+            let metadata_rollback = restore_global_npm_metadata(&snapshots);
+            let install_rollback = restore_moved_global_npm_roots(&moved);
+            let rollback = combine_rollback_errors(metadata_rollback.err(), install_rollback.err());
+            return Err(with_uninstall_rollback(error, rollback));
+        }
+        for (_, backup) in &moved {
+            if let Err(error) = std::fs::remove_dir_all(backup) {
+                tracing::warn!(
+                    error = %error,
+                    path = %backup.display(),
+                    "failed to remove committed global npm uninstall backup"
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
+fn global_npm_install_roots(
+    ctx: &osdk_core::backend::Ctx,
+    backend: &osdk_core::backend::npm_package::NpmPackageBackend,
+    version: &ToolVersion,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut roots = Vec::new();
+    if let Some(root) = backend.existing_global_install_root(ctx, version)? {
+        roots.push(root);
+    }
+    if let Some(legacy) = backend.legacy_global_install_root(ctx, version)? {
+        if !roots.contains(&legacy) {
+            roots.push(legacy);
+        }
+    }
+    Ok(roots)
+}
+
+fn global_config_selects_version(
+    app: &App,
+    version: &ToolVersion,
+    installed: &[String],
+) -> Result<bool> {
+    let config = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+    let Some(entry) = config.global_tool_configs.get(&version.backend) else {
+        return Ok(false);
+    };
+    let spec = VersionSpec::parse(&config.expand_alias(&version.backend, entry.version())?);
+    if let VersionSpec::Exact(selected) = spec {
+        return Ok(selected == version.version);
+    }
+    let lock_path = app.ctx.dirs.user_lock_file();
+    if lock_path.is_file() {
+        if let Some(selected) = crate::lockfile::locked_requests(&lock_path, app.ctx.platform)?
+            .unwrap_or_default()
+            .into_iter()
+            .find(|request| {
+                request.backend == version.backend
+                    && request
+                        .options
+                        .get(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION)
+                        .map(String::as_str)
+                        == Some(osdk_core::npm_tools::ToolScope::Global.as_str())
+            })
+        {
+            return Ok(selected.spec == VersionSpec::Exact(version.version.clone()));
+        }
+    }
+    Ok(
+        select_installed_version(&version.backend, &spec, installed.to_vec())
+            .is_ok_and(|selected| selected == version.version),
+    )
+}
+
+fn global_lock_selects_version(app: &App, version: &ToolVersion) -> Result<bool> {
+    let path = app.ctx.dirs.user_lock_file();
+    if !path.is_file() {
+        return Ok(false);
+    }
+    Ok(crate::lockfile::locked_requests(&path, app.ctx.platform)?
+        .unwrap_or_default()
+        .into_iter()
+        .any(|request| {
+            request.backend == version.backend
+                && request.spec == VersionSpec::Exact(version.version.clone())
+                && request
+                    .options
+                    .get(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION)
+                    .map(String::as_str)
+                    == Some(osdk_core::npm_tools::ToolScope::Global.as_str())
+        }))
+}
+
+fn remove_unowned_global_npm_shims(
+    app: &App,
+    bin_names: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let ctx = osdk_core::backend::Ctx {
+        dirs: app.ctx.dirs.clone(),
+        platform: app.ctx.platform,
+        config: osdk_core::config::Config::load(&app.ctx.dirs.user_config_file(), &cwd)?,
+        client: app.ctx.client.clone(),
+        cas: app.ctx.cas.clone(),
+        show_progress: app.ctx.show_progress,
+    };
+    let refreshed = App {
+        ctx,
+        registry: osdk_core::Registry::load(&app.ctx.dirs)?,
+        prompt: app.prompt.clone(),
+        source_override: app.source_override.clone(),
+        refresh_sources: app.refresh_sources,
+    };
+    let owners = installed_shim_owners(&refreshed)?;
+    for name in bin_names {
+        if !owners
+            .get(name)
+            .is_some_and(|owner_ids| !owner_ids.is_empty())
+        {
+            osdk_core::shim::remove_managed_shim(&app.ctx.dirs, name)?;
+        }
+    }
+    Ok(())
+}
+
+fn global_npm_metadata_snapshots(
+    app: &App,
+    bin_names: &std::collections::BTreeSet<String>,
+) -> Result<Vec<GlobalNpmPathSnapshot>> {
+    let mut paths = vec![
+        app.ctx.dirs.user_config_file(),
+        app.ctx.dirs.user_lock_file(),
+    ];
+    for name in bin_names {
+        paths.push(app.ctx.dirs.shims().join(name));
+        #[cfg(windows)]
+        paths.push(app.ctx.dirs.shims().join(format!("{name}.cmd")));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(GlobalNpmPathSnapshot::capture)
+        .collect()
+}
+
+fn restore_global_npm_metadata(snapshots: &[GlobalNpmPathSnapshot]) -> Result<()> {
+    let failures = snapshots
+        .iter()
+        .rev()
+        .filter_map(|snapshot| snapshot.restore().err())
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", failures.join("; "))
+    }
+}
+
+struct GlobalNpmPathSnapshot {
+    path: std::path::PathBuf,
+    state: GlobalNpmPathState,
+}
+
+enum GlobalNpmPathState {
+    Absent,
+    File {
+        bytes: Vec<u8>,
+        permissions: std::fs::Permissions,
+    },
+    Symlink(std::path::PathBuf),
+}
+
+impl GlobalNpmPathSnapshot {
+    fn capture(path: std::path::PathBuf) -> Result<Self> {
+        let state = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                GlobalNpmPathState::Symlink(std::fs::read_link(&path)?)
+            }
+            Ok(metadata) if metadata.is_file() => GlobalNpmPathState::File {
+                bytes: std::fs::read(&path)?,
+                permissions: metadata.permissions(),
+            },
+            Ok(_) => anyhow::bail!("cannot snapshot non-file path {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                GlobalNpmPathState::Absent
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspecting {}", path.display()))
+            }
+        };
+        Ok(Self { path, state })
+    }
+
+    fn restore(&self) -> Result<()> {
+        match &self.state {
+            GlobalNpmPathState::Absent => remove_global_npm_snapshot_path(&self.path),
+            GlobalNpmPathState::File { bytes, permissions } => {
+                atomic_restore_project_file(&self.path, bytes)?;
+                std::fs::set_permissions(&self.path, permissions.clone())
+                    .with_context(|| format!("restoring permissions for {}", self.path.display()))
+            }
+            GlobalNpmPathState::Symlink(target) => {
+                remove_global_npm_snapshot_path(&self.path)?;
+                if let Some(parent) = self.path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(target, &self.path)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(target, &self.path)?;
+                Ok(())
+            }
+        }
+    }
+}
+
+fn remove_global_npm_snapshot_path(path: &std::path::Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+            std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))
+        }
+        Ok(_) => anyhow::bail!("refusing to remove non-file path {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspecting {}", path.display())),
+    }
+}
+
+fn restore_moved_global_npm_roots(
+    moved: &[(std::path::PathBuf, std::path::PathBuf)],
+) -> Result<()> {
+    let failures = moved
+        .iter()
+        .rev()
+        .filter_map(|(root, backup)| {
+            std::fs::rename(backup, root)
+                .with_context(|| format!("restoring global npm install {}", root.display()))
+                .err()
+        })
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", failures.join("; "))
+    }
+}
+
+fn unused_sibling_path(path: &std::path::Path, kind: &str) -> Result<std::path::PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("path has no file name: {}", path.display()))?
+        .to_string_lossy();
+    (0..1024u32)
+        .map(|attempt| {
+            parent.join(format!(
+                ".{name}.osdk-{kind}-{}-{attempt}",
+                std::process::id()
+            ))
+        })
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| anyhow!("could not allocate transaction path for {}", path.display()))
+}
+
+fn combine_rollback_errors(
+    first: Option<anyhow::Error>,
+    second: Option<anyhow::Error>,
+) -> Option<anyhow::Error> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.context(second.to_string())),
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
+    }
+}
+
+fn with_uninstall_rollback(error: anyhow::Error, rollback: Option<anyhow::Error>) -> anyhow::Error {
+    match rollback {
+        Some(rollback) => error.context(format!(
+            "global npm uninstall rollback failed: {rollback:#}"
+        )),
+        None => error,
+    }
 }
 
 pub fn current(app: &App, tool: Option<String>) -> Result<()> {
@@ -1546,64 +2321,94 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn where_cmd(app: &App, tool: String) -> Result<()> {
+pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
+    let explicit_spec = requested_spec_literal(&tool).is_some();
     let req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
     let backend = app.registry.get(&req.backend)?;
-    let version = match &req.spec {
-        VersionSpec::Exact(v) => v.clone(),
-        _ => {
-            let cwd = std::env::current_dir()?;
-            let installed = backend.list_installed(&app.ctx)?;
-            let dynamic_request =
-                osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
-            let resolved = osdk_core::version::resolver::resolve_active(
-                backend.id(),
-                &cwd,
-                &app.ctx.config.tools,
-                backend.idiomatic_files(),
-            )
-            .map(|active| (active.spec, active.is_range))
-            .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
-            match resolved {
-                Some((spec, _is_range)) if backend.id() == "python" => {
-                    osdk_core::backend::python::select_installed(&spec, &installed)
-                        .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-                }
-                Some((spec, is_range)) => {
-                    let parsed = if is_range {
-                        VersionSpec::parse_range(&spec)
-                            .unwrap_or_else(|_| VersionSpec::parse(&spec))
-                    } else {
-                        VersionSpec::parse(&spec)
-                    };
-                    match &parsed {
-                        VersionSpec::Exact(version)
-                            if installed.iter().any(|installed| installed == version) =>
-                        {
-                            version.clone()
-                        }
-                        _ => {
-                            let infos: Vec<_> = installed
-                                .iter()
-                                .map(osdk_core::version::VersionInfo::stable)
-                                .collect();
-                            osdk_core::version::select_version(&parsed, &infos)
-                                .map(|version| version.version.clone())
-                                .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+    if global && !req.backend.starts_with("npm:") {
+        anyhow::bail!("--global is only supported for npm:<package> where requests");
+    }
+    let npm_backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(backend.id());
+    let mut npm_scope = npm_backend
+        .as_ref()
+        .map(|_| npm_scope_hint(backend.id(), global));
+    let version = if let Some(npm) = npm_backend.as_ref() {
+        let installed =
+            npm.list_installed_for(&app.ctx, npm_scope.as_ref().expect("npm scope hint exists"))?;
+        let requested = if global {
+            global_npm_selection_spec(app, &req, explicit_spec)?
+        } else if !matches!(req.spec, VersionSpec::Exact(_)) {
+            osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
+                .map(|request| request.spec)
+                .unwrap_or(req.spec.clone())
+        } else {
+            req.spec.clone()
+        };
+        select_installed_version(backend.id(), &requested, installed)?
+    } else {
+        match &req.spec {
+            VersionSpec::Exact(v) => v.clone(),
+            _ => {
+                let cwd = std::env::current_dir()?;
+                let installed = backend.list_installed(&app.ctx)?;
+                let dynamic_request =
+                    osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
+                let resolved = osdk_core::version::resolver::resolve_active(
+                    backend.id(),
+                    &cwd,
+                    &app.ctx.config.tools,
+                    backend.idiomatic_files(),
+                )
+                .map(|active| (active.spec, active.is_range))
+                .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
+                match resolved {
+                    Some((spec, _is_range)) if backend.id() == "python" => {
+                        osdk_core::backend::python::select_installed(&spec, &installed)
+                            .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+                    }
+                    Some((spec, is_range)) => {
+                        let parsed = if is_range {
+                            VersionSpec::parse_range(&spec)
+                                .unwrap_or_else(|_| VersionSpec::parse(&spec))
+                        } else {
+                            VersionSpec::parse(&spec)
+                        };
+                        match &parsed {
+                            VersionSpec::Exact(version)
+                                if installed.iter().any(|installed| installed == version) =>
+                            {
+                                version.clone()
+                            }
+                            _ => {
+                                let infos: Vec<_> = installed
+                                    .iter()
+                                    .map(osdk_core::version::VersionInfo::stable)
+                                    .collect();
+                                osdk_core::version::select_version(&parsed, &infos)
+                                    .map(|version| version.version.clone())
+                                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+                            }
                         }
                     }
+                    None => installed
+                        .into_iter()
+                        .last()
+                        .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
                 }
-                None => installed
-                    .into_iter()
-                    .last()
-                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
             }
         }
     };
-    let dir = app.ctx.dirs.install_path(backend.id(), &version);
-    if !dir.exists() {
+    let dir = if let Some(npm) = npm_backend {
+        let mut selected = npm_scope.take().expect("npm scope hint exists");
+        selected.version.clone_from(&version);
+        npm.where_install_root_for(&app.ctx, &selected)?
+    } else {
+        let path = app.ctx.dirs.install_path(backend.id(), &version);
+        path.exists().then_some(path)
+    };
+    let Some(dir) = dir else {
         return Err(anyhow!("{}@{} is not installed", backend.id(), version));
-    }
+    };
     println!("{}", dir.display());
     Ok(())
 }
@@ -1621,7 +2426,7 @@ pub fn reshim(app: &App) -> Result<()> {
     Ok(())
 }
 
-fn reconcile_managed_shims(app: &App) -> Result<()> {
+pub(crate) fn reconcile_managed_shims(app: &App) -> Result<()> {
     let owners = installed_shim_owners(app)?;
     let expected = owners
         .into_iter()
@@ -1648,6 +2453,34 @@ fn reconcile_managed_shims(app: &App) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Remove old bin shims from one backend only when no different installed
+/// backend still owns that bin name. This deliberately ignores the current
+/// backend's old versions and does not consult its possibly stale config pin.
+pub(crate) fn remove_stale_shims_without_other_owners(
+    app: &App,
+    current_backend: &str,
+    old_names: &[String],
+    new_names: &[String],
+) -> Result<()> {
+    let owners = installed_shim_owners(app)?;
+    for name in old_names.iter().filter(|name| !new_names.contains(name)) {
+        if !has_other_shim_owner(&owners, name, current_backend) {
+            osdk_core::shim::remove_managed_shim(&app.ctx.dirs, name)?;
+        }
+    }
+    Ok(())
+}
+
+fn has_other_shim_owner(
+    owners: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    name: &str,
+    current_backend: &str,
+) -> bool {
+    owners
+        .get(name)
+        .is_some_and(|owner_ids| owner_ids.iter().any(|owner| owner != current_backend))
 }
 
 /// Generate shims for all bin names a version exposes. Returns count.
@@ -2792,7 +3625,7 @@ fn routed_bin_names_for_version(
     let mut names = osdk_core::shim::routed_bin_names(ctx, backend, version)?
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-    if version.backend.contains(':') {
+    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
         names.extend(osdk_core::shim::dynamic_manifest_bin_names(
             ctx,
             &version.backend,
@@ -2808,7 +3641,7 @@ fn managed_bin_paths(
     version: &ToolVersion,
 ) -> Result<Vec<std::path::PathBuf>> {
     let mut paths = backend.bin_paths(ctx, version)?;
-    if version.backend.contains(':') {
+    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
         paths.extend(osdk_core::shim::dynamic_manifest_bin_paths(
             ctx,
             &version.backend,
@@ -2980,6 +3813,10 @@ mod command_flow_tests {
                 ProjectDependencySection::OptionalDependencies,
             ),
             (
+                r#"{"dependencies":{"prettier":"^2"},"optionalDependencies":{"prettier":"^2"}}"#,
+                ProjectDependencySection::OptionalDependencies,
+            ),
+            (
                 r#"{"peerDependencies":{"prettier":"^2"}}"#,
                 ProjectDependencySection::PeerDependencies { also_dev: false },
             ),
@@ -2998,6 +3835,75 @@ mod command_flow_tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn project_file_snapshot_restores_old_bytes_and_removes_new_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let existing = temporary.path().join("package.json");
+        let created = temporary.path().join("aube-lock.yaml");
+        std::fs::write(&existing, b"old manifest").unwrap();
+        let existing_snapshot = snapshot_project_file(&existing).unwrap();
+        let created_snapshot = snapshot_project_file(&created).unwrap();
+
+        std::fs::write(&existing, b"new manifest").unwrap();
+        std::fs::write(&created, b"new lock").unwrap();
+        existing_snapshot.restore().unwrap();
+        created_snapshot.restore().unwrap();
+
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old manifest");
+        assert!(!created.exists());
+    }
+
+    #[test]
+    fn expected_project_native_lock_preserves_incumbent_and_defaults_to_installer() {
+        use osdk_core::npm_tools::{NativeLock, NativeLockKind, NpmInstaller, NpmProject};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let project = NpmProject {
+            root: root.to_path_buf(),
+            package_json: root.join("package.json"),
+            declared_manager: None,
+            native_lock: Some(NativeLock {
+                kind: NativeLockKind::Pnpm,
+                path: root.join("pnpm-lock.yaml"),
+                version: 9,
+                format: "pnpm-v9".into(),
+                supported: true,
+            }),
+        };
+        assert_eq!(
+            expected_project_native_lock(&project, NpmInstaller::Aube),
+            (NativeLockKind::Pnpm, root.join("pnpm-lock.yaml"))
+        );
+
+        let without_lock = NpmProject {
+            native_lock: None,
+            ..project
+        };
+        assert_eq!(
+            expected_project_native_lock(&without_lock, NpmInstaller::Aube),
+            (NativeLockKind::Aube, root.join("aube-lock.yaml"))
+        );
+        assert_eq!(
+            expected_project_native_lock(&without_lock, NpmInstaller::Npm),
+            (NativeLockKind::PackageLock, root.join("package-lock.json"))
+        );
+        let switched = NativeLock {
+            kind: NativeLockKind::Pnpm,
+            path: root.join("pnpm-lock.yaml"),
+            version: 9,
+            format: "pnpm-v9".into(),
+            supported: true,
+        };
+        let error = validate_installed_project_native_lock(
+            NpmInstaller::Aube,
+            &(NativeLockKind::PackageLock, root.join("package-lock.json")),
+            &switched,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed native lock identity"));
     }
 
     #[test]
@@ -3072,6 +3978,23 @@ mod command_flow_tests {
     }
 
     #[test]
+    fn compatibility_requests_are_explicitly_bound_to_isolated_scope() {
+        let mut requests = vec![
+            ToolRequest::parse("npm:prettier@3.6.2").unwrap(),
+            ToolRequest::parse("node@20.10.0").unwrap(),
+        ];
+        mark_isolated_npm_scope(&mut requests);
+
+        assert_eq!(
+            requests[0].options[osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION],
+            osdk_core::npm_tools::ToolScope::Project.as_str()
+        );
+        assert!(!requests[1]
+            .options
+            .contains_key(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION));
+    }
+
+    #[test]
     fn lock_tuple_uses_the_same_exact_node_as_graph_generation() {
         let mut npm = ToolVersion::new("npm:prettier", "3.6.2");
         npm.options.insert(
@@ -3092,5 +4015,59 @@ mod command_flow_tests {
             resolved[0].1.options[osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION],
             "20.10.0"
         );
+    }
+
+    #[test]
+    fn stale_shim_cleanup_preserves_names_owned_by_another_backend() {
+        let owners = std::collections::BTreeMap::from([
+            (
+                "shared".to_string(),
+                std::collections::BTreeSet::from(["npm:old".to_string(), "npm:other".to_string()]),
+            ),
+            (
+                "only-old".to_string(),
+                std::collections::BTreeSet::from(["npm:old".to_string()]),
+            ),
+        ]);
+        assert!(has_other_shim_owner(&owners, "shared", "npm:old"));
+        assert!(!has_other_shim_owner(&owners, "only-old", "npm:old"));
+    }
+
+    #[test]
+    fn installed_version_selection_is_scope_candidate_bounded() {
+        let global = vec!["2.0.0".to_string(), "3.0.0".to_string()];
+        assert_eq!(
+            select_installed_version(
+                "npm:fixture",
+                &VersionSpec::Prefix("3".into()),
+                global.clone(),
+            )
+            .unwrap(),
+            "3.0.0"
+        );
+        assert!(select_installed_version(
+            "npm:fixture",
+            &VersionSpec::Exact("1.0.0".into()),
+            global,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn global_snapshot_restores_files_symlinks_and_absence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("config.toml");
+        let absent = temporary.path().join("new-shim");
+        std::fs::write(&file, b"old").unwrap();
+        let file_snapshot = GlobalNpmPathSnapshot::capture(file.clone()).unwrap();
+        let absent_snapshot = GlobalNpmPathSnapshot::capture(absent.clone()).unwrap();
+
+        std::fs::write(&file, b"new").unwrap();
+        std::fs::write(&absent, b"generated").unwrap();
+        file_snapshot.restore().unwrap();
+        absent_snapshot.restore().unwrap();
+
+        assert_eq!(std::fs::read(file).unwrap(), b"old");
+        assert!(!absent.exists());
     }
 }

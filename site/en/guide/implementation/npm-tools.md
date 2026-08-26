@@ -48,11 +48,15 @@ its native owner instead. A `packageManager` declaration is checked against the
 lock owner; conflicting or multiple locks fail closed. Explicit
 `installer=aube|npm|pnpm` bypasses the declaration but not lock compatibility.
 
-The resulting plan is immutable for the operation. Native project delegation
-uses an exact managed npm or pnpm executable, a managed Node, a preflighted
-registry environment, and one subprocess invocation. Any non-zero exit is
-returned as-is; there is no fallback replay through Aube or another native
-manager. Project dependency-section selection is also fixed before invocation:
+Initial discovery chooses a candidate installer without mutation. After taking
+the per-project npm lock, osdk reopens the manifest and native lock and replans
+from the original requested installer (`auto` or an explicit choice), so a
+concurrent lock-owner change cannot leave a stale concrete plan. The concrete
+plan selected under that lock is then fixed for invocation. Native project
+delegation uses an exact managed npm or pnpm executable, a managed Node, a
+preflighted registry environment, and one subprocess invocation. Any non-zero
+exit is returned as-is; there is no fallback replay through Aube or another
+native manager. Project dependency-section selection is also fixed before invocation:
 existing production, optional, peer, or development placement is preserved and
 a missing package defaults to development dependencies. All project-add paths
 disable lifecycle scripts.

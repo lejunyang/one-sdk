@@ -158,6 +158,9 @@ pub enum Command {
     Uninstall {
         /// e.g. `node@20.11.1`.
         tool: String,
+        /// Remove a user-global npm package installation and its selection state.
+        #[arg(short, long)]
+        global: bool,
     },
 
     /// Show the active version of each tool for the current directory.
@@ -167,6 +170,9 @@ pub enum Command {
     Where {
         /// e.g. `node` or `node@20.11.1`.
         tool: String,
+        /// Resolve an npm package from global scope, ignoring project selection.
+        #[arg(short, long)]
+        global: bool,
     },
 
     /// Regenerate shim launchers for all installed tools.

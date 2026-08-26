@@ -150,6 +150,8 @@ osdk use --global npm:prettier@3
 # Use a managed native package manager explicitly.
 osdk use -g npm:eslint@9 -o installer=npm
 osdk use -g 'npm:@antfu/ni@0.21.12' -o installer=pnpm
+osdk where --global 'npm:@antfu/ni'
+osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
 osdk installs the selected Node and, when requested, npm or pnpm. Native npm
@@ -164,6 +166,13 @@ basic package, scope, Node, installer, and optional native-lock identity are
 written to `$OSDK_CONFIG_DIR/osdk.lock`. npm global installs do not produce a
 dependency lock. pnpm's `pnpm-lock.yaml` and Aube's `aube-lock.yaml` remain in
 their controlled install directories.
+
+`where --global` resolves only against global npm installations and ignores a
+project selection. `uninstall --global` removes the canonical global root and
+any explicitly global legacy root, then removes the matching user config and
+user-lock entries plus shims that no other installed tool owns. These metadata
+changes and the install removal are serialized and rolled back together on a
+failure.
 
 ## Package and version syntax
 
@@ -198,13 +207,17 @@ osdk current npm:prettier
 osdk list npm:prettier
 osdk where npm:prettier@3.6.2
 
-# Remove an osdk-owned exact installation and rebuild managed shims.
+# The default lifecycle stays project/isolated; opt in to global explicitly.
 osdk --yes uninstall npm:prettier@3.6.2
+osdk where --global npm:prettier@3.6.2
+osdk --yes uninstall --global npm:prettier@3.6.2
 osdk reshim
 ```
 
-`list`, `where`, `uninstall`, and `reshim` operate on osdk-owned isolated or
-global installations. A package added to a real project remains owned by that
+Plain `where` follows the explicit/current configuration scope and otherwise
+retains its isolated-first compatibility behavior. Plain `uninstall` removes
+only the isolated installation; both commands require `--global` to target the
+user-wide installation. A package added to a real project remains owned by that
 project and its package manager. Activated commands come from the curated
 generation, whose launchers target the configured package's validated declared
 files under `node_modules/<package>`.

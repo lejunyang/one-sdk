@@ -126,6 +126,8 @@ osdk use --global npm:prettier@3
 # 显式使用受管原生包管理器。
 osdk use -g npm:eslint@9 -o installer=npm
 osdk use -g 'npm:@antfu/ni@0.21.12' -o installer=pnpm
+osdk where --global 'npm:@antfu/ni'
+osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
 osdk 会安装所选 Node，并在需要时安装 npm 或 pnpm。原生 npm 执行
@@ -136,6 +138,11 @@ global、bin 与 store 目录。Aube 使用等价的 osdk 自有合成全局项�
 所选版本和安装器写入用户配置；基本的 package、scope、Node、installer 和可选原生
 lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依赖 lock；pnpm 的
 `pnpm-lock.yaml` 与 Aube 的 `aube-lock.yaml` 保留在各自受控安装目录中。
+
+`where --global` 只在全局 npm 安装中解析，并忽略项目选择。
+`uninstall --global` 会删除规范全局根和任何明确标记为 global 的旧版根，然后清理匹配的
+用户配置、用户 lock 条目，以及不再由其他已安装工具拥有的 shim。安装删除与这些元数据
+变更会串行执行，并在失败时一起回滚。
 
 ## 包名与版本语法
 
@@ -168,14 +175,17 @@ osdk current npm:prettier
 osdk list npm:prettier
 osdk where npm:prettier@3.6.2
 
-# 删除 osdk 自有的精确安装，并重建受管 shim。
+# 默认 lifecycle 保持项目/隔离语义；全局操作必须显式选择。
 osdk --yes uninstall npm:prettier@3.6.2
+osdk where --global npm:prettier@3.6.2
+osdk --yes uninstall --global npm:prettier@3.6.2
 osdk reshim
 ```
 
-`list`、`where`、`uninstall` 与 `reshim` 操作 osdk 自有的隔离或全局安装。加入真实项目
-的包仍由项目及其包管理器所有。激活命令来自筛选 generation，其中的 launcher 指向
-`node_modules/<package>` 下已配置包通过校验的声明文件。
+普通 `where` 按显式/当前配置作用域解析，没有作用域信号时保留 isolated-first 兼容行为；
+普通 `uninstall` 只删除隔离安装。两者都必须通过 `--global` 才会操作用户级全局安装。加入
+真实项目的包仍由项目及其包管理器所有。激活命令来自筛选 generation，其中的 launcher
+指向 `node_modules/<package>` 下已配置包通过校验的声明文件。
 `osdk list-remote npm:prettier [FILTER]` 可列出 Registry 中的稳定版本。
 
 ## 构建脚本策略

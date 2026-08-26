@@ -1466,6 +1466,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.uninstall.flag.global",
+        (
+            "Remove a user-global npm package installation, configuration, lock entry, and shims",
+            "删除用户级全局 npm 包安装及其配置、锁条目和 shim",
+        ),
+    );
+    m.insert(
         "help.current.about",
         (
             "Show the active version of each tool for the current directory",
@@ -1477,6 +1484,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Print the install directory of a tool version",
             "打印某个工具版本的安装目录",
+        ),
+    );
+    m.insert(
+        "help.where.flag.global",
+        (
+            "Resolve an npm package from global scope, ignoring project selection",
+            "从全局作用域定位 npm 包，忽略项目选择",
         ),
     );
     m.insert(
@@ -1906,6 +1920,8 @@ mod tests {
         "help.use.arg.tool",
         "help.use.flag.global",
         "help.use.flag.opt",
+        "help.uninstall.flag.global",
+        "help.where.flag.global",
     ];
 
     #[test]

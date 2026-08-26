@@ -153,6 +153,8 @@ osdk use npm:eslint@9 -o installer=pnpm
 
 # 安装用户级工具，不修改当前项目。
 osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
+osdk where --global 'npm:@antfu/ni'
+osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
 项目自动安装会在现有 lock 格式兼容时优先使用 Aube；也可以用
@@ -160,6 +162,9 @@ osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
 `osdk.toml` 与 `osdk.lock`，传递依赖图仍以包管理器的原生 lock 为准。当前目录向上没有
 `package.json` 时，本地 `use` 保留原有的 osdk 隔离安装与 shim 行为。生成的
 `.osdk/npm-bin/` 是本地派生状态，通常应加入版本控制忽略规则。
+`where --global` 与 `uninstall --global` 会显式操作用户级 npm 安装；不带该标志时继续
+保持原有项目/隔离行为。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他
+owner 的 shim。
 
 指南：[npm 开发工具](site/guide/npm-tools.md)
 

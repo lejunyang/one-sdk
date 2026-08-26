@@ -12,9 +12,14 @@ static NEXT_CONFIG_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 
 /// Write a `[tools] <tool> = <spec>` pin to the user global config.
 pub fn set_global_tool(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
+    with_global_config_lock(ctx, || set_global_tool_unlocked(ctx, tool, spec))
+}
+
+/// Update a global tool version when the caller already holds the shared
+/// global state lock.
+pub(crate) fn set_global_tool_unlocked(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
     let path = ctx.dirs.user_config_file();
-    edit_tool_version(&path, tool, spec)?;
-    Ok(())
+    edit_tool_version(&path, tool, spec)
 }
 
 /// Write a `[tools]` pin to the nearest project config, creating `osdk.toml` in
@@ -30,9 +35,34 @@ pub fn set_project_tool(tool: &str, spec: &str) -> Result<PathBuf> {
 /// user global config.
 #[allow(dead_code)]
 pub fn set_global_tool_config(ctx: &Ctx, tool: &str, config: &StructuredToolConfig) -> Result<()> {
+    with_global_config_lock(ctx, || set_global_tool_config_unlocked(ctx, tool, config))
+}
+
+/// Update a global tool entry when the caller already holds the shared global
+/// state lock. This avoids recursively acquiring the process-wide file lock.
+pub(crate) fn set_global_tool_config_unlocked(
+    ctx: &Ctx,
+    tool: &str,
+    config: &StructuredToolConfig,
+) -> Result<()> {
     let path = ctx.dirs.user_config_file();
-    edit_tool_config(&path, tool, config)?;
-    Ok(())
+    edit_tool_config(&path, tool, config)
+}
+
+/// Remove one user-global tool selection. Callers that already hold the
+/// shared global state lock must use this unlocked form.
+pub(crate) fn remove_global_tool_unlocked(ctx: &Ctx, tool: &str) -> Result<bool> {
+    let path = ctx.dirs.user_config_file();
+    let mut doc = load_doc(&path)?;
+    let removed = doc
+        .get_mut("tools")
+        .and_then(toml_edit::Item::as_table_mut)
+        .map(|tools| tools.remove(tool).is_some())
+        .unwrap_or(false);
+    if removed {
+        save_doc(&path, &doc)?;
+    }
+    Ok(removed)
 }
 
 /// Write a structured `[tools]` entry to the nearest project config, creating
@@ -61,6 +91,10 @@ pub fn set_project_npm_tool_at(
 
 /// Set or clear a per-tool source pin in the user global config.
 pub fn set_source_pin(ctx: &Ctx, tool: &str, id: Option<&str>) -> Result<()> {
+    with_global_config_lock(ctx, || set_source_pin_unlocked(ctx, tool, id))
+}
+
+fn set_source_pin_unlocked(ctx: &Ctx, tool: &str, id: Option<&str>) -> Result<()> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
 
@@ -97,6 +131,17 @@ pub fn set_model_env(
     enabled: bool,
     force: bool,
 ) -> Result<()> {
+    with_global_config_lock(ctx, || {
+        set_model_env_unlocked(ctx, provider, enabled, force)
+    })
+}
+
+fn set_model_env_unlocked(
+    ctx: &Ctx,
+    provider: osdk_core::model::ProviderId,
+    enabled: bool,
+    force: bool,
+) -> Result<()> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
     let sources = doc
@@ -127,6 +172,10 @@ pub fn set_model_env(
 }
 
 pub fn set_version_alias(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Result<()> {
+    with_global_config_lock(ctx, || set_version_alias_unlocked(ctx, tool, name, version))
+}
+
+fn set_version_alias_unlocked(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Result<()> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
     let aliases = doc
@@ -147,6 +196,10 @@ pub fn set_version_alias(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Re
 }
 
 pub fn remove_version_alias(ctx: &Ctx, tool: &str, name: &str) -> Result<bool> {
+    with_global_config_lock(ctx, || remove_version_alias_unlocked(ctx, tool, name))
+}
+
+fn remove_version_alias_unlocked(ctx: &Ctx, tool: &str, name: &str) -> Result<bool> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
     let removed = doc
@@ -164,6 +217,19 @@ pub fn remove_version_alias(ctx: &Ctx, tool: &str, name: &str) -> Result<bool> {
 
 /// Add a custom source to a tool's `[[sources.<tool>.custom]]` array.
 pub fn add_custom_source(
+    ctx: &Ctx,
+    tool: &str,
+    id: &str,
+    download_url: &str,
+    index_url: Option<&str>,
+    forward_credentials: bool,
+) -> Result<()> {
+    with_global_config_lock(ctx, || {
+        add_custom_source_unlocked(ctx, tool, id, download_url, index_url, forward_credentials)
+    })
+}
+
+fn add_custom_source_unlocked(
     ctx: &Ctx,
     tool: &str,
     id: &str,
@@ -225,6 +291,10 @@ pub fn add_custom_source(
 
 /// Remove a custom source by id from a tool. Returns whether one was removed.
 pub fn remove_custom_source(ctx: &Ctx, tool: &str, id: &str) -> Result<bool> {
+    with_global_config_lock(ctx, || remove_custom_source_unlocked(ctx, tool, id))
+}
+
+fn remove_custom_source_unlocked(ctx: &Ctx, tool: &str, id: &str) -> Result<bool> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
     let removed = (|| {
@@ -246,6 +316,10 @@ pub fn remove_custom_source(ctx: &Ctx, tool: &str, id: &str) -> Result<bool> {
         save_doc(&path, &doc)?;
     }
     Ok(removed)
+}
+
+fn with_global_config_lock<T>(ctx: &Ctx, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    crate::global_npm_use::with_global_npm_state_lock(&ctx.dirs, operation)
 }
 
 fn edit_tool_version(path: &Path, tool: &str, spec: &str) -> Result<()> {
@@ -565,5 +639,51 @@ mod tests {
         assert!(text.contains("yes = true"));
         assert!(text.contains("[tools]"));
         assert!(text.contains("npm = { version = \"11.5.2\", allow_builds = [\"sharp\"] }"));
+    }
+
+    #[test]
+    fn removing_global_tool_preserves_other_user_configuration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+            osdk_core::dirs::env_keys::DATA_DIR => {
+                Some(temporary.path().join("data").display().to_string())
+            }
+            osdk_core::dirs::env_keys::CACHE_DIR => {
+                Some(temporary.path().join("cache").display().to_string())
+            }
+            osdk_core::dirs::env_keys::CONFIG_DIR => {
+                Some(temporary.path().join("config").display().to_string())
+            }
+            osdk_core::dirs::env_keys::STORE_DIR => {
+                Some(temporary.path().join("store").display().to_string())
+            }
+            osdk_core::dirs::env_keys::INSTALL_DIR => {
+                Some(temporary.path().join("installs").display().to_string())
+            }
+            _ => None,
+        })
+        .unwrap();
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        std::fs::write(
+            dirs.user_config_file(),
+            "[tools]\nnode = \"22\"\n\"npm:prettier\" = { version = \"3\", installer = \"aube\" }\n\n[aliases.node]\nlts = \"22\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load_user(&dirs.user_config_file()).unwrap();
+        let ctx = osdk_core::backend::Ctx {
+            dirs,
+            platform: osdk_core::platform::Platform::current(),
+            config,
+            client: osdk_core::http::client().unwrap(),
+            cas: std::sync::Arc::new(osdk_core::store::Cas::new(temporary.path().join("store"))),
+            show_progress: false,
+        };
+
+        assert!(remove_global_tool_unlocked(&ctx, "npm:prettier").unwrap());
+        assert!(!remove_global_tool_unlocked(&ctx, "npm:prettier").unwrap());
+        let text = std::fs::read_to_string(ctx.dirs.user_config_file()).unwrap();
+        assert!(!text.contains("npm:prettier"));
+        assert!(text.contains("node = \"22\""));
+        assert!(text.contains("lts = \"22\""));
     }
 }

@@ -37,9 +37,11 @@ Aube。目前支持 Aube/pnpm v9 与 npm lock v2/v3；已知但不支持的 npm 
 选择它的原生 owner。`packageManager` 声明会与 lock owner 交叉校验；冲突或多个 lock
 都会 fail closed。显式 `installer=aube|npm|pnpm` 可覆盖声明，但不能绕过 lock 兼容性。
 
-一次操作中的规划结果不可变。原生项目委托使用精确的受管 npm 或 pnpm 可执行文件、
-受管 Node、预检后的 Registry 环境，并且只启动一次子进程。非零退出会原样返回，不会
-改用 Aube 或另一原生管理器重放。依赖区段也在调用前固定：保留已有 production、
+首次发现会在不修改项目的前提下选择候选安装器。取得每项目 npm 锁后，osdk 会重新读取
+manifest 与原生 lock，并用用户最初请求的安装器（`auto` 或显式选择）重新规划，避免并发
+lock owner 变化留下过期的具体计划。锁内选出的具体计划随后固定用于调用。原生项目委托
+使用精确的受管 npm 或 pnpm 可执行文件、受管 Node、预检后的 Registry 环境，并且只启动
+一次子进程。非零退出会原样返回，不会改用 Aube 或另一原生管理器重放。依赖区段也在调用前固定：保留已有 production、
 optional、peer 或 development 位置，缺失包默认作为开发依赖。所有项目 add 路径都禁用
 lifecycle scripts。
 
