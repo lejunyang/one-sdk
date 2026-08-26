@@ -96,7 +96,10 @@ impl NpmInstaller {
             "aube" => Ok(Self::Aube),
             "npm" | "package-lock" | "npm-shrinkwrap" => Ok(Self::Npm),
             "pnpm" => Ok(Self::Pnpm),
-            _ => anyhow::bail!("unsupported npm installer `{value}`"),
+            _ => anyhow::bail!(osdk_core::t!(
+                "err.lock_npm_installer_unsupported",
+                installer = value
+            )),
         }
     }
 
@@ -384,17 +387,22 @@ fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
             match (backend.strip_prefix("npm:"), locked.npm.as_ref()) {
                 (Some(package), Some(LockedNpmGraph::Metadata(npm))) => {
                     if locked.artifact.is_some() {
-                        anyhow::bail!(
-                            "schema 3 npm entry `{backend}` for platform `{platform}` cannot carry a generic artifact receipt"
-                        );
+                        anyhow::bail!(osdk_core::t!(
+                            "err.lock_schema3_npm_artifact_forbidden",
+                            backend = backend,
+                            platform = platform
+                        ));
                     }
                     if let Some(key) = locked.options.keys().find(|key| {
                         key.starts_with("__osdk_npm_")
                             || key.as_str() == LOCKED_NPM_NODE_VERSION_OPTION
                     }) {
-                        anyhow::bail!(
-                            "schema 3 npm entry `{backend}` for platform `{platform}` cannot carry private option `{key}`"
-                        );
+                        anyhow::bail!(osdk_core::t!(
+                            "err.lock_schema3_npm_private_option_forbidden",
+                            backend = backend,
+                            platform = platform,
+                            key = key
+                        ));
                     }
                     if package.is_empty() || npm.package != package {
                         anyhow::bail!(osdk_core::t!(
@@ -423,12 +431,16 @@ fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
                         validate_native_lock(backend, native_lock)?;
                     }
                 }
-                (Some(_), None) => anyhow::bail!(
-                    "schema 3 npm entry `{backend}` on `{platform}` is missing npm metadata"
-                ),
-                (Some(_), Some(_)) => anyhow::bail!(
-                    "schema 3 npm entry `{backend}` on `{platform}` uses legacy graph metadata"
-                ),
+                (Some(_), None) => anyhow::bail!(osdk_core::t!(
+                    "err.lock_schema3_npm_metadata_missing",
+                    backend = backend,
+                    platform = platform
+                )),
+                (Some(_), Some(_)) => anyhow::bail!(osdk_core::t!(
+                    "err.lock_schema3_npm_legacy_metadata",
+                    backend = backend,
+                    platform = platform
+                )),
                 (None, Some(_)) => anyhow::bail!(osdk_core::t!(
                     "err.lock_non_npm_graph_metadata",
                     backend = backend,
@@ -450,11 +462,12 @@ fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result
         NpmInstaller::Pnpm => versioned_format(&native_lock.format, &["pnpm-v"]),
     };
     if !valid_format {
-        anyhow::bail!(
-            "unsupported native npm lock format `{}` for `{backend}` and owner `{}`",
-            native_lock.format,
-            native_lock.kind.as_str()
-        );
+        anyhow::bail!(osdk_core::t!(
+            "err.lock_npm_native_format_unsupported",
+            format = native_lock.format,
+            backend = backend,
+            owner = native_lock.kind.as_str()
+        ));
     }
     validate_sha256(backend, &native_lock.sha256)
 }
@@ -553,9 +566,11 @@ fn validate_complete_npm_entries(
                     ));
                 }
                 (Some(_), Some(LockedNpmGraph::Metadata(_))) => {
-                    anyhow::bail!(
-                        "schema 2 npm entry `{backend}` on `{platform}` uses schema 3 metadata"
-                    );
+                    anyhow::bail!(osdk_core::t!(
+                        "err.lock_schema2_npm_schema3_metadata",
+                        backend = backend,
+                        platform = platform
+                    ));
                 }
                 (None, Some(_)) => {
                     anyhow::bail!(osdk_core::t!(
@@ -744,9 +759,11 @@ fn validate_version_identity(backend: &str, value: &str) -> Result<()> {
 fn validate_exact_node_version(backend: &str, value: &str) -> Result<()> {
     validate_version_identity(backend, value)?;
     if !matches!(VersionSpec::parse(value), VersionSpec::Exact(version) if version == value) {
-        anyhow::bail!(
-            "npm entry `{backend}` has non-exact node version `{value}`; expected a complete semantic version"
-        );
+        anyhow::bail!(osdk_core::t!(
+            "err.lock_npm_node_version_not_exact",
+            backend = backend,
+            version = value
+        ));
     }
     Ok(())
 }
@@ -1120,9 +1137,12 @@ fn locked_native_lock_from_options(version: &ToolVersion) -> Result<Option<Locke
         return Ok(None);
     }
     let required = |key: &str, value: Option<&String>| {
-        value
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("native npm lock metadata is missing `{key}`"))
+        value.cloned().ok_or_else(|| {
+            anyhow::anyhow!(osdk_core::t!(
+                "err.lock_npm_native_metadata_missing",
+                key = key
+            ))
+        })
     };
     let native_lock = LockedNativeLock {
         kind: NpmInstaller::parse(&required(LOCKED_NPM_NATIVE_LOCK_KIND_OPTION, values[0])?)?,
@@ -2038,6 +2058,35 @@ lockfile = "lockfileVersion: '9.0'"
         };
         assert_eq!(npm.installer, NpmInstaller::Aube);
         assert_eq!(npm.native_lock.as_ref().unwrap().kind, NpmInstaller::Pnpm);
+    }
+
+    #[test]
+    fn schema_three_errors_render_in_chinese() {
+        let missing = osdk_core::i18n::interpolate(
+            &osdk_core::i18n::trl(
+                osdk_core::i18n::Lang::Zh,
+                "err.lock_schema3_npm_metadata_missing",
+            ),
+            &[("backend", "npm:prettier"), ("platform", "linux-x64")],
+        );
+        assert_eq!(
+            missing,
+            "平台 `linux-x64` 上的 schema 3 npm 条目 `npm:prettier` 缺少 npm 元数据"
+        );
+
+        let format = osdk_core::i18n::interpolate(
+            &osdk_core::i18n::trl(
+                osdk_core::i18n::Lang::Zh,
+                "err.lock_npm_native_format_unsupported",
+            ),
+            &[
+                ("format", "future-v10"),
+                ("backend", "npm:prettier"),
+                ("owner", "pnpm"),
+            ],
+        );
+        assert!(format.contains("原生 npm 锁文件格式 `future-v10` 不受支持"));
+        assert!(format.contains("`npm:prettier`"));
     }
 
     #[test]

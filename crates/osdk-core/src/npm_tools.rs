@@ -102,8 +102,9 @@ impl FromStr for NpmInstaller {
             "aube" => Ok(Self::Aube),
             "npm" => Ok(Self::Npm),
             "pnpm" => Ok(Self::Pnpm),
-            other => Err(Error::config(format!(
-                "invalid npm installer `{other}` (expected auto|aube|npm|pnpm)"
+            other => Err(Error::config(crate::t!(
+                "err.npm_installer_invalid",
+                installer = other
             ))),
         }
     }
@@ -140,8 +141,9 @@ impl FromStr for ToolScope {
         match value.trim().to_ascii_lowercase().as_str() {
             "project" => Ok(Self::Project),
             "global" => Ok(Self::Global),
-            other => Err(Error::config(format!(
-                "invalid npm tool scope `{other}` (expected project|global)"
+            other => Err(Error::config(crate::t!(
+                "err.npm_scope_invalid",
+                scope = other
             ))),
         }
     }
@@ -248,9 +250,7 @@ pub fn installer_from_tool_config(entry: Option<&ToolConfigEntry>) -> Result<Npm
     };
     match value {
         ToolConfigValue::String(value) => value.parse(),
-        _ => Err(Error::config(
-            "npm installer option must be a string (auto|aube|npm|pnpm)",
-        )),
+        _ => Err(Error::config(crate::t!("err.npm_installer_option_type"))),
     }
 }
 
@@ -273,9 +273,9 @@ pub fn find_nearest_package_json(start_dir: &Path) -> Result<Option<PathBuf>> {
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => return Ok(Some(path)),
             Ok(_) => {
-                return Err(Error::config(format!(
-                    "{} must be a regular file and must not be a symlink",
-                    path.display()
+                return Err(Error::config(crate::t!(
+                    "err.npm_project_file_not_regular",
+                    path = path.display()
                 )))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -356,12 +356,12 @@ fn select_automatic_installer(project: Option<&NpmProject>) -> Result<NpmInstall
         let declared_installer = declared_installer(declared)?;
         if let Some(native_lock) = &project.native_lock {
             if native_lock.installer() != declared_installer {
-                return Err(Error::config(format!(
-                    "{} declares package manager `{}` but {} belongs to `{}`",
-                    project.package_json.display(),
-                    declared.manager,
-                    native_lock.path.display(),
-                    native_lock.installer()
+                return Err(Error::config(crate::t!(
+                    "err.npm_manager_lock_owner_conflict",
+                    manifest = project.package_json.display(),
+                    manager = declared.manager,
+                    lock = native_lock.path.display(),
+                    owner = native_lock.installer()
                 )));
             }
             return if native_lock.supported {
@@ -386,9 +386,10 @@ fn declared_installer(declared: &PackageManagerRequest) -> Result<NpmInstaller> 
         "aube" => Ok(NpmInstaller::Aube),
         "npm" => Ok(NpmInstaller::Npm),
         "pnpm" => Ok(NpmInstaller::Pnpm),
-        other => Err(Error::config(format!(
-            "{} declares unsupported npm-tool installer `{other}`; expected aube, npm, or pnpm",
-            declared.source.display()
+        other => Err(Error::config(crate::t!(
+            "err.npm_declared_installer_unsupported",
+            source = declared.source.display(),
+            installer = other
         ))),
     }
 }
@@ -406,19 +407,20 @@ fn validate_explicit_installer(
         if native_lock.supported {
             return Ok(());
         }
-        return Err(Error::config(format!(
-            "installer `aube` cannot read unsupported lock format `{}` at {}; use installer `{}`",
-            native_lock.format,
-            native_lock.path.display(),
-            native_lock.installer()
+        return Err(Error::config(crate::t!(
+            "err.npm_aube_lock_format_unsupported",
+            format = native_lock.format,
+            path = native_lock.path.display(),
+            owner = native_lock.installer()
         )));
     }
 
     if requested.is_native() && native_lock.installer() != requested {
-        return Err(Error::config(format!(
-            "installer `{requested}` conflicts with {} owned by `{}`",
-            native_lock.path.display(),
-            native_lock.installer()
+        return Err(Error::config(crate::t!(
+            "err.npm_installer_lock_conflict",
+            installer = requested,
+            path = native_lock.path.display(),
+            owner = native_lock.installer()
         )));
     }
     Ok(())
@@ -436,9 +438,9 @@ fn inspect_native_lock(project_root: &Path) -> Result<Option<NativeLock>> {
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => present.push((kind, path)),
             Ok(_) => {
-                return Err(Error::config(format!(
-                    "{} must be a regular file and must not be a symlink",
-                    path.display()
+                return Err(Error::config(crate::t!(
+                    "err.npm_project_file_not_regular",
+                    path = path.display()
                 )))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -447,9 +449,9 @@ fn inspect_native_lock(project_root: &Path) -> Result<Option<NativeLock>> {
     }
 
     if present.len() > 1 {
-        return Err(Error::config(format!(
-            "ambiguous npm project: multiple recognized lockfiles exist: {}",
-            present
+        return Err(Error::config(crate::t!(
+            "err.npm_project_lock_ambiguous",
+            paths = present
                 .iter()
                 .map(|(_, path)| path.display().to_string())
                 .collect::<Vec<_>>()
@@ -466,26 +468,42 @@ fn parse_native_lock(kind: NativeLockKind, path: PathBuf) -> Result<NativeLock> 
     let text = std::fs::read_to_string(&path).map_err(|error| Error::io(&path, error))?;
     let version = match kind {
         NativeLockKind::PackageLock | NativeLockKind::NpmShrinkwrap => {
-            let value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|error| Error::config(format!("parsing {}: {error}", path.display())))?;
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                Error::config(crate::t!(
+                    "err.npm_native_lock_parse",
+                    path = path.display(),
+                    error = error
+                ))
+            })?;
             value
                 .get("lockfileVersion")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| {
-                    Error::config(format!(
-                        "{} is missing a numeric lockfileVersion",
-                        path.display()
+                    Error::config(crate::t!(
+                        "err.npm_native_lock_version_numeric_required",
+                        path = path.display()
                     ))
                 })?
         }
         NativeLockKind::Aube | NativeLockKind::Pnpm => {
-            let value: serde_yaml::Value = serde_yaml::from_str(&text)
-                .map_err(|error| Error::config(format!("parsing {}: {error}", path.display())))?;
+            let value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
+                Error::config(crate::t!(
+                    "err.npm_native_lock_parse",
+                    path = path.display(),
+                    error = error
+                ))
+            })?;
             let value = value.get("lockfileVersion").ok_or_else(|| {
-                Error::config(format!("{} is missing lockfileVersion", path.display()))
+                Error::config(crate::t!(
+                    "err.npm_native_lock_version_missing",
+                    path = path.display()
+                ))
             })?;
             yaml_lock_major(value).ok_or_else(|| {
-                Error::config(format!("{} has malformed lockfileVersion", path.display()))
+                Error::config(crate::t!(
+                    "err.npm_native_lock_version_malformed",
+                    path = path.display()
+                ))
             })?
         }
     };
@@ -497,9 +515,10 @@ fn parse_native_lock(kind: NativeLockKind, path: PathBuf) -> Result<NativeLock> 
         }
     };
     if kind == NativeLockKind::Aube && !supported {
-        return Err(Error::config(format!(
-            "{} uses unsupported aube lockfile version {version}; expected v9",
-            path.display()
+        return Err(Error::config(crate::t!(
+            "err.npm_aube_lock_version_unsupported",
+            path = path.display(),
+            version = version
         )));
     }
 
@@ -879,5 +898,31 @@ mod tests {
             plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Global).unwrap();
         assert_eq!(plan.installer, NpmInstaller::Aube);
         assert!(plan.project.is_none());
+    }
+
+    #[test]
+    fn npm_scope_errors_render_in_chinese() {
+        let invalid_installer = crate::i18n::interpolate(
+            &crate::i18n::trl(crate::i18n::Lang::Zh, "err.npm_installer_invalid"),
+            &[("installer", "yarn")],
+        );
+        assert_eq!(
+            invalid_installer,
+            "无效的 npm 安装器 `yarn`（应为 auto|aube|npm|pnpm）"
+        );
+
+        let conflict = crate::i18n::interpolate(
+            &crate::i18n::trl(crate::i18n::Lang::Zh, "err.npm_manager_lock_owner_conflict"),
+            &[
+                ("manifest", "/repo/package.json"),
+                ("manager", "npm"),
+                ("lock", "/repo/pnpm-lock.yaml"),
+                ("owner", "pnpm"),
+            ],
+        );
+        assert_eq!(
+            conflict,
+            "/repo/package.json 声明的包管理器为 `npm`，但 /repo/pnpm-lock.yaml 属于 `pnpm`"
+        );
     }
 }

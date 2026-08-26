@@ -542,6 +542,174 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.npm_installer_invalid",
+        (
+            "invalid npm installer `{installer}` (expected auto|aube|npm|pnpm)",
+            "无效的 npm 安装器 `{installer}`（应为 auto|aube|npm|pnpm）",
+        ),
+    );
+    m.insert(
+        "err.npm_scope_invalid",
+        (
+            "invalid npm tool scope `{scope}` (expected project|global)",
+            "无效的 npm 工具作用域 `{scope}`（应为 project|global）",
+        ),
+    );
+    m.insert(
+        "err.npm_installer_option_type",
+        (
+            "npm installer option must be a string (auto|aube|npm|pnpm)",
+            "npm installer 选项必须是字符串（auto|aube|npm|pnpm）",
+        ),
+    );
+    m.insert(
+        "err.npm_project_file_not_regular",
+        (
+            "{path} must be a regular file and must not be a symlink",
+            "{path} 必须是常规文件且不能是符号链接",
+        ),
+    );
+    m.insert(
+        "err.npm_manager_lock_owner_conflict",
+        (
+            "{manifest} declares package manager `{manager}` but {lock} belongs to `{owner}`",
+            "{manifest} 声明的包管理器为 `{manager}`，但 {lock} 属于 `{owner}`",
+        ),
+    );
+    m.insert(
+        "err.npm_declared_installer_unsupported",
+        (
+            "{source} declares unsupported npm-tool installer `{installer}`; expected aube, npm, or pnpm",
+            "{source} 声明了不受支持的 npm 工具安装器 `{installer}`；应为 aube、npm 或 pnpm",
+        ),
+    );
+    m.insert(
+        "err.npm_aube_lock_format_unsupported",
+        (
+            "installer `aube` cannot read unsupported lock format `{format}` at {path}; use installer `{owner}`",
+            "安装器 `aube` 无法读取 {path} 中不受支持的锁文件格式 `{format}`；请使用安装器 `{owner}`",
+        ),
+    );
+    m.insert(
+        "err.npm_installer_lock_conflict",
+        (
+            "installer `{installer}` conflicts with {path} owned by `{owner}`",
+            "安装器 `{installer}` 与属于 `{owner}` 的锁文件 {path} 冲突",
+        ),
+    );
+    m.insert(
+        "err.npm_project_lock_ambiguous",
+        (
+            "ambiguous npm project: multiple recognized lockfiles exist: {paths}",
+            "npm 项目存在歧义：发现多个可识别的锁文件：{paths}",
+        ),
+    );
+    m.insert(
+        "err.npm_native_lock_parse",
+        (
+            "parsing npm lockfile {path}: {error}",
+            "解析 npm 锁文件 {path} 失败：{error}",
+        ),
+    );
+    m.insert(
+        "err.npm_native_lock_version_numeric_required",
+        (
+            "{path} is missing a numeric lockfileVersion",
+            "{path} 缺少数值类型的 lockfileVersion",
+        ),
+    );
+    m.insert(
+        "err.npm_native_lock_version_missing",
+        (
+            "{path} is missing lockfileVersion",
+            "{path} 缺少 lockfileVersion",
+        ),
+    );
+    m.insert(
+        "err.npm_native_lock_version_malformed",
+        (
+            "{path} has malformed lockfileVersion",
+            "{path} 的 lockfileVersion 格式错误",
+        ),
+    );
+    m.insert(
+        "err.npm_aube_lock_version_unsupported",
+        (
+            "{path} uses unsupported aube lockfile version {version}; expected v9",
+            "{path} 使用了不受支持的 aube 锁文件版本 {version}；应为 v9",
+        ),
+    );
+    m.insert(
+        "err.package_manager_manifest_read",
+        (
+            "reading package-manager manifest {path}: {error}",
+            "读取包管理器清单 {path} 失败：{error}",
+        ),
+    );
+    m.insert(
+        "err.package_manager_manifest_parse",
+        (
+            "parsing package-manager manifest {path}: {error}",
+            "解析包管理器清单 {path} 失败：{error}",
+        ),
+    );
+    m.insert(
+        "err.package_manager_field_type",
+        (
+            "{path} packageManager must be a string",
+            "{path} 中的 packageManager 必须是字符串",
+        ),
+    );
+    m.insert(
+        "err.package_manager_dev_engines_empty",
+        (
+            "{path} devEngines.packageManager must not be an empty array",
+            "{path} 中的 devEngines.packageManager 不能为空数组",
+        ),
+    );
+    m.insert(
+        "err.package_manager_name_missing",
+        (
+            "{path} devEngines.packageManager is missing name",
+            "{path} 中的 devEngines.packageManager 缺少 name",
+        ),
+    );
+    m.insert(
+        "err.package_manager_version_missing",
+        (
+            "{path} devEngines.packageManager is missing version",
+            "{path} 中的 devEngines.packageManager 缺少 version",
+        ),
+    );
+    m.insert(
+        "err.package_manager_declaration_invalid",
+        (
+            "{path} packageManager must be `<manager>@<exact-version>`",
+            "{path} 中的 packageManager 必须为 `<manager>@<exact-version>`",
+        ),
+    );
+    m.insert(
+        "err.package_manager_unsupported",
+        (
+            "{path} has unsupported package manager `{manager}`",
+            "{path} 使用了不受支持的包管理器 `{manager}`",
+        ),
+    );
+    m.insert(
+        "err.package_manager_name_invalid",
+        (
+            "{path} has invalid package manager name `{manager}`",
+            "{path} 中的包管理器名称 `{manager}` 无效",
+        ),
+    );
+    m.insert(
+        "err.package_manager_version_not_exact",
+        (
+            "{path} package manager `{manager}` requires an exact semver without URL/hash suffix: `{version}`",
+            "{path} 中的包管理器 `{manager}` 必须使用不含 URL/hash 后缀的精确 semver：`{version}`",
+        ),
+    );
+    m.insert(
         "err.npm_managed_node_dependency_required",
         (
             "npm tools require a managed Node dependency",
@@ -784,6 +952,69 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "lockfile {path} is not UTF-8",
             "锁文件 {path} 不是 UTF-8 编码",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_installer_unsupported",
+        (
+            "unsupported npm installer `{installer}` in lock metadata",
+            "锁元数据中的 npm 安装器 `{installer}` 不受支持",
+        ),
+    );
+    m.insert(
+        "err.lock_schema3_npm_artifact_forbidden",
+        (
+            "schema 3 npm entry `{backend}` for platform `{platform}` cannot carry a generic artifact receipt",
+            "平台 `{platform}` 的 schema 3 npm 条目 `{backend}` 不能包含通用制品收据",
+        ),
+    );
+    m.insert(
+        "err.lock_schema3_npm_private_option_forbidden",
+        (
+            "schema 3 npm entry `{backend}` for platform `{platform}` cannot carry private option `{key}`",
+            "平台 `{platform}` 的 schema 3 npm 条目 `{backend}` 不能包含内部选项 `{key}`",
+        ),
+    );
+    m.insert(
+        "err.lock_schema3_npm_metadata_missing",
+        (
+            "schema 3 npm entry `{backend}` on `{platform}` is missing npm metadata",
+            "平台 `{platform}` 上的 schema 3 npm 条目 `{backend}` 缺少 npm 元数据",
+        ),
+    );
+    m.insert(
+        "err.lock_schema3_npm_legacy_metadata",
+        (
+            "schema 3 npm entry `{backend}` on `{platform}` uses legacy graph metadata",
+            "平台 `{platform}` 上的 schema 3 npm 条目 `{backend}` 使用了旧版依赖图元数据",
+        ),
+    );
+    m.insert(
+        "err.lock_schema2_npm_schema3_metadata",
+        (
+            "schema 2 npm entry `{backend}` on `{platform}` uses schema 3 metadata",
+            "平台 `{platform}` 上的 schema 2 npm 条目 `{backend}` 使用了 schema 3 元数据",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_native_format_unsupported",
+        (
+            "unsupported native npm lock format `{format}` for `{backend}` and owner `{owner}`",
+            "`{backend}` 的原生 npm 锁文件格式 `{format}` 不受支持，其所有者为 `{owner}`",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_node_version_not_exact",
+        (
+            "npm entry `{backend}` has non-exact node version `{version}`; expected a complete semantic version",
+            "npm 条目 `{backend}` 的 Node 版本 `{version}` 不精确；应为完整的语义版本",
+        ),
+    );
+    m.insert(
+        "err.lock_npm_native_metadata_missing",
+        (
+            "native npm lock metadata is missing `{key}`",
+            "原生 npm 锁元数据缺少 `{key}`",
         ),
     );
     m.insert(
@@ -1185,27 +1416,42 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.use.long",
         (
-            "Install the tool if needed, generate shims, and write a version pin. By default the \
-             pin goes to the nearest project config (osdk.toml); use --global to pin in the user \
-             config.\n\nEXAMPLES:\n  osdk use node@20            # pin in this project\n  osdk use \
-             -g python@3.12          # global default\n  osdk use rust@stable -o profile=minimal",
-            "如有需要则安装工具、生成 shim，并写入版本固定。默认写入最近的项目配置（osdk.toml）；\
-             使用 --global 写入用户配置。\n\n示例：\n  osdk use node@20            # 固定在本项目\n  \
-             osdk use -g python@3.12          # 全局默认\n  osdk use rust@stable -o profile=minimal",
+            "Install a tool if needed and make it active. For ordinary SDKs, the default writes a \
+             project pin; --global writes the user default. For `npm:<package>` inside a Node \
+             project, the default modifies package.json and its native lockfile, then records the npm \
+             selection in project osdk.toml and exact Node/npm metadata in osdk.lock. `--global` ignores the current \
+             project, installs into an osdk-managed prefix, and updates the user config and lock. \
+             Installer auto-selection prefers embedded Aube when the project lock is compatible; npm \
+             package build scripts are disabled by default.\n\nEXAMPLES:\n  osdk use node@20\n  osdk use \
+             npm:prettier@3 -o installer=auto\n  osdk use -g npm:prettier@3 -o allow_builds=false",
+            "如有需要则安装工具并使其生效。对于普通 SDK，默认写入项目版本固定；--global 写入用户默认值。\
+             对 Node 项目中的 `npm:<package>`，默认会修改 package.json 及其原生锁文件，然后在项目 \
+             osdk.toml 中记录 npm 选择，并在 osdk.lock 中记录精确的 Node/npm 元数据。`--global` 会忽略当前项目，安装到 \
+             osdk 管理的隔离前缀，并更新用户配置和锁文件。安装器自动选择会在项目锁格式兼容时优先使用\
+             内嵌 Aube；npm 包构建脚本默认禁用。\n\n示例：\n  \
+             osdk use node@20\n  osdk use npm:prettier@3 -o installer=auto\n  osdk use -g \
+             npm:prettier@3 -o allow_builds=false",
         ),
     );
     m.insert(
         "help.use.arg.tool",
         (
-            "Tool and version, e.g. `node@20`",
-            "工具与版本，例如 `node@20`",
+            "Tool and version, e.g. `node@20` or `npm:prettier@3`",
+            "工具与版本，例如 `node@20` 或 `npm:prettier@3`",
         ),
     );
     m.insert(
         "help.use.flag.global",
         (
-            "Write the pin to the user global config instead of the project",
-            "将固定写入用户全局配置而非项目",
+            "Use global scope; npm packages ignore the current project and use an osdk-managed prefix and user lock",
+            "使用全局作用域；npm 包会忽略当前项目，使用 osdk 管理的隔离前缀和用户锁文件",
+        ),
+    );
+    m.insert(
+        "help.use.flag.opt",
+        (
+            "Backend option as key=value (repeatable); npm packages support `installer=auto|aube|npm|pnpm` (auto prefers compatible Aube) and `allow_builds=false|true|package,...` for non-project installs (npm accepts booleans only; project installs always disable scripts)",
+            "后端选项，形如 key=value（可重复）；npm 包支持 `installer=auto|aube|npm|pnpm`（auto 优先使用兼容的 Aube），非项目安装支持 `allow_builds=false|true|包名,...`（npm 仅接受布尔值；项目安装始终禁用脚本）",
         ),
     );
     m.insert(
@@ -1616,4 +1862,133 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     );
 
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NPM_SCOPE_AND_SCHEMA3_KEYS: &[&str] = &[
+        "err.npm_installer_invalid",
+        "err.npm_scope_invalid",
+        "err.npm_installer_option_type",
+        "err.npm_project_file_not_regular",
+        "err.npm_manager_lock_owner_conflict",
+        "err.npm_declared_installer_unsupported",
+        "err.npm_aube_lock_format_unsupported",
+        "err.npm_installer_lock_conflict",
+        "err.npm_project_lock_ambiguous",
+        "err.npm_native_lock_parse",
+        "err.npm_native_lock_version_numeric_required",
+        "err.npm_native_lock_version_missing",
+        "err.npm_native_lock_version_malformed",
+        "err.npm_aube_lock_version_unsupported",
+        "err.package_manager_manifest_read",
+        "err.package_manager_manifest_parse",
+        "err.package_manager_field_type",
+        "err.package_manager_dev_engines_empty",
+        "err.package_manager_name_missing",
+        "err.package_manager_version_missing",
+        "err.package_manager_declaration_invalid",
+        "err.package_manager_unsupported",
+        "err.package_manager_name_invalid",
+        "err.package_manager_version_not_exact",
+        "err.lock_npm_installer_unsupported",
+        "err.lock_schema3_npm_artifact_forbidden",
+        "err.lock_schema3_npm_private_option_forbidden",
+        "err.lock_schema3_npm_metadata_missing",
+        "err.lock_schema3_npm_legacy_metadata",
+        "err.lock_schema2_npm_schema3_metadata",
+        "err.lock_npm_native_format_unsupported",
+        "err.lock_npm_node_version_not_exact",
+        "err.lock_npm_native_metadata_missing",
+        "help.use.long",
+        "help.use.arg.tool",
+        "help.use.flag.global",
+        "help.use.flag.opt",
+    ];
+
+    #[test]
+    fn npm_scope_and_schema3_messages_are_bilingual_with_matching_placeholders() {
+        let catalog = build();
+        for key in NPM_SCOPE_AND_SCHEMA3_KEYS {
+            let &(english, chinese) = catalog.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(!english.is_empty(), "missing English for {key}");
+            assert!(!chinese.is_empty(), "missing Chinese for {key}");
+            assert_ne!(english, chinese, "Chinese is not translated for {key}");
+            assert_eq!(
+                placeholders(english),
+                placeholders(chinese),
+                "placeholder mismatch for {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_scope_errors_and_use_help_have_chinese_regressions() {
+        let catalog = build();
+        let conflict = crate::i18n::interpolate(
+            catalog["err.npm_manager_lock_owner_conflict"].1,
+            &[
+                ("manifest", "/repo/package.json"),
+                ("manager", "npm"),
+                ("lock", "/repo/pnpm-lock.yaml"),
+                ("owner", "pnpm"),
+            ],
+        );
+        assert!(conflict.contains("声明的包管理器"));
+        assert!(conflict.contains("/repo/package.json"));
+        assert!(conflict.contains("/repo/pnpm-lock.yaml"));
+
+        let schema = crate::i18n::interpolate(
+            catalog["err.lock_schema3_npm_metadata_missing"].1,
+            &[("backend", "npm:prettier"), ("platform", "linux-x64")],
+        );
+        assert!(schema.contains("缺少 npm 元数据"));
+        assert!(schema.contains("npm:prettier"));
+
+        let help = catalog["help.use.long"].1;
+        for expected in [
+            "package.json",
+            "原生锁文件",
+            "osdk.toml",
+            "osdk.lock",
+            "--global",
+            "忽略当前项目",
+            "隔离前缀",
+            "Aube",
+            "构建脚本默认禁用",
+        ] {
+            assert!(
+                help.contains(expected),
+                "Chinese use help misses {expected}"
+            );
+        }
+        let option = catalog["help.use.flag.opt"].1;
+        for expected in [
+            "installer=auto|aube|npm|pnpm",
+            "allow_builds",
+            "项目安装始终禁用脚本",
+        ] {
+            assert!(
+                option.contains(expected),
+                "Chinese -o help misses {expected}"
+            );
+        }
+    }
+
+    fn placeholders(message: &str) -> Vec<&str> {
+        let mut result = Vec::new();
+        let mut rest = message;
+        while let Some(open) = rest.find('{') {
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find('}') else {
+                break;
+            };
+            result.push(&rest[..close]);
+            rest = &rest[close + 1..];
+        }
+        result.sort_unstable();
+        result
+    }
 }

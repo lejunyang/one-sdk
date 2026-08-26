@@ -74,7 +74,7 @@ fn localize_subcommands(cmd: Command) -> Command {
             .long_about(h("help.use.long"))
             .mut_arg("tool", |a| a.help(h("help.use.arg.tool")))
             .mut_arg("global", |a| a.help(h("help.use.flag.global")))
-            .mut_arg("opts", |a| a.help(h("help.opt")))
+            .mut_arg("opts", |a| a.help(h("help.use.flag.opt")))
     })
     .mut_subcommand("uninstall", |c| {
         c.about(h("help.uninstall.about"))
@@ -195,4 +195,38 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_arg("dry_run", |a| a.help(h("help.prune.flag.dry_run")))
     })
     .mut_subcommand("doctor", |c| c.about(h("help.doctor.about")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn use_help_maps_to_npm_scope_specific_text() {
+        let command = localize(crate::cli::Cli::command());
+        let use_command = command.find_subcommand("use").unwrap();
+        let long_help = use_command.get_long_about().unwrap().to_string();
+        for expected in ["package.json", "osdk.toml", "osdk.lock", "--global", "Aube"] {
+            assert!(long_help.contains(expected), "use help misses {expected}");
+        }
+
+        let option_help = use_command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "opts")
+            .and_then(|argument| argument.get_help())
+            .unwrap()
+            .to_string();
+        assert!(option_help.contains("installer=auto|aube|npm|pnpm"));
+        assert!(option_help.contains("allow_builds"));
+
+        let install_command = command.find_subcommand("install").unwrap();
+        let install_option_help = install_command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "opts")
+            .and_then(|argument| argument.get_help())
+            .unwrap()
+            .to_string();
+        assert!(!install_option_help.contains("allow_builds"));
+    }
 }

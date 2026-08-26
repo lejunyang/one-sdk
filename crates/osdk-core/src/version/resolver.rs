@@ -51,15 +51,25 @@ pub struct PackageManagerRequest {
 pub fn package_manager_from_package_json(
     path: &Path,
 ) -> Result<Option<PackageManagerRequest>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| format!("parsing {}: {error}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        crate::t!(
+            "err.package_manager_manifest_read",
+            path = path.display(),
+            error = error
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        crate::t!(
+            "err.package_manager_manifest_parse",
+            path = path.display(),
+            error = error
+        )
+    })?;
 
     if let Some(value) = value.get("packageManager") {
         let raw = value
             .as_str()
-            .ok_or_else(|| format!("{} packageManager must be a string", path.display()))?;
+            .ok_or_else(|| crate::t!("err.package_manager_field_type", path = path.display()))?;
         return parse_package_manager_declaration(raw, path.to_path_buf()).map(Some);
     }
 
@@ -71,9 +81,9 @@ pub fn package_manager_from_package_json(
     };
     let package_manager = if let Some(items) = package_manager.as_array() {
         items.first().ok_or_else(|| {
-            format!(
-                "{} devEngines.packageManager must not be an empty array",
-                path.display()
+            crate::t!(
+                "err.package_manager_dev_engines_empty",
+                path = path.display()
             )
         })?
     } else {
@@ -82,21 +92,11 @@ pub fn package_manager_from_package_json(
     let manager = package_manager
         .get("name")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            format!(
-                "{} devEngines.packageManager is missing name",
-                path.display()
-            )
-        })?;
+        .ok_or_else(|| crate::t!("err.package_manager_name_missing", path = path.display()))?;
     let version = package_manager
         .get("version")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            format!(
-                "{} devEngines.packageManager is missing version",
-                path.display()
-            )
-        })?;
+        .ok_or_else(|| crate::t!("err.package_manager_version_missing", path = path.display()))?;
     parse_package_manager_declaration_parts(manager, version, path.to_path_buf()).map(Some)
 }
 
@@ -142,9 +142,9 @@ fn parse_package_manager_declaration(
     source: PathBuf,
 ) -> Result<PackageManagerRequest, String> {
     let Some((manager, version)) = raw.split_once('@') else {
-        return Err(format!(
-            "{} packageManager must be `<manager>@<exact-version>`",
-            source.display()
+        return Err(crate::t!(
+            "err.package_manager_declaration_invalid",
+            path = source.display()
         ));
     };
     parse_package_manager_declaration_parts(manager, version, source)
@@ -165,10 +165,10 @@ fn validate_supported_package_manager(
     if matches!(request.manager.as_str(), "npm" | "pnpm" | "yarn") {
         Ok(request)
     } else {
-        Err(format!(
-            "{} has unsupported package manager `{}`",
-            request.source.display(),
-            request.manager
+        Err(crate::t!(
+            "err.package_manager_unsupported",
+            path = request.source.display(),
+            manager = request.manager
         ))
     }
 }
@@ -184,15 +184,18 @@ fn parse_package_manager_declaration_parts(
         || manager.contains(char::is_whitespace)
         || manager.contains(['/', '\\', '#', '+'])
     {
-        return Err(format!(
-            "{} has invalid package manager name `{manager}`",
-            source.display()
+        return Err(crate::t!(
+            "err.package_manager_name_invalid",
+            path = source.display(),
+            manager = manager
         ));
     }
     if version.contains(['#', '+', '/', '\\']) || semver::Version::parse(version).is_err() {
-        return Err(format!(
-            "{} package manager `{manager}` requires an exact semver without URL/hash suffix: `{version}`",
-            source.display()
+        return Err(crate::t!(
+            "err.package_manager_version_not_exact",
+            path = source.display(),
+            manager = manager,
+            version = version
         ));
     }
     Ok(PackageManagerRequest {
@@ -537,6 +540,25 @@ mod tests {
             .unwrap();
             assert!(resolve_package_manager(temp.path()).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn package_manager_errors_render_in_chinese() {
+        let invalid = crate::i18n::interpolate(
+            &crate::i18n::trl(
+                crate::i18n::Lang::Zh,
+                "err.package_manager_version_not_exact",
+            ),
+            &[
+                ("path", "/repo/package.json"),
+                ("manager", "npm"),
+                ("version", "latest"),
+            ],
+        );
+        assert_eq!(
+            invalid,
+            "/repo/package.json 中的包管理器 `npm` 必须使用不含 URL/hash 后缀的精确 semver：`latest`"
+        );
     }
 
     #[test]

@@ -140,15 +140,15 @@ pub enum Command {
         filter: Option<String>,
     },
 
-    /// Set the active version (installs if needed) and write a pin.
+    /// Install a tool if needed and make it active.
     #[command(alias = "u")]
     Use {
-        /// e.g. `node@20`.
+        /// Tool and version, e.g. `node@20` or `npm:prettier@3`.
         tool: String,
-        /// Write the pin to the user global config instead of the project.
+        /// Use global scope; npm packages ignore the project and use an isolated prefix/user lock.
         #[arg(short, long)]
         global: bool,
-        /// Backend-specific option as key=value (repeatable). See `install`.
+        /// Backend option as key=value (repeatable); npm supports installer and allow_builds.
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         opts: Vec<String>,
     },
