@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -100,15 +100,19 @@ impl NpmPackageBackend {
         })
     }
 
-    fn install_root(&self, ctx: &Ctx, version: &str) -> PathBuf {
+    pub fn install_root(&self, ctx: &Ctx, version: &str) -> PathBuf {
         ctx.dirs.install_path(self.id(), version)
     }
 
-    fn project_dir(&self, ctx: &Ctx, version: &str) -> PathBuf {
+    pub fn project_dir(&self, ctx: &Ctx, version: &str) -> PathBuf {
         self.install_root(ctx, version).join(PROJECT_DIR)
     }
 
-    fn aube_cache_dir(ctx: &Ctx) -> PathBuf {
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+
+    pub fn aube_cache_dir(ctx: &Ctx) -> PathBuf {
         ctx.dirs
             .cache
             .join(AUBE_DIR)
@@ -116,7 +120,7 @@ impl NpmPackageBackend {
             .join(CACHE_DIR)
     }
 
-    fn aube_store_dir(ctx: &Ctx) -> PathBuf {
+    pub fn aube_store_dir(ctx: &Ctx) -> PathBuf {
         ctx.dirs.store.join(AUBE_DIR)
     }
 
@@ -159,6 +163,14 @@ impl NpmPackageBackend {
         packages.sort();
         packages.dedup();
         Ok(BuildPolicy::Packages(packages))
+    }
+
+    pub fn write_empty_project_manifest(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        Self::write_project_manifest(
+            &self.project_dir(ctx, &tv.version),
+            None,
+            &Self::build_policy(tv)?,
+        )
     }
 
     fn write_project_manifest(
@@ -388,6 +400,111 @@ impl NpmPackageBackend {
             graph_identity.root_source.clone(),
         );
         manifest.normalize()
+    }
+
+    /// Validate a synthetic-project install produced by an explicitly managed
+    /// npm-compatible installer and publish the common dynamic inventory.
+    ///
+    /// The caller owns the package-manager invocation and its native lock. This
+    /// method deliberately reuses the same confined bin-target validation as
+    /// embedded Aube installs, so native npm/pnpm cannot publish paths outside
+    /// the osdk install root.
+    pub fn finalize_global_install(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        bin_dir: &Path,
+        node_version: &str,
+        installer: &str,
+        native_lock: Option<(&str, &str)>,
+    ) -> Result<DynamicToolManifest> {
+        let install_root = self.install_root(ctx, &tv.version);
+        let package_dir = if installer == "npm" {
+            #[cfg(windows)]
+            let modules = install_root.join("node_modules");
+            #[cfg(not(windows))]
+            let modules = install_root.join("lib/node_modules");
+            modules.join(&self.package)
+        } else if installer == "aube" {
+            package_install_dir(&self.project_dir(ctx, &tv.version), &self.package)
+        } else {
+            install_root.clone()
+        };
+        if !package_dir.is_dir() {
+            return Err(Error::other(crate::t!(
+                "err.npm_install_package_missing",
+                package = self.package,
+                path = install_root.display()
+            )));
+        }
+        let mut manifest = DynamicToolManifest::new(self.id())?;
+        manifest.version = Some(tv.version.clone());
+        manifest.bins = discover_global_bins(&install_root, bin_dir)?;
+        manifest
+            .metadata
+            .insert(METADATA_PROVIDER.into(), PROVIDER.into());
+        manifest
+            .metadata
+            .insert(METADATA_PACKAGE.into(), self.package.clone());
+        manifest
+            .metadata
+            .insert(METADATA_RUNTIME.into(), "node".into());
+        manifest
+            .metadata
+            .insert(METADATA_NODE_VERSION.into(), node_version.into());
+        manifest.metadata.insert(
+            METADATA_BUILD_POLICY.into(),
+            Self::build_policy(tv)?.identity(),
+        );
+        manifest
+            .metadata
+            .insert("installer".into(), installer.into());
+        manifest.metadata.insert("scope".into(), "global".into());
+        if let Some((native_lock_format, native_lock_sha256)) = native_lock {
+            manifest
+                .metadata
+                .insert("native_lock_format".into(), native_lock_format.into());
+            manifest
+                .metadata
+                .insert(METADATA_LOCK_SHA256.into(), native_lock_sha256.into());
+        }
+        let manifest = manifest.normalize()?;
+        manifest.write_atomic(&install_root)?;
+        std::fs::write(install_root.join(".osdk-complete"), b"")
+            .map_err(|error| Error::io(install_root.join(".osdk-complete"), error))?;
+        Ok(manifest)
+    }
+
+    fn global_manifest(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Option<DynamicToolManifest>> {
+        let install_root = self.install_root(ctx, &tv.version);
+        let path = DynamicToolManifest::manifest_path(&install_root);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let manifest = DynamicToolManifest::load(&install_root)?;
+        if manifest.metadata.get("scope").map(String::as_str) != Some("global") {
+            return Ok(None);
+        }
+        if manifest.id != self.id || manifest.version.as_deref() != Some(tv.version.as_str()) {
+            return Err(Error::other(format!(
+                "global npm inventory identity mismatch at {}",
+                path.display()
+            )));
+        }
+        let canonical_root =
+            dunce::canonicalize(&install_root).map_err(|error| Error::io(&install_root, error))?;
+        for bin in &manifest.bins {
+            let path = install_root.join(&bin.path);
+            let canonical = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+            if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
+                return Err(Error::other(crate::t!(
+                    "err.npm_bin_outside_install_root",
+                    name = bin.name,
+                    path = install_root.display()
+                )));
+            }
+        }
+        Ok(Some(manifest))
     }
 }
 
@@ -629,6 +746,16 @@ impl Backend for NpmPackageBackend {
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
+        if let Some(manifest) = self.global_manifest(ctx, tv)? {
+            let install_root = self.install_root(ctx, &tv.version);
+            return Ok(manifest
+                .bins
+                .iter()
+                .filter_map(|bin| install_root.join(&bin.path).parent().map(Path::to_path_buf))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect());
+        }
         Ok(vec![self
             .project_dir(ctx, &tv.version)
             .join("node_modules")
@@ -655,6 +782,9 @@ impl Backend for NpmPackageBackend {
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
+        if let Some(manifest) = self.global_manifest(ctx, tv)? {
+            return Ok(manifest.bins.into_iter().map(|bin| bin.name).collect());
+        }
         let paths = self.bin_paths(ctx, tv)?;
         let mut names = Vec::new();
         for path in paths {
@@ -1047,6 +1177,58 @@ fn discover_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolB
         )));
     }
     Ok(bins)
+}
+
+fn discover_global_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolBin>> {
+    let mut bins = Vec::new();
+    for name in discover_bin_names(bin_dir)? {
+        let absolute = resolve_bin_target(bin_dir, &name)?;
+        absolute.strip_prefix(install_root).map_err(|_| {
+            Error::other(crate::t!(
+                "err.npm_bin_outside_install_root",
+                name = name,
+                path = install_root.display()
+            ))
+        })?;
+        let entry = global_bin_entry(bin_dir, &name).ok_or_else(|| {
+            Error::other(crate::t!(
+                "err.npm_bin_target_unresolved",
+                name = name,
+                path = bin_dir.display()
+            ))
+        })?;
+        let relative = entry.strip_prefix(install_root).map_err(|_| {
+            Error::other(crate::t!(
+                "err.npm_bin_outside_install_root",
+                name = name,
+                path = install_root.display()
+            ))
+        })?;
+        bins.push(DynamicToolBin {
+            name,
+            path: relative.to_string_lossy().replace('\\', "/"),
+        });
+    }
+    if bins.is_empty() {
+        return Err(Error::other(crate::t!(
+            "err.npm_bins_not_discovered",
+            path = bin_dir.display()
+        )));
+    }
+    Ok(bins)
+}
+
+fn global_bin_entry(bin_dir: &Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidates = [
+        bin_dir.join(format!("{name}.cmd")),
+        bin_dir.join(format!("{name}.exe")),
+        bin_dir.join(format!("{name}.bat")),
+        bin_dir.join(name),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [bin_dir.join(name)];
+    candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn discover_bin_names(bin_dir: &Path) -> Result<Vec<String>> {
@@ -1676,6 +1858,37 @@ mod tests {
                 name: "prettier".into(),
                 path: "project/node_modules/prettier/bin/prettier.js".into(),
             }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_inventory_drives_native_bin_paths_after_restart() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let version = ToolVersion::new("npm:prettier", "3.6.2");
+        let install_root = backend.install_root(&ctx, &version.version);
+        let bin_dir = install_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let executable = bin_dir.join("prettier");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut manifest = DynamicToolManifest::new(backend.id()).unwrap();
+        manifest.version = Some(version.version.clone());
+        manifest.bins = vec![DynamicToolBin {
+            name: "prettier".into(),
+            path: "bin/prettier".into(),
+        }];
+        manifest.metadata.insert("scope".into(), "global".into());
+        manifest.write_atomic(&install_root).unwrap();
+
+        assert_eq!(backend.bin_paths(&ctx, &version).unwrap(), vec![bin_dir]);
+        assert_eq!(
+            backend.bin_names(&ctx, &version).unwrap(),
+            vec!["prettier".to_string()]
         );
     }
 

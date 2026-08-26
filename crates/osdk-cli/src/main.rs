@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod commands;
 mod config_edit;
+mod global_npm_use;
 mod localize;
 mod lockfile;
 mod prompt;

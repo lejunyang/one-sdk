@@ -3085,6 +3085,7 @@ dependencies = [
  "osdk-core",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tar",
  "tempfile",
  "tokio",
@@ -3092,6 +3093,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
