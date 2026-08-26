@@ -13,6 +13,10 @@ fn osdk() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_osdk"))
 }
 
+fn osdk_aube() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_osdk-aube"))
+}
+
 fn platform_key() -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
@@ -74,7 +78,11 @@ fn run_isolated_in_with_env(
         .env("OSDK_CACHE_DIR", &cache)
         .env("OSDK_CONFIG_DIR", &config)
         .env("OSDK_STORE_DIR", &store)
-        .env("OSDK_INSTALL_DIR", &installs);
+        .env("OSDK_INSTALL_DIR", &installs)
+        // Referencing Cargo's binary variable makes the sidecar an explicit
+        // integration-test artifact. Individual tests can still override it
+        // with a protocol fixture below.
+        .env("OSDK_AUBE_BIN", osdk_aube());
     for (key, value) in env {
         command.env(key, value);
     }
@@ -1346,6 +1354,92 @@ fn install_without_arguments_consumes_matching_platform_lock() {
 
 #[cfg(unix)]
 #[test]
+fn use_preserves_unique_indirect_project_key_for_preinstalled_backend() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"tool.node\" = \"node@1.0.0\"\n",
+    )
+    .unwrap();
+
+    let install = temporary.path().join("installs/node/1.0.0");
+    let node_bin = install.join("bin/node");
+    write_executable(&node_bin, "#!/bin/sh\nexit 0\n");
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let shim_bin_dir = temporary.path().join("bin");
+    write_executable(
+        &shim_bin_dir.join("osdk-shim"),
+        "#!/bin/sh\nprintf 'shim placeholder\\n'\n",
+    );
+    let data_bin = temporary.path().join("data/bin");
+    std::fs::create_dir_all(&data_bin).unwrap();
+    std::os::unix::fs::symlink(shim_bin_dir.join("osdk-shim"), data_bin.join("osdk-shim")).unwrap();
+
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["--offline", "use", "tool.node"],
+        &[
+            ("PATH", shim_bin_dir.to_str().unwrap()),
+            ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
+    assert!(
+        config.contains("\"tool.node\" = \"node@1.0.0\""),
+        "{config}"
+    );
+    assert!(!config.contains("\nnode = "), "{config}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("pinned tool.node@1.0.0"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn global_use_rejects_indirect_npm_alias_without_reading_project_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[tools]\n\"tool.fixture\" = { version = \"npm:fixture-cli@1.2.3\", installer = \"aube\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"tool.fixture\" = { version = \"npm:fixture-cli@9.9.9\", installer = \"npm\" }\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["use", "--global", "tool.fixture"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap())],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("global npm package aliases are not supported"),
+        "{stderr}"
+    );
+    let config = std::fs::read_to_string(temporary.path().join("config/config.toml")).unwrap();
+    assert!(config.contains("installer = \"aube\""), "{config}");
+    assert!(!config.contains("9.9.9"), "{config}");
+}
+
+#[cfg(unix)]
+#[test]
 fn artifact_lock_reinstalls_offline_and_rejects_tampering() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -2316,6 +2410,48 @@ fn write_fake_registry_manager(
     }
 }
 
+#[cfg(unix)]
+fn write_fake_aube_helper(root: &Path) -> PathBuf {
+    let helper = root.join("bin/osdk-aube-fixture");
+    write_executable(
+        &helper,
+        r####"#!/bin/sh
+set -eu
+log="$NPM_CONFIG_CACHE_DIR/sidecar.log"
+mkdir -p "$NPM_CONFIG_CACHE_DIR"
+{
+  printf 'args=%s\n' "$*"
+  printf 'cwd=%s\n' "$PWD"
+  printf 'HOME=%s\n' "$HOME"
+  printf 'XDG_CONFIG_HOME=%s\n' "$XDG_CONFIG_HOME"
+  printf 'XDG_DATA_HOME=%s\n' "$XDG_DATA_HOME"
+  printf 'XDG_CACHE_HOME=%s\n' "$XDG_CACHE_HOME"
+  printf 'NPM_CONFIG_USERCONFIG=%s\n' "$NPM_CONFIG_USERCONFIG"
+  printf 'NPM_CONFIG_GLOBALCONFIG=%s\n' "$NPM_CONFIG_GLOBALCONFIG"
+  printf 'NPM_CONFIG_GLOBAL_DIR=%s\n' "$NPM_CONFIG_GLOBAL_DIR"
+  printf 'NPM_CONFIG_GLOBAL_BIN_DIR=%s\n' "$NPM_CONFIG_GLOBAL_BIN_DIR"
+  printf 'NPM_CONFIG_STORE_DIR=%s\n' "$NPM_CONFIG_STORE_DIR"
+  printf 'NPM_CONFIG_CACHE_DIR=%s\n' "$NPM_CONFIG_CACHE_DIR"
+  printf 'NPM_CONFIG_NODE_VERSION=%s\n' "$NPM_CONFIG_NODE_VERSION"
+  printf 'AUBE_RUNTIME_DIR=%s\n' "$AUBE_RUNTIME_DIR"
+  printf 'AUBE_NO_UPDATE_CHECK=%s\n' "$AUBE_NO_UPDATE_CHECK"
+  printf 'CI=%s\n' "${CI-unset}"
+  printf 'PATH=%s\n' "$PATH"
+} >> "$log"
+pkg_root="$NPM_CONFIG_GLOBAL_DIR/global-aube"
+install="$pkg_root/fixture-install"
+mkdir -p "$install/node_modules/fixture-cli" "$NPM_CONFIG_GLOBAL_BIN_DIR"
+printf '%s\n' '{"name":"aube-global","version":"0.0.0","private":true,"dependencies":{"fixture-cli":"1.2.3"}}' > "$install/package.json"
+printf '%s\n' 'lockfileVersion: '\''9.0'\''' 'importers:' '  .:' '    dependencies:' '      fixture-cli:' '        specifier: 1.2.3' '        version: 1.2.3' 'packages:' '  fixture-cli@1.2.3:' '    resolution: {integrity: sha512-Zml4dHVyZQ==}' > "$install/aube-lock.yaml"
+printf '%s\n' '{"name":"fixture-cli","version":"1.2.3","bin":{"fixture-cli":"cli.js"}}' > "$install/node_modules/fixture-cli/package.json"
+printf '%s\n' '#!/bin/sh' 'echo "aube-fixture:$*"' > "$install/node_modules/fixture-cli/cli.js"
+chmod +x "$install/node_modules/fixture-cli/cli.js"
+ln -s "$install" "$pkg_root/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"####,
+    );
+    helper
+}
+
 #[cfg(not(windows))]
 fn registry_fixture(requests: usize, healthy: bool) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2333,12 +2469,12 @@ fn registry_fixture(requests: usize, healthy: bool) -> (String, std::thread::Joi
                 request.extend_from_slice(&buffer[..read]);
             }
             let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with("GET /npm/latest "), "{request}");
+            assert!(request.starts_with("GET /-/ping "), "{request}");
             let lowercase = request.to_ascii_lowercase();
             assert!(!lowercase.contains("authorization:"), "{request}");
             assert!(!lowercase.contains("cookie:"), "{request}");
             if healthy {
-                let body = r#"{"name":"npm","version":"1.0.0"}"#;
+                let body = r#"{}"#;
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2380,6 +2516,379 @@ fn write_registry_config(root: &Path, urls: &[&str]) {
         format!("[registries.npm]\nurls = [{urls}]\nprobe_timeout_ms = 500\n"),
     )
     .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn global_aube_use_publishes_relocatable_install_and_reuses_it_offline() {
+    let temporary = tempfile::tempdir().unwrap();
+    let caller = temporary.path().join("caller");
+    std::fs::create_dir_all(&caller).unwrap();
+    let caller_manifest = caller.join("package.json");
+    std::fs::write(&caller_manifest, r#"{"name":"untouched"}"#).unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    let (registry, registry_thread) = registry_fixture(1, true);
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        format!(
+            "[sources]\nselection = \"ordered\"\n[registries.npm]\nurls = [{registry:?}]\nprobe_timeout_ms = 500\n[tools]\nnode = \"20.0.0\"\n"
+        ),
+    )
+    .unwrap();
+    write_executable(
+        &temporary.path().join("installs/node/20.0.0/bin/node"),
+        "#!/bin/sh\nexec /bin/sh \"$@\"\n",
+    );
+    std::fs::write(
+        temporary.path().join("installs/node/20.0.0/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+    let helper = write_fake_aube_helper(temporary.path());
+    let helper_value = helper.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &caller,
+        &[
+            "use",
+            "--global",
+            "npm:fixture-cli@1.2.3",
+            "-o",
+            "installer=aube",
+            "-o",
+            "allow_builds=@Scope/Native,Plain-Native",
+        ],
+        &[
+            ("OSDK_AUBE_BIN", helper_value.as_str()),
+            ("PATH", "/usr/bin:/bin"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "root={}\nstdout={}\nstderr={}",
+        temporary.path().display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    registry_thread.join().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&caller_manifest).unwrap(),
+        r#"{"name":"untouched"}"#
+    );
+
+    let log =
+        std::fs::read_to_string(temporary.path().join("cache/aube/v1/cache/sidecar.log")).unwrap();
+    assert_eq!(
+        log.lines().filter(|line| line.starts_with("args=")).count(),
+        1
+    );
+    let args = log.lines().find(|line| line.starts_with("args=")).unwrap();
+    let expected_registry_arg = format!("--registry={registry}");
+    for expected in [
+        "add --global --save-exact --disable-gvs --config.nodeLinker=hoisted",
+        "--allow-build=@scope/native",
+        "--allow-build=plain-native",
+        &expected_registry_arg,
+        "fixture-cli@1.2.3",
+    ] {
+        assert!(args.contains(expected), "missing {expected} in {args}");
+    }
+    assert!(log.contains("CI=unset\n"), "{log}");
+    assert!(log.contains("AUBE_NO_UPDATE_CHECK=1\n"), "{log}");
+    assert!(log.lines().any(|line| {
+        line.starts_with("HOME=")
+            && line.contains(".osdk-stage-")
+            && line.ends_with("/native-config/home")
+    }));
+    for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"] {
+        assert!(
+            log.lines().any(|line| {
+                line.starts_with(&format!("{key}=")) && line.contains(".osdk-stage-")
+            }),
+            "{log}"
+        );
+    }
+    assert!(log.lines().any(|line| {
+        line.starts_with("NPM_CONFIG_GLOBAL_DIR=")
+            && line.contains(".osdk-stage-")
+            && line.ends_with("/aube-global")
+    }));
+    assert!(log.lines().any(|line| {
+        line.starts_with("NPM_CONFIG_GLOBAL_BIN_DIR=")
+            && line.contains(".osdk-stage-")
+            && line.ends_with("/bin")
+    }));
+    assert!(log.lines().any(|line| {
+        line.starts_with("AUBE_RUNTIME_DIR=")
+            && line.contains(".osdk-stage-")
+            && line.ends_with("/aube-runtime-disabled")
+    }));
+    assert!(log.contains(&format!(
+        "NPM_CONFIG_STORE_DIR={}\n",
+        temporary.path().join("store/aube").display()
+    )));
+    assert!(log.contains(&format!(
+        "NPM_CONFIG_CACHE_DIR={}\n",
+        temporary.path().join("cache/aube/v1/cache").display()
+    )));
+    assert!(log.contains("NPM_CONFIG_NODE_VERSION=20.0.0\n"), "{log}");
+    let path_line = log.lines().find(|line| line.starts_with("PATH=")).unwrap();
+    assert!(path_line.contains(
+        &temporary
+            .path()
+            .join("installs/node/20.0.0/bin")
+            .display()
+            .to_string()
+    ));
+
+    let final_root = temporary
+        .path()
+        .join("installs/npm-global/fixture-cli/1.2.3");
+    assert!(final_root.join("project/aube-lock.yaml").is_file());
+    assert!(final_root
+        .join("project/node_modules/fixture-cli/package.json")
+        .is_file());
+    assert!(final_root.join(".osdk-complete").is_file());
+    assert!(!final_root.join("aube-global").exists());
+    assert!(!final_root.join("native-config").exists());
+    assert!(!final_root.join("aube-runtime-disabled").exists());
+    let launcher = final_root.join("bin/fixture-cli");
+    assert_eq!(
+        std::fs::canonicalize(&launcher).unwrap(),
+        std::fs::canonicalize(final_root.join("project/node_modules/fixture-cli/cli.js")).unwrap()
+    );
+    let executed = Command::new(&launcher).arg("works").output().unwrap();
+    assert!(executed.status.success());
+    assert_eq!(
+        String::from_utf8(executed.stdout).unwrap(),
+        "aube-fixture:works\n"
+    );
+
+    let location = run_isolated(
+        temporary.path(),
+        &["where", "--global", "npm:fixture-cli@1.2.3"],
+    );
+    assert!(
+        location.status.success(),
+        "{}",
+        String::from_utf8_lossy(&location.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(location.stdout).unwrap().trim(),
+        final_root.display().to_string()
+    );
+    let config = std::fs::read_to_string(temporary.path().join("config/config.toml")).unwrap();
+    assert!(config.contains("installer = \"aube\""), "{config}");
+    let lock = std::fs::read_to_string(temporary.path().join("config/osdk.lock")).unwrap();
+    assert!(lock.contains("installer = \"aube\""), "{lock}");
+    assert!(lock.contains("scope = \"global\""), "{lock}");
+
+    let offline_helper_marker = temporary.path().join("offline-helper-ran");
+    write_executable(
+        &helper,
+        &format!(
+            "#!/bin/sh\nprintf ran > '{}'\nexit 79\n",
+            offline_helper_marker.display()
+        ),
+    );
+    let offline = run_isolated_in_with_env(
+        temporary.path(),
+        &caller,
+        &[
+            "--offline",
+            "use",
+            "--global",
+            "npm:fixture-cli@1.2.3",
+            "-o",
+            "installer=aube",
+        ],
+        &[("OSDK_AUBE_BIN", helper_value.as_str())],
+    );
+    assert!(
+        offline.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&offline.stdout),
+        String::from_utf8_lossy(&offline.stderr)
+    );
+    assert!(
+        !offline_helper_marker.exists(),
+        "offline reuse unexpectedly launched Aube"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temporary.path().join("cache/aube/v1/cache/sidecar.log"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("args="))
+            .count(),
+        1
+    );
+
+    let uninstall = run_isolated(
+        temporary.path(),
+        &["--yes", "uninstall", "--global", "npm:fixture-cli@1.2.3"],
+    );
+    assert!(
+        uninstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    assert!(!final_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_global_aube_use_rejects_before_mutation_or_helper_spawn() {
+    let temporary = tempfile::tempdir().unwrap();
+    let marker = temporary.path().join("helper-ran");
+    let helper = temporary.path().join("bin/osdk-aube-must-not-run");
+    write_executable(
+        &helper,
+        &format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+    );
+    let helper_value = helper.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "--offline",
+            "use",
+            "--global",
+            "npm:fixture-cli@1.2.3",
+            "-o",
+            "installer=aube",
+        ],
+        &[("OSDK_AUBE_BIN", helper_value.as_str())],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("global Aube installs are unavailable in offline mode"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!marker.exists());
+    assert!(!temporary.path().join("installs/npm-global").exists());
+    assert!(!temporary.path().join("config/config.toml").exists());
+    assert!(!temporary.path().join("config/osdk.lock").exists());
+    assert!(!temporary.path().join("cache/aube").exists());
+    assert!(!temporary.path().join("store/aube").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn authenticated_global_use_fails_before_public_metadata_probe_or_installer_spawn() {
+    for installer in ["aube", "npm", "pnpm"] {
+        for native_policy in ["auth-env", "private-npmrc"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+            std::fs::write(
+                temporary.path().join("config/config.toml"),
+                format!(
+                    r#"[sources]
+selection = "ordered"
+
+[sources."npm:fixture-cli"]
+disable = ["npmmirror", "npm"]
+
+[[sources."npm:fixture-cli".custom]]
+id = "public-fixture"
+kind = "custom"
+index_url = {endpoint:?}
+download_url = {endpoint:?}
+
+[registries.npm]
+urls = [{endpoint:?}]
+probe_timeout_ms = 500
+"#
+                ),
+            )
+            .unwrap();
+
+            if native_policy == "private-npmrc" {
+                std::fs::create_dir_all(temporary.path().join("home")).unwrap();
+                std::fs::write(
+                    temporary.path().join("home/.npmrc"),
+                    "registry=https://packages.corp.invalid/\n",
+                )
+                .unwrap();
+            }
+            let marker = temporary
+                .path()
+                .join(format!("{installer}-{native_policy}-spawned"));
+            let marker_value = marker.display().to_string();
+            let mut environment = Vec::new();
+            if native_policy == "auth-env" {
+                environment.push((
+                    "NPM_TOKEN".to_string(),
+                    "must-not-appear-in-errors".to_string(),
+                ));
+            }
+            if installer == "aube" {
+                let helper = temporary.path().join("bin/osdk-aube-must-not-run");
+                write_executable(
+                    &helper,
+                    &format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+                );
+                let helper_value = helper.display().to_string();
+                environment.push(("OSDK_AUBE_BIN".into(), helper_value));
+            } else {
+                write_fake_registry_manager(
+                    temporary.path(),
+                    installer,
+                    "10.0.0",
+                    installer,
+                    "#!/bin/sh\nprintf ran > \"$OSDK_TEST_MARKER\"\n",
+                );
+                environment.push(("OSDK_TEST_MARKER".into(), marker_value));
+            }
+            let environment = environment
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let installer_option = format!("installer={installer}");
+            let output = run_isolated_in_with_env(
+                temporary.path(),
+                temporary.path(),
+                &[
+                    "use",
+                    "--global",
+                    "npm:fixture-cli",
+                    "-o",
+                    &installer_option,
+                ],
+                &environment,
+            );
+
+            assert!(
+                !output.status.success(),
+                "{installer} unexpectedly succeeded"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("cannot safely isolate global"),
+                "{installer}: {stderr}"
+            );
+            let expected_reason = if native_policy == "auth-env" {
+                "NPM_TOKEN"
+            } else {
+                "private or unknown native registry"
+            };
+            assert!(stderr.contains(expected_reason), "{installer}: {stderr}");
+            assert!(
+                !stderr.contains("must-not-appear-in-errors"),
+                "{installer}: {stderr}"
+            );
+            assert!(
+                listener.accept().is_err(),
+                "{installer} contacted a public metadata or registry endpoint"
+            );
+            assert!(!marker.exists(), "{installer} spawned its installer/helper");
+            assert!(!temporary.path().join("installs/npm-global").exists());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2529,6 +3038,166 @@ printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
         assert!(!hook.contains("/node_modules/.bin"), "{hook}");
         assert!(!temporary.path().join("installs/npm/fixture-cli").exists());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn project_npm_use_preserves_indirect_alias_key_while_curated_metadata_stays_canonical() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let nested = project.join("src");
+    let project_bin = project.join("node_modules/.bin");
+    std::fs::create_dir_all(&project_bin).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"npm@10.0.0","dependencies":{"fixture-cli":"^1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"tool.fixture\" = { version = \"npm:fixture-cli@1.0.0\", installer = \"npm\" }\n\"tool.fixture.same\" = \"npm:fixture-cli@1.2.3\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[sources]\nselection = \"ordered\"\n[tools]\nnode = \"20.0.0\"\n",
+    )
+    .unwrap();
+
+    let marker = temporary.path().join("npm.calls");
+    let native_lock = project.join("package-lock.json");
+    let installed_package = project.join("node_modules/fixture-cli");
+    std::fs::create_dir_all(&installed_package).unwrap();
+    std::fs::write(
+        installed_package.join("package.json"),
+        r#"{"name":"fixture-cli","version":"1.2.3","bin":{"fixture-cli":"cli.js"}}"#,
+    )
+    .unwrap();
+    std::fs::write(installed_package.join("cli.js"), "fixture\n").unwrap();
+    std::os::unix::fs::symlink(
+        installed_package.join("cli.js"),
+        project_bin.join("fixture-cli"),
+    )
+    .unwrap();
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        r#"#!/bin/sh
+printf 'call\n' >> "$OSDK_TEST_MARKER"
+printf 'args=%s\n' "$*" >> "$OSDK_TEST_MARKER"
+printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
+"#,
+    );
+    let marker_value = marker.display().to_string();
+    let lock_value = native_lock.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &nested,
+        &["use", "tool.fixture@1.2.3"],
+        &[
+            ("OSDK_TEST_MARKER", marker_value.as_str()),
+            ("OSDK_TEST_LOCK", lock_value.as_str()),
+            ("OSDK_TEST_LOCK_CONTENTS", r#"{"lockfileVersion":3}"#),
+            ("npm_config_registry", "https://registry.example.test/"),
+            ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
+    assert!(config.contains("\"tool.fixture\" = {"), "{config}");
+    assert!(
+        config.contains("version = \"npm:fixture-cli@1.2.3\""),
+        "{config}"
+    );
+    assert!(
+        config.contains("\"tool.fixture.same\" = \"npm:fixture-cli@1.2.3\""),
+        "{config}"
+    );
+    assert!(!config.contains("\"npm:fixture-cli\" = {"), "{config}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("pinned tool.fixture@1.2.3"), "{stdout}");
+
+    let hook = run_isolated_in(temporary.path(), &nested, &["hook-env", "--shell", "bash"]);
+    assert!(
+        hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hook.stderr)
+    );
+    let hook = String::from_utf8(hook.stdout).unwrap();
+    assert!(hook.contains("/.osdk/npm-bin/generations/"), "{hook}");
+
+    let calls = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(
+        calls.lines().filter(|line| *line == "call").count(),
+        1,
+        "{calls}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn project_npm_use_rejects_conflicting_aliases_before_installer_mutation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let nested = project.join("src");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"packageManager":"npm@10.0.0"}"#,
+    )
+    .unwrap();
+    let config_path = project.join("osdk.toml");
+    let original_config = "[tools]\n\"tool.alpha\" = { version = \"npm:fixture-cli@1.0.0\", installer = \"npm\" }\n\"tool.beta\" = \"npm:fixture-cli@2.0.0\"\n";
+    std::fs::write(&config_path, original_config).unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[sources]\nselection = \"ordered\"\n[tools]\nnode = \"20.0.0\"\n",
+    )
+    .unwrap();
+
+    let marker = temporary.path().join("npm.calls");
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        "#!/bin/sh\nprintf 'called\n' >> \"$OSDK_TEST_MARKER\"\n",
+    );
+    let marker_value = marker.display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &nested,
+        &["use", "tool.alpha@3.0.0"],
+        &[
+            ("OSDK_TEST_MARKER", marker_value.as_str()),
+            ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+        ],
+    );
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("npm:fixture-cli"), "{stderr}");
+    assert!(stderr.contains("tool.alpha"), "{stderr}");
+    assert!(stderr.contains("3.0.0"), "{stderr}");
+    assert!(stderr.contains("tool.beta"), "{stderr}");
+    assert!(stderr.contains("2.0.0"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        original_config
+    );
+    assert!(!marker.exists());
+    assert!(!project.join("osdk.lock").exists());
+    assert!(!project.join(".osdk/npm-bin/current.json").exists());
 }
 
 #[cfg(unix)]
