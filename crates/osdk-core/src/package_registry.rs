@@ -2496,6 +2496,9 @@ npmRegistries:
             sources,
             tools: Default::default(),
             tool_configs: Default::default(),
+            global_tools: Default::default(),
+            global_tool_configs: Default::default(),
+            tool_origins: Default::default(),
             aliases: Default::default(),
             project_config_path: None,
         };

@@ -41,6 +41,65 @@ pub struct PackageManagerRequest {
     pub source: PathBuf,
 }
 
+/// Read the package-manager declaration from one specific `package.json`.
+///
+/// Unlike [`resolve_package_manager`], this helper does not walk ancestors and
+/// does not restrict the manager name. Callers that treat the nearest manifest
+/// as a hard project boundary can therefore inspect that exact declaration and
+/// apply their own supported-manager policy. `packageManager` wins over
+/// `devEngines.packageManager`, matching Node/Corepack conventions.
+pub fn package_manager_from_package_json(
+    path: &Path,
+) -> Result<Option<PackageManagerRequest>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("parsing {}: {error}", path.display()))?;
+
+    if let Some(value) = value.get("packageManager") {
+        let raw = value
+            .as_str()
+            .ok_or_else(|| format!("{} packageManager must be a string", path.display()))?;
+        return parse_package_manager_declaration(raw, path.to_path_buf()).map(Some);
+    }
+
+    let Some(package_manager) = value
+        .get("devEngines")
+        .and_then(|value| value.get("packageManager"))
+    else {
+        return Ok(None);
+    };
+    let package_manager = if let Some(items) = package_manager.as_array() {
+        items.first().ok_or_else(|| {
+            format!(
+                "{} devEngines.packageManager must not be an empty array",
+                path.display()
+            )
+        })?
+    } else {
+        package_manager
+    };
+    let manager = package_manager
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "{} devEngines.packageManager is missing name",
+                path.display()
+            )
+        })?;
+    let version = package_manager
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "{} devEngines.packageManager is missing version",
+                path.display()
+            )
+        })?;
+    parse_package_manager_declaration_parts(manager, version, path.to_path_buf()).map(Some)
+}
+
 pub fn resolve_package_manager(start_dir: &Path) -> Result<Option<PackageManagerRequest>, String> {
     for directory in start_dir.ancestors() {
         for name in PROJECT_CONFIG_NAMES {
@@ -57,43 +116,8 @@ pub fn resolve_package_manager(start_dir: &Path) -> Result<Option<PackageManager
         if !path.is_file() {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| format!("reading {}: {error}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| format!("parsing {}: {error}", path.display()))?;
-        if let Some(raw) = value
-            .get("packageManager")
-            .and_then(serde_json::Value::as_str)
-        {
-            return parse_package_manager_field(raw, path).map(Some);
-        }
-        if let Some(package_manager) = value
-            .get("devEngines")
-            .and_then(|value| value.get("packageManager"))
-        {
-            let package_manager = package_manager
-                .as_array()
-                .and_then(|items| items.first())
-                .unwrap_or(package_manager);
-            let manager = package_manager
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    format!(
-                        "{} devEngines.packageManager is missing name",
-                        path.display()
-                    )
-                })?;
-            let version = package_manager
-                .get("version")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    format!(
-                        "{} devEngines.packageManager is missing version",
-                        path.display()
-                    )
-                })?;
-            return parse_package_manager(manager, version, path).map(Some);
+        if let Some(request) = package_manager_from_package_json(&path)? {
+            return validate_supported_package_manager(request).map(Some);
         }
     }
     Ok(None)
@@ -113,17 +137,17 @@ fn read_project_package_manager(path: &Path) -> Option<(String, String)> {
     None
 }
 
-fn parse_package_manager_field(
+fn parse_package_manager_declaration(
     raw: &str,
     source: PathBuf,
 ) -> Result<PackageManagerRequest, String> {
     let Some((manager, version)) = raw.split_once('@') else {
         return Err(format!(
-            "{} packageManager must be `<npm|pnpm|yarn>@<exact-version>`",
+            "{} packageManager must be `<manager>@<exact-version>`",
             source.display()
         ));
     };
-    parse_package_manager(manager, version, source)
+    parse_package_manager_declaration_parts(manager, version, source)
 }
 
 fn parse_package_manager(
@@ -131,9 +155,37 @@ fn parse_package_manager(
     version: &str,
     source: PathBuf,
 ) -> Result<PackageManagerRequest, String> {
-    if !matches!(manager, "npm" | "pnpm" | "yarn") {
+    let request = parse_package_manager_declaration_parts(manager, version, source)?;
+    validate_supported_package_manager(request)
+}
+
+fn validate_supported_package_manager(
+    request: PackageManagerRequest,
+) -> Result<PackageManagerRequest, String> {
+    if matches!(request.manager.as_str(), "npm" | "pnpm" | "yarn") {
+        Ok(request)
+    } else {
+        Err(format!(
+            "{} has unsupported package manager `{}`",
+            request.source.display(),
+            request.manager
+        ))
+    }
+}
+
+fn parse_package_manager_declaration_parts(
+    manager: &str,
+    version: &str,
+    source: PathBuf,
+) -> Result<PackageManagerRequest, String> {
+    let manager = manager.trim();
+    let version = version.trim();
+    if manager.is_empty()
+        || manager.contains(char::is_whitespace)
+        || manager.contains(['/', '\\', '#', '+'])
+    {
         return Err(format!(
-            "{} has unsupported package manager `{manager}`",
+            "{} has invalid package manager name `{manager}`",
             source.display()
         ));
     }
@@ -144,8 +196,8 @@ fn parse_package_manager(
         ));
     }
     Ok(PackageManagerRequest {
-        manager: manager.into(),
-        version: version.into(),
+        manager: manager.to_ascii_lowercase(),
+        version: version.to_string(),
         source,
     })
 }
@@ -442,6 +494,20 @@ mod tests {
         let selected = resolve_package_manager(temp.path()).unwrap().unwrap();
         assert_eq!(selected.manager, "yarn");
         assert_eq!(selected.version, "4.10.3");
+    }
+
+    #[test]
+    fn exact_package_json_helper_stays_at_one_manifest_and_preserves_unknown_manager() {
+        let temporary = tempfile::tempdir().unwrap();
+        let package = temporary.path().join("package.json");
+        std::fs::write(&package, r#"{"packageManager":"bun@1.2.3"}"#).unwrap();
+
+        let selected = package_manager_from_package_json(&package)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.manager, "bun");
+        assert_eq!(selected.version, "1.2.3");
+        assert_eq!(selected.source, package);
     }
 
     #[test]

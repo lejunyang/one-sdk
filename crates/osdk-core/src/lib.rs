@@ -25,6 +25,7 @@ pub mod inventory;
 pub mod lock;
 pub mod model;
 pub mod npm;
+pub mod npm_tools;
 pub mod package_registry;
 pub mod pipeline;
 pub mod platform;

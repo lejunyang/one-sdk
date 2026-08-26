@@ -142,6 +142,12 @@ impl Dirs {
         self.config.join("config.toml")
     }
 
+    /// User-scoped lockfile. Keeping it beside `config.toml` gives global tool
+    /// pins a deterministic lock independent of the current working directory.
+    pub fn user_lock_file(&self) -> PathBuf {
+        self.config.join("osdk.lock")
+    }
+
     /// Create the core directory tree (idempotent).
     pub fn ensure(&self) -> Result<()> {
         for d in [
@@ -285,6 +291,7 @@ mod tests {
         assert_eq!(d.installs, PathBuf::from("/x/data/installs"));
         assert_eq!(d.shims(), PathBuf::from("/x/data/shims"));
         assert_eq!(d.models(), PathBuf::from("/x/data/models"));
+        assert_eq!(d.user_lock_file(), PathBuf::from("/x/cfg/osdk.lock"));
         assert_eq!(
             d.install_path("node", "20.1.0"),
             PathBuf::from("/x/data/installs/node/20.1.0")

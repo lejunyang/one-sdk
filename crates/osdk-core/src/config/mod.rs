@@ -27,10 +27,24 @@ pub struct Config {
     pub tools: BTreeMap<String, String>,
     /// Merged tool config entries with structured options preserved.
     pub tool_configs: BTreeMap<String, ToolConfigEntry>,
+    /// Tool pins contributed by the user-global config before project merging.
+    pub global_tools: BTreeMap<String, String>,
+    /// Structured user-global tool entries before project merging.
+    pub global_tool_configs: BTreeMap<String, ToolConfigEntry>,
+    /// Origin of each winning entry in [`Config::tools`].
+    pub tool_origins: BTreeMap<String, ToolConfigOrigin>,
     /// User-defined version aliases: tool -> alias -> version spec.
     pub aliases: BTreeMap<String, BTreeMap<String, String>>,
-    /// Path of the project config that contributed pins, if any.
+    /// Path of the nearest discovered project config, if any.
     pub project_config_path: Option<PathBuf>,
+}
+
+/// Source layer that contributed an effective tool entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolConfigOrigin {
+    GlobalConfig(PathBuf),
+    ProjectConfig(PathBuf),
+    ToolVersions(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,6 +471,11 @@ impl Config {
         self.sources.per_tool.get(tool)
     }
 
+    /// Provenance of the effective merged tool entry.
+    pub fn tool_origin(&self, tool: &str) -> Option<&ToolConfigOrigin> {
+        self.tool_origins.get(tool)
+    }
+
     /// Effective package-registry configuration after user/project layering.
     pub fn registries(&self) -> &RegistriesConfig {
         &self.sources.registries
@@ -560,28 +579,49 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
         sources: SourcesConfig::default(),
         tools: BTreeMap::new(),
         tool_configs: BTreeMap::new(),
+        global_tools: BTreeMap::new(),
+        global_tool_configs: BTreeMap::new(),
+        tool_origins: BTreeMap::new(),
         aliases: BTreeMap::new(),
         project_config_path: None,
     };
 
     if user_config_file.exists() {
         let file = read_config_file(user_config_file)?;
+        cfg.global_tool_configs = file.tools.clone();
+        cfg.global_tools = file
+            .tools
+            .iter()
+            .map(|(tool, entry)| (tool.clone(), entry.version().to_string()))
+            .collect();
+        cfg.tool_origins.extend(file.tools.keys().map(|tool| {
+            (
+                tool.clone(),
+                ToolConfigOrigin::GlobalConfig(user_config_file.to_path_buf()),
+            )
+        }));
         cfg.apply_file(file, true);
     }
 
     if let Some(start_dir) = start_dir {
         if let Some((path, file)) = find_project_config(start_dir)? {
+            cfg.tool_origins.extend(
+                file.tools
+                    .keys()
+                    .map(|tool| (tool.clone(), ToolConfigOrigin::ProjectConfig(path.clone()))),
+            );
             cfg.apply_file(file, false);
             cfg.project_config_path = Some(path);
         }
-        if let Some(tv) = find_tool_versions(start_dir)? {
+        if let Some((path, tv)) = find_tool_versions(start_dir)? {
             for (tool, version) in tv {
-                cfg.tools
-                    .entry(tool.clone())
-                    .or_insert_with(|| version.clone());
-                cfg.tool_configs
-                    .entry(tool)
-                    .or_insert_with(|| ToolConfigEntry::legacy(version));
+                if !cfg.tools.contains_key(&tool) {
+                    cfg.tools.insert(tool.clone(), version.clone());
+                    cfg.tool_configs
+                        .insert(tool.clone(), ToolConfigEntry::legacy(version));
+                    cfg.tool_origins
+                        .insert(tool, ToolConfigOrigin::ToolVersions(path.clone()));
+                }
             }
         }
     }
@@ -645,13 +685,13 @@ fn find_project_config(start_dir: &Path) -> Result<Option<(PathBuf, ConfigFile)>
 
 /// Walk up looking for a `.tool-versions` file (asdf-compatible). Each line is
 /// `<tool> <version>`; comments start with `#`.
-fn find_tool_versions(start_dir: &Path) -> Result<Option<BTreeMap<String, String>>> {
+fn find_tool_versions(start_dir: &Path) -> Result<Option<(PathBuf, BTreeMap<String, String>)>> {
     let mut cur = Some(start_dir);
     while let Some(dir) = cur {
         let candidate = dir.join(".tool-versions");
         if candidate.is_file() {
             let text = std::fs::read_to_string(&candidate).map_err(|e| Error::io(&candidate, e))?;
-            return Ok(Some(parse_tool_versions(&text)));
+            return Ok(Some((candidate, parse_tool_versions(&text))));
         }
         cur = dir.parent();
     }
@@ -703,6 +743,9 @@ mod tests {
             sources: SourcesConfig::default(),
             tools: BTreeMap::new(),
             tool_configs: BTreeMap::new(),
+            global_tools: BTreeMap::new(),
+            global_tool_configs: BTreeMap::new(),
+            tool_origins: BTreeMap::new(),
             aliases: BTreeMap::new(),
             project_config_path: None,
         };
@@ -852,6 +895,45 @@ pnpm = "9.0.0"
                 .get("engine"),
             Some(&ToolConfigValue::String("node".to_string()))
         );
+        assert_eq!(config.global_tools["node"], "20");
+        assert_eq!(config.global_tools["npm"], "11.5.1");
+        assert_eq!(config.global_tool_configs["npm"].version(), "11.5.1");
+        assert_eq!(
+            config.tool_origins["node"],
+            ToolConfigOrigin::GlobalConfig(user_config.clone())
+        );
+        assert_eq!(
+            config.tool_origins["npm"],
+            ToolConfigOrigin::ProjectConfig(temporary.path().join("project/osdk.toml"))
+        );
+        assert_eq!(
+            config.tool_origins["pnpm"],
+            ToolConfigOrigin::ProjectConfig(temporary.path().join("project/osdk.toml"))
+        );
+        assert_eq!(
+            config.tool_origins["bun"],
+            ToolConfigOrigin::ToolVersions(temporary.path().join("project/.tool-versions"))
+        );
+    }
+
+    #[test]
+    fn load_user_preserves_global_tool_provenance_without_project_entries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            "[tools]\nnode = \"20\"\nnpm = { version = \"11\", installer = \"npm\" }\n",
+        )
+        .unwrap();
+
+        let config = Config::load_user(&user_config).unwrap();
+        assert_eq!(config.tools, config.global_tools);
+        assert_eq!(config.tool_configs, config.global_tool_configs);
+        assert_eq!(
+            config.tool_origins["npm"],
+            ToolConfigOrigin::GlobalConfig(user_config)
+        );
+        assert!(config.project_config_path.is_none());
     }
 
     #[test]
