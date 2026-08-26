@@ -218,7 +218,6 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
     let mut path_prepend = Vec::new();
     let mut set_vars = BTreeMap::new();
     let mut has_generated_shim = false;
-    let mut managed_node_bin = None;
     let dynamic_report = crate::shim::scan_dynamic_installs(ctx).ok();
     let mut backend_ids = registry
         .all()
@@ -295,9 +294,6 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
             .into_iter()
             .flatten()
             .collect::<std::collections::BTreeSet<_>>();
-        if backend.id() == "node" {
-            managed_node_bin = backend_bins.iter().find(|path| path.is_dir()).cloned();
-        }
         let bins = backend_bins
             .into_iter()
             .chain(
@@ -320,8 +316,10 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
     }
 
     prioritize_managed_paths(&mut path_prepend, &ctx.dirs.shims(), has_generated_shim);
-    if let Some(project_bin) = project_bin_for(cwd) {
-        prioritize_project_bin(&mut path_prepend, project_bin, managed_node_bin.as_deref());
+    if project_npm_bins_are_trusted(ctx, cwd) {
+        if let Some(project_bin) = project_bin_for(cwd) {
+            prioritize_project_bin(&mut path_prepend, project_bin);
+        }
     }
 
     let previous = std::env::var("OSDK_MANAGED_ENV").unwrap_or_default();
@@ -336,6 +334,39 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         set_vars,
         unset_vars,
     }
+}
+
+fn project_npm_bins_are_trusted(ctx: &Ctx, cwd: &std::path::Path) -> bool {
+    let Some(config_path) = ctx.config.tool_origins.iter().find_map(|(key, origin)| {
+        let configured = key.starts_with("npm:")
+            || ctx
+                .config
+                .tools
+                .get(key)
+                .is_some_and(|value| value.starts_with("npm:"));
+        match (configured, origin) {
+            (true, crate::config::ToolConfigOrigin::ProjectConfig(path)) => Some(path),
+            _ => None,
+        }
+    }) else {
+        return false;
+    };
+    let Some(config_root) = config_path.parent() else {
+        return false;
+    };
+    let Ok(config_root) = dunce::canonicalize(config_root) else {
+        return false;
+    };
+    let Ok(cwd) = dunce::canonicalize(cwd) else {
+        return false;
+    };
+    cwd.starts_with(&config_root)
+        && crate::trust::is_trusted(
+            &ctx.dirs.config,
+            config_path,
+            std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS").as_ref(),
+        )
+        .unwrap_or(false)
 }
 
 /// Return the nearest Node project's installed command directory. The nearest
@@ -388,32 +419,16 @@ fn project_bin_for(cwd: &std::path::Path) -> Option<PathBuf> {
     .then_some(canonical_bin)
 }
 
-fn prioritize_project_bin(
-    paths: &mut Vec<PathBuf>,
-    project_bin: PathBuf,
-    managed_node_bin: Option<&std::path::Path>,
-) {
+fn prioritize_project_bin(paths: &mut Vec<PathBuf>, project_bin: PathBuf) {
     let node_collision = directory_provides_command(&project_bin, "node").unwrap_or(true);
-    paths.retain(|path| !same_existing_path(path, &project_bin));
-
+    // Never put a directory that can replace `node` on PATH. Elevating the
+    // complete managed Node bin would also elevate bundled npm/npx ahead of
+    // osdk's registry-aware shims, so fail closed for this unusual project.
     if node_collision {
-        let Some(node_bin) = managed_node_bin.and_then(|node_bin| {
-            paths
-                .iter()
-                .find(|path| same_existing_path(path, node_bin))
-                .cloned()
-        }) else {
-            paths.insert(0, project_bin);
-            return;
-        };
-        paths.retain(|path| !same_existing_path(path, &node_bin));
-        paths.insert(0, project_bin);
-        if !same_existing_path(&node_bin, &paths[0]) {
-            paths.insert(0, node_bin);
-        }
-    } else {
-        paths.insert(0, project_bin);
+        return;
     }
+    paths.retain(|path| !same_existing_path(path, &project_bin));
+    paths.insert(0, project_bin);
 }
 
 fn same_existing_path(left: &std::path::Path, right: &std::path::Path) -> bool {
@@ -434,13 +449,10 @@ fn command_name_matches(file_name: &std::ffi::OsStr, command: &str) -> bool {
     #[cfg(windows)]
     {
         let file_name = file_name.to_string_lossy();
-        std::iter::once(command.to_string())
-            .chain(
-                ["com", "exe", "bat", "cmd", "ps1"]
-                    .into_iter()
-                    .map(|extension| format!("{command}.{extension}")),
-            )
-            .any(|candidate| file_name.eq_ignore_ascii_case(&candidate))
+        file_name.eq_ignore_ascii_case(command)
+            || file_name
+                .get(..command.len() + 1)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&format!("{command}.")))
     }
     #[cfg(not(windows))]
     {
@@ -811,7 +823,7 @@ mod tests {
         let mut paths = vec![shims.clone(), npm.clone(), node.clone()];
 
         let discovered = project_bin_for(&project).unwrap();
-        prioritize_project_bin(&mut paths, discovered.clone(), Some(&node));
+        prioritize_project_bin(&mut paths, discovered.clone());
         assert_eq!(
             paths,
             vec![discovered.clone(), shims.clone(), npm, node.clone()]
@@ -819,16 +831,12 @@ mod tests {
 
         write_test_command(&project_bin, "node");
         let mut guarded_paths = vec![shims.clone(), node.clone()];
-        prioritize_project_bin(
-            &mut guarded_paths,
-            project_bin_for(&project).unwrap(),
-            Some(&node),
-        );
-        assert_eq!(guarded_paths, vec![node, discovered, shims]);
+        prioritize_project_bin(&mut guarded_paths, project_bin_for(&project).unwrap());
+        assert_eq!(guarded_paths, vec![shims, node]);
     }
 
     #[test]
-    fn project_bin_with_node_is_still_active_without_managed_node() {
+    fn project_bin_with_node_is_omitted_without_managed_node() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");
         let project_bin = project.join("node_modules").join(".bin");
@@ -838,9 +846,9 @@ mod tests {
 
         let mut paths = vec![temporary.path().join("osdk/shims")];
         let discovered = project_bin_for(&project).unwrap();
-        prioritize_project_bin(&mut paths, discovered.clone(), None);
+        prioritize_project_bin(&mut paths, discovered);
 
-        assert_eq!(paths, vec![discovered, temporary.path().join("osdk/shims")]);
+        assert_eq!(paths, vec![temporary.path().join("osdk/shims")]);
     }
 
     #[test]
@@ -937,7 +945,7 @@ mod tests {
             assert!(command_name_matches(std::ffi::OsStr::new(name), "node"));
         }
         #[cfg(windows)]
-        assert!(!command_name_matches(
+        assert!(command_name_matches(
             std::ffi::OsStr::new("node.js"),
             "node"
         ));
@@ -961,7 +969,7 @@ mod tests {
         let canonical = dunce::canonicalize(&project_bin).unwrap();
         let mut paths = vec![project_bin, PathBuf::from("/osdk/shims")];
 
-        prioritize_project_bin(&mut paths, canonical.clone(), None);
+        prioritize_project_bin(&mut paths, canonical.clone());
 
         assert_eq!(paths, vec![canonical, PathBuf::from("/osdk/shims")]);
     }
@@ -979,7 +987,7 @@ mod tests {
         let canonical = dunce::canonicalize(&project_bin).unwrap();
         let mut paths = vec![alias, PathBuf::from("/osdk/shims")];
 
-        prioritize_project_bin(&mut paths, canonical.clone(), None);
+        prioritize_project_bin(&mut paths, canonical.clone());
 
         assert_eq!(paths, vec![canonical, PathBuf::from("/osdk/shims")]);
     }
@@ -987,12 +995,13 @@ mod tests {
     #[test]
     fn computed_activation_path_routes_node_bundled_npm_through_shims() {
         let temporary = tempfile::tempdir().unwrap();
-        let ctx = test_ctx(temporary.path(), &[("node", "22.14.0")]);
+        let mut ctx = test_ctx(temporary.path(), &[("node", "22.14.0")]);
         let project = temporary.path().join("project/src");
         let project_bin = temporary.path().join("project/node_modules/.bin");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&project_bin).unwrap();
         std::fs::write(temporary.path().join("project/package.json"), b"{}").unwrap();
+        trust_project_npm(&mut ctx, &temporary.path().join("project"));
         write_test_command(&project_bin, "eslint");
         let node = mark_installed(
             &ctx,
@@ -1036,7 +1045,7 @@ mod tests {
     #[test]
     fn computed_activation_path_guards_node_from_project_bin() {
         let temporary = tempfile::tempdir().unwrap();
-        let ctx = test_ctx(temporary.path(), &[]);
+        let mut ctx = test_ctx(temporary.path(), &[]);
         let project = temporary.path().join("project");
         let project_bin = project.join("node_modules/.bin");
         std::fs::create_dir_all(&project_bin).unwrap();
@@ -1045,6 +1054,7 @@ mod tests {
             br#"{"engines":{"node":">=20 <23"}}"#,
         )
         .unwrap();
+        trust_project_npm(&mut ctx, &project);
         write_test_command(&project_bin, "node");
 
         let older_node = mark_installed(
@@ -1068,14 +1078,32 @@ mod tests {
 
         let delta = compute_env_delta(&ctx, &Registry::new(), &project);
 
-        assert_eq!(
-            delta.path_prepend,
-            vec![
-                node,
-                dunce::canonicalize(project_bin).unwrap(),
-                ctx.dirs.shims()
-            ]
+        assert_eq!(delta.path_prepend, vec![ctx.dirs.shims(), node]);
+    }
+
+    #[test]
+    fn untrusted_project_npm_bins_are_not_activated() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temporary.path(), &[]);
+        let project = temporary.path().join("project");
+        let bin = project.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        std::fs::write(
+            project.join("osdk.toml"),
+            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"aube\"\n",
+        )
+        .unwrap();
+        ctx.config.tools.insert("npm:prettier".into(), "3".into());
+        ctx.config.tool_origins.insert(
+            "npm:prettier".into(),
+            crate::config::ToolConfigOrigin::ProjectConfig(project.join("osdk.toml")),
         );
+
+        assert!(!project_npm_bins_are_trusted(&ctx, &project));
+        assert!(!compute_env_delta(&ctx, &Registry::new(), &project)
+            .path_prepend
+            .contains(&dunce::canonicalize(bin).unwrap()));
     }
 
     #[test]
@@ -1116,5 +1144,21 @@ mod tests {
         #[cfg(not(windows))]
         let path = directory.join(name);
         std::fs::write(path, b"test command").unwrap();
+    }
+
+    fn trust_project_npm(ctx: &mut Ctx, project: &std::path::Path) {
+        let config = project.join("osdk.toml");
+        std::fs::write(
+            &config,
+            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"aube\"\n",
+        )
+        .unwrap();
+        crate::trust::trust(&ctx.dirs.config, &config).unwrap();
+        ctx.config.tools.insert("npm:prettier".into(), "3".into());
+        ctx.config.tool_origins.insert(
+            "npm:prettier".into(),
+            crate::config::ToolConfigOrigin::ProjectConfig(config.clone()),
+        );
+        ctx.config.project_config_path = Some(config);
     }
 }

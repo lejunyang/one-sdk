@@ -71,9 +71,26 @@ pub fn requires_trust(path: &Path) -> Result<bool> {
     let Some(table) = value.as_table() else {
         return Ok(false);
     };
-    Ok(table
-        .keys()
-        .any(|key| !matches!(key.as_str(), "tools" | "aliases")))
+    let npm_tool_activation = table
+        .get("tools")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|tools| {
+            tools.iter().any(|(key, value)| {
+                key.starts_with("npm:")
+                    || value
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("npm:"))
+                    || value
+                        .as_table()
+                        .and_then(|entry| entry.get("version"))
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|value| value.starts_with("npm:"))
+            })
+        });
+    Ok(npm_tool_activation
+        || table
+            .keys()
+            .any(|key| !matches!(key.as_str(), "tools" | "aliases")))
 }
 
 pub fn is_trusted(
@@ -242,6 +259,21 @@ mod tests {
             "[tools]\nnode = \"20\"\n[registries.npm]\nurls = [\"https://registry.npmjs.org/\"]\n",
         )
         .unwrap();
+        assert!(requires_trust(&path).unwrap());
+    }
+
+    #[test]
+    fn npm_project_tool_activation_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        std::fs::write(
+            &path,
+            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"aube\"\n",
+        )
+        .unwrap();
+        assert!(requires_trust(&path).unwrap());
+
+        std::fs::write(&path, "[tools]\nformatter = \"npm:prettier@3\"\n").unwrap();
         assert!(requires_trust(&path).unwrap());
     }
 }
