@@ -6,7 +6,8 @@ osdk separates persistent installation state, content-addressed objects, and dis
 
 The default layout is below. The data and cache roots are overridable, while store and installs also have dedicated overrides; the remaining paths are derived subdirectories:
 
-- `<data>/installs/<tool>/<version>`: materialized SDKs.
+- `<installs>/<tool>/<version>`: materialized SDKs and isolated tools; `<installs>` defaults to `<data>/installs` and can be overridden by `OSDK_INSTALL_DIR`.
+- `<installs>/npm-global/<package>/<version>`: canonical root for `use --global npm:<package>`; an older global manifest under `<installs>/npm/<package>/<version>` is recognized only for compatibility and migration.
 - `<data>/models/<name>/snapshots/<snapshot>`: materialized model snapshots.
 - `<data>/store/<aa>/<bb>/<blake3>`: CAS shared by SDK and model files.
 - `<data>/shims`: command shims.
@@ -14,7 +15,7 @@ The default layout is below. The data and cache roots are overridable, while sto
 - `<cache>/tmp`: installation extraction scratch space.
 - `<cache>/remote` and `<cache>/sources`: remote metadata and source-probe caches.
 - `<cache>/pkg`: native downstream package-manager and model-client caches.
-- `<cache>/aube/<npm-tool>/<version>`: isolated Aube cache/store data for dynamic npm tools.
+- `<cache>/aube/v1/cache` and `<data>/store/aube`: the cache/store shared by Aube-backed isolated, project, and global npm tools; each real project or controlled install root still keeps its own native lock.
 
 `Dirs::ensure` creates the core tree during CLI initialization. Store and installs default to the same data volume so hardlinks work. `OSDK_STORE_DIR` may put the store on another volume, which can force materialization to fall back to reflink or copy.
 
@@ -42,7 +43,7 @@ Models use [`ModelStore::publish`](https://github.com/lejunyang/one-sdk/blob/mai
 
 ## No cross-manager package CAS
 
-The CAS deduplicates verified, extracted SDK files and model files. It does **not** parse, ingest, or deduplicate project dependency packages across npm, pnpm, Yarn, Bun, Deno, pip, Go, Cargo, Maven, or Gradle. `npm:<package>` uses embedded Aube and maintains a cache/store under `<cache>/aube` for each dynamic backend/version; it does not enter the BLAKE3 SDK CAS either.
+The CAS deduplicates verified, extracted SDK files and model files. It does **not** parse, ingest, or deduplicate project dependency packages across npm, pnpm, Yarn, Bun, Deno, pip, Go, Cargo, Maven, or Gradle. Aube-backed `npm:<package>` operations share `<cache>/aube/v1/cache` and `<data>/store/aube`, while native npm/pnpm use their downstream cache/store paths; none of those package contents enter the BLAKE3 SDK CAS.
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) and backend `exec_env` methods only redirect each manager's native cache to a separate child of `<cache>/pkg`, including npm, the pnpm store, Yarn, Bun, and Deno. Variables are injected only when the user has not set them, except that a value managed by a previous osdk hook can be refreshed. Sharing a parent directory does not unify content protocols: there is no cross-manager package CAS or cross-manager blob deduplication.
 

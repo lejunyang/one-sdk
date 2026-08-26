@@ -32,7 +32,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | [Storage and caches](./storage-cache) | SDK/model CAS, materialization fallbacks, download cache, and manager-native caches |
 | [Verification and supply-chain boundaries](./verification) | Checksums, Minisign, GitHub Artifact Attestations, and archive-safety boundaries |
 | [Backends and model providers](./backends-models) | Built-in, declarative, and GitHub backends plus Hugging Face and ModelScope snapshots |
-| [npm developer tools](./npm-tools) | `npm:<package>` identity, Aube installation, script policy, dependency graphs, inventory, and conflict rejection |
+| [npm developer tools](./npm-tools) | `npm:<package>` identity, project/global/isolated installers, script policy, native locks, inventory, and conflict rejection |
 | [Reliability and concurrency](./reliability) | Locks, atomic publication, retries, offline fallback, idempotency, and GC boundaries |
 
 ## Boundaries to remember

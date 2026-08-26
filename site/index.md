@@ -34,13 +34,13 @@ features:
     details: 探测官方源和权威镜像，按速度选择并在元数据或下载失败时自动切换。
   - icon: ⌁
     title: 可复现的项目环境
-    details: 生成按平台分区的 osdk.lock，保存精确版本和各 backend 的复现信息；npm 工具引用随 lock 提交的内容寻址 graph sidecar。
+    details: 生成按平台分区的 osdk.lock，保存精确版本和各 backend 的复现信息；schema 3 为 npm 工具记录作用域与原生 lock 身份。
   - icon: ✓
     title: 完整性与来源验证
     details: 支持上游校验和、严格校验策略，以及 GitHub Artifact Attestations 的 Sigstore 验证。
   - icon: ⬡
     title: 离线重装与共享缓存
-    details: 复用元数据、制品和原生包缓存；npm 工具可结合已提交的 graph sidecar 与预热的 Aube 缓存离线重装。
+    details: 复用元数据、制品和原生包缓存；npm 工具的冷离线重装还需要安装器保留的原生 lock 和已预热缓存。
 ---
 
 ## 三步开始

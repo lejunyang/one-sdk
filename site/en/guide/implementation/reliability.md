@@ -9,7 +9,7 @@ osdk combines bounded concurrency, source probing and failover, resumable downlo
 Multi-tool installation first applies a Node-first barrier. If requests contain
 npm, pnpm, Yarn, or a dynamic `npm:<package>` tool without Node, the CLI injects
 Node. Every Node request completes serially and receives its shims before the
-remaining requests enter `buffer_unordered(jobs)`, preventing an Aube npm tool
+remaining requests enter `buffer_unordered(jobs)`, preventing an npm tool
 from racing its managed runtime. Completion order after the barrier is
 unspecified. Shims are generated in that order; only returned resolution records
 are sorted by backend name afterward. A failed task makes the batch return an

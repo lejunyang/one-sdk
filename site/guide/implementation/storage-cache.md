@@ -6,7 +6,8 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 
 默认布局如下。data 与 cache 根目录可覆盖，store 和 installs 另有专用覆盖变量；其余路径是从这些根派生的子目录：
 
-- `<data>/installs/<tool>/<version>`：已物化的 SDK。
+- `<installs>/<tool>/<version>`：已物化的 SDK 与隔离工具；`<installs>` 默认为 `<data>/installs`，也可由 `OSDK_INSTALL_DIR` 覆盖。
+- `<installs>/npm-global/<package>/<version>`：`use --global npm:<package>` 的规范全局安装根；旧版放在 `<installs>/npm/<package>/<version>` 的 global manifest 只用于兼容识别和迁移。
 - `<data>/models/<name>/snapshots/<snapshot>`：已物化的模型快照。
 - `<data>/store/<aa>/<bb>/<blake3>`：SDK 与模型文件共享的 CAS。
 - `<data>/shims`：命令 shim。
@@ -14,7 +15,7 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 - `<cache>/tmp`：安装解压暂存区。
 - `<cache>/remote`、`<cache>/sources`：远程 metadata 与源测速缓存。
 - `<cache>/pkg`：下游包管理器与模型客户端的原生缓存。
-- `<cache>/aube/<npm-tool>/<version>`：动态 npm 工具的隔离 Aube cache/store。
+- `<cache>/aube/v1/cache` 与 `<data>/store/aube`：Aube 驱动的隔离、项目与全局 npm 工具共享的 cache/store；每个真实项目或受控安装根仍保留自己的原生 lock。
 
 `Dirs::ensure` 在 CLI 初始化时建立核心目录。默认 store 与 installs 同在 data volume，便于 hardlink；`OSDK_STORE_DIR` 可把 store 移到其他卷，但这可能让物化回退到 reflink 或 copy。
 
@@ -42,7 +43,7 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 
 ## 不存在跨 manager 的包 CAS
 
-CAS 去重的是 osdk 已验证并解压的 SDK 文件和模型文件。它**不解析、摄取或跨 npm/pnpm/Yarn/Bun/Deno/pip/Go/Cargo/Maven/Gradle 去重项目依赖包**。`npm:<package>` 使用 embedded Aube，并按动态 backend/version 在 `<cache>/aube` 下维护自己的 cache/store；它同样不进入 BLAKE3 SDK CAS。
+CAS 去重的是 osdk 已验证并解压的 SDK 文件和模型文件。它**不解析、摄取或跨 npm/pnpm/Yarn/Bun/Deno/pip/Go/Cargo/Maven/Gradle 去重项目依赖包**。Aube 驱动的 `npm:<package>` 操作共享 `<cache>/aube/v1/cache>` 与 `<data>/store/aube`，原生 npm/pnpm 则使用各自的下游 cache/store；这些包内容都不进入 BLAKE3 SDK CAS。
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) 与 backend 的 `exec_env` 只是把各 manager 的原生缓存重定向到 `<cache>/pkg` 下的独立子目录，例如 npm、pnpm store、Yarn、Bun 和 Deno。变量只有在用户未设置时才注入；若值来自上一轮 osdk hook，则允许刷新。目录共用一个父根不代表内容协议统一，因此不存在跨 manager 的 package CAS 或跨 manager blob 去重。
 

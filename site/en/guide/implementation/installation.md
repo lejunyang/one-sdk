@@ -19,9 +19,11 @@ dynamic npm tool from racing its runtime.
 Except for that Node dependency barrier, different tools may run concurrently,
 while a pipeline or backend file lock serializes writes to the same
 `tool@version`. If any member of a batch fails, `try_collect` returns the error
-and the final shim-generation phase is not entered. Dynamic npm tools bypass the
-archive CAS pipeline below and use embedded Aube with an isolated cache/store;
-see [npm developer tool implementation](./npm-tools).
+and the final shim-generation phase is not entered. The compatibility isolated
+npm path used by explicit `install`/`exec` bypasses the archive CAS pipeline
+below and uses embedded Aube with an isolated cache/store. Project-aware and
+global `use` can instead select Aube, npm, or pnpm during planning; see
+[npm developer tool implementation](./npm-tools).
 
 ## Backend plans
 
@@ -48,9 +50,9 @@ A request restored from the lockfile first uses [`locked_install_plan`](https://
 [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs) writes to a sibling `.partial` file and atomically renames it on success. It sends `Range` plus `If-Range` only when partial metadata has an ETag or Last-Modified validator for the same URL. A server that ignores ranges, changes the object, or returns a mismatched `Content-Range` causes a safe restart or failure rather than blind concatenation. Sensitive headers apply only to the initial request and are not retained on cross-host redirects.
 This paragraph concerns download headers carried by a generic artifact download
 plan. `Source.headers` separately applies to osdk metadata/source probes under an
-origin boundary. Dynamic npm tools currently do not forward arbitrary
-`Source.headers` into embedded Aube package fetches; authentication must use
-Aube/npm's native trusted configuration or environment path.
+origin boundary. Aube-backed npm package fetches currently do not forward
+arbitrary `Source.headers`; authentication must use Aube/npm's native trusted
+configuration or environment path.
 
 An artifact-cache hit during an actual pipeline run or reinstall still runs the applicable checksum or attestation verification; mere cache-file existence is not trusted. Offline reinstall can reuse a persisted checksum, but it never falls back to the network when the artifact cache is absent. Ordinary `osdk install` reuses an already complete installation before entering the pipeline and does not revalidate its receipt, checksum, or installed bytes.
 
@@ -61,6 +63,6 @@ An artifact-cache hit during an actual pipeline run or reinstall still runs the 
 - Checksums are policy-dependent unless the backend supplies one, attestation supplies an authenticated digest, or `require_checksums` is enabled. Guarantees therefore differ by backend.
 - `ensure_post_install` may have additional side effects. On a fresh Node install, Corepack failure removes the installation tree; on the already-installed fast path, `ensure_post_install` may fail while the existing completion marker remains.
 - Delegate backends such as Rust do not traverse the complete archive pipeline; inspect the backend for their exact idempotency and verification boundary.
-- For backends with a generic artifact receipt, a locked artifact URL fixes artifact identity and enables metadata-free reinstall. Reinstallation applies any available or policy-required checksum/attestation checks; with no digest/evidence and `require_checksums=false`, it may proceed without cryptographic integrity verification. Dynamic npm tools instead use the committed graph-sidecar path documented in [npm developer tool implementation](./npm-tools).
+- For backends with a generic artifact receipt, a locked artifact URL fixes artifact identity and enables metadata-free reinstall. Reinstallation applies any available or policy-required checksum/attestation checks; with no digest/evidence and `require_checksums=false`, it may proceed without cryptographic integrity verification. npm tools do not use generic artifact receipts. Current schema 3 records scope, installer, and optional native-lock identity while leaving the dependency-graph payload under installer ownership. Schema 2 graph sidecars remain a compatibility-read path only; see [npm developer tool implementation](./npm-tools).
 
 Core coverage is in [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs), [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs), [`backend/contract.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/contract.rs), and end-to-end [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs).

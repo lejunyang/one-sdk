@@ -34,12 +34,13 @@ The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core
 | `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then delegated to isolated rustup | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument plus `@deno/<platform>` | npm SRI | Platform package; exports `DENO_DIR` |
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument plus full dependency resolution through embedded Aube | The Aube graph carries transitive integrity; scripts denied by default | Discovers `.bin` dynamically, adds managed Node, and records a committed content-addressed graph sidecar in schema 2 |
+| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default | Discovers `.bin` dynamically, adds managed Node, and records only scope, installer, and optional native-lock identity in schema 3 |
 | `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
 
 These implementations live under [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/). The npm-backed implementations share packument, version, and SRI handling in [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs). Generic source ranking is in [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 See [npm developer tool implementation](./npm-tools) for the complete dynamic
-backend installation, cache, graph-sidecar, and shim boundaries.
+backend project/global/isolated installation, cache, metadata-only lock, schema 2
+sidecar compatibility, and shim boundaries.
 
 ## Declarative and GitHub backends
 

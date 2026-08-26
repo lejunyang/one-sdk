@@ -119,8 +119,12 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
 - for backends with a generic artifact receipt, a lock's artifact URL/checksum
   can support offline reinstall; bytes are reverified when the pipeline actually
   reinstalls with a checksum, while an existing complete installation is reused;
-- `npm:<package>` does not use a generic artifact URL; it needs a validated
-  graph sidecar committed with `osdk.lock` plus a warmed Aube cache/store;
+- `npm:<package>` does not use a generic artifact URL. Schema 3 `osdk.lock`
+  stores only scope, installer, and optional native-lock identity, not the
+  dependency graph, so that metadata alone cannot cold-restore the graph. A
+  complete install can be reused; operations that support native-lock replay
+  additionally need the installer-owned lock and a warmed cache/store. Schema 2
+  graph sidecars are compatibility-read inputs only;
 - `attestations=required` additionally needs the proof bundle cached by artifact SHA-256; lock evidence cannot replace verification.
 
 `OSDK_OFFLINE` controls osdk and compatible environment values managed by its

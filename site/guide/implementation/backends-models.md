@@ -34,11 +34,11 @@
 | `rust` (`rustup`) | rustup channel/version；官方、rsproxy、TUNA | rustup-init SHA-256；随后委托隔离 rustup | toolchain 不走归档 CAS；支持 `profile`、`components`、`targets`，设置隔离的 `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument + `@deno/<platform>` | npm SRI | 平台包；设置 `DENO_DIR` |
 | `bun` | `bun` packument + `@oven/bun-<platform>` | npm SRI | 平台包；设置 `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument + embedded Aube 完整依赖解析 | Aube graph 携带传递 integrity；默认禁脚本 | 动态发现 `.bin`；自动加入受管 Node；schema 2 lock 引用已提交的内容寻址 graph sidecar |
+| `npm:<package>` | npm packument；隔离安装使用 embedded Aube，项目/全局 `use` 可规划 Aube、npm 或 pnpm | 原生 lock 或 Aube graph 携带传递 integrity；默认禁脚本 | 动态发现 `.bin`；自动加入受管 Node；schema 3 只记录 scope、installer 与可选原生 lock 身份 |
 | `github:owner/repo` | GitHub API，限流时回退 Atom/公开 release 页面；也支持静态 catalog | checksum、可选 minisign、GitHub artifact attestation | 自动选择 host asset；支持归档或裸二进制；复杂命名可用 regex/template/bin/rename/strip 规则 |
 
 上述实现位于 [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/)。npm 系列共用 [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs) 的 packument、版本与 SRI 解析。通用来源排序位于 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)。
-动态 npm backend 的完整安装、缓存、graph sidecar 与 shim 边界见 [npm 开发工具实现](./npm-tools)。
+动态 npm backend 的项目/全局/隔离安装、缓存、metadata-only lock、schema 2 sidecar 兼容与 shim 边界见 [npm 开发工具实现](./npm-tools)。
 
 ## 声明式与 GitHub backend
 

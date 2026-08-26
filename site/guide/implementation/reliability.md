@@ -8,7 +8,7 @@ osdk 通过有限并发、源探测与故障转移、可恢复下载、跨进程
 
 多工具安装先应用 Node-first barrier：若请求包含 npm、pnpm、Yarn 或动态
 `npm:<package>` 且没有 Node，CLI 自动注入 Node；所有 Node 请求先串行完成并生成 shim，
-其余请求才进入 `buffer_unordered(jobs)`。这避免 Aube npm 工具与其受管 runtime 竞态。
+其余请求才进入 `buffer_unordered(jobs)`。这避免 npm 工具安装与其受管 runtime 竞态。
 barrier 之后的完成顺序不固定，shim 按该完成顺序生成，只有返回的解析记录随后按
 backend 名称排序。任何任务失败会使批次返回错误，但已完成的独立安装不会回滚，因此
 它是“依赖 barrier + 有界并发 + 每项提交”，不是全批事务。

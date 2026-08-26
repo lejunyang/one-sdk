@@ -34,13 +34,13 @@ features:
     details: Probe official sources and authoritative mirrors, select by speed, and fail over when metadata or artifact downloads fail.
   - icon: ⌁
     title: Reproducible Projects
-    details: Generate a platform-aware osdk.lock with exact versions and backend-specific reproduction data; npm tools reference committed content-addressed graph sidecars.
+    details: Generate a platform-aware osdk.lock with exact versions and backend-specific reproduction data; schema 3 records npm tool scope and native-lock identity.
   - icon: ✓
     title: Integrity and Provenance
     details: Verify upstream checksums, enforce strict checksum policies, and validate GitHub Artifact Attestations with Sigstore.
   - icon: ⬡
     title: Offline Reinstall and Shared Caches
-    details: Reuse metadata, artifacts, and native package caches; npm tools can reinstall offline with committed graph sidecars and a warmed Aube cache.
+    details: Reuse metadata, artifacts, and native package caches; cold offline npm reinstalls also need installer-owned native locks and warmed caches.
 ---
 
 ## Start in three steps

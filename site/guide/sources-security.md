@@ -106,8 +106,10 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
 - 缺少缓存时明确报错，不会偷偷联网；
 - 对支持通用 artifact receipt 的 backend，lock 中的 artifact URL/checksum 可支持离线
   重装；pipeline 实际重装且有 checksum 时重新校验字节，已有完整安装则直接复用；
-- `npm:<package>` 不使用通用 artifact URL；它需要随 `osdk.lock` 提交且校验通过的
-  graph sidecar，以及预热的 Aube cache/store；
+- `npm:<package>` 不使用通用 artifact URL。schema 3 `osdk.lock` 只保存 scope、installer
+  与可选原生 lock 身份，而不携带依赖图；仅靠这些 metadata 不能冷恢复依赖图。已有完整
+  安装可直接复用；支持原生 lock 重放的操作还需要安装器拥有的 lock 与已预热 cache/store。
+  schema 2 graph sidecar 仅用于兼容读取；
 - `attestations=required` 还要求按 artifact SHA-256 缓存的证明 bundle，lock evidence
   不能代替重新验证。
 
