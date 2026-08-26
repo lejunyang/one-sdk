@@ -2418,6 +2418,14 @@ fn project_npm_use_runs_managed_native_installer_once_and_publishes_metadata() {
         let marker = temporary.path().join(format!("{manager}.calls"));
         let native_lock = project.join(lock_name);
         let installed_bin = project_bin.join("fixture-cli");
+        let installed_package = project.join("node_modules/fixture-cli");
+        std::fs::create_dir_all(&installed_package).unwrap();
+        std::fs::write(
+            installed_package.join("package.json"),
+            r#"{"name":"fixture-cli","version":"1.2.3","bin":{"fixture-cli":"cli.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(installed_package.join("cli.js"), "fixture\n").unwrap();
         write_fake_registry_manager(
             temporary.path(),
             manager,
@@ -2428,7 +2436,7 @@ printf 'call\n' >> "$OSDK_TEST_MARKER"
 printf 'args=%s\n' "$*" >> "$OSDK_TEST_MARKER"
 printf 'path=%s\n' "$PATH" >> "$OSDK_TEST_MARKER"
 printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
-printf 'fixture\n' > "$OSDK_TEST_BIN"
+printf '#!/bin/sh\nexit 0\n' > "$OSDK_TEST_BIN"
 "#,
         );
         let marker_value = marker.display().to_string();

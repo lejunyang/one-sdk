@@ -116,25 +116,83 @@ impl NpmPackageBackend {
     /// user project. This checks package.json#bin and then validates the
     /// corresponding launcher target instead of accepting an unrelated entry
     /// that merely happens to exist in node_modules/.bin.
-    pub fn validate_project_package_bins(&self, project_dir: &Path) -> Result<Vec<String>> {
+    pub fn validate_project_package_bins(
+        &self,
+        project_dir: &Path,
+        expected_version: &str,
+    ) -> Result<Vec<String>> {
         let package_dir = package_install_dir(project_dir, &self.package);
         let manifest_path = package_dir.join("package.json");
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(&manifest_path).map_err(|error| Error::io(&manifest_path, error))?,
         )?;
-        let names = package_bin_names(&manifest, &self.package)?;
+        if manifest.get("name").and_then(serde_json::Value::as_str) != Some(&self.package)
+            || manifest.get("version").and_then(serde_json::Value::as_str) != Some(expected_version)
+        {
+            return Err(Error::other(format!(
+                "installed project package identity mismatch: expected {}@{}",
+                self.package, expected_version
+            )));
+        }
+        let entries = package_bin_entries(&manifest, &self.package)?;
         let bin_dir = project_dir.join("node_modules/.bin");
-        for name in &names {
-            let target = resolve_bin_target(&bin_dir, name)?;
-            if !target.starts_with(&package_dir) {
+        let canonical_package =
+            dunce::canonicalize(&package_dir).map_err(|error| Error::io(&package_dir, error))?;
+        for (name, relative_target) in &entries {
+            if relative_target.is_absolute()
+                || relative_target.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(Error::other(format!(
+                    "npm package {} declares unsafe bin path {}",
+                    self.package,
+                    relative_target.display()
+                )));
+            }
+            let declared_path = package_dir.join(relative_target);
+            let declared_target = dunce::canonicalize(&declared_path)
+                .map_err(|error| Error::io(&declared_path, error))?;
+            if !declared_target.is_file() || !declared_target.starts_with(&canonical_package) {
                 return Err(Error::other(crate::t!(
                     "err.npm_bin_outside_install_root",
                     name = name,
-                    path = package_dir.display()
+                    path = canonical_package.display()
                 )));
             }
+            let launcher = global_bin_entry(&bin_dir, name).ok_or_else(|| {
+                Error::other(crate::t!(
+                    "err.npm_bin_target_unresolved",
+                    name = name,
+                    path = bin_dir.display()
+                ))
+            })?;
+            #[cfg(not(windows))]
+            {
+                let metadata = std::fs::symlink_metadata(&launcher)
+                    .map_err(|error| Error::io(&launcher, error))?;
+                // npm-style project bins are symlinks to the package's
+                // declared target. Wrapper files are permitted for managers
+                // that generate them, but the declared target itself was
+                // already confined and validated above.
+                if metadata.file_type().is_symlink()
+                    && dunce::canonicalize(&launcher)
+                        .map_err(|error| Error::io(&launcher, error))?
+                        != declared_target
+                {
+                    return Err(Error::other(format!(
+                        "project launcher `{name}` does not point at the bin declared by {}",
+                        self.package
+                    )));
+                }
+            }
         }
-        Ok(names)
+        Ok(entries.into_iter().map(|(name, _)| name).collect())
     }
 
     pub fn aube_cache_dir(ctx: &Ctx) -> PathBuf {
@@ -291,6 +349,70 @@ impl NpmPackageBackend {
         }
 
         Ok(Some(LockedNpmGraph { lockfile }))
+    }
+
+    fn validate_compact_lock_metadata(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        let metadata_present = tv.options.keys().any(|key| key.starts_with("__osdk_npm_"));
+        if !metadata_present || tv.options.contains_key(LOCKED_NPM_LOCKFILE_OPTION) {
+            return Ok(());
+        }
+        let package = tv
+            .options
+            .get(LOCKED_NPM_PACKAGE_OPTION)
+            .ok_or_else(|| Error::other("compact npm lock metadata is missing package identity"))?;
+        if package != &self.package {
+            return Err(Error::other(format!(
+                "compact npm lock package mismatch: expected {}, found {package}",
+                self.package
+            )));
+        }
+        let scope = tv.options.get(crate::npm_tools::LOCKED_NPM_SCOPE_OPTION);
+        let installer = tv
+            .options
+            .get(crate::npm_tools::LOCKED_NPM_INSTALLER_OPTION)
+            .ok_or_else(|| Error::other("compact npm lock metadata is missing installer"))?;
+        let root = match scope.map(String::as_str) {
+            Some("global") => self.install_root(ctx, &tv.version),
+            Some("project") => return Ok(()),
+            _ => return Err(Error::other("compact npm lock metadata has invalid scope")),
+        };
+        let manifest = DynamicToolManifest::load(&root)?;
+        if manifest.metadata.get("scope").map(String::as_str) != Some("global")
+            || manifest.metadata.get("installer").map(String::as_str) != Some(installer)
+        {
+            return Err(Error::other(format!(
+                "global npm install metadata does not match the lock for {}@{}",
+                self.id, tv.version
+            )));
+        }
+        let keys = [
+            crate::npm_tools::LOCKED_NPM_NATIVE_LOCK_KIND_OPTION,
+            crate::npm_tools::LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION,
+            crate::npm_tools::LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION,
+        ];
+        let present = keys
+            .iter()
+            .map(|key| tv.options.get(*key))
+            .collect::<Vec<_>>();
+        if present.iter().all(|value| value.is_none()) {
+            return Ok(());
+        }
+        if present.iter().any(|value| value.is_none()) {
+            return Err(Error::other(
+                "compact npm native-lock metadata is incomplete",
+            ));
+        }
+        let expected_format = present[1].expect("validated above");
+        let expected_digest = present[2].expect("validated above");
+        if manifest.metadata.get("native_lock_format") != Some(expected_format)
+            || manifest.metadata.get(METADATA_LOCK_SHA256) != Some(expected_digest)
+        {
+            return Err(Error::other(format!(
+                "global npm native lock metadata does not match the lock for {}@{}",
+                self.id, tv.version
+            )));
+        }
+        Ok(())
     }
 
     fn restore_locked_project(
@@ -576,6 +698,7 @@ impl Backend for NpmPackageBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
+        self.validate_compact_lock_metadata(ctx, tv)?;
         let install_root = self.install_root(ctx, &tv.version);
         let project_dir = self.project_dir(ctx, &tv.version);
         let locked_graph = self.locked_graph(tv)?;
@@ -1176,24 +1299,34 @@ fn package_install_dir(project_dir: &Path, package: &str) -> PathBuf {
     node_modules.join(package)
 }
 
-fn package_bin_names(manifest: &serde_json::Value, package: &str) -> Result<Vec<String>> {
-    let mut names = match manifest.get("bin") {
-        Some(serde_json::Value::String(_)) => {
-            vec![package.rsplit('/').next().unwrap_or(package).to_string()]
-        }
-        Some(serde_json::Value::Object(entries)) => entries.keys().cloned().collect(),
+fn package_bin_entries(
+    manifest: &serde_json::Value,
+    package: &str,
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut entries = match manifest.get("bin") {
+        Some(serde_json::Value::String(path)) => vec![(
+            package.rsplit('/').next().unwrap_or(package).to_string(),
+            PathBuf::from(path),
+        )],
+        Some(serde_json::Value::Object(entries)) => entries
+            .iter()
+            .filter_map(|(name, path)| {
+                path.as_str()
+                    .map(|path| (name.clone(), PathBuf::from(path)))
+            })
+            .collect(),
         _ => Vec::new(),
     };
-    names.retain(|name| !name.is_empty() && !name.contains(['/', '\\']));
-    names.sort();
-    names.dedup();
-    if names.is_empty() {
+    entries.retain(|(name, _)| !name.is_empty() && !name.contains(['/', '\\']));
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.dedup_by(|left, right| left.0 == right.0);
+    if entries.is_empty() {
         return Err(Error::other(crate::t!(
             "err.npm_dynamic_no_validated_executables",
             tool = format!("npm:{package}")
         )));
     }
-    Ok(names)
+    Ok(entries)
 }
 
 fn discover_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolBin>> {

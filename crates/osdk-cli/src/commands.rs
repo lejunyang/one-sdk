@@ -1107,7 +1107,7 @@ async fn use_project_npm(
 
     osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?
-        .validate_project_package_bins(&project.root)?;
+        .validate_project_package_bins(&project.root, &version.version)?;
     let installed_project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
         .ok_or_else(|| anyhow!("project package.json disappeared during npm install"))?;
     let native_lock = installed_project.native_lock.ok_or_else(|| {
