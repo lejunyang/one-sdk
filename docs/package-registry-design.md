@@ -73,7 +73,7 @@ URL 应满足以下约束：
 5. 启动原始 manager 命令**恰好一次**，完整继承 stdin/stdout/stderr，并透传其退出状态。
 6. 如果所有候选都不健康，则在启动 manager 前失败，并展示每个候选的有界、脱敏诊断。
 
-实现会探测 npm-compatible registry 的轻量 metadata endpoint `<base>/npm/latest`，要求成功 HTTP 状态、非空且有大小上限的 JSON，以及基本的 `name` / `version` 字段。探测不得调用 manager 的 `install` 命令，不得携带 registry token、cookie 或从原生配置提取的 Authorization header，也不得执行响应中的任何内容。普通 HTTP(S) proxy 环境变量会沿用，以免在必须通过企业代理联网时把可用 manager 阻断；manager 原生配置中无法安全复现的代理或 TLS 策略则触发保守透传。redirect 最多三次，并且每一跳必须保持原始 HTTPS origin，禁止降级、跨 origin、URL credential 与循环。
+实现会探测 npm-compatible registry 的标准轻量 endpoint `<base>/-/ping`，要求成功 HTTP 状态、非空且不超过 64 KiB 的 JSON object。探测不得调用 manager 的 `install` 命令，不得携带 registry token、cookie 或从原生配置提取的 Authorization header，也不得执行响应中的任何内容。普通 HTTP(S) proxy 环境变量会沿用，以免在必须通过企业代理联网时把可用 manager 阻断；manager 原生配置中无法安全复现的代理或 TLS 策略则触发保守透传。redirect 最多三次，并且每一跳必须保持原始 HTTPS origin，禁止降级、跨 origin、URL credential 与循环。
 
 ### 为什么运行中不重试
 

@@ -29,13 +29,14 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 同源 redirect 继续携带，第一次跨源 redirect 后永久移除。header 值只以 hash 参与
 metadata/probe cache identity，不明文写入 cache。Aube 2.1 embedded API 无法安全接收
 任意 source header，因此 `npm:<package>` 的 Aube package fetch 不转发
-`Source.headers`；认证 Registry 应走 Aube/npm 原生可信配置或环境变量路径。
+`Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会拒绝
+认证或私有原生配置透传。
 
 ## 项目 registry 启动前预检
 
 registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs)，调用点是 [`apply_package_registry_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)。它只处理明确 allow-list 中可能拉取 npm 包的命令，并先识别 manager family；Yarn major 无法可靠确定时保守透传。
 
-对需要预检的命令，每次调用都会执行新的、并发的匿名探测，不复用 SDK source probe cache。候选 endpoint 是 `<base>/npm/latest`，必须满足：成功 HTTP 状态、非空 JSON、响应不超过 64 KiB、`name` 精确为 `npm` 且 `version` 非空。每个请求有界超时；redirect chain 最多包含三个 URL（即最多跟随两次 redirect），且必须始终为原始 HTTPS origin，禁止降级、跨 origin、凭据 URL 与循环。探测不会携带 registry token、cookie 或从 manager 配置提取的 Authorization；普通系统 HTTP(S) proxy 环境仍由 HTTP client 使用。
+对需要预检的命令，每次调用都会执行新的、并发的匿名探测，不复用 SDK source probe cache。候选 endpoint 是 npm-compatible Registry 的标准 `<base>/-/ping`，必须满足：成功 HTTP 状态、非空 JSON object、响应不超过 64 KiB。每个请求有界超时；redirect chain 最多包含三个 URL（即最多跟随两次 redirect），且必须始终为原始 HTTPS origin，禁止降级、跨 origin、凭据 URL 与循环。探测不会携带 registry token、cookie 或从 manager 配置提取的 Authorization；普通系统 HTTP(S) proxy 环境仍由 HTTP client 使用。
 
 候选选择规则：
 

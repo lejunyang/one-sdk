@@ -31,14 +31,15 @@ redirects, and are permanently stripped after the first cross-origin redirect.
 Only hashes of header values participate in metadata/probe cache identity; clear
 values are not persisted. Aube 2.1's embedded API cannot safely accept arbitrary
 source headers, so `npm:<package>` Aube package fetches do not forward
-`Source.headers`; authenticated registries must use Aube/npm's native trusted
-configuration or environment path.
+`Source.headers`. Project operations may use native trusted configuration;
+global npm-tool installs reject authenticated/private native pass-through while
+running in their isolated prefix.
 
 ## Project registry preflight
 
 The planner lives in [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs), called by [`apply_package_registry_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs). It handles only an explicit allow-list of commands that may fetch npm packages and first identifies the manager family. An unknown Yarn major is conservatively passed through.
 
-Every eligible invocation performs fresh concurrent anonymous probes; it does not reuse the SDK-source probe cache. The endpoint is `<base>/npm/latest` and must return a successful status, non-empty JSON no larger than 64 KiB, `name` exactly equal to `npm`, and a non-empty `version`. Each request has a bounded timeout. The redirect chain may contain at most three URLs, meaning at most two redirects are followed, and it must remain on the original HTTPS origin with no downgrade, cross-origin target, URL credentials, or loop. Probes send no registry token, cookie, or Authorization extracted from native configuration. Ordinary system HTTP(S) proxy settings still apply.
+Every eligible invocation performs fresh concurrent anonymous probes; it does not reuse the SDK-source probe cache. The endpoint is the standard npm-compatible `<base>/-/ping` and must return a successful status plus a non-empty JSON object no larger than 64 KiB. Each request has a bounded timeout. The redirect chain may contain at most three URLs, meaning at most two redirects are followed, and it must remain on the original HTTPS origin with no downgrade, cross-origin target, URL credentials, or loop. Probes send no registry token, cookie, or Authorization extracted from native configuration. Ordinary system HTTP(S) proxy settings still apply.
 
 Candidate selection is intentionally precise:
 

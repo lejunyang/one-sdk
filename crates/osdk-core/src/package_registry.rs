@@ -11,7 +11,6 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use serde::Deserialize;
 
 use crate::backend::Ctx;
 use crate::config::normalize_registry_url;
@@ -19,6 +18,7 @@ use crate::error::{Error, Result};
 
 const NPMMIRROR: &str = "https://registry.npmmirror.com/";
 const NPMJS: &str = "https://registry.npmjs.org/";
+const REGISTRY_PROBE_ACCEPT: &str = "application/json";
 const MAX_PROBE_BODY: usize = 64 * 1024;
 const MAX_PROBE_REDIRECTS: usize = 3;
 
@@ -1447,17 +1447,16 @@ fn validate_registry_probe_redirect(
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct NpmMetadata {
-    name: String,
-    version: String,
-}
-
 async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) -> RegistryProbe {
     let started = Instant::now();
-    let endpoint = format!("{}npm/latest", base.trim_end_matches('/').to_owned() + "/");
+    let endpoint = format!("{}-/ping", base.trim_end_matches('/').to_owned() + "/");
     let result = tokio::time::timeout(timeout, async {
-        let response = client.get(&endpoint).send().await.map_err(probe_error)?;
+        let response = client
+            .get(&endpoint)
+            .header(reqwest::header::ACCEPT, REGISTRY_PROBE_ACCEPT)
+            .send()
+            .await
+            .map_err(probe_error)?;
         if !response.status().is_success() {
             return Err(format!("HTTP {}", response.status().as_u16()));
         }
@@ -1473,10 +1472,10 @@ async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) ->
         if body.is_empty() {
             return Err("empty response".into());
         }
-        let metadata: NpmMetadata =
-            serde_json::from_slice(&body).map_err(|_| "invalid npm metadata JSON".to_string())?;
-        if metadata.name != "npm" || metadata.version.trim().is_empty() {
-            return Err("npm metadata has an unexpected name or missing version".into());
+        let ping: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| "invalid npm registry ping JSON".to_string())?;
+        if !ping.is_object() {
+            return Err("npm registry ping response is not a JSON object".into());
         }
         Ok(())
     })
@@ -2266,7 +2265,11 @@ npmRegistries:
         assert!(probes[1].ok);
         let request = request.recv_timeout(Duration::from_secs(3)).unwrap();
         let lower = request.to_ascii_lowercase();
-        assert!(request.starts_with("GET /npm/latest HTTP/1.1"), "{request}");
+        assert!(request.starts_with("GET /-/ping HTTP/1.1"), "{request}");
+        assert!(
+            lower.contains(&format!("accept: {REGISTRY_PROBE_ACCEPT}\r\n")),
+            "{request}"
+        );
         assert!(!lower.contains("authorization:"), "{request}");
         assert!(!lower.contains("cookie:"), "{request}");
         server.join().unwrap();
@@ -2299,15 +2302,22 @@ npmRegistries:
     }
 
     #[tokio::test]
-    async fn malformed_metadata_is_not_healthy() {
-        let (url, _request, server) = registry_server(
-            "200 OK",
-            r#"{"name":"other","version":"1"}"#,
-            Duration::ZERO,
-        );
+    async fn non_object_ping_response_is_not_healthy() {
+        let (url, _request, server) = registry_server("200 OK", "[]", Duration::ZERO);
         let probe = probe_one(&reqwest::Client::new(), url, Duration::from_secs(2)).await;
         assert!(!probe.ok);
-        assert!(probe.error.unwrap().contains("unexpected name"));
+        assert_eq!(
+            probe.error.as_deref(),
+            Some("npm registry ping response is not a JSON object")
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_object_ping_response_is_healthy() {
+        let (url, _request, server) = registry_server("200 OK", "{}", Duration::ZERO);
+        let probe = probe_one(&reqwest::Client::new(), url, Duration::from_secs(2)).await;
+        assert!(probe.ok, "{probe:?}");
         server.join().unwrap();
     }
 
@@ -2321,6 +2331,22 @@ npmRegistries:
         let probe = probe_one(&reqwest::Client::new(), url, Duration::from_secs(2)).await;
         assert!(!probe.ok);
         assert_eq!(probe.error.as_deref(), Some("HTTP 503"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_registry_ping_is_not_healthy() {
+        let mut body = "{}".to_string();
+        body.push_str(&" ".repeat(MAX_PROBE_BODY + 1 - body.len()));
+        let (url, _request, server) = registry_server("200 OK", body, Duration::ZERO);
+
+        let probe = probe_one(&reqwest::Client::new(), url, Duration::from_secs(2)).await;
+
+        assert!(!probe.ok);
+        assert_eq!(
+            probe.error,
+            Some(format!("response exceeds {MAX_PROBE_BODY} bytes"))
+        );
         server.join().unwrap();
     }
 
@@ -2340,7 +2366,7 @@ npmRegistries:
         assert!(!probe.ok);
         assert!(probe.error.is_some());
         let request = request.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert!(request.starts_with("GET /npm/latest HTTP/1.1"), "{request}");
+        assert!(request.starts_with("GET /-/ping HTTP/1.1"), "{request}");
         server.join().unwrap();
 
         let error = target.accept().unwrap_err();
@@ -2395,7 +2421,7 @@ npmRegistries:
         let request = request.recv_timeout(Duration::from_secs(3)).unwrap();
         let lower = request.to_ascii_lowercase();
         assert!(
-            request.starts_with("GET http://registry-probe.invalid/npm/latest HTTP/1.1"),
+            request.starts_with("GET http://registry-probe.invalid/-/ping HTTP/1.1"),
             "{request}"
         );
         assert!(!lower.contains("authorization:"), "{request}");
@@ -2527,9 +2553,10 @@ npmRegistries:
 
     fn registry_server(
         status: &'static str,
-        body: &'static str,
+        body: impl Into<String>,
         delay: Duration,
     ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let body = body.into();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
