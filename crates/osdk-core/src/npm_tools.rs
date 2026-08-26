@@ -353,9 +353,9 @@ fn select_automatic_installer(project: Option<&NpmProject>) -> Result<NpmInstall
     };
 
     if let Some(declared) = &project.declared_manager {
-        let installer = declared_installer(declared)?;
+        let declared_installer = declared_installer(declared)?;
         if let Some(native_lock) = &project.native_lock {
-            if native_lock.installer() != installer {
+            if native_lock.installer() != declared_installer {
                 return Err(Error::config(format!(
                     "{} declares package manager `{}` but {} belongs to `{}`",
                     project.package_json.display(),
@@ -364,8 +364,15 @@ fn select_automatic_installer(project: Option<&NpmProject>) -> Result<NpmInstall
                     native_lock.installer()
                 )));
             }
+            return if native_lock.supported {
+                Ok(NpmInstaller::Aube)
+            } else {
+                Ok(declared_installer)
+            };
         }
-        return Ok(installer);
+        // With no incumbent lock there is nothing manager-specific to
+        // preserve, so the default remains the embedded Aube engine.
+        return Ok(NpmInstaller::Aube);
     }
 
     match &project.native_lock {
@@ -623,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn package_manager_wins_over_dev_engines_and_auto_uses_it() {
+    fn package_manager_wins_over_dev_engines_while_auto_prefers_aube() {
         let temporary = tempfile::tempdir().unwrap();
         write_package(
             temporary.path(),
@@ -631,7 +638,7 @@ mod tests {
         );
         let plan =
             plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project).unwrap();
-        assert_eq!(plan.installer, NpmInstaller::Pnpm);
+        assert_eq!(plan.installer, NpmInstaller::Aube);
         assert_eq!(
             plan.project.unwrap().declared_manager.unwrap().manager,
             "pnpm"
@@ -735,6 +742,37 @@ mod tests {
         assert!(
             plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project).is_err()
         );
+    }
+
+    #[test]
+    fn declared_manager_with_unsupported_owned_lock_uses_native_owner() {
+        for (manager, file, contents, expected) in [
+            (
+                "npm",
+                "package-lock.json",
+                r#"{"lockfileVersion":4}"#,
+                NpmInstaller::Npm,
+            ),
+            (
+                "pnpm",
+                "pnpm-lock.yaml",
+                "lockfileVersion: '8.0'\n",
+                NpmInstaller::Pnpm,
+            ),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            write_package(
+                temporary.path(),
+                &format!(r#"{{"packageManager":"{manager}@9.0.0"}}"#),
+            );
+            std::fs::write(temporary.path().join(file), contents).unwrap();
+            assert_eq!(
+                plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project)
+                    .unwrap()
+                    .installer,
+                expected
+            );
+        }
     }
 
     #[test]
