@@ -2384,6 +2384,134 @@ fn write_registry_config(root: &Path, urls: &[&str]) {
 
 #[cfg(unix)]
 #[test]
+fn project_npm_use_runs_managed_native_installer_once_and_publishes_metadata() {
+    for (manager, lock_name, lock_contents, manifest, expected_args) in [
+        (
+            "npm",
+            "package-lock.json",
+            r#"{"lockfileVersion":3}"#,
+            r#"{"packageManager":"npm@10.0.0","dependencies":{"fixture-cli":"^1"}}"#,
+            "install --save-prod --ignore-scripts fixture-cli@1.2.3",
+        ),
+        (
+            "pnpm",
+            "pnpm-lock.yaml",
+            "lockfileVersion: 9.0\n",
+            r#"{"packageManager":"pnpm@10.0.0","devDependencies":{"fixture-cli":"^1"}}"#,
+            "add -D --ignore-scripts fixture-cli@1.2.3",
+        ),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let nested = project.join("src");
+        let project_bin = project.join("node_modules/.bin");
+        std::fs::create_dir_all(&project_bin).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(project.join("package.json"), manifest).unwrap();
+        std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+        std::fs::write(
+            temporary.path().join("config/config.toml"),
+            "[sources]\nselection = \"ordered\"\n[tools]\nnode = \"20.0.0\"\n",
+        )
+        .unwrap();
+
+        let marker = temporary.path().join(format!("{manager}.calls"));
+        let native_lock = project.join(lock_name);
+        let installed_bin = project_bin.join("fixture-cli");
+        write_fake_registry_manager(
+            temporary.path(),
+            manager,
+            "10.0.0",
+            manager,
+            r#"#!/bin/sh
+printf 'call\n' >> "$OSDK_TEST_MARKER"
+printf 'args=%s\n' "$*" >> "$OSDK_TEST_MARKER"
+printf 'path=%s\n' "$PATH" >> "$OSDK_TEST_MARKER"
+printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
+printf 'fixture\n' > "$OSDK_TEST_BIN"
+"#,
+        );
+        let marker_value = marker.display().to_string();
+        let lock_value = native_lock.display().to_string();
+        let bin_value = installed_bin.display().to_string();
+        let installer = format!("installer={manager}");
+        let registry_key = if manager == "pnpm" {
+            "pnpm_config_registry"
+        } else {
+            "npm_config_registry"
+        };
+        let output = run_isolated_in_with_env(
+            temporary.path(),
+            &nested,
+            &["use", "npm:fixture-cli@1.2.3", "-o", &installer],
+            &[
+                ("OSDK_TEST_MARKER", marker_value.as_str()),
+                ("OSDK_TEST_LOCK", lock_value.as_str()),
+                ("OSDK_TEST_LOCK_CONTENTS", lock_contents),
+                ("OSDK_TEST_BIN", bin_value.as_str()),
+                (registry_key, "https://registry.example.test/"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{manager}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let calls = std::fs::read_to_string(&marker).unwrap();
+        let lines = calls.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines.iter().filter(|line| **line == "call").count(),
+            1,
+            "{manager} launched more than once: {calls}"
+        );
+        assert_eq!(lines[1], format!("args={expected_args}"));
+        let manager_bin = if manager == "npm" {
+            temporary.path().join("installs/npm/10.0.0/bin")
+        } else {
+            temporary.path().join("installs/pnpm/10.0.0")
+        };
+        let expected_path = std::env::join_paths([
+            manager_bin,
+            temporary.path().join("installs/node/20.0.0/bin"),
+        ])
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        assert_eq!(lines[2], format!("path={expected_path}"));
+
+        let config_path = project.join("osdk.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("node = \"20.0.0\""), "{config}");
+        assert!(config.contains("\"npm:fixture-cli\" = {"), "{config}");
+        assert!(config.contains("version = \"1.2.3\""), "{config}");
+        assert!(
+            config.contains(&format!("installer = \"{manager}\"")),
+            "{config}"
+        );
+        assert!(
+            osdk_core::trust::is_trusted(&temporary.path().join("config"), &config_path, None,)
+                .unwrap()
+        );
+
+        let lock: toml::Value = std::fs::read_to_string(project.join("osdk.lock"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let tools = &lock["platforms"][platform_key()]["tools"];
+        assert_eq!(tools["node"]["version"].as_str(), Some("20.0.0"));
+        let npm = &tools["npm:fixture-cli"]["npm"];
+        assert_eq!(npm["installer"].as_str(), Some(manager));
+        assert_eq!(npm["scope"].as_str(), Some("project"));
+        assert_eq!(npm["node_version"].as_str(), Some("20.0.0"));
+        assert_eq!(npm["native_lock"]["kind"].as_str(), Some(manager));
+        assert_eq!(npm["native_lock"]["sha256"].as_str().unwrap().len(), 64);
+        assert!(!temporary.path().join("installs/npm/fixture-cli").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn exec_registry_fallback_injects_only_the_manager_variable_and_runs_once() {
     let temporary = tempfile::tempdir().unwrap();
     let cases = [

@@ -46,6 +46,21 @@ pub struct EmbeddedInstallRequest<'a> {
     pub offline: bool,
 }
 
+/// Add one or more dependencies directly to a user-owned project. Project
+/// installs deliberately share osdk's Aube cache and store, but always use the
+/// caller-selected managed Node runtime and never execute lifecycle scripts.
+pub struct EmbeddedProjectAddRequest<'a> {
+    pub project_dir: &'a Path,
+    pub packages: &'a [String],
+    pub cache_dir: PathBuf,
+    pub store_dir: PathBuf,
+    pub node_bin_dir: PathBuf,
+    pub save_dev: bool,
+    pub save_optional: bool,
+    pub save_peer: bool,
+    pub offline: bool,
+}
+
 pub struct EmbeddedFrozenInstallRequest<'a> {
     pub project_dir: &'a Path,
     pub cache_dir: PathBuf,
@@ -90,6 +105,50 @@ pub async fn install_packages(request: EmbeddedInstallRequest<'_>) -> Result<()>
     embed::add_with_overrides(request.project_dir, request.packages, options, overrides)
         .await
         .map_err(|error| Error::other(format_aube_error(&error)))
+}
+
+/// Install one exact package into an osdk-owned synthetic global project.
+///
+/// Aube's CLI global path owns process-global cwd and user-global directories,
+/// so an embedding host cannot safely call it. A synthetic project provides
+/// equivalent package materialization while keeping the native lock, bins,
+/// cache, store, and Node runtime inside paths selected by osdk.
+pub async fn install_global_package(request: EmbeddedInstallRequest<'_>) -> Result<()> {
+    install_packages(request).await
+}
+
+pub async fn add_to_project(request: EmbeddedProjectAddRequest<'_>) -> Result<()> {
+    initialize();
+
+    let (options, overrides) = project_add_options(&request);
+
+    embed::add_with_overrides(request.project_dir, request.packages, options, overrides)
+        .await
+        .map_err(|error| Error::other(format_aube_error(&error)))
+}
+
+fn project_add_options(
+    request: &EmbeddedProjectAddRequest<'_>,
+) -> (AddToProjectOptions, EmbedderInstallOverrides) {
+    let options = AddToProjectOptions {
+        save_dev: request.save_dev,
+        save_exact: false,
+        save_optional: request.save_optional,
+        save_peer: request.save_peer,
+        ignore_scripts: true,
+        dangerously_allow_all_builds: false,
+        offline: request.offline,
+        dep_selection: DepSelection::All,
+        control: InstallControl::silent(),
+        runtime: Some(EmbedderRuntime::selector(request.node_bin_dir.clone())),
+        ..Default::default()
+    };
+    let overrides = EmbedderInstallOverrides {
+        use_global_virtual_store: Some(false),
+        cache_dir: Some(request.cache_dir.clone()),
+        store_dir: Some(request.store_dir.clone()),
+    };
+    (options, overrides)
 }
 
 pub async fn install_frozen(request: EmbeddedFrozenInstallRequest<'_>) -> Result<()> {
@@ -230,6 +289,35 @@ mod tests {
         assert!(options.lockfile_only);
         assert_eq!(options.network_mode, NetworkMode::Online);
         assert!(!options.strict_no_lockfile);
+        assert!(options.runtime.is_some());
+        assert_eq!(overrides.use_global_virtual_store, Some(false));
+        assert_eq!(overrides.cache_dir, Some(cache_dir));
+        assert_eq!(overrides.store_dir, Some(store_dir));
+    }
+
+    #[test]
+    fn project_add_options_disable_scripts_and_preserve_selected_section() {
+        let project_dir = PathBuf::from("/tmp/osdk-aube-project");
+        let cache_dir = PathBuf::from("/tmp/osdk-aube-cache");
+        let store_dir = PathBuf::from("/tmp/osdk-aube-store");
+        let request = EmbeddedProjectAddRequest {
+            project_dir: &project_dir,
+            packages: &["prettier@3".into()],
+            cache_dir: cache_dir.clone(),
+            store_dir: store_dir.clone(),
+            node_bin_dir: PathBuf::from("/tmp/osdk-node-bin"),
+            save_dev: true,
+            save_optional: false,
+            save_peer: false,
+            offline: false,
+        };
+        let (options, overrides) = project_add_options(&request);
+
+        assert!(options.save_dev);
+        assert!(!options.save_optional);
+        assert!(!options.save_peer);
+        assert!(options.ignore_scripts);
+        assert!(!options.dangerously_allow_all_builds);
         assert!(options.runtime.is_some());
         assert_eq!(overrides.use_global_virtual_store, Some(false));
         assert_eq!(overrides.cache_dir, Some(cache_dir));

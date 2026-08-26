@@ -1,11 +1,14 @@
 //! Format-preserving edits to config files via `toml_edit`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use osdk_core::backend::Ctx;
 use osdk_core::config::PROJECT_CONFIG_NAMES;
 use osdk_core::config::{StructuredToolConfig, ToolConfigValue};
+
+static NEXT_CONFIG_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 
 /// Write a `[tools] <tool> = <spec>` pin to the user global config.
 pub fn set_global_tool(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
@@ -40,6 +43,20 @@ pub fn set_project_tool_config(tool: &str, config: &StructuredToolConfig) -> Res
     let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
     edit_tool_config(&path, tool, config)?;
     Ok(path)
+}
+
+/// Atomically update the exact Node runtime and a structured npm tool entry in
+/// one project config publication. Existing Node options are retained.
+pub fn set_project_npm_tool_at(
+    path: &Path,
+    node_version: &str,
+    tool: &str,
+    config: &StructuredToolConfig,
+) -> Result<()> {
+    let mut doc = load_doc(path)?;
+    set_tool_version_in_doc(&mut doc, "node", node_version)?;
+    set_tool_config_in_doc(&mut doc, tool, config)?;
+    save_doc(path, &doc)
 }
 
 /// Set or clear a per-tool source pin in the user global config.
@@ -233,6 +250,12 @@ pub fn remove_custom_source(ctx: &Ctx, tool: &str, id: &str) -> Result<bool> {
 
 fn edit_tool_version(path: &Path, tool: &str, spec: &str) -> Result<()> {
     let mut doc = load_doc(path)?;
+    set_tool_version_in_doc(&mut doc, tool, spec)?;
+    save_doc(path, &doc)?;
+    Ok(())
+}
+
+fn set_tool_version_in_doc(doc: &mut toml_edit::DocumentMut, tool: &str, spec: &str) -> Result<()> {
     let tools = doc
         .entry("tools")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
@@ -257,12 +280,21 @@ fn edit_tool_version(path: &Path, tool: &str, spec: &str) -> Result<()> {
             tools_tbl.insert(tool, toml_edit::value(spec));
         }
     }
-    save_doc(path, &doc)?;
     Ok(())
 }
 
 fn edit_tool_config(path: &Path, tool: &str, config: &StructuredToolConfig) -> Result<()> {
     let mut doc = load_doc(path)?;
+    set_tool_config_in_doc(&mut doc, tool, config)?;
+    save_doc(path, &doc)?;
+    Ok(())
+}
+
+fn set_tool_config_in_doc(
+    doc: &mut toml_edit::DocumentMut,
+    tool: &str,
+    config: &StructuredToolConfig,
+) -> Result<()> {
     let tools = doc
         .entry("tools")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
@@ -280,7 +312,6 @@ fn edit_tool_config(path: &Path, tool: &str, config: &StructuredToolConfig) -> R
         tool,
         toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)),
     );
-    save_doc(path, &doc)?;
     Ok(())
 }
 
@@ -311,11 +342,95 @@ fn load_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
 }
 
 fn save_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .context("configuration path has no file name")?
+        .to_string_lossy();
+    let (temporary, mut file) = loop {
+        let serial = NEXT_CONFIG_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(".{file_name}.tmp-{}-{serial}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+        {
+            Ok(file) => break (temporary, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", temporary.display()))
+            }
+        }
+    };
+    use std::io::Write as _;
+    let result = (|| -> Result<()> {
+        file.write_all(doc.to_string().as_bytes())
+            .with_context(|| format!("writing {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", temporary.display()))?;
+        drop(file);
+        replace_file(&temporary, path)?;
+        sync_parent_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    std::fs::write(path, doc.to_string()).with_context(|| format!("writing {}", path.display()))?;
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::rename(source, destination)
+        .with_context(|| format!("replacing {}", destination.display()))
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+    const REPLACE_EXISTING: u32 = 0x1;
+    const WRITE_THROUGH: u32 = 0x8;
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            REPLACE_EXISTING | WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| "replacing configuration file".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("syncing configuration directory {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<()> {
     Ok(())
 }
 

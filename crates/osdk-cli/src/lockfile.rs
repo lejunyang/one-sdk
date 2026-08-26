@@ -830,6 +830,7 @@ pub fn merge_resolved_with_scope(
     save(path, &lockfile)
 }
 
+#[allow(dead_code)]
 pub fn upsert_resolved_with_scope(
     path: &Path,
     platform: Platform,
@@ -838,13 +839,32 @@ pub fn upsert_resolved_with_scope(
     version: &ToolVersion,
     scope: LockScope,
 ) -> Result<()> {
-    reject_linked_rust(dirs, version)?;
-    if request.backend != version.backend {
-        anyhow::bail!(
-            "cannot lock request `{}` with resolved backend `{}`",
-            request.backend,
-            version.backend
-        );
+    upsert_resolved_many_with_scope(
+        path,
+        platform,
+        dirs,
+        std::slice::from_ref(&(request.clone(), version.clone())),
+        scope,
+    )
+}
+
+/// Upsert several exact tool identities and atomically save the lock once.
+pub fn upsert_resolved_many_with_scope(
+    path: &Path,
+    platform: Platform,
+    dirs: &osdk_core::dirs::Dirs,
+    resolved: &[(ToolRequest, ToolVersion)],
+    scope: LockScope,
+) -> Result<()> {
+    for (request, version) in resolved {
+        reject_linked_rust(dirs, version)?;
+        if request.backend != version.backend {
+            anyhow::bail!(
+                "cannot lock request `{}` with resolved backend `{}`",
+                request.backend,
+                version.backend
+            );
+        }
     }
     let mut lockfile = if path.is_file() {
         load(path)?
@@ -858,56 +878,63 @@ pub fn upsert_resolved_with_scope(
         .platforms
         .entry(platform_key(platform))
         .or_default();
-    let node_version = if version.backend == "node" {
-        Some(version.version.as_str())
-    } else {
-        version
-            .options
-            .get(LOCKED_NPM_NODE_VERSION_OPTION)
-            .map(String::as_str)
-            .or_else(|| {
-                platform_lock
-                    .tools
-                    .get("node")
-                    .map(|node| node.version.as_str())
-            })
-    };
-    let npm_metadata = locked_npm_metadata(dirs, version, node_version, scope)?;
-    let mut options = public_options(&version.options);
-    if npm_metadata.is_some() {
-        options.remove("node_version");
+    let node_version = resolved
+        .iter()
+        .rev()
+        .find_map(|(_, version)| (version.backend == "node").then(|| version.version.clone()))
+        .or_else(|| {
+            platform_lock
+                .tools
+                .get("node")
+                .map(|node| node.version.clone())
+        });
+    for (request, version) in resolved {
+        let effective_node = if version.backend == "node" {
+            Some(version.version.as_str())
+        } else {
+            version
+                .options
+                .get(LOCKED_NPM_NODE_VERSION_OPTION)
+                .map(String::as_str)
+                .or(node_version.as_deref())
+        };
+        let npm_metadata = locked_npm_metadata(dirs, version, effective_node, scope)?;
+        let mut options = public_options(&version.options);
+        if npm_metadata.is_some() {
+            options.remove("node_version");
+        }
+        let artifact = if version.backend.starts_with("npm:") {
+            None
+        } else {
+            let resolved_artifact =
+                osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
+                    url: receipt.url,
+                    file_name: receipt.file_name,
+                    checksum: receipt.checksum,
+                    subdir: version.options.get("catalog-subdir").cloned(),
+                    evidence: receipt.evidence,
+                });
+            osdk_core::pipeline::artifact_receipt(dirs, &version.backend, &version.version)
+                .map(|receipt| LockedArtifact {
+                    url: receipt.url,
+                    file_name: receipt.file_name,
+                    checksum: receipt.checksum,
+                    subdir: version.options.get("catalog-subdir").cloned(),
+                    evidence: receipt.evidence,
+                })
+                .or(resolved_artifact)
+        };
+        platform_lock.tools.insert(
+            request.backend.clone(),
+            LockedTool {
+                request: request.spec.to_string(),
+                version: version.version.clone(),
+                options,
+                artifact,
+                npm: npm_metadata.map(LockedNpmGraph::Metadata),
+            },
+        );
     }
-    let artifact = if version.backend.starts_with("npm:") {
-        None
-    } else {
-        let resolved_artifact =
-            osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
-                url: receipt.url,
-                file_name: receipt.file_name,
-                checksum: receipt.checksum,
-                subdir: version.options.get("catalog-subdir").cloned(),
-                evidence: receipt.evidence,
-            });
-        osdk_core::pipeline::artifact_receipt(dirs, &version.backend, &version.version)
-            .map(|receipt| LockedArtifact {
-                url: receipt.url,
-                file_name: receipt.file_name,
-                checksum: receipt.checksum,
-                subdir: version.options.get("catalog-subdir").cloned(),
-                evidence: receipt.evidence,
-            })
-            .or(resolved_artifact)
-    };
-    platform_lock.tools.insert(
-        request.backend.clone(),
-        LockedTool {
-            request: request.spec.to_string(),
-            version: version.version.clone(),
-            options,
-            artifact,
-            npm: npm_metadata.map(LockedNpmGraph::Metadata),
-        },
-    );
     save(path, &lockfile)
 }
 

@@ -252,8 +252,19 @@ async fn apply_package_registry_plan(
     args: &[String],
     env: &mut std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
-    let executable_alias = executable_basename(program);
     let cwd = std::env::current_dir().context("getting current dir for registry preflight")?;
+    apply_package_registry_plan_at(app, resolved, program, args, env, &cwd).await
+}
+
+async fn apply_package_registry_plan_at(
+    app: &App,
+    resolved: &[(ToolRequest, ToolVersion)],
+    program: &str,
+    args: &[String],
+    env: &mut std::collections::BTreeMap<String, String>,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    let executable_alias = executable_basename(program);
     let project_yarn_version = project_yarn_version(&cwd);
     let yarn_version = resolved
         .iter()
@@ -274,7 +285,7 @@ async fn apply_package_registry_plan(
         return Ok(());
     }
     let registry_env = package_registry::registry_env(manager);
-    match package_registry::plan(&app.ctx, &cwd, manager, &executable_alias, args, |key| {
+    match package_registry::plan(&app.ctx, cwd, manager, &executable_alias, args, |key| {
         std::env::var(key).ok()
     })
     .await?
@@ -933,17 +944,43 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
 }
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
+    let requested_spec = requested_spec_literal(&tool);
     let mut req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
     inherit_configured_options(app, &mut req);
     for (k, v) in parse_opts(&opts)? {
         req.options.insert(k, v);
     }
+    if global && req.backend.starts_with("npm:") {
+        return crate::global_npm_use::install(app, req, requested_spec).await;
+    }
+    if !global && req.backend.starts_with("npm:") {
+        let cwd = std::env::current_dir()?;
+        let requested_installer =
+            osdk_core::npm_tools::installer_from_request_options(&req.options)?;
+        let plan = osdk_core::npm_tools::plan_npm_installer(
+            &cwd,
+            requested_installer,
+            osdk_core::npm_tools::ToolScope::Project,
+        )?;
+        if let Some(project) = plan.project {
+            return use_project_npm(app, req, requested_spec, project, plan.installer).await;
+        }
+    }
+    use_legacy_cmd(app, req, requested_spec, global).await
+}
+
+async fn use_legacy_cmd(
+    app: &mut App,
+    req: ToolRequest,
+    requested_spec: Option<String>,
+    global: bool,
+) -> Result<()> {
     let persisted_options = req.options.clone();
     let tv = install_one(app, &req).await?;
     // Pin the exact spec string the user typed (verbatim after `@`), so
     // channels like `stable` or `temurin-17` are preserved rather than being
     // normalized to `latest`. Bare `tool` (no `@`) pins the resolved version.
-    let spec = requested_spec_literal(&tool).unwrap_or_else(|| tv.version.clone());
+    let spec = requested_spec.unwrap_or_else(|| tv.version.clone());
     if global {
         if persisted_options.is_empty() {
             crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
@@ -973,6 +1010,442 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
                 path = path.display()
             )
         );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectDependencySection {
+    Dependencies,
+    DevDependencies,
+    OptionalDependencies,
+    PeerDependencies { also_dev: bool },
+}
+
+async fn use_project_npm(
+    app: &mut App,
+    request: ToolRequest,
+    requested_spec: Option<String>,
+    project: osdk_core::npm_tools::NpmProject,
+    installer: osdk_core::npm_tools::NpmInstaller,
+) -> Result<()> {
+    let package = request
+        .backend
+        .strip_prefix("npm:")
+        .ok_or_else(|| anyhow!("project npm install requires an npm: package request"))?
+        .to_string();
+    let section = project_dependency_section(&project.package_json, &package)?;
+    let node_request = project_node_request(app, &project.root)?;
+    let (node_backend, node_version) = install_one_without_shims(app, &node_request).await?;
+    generate_shims_for(app, node_backend.as_ref(), &node_version)?;
+    let node_bin_dir = managed_bin_paths(&app.ctx, node_backend.as_ref(), &node_version)?
+        .into_iter()
+        .find(|path| path.join(node_executable_name()).is_file())
+        .ok_or_else(|| {
+            anyhow!(t!(
+                "err.managed_node_bin_dir_missing",
+                version = node_version.version
+            ))
+        })?;
+
+    apply_source_override(app, &request.backend);
+    let backend = app.registry.get(&request.backend)?;
+    let mut effective = expand_request_alias(app, backend.as_ref(), &request)?;
+    effective.options.insert(
+        osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+        node_version.version.clone(),
+    );
+    let mut version = backend
+        .resolve_version(&app.ctx, &effective)
+        .await
+        .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
+    let package_spec = project_package_spec(&package, requested_spec.as_deref(), &version.version);
+
+    match installer {
+        osdk_core::npm_tools::NpmInstaller::Aube => {
+            osdk_core::backend::aube_host::add_to_project(
+                osdk_core::backend::aube_host::EmbeddedProjectAddRequest {
+                    project_dir: &project.root,
+                    packages: std::slice::from_ref(&package_spec),
+                    cache_dir: osdk_core::backend::npm_package::NpmPackageBackend::aube_cache_dir(
+                        &app.ctx,
+                    ),
+                    store_dir: osdk_core::backend::npm_package::NpmPackageBackend::aube_store_dir(
+                        &app.ctx,
+                    ),
+                    node_bin_dir: node_bin_dir.clone(),
+                    save_dev: matches!(
+                        section,
+                        ProjectDependencySection::DevDependencies
+                            | ProjectDependencySection::PeerDependencies { also_dev: true }
+                    ),
+                    save_optional: matches!(
+                        section,
+                        ProjectDependencySection::OptionalDependencies
+                    ),
+                    save_peer: matches!(section, ProjectDependencySection::PeerDependencies { .. }),
+                    offline: app.ctx.config.settings.offline,
+                },
+            )
+            .await?;
+        }
+        osdk_core::npm_tools::NpmInstaller::Npm | osdk_core::npm_tools::NpmInstaller::Pnpm => {
+            run_project_native_installer(
+                app,
+                installer,
+                &project.root,
+                &package_spec,
+                section,
+                &node_bin_dir,
+            )
+            .await?;
+        }
+        osdk_core::npm_tools::NpmInstaller::Auto => {
+            unreachable!("npm installer planning always returns a concrete installer")
+        }
+    }
+
+    validate_project_package_bin(&project.root, &package)?;
+    let installed_project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
+        .ok_or_else(|| anyhow!("project package.json disappeared during npm install"))?;
+    let native_lock = installed_project.native_lock.ok_or_else(|| {
+        anyhow!(
+            "installer `{installer}` did not write a recognized native lockfile in {}",
+            project.root.display()
+        )
+    })?;
+    if installer != osdk_core::npm_tools::NpmInstaller::Aube && native_lock.installer() != installer
+    {
+        anyhow::bail!(
+            "installer `{installer}` wrote {} owned by `{}`",
+            native_lock.path.display(),
+            native_lock.installer()
+        );
+    }
+    record_project_npm_metadata(&mut version, installer, &native_lock, &node_version.version)?;
+
+    let lock_path = project.root.join(crate::lockfile::LOCKFILE_NAME);
+    crate::lockfile::upsert_resolved_many_with_scope(
+        &lock_path,
+        app.ctx.platform,
+        &app.ctx.dirs,
+        &[
+            (node_request.clone(), node_version.clone()),
+            (request.clone(), version.clone()),
+        ],
+        crate::lockfile::LockScope::Project,
+    )?;
+
+    let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
+    let config_path = project_config_path(app, &project.root);
+    let mut config_options = request.options.clone();
+    config_options.insert("installer".into(), installer.as_str().into());
+    crate::config_edit::set_project_npm_tool_at(
+        &config_path,
+        &node_version.version,
+        &request.backend,
+        &structured_tool_config(&persisted_spec, &config_options),
+    )?;
+    osdk_core::trust::trust(&app.ctx.dirs.config, &config_path)?;
+    println!(
+        "{}",
+        t!(
+            "msg.pinned_project",
+            tool = request.backend,
+            ver = persisted_spec,
+            path = config_path.display()
+        )
+    );
+    Ok(())
+}
+
+fn project_dependency_section(
+    path: &std::path::Path,
+    package: &str,
+) -> Result<ProjectDependencySection> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    let contains = |section: &str| {
+        manifest
+            .get(section)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| dependencies.contains_key(package))
+    };
+    Ok(if contains("dependencies") {
+        ProjectDependencySection::Dependencies
+    } else if contains("optionalDependencies") {
+        ProjectDependencySection::OptionalDependencies
+    } else if contains("peerDependencies") {
+        ProjectDependencySection::PeerDependencies {
+            also_dev: contains("devDependencies"),
+        }
+    } else if contains("devDependencies") {
+        ProjectDependencySection::DevDependencies
+    } else {
+        ProjectDependencySection::DevDependencies
+    })
+}
+
+fn project_package_spec(package: &str, requested: Option<&str>, resolved: &str) -> String {
+    format!("{package}@{}", requested.unwrap_or(resolved))
+}
+
+fn node_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    }
+}
+
+fn project_node_request(app: &App, project_root: &std::path::Path) -> Result<ToolRequest> {
+    let backend = app.registry.get("node")?;
+    let spec = osdk_core::version::resolver::resolve_active(
+        "node",
+        project_root,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    )
+    .map(|active| {
+        if active.is_range {
+            VersionSpec::parse_range(&active.spec)
+        } else {
+            Ok(VersionSpec::parse(&active.spec))
+        }
+    })
+    .transpose()?
+    .unwrap_or(VersionSpec::Latest);
+    Ok(ToolRequest {
+        backend: "node".into(),
+        spec,
+        options: app
+            .ctx
+            .config
+            .tool_configs
+            .get("node")
+            .map(|entry| entry.to_request_options())
+            .unwrap_or_default(),
+    })
+}
+
+async fn run_project_native_installer(
+    app: &mut App,
+    installer: osdk_core::npm_tools::NpmInstaller,
+    project_root: &std::path::Path,
+    package_spec: &str,
+    section: ProjectDependencySection,
+    node_bin_dir: &std::path::Path,
+) -> Result<()> {
+    let manager_id = installer
+        .executable()
+        .filter(|manager| matches!(*manager, "npm" | "pnpm"))
+        .ok_or_else(|| anyhow!("project native installer must be npm or pnpm"))?;
+    let manager_request = project_manager_request(app, manager_id, project_root)?;
+    let (manager_backend, manager_version) =
+        install_one_without_shims(app, &manager_request).await?;
+    generate_shims_for(app, manager_backend.as_ref(), &manager_version)?;
+    let manager = find_managed_executable(
+        &managed_bin_paths(&app.ctx, manager_backend.as_ref(), &manager_version)?,
+        manager_id,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "managed {manager_id} executable not found for {}@{}",
+            manager_version.backend,
+            manager_version.version
+        )
+    })?;
+    let args = project_manager_args(installer, package_spec, section);
+    let mut env = manager_backend.exec_env(&app.ctx, &manager_version)?;
+    let mut paths = vec![manager.parent().unwrap_or(project_root).to_path_buf()];
+    paths.push(node_bin_dir.to_path_buf());
+    if let Some(existing_path) = std::env::var_os("PATH").filter(|path| !path.is_empty()) {
+        paths.extend(std::env::split_paths(&existing_path));
+    }
+    env.insert(
+        "PATH".into(),
+        std::env::join_paths(paths)?.to_string_lossy().into_owned(),
+    );
+    let resolved = vec![(manager_request, manager_version)];
+    apply_package_registry_plan_at(app, &resolved, manager_id, &args, &mut env, project_root)
+        .await?;
+    let status = command_for_program(&manager)
+        .args(&args)
+        .current_dir(project_root)
+        .envs(env)
+        .status()
+        .with_context(|| format!("running {}", manager.display()))?;
+    if !status.success() {
+        anyhow::bail!("command exited with {status}");
+    }
+    Ok(())
+}
+
+fn project_manager_request(
+    app: &App,
+    manager: &str,
+    project_root: &std::path::Path,
+) -> Result<ToolRequest> {
+    let backend = app.registry.get(manager)?;
+    let spec = osdk_core::version::resolver::resolve_active(
+        manager,
+        project_root,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    )
+    .map(|active| {
+        if active.is_range {
+            VersionSpec::parse_range(&active.spec).unwrap_or_else(|_| VersionSpec::parse(&active.spec))
+        } else {
+            VersionSpec::parse(&active.spec)
+        }
+    })
+    .unwrap_or(VersionSpec::Latest);
+    Ok(ToolRequest {
+        backend: manager.into(),
+        spec,
+        options: app
+            .ctx
+            .config
+            .tool_configs
+            .get(manager)
+            .map(|entry| entry.to_request_options())
+            .unwrap_or_default(),
+    })
+}
+
+fn project_manager_args(
+    installer: osdk_core::npm_tools::NpmInstaller,
+    package_spec: &str,
+    section: ProjectDependencySection,
+) -> Vec<String> {
+    let mut args = match installer {
+        osdk_core::npm_tools::NpmInstaller::Npm => vec!["install".into()],
+        osdk_core::npm_tools::NpmInstaller::Pnpm => vec!["add".into()],
+        _ => unreachable!("only native installers have command arguments"),
+    };
+    match (installer, section) {
+        (osdk_core::npm_tools::NpmInstaller::Npm, ProjectDependencySection::Dependencies) => {
+            args.push("--save-prod".into())
+        }
+        (osdk_core::npm_tools::NpmInstaller::Npm, ProjectDependencySection::DevDependencies) => {
+            args.push("--save-dev".into())
+        }
+        (
+            osdk_core::npm_tools::NpmInstaller::Npm,
+            ProjectDependencySection::OptionalDependencies,
+        ) => args.push("--save-optional".into()),
+        (
+            osdk_core::npm_tools::NpmInstaller::Npm,
+            ProjectDependencySection::PeerDependencies { also_dev },
+        ) => {
+            args.push("--save-peer".into());
+            if also_dev {
+                args.push("--save-dev".into());
+            }
+        }
+        (osdk_core::npm_tools::NpmInstaller::Pnpm, ProjectDependencySection::Dependencies) => {
+            args.push("-P".into())
+        }
+        (osdk_core::npm_tools::NpmInstaller::Pnpm, ProjectDependencySection::DevDependencies) => {
+            args.push("-D".into())
+        }
+        (
+            osdk_core::npm_tools::NpmInstaller::Pnpm,
+            ProjectDependencySection::OptionalDependencies,
+        ) => args.push("-O".into()),
+        (
+            osdk_core::npm_tools::NpmInstaller::Pnpm,
+            ProjectDependencySection::PeerDependencies { also_dev },
+        ) => {
+            args.push("--save-peer".into());
+            if also_dev {
+                args.push("-D".into());
+            }
+        }
+        _ => unreachable!("only native installers have command arguments"),
+    }
+    args.push("--ignore-scripts".into());
+    args.push(package_spec.into());
+    args
+}
+
+fn record_project_npm_metadata(
+    version: &mut ToolVersion,
+    installer: osdk_core::npm_tools::NpmInstaller,
+    native_lock: &osdk_core::npm_tools::NativeLock,
+    node_version: &str,
+) -> Result<()> {
+    let sha256 = osdk_core::pipeline::verify::hash_file(
+        &native_lock.path,
+        osdk_core::pipeline::HashAlgo::Sha256,
+    )?;
+    version.options.insert(
+        osdk_core::npm_tools::INSTALLER_OPTION.into(),
+        installer.as_str().into(),
+    );
+    version.options.insert(
+        osdk_core::npm_tools::LOCKED_NPM_INSTALLER_OPTION.into(),
+        installer.as_str().into(),
+    );
+    version.options.insert(
+        osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION.into(),
+        osdk_core::npm_tools::ToolScope::Project.as_str().into(),
+    );
+    version.options.insert(
+        osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+        node_version.into(),
+    );
+    version.options.insert(
+        osdk_core::npm_tools::LOCKED_NPM_NATIVE_LOCK_KIND_OPTION.into(),
+        native_lock.installer_name().into(),
+    );
+    version.options.insert(
+        osdk_core::npm_tools::LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION.into(),
+        native_lock.format.clone(),
+    );
+    version.options.insert(
+        osdk_core::npm_tools::LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION.into(),
+        sha256,
+    );
+    Ok(())
+}
+
+fn project_config_path(app: &App, project_root: &std::path::Path) -> std::path::PathBuf {
+    app.ctx
+        .config
+        .project_config_path
+        .as_ref()
+        .filter(|path| {
+            path.parent()
+                .is_some_and(|parent| same_config_path(parent, project_root))
+        })
+        .cloned()
+        .unwrap_or_else(|| project_root.join("osdk.toml"))
+}
+
+fn same_config_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+        || match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+}
+
+fn validate_project_package_bin(project_root: &std::path::Path, package: &str) -> Result<()> {
+    let bin_dir = project_root.join("node_modules").join(".bin");
+    let metadata = std::fs::symlink_metadata(&bin_dir).with_context(|| {
+        format!(
+            "installed npm package `{package}` did not create {}",
+            bin_dir.display()
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        anyhow::bail!("{} is not a regular directory", bin_dir.display());
+    }
+    if std::fs::read_dir(&bin_dir)?.next().is_none() {
+        anyhow::bail!("installed npm package `{package}` exposes no project executable");
     }
     Ok(())
 }
@@ -2498,6 +2971,95 @@ pub fn human_bytes(n: u64) -> String {
 #[cfg(test)]
 mod command_flow_tests {
     use super::*;
+
+    #[test]
+    fn project_dependency_section_preserves_existing_section_and_defaults_to_dev() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("package.json");
+        for (manifest, expected) in [
+            (
+                r#"{"dependencies":{"prettier":"^2"}}"#,
+                ProjectDependencySection::Dependencies,
+            ),
+            (
+                r#"{"devDependencies":{"prettier":"^2"}}"#,
+                ProjectDependencySection::DevDependencies,
+            ),
+            (
+                r#"{"optionalDependencies":{"prettier":"^2"}}"#,
+                ProjectDependencySection::OptionalDependencies,
+            ),
+            (
+                r#"{"peerDependencies":{"prettier":"^2"}}"#,
+                ProjectDependencySection::PeerDependencies { also_dev: false },
+            ),
+            (
+                r#"{"peerDependencies":{"prettier":"^2"},"devDependencies":{"prettier":"^2"}}"#,
+                ProjectDependencySection::PeerDependencies { also_dev: true },
+            ),
+            (
+                r#"{"dependencies":{}}"#,
+                ProjectDependencySection::DevDependencies,
+            ),
+        ] {
+            std::fs::write(&path, manifest).unwrap();
+            assert_eq!(
+                project_dependency_section(&path, "prettier").unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn native_project_args_preserve_sections_and_disable_scripts() {
+        use osdk_core::npm_tools::NpmInstaller;
+
+        let cases = [
+            (
+                NpmInstaller::Npm,
+                ProjectDependencySection::Dependencies,
+                vec!["install", "--save-prod", "--ignore-scripts", "prettier@3"],
+            ),
+            (
+                NpmInstaller::Npm,
+                ProjectDependencySection::DevDependencies,
+                vec!["install", "--save-dev", "--ignore-scripts", "prettier@3"],
+            ),
+            (
+                NpmInstaller::Npm,
+                ProjectDependencySection::OptionalDependencies,
+                vec![
+                    "install",
+                    "--save-optional",
+                    "--ignore-scripts",
+                    "prettier@3",
+                ],
+            ),
+            (
+                NpmInstaller::Pnpm,
+                ProjectDependencySection::PeerDependencies { also_dev: true },
+                vec!["add", "--save-peer", "-D", "--ignore-scripts", "prettier@3"],
+            ),
+        ];
+        for (installer, section, expected) in cases {
+            assert_eq!(
+                project_manager_args(installer, "prettier@3", section),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn project_package_spec_preserves_user_request_and_defaults_to_exact() {
+        assert_eq!(
+            project_package_spec("prettier", Some("3"), "3.6.2"),
+            "prettier@3"
+        );
+        assert_eq!(
+            project_package_spec("@antfu/ni", None, "0.21.12"),
+            "@antfu/ni@0.21.12"
+        );
+    }
 
     #[test]
     fn exact_resolved_node_is_bound_to_npm_requests() {
