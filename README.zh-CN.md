@@ -157,11 +157,18 @@ osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-项目自动安装会在现有 lock 格式兼容时优先使用 Aube；也可以用
-`installer=aube`、`installer=npm`、`installer=pnpm` 明确选择。osdk 把项目元数据写入
-`osdk.toml` 与 `osdk.lock`，传递依赖图仍以包管理器的原生 lock 为准。当前目录向上没有
-`package.json` 时，本地 `use` 保留原有的 osdk 隔离安装与 shim 行为。生成的
-`.osdk/npm-bin/` 是本地派生状态，通常应加入版本控制忽略规则。
+项目 `use` 会遵循最近的 `package.json` 以及唯一一个兼容的现有原生 lock；自动选择会在
+该 lock 兼容时优先使用 Aube，也可以用 `installer=aube`、`installer=npm`、
+`installer=pnpm` 明确选择。Shell 激活只会暴露由可信项目配置选中、且通过校验的包命令，
+不会加入项目的整个 `node_modules/.bin`。当前目录向上没有 `package.json` 时，本地 `use`
+保留原有的 osdk 隔离安装与 shim 行为。生成的 `.osdk/npm-bin/` 是本地派生状态，通常应
+加入版本控制忽略规则。请把包管理器的原生 lock 与 `osdk.lock` 一起提交；后者不能替代
+传递依赖图。
+
+全局 npm、pnpm 与 Aube 都会在 osdk 控制的前缀中调用各自真正的 global-add，不修改环境中
+的 Node 安装。Release 安装会同时提供 Aube 全局模式所需的 `osdk-aube` 辅助程序。Aube
+2.1 新建或修复全局安装时需要联网；已完整安装的精确版本可以在不启动 Aube 的情况下离线
+再次选中。安装过程本身必须使用原生离线模式时，请选择 npm 或 pnpm。
 `where --global` 与 `uninstall --global` 会显式操作用户级 npm 安装；不带该标志时继续
 保持原有项目/隔离行为。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他
 owner 的 shim。
@@ -170,7 +177,7 @@ owner 的 shim。
 
 ## 场景：使用各语言生态
 
-安装、切换、锁定、下载源、缓存和离线命令在各生态保持一致；需要生态专属操作时，
+各生态使用一致的命令风格，具体 backend 的能力说明见对应指南；需要生态专属操作时，
 使用对应的扩展命令。
 
 ### Node.js

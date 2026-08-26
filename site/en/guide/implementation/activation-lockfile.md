@@ -27,8 +27,10 @@ The shim reloads configuration and selects an installed version for its current 
 
 Isolated and global `npm:<package>` installs record commands found under their
 controlled install roots and relative paths in an inventory. A real-project
-install instead validates bins declared by the requested package and exposes
-`node_modules/.bin` through trusted project activation. At startup, the shim
+install instead validates bins declared by the requested package and publishes
+a curated `.osdk/npm-bin/generations/<identity>/bin` directory. Trusted project
+activation exposes that validated generation, never the complete
+`node_modules/.bin`. At startup, the shim
 scans managed inventories to recover backend ownership and adds managed Node to that
 backend's PATH. With multiple backend owners, runtime dispatch routes only when
 current configuration selects exactly one; otherwise it refuses to choose. CLI

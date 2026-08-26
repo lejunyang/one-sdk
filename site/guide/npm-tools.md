@@ -66,14 +66,16 @@ node = "22.17.0"
 
 ## 安装器选择
 
-自动选择以 Aube 为先：没有原生 lock，或现有 lock 格式能被内嵌 Aube 读取时，osdk
-都会选择 Aube。目前兼容 Aube v9、pnpm v9，以及 npm
-`package-lock.json` / `npm-shrinkwrap.json` v2 或 v3。若已知 npm 或 pnpm lock 版本过新
-或 Aube 尚不支持，osdk 会只调用一次拥有该 lock 的原生包管理器。
+修改项目之前，osdk 会读取最近的 `package.json` 及其同目录下可识别的原生 lock。没有
+原生 lock，或恰好存在一个且其格式可由 Aube 读取时，自动选择会使用 Aube。目前兼容
+Aube v9、pnpm v9，以及 npm `package-lock.json` / `npm-shrinkwrap.json` v2 或 v3。若唯一
+现有的 npm 或 pnpm lock 版本过新或 Aube 尚不支持，osdk 会只调用一次拥有该 lock 的原生
+包管理器。
 
 `package.json#packageManager`（其次是 `devEngines.packageManager`）用于识别声明的
-owner。声明与已有原生 lock 必须一致；同时存在多个可识别 lockfile 也会因歧义被拒绝。
-自动模式只接受声明的 Aube、npm 或 pnpm；其他管理器需要先明确选择支持的安装器。
+owner。声明必须与唯一现有的原生 lock 一致；同时存在两个或更多可识别 lockfile 时，会在
+修改任何内容前因歧义而拒绝。自动模式只接受声明的 Aube、npm 或 pnpm；其他管理器需要
+先明确选择支持的安装器。
 
 需要时可显式选择安装器：
 
@@ -130,14 +132,22 @@ osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-osdk 会安装所选 Node，并在需要时安装 npm 或 pnpm。原生 npm 执行
-`install --global --prefix ...`；原生 pnpm 执行 `add --global`，并使用 osdk 控制的
-global、bin 与 store 目录。Aube 使用等价的 osdk 自有合成全局项目。这些模式都不会
-修改环境中的 Node 安装或当前项目；校验后的命令通过 osdk shim 发布。
+osdk 会安装所选 Node，并在需要时安装 npm 或 pnpm。随后每个安装器都会在 osdk 控制的
+前缀中执行自己真正的 global-add：npm 使用 `install --global --prefix ...`，pnpm 使用
+`add --global`，Aube 则通过安装包中同目录的 `osdk-aube` 辅助程序执行
+`add --global`。该辅助进程为 Aube 提供隔离的 home 与前缀，同时复用 osdk 共享的 Aube
+store 和 cache。osdk 会适配生成的原生全局布局，校验选中包及其声明命令，并只通过 shim
+发布这些命令。三种模式都不会修改环境中的 Node 安装或当前项目。
 
 所选版本和安装器写入用户配置；基本的 package、scope、Node、installer 和可选原生
 lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依赖 lock；pnpm 的
 `pnpm-lock.yaml` 与 Aube 的 `aube-lock.yaml` 保留在各自受控安装目录中。
+
+::: warning Aube 全局离线支持
+Aube 2.1 无法在 osdk 离线模式中新建或修复全局安装；已经完整安装的匹配精确版本可以在
+不启动 Aube 的情况下离线再次选中。安装过程本身必须使用原生全局离线模式时，请选择 npm
+或 pnpm。共享的 Aube store 与 cache 仍会在受支持的在线安装中避免重复下载。
+:::
 
 `where --global` 只在全局 npm 安装中解析，并忽略项目选择。
 `uninstall --global` 会删除规范全局根和任何明确标记为 global 的旧版根，然后清理匹配的
@@ -213,7 +223,9 @@ false 或 true；Aube 与 pnpm 支持按包放行。
 
 动态 npm 版本 metadata 使用常规 npm source 选择，在 npmmirror 与 npmjs 之间选择。
 它与受管原生 npm 或 pnpm 进程启动前执行的 `[registries.npm]` 预检不同。项目委托保留
-文档约定的显式 Registry 优先级；全局委托则在 osdk 控制的前缀中使用隔离配置。
+文档约定的显式 Registry 优先级；全局委托则在 osdk 控制的前缀中使用隔离配置，当前会
+拒绝原生私有、认证或 scope Registry 的透传。该作用域请配置可匿名访问的
+`[registries.npm]` endpoint。
 
 所有 Aube 驱动的 npm 工具会跨项目、全局作用域、包和版本共享以下 osdk 自有路径：
 

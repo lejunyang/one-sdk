@@ -26,7 +26,9 @@
 shim 启动时重新加载配置并按当前工作目录选择已安装版本，不访问网络。它会从子进程 PATH 中移除 shim 目录以阻止递归，加入真实 backend bin；JavaScript 包管理器还会加入受管 Node。npm、pnpm、Yarn、Bun 和 Deno 的依赖获取命令在真正执行前运行 registry preflight。Node 自带的 npm/npx 可被路由，但 Node backend 不取得独立 npm backend 的所有权，详见 [`routed_bin_names`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/shim/mod.rs#L25) 与 [`osdk-shim::real_main`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-shim/src/main.rs#L27)。
 
 隔离与全局 `npm:<package>` 安装会把受控安装根中发现的命令和相对路径写入 inventory；
-真实项目安装则校验请求包声明的 bin，并由受信任项目激活暴露 `node_modules/.bin`。shim
+真实项目安装则校验请求包声明的 bin，并生成筛选后的
+`.osdk/npm-bin/generations/<identity>/bin`；受信任项目激活只暴露该校验 generation，绝不
+加入完整的 `node_modules/.bin`。shim
 启动时扫描受管 inventory 以恢复 backend ownership，并为其 PATH 追加受管 Node。若多个
 backend 导出同名 bin，运行时仅在当前配置能唯一选出 owner 时路由，否则拒绝任选一个；
 CLI 生成或 `reshim` 则始终对多个已安装 backend owner 移除歧义的受管 shim 并报错。

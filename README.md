@@ -165,14 +165,24 @@ osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-Automatic project installs prefer Aube when the existing lock format is
+Project `use` respects the nearest `package.json` and exactly one compatible
+existing native lock. Automatic selection prefers Aube when that lock is
 compatible; `installer=aube`, `installer=npm`, and `installer=pnpm` select one
-explicitly. osdk writes project metadata to `osdk.toml` and `osdk.lock`, while
-the package manager's native lock remains the source of the transitive
-dependency graph. Without a `package.json`, local `use` retains the isolated
-osdk-managed installation and shim behavior. The generated
-`.osdk/npm-bin/` directory is local derived state and should normally be ignored
-by version control.
+explicitly. Shell activation exposes only validated commands from packages
+selected by the trusted project configuration, never the project's entire
+`node_modules/.bin`. Without a `package.json`, local `use` retains the isolated
+osdk-managed installation and shim behavior. The generated `.osdk/npm-bin/`
+directory is local derived state and should normally be ignored by version
+control. Commit the package manager's native lock alongside `osdk.lock`; the
+latter does not replace the transitive dependency graph.
+
+Global npm, pnpm, and Aube choices each run that manager's real global-add
+operation inside an osdk-controlled prefix, leaving the ambient Node
+installation untouched. Release installs include the `osdk-aube` companion
+needed for Aube global mode. Aube 2.1 needs network access for a new or repaired
+global install, although an already complete exact install can be selected again
+offline without launching Aube; choose npm or pnpm when the install itself must
+use a native offline mode.
 `where --global` and `uninstall --global` explicitly target the user-wide npm
 installation. Without that flag, the existing project/isolated behavior is
 preserved; a global uninstall also removes its user config, lock entry, and
@@ -182,8 +192,9 @@ Guide: [npm developer tools](site/en/guide/npm-tools.md)
 
 ## Scenario: work in each language ecosystem
 
-The same install, use, lock, source, cache, and offline commands apply across
-ecosystems. The runtime-specific commands cover the workflows that need them.
+The same command style applies across ecosystems, while backend-specific
+capability notes live in their guides. Runtime-specific commands cover the
+workflows that need them.
 
 ### Node.js
 

@@ -1,7 +1,8 @@
 # 安装
 
-osdk 提供 Windows、macOS 和 Linux 的预编译二进制。安装包同时包含主程序
-`osdk` 和负责启动已激活工具的 `osdk-shim`。
+osdk 提供 Windows、macOS 和 Linux 的预编译二进制。每个 Release 安装包会安装三个
+同目录程序：主 CLI `osdk`、负责启动已激活工具的 `osdk-shim`，以及为 Aube 全局安装提供
+进程隔离的内部辅助程序 `osdk-aube`。请始终把三个程序放在同一目录。
 
 ## Linux 与 macOS
 
@@ -104,9 +105,11 @@ cargo build --locked --release
 ```text
 target/release/osdk
 target/release/osdk-shim
+target/release/osdk-aube
 ```
 
-请把两个文件放在同一目录，并将该目录加入 `PATH`。
+请把三个文件放在同一目录，并将该目录加入 `PATH`。`osdk-aube` 是随安装包提供的内部
+实现辅助程序，通常不需要由用户直接运行。
 
 在中国大陆可以先配置 rustup 镜像：
 

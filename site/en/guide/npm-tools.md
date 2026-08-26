@@ -76,17 +76,19 @@ editing that file changes its trust identity and requires review and
 
 ## Installer selection
 
-Automatic selection is Aube-first. With no native lock, or with a lock format
-that embedded Aube can read, osdk chooses Aube. Current compatible formats are
-Aube v9, pnpm v9, and npm `package-lock.json` / `npm-shrinkwrap.json` v2 or v3.
-When a known npm or pnpm lock is too new or otherwise unsupported by Aube, osdk
-delegates once to the native manager that owns it.
+Before changing the project, osdk reads the nearest `package.json` and the
+recognized native locks beside it. With no native lock, or with exactly one
+lock whose format Aube can read, automatic selection chooses Aube. Current
+compatible formats are Aube v9, pnpm v9, and npm `package-lock.json` /
+`npm-shrinkwrap.json` v2 or v3. When the one existing npm or pnpm lock is too
+new or otherwise unsupported by Aube, osdk delegates once to the native manager
+that owns it.
 
 `package.json#packageManager` (then `devEngines.packageManager`) identifies the
-declared owner. A declaration and an existing native lock must agree; multiple
-recognized lockfiles are also rejected as ambiguous. Automatic mode accepts
-declared Aube, npm, or pnpm; another manager requires an explicit supported
-installer choice.
+declared owner. A declaration and the one existing native lock must agree; two
+or more recognized lockfiles are rejected as ambiguous before anything is
+changed. Automatic mode accepts declared Aube, npm, or pnpm; another manager
+requires an explicit supported installer choice.
 
 Choose an installer explicitly when required:
 
@@ -154,18 +156,29 @@ osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-osdk installs the selected Node and, when requested, npm or pnpm. Native npm
-runs `install --global --prefix ...`; native pnpm runs `add --global` with
-osdk-controlled global, bin, and store directories. Aube uses an equivalent
-osdk-owned synthetic global project. None of these modes writes to the ambient
-Node installation or the current project. Validated commands are published
-through osdk shims.
+osdk installs the selected Node and, when requested, npm or pnpm. Each installer
+then runs its real global-add operation in an osdk-controlled prefix: npm uses
+`install --global --prefix ...`, pnpm uses `add --global`, and Aube uses
+`add --global` through the packaged sibling `osdk-aube` helper. The helper gives
+Aube an isolated home and prefix while reusing osdk's shared Aube store and
+cache. osdk adapts the resulting native global layout, validates the selected
+package and its declared commands, and publishes only those commands through
+osdk shims. None of the three modes writes to the ambient Node installation or
+the current project.
 
 The selected version and installer are written to the user configuration, and
 basic package, scope, Node, installer, and optional native-lock identity are
 written to `$OSDK_CONFIG_DIR/osdk.lock`. npm global installs do not produce a
 dependency lock. pnpm's `pnpm-lock.yaml` and Aube's `aube-lock.yaml` remain in
 their controlled install directories.
+
+::: warning Aube global offline support
+Aube 2.1 cannot create or repair a global installation in osdk's offline mode.
+An already complete matching exact installation can be selected again offline
+without launching Aube. Select npm or pnpm when the installation itself must use
+their native global offline mode. The shared Aube store and cache still avoid
+duplicate downloads during supported online installs.
+:::
 
 `where --global` resolves only against global npm installations and ignores a
 project selection. `uninstall --global` removes the canonical global root and
@@ -252,8 +265,10 @@ named-package form.
 Dynamic npm version metadata uses the normal npm source selection across
 npmmirror and npmjs. This is distinct from the `[registries.npm]` preflight used
 before a managed native npm or pnpm process starts. Project delegates retain the
-documented explicit registry precedence; global delegates run with isolated
-configuration inside the osdk-controlled prefix.
+documented explicit registry precedence. Global delegates run with isolated
+configuration inside the osdk-controlled prefix and currently reject native
+private/authenticated/scoped registry pass-through; configure an anonymously
+reachable `[registries.npm]` endpoint for that scope.
 
 All Aube-backed npm tools—across project, global, package, version, and scope—
 share these osdk-owned paths:

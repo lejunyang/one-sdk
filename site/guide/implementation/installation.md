@@ -15,7 +15,7 @@
 4. 否则调用 backend 的 `install`；
 5. 所有安装完成后生成 shim，并按 backend 名排序结果。
 
-这意味着除上述 Node 前置依赖外，不同工具可以并发；同一个 `tool@version` 的写入仍由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用 embedded Aube 与独立 cache/store；项目感知或全局 `use` 还可在规划阶段选择 Aube、npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。
+这意味着除上述 Node 前置依赖外，不同工具可以并发；同一个 `tool@version` 的写入仍由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用 embedded Aube、隔离的安装根以及 osdk 自有的共享 Aube cache/store；项目感知或全局 `use` 还可在规划阶段选择 Aube、npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。
 
 ## Backend 生成计划
 
@@ -41,8 +41,9 @@
 
 [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs) 先写同级 `.partial` 文件，成功后原子 rename。只有 partial metadata 中保存了同一 URL 的 ETag 或 Last-Modified 时才发送 `Range` + `If-Range`；服务端忽略 range、对象变化或返回不匹配的 `Content-Range` 时会安全重启或失败，不会盲目拼接。敏感请求头只附加在初始请求，跨 host redirect 不继承。
 这里描述的是通用 artifact download plan 携带的下载 header。`Source.headers` 另用于
-osdk metadata/source probe，并按 origin 约束；Aube 驱动的 npm package fetch
-当前不转发任意 `Source.headers`，认证应走 Aube/npm 原生可信配置或环境变量。
+osdk metadata/source probe，并按 origin 约束；Aube 驱动的 npm package fetch 当前不转发
+任意 `Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会
+拒绝认证或私有原生配置透传。
 
 在实际进入 pipeline 的安装或重装中，artifact cache 命中仍会执行适用的 checksum/attestation 逻辑，而不是把“文件存在”当作验证成功。离线重装可以使用先前持久化的 checksum；但没有缓存 artifact 时不会联网降级。普通 `osdk install` 若发现完整安装，会在 pipeline 之前复用它，不重新校验 receipt、checksum 或已安装字节。
 

@@ -111,38 +111,51 @@ omitted from the activation delta. A valid curated bin directory is prepended
 ahead of osdk shims and managed runtimes, unless it contains a `node` command,
 in which case the entire generation is omitted.
 
-## Embedded Aube installation
+## Isolated and global Aube execution
 
-For isolated and global Aube installs,
+Isolated `install` and `exec` continue to use
 [`npm_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/npm_package.rs)
-creates an osdk-owned synthetic project for each package/version.
+and
 [`aube_host.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/aube_host.rs)
-embeds Aube through its library API instead of spawning `npm install -g`. The
-host disables Aube runtime switching, self engine checks, and self-update; osdk
-owns Node, version selection, and lifecycle orchestration.
+through Aube's embedded library API. That compatibility path creates one
+osdk-owned synthetic project per package/version and keeps Aube runtime
+switching, self engine checks, and self-update disabled; osdk owns Node, version
+selection, and lifecycle orchestration.
 
-Install paths for isolated and global tools remain separated by canonical
-backend and version. Aube's cache and store, however, are deliberately shared
-across packages, versions, and project/global scopes:
+Global `use` follows a different path. It locates the packaged `osdk-aube`
+executable beside `osdk` and invokes Aube's real `add --global --save-exact` in
+a helper process. Process isolation is required because Aube's global command
+owns its working directory and process-global settings. The helper receives an
+osdk-owned home, configuration, global prefix, bin directory, disabled runtime
+directory, and the shared Aube cache and store:
 
 ```text
-<installs>/npm/<package>/<version>/
-  project/package.json
-  project/aube-lock.yaml
-  project/node_modules/.bin/...  # isolated/global source bins exposed via osdk shims
-  .osdk-tool.json
-  .osdk-complete
+<global-install-staging>/
+  aube-home/
+  aube-global/global-aube/...    # native Aube global output
+  bin/                           # native Aube launchers
 
 <cache>/aube/v1/cache/
 <store>/aube/
 ```
 
-Actual paths use the platform-safe tool-ID mapping, so scoped packages retain
-nested components. The install publishes `.osdk-complete` only after the package
-directory, `.bin` directory, resolvable discovered commands, and inventory have
-all been written. Failure paths attempt to remove the incomplete install root.
-Root package metadata must provide parseable SHA-256 or SHA-512 SRI; otherwise
-installation fails. Aube's graph carries integrity for the full transitive set.
+After the helper exits, osdk finds the selected root package in Aube's native
+`global-aube` tree and moves that install into the canonical
+`<global-install>/project` layout. It removes the temporary Aube home/global/
+runtime directories, clears the native bin directory, and reconstructs
+relocatable launchers solely from the selected package's declared `bin` entries.
+It then validates package identity, exact version, target containment, every
+launcher, the Aube native lock, inventory, and completed state before promoting
+the staged root and publishing shims. A missing sibling `osdk-aube` is an
+installation error, not a reason to fall back to another mode.
+
+The Aube cache and store are shared across isolated, project, and global
+operations, while each project or global install retains its own native lock.
+Aube 2.1 global invocation does not receive an offline flag. A new or repaired
+global Aube install is therefore rejected with `--offline`, before registry
+probing or helper launch. A complete matching exact install can be reused
+offline without invoking Aube; npm and pnpm global delegates pass through their
+native offline flags when installation is required.
 
 ## Automatic source selection and cache identity
 
@@ -167,24 +180,32 @@ source order and performs no probe.
 osdk's own npm metadata requests and source probes honor explicit
 `Source.headers`, but only for the configured index/download origin. Headers
 survive same-origin redirects and are permanently removed after the first
-cross-origin redirect. Aube 2.1's embedded API cannot safely accept arbitrary
-source headers, so Aube package fetches do not forward `Source.headers`; an
-authenticated registry must use Aube/npm's native trusted configuration or
-environment path. Registry preflight in `package_registry.rs` applies to
-npm/pnpm/Yarn/Bun/Deno commands that users run later, evaluates each invocation
-independently, and must not be described as using this TTL cache.
+cross-origin redirect. Aube 2.1 cannot safely accept arbitrary source headers
+through these integration paths, so Aube package fetches do not forward
+`Source.headers`. Global managed-tool installation currently rejects native
+authenticated, scoped, private, TLS-customized, or proxy registry pass-through
+because that state cannot be copied into the isolated prefix without widening
+the credential boundary; use an anonymous configured registry for this path.
+Registry preflight in `package_registry.rs`
+applies to npm/pnpm/Yarn/Bun/Deno commands that users run later, evaluates each
+invocation independently, and must not be described as using this TTL cache.
 
 ## Build-script policy and structured configuration
 
-For isolated and global installs, the default `BuildPolicy::Deny` passes
-`ignore_scripts = true` to Aube, so root and transitive lifecycle/build scripts
-do not run. `allow_builds` comes from a CLI string or structured `[tools]` entry:
+For isolated and global installs, the default `BuildPolicy::Deny` disables root
+and transitive lifecycle/build scripts. The embedded path sets
+`ignore_scripts = true`. Aube 2.1 drops that flag while constructing its inner
+global-add request, so the global helper instead passes `--deny-build=*` to
+override Aube's built-in trusted dependency list.
+`allow_builds` comes from a CLI string or structured `[tools]` entry:
 
 - false values and an empty value remain deny;
-- a package array becomes a comma-separated request option and then
-  `package.json#aube.allowBuilds` in the synthetic project;
-- a true value sets Aube's `dangerously_allow_all_builds`, explicitly allowing
-  scripts throughout the dependency graph.
+- a package array becomes a comma-separated request option, then either
+  `package.json#aube.allowBuilds` for the embedded synthetic project or repeated
+  `--allow-build` flags for global Aube;
+- a true value sets the embedded `dangerously_allow_all_builds` option or passes
+  `--dangerously-allow-all-builds` globally, explicitly allowing scripts
+  throughout the dependency graph.
 
 Regardless of the eventual install policy, `osdk lock` uses
 `ignore_scripts = true`, `run_root_lifecycle = false`, and
@@ -218,10 +239,13 @@ sha256 = "<64 lowercase hex characters>"
 On write, the CLI extracts npm metadata from the installed tool or declared
 private options: package name, installer, scope, an optional exact Node
 version, and optional native-lock owner/format/SHA-256. Project-aware `use`
-hashes the native lock beside the real `package.json`. Global Aube and pnpm
-installs retain their native locks under the controlled install root and record
-their identity in the user lock; npm's real global mode creates no dependency
-lock, so that identity is absent. The payload itself is never persisted in
+hashes the native lock beside the real `package.json`. The native lock remains
+owned by the chosen package-manager operation; its `kind` can therefore differ
+from the concrete installer when Aube consumes a compatible incumbent npm or
+pnpm lock. Global Aube and pnpm installs retain their native locks under the
+controlled install root and record their identity in the user lock; npm's real
+global mode creates no dependency lock, so that identity is absent. The native
+payload itself is never persisted in
 `osdk.lock`. The main lock is currently limited to 16 MiB, and schema 3 writes
 only atomically replace the main lock.
 
@@ -254,14 +278,16 @@ metadata only; the existing sidecar file is not deleted automatically.
 
 ## Isolated/global inventory, shims, and conflict rejection
 
-For isolated and global installs, the backend scans the synthetic project's entire
-`node_modules/.bin` and writes the tool ID, exact version, relative bin paths,
-and stable metadata to `.osdk-tool.json`; those bins may come from the root
-package or transitive dependencies. A bin name must be a single filename and its
-resolved canonical target must remain under the install root. Missing bins,
-duplicate names, path traversal, and corrupt inventories are rejected. Inventory
-scans do not follow symlinks and bound traversal depth, manifest count, and file
-size.
+For an isolated install, the backend scans the synthetic project's complete
+`node_modules/.bin`, so recorded bins may come from the root package or
+transitive dependencies. For a global install, normalization instead resets the
+manager-produced bin directory and recreates launchers only for the selected
+root package's declared bins. Both paths write the tool ID, exact version,
+relative bin paths, and stable metadata to `.osdk-tool.json`. A bin name must be
+a single filename and its resolved canonical target must remain under the install
+root. Missing bins, duplicate names, path traversal, and corrupt inventories are
+rejected. Inventory scans do not follow symlinks and bound traversal depth,
+manifest count, and file size.
 
 The CLI and shim derive a `bin name -> backend owner` map from inventory:
 

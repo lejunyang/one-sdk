@@ -1,7 +1,9 @@
 # Installation
 
-osdk provides prebuilt binaries for Windows, macOS, and Linux. Each archive
-contains the main `osdk` program and `osdk-shim`, which launches active tools.
+osdk provides prebuilt binaries for Windows, macOS, and Linux. Each release
+archive installs three sibling programs: the main `osdk` CLI, `osdk-shim`,
+which launches active tools, and the private `osdk-aube` helper used for
+process-isolated Aube global installs. Keep all three in the same directory.
 
 ## Linux and macOS
 
@@ -97,9 +99,12 @@ The binaries are written to:
 ```text
 target/release/osdk
 target/release/osdk-shim
+target/release/osdk-aube
 ```
 
-Place both files in the same directory and add that directory to `PATH`.
+Place all three files in the same directory and add that directory to `PATH`.
+`osdk-aube` is a packaged implementation helper, not a command users normally
+invoke directly.
 
 In mainland China, you may want to configure a rustup mirror first:
 

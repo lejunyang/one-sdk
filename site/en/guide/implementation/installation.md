@@ -21,8 +21,9 @@ while a pipeline or backend file lock serializes writes to the same
 `tool@version`. If any member of a batch fails, `try_collect` returns the error
 and the final shim-generation phase is not entered. The compatibility isolated
 npm path used by explicit `install`/`exec` bypasses the archive CAS pipeline
-below and uses embedded Aube with an isolated cache/store. Project-aware and
-global `use` can instead select Aube, npm, or pnpm during planning; see
+below and uses embedded Aube with an isolated install root and the shared
+osdk-owned Aube cache/store. Project-aware and global `use` can instead select
+Aube, npm, or pnpm during planning; see
 [npm developer tool implementation](./npm-tools).
 
 ## Backend plans
@@ -51,8 +52,9 @@ A request restored from the lockfile first uses [`locked_install_plan`](https://
 This paragraph concerns download headers carried by a generic artifact download
 plan. `Source.headers` separately applies to osdk metadata/source probes under an
 origin boundary. Aube-backed npm package fetches currently do not forward
-arbitrary `Source.headers`; authentication must use Aube/npm's native trusted
-configuration or environment path.
+arbitrary `Source.headers`. Project operations may use native trusted
+configuration; global npm-tool installs reject authenticated/private native
+pass-through while running in their isolated prefix.
 
 An artifact-cache hit during an actual pipeline run or reinstall still runs the applicable checksum or attestation verification; mere cache-file existence is not trusted. Offline reinstall can reuse a persisted checksum, but it never falls back to the network when the artifact cache is absent. Ordinary `osdk install` reuses an already complete installation before entering the pipeline and does not revalidate its receipt, checksum, or installed bytes.
 
