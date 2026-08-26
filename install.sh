@@ -162,13 +162,13 @@ fi
 
 mkdir -p "$work_dir/unpack" "$INSTALL_DIR"
 tar -xzf "$work_dir/$archive" -C "$work_dir/unpack"
-for binary in osdk osdk-shim; do
+for binary in osdk osdk-shim osdk-aube; do
   [ -f "$work_dir/unpack/$binary" ] || fail "$archive does not contain $binary"
   chmod 755 "$work_dir/unpack/$binary"
   mv "$work_dir/unpack/$binary" "$INSTALL_DIR/$binary"
 done
 
-printf 'Installed osdk and osdk-shim to %s\n' "$INSTALL_DIR"
+printf 'Installed osdk, osdk-shim, and osdk-aube to %s\n' "$INSTALL_DIR"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)

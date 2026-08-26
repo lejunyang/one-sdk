@@ -49,6 +49,7 @@ jobs:
           cargo build --locked --release \
             --package osdk-cli \
             --package osdk-shim \
+            --bin osdk-aube \
             2>&1 | tee "$RUNNER_TEMP/one-sdk-live-smoke-build/logs/build.log"
       - name: Upload build log
         if: ${{ always() }}
@@ -65,6 +66,7 @@ jobs:
           path: |
             ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk
             ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk-shim
+            ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk-aube
           if-no-files-found: error
           retention-days: 1
 

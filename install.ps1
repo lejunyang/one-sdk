@@ -99,7 +99,7 @@ try {
     $unpackDir = Join-Path $tempDir "unpack"
     Expand-Archive -Path $archivePath -DestinationPath $unpackDir
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    foreach ($binary in @("osdk.exe", "osdk-shim.exe")) {
+    foreach ($binary in @("osdk.exe", "osdk-shim.exe", "osdk-aube.exe")) {
         $source = Join-Path $unpackDir $binary
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "$archive does not contain $binary."
@@ -107,7 +107,7 @@ try {
         Copy-Item -Force -LiteralPath $source -Destination (Join-Path $InstallDir $binary)
     }
 
-    Write-Host "Installed osdk and osdk-shim to $InstallDir"
+    Write-Host "Installed osdk, osdk-shim, and osdk-aube to $InstallDir"
     $pathEntries = $env:PATH -split [System.IO.Path]::PathSeparator
     if ($InstallDir -notin $pathEntries) {
         Write-Host "Add $InstallDir to PATH to run osdk."
