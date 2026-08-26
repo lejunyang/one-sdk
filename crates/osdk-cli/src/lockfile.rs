@@ -17,6 +17,11 @@ pub const LOCKFILE_NAME: &str = "osdk.lock";
 const NPM_LOCK_FORMAT: &str = "aube-v9";
 const NPM_LOCKFILE_PATH: &str = "project/aube-lock.yaml";
 const NPM_GRAPH_DIRECTORY: &str = "osdk.lock.d/npm";
+const LOCKED_NPM_INSTALLER_OPTION: &str = "__osdk_npm_installer";
+const LOCKED_NPM_SCOPE_OPTION: &str = "__osdk_npm_scope";
+const LOCKED_NPM_NATIVE_LOCK_KIND_OPTION: &str = "__osdk_npm_native_lock_kind";
+const LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION: &str = "__osdk_npm_native_lock_format";
+const LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION: &str = "__osdk_npm_native_lock_sha256";
 const MAX_LOCKFILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_NPM_GRAPH_BYTES: u64 = 16 * 1024 * 1024;
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
@@ -51,8 +56,73 @@ pub struct LockedTool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum LockedNpmGraph {
+    Metadata(LockedNpmMetadata),
     Sidecar(LockedNpmSidecar),
     Legacy(LegacyLockedNpmGraph),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LockedNpmMetadata {
+    pub package: String,
+    pub installer: NpmInstaller,
+    pub scope: LockScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_lock: Option<LockedNativeLock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LockedNativeLock {
+    pub kind: NpmInstaller,
+    pub format: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NpmInstaller {
+    Aube,
+    #[serde(alias = "package-lock", alias = "npm-shrinkwrap")]
+    Npm,
+    Pnpm,
+}
+
+impl NpmInstaller {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "aube" => Ok(Self::Aube),
+            "npm" | "package-lock" | "npm-shrinkwrap" => Ok(Self::Npm),
+            "pnpm" => Ok(Self::Pnpm),
+            _ => anyhow::bail!("unsupported npm installer `{value}`"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Aube => "aube",
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LockScope {
+    Project,
+    Global,
+}
+
+impl LockScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Global => "global",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,7 +148,7 @@ impl LockedNpmGraph {
     fn sidecar(&self, backend: &str) -> Result<&LockedNpmSidecar> {
         match self {
             Self::Sidecar(sidecar) => Ok(sidecar),
-            Self::Legacy(_) => anyhow::bail!(osdk_core::t!(
+            Self::Metadata(_) | Self::Legacy(_) => anyhow::bail!(osdk_core::t!(
                 "err.lock_npm_legacy_inline_regenerate",
                 backend = backend
             )),
@@ -118,7 +188,7 @@ pub struct LockedModelFile {
 }
 
 fn schema_version() -> u32 {
-    2
+    3
 }
 
 impl Default for Lockfile {
@@ -203,8 +273,10 @@ pub fn load(path: &Path) -> Result<Lockfile> {
             path.display()
         );
     }
-    if lockfile.schema == schema_version() {
-        validate_schema_two(path, &lockfile, false)?;
+    match lockfile.schema {
+        2 => validate_schema_two(path, &lockfile, false)?,
+        3 => validate_schema_three(&lockfile)?,
+        _ => {}
     }
     Ok(lockfile)
 }
@@ -246,19 +318,27 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
                 }
             }
             if let Some(npm) = &locked.npm {
-                let npm = npm.sidecar(backend)?;
-                let lockfile = read_npm_graph_sidecar(path, backend, npm)?;
-                options.insert(LOCKED_NPM_PACKAGE_OPTION.into(), npm.package.clone());
-                options.insert(
-                    LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
-                    npm.lock_format.clone(),
-                );
-                options.insert(LOCKED_NPM_LOCK_SHA256_OPTION.into(), npm.sha256.clone());
-                options.insert(LOCKED_NPM_LOCKFILE_OPTION.into(), lockfile);
-                options.insert(
-                    LOCKED_NPM_NODE_VERSION_OPTION.into(),
-                    npm.node_version.clone(),
-                );
+                match npm {
+                    LockedNpmGraph::Metadata(npm) => inject_npm_metadata(&mut options, npm),
+                    LockedNpmGraph::Sidecar(npm) => {
+                        let lockfile = read_npm_graph_sidecar(path, backend, npm)?;
+                        options.insert(LOCKED_NPM_PACKAGE_OPTION.into(), npm.package.clone());
+                        options.insert(
+                            LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
+                            npm.lock_format.clone(),
+                        );
+                        options.insert(LOCKED_NPM_LOCK_SHA256_OPTION.into(), npm.sha256.clone());
+                        options.insert(LOCKED_NPM_LOCKFILE_OPTION.into(), lockfile);
+                        options.insert(
+                            LOCKED_NPM_NODE_VERSION_OPTION.into(),
+                            npm.node_version.clone(),
+                        );
+                    }
+                    LockedNpmGraph::Legacy(_) => {
+                        npm.sidecar(backend)?;
+                        unreachable!("legacy npm metadata is rejected above")
+                    }
+                }
             }
             Ok(ToolRequest {
                 backend: backend.clone(),
@@ -268,6 +348,123 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Some(requests))
+}
+
+fn inject_npm_metadata(options: &mut BTreeMap<String, String>, npm: &LockedNpmMetadata) {
+    options.insert(LOCKED_NPM_PACKAGE_OPTION.into(), npm.package.clone());
+    options.insert(
+        LOCKED_NPM_INSTALLER_OPTION.into(),
+        npm.installer.as_str().into(),
+    );
+    options.insert(LOCKED_NPM_SCOPE_OPTION.into(), npm.scope.as_str().into());
+    if let Some(node_version) = &npm.node_version {
+        options.insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), node_version.clone());
+    }
+    if let Some(native_lock) = &npm.native_lock {
+        options.insert(
+            LOCKED_NPM_NATIVE_LOCK_KIND_OPTION.into(),
+            native_lock.kind.as_str().into(),
+        );
+        options.insert(
+            LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION.into(),
+            native_lock.format.clone(),
+        );
+        options.insert(
+            LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION.into(),
+            native_lock.sha256.clone(),
+        );
+    }
+}
+
+fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
+    for (platform, platform_lock) in &lockfile.platforms {
+        let node = platform_lock.tools.get("node");
+        for (backend, locked) in &platform_lock.tools {
+            validate_locked_tool_identity(backend, locked)?;
+            match (backend.strip_prefix("npm:"), locked.npm.as_ref()) {
+                (Some(package), Some(LockedNpmGraph::Metadata(npm))) => {
+                    if locked.artifact.is_some() {
+                        anyhow::bail!(
+                            "schema 3 npm entry `{backend}` for platform `{platform}` cannot carry a generic artifact receipt"
+                        );
+                    }
+                    if let Some(key) = locked.options.keys().find(|key| {
+                        key.starts_with("__osdk_npm_")
+                            || key.as_str() == LOCKED_NPM_NODE_VERSION_OPTION
+                    }) {
+                        anyhow::bail!(
+                            "schema 3 npm entry `{backend}` for platform `{platform}` cannot carry private option `{key}`"
+                        );
+                    }
+                    if package.is_empty() || npm.package != package {
+                        anyhow::bail!(osdk_core::t!(
+                            "err.lock_npm_package_mismatch",
+                            backend = backend,
+                            platform = platform,
+                            expected = package,
+                            actual = npm.package
+                        ));
+                    }
+                    if let Some(node_version) = &npm.node_version {
+                        validate_exact_node_version(backend, node_version)?;
+                        if let Some(node) = node {
+                            if node_version != &node.version {
+                                anyhow::bail!(osdk_core::t!(
+                                    "err.lock_npm_node_version_mismatch",
+                                    backend = backend,
+                                    platform = platform,
+                                    expected = node.version,
+                                    actual = node_version
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(native_lock) = &npm.native_lock {
+                        validate_native_lock(backend, native_lock)?;
+                    }
+                }
+                (Some(_), None) => anyhow::bail!(
+                    "schema 3 npm entry `{backend}` on `{platform}` is missing npm metadata"
+                ),
+                (Some(_), Some(_)) => anyhow::bail!(
+                    "schema 3 npm entry `{backend}` on `{platform}` uses legacy graph metadata"
+                ),
+                (None, Some(_)) => anyhow::bail!(osdk_core::t!(
+                    "err.lock_non_npm_graph_metadata",
+                    backend = backend,
+                    platform = platform
+                )),
+                (None, None) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result<()> {
+    let valid_format = match native_lock.kind {
+        NpmInstaller::Aube => versioned_format(&native_lock.format, &["aube-v"]),
+        NpmInstaller::Npm => {
+            versioned_format(&native_lock.format, &["package-lock-v", "npm-shrinkwrap-v"])
+        }
+        NpmInstaller::Pnpm => versioned_format(&native_lock.format, &["pnpm-v"]),
+    };
+    if !valid_format {
+        anyhow::bail!(
+            "unsupported native npm lock format `{}` for `{backend}` and owner `{}`",
+            native_lock.format,
+            native_lock.kind.as_str()
+        );
+    }
+    validate_sha256(backend, &native_lock.sha256)
+}
+
+fn versioned_format(value: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| {
+        value.strip_prefix(prefix).is_some_and(|version| {
+            !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
 }
 
 fn validate_schema_two(path: &Path, lockfile: &Lockfile, read_graphs: bool) -> Result<()> {
@@ -354,6 +551,11 @@ fn validate_complete_npm_entries(
                         backend = backend,
                         platform = platform
                     ));
+                }
+                (Some(_), Some(LockedNpmGraph::Metadata(_))) => {
+                    anyhow::bail!(
+                        "schema 2 npm entry `{backend}` on `{platform}` uses schema 3 metadata"
+                    );
                 }
                 (None, Some(_)) => {
                     anyhow::bail!(osdk_core::t!(
@@ -489,19 +691,7 @@ fn validate_locked_tool_identity(backend: &str, locked: &LockedTool) -> Result<(
             backend = backend
         ));
     }
-    let version = locked.version.trim();
-    if version.is_empty()
-        || version == "."
-        || version == ".."
-        || version.contains(['/', '\\'])
-        || std::path::Path::new(version).is_absolute()
-    {
-        anyhow::bail!(osdk_core::t!(
-            "err.lock_version_unsafe",
-            version = locked.version,
-            backend = backend
-        ));
-    }
+    validate_version_identity(backend, &locked.version)?;
     if let Some(artifact) = &locked.artifact {
         let file = std::path::Path::new(&artifact.file_name);
         if file.components().count() != 1
@@ -534,11 +724,48 @@ fn validate_locked_tool_identity(backend: &str, locked: &LockedTool) -> Result<(
     Ok(())
 }
 
+fn validate_version_identity(backend: &str, value: &str) -> Result<()> {
+    let version = value.trim();
+    if version.is_empty()
+        || version == "."
+        || version == ".."
+        || version.contains(['/', '\\'])
+        || std::path::Path::new(version).is_absolute()
+    {
+        anyhow::bail!(osdk_core::t!(
+            "err.lock_version_unsafe",
+            version = value,
+            backend = backend
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_node_version(backend: &str, value: &str) -> Result<()> {
+    validate_version_identity(backend, value)?;
+    if !matches!(VersionSpec::parse(value), VersionSpec::Exact(version) if version == value) {
+        anyhow::bail!(
+            "npm entry `{backend}` has non-exact node version `{value}`; expected a complete semantic version"
+        );
+    }
+    Ok(())
+}
+
 pub fn merge_resolved(
     path: &Path,
     platform: Platform,
     dirs: &osdk_core::dirs::Dirs,
     resolved: &[(ToolRequest, ToolVersion)],
+) -> Result<()> {
+    merge_resolved_with_scope(path, platform, dirs, resolved, LockScope::Project)
+}
+
+pub fn merge_resolved_with_scope(
+    path: &Path,
+    platform: Platform,
+    dirs: &osdk_core::dirs::Dirs,
+    resolved: &[(ToolRequest, ToolVersion)],
+    scope: LockScope,
 ) -> Result<()> {
     let mut lockfile = if path.is_file() {
         load(path)?
@@ -550,35 +777,20 @@ pub fn merge_resolved(
         }
     };
     if lockfile.schema == 1 {
-        reject_legacy_npm_entries(&lockfile)?;
+        reject_unmigratable_schema_one_npm_entries(&lockfile)?;
     }
     let node_version = resolved
         .iter()
         .rev()
         .find_map(|(_, version)| (version.backend == "node").then(|| version.version.clone()));
-    let mut npm_graphs = Vec::new();
     let platform_lock = lockfile
         .platforms
         .entry(platform_key(platform))
         .or_default();
     platform_lock.tools.clear();
     for (request, version) in resolved {
-        if version.backend == "rust"
-            && dirs
-                .install_path("rust", &version.version)
-                .join(".osdk-linked")
-                .is_file()
-        {
-            anyhow::bail!(
-                "linked Rust toolchain `{}` is local-only and cannot be written as a reproducible lock artifact",
-                version.version
-            );
-        }
-        let npm = locked_npm_graph(dirs, version, node_version.as_deref())?;
-        let npm_metadata = npm.as_ref().map(|graph| graph.metadata.clone());
-        if let Some(graph) = npm {
-            npm_graphs.push(graph);
-        }
+        reject_linked_rust(dirs, version)?;
+        let npm_metadata = locked_npm_metadata(dirs, version, node_version.as_deref(), scope)?;
         let mut options = public_options(&version.options);
         if npm_metadata.is_some() {
             options.remove("node_version");
@@ -611,11 +823,107 @@ pub fn merge_resolved(
                 version: version.version.clone(),
                 options,
                 artifact,
-                npm: npm_metadata.map(LockedNpmGraph::Sidecar),
+                npm: npm_metadata.map(LockedNpmGraph::Metadata),
             },
         );
     }
-    save_with_npm_graphs(path, &lockfile, &npm_graphs)
+    save(path, &lockfile)
+}
+
+pub fn upsert_resolved_with_scope(
+    path: &Path,
+    platform: Platform,
+    dirs: &osdk_core::dirs::Dirs,
+    request: &ToolRequest,
+    version: &ToolVersion,
+    scope: LockScope,
+) -> Result<()> {
+    reject_linked_rust(dirs, version)?;
+    if request.backend != version.backend {
+        anyhow::bail!(
+            "cannot lock request `{}` with resolved backend `{}`",
+            request.backend,
+            version.backend
+        );
+    }
+    let mut lockfile = if path.is_file() {
+        load(path)?
+    } else {
+        Lockfile::default()
+    };
+    if lockfile.schema == 1 {
+        reject_unmigratable_schema_one_npm_entries(&lockfile)?;
+    }
+    let platform_lock = lockfile
+        .platforms
+        .entry(platform_key(platform))
+        .or_default();
+    let node_version = if version.backend == "node" {
+        Some(version.version.as_str())
+    } else {
+        version
+            .options
+            .get(LOCKED_NPM_NODE_VERSION_OPTION)
+            .map(String::as_str)
+            .or_else(|| {
+                platform_lock
+                    .tools
+                    .get("node")
+                    .map(|node| node.version.as_str())
+            })
+    };
+    let npm_metadata = locked_npm_metadata(dirs, version, node_version, scope)?;
+    let mut options = public_options(&version.options);
+    if npm_metadata.is_some() {
+        options.remove("node_version");
+    }
+    let artifact = if version.backend.starts_with("npm:") {
+        None
+    } else {
+        let resolved_artifact =
+            osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
+                url: receipt.url,
+                file_name: receipt.file_name,
+                checksum: receipt.checksum,
+                subdir: version.options.get("catalog-subdir").cloned(),
+                evidence: receipt.evidence,
+            });
+        osdk_core::pipeline::artifact_receipt(dirs, &version.backend, &version.version)
+            .map(|receipt| LockedArtifact {
+                url: receipt.url,
+                file_name: receipt.file_name,
+                checksum: receipt.checksum,
+                subdir: version.options.get("catalog-subdir").cloned(),
+                evidence: receipt.evidence,
+            })
+            .or(resolved_artifact)
+    };
+    platform_lock.tools.insert(
+        request.backend.clone(),
+        LockedTool {
+            request: request.spec.to_string(),
+            version: version.version.clone(),
+            options,
+            artifact,
+            npm: npm_metadata.map(LockedNpmGraph::Metadata),
+        },
+    );
+    save(path, &lockfile)
+}
+
+fn reject_linked_rust(dirs: &osdk_core::dirs::Dirs, version: &ToolVersion) -> Result<()> {
+    if version.backend == "rust"
+        && dirs
+            .install_path("rust", &version.version)
+            .join(".osdk-linked")
+            .is_file()
+    {
+        anyhow::bail!(
+            "linked Rust toolchain `{}` is local-only and cannot be written as a reproducible lock artifact",
+            version.version
+        );
+    }
+    Ok(())
 }
 
 pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -> Result<()> {
@@ -625,7 +933,7 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
         Lockfile::default()
     };
     if lockfile.schema == 1 {
-        reject_legacy_npm_entries(&lockfile)?;
+        reject_unmigratable_schema_one_npm_entries(&lockfile)?;
     }
     lockfile.models.insert(
         manifest.name.clone(),
@@ -679,55 +987,99 @@ fn reject_legacy_npm_entries(lockfile: &Lockfile) -> Result<()> {
     Ok(())
 }
 
-struct PendingNpmGraph {
-    metadata: LockedNpmSidecar,
-    bytes: Vec<u8>,
+fn reject_unmigratable_schema_one_npm_entries(lockfile: &Lockfile) -> Result<()> {
+    for (platform, platform_lock) in &lockfile.platforms {
+        if let Some((backend, _)) = platform_lock.tools.iter().find(|(backend, locked)| {
+            backend.starts_with("npm:") && matches!(locked.npm, Some(LockedNpmGraph::Legacy(_)))
+        }) {
+            anyhow::bail!(osdk_core::t!(
+                "err.lock_schema1_npm_migration_requires_graph",
+                backend = backend,
+                platform = platform
+            ));
+        }
+    }
+    Ok(())
 }
 
-fn locked_npm_graph(
+fn locked_npm_metadata(
     dirs: &osdk_core::dirs::Dirs,
     version: &ToolVersion,
     node_version: Option<&str>,
-) -> Result<Option<PendingNpmGraph>> {
+    scope: LockScope,
+) -> Result<Option<LockedNpmMetadata>> {
     let Some(package) = version.backend.strip_prefix("npm:") else {
         return Ok(None);
     };
-    let node_version = node_version.ok_or_else(|| {
-        anyhow::anyhow!(osdk_core::t!(
-            "err.lock_npm_resolved_node_required",
-            backend = version.backend
-        ))
-    })?;
+    let node_version = node_version
+        .or_else(|| {
+            version
+                .options
+                .get(LOCKED_NPM_NODE_VERSION_OPTION)
+                .map(String::as_str)
+        })
+        .map(str::to_owned);
+    let installer = version
+        .options
+        .get(LOCKED_NPM_INSTALLER_OPTION)
+        .map(|value| NpmInstaller::parse(value))
+        .transpose()?
+        .unwrap_or(NpmInstaller::Aube);
+    let declared_native_lock = locked_native_lock_from_options(version)?;
     let lock_path = dirs
         .install_path(&version.backend, &version.version)
         .join(NPM_LOCKFILE_PATH);
-    let bytes = read_bounded(&lock_path, MAX_NPM_GRAPH_BYTES)
-        .with_context(|| osdk_core::t!("err.npm_lock_payload_read", path = lock_path.display()))?;
-    let sha256 = osdk_core::pipeline::verify::hash_bytes(&bytes, HashAlgo::Sha256);
-    std::str::from_utf8(&bytes).with_context(|| {
-        osdk_core::t!("err.npm_lock_payload_not_utf8", path = lock_path.display())
-    })?;
-    Ok(Some(PendingNpmGraph {
-        metadata: LockedNpmSidecar {
-            package: package.to_string(),
-            node_version: node_version.to_string(),
-            lock_format: NPM_LOCK_FORMAT.into(),
-            graph: npm_graph_relative_path(&sha256),
-            sha256,
-        },
-        bytes,
+    let native_lock = if let Some(native_lock) = declared_native_lock {
+        Some(native_lock)
+    } else if installer == NpmInstaller::Aube && lock_path.is_file() {
+        let bytes = read_bounded(&lock_path, MAX_NPM_GRAPH_BYTES).with_context(|| {
+            osdk_core::t!("err.npm_lock_payload_read", path = lock_path.display())
+        })?;
+        Some(LockedNativeLock {
+            kind: installer,
+            format: match installer {
+                NpmInstaller::Aube => NPM_LOCK_FORMAT.into(),
+                NpmInstaller::Npm => "package-lock-v3".into(),
+                NpmInstaller::Pnpm => "pnpm-v9".into(),
+            },
+            sha256: osdk_core::pipeline::verify::hash_bytes(&bytes, HashAlgo::Sha256),
+        })
+    } else {
+        None
+    };
+    Ok(Some(LockedNpmMetadata {
+        package: package.to_string(),
+        installer,
+        scope,
+        node_version,
+        native_lock,
     }))
 }
 
-fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
-    save_with_npm_graphs(path, lockfile, &[])
+fn locked_native_lock_from_options(version: &ToolVersion) -> Result<Option<LockedNativeLock>> {
+    let values = [
+        version.options.get(LOCKED_NPM_NATIVE_LOCK_KIND_OPTION),
+        version.options.get(LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION),
+        version.options.get(LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION),
+    ];
+    if values.iter().all(|value| value.is_none()) {
+        return Ok(None);
+    }
+    let required = |key: &str, value: Option<&String>| {
+        value
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("native npm lock metadata is missing `{key}`"))
+    };
+    let native_lock = LockedNativeLock {
+        kind: NpmInstaller::parse(&required(LOCKED_NPM_NATIVE_LOCK_KIND_OPTION, values[0])?)?,
+        format: required(LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION, values[1])?,
+        sha256: required(LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION, values[2])?,
+    };
+    validate_native_lock(&version.backend, &native_lock)?;
+    Ok(Some(native_lock))
 }
 
-fn save_with_npm_graphs(
-    path: &Path,
-    lockfile: &Lockfile,
-    npm_graphs: &[PendingNpmGraph],
-) -> Result<()> {
+fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -736,11 +1088,14 @@ fn save_with_npm_graphs(
             .with_context(|| osdk_core::t!("err.fs_directory_create", path = parent.display()))?;
     }
     if lockfile.schema == 1 {
-        reject_legacy_npm_entries(lockfile)?;
+        reject_unmigratable_schema_one_npm_entries(lockfile)?;
+    } else if lockfile.schema == 2 {
+        validate_schema_two(path, lockfile, true)?;
     }
     let mut lockfile = lockfile.clone();
+    migrate_npm_entries_to_schema_three(&mut lockfile)?;
     lockfile.schema = schema_version();
-    validate_schema_two(path, &lockfile, false)?;
+    validate_schema_three(&lockfile)?;
     let text = toml::to_string_pretty(&lockfile)?;
     if text.len() as u64 > MAX_LOCKFILE_BYTES {
         anyhow::bail!(osdk_core::t!(
@@ -748,13 +1103,52 @@ fn save_with_npm_graphs(
             maximum = MAX_LOCKFILE_BYTES
         ));
     }
-    for graph in npm_graphs {
-        let destination = npm_graph_path(path, &graph.metadata.graph);
-        reject_symlinked_graph_path(path, &destination)?;
-        atomic_write(&destination, &graph.bytes)?;
-    }
-    validate_schema_two(path, &lockfile, true)?;
     atomic_write(path, text.as_bytes())?;
+    Ok(())
+}
+
+fn migrate_npm_entries_to_schema_three(lockfile: &mut Lockfile) -> Result<()> {
+    for platform_lock in lockfile.platforms.values_mut() {
+        for (backend, locked) in &mut platform_lock.tools {
+            let Some(package) = backend.strip_prefix("npm:") else {
+                continue;
+            };
+            let metadata = match locked.npm.take() {
+                Some(LockedNpmGraph::Metadata(metadata)) => metadata,
+                Some(LockedNpmGraph::Sidecar(sidecar)) => LockedNpmMetadata {
+                    package: sidecar.package,
+                    installer: NpmInstaller::Aube,
+                    scope: LockScope::Project,
+                    node_version: Some(sidecar.node_version),
+                    native_lock: Some(LockedNativeLock {
+                        kind: NpmInstaller::Aube,
+                        format: sidecar.lock_format,
+                        sha256: sidecar.sha256,
+                    }),
+                },
+                Some(LockedNpmGraph::Legacy(_)) | None => {
+                    let installer = locked
+                        .options
+                        .get(LOCKED_NPM_INSTALLER_OPTION)
+                        .map(|value| NpmInstaller::parse(value))
+                        .transpose()?
+                        .unwrap_or(NpmInstaller::Aube);
+                    LockedNpmMetadata {
+                        package: package.to_string(),
+                        installer,
+                        scope: LockScope::Project,
+                        node_version: locked.options.get(LOCKED_NPM_NODE_VERSION_OPTION).cloned(),
+                        native_lock: None,
+                    }
+                }
+            };
+            locked.options.retain(|key, _| {
+                !key.starts_with("__osdk_npm_") && key != LOCKED_NPM_NODE_VERSION_OPTION
+            });
+            locked.npm = Some(LockedNpmGraph::Metadata(metadata));
+            locked.artifact = None;
+        }
+    }
     Ok(())
 }
 
@@ -1003,7 +1397,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     }
 
     #[test]
-    fn direct_save_rejects_schema_one_npm_without_changing_the_file() {
+    fn direct_save_migrates_schema_one_npm_to_metadata_only() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         std::fs::write(&path, b"sentinel").unwrap();
@@ -1026,11 +1420,13 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             )]),
             models: BTreeMap::new(),
         };
-        let error = save(&path, &legacy).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cannot be migrated without a dependency graph"));
-        assert_eq!(std::fs::read(&path).unwrap(), b"sentinel");
+        save(&path, &legacy).unwrap();
+        let lock = load(&path).unwrap();
+        assert_eq!(lock.schema, 3);
+        assert!(matches!(
+            lock.platforms["linux-x64"].tools["npm:prettier"].npm,
+            Some(LockedNpmGraph::Metadata(_))
+        ));
     }
 
     #[test]
@@ -1047,7 +1443,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     }
 
     #[test]
-    fn schema_one_legacy_npm_is_readable_but_cannot_be_consumed_or_migrated() {
+    fn schema_one_npm_without_inline_payload_is_readable_and_migrated() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         std::fs::write(
@@ -1080,8 +1476,7 @@ version = "3.6.2"
             .to_string()
             .contains("cannot be migrated without a dependency graph"));
 
-        let before = std::fs::read(&path).unwrap();
-        let error = merge_resolved(
+        merge_resolved(
             &path,
             linux(),
             &test_dirs(temp.path()),
@@ -1090,17 +1485,16 @@ version = "3.6.2"
                 ToolVersion::new("node", "24.1.0"),
             )],
         )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cannot be migrated without a dependency graph"));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        .unwrap();
+        let migrated = load(&path).unwrap();
+        assert_eq!(migrated.schema, 3);
+        assert!(matches!(
+            migrated.platforms["windows-x64"].tools["npm:prettier"].npm,
+            Some(LockedNpmGraph::Metadata(_))
+        ));
 
-        let error = merge_model(&path, &test_model_manifest()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cannot be migrated without a dependency graph"));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        merge_model(&path, &test_model_manifest()).unwrap();
+        assert!(load(&path).unwrap().models.contains_key("qwen"));
     }
 
     #[test]
@@ -1224,22 +1618,28 @@ lockfile = "lockfileVersion: '9.0'"
         let npm = loaded.platforms["linux-x64"].tools[backend]
             .npm
             .as_ref()
-            .unwrap()
-            .sidecar(backend)
             .unwrap();
+        let LockedNpmGraph::Metadata(npm) = npm else {
+            panic!("schema 3 writes npm metadata");
+        };
         assert_eq!(npm.package, "@antfu/ni");
-        assert_eq!(npm.node_version, "24.1.0");
-        assert_eq!(npm.lock_format, NPM_LOCK_FORMAT);
-        assert_eq!(npm.sha256, expected_sha256);
-        assert_eq!(npm.graph, format!("osdk.lock.d/npm/{expected_sha256}.yaml"));
+        assert_eq!(npm.installer, NpmInstaller::Aube);
+        assert_eq!(npm.scope, LockScope::Project);
+        assert_eq!(npm.node_version.as_deref(), Some("24.1.0"));
         assert_eq!(
-            std::fs::read(npm_graph_path(&path, &npm.graph)).unwrap(),
-            lockfile.as_bytes()
+            npm.native_lock,
+            Some(LockedNativeLock {
+                kind: NpmInstaller::Aube,
+                format: NPM_LOCK_FORMAT.into(),
+                sha256: expected_sha256.clone(),
+            })
         );
         let main_lock = std::fs::read_to_string(&path).unwrap();
         assert!(!main_lock.contains("lockfile ="));
         assert!(!main_lock.contains("lock_sha256"));
+        assert!(!main_lock.contains("graph ="));
         assert!(!main_lock.contains("# caf"));
+        assert!(!temp.path().join(NPM_GRAPH_DIRECTORY).exists());
 
         let requests = locked_requests(&path, linux()).unwrap().unwrap();
         let options = &requests
@@ -1248,17 +1648,25 @@ lockfile = "lockfileVersion: '9.0'"
             .unwrap()
             .options;
         assert_eq!(options[LOCKED_NPM_PACKAGE_OPTION], "@antfu/ni");
-        assert_eq!(options[LOCKED_NPM_LOCK_FORMAT_OPTION], NPM_LOCK_FORMAT);
-        assert_eq!(options[LOCKED_NPM_LOCK_SHA256_OPTION], expected_sha256);
-        assert_eq!(options[LOCKED_NPM_NODE_VERSION_OPTION], "24.1.0");
+        assert_eq!(options[LOCKED_NPM_INSTALLER_OPTION], "aube");
+        assert_eq!(options[LOCKED_NPM_SCOPE_OPTION], "project");
+        assert_eq!(options[LOCKED_NPM_NATIVE_LOCK_KIND_OPTION], "aube");
         assert_eq!(
-            options[LOCKED_NPM_LOCKFILE_OPTION].as_bytes(),
-            lockfile.as_bytes()
+            options[LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION],
+            NPM_LOCK_FORMAT
         );
+        assert_eq!(
+            options[LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION],
+            expected_sha256
+        );
+        assert_eq!(options[LOCKED_NPM_NODE_VERSION_OPTION], "24.1.0");
+        assert!(!options.contains_key(LOCKED_NPM_LOCKFILE_OPTION));
+        assert!(!options.contains_key(LOCKED_NPM_LOCK_FORMAT_OPTION));
+        assert!(!options.contains_key(LOCKED_NPM_LOCK_SHA256_OPTION));
     }
 
     #[test]
-    fn npm_lock_requires_a_resolved_node_and_ignores_stale_artifact_receipts() {
+    fn npm_lock_records_optional_node_and_ignores_stale_artifact_receipts() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         let dirs = test_dirs(temp.path());
@@ -1277,11 +1685,16 @@ lockfile = "lockfileVersion: '9.0'"
             ToolRequest::parse("npm:prettier@3.6.2").unwrap(),
             ToolVersion::new(backend, version),
         )];
-        let error = merge_resolved(&path, linux(), &dirs, &npm_only).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("without a resolved `node` entry"));
-        assert!(!path.exists());
+        merge_resolved(&path, linux(), &dirs, &npm_only).unwrap();
+        let lock = load(&path).unwrap();
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools[backend]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert!(npm.node_version.is_none());
 
         merge_resolved(
             &path,
@@ -1337,15 +1750,16 @@ lockfile = "lockfileVersion: '9.0'"
         let npm = lock.platforms["linux-x64"].tools["npm:prettier"]
             .npm
             .as_ref()
-            .unwrap()
-            .sidecar("npm:prettier")
             .unwrap();
-        assert_eq!(npm.node_version, "24.1.0");
+        let LockedNpmGraph::Metadata(npm) = npm else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert_eq!(npm.node_version.as_deref(), Some("24.1.0"));
         assert_eq!(lock.platforms["linux-x64"].tools["node"].version, "24.1.0");
     }
 
     #[test]
-    fn replacing_an_npm_graph_does_not_delete_the_old_sidecar() {
+    fn scoped_writer_records_global_scope_without_a_graph_reference() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         let dirs = test_dirs(temp.path());
@@ -1364,20 +1778,168 @@ lockfile = "lockfileVersion: '9.0'"
                 ToolVersion::new("node", "24.1.0"),
             ),
         ];
-        std::fs::write(&installed_lock, b"lockfileVersion: '9.0'\n# first\n").unwrap();
-        merge_resolved(&path, linux(), &dirs, &resolved).unwrap();
-        let first = npm_graph_path(
-            &path,
-            &npm_graph_relative_path(&osdk_core::pipeline::verify::hash_bytes(
-                b"lockfileVersion: '9.0'\n# first\n",
-                HashAlgo::Sha256,
-            )),
-        );
-        assert!(first.is_file());
+        std::fs::write(&installed_lock, b"lockfileVersion: '9.0'\n").unwrap();
+        merge_resolved_with_scope(&path, linux(), &dirs, &resolved, LockScope::Global).unwrap();
 
-        std::fs::write(&installed_lock, b"lockfileVersion: '9.0'\n# second\n").unwrap();
-        merge_resolved(&path, linux(), &dirs, &resolved).unwrap();
-        assert!(first.is_file());
+        let lock = load(&path).unwrap();
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert_eq!(npm.scope, LockScope::Global);
+        assert!(!std::fs::read_to_string(path).unwrap().contains("graph ="));
+    }
+
+    #[test]
+    fn scoped_upsert_preserves_other_tools_platforms_and_models() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let mut initial = Lockfile::default();
+        initial.platforms.insert(
+            "windows-x64".into(),
+            PlatformLock {
+                tools: BTreeMap::from([(
+                    "node".into(),
+                    LockedTool {
+                        request: "20".into(),
+                        version: "20.19.0".into(),
+                        ..LockedTool::default()
+                    },
+                )]),
+            },
+        );
+        initial.platforms.insert(
+            "linux-x64".into(),
+            PlatformLock {
+                tools: BTreeMap::from([(
+                    "rust".into(),
+                    LockedTool {
+                        request: "stable".into(),
+                        version: "1.98.0".into(),
+                        ..LockedTool::default()
+                    },
+                )]),
+            },
+        );
+        initial.models.insert("qwen".into(), test_locked_model());
+        save(&path, &initial).unwrap();
+
+        let request = ToolRequest::parse("npm:prettier@3.6.2").unwrap();
+        let mut version = ToolVersion::new("npm:prettier", "3.6.2");
+        version
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "24.1.0".into());
+        upsert_resolved_with_scope(&path, linux(), &dirs, &request, &version, LockScope::Global)
+            .unwrap();
+
+        let lock = load(&path).unwrap();
+        assert!(lock.platforms["windows-x64"].tools.contains_key("node"));
+        assert!(lock.platforms["linux-x64"].tools.contains_key("rust"));
+        assert!(lock.models.contains_key("qwen"));
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert_eq!(npm.scope, LockScope::Global);
+        assert_eq!(npm.node_version.as_deref(), Some("24.1.0"));
+    }
+
+    #[test]
+    fn schema_two_sidecar_remains_frozen_read_compatible_and_migrates_without_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let payload = b"lockfileVersion: '9.0'\n";
+        let sha256 = osdk_core::pipeline::verify::hash_bytes(payload, HashAlgo::Sha256);
+        let text = valid_schema_two_npm_lock_with_sha256(&sha256);
+        std::fs::write(&path, text).unwrap();
+        let sidecar = npm_graph_path(&path, &npm_graph_relative_path(&sha256));
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, payload).unwrap();
+
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        let options = &requests
+            .iter()
+            .find(|request| request.backend == "npm:prettier")
+            .unwrap()
+            .options;
+        assert_eq!(options[LOCKED_NPM_LOCKFILE_OPTION].as_bytes(), payload);
+
+        merge_model(&path, &test_model_manifest()).unwrap();
+        let lock = load(&path).unwrap();
+        assert_eq!(lock.schema, 3);
+        assert!(matches!(
+            lock.platforms["linux-x64"].tools["npm:prettier"].npm,
+            Some(LockedNpmGraph::Metadata(_))
+        ));
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("graph ="));
+        assert!(sidecar.is_file());
+    }
+
+    #[test]
+    fn schema_two_write_refuses_missing_sidecar_before_replacing_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(&path, valid_schema_two_npm_lock()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = merge_model(&path, &test_model_manifest()).unwrap_err();
+        assert!(format!("{error:#}").contains("reading npm graph sidecar"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn schema_three_rejects_payload_paths_and_non_exact_node_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let valid = valid_schema_three_npm_lock();
+
+        std::fs::write(
+            &path,
+            valid.replace(
+                "scope = \"project\"",
+                "scope = \"project\"\ngraph = \"legacy.yaml\"",
+            ),
+        )
+        .unwrap();
+        assert!(format!("{:#}", load(&path).unwrap_err()).contains("did not match any variant"));
+
+        std::fs::write(
+            &path,
+            valid.replace("node_version = \"24.1.0\"", "node_version = \"24\""),
+        )
+        .unwrap();
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("non-exact node version"));
+    }
+
+    #[test]
+    fn schema_three_native_lock_owner_can_differ_from_selected_installer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let text = valid_schema_three_npm_lock()
+            .replace("kind = \"aube\"", "kind = \"pnpm\"")
+            .replace("format = \"aube-v9\"", "format = \"pnpm-v9\"");
+        std::fs::write(&path, text).unwrap();
+        let lock = load(&path).unwrap();
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 reads npm metadata");
+        };
+        assert_eq!(npm.installer, NpmInstaller::Aube);
+        assert_eq!(npm.native_lock.as_ref().unwrap().kind, NpmInstaller::Pnpm);
     }
 
     #[test]
@@ -1528,10 +2090,10 @@ lockfile = "lockfileVersion: '9.0'"
     }
 
     #[test]
-    fn npm_merge_requires_an_installed_graph_payload() {
+    fn npm_merge_allows_metadata_without_an_installed_native_lock() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
-        let error = merge_resolved(
+        merge_resolved(
             &path,
             linux(),
             &test_dirs(temp.path()),
@@ -1546,14 +2108,20 @@ lockfile = "lockfileVersion: '9.0'"
                 ),
             ],
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("reading npm lock payload"));
-        assert!(error.to_string().contains("aube-lock.yaml"));
-        assert!(!path.exists());
+        .unwrap();
+        let lock = load(&path).unwrap();
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert!(npm.native_lock.is_none());
     }
 
     #[test]
-    fn npm_merge_rejects_non_utf8_graph_payload() {
+    fn npm_merge_hashes_non_utf8_native_lock_without_persisting_payload() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         let dirs = test_dirs(temp.path());
@@ -1563,7 +2131,7 @@ lockfile = "lockfileVersion: '9.0'"
         std::fs::create_dir_all(installed_lock.parent().unwrap()).unwrap();
         std::fs::write(&installed_lock, [0xff, 0xfe]).unwrap();
 
-        let error = merge_resolved(
+        merge_resolved(
             &path,
             linux(),
             &dirs,
@@ -1578,9 +2146,93 @@ lockfile = "lockfileVersion: '9.0'"
                 ),
             ],
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("is not UTF-8"));
-        assert!(!path.exists());
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(char::REPLACEMENT_CHARACTER));
+        assert!(!text.contains("lockfile ="));
+        let lock = load(&path).unwrap();
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert!(npm.native_lock.is_some());
+    }
+
+    #[test]
+    fn npm_metadata_accepts_declared_pnpm_native_lock_without_aube_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let mut version = ToolVersion::new("npm:prettier", "3.6.2");
+        version
+            .options
+            .insert(LOCKED_NPM_INSTALLER_OPTION.into(), "pnpm".into());
+        version
+            .options
+            .insert(LOCKED_NPM_NATIVE_LOCK_KIND_OPTION.into(), "pnpm".into());
+        version.options.insert(
+            LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION.into(),
+            "pnpm-v9".into(),
+        );
+        version
+            .options
+            .insert(LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION.into(), "b".repeat(64));
+        merge_resolved_with_scope(
+            &path,
+            linux(),
+            &test_dirs(temp.path()),
+            &[(ToolRequest::parse("npm:prettier@3.6.2").unwrap(), version)],
+            LockScope::Global,
+        )
+        .unwrap();
+
+        let lock = load(&path).unwrap();
+        let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
+            .npm
+            .as_ref()
+            .unwrap()
+        else {
+            panic!("schema 3 writes npm metadata");
+        };
+        assert_eq!(npm.installer, NpmInstaller::Pnpm);
+        assert_eq!(npm.scope, LockScope::Global);
+        assert_eq!(npm.native_lock.as_ref().unwrap().format, "pnpm-v9");
+    }
+
+    #[test]
+    fn package_lock_kind_alias_is_normalized_to_npm_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let mut version = ToolVersion::new("npm:prettier", "3.6.2");
+        version
+            .options
+            .insert(LOCKED_NPM_INSTALLER_OPTION.into(), "npm".into());
+        version.options.insert(
+            LOCKED_NPM_NATIVE_LOCK_KIND_OPTION.into(),
+            "package-lock".into(),
+        );
+        version.options.insert(
+            LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION.into(),
+            "package-lock-v2".into(),
+        );
+        version
+            .options
+            .insert(LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION.into(), "c".repeat(64));
+        merge_resolved_with_scope(
+            &path,
+            linux(),
+            &test_dirs(temp.path()),
+            &[(ToolRequest::parse("npm:prettier@3.6.2").unwrap(), version)],
+            LockScope::Project,
+        )
+        .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("kind = \"npm\""));
+        assert!(!text.contains("kind = \"package-lock\""));
+        assert!(text.contains("format = \"package-lock-v2\""));
     }
 
     #[test]
@@ -1816,7 +2468,10 @@ subdir = "install"
     }
 
     fn valid_schema_two_npm_lock() -> String {
-        let sha256 = "a".repeat(64);
+        valid_schema_two_npm_lock_with_sha256(&"a".repeat(64))
+    }
+
+    fn valid_schema_two_npm_lock_with_sha256(sha256: &str) -> String {
         format!(
             r#"
 schema = 2
@@ -1839,6 +2494,34 @@ graph = "osdk.lock.d/npm/{sha256}.yaml"
         )
     }
 
+    fn valid_schema_three_npm_lock() -> String {
+        let sha256 = "a".repeat(64);
+        format!(
+            r#"
+schema = 3
+
+[platforms.linux-x64.tools.node]
+request = "24"
+version = "24.1.0"
+
+[platforms.linux-x64.tools."npm:prettier"]
+request = "3"
+version = "3.6.2"
+
+[platforms.linux-x64.tools."npm:prettier".npm]
+package = "prettier"
+installer = "aube"
+scope = "project"
+node_version = "24.1.0"
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "aube"
+format = "aube-v9"
+sha256 = "{sha256}"
+"#
+        )
+    }
+
     fn test_model_manifest() -> osdk_core::model::SnapshotManifest {
         osdk_core::model::SnapshotManifest {
             schema: 1,
@@ -1857,6 +2540,22 @@ graph = "osdk.lock.d/npm/{sha256}.yaml"
                 etag: None,
             }],
             created_at: 0,
+        }
+    }
+
+    fn test_locked_model() -> LockedModel {
+        LockedModel {
+            provider: osdk_core::model::ProviderId::HuggingFace,
+            repository: "Qwen/Qwen2.5-7B-Instruct".into(),
+            requested_revision: "main".into(),
+            revision: "abc123".into(),
+            endpoint: "https://huggingface.co".into(),
+            variant: Some("safetensors".into()),
+            files: vec![LockedModelFile {
+                path: "config.json".into(),
+                size: 10,
+                sha256: "sha256".into(),
+            }],
         }
     }
 
