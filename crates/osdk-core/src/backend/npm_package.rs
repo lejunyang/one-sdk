@@ -16,7 +16,8 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 const PROVIDER: &str = "npm-package";
 const PROJECT_DIR: &str = "project";
-const STORE_DIR: &str = "store";
+const AUBE_DIR: &str = "aube";
+const AUBE_CACHE_VERSION: &str = "v1";
 const CACHE_DIR: &str = "cache";
 const METADATA_PROVIDER: &str = "provider";
 const METADATA_PACKAGE: &str = "package";
@@ -107,22 +108,16 @@ impl NpmPackageBackend {
         self.install_root(ctx, version).join(PROJECT_DIR)
     }
 
-    fn aube_cache_dir(&self, ctx: &Ctx, version: &str) -> PathBuf {
+    fn aube_cache_dir(ctx: &Ctx) -> PathBuf {
         ctx.dirs
             .cache
-            .join("aube")
-            .join(crate::dirs::sanitize_tool_id(self.id()))
-            .join(crate::dirs::sanitize_version_component(version))
+            .join(AUBE_DIR)
+            .join(AUBE_CACHE_VERSION)
             .join(CACHE_DIR)
     }
 
-    fn aube_store_dir(&self, ctx: &Ctx, version: &str) -> PathBuf {
-        ctx.dirs
-            .cache
-            .join("aube")
-            .join(crate::dirs::sanitize_tool_id(self.id()))
-            .join(crate::dirs::sanitize_version_component(version))
-            .join(STORE_DIR)
+    fn aube_store_dir(ctx: &Ctx) -> PathBuf {
+        ctx.dirs.store.join(AUBE_DIR)
     }
 
     fn package_spec(&self, tv: &ToolVersion) -> String {
@@ -303,8 +298,8 @@ impl NpmPackageBackend {
         Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
         aube_host::prepare_lock_graph(EmbeddedLockGraphRequest {
             project_dir: &project_dir,
-            cache_dir: self.aube_cache_dir(ctx, &tv.version),
-            store_dir: self.aube_store_dir(ctx, &tv.version),
+            cache_dir: Self::aube_cache_dir(ctx),
+            store_dir: Self::aube_store_dir(ctx),
             node_bin_dir: managed_node(ctx, tv)?.0,
             offline: ctx.config.settings.offline,
         })
@@ -513,8 +508,8 @@ impl Backend for NpmPackageBackend {
             Self::write_project_npmrc(&project_dir, None)?;
             let request = EmbeddedFrozenInstallRequest {
                 project_dir: &project_dir,
-                cache_dir: self.aube_cache_dir(ctx, &tv.version),
-                store_dir: self.aube_store_dir(ctx, &tv.version),
+                cache_dir: Self::aube_cache_dir(ctx),
+                store_dir: Self::aube_store_dir(ctx),
                 node_bin_dir,
                 scripts_enabled: !matches!(build_policy, BuildPolicy::Deny),
                 dangerously_allow_all_builds: matches!(build_policy, BuildPolicy::AllowAll),
@@ -541,8 +536,8 @@ impl Backend for NpmPackageBackend {
                 let request = EmbeddedInstallRequest {
                     project_dir: &project_dir,
                     packages: std::slice::from_ref(&package_spec),
-                    cache_dir: self.aube_cache_dir(ctx, &tv.version),
-                    store_dir: self.aube_store_dir(ctx, &tv.version),
+                    cache_dir: Self::aube_cache_dir(ctx),
+                    store_dir: Self::aube_store_dir(ctx),
                     node_bin_dir: node_bin_dir.clone(),
                     scripts_enabled: !matches!(build_policy, BuildPolicy::Deny),
                     dangerously_allow_all_builds: matches!(build_policy, BuildPolicy::AllowAll),
@@ -637,7 +632,7 @@ impl Backend for NpmPackageBackend {
             .join(".bin")])
     }
 
-    fn exec_env(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
+    fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
         let mut env = crate::cache::manager_exec_env(
             &ctx.dirs.cache,
             &[
@@ -647,11 +642,11 @@ impl Backend for NpmPackageBackend {
         );
         env.insert(
             "npm_config_cache".into(),
-            self.aube_cache_dir(ctx, &tv.version).display().to_string(),
+            Self::aube_cache_dir(ctx).display().to_string(),
         );
         env.insert(
             "npm_config_store_dir".into(),
-            self.aube_store_dir(ctx, &tv.version).display().to_string(),
+            Self::aube_store_dir(ctx).display().to_string(),
         );
         Ok(env)
     }
@@ -1141,6 +1136,31 @@ mod tests {
     }
 
     #[test]
+    fn aube_storage_is_shared_across_packages_versions_and_scopes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let cases = [
+            ("npm:prettier", "3.6.2"),
+            ("npm:prettier", "3.6.1"),
+            ("npm:@antfu/ni", "0.21.12"),
+        ];
+        let paths = cases.map(|(id, version)| {
+            let backend = NpmPackageBackend::from_id(id).unwrap();
+            let env = backend
+                .exec_env(&ctx, &ToolVersion::new(id, version))
+                .unwrap();
+            (
+                PathBuf::from(&env["npm_config_cache"]),
+                PathBuf::from(&env["npm_config_store_dir"]),
+            )
+        });
+
+        assert!(paths.iter().all(|path| path == &paths[0]));
+        assert_eq!(paths[0].0, temporary.path().join("cache/aube/v1/cache"));
+        assert_eq!(paths[0].1, temporary.path().join("store/aube"));
+    }
+
+    #[test]
     fn package_install_dir_tracks_scope_layout() {
         let root = PathBuf::from("/tmp/install/project");
         assert_eq!(
@@ -1543,6 +1563,7 @@ mod tests {
             "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
             "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
             "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
             _ => None,
         })
         .unwrap();
@@ -1559,6 +1580,9 @@ mod tests {
                 sources: Default::default(),
                 tools: Default::default(),
                 tool_configs: Default::default(),
+                global_tools: Default::default(),
+                global_tool_configs: Default::default(),
+                tool_origins: Default::default(),
                 aliases: Default::default(),
                 project_config_path: None,
             },
@@ -1693,6 +1717,9 @@ mod tests {
                 sources: Default::default(),
                 tools: Default::default(),
                 tool_configs: Default::default(),
+                global_tools: Default::default(),
+                global_tool_configs: Default::default(),
+                tool_origins: Default::default(),
                 aliases: Default::default(),
                 project_config_path: None,
             },
