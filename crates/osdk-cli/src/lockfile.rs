@@ -911,6 +911,32 @@ pub fn upsert_resolved_with_scope(
     save(path, &lockfile)
 }
 
+/// Remove one tool entry for a platform while preserving every other tool,
+/// platform, and model record. Empty platform tables are pruned.
+pub fn remove_tool(path: &Path, platform: Platform, backend: &str) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let mut lockfile = load(path)?;
+    let key = platform_key(platform);
+    let removed = lockfile
+        .platforms
+        .get_mut(&key)
+        .is_some_and(|platform| platform.tools.remove(backend).is_some());
+    if !removed {
+        return Ok(false);
+    }
+    if lockfile
+        .platforms
+        .get(&key)
+        .is_some_and(|platform| platform.tools.is_empty())
+    {
+        lockfile.platforms.remove(&key);
+    }
+    save(path, &lockfile)?;
+    Ok(true)
+}
+
 fn reject_linked_rust(dirs: &osdk_core::dirs::Dirs, version: &ToolVersion) -> Result<()> {
     if version.backend == "rust"
         && dirs
@@ -1862,6 +1888,37 @@ lockfile = "lockfileVersion: '9.0'"
         };
         assert_eq!(npm.scope, LockScope::Global);
         assert_eq!(npm.node_version.as_deref(), Some("24.1.0"));
+    }
+
+    #[test]
+    fn removing_one_tool_preserves_other_lock_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        merge_resolved(
+            &path,
+            linux(),
+            &dirs,
+            &[
+                (
+                    ToolRequest::parse("node@24.1.0").unwrap(),
+                    ToolVersion::new("node", "24.1.0"),
+                ),
+                (
+                    ToolRequest::parse("go@1.24.0").unwrap(),
+                    ToolVersion::new("go", "1.24.0"),
+                ),
+            ],
+        )
+        .unwrap();
+        merge_model(&path, &test_model_manifest()).unwrap();
+
+        assert!(remove_tool(&path, linux(), "go").unwrap());
+        assert!(!remove_tool(&path, linux(), "missing").unwrap());
+        let lock = load(&path).unwrap();
+        assert!(lock.platforms["linux-x64"].tools.contains_key("node"));
+        assert!(!lock.platforms["linux-x64"].tools.contains_key("go"));
+        assert!(lock.models.contains_key("qwen"));
     }
 
     #[test]
