@@ -4,9 +4,9 @@
 //! - Shims (default): the shims dir on PATH; robust in IDEs/CI. Set up by
 //!   `osdk` itself when tools are installed.
 //! - Shell activation (`osdk activate <shell>`): injects a hook that runs
-//!   `osdk hook-env` on each prompt / dir change, putting shims before the
-//!   active versions' real bin dirs and exporting their env
-//!   (GOROOT/JAVA_HOME/...).
+//!   `osdk hook-env` on each prompt / dir change, putting a project's installed
+//!   commands before global shims and active versions' real bin dirs, and
+//!   exporting their env (GOROOT/JAVA_HOME/...).
 //!
 //! This module renders the per-shell snippets and computes the env delta.
 
@@ -203,7 +203,8 @@ Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_S
 
 /// The env changes to apply for the active toolset in `cwd`.
 pub struct EnvDelta {
-    /// Directories to prepend to PATH (shims first, then active tools' bin dirs).
+    /// Directories to prepend to PATH (project bins, shims, and active tools'
+    /// bin dirs, with a managed Node guard when required).
     pub path_prepend: Vec<PathBuf>,
     /// Variables to set (GOROOT, JAVA_HOME, ...).
     pub set_vars: BTreeMap<String, String>,
@@ -217,6 +218,7 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
     let mut path_prepend = Vec::new();
     let mut set_vars = BTreeMap::new();
     let mut has_generated_shim = false;
+    let mut managed_node_bin = None;
     let dynamic_report = crate::shim::scan_dynamic_installs(ctx).ok();
     let mut backend_ids = registry
         .all()
@@ -287,11 +289,17 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         }) {
             has_generated_shim = true;
         }
-        let bins = backend
+        let backend_bins = backend
             .bin_paths(ctx, &tv)
             .ok()
             .into_iter()
             .flatten()
+            .collect::<std::collections::BTreeSet<_>>();
+        if backend.id() == "node" {
+            managed_node_bin = backend_bins.iter().find(|path| path.is_dir()).cloned();
+        }
+        let bins = backend_bins
+            .into_iter()
             .chain(
                 crate::shim::dynamic_manifest_bin_paths(ctx, backend.id(), &version)
                     .ok()
@@ -312,6 +320,9 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
     }
 
     prioritize_managed_paths(&mut path_prepend, &ctx.dirs.shims(), has_generated_shim);
+    if let Some(project_bin) = project_bin_for(cwd) {
+        prioritize_project_bin(&mut path_prepend, project_bin, managed_node_bin.as_deref());
+    }
 
     let previous = std::env::var("OSDK_MANAGED_ENV").unwrap_or_default();
     let unset_vars = previous
@@ -324,6 +335,116 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         path_prepend,
         set_vars,
         unset_vars,
+    }
+}
+
+/// Return the nearest Node project's installed command directory. The nearest
+/// `package.json` is a hard boundary: if its `.bin` is absent or unsafe, an
+/// outer project must not leak commands into the current working directory.
+fn project_bin_for(cwd: &std::path::Path) -> Option<PathBuf> {
+    let project_root = cwd.ancestors().find_map(|directory| {
+        let package_json = directory.join("package.json");
+        match std::fs::symlink_metadata(&package_json) {
+            Ok(metadata) => Some(metadata.file_type().is_file().then_some(directory)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            // Fail closed when a possible nearer boundary cannot be inspected.
+            Err(_) => Some(None),
+        }
+    })??;
+
+    let canonical_root = dunce::canonicalize(project_root).ok()?;
+    if !canonical_root.is_dir() {
+        return None;
+    }
+    let canonical_package = dunce::canonicalize(project_root.join("package.json")).ok()?;
+    if !canonical_package.is_file()
+        || canonical_package
+            .parent()
+            .is_none_or(|parent| !same_existing_path(parent, &canonical_root))
+    {
+        return None;
+    }
+
+    let node_modules = project_root.join("node_modules");
+    let bin = node_modules.join(".bin");
+    if std::fs::symlink_metadata(&node_modules)
+        .ok()
+        .is_none_or(|metadata| !metadata.file_type().is_dir())
+        || std::fs::symlink_metadata(&bin)
+            .ok()
+            .is_none_or(|metadata| !metadata.file_type().is_dir())
+    {
+        return None;
+    }
+
+    let canonical_node_modules = dunce::canonicalize(&node_modules).ok()?;
+    let canonical_bin = dunce::canonicalize(&bin).ok()?;
+    (canonical_node_modules
+        .parent()
+        .is_some_and(|parent| same_existing_path(parent, &canonical_root))
+        && canonical_bin
+            .parent()
+            .is_some_and(|parent| same_existing_path(parent, &canonical_node_modules)))
+    .then_some(canonical_bin)
+}
+
+fn prioritize_project_bin(
+    paths: &mut Vec<PathBuf>,
+    project_bin: PathBuf,
+    managed_node_bin: Option<&std::path::Path>,
+) {
+    let node_collision = directory_provides_command(&project_bin, "node").unwrap_or(true);
+    paths.retain(|path| !same_existing_path(path, &project_bin));
+
+    if node_collision {
+        let Some(node_bin) = managed_node_bin.and_then(|node_bin| {
+            paths
+                .iter()
+                .find(|path| same_existing_path(path, node_bin))
+                .cloned()
+        }) else {
+            paths.insert(0, project_bin);
+            return;
+        };
+        paths.retain(|path| !same_existing_path(path, &node_bin));
+        paths.insert(0, project_bin);
+        if !same_existing_path(&node_bin, &paths[0]) {
+            paths.insert(0, node_bin);
+        }
+    } else {
+        paths.insert(0, project_bin);
+    }
+}
+
+fn same_existing_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right || same_file::is_same_file(left, right).unwrap_or(false)
+}
+
+fn directory_provides_command(directory: &std::path::Path, command: &str) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir(directory)? {
+        let file_name = entry?.file_name();
+        if command_name_matches(&file_name, command) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn command_name_matches(file_name: &std::ffi::OsStr, command: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let file_name = file_name.to_string_lossy();
+        std::iter::once(command.to_string())
+            .chain(
+                ["com", "exe", "bat", "cmd", "ps1"]
+                    .into_iter()
+                    .map(|extension| format!("{command}.{extension}")),
+            )
+            .any(|candidate| file_name.eq_ignore_ascii_case(&candidate))
+    }
+    #[cfg(not(windows))]
+    {
+        file_name == std::ffi::OsStr::new(command)
     }
 }
 
@@ -574,6 +695,9 @@ mod tests {
                     .map(|(tool, version)| (tool.to_string(), version.to_string()))
                     .collect(),
                 tool_configs: BTreeMap::new(),
+                global_tools: BTreeMap::new(),
+                global_tool_configs: BTreeMap::new(),
+                tool_origins: BTreeMap::new(),
                 aliases: BTreeMap::new(),
                 project_config_path: None,
             },
@@ -673,9 +797,203 @@ mod tests {
     }
 
     #[test]
+    fn project_bin_precedes_shims_without_shadowing_managed_node() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let project_bin = project.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&project_bin).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        write_test_command(&project_bin, "eslint");
+
+        let shims = temporary.path().join("osdk/shims");
+        let node = temporary.path().join("osdk/installs/node/22.14.0/bin");
+        let npm = temporary.path().join("osdk/installs/npm/10.9.0/bin");
+        let mut paths = vec![shims.clone(), npm.clone(), node.clone()];
+
+        let discovered = project_bin_for(&project).unwrap();
+        prioritize_project_bin(&mut paths, discovered.clone(), Some(&node));
+        assert_eq!(
+            paths,
+            vec![discovered.clone(), shims.clone(), npm, node.clone()]
+        );
+
+        write_test_command(&project_bin, "node");
+        let mut guarded_paths = vec![shims.clone(), node.clone()];
+        prioritize_project_bin(
+            &mut guarded_paths,
+            project_bin_for(&project).unwrap(),
+            Some(&node),
+        );
+        assert_eq!(guarded_paths, vec![node, discovered, shims]);
+    }
+
+    #[test]
+    fn project_bin_with_node_is_still_active_without_managed_node() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let project_bin = project.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&project_bin).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        write_test_command(&project_bin, "node");
+
+        let mut paths = vec![temporary.path().join("osdk/shims")];
+        let discovered = project_bin_for(&project).unwrap();
+        prioritize_project_bin(&mut paths, discovered.clone(), None);
+
+        assert_eq!(paths, vec![discovered, temporary.path().join("osdk/shims")]);
+    }
+
+    #[test]
+    fn project_bin_discovery_stops_at_nearest_package_boundary() {
+        let temporary = tempfile::tempdir().unwrap();
+        let outer = temporary.path().join("outer");
+        let outer_bin = outer.join("node_modules").join(".bin");
+        let nested = outer.join("packages/app/src");
+        std::fs::create_dir_all(&outer_bin).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(outer.join("package.json"), b"{}").unwrap();
+        std::fs::write(outer.join("packages/app/package.json"), b"{}").unwrap();
+
+        assert_eq!(project_bin_for(&nested), None);
+        assert!(!outer.join("packages/app/node_modules/.bin").exists());
+
+        std::fs::remove_file(outer.join("packages/app/package.json")).unwrap();
+        assert_eq!(
+            project_bin_for(&nested),
+            Some(dunce::canonicalize(outer_bin).unwrap())
+        );
+    }
+
+    #[test]
+    fn missing_project_bin_is_not_created() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project/src");
+        let project_bin = temporary.path().join("project/node_modules/.bin");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(temporary.path().join("project/package.json"), b"{}").unwrap();
+
+        assert_eq!(project_bin_for(&project), None);
+        assert!(!project_bin.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_bin_discovery_rejects_paths_outside_project() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let outside = temporary.path().join("outside-bin");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        symlink(&outside, project.join("node_modules/.bin")).unwrap();
+
+        assert_eq!(project_bin_for(&project), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_bin_discovery_rejects_symlinked_package_marker() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let nested = project.join("src");
+        std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(temporary.path().join("package.json"), b"{}").unwrap();
+        symlink(
+            temporary.path().join("package.json"),
+            project.join("package.json"),
+        )
+        .unwrap();
+
+        assert_eq!(project_bin_for(&nested), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_bin_discovery_rejects_symlinked_node_modules() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let outside_modules = temporary.path().join("outside-modules");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(outside_modules.join(".bin")).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        symlink(&outside_modules, project.join("node_modules")).unwrap();
+
+        assert_eq!(project_bin_for(&project), None);
+    }
+
+    #[test]
+    fn command_collision_names_follow_target_rules() {
+        #[cfg(windows)]
+        for name in [
+            "node", "node.com", "NODE.EXE", "NoDe.BaT", "node.CMD", "NODE.ps1",
+        ] {
+            assert!(command_name_matches(std::ffi::OsStr::new(name), "node"));
+        }
+        #[cfg(windows)]
+        assert!(!command_name_matches(
+            std::ffi::OsStr::new("node.js"),
+            "node"
+        ));
+
+        #[cfg(not(windows))]
+        {
+            assert!(command_name_matches(std::ffi::OsStr::new("node"), "node"));
+            assert!(!command_name_matches(std::ffi::OsStr::new("Node"), "node"));
+            assert!(!command_name_matches(
+                std::ffi::OsStr::new("node.cmd"),
+                "node"
+            ));
+        }
+    }
+
+    #[test]
+    fn project_path_is_deduplicated_against_existing_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project_bin = temporary.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&project_bin).unwrap();
+        let canonical = dunce::canonicalize(&project_bin).unwrap();
+        let mut paths = vec![project_bin, PathBuf::from("/osdk/shims")];
+
+        prioritize_project_bin(&mut paths, canonical.clone(), None);
+
+        assert_eq!(paths, vec![canonical, PathBuf::from("/osdk/shims")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_path_is_deduplicated_against_a_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project_bin = temporary.path().join("node_modules/.bin");
+        let alias = temporary.path().join("project-bin");
+        std::fs::create_dir_all(&project_bin).unwrap();
+        symlink(&project_bin, &alias).unwrap();
+        let canonical = dunce::canonicalize(&project_bin).unwrap();
+        let mut paths = vec![alias, PathBuf::from("/osdk/shims")];
+
+        prioritize_project_bin(&mut paths, canonical.clone(), None);
+
+        assert_eq!(paths, vec![canonical, PathBuf::from("/osdk/shims")]);
+    }
+
+    #[test]
     fn computed_activation_path_routes_node_bundled_npm_through_shims() {
         let temporary = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temporary.path(), &[("node", "22.14.0")]);
+        let project = temporary.path().join("project/src");
+        let project_bin = temporary.path().join("project/node_modules/.bin");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&project_bin).unwrap();
+        std::fs::write(temporary.path().join("project/package.json"), b"{}").unwrap();
+        write_test_command(&project_bin, "eslint");
         let node = mark_installed(
             &ctx,
             "node",
@@ -703,9 +1021,61 @@ mod tests {
         std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
         std::fs::write(&shim, b"shim").unwrap();
 
-        let delta = compute_env_delta(&ctx, &Registry::new(), temporary.path());
+        let delta = compute_env_delta(&ctx, &Registry::new(), &project);
 
-        assert_eq!(delta.path_prepend, vec![ctx.dirs.shims(), node]);
+        assert_eq!(
+            delta.path_prepend,
+            vec![
+                dunce::canonicalize(project_bin).unwrap(),
+                ctx.dirs.shims(),
+                node
+            ]
+        );
+    }
+
+    #[test]
+    fn computed_activation_path_guards_node_from_project_bin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temporary.path(), &[]);
+        let project = temporary.path().join("project");
+        let project_bin = project.join("node_modules/.bin");
+        std::fs::create_dir_all(&project_bin).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            br#"{"engines":{"node":">=20 <23"}}"#,
+        )
+        .unwrap();
+        write_test_command(&project_bin, "node");
+
+        let older_node = mark_installed(
+            &ctx,
+            "node",
+            "20.0.0",
+            if cfg!(windows) { "" } else { "bin" },
+        );
+        write_test_command(&older_node, "node");
+        let node = mark_installed(
+            &ctx,
+            "node",
+            "22.14.0",
+            if cfg!(windows) { "" } else { "bin" },
+        );
+        write_test_command(&node, "node");
+        let shim_name = if cfg!(windows) { "node.cmd" } else { "node" };
+        let shim = ctx.dirs.shims().join(shim_name);
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, b"shim").unwrap();
+
+        let delta = compute_env_delta(&ctx, &Registry::new(), &project);
+
+        assert_eq!(
+            delta.path_prepend,
+            vec![
+                node,
+                dunce::canonicalize(project_bin).unwrap(),
+                ctx.dirs.shims()
+            ]
+        );
     }
 
     #[test]
@@ -738,5 +1108,13 @@ mod tests {
         assert!(out.contains("export PATH=\"$OSDK_ORIGINAL_PATH\""));
         assert!(out.contains("unset GOROOT"));
         assert!(out.contains("unset OSDK_MANAGED_ENV"));
+    }
+
+    fn write_test_command(directory: &std::path::Path, name: &str) {
+        #[cfg(windows)]
+        let path = directory.join(format!("{name}.cmd"));
+        #[cfg(not(windows))]
+        let path = directory.join(name);
+        std::fs::write(path, b"test command").unwrap();
     }
 }
