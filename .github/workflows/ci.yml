@@ -30,6 +30,28 @@ jobs:
       - name: check minimum supported Rust version
         run: cargo check --locked --workspace
 
+  installers:
+    name: installer smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.x"
+      - name: Unix installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/test-installers.sh
+      - name: PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-installers.ps1
+
   # Keep the interactive terminal contract visible on both macOS architectures.
   # This uses native GitHub-hosted macOS machines rather than emulation.
   macos-terminal:

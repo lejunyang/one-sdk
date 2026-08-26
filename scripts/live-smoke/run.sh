@@ -80,6 +80,38 @@ version_command=()
 install_options=()
 exec_tools=()
 cleanup_tools=()
+global_aube=0
+global_aube_cleanup_active=0
+
+cleanup_global_aube_on_exit() {
+  status=$?
+  trap - EXIT
+  if [[ "$global_aube_cleanup_active" = "1" ]]; then
+    set +e
+    printf '\nGlobal Aube smoke failed; attempting isolated cleanup.\n'
+    timeout --foreground "$command_timeout" \
+      "$osdk_binary" --quiet --yes uninstall --global "$request"
+    node_output=$(timeout --foreground "$command_timeout" \
+      "$osdk_binary" list node 2>&1)
+    node_status=$?
+    printf '%s\n' "$node_output"
+    if [[ $node_status -eq 0 ]]; then
+      node_version=
+      while IFS= read -r line; do
+        if [[ "$line" == "  "* ]]; then
+          node_version=${line#"  "}
+        fi
+      done <<< "$node_output"
+      if [[ -n "$node_version" ]]; then
+        timeout --foreground "$command_timeout" \
+          "$osdk_binary" --quiet --yes uninstall "node@$node_version"
+      fi
+    fi
+  fi
+  exit "$status"
+}
+
+trap cleanup_global_aube_on_exit EXIT
 
 case "$backend" in
   node)
@@ -136,14 +168,29 @@ case "$backend" in
     request=github:cli/cli@latest
     version_command=(gh --version)
     ;;
+  npm-global-aube)
+    binary_dir=$(cd "$(dirname "$osdk_binary")" && pwd)
+    for sibling in osdk-shim osdk-aube; do
+      if [[ ! -x "$binary_dir/$sibling" ]]; then
+        printf 'required sibling binary is not executable: %s\n' \
+          "$binary_dir/$sibling" >&2
+        exit 2
+      fi
+    done
+    request=npm:prettier@3.6.2
+    cleanup_tools=(node)
+    global_aube=1
+    ;;
   *)
     printf 'unsupported live-smoke backend: %s\n' "$backend" >&2
     exit 2
     ;;
 esac
 
-exec_tools+=(--tool "$request")
-cleanup_tools+=("$list_tool")
+if [[ "$global_aube" = "0" ]]; then
+  exec_tools+=(--tool "$request")
+  cleanup_tools+=("$list_tool")
+fi
 
 printf 'backend=%s\n' "$backend"
 printf 'request=%s\n' "$request"
@@ -151,21 +198,40 @@ printf 'smoke_root=%s\n' "$smoke_root"
 printf 'command_timeout=%s\n' "$command_timeout"
 
 cd "$smoke_root/project"
-run "$osdk_binary" --quiet list-remote "$list_tool"
-run "$osdk_binary" --quiet --yes install "$request" "${install_options[@]}"
-run "$osdk_binary" --quiet lock "$request" "${install_options[@]}"
+if [[ "$global_aube" = "1" ]]; then
+  global_aube_cleanup_active=1
+  run "$osdk_binary" --quiet --yes use --global "$request" -o installer=aube
+  run "$osdk_binary" where --global "$request"
+  prettier_shim="$OSDK_DATA_DIR/shims/prettier"
+  if [[ ! -x "$prettier_shim" ]]; then
+    printf 'global Aube install did not publish an executable shim: %s\n' \
+      "$prettier_shim" >&2
+    exit 1
+  fi
+  run "$prettier_shim" --version
+  run "$osdk_binary" --quiet --yes uninstall --global "$request"
+  if [[ -e "$prettier_shim" || -L "$prettier_shim" ]]; then
+    printf 'global Aube uninstall left its shim behind: %s\n' \
+      "$prettier_shim" >&2
+    exit 1
+  fi
+else
+  run "$osdk_binary" --quiet list-remote "$list_tool"
+  run "$osdk_binary" --quiet --yes install "$request" "${install_options[@]}"
+  run "$osdk_binary" --quiet lock "$request" "${install_options[@]}"
 
-lock_artifact="$smoke_root/logs/$backend.osdk.lock"
-if [[ ! -s osdk.lock ]]; then
-  printf 'lock command did not write osdk.lock\n' >&2
-  exit 1
+  lock_artifact="$smoke_root/logs/$backend.osdk.lock"
+  if [[ ! -s osdk.lock ]]; then
+    printf 'lock command did not write osdk.lock\n' >&2
+    exit 1
+  fi
+  cp osdk.lock "$lock_artifact"
+  printf '\nlock_artifact=%s\n' "$lock_artifact"
+  cat "$lock_artifact"
+
+  run "$osdk_binary" list "$list_tool"
+  run "$osdk_binary" exec "${exec_tools[@]}" -- "${version_command[@]}"
 fi
-cp osdk.lock "$lock_artifact"
-printf '\nlock_artifact=%s\n' "$lock_artifact"
-cat "$lock_artifact"
-
-run "$osdk_binary" list "$list_tool"
-run "$osdk_binary" exec "${exec_tools[@]}" -- "${version_command[@]}"
 
 for cleanup_tool in "${cleanup_tools[@]}"; do
   printf '\n+ %q list %q\n' "$osdk_binary" "$cleanup_tool"
@@ -184,7 +250,7 @@ for cleanup_tool in "${cleanup_tools[@]}"; do
     printf 'could not determine installed version for %s\n' "$cleanup_tool" >&2
     exit 1
   fi
-  run "$osdk_binary" uninstall "$cleanup_tool@$installed_version"
+  run "$osdk_binary" --quiet --yes uninstall "$cleanup_tool@$installed_version"
 done
 
 remaining_marker=$(find "$OSDK_INSTALL_DIR" -type f -name .osdk-complete -print -quit)
@@ -192,4 +258,5 @@ if [[ -n "$remaining_marker" ]]; then
   printf 'complete marker remains after uninstall: %s\n' "$remaining_marker" >&2
   exit 1
 fi
+global_aube_cleanup_active=0
 printf '\nno complete markers remain under %s\n' "$OSDK_INSTALL_DIR"

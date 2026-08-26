@@ -78,9 +78,7 @@ jobs:
       - name: Build release binaries
         run: >-
           cargo build --locked --release
-          --package osdk-cli
-          --package osdk-shim
-          --bin osdk-aube
+          --workspace --bins
           --target ${{ matrix.target }}
       - name: Package Unix binaries
         if: ${{ matrix.archive == 'tar' }}
