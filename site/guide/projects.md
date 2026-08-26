@@ -69,6 +69,27 @@ default = "maintenance"
 
 `osdk use node@20` 会修改最近的项目配置；没有项目配置时在当前目录创建
 `osdk.toml`。`osdk use --global node@20` 修改用户配置。
+对于 `npm:<package>`，本地 `use` 会先查找最近的 `package.json`；下一节说明其项目感知
+行为。
+
+## 在真实项目中使用 npm 工具
+
+在 Node 项目下的任意目录执行以下命令，会把包加入最近 `package.json` 所在的项目：
+
+```bash
+osdk use npm:prettier@3
+```
+
+包会保留原有的 `dependencies`、`devDependencies`、`optionalDependencies` 或
+`peerDependencies` 区段；新包默认加入 `devDependencies`。现有 lock 格式兼容时 osdk
+使用 Aube，也可用 `-o installer=aube|npm|pnpm` 显式指定。某个安装器失败后不会换另一个
+安装器重试。祖先目录中没有 `package.json` 时，该命令保留原有的 osdk 隔离安装与 shim
+行为。
+
+项目感知的 `use` 会更新原生 `package.json` 与包管理器 lock，再把精确 Node 选择和结构化
+npm 条目写入 `osdk.toml`。它还会写一份紧凑的 `osdk.lock`，记录 installer、scope、Node
+和原生 lock 身份。该 metadata 不包含传递依赖图；原生包管理器 lock 仍是依赖图来源。
+项目中应同时保留这四类文件。安装器与激活细节见 [npm 开发工具](./npm-tools)。
 
 ## 完整配置参考
 
@@ -134,6 +155,7 @@ pnpm = "10.15.0"
 
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
+installer = "aube"            # auto|aube|npm|pnpm；隐式默认值为 auto
 allow_builds = ["@scope/native-tool", "esbuild"]
 
 [aliases.node]
@@ -144,8 +166,9 @@ Registry URL 会去重并补尾部 `/`。只允许带 host 的 HTTP(S) URL；cre
 query 和 fragment 都会被拒绝。来源的选择语义见[下载源与供应链安全](./sources-security)，
 Registry 的选择语义见[JavaScript 包管理器](./package-managers)。
 结构化工具对象要求 `version`，其他 option 可以是字符串、布尔值或字符串数组；数组
-传给 backend 时会转成逗号分隔值。上例 `allow_builds` 只允许列出的 npm 依赖执行构建
-脚本；完整安全边界见 [npm 开发工具](./npm-tools#项目配置与构建脚本)。
+传给 backend 时会转成逗号分隔值。`installer` 选择 npm 工具安装器。`allow_builds` 控制
+隔离与全局安装；项目感知的 `use` 始终禁用 lifecycle scripts。完整安全边界见
+[npm 开发工具](./npm-tools#构建脚本策略)。
 
 ## 精确的覆盖与合并语义
 
@@ -207,9 +230,11 @@ osdk trust list
 osdk untrust [PATH]
 ```
 
-`PATH` 可为配置文件或目录；目录会从该处向上找最近项目配置。只有顶层
-`[tools]` 和 `[aliases]` 的项目文件无需信任。只要出现其他顶层 section（包括
-`settings`、`sources`、`registries` 或未知 section），普通命令就会要求先信任。
+`PATH` 可为配置文件或目录；目录会从该处向上找最近项目配置。只有顶层 `[tools]` 和
+`[aliases]` 的项目文件通常无需信任，但 npm 工具项需要信任，因为 Shell 激活可能暴露
+项目的 `node_modules/.bin`。其他顶层 section（包括 `settings`、`sources`、`registries`
+或未知 section）也需要信任。项目感知的 `osdk use npm:...` 成功后会信任它刚生成的
+`osdk.toml` 精确内容；之后编辑会使该记录失效。
 
 ```bash
 osdk --yes trust                 # 最近项目配置

@@ -1,32 +1,115 @@
 # npm 开发工具
 
-osdk 可以把 npm Registry 中发布的命令行包作为独立开发工具管理。请求使用
-`npm:<package>` 命名空间，安装、固定、临时执行、查询、升级和卸载都复用统一的
-osdk 命令。
+osdk 通过 `npm:<package>` 命名空间使用 npm Registry 中发布的命令行包。
+`osdk use` 会识别上下文：它可以把工具加入真实 Node 项目、安装为用户级全局工具，
+也可以在没有 Node 项目时保留原有的 osdk 隔离安装。
 
 ::: tip 先区分两个名字
-`npm@11.5.2` 安装的是 npm 包管理器；`npm:prettier@3` 安装的是 npm Registry
-中的 Prettier 工具。若确实要把 Registry 中名为 `npm` 的包当作动态工具，请写
-`npm:npm`。
+`npm@11.5.2` 安装的是 npm 包管理器；`npm:prettier@3` 选择的是 npm Registry 中的
+Prettier 包。若要选择 Registry 中名字就叫 `npm` 的包，请写 `npm:npm`。
 :::
 
-## 快速开始
+## `use` 如何选择作用域
 
-将 Prettier 安装并固定到当前项目：
+| 命令与上下文 | 安装目标 | 配置与 lock |
+| --- | --- | --- |
+| 在 `package.json` 下执行 `osdk use npm:prettier@3` | 最近的真实 Node 项目 | 该 `package.json` 同目录的 `osdk.toml`、`osdk.lock`，以及项目原生 package lock |
+| `osdk use --global npm:prettier@3` | osdk 控制的全局前缀 | 用户 `config.toml` 和用户 `osdk.lock`；忽略当前项目 |
+| 祖先目录中没有 `package.json` 时执行本地 `use` | 原有 osdk 隔离安装 | 普通项目 pin，以及 osdk 自有合成项目和 shim |
+
+最近的普通 `package.json` 是硬项目边界。较近 manifest 是软链接或格式异常时，osdk
+不会跳过它并落到外层项目。显式 `osdk install npm:...` 与
+`osdk exec --tool npm:...` 继续使用隔离的受管工具流程；修改真实项目只发生在本地
+`use`。
+
+## 将工具加入 Node 项目
+
+可在项目根目录下的任意子目录执行 `use`，然后启用 Shell 激活：
 
 ```bash
+cd my-app/packages/web/src
 osdk use npm:prettier@3
 eval "$(osdk activate bash)"
 prettier --check .
 ```
 
-`use` 会在需要时先安装受管 Node，再安装包、生成其私有 `.bin` 命令的 shim，并把
-`"npm:prettier" = "3"` 写入最近的项目配置。使用 `--global`（或 `-g`）
-可改为用户级固定。若只想运行一次、不修改配置：
+osdk 会先解析并安装受管 Node，再把 Prettier 加入最近的项目。如果包已经位于
+`dependencies`、`devDependencies`、`optionalDependencies` 或 `peerDependencies`，它会
+留在原区段；新包默认加入 `devDependencies`。若一个包同时是 peer dependency 和开发
+依赖，这两个角色都会保留。项目添加始终禁用 lifecycle scripts。
+
+安装器返回后，osdk 会校验已安装包的名称与精确版本、包声明的 `bin` 目标，以及
+`node_modules/.bin` 中对应的 launcher。没有可执行命令、包身份不符或路径逃出包目录时
+都会 fail closed。
+
+该操作还会写入或更新类似下面的结构化项目选择：
+
+```toml
+[tools]
+node = "22.17.0"
+"npm:prettier" = { version = "3", installer = "aube" }
+```
+
+精确受管 Node 版本与具体安装器会一起记录；已有 Node 工具项的其他选项会保留。由于
+激活可能暴露项目代码，osdk 会自动信任这次生成的 `osdk.toml` 精确内容；之后编辑文件
+会改变其信任身份，需要重新审阅并执行 `osdk trust`。
+
+## 安装器选择
+
+自动选择以 Aube 为先：没有原生 lock，或现有 lock 格式能被内嵌 Aube 读取时，osdk
+都会选择 Aube。目前兼容 Aube v9、pnpm v9，以及 npm
+`package-lock.json` / `npm-shrinkwrap.json` v2 或 v3。若已知 npm 或 pnpm lock 版本过新
+或 Aube 尚不支持，osdk 会只调用一次拥有该 lock 的原生包管理器。
+
+`package.json#packageManager`（其次是 `devEngines.packageManager`）用于识别声明的
+owner。声明与已有原生 lock 必须一致；同时存在多个可识别 lockfile 也会因歧义被拒绝。
+自动模式只接受声明的 Aube、npm 或 pnpm；其他管理器需要先明确选择支持的安装器。
+
+需要时可显式选择安装器：
 
 ```bash
-osdk exec --tool npm:prettier@3 -- prettier --check .
+osdk use npm:prettier@3 -o installer=aube
+osdk use npm:prettier@3 -o installer=npm
+osdk use npm:prettier@3 -o installer=pnpm
 ```
+
+显式选择可以覆盖 package-manager 声明，但仍须与当前 lock 兼容：Aube 不会读取不支持
+的格式，npm 或 pnpm 也不会覆盖另一原生管理器的 lock。安装器在修改项目前就已确定，
+且最多只执行一次；Aube/npm/pnpm 失败会直接返回，osdk 不会换一个安装器重放操作。
+
+## 项目激活与信任边界
+
+项目配置含 npm 工具且已经信任时，Shell hook 会把最近项目真实的
+`node_modules/.bin` 加到 PATH 前面，但必须同时通过以下检查：
+
+- 已信任的 `osdk.toml` 与最近的普通 `package.json` 属于同一项目根；
+- `node_modules` 和 `node_modules/.bin` 都是真实目录，规范化路径仍直接位于该项目下；
+- 本地 `.bin` 不提供 `node`，避免替换当前选中的受管运行时。
+
+hook 不会创建缺失的 `.bin`，也不会越过最近的 package 边界寻找外层命令。安全时项目
+命令优先，同时 osdk 的 shim 路由继续保护受管 Node 和包管理器命令。
+
+## 安装全局 npm 工具
+
+全局作用域忽略当前项目的 manifest、声明和 lock：
+
+```bash
+# Aube 是默认的全局安装器。
+osdk use --global npm:prettier@3
+
+# 显式使用受管原生包管理器。
+osdk use -g npm:eslint@9 -o installer=npm
+osdk use -g 'npm:@antfu/ni@0.21.12' -o installer=pnpm
+```
+
+osdk 会安装所选 Node，并在需要时安装 npm 或 pnpm。原生 npm 执行
+`install --global --prefix ...`；原生 pnpm 执行 `add --global`，并使用 osdk 控制的
+global、bin 与 store 目录。Aube 使用等价的 osdk 自有合成全局项目。这些模式都不会
+修改环境中的 Node 安装或当前项目；校验后的命令通过 osdk shim 发布。
+
+所选版本和安装器写入用户配置；基本的 package、scope、Node、installer 和可选原生
+lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依赖 lock；pnpm 的
+`pnpm-lock.yaml` 与 Aube 的 `aube-lock.yaml` 保留在各自受控安装目录中。
 
 ## 包名与版本语法
 
@@ -38,146 +121,89 @@ npm:@<scope>/<package>[@VERSION]
 普通包与 scoped 包都受支持：
 
 ```bash
-osdk install npm:prettier@3
+osdk use npm:prettier@3
 osdk install 'npm:@antfu/ni@0.21.12'
 osdk exec -t 'npm:@antfu/ni@0.21.12' -- ni
 ```
 
-scoped 包中的第一个 `@` 属于 scope，最后一个 `@` 才分隔版本。Shell 通常不会
-特殊处理它，但加单引号可以避免命令被其他包装层误解。省略版本会解析最新稳定版；
-`3`、`3.6` 等前缀会选取最高的匹配稳定版。
+scoped 包中的第一个 `@` 属于 scope，最后一个 `@` 才分隔版本。Shell 通常不会特殊
+处理它，但单引号可以避免命令被其他包装层误解。省略版本会选择最新稳定版；`3`、
+`3.6` 等前缀会选择最高的匹配稳定版。
 
-## 完整生命周期
-
-以下示例覆盖 npm 工具可用的通用命令面：
+## 其他生命周期命令
 
 ```bash
-# 安装或固定
+# 隔离安装或单次执行；两者都不修改 package.json。
 osdk install npm:prettier@3
-osdk use npm:prettier@3
+osdk exec --tool npm:prettier@3 -- prettier --check .
 
-# 临时运行，不写项目固定版本
-osdk exec -t npm:prettier@3 -- prettier --check .
-
-# 查询
-osdk list npm:prettier
+# 查看当前选择和 osdk 自有的隔离/全局安装。
 osdk current npm:prettier
-osdk where npm:prettier
+osdk list npm:prettier
 osdk where npm:prettier@3.6.2
 
-# 检查和升级当前项目，或只操作指定工具
-osdk outdated
-osdk outdated npm:prettier@3
-osdk upgrade
-osdk upgrade npm:prettier@3
-
-# 删除精确版本；--yes 适合非交互环境
+# 删除 osdk 自有的精确安装，并重建受管 shim。
 osdk --yes uninstall npm:prettier@3.6.2
-
-# 重建所有已安装工具的 shim
 osdk reshim
 ```
 
-| 命令 | npm 工具行为 |
-| --- | --- |
-| `use` | 必要时安装，生成 shim，并保存项目或用户级版本；输入的版本前缀会保留 |
-| `install` | 显式请求直接安装；无参数且无 `-o` 时优先使用当前平台的 `osdk.lock` |
-| `exec` | 必要时安装，在精确工具环境中执行包实际导出的 bin，不写 pin |
-| `list` | 列出已安装版本；参数是 `npm:<package>` backend id，不带版本 |
-| `current` | 显示当前目录配置解析到的请求；它不表示该版本一定已安装 |
-| `where` | 输出匹配的安装目录；传精确版本可避免选择歧义 |
-| `uninstall` | 删除安装并重新协调 shim；自动化建议传精确版本和全局 `--yes` |
-| `outdated` | 重新解析目标并报告该精确版本是否尚未安装，不读取旧 lock |
-| `upgrade` | 重新解析并安装，再刷新当前 host 的 lock，不以旧 lock 为解析输入 |
-| `reshim` | 根据已安装工具的 inventory 重建命令入口，无工具参数 |
+`list`、`where`、`uninstall` 与 `reshim` 操作 osdk 自有的隔离或全局安装。加入真实项目
+的包仍由项目及其包管理器所有，命令来自 `node_modules/.bin`。
+`osdk list-remote npm:prettier [FILTER]` 可列出 Registry 中的稳定版本。
 
-还可用 `osdk list-remote npm:prettier [FILTER]` 查看 Registry 中的稳定版本。
+## 构建脚本策略
 
-## 项目配置与构建脚本
-
-简单的版本固定可以使用字符串；带安装策略时使用结构化 `[tools]` 项。包含 `:`
-或 scoped 包名的 TOML key 应加引号：
+本地项目 `use` 始终禁用 lifecycle scripts，无论使用 Aube 还是原生 npm/pnpm。隔离与
+全局安装也默认禁用脚本；已经审阅的包可通过结构化工具项或单次选项放行：
 
 ```toml
-[tools]
-node = "22"
-"npm:prettier" = "3"
-
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
+installer = "aube"
 allow_builds = ["@scope/native-tool", "esbuild"]
 ```
 
-npm 工具的 lifecycle/build scripts **默认全部禁用**。`allow_builds` 有三种有效策略：
-
-| 配置 | 效果 |
+| 配置 | 对隔离/全局安装的效果 |
 | --- | --- |
-| 省略或 `false` | 禁止所有依赖的构建脚本；默认且推荐 |
-| `["pkg-a", "pkg-b"]` | 只允许列出的包运行构建脚本 |
-| `true` | 允许整个依赖图运行构建脚本；危险，只应在完整审阅后使用 |
+| 省略或 `false` | 禁止所有依赖的构建脚本 |
+| `["pkg-a", "pkg-b"]` | 所选安装器支持 allowlist 时，只允许列出的包 |
+| `true` | 允许整个依赖图执行脚本；只应在完整审阅后使用 |
 
-一次性 CLI 调用可写成 `-o allow_builds=esbuild,sharp`，或显式使用危险的
-`-o allow_builds=true`。团队配置建议使用数组形式，让允许范围清晰可审阅。
+单次形式是 `-o allow_builds=esbuild,sharp`。原生 npm 无法实施包级 allowlist，只接受
+false 或 true；Aube 与 pnpm 支持按包放行。
 
-## 受管 Node 与来源选择
+## Source 与共享存储
 
-动态 npm 工具始终使用 osdk 管理的 Node，不依赖 PATH 上碰巧存在的系统 Node。请求
-中没有 Node 时，osdk 会自动加入当前项目解析到的 Node；项目也没有声明时则加入
-`node@latest`。Node 会先于 npm 工具安装。若需要团队可重复的运行时，请在项目中
-显式固定 Node。
+动态 npm 版本 metadata 使用常规 npm source 选择，在 npmmirror 与 npmjs 之间选择。
+它与受管原生 npm 或 pnpm 进程启动前执行的 `[registries.npm]` 预检不同。项目委托保留
+文档约定的显式 Registry 优先级；全局委托则在 osdk 控制的前缀中使用隔离配置。
 
-每个 `npm:<package>` backend 默认在 npmmirror 与 npmjs 官方源之间使用通用
-`sources.selection = "auto"` 策略：并发探测、按吞吐和首字节时间排序，并在 TTL
-内复用结果。缓存与候选集合指纹绑定；URL、顺序、优先级、启用状态或认证 header
-发生变化时，旧排序不会被误用。
+所有 Aube 驱动的 npm 工具会跨项目、全局作用域、包和版本共享以下 osdk 自有路径：
 
-这里的 `Source.headers` 只用于 osdk 自己执行的 metadata 请求和 probe：header 受
-index/download origin 约束，同源 redirect 保留，跨源后移除。Aube 2.1 package fetch
-不会接收任意 `Source.headers`；私有 npm Registry 的认证应配置在 Aube/npm 原生可信
-配置或环境变量中。
-
-```bash
-osdk source list npm:prettier
-osdk source test npm:prettier
-osdk --refresh-sources install npm:prettier@3
-osdk --source npm install npm:prettier@3
+```text
+$OSDK_CACHE_DIR/aube/v1/cache
+$OSDK_STORE_DIR/aube
 ```
 
-这里选择的是**工具自身的下载 source**。它与运行项目中的 `npm install` 前执行的
-`[registries.npm]` Registry 预检是两套控制面；后者见
-[JavaScript 包管理器](./package-managers#registry-预检)。
+共享布局避免重复下载相同包内容，而每个真实项目或受控全局安装仍保留自己的原生
+lock。
 
-## 锁定与离线重装
+## `osdk.lock` 提供什么保证
 
-schema 2 `osdk.lock` 为每个动态 npm 工具保存 package、精确 Node 版本、graph 格式、
-SHA-256 和内容寻址路径；完整 Aube 图写入相邻的
-`osdk.lock.d/npm/<sha256>.yaml`。graph 携带传递依赖的 integrity，生成过程不会执行
-lifecycle scripts。`osdk.lock` 与 `osdk.lock.d/` 必须一起提交到仓库。
+项目感知的 `use` 会写入紧凑的 schema 3 `osdk.lock` 条目，包括 package、解析版本、
+具体 installer、scope、精确 Node 版本，以及原生 lock 的 kind、format 与 SHA-256。全局
+工具的用户 lock 使用相同的 metadata-only 模式；npm 全局安装没有原生 lock 身份。
 
-离线重装前需要同时准备主 lock、graph sidecar 和 Aube package cache/store：
+::: warning 依赖图限制
+`osdk.lock` 中的 metadata 本身**不会**捕获或重建 npm 传递依赖图。安装器的原生 lock
+仍是依赖图来源：真实项目中的 `aube-lock.yaml`、`package-lock.json`、
+`npm-shrinkwrap.json` 或 `pnpm-lock.yaml`，或者受控全局安装目录中保留的 Aube/pnpm
+lock。npm 全局安装没有依赖 lock，因此只凭用户 `osdk.lock` 无法复现其传递依赖选择。
+:::
 
-```bash
-# 联网阶段：生成完整 graph，并下载 graph 引用的包
-osdk lock
-osdk install
+项目工作流应同时提交 `package.json`、原生项目 lock、`osdk.toml` 与 `osdk.lock`。
+schema 2 graph sidecar 仍可兼容读取，但当前 schema 3 不再创建新 sidecar，也不嵌入它的
+payload。
 
-# 之后保留 osdk.lock、osdk.lock.d/ 与同一份缓存，冻结重装
-osdk --offline install
-```
-
-只有主 lock 或 sidecar 不代表包内容已经缓存。sidecar 缺失、损坏、超过 16 MiB，或
-graph 引用的缓存内容缺失时，离线安装都会明确失败。显式
-`osdk --offline install npm:prettier@3.6.2` 会绕过项目 lock；需要从 lock 恢复时应
-使用无参数 `install`。详情见[可复现锁文件](./lockfiles)。
-
-## 命令发现与冲突
-
-安装后，osdk 从合成安装项目的 `node_modules/.bin` 发现命令并记录 inventory；其中
-可能包含根包或传递依赖创建的 bin。`.bin` 为空、命令目标无法解析或目标逃出安装根
-目录都会失败。若不同 backend 导出同名命令，shim 发布和运行时路由会 fail closed，
-不会按扫描顺序任意选择。运行时若当前配置只选中一个 owner，可以据此消除路由歧义；
-当前 CLI 生成或 `reshim` 仍会对多个已安装 owner 移除歧义 shim 并报错。同一 backend
-的多个版本由当前版本选择规则处理。
-
-内部的 Aube 安装、graph sidecar 校验、缓存布局和路由算法见
+安装器规划、metadata 校验、原生前缀隔离和激活安全检查见
 [npm 工具实现](./implementation/npm-tools)。

@@ -25,15 +25,47 @@ Registry 预检是三个相邻但不同的概念。
 调度其余工具。Aube 收到的 runtime selector 只指向该受管 Node；安装和 shim 执行都不
 以系统 PATH 中的 Node 作为隐式依赖。
 
+`use` 在该旧流程之前增加两条作用域分支：非全局 `npm:*` 请求会检查最近的
+`package.json`，存在时直接修改该真实项目；全局请求忽略项目状态并安装到 osdk 自有
+前缀。本地查找不到 `package.json` 时，则回到原有隔离 backend 路径。
+
+## 安装器规划与单次委托
+
+[`npm_tools.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm_tools.rs)
+会在修改前完成整个安装器规划。`auto` 对新项目或任何受支持的现有原生 lock 选择
+Aube。目前支持 Aube/pnpm v9 与 npm lock v2/v3；已知但不支持的 npm 或 pnpm 格式则
+选择它的原生 owner。`packageManager` 声明会与 lock owner 交叉校验；冲突或多个 lock
+都会 fail closed。显式 `installer=aube|npm|pnpm` 可覆盖声明，但不能绕过 lock 兼容性。
+
+一次操作中的规划结果不可变。原生项目委托使用精确的受管 npm 或 pnpm 可执行文件、
+受管 Node、预检后的 Registry 环境，并且只启动一次子进程。非零退出会原样返回，不会
+改用 Aube 或另一原生管理器重放。依赖区段也在调用前固定：保留已有 production、
+optional、peer 或 development 位置，缺失包默认作为开发依赖。所有项目 add 路径都禁用
+lifecycle scripts。
+
+## 真实项目发布与激活
+
+项目安装器成功后，osdk 校验已安装包的名称与精确版本，解析其声明的 bin 条目，将每个
+规范化目标限制在包目录内，并检查对应项目 launcher。随后原子更新 `osdk.toml` 中的
+精确 Node 与结构化 npm 选择，把紧凑的原生 lock metadata 写入项目 `osdk.lock`，并信任
+刚生成的配置。这条分支不会创建 osdk 私有 npm 工具安装。
+
+只有 npm 选择来自已信任配置，且该配置与最近普通 `package.json` 位于同一规范项目根
+时，Shell 激活才暴露真实项目的 `node_modules/.bin`。`node_modules` 与 `.bin` 必须是
+受项目约束的真实目录。发现过程在最近 package 边界停止，不会创建缺失目录，并会跳过
+任何可能遮蔽 `node` 的 `.bin`。
+
 ## Embedded Aube 安装
 
+对于隔离和全局 Aube 安装，
 [`npm_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/npm_package.rs)
-为每个 package/version 建立 osdk 私有的合成项目；
+会为每个 package/version 建立 osdk 私有的合成项目；
 [`aube_host.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/aube_host.rs)
 以 library API 嵌入 Aube，而不是生成 `npm install -g` 子进程。host 关闭 Aube 的
 runtime switching、self engine check 和 self-update，由 osdk 管理 Node、版本和生命周期。
 
-安装目录和缓存逻辑上按 canonical backend 与版本隔离：
+隔离与全局工具的安装目录仍按 canonical backend 与版本分开；但 Aube cache/store 会
+有意跨包、版本和项目/全局作用域共享：
 
 ```text
 <installs>/npm/<package>/<version>/
@@ -43,8 +75,8 @@ runtime switching、self engine check 和 self-update，由 osdk 管理 Node、�
   .osdk-tool.json
   .osdk-complete
 
-<cache>/aube/npm/<package>/<version>/cache/
-<cache>/aube/npm/<package>/<version>/store/
+<cache>/aube/v1/cache/
+<store>/aube/
 ```
 
 实际路径会经过平台安全的 tool-id 转换，scoped 包因此继续形成嵌套目录。只有包目录、
@@ -76,9 +108,9 @@ npm/pnpm/Yarn/Bun/Deno 命令，每次调用独立判断，不能与这里的 TT
 
 ## 构建脚本策略与结构化配置
 
-默认 `BuildPolicy::Deny` 向 Aube 传入 `ignore_scripts = true`，因此 root 与传递依赖的
-lifecycle/build scripts 都不会运行。`allow_builds` 从 CLI 字符串或结构化 `[tools]`
-读取：
+对隔离和全局安装，默认 `BuildPolicy::Deny` 向 Aube 传入 `ignore_scripts = true`，因此
+root 与传递依赖的 lifecycle/build scripts 都不会运行。`allow_builds` 从 CLI 字符串或
+结构化 `[tools]` 读取：
 
 - false 值或空值仍为 deny；
 - 包名数组在进入 request 时转成逗号列表，再写入合成
@@ -91,7 +123,7 @@ lifecycle/build scripts 都不会运行。`allow_builds` 从 CLI 字符串或结
 继承。`use -o allow_builds=esbuild,sharp` 会规范化并持久化为字符串数组，true/false
 则持久化为布尔值，使生成的项目配置继续保持结构化。
 
-## schema 3、metadata-only 主 lock 与兼容读取
+## schema 3、metadata-only lock 与原生依赖图所有权
 
 `osdk.lock` 的当前写入 schema 是 3。每个 npm 工具记录 request、精确 version、
 options 和 `npm` 元数据；当前不写通用 `artifact` 子表，也不把 graph payload 或路径写进
@@ -111,10 +143,15 @@ sha256 = "<64 lowercase hex characters>"
 ```
 
 写入时，CLI 会从已安装工具或声明的私有 option 中提取 npm 元数据：包名、installer、
-scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA-256。对于 Aube，
-若安装目录中的 `project/aube-lock.yaml` 存在，会读取其原始字节并只把 SHA-256 摘要写回
-主 lock；payload 本身不会进入 `osdk.lock`。主 lock 当前限制为 16 MiB，写入时只原子替换
-主 lock。
+scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA-256。项目感知的
+`use` 对真实 `package.json` 旁的原生 lock 计算摘要。全局 Aube 和 pnpm 把原生 lock 保留
+在受控安装根内，并将其身份记录到用户 lock；npm 的真实全局模式不会创建依赖 lock，
+因此没有该身份。payload 本身不会进入 `osdk.lock`。主 lock 当前限制为 16 MiB，写入时
+只原子替换主 lock。
+
+这是有意保留的限制：schema 3 metadata 不捕获传递依赖图，单靠它无法重建该图。真实
+项目的原生 lock，或受控全局安装目录中的 Aube/pnpm 原生 lock，仍是依赖图事实来源。
+npm 全局安装没有对应的 graph lock。
 
 无参数 `osdk install` 读取 schema 3 lock 后，会把这些字段重新注入私有 option，并先校验
 package/backend、一致的 installer/scope、可选的同平台 Node 精确版本，以及可选
@@ -153,8 +190,8 @@ CLI 和 shim 根据 inventory 建立 `bin name -> backend owner` 映射：
 
 ## 主要验证点
 
-相关单元与契约测试分别覆盖 namespaced/scoped parser、构建策略、sidecar 身份/格式/
-摘要与精确字节 round trip，以及 missing、tampered、oversized、symlink sidecar 的拒绝；
-还覆盖 schema 1 npm 迁移拒绝、无 graph 的离线拒绝、bin 路径约束、inventory 扫描、
-shim 运行时 Node 注入和同一动态 backend 的多版本 reshim。跨平台行为仍需按仓库要求
-运行 Linux workspace 测试与完整 Windows GNU Wine 套件。
+相关单元与契约测试覆盖 namespaced/scoped parser、安装器规划、依赖区段保留、原生委托
+只执行一次、紧凑 lock metadata、全局前缀参数、原生 lock 身份、项目 bin 信任与路径
+约束、inventory 扫描和 shim 冲突行为。兼容性测试继续覆盖 schema 2 sidecar 校验与
+schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行 Linux workspace 测试与完整
+Windows GNU Wine 套件。

@@ -142,25 +142,31 @@ package-manager configuration remain under your control.
 
 Guide: [Package managers and registry selection](site/en/guide/package-managers.md)
 
-## Scenario: install an npm-published developer tool
+## Scenario: add an npm-published developer tool
 
-Prefix a package with `npm:` to manage its command-line tools independently of
-the npm package manager itself. osdk installs a managed Node first, discovers
-commands in the package's private installation, and makes them available through
-shims:
+Prefix a package with `npm:` to distinguish it from the npm package manager. In
+a Node project, `use` adds the package to the nearest `package.json`, keeps an
+existing dependency section (or defaults to `devDependencies`), and makes its
+local command available after shell activation:
 
 ```bash
 osdk use npm:prettier@3
-osdk exec --tool npm:prettier@3 -- prettier --check .
-osdk install 'npm:@antfu/ni@0.21.12'
-osdk current 'npm:@antfu/ni'
+eval "$(osdk activate bash)"
+prettier --check .
+
+# Force a particular installer when the automatic choice is not wanted.
+osdk use npm:eslint@9 -o installer=pnpm
+
+# Install a user-wide tool without changing the current project.
+osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
 ```
 
-Package lifecycle scripts are disabled by default. Projects that need a native
-build can allow only the packages they have reviewed. A schema 2 `osdk.lock`
-references a committed, content-addressed `osdk.lock.d/npm/<sha256>.yaml` graph
-sidecar; keep both with the repository for frozen reinstall and, once the Aube
-cache is warm, offline use.
+Automatic project installs prefer Aube when the existing lock format is
+compatible; `installer=aube`, `installer=npm`, and `installer=pnpm` select one
+explicitly. osdk writes project metadata to `osdk.toml` and `osdk.lock`, while
+the package manager's native lock remains the source of the transitive
+dependency graph. Without a `package.json`, local `use` retains the isolated
+osdk-managed installation and shim behavior.
 
 Guide: [npm developer tools](site/en/guide/npm-tools.md)
 

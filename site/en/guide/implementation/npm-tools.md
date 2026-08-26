@@ -32,8 +32,50 @@ the remaining tools concurrently. Aube's runtime selector points only to that
 managed Node; neither installation nor shim execution treats a system Node on
 PATH as an implicit dependency.
 
+`use` adds two scope-specific branches before that legacy flow. A non-global
+`npm:*` request inspects the nearest `package.json` and, when present, mutates
+that real project. A global request ignores project state and installs under an
+osdk-owned prefix. If local discovery finds no `package.json`, execution falls
+back to the original isolated backend path.
+
+## Installer planning and one-shot delegation
+
+[`npm_tools.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm_tools.rs)
+plans the complete installer before mutation. `auto` selects Aube for a new
+project or any supported incumbent native lock. Current supported inputs are
+Aube/pnpm v9 and npm lock v2/v3. A known unsupported npm or pnpm format selects
+its native owner instead. A `packageManager` declaration is checked against the
+lock owner; conflicting or multiple locks fail closed. Explicit
+`installer=aube|npm|pnpm` bypasses the declaration but not lock compatibility.
+
+The resulting plan is immutable for the operation. Native project delegation
+uses an exact managed npm or pnpm executable, a managed Node, a preflighted
+registry environment, and one subprocess invocation. Any non-zero exit is
+returned as-is; there is no fallback replay through Aube or another native
+manager. Project dependency-section selection is also fixed before invocation:
+existing production, optional, peer, or development placement is preserved and
+a missing package defaults to development dependencies. All project-add paths
+disable lifecycle scripts.
+
+## Real-project publication and activation
+
+After a project installer succeeds, osdk verifies the installed package's name
+and exact version, parses its declared bin entries, confines each canonical
+target to the package directory, and checks the matching project launcher. It
+then atomically updates `osdk.toml` with exact Node plus the structured npm
+selection, writes compact native-lock metadata to the project `osdk.lock`, and
+trusts the exact generated config. It does not create an osdk-private npm tool
+install for this branch.
+
+Shell activation exposes a real project's `node_modules/.bin` only when the npm
+selection originates from a trusted config at the same canonical root as the
+nearest regular `package.json`. `node_modules` and `.bin` must be real, confined
+directories. Discovery stops at the nearest package boundary, never creates a
+missing directory, and omits a `.bin` that could shadow `node`.
+
 ## Embedded Aube installation
 
+For isolated and global Aube installs,
 [`npm_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/npm_package.rs)
 creates an osdk-owned synthetic project for each package/version.
 [`aube_host.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/aube_host.rs)
@@ -41,7 +83,9 @@ embeds Aube through its library API instead of spawning `npm install -g`. The
 host disables Aube runtime switching, self engine checks, and self-update; osdk
 owns Node, version selection, and lifecycle orchestration.
 
-Install and cache paths are logically isolated by canonical backend and version:
+Install paths for isolated and global tools remain separated by canonical
+backend and version. Aube's cache and store, however, are deliberately shared
+across packages, versions, and project/global scopes:
 
 ```text
 <installs>/npm/<package>/<version>/
@@ -51,8 +95,8 @@ Install and cache paths are logically isolated by canonical backend and version:
   .osdk-tool.json
   .osdk-complete
 
-<cache>/aube/npm/<package>/<version>/cache/
-<cache>/aube/npm/<package>/<version>/store/
+<cache>/aube/v1/cache/
+<store>/aube/
 ```
 
 Actual paths use the platform-safe tool-ID mapping, so scoped packages retain
@@ -94,9 +138,9 @@ independently, and must not be described as using this TTL cache.
 
 ## Build-script policy and structured configuration
 
-The default `BuildPolicy::Deny` passes `ignore_scripts = true` to Aube, so root
-and transitive lifecycle/build scripts do not run. `allow_builds` comes from a
-CLI string or structured `[tools]` entry:
+For isolated and global installs, the default `BuildPolicy::Deny` passes
+`ignore_scripts = true` to Aube, so root and transitive lifecycle/build scripts
+do not run. `allow_builds` comes from a CLI string or structured `[tools]` entry:
 
 - false values and an empty value remain deny;
 - a package array becomes a comma-separated request option and then
@@ -113,7 +157,7 @@ fields are not merged. `use -o allow_builds=esbuild,sharp` normalizes and
 persists a string array, while true/false becomes a boolean, keeping generated
 project configuration structured.
 
-## Schema 3, metadata-only main locks, and compatibility reads
+## Schema 3, metadata-only locks, and native graph ownership
 
 The current write format for `osdk.lock` is schema 3. Each npm tool records its
 request, exact version, options, and `npm` metadata. It does not write a
@@ -135,11 +179,19 @@ sha256 = "<64 lowercase hex characters>"
 
 On write, the CLI extracts npm metadata from the installed tool or declared
 private options: package name, installer, scope, an optional exact Node
-version, and optional native-lock owner/format/SHA-256. For Aube, if
-`project/aube-lock.yaml` exists in the install directory, osdk reads its raw
-bytes and records only the SHA-256 digest in the main lock. The payload itself
-is not persisted in `osdk.lock`. The main lock is currently limited to 16 MiB,
-and schema 3 writes only atomically replace the main lock.
+version, and optional native-lock owner/format/SHA-256. Project-aware `use`
+hashes the native lock beside the real `package.json`. Global Aube and pnpm
+installs retain their native locks under the controlled install root and record
+their identity in the user lock; npm's real global mode creates no dependency
+lock, so that identity is absent. The payload itself is never persisted in
+`osdk.lock`. The main lock is currently limited to 16 MiB, and schema 3 writes
+only atomically replace the main lock.
+
+This is an intentional limitation: schema 3 metadata does not capture the
+transitive dependency graph and cannot reconstruct it by itself. The real
+project's native lock, or the Aube/pnpm native lock in a controlled global
+install directory, remains the graph source of truth. npm global installs have
+no equivalent graph lock.
 
 Argument-free `osdk install` reading a schema 3 lock reinjects that metadata as
 private options and validates package/backend identity, installer/scope
@@ -192,10 +244,10 @@ described as a globally rolled-back installation transaction.
 
 ## Main verification points
 
-Unit and contract tests cover namespaced/scoped parsing, build policy, sidecar
-identity/format/digest and exact-byte round trips, plus rejection of missing,
-tampered, oversized, and symlinked sidecars. They also cover schema 1 npm
-migration rejection, offline rejection without a graph, bin path confinement,
-inventory scanning, managed Node injection at shim runtime, and reshimming
-multiple versions of one dynamic backend. Cross-platform changes remain subject
-to the repository's Linux workspace tests and full Windows GNU Wine suite.
+Unit and contract tests cover namespaced/scoped parsing, installer planning,
+dependency-section retention, one-shot native delegation, compact lock metadata,
+global-prefix arguments, native-lock identity, project-bin trust and confinement,
+inventory scanning, and shim conflict behavior. Compatibility tests retain the
+schema 2 sidecar validation and schema 1 npm-migration rejection boundaries.
+Cross-platform changes remain subject to the repository's Linux workspace tests
+and full Windows GNU Wine suite.

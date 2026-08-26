@@ -136,23 +136,28 @@ osdk registry test pnpm
 
 指南：[包管理器与 Registry 选择](site/guide/package-managers.md)
 
-## 场景：安装 npm 发布的开发工具
+## 场景：添加 npm 发布的开发工具
 
-给包名加上 `npm:` 前缀，即可独立管理 npm 包提供的命令行工具，而不是管理 npm
-包管理器本身。osdk 会先安装受管 Node，从该包的私有安装中发现命令，再通过 shim
-暴露它们：
+给包名加上 `npm:` 前缀，即可与 npm 包管理器本身区分。在 Node 项目中，`use` 会把包
+加入最近的 `package.json`，保留它已有的依赖区段（否则默认写入
+`devDependencies`），并在 Shell 激活后提供项目本地命令：
 
 ```bash
 osdk use npm:prettier@3
-osdk exec --tool npm:prettier@3 -- prettier --check .
-osdk install 'npm:@antfu/ni@0.21.12'
-osdk current 'npm:@antfu/ni'
+eval "$(osdk activate bash)"
+prettier --check .
+
+# 不采用自动选择时，显式指定安装器。
+osdk use npm:eslint@9 -o installer=pnpm
+
+# 安装用户级工具，不修改当前项目。
+osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
 ```
 
-包的生命周期脚本默认全部禁用；确有原生构建需要时，可以只放行已经审阅过的包。
-schema 2 `osdk.lock` 会引用按内容寻址的
-`osdk.lock.d/npm/<sha256>.yaml` npm graph sidecar；两者都应提交到仓库，用于冻结
-重装，Aube 缓存预热后也能离线重装。
+项目自动安装会在现有 lock 格式兼容时优先使用 Aube；也可以用
+`installer=aube`、`installer=npm`、`installer=pnpm` 明确选择。osdk 把项目元数据写入
+`osdk.toml` 与 `osdk.lock`，传递依赖图仍以包管理器的原生 lock 为准。当前目录向上没有
+`package.json` 时，本地 `use` 保留原有的 osdk 隔离安装与 shim 行为。
 
 指南：[npm 开发工具](site/guide/npm-tools.md)
 

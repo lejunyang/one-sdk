@@ -72,6 +72,33 @@ default = "maintenance"
 
 `osdk use node@20` updates the nearest project file or creates `osdk.toml` in
 the current directory. `osdk use --global node@20` updates user configuration.
+For `npm:<package>`, local `use` first looks for the nearest `package.json`; the
+next section describes its project-aware behavior.
+
+## npm tools in a real project
+
+From any directory below a Node project, this command adds the package to the
+project rooted at the nearest `package.json`:
+
+```bash
+osdk use npm:prettier@3
+```
+
+The package stays in its existing `dependencies`, `devDependencies`,
+`optionalDependencies`, or `peerDependencies` section; a new package defaults
+to `devDependencies`. osdk uses Aube when the incumbent lock format is
+compatible, or accepts `-o installer=aube|npm|pnpm` for an explicit choice. It
+does not retry a failed operation through another installer. With no
+`package.json` in the ancestor chain, the command keeps the legacy isolated
+osdk-managed install and shim behavior.
+
+Project-aware use updates the native `package.json` and package-manager lock,
+then writes an exact Node selection and structured npm entry to `osdk.toml`. It
+also writes a compact `osdk.lock` entry with installer, scope, Node, and native-
+lock identity. That metadata does not contain the transitive dependency graph;
+the native package-manager lock remains its source. Keep all four project files
+together. See [npm Developer Tools](./npm-tools) for installer and activation
+details.
 
 ## Complete configuration reference
 
@@ -139,6 +166,7 @@ pnpm = "10.15.0"
 
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
+installer = "aube"            # auto|aube|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
 [aliases.node]
@@ -151,9 +179,10 @@ rejected. See [Sources and Supply-chain Security](./sources-security) and
 [JavaScript Package Managers](./package-managers) for runtime selection.
 Structured tool objects require `version`; other options may be strings,
 booleans, or string arrays. Arrays become comma-separated values when passed to
-the backend. The `allow_builds` example permits build scripts only for the named
-npm dependencies; see [npm Developer Tools](./npm-tools#project-configuration-and-build-scripts)
-for the complete security boundary.
+the backend. `installer` selects the npm tool installer. `allow_builds` controls
+isolated and global installs; project-aware `use` always disables lifecycle
+scripts. See [npm Developer Tools](./npm-tools#build-script-policy) for the
+complete security boundary.
 
 ## Exact override and merge semantics
 
@@ -217,9 +246,12 @@ osdk untrust [PATH]
 ```
 
 `PATH` may name a config file or directory; a directory triggers upward project
-discovery. Only project files containing exclusively top-level `[tools]` and
-`[aliases]` are trust-free. Any other top-level section—including `settings`,
-`sources`, `registries`, or an unknown section—must be trusted first.
+discovery. Project files containing exclusively top-level `[tools]` and
+`[aliases]` are normally trust-free, but an npm tool entry requires trust
+because shell activation may expose project `node_modules/.bin`. Any other
+top-level section—including `settings`, `sources`, `registries`, or an unknown
+section—also requires trust. A successful project-aware `osdk use npm:...`
+trusts the exact `osdk.toml` it generated; later edits invalidate that record.
 
 ```bash
 osdk --yes trust                 # nearest project configuration

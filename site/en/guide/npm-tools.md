@@ -1,34 +1,137 @@
 # npm Developer Tools
 
-osdk can manage command-line packages published to an npm registry as
-independent developer tools. Requests use the `npm:<package>` namespace, while
-installation, pinning, one-shot execution, inspection, upgrade, and removal use
-the common osdk command surface.
+osdk accepts command-line packages from an npm registry through the
+`npm:<package>` namespace. `osdk use` is context-aware: it can add a tool to a
+real Node project, install it as a user-wide global tool, or retain the original
+isolated osdk installation when there is no Node project.
 
 ::: tip Distinguish the two names first
-`npm@11.5.2` installs the npm package manager. `npm:prettier@3` installs the
-Prettier tool from the npm registry. To manage the registry package literally
-named `npm` as a dynamic tool, use `npm:npm`.
+`npm@11.5.2` installs the npm package manager. `npm:prettier@3` selects the
+Prettier package from the npm registry. To select the registry package literally
+named `npm`, use `npm:npm`.
 :::
 
-## Quick start
+## How `use` chooses the scope
 
-Install Prettier and pin it for the current project:
+| Command and context | Installation target | Configuration and lock |
+| --- | --- | --- |
+| `osdk use npm:prettier@3` below a `package.json` | The nearest real Node project | `osdk.toml` and `osdk.lock` beside that `package.json`, plus the project's native package lock |
+| `osdk use --global npm:prettier@3` | An osdk-controlled global prefix | User `config.toml` and user `osdk.lock`; the current project is ignored |
+| Local `use` with no `package.json` in the ancestor chain | The legacy isolated osdk install | The normal project pin plus an osdk-owned synthetic project and shim |
+
+The nearest regular `package.json` is a hard project boundary. osdk does not
+fall through a malformed or symlinked nearer manifest to an outer project.
+Explicit `osdk install npm:...` and `osdk exec --tool npm:...` continue to use
+the isolated managed-tool flow; project mutation is specific to local `use`.
+
+## Add a tool to a Node project
+
+Run `use` anywhere below the project root, then enable shell activation:
 
 ```bash
+cd my-app/packages/web/src
 osdk use npm:prettier@3
 eval "$(osdk activate bash)"
 prettier --check .
 ```
 
-`use` installs managed Node first when necessary, installs the package, creates
-shims for commands in its private `.bin`, and writes `"npm:prettier" = "3"` to the
-nearest project configuration. Add `--global` (or `-g`) for a user-level pin.
-To run it once without changing configuration:
+osdk resolves and installs a managed Node first, then adds Prettier to the
+nearest project. If the package already appears in `dependencies`,
+`devDependencies`, `optionalDependencies`, or `peerDependencies`, it remains in
+that section. A new package defaults to `devDependencies`. A package present in
+both peer and development dependencies retains both roles. Project adds always
+disable lifecycle scripts.
+
+After the installer returns, osdk verifies the installed package name and exact
+version, its declared `bin` targets, and the corresponding launchers under
+`node_modules/.bin`. A missing executable, an identity mismatch, or a path that
+escapes the package fails closed.
+
+The operation also writes or updates a structured project selection similar to:
+
+```toml
+[tools]
+node = "22.17.0"
+"npm:prettier" = { version = "3", installer = "aube" }
+```
+
+The exact managed Node version and concrete installer are recorded together. An
+existing Node tool entry keeps its other options. osdk automatically trusts the
+exact generated `osdk.toml` content because activation can expose project code;
+editing that file changes its trust identity and requires review and
+`osdk trust` again.
+
+## Installer selection
+
+Automatic selection is Aube-first. With no native lock, or with a lock format
+that embedded Aube can read, osdk chooses Aube. Current compatible formats are
+Aube v9, pnpm v9, and npm `package-lock.json` / `npm-shrinkwrap.json` v2 or v3.
+When a known npm or pnpm lock is too new or otherwise unsupported by Aube, osdk
+delegates once to the native manager that owns it.
+
+`package.json#packageManager` (then `devEngines.packageManager`) identifies the
+declared owner. A declaration and an existing native lock must agree; multiple
+recognized lockfiles are also rejected as ambiguous. Automatic mode accepts
+declared Aube, npm, or pnpm; another manager requires an explicit supported
+installer choice.
+
+Choose an installer explicitly when required:
 
 ```bash
-osdk exec --tool npm:prettier@3 -- prettier --check .
+osdk use npm:prettier@3 -o installer=aube
+osdk use npm:prettier@3 -o installer=npm
+osdk use npm:prettier@3 -o installer=pnpm
 ```
+
+An explicit choice overrides the package-manager declaration, but it still must
+be compatible with the incumbent lock: Aube will not consume an unsupported
+format, and npm or pnpm will not overwrite the other native manager's lock. The
+installer is selected before mutation and is invoked at most once. A failed
+Aube/npm/pnpm operation is returned directly; osdk never replays it through a
+different installer.
+
+## Project activation and trust boundary
+
+For a trusted npm-bearing project configuration, the shell hook prepends the
+nearest project's real `node_modules/.bin`. It does so only when all of these
+checks pass:
+
+- the trusted `osdk.toml` belongs to the same root as the nearest regular
+  `package.json`;
+- `node_modules` and `node_modules/.bin` are real directories whose canonical
+  paths remain directly under that project;
+- the local `.bin` does not provide `node`, which could replace the selected
+  managed runtime.
+
+The hook neither creates a missing `.bin` nor falls back to an outer package
+boundary. Project commands take precedence when safe, while osdk's shim routing
+continues to protect the managed Node and package-manager commands.
+
+## Install a global npm tool
+
+Global scope ignores the current project's manifest, declaration, and locks:
+
+```bash
+# Aube is the default global installer.
+osdk use --global npm:prettier@3
+
+# Use a managed native package manager explicitly.
+osdk use -g npm:eslint@9 -o installer=npm
+osdk use -g 'npm:@antfu/ni@0.21.12' -o installer=pnpm
+```
+
+osdk installs the selected Node and, when requested, npm or pnpm. Native npm
+runs `install --global --prefix ...`; native pnpm runs `add --global` with
+osdk-controlled global, bin, and store directories. Aube uses an equivalent
+osdk-owned synthetic global project. None of these modes writes to the ambient
+Node installation or the current project. Validated commands are published
+through osdk shims.
+
+The selected version and installer are written to the user configuration, and
+basic package, scope, Node, installer, and optional native-lock identity are
+written to `$OSDK_CONFIG_DIR/osdk.lock`. npm global installs do not produce a
+dependency lock. pnpm's `pnpm-lock.yaml` and Aube's `aube-lock.yaml` remain in
+their controlled install directories.
 
 ## Package and version syntax
 
@@ -40,7 +143,7 @@ npm:@<scope>/<package>[@VERSION]
 Both unscoped and scoped packages are supported:
 
 ```bash
-osdk install npm:prettier@3
+osdk use npm:prettier@3
 osdk install 'npm:@antfu/ni@0.21.12'
 osdk exec -t 'npm:@antfu/ni@0.21.12' -- ni
 ```
@@ -51,152 +154,91 @@ protect the request from other command wrappers. Omitting the version selects
 the latest stable release; prefixes such as `3` and `3.6` select the highest
 matching stable release.
 
-## Complete lifecycle
-
-The following examples cover the common command surface available to npm tools:
+## Other lifecycle commands
 
 ```bash
-# Install or pin
+# Isolated install or one-shot execution; neither edits package.json.
 osdk install npm:prettier@3
-osdk use npm:prettier@3
+osdk exec --tool npm:prettier@3 -- prettier --check .
 
-# Run once without writing a project pin
-osdk exec -t npm:prettier@3 -- prettier --check .
-
-# Inspect
-osdk list npm:prettier
+# Inspect current selection and osdk-owned isolated/global installs.
 osdk current npm:prettier
-osdk where npm:prettier
+osdk list npm:prettier
 osdk where npm:prettier@3.6.2
 
-# Check or upgrade the project, or target one tool
-osdk outdated
-osdk outdated npm:prettier@3
-osdk upgrade
-osdk upgrade npm:prettier@3
-
-# Remove an exact version; --yes is useful for automation
+# Remove an osdk-owned exact installation and rebuild managed shims.
 osdk --yes uninstall npm:prettier@3.6.2
-
-# Rebuild shims for every installed tool
 osdk reshim
 ```
 
-| Command | npm tool behavior |
-| --- | --- |
-| `use` | Installs if needed, creates shims, and saves a project or user-level version; preserves the version prefix you typed |
-| `install` | Installs explicit requests directly; with no arguments and no `-o`, prefers the current-platform `osdk.lock` |
-| `exec` | Installs if needed and runs the package's actual exported bin in an exact environment without writing a pin |
-| `list` | Lists installed versions; its argument is the versionless `npm:<package>` backend id |
-| `current` | Shows the request selected by current-directory configuration; it does not prove that version is installed |
-| `where` | Prints a matching install directory; pass an exact version to avoid selection ambiguity |
-| `uninstall` | Removes an install and reconciles shims; automation should use an exact version and global `--yes` |
-| `outdated` | Re-resolves the target and reports when that exact version is not installed; does not read the old lock |
-| `upgrade` | Re-resolves and installs, then refreshes the host lock; does not use the old lock as resolution input |
-| `reshim` | Rebuilds command entry points from installed inventories; takes no tool argument |
+`list`, `where`, `uninstall`, and `reshim` operate on osdk-owned isolated or
+global installations. A package added to a real project remains owned by that
+project and its package manager; its commands come from `node_modules/.bin`.
+`osdk list-remote npm:prettier [FILTER]` lists stable registry versions.
 
-`osdk list-remote npm:prettier [FILTER]` also lists stable registry versions.
+## Build-script policy
 
-## Project configuration and build scripts
-
-Use a string for a simple version pin and a structured `[tools]` entry for
-installation policy. Quote TOML keys that contain `:` or a scoped package name:
+Local project `use` always disables lifecycle scripts, for Aube as well as the
+native npm and pnpm delegates. For isolated and global installs, scripts are
+also disabled by default. Reviewed packages can opt in with a structured tool
+entry or a one-shot option:
 
 ```toml
-[tools]
-node = "22"
-"npm:prettier" = "3"
-
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
+installer = "aube"
 allow_builds = ["@scope/native-tool", "esbuild"]
 ```
 
-npm tool lifecycle/build scripts are **fully disabled by default**.
-`allow_builds` accepts three policies:
-
-| Configuration | Effect |
+| Configuration | Isolated/global effect |
 | --- | --- |
-| Omitted or `false` | Deny build scripts for every dependency; the default and recommended policy |
-| `["pkg-a", "pkg-b"]` | Allow build scripts only for the named packages |
-| `true` | Allow build scripts throughout the graph; dangerous and intended only after full review |
+| Omitted or `false` | Deny all dependency build scripts |
+| `["pkg-a", "pkg-b"]` | Allow only named packages where the selected installer supports an allowlist |
+| `true` | Allow scripts throughout the graph; use only after full review |
 
-For a one-shot command, use `-o allow_builds=esbuild,sharp`, or explicitly use
-the dangerous `-o allow_builds=true`. Prefer an array in team configuration so
-the allowlist remains easy to review.
+The one-shot form is `-o allow_builds=esbuild,sharp`. Native npm cannot enforce
+a package allowlist and accepts only false or true; Aube and pnpm support the
+named-package form.
 
-## Managed Node and source selection
+## Sources and shared storage
 
-Dynamic npm tools always run on Node managed by osdk; they do not depend on a
-system Node that happens to be on PATH. If the request does not include Node,
-osdk adds the Node selected for the current project, or `node@latest` when the
-project has no declaration. Node installs before the npm tool. Pin Node
-explicitly when the team needs a repeatable runtime.
+Dynamic npm version metadata uses the normal npm source selection across
+npmmirror and npmjs. This is distinct from the `[registries.npm]` preflight used
+before a managed native npm or pnpm process starts. Project delegates retain the
+documented explicit registry precedence; global delegates run with isolated
+configuration inside the osdk-controlled prefix.
 
-Each `npm:<package>` backend uses the common `sources.selection = "auto"`
-strategy across npmmirror and the official npmjs source by default. Candidates
-are probed concurrently and ranked by throughput and time to first byte; the
-result is reused for its configured TTL. The cache is bound to a fingerprint of
-the candidates, so URL, order, priority, enabled-state, or authentication-header
-changes cannot reuse an incompatible ranking.
+All Aube-backed npm tools—across project, global, package, version, and scope—
+share these osdk-owned paths:
 
-`Source.headers` here applies only to metadata requests and probes performed by
-osdk. Headers are bound to the configured index/download origin, retained across
-same-origin redirects, and removed after a cross-origin redirect. Aube 2.1
-package fetches do not accept arbitrary `Source.headers`; configure private npm
-registry authentication through Aube/npm's native trusted configuration or
-environment path.
-
-```bash
-osdk source list npm:prettier
-osdk source test npm:prettier
-osdk --refresh-sources install npm:prettier@3
-osdk --source npm install npm:prettier@3
+```text
+$OSDK_CACHE_DIR/aube/v1/cache
+$OSDK_STORE_DIR/aube
 ```
 
-This selects the **download source for the tool itself**. It is separate from
-the `[registries.npm]` preflight performed before a project's `npm install`; see
-[JavaScript Package Managers](./package-managers#registry-preflight).
+The shared layout avoids redownloading the same package content while each real
+project or controlled global install retains its own native lock.
 
-## Locking and offline reinstall
+## What `osdk.lock` guarantees
 
-For every dynamic npm tool, schema 2 `osdk.lock` records the package, exact Node
-version, graph format, SHA-256, and content-addressed path. The complete Aube
-graph is written beside it as `osdk.lock.d/npm/<sha256>.yaml`. The graph carries
-transitive dependency integrity, and generating it never runs lifecycle scripts.
-Commit both `osdk.lock` and `osdk.lock.d/` to the repository.
+Project-aware `use` writes a compact schema 3 `osdk.lock` entry containing the
+package, resolved version, concrete installer, scope, exact Node version, and
+the native lock's kind, format, and SHA-256. The user lock for global tools uses
+the same metadata-only model; npm global simply has no native-lock identity.
 
-Prepare the main lock, graph sidecar, and Aube package cache/store before going
-offline:
+::: warning Graph limitation
+The metadata in `osdk.lock` does **not** itself capture or reconstruct the
+transitive npm dependency graph. The installer's native lock remains the source
+of that graph: the real project's `aube-lock.yaml`, `package-lock.json`,
+`npm-shrinkwrap.json`, or `pnpm-lock.yaml`, or the Aube/pnpm lock retained in a
+controlled global install directory. An npm global install has no dependency
+lock, so its transitive selection is not reproducible from the user
+`osdk.lock` alone.
+:::
 
-```bash
-# Online: generate the complete graph and download packages referenced by it
-osdk lock
-osdk install
+Commit `package.json`, the native project lock, `osdk.toml`, and `osdk.lock` for
+a project workflow. Schema 2 graph sidecars remain readable for compatibility,
+but current schema 3 writes do not create a new sidecar or embed its payload.
 
-# Later, retain osdk.lock, osdk.lock.d/, and the same cache; reinstall frozen
-osdk --offline install
-```
-
-Neither the main lock nor its sidecar means package contents are cached. Offline
-installation fails explicitly if the sidecar is missing, corrupt, larger than
-16 MiB, or any required cached content is absent. Explicit
-`osdk --offline install npm:prettier@3.6.2` bypasses the project lock; use
-argument-free `install` to restore from it. See [Reproducible Lockfiles](./lockfiles)
-for the wider lock semantics.
-
-## Command discovery and conflicts
-
-After installation, osdk discovers commands under the synthetic project's
-`node_modules/.bin` and records an inventory; those bins may come from the root
-package or a transitive dependency. An empty `.bin`, an unresolved command
-target, or a target escaping the install root is rejected. If different
-backends expose the same command name, shim publication and runtime routing fail
-closed instead of choosing by scan order. At runtime, selecting exactly one
-owner in current configuration resolves the dispatch ambiguity. CLI generation
-and `reshim` currently still remove the ambiguous shim and error when multiple
-installed owners exist. Multiple versions of one backend use normal current-
-version selection.
-
-For the embedded Aube install, graph-sidecar validation, cache layout, and routing
-algorithms, see [npm tool implementation](./implementation/npm-tools).
+For installer planning, metadata validation, native-prefix isolation, and the
+activation safety checks, see [npm tool implementation](./implementation/npm-tools).
