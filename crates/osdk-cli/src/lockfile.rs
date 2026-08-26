@@ -913,6 +913,7 @@ pub fn upsert_resolved_with_scope(
 
 /// Remove one tool entry for a platform while preserving every other tool,
 /// platform, and model record. Empty platform tables are pruned.
+#[allow(dead_code)]
 pub fn remove_tool(path: &Path, platform: Platform, backend: &str) -> Result<bool> {
     if !path.is_file() {
         return Ok(false);
