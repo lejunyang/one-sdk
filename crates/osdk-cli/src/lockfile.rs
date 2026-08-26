@@ -455,11 +455,12 @@ fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
 
 fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result<()> {
     let valid_format = match native_lock.kind {
-        NpmInstaller::Aube => versioned_format(&native_lock.format, &["aube-v"]),
-        NpmInstaller::Npm => {
-            versioned_format(&native_lock.format, &["package-lock-v", "npm-shrinkwrap-v"])
-        }
-        NpmInstaller::Pnpm => versioned_format(&native_lock.format, &["pnpm-v"]),
+        NpmInstaller::Aube => native_lock.format == "aube-v9",
+        NpmInstaller::Npm => matches!(
+            native_lock.format.as_str(),
+            "package-lock-v2" | "package-lock-v3" | "npm-shrinkwrap-v2" | "npm-shrinkwrap-v3"
+        ),
+        NpmInstaller::Pnpm => native_lock.format == "pnpm-v9",
     };
     if !valid_format {
         anyhow::bail!(osdk_core::t!(
@@ -470,14 +471,6 @@ fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result
         ));
     }
     validate_sha256(backend, &native_lock.sha256)
-}
-
-fn versioned_format(value: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|prefix| {
-        value.strip_prefix(prefix).is_some_and(|version| {
-            !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    })
 }
 
 fn validate_schema_two(path: &Path, lockfile: &Lockfile, read_graphs: bool) -> Result<()> {
@@ -2058,6 +2051,28 @@ lockfile = "lockfileVersion: '9.0'"
         };
         assert_eq!(npm.installer, NpmInstaller::Aube);
         assert_eq!(npm.native_lock.as_ref().unwrap().kind, NpmInstaller::Pnpm);
+    }
+
+    #[test]
+    fn schema_three_rejects_future_native_lock_formats() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        for (kind, format) in [
+            ("aube", "aube-v10"),
+            ("pnpm", "pnpm-v10"),
+            ("npm", "package-lock-v4"),
+            ("npm", "npm-shrinkwrap-v4"),
+        ] {
+            let text = valid_schema_three_npm_lock()
+                .replace("kind = \"aube\"", &format!("kind = \"{kind}\""))
+                .replace("format = \"aube-v9\"", &format!("format = \"{format}\""));
+            std::fs::write(&path, text).unwrap();
+            let error = load(&path).unwrap_err().to_string();
+            assert!(
+                error.contains(format),
+                "unexpected error for {format}: {error}"
+            );
+        }
     }
 
     #[test]
