@@ -1,9 +1,10 @@
 //! Global `npm:<package>` installation for `osdk use --global`.
 //!
-//! Global means user-selected and shim-visible in osdk. Native npm and pnpm
-//! execute their real global-add modes against an osdk-owned prefix; embedded
-//! Aube uses its safe synthetic-project equivalent. Neither path mutates the
-//! caller's project or an ambient Node installation.
+//! Global means user-selected and shim-visible in osdk. npm, pnpm, and Aube
+//! execute their real global-add modes against an osdk-owned prefix. Aube runs
+//! in the `osdk-aube` helper process because its global command owns process
+//! cwd and process-global settings. No path mutates the caller's project or an
+//! ambient Node installation.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -14,7 +15,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use osdk_core::backend::aube_host::{self, EmbeddedInstallRequest};
 use osdk_core::backend::npm_package::{NpmPackageBackend, LOCKED_NPM_NODE_VERSION_OPTION};
 use osdk_core::backend::{Backend, InstallCtx};
 use osdk_core::npm_tools::{
@@ -377,6 +377,43 @@ fn replace_path_from_staging(staging: &Path, final_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn sync_shim_publication(
+    dirs: &osdk_core::dirs::Dirs,
+    affected_bin_names: &[String],
+) -> Result<()> {
+    let shims = dirs.shims();
+    for name in affected_bin_names {
+        sync_file_if_present(&shims.join(name))?;
+        #[cfg(windows)]
+        sync_file_if_present(&shims.join(format!("{name}.cmd")))?;
+    }
+    #[cfg(unix)]
+    if shims.is_dir() {
+        std::fs::File::open(&shims)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("syncing shim directory {}", shims.display()))?;
+    }
+    Ok(())
+}
+
+fn sync_file_if_present(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(()),
+        Ok(metadata) if metadata.is_file() => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .and_then(|file| file.sync_all())
+            .with_context(|| format!("syncing shim {}", path.display())),
+        Ok(_) => Err(anyhow!(
+            "shim publication path is not a file: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspecting shim {}", path.display())),
+    }
+}
+
 impl PromotedInstall {
     fn mark_activated(&self) -> Result<()> {
         write_promotion_journal(
@@ -439,6 +476,17 @@ impl PromotedInstall {
         }
         self.completed = true;
     }
+}
+
+fn publish_then_activate(
+    replacement: Option<&PromotedInstall>,
+    publish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    publish()?;
+    if let Some(replacement) = replacement {
+        replacement.mark_activated()?;
+    }
+    Ok(())
 }
 
 impl Drop for PromotedInstall {
@@ -552,8 +600,12 @@ fn read_promotion_journal(path: &Path) -> Result<Option<PromotionJournal>> {
 /// Recover the canonical install root after an interrupted directory promotion.
 ///
 /// Directory renames reduce the inconsistent interval, but they are not a
-/// power-loss transaction. The journal makes the next operation deterministic:
-/// an activated publication is kept, while every earlier phase is rolled back.
+/// power-loss transaction. Before the staged tree reaches its canonical path,
+/// recovery rolls back. Once `NewPromoted` is durable, recovery keeps the new
+/// tree: publication may already have replaced config or lock, so restoring the
+/// old tree could make newly published metadata point at the wrong install. A
+/// rerun idempotently repairs any config, lock, or shim work that had not yet
+/// completed. `Activated` is only recorded after all of that work succeeds.
 fn recover_interrupted_promotion(final_root: &Path) -> Result<()> {
     let journal_path = promotion_journal_path(final_root);
     let Some(journal) = read_promotion_journal(&journal_path)? else {
@@ -583,10 +635,13 @@ fn recover_interrupted_promotion(final_root: &Path) -> Result<()> {
     validate_journal_path(final_root, &journal.stage_root, "stage")?;
     validate_journal_path(final_root, &journal.backup_root, "backup")?;
 
-    if journal.phase == PromotionPhase::Activated {
+    if matches!(
+        journal.phase,
+        PromotionPhase::NewPromoted | PromotionPhase::Activated
+    ) {
         if !final_root.exists() {
             return Err(anyhow!(
-                "activated global npm promotion is missing canonical install {}",
+                "promoted global npm install is missing canonical install {}",
                 final_root.display()
             ));
         }
@@ -639,12 +694,20 @@ fn transaction_debris_paths(final_root: &Path, kind: &str) -> Result<Vec<PathBuf
     let parent = final_root
         .parent()
         .ok_or_else(|| anyhow!("global install root has no parent"))?;
+    if !parent.exists() {
+        return Ok(Vec::new());
+    }
     let name = final_root
         .file_name()
         .ok_or_else(|| anyhow!("global install root has no file name"))?
         .to_string_lossy();
     let prefix = format!(".{name}.osdk-{kind}-");
-    let mut paths = std::fs::read_dir(parent)?
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| {
@@ -683,6 +746,9 @@ fn scavenge_transaction_debris(final_root: &Path, keep: &[&Path]) -> Result<()> 
     let parent = final_root
         .parent()
         .ok_or_else(|| anyhow!("global install root has no parent"))?;
+    if !parent.exists() {
+        return Ok(());
+    }
     let name = final_root
         .file_name()
         .ok_or_else(|| anyhow!("global install root has no file name"))?
@@ -692,7 +758,12 @@ fn scavenge_transaction_debris(final_root: &Path, keep: &[&Path]) -> Result<()> 
         format!(".{name}.osdk-backup-"),
         format!(".{name}.osdk-failed-"),
     ];
-    for entry in std::fs::read_dir(parent)? {
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = entry?;
         let path = entry.path();
         if keep.contains(&path.as_path()) {
@@ -815,134 +886,226 @@ pub async fn install(
             "global npm installer requires an npm:<package> request"
         ));
     }
-    apply_source_override(app, &request.backend);
     let requested_installer = npm_tools::installer_from_request_options(&request.options)?;
     let cwd = std::env::current_dir().context("getting current dir for global npm install")?;
     let plan = npm_tools::plan_npm_installer(&cwd, requested_installer, ToolScope::Global)?;
-    let runtime = ensure_managed_runtime(app, plan.installer).await?;
-
-    request.options.insert(
-        LOCKED_NPM_INSTALLER_OPTION.into(),
-        plan.installer.as_str().into(),
-    );
-    request.options.insert(
-        LOCKED_NPM_SCOPE_OPTION.into(),
-        ToolScope::Global.as_str().into(),
-    );
-    request.options.insert(
-        LOCKED_NPM_NODE_VERSION_OPTION.into(),
-        runtime.node_version.version.clone(),
-    );
-
     let backend = NpmPackageBackend::from_id(&request.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?;
-    if app.refresh_sources {
-        select::refresh(&app.ctx, &backend).await?;
-    }
     let effective = expand_alias(app, &request)?;
-    let mut version = backend
-        .resolve_version(&app.ctx, &effective)
-        .await
-        .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
-    version.options = request.options.clone();
-    version
-        .options
-        .insert(INSTALLER_OPTION.into(), plan.installer.as_str().into());
-
-    let final_layout = GlobalInstallLayout::for_root(
-        backend.global_install_root(&app.ctx, &version.version),
-        plan.installer,
-        app.ctx.platform,
-    );
-    let lock_path = app.ctx.dirs.lock_dir(backend.id()).join(format!(
-        "{}.global.lock",
-        osdk_core::dirs::sanitize_version_component(&version.version)
-    ));
-    let _mutation_lock = osdk_core::lock::FileLock::acquire(lock_path)?;
-    recover_interrupted_promotion(&final_layout.root)?;
-
-    let installed_native_lock = native_lock_path(&final_layout, plan.installer);
+    let mut mutation_lock = None;
+    let mut final_layout = None;
+    let mut runtime = None;
+    let mut version = None;
     let mut staged_install = None;
-    if !completed_install_matches_at(
-        &backend,
-        &version,
-        plan.installer,
-        &runtime.node_version.version,
-        &final_layout,
-        installed_native_lock.as_deref(),
-    )? {
-        let staged = StagedInstall::begin(&final_layout.root)?;
-        let staged_layout = GlobalInstallLayout::for_root(
-            staged.root().to_path_buf(),
+
+    // An exact request identifies its canonical root without consulting a
+    // registry. Recover that root first, then reuse it when its recorded Node
+    // identity is backed by a locally installed runtime. This path must stay
+    // free of source probes, downloads, post-install hooks, and helpers.
+    if let VersionSpec::Exact(exact) = &effective.spec {
+        let candidate_layout = GlobalInstallLayout::for_root(
+            backend.global_install_root(&app.ctx, exact),
             plan.installer,
             app.ctx.platform,
         );
-        run_global_install(
+        let lock = acquire_global_version_lock(app, &backend, exact)?;
+        recover_interrupted_promotion_serialized(&app.ctx.dirs, &candidate_layout.root)?;
+        if let Some(existing_runtime) =
+            load_existing_managed_runtime(app, backend.id(), exact, plan.installer)?
+        {
+            set_runtime_request_options(&mut request, plan.installer, &existing_runtime);
+            let mut candidate = ToolVersion::new(backend.id(), exact.clone());
+            candidate.options = request.options.clone();
+            candidate
+                .options
+                .insert(INSTALLER_OPTION.into(), plan.installer.as_str().into());
+            let installed_native_lock = native_lock_path(&candidate_layout, plan.installer);
+            if completed_install_matches_at(
+                &backend,
+                &candidate,
+                plan.installer,
+                &existing_runtime.node_version.version,
+                &candidate_layout,
+                installed_native_lock.as_deref(),
+            )? {
+                let native = installed_native_lock
+                    .as_deref()
+                    .filter(|path| path.is_file())
+                    .map(|path| read_native_lock(path, plan.installer))
+                    .transpose()?;
+                inject_native_metadata(
+                    &mut candidate,
+                    plan.installer,
+                    &existing_runtime.node_version.version,
+                    native.as_ref(),
+                );
+                runtime = Some(existing_runtime);
+                version = Some(candidate);
+            }
+        }
+        mutation_lock = Some(lock);
+        final_layout = Some(candidate_layout);
+    }
+
+    if version.is_none() {
+        // Aube 2.1 global add always resolves online and exposes no offline
+        // switch. Exact local recovery/reuse is allowed above, but a new
+        // helper install must fail before registry or runtime preparation.
+        if plan.installer == NpmInstaller::Aube && app.ctx.config.settings.offline {
+            return Err(anyhow!(osdk_core::t!(
+                "err.npm_global_aube_offline_unsupported"
+            )));
+        }
+        let package_spec = format!("{}@{}", backend.package(), request.spec);
+        let (registry_manager, registry_alias, registry_command) = match plan.installer {
+            NpmInstaller::Aube | NpmInstaller::Npm => (PackageManager::Npm, "npm", "install"),
+            NpmInstaller::Pnpm => (PackageManager::Pnpm, "pnpm", "add"),
+            NpmInstaller::Auto => {
+                unreachable!("global planning always produces a concrete installer")
+            }
+        };
+        // This must precede runtime preparation and npm package resolution. A
+        // private/authenticated native registry cannot be reproduced inside
+        // the isolated global installer.
+        let selected_registry = plan_isolated_global_registry(
             app,
-            &backend,
-            &version,
-            plan.installer,
-            &runtime,
-            &staged_layout,
+            &app.ctx.dirs.data.join("global-registry-preflight"),
+            registry_manager,
+            registry_alias,
+            &[registry_command.into(), package_spec],
         )
         .await?;
-        normalize_global_bins(&backend, &version, plan.installer, &staged_layout)?;
-        validate_global_package_identity(&backend, &version, plan.installer, &staged_layout)?;
-        let staged_native_lock = native_lock_path(&staged_layout, plan.installer);
-        let native = staged_native_lock
-            .as_deref()
-            .filter(|path| path.is_file())
-            .map(|path| read_native_lock(path, plan.installer))
-            .transpose()?;
-        inject_native_metadata(
-            &mut version,
+        apply_source_override(app, &request.backend);
+        let prepared_runtime = ensure_managed_runtime(app, plan.installer).await?;
+        set_runtime_request_options(&mut request, plan.installer, &prepared_runtime);
+
+        if app.refresh_sources {
+            select::refresh(&app.ctx, &backend).await?;
+        }
+        let effective = expand_alias(app, &request)?;
+        let mut resolved = backend
+            .resolve_version(&app.ctx, &effective)
+            .await
+            .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
+        resolved.options = request.options.clone();
+        resolved
+            .options
+            .insert(INSTALLER_OPTION.into(), plan.installer.as_str().into());
+        let resolved_layout = GlobalInstallLayout::for_root(
+            backend.global_install_root(&app.ctx, &resolved.version),
             plan.installer,
-            &runtime.node_version.version,
-            native.as_ref(),
+            app.ctx.platform,
         );
-        backend
-            .finalize_global_install_at(
-                &app.ctx,
-                &version,
-                &staged_layout.root,
-                &staged_layout.bin,
-                &runtime.node_version.version,
-                plan.installer.as_str(),
-                native
-                    .as_ref()
-                    .map(|native| (native.format.as_str(), native.sha256.as_str())),
-            )
-            .map_err(anyhow::Error::new)?;
+        if let Some(existing_layout) = &final_layout {
+            if existing_layout.root != resolved_layout.root {
+                return Err(anyhow!(
+                    "exact global npm request resolved to an unexpected version: {}",
+                    resolved.version
+                ));
+            }
+        } else {
+            mutation_lock = Some(acquire_global_version_lock(
+                app,
+                &backend,
+                &resolved.version,
+            )?);
+            recover_interrupted_promotion_serialized(&app.ctx.dirs, &resolved_layout.root)?;
+            final_layout = Some(resolved_layout.clone());
+        }
+
+        let installed_native_lock = native_lock_path(&resolved_layout, plan.installer);
         if !completed_install_matches_at(
             &backend,
-            &version,
+            &resolved,
             plan.installer,
-            &runtime.node_version.version,
-            &staged_layout,
-            staged_native_lock.as_deref(),
+            &prepared_runtime.node_version.version,
+            &resolved_layout,
+            installed_native_lock.as_deref(),
         )? {
-            return Err(anyhow!(
-                "staged global npm install failed completed-state validation at {}",
-                staged_layout.root.display()
-            ));
+            let staged = StagedInstall::begin(&resolved_layout.root)?;
+            let staged_layout = GlobalInstallLayout::for_root(
+                staged.root().to_path_buf(),
+                plan.installer,
+                app.ctx.platform,
+            );
+            run_global_install(
+                app,
+                &backend,
+                &resolved,
+                plan.installer,
+                &prepared_runtime,
+                &staged_layout,
+                selected_registry.as_deref(),
+            )
+            .await?;
+            normalize_global_bins(&backend, &resolved, plan.installer, &staged_layout)?;
+            validate_global_package_identity(&backend, &resolved, plan.installer, &staged_layout)?;
+            let staged_native_lock = native_lock_path(&staged_layout, plan.installer);
+            let native = staged_native_lock
+                .as_deref()
+                .filter(|path| path.is_file())
+                .map(|path| read_native_lock(path, plan.installer))
+                .transpose()?;
+            inject_native_metadata(
+                &mut resolved,
+                plan.installer,
+                &prepared_runtime.node_version.version,
+                native.as_ref(),
+            );
+            backend
+                .finalize_global_install_at(
+                    &app.ctx,
+                    &resolved,
+                    &staged_layout.root,
+                    &staged_layout.bin,
+                    &prepared_runtime.node_version.version,
+                    plan.installer.as_str(),
+                    native
+                        .as_ref()
+                        .map(|native| (native.format.as_str(), native.sha256.as_str())),
+                )
+                .map_err(anyhow::Error::new)?;
+            if !completed_install_matches_at(
+                &backend,
+                &resolved,
+                plan.installer,
+                &prepared_runtime.node_version.version,
+                &staged_layout,
+                staged_native_lock.as_deref(),
+            )? {
+                return Err(anyhow!(
+                    "staged global npm install failed completed-state validation at {}",
+                    staged_layout.root.display()
+                ));
+            }
+            staged_install = Some(staged);
+        } else {
+            let native = installed_native_lock
+                .as_deref()
+                .filter(|path| path.is_file())
+                .map(|path| read_native_lock(path, plan.installer))
+                .transpose()?;
+            inject_native_metadata(
+                &mut resolved,
+                plan.installer,
+                &prepared_runtime.node_version.version,
+                native.as_ref(),
+            );
         }
-        staged_install = Some(staged);
-    } else {
-        let native = installed_native_lock
-            .as_deref()
-            .filter(|path| path.is_file())
-            .map(|path| read_native_lock(path, plan.installer))
-            .transpose()?;
-        inject_native_metadata(
-            &mut version,
-            plan.installer,
-            &runtime.node_version.version,
-            native.as_ref(),
-        );
+        runtime = Some(prepared_runtime);
+        version = Some(resolved);
     }
+
+    let runtime = runtime.expect("global npm runtime is available after preparation or reuse");
+    let version = version.expect("global npm version is available after preparation or reuse");
+    let final_layout =
+        final_layout.expect("global npm layout is available after preparation or reuse");
+    let _mutation_lock =
+        mutation_lock.expect("global npm mutation lock is held through publication");
 
     let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
     with_global_npm_state_lock(&app.ctx.dirs, || {
+        crate::commands::recover_interrupted_global_npm_uninstalls(app)?;
         let new_bin_names = manifest_bin_names(
             staged_install
                 .as_ref()
@@ -974,14 +1137,13 @@ pub async fn install(
         } else {
             None
         };
-        // Arm crash recovery before changing the active config. From this
-        // durable point, an abrupt exit keeps the fully validated new root.
+        // `NewPromoted` is the roll-forward boundary: an abrupt exit keeps the
+        // fully validated new root and a rerun repairs any remaining metadata
+        // or shims. Do not mark the publication activated until config, lock,
+        // and every affected shim directory entry have been durably published.
         // A normal error still rolls every publication step back below.
-        let publish_result = (|| {
+        let publish_result = publish_then_activate(replacement.as_ref(), || {
             crate::commands::generate_shims_for(app, &backend, &version)?;
-            if let Some(replacement) = replacement.as_ref() {
-                replacement.mark_activated()?;
-            }
             persist_global_config(app, &request, &persisted_spec, plan.installer)?;
             persist_global_lock(app, &request, &version, &runtime)?;
             let refreshed = refreshed_app(app)?;
@@ -990,8 +1152,18 @@ pub async fn install(
                 backend.id(),
                 &old_bin_names,
                 &new_bin_names,
-            )
-        })();
+            )?;
+            // This full pass makes the roll-forward path idempotent even when
+            // a prior process crashed after publishing config/lock but before
+            // it could remove a bin name from the previously selected version.
+            crate::commands::reconcile_managed_shims(&refreshed)?;
+            let mut affected_bin_names = old_bin_names.clone();
+            affected_bin_names.extend(new_bin_names.iter().cloned());
+            affected_bin_names.sort();
+            affected_bin_names.dedup();
+            sync_shim_publication(&app.ctx.dirs, &affected_bin_names)?;
+            Ok(())
+        });
         if let Err(error) = publish_result {
             let publication_error = publication.restore().err();
             let replacement_error = replacement
@@ -1034,6 +1206,28 @@ pub(crate) fn with_global_npm_state_lock<T>(
 ) -> Result<T> {
     let _lock = osdk_core::lock::FileLock::acquire(dirs.data.join("locks/global-npm-state.lock"))?;
     operation()
+}
+
+fn acquire_global_version_lock(
+    app: &App,
+    backend: &NpmPackageBackend,
+    version: &str,
+) -> Result<osdk_core::lock::FileLock> {
+    osdk_core::lock::FileLock::acquire(app.ctx.dirs.lock_dir(backend.id()).join(format!(
+        "{}.global.lock",
+        osdk_core::dirs::sanitize_version_component(version)
+    )))
+    .map_err(anyhow::Error::new)
+}
+
+/// Callers hold the version mutation lock before entering this helper. That
+/// establishes the same mutation -> global order used by publication while
+/// serializing root recovery with global uninstall and uninstall recovery.
+fn recover_interrupted_promotion_serialized(
+    dirs: &osdk_core::dirs::Dirs,
+    final_root: &Path,
+) -> Result<()> {
+    with_global_npm_state_lock(dirs, || recover_interrupted_promotion(final_root))
 }
 
 fn refreshed_app(app: &App) -> Result<App> {
@@ -1080,6 +1274,146 @@ async fn ensure_managed_runtime(app: &mut App, installer: NpmInstaller) -> Resul
         node_bin,
         manager,
     })
+}
+
+fn set_runtime_request_options(
+    request: &mut ToolRequest,
+    installer: NpmInstaller,
+    runtime: &ManagedRuntime,
+) {
+    request.options.insert(
+        LOCKED_NPM_INSTALLER_OPTION.into(),
+        installer.as_str().into(),
+    );
+    request.options.insert(
+        LOCKED_NPM_SCOPE_OPTION.into(),
+        ToolScope::Global.as_str().into(),
+    );
+    request.options.insert(
+        LOCKED_NPM_NODE_VERSION_OPTION.into(),
+        runtime.node_version.version.clone(),
+    );
+}
+
+/// Reconstruct a runtime strictly from authoritative local state. The npm
+/// package manifest is deliberately not used to choose Node: it is only
+/// compared against this independently selected installed runtime later.
+fn load_existing_managed_runtime(
+    app: &App,
+    package_backend: &str,
+    package_version: &str,
+    installer: NpmInstaller,
+) -> Result<Option<ManagedRuntime>> {
+    let locked = existing_global_lock_requests(app, package_backend, package_version)?;
+    let node_request = locked
+        .as_ref()
+        .and_then(|requests| exact_locked_request(requests, "node"))
+        .cloned()
+        .or_else(|| exact_configured_request(app, "node"));
+    let Some(node_request) = node_request else {
+        return Ok(None);
+    };
+    let Some((node_version, node_bin)) = load_exact_runtime_component(app, &node_request, "node")?
+    else {
+        return Ok(None);
+    };
+
+    let manager_id = match installer {
+        NpmInstaller::Npm => Some("npm"),
+        NpmInstaller::Pnpm => Some("pnpm"),
+        NpmInstaller::Aube => None,
+        NpmInstaller::Auto => unreachable!("global planning always produces a concrete installer"),
+    };
+    let manager = if let Some(manager_id) = manager_id {
+        let manager_request = locked
+            .as_ref()
+            .and_then(|requests| exact_locked_request(requests, manager_id))
+            .cloned()
+            .or_else(|| exact_configured_request(app, manager_id));
+        let Some(manager_request) = manager_request else {
+            return Ok(None);
+        };
+        let Some((manager_version, executable)) =
+            load_exact_runtime_component(app, &manager_request, manager_id)?
+        else {
+            return Ok(None);
+        };
+        Some((manager_request, manager_version, executable))
+    } else {
+        None
+    };
+
+    Ok(Some(ManagedRuntime {
+        node_request,
+        node_version,
+        node_bin,
+        manager,
+    }))
+}
+
+fn existing_global_lock_requests(
+    app: &App,
+    package_backend: &str,
+    package_version: &str,
+) -> Result<Option<Vec<ToolRequest>>> {
+    let path = app.ctx.dirs.user_lock_file();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let Some(requests) = crate::lockfile::locked_requests(&path, app.ctx.platform)? else {
+        return Ok(None);
+    };
+    let matches_package = requests.iter().any(|request| {
+        request.backend == package_backend
+            && matches!(&request.spec, VersionSpec::Exact(version) if version == package_version)
+            && request
+                .options
+                .get(LOCKED_NPM_SCOPE_OPTION)
+                .map(String::as_str)
+                == Some(ToolScope::Global.as_str())
+    });
+    Ok(matches_package.then_some(requests))
+}
+
+fn exact_locked_request<'a>(requests: &'a [ToolRequest], backend: &str) -> Option<&'a ToolRequest> {
+    requests
+        .iter()
+        .find(|request| request.backend == backend && matches!(request.spec, VersionSpec::Exact(_)))
+}
+
+fn exact_configured_request(app: &App, backend: &str) -> Option<ToolRequest> {
+    let request = configured_request(app, backend);
+    matches!(request.spec, VersionSpec::Exact(_)).then_some(request)
+}
+
+fn load_exact_runtime_component(
+    app: &App,
+    request: &ToolRequest,
+    executable: &str,
+) -> Result<Option<(ToolVersion, PathBuf)>> {
+    let VersionSpec::Exact(version) = &request.spec else {
+        return Ok(None);
+    };
+    let backend = app.registry.get(&request.backend)?;
+    let installed = ToolVersion::new(backend.id(), version.clone());
+    if !backend
+        .list_installed(&app.ctx)?
+        .iter()
+        .any(|candidate| candidate == version)
+    {
+        return Ok(None);
+    }
+    let Some(path) = find_executable(&backend.bin_paths(&app.ctx, &installed)?, executable) else {
+        return Ok(None);
+    };
+    let location = if executable == "node" {
+        path.parent()
+            .ok_or_else(|| anyhow!("managed node executable has no parent directory"))?
+            .to_path_buf()
+    } else {
+        path
+    };
+    Ok(Some((installed, location)))
 }
 
 fn exact_request(mut request: ToolRequest, version: &ToolVersion) -> ToolRequest {
@@ -1132,70 +1466,607 @@ async fn run_global_install(
     installer: NpmInstaller,
     runtime: &ManagedRuntime,
     layout: &GlobalInstallLayout,
+    selected_registry: Option<&str>,
 ) -> Result<()> {
-    let project = &layout.project;
     match installer {
         NpmInstaller::Aube => {
-            write_aube_project_manifest(project, backend.package(), &version.version, version)?;
-            let source = selected_package_source(app, backend).await?;
-            let package_spec = format!("{}@{}", backend.package(), version.version);
-            let (scripts_enabled, allow_all) = build_policy_flags(version)?;
-            aube_host::install_global_package(EmbeddedInstallRequest {
-                project_dir: project,
-                packages: std::slice::from_ref(&package_spec),
-                cache_dir: NpmPackageBackend::aube_cache_dir(&app.ctx),
-                store_dir: NpmPackageBackend::aube_store_dir(&app.ctx),
-                node_bin_dir: runtime.node_bin.clone(),
-                scripts_enabled,
-                dangerously_allow_all_builds: allow_all,
-                offline: app.ctx.config.settings.offline,
-                registry: source,
-            })
-            .await
-            .map_err(anyhow::Error::new)?;
-            Ok(())
+            run_aube_global_installer(app, backend, version, runtime, layout, selected_registry)
+                .await
         }
         NpmInstaller::Npm | NpmInstaller::Pnpm => {
-            run_native_installer(app, backend, version, installer, runtime, layout).await
+            run_native_installer(
+                app,
+                backend,
+                version,
+                installer,
+                runtime,
+                layout,
+                selected_registry,
+            )
+            .await
         }
         NpmInstaller::Auto => unreachable!("global planning always produces a concrete installer"),
     }
 }
 
-fn write_aube_project_manifest(
-    project: &Path,
-    package: &str,
-    version: &str,
-    tool: &ToolVersion,
+async fn run_aube_global_installer(
+    app: &App,
+    backend: &NpmPackageBackend,
+    version: &ToolVersion,
+    runtime: &ManagedRuntime,
+    layout: &GlobalInstallLayout,
+    selected_registry: Option<&str>,
 ) -> Result<()> {
-    std::fs::create_dir_all(project)?;
-    let mut manifest = serde_json::json!({
-        "name": "osdk-global-npm-tool",
-        "private": true
-    });
-    if let Some(raw) = tool.options.get("allow_builds") {
-        let lower = raw.trim().to_ascii_lowercase();
-        if !matches!(
-            lower.as_str(),
-            "" | "false" | "0" | "no" | "off" | "true" | "1" | "yes" | "on"
-        ) {
-            let allow_builds = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(|item| (item.to_ascii_lowercase(), serde_json::Value::Bool(true)))
-                .collect::<serde_json::Map<_, _>>();
-            manifest["aube"] = serde_json::json!({ "allowBuilds": allow_builds });
+    let helper = find_aube_helper()?;
+    let package_spec = format!("{}@{}", backend.package(), version.version);
+    let native = layout.root.join(NATIVE_CONFIG_DIR);
+    let aube_home = native.join("home");
+    let aube_global_parent = layout.root.join("aube-global");
+    let aube_bin = layout.bin.clone();
+    let aube_cache = NpmPackageBackend::aube_cache_dir(&app.ctx);
+    let aube_store = NpmPackageBackend::aube_store_dir(&app.ctx);
+    let aube_runtime = layout.root.join("aube-runtime-disabled");
+    let user_config = native.join("aube.npmrc");
+    let global_config = native.join("aube-global.npmrc");
+    let xdg_config = native.join("xdg-config");
+    let xdg_data = native.join("xdg-data");
+    let xdg_cache = native.join("xdg-cache");
+    for path in [
+        &aube_home,
+        &aube_global_parent,
+        &aube_bin,
+        &aube_cache,
+        &aube_store,
+        &aube_runtime,
+        &native,
+        &xdg_config,
+        &xdg_data,
+        &xdg_cache,
+    ] {
+        std::fs::create_dir_all(path)?;
+    }
+    for path in [
+        &native,
+        &aube_home,
+        &aube_global_parent,
+        &aube_bin,
+        &aube_runtime,
+        &xdg_config,
+        &xdg_data,
+        &xdg_cache,
+    ] {
+        validate_owned_stage_directory(&layout.root, path)?;
+    }
+    for path in [&user_config, &global_config] {
+        if !path.exists() {
+            std::fs::write(path, b"")?;
         }
     }
-    // Aube's embedded add writes the exact dependency into this private
-    // manifest; retaining the inputs here makes the staging intent explicit.
-    manifest["osdkRequestedPackage"] = serde_json::Value::String(package.into());
-    manifest["osdkRequestedVersion"] = serde_json::Value::String(version.into());
-    std::fs::write(
-        project.join("package.json"),
-        serde_json::to_vec_pretty(&manifest)?,
+
+    let args = aube_global_args(version, package_spec, selected_registry.map(str::to_owned))?;
+
+    let path = std::env::join_paths(std::iter::once(runtime.node_bin.clone()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))?;
+    let mut env = BTreeMap::from([
+        ("PATH".into(), path.to_string_lossy().into_owned()),
+        ("HOME".into(), aube_home.display().to_string()),
+        ("XDG_CONFIG_HOME".into(), xdg_config.display().to_string()),
+        ("XDG_DATA_HOME".into(), xdg_data.display().to_string()),
+        ("XDG_CACHE_HOME".into(), xdg_cache.display().to_string()),
+        (
+            "NPM_CONFIG_USERCONFIG".into(),
+            user_config.display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_GLOBALCONFIG".into(),
+            global_config.display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_GLOBAL_DIR".into(),
+            aube_global_parent.display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_GLOBAL_BIN_DIR".into(),
+            aube_bin.display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_STORE_DIR".into(),
+            aube_store.display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_CACHE_DIR".into(),
+            aube_cache.display().to_string(),
+        ),
+        (
+            "NPM_CONFIG_NODE_VERSION".into(),
+            runtime.node_version.version.clone(),
+        ),
+        (
+            "AUBE_RUNTIME_DIR".into(),
+            aube_runtime.display().to_string(),
+        ),
+        ("AUBE_NO_UPDATE_CHECK".into(), "1".into()),
+    ]);
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "PATHEXT",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.into(), value);
+        }
+    }
+    run_managed_command(&helper, &args, &env, &layout.root)
+        .with_context(|| format!("running bundled Aube helper {}", helper.display()))?;
+
+    let package_root = aube_global_parent.join("global-aube");
+    let resolved = resolve_aube_global_install(
+        &layout.root,
+        &package_root,
+        backend.package(),
+        &version.version,
     )?;
+    let destination = layout.project.clone();
+    if destination.exists() {
+        remove_path(&destination)?;
+    }
+    // Narrow the pointer-swap race by checking it again immediately before
+    // unlinking the Aube-owned stable pointer and moving its physical tree.
+    let current_target = dunce::canonicalize(&resolved.pointer).with_context(|| {
+        format!(
+            "re-resolving Aube global pointer {}",
+            resolved.pointer.display()
+        )
+    })?;
+    if current_target != resolved.install_dir {
+        return Err(anyhow!(
+            "Aube global pointer {} changed during validation",
+            resolved.pointer.display()
+        ));
+    }
+    remove_aube_hash_pointer(&resolved.pointer)?;
+    std::fs::rename(&resolved.install_dir, &destination).with_context(|| {
+        format!(
+            "moving Aube global install {} to {}",
+            resolved.install_dir.display(),
+            destination.display()
+        )
+    })?;
+    validate_aube_project(&destination, backend.package(), &version.version)?;
+    remove_path_best_effort(&aube_global_parent);
+    remove_path_best_effort(&native);
+    remove_path_best_effort(&aube_runtime);
+    Ok(())
+}
+
+fn find_aube_helper() -> Result<PathBuf> {
+    if let Some(override_path) = std::env::var_os("OSDK_AUBE_BIN") {
+        if override_path.is_empty() {
+            return Err(anyhow!("OSDK_AUBE_BIN must not be empty"));
+        }
+        let override_path = PathBuf::from(override_path);
+        if override_path.is_file() {
+            return Ok(override_path);
+        }
+        return Err(anyhow!(
+            "Aube helper override is not a regular file: {}",
+            override_path.display()
+        ));
+    }
+    let current = std::env::current_exe().context("locating osdk executable")?;
+    let name = if cfg!(windows) {
+        "osdk-aube.exe"
+    } else {
+        "osdk-aube"
+    };
+    let sibling = current
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(name);
+    if sibling.is_file() {
+        Ok(sibling)
+    } else {
+        Err(anyhow!(
+            "required Aube helper is missing at {}; reinstall osdk with osdk-aube",
+            sibling.display()
+        ))
+    }
+}
+
+fn aube_global_args(
+    version: &ToolVersion,
+    package_spec: String,
+    source: Option<String>,
+) -> Result<Vec<String>> {
+    let mut args = vec![
+        "add".to_string(),
+        "--global".to_string(),
+        "--save-exact".to_string(),
+        "--disable-gvs".to_string(),
+        "--config.nodeLinker=hoisted".to_string(),
+    ];
+    match npm_build_policy(version)? {
+        NpmBuildPolicy::Deny => {
+            // Aube 2.1's global wrapper drops --ignore-scripts when it builds
+            // the inner add request. A wildcard deny is the fail-closed
+            // equivalent and overrides the built-in trusted dependency list.
+            args.push("--deny-build=*".into());
+        }
+        NpmBuildPolicy::AllowAll => {
+            args.push("--dangerously-allow-all-builds".into());
+        }
+        NpmBuildPolicy::Packages(packages) => {
+            for package in packages {
+                args.push(format!("--allow-build={package}"));
+            }
+        }
+    }
+    if let Some(source) = source {
+        args.push(format!("--registry={source}"));
+    }
+    args.push(package_spec);
+    Ok(args)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NpmBuildPolicy {
+    Deny,
+    AllowAll,
+    Packages(Vec<String>),
+}
+
+impl NpmBuildPolicy {
+    fn identity(&self) -> String {
+        match self {
+            Self::Deny => "deny".into(),
+            Self::AllowAll => "allow-all".into(),
+            Self::Packages(packages) => format!("packages:{}", packages.join(",")),
+        }
+    }
+}
+
+fn parse_npm_build_policy(raw: Option<&str>) -> Result<NpmBuildPolicy> {
+    let Some(raw) = raw else {
+        return Ok(NpmBuildPolicy::Deny);
+    };
+    let raw = raw.trim();
+    let lower = raw.to_ascii_lowercase();
+    if lower.is_empty() || matches!(lower.as_str(), "false" | "0" | "no" | "off") {
+        return Ok(NpmBuildPolicy::Deny);
+    }
+    if matches!(lower.as_str(), "true" | "1" | "yes" | "on") {
+        return Ok(NpmBuildPolicy::AllowAll);
+    }
+    let mut packages = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|package| !package.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    packages.sort();
+    packages.dedup();
+    if packages.is_empty() {
+        return Err(anyhow!("allow_builds contains no package names"));
+    }
+    Ok(NpmBuildPolicy::Packages(packages))
+}
+
+fn npm_build_policy(version: &ToolVersion) -> Result<NpmBuildPolicy> {
+    parse_npm_build_policy(version.options.get("allow_builds").map(String::as_str))
+}
+
+fn npm_build_policy_identity(version: &ToolVersion) -> Result<String> {
+    Ok(npm_build_policy(version)?.identity())
+}
+
+#[derive(Debug)]
+struct ResolvedAubeGlobalInstall {
+    pointer: PathBuf,
+    install_dir: PathBuf,
+}
+
+fn resolve_aube_global_install(
+    stage_root: &Path,
+    package_root: &Path,
+    package: &str,
+    version: &str,
+) -> Result<ResolvedAubeGlobalInstall> {
+    let canonical_stage = dunce::canonicalize(stage_root)
+        .with_context(|| format!("canonicalizing Aube stage {}", stage_root.display()))?;
+    let root_metadata = std::fs::symlink_metadata(package_root)
+        .with_context(|| format!("reading Aube global root {}", package_root.display()))?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "Aube global package root is not a real directory: {}",
+            package_root.display()
+        ));
+    }
+    let canonical_package_root = dunce::canonicalize(package_root)
+        .with_context(|| format!("canonicalizing Aube global root {}", package_root.display()))?;
+    if canonical_package_root == canonical_stage
+        || !canonical_package_root.starts_with(&canonical_stage)
+    {
+        return Err(anyhow!(
+            "Aube global package root escapes the osdk staging directory: {}",
+            canonical_package_root.display()
+        ));
+    }
+
+    let mut pointer_count = 0usize;
+    let mut valid = Vec::new();
+    let mut rejected = Vec::new();
+    for entry in std::fs::read_dir(&canonical_package_root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_aube_hash_pointer_name(&name) {
+            continue;
+        }
+        pointer_count += 1;
+        let pointer = entry.path();
+        let result = (|| -> Result<PathBuf> {
+            let metadata = std::fs::symlink_metadata(&pointer)?;
+            if !is_aube_hash_pointer(&metadata) {
+                return Err(anyhow!("hash entry is not a symlink"));
+            }
+            let target = dunce::canonicalize(&pointer)?;
+            let target_metadata = std::fs::symlink_metadata(&target)?;
+            if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
+                return Err(anyhow!("pointer target is not a real directory"));
+            }
+            if target == canonical_package_root
+                || target.parent() != Some(canonical_package_root.as_path())
+            {
+                return Err(anyhow!("pointer target escapes the Aube global root"));
+            }
+            validate_aube_project(&target, package, version)?;
+            Ok(target)
+        })();
+        match result {
+            Ok(install_dir) => valid.push(ResolvedAubeGlobalInstall {
+                pointer,
+                install_dir,
+            }),
+            Err(error) => rejected.push(format!("{name}: {error:#}")),
+        }
+    }
+
+    match valid.len() {
+        1 if pointer_count == 1 => Ok(valid.pop().expect("one candidate exists")),
+        0 => Err(anyhow!(
+            "Aube global install did not produce exactly one valid hash pointer under {} (found {pointer_count}); {}",
+            canonical_package_root.display(),
+            if rejected.is_empty() {
+                "no 64-character lowercase hash pointers found".to_string()
+            } else {
+                rejected.join("; ")
+            }
+        )),
+        _ => Err(anyhow!(
+            "Aube global install is ambiguous under {}: found {} valid hash pointers ({} total)",
+            canonical_package_root.display(),
+            valid.len(),
+            pointer_count
+        )),
+    }
+}
+
+#[cfg(not(windows))]
+fn is_aube_hash_pointer(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(windows)]
+fn is_aube_hash_pointer(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn is_aube_hash_pointer_name(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn remove_aube_hash_pointer(pointer: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        std::fs::remove_dir(pointer)
+            .with_context(|| format!("removing Aube global junction {}", pointer.display()))?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(pointer)
+            .with_context(|| format!("removing Aube global symlink {}", pointer.display()))?;
+    }
+    Ok(())
+}
+
+fn validate_aube_project(project: &Path, package: &str, version: &str) -> Result<()> {
+    let project_metadata = std::fs::symlink_metadata(project)?;
+    if !project_metadata.is_dir() || project_metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "Aube install is not a real directory: {}",
+            project.display()
+        ));
+    }
+    let canonical_project = dunce::canonicalize(project)
+        .with_context(|| format!("canonicalizing Aube install {}", project.display()))?;
+    let root_manifest_path = canonical_project.join("package.json");
+    let root_manifest = read_bounded_regular_json(&root_manifest_path, "Aube root manifest")?;
+    let dependencies = root_manifest
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow!("Aube root manifest has no dependencies object"))?;
+    if root_manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        != Some("aube-global")
+        || root_manifest
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            != Some("0.0.0")
+        || root_manifest
+            .get("private")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || dependencies.len() != 1
+        || dependencies
+            .get(package)
+            .and_then(serde_json::Value::as_str)
+            != Some(version)
+    {
+        return Err(anyhow!(
+            "Aube root manifest does not describe exactly {package}@{version}"
+        ));
+    }
+
+    let package_manifest_path = canonical_project
+        .join("node_modules")
+        .join(package)
+        .join("package.json");
+    let package_manifest =
+        read_bounded_regular_json(&package_manifest_path, "installed npm package manifest")?;
+    let canonical_manifest = dunce::canonicalize(&package_manifest_path)?;
+    let canonical_package_dir = canonical_manifest
+        .parent()
+        .ok_or_else(|| anyhow!("installed package manifest has no parent"))?;
+    if !canonical_package_dir.starts_with(&canonical_project)
+        || !canonical_manifest.starts_with(canonical_package_dir)
+        || package_manifest
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            != Some(package)
+        || package_manifest
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            != Some(version)
+    {
+        return Err(anyhow!(
+            "installed package manifest does not match {package}@{version}"
+        ));
+    }
+    validate_aube_lock_identity(&canonical_project.join("aube-lock.yaml"), package, version)
+}
+
+fn read_bounded_regular_json(path: &Path, description: &str) -> Result<serde_json::Value> {
+    const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("reading {description} metadata at {}", path.display()))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_MANIFEST_BYTES
+    {
+        return Err(anyhow!(
+            "{description} is not a bounded regular file: {}",
+            path.display()
+        ));
+    }
+    serde_json::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("parsing {description} {}", path.display()))
+}
+
+fn validate_aube_lock_identity(path: &Path, package: &str, version: &str) -> Result<()> {
+    const MAX_LOCK_BYTES: u64 = 64 * 1024 * 1024;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("reading Aube lock metadata at {}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_LOCK_BYTES {
+        return Err(anyhow!(
+            "Aube lock is not a bounded regular file: {}",
+            path.display()
+        ));
+    }
+    let value: serde_yaml::Value = serde_yaml::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("parsing Aube lock {}", path.display()))?;
+    if yaml_lock_major(
+        value
+            .get("lockfileVersion")
+            .ok_or_else(|| anyhow!("{} is missing lockfileVersion", path.display()))?,
+    )? != 9
+    {
+        return Err(anyhow!("unsupported Aube global lock format"));
+    }
+    let dependencies = value
+        .get("importers")
+        .and_then(|value| value.get("."))
+        .and_then(|value| value.get("dependencies"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| anyhow!("Aube lock has no root dependency map"))?;
+    if dependencies.len() != 1 {
+        return Err(anyhow!(
+            "Aube lock does not contain exactly one root dependency"
+        ));
+    }
+    let dependency_key = serde_yaml::Value::String(package.into());
+    let dependency = dependencies
+        .get(&dependency_key)
+        .ok_or_else(|| anyhow!("Aube lock is missing {package}"))?;
+    let specifier = dependency
+        .get("specifier")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_default();
+    let resolved = dependency
+        .get("version")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_default();
+    if specifier != version
+        || !(resolved == version
+            || resolved
+                .strip_prefix(version)
+                .is_some_and(|suffix| suffix.starts_with('(')))
+    {
+        return Err(anyhow!(
+            "Aube lock dependency identity mismatch for {package}@{version}"
+        ));
+    }
+    let package_key = serde_yaml::Value::String(format!("{package}@{version}"));
+    let integrity = value
+        .get("packages")
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|packages| packages.get(&package_key))
+        .and_then(|record| record.get("resolution"))
+        .and_then(|resolution| resolution.get("integrity"))
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_default();
+    if integrity.trim().is_empty() {
+        return Err(anyhow!(
+            "Aube lock is missing integrity for {package}@{version}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_owned_stage_directory(stage_root: &Path, directory: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(directory)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(anyhow!(
+            "Aube staging component is not a real directory: {}",
+            directory.display()
+        ));
+    }
+    let stage = dunce::canonicalize(stage_root)?;
+    let directory = dunce::canonicalize(directory)?;
+    if directory == stage || !directory.starts_with(&stage) {
+        return Err(anyhow!(
+            "Aube staging component escapes {}: {}",
+            stage.display(),
+            directory.display()
+        ));
+    }
     Ok(())
 }
 
@@ -1296,11 +2167,6 @@ fn path_relative_to(target: &Path, base: &Path) -> Result<PathBuf> {
     Ok(relative)
 }
 
-async fn selected_package_source(app: &App, backend: &dyn Backend) -> Result<Option<String>> {
-    let sources = select::ranked_source_list(&app.ctx, backend).await?;
-    Ok(sources.first().map(|source| source.download_url.clone()))
-}
-
 async fn run_native_installer(
     app: &App,
     backend: &NpmPackageBackend,
@@ -1308,14 +2174,15 @@ async fn run_native_installer(
     installer: NpmInstaller,
     runtime: &ManagedRuntime,
     layout: &GlobalInstallLayout,
+    selected_registry: Option<&str>,
 ) -> Result<()> {
     let (_, manager_version, executable) = runtime
         .manager
         .as_ref()
         .ok_or_else(|| anyhow!("managed {installer} was not prepared"))?;
-    let (manager, executable_alias) = match installer {
-        NpmInstaller::Npm => (PackageManager::Npm, "npm"),
-        NpmInstaller::Pnpm => (PackageManager::Pnpm, "pnpm"),
+    let manager = match installer {
+        NpmInstaller::Npm => PackageManager::Npm,
+        NpmInstaller::Pnpm => PackageManager::Pnpm,
         _ => unreachable!(),
     };
     let package_spec = format!("{}@{}", backend.package(), version.version);
@@ -1328,17 +2195,6 @@ async fn run_native_installer(
         &app.ctx.dirs,
         app.ctx.config.settings.offline,
     )?;
-    let logical_args =
-        native_preflight_args(installer, &package_spec, app.ctx.config.settings.offline);
-    let registry_plan = package_registry::plan(
-        &app.ctx,
-        &layout.root,
-        manager,
-        executable_alias,
-        &logical_args,
-        |_| None,
-    )
-    .await?;
     let mut env = isolated_native_env(
         app,
         &layout.root,
@@ -1347,21 +2203,54 @@ async fn run_native_installer(
         &runtime.node_bin,
         manager_version,
     )?;
-    match registry_plan {
-        RegistryPlan::Selected { url, .. } => {
-            env.insert(package_registry::registry_env(manager).into(), url);
-        }
-        RegistryPlan::Unavailable { probes } => {
-            return Err(unavailable_registry_error(manager, &probes));
-        }
-        RegistryPlan::PassThrough { .. } if app.ctx.config.settings.offline => {}
-        RegistryPlan::PassThrough { reason } => {
-            return Err(anyhow!(
-                "cannot safely isolate global {manager} install: registry preflight passed through ({reason})"
-            ));
-        }
+    if let Some(url) = selected_registry {
+        env.insert(package_registry::registry_env(manager).into(), url.into());
     }
     run_managed_command(executable, &args, &env, &layout.root)
+}
+
+fn global_registry_ctx(app: &App) -> Result<osdk_core::backend::Ctx> {
+    let mut config = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+    // Command-line offline mode is already folded into the active context and
+    // must remain authoritative even though project configuration is excluded.
+    config.settings.offline = app.ctx.config.settings.offline;
+    Ok(osdk_core::backend::Ctx {
+        dirs: app.ctx.dirs.clone(),
+        platform: app.ctx.platform,
+        config,
+        client: app.ctx.client.clone(),
+        cas: app.ctx.cas.clone(),
+        show_progress: app.ctx.show_progress,
+    })
+}
+
+async fn plan_isolated_global_registry(
+    app: &App,
+    cwd: &Path,
+    manager: PackageManager,
+    executable_alias: &str,
+    logical_args: &[String],
+) -> Result<Option<String>> {
+    let context = global_registry_ctx(app)?;
+    match package_registry::plan(
+        &context,
+        cwd,
+        manager,
+        executable_alias,
+        logical_args,
+        |key| std::env::var(key).ok(),
+    )
+    .await?
+    {
+        RegistryPlan::Selected { url, .. } => Ok(Some(url)),
+        RegistryPlan::Unavailable { probes } => Err(unavailable_registry_error(manager, &probes)),
+        RegistryPlan::PassThrough { .. } if context.config.settings.offline => Ok(None),
+        RegistryPlan::PassThrough { reason } => Err(anyhow!(osdk_core::t!(
+            "err.npm_global_registry_isolation",
+            manager = manager,
+            reason = reason
+        ))),
+    }
 }
 
 fn native_args(
@@ -1373,7 +2262,7 @@ fn native_args(
     dirs: &osdk_core::dirs::Dirs,
     offline: bool,
 ) -> Result<Vec<String>> {
-    let allow_builds = version.options.get("allow_builds").map(String::as_str);
+    let build_policy = npm_build_policy(version)?;
     match installer {
         NpmInstaller::Npm => {
             let mut args = vec![
@@ -1384,12 +2273,10 @@ fn native_args(
                 "--audit=false".into(),
                 "--fund=false".into(),
             ];
-            match allow_builds {
-                None | Some("" | "false" | "0" | "no" | "off") => {
-                    args.push("--ignore-scripts".into())
-                }
-                Some("true" | "1" | "yes" | "on") => {}
-                Some(_) => {
+            match build_policy {
+                NpmBuildPolicy::Deny => args.push("--ignore-scripts".into()),
+                NpmBuildPolicy::AllowAll => {}
+                NpmBuildPolicy::Packages(_) => {
                     return Err(anyhow!(
                         "installer `npm` cannot enforce a package allowlist; use allow_builds=false or true"
                     ))
@@ -1412,19 +2299,11 @@ fn native_args(
                 "--store-dir".into(),
                 dirs.store.join("pnpm-store").display().to_string(),
             ];
-            match allow_builds {
-                None | Some("" | "false" | "0" | "no" | "off") => {
-                    args.push("--ignore-scripts".into())
-                }
-                Some("true" | "1" | "yes" | "on") => {
-                    args.push("--dangerously-allow-all-builds".into())
-                }
-                Some(packages) => {
-                    for package in packages
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|item| !item.is_empty())
-                    {
+            match build_policy {
+                NpmBuildPolicy::Deny => args.push("--ignore-scripts".into()),
+                NpmBuildPolicy::AllowAll => args.push("--dangerously-allow-all-builds".into()),
+                NpmBuildPolicy::Packages(packages) => {
+                    for package in packages {
                         args.push(format!("--allow-build={package}"));
                     }
                 }
@@ -1439,6 +2318,7 @@ fn native_args(
     }
 }
 
+#[cfg(test)]
 fn native_preflight_args(
     installer: NpmInstaller,
     package_spec: &str,
@@ -1604,11 +2484,15 @@ fn run_managed_command(
     if output.status.success() {
         Ok(())
     } else {
+        const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+        let stdout = &output.stdout[..output.stdout.len().min(MAX_DIAGNOSTIC_BYTES)];
+        let stderr = &output.stderr[..output.stderr.len().min(MAX_DIAGNOSTIC_BYTES)];
         Err(anyhow!(
-            "managed installer {} failed with {}:\n{}",
+            "managed installer {} failed with {}:\nstdout:\n{}\nstderr:\n{}",
             executable.display(),
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(stdout),
+            String::from_utf8_lossy(stderr)
         ))
     }
 }
@@ -2107,6 +2991,14 @@ fn completed_install_matches_at(
         Ok(manifest) => manifest,
         Err(_) => return Ok(false),
     };
+    // Aube's former synthetic-project implementation used a different root
+    // manifest. Requiring the true global-add manifest and graph prevents an
+    // apparently complete legacy tree from bypassing the sidecar migration.
+    if installer == NpmInstaller::Aube
+        && validate_aube_project(&layout.project, backend.package(), &version.version).is_err()
+    {
+        return Ok(false);
+    }
     if validate_global_package_identity(backend, version, installer, layout).is_err() {
         return Ok(false);
     }
@@ -2142,12 +3034,16 @@ fn completed_install_matches_at(
                 && !manifest.metadata.contains_key("lock_sha256")
         }
     };
+    let expected_build_policy = npm_build_policy_identity(version)?;
+    let build_policy_matches =
+        manifest.metadata.get("build_policy") == Some(&expected_build_policy);
     let bin_dir = &layout.bin;
     Ok(manifest.id == version.backend
         && manifest.version.as_deref() == Some(version.version.as_str())
         && manifest.metadata.get("installer").map(String::as_str) == Some(installer.as_str())
         && manifest.metadata.get("scope").map(String::as_str) == Some("global")
         && manifest.metadata.get("node_version").map(String::as_str) == Some(node_version)
+        && build_policy_matches
         && native_matches
         && bin_dir.is_dir())
 }
@@ -2185,8 +3081,8 @@ fn persist_global_config(
         .options
         .iter()
         .filter(|(key, _)| !key.starts_with("__osdk_"))
-        .map(|(key, value)| (key.clone(), option_value(key, value)))
-        .collect::<BTreeMap<_, _>>();
+        .map(|(key, value)| Ok((key.clone(), option_value(key, value)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
     options.insert(
         INSTALLER_OPTION.into(),
         osdk_core::config::ToolConfigValue::String(installer.as_str().into()),
@@ -2201,33 +3097,17 @@ fn persist_global_config(
     )
 }
 
-fn option_value(key: &str, value: &str) -> osdk_core::config::ToolConfigValue {
+fn option_value(key: &str, value: &str) -> Result<osdk_core::config::ToolConfigValue> {
     if key == "allow_builds" {
-        return match value.to_ascii_lowercase().as_str() {
-            "true" => osdk_core::config::ToolConfigValue::Bool(true),
-            "false" => osdk_core::config::ToolConfigValue::Bool(false),
-            _ => osdk_core::config::ToolConfigValue::Array(
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-            ),
-        };
+        return Ok(match parse_npm_build_policy(Some(value))? {
+            NpmBuildPolicy::Deny => osdk_core::config::ToolConfigValue::Bool(false),
+            NpmBuildPolicy::AllowAll => osdk_core::config::ToolConfigValue::Bool(true),
+            NpmBuildPolicy::Packages(packages) => {
+                osdk_core::config::ToolConfigValue::Array(packages)
+            }
+        });
     }
-    osdk_core::config::ToolConfigValue::String(value.into())
-}
-
-fn build_policy_flags(version: &ToolVersion) -> Result<(bool, bool)> {
-    let Some(raw) = version.options.get("allow_builds") else {
-        return Ok((false, false));
-    };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "false" | "0" | "no" | "off" => Ok((false, false)),
-        "true" | "1" | "yes" | "on" => Ok((true, true)),
-        _ => Ok((true, false)),
-    }
+    Ok(osdk_core::config::ToolConfigValue::String(value.into()))
 }
 
 fn apply_source_override(app: &mut App, tool: &str) {
@@ -2334,6 +3214,135 @@ mod tests {
             assert_eq!(identity.format, format);
             assert_eq!(identity.sha256.len(), 64);
         }
+    }
+
+    #[test]
+    fn aube_global_arguments_enforce_relocatable_build_policy() {
+        let base = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let denied = aube_global_args(&base, "fixture-cli@1.2.3".into(), None).unwrap();
+        assert!(denied.iter().any(|arg| arg == "--deny-build=*"));
+        assert!(!denied.iter().any(|arg| arg == "--ignore-scripts"));
+        assert!(denied.iter().any(|arg| arg == "--disable-gvs"));
+        assert!(denied
+            .iter()
+            .any(|arg| arg == "--config.nodeLinker=hoisted"));
+
+        let mut allow_all = base.clone();
+        allow_all
+            .options
+            .insert("allow_builds".into(), " TRUE ".into());
+        let allow_all = aube_global_args(&allow_all, "fixture-cli@1.2.3".into(), None).unwrap();
+        assert!(allow_all
+            .iter()
+            .any(|arg| arg == "--dangerously-allow-all-builds"));
+        assert!(!allow_all.iter().any(|arg| arg.starts_with("--deny-build")));
+
+        let mut selected = base;
+        selected.options.insert(
+            "allow_builds".into(),
+            " @Scope/Native, Plain-Native ".into(),
+        );
+        let selected = aube_global_args(
+            &selected,
+            "fixture-cli@1.2.3".into(),
+            Some("https://registry.example.test/".into()),
+        )
+        .unwrap();
+        assert!(selected
+            .iter()
+            .any(|arg| arg == "--allow-build=@scope/native"));
+        assert!(selected
+            .iter()
+            .any(|arg| arg == "--allow-build=plain-native"));
+        assert!(selected
+            .iter()
+            .any(|arg| arg == "--registry=https://registry.example.test/"));
+    }
+
+    #[cfg(unix)]
+    fn write_valid_aube_candidate(root: &Path, hash: char, package: &str, version: &str) {
+        let install = root.join(format!("fixture-{hash}"));
+        let package_dir = install.join("node_modules").join(package);
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            install.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "aube-global",
+                "version": "0.0.0",
+                "private": true,
+                "dependencies": { package: version }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            install.join("aube-lock.yaml"),
+            format!(
+                "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      {package}:\n        specifier: {version}\n        version: {version}\npackages:\n  {package}@{version}:\n    resolution: {{integrity: sha512-Zml4dHVyZQ==}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": package,
+                "version": version,
+                "bin": { "fixture-cli": "cli.js" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(package_dir.join("cli.js"), "fixture").unwrap();
+        std::os::unix::fs::symlink(&install, root.join(hash.to_string().repeat(64))).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aube_global_resolver_requires_one_contained_exact_hash_pointer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let package_root = stage.join("aube-global/global-aube");
+        std::fs::create_dir_all(&package_root).unwrap();
+
+        let missing =
+            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
+        assert!(missing
+            .to_string()
+            .contains("exactly one valid hash pointer"));
+
+        write_valid_aube_candidate(&package_root, 'a', "fixture-cli", "1.2.3");
+        let selected =
+            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap();
+        assert_eq!(
+            selected.install_dir,
+            dunce::canonicalize(package_root.join("fixture-a")).unwrap()
+        );
+
+        write_valid_aube_candidate(&package_root, 'b', "fixture-cli", "1.2.3");
+        let ambiguous =
+            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
+        assert!(ambiguous.to_string().contains("ambiguous"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aube_global_resolver_rejects_escape_and_wrong_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stage = temporary.path().join("stage");
+        let package_root = stage.join("aube-global/global-aube");
+        std::fs::create_dir_all(&package_root).unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, package_root.join("c".repeat(64))).unwrap();
+        let escaped =
+            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
+        assert!(escaped.to_string().contains("escapes the Aube global root"));
+
+        std::fs::remove_file(package_root.join("c".repeat(64))).unwrap();
+        write_valid_aube_candidate(&package_root, 'd', "fixture-cli", "9.9.9");
+        let mismatch =
+            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
+        assert!(mismatch.to_string().contains("does not describe exactly"));
     }
 
     #[test]
@@ -2449,7 +3458,10 @@ mod tests {
 
             recover_interrupted_promotion(&final_root).unwrap();
 
-            let expected = if phase == PromotionPhase::Activated {
+            let expected = if matches!(
+                phase,
+                PromotionPhase::NewPromoted | PromotionPhase::Activated
+            ) {
                 b"new".as_slice()
             } else {
                 b"old".as_slice()
@@ -2463,7 +3475,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_first_install_without_previous_root_is_removed() {
+    fn interrupted_first_install_recovers_by_phase() {
         for phase in [
             PromotionPhase::Prepared,
             PromotionPhase::NewPromoted,
@@ -2495,11 +3507,201 @@ mod tests {
 
             assert_eq!(
                 final_root.exists(),
-                phase == PromotionPhase::Activated,
+                matches!(
+                    phase,
+                    PromotionPhase::NewPromoted | PromotionPhase::Activated
+                ),
                 "phase {phase:?}"
             );
             assert!(transaction_debris(parent).is_empty());
         }
+    }
+
+    #[test]
+    fn activation_marker_is_written_only_after_publication_succeeds() {
+        let temporary = tempfile::tempdir().unwrap();
+        let final_root = temporary.path().join("npm-global/tool/1.0.0");
+        std::fs::create_dir_all(&final_root).unwrap();
+        std::fs::write(final_root.join("payload"), b"old").unwrap();
+        let staged = StagedInstall::begin(&final_root).unwrap();
+        std::fs::write(staged.root().join("payload"), b"new").unwrap();
+        let mut promoted = staged.promote().unwrap();
+
+        let error = publish_then_activate(Some(&promoted), || {
+            Err(anyhow!("injected publication crash"))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected publication crash"));
+        let journal = read_promotion_journal(&promotion_journal_path(&final_root))
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.phase, PromotionPhase::NewPromoted);
+        promoted.rollback().unwrap();
+    }
+
+    #[test]
+    fn new_promoted_recovery_never_restores_old_tree_over_partial_new_metadata() {
+        for (config, lock) in [
+            (b"old-config".as_slice(), b"old-lock".as_slice()),
+            (b"new-config".as_slice(), b"old-lock".as_slice()),
+            (b"new-config".as_slice(), b"new-lock".as_slice()),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let final_root = temporary.path().join("npm-global/tool/1.0.0");
+            let parent = final_root.parent().unwrap();
+            let stage_root = parent.join(".1.0.0.osdk-stage-crash");
+            let backup_root = parent.join(".1.0.0.osdk-backup-crash");
+            let config_path = temporary.path().join("config.toml");
+            let lock_path = temporary.path().join("osdk.lock");
+            std::fs::create_dir_all(&final_root).unwrap();
+            std::fs::create_dir_all(&stage_root).unwrap();
+            std::fs::create_dir_all(&backup_root).unwrap();
+            std::fs::write(final_root.join("payload"), b"new").unwrap();
+            std::fs::write(stage_root.join("payload"), b"staged").unwrap();
+            std::fs::write(backup_root.join("payload"), b"old").unwrap();
+            std::fs::write(&config_path, config).unwrap();
+            std::fs::write(&lock_path, lock).unwrap();
+            write_promotion_journal(
+                &promotion_journal_path(&final_root),
+                &PromotionJournal {
+                    stage_root,
+                    backup_root: backup_root.clone(),
+                    had_previous: true,
+                    phase: PromotionPhase::NewPromoted,
+                },
+            )
+            .unwrap();
+
+            recover_interrupted_promotion(&final_root).unwrap();
+
+            assert_eq!(std::fs::read(final_root.join("payload")).unwrap(), b"new");
+            assert_eq!(std::fs::read(config_path).unwrap(), config);
+            assert_eq!(std::fs::read(lock_path).unwrap(), lock);
+            assert!(!backup_root.exists());
+            assert!(!promotion_journal_path(&final_root).exists());
+        }
+    }
+
+    #[test]
+    fn new_promoted_recovery_then_publication_converges_after_each_metadata_boundary() {
+        for crash_after in ["promotion", "config", "lock", "shims"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let final_root = temporary.path().join("npm-global/tool/1.0.0");
+            let parent = final_root.parent().unwrap();
+            let stage_root = parent.join(".1.0.0.osdk-stage-crash");
+            let backup_root = parent.join(".1.0.0.osdk-backup-crash");
+            let config_path = temporary.path().join("config.toml");
+            let lock_path = temporary.path().join("osdk.lock");
+            let shim_path = temporary.path().join("shim");
+            std::fs::create_dir_all(&final_root).unwrap();
+            std::fs::create_dir_all(&stage_root).unwrap();
+            std::fs::create_dir_all(&backup_root).unwrap();
+            std::fs::write(final_root.join("payload"), b"new").unwrap();
+            std::fs::write(stage_root.join("payload"), b"staged").unwrap();
+            std::fs::write(backup_root.join("payload"), b"old").unwrap();
+            std::fs::write(&config_path, b"old-config").unwrap();
+            std::fs::write(&lock_path, b"old-lock").unwrap();
+            std::fs::write(&shim_path, b"old-shim").unwrap();
+            if matches!(crash_after, "config" | "lock" | "shims") {
+                std::fs::write(&config_path, b"new-config").unwrap();
+            }
+            if matches!(crash_after, "lock" | "shims") {
+                std::fs::write(&lock_path, b"new-lock").unwrap();
+            }
+            if crash_after == "shims" {
+                std::fs::write(&shim_path, b"new-shim").unwrap();
+            }
+            write_promotion_journal(
+                &promotion_journal_path(&final_root),
+                &PromotionJournal {
+                    stage_root,
+                    backup_root,
+                    had_previous: true,
+                    phase: PromotionPhase::NewPromoted,
+                },
+            )
+            .unwrap();
+
+            recover_interrupted_promotion(&final_root).unwrap();
+            publish_then_activate(None, || {
+                std::fs::write(&config_path, b"new-config")?;
+                std::fs::write(&lock_path, b"new-lock")?;
+                std::fs::write(&shim_path, b"new-shim")?;
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(std::fs::read(final_root.join("payload")).unwrap(), b"new");
+            assert_eq!(std::fs::read(config_path).unwrap(), b"new-config");
+            assert_eq!(std::fs::read(lock_path).unwrap(), b"new-lock");
+            assert_eq!(std::fs::read(shim_path).unwrap(), b"new-shim");
+            assert!(transaction_debris(parent).is_empty());
+        }
+    }
+
+    #[test]
+    fn successful_publication_writes_activation_marker_last() {
+        let temporary = tempfile::tempdir().unwrap();
+        let final_root = temporary.path().join("npm-global/tool/1.0.0");
+        std::fs::create_dir_all(&final_root).unwrap();
+        std::fs::write(final_root.join("payload"), b"old").unwrap();
+        let staged = StagedInstall::begin(&final_root).unwrap();
+        std::fs::write(staged.root().join("payload"), b"new").unwrap();
+        let mut promoted = staged.promote().unwrap();
+        let publication_ran = std::cell::Cell::new(false);
+
+        publish_then_activate(Some(&promoted), || {
+            publication_ran.set(true);
+            let journal = read_promotion_journal(&promotion_journal_path(&final_root))?
+                .expect("promotion journal exists during publication");
+            assert_eq!(journal.phase, PromotionPhase::NewPromoted);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(publication_ran.get());
+        let journal = read_promotion_journal(&promotion_journal_path(&final_root))
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.phase, PromotionPhase::Activated);
+        promoted.finish();
+    }
+
+    #[test]
+    fn shim_publication_sync_accepts_created_and_removed_entries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(temporary.path());
+        let shims = dirs.shims();
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("created"), b"shim").unwrap();
+
+        sync_shim_publication(&dirs, &["created".into(), "removed".into()]).unwrap();
+    }
+
+    #[test]
+    fn shim_sync_failure_does_not_advance_activation_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let final_root = temporary.path().join("npm-global/tool/1.0.0");
+        std::fs::create_dir_all(&final_root).unwrap();
+        std::fs::write(final_root.join("payload"), b"old").unwrap();
+        let staged = StagedInstall::begin(&final_root).unwrap();
+        std::fs::write(staged.root().join("payload"), b"new").unwrap();
+        let mut promoted = staged.promote().unwrap();
+        let dirs = test_dirs(temporary.path());
+        std::fs::create_dir_all(dirs.shims().join("not-a-file")).unwrap();
+
+        let error = publish_then_activate(Some(&promoted), || {
+            sync_shim_publication(&dirs, &["not-a-file".into()])
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not a file"));
+        let journal = read_promotion_journal(&promotion_journal_path(&final_root))
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.phase, PromotionPhase::NewPromoted);
+        promoted.rollback().unwrap();
     }
 
     #[test]
@@ -2518,6 +3720,19 @@ mod tests {
 
         assert_eq!(std::fs::read(final_root.join("payload")).unwrap(), b"old");
         assert!(transaction_debris(parent).is_empty());
+    }
+
+    #[test]
+    fn first_global_install_recovery_tolerates_missing_parent_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let final_root = temporary
+            .path()
+            .join("not-created/npm-global/fixture-cli/1.0.0");
+
+        recover_interrupted_promotion(&final_root).unwrap();
+
+        assert!(!final_root.exists());
+        assert!(!final_root.parent().unwrap().exists());
     }
 
     #[test]
@@ -2910,6 +4125,7 @@ mod tests {
             ("installer".into(), "npm".into()),
             ("scope".into(), "global".into()),
             ("node_version".into(), "22.1.0".into()),
+            ("build_policy".into(), "deny".into()),
         ]);
         manifest.write_atomic(root).unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
@@ -3063,6 +4279,7 @@ mod tests {
             ("installer".into(), "npm".into()),
             ("scope".into(), "global".into()),
             ("node_version".into(), "22.1.0".into()),
+            ("build_policy".into(), "deny".into()),
         ]);
         manifest.write_atomic(&root).unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
@@ -3103,6 +4320,11 @@ mod tests {
         let project = layout.project.clone();
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"name":"aube-global","version":"0.0.0","private":true,"dependencies":{"prettier":"3.6.2"}}"#,
+        )
+        .unwrap();
         let package = project.join("node_modules/prettier");
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
@@ -3137,7 +4359,11 @@ mod tests {
             )
             .unwrap();
         }
-        std::fs::write(project.join("aube-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        std::fs::write(
+            project.join("aube-lock.yaml"),
+            "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      prettier:\n        specifier: 3.6.2\n        version: 3.6.2\npackages:\n  prettier@3.6.2:\n    resolution: {integrity: sha512-Zml4dHVyZQ==}\n",
+        )
+        .unwrap();
         let digest = read_native_lock(&project.join("aube-lock.yaml"), NpmInstaller::Aube).unwrap();
         let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:prettier").unwrap();
         manifest.version = Some("3.6.2".into());
@@ -3153,6 +4379,7 @@ mod tests {
             ("installer".into(), "aube".into()),
             ("scope".into(), "global".into()),
             ("node_version".into(), "22.1.0".into()),
+            ("build_policy".into(), "deny".into()),
             ("native_lock_format".into(), "aube-v9".into()),
             ("lock_sha256".into(), digest.sha256),
         ]);

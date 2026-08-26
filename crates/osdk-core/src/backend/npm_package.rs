@@ -2549,7 +2549,7 @@ fn npm_channel_spec(spec: &str) -> bool {
         && spec
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        && matches!(npm_spec_satisfaction(spec, "0.0.0"), None)
+        && npm_spec_satisfaction(spec, "0.0.0").is_none()
 }
 
 fn project_lock_binds_selection(

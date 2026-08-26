@@ -185,16 +185,6 @@ pub async fn install_packages(request: EmbeddedInstallRequest<'_>) -> Result<()>
     .map_err(|error| Error::other(format_aube_error(&error)))
 }
 
-/// Install one exact package into an osdk-owned synthetic global project.
-///
-/// Aube's CLI global path owns process-global cwd and user-global directories,
-/// so an embedding host cannot safely call it. A synthetic project provides
-/// equivalent package materialization while keeping the native lock, bins,
-/// cache, store, and Node runtime inside paths selected by osdk.
-pub async fn install_global_package(request: EmbeddedInstallRequest<'_>) -> Result<()> {
-    install_packages(request).await
-}
-
 pub async fn add_to_project(request: EmbeddedProjectAddRequest<'_>) -> Result<()> {
     let registry = request.registry.clone();
     let (options, overrides) = project_add_options(&request);

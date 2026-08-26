@@ -752,6 +752,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.npm_global_aube_offline_unsupported",
+        (
+            "global Aube installs are unavailable in offline mode because Aube 2.1 does not support offline global add",
+            "Aube 2.1 不支持全局离线添加，因此离线模式下无法执行 Aube 全局安装",
+        ),
+    );
+    m.insert(
+        "err.npm_global_registry_isolation",
+        (
+            "cannot safely isolate global {manager} install: registry preflight passed through ({reason})",
+            "无法安全隔离全局 {manager} 安装：Registry 预检要求透传（{reason}）",
+        ),
+    );
+    m.insert(
         "err.npm_lock_graph_option_missing",
         (
             "locked npm graph is missing private option `{key}`",
