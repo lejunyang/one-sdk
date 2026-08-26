@@ -2124,19 +2124,12 @@ fn remove_unowned_global_npm_shims(
 
 fn global_npm_metadata_snapshots(
     app: &App,
-    bin_names: &std::collections::BTreeSet<String>,
+    _bin_names: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<GlobalNpmPathSnapshot>> {
-    let mut paths = vec![
+    let paths = vec![
         app.ctx.dirs.user_config_file(),
         app.ctx.dirs.user_lock_file(),
     ];
-    for name in bin_names {
-        paths.push(app.ctx.dirs.shims().join(name));
-        #[cfg(windows)]
-        paths.push(app.ctx.dirs.shims().join(format!("{name}.cmd")));
-    }
-    paths.sort();
-    paths.dedup();
     paths
         .into_iter()
         .map(GlobalNpmPathSnapshot::capture)
