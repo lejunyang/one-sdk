@@ -61,17 +61,51 @@ disable lifecycle scripts.
 
 After a project installer succeeds, osdk verifies the installed package's name
 and exact version, parses its declared bin entries, confines each canonical
-target to the package directory, and checks the matching project launcher. It
-then atomically updates `osdk.toml` with exact Node plus the structured npm
-selection, writes compact native-lock metadata to the project `osdk.lock`, and
-trusts the exact generated config. It does not create an osdk-private npm tool
-install for this branch.
+target to the package directory, and checks the package-manager launcher. It
+does not put the raw `node_modules/.bin` on PATH. Instead, it builds an immutable
+curated generation containing only the declared bins of npm packages selected
+in project configuration:
 
-Shell activation exposes a real project's `node_modules/.bin` only when the npm
-selection originates from a trusted config at the same canonical root as the
-nearest regular `package.json`. `node_modules` and `.bin` must be real, confined
-directories. Discovery stops at the nearest package boundary, never creates a
-missing directory, and omits a `.bin` that could shadow `node`.
+```text
+<project>/.osdk/npm-bin/
+  current
+  publish.lock
+  generations/<sha256>/
+    manifest.json
+    bin/<activated curated launchers>
+
+<project>/node_modules/<configured-package>/<declared target>
+<project>/node_modules/.bin/<source launcher, validation only; never activated>
+```
+
+The generation ID is SHA-256 over its schema, platform, sorted selections, and
+sorted bin records. On Unix the curated entries are relative symlinks to the
+canonical declared package targets; on Windows they are constrained `.cmd`
+wrappers invoking managed Node. Duplicate command names across selected
+packages fail closed (case-insensitively on Windows). Generation construction
+uses a staging-directory rename, and the JSON `current` pointer is written
+through an atomically replaced temporary file. Existing selections are carried
+forward only while their configured specs still match. A later transaction
+failure restores the previous pointer; completed unreferenced generations may
+remain and there is currently no stale-generation garbage collection.
+
+After publication, osdk atomically updates `osdk.toml` with exact Node plus the
+structured npm selection, writes compact native-lock metadata to project
+`osdk.lock`, and trusts the exact generated config. It does not create an
+osdk-private npm tool install for this branch. `.osdk/npm-bin/` is derived local
+state and should normally be ignored with `/.osdk/npm-bin/` at the package root
+or `**/.osdk/npm-bin/` for nested workspace packages, rather than ignoring every
+possible future `.osdk` file.
+
+At each shell activation, osdk first requires an npm selection from a trusted
+project config at the same canonical root as the nearest regular
+`package.json`. It then revalidates the `current` pointer, schema/platform and
+content-derived generation identity, owned non-symlink directories, exact file
+set, configured specs, installed package identities and versions, declared
+targets, and every curated launcher. Missing or invalid state is silently
+omitted from the activation delta. A valid curated bin directory is prepended
+ahead of osdk shims and managed runtimes, unless it contains a `node` command,
+in which case the entire generation is omitted.
 
 ## Embedded Aube installation
 
@@ -91,7 +125,7 @@ across packages, versions, and project/global scopes:
 <installs>/npm/<package>/<version>/
   project/package.json
   project/aube-lock.yaml
-  project/node_modules/.bin/...
+  project/node_modules/.bin/...  # isolated/global source bins exposed via osdk shims
   .osdk-tool.json
   .osdk-complete
 
@@ -214,9 +248,9 @@ its digest. Only after that validation does the graph become a compatibility
 input to the backend. A later successful write migrates the entry to schema 3
 metadata only; the existing sidecar file is not deleted automatically.
 
-## Inventory, shims, and conflict rejection
+## Isolated/global inventory, shims, and conflict rejection
 
-Before completing an install, the backend scans the synthetic project's entire
+For isolated and global installs, the backend scans the synthetic project's entire
 `node_modules/.bin` and writes the tool ID, exact version, relative bin paths,
 and stable metadata to `.osdk-tool.json`; those bins may come from the root
 package or transitive dependencies. A bin name must be a single filename and its
@@ -246,8 +280,9 @@ described as a globally rolled-back installation transaction.
 
 Unit and contract tests cover namespaced/scoped parsing, installer planning,
 dependency-section retention, one-shot native delegation, compact lock metadata,
-global-prefix arguments, native-lock identity, project-bin trust and confinement,
-inventory scanning, and shim conflict behavior. Compatibility tests retain the
-schema 2 sidecar validation and schema 1 npm-migration rejection boundaries.
-Cross-platform changes remain subject to the repository's Linux workspace tests
-and full Windows GNU Wine suite.
+global-prefix arguments, native-lock identity, curated generation publication
+and revalidation, raw-project-bin exclusion, inventory scanning, and shim
+conflict behavior. Compatibility tests retain the schema 2 sidecar validation
+and schema 1 npm-migration rejection boundaries. Cross-platform changes remain
+subject to the repository's Linux workspace tests and full Windows GNU Wine
+suite.

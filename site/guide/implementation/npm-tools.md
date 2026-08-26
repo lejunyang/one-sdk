@@ -46,14 +46,40 @@ lifecycle scripts。
 ## 真实项目发布与激活
 
 项目安装器成功后，osdk 校验已安装包的名称与精确版本，解析其声明的 bin 条目，将每个
-规范化目标限制在包目录内，并检查对应项目 launcher。随后原子更新 `osdk.toml` 中的
-精确 Node 与结构化 npm 选择，把紧凑的原生 lock metadata 写入项目 `osdk.lock`，并信任
-刚生成的配置。这条分支不会创建 osdk 私有 npm 工具安装。
+规范化目标限制在包目录内，并检查包管理器 launcher。原始 `node_modules/.bin` 不会加入
+PATH；osdk 会改为构建不可变的筛选 generation，其中只包含项目配置所选 npm 包声明的
+bin：
 
-只有 npm 选择来自已信任配置，且该配置与最近普通 `package.json` 位于同一规范项目根
-时，Shell 激活才暴露真实项目的 `node_modules/.bin`。`node_modules` 与 `.bin` 必须是
-受项目约束的真实目录。发现过程在最近 package 边界停止，不会创建缺失目录，并会跳过
-任何可能遮蔽 `node` 的 `.bin`。
+```text
+<project>/.osdk/npm-bin/
+  current
+  publish.lock
+  generations/<sha256>/
+    manifest.json
+    bin/<激活使用的筛选 launcher>
+
+<project>/node_modules/<configured-package>/<declared target>
+<project>/node_modules/.bin/<仅供校验、永不激活的源 launcher>
+```
+
+generation ID 是 schema、平台、排序后的选择与 bin 记录的 SHA-256。Unix 上的筛选条目
+是指向规范声明目标的相对软链接；Windows 上则是调用受管 Node、经过约束的 `.cmd`
+wrapper。所选包之间出现重复命令名时 fail closed（Windows 不区分大小写）。generation
+先在 staging 目录构建再 rename；JSON `current` 指针通过临时文件原子替换。只有配置 spec
+仍匹配的旧选择才会被带入新 generation。后续事务失败会恢复原指针；已完成但未被引用的
+generation 可能保留，目前没有 stale-generation 垃圾回收。
+
+发布后，osdk 原子更新 `osdk.toml` 中的精确 Node 与结构化 npm 选择，把紧凑的原生 lock
+metadata 写入项目 `osdk.lock`，并信任刚生成的配置。这条分支不会创建 osdk 私有 npm
+工具安装。`.osdk/npm-bin/` 是本地派生状态，通常应在 package 根使用
+`/.osdk/npm-bin/`，或为嵌套 workspace package 使用 `**/.osdk/npm-bin/` 忽略，而不是
+忽略将来 `.osdk` 下所有可能的文件。
+
+每次 Shell 激活时，osdk 首先要求 npm 选择来自已信任项目配置，且配置与最近的普通
+`package.json` 位于同一规范根。随后重新校验 `current` 指针、schema/平台与内容派生的
+generation 身份、自有非软链接目录、精确文件集合、配置 spec、已安装包身份与版本、声明
+目标及每个筛选 launcher。状态缺失或无效时会从激活增量中静默省略。有效筛选 bin 目录
+会位于 osdk shim 与受管运行时之前；若其中包含 `node` 命令，则整个 generation 都会省略。
 
 ## Embedded Aube 安装
 
@@ -71,7 +97,7 @@ runtime switching、self engine check 和 self-update，由 osdk 管理 Node、�
 <installs>/npm/<package>/<version>/
   project/package.json
   project/aube-lock.yaml
-  project/node_modules/.bin/...
+  project/node_modules/.bin/...  # 通过 osdk shim 暴露的隔离/全局源 bin
   .osdk-tool.json
   .osdk-complete
 
@@ -168,9 +194,9 @@ schema 2 sidecar 仍保持冻结读取兼容：读锁时如果遇到旧 sidecar 
 graph 内容会作为兼容输入注入 backend。只有在后续成功写入主 lock 时，条目才迁移成
 schema 3 metadata-only 形式；原有 sidecar 文件不会被自动删除。
 
-## Inventory、shim 与冲突拒绝
+## 隔离/全局 inventory、shim 与冲突拒绝
 
-安装完成前，backend 扫描合成项目的整个 `node_modules/.bin`，将 tool id、精确版本、
+对隔离与全局安装，backend 会扫描合成项目的整个 `node_modules/.bin`，将 tool id、精确版本、
 相对 bin 路径和稳定 metadata 写入 `.osdk-tool.json`；这些 bin 可能来自根包或传递依赖。
 bin 名必须是单一文件名，解析后的 canonical target 必须仍在安装根内；没有任何 bin、
 重复名称、路径穿越或损坏 inventory 都会拒绝。inventory 扫描不跟随符号链接，并对
@@ -191,7 +217,7 @@ CLI 和 shim 根据 inventory 建立 `bin name -> backend owner` 映射：
 ## 主要验证点
 
 相关单元与契约测试覆盖 namespaced/scoped parser、安装器规划、依赖区段保留、原生委托
-只执行一次、紧凑 lock metadata、全局前缀参数、原生 lock 身份、项目 bin 信任与路径
-约束、inventory 扫描和 shim 冲突行为。兼容性测试继续覆盖 schema 2 sidecar 校验与
-schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行 Linux workspace 测试与完整
-Windows GNU Wine 套件。
+只执行一次、紧凑 lock metadata、全局前缀参数、原生 lock 身份、筛选 generation 发布与
+重新校验、原始项目 bin 排除、inventory 扫描和 shim 冲突行为。兼容性测试继续覆盖
+schema 2 sidecar 校验与 schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行 Linux
+workspace 测试与完整 Windows GNU Wine 套件。

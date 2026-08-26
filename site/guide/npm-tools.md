@@ -13,7 +13,7 @@ Prettier 包。若要选择 Registry 中名字就叫 `npm` 的包，请写 `npm:
 
 | 命令与上下文 | 安装目标 | 配置与 lock |
 | --- | --- | --- |
-| 在 `package.json` 下执行 `osdk use npm:prettier@3` | 最近的真实 Node 项目 | 该 `package.json` 同目录的 `osdk.toml`、`osdk.lock`，以及项目原生 package lock |
+| 在 `package.json` 下执行 `osdk use npm:prettier@3` | 最近的真实 Node 项目 | `osdk.toml`、`osdk.lock`、原生 package lock，以及本地筛选命令 generation |
 | `osdk use --global npm:prettier@3` | osdk 控制的全局前缀 | 用户 `config.toml` 和用户 `osdk.lock`；忽略当前项目 |
 | 祖先目录中没有 `package.json` 时执行本地 `use` | 原有 osdk 隔离安装 | 普通项目 pin，以及 osdk 自有合成项目和 shim |
 
@@ -41,6 +41,16 @@ osdk 会先解析并安装受管 Node，再把 Prettier 加入最近的项目。
 安装器返回后，osdk 会校验已安装包的名称与精确版本、包声明的 `bin` 目标，以及
 `node_modules/.bin` 中对应的 launcher。没有可执行命令、包身份不符或路径逃出包目录时
 都会 fail closed。
+
+随后，osdk 只把已配置包声明并通过校验的命令发布到不可变的自有 generation：
+
+```text
+.osdk/npm-bin/generations/<sha256>/bin/
+```
+
+其中的 launcher 仍执行 `node_modules/<package>` 下包实际声明的目标；包管理器生成的完整
+`node_modules/.bin` 只用于安装后校验，osdk 从不把它加入 PATH。继续配置 npm 工具时，
+新 generation 只保留配置 spec 仍与项目完全匹配的选择；命令名冲突会 fail closed。
 
 该操作还会写入或更新类似下面的结构化项目选择：
 
@@ -79,15 +89,31 @@ osdk use npm:prettier@3 -o installer=pnpm
 
 ## 项目激活与信任边界
 
-项目配置含 npm 工具且已经信任时，Shell hook 会把最近项目真实的
-`node_modules/.bin` 加到 PATH 前面，但必须同时通过以下检查：
+项目配置含 npm 工具且已经信任时，Shell hook 只会把当前筛选后的
+`.osdk/npm-bin/generations/<sha256>/bin` 加到 PATH 前面，绝不会加入项目原始的
+`node_modules/.bin`。激活过程只读，且必须同时通过以下检查：
 
 - 已信任的 `osdk.toml` 与最近的普通 `package.json` 属于同一项目根；
-- `node_modules` 和 `node_modules/.bin` 都是真实目录，规范化路径仍直接位于该项目下；
-- 本地 `.bin` 不提供 `node`，避免替换当前选中的受管运行时。
+- `.osdk/npm-bin/current` 是普通且有效的 JSON 指针，其 generation schema、平台、内容
+  派生 ID 与 manifest 一致；
+- 所有 `.osdk/npm-bin` 自有目录都是项目内的非软链接目录，generation 只含声明的文件；
+- 每个已发布包及其 spec 仍匹配已信任项目配置，且安装名称、精确版本、声明目标和筛选
+  launcher 都重新通过校验；
+- 筛选后的 generation 不提供 `node`，避免替换当前选中的受管运行时。
 
-hook 不会创建缺失的 `.bin`，也不会越过最近的 package 边界寻找外层命令。安全时项目
-命令优先，同时 osdk 的 shim 路由继续保护受管 Node 和包管理器命令。
+指针、generation 或任一目标缺失、过期、被修改或不安全时，hook 会忽略整个筛选目录。
+校验通过时，筛选命令位于 osdk shim 与受管运行时路径之前。成功的 `use` 会发布
+generation（新内容先通过 staging 构建），并原子替换 `current` 指针；较旧的完整
+generation 可能作为可丢弃的本地状态保留。
+
+建议在该 package 根目录的忽略文件中加入精确规则：
+
+```text
+/.osdk/npm-bin/
+```
+
+若要在仓库根统一覆盖嵌套 workspace package，请使用 `**/.osdk/npm-bin/`。不要直接忽略
+整个 `.osdk/`，以便将来仍可有意提交该目录下的其他项目 metadata。
 
 ## 安装全局 npm 工具
 
@@ -148,7 +174,8 @@ osdk reshim
 ```
 
 `list`、`where`、`uninstall` 与 `reshim` 操作 osdk 自有的隔离或全局安装。加入真实项目
-的包仍由项目及其包管理器所有，命令来自 `node_modules/.bin`。
+的包仍由项目及其包管理器所有。激活命令来自筛选 generation，其中的 launcher 指向
+`node_modules/<package>` 下已配置包通过校验的声明文件。
 `osdk list-remote npm:prettier [FILTER]` 可列出 Registry 中的稳定版本。
 
 ## 构建脚本策略

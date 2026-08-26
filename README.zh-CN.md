@@ -140,7 +140,8 @@ osdk registry test pnpm
 
 给包名加上 `npm:` 前缀，即可与 npm 包管理器本身区分。在 Node 项目中，`use` 会把包
 加入最近的 `package.json`，保留它已有的依赖区段（否则默认写入
-`devDependencies`），并在 Shell 激活后提供项目本地命令：
+`devDependencies`），并在 Shell 激活后提供项目本地命令。激活只会暴露由 osdk 筛选、
+且属于已配置包的已校验命令，不会把整个项目 `node_modules/.bin` 加入 PATH：
 
 ```bash
 osdk use npm:prettier@3
@@ -157,7 +158,8 @@ osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
 项目自动安装会在现有 lock 格式兼容时优先使用 Aube；也可以用
 `installer=aube`、`installer=npm`、`installer=pnpm` 明确选择。osdk 把项目元数据写入
 `osdk.toml` 与 `osdk.lock`，传递依赖图仍以包管理器的原生 lock 为准。当前目录向上没有
-`package.json` 时，本地 `use` 保留原有的 osdk 隔离安装与 shim 行为。
+`package.json` 时，本地 `use` 保留原有的 osdk 隔离安装与 shim 行为。生成的
+`.osdk/npm-bin/` 是本地派生状态，通常应加入版本控制忽略规则。
 
 指南：[npm 开发工具](site/guide/npm-tools.md)
 

@@ -15,7 +15,7 @@ named `npm`, use `npm:npm`.
 
 | Command and context | Installation target | Configuration and lock |
 | --- | --- | --- |
-| `osdk use npm:prettier@3` below a `package.json` | The nearest real Node project | `osdk.toml` and `osdk.lock` beside that `package.json`, plus the project's native package lock |
+| `osdk use npm:prettier@3` below a `package.json` | The nearest real Node project | `osdk.toml`, `osdk.lock`, the native package lock, and a local curated command generation |
 | `osdk use --global npm:prettier@3` | An osdk-controlled global prefix | User `config.toml` and user `osdk.lock`; the current project is ignored |
 | Local `use` with no `package.json` in the ancestor chain | The legacy isolated osdk install | The normal project pin plus an osdk-owned synthetic project and shim |
 
@@ -46,6 +46,19 @@ After the installer returns, osdk verifies the installed package name and exact
 version, its declared `bin` targets, and the corresponding launchers under
 `node_modules/.bin`. A missing executable, an identity mismatch, or a path that
 escapes the package fails closed.
+
+It then publishes only the configured package's declared, validated commands in
+an immutable osdk-owned generation:
+
+```text
+.osdk/npm-bin/generations/<sha256>/bin/
+```
+
+The generated launchers still execute the package's real declared targets under
+`node_modules/<package>`; the package manager's broad `node_modules/.bin` is
+used for post-install validation but is never placed on PATH by osdk. As more
+npm tools are configured, a new generation retains only selections whose exact
+configured specs still match the project. Conflicting command names fail closed.
 
 The operation also writes or updates a structured project selection similar to:
 
@@ -92,20 +105,39 @@ different installer.
 
 ## Project activation and trust boundary
 
-For a trusted npm-bearing project configuration, the shell hook prepends the
-nearest project's real `node_modules/.bin`. It does so only when all of these
-checks pass:
+For a trusted npm-bearing project configuration, the shell hook prepends only
+the active curated `.osdk/npm-bin/generations/<sha256>/bin`. It never adds the
+raw project `node_modules/.bin`. Activation is read-only and enables the curated
+directory only when all of these checks pass:
 
 - the trusted `osdk.toml` belongs to the same root as the nearest regular
   `package.json`;
-- `node_modules` and `node_modules/.bin` are real directories whose canonical
-  paths remain directly under that project;
-- the local `.bin` does not provide `node`, which could replace the selected
-  managed runtime.
+- `.osdk/npm-bin/current` is a valid regular JSON pointer to a generation whose
+  schema, platform, content-derived ID, and manifest agree;
+- all owned `.osdk/npm-bin` directories remain non-symlink directories inside
+  the project, and the generation contains exactly its declared files;
+- every published package/spec still matches trusted project configuration,
+  and its installed name, exact version, declared targets, and curated
+  launchers all revalidate;
+- the curated generation does not provide `node`, which could replace the
+  selected managed runtime.
 
-The hook neither creates a missing `.bin` nor falls back to an outer package
-boundary. Project commands take precedence when safe, while osdk's shim routing
-continues to protect the managed Node and package-manager commands.
+If the pointer, generation, or any target is absent, stale, modified, or unsafe,
+the hook omits the entire curated directory. When valid, the curated commands
+precede osdk shims and managed runtime paths. A successful `use` publishes a
+generation—building new content through staging—and atomically replaces the
+`current` pointer; older completed generations may remain as disposable local
+state.
+
+Add the narrow derived directory to an ignore file at that package root:
+
+```text
+/.osdk/npm-bin/
+```
+
+For a repository-root rule that should cover nested workspace packages, use
+`**/.osdk/npm-bin/`. Prefer either narrow rule to ignoring all of `.osdk/`, so
+future project metadata under that directory can still be committed deliberately.
 
 ## Install a global npm tool
 
@@ -173,7 +205,9 @@ osdk reshim
 
 `list`, `where`, `uninstall`, and `reshim` operate on osdk-owned isolated or
 global installations. A package added to a real project remains owned by that
-project and its package manager; its commands come from `node_modules/.bin`.
+project and its package manager. Activated commands come from the curated
+generation, whose launchers target the configured package's validated declared
+files under `node_modules/<package>`.
 `osdk list-remote npm:prettier [FILTER]` lists stable registry versions.
 
 ## Build-script policy

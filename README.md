@@ -147,7 +147,9 @@ Guide: [Package managers and registry selection](site/en/guide/package-managers.
 Prefix a package with `npm:` to distinguish it from the npm package manager. In
 a Node project, `use` adds the package to the nearest `package.json`, keeps an
 existing dependency section (or defaults to `devDependencies`), and makes its
-local command available after shell activation:
+local command available after shell activation. Activation exposes only an
+osdk-curated generation of the configured packages' validated commands, never
+the project's entire `node_modules/.bin`:
 
 ```bash
 osdk use npm:prettier@3
@@ -166,7 +168,9 @@ compatible; `installer=aube`, `installer=npm`, and `installer=pnpm` select one
 explicitly. osdk writes project metadata to `osdk.toml` and `osdk.lock`, while
 the package manager's native lock remains the source of the transitive
 dependency graph. Without a `package.json`, local `use` retains the isolated
-osdk-managed installation and shim behavior.
+osdk-managed installation and shim behavior. The generated
+`.osdk/npm-bin/` directory is local derived state and should normally be ignored
+by version control.
 
 Guide: [npm developer tools](site/en/guide/npm-tools.md)
 

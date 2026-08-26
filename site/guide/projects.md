@@ -91,6 +91,11 @@ npm 条目写入 `osdk.toml`。它还会写一份紧凑的 `osdk.lock`，记录 
 和原生 lock 身份。该 metadata 不包含传递依赖图；原生包管理器 lock 仍是依赖图来源。
 项目中应同时保留这四类文件。安装器与激活细节见 [npm 开发工具](./npm-tools)。
 
+为支持 Shell 激活，`use` 还会在 `.osdk/npm-bin/` 下生成本地派生状态。只有已配置 npm
+工具的筛选 launcher 会被激活；整个 `node_modules/.bin` 永远不会加入 PATH。建议把
+`/.osdk/npm-bin/` 加入 package 根目录的忽略文件；若仓库根包含嵌套 package，则可在
+仓库根使用 `**/.osdk/npm-bin/`，同时继续提交上述四类事实来源文件。
+
 ## 完整配置参考
 
 以下示例覆盖当前可编辑 schema。`[tools]` 的值既可以是版本字符串，也可以是带
@@ -232,9 +237,10 @@ osdk untrust [PATH]
 
 `PATH` 可为配置文件或目录；目录会从该处向上找最近项目配置。只有顶层 `[tools]` 和
 `[aliases]` 的项目文件通常无需信任，但 npm 工具项需要信任，因为 Shell 激活可能暴露
-项目的 `node_modules/.bin`。其他顶层 section（包括 `settings`、`sources`、`registries`
-或未知 section）也需要信任。项目感知的 `osdk use npm:...` 成功后会信任它刚生成的
-`osdk.toml` 精确内容；之后编辑会使该记录失效。
+最终执行项目依赖文件的筛选 launcher；原始 `node_modules/.bin` 永远不会被激活。其他
+顶层 section（包括 `settings`、`sources`、`registries` 或未知 section）也需要信任。
+项目感知的 `osdk use npm:...` 成功后会信任它刚生成的 `osdk.toml` 精确内容；之后编辑
+会使该记录失效，并阻止筛选 generation 激活。
 
 ```bash
 osdk --yes trust                 # 最近项目配置

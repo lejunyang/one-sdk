@@ -100,6 +100,13 @@ the native package-manager lock remains its source. Keep all four project files
 together. See [npm Developer Tools](./npm-tools) for installer and activation
 details.
 
+For shell activation, `use` also generates local derived state under
+`.osdk/npm-bin/`. Only curated launchers for the configured npm tools are
+activated; the whole `node_modules/.bin` directory is never added to PATH. Add
+`/.osdk/npm-bin/` to an ignore file at the package root, or
+`**/.osdk/npm-bin/` at a repository root that contains nested packages, while
+continuing to commit the four source-of-truth files above.
+
 ## Complete configuration reference
 
 The following example covers the current editable schema. Values in `[tools]`
@@ -248,10 +255,12 @@ osdk untrust [PATH]
 `PATH` may name a config file or directory; a directory triggers upward project
 discovery. Project files containing exclusively top-level `[tools]` and
 `[aliases]` are normally trust-free, but an npm tool entry requires trust
-because shell activation may expose project `node_modules/.bin`. Any other
-top-level section—including `settings`, `sources`, `registries`, or an unknown
-section—also requires trust. A successful project-aware `osdk use npm:...`
-trusts the exact `osdk.toml` it generated; later edits invalidate that record.
+because shell activation may expose curated launchers that ultimately execute
+files from project dependencies. Raw `node_modules/.bin` is never activated.
+Any other top-level section—including `settings`, `sources`, `registries`, or an
+unknown section—also requires trust. A successful project-aware
+`osdk use npm:...` trusts the exact `osdk.toml` it generated; later edits
+invalidate that record and prevent the curated generation from activating.
 
 ```bash
 osdk --yes trust                 # nearest project configuration
