@@ -360,7 +360,10 @@ fn project_npm_bins_are_trusted(ctx: &Ctx, cwd: &std::path::Path) -> bool {
     let Ok(cwd) = dunce::canonicalize(cwd) else {
         return false;
     };
-    cwd.starts_with(&config_root)
+    let Some(project_root) = nearest_package_root(&cwd) else {
+        return false;
+    };
+    same_existing_path(&config_root, &project_root)
         && crate::trust::is_trusted(
             &ctx.dirs.config,
             config_path,
@@ -373,26 +376,9 @@ fn project_npm_bins_are_trusted(ctx: &Ctx, cwd: &std::path::Path) -> bool {
 /// `package.json` is a hard boundary: if its `.bin` is absent or unsafe, an
 /// outer project must not leak commands into the current working directory.
 fn project_bin_for(cwd: &std::path::Path) -> Option<PathBuf> {
-    let project_root = cwd.ancestors().find_map(|directory| {
-        let package_json = directory.join("package.json");
-        match std::fs::symlink_metadata(&package_json) {
-            Ok(metadata) => Some(metadata.file_type().is_file().then_some(directory)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            // Fail closed when a possible nearer boundary cannot be inspected.
-            Err(_) => Some(None),
-        }
-    })??;
-
-    let canonical_root = dunce::canonicalize(project_root).ok()?;
+    let project_root = nearest_package_root(cwd)?;
+    let canonical_root = dunce::canonicalize(&project_root).ok()?;
     if !canonical_root.is_dir() {
-        return None;
-    }
-    let canonical_package = dunce::canonicalize(project_root.join("package.json")).ok()?;
-    if !canonical_package.is_file()
-        || canonical_package
-            .parent()
-            .is_none_or(|parent| !same_existing_path(parent, &canonical_root))
-    {
         return None;
     }
 
@@ -417,6 +403,30 @@ fn project_bin_for(cwd: &std::path::Path) -> Option<PathBuf> {
             .parent()
             .is_some_and(|parent| same_existing_path(parent, &canonical_node_modules)))
     .then_some(canonical_bin)
+}
+
+fn nearest_package_root(cwd: &std::path::Path) -> Option<PathBuf> {
+    let root = cwd.ancestors().find_map(|directory| {
+        let package_json = directory.join("package.json");
+        match std::fs::symlink_metadata(&package_json) {
+            Ok(metadata) => Some(
+                metadata
+                    .file_type()
+                    .is_file()
+                    .then(|| directory.to_path_buf()),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            // Fail closed when a possible nearer boundary cannot be inspected.
+            Err(_) => Some(None),
+        }
+    })??;
+    let canonical_root = dunce::canonicalize(&root).ok()?;
+    let canonical_package = dunce::canonicalize(root.join("package.json")).ok()?;
+    (canonical_package.is_file()
+        && canonical_package
+            .parent()
+            .is_some_and(|parent| same_existing_path(parent, &canonical_root)))
+    .then_some(canonical_root)
 }
 
 fn prioritize_project_bin(paths: &mut Vec<PathBuf>, project_bin: PathBuf) {
