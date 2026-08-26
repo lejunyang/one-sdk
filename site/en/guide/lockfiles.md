@@ -66,10 +66,10 @@ In unusual nested layouts, the nearest readable lock and the project-determined
 write path can differ. Keep `osdk.toml` and `osdk.lock` together at the project
 root.
 
-## Schema 2
+## Schema 3
 
 ```toml
-schema = 2
+schema = 3
 
 [platforms.linux-x64.tools.node]
 request = "20"
@@ -94,10 +94,14 @@ version = "3.6.2"
 
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-node_version = "20.20.0"
-lock_format = "aube-v9"
+installer = "aube"
+scope = "project"
+node_version = "20.20.0"     # optional
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "aube"
+format = "aube-v9"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-graph = "osdk.lock.d/npm/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.yaml"
 
 [models.qwen]
 provider = "huggingface"
@@ -118,18 +122,24 @@ Platform keys use `linux-*`, `macos-*`, or `windows-*` plus
 other platform sections and top-level model entries. Internal `__osdk_*`
 options are omitted from public `options`; non-npm backends that support generic
 receipts store artifact identity separately.
-Schema 2 requires an `npm` table for every `npm:<package>`. The main lock stores
-only `package`, `node_version`, `lock_format`, `sha256`, and the canonical
-`graph` path. The complete Aube graph lives at
-`osdk.lock.d/npm/<sha256>.yaml` and carries transitive dependency integrity. An
-npm tool entry cannot carry a generic `artifact` table. Commit the main lock and
-`osdk.lock.d/` together.
+Schema 3 requires an `npm` table for every `npm:<package>`. The main lock stores
+only basic npm metadata: `package`, `installer`, `scope`, an optional exact
+`node_version`, and optional `native_lock.kind`, `native_lock.format`, and
+`native_lock.sha256`. It no longer stores a graph payload or any graph/path
+field. An npm tool entry cannot carry a generic `artifact` table. Native lock
+content stays in the installer-owned directory; `osdk.lock` keeps only metadata
+and an optional digest.
 
 A schema 1 lock without npm tools remains readable and safely upgrades on its
 next successful write. A schema 1 lock containing any `npm:*` entry, including
 the old inline graph form, cannot be consumed or migrated and must be regenerated;
-this prevents old records without a verifiable sidecar from being mislabeled as
-schema 2.
+this prevents old records without a verifiable dependency graph from being
+mislabeled as the current schema.
+
+Schema 2 npm sidecars remain readable. Reads still validate the sidecar and use
+it as frozen input. Only a later successful write rewrites the entry into the
+schema 3 metadata-only form; the existing `osdk.lock.d/` sidecar is not deleted
+automatically.
 
 For Node, `lock -o arch=...` writes the target-architecture section. osdk has no
 cross-architecture download-only mode, and installation rejects an artifact that
@@ -153,49 +163,38 @@ osdk upgrade    # install re-resolved versions and refresh the lock
 ```
 
 Malformed TOML and unsupported schemas fail explicitly instead of silently
-falling back to configuration. The main lock and each npm graph sidecar are
-currently limited to 16 MiB. Writes atomically publish sidecars first, read and
-validate every graph, and only then atomically replace the main lock.
+falling back to configuration. The main lock is currently limited to 16 MiB;
+schema 2 npm sidecars still use the same 16 MiB validation bound when read for
+compatibility. Schema 3 writes only atomically replace the main lock and do not
+generate a new npm graph sidecar.
 
-## npm tool graphs and the offline boundary
+## npm metadata and compatibility boundaries
 
-For `npm:<package>`, `osdk lock` first ensures managed Node is installed, then
-uses embedded Aube in lockfile-only mode to resolve the complete dependency
-graph. This phase never runs lifecycle scripts. The original UTF-8 graph bytes
-are addressed by SHA-256 at `osdk.lock.d/npm/<sha256>.yaml`; the main lock stores
-only the package, exact Node version used for the graph, `aube-v9`, digest, and
-the sidecar path uniquely determined by that digest.
+For `npm:<package>`, the schema 3 main lock records npm metadata rather than a
+complete dependency graph. It preserves the package name, selected installer,
+scope, an optional exact Node version, and optional native-lock owner/format/
+SHA-256 metadata. The native lock payload and filesystem path remain owned by
+the installer and are not written back into `osdk.lock`.
 
 When argument-free `osdk install` restores an npm tool from the lock, it first
-checks that all fields exist, package and backend identities match, the Node
-version matches the same-platform Node entry, and the format and path are
-canonical. It then rejects symlinked paths, reads the sidecar with a 16 MiB
-limit, validates UTF-8 and SHA-256 over its actual bytes, and installs from that
-frozen graph. Offline reinstall also requires the same warmed Aube cache/store;
-the sidecar fixes the graph but contains no package tarballs. The recommended
-flow is:
+checks package/backend identity, validates `installer` and `scope`, ensures any
+recorded `node_version` matches the same-platform Node entry, and validates any
+recorded `native_lock` owner/format/SHA-256. If the lock comes from older
+schema 2 data, reads still validate the sidecar under the old rules and use it
+as a compatibility input; the next successful write rewrites the main lock to
+schema 3 metadata only.
 
-```bash
-# Online: generate the graph and warm all referenced package content
-osdk lock
-osdk install
-
-# After removing it, rebuild offline with the same lock, sidecar, and cache
-osdk --offline install
-```
-
-Explicit `osdk --offline install npm:prettier@3.6.2` does not read the project
-lock and therefore cannot use its graph. A missing, corrupt, oversized, or
-symlinked sidecar, or missing cached package content, fails explicitly. See
-[npm Developer Tools](./npm-tools) for details.
+For schema 2 compatibility reads, a missing, corrupt, oversized, or symlinked
+sidecar still fails explicitly. See [npm Developer Tools](./npm-tools) for
+details.
 
 ## Verification boundaries for locked reinstalls
 
 A lock can preserve the actual URL, filename, checksum, archive subdirectory,
 and attestation evidence for non-npm backends that support generic artifact
 receipts. No-argument installation restores their saved resolution, backend
-options, and artifact identity. npm tools use the graph sidecar described above,
-not a generic artifact receipt. For a floating Rust channel,
+options, and artifact identity. npm tools use the metadata-only npm table
+described above, not a generic artifact receipt. For a floating Rust channel,
 that resolution remains a channel name rather than an immutable release.
 
 When an installation is missing or incomplete and the pipeline actually runs, a

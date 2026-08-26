@@ -91,40 +91,45 @@ lifecycle/build scripts 都不会运行。`allow_builds` 从 CLI 字符串或结
 继承。`use -o allow_builds=esbuild,sharp` 会规范化并持久化为字符串数组，true/false
 则持久化为布尔值，使生成的项目配置继续保持结构化。
 
-## schema 2、Graph Sidecar 与冻结恢复
+## schema 3、metadata-only 主 lock 与兼容读取
 
-`osdk.lock` 的当前写入 schema 是 2。每个 npm 工具记录 request、精确 version、
-options 和 `npm` sidecar 元数据；当前不写通用 `artifact` 子表：
+`osdk.lock` 的当前写入 schema 是 3。每个 npm 工具记录 request、精确 version、
+options 和 `npm` 元数据；当前不写通用 `artifact` 子表，也不把 graph payload 或路径写进
+主 lock：
 
 ```toml
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-node_version = "24.1.0"
-lock_format = "aube-v9"
+installer = "aube"
+scope = "project"
+node_version = "24.1.0" # 可省略
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "aube"
+format = "aube-v9"
 sha256 = "<64 lowercase hex characters>"
-graph = "osdk.lock.d/npm/<sha256>.yaml"
 ```
 
-`osdk lock` 对 npm 工具不是纯 metadata 解析：CLI 先确保受管 Node 已安装，再调用
-`prepare_lock_graph`，由 Aube 的 lockfile-only 模式解析完整依赖图并使用隔离的
-cache/store。安装目录中 `aube-lock.yaml` 的原始 UTF-8 字节按 SHA-256 寻址，原子写入
-`osdk.lock.d/npm/<sha256>.yaml`；主 lock 只保存上面的五个字段。单个 graph sidecar 和
-主 lock 当前都限制为 16 MiB。sidecar 写完后会先重新读取并校验，最后才原子替换主
-lock。`osdk.lock` 与 `osdk.lock.d/` 必须一起提交到仓库。
+写入时，CLI 会从已安装工具或声明的私有 option 中提取 npm 元数据：包名、installer、
+scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA-256。对于 Aube，
+若安装目录中的 `project/aube-lock.yaml` 存在，会读取其原始字节并只把 SHA-256 摘要写回
+主 lock；payload 本身不会进入 `osdk.lock`。主 lock 当前限制为 16 MiB，写入时只原子替换
+主 lock。
 
-无参数 `osdk install` 读取当前平台 lock 后，先检查 package/backend、同平台 Node 精确
-版本、`aube-v9`、64 位小写 SHA-256 和由摘要唯一决定的路径；再拒绝 sidecar 目录或
-文件中的 symlink，以 16 MiB 上限读取完整 UTF-8 字节并重算摘要。校验通过后，graph
-内容才作为私有 option 交给 backend，恢复成 `aube-lock.yaml` 并执行 Aube frozen install。
+无参数 `osdk install` 读取 schema 3 lock 后，会把这些字段重新注入私有 option，并先校验
+package/backend、一致的 installer/scope、可选的同平台 Node 精确版本，以及可选
+native lock 的 format/SHA-256 是否满足 owner 的格式约束。主 lock 不再提供 graph/path，
+因此这里恢复的是 metadata，而不是 sidecar 路径。
 
 不含 npm 条目的 schema 1 lock 可正常读取，并在下一次成功写入时升级。含任意
 `npm:*` 的 schema 1 lock（包括旧 inline graph）不能消费、merge 或保存；必须重新生成，
-不能假装安全迁移成 sidecar 格式。
+不能假装安全迁移成当前 metadata-only 格式。
 
-offline 需要三部分同时存在：有效的 schema 2 主 lock 元数据、已提交且校验通过的 graph
-sidecar，以及包含 graph 所引用 package 的 Aube cache/store；同平台锁定的受管 Node 也
-必须可用。缺任何一项都会失败且不回退网络。已有安装只有通过完整 identity/layout
-校验才会复用，而不是只检查 `.osdk-complete`。
+schema 2 sidecar 仍保持冻结读取兼容：读锁时如果遇到旧 sidecar 形式，osdk 会继续校验
+`package`、Node 版本、`aube-v9`、64 位小写 SHA-256、规范 sidecar 路径，以及 sidecar
+目录/文件非 symlink，再以 16 MiB 上限读取完整 UTF-8 字节并重算摘要。校验通过后，
+graph 内容会作为兼容输入注入 backend。只有在后续成功写入主 lock 时，条目才迁移成
+schema 3 metadata-only 形式；原有 sidecar 文件不会被自动删除。
 
 ## Inventory、shim 与冲突拒绝
 

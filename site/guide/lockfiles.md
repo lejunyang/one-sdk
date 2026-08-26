@@ -60,10 +60,10 @@ backend 选项，也会绕过 lock；建议先用相同选项重新 `lock`。
 在特殊嵌套布局中，最近可读 lock 与项目配置决定的写入位置可能不同。建议把
 `osdk.toml` 与 `osdk.lock` 放在同一项目根目录。
 
-## Schema 2
+## Schema 3
 
 ```toml
-schema = 2
+schema = 3
 
 [platforms.linux-x64.tools.node]
 request = "20"
@@ -88,10 +88,14 @@ version = "3.6.2"
 
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-node_version = "20.20.0"
-lock_format = "aube-v9"
+installer = "aube"
+scope = "project"
+node_version = "20.20.0" # 可省略
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "aube"
+format = "aube-v9"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-graph = "osdk.lock.d/npm/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.yaml"
 
 [models.qwen]
 provider = "huggingface"
@@ -111,14 +115,20 @@ sha256 = "..."
 musl Linux 追加 `-musl`。更新一个平台会保留其他平台和顶层模型记录。内部
 `__osdk_*` 选项不写入公开 `options`；支持通用 receipt 的非 npm backend 会单独保存
 artifact 身份。
-schema 2 要求每个 `npm:<package>` 都有 `npm` 子表；主 lock 只保存 `package`、
-`node_version`、`lock_format`、`sha256` 和规范 `graph` 路径。完整 Aube 图位于
-`osdk.lock.d/npm/<sha256>.yaml`，依赖图本身携带传递依赖的 integrity。npm 工具条目
-不能写通用 `artifact` 子表。主 lock 和 `osdk.lock.d/` 应一起提交。
+schema 3 要求每个 `npm:<package>` 都有 `npm` 子表；主 lock 只保存基础 npm 元数据：
+`package`、`installer`、`scope`、可选的精确 `node_version`，以及可选的
+`native_lock.kind`、`native_lock.format`、`native_lock.sha256`。它不再保存 graph
+payload，也不保存 graph/path 字段。npm 工具条目不能写通用 `artifact` 子表。
+native lock 内容继续保留在 installer 自己管理的目录中；`osdk.lock` 只记录元数据与
+可选摘要。
 
-不含 npm 工具的 schema 1 lock 仍可读取，并在下一次成功写入时安全升级为 schema 2。
-含任意 `npm:*` 条目的 schema 1 lock（包括旧 inline graph）不能消费或迁移；必须重新
-生成，避免把没有可验证 sidecar 的旧记录误标成 schema 2。
+不含 npm 工具的 schema 1 lock 仍可读取，并在下一次成功写入时安全升级。含任意
+`npm:*` 条目的 schema 1 lock（包括旧 inline graph）不能消费或迁移；必须重新生成，
+避免把没有可验证依赖图的旧记录误标成当前 schema。
+
+schema 2 的 npm sidecar 仍可读取：读取时会继续校验 sidecar，并把内容作为冻结输入。
+只有在后续成功写回 `osdk.lock` 时，osdk 才会把条目迁移成 schema 3 的 metadata-only
+格式；原有 `osdk.lock.d/` sidecar 不会被自动删除。
 
 Node 的 `lock -o arch=...` 会写入目标架构区段；osdk 没有跨架构“只下载”模式，
 随后在不匹配 host 上安装会拒绝。当前 `upgrade -o arch=...` 始终写 host 平台区段，
@@ -138,41 +148,31 @@ osdk lock       # 只刷新精确解析
 osdk upgrade    # 安装重新解析的版本并刷新 lock
 ```
 
-损坏的 TOML 或 schema 1/2 之外的 lock 会直接报错，不会静默回退配置。主 lock 和
-单个 npm graph sidecar 当前都限制为 16 MiB。写入时先原子发布 sidecar，重新读取并
-校验全部 graph，再原子替换主 lock。
+损坏的 TOML 或不支持的 schema 会直接报错，不会静默回退配置。主 lock 当前限制为
+16 MiB；schema 2 npm sidecar 在兼容读取时仍按 16 MiB 上限校验。写入 schema 3 时只会
+原子替换主 lock，不会为 npm graph 再生成 sidecar。
 
-## npm 工具依赖图与离线边界
+## npm 元数据与兼容边界
 
-对 `npm:<package>`，`osdk lock` 会先确保受管 Node 已安装，再让 embedded Aube 以
-lockfile-only 模式解析完整依赖图；该阶段不会执行 lifecycle scripts。原始 UTF-8 graph
-字节按 SHA-256 寻址写入 `osdk.lock.d/npm/<sha256>.yaml`，主 lock 只保存 package、
-锁图使用的 Node 精确版本、`aube-v9`、摘要和由摘要唯一决定的 sidecar 路径。
+对 `npm:<package>`，schema 3 主 lock 记录的是 npm 元数据，而不是完整依赖图。它会
+保存包名、选定 installer、作用域、可选的精确 Node 版本，以及可选 native lock 的 owner/
+format/SHA-256。native lock 的实际 payload 和路径继续由 installer 自己管理，不会写回
+`osdk.lock`。
 
-无参数 `osdk install` 从 lock 恢复 npm 工具时，会先验证 graph 字段完整、package 与
-backend 一致、Node 版本与同平台 Node 条目一致、格式和路径规范；随后拒绝 symlink
-路径，以 16 MiB 上限读取 sidecar，检查 UTF-8 和实际字节 SHA-256，再按 frozen graph
-安装。离线重装还要求同一份 Aube cache/store 已预热；sidecar 只固定依赖图，不包含
-package tarball。推荐流程：
+无参数 `osdk install` 从 schema 3 lock 恢复 npm 工具时，会先验证 package 与 backend
+一致、`installer` 与 `scope` 合法、可选 `node_version` 与同平台 Node 条目一致，以及可选
+`native_lock` 的 owner/format/SHA-256 是否自洽。若 lock 来自较旧的 schema 2，读取时仍会
+按旧规则校验 sidecar，并把它作为兼容输入；但下一次成功写入会改写成 metadata-only 的
+schema 3 主 lock。
 
-```bash
-# 在线生成 graph 并预热它引用的 package 内容
-osdk lock
-osdk install
-
-# 删除安装后，可用同一 lock、sidecar 和缓存离线重建
-osdk --offline install
-```
-
-显式 `osdk --offline install npm:prettier@3.6.2` 不读取项目 lock，因此不能借用其中的
-graph。缺少或损坏 sidecar、超过大小限制，或缺少缓存内容都会明确失败；详情见
+对于 schema 2 兼容读取，缺少或损坏 sidecar、超过大小限制，都会明确失败；详情见
 [npm 开发工具](./npm-tools)。
 
 ## 锁定 artifact 的重装校验边界
 
 对支持通用 artifact receipt 的非 npm backend，lock 可记录实际 URL、文件名、checksum、
 archive 子目录和 attestation evidence。无参数安装会恢复其 backend 选项与 artifact
-身份；npm 工具改用上文的 graph sidecar，不使用通用 artifact receipt。
+身份；npm 工具改用上文的 metadata-only npm 子表，不使用通用 artifact receipt。
 对 Rust 浮动 channel，这个结果仍是 channel 名而非不可变版本。
 
 当安装目录缺失或不完整、pipeline 实际执行重装时，lock 中存在的 checksum 会对下载或

@@ -113,49 +113,54 @@ fields are not merged. `use -o allow_builds=esbuild,sharp` normalizes and
 persists a string array, while true/false becomes a boolean, keeping generated
 project configuration structured.
 
-## Schema 2, graph sidecars, and frozen restoration
+## Schema 3, metadata-only main locks, and compatibility reads
 
-The current write format for `osdk.lock` is schema 2. Each npm tool records its
-request, exact version, options, and `npm` sidecar metadata; it does not write a
-generic `artifact` table:
+The current write format for `osdk.lock` is schema 3. Each npm tool records its
+request, exact version, options, and `npm` metadata. It does not write a
+generic `artifact` table, and it no longer stores any graph payload or graph
+path in the main lock:
 
 ```toml
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-node_version = "24.1.0"
-lock_format = "aube-v9"
+installer = "aube"
+scope = "project"
+node_version = "24.1.0"      # optional
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "aube"
+format = "aube-v9"
 sha256 = "<64 lowercase hex characters>"
-graph = "osdk.lock.d/npm/<sha256>.yaml"
 ```
 
-For npm tools, `osdk lock` is more than metadata resolution. The CLI first
-ensures managed Node is installed, then calls `prepare_lock_graph`, which uses
-Aube's lockfile-only mode and isolated cache/store to resolve the complete graph.
-The original UTF-8 bytes of the installed `aube-lock.yaml` are addressed by
-SHA-256 and atomically written to `osdk.lock.d/npm/<sha256>.yaml`; the main lock
-stores only the five fields above. Both the main lock and each graph sidecar are
-currently limited to 16 MiB. Sidecars are written and read back for validation
-before the main lock is atomically replaced. Commit `osdk.lock` and
-`osdk.lock.d/` together.
+On write, the CLI extracts npm metadata from the installed tool or declared
+private options: package name, installer, scope, an optional exact Node
+version, and optional native-lock owner/format/SHA-256. For Aube, if
+`project/aube-lock.yaml` exists in the install directory, osdk reads its raw
+bytes and records only the SHA-256 digest in the main lock. The payload itself
+is not persisted in `osdk.lock`. The main lock is currently limited to 16 MiB,
+and schema 3 writes only atomically replace the main lock.
 
-Argument-free `osdk install` first validates package/backend identity, the exact
-same-platform Node version, `aube-v9`, the 64-character lowercase SHA-256, and
-the path uniquely derived from that digest. It rejects symlinks in the sidecar
-path, reads at most 16 MiB, and validates UTF-8 plus SHA-256 over the actual
-bytes. Only then is the graph passed as a private backend option, restored as
-`aube-lock.yaml`, and installed in Aube frozen mode.
+Argument-free `osdk install` reading a schema 3 lock reinjects that metadata as
+private options and validates package/backend identity, installer/scope
+consistency, any exact same-platform Node version, and any recorded native-lock
+format/SHA-256 against the owning installer's constraints. The main lock no
+longer provides a graph/path field, so this path restores metadata rather than
+a sidecar path.
 
 A schema 1 lock without npm entries remains readable and upgrades on its next
 successful write. A schema 1 lock containing any `npm:*` entry, including the
 old inline graph representation, cannot be consumed, merged, or saved and must
-be regenerated instead of being falsely migrated to the sidecar format.
+be regenerated instead of being falsely migrated to the current metadata-only
+format.
 
-Offline use requires valid schema 2 main-lock metadata, a committed graph
-sidecar that passes validation, and an Aube cache/store containing every package
-referenced by that graph; the locked managed Node must also be available. Missing
-any part fails without network fallback. An existing install is reused only
-after full identity and layout validation, not merely because `.osdk-complete`
-exists.
+Schema 2 sidecars remain frozen-read compatible. When an older sidecar entry is
+read, osdk still validates the package, Node version, `aube-v9`, 64-character
+lowercase SHA-256, canonical sidecar path, and non-symlink sidecar directory and
+file, then rereads the full UTF-8 payload with the 16 MiB bound and recomputes
+its digest. Only after that validation does the graph become a compatibility
+input to the backend. A later successful write migrates the entry to schema 3
+metadata only; the existing sidecar file is not deleted automatically.
 
 ## Inventory, shims, and conflict rejection
 
