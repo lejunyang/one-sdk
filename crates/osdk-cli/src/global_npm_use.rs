@@ -152,8 +152,11 @@ pub async fn install(
 
     let _global_mutation_lock =
         osdk_core::lock::FileLock::acquire(app.ctx.dirs.data.join("locks/global-npm-state.lock"))?;
+    // Persist the selected state first; shim publication follows it and the
+    // config write is the final activation commit. A failed reshim leaves no
+    // active config pointing at partially-published state.
     persist_global_lock(app, &request, &version, &runtime)?;
-    crate::commands::reshim(app)?;
+    crate::commands::generate_shims_for(app, &backend, &version)?;
     let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
     persist_global_config(app, &request, &persisted_spec, plan.installer)?;
     println!(
@@ -815,6 +818,16 @@ fn read_native_lock(path: &Path, installer: NpmInstaller) -> Result<NativeLockId
         }
         NpmInstaller::Auto => unreachable!(),
     };
+    let supported = match installer {
+        NpmInstaller::Aube | NpmInstaller::Pnpm => format.ends_with("-v9"),
+        NpmInstaller::Npm => matches!(format.as_str(), "package-lock-v2" | "package-lock-v3"),
+        NpmInstaller::Auto => unreachable!(),
+    };
+    if !supported {
+        anyhow::bail!(
+            "unsupported native lock format `{format}` produced by global installer `{installer}`"
+        );
+    }
     Ok(NativeLockIdentity {
         kind,
         format,
