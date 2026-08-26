@@ -112,6 +112,31 @@ impl NpmPackageBackend {
         &self.package
     }
 
+    /// Validate that this exact package owns at least one runnable bin in a
+    /// user project. This checks package.json#bin and then validates the
+    /// corresponding launcher target instead of accepting an unrelated entry
+    /// that merely happens to exist in node_modules/.bin.
+    pub fn validate_project_package_bins(&self, project_dir: &Path) -> Result<Vec<String>> {
+        let package_dir = package_install_dir(project_dir, &self.package);
+        let manifest_path = package_dir.join("package.json");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path).map_err(|error| Error::io(&manifest_path, error))?,
+        )?;
+        let names = package_bin_names(&manifest, &self.package)?;
+        let bin_dir = project_dir.join("node_modules/.bin");
+        for name in &names {
+            let target = resolve_bin_target(&bin_dir, name)?;
+            if !target.starts_with(&package_dir) {
+                return Err(Error::other(crate::t!(
+                    "err.npm_bin_outside_install_root",
+                    name = name,
+                    path = package_dir.display()
+                )));
+            }
+        }
+        Ok(names)
+    }
+
     pub fn aube_cache_dir(ctx: &Ctx) -> PathBuf {
         ctx.dirs
             .cache
@@ -1149,6 +1174,26 @@ fn package_install_dir(project_dir: &Path, package: &str) -> PathBuf {
         return node_modules.join(format!("@{scope}")).join(name);
     }
     node_modules.join(package)
+}
+
+fn package_bin_names(manifest: &serde_json::Value, package: &str) -> Result<Vec<String>> {
+    let mut names = match manifest.get("bin") {
+        Some(serde_json::Value::String(_)) => {
+            vec![package.rsplit('/').next().unwrap_or(package).to_string()]
+        }
+        Some(serde_json::Value::Object(entries)) => entries.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    names.retain(|name| !name.is_empty() && !name.contains(['/', '\\']));
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Err(Error::other(crate::t!(
+            "err.npm_dynamic_no_validated_executables",
+            tool = format!("npm:{package}")
+        )));
+    }
+    Ok(names)
 }
 
 fn discover_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolBin>> {

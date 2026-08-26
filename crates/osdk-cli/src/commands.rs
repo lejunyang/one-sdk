@@ -1105,7 +1105,9 @@ async fn use_project_npm(
         }
     }
 
-    validate_project_package_bin(&project.root, &package)?;
+    osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
+        .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?
+        .validate_project_package_bins(&project.root)?;
     let installed_project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
         .ok_or_else(|| anyhow!("project package.json disappeared during npm install"))?;
     let native_lock = installed_project.native_lock.ok_or_else(|| {
@@ -1296,7 +1298,8 @@ fn project_manager_request(
     )
     .map(|active| {
         if active.is_range {
-            VersionSpec::parse_range(&active.spec).unwrap_or_else(|_| VersionSpec::parse(&active.spec))
+            VersionSpec::parse_range(&active.spec)
+                .unwrap_or_else(|_| VersionSpec::parse(&active.spec))
         } else {
             VersionSpec::parse(&active.spec)
         }
@@ -1431,23 +1434,6 @@ fn same_config_path(left: &std::path::Path, right: &std::path::Path) -> bool {
             (Ok(left), Ok(right)) => left == right,
             _ => false,
         }
-}
-
-fn validate_project_package_bin(project_root: &std::path::Path, package: &str) -> Result<()> {
-    let bin_dir = project_root.join("node_modules").join(".bin");
-    let metadata = std::fs::symlink_metadata(&bin_dir).with_context(|| {
-        format!(
-            "installed npm package `{package}` did not create {}",
-            bin_dir.display()
-        )
-    })?;
-    if !metadata.file_type().is_dir() {
-        anyhow::bail!("{} is not a regular directory", bin_dir.display());
-    }
-    if std::fs::read_dir(&bin_dir)?.next().is_none() {
-        anyhow::bail!("installed npm package `{package}` exposes no project executable");
-    }
-    Ok(())
 }
 
 fn structured_tool_config(
@@ -1665,7 +1651,11 @@ fn reconcile_managed_shims(app: &App) -> Result<()> {
 }
 
 /// Generate shims for all bin names a version exposes. Returns count.
-fn generate_shims_for(app: &App, backend: &dyn Backend, tv: &ToolVersion) -> Result<usize> {
+pub(crate) fn generate_shims_for(
+    app: &App,
+    backend: &dyn Backend,
+    tv: &ToolVersion,
+) -> Result<usize> {
     let shim_bin = match osdk_core::shim::find_shim_binary(&app.ctx.dirs) {
         Some(b) => b,
         None => {
