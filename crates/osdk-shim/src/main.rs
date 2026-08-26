@@ -92,7 +92,13 @@ fn real_main() -> i32 {
     let tools = config.tools.clone();
     let idiomatic_probe_cwd = cwd.clone();
     let ctx = make_ctx(dirs.clone(), platform, config);
-    let dynamic_report = osdk_core::shim::scan_dynamic_installs(&ctx).ok();
+    let dynamic_report = match osdk_core::shim::scan_dynamic_installs(&ctx) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("osdk-shim: {error}");
+            return 1;
+        }
+    };
 
     // Find which backend owns this tool name (its id, or one of the executables
     // an installed version provides, e.g. pip -> python, npm -> node).
@@ -101,7 +107,7 @@ fn real_main() -> i32 {
         &ctx,
         &idiomatic_probe_cwd,
         &tool_name,
-        dynamic_report.as_ref(),
+        Some(&dynamic_report),
     ) {
         Some(b) => b,
         None => {

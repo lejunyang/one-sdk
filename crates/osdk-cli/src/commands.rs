@@ -8,6 +8,7 @@ use osdk_core::package_registry::{self, PackageManager, RegistryPlan, RegistryPr
 use osdk_core::source::select;
 use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::App;
 use crate::cli::{
@@ -15,6 +16,9 @@ use crate::cli::{
     RegistryCommand, RustCommand, RustItemCommand, RustOverrideCommand, RustToolchainCommand,
     SourceCommand, TrustCommand,
 };
+
+const GLOBAL_NPM_UNINSTALL_JOURNAL_DIR: &str = "transactions/global-npm-uninstall";
+static NEXT_GLOBAL_NPM_UNINSTALL_FILE: AtomicU64 = AtomicU64::new(0);
 
 /// Apply a one-shot `--source` override into the config for this run.
 fn apply_source_override(app: &mut App, tool: &str) {
@@ -749,13 +753,17 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
-        let mut requests = tools
+        let requests = tools
             .iter()
-            .map(|s| ToolRequest::parse(s).map_err(|e| anyhow!("{e}")))
+            .map(|s| {
+                resolve_explicit_request(
+                    app,
+                    s,
+                    &app.ctx.config.tool_configs,
+                    &app.ctx.config.tools,
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
-        for request in &mut requests {
-            inherit_configured_options(app, request);
-        }
         return inject_node_dependency(app, requests);
     }
     // From config pins.
@@ -834,18 +842,21 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     inject_node_dependency(app, out)
 }
 
-fn inherit_configured_options(app: &App, request: &mut ToolRequest) {
-    let configured = app
-        .ctx
-        .config
-        .tool_configs
-        .get(&request.backend)
+fn inherit_configured_options_from(
+    request: &mut ToolRequest,
+    tool_configs: &std::collections::BTreeMap<String, osdk_core::config::ToolConfigEntry>,
+    tools: &std::collections::BTreeMap<String, String>,
+    configured_key: Option<&str>,
+) {
+    let configured = configured_key
+        .and_then(|key| tool_configs.get(key))
+        .or_else(|| tool_configs.get(&request.backend))
         .or_else(|| {
-            app.ctx.config.tools.iter().find_map(|(key, value)| {
+            tools.iter().find_map(|(key, value)| {
                 ToolRequest::parse(value)
                     .ok()
                     .filter(|configured| configured.backend == request.backend)
-                    .and_then(|_| app.ctx.config.tool_configs.get(key))
+                    .and_then(|_| tool_configs.get(key))
             })
         })
         .map(|entry| entry.to_request_options())
@@ -853,6 +864,70 @@ fn inherit_configured_options(app: &App, request: &mut ToolRequest) {
     let explicit = std::mem::take(&mut request.options);
     request.options = configured;
     request.options.extend(explicit);
+}
+
+fn resolve_explicit_request(
+    app: &App,
+    operand: &str,
+    tool_configs: &std::collections::BTreeMap<String, osdk_core::config::ToolConfigEntry>,
+    tools: &std::collections::BTreeMap<String, String>,
+) -> Result<ToolRequest> {
+    let (mut request, configured_key) =
+        resolve_explicit_request_target(app, operand, tool_configs, tools)?;
+    inherit_configured_options_from(&mut request, tool_configs, tools, configured_key.as_deref());
+    Ok(request)
+}
+
+fn resolve_explicit_request_target(
+    app: &App,
+    operand: &str,
+    tool_configs: &std::collections::BTreeMap<String, osdk_core::config::ToolConfigEntry>,
+    _tools: &std::collections::BTreeMap<String, String>,
+) -> Result<(ToolRequest, Option<String>)> {
+    let parsed = ToolRequest::parse(operand).map_err(|e| anyhow!("{e}"))?;
+    if app.registry.get(&parsed.backend).is_ok() {
+        return Ok((parsed, None));
+    }
+    let Some(entry) = tool_configs.get(&parsed.backend) else {
+        return Ok((parsed, None));
+    };
+    let configured_key = parsed.backend.clone();
+    let mut resolved = ToolRequest::parse(entry.version()).map_err(|e| anyhow!("{e}"))?;
+    if app.registry.get(&resolved.backend).is_err() {
+        return Ok((parsed, None));
+    }
+    if requested_spec_literal(operand).is_some() {
+        resolved.spec = parsed.spec;
+    }
+    Ok((resolved, Some(configured_key)))
+}
+
+fn apply_use_options(
+    config: &osdk_core::config::Config,
+    request: &mut ToolRequest,
+    global: bool,
+    opts: &[String],
+    configured_key: Option<&str>,
+) -> Result<()> {
+    if global && request.backend.starts_with("npm:") {
+        inherit_configured_options_from(
+            request,
+            &config.global_tool_configs,
+            &config.global_tools,
+            configured_key,
+        );
+    } else {
+        inherit_configured_options_from(
+            request,
+            &config.tool_configs,
+            &config.tools,
+            configured_key,
+        );
+    }
+    for (key, value) in parse_opts(opts)? {
+        request.options.insert(key, value);
+    }
+    Ok(())
 }
 
 fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
@@ -961,12 +1036,35 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
     let requested_spec = requested_spec_literal(&tool);
-    let mut req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
-    inherit_configured_options(app, &mut req);
-    for (k, v) in parse_opts(&opts)? {
-        req.options.insert(k, v);
-    }
+    let (mut req, configured_key) = if global {
+        resolve_explicit_request_target(
+            app,
+            &tool,
+            &app.ctx.config.global_tool_configs,
+            &app.ctx.config.global_tools,
+        )?
+    } else {
+        let (request, key) = resolve_explicit_request_target(
+            app,
+            &tool,
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+        )?;
+        (request, key)
+    };
+    apply_use_options(
+        &app.ctx.config,
+        &mut req,
+        global,
+        &opts,
+        configured_key.as_deref(),
+    )?;
     if global && req.backend.starts_with("npm:") {
+        if configured_key.is_some() {
+            anyhow::bail!(
+                "global npm package aliases are not supported; use the canonical npm:<package> request"
+            );
+        }
         return crate::global_npm_use::install(app, req, requested_spec).await;
     }
     if !global && req.backend.starts_with("npm:") {
@@ -979,10 +1077,18 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
             osdk_core::npm_tools::ToolScope::Project,
         )?;
         if let Some(project) = plan.project {
-            return use_project_npm(app, req, requested_spec, project, requested_installer).await;
+            return use_project_npm(
+                app,
+                req,
+                requested_spec,
+                project,
+                requested_installer,
+                configured_key,
+            )
+            .await;
         }
     }
-    use_legacy_cmd(app, req, requested_spec, global).await
+    use_legacy_cmd(app, req, requested_spec, global, configured_key).await
 }
 
 async fn use_legacy_cmd(
@@ -990,6 +1096,7 @@ async fn use_legacy_cmd(
     req: ToolRequest,
     requested_spec: Option<String>,
     global: bool,
+    configured_key: Option<String>,
 ) -> Result<()> {
     let persisted_options = req.options.clone();
     let tv = install_one(app, &req).await?;
@@ -997,37 +1104,100 @@ async fn use_legacy_cmd(
     // channels like `stable` or `temurin-17` are preserved rather than being
     // normalized to `latest`. Bare `tool` (no `@`) pins the resolved version.
     let spec = requested_spec.unwrap_or_else(|| tv.version.clone());
+    let persist_target = select_use_persist_target(app, &tv.backend, global, configured_key)?;
+    let persisted_version = persist_version_for_target(&persist_target, &tv.backend, &spec);
     if global {
         if persisted_options.is_empty() {
-            crate::config_edit::set_global_tool(&app.ctx, &tv.backend, &spec)?;
+            crate::config_edit::set_global_tool(&app.ctx, &persist_target.key, &persisted_version)?;
         } else {
             crate::config_edit::set_global_tool_config(
                 &app.ctx,
-                &tv.backend,
-                &structured_tool_config(&spec, &persisted_options),
+                &persist_target.key,
+                &structured_tool_config(&persisted_version, &persisted_options),
             )?;
         }
-        println!("{}", t!("msg.pinned_global", tool = tv.backend, ver = spec));
+        println!(
+            "{}",
+            t!("msg.pinned_global", tool = persist_target.key, ver = spec)
+        );
     } else {
         let path = if persisted_options.is_empty() {
-            crate::config_edit::set_project_tool(&tv.backend, &spec)?
+            crate::config_edit::set_project_tool(&persist_target.key, &persisted_version)?
         } else {
             crate::config_edit::set_project_tool_config(
-                &tv.backend,
-                &structured_tool_config(&spec, &persisted_options),
+                &persist_target.key,
+                &structured_tool_config(&persisted_version, &persisted_options),
             )?
         };
         println!(
             "{}",
             t!(
                 "msg.pinned_project",
-                tool = tv.backend,
+                tool = persist_target.key,
                 ver = spec,
                 path = path.display()
             )
         );
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct UsePersistTarget {
+    key: String,
+    indirect: bool,
+}
+
+fn select_use_persist_target(
+    app: &App,
+    backend: &str,
+    global: bool,
+    configured_key: Option<String>,
+) -> Result<UsePersistTarget> {
+    if let Some(key) = configured_key {
+        return Ok(UsePersistTarget {
+            indirect: key != backend,
+            key,
+        });
+    }
+
+    let tools = if global {
+        &app.ctx.config.global_tools
+    } else {
+        &app.ctx.config.tools
+    };
+    let matches = tools
+        .iter()
+        .filter_map(|(key, value)| {
+            (key != backend)
+                .then(|| ToolRequest::parse(value).ok())
+                .flatten()
+                .filter(|request| request.backend == backend)
+                .map(|_| key.clone())
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [] => Ok(UsePersistTarget {
+            key: backend.to_string(),
+            indirect: false,
+        }),
+        [key] => Ok(UsePersistTarget {
+            key: key.clone(),
+            indirect: true,
+        }),
+        _ => anyhow::bail!(
+            "multiple configured tool keys resolve to `{backend}`; use the desired key explicitly"
+        ),
+    }
+}
+
+fn persist_version_for_target(target: &UsePersistTarget, backend: &str, spec: &str) -> String {
+    if target.indirect {
+        format!("{backend}@{spec}")
+    } else {
+        spec.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1044,6 +1214,7 @@ async fn use_project_npm(
     requested_spec: Option<String>,
     project: osdk_core::npm_tools::NpmProject,
     requested_installer: osdk_core::npm_tools::NpmInstaller,
+    configured_key: Option<String>,
 ) -> Result<()> {
     let package = request
         .backend
@@ -1084,6 +1255,14 @@ async fn use_project_npm(
         &project.root,
         &project.package_json,
         &config_path,
+    )?;
+    let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
+    let configured_spec = persisted_spec.clone();
+    let config_key = configured_key.as_deref().unwrap_or(&request.backend);
+    let configured_specs = project_npm_configured_specs(
+        app,
+        &config_path,
+        Some((config_key, &request.backend, &configured_spec)),
     )?;
     let project = osdk_core::npm_tools::inspect_npm_project(&project.root)?
         .ok_or_else(|| anyhow!("project package.json disappeared before npm install"))?;
@@ -1178,28 +1357,29 @@ async fn use_project_npm(
             crate::lockfile::LockScope::Project,
         )?;
 
-        let persisted_spec = requested_spec.unwrap_or_else(|| version.version.clone());
-        let mut configured_specs = project_npm_configured_specs(app, &config_path)?;
-        configured_specs.insert(request.backend.clone(), persisted_spec.clone());
         osdk_core::backend::npm_package::publish_project_bin_generation(
             &project.root,
             &osdk_core::backend::npm_package::ProjectNpmBinSelection {
                 backend: request.backend.clone(),
-                configured_spec: persisted_spec.clone(),
+                configured_spec: configured_spec.clone(),
                 version: version.version.clone(),
             },
             &configured_specs,
         )?;
         let mut config_options = request.options.clone();
         config_options.insert("installer".into(), installer.as_str().into());
+        let config_version = configured_key
+            .as_ref()
+            .map(|_| format!("{}@{}", request.backend, persisted_spec))
+            .unwrap_or_else(|| persisted_spec.clone());
         crate::config_edit::set_project_npm_tool_at(
             &config_path,
             &node_version.version,
-            &request.backend,
-            &structured_tool_config(&persisted_spec, &config_options),
+            config_key,
+            &structured_tool_config(&config_version, &config_options),
         )?;
         osdk_core::trust::trust(&app.ctx.dirs.config, &config_path)?;
-        Ok((persisted_spec, config_path.clone()))
+        Ok((persisted_spec.clone(), config_path.clone()))
     }
     .await;
 
@@ -1212,7 +1392,7 @@ async fn use_project_npm(
         "{}",
         t!(
             "msg.pinned_project",
-            tool = request.backend,
+            tool = configured_key.as_deref().unwrap_or(&request.backend),
             ver = persisted_spec,
             path = config_path.display()
         )
@@ -1223,24 +1403,35 @@ async fn use_project_npm(
 fn project_npm_configured_specs(
     app: &App,
     config_path: &std::path::Path,
+    replacement: Option<(&str, &str, &str)>,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let project_root = config_path
         .parent()
         .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?;
     let config = osdk_core::config::Config::load(&app.ctx.dirs.user_config_file(), project_root)?;
-    Ok(config
-        .tools
-        .iter()
-        .filter(|(backend, _)| backend.starts_with("npm:"))
-        .filter(|(backend, _)| {
-            matches!(
-                config.tool_origins.get(*backend),
-                Some(osdk_core::config::ToolConfigOrigin::ProjectConfig(path))
-                    if same_config_path(path, config_path)
-            )
-        })
-        .map(|(backend, spec)| (backend.clone(), spec.clone()))
-        .collect())
+    let mut entries = Vec::new();
+    for (key, value) in &config.tools {
+        if !matches!(
+            config.tool_origins.get(key),
+            Some(osdk_core::config::ToolConfigOrigin::ProjectConfig(path))
+                if same_config_path(path, config_path)
+        ) {
+            continue;
+        }
+        if replacement.is_some_and(|(replacement_key, _, _)| key == replacement_key) {
+            continue;
+        }
+        entries.push((key.clone(), value.clone()));
+    }
+    if let Some((key, backend, spec)) = replacement {
+        let value = if key == backend {
+            spec.to_string()
+        } else {
+            format!("{backend}@{spec}")
+        };
+        entries.push((key.to_string(), value));
+    }
+    osdk_core::activate::canonical_project_npm_specs(entries).map_err(anyhow::Error::from)
 }
 
 fn expected_project_native_lock(
@@ -1803,6 +1994,11 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     if global && !req.backend.starts_with("npm:") {
         anyhow::bail!("--global is only supported for npm:<package> uninstall requests");
     }
+    if global {
+        crate::global_npm_use::with_global_npm_state_lock(&app.ctx.dirs, || {
+            recover_interrupted_global_npm_uninstalls(app)
+        })?;
+    }
     let version = if global {
         select_global_npm_version(app, &req, requested_spec_literal(&tool).is_some())?
     } else if let Some(npm) =
@@ -1958,6 +2154,7 @@ fn uninstall_global_npm(app: &App, version: &ToolVersion) -> Result<()> {
     let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", version.backend))?;
     crate::global_npm_use::with_global_npm_state_lock(&app.ctx.dirs, || {
+        recover_interrupted_global_npm_uninstalls(app)?;
         let roots = global_npm_install_roots(&app.ctx, &backend, version)?;
         if roots.is_empty() {
             anyhow::bail!("{} is not installed in global scope", version);
@@ -1974,18 +2171,29 @@ fn uninstall_global_npm(app: &App, version: &ToolVersion) -> Result<()> {
         let remove_config = global_config_selects_version(app, version, &installed_before)?;
         let remove_lock = global_lock_selects_version(app, version)?;
         let snapshots = global_npm_metadata_snapshots(app, &bin_names)?;
-        let mut moved = Vec::new();
-        for root in &roots {
-            let backup = unused_sibling_path(root, "uninstall-backup")?;
-            if let Err(error) = std::fs::rename(root, &backup) {
-                let rollback = restore_moved_global_npm_roots(&moved);
+        let mut transaction = GlobalNpmUninstallTransaction::prepare(
+            app,
+            version,
+            &roots,
+            &bin_names,
+            remove_config,
+            remove_lock,
+        )?;
+        for index in 0..transaction.journal.roots.len() {
+            let original = transaction.journal.roots[index].original.clone();
+            let backup = transaction.journal.roots[index].backup.clone();
+            if let Err(error) = rename_global_npm_uninstall_path(&original, &backup) {
+                let rollback = transaction.rollback_roots();
                 return Err(with_uninstall_rollback(
-                    anyhow!(error).context(format!("staging removal of {}", root.display())),
+                    anyhow!(error).context(format!("staging removal of {}", original.display())),
                     rollback.err(),
                 ));
             }
-            moved.push((root.clone(), backup));
         }
+        // Every root is now recoverable from a durable backup. Crossing this
+        // write-ahead commit makes a crash complete the uninstall; normal
+        // returned errors still use the in-process snapshots to roll back.
+        transaction.mark_committed()?;
         let metadata_result = (|| {
             if remove_config {
                 crate::config_edit::remove_global_tool_unlocked(&app.ctx, &version.backend)?;
@@ -2001,19 +2209,16 @@ fn uninstall_global_npm(app: &App, version: &ToolVersion) -> Result<()> {
         })();
         if let Err(error) = metadata_result {
             let metadata_rollback = restore_global_npm_metadata(&snapshots);
-            let install_rollback = restore_moved_global_npm_roots(&moved);
-            let rollback = combine_rollback_errors(metadata_rollback.err(), install_rollback.err());
+            let install_rollback = transaction.rollback_roots();
+            let shim_rollback = refreshed_global_npm_app(app)
+                .and_then(|app| generate_global_npm_shims_for(&app, version, &bin_names));
+            let rollback = combine_rollback_errors(
+                combine_rollback_errors(metadata_rollback.err(), install_rollback.err()),
+                shim_rollback.err(),
+            );
             return Err(with_uninstall_rollback(error, rollback));
         }
-        for (_, backup) in &moved {
-            if let Err(error) = std::fs::remove_dir_all(backup) {
-                tracing::warn!(
-                    error = %error,
-                    path = %backup.display(),
-                    "failed to remove committed global npm uninstall backup"
-                );
-            }
-        }
+        transaction.finish();
         Ok(())
     })
 }
@@ -2033,6 +2238,534 @@ fn global_npm_install_roots(
         }
     }
     Ok(roots)
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalNpmUninstallJournal {
+    backend: String,
+    version: String,
+    roots: Vec<GlobalNpmUninstallRoot>,
+    bin_names: Vec<String>,
+    config_entry: Option<osdk_core::config::ToolConfigEntry>,
+    lock_entry: Option<GlobalNpmUninstallLockEntry>,
+    committed: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalNpmUninstallRoot {
+    original: std::path::PathBuf,
+    backup: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct GlobalNpmUninstallLockEntry {
+    version: String,
+    options: std::collections::BTreeMap<String, String>,
+}
+
+struct GlobalNpmUninstallTransaction {
+    path: std::path::PathBuf,
+    journal: GlobalNpmUninstallJournal,
+    completed: bool,
+}
+
+impl GlobalNpmUninstallTransaction {
+    fn prepare(
+        app: &App,
+        version: &ToolVersion,
+        roots: &[std::path::PathBuf],
+        bin_names: &std::collections::BTreeSet<String>,
+        remove_config: bool,
+        remove_lock: bool,
+    ) -> Result<Self> {
+        let roots = roots
+            .iter()
+            .map(|original| {
+                Ok(GlobalNpmUninstallRoot {
+                    original: original.clone(),
+                    backup: unused_sibling_path(original, "uninstall-backup")?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let path = global_npm_uninstall_journal_path(&app.ctx.dirs, version);
+        if path.exists() {
+            anyhow::bail!(
+                "global npm uninstall journal already exists for {}",
+                version
+            );
+        }
+        let transaction = Self {
+            path,
+            journal: GlobalNpmUninstallJournal {
+                backend: version.backend.clone(),
+                version: version.version.clone(),
+                roots,
+                bin_names: bin_names.iter().cloned().collect(),
+                config_entry: remove_config
+                    .then(|| capture_global_npm_uninstall_config_entry(app, version))
+                    .transpose()?
+                    .flatten(),
+                lock_entry: remove_lock
+                    .then(|| capture_global_npm_uninstall_lock_entry(app, version))
+                    .transpose()?
+                    .flatten(),
+                committed: false,
+            },
+            completed: false,
+        };
+        transaction.persist()?;
+        Ok(transaction)
+    }
+
+    fn persist(&self) -> Result<()> {
+        write_global_npm_uninstall_journal(&self.path, &self.journal)
+    }
+
+    fn mark_committed(&mut self) -> Result<()> {
+        let mut committed = self.journal.clone();
+        committed.committed = true;
+        write_global_npm_uninstall_journal(&self.path, &committed)?;
+        self.journal = committed;
+        Ok(())
+    }
+
+    fn rollback_roots(&mut self) -> Result<()> {
+        let result = restore_moved_global_npm_roots(&self.journal.roots);
+        if result.is_ok() {
+            remove_global_npm_uninstall_path(&self.path)?;
+            self.completed = true;
+        }
+        result
+    }
+
+    fn finish(&mut self) {
+        let mut cleanup_failed = false;
+        for root in &self.journal.roots {
+            if let Err(error) = remove_global_npm_uninstall_path(&root.backup) {
+                cleanup_failed = true;
+                tracing::warn!(
+                    error = %error,
+                    path = %root.backup.display(),
+                    "failed to remove committed global npm uninstall backup"
+                );
+            }
+        }
+        if !cleanup_failed {
+            if let Err(error) = remove_global_npm_uninstall_path(&self.path) {
+                tracing::warn!(
+                    error = %error,
+                    path = %self.path.display(),
+                    "failed to remove committed global npm uninstall journal"
+                );
+            } else {
+                self.completed = true;
+            }
+        }
+    }
+}
+
+impl Drop for GlobalNpmUninstallTransaction {
+    fn drop(&mut self) {
+        // A normal error before the commit marker restores availability. A
+        // committed transaction is deliberately left for roll-forward unless
+        // the caller explicitly rolls it back with its metadata snapshots.
+        // Panics model abrupt termination and likewise leave the journal for
+        // deterministic recovery on the next locked operation.
+        if !self.completed && !self.journal.committed && !std::thread::panicking() {
+            let _ = self.rollback_roots();
+        }
+    }
+}
+
+fn global_npm_uninstall_journal_dir(dirs: &osdk_core::dirs::Dirs) -> std::path::PathBuf {
+    dirs.data.join(GLOBAL_NPM_UNINSTALL_JOURNAL_DIR)
+}
+
+fn global_npm_uninstall_journal_path(
+    dirs: &osdk_core::dirs::Dirs,
+    version: &ToolVersion,
+) -> std::path::PathBuf {
+    let backend = osdk_core::pipeline::verify::hash_bytes(
+        version.backend.as_bytes(),
+        osdk_core::pipeline::HashAlgo::Sha256,
+    );
+    let version = osdk_core::pipeline::verify::hash_bytes(
+        version.version.as_bytes(),
+        osdk_core::pipeline::HashAlgo::Sha256,
+    );
+    global_npm_uninstall_journal_dir(dirs).join(format!("{backend}-{version}.json"))
+}
+
+fn capture_global_npm_uninstall_config_entry(
+    app: &App,
+    version: &ToolVersion,
+) -> Result<Option<osdk_core::config::ToolConfigEntry>> {
+    Ok(
+        osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?
+            .global_tool_configs
+            .get(&version.backend)
+            .cloned(),
+    )
+}
+
+fn capture_global_npm_uninstall_lock_entry(
+    app: &App,
+    version: &ToolVersion,
+) -> Result<Option<GlobalNpmUninstallLockEntry>> {
+    let path = app.ctx.dirs.user_lock_file();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(crate::lockfile::locked_requests(&path, app.ctx.platform)?
+        .unwrap_or_default()
+        .into_iter()
+        .find(|request| {
+            request.backend == version.backend
+                && request.spec == VersionSpec::Exact(version.version.clone())
+                && request
+                    .options
+                    .get(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION)
+                    .map(String::as_str)
+                    == Some(osdk_core::npm_tools::ToolScope::Global.as_str())
+        })
+        .map(|request| GlobalNpmUninstallLockEntry {
+            version: version.version.clone(),
+            options: request.options,
+        }))
+}
+
+fn write_global_npm_uninstall_journal(
+    path: &std::path::Path,
+    journal: &GlobalNpmUninstallJournal,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("uninstall journal has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating uninstall journal directory {}", parent.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("uninstall journal has no file name: {}", path.display()))?
+        .to_string_lossy();
+    let temporary = loop {
+        let nonce = NEXT_GLOBAL_NPM_UNINSTALL_FILE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.write-{}-{nonce}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "creating global npm uninstall journal {}",
+                        candidate.display()
+                    )
+                })
+            }
+        }
+    };
+    let (temporary_path, mut temporary_file) = temporary;
+    let result = (|| -> Result<()> {
+        use std::io::Write as _;
+        temporary_file.write_all(&serde_json::to_vec(journal)?)?;
+        temporary_file.sync_all()?;
+        drop(temporary_file);
+        replace_project_file(&temporary_path, path)?;
+        sync_global_npm_uninstall_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result.with_context(|| format!("writing global npm uninstall journal {}", path.display()))
+}
+
+#[cfg(unix)]
+fn sync_global_npm_uninstall_directory(path: &std::path::Path) -> Result<()> {
+    std::fs::File::open(path)?
+        .sync_all()
+        .with_context(|| format!("syncing uninstall journal directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_global_npm_uninstall_directory(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+fn read_global_npm_uninstall_journal(path: &std::path::Path) -> Result<GlobalNpmUninstallJournal> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading global npm uninstall journal {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing global npm uninstall journal {}", path.display()))
+}
+
+/// Complete or roll back global npm uninstalls left by a terminated process.
+/// Callers must hold the shared global npm state lock.
+pub(crate) fn recover_interrupted_global_npm_uninstalls(app: &App) -> Result<()> {
+    let directory = global_npm_uninstall_journal_dir(&app.ctx.dirs);
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "reading global npm uninstall journals {}",
+                    directory.display()
+                )
+            })
+        }
+    };
+    let mut journals = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    journals.sort();
+    for path in journals {
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
+            continue;
+        }
+        recover_global_npm_uninstall(app, &path)?;
+    }
+    Ok(())
+}
+
+fn recover_global_npm_uninstall(app: &App, path: &std::path::Path) -> Result<()> {
+    let journal = read_global_npm_uninstall_journal(path)?;
+    validate_global_npm_uninstall_journal(app, path, &journal)?;
+    let version = ToolVersion::new(&journal.backend, &journal.version);
+    let bin_names = journal.bin_names.iter().cloned().collect();
+    if journal.committed {
+        finish_recovered_global_npm_uninstall(app, path, &journal, &version, &bin_names)
+    } else {
+        rollback_recovered_global_npm_uninstall(app, path, &journal, &version, &bin_names)
+    }
+}
+
+fn validate_global_npm_uninstall_journal(
+    app: &App,
+    path: &std::path::Path,
+    journal: &GlobalNpmUninstallJournal,
+) -> Result<()> {
+    let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&journal.backend)
+        .filter(|backend| backend.id() == journal.backend)
+        .ok_or_else(|| {
+            anyhow!(
+                "invalid backend `{}` in global npm uninstall journal {}",
+                journal.backend,
+                path.display()
+            )
+        })?;
+    if journal.version.is_empty() || journal.roots.is_empty() {
+        anyhow::bail!("incomplete global npm uninstall journal {}", path.display());
+    }
+    let version = ToolVersion::new(&journal.backend, &journal.version);
+    let expected_path = global_npm_uninstall_journal_path(&app.ctx.dirs, &version);
+    if path != expected_path {
+        anyhow::bail!(
+            "unsafe global npm uninstall journal path {} (expected {})",
+            path.display(),
+            expected_path.display()
+        );
+    }
+    let expected_roots = [
+        backend.global_install_root(&app.ctx, &journal.version),
+        backend.isolated_install_root(&app.ctx, &journal.version),
+    ];
+    let mut originals = std::collections::BTreeSet::new();
+    let mut backups = std::collections::BTreeSet::new();
+    for root in &journal.roots {
+        if !expected_roots.contains(&root.original) || !originals.insert(root.original.clone()) {
+            anyhow::bail!(
+                "unsafe original path {} in global npm uninstall journal {}",
+                root.original.display(),
+                path.display()
+            );
+        }
+        let parent = root
+            .original
+            .parent()
+            .ok_or_else(|| anyhow!("global npm uninstall root has no parent"))?;
+        let name = root
+            .original
+            .file_name()
+            .ok_or_else(|| anyhow!("global npm uninstall root has no file name"))?
+            .to_string_lossy();
+        let prefix = format!(".{name}.osdk-uninstall-backup-");
+        if root.backup.parent() != Some(parent)
+            || !root
+                .backup
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+            || !backups.insert(root.backup.clone())
+        {
+            anyhow::bail!(
+                "unsafe backup path {} in global npm uninstall journal {}",
+                root.backup.display(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn finish_recovered_global_npm_uninstall(
+    app: &App,
+    path: &std::path::Path,
+    journal: &GlobalNpmUninstallJournal,
+    version: &ToolVersion,
+    bin_names: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let config_matches = match &journal.config_entry {
+        Some(expected) => {
+            global_npm_uninstall_config_entry(app, version)?.as_ref() == Some(expected)
+        }
+        None => false,
+    };
+    if config_matches {
+        crate::config_edit::remove_global_tool_unlocked(&app.ctx, &version.backend)?;
+    }
+    let config_is_safe = match &journal.config_entry {
+        Some(expected) => {
+            global_npm_uninstall_config_entry(app, version)?.as_ref() != Some(expected)
+        }
+        None => true,
+    };
+    let lock_matches = match &journal.lock_entry {
+        Some(expected) => global_npm_uninstall_lock_entry(app, version)?.as_ref() == Some(expected),
+        None => false,
+    };
+    if lock_matches {
+        crate::lockfile::remove_tool(
+            &app.ctx.dirs.user_lock_file(),
+            app.ctx.platform,
+            &version.backend,
+        )?;
+    }
+    let lock_is_safe = match &journal.lock_entry {
+        Some(expected) => global_npm_uninstall_lock_entry(app, version)?.as_ref() != Some(expected),
+        None => true,
+    };
+    if !config_is_safe || !lock_is_safe {
+        anyhow::bail!(
+            "cannot finish interrupted global npm uninstall for {}: active metadata still matches the removed install",
+            version
+        );
+    }
+    remove_unowned_global_npm_shims(app, bin_names)?;
+    for root in &journal.roots {
+        remove_global_npm_uninstall_path(&root.backup)?;
+    }
+    remove_global_npm_uninstall_path(path)
+}
+
+fn rollback_recovered_global_npm_uninstall(
+    app: &App,
+    path: &std::path::Path,
+    journal: &GlobalNpmUninstallJournal,
+    version: &ToolVersion,
+    bin_names: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    restore_moved_global_npm_roots(&journal.roots)?;
+    if global_config_still_selects_version(app, version)? {
+        let refreshed = refreshed_global_npm_app(app)?;
+        generate_global_npm_shims_for(&refreshed, version, bin_names)?;
+    }
+    remove_global_npm_uninstall_path(path)
+}
+
+fn global_config_still_selects_version(app: &App, version: &ToolVersion) -> Result<bool> {
+    let config = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+    let Some(entry) = config.global_tool_configs.get(&version.backend) else {
+        return Ok(false);
+    };
+    let spec = VersionSpec::parse(&config.expand_alias(&version.backend, entry.version())?);
+    match spec {
+        VersionSpec::Exact(selected) => Ok(selected == version.version),
+        _ => Ok(global_lock_selects_version(app, version)?),
+    }
+}
+
+fn global_npm_uninstall_config_entry(
+    app: &App,
+    version: &ToolVersion,
+) -> Result<Option<osdk_core::config::ToolConfigEntry>> {
+    capture_global_npm_uninstall_config_entry(app, version)
+}
+
+fn global_npm_uninstall_lock_entry(
+    app: &App,
+    version: &ToolVersion,
+) -> Result<Option<GlobalNpmUninstallLockEntry>> {
+    capture_global_npm_uninstall_lock_entry(app, version)
+}
+
+fn refreshed_global_npm_app(app: &App) -> Result<App> {
+    let cwd = std::env::current_dir()?;
+    let ctx = osdk_core::backend::Ctx {
+        dirs: app.ctx.dirs.clone(),
+        platform: app.ctx.platform,
+        config: osdk_core::config::Config::load(&app.ctx.dirs.user_config_file(), &cwd)?,
+        client: app.ctx.client.clone(),
+        cas: app.ctx.cas.clone(),
+        show_progress: app.ctx.show_progress,
+    };
+    Ok(App {
+        ctx,
+        registry: osdk_core::Registry::load(&app.ctx.dirs)?,
+        prompt: app.prompt.clone(),
+        source_override: app.source_override.clone(),
+        refresh_sources: app.refresh_sources,
+    })
+}
+
+fn generate_global_npm_shims_for(
+    app: &App,
+    version: &ToolVersion,
+    bin_names: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if global_config_still_selects_version(app, version)? {
+        if let Some(shim_binary) = osdk_core::shim::find_shim_binary(&app.ctx.dirs) {
+            for name in bin_names {
+                osdk_core::shim::generate_shim(&app.ctx.dirs, name, &shim_binary)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_global_npm_uninstall_path(path: &std::path::Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
+        }
+        Ok(_) => std::fs::remove_file(path).with_context(|| format!("removing {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("inspecting {}", path.display())),
+    }
+}
+
+fn rename_global_npm_uninstall_path(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut last = None;
+    for attempt in 0..4 {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last = Some(error);
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    Err(last.expect("rename was attempted"))
 }
 
 fn global_config_selects_version(
@@ -2219,15 +2952,28 @@ fn remove_global_npm_snapshot_path(path: &std::path::Path) -> Result<()> {
     }
 }
 
-fn restore_moved_global_npm_roots(
-    moved: &[(std::path::PathBuf, std::path::PathBuf)],
-) -> Result<()> {
+fn restore_moved_global_npm_roots(moved: &[GlobalNpmUninstallRoot]) -> Result<()> {
     let failures = moved
         .iter()
         .rev()
-        .filter_map(|(root, backup)| {
-            std::fs::rename(backup, root)
-                .with_context(|| format!("restoring global npm install {}", root.display()))
+        .filter_map(|root| {
+            if !root.backup.exists() {
+                return None;
+            }
+            if root.original.exists() {
+                return Some(anyhow!(
+                    "refusing to overwrite existing global npm install {} while backup {} also exists",
+                    root.original.display(),
+                    root.backup.display()
+                ));
+            }
+            rename_global_npm_uninstall_path(&root.backup, &root.original)
+                .with_context(|| {
+                    format!(
+                        "restoring global npm install {}",
+                        root.original.display()
+                    )
+                })
                 .err()
         })
         .map(|error| error.to_string())
@@ -2651,7 +3397,7 @@ pub fn deactivate(shell: String) -> Result<()> {
 pub fn hook_env(app: &App, shell: String) -> Result<()> {
     let sh: osdk_core::activate::Shell = shell.parse().map_err(|e| anyhow!("{e}"))?;
     let cwd = std::env::current_dir()?;
-    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, &cwd);
+    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, &cwd)?;
     // Layer 2: downstream package caches (only vars the user hasn't set).
     let cache_vars = osdk_core::cache::cache_env(&app.ctx.dirs.cache, |k| std::env::var(k).ok());
     delta.set_vars.extend(cache_vars);
@@ -3787,6 +4533,284 @@ pub fn human_bytes(n: u64) -> String {
 #[cfg(test)]
 mod command_flow_tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::prompt::TerminalPrompt;
+
+    fn layered_npm_tool_config() -> (tempfile::TempDir, osdk_core::config::Config) {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project/nested");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[tools]
+"npm:fixture-cli" = { version = "1", installer = "pnpm", allow_builds = ["global-build"] }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("project/osdk.toml"),
+            r#"
+[tools]
+"npm:fixture-cli" = { version = "2", installer = "npm", allow_builds = ["project-build"] }
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        (temporary, config)
+    }
+
+    fn app_with_config(
+        temporary: &tempfile::TempDir,
+        config: osdk_core::config::Config,
+    ) -> crate::app::App {
+        let dirs = osdk_core::dirs::Dirs {
+            data: temporary.path().join("data"),
+            cache: temporary.path().join("cache"),
+            config: temporary.path().join("config"),
+            store: temporary.path().join("store"),
+            installs: temporary.path().join("installs"),
+        };
+        for directory in [
+            &dirs.data,
+            &dirs.cache,
+            &dirs.config,
+            &dirs.store,
+            &dirs.installs,
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let client = osdk_core::http::client().unwrap();
+        let cas = Arc::new(osdk_core::store::Cas::new(dirs.store.clone()));
+        let registry = osdk_core::Registry::load(&dirs).unwrap();
+        let ctx = osdk_core::backend::Ctx {
+            dirs,
+            platform: osdk_core::platform::Platform::current(),
+            config,
+            client,
+            cas,
+            show_progress: false,
+        };
+        crate::app::App {
+            ctx,
+            registry,
+            prompt: Arc::new(TerminalPrompt::new(false)),
+            source_override: None,
+            refresh_sources: false,
+        }
+    }
+
+    #[test]
+    fn global_npm_use_options_ignore_project_scope_and_apply_cli_last() {
+        let (_temporary, config) = layered_npm_tool_config();
+        let mut configured = ToolRequest::parse("npm:fixture-cli@3").unwrap();
+
+        apply_use_options(&config, &mut configured, true, &[], None).unwrap();
+
+        assert_eq!(configured.options["installer"], "pnpm");
+        assert_eq!(configured.options["allow_builds"], "global-build");
+
+        let mut overridden = ToolRequest::parse("npm:fixture-cli@3").unwrap();
+        apply_use_options(
+            &config,
+            &mut overridden,
+            true,
+            &["installer=aube".into(), "allow_builds=cli-build".into()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(overridden.options["installer"], "aube");
+        assert_eq!(overridden.options["allow_builds"], "cli-build");
+    }
+
+    #[test]
+    fn local_npm_use_options_keep_project_merged_values() {
+        let (_temporary, config) = layered_npm_tool_config();
+        let mut request = ToolRequest::parse("npm:fixture-cli@3").unwrap();
+
+        apply_use_options(&config, &mut request, false, &[], None).unwrap();
+
+        assert_eq!(request.options["installer"], "npm");
+        assert_eq!(request.options["allow_builds"], "project-build");
+    }
+
+    #[test]
+    fn explicit_operand_resolves_through_configured_indirect_key() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[tools]
+"tool.node" = { version = "node@20.10.0", corepack = true }
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let request = resolve_explicit_request(
+            &app,
+            "tool.node",
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+        )
+        .unwrap();
+
+        assert_eq!(request.backend, "node");
+        assert_eq!(request.spec, VersionSpec::Exact("20.10.0".into()));
+        assert_eq!(request.options["corepack"], "true");
+    }
+
+    #[test]
+    fn explicit_operand_keeps_explicit_spec_when_resolving_indirect_key() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[tools]
+"tool.node" = { version = "node@20.10.0", corepack = true }
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let request = resolve_explicit_request(
+            &app,
+            "tool.node@22.0.0",
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+        )
+        .unwrap();
+
+        assert_eq!(request.backend, "node");
+        assert_eq!(request.spec, VersionSpec::Exact("22.0.0".into()));
+        assert_eq!(request.options["corepack"], "true");
+    }
+
+    #[test]
+    fn select_use_persist_target_reports_ambiguous_indirect_backend() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[tools]
+"tool.node" = "node@20.10.0"
+"tool.node.lts" = "node@22.0.0"
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let error = select_use_persist_target(&app, "node", false, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("multiple configured tool keys resolve to `node`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn project_npm_specs_reject_conflicting_aliases_and_accept_identical_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        let config_path = project.join("osdk.toml");
+        std::fs::write(
+            &config_path,
+            "[tools]\n\"tool.alpha\" = \"npm:fixture-cli@1.2.3\"\n\"tool.beta\" = \"npm:fixture-cli@2.0.0\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let error = project_npm_configured_specs(&app, &config_path, None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("npm:fixture-cli"), "{message}");
+        assert!(message.contains("tool.alpha"), "{message}");
+        assert!(message.contains("1.2.3"), "{message}");
+        assert!(message.contains("tool.beta"), "{message}");
+        assert!(message.contains("2.0.0"), "{message}");
+
+        std::fs::write(
+            &config_path,
+            "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n\"tool.beta\" = \"npm:fixture-cli@2.0.0\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let error = project_npm_configured_specs(&app, &config_path, None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("npm:fixture-cli"), "{message}");
+        assert!(message.contains("tool.beta"), "{message}");
+
+        std::fs::write(
+            &config_path,
+            "[tools]\n\"tool.alpha\" = \"npm:fixture-cli@1.2.3\"\n\"tool.beta\" = \"npm:fixture-cli@1.2.3\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        assert_eq!(
+            project_npm_configured_specs(&app, &config_path, None).unwrap(),
+            std::collections::BTreeMap::from([("npm:fixture-cli".into(), "1.2.3".into())])
+        );
+    }
+
+    #[test]
+    fn project_npm_specs_replace_the_current_alias_before_conflict_checking() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        let config_path = project.join("osdk.toml");
+        std::fs::write(
+            &config_path,
+            "[tools]\n\"tool.alpha\" = \"npm:fixture-cli@1.0.0\"\n\"tool.beta\" = \"npm:fixture-cli@2.0.0\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        assert_eq!(
+            project_npm_configured_specs(
+                &app,
+                &config_path,
+                Some(("tool.alpha", "npm:fixture-cli", "2.0.0")),
+            )
+            .unwrap(),
+            std::collections::BTreeMap::from([("npm:fixture-cli".into(), "2.0.0".into())])
+        );
+
+        let error = project_npm_configured_specs(
+            &app,
+            &config_path,
+            Some(("tool.alpha", "npm:fixture-cli", "3.0.0")),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("tool.alpha"), "{message}");
+        assert!(message.contains("3.0.0"), "{message}");
+        assert!(message.contains("tool.beta"), "{message}");
+        assert!(message.contains("2.0.0"), "{message}");
+    }
 
     #[test]
     fn project_dependency_section_preserves_existing_section_and_defaults_to_dev() {
@@ -4062,5 +5086,210 @@ mod command_flow_tests {
 
         assert_eq!(std::fs::read(file).unwrap(), b"old");
         assert!(!absent.exists());
+    }
+
+    fn write_global_npm_uninstall_fixture(
+        app: &App,
+        version: &ToolVersion,
+        bin_name: &str,
+    ) -> std::path::PathBuf {
+        let backend =
+            osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend).unwrap();
+        let root = backend.global_install_root(&app.ctx, &version.version);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join(bin_name), b"fixture").unwrap();
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::new(&version.backend).unwrap();
+        manifest.version = Some(version.version.clone());
+        manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
+            name: bin_name.into(),
+            path: format!("bin/{bin_name}"),
+        }];
+        manifest.metadata.insert("scope".into(), "global".into());
+        manifest.write_atomic(&root).unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        root
+    }
+
+    #[test]
+    fn interrupted_global_npm_uninstall_before_commit_restores_install() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n").unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
+        let transaction = GlobalNpmUninstallTransaction::prepare(
+            &app,
+            &version,
+            std::slice::from_ref(&root),
+            &bins,
+            true,
+            false,
+        )
+        .unwrap();
+        let journal_path = transaction.path.clone();
+        let backup = transaction.journal.roots[0].backup.clone();
+        std::mem::forget(transaction);
+        std::fs::rename(&root, &backup).unwrap();
+
+        recover_interrupted_global_npm_uninstalls(&app).unwrap();
+
+        assert!(root.is_dir());
+        assert!(!backup.exists());
+        assert!(!journal_path.exists());
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        assert_eq!(config.global_tools["npm:fixture-cli"], "1.2.3");
+    }
+
+    #[test]
+    fn committed_global_npm_uninstall_recovery_preserves_newer_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n").unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
+        let mut transaction = GlobalNpmUninstallTransaction::prepare(
+            &app,
+            &version,
+            std::slice::from_ref(&root),
+            &bins,
+            true,
+            false,
+        )
+        .unwrap();
+        let journal_path = transaction.path.clone();
+        let backup = transaction.journal.roots[0].backup.clone();
+        std::fs::rename(&root, &backup).unwrap();
+        transaction.mark_committed().unwrap();
+        std::mem::forget(transaction);
+        crate::config_edit::set_global_tool_unlocked(&app.ctx, &version.backend, "2.0.0").unwrap();
+
+        recover_interrupted_global_npm_uninstalls(&app).unwrap();
+
+        assert!(!root.exists());
+        assert!(!backup.exists());
+        assert!(!journal_path.exists());
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        assert_eq!(config.global_tools["npm:fixture-cli"], "2.0.0");
+    }
+
+    #[test]
+    fn global_npm_uninstall_journal_rejects_unsafe_backup_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config =
+            osdk_core::config::Config::load_user(&temporary.path().join("config/config.toml"))
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let backend =
+            osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend).unwrap();
+        let path = global_npm_uninstall_journal_path(&app.ctx.dirs, &version);
+        let journal = GlobalNpmUninstallJournal {
+            backend: version.backend.clone(),
+            version: version.version.clone(),
+            roots: vec![GlobalNpmUninstallRoot {
+                original: backend.global_install_root(&app.ctx, &version.version),
+                backup: temporary.path().join("outside"),
+            }],
+            bin_names: vec!["fixture-cli".into()],
+            config_entry: None,
+            lock_entry: None,
+            committed: false,
+        };
+        write_global_npm_uninstall_journal(&path, &journal).unwrap();
+
+        let error = recover_interrupted_global_npm_uninstalls(&app).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unsafe backup path"),
+            "{error:#}"
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn committed_global_npm_uninstall_recovery_removes_matching_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[tools]\nnode = \"20.0.0\"\n\"npm:fixture-cli\" = \"1.2.3\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
+        let mut transaction = GlobalNpmUninstallTransaction::prepare(
+            &app,
+            &version,
+            std::slice::from_ref(&root),
+            &bins,
+            true,
+            false,
+        )
+        .unwrap();
+        let backup = transaction.journal.roots[0].backup.clone();
+        std::fs::rename(&root, &backup).unwrap();
+        transaction.mark_committed().unwrap();
+        std::mem::forget(transaction);
+
+        recover_interrupted_global_npm_uninstalls(&app).unwrap();
+
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        assert!(!config.global_tools.contains_key("npm:fixture-cli"));
+        assert_eq!(config.global_tools["node"], "20.0.0");
+        assert!(!root.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn panicking_after_global_npm_uninstall_commit_leaves_recoverable_journal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config/config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n").unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let app = app_with_config(&temporary, config);
+        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
+        let journal_path = global_npm_uninstall_journal_path(&app.ctx.dirs, &version);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut transaction = GlobalNpmUninstallTransaction::prepare(
+                &app,
+                &version,
+                std::slice::from_ref(&root),
+                &bins,
+                true,
+                false,
+            )
+            .unwrap();
+            let backup = transaction.journal.roots[0].backup.clone();
+            std::fs::rename(&root, backup).unwrap();
+            transaction.mark_committed().unwrap();
+            panic!("simulated abrupt termination");
+        }));
+        assert!(panic.is_err());
+        assert!(!root.exists());
+        assert!(journal_path.exists());
+
+        recover_interrupted_global_npm_uninstalls(&app).unwrap();
+
+        assert!(!root.exists());
+        assert!(!journal_path.exists());
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        assert!(!config.global_tools.contains_key("npm:fixture-cli"));
     }
 }

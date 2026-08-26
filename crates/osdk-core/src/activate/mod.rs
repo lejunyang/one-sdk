@@ -213,24 +213,29 @@ pub struct EnvDelta {
 }
 
 /// Compute the env delta for the directory `cwd`: for each backend with an
-/// active + installed version, collect its bin dirs and exec env.
-pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) -> EnvDelta {
+/// active + installed version, collect its bin dirs and exec env. Invalid
+/// dynamic-tool inventory aborts activation instead of producing a partial
+/// environment that could route around the configured tool.
+pub fn compute_env_delta(
+    ctx: &Ctx,
+    registry: &Registry,
+    cwd: &std::path::Path,
+) -> crate::Result<EnvDelta> {
     let mut path_prepend = Vec::new();
     let mut set_vars = BTreeMap::new();
     let mut has_generated_shim = false;
-    let dynamic_report = crate::shim::scan_dynamic_installs(ctx).ok();
+    let dynamic_report = crate::shim::scan_dynamic_installs(ctx)?;
     let mut backend_ids = registry
         .all()
         .iter()
         .map(|backend| backend.id().to_string())
         .collect::<Vec<_>>();
-    if let Some(report) = &dynamic_report {
-        backend_ids.extend(crate::shim::configured_and_installed_dynamic_ids(
-            ctx, report,
-        ));
-        backend_ids.sort();
-        backend_ids.dedup();
-    }
+    backend_ids.extend(crate::shim::configured_and_installed_dynamic_ids(
+        ctx,
+        &dynamic_report,
+    ));
+    backend_ids.sort();
+    backend_ids.dedup();
 
     for backend_id in backend_ids {
         let Ok(backend) = registry.get(&backend_id) else {
@@ -316,7 +321,7 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
     }
 
     prioritize_managed_paths(&mut path_prepend, &ctx.dirs.shims(), has_generated_shim);
-    if let Some(project_bin) = trusted_project_npm_bin(ctx, cwd) {
+    if let Some(project_bin) = trusted_project_npm_bin(ctx, cwd)? {
         prioritize_project_bin(&mut path_prepend, project_bin);
     }
 
@@ -327,14 +332,14 @@ pub fn compute_env_delta(ctx: &Ctx, registry: &Registry, cwd: &std::path::Path) 
         .map(str::to_string)
         .collect();
 
-    EnvDelta {
+    Ok(EnvDelta {
         path_prepend,
         set_vars,
         unset_vars,
-    }
+    })
 }
 
-fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> Option<PathBuf> {
+fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> crate::Result<Option<PathBuf>> {
     let config_path = ctx.config.tool_origins.iter().find_map(|(key, origin)| {
         let configured = key.starts_with("npm:")
             || ctx
@@ -346,15 +351,22 @@ fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> Option<PathBuf> 
             (true, crate::config::ToolConfigOrigin::ProjectConfig(path)) => Some(path),
             _ => None,
         }
-    })?;
-    let config_root = config_path.parent()?;
+    });
+    let Some(config_path) = config_path else {
+        return Ok(None);
+    };
+    let Some(config_root) = config_path.parent() else {
+        return Ok(None);
+    };
     let Ok(config_root) = dunce::canonicalize(config_root) else {
-        return None;
+        return Ok(None);
     };
     let Ok(cwd) = dunce::canonicalize(cwd) else {
-        return None;
+        return Ok(None);
     };
-    let project_root = nearest_package_root(&cwd)?;
+    let Some(project_root) = nearest_package_root(&cwd) else {
+        return Ok(None);
+    };
     if !same_existing_path(&config_root, &project_root)
         || !crate::trust::is_trusted(
             &ctx.dirs.config,
@@ -363,38 +375,73 @@ fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> Option<PathBuf> 
         )
         .unwrap_or(false)
     {
-        return None;
+        return Ok(None);
     }
     let configured_specs = project_npm_configured_specs(ctx, config_path)?;
     crate::backend::npm_package::validated_project_bin_dir(&project_root, &configured_specs)
-        .ok()
-        .flatten()
+        .map_err(|error| crate::error::Error::other(error.to_string()))
 }
 
 fn project_npm_configured_specs(
     ctx: &Ctx,
     config_path: &std::path::Path,
-) -> Option<BTreeMap<String, String>> {
-    let config_root = config_path.parent()?;
-    let config = crate::config::Config::load(&ctx.dirs.user_config_file(), config_root).ok()?;
-    let mut configured = BTreeMap::new();
-    for (key, value) in &config.tools {
-        if !matches!(
-            config.tool_origins.get(key),
-            Some(crate::config::ToolConfigOrigin::ProjectConfig(path))
-                if same_existing_path(path, config_path)
-        ) {
+) -> crate::Result<BTreeMap<String, String>> {
+    let config_root = config_path.parent().ok_or_else(|| {
+        crate::error::Error::other(format!(
+            "project config has no parent: {}",
+            config_path.display()
+        ))
+    })?;
+    let config = crate::config::Config::load(&ctx.dirs.user_config_file(), config_root)?;
+    canonical_project_npm_specs(
+        config
+            .tools
+            .iter()
+            .filter(|(key, _)| {
+                matches!(
+                    config.tool_origins.get(*key),
+                    Some(crate::config::ToolConfigOrigin::ProjectConfig(path))
+                        if same_existing_path(path, config_path)
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone())),
+    )
+}
+
+/// Reconstruct canonical npm backend specs from project tool entries without
+/// letting raw-key ordering decide which of two aliases wins.
+pub fn canonical_project_npm_specs(
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> crate::Result<BTreeMap<String, String>> {
+    let mut entries = entries.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut configured = BTreeMap::<String, (String, String)>::new();
+    for (key, value) in entries {
+        let entry = if key.starts_with("npm:") {
+            Some((key.clone(), value))
+        } else {
+            crate::version::ToolRequest::parse(&value)
+                .ok()
+                .filter(|request| request.backend.starts_with("npm:"))
+                .map(|request| (request.backend, request.spec.to_string()))
+        };
+        let Some((backend, spec)) = entry else {
+            continue;
+        };
+        if let Some((existing_key, existing_spec)) = configured.get(&backend) {
+            if existing_spec != &spec {
+                return Err(crate::error::Error::other(format!(
+                    "conflicting project npm aliases for `{backend}`: `{existing_key}` configures `{existing_spec}`, but `{key}` configures `{spec}`"
+                )));
+            }
             continue;
         }
-        if key.starts_with("npm:") {
-            configured.insert(key.clone(), value.clone());
-        } else if let Ok(request) = crate::version::ToolRequest::parse(value) {
-            if request.backend.starts_with("npm:") {
-                configured.insert(request.backend, request.spec.to_string());
-            }
-        }
+        configured.insert(backend, (key, spec));
     }
-    Some(configured)
+    Ok(configured
+        .into_iter()
+        .map(|(backend, (_, spec))| (backend, spec))
+        .collect())
 }
 
 fn nearest_package_root(cwd: &std::path::Path) -> Option<PathBuf> {
@@ -877,10 +924,89 @@ mod tests {
             crate::config::ToolConfigOrigin::ProjectConfig(project.join("osdk.toml")),
         );
 
-        assert!(trusted_project_npm_bin(&ctx, &project).is_none());
+        assert!(trusted_project_npm_bin(&ctx, &project).unwrap().is_none());
         assert!(!compute_env_delta(&ctx, &Registry::new(), &project)
+            .unwrap()
             .path_prepend
             .contains(&dunce::canonicalize(bin).unwrap()));
+    }
+
+    #[test]
+    fn project_npm_specs_reject_conflicting_aliases_and_accept_identical_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config_path = project.join("osdk.toml");
+        std::fs::write(
+            &config_path,
+            "[tools]\n\"tool.alpha\" = \"npm:fixture-cli@1.2.3\"\n\"tool.beta\" = \"npm:fixture-cli@2.0.0\"\n",
+        )
+        .unwrap();
+        let mut ctx = test_ctx(temporary.path(), &[]);
+        ctx.config =
+            crate::config::Config::load(&temporary.path().join("config/config.toml"), &project)
+                .unwrap();
+
+        let error = project_npm_configured_specs(&ctx, &config_path).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("npm:fixture-cli"), "{message}");
+        assert!(message.contains("tool.alpha"), "{message}");
+        assert!(message.contains("1.2.3"), "{message}");
+        assert!(message.contains("tool.beta"), "{message}");
+        assert!(message.contains("2.0.0"), "{message}");
+
+        std::fs::write(
+            &config_path,
+            "[tools]\n\"tool.alpha\" = \"npm:fixture-cli@1.2.3\"\n\"tool.beta\" = \"npm:fixture-cli@1.2.3\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            project_npm_configured_specs(&ctx, &config_path).unwrap(),
+            BTreeMap::from([("npm:fixture-cli".into(), "1.2.3".into())])
+        );
+    }
+
+    #[test]
+    fn activation_fails_closed_on_corrupt_inventory_with_valid_configured_dynamic_tool() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temporary.path(), &[("npm:fixture-cli", "1.2.3")]);
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let valid_root = ctx.dirs.install_path("npm:fixture-cli", "1.2.3");
+        let mut manifest = crate::inventory::DynamicToolManifest::new("npm:fixture-cli").unwrap();
+        manifest.version = Some("1.2.3".into());
+        manifest.bins.push(crate::inventory::DynamicToolBin {
+            name: "fixture-cli".into(),
+            path: "bin/fixture-cli".into(),
+        });
+        manifest.write_atomic(&valid_root).unwrap();
+        std::fs::create_dir_all(valid_root.join("bin")).unwrap();
+        std::fs::write(valid_root.join("bin/fixture-cli"), b"fixture").unwrap();
+        std::fs::write(valid_root.join(".osdk-complete"), b"").unwrap();
+
+        let corrupt_root = ctx.dirs.installs.join("github/corrupt/tool/1.0.0");
+        std::fs::create_dir_all(&corrupt_root).unwrap();
+        std::fs::write(
+            crate::inventory::DynamicToolManifest::manifest_path(&corrupt_root),
+            b"{not valid json",
+        )
+        .unwrap();
+
+        let error = match compute_env_delta(&ctx, &Registry::new(), &project) {
+            Ok(_) => panic!("corrupt inventory unexpectedly produced an activation delta"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("refusing dynamic tool inventory scan"),
+            "{message}"
+        );
+        assert!(message.contains("corrupt"), "{message}");
+        assert!(
+            message.contains(crate::inventory::INVENTORY_FILE),
+            "{message}"
+        );
     }
 
     #[test]

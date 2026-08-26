@@ -426,6 +426,50 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
 
 #[cfg(unix)]
 #[test]
+fn dynamic_shim_fails_closed_on_corrupt_inventory_with_valid_configured_tool() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let corrupt_root = temporary.path().join("installs/github/corrupt/tool/1.0.0");
+    std::fs::create_dir_all(&corrupt_root).unwrap();
+    std::fs::write(
+        osdk_core::inventory::DynamicToolManifest::manifest_path(&corrupt_root),
+        b"{not valid json",
+    )
+    .unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .arg("ni")
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing dynamic tool inventory scan"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("corrupt"), "{stderr}");
+    assert!(
+        stderr.contains(osdk_core::inventory::INVENTORY_FILE),
+        "{stderr}"
+    );
+    assert!(!log.exists(), "configured dynamic tool unexpectedly ran");
+}
+
+#[cfg(unix)]
+#[test]
 fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
@@ -865,7 +909,7 @@ fn node_only_activation_routes_bundled_npm_and_npx_through_preflight() {
         osdk_core::shim::generate_shim(&dirs, &alias, &shim()).unwrap();
     }
 
-    let activation = osdk_core::activate::compute_env_delta(&context, &registry, &project);
+    let activation = osdk_core::activate::compute_env_delta(&context, &registry, &project).unwrap();
     assert_eq!(activation.path_prepend, vec![dirs.shims(), node_bin]);
     let activation_path = std::env::join_paths(activation.path_prepend).unwrap();
 
