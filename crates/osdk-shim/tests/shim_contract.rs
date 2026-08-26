@@ -397,6 +397,7 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
     configure_registry(temporary.path(), server.url());
     let output = isolated_command(temporary.path(), &project)
         .args(["ni", "install", "fixture-package"])
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
         .output()
         .unwrap();
 
@@ -419,6 +420,73 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
                 .path()
                 .join("installs/npm/@antfu/ni/1.0.0/node_modules/.bin/ni")
                 .display()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("global.log");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\" }\nnode = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let global_root = temporary
+        .path()
+        .join("installs/npm-global/fixture-cli/1.2.3");
+    write_executable(
+        &global_root.join("bin/fixture-cli"),
+        &format!(
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$(command -v node)\" \"$(command -v fixture-cli)\" > {}\n",
+            log.display()
+        ),
+    );
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:fixture-cli").unwrap();
+    manifest.version = Some("1.2.3".into());
+    manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
+        name: "fixture-cli".into(),
+        path: "bin/fixture-cli".into(),
+    }];
+    manifest.metadata.insert("scope".into(), "global".into());
+    manifest
+        .metadata
+        .insert("node_version".into(), "1.0.0".into());
+    manifest.write_atomic(&global_root).unwrap();
+    std::fs::write(global_root.join(".osdk-complete"), b"").unwrap();
+    write_executable(
+        &temporary.path().join("installs/node/1.0.0/bin/node"),
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::write(
+        temporary.path().join("installs/node/1.0.0/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .arg("fixture-cli")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        format!(
+            "{}|{}\n",
+            temporary
+                .path()
+                .join("installs/node/1.0.0/bin/node")
+                .display(),
+            global_root.join("bin/fixture-cli").display()
         )
     );
 }
@@ -457,6 +525,7 @@ fn dynamic_npm_shim_does_not_fall_back_when_recorded_node_is_missing() {
 
     let output = isolated_command(temporary.path(), &project)
         .arg("ni")
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
         .output()
         .unwrap();
 
@@ -589,6 +658,7 @@ fn dynamic_npm_shim_localizes_missing_managed_node_from_environment() {
 
     let output = isolated_command(temporary.path(), &project)
         .args(["ni"])
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
         .env("OSDK_LANG", "zh")
         .output()
         .unwrap();
@@ -623,6 +693,7 @@ fn dynamic_npm_shim_localizes_missing_managed_node_from_config() {
 
     let output = isolated_command(temporary.path(), &project)
         .args(["ni"])
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
         .output()
         .unwrap();
 

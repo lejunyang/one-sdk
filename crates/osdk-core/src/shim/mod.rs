@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::backend::npm_package::NpmPackageBackend;
 use crate::backend::{Backend, Ctx};
 use crate::dirs::{create_dir_all, Dirs};
 use crate::error::{Error, Result};
@@ -139,12 +140,13 @@ pub fn dynamic_manifest_for_version(
     if !backend_id.contains(':') {
         return Ok(None);
     }
-    let install_root = ctx.dirs.install_path(backend_id, version);
-    let manifest_path = DynamicToolManifest::manifest_path(&install_root);
-    if !manifest_path.is_file() {
-        return Ok(None);
+    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
+        let manifest_path = DynamicToolManifest::manifest_path(&install_root);
+        if manifest_path.is_file() {
+            return Ok(Some(DynamicToolManifest::load(&install_root)?));
+        }
     }
-    Ok(Some(DynamicToolManifest::load(&install_root)?))
+    Ok(None)
 }
 
 /// Bin names exported by a manifest-backed dynamic install.
@@ -171,11 +173,14 @@ pub fn dynamic_manifest_bin_paths(
     backend_id: &str,
     version: &str,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let install_root = ctx.dirs.install_path(backend_id, version);
-    let Some(manifest) = dynamic_manifest_for_version(ctx, backend_id, version)? else {
-        return Ok(Vec::new());
-    };
-    Ok(manifest_bin_paths(&install_root, &manifest))
+    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
+        let manifest_path = DynamicToolManifest::manifest_path(&install_root);
+        if manifest_path.is_file() {
+            let manifest = DynamicToolManifest::load(&install_root)?;
+            return Ok(manifest_bin_paths(&install_root, &manifest));
+        }
+    }
+    Ok(Vec::new())
 }
 
 /// Resolve one executable path directly from the manifest instead of relying on
@@ -186,15 +191,34 @@ pub fn dynamic_manifest_executable(
     version: &str,
     executable_name: &str,
 ) -> Result<Option<std::path::PathBuf>> {
-    let install_root = ctx.dirs.install_path(backend_id, version);
-    let Some(manifest) = dynamic_manifest_for_version(ctx, backend_id, version)? else {
-        return Ok(None);
-    };
-    Ok(manifest
-        .bins
-        .into_iter()
-        .find(|bin| bin.name == executable_name)
-        .map(|bin| install_root.join(bin.path)))
+    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
+        let manifest_path = DynamicToolManifest::manifest_path(&install_root);
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let manifest = DynamicToolManifest::load(&install_root)?;
+        return Ok(manifest
+            .bins
+            .into_iter()
+            .find(|bin| bin.name == executable_name)
+            .map(|bin| install_root.join(bin.path)));
+    }
+    Ok(None)
+}
+
+fn dynamic_install_roots(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &str,
+) -> Result<Vec<std::path::PathBuf>> {
+    if let Some(backend) = NpmPackageBackend::from_id(backend_id) {
+        let tv = ToolVersion::new(backend_id, version);
+        return Ok(backend
+            .selected_install_root(ctx, &tv)?
+            .into_iter()
+            .collect());
+    }
+    Ok(vec![ctx.dirs.install_path(backend_id, version)])
 }
 
 fn manifest_bin_paths(
@@ -334,15 +358,123 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::{Config, Settings, SourcesConfig, ToolConfigEntry, ToolConfigOrigin};
+    use crate::inventory::DynamicToolBin;
+    use crate::platform::Platform;
+    use crate::store::Cas;
+
+    fn npm_scope_test_ctx(
+        root: &Path,
+        origin: Option<ToolConfigOrigin>,
+    ) -> (Ctx, NpmPackageBackend) {
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let key = "npm:fixture-cli".to_string();
+        let entry = ToolConfigEntry::legacy("1.2.3");
+        let mut tool_origins = BTreeMap::new();
+        let mut global_tool_configs = BTreeMap::new();
+        if let Some(origin) = origin {
+            if matches!(origin, ToolConfigOrigin::GlobalConfig(_)) {
+                global_tool_configs.insert(key.clone(), entry.clone());
+            }
+            tool_origins.insert(key.clone(), origin);
+        }
+        let ctx = Ctx {
+            cas: Arc::new(Cas::new(dirs.store.clone())),
+            dirs,
+            platform: Platform::current(),
+            config: Config {
+                settings: Settings::default(),
+                sources: SourcesConfig::default(),
+                tools: BTreeMap::from([(key.clone(), "1.2.3".into())]),
+                tool_configs: BTreeMap::from([(key, entry)]),
+                global_tools: Default::default(),
+                global_tool_configs,
+                tool_origins,
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        };
+        let backend = NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
+        (ctx, backend)
+    }
+
+    fn write_dynamic_fixture(root: &Path, bin_name: &str, scope: Option<&str>) {
+        let bin = root.join(format!("bin/{bin_name}"));
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"fixture").unwrap();
+        let mut manifest = DynamicToolManifest::new("npm:fixture-cli").unwrap();
+        manifest.version = Some("1.2.3".into());
+        manifest.bins = vec![DynamicToolBin {
+            name: bin_name.into(),
+            path: format!("bin/{bin_name}"),
+        }];
+        if let Some(scope) = scope {
+            manifest.metadata.insert("scope".into(), scope.into());
+        }
+        manifest.write_atomic(root).unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+    }
+
+    #[test]
+    fn npm_manifest_lookup_is_scope_strict_and_compatibility_falls_back() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project_config = temporary.path().join("project/osdk.toml");
+        let (project_ctx, backend) = npm_scope_test_ctx(
+            temporary.path(),
+            Some(ToolConfigOrigin::ProjectConfig(project_config)),
+        );
+        let isolated = backend.isolated_install_root(&project_ctx, "1.2.3");
+        let global = backend.global_install_root(&project_ctx, "1.2.3");
+        write_dynamic_fixture(&global, "global-bin", Some("global"));
+        assert!(
+            dynamic_manifest_for_version(&project_ctx, backend.id(), "1.2.3")
+                .unwrap()
+                .is_none()
+        );
+
+        write_dynamic_fixture(&isolated, "isolated-bin", None);
+        let global_config = temporary.path().join("config/config.toml");
+        let (global_ctx, _) = npm_scope_test_ctx(
+            temporary.path(),
+            Some(ToolConfigOrigin::GlobalConfig(global_config)),
+        );
+        let manifest = dynamic_manifest_for_version(&global_ctx, backend.id(), "1.2.3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(manifest.bins[0].name, "global-bin");
+
+        std::fs::remove_dir_all(&global).unwrap();
+        assert!(
+            dynamic_manifest_for_version(&global_ctx, backend.id(), "1.2.3")
+                .unwrap()
+                .is_none()
+        );
+        write_dynamic_fixture(&global, "global-bin", Some("global"));
+
+        let (compat_ctx, _) = npm_scope_test_ctx(temporary.path(), None);
+        let manifest = dynamic_manifest_for_version(&compat_ctx, backend.id(), "1.2.3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(manifest.bins[0].name, "isolated-bin");
+    }
+
     #[test]
     fn indirect_dynamic_request_preserves_structured_options() {
-        use std::collections::BTreeMap;
-        use std::sync::Arc;
-
-        use super::*;
-        use crate::config::{Config, Settings, SourcesConfig, ToolConfigEntry, ToolConfigValue};
-        use crate::platform::Platform;
-        use crate::store::Cas;
+        use crate::config::ToolConfigValue;
 
         let td = tempfile::tempdir().unwrap();
         let dirs = Dirs::resolve_from(|key| match key {

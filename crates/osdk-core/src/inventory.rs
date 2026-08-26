@@ -312,7 +312,16 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
     let mut diagnostics = Vec::new();
     let walker = walkdir::WalkDir::new(scan_root)
         .follow_links(false)
-        .max_depth(options.max_depth.saturating_add(1));
+        .max_depth(options.max_depth.saturating_add(1))
+        .into_iter()
+        // Hidden directories below the install root are implementation state
+        // (`.locks`, atomic staging/backup trees, and similar). The inventory
+        // file itself is intentionally hidden, so filter directories only.
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !entry.file_type().is_dir()
+                || !entry.file_name().to_string_lossy().starts_with('.')
+        });
 
     for entry in walker {
         match entry {
@@ -1004,6 +1013,36 @@ mod tests {
             report.diagnostics[0].kind,
             InventoryDiagnosticKind::ManifestTooLarge
         );
+    }
+
+    #[test]
+    fn scan_ignores_hidden_transaction_and_lock_directories() {
+        let temporary = tempdir().unwrap();
+        let canonical_root = temporary.path().join("npm-global/fixture-cli/1.2.3");
+        let staged_root = temporary
+            .path()
+            .join("npm-global/fixture-cli/.1.2.3.osdk-stage-1");
+        let backup_root = temporary
+            .path()
+            .join("npm-global/fixture-cli/.1.2.3.osdk-backup-1");
+        let lock_root = temporary.path().join("npm/fixture-cli/.locks/1.2.3");
+
+        for (root, marker) in [
+            (&canonical_root, "canonical"),
+            (&staged_root, "staged"),
+            (&backup_root, "backup"),
+            (&lock_root, "lock"),
+        ] {
+            let mut manifest = DynamicToolManifest::new("npm:fixture-cli").unwrap();
+            manifest.version = Some("1.2.3".into());
+            manifest.metadata.insert("marker".into(), marker.into());
+            manifest.write_atomic(root).unwrap();
+        }
+
+        let report = scan_installs(temporary.path(), &ScanOptions::default()).unwrap();
+        assert_eq!(report.installs.len(), 1);
+        assert_eq!(report.installs[0].install_root, canonical_root);
+        assert_eq!(report.installs[0].manifest.metadata["marker"], "canonical");
     }
 
     #[test]

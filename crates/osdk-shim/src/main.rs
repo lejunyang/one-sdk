@@ -626,7 +626,7 @@ fn managed_bin_paths(
     version: &ToolVersion,
 ) -> Vec<PathBuf> {
     let mut paths = backend.bin_paths(ctx, version).unwrap_or_default();
-    if version.backend.contains(':') {
+    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
         if let Ok(dynamic_paths) =
             osdk_core::shim::dynamic_manifest_bin_paths(ctx, &version.backend, &version.version)
         {
@@ -644,7 +644,7 @@ fn managed_executable_path(
     version: &ToolVersion,
     executable_name: &str,
 ) -> Option<PathBuf> {
-    if version.backend.contains(':') {
+    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
         if let Ok(path) = osdk_core::shim::dynamic_manifest_executable(
             ctx,
             &version.backend,

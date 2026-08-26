@@ -2426,6 +2426,11 @@ fn project_npm_use_runs_managed_native_installer_once_and_publishes_metadata() {
         )
         .unwrap();
         std::fs::write(installed_package.join("cli.js"), "fixture\n").unwrap();
+        std::os::unix::fs::symlink(
+            installed_package.join("cli.js"),
+            project_bin.join("fixture-cli"),
+        )
+        .unwrap();
         write_fake_registry_manager(
             temporary.path(),
             manager,
@@ -2436,7 +2441,6 @@ printf 'call\n' >> "$OSDK_TEST_MARKER"
 printf 'args=%s\n' "$*" >> "$OSDK_TEST_MARKER"
 printf 'path=%s\n' "$PATH" >> "$OSDK_TEST_MARKER"
 printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
-printf '#!/bin/sh\nexit 0\n' > "$OSDK_TEST_BIN"
 "#,
         );
         let marker_value = marker.display().to_string();
@@ -2514,8 +2518,154 @@ printf '#!/bin/sh\nexit 0\n' > "$OSDK_TEST_BIN"
         assert_eq!(npm["node_version"].as_str(), Some("20.0.0"));
         assert_eq!(npm["native_lock"]["kind"].as_str(), Some(manager));
         assert_eq!(npm["native_lock"]["sha256"].as_str().unwrap().len(), 64);
+        let hook = run_isolated_in(temporary.path(), &nested, &["hook-env", "--shell", "bash"]);
+        assert!(
+            hook.status.success(),
+            "{}",
+            String::from_utf8_lossy(&hook.stderr)
+        );
+        let hook = String::from_utf8(hook.stdout).unwrap();
+        assert!(hook.contains("/.osdk/npm-bin/generations/"), "{hook}");
+        assert!(!hook.contains("/node_modules/.bin"), "{hook}");
         assert!(!temporary.path().join("installs/npm/fixture-cli").exists());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn project_npm_use_restores_manifest_and_lock_after_bin_validation_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let nested = project.join("src");
+    let project_bin = project.join("node_modules/.bin");
+    let installed_package = project.join("node_modules/fixture-cli");
+    std::fs::create_dir_all(&project_bin).unwrap();
+    std::fs::create_dir_all(&installed_package).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    let old_manifest = br#"{"packageManager":"npm@10.0.0","devDependencies":{"kept":"1"}}"#;
+    let old_lock = br#"{"lockfileVersion":3,"old":true}"#;
+    std::fs::write(project.join("package.json"), old_manifest).unwrap();
+    std::fs::write(project.join("package-lock.json"), old_lock).unwrap();
+    std::fs::write(
+        installed_package.join("package.json"),
+        r#"{"name":"fixture-cli","version":"1.2.3","bin":{"fixture-cli":"cli.js"}}"#,
+    )
+    .unwrap();
+    std::fs::write(installed_package.join("cli.js"), "fixture\n").unwrap();
+    // A same-name opaque launcher is the post-install validation failure.
+    std::fs::write(
+        project_bin.join("fixture-cli"),
+        "#!/bin/sh\necho hijacked\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[tools]\nnode = \"20.0.0\"\n",
+    )
+    .unwrap();
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        r#"#!/bin/sh
+printf '%s' '{"packageManager":"npm@10.0.0","devDependencies":{"fixture-cli":"1.2.3"}}' > "$OSDK_TEST_MANIFEST"
+printf '%s' '{"lockfileVersion":3,"new":true}' > "$OSDK_TEST_LOCK"
+"#,
+    );
+    let manifest_path = project.join("package.json").display().to_string();
+    let lock_path = project.join("package-lock.json").display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &nested,
+        &["use", "npm:fixture-cli@1.2.3", "-o", "installer=npm"],
+        &[
+            ("OSDK_TEST_MANIFEST", manifest_path.as_str()),
+            ("OSDK_TEST_LOCK", lock_path.as_str()),
+            ("npm_config_registry", "https://registry.example.test/"),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read(project.join("package.json")).unwrap(),
+        old_manifest
+    );
+    assert_eq!(
+        std::fs::read(project.join("package-lock.json")).unwrap(),
+        old_lock
+    );
+    assert!(!project.join("osdk.lock").exists());
+    assert!(!project.join("osdk.toml").exists());
+    assert!(!osdk_core::backend::npm_package::project_bin_current_path(&project).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn project_npm_use_rejects_and_rolls_back_native_lock_owner_switch() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let installed_package = project.join("node_modules/fixture-cli");
+    let project_bin = project.join("node_modules/.bin");
+    std::fs::create_dir_all(&installed_package).unwrap();
+    std::fs::create_dir_all(&project_bin).unwrap();
+    let manifest = br#"{"packageManager":"npm@10.0.0","devDependencies":{"fixture-cli":"1.2.3"}}"#;
+    let package_lock = br#"{"lockfileVersion":3,"old":true}"#;
+    std::fs::write(project.join("package.json"), manifest).unwrap();
+    std::fs::write(project.join("package-lock.json"), package_lock).unwrap();
+    std::fs::write(
+        installed_package.join("package.json"),
+        r#"{"name":"fixture-cli","version":"1.2.3","bin":{"fixture-cli":"cli.js"}}"#,
+    )
+    .unwrap();
+    std::fs::write(installed_package.join("cli.js"), "fixture\n").unwrap();
+    std::os::unix::fs::symlink(
+        installed_package.join("cli.js"),
+        project_bin.join("fixture-cli"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[tools]\nnode = \"20.0.0\"\n",
+    )
+    .unwrap();
+    write_fake_registry_manager(
+        temporary.path(),
+        "npm",
+        "10.0.0",
+        "npm",
+        r#"#!/bin/sh
+rm -f "$OSDK_TEST_OLD_LOCK"
+printf 'lockfileVersion: 9.0\n' > "$OSDK_TEST_NEW_LOCK"
+"#,
+    );
+    let old_lock = project.join("package-lock.json").display().to_string();
+    let new_lock = project.join("pnpm-lock.yaml").display().to_string();
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["use", "npm:fixture-cli@1.2.3", "-o", "installer=npm"],
+        &[
+            ("OSDK_TEST_OLD_LOCK", old_lock.as_str()),
+            ("OSDK_TEST_NEW_LOCK", new_lock.as_str()),
+            ("npm_config_registry", "https://registry.example.test/"),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read(project.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        std::fs::read(project.join("package-lock.json")).unwrap(),
+        package_lock
+    );
+    assert!(!project.join("pnpm-lock.yaml").exists());
+    assert!(!project.join("osdk.lock").exists());
+    assert!(!project.join("osdk.toml").exists());
 }
 
 #[cfg(unix)]
@@ -3033,7 +3183,10 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
         temporary.path(),
         &project,
         &["reshim"],
-        &[("PATH", shim_bin_dir.to_str().unwrap())],
+        &[
+            ("PATH", shim_bin_dir.to_str().unwrap()),
+            ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+        ],
     );
     assert!(
         output.status.success(),
