@@ -200,7 +200,10 @@ impl NpmPackageBackend {
             tv.options.get(LOCKED_NPM_LOCK_SHA256_OPTION),
             tv.options.get(LOCKED_NPM_LOCKFILE_OPTION),
         ];
-        if values.iter().all(|value| value.is_none()) {
+        // Schema 3 intentionally carries package/installer/scope metadata
+        // without the old frozen graph payload. Package identity alone must
+        // therefore not opt into the legacy graph reader.
+        if values[1..].iter().all(|value| value.is_none()) {
             return Ok(None);
         }
 
@@ -1512,11 +1515,17 @@ mod tests {
         partial
             .options
             .insert(LOCKED_NPM_PACKAGE_OPTION.into(), "prettier".into());
+        assert!(backend.locked_graph(&partial).unwrap().is_none());
+
+        partial.options.insert(
+            LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
+            AUBE_LOCK_FORMAT.into(),
+        );
         assert!(backend
             .locked_graph(&partial)
             .unwrap_err()
             .to_string()
-            .contains(LOCKED_NPM_LOCK_FORMAT_OPTION));
+            .contains(LOCKED_NPM_LOCK_SHA256_OPTION));
 
         let lockfile = "lockfileVersion: '9.0'\n";
         let mut uppercase = locked_version("npm:prettier", "prettier", "3.6.2", lockfile);

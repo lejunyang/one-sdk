@@ -1192,12 +1192,25 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| osdk_core::t!("err.fs_file_sync", path = temporary.display()))?;
         drop(file);
         atomic_replace(&temporary, path)?;
+        sync_parent_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("syncing lockfile directory {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(not(windows))]
