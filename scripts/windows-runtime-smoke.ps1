@@ -49,6 +49,92 @@ function Invoke-Stage {
     }
 }
 
+function Invoke-RedirectedProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$StandardInput,
+        [string]$WorkingDirectory,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    foreach ($argument in $ArgumentList) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        if (-not $process.Start()) {
+            throw "failed to start $FilePath"
+        }
+        $started = $true
+
+        # Drain both output streams while the process runs so neither pipe can
+        # fill up and prevent the child process from exiting.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        try {
+            $process.StandardInput.WriteLine($StandardInput)
+        }
+        finally {
+            # The target batch file uses `set /p`, so provide a complete line
+            # and then close stdin explicitly to propagate EOF as well.
+            $process.StandardInput.Close()
+        }
+
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try {
+                $process.Kill($true)
+            }
+            catch {
+                # The process can exit between the timeout and the kill call.
+                if (-not $process.HasExited) {
+                    throw
+                }
+            }
+            if (-not $process.WaitForExit(5000)) {
+                throw "$FilePath did not exit after its process tree was terminated"
+            }
+            # A descendant can race process-tree enumeration and retain an
+            # inherited pipe handle. Do not turn the timeout path back into an
+            # unbounded wait for redirected output.
+            throw "$FilePath timed out after $TimeoutSeconds seconds and was terminated"
+        }
+
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+
+        [PSCustomObject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdout
+            Stderr = $stderr
+        }
+    }
+    finally {
+        if ($started -and -not $process.HasExited) {
+            try {
+                $process.Kill($true)
+                $null = $process.WaitForExit(5000)
+            }
+            catch {
+                Write-Warning "failed to terminate process tree for $FilePath`: $_"
+            }
+        }
+        $process.Dispose()
+    }
+}
+
 $bin = (Resolve-Path -LiteralPath $BinDir).Path
 $sourceOsdk = Join-Path $bin "osdk.exe"
 $sourceShim = Join-Path $bin "osdk-shim.exe"
@@ -127,10 +213,18 @@ exit /b 23
         Invoke-Stage "PowerShell shim contract" {
             $stdout = Join-Path $root "powershell.stdout"
             $stderr = Join-Path $root "powershell.stderr"
-            Get-Content -LiteralPath $inputPath -Raw |
-                & $shimCmd "first arg" "second arg" 1> $stdout 2> $stderr
-            $exitCode = $LASTEXITCODE
-            Assert-ContractOutput "PowerShell" $exitCode $stdout $stderr
+            # Enter through the generated batch shim so this still covers the
+            # complete .cmd -> osdk-shim.exe -> target .cmd chain.
+            $cmdLine = '""{0}" "first arg" "second arg""' -f $shimCmd
+            $result = Invoke-RedirectedProcess `
+                -FilePath $env:ComSpec `
+                -ArgumentList @('/D', '/S', '/C', $cmdLine) `
+                -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
+                -WorkingDirectory $project `
+                -TimeoutSeconds 30
+            Set-Content -LiteralPath $stdout -Encoding ascii -NoNewline -Value $result.Stdout
+            Set-Content -LiteralPath $stderr -Encoding ascii -NoNewline -Value $result.Stderr
+            Assert-ContractOutput "PowerShell" $result.ExitCode $stdout $stderr
         }
 
         Invoke-Stage "cmd.exe shim contract" {

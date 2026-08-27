@@ -77,7 +77,7 @@ jobs:
   # Lint + unit tests across the three supported platforms.
   test:
     name: test (${{ matrix.os }})
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

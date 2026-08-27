@@ -766,4 +766,76 @@ mod tests {
             "forwarded value"
         );
     }
+
+    #[test]
+    fn batch_targets_forward_standard_streams_and_exit_code() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let script = temporary.path().join("stream fixture.cmd");
+        let stdout_path = temporary.path().join("stdout.txt");
+        let stderr_path = temporary.path().join("stderr.txt");
+        std::fs::write(
+            &script,
+            "@echo off\r\nset /p line=\r\necho out:%~1:%line%\r\necho err:%~2 1>&2\r\nexit /b 23\r\n",
+        )
+        .unwrap();
+
+        let executable = std::env::current_exe().unwrap();
+        let mut child = Command::new(executable)
+            .arg("--exact")
+            .arg("tests::run_batch_target_fixture")
+            .arg("--ignored")
+            .env("OSDK_SHIM_TEST_BATCH_TARGET", &script)
+            .env("OSDK_SHIM_TEST_BATCH_ARG1", "first arg")
+            .env("OSDK_SHIM_TEST_BATCH_ARG2", "second arg")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"input\n").unwrap();
+        drop(child.stdin.take());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("batch target stream forwarding timed out after 10 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        assert_eq!(status.code(), Some(23));
+        let stdout = std::fs::read_to_string(stdout_path).unwrap();
+        let stderr = std::fs::read_to_string(stderr_path).unwrap();
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.trim() == "out:first arg:input"),
+            "{stdout}"
+        );
+        assert!(
+            stderr.lines().any(|line| line.trim() == "err:second arg"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    #[ignore = "helper process for the redirected batch-target contract"]
+    fn run_batch_target_fixture() {
+        let Some(script) = std::env::var_os("OSDK_SHIM_TEST_BATCH_TARGET") else {
+            return;
+        };
+        let first = std::env::var("OSDK_SHIM_TEST_BATCH_ARG1").unwrap();
+        let second = std::env::var("OSDK_SHIM_TEST_BATCH_ARG2").unwrap();
+        std::process::exit(exec(
+            &PathBuf::from(script),
+            &[first, second],
+            &std::collections::BTreeMap::new(),
+        ));
+    }
 }
