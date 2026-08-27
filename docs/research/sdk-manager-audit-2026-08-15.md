@@ -4,6 +4,11 @@ Date: 2026-08-15
 
 Project: `github.com/lejunyang/one-sdk`
 
+> Historical snapshot: this report describes the repository before the
+> remediation roadmap and npm developer-tool work landed. For the current mise
+> backend comparison and implementation priorities, see
+> [`mise-dev-tools-backends-2026-08-28.md`](./mise-dev-tools-backends-2026-08-28.md).
+
 ## Scope
 
 This audit covers:
