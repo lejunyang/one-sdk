@@ -2195,11 +2195,13 @@ fn is_npm_windows_wrapper(text: &str) -> bool {
 }
 
 fn discover_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolBin>> {
+    let canonical_root =
+        std::fs::canonicalize(install_root).map_err(|error| Error::io(install_root, error))?;
     let mut bins = Vec::new();
     for name in discover_bin_names(bin_dir)? {
         let absolute = resolve_bin_target(bin_dir, &name)?;
         let relative = absolute
-            .strip_prefix(install_root)
+            .strip_prefix(&canonical_root)
             .map_err(|_| {
                 Error::other(crate::t!(
                     "err.npm_bin_outside_install_root",
@@ -2223,10 +2225,23 @@ fn discover_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolB
 }
 
 fn discover_global_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolBin>> {
+    let canonical_root =
+        std::fs::canonicalize(install_root).map_err(|error| Error::io(install_root, error))?;
+    let canonical_bin_dir =
+        std::fs::canonicalize(bin_dir).map_err(|error| Error::io(bin_dir, error))?;
+    let relative_bin_dir = canonical_bin_dir
+        .strip_prefix(&canonical_root)
+        .map_err(|_| {
+            Error::other(crate::t!(
+                "err.npm_bin_outside_install_root",
+                name = bin_dir.display(),
+                path = install_root.display()
+            ))
+        })?;
     let mut bins = Vec::new();
     for name in discover_bin_names(bin_dir)? {
         let absolute = resolve_bin_target(bin_dir, &name)?;
-        absolute.strip_prefix(install_root).map_err(|_| {
+        absolute.strip_prefix(&canonical_root).map_err(|_| {
             Error::other(crate::t!(
                 "err.npm_bin_outside_install_root",
                 name = name,
@@ -2240,13 +2255,14 @@ fn discover_global_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<Dynam
                 path = bin_dir.display()
             ))
         })?;
-        let relative = entry.strip_prefix(install_root).map_err(|_| {
+        let file_name = entry.file_name().ok_or_else(|| {
             Error::other(crate::t!(
-                "err.npm_bin_outside_install_root",
+                "err.npm_bin_target_unresolved",
                 name = name,
-                path = install_root.display()
+                path = bin_dir.display()
             ))
         })?;
+        let relative = relative_bin_dir.join(file_name);
         bins.push(DynamicToolBin {
             name,
             path: relative.to_string_lossy().replace('\\', "/"),
@@ -4359,6 +4375,54 @@ scope = "project"
 
     #[cfg(unix)]
     #[test]
+    fn discovers_project_and_global_bins_through_aliased_install_root() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let physical_parent = temporary.path().join("physical");
+        let aliased_parent = temporary.path().join("aliased");
+        std::fs::create_dir_all(&physical_parent).unwrap();
+        symlink(&physical_parent, &aliased_parent).unwrap();
+
+        let install_root = aliased_parent.join("install");
+        let physical_install_root = physical_parent.join("install");
+        let package_dir = physical_install_root.join("project/node_modules/prettier/bin");
+        let project_bin_dir = physical_install_root.join("project/node_modules/.bin");
+        let global_bin_dir = physical_install_root.join("bin");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::create_dir_all(&project_bin_dir).unwrap();
+        std::fs::create_dir_all(&global_bin_dir).unwrap();
+        let script = package_dir.join("prettier.js");
+        std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        symlink(
+            "../prettier/bin/prettier.js",
+            project_bin_dir.join("prettier"),
+        )
+        .unwrap();
+        symlink(
+            "../project/node_modules/prettier/bin/prettier.js",
+            global_bin_dir.join("prettier"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            discover_bins(&install_root, &project_bin_dir).unwrap(),
+            vec![DynamicToolBin {
+                name: "prettier".into(),
+                path: "project/node_modules/prettier/bin/prettier.js".into(),
+            }]
+        );
+        assert_eq!(
+            discover_global_bins(&install_root, &global_bin_dir).unwrap(),
+            vec![DynamicToolBin {
+                name: "prettier".into(),
+                path: "bin/prettier".into(),
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn global_inventory_drives_native_bin_paths_after_restart() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -4404,6 +4468,12 @@ scope = "project"
         symlink(&outside_script, bin_dir.join("prettier")).unwrap();
 
         let error = discover_bins(&install_root, &bin_dir).unwrap_err();
+        assert!(error.to_string().contains("outside install root"));
+
+        let global_bin_dir = install_root.join("bin");
+        std::fs::create_dir_all(&global_bin_dir).unwrap();
+        symlink(&outside_script, global_bin_dir.join("prettier")).unwrap();
+        let error = discover_global_bins(&install_root, &global_bin_dir).unwrap_err();
         assert!(error.to_string().contains("outside install root"));
     }
 
