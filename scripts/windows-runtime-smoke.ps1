@@ -52,7 +52,7 @@ function Invoke-Stage {
 function Invoke-RedirectedProcess {
     param(
         [string]$FilePath,
-        [string[]]$ArgumentList,
+        [string]$Arguments,
         [string]$StandardInput,
         [string]$WorkingDirectory,
         [int]$TimeoutSeconds = 30
@@ -60,9 +60,11 @@ function Invoke-RedirectedProcess {
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $FilePath
-    foreach ($argument in $ArgumentList) {
-        $startInfo.ArgumentList.Add($argument)
-    }
+    # cmd.exe parses the raw text after /C itself rather than following the
+    # CommandLineToArgvW rules used by ProcessStartInfo.ArgumentList. Supplying
+    # an already quoted command as an ArgumentList item makes .NET escape its
+    # quotes a second time, so cmd rejects the command immediately.
+    $startInfo.Arguments = $Arguments
     $startInfo.WorkingDirectory = $WorkingDirectory
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
@@ -215,10 +217,10 @@ exit /b 23
             $stderr = Join-Path $root "powershell.stderr"
             # Enter through the generated batch shim so this still covers the
             # complete .cmd -> osdk-shim.exe -> target .cmd chain.
-            $cmdLine = '""{0}" "first arg" "second arg""' -f $shimCmd
+            $cmdLine = '/D /S /C ""{0}" "first arg" "second arg""' -f $shimCmd
             $result = Invoke-RedirectedProcess `
                 -FilePath $env:ComSpec `
-                -ArgumentList @('/D', '/S', '/C', $cmdLine) `
+                -Arguments $cmdLine `
                 -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
                 -WorkingDirectory $project `
                 -TimeoutSeconds 30
