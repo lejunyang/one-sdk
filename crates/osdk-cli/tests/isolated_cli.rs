@@ -3824,19 +3824,13 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
             &install_root.join("project/node_modules/.bin/ni"),
             "#!/bin/sh\nexit 0\n",
         );
-        let manifest = osdk_core::inventory::DynamicToolManifest {
-            schema: 1,
-            id: "npm:@antfu/ni".into(),
-            version: Some(version.into()),
-            config_keys: vec!["tool.ni".into()],
-            bins: vec![osdk_core::inventory::DynamicToolBin {
-                name: "ni".into(),
-                path: "project/node_modules/.bin/ni".into(),
-            }],
-            metadata: Default::default(),
-        }
-        .normalize()
-        .unwrap();
+        let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:@antfu/ni").unwrap();
+        manifest.version = Some(version.into());
+        manifest.config_keys = vec!["tool.ni".into()];
+        manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
+            name: "ni".into(),
+            path: "project/node_modules/.bin/ni".into(),
+        }];
         manifest.write_atomic(&install_root).unwrap();
         std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
     }

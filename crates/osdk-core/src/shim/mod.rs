@@ -18,6 +18,7 @@ use crate::backend::{Backend, Ctx};
 use crate::dirs::{create_dir_all, Dirs};
 use crate::error::{Error, Result};
 use crate::inventory::{self, BinOwnerCandidate, DynamicToolManifest, ScanOptions, ScanReport};
+use crate::npm_tools::{ToolScope, LOCKED_NPM_SCOPE_OPTION};
 use crate::version::ToolVersion;
 use crate::version::{ToolRequest, VersionSpec};
 
@@ -54,12 +55,14 @@ pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
 /// `config_keys`.
 pub fn configured_dynamic_ids(ctx: &Ctx, report: &ScanReport) -> Vec<String> {
     let mut ids = BTreeSet::new();
-    ids.extend(
-        ctx.config
-            .tools
-            .keys()
-            .filter_map(|key| inventory::canonical_dynamic_id(key).ok()),
-    );
+    ids.extend(ctx.config.tools.iter().filter_map(|(key, value)| {
+        inventory::canonical_dynamic_id(key).ok().or_else(|| {
+            ToolRequest::parse(value)
+                .ok()
+                .filter(|request| request.backend.contains(':'))
+                .map(|request| request.backend)
+        })
+    }));
 
     let configured_values = ctx
         .config
@@ -124,6 +127,108 @@ pub fn dynamic_request_from_config(ctx: &Ctx, backend_id: &str) -> Option<ToolRe
     None
 }
 
+/// One persisted dynamic install whose complete identity has been checked
+/// against the active request. Callers keep this value through path and
+/// executable selection so security-sensitive inventory data is not reloaded.
+#[derive(Debug)]
+pub struct ValidatedDynamicInstall {
+    bins: BTreeMap<String, std::path::PathBuf>,
+    metadata: BTreeMap<String, String>,
+}
+
+impl ValidatedDynamicInstall {
+    pub fn bin_names(&self) -> Vec<String> {
+        self.bins.keys().cloned().collect()
+    }
+
+    pub fn bin_paths(&self) -> Vec<std::path::PathBuf> {
+        self.bins
+            .values()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn executable(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.bins.get(name).cloned()
+    }
+
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+}
+
+/// Load the selected dynamic install and require it to prove the same backend,
+/// exact version, and public option identity as the configured request. Legacy
+/// schema-1 and missing inventories are readable/discoverable elsewhere, but
+/// cannot authorize PATH exposure or execution.
+pub fn validated_dynamic_install(
+    ctx: &Ctx,
+    report: &ScanReport,
+    request: &ToolRequest,
+    version: &str,
+) -> Result<ValidatedDynamicInstall> {
+    let (root, required_scope) = selected_dynamic_install_root(ctx, request, version)?;
+    let manifest_path = DynamicToolManifest::manifest_path(&root);
+    let manifest = report
+        .installs
+        .iter()
+        .find(|install| install.install_root == root)
+        .map(|install| &install.manifest)
+        .ok_or_else(|| {
+            Error::other(format!(
+                "dynamic tool `{}@{version}` has missing or invalid install identity at {}; reinstall it before use",
+                request.backend,
+                manifest_path.display()
+            ))
+        })?;
+    if manifest.id != request.backend
+        || manifest.version.as_deref() != Some(version)
+        || !manifest.matches_identity_options(&request.options)?
+    {
+        return Err(Error::other(format!(
+            "dynamic tool `{}@{version}` was installed with a different identity; reinstall it before use",
+            request.backend
+        )));
+    }
+    let manifest_scope = manifest
+        .metadata
+        .get("scope")
+        .map(|scope| scope.parse::<ToolScope>())
+        .transpose()?;
+    if required_scope.is_some_and(|scope| match scope {
+        ToolScope::Project => !matches!(manifest_scope, None | Some(ToolScope::Project)),
+        ToolScope::Global => manifest_scope != Some(ToolScope::Global),
+    }) || (root != ctx.dirs.install_path(&request.backend, version)
+        && manifest_scope != Some(ToolScope::Global))
+    {
+        return Err(Error::other(format!(
+            "dynamic tool `{}@{version}` was installed with a different scope; reinstall it before use",
+            request.backend
+        )));
+    }
+    let canonical_root = dunce::canonicalize(&root).map_err(|error| Error::io(&root, error))?;
+    let mut bins = BTreeMap::new();
+    for bin in &manifest.bins {
+        let path = root.join(&bin.path);
+        let canonical = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+        if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
+            return Err(Error::other(format!(
+                "dynamic tool `{}` inventory bin `{}` does not resolve to a file inside {}",
+                request.backend,
+                bin.name,
+                root.display()
+            )));
+        }
+        bins.insert(bin.name.clone(), canonical);
+    }
+    Ok(ValidatedDynamicInstall {
+        bins,
+        metadata: manifest.metadata.clone(),
+    })
+}
+
 /// Deterministic manifest-backed bin ownership used after a process restart,
 /// even when the dynamic backend implementation itself does not expose
 /// `bin_names` yet.
@@ -131,81 +236,73 @@ pub fn dynamic_bin_ownership(report: &ScanReport) -> BTreeMap<String, Vec<BinOwn
     inventory::build_bin_ownership_candidates(&report.installs)
 }
 
-/// Load the dynamic manifest recorded for one installed backend version.
-pub fn dynamic_manifest_for_version(
+fn selected_dynamic_install_root(
     ctx: &Ctx,
-    backend_id: &str,
+    request: &ToolRequest,
     version: &str,
-) -> Result<Option<DynamicToolManifest>> {
-    if !backend_id.contains(':') {
-        return Ok(None);
-    }
-    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
-        let manifest_path = DynamicToolManifest::manifest_path(&install_root);
-        if manifest_path.is_file() {
-            return Ok(Some(DynamicToolManifest::load(&install_root)?));
+) -> Result<(std::path::PathBuf, Option<ToolScope>)> {
+    if let Some(backend) = NpmPackageBackend::from_id(&request.backend) {
+        let scope = configured_npm_scope(ctx, request)?;
+        let isolated = backend.isolated_install_root(ctx, version);
+        let global = backend.global_install_root(ctx, version);
+        let candidates = match scope {
+            Some(ToolScope::Project) => vec![isolated],
+            Some(ToolScope::Global) => vec![global, isolated],
+            None => vec![isolated, global],
+        };
+        for root in candidates {
+            if has_regular_completion_marker(&root) {
+                return Ok((root, scope));
+            }
         }
+        return Err(missing_dynamic_install(&request.backend, version));
     }
-    Ok(None)
-}
-
-/// Bin names exported by a manifest-backed dynamic install.
-pub fn dynamic_manifest_bin_names(
-    ctx: &Ctx,
-    backend_id: &str,
-    version: &str,
-) -> Result<Vec<String>> {
-    let Some(manifest) = dynamic_manifest_for_version(ctx, backend_id, version)? else {
-        return Ok(Vec::new());
-    };
-    Ok(manifest
-        .bins
-        .into_iter()
-        .map(|bin| bin.name)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
-}
-
-/// PATH directories contributed by a manifest-backed dynamic install.
-pub fn dynamic_manifest_bin_paths(
-    ctx: &Ctx,
-    backend_id: &str,
-    version: &str,
-) -> Result<Vec<std::path::PathBuf>> {
-    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
-        let manifest_path = DynamicToolManifest::manifest_path(&install_root);
-        if manifest_path.is_file() {
-            let manifest = DynamicToolManifest::load(&install_root)?;
-            return Ok(manifest_bin_paths(&install_root, &manifest));
-        }
+    let root = ctx.dirs.install_path(&request.backend, version);
+    if has_regular_completion_marker(&root) {
+        Ok((root, None))
+    } else {
+        Err(missing_dynamic_install(&request.backend, version))
     }
-    Ok(Vec::new())
 }
 
-/// Resolve one executable path directly from the manifest instead of relying on
-/// backend `bin_paths`.
-pub fn dynamic_manifest_executable(
-    ctx: &Ctx,
-    backend_id: &str,
-    version: &str,
-    executable_name: &str,
-) -> Result<Option<std::path::PathBuf>> {
-    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
-        let manifest_path = DynamicToolManifest::manifest_path(&install_root);
-        if !manifest_path.is_file() {
+fn has_regular_completion_marker(root: &Path) -> bool {
+    std::fs::symlink_metadata(root.join(".osdk-complete"))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+pub(crate) fn configured_npm_scope(ctx: &Ctx, request: &ToolRequest) -> Result<Option<ToolScope>> {
+    if let Some(scope) = request.options.get(LOCKED_NPM_SCOPE_OPTION) {
+        return scope.parse().map(Some);
+    }
+    let mut project = false;
+    let mut global = false;
+    for (key, value) in &ctx.config.tools {
+        let matches = key == &request.backend
+            || ToolRequest::parse(value)
+                .is_ok_and(|candidate| candidate.backend == request.backend);
+        if !matches {
             continue;
         }
-        let manifest = DynamicToolManifest::load(&install_root)?;
-        return Ok(manifest
-            .bins
-            .into_iter()
-            .find(|bin| bin.name == executable_name)
-            .map(|bin| install_root.join(bin.path)));
+        match ctx.config.tool_origins.get(key) {
+            Some(
+                crate::config::ToolConfigOrigin::ProjectConfig(_)
+                | crate::config::ToolConfigOrigin::ToolVersions(_),
+            ) => project = true,
+            Some(crate::config::ToolConfigOrigin::GlobalConfig(_)) => global = true,
+            None if ctx.config.global_tool_configs.contains_key(key) => global = true,
+            None => {}
+        }
     }
-    Ok(None)
+    Ok(if project {
+        Some(ToolScope::Project)
+    } else if global {
+        Some(ToolScope::Global)
+    } else {
+        None
+    })
 }
 
+#[cfg(test)]
 fn dynamic_install_roots(
     ctx: &Ctx,
     backend_id: &str,
@@ -221,22 +318,24 @@ fn dynamic_install_roots(
     Ok(vec![ctx.dirs.install_path(backend_id, version)])
 }
 
-fn manifest_bin_paths(
-    install_root: &std::path::Path,
-    manifest: &DynamicToolManifest,
-) -> Vec<std::path::PathBuf> {
-    manifest
-        .bins
-        .iter()
-        .filter_map(|bin| {
-            install_root
-                .join(&bin.path)
-                .parent()
-                .map(|path| path.to_path_buf())
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+#[cfg(test)]
+fn dynamic_manifest_for_version(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &str,
+) -> Result<Option<DynamicToolManifest>> {
+    for install_root in dynamic_install_roots(ctx, backend_id, version)? {
+        if DynamicToolManifest::manifest_path(&install_root).is_file() {
+            return Ok(Some(DynamicToolManifest::load(&install_root)?));
+        }
+    }
+    Ok(None)
+}
+
+fn missing_dynamic_install(backend_id: &str, version: &str) -> Error {
+    Error::other(format!(
+        "dynamic tool `{backend_id}@{version}` has no complete selected install; reinstall it before use"
+    ))
 }
 
 /// Generate a shim named `name` in the shims dir pointing at `osdk_shim_bin`.
@@ -513,6 +612,90 @@ mod tests {
         let request = dynamic_request_from_config(&ctx, "npm:@antfu/ni").unwrap();
         assert_eq!(request.spec.to_string(), "0.21.12");
         assert_eq!(request.options["allow_builds"], "esbuild");
+    }
+
+    #[test]
+    fn validated_dynamic_install_requires_schema_two_matching_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (ctx, backend) = npm_scope_test_ctx(temporary.path(), None);
+        let root = backend.isolated_install_root(&ctx, "1.2.3");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/fixture-cli"), b"fixture").unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        let request = dynamic_request_from_config(&ctx, backend.id()).unwrap();
+
+        let report = scan_dynamic_installs(&ctx).unwrap();
+        let missing = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("missing or invalid install identity"),
+            "{missing}"
+        );
+
+        std::fs::write(
+            DynamicToolManifest::manifest_path(&root),
+            r#"{"schema":1,"id":"npm:fixture-cli","version":"1.2.3","bins":[{"name":"fixture-cli","path":"bin/fixture-cli"}]}"#,
+        )
+        .unwrap();
+        let report = scan_dynamic_installs(&ctx).unwrap();
+        let legacy = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap_err();
+        assert!(
+            legacy.to_string().contains("different identity"),
+            "{legacy}"
+        );
+
+        let mut mismatched = DynamicToolManifest::new(backend.id())
+            .unwrap()
+            .with_identity_options(&BTreeMap::from([("installer".into(), "aube".into())]))
+            .unwrap();
+        mismatched.version = Some("1.2.3".into());
+        mismatched.bins = vec![DynamicToolBin {
+            name: "fixture-cli".into(),
+            path: "bin/fixture-cli".into(),
+        }];
+        mismatched.write_atomic(&root).unwrap();
+        let report = scan_dynamic_installs(&ctx).unwrap();
+        let mismatch = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap_err();
+        assert!(
+            mismatch.to_string().contains("different identity"),
+            "{mismatch}"
+        );
+    }
+
+    #[test]
+    fn validated_dynamic_install_requires_completion_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (ctx, backend) = npm_scope_test_ctx(temporary.path(), None);
+        let root = backend.isolated_install_root(&ctx, "1.2.3");
+        write_dynamic_fixture(&root, "fixture-cli", None);
+        let request = dynamic_request_from_config(&ctx, backend.id()).unwrap();
+        let report = scan_dynamic_installs(&ctx).unwrap();
+
+        std::fs::remove_file(root.join(".osdk-complete")).unwrap();
+        let incomplete = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap_err();
+        assert!(incomplete
+            .to_string()
+            .contains("no complete selected install"));
+        assert!(incomplete.to_string().contains("reinstall"));
+
+        std::fs::create_dir(root.join(".osdk-complete")).unwrap();
+        let invalid = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap_err();
+        assert!(invalid.to_string().contains("no complete selected install"));
+        assert!(invalid.to_string().contains("reinstall"));
+    }
+
+    #[test]
+    fn configured_dynamic_ids_include_indirect_requests_without_inventory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut ctx, _) = npm_scope_test_ctx(temporary.path(), None);
+        ctx.config.tools = BTreeMap::from([("tool.ni".into(), "npm:@antfu/ni@1.2.3".into())]);
+        ctx.config.tool_configs.clear();
+
+        assert_eq!(
+            configured_dynamic_ids(&ctx, &ScanReport::default()),
+            vec!["npm:@antfu/ni"]
+        );
     }
 
     #[cfg(unix)]

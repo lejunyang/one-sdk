@@ -87,21 +87,16 @@ fn install_dynamic_npm_fixture(
         &install_root.join(format!("node_modules/.bin/{executable_name}")),
         executable_script,
     );
-    let manifest = osdk_core::inventory::DynamicToolManifest {
-        schema: 1,
-        id: backend_id.into(),
-        version: Some(version.into()),
-        config_keys: vec![tool_key.into()],
-        bins: vec![osdk_core::inventory::DynamicToolBin {
-            name: executable_name.into(),
-            path: format!("node_modules/.bin/{executable_name}"),
-        }],
-        metadata: [("node_version".into(), "1.0.0".into())]
-            .into_iter()
-            .collect(),
-    }
-    .normalize()
-    .unwrap();
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend_id).unwrap();
+    manifest.version = Some(version.into());
+    manifest.config_keys = vec![tool_key.into()];
+    manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
+        name: executable_name.into(),
+        path: format!("node_modules/.bin/{executable_name}"),
+    }];
+    manifest.metadata = [("node_version".into(), "1.0.0".into())]
+        .into_iter()
+        .collect();
     manifest.write_atomic(&install_root).unwrap();
     std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
 
@@ -469,6 +464,144 @@ fn dynamic_shim_fails_closed_on_corrupt_inventory_with_valid_configured_tool() {
 }
 
 #[cfg(unix)]
+fn assert_dynamic_identity_rejected(root: &Path, project: &Path, log: &Path, expected: &str) {
+    let output = isolated_command(root, project)
+        .arg("ni")
+        .env("OSDK_TRUSTED_CONFIG_PATHS", project)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(expected), "{stderr}");
+    assert!(stderr.contains("reinstall"), "{stderr}");
+    assert!(!log.exists(), "configured dynamic tool unexpectedly ran");
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_dynamic_shim_rejects_missing_inventory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+    std::fs::remove_file(osdk_core::inventory::DynamicToolManifest::manifest_path(
+        &install_root,
+    ))
+    .unwrap();
+
+    assert_dynamic_identity_rejected(
+        temporary.path(),
+        &project,
+        &log,
+        "missing or invalid install identity",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_dynamic_shim_rejects_missing_completion_marker() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+    std::fs::remove_file(install_root.join(".osdk-complete")).unwrap();
+
+    assert_dynamic_identity_rejected(
+        temporary.path(),
+        &project,
+        &log,
+        "no complete selected install",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_dynamic_shim_rejects_schema_one_inventory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "tool.ni",
+        "npm:@antfu/ni",
+        "1.0.0",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+    let path = osdk_core::inventory::DynamicToolManifest::manifest_path(&install_root);
+    std::fs::write(
+        &path,
+        r#"{"schema":1,"id":"npm:@antfu/ni","version":"1.0.0","config_keys":["tool.ni"],"bins":[{"name":"ni","path":"node_modules/.bin/ni"}],"metadata":{"node_version":"1.0.0"}}"#,
+    )
+    .unwrap();
+
+    assert_dynamic_identity_rejected(temporary.path(), &project, &log, "different identity");
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_dynamic_shim_rejects_option_identity_mismatch() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("dynamic.log");
+    install_dynamic_npm_fixture(
+        temporary.path(),
+        &project,
+        "npm:fixture-cli",
+        "npm:fixture-cli",
+        "1.2.3",
+        "ni",
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        "#!/bin/sh\nexit 0\n",
+    );
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\" }\nnode = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let install_root = temporary.path().join("installs/npm/fixture-cli/1.2.3");
+    let old_manifest = osdk_core::inventory::DynamicToolManifest::load(&install_root).unwrap();
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::new(&old_manifest.id)
+        .unwrap()
+        .with_identity_options(&std::collections::BTreeMap::from([(
+            "installer".into(),
+            "npm".into(),
+        )]))
+        .unwrap();
+    manifest.version = old_manifest.version;
+    manifest.config_keys = old_manifest.config_keys;
+    manifest.bins = old_manifest.bins;
+    manifest.metadata = old_manifest.metadata;
+    manifest.write_atomic(&install_root).unwrap();
+
+    assert_dynamic_identity_rejected(temporary.path(), &project, &log, "different identity");
+}
+
+#[cfg(unix)]
 #[test]
 fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
     let temporary = tempfile::tempdir().unwrap();
@@ -491,7 +624,13 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
             log.display()
         ),
     );
-    let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:fixture-cli").unwrap();
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:fixture-cli")
+        .unwrap()
+        .with_identity_options(&std::collections::BTreeMap::from([(
+            "installer".into(),
+            "aube".into(),
+        )]))
+        .unwrap();
     manifest.version = Some("1.2.3".into());
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: "fixture-cli".into(),

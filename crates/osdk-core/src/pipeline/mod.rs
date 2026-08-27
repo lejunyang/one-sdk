@@ -132,6 +132,26 @@ pub async fn run_with_attestation(
     ctx: &PipelineCtx<'_>,
     attestation: Option<&GithubAttestation>,
 ) -> Result<PathBuf> {
+    run_with_attestation_inner(plan, ctx, attestation, true).await
+}
+
+/// Materialize an archive and write its receipt, but leave the completion
+/// marker to a backend-specific finalizer. This lets dynamic backends publish
+/// required inventory before the directory becomes reusable.
+pub(crate) async fn run_with_attestation_unfinalized(
+    plan: &InstallPlan,
+    ctx: &PipelineCtx<'_>,
+    attestation: Option<&GithubAttestation>,
+) -> Result<PathBuf> {
+    run_with_attestation_inner(plan, ctx, attestation, false).await
+}
+
+async fn run_with_attestation_inner(
+    plan: &InstallPlan,
+    ctx: &PipelineCtx<'_>,
+    attestation: Option<&GithubAttestation>,
+    mark_complete: bool,
+) -> Result<PathBuf> {
     let install_dir = ctx.dirs.install_path(&plan.tool, &plan.version);
     let archive_path = artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name)?;
 
@@ -283,8 +303,10 @@ pub async fn run_with_attestation(
             evidence,
         },
     )?;
-    std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
-        .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
+    if mark_complete {
+        std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
+            .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
+    }
 
     tracing::debug!(
         tool = %plan.tool,
@@ -366,6 +388,79 @@ pub async fn install_single_binary(
     offline: bool,
     require_checksums: bool,
     attestation: Option<&GithubAttestation>,
+) -> Result<()> {
+    install_single_binary_inner(
+        client,
+        dirs,
+        tool,
+        version,
+        urls,
+        exe_name,
+        download_name,
+        os,
+        checksum,
+        show_progress,
+        offline,
+        require_checksums,
+        attestation,
+        true,
+    )
+    .await
+}
+
+/// Install a bare executable and its receipt without publishing the completion
+/// marker. See [`run_with_attestation_unfinalized`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn install_single_binary_unfinalized(
+    client: &reqwest::Client,
+    dirs: &Dirs,
+    tool: &str,
+    version: &str,
+    urls: &[String],
+    exe_name: &str,
+    download_name: &str,
+    os: crate::platform::Os,
+    checksum: Option<&Checksum>,
+    show_progress: bool,
+    offline: bool,
+    require_checksums: bool,
+    attestation: Option<&GithubAttestation>,
+) -> Result<()> {
+    install_single_binary_inner(
+        client,
+        dirs,
+        tool,
+        version,
+        urls,
+        exe_name,
+        download_name,
+        os,
+        checksum,
+        show_progress,
+        offline,
+        require_checksums,
+        attestation,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn install_single_binary_inner(
+    client: &reqwest::Client,
+    dirs: &Dirs,
+    tool: &str,
+    version: &str,
+    urls: &[String],
+    exe_name: &str,
+    download_name: &str,
+    os: crate::platform::Os,
+    checksum: Option<&Checksum>,
+    show_progress: bool,
+    offline: bool,
+    require_checksums: bool,
+    attestation: Option<&GithubAttestation>,
+    mark_complete: bool,
 ) -> Result<()> {
     let install_dir = dirs.install_path(tool, version);
     validate_safe_filename("executable name", exe_name)?;
@@ -494,8 +589,10 @@ pub async fn install_single_binary(
             evidence,
         },
     )?;
-    std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
-        .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
+    if mark_complete {
+        std::fs::write(install_dir.join(COMPLETE_MARKER), b"")
+            .map_err(|e| Error::io(install_dir.join(COMPLETE_MARKER), e))?;
+    }
     Ok(())
 }
 

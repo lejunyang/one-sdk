@@ -143,9 +143,14 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
     let resolved = install_requests(app, requests, Vec::new()).await?;
     let mut paths = Vec::new();
     let mut env = std::collections::BTreeMap::new();
-    for (_, version) in &resolved {
+    for (request, version) in &resolved {
         let backend = app.registry.get(&version.backend)?;
-        paths.extend(managed_bin_paths(&app.ctx, backend.as_ref(), version)?);
+        paths.extend(managed_bin_paths(
+            &app.ctx,
+            backend.as_ref(),
+            version,
+            Some(request),
+        )?);
         env.extend(backend.exec_env(&app.ctx, version)?);
     }
     paths.sort_by_key(|path| managed_runtime_path_priority(path));
@@ -193,7 +198,7 @@ fn resolve_managed_launcher_alias(
         })?;
     let backend = app.registry.get(backend_id)?;
     let executable = find_managed_executable(
-        &managed_bin_paths(&app.ctx, backend.as_ref(), version)?,
+        &managed_bin_paths(&app.ctx, backend.as_ref(), version, None)?,
         canonical,
     )
     .ok_or_else(|| {
@@ -616,7 +621,8 @@ async fn resolve_requests(
         apply_source_override(app, &request.backend);
         let backend = app.registry.get(&request.backend)?;
         let effective = expand_request_alias(app, backend.as_ref(), &request)?;
-        let version = backend.resolve_version(&app.ctx, &effective).await?;
+        let mut version = backend.resolve_version(&app.ctx, &effective).await?;
+        bind_dynamic_request_options(&effective, &mut version);
         resolved.push((request, version));
     }
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
@@ -672,10 +678,11 @@ async fn install_one_without_shims(
     }
     let backend = app.registry.get(&req.backend)?;
     let effective = expand_request_alias(app, backend.as_ref(), req)?;
-    let tv = backend
+    let mut tv = backend
         .resolve_version(&app.ctx, &effective)
         .await
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
+    bind_dynamic_request_options(&effective, &mut tv);
 
     if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
         && !backend.id().starts_with("npm:")
@@ -707,6 +714,12 @@ fn expand_request_alias(
     effective.backend = backend.id().to_string();
     effective.spec = VersionSpec::parse(&expanded);
     Ok(effective)
+}
+
+fn bind_dynamic_request_options(request: &ToolRequest, version: &mut ToolVersion) {
+    if version.backend.contains(':') {
+        version.options.extend(request.options.clone());
+    }
 }
 
 pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
@@ -1224,7 +1237,7 @@ async fn use_project_npm(
     let node_request = project_node_request(app, &project.root)?;
     let (node_backend, node_version) = install_one_without_shims(app, &node_request).await?;
     generate_shims_for(app, node_backend.as_ref(), &node_version)?;
-    let node_bin_dir = managed_bin_paths(&app.ctx, node_backend.as_ref(), &node_version)?
+    let node_bin_dir = managed_bin_paths(&app.ctx, node_backend.as_ref(), &node_version, None)?
         .into_iter()
         .find(|path| path.join(node_executable_name()).is_file())
         .ok_or_else(|| {
@@ -1245,6 +1258,7 @@ async fn use_project_npm(
         .resolve_version(&app.ctx, &effective)
         .await
         .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
+    bind_dynamic_request_options(&effective, &mut version);
     let package_spec = project_package_spec(&package, requested_spec.as_deref(), &version.version);
     // Re-open and re-plan after taking the project lock below. Another osdk
     // process may have changed the manifest or incumbent native lock while
@@ -1769,7 +1783,7 @@ async fn run_project_native_installer(
         install_one_without_shims(app, &manager_request).await?;
     generate_shims_for(app, manager_backend.as_ref(), &manager_version)?;
     let manager = find_managed_executable(
-        &managed_bin_paths(&app.ctx, manager_backend.as_ref(), &manager_version)?,
+        &managed_bin_paths(&app.ctx, manager_backend.as_ref(), &manager_version, None)?,
         manager_id,
     )
     .ok_or_else(|| {
@@ -3155,8 +3169,30 @@ pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
 pub fn reshim(app: &App) -> Result<()> {
     let mut total = 0;
     for backend in all_display_backends(app)? {
-        for version in backend.list_installed(&app.ctx)? {
-            let tv = ToolVersion::new(backend.id(), &version);
+        let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
+        let installed = match backend.list_installed(&app.ctx) {
+            Ok(installed) => installed,
+            Err(error) if dynamic_request.is_none() && backend.id().contains(':') => {
+                tracing::warn!(
+                    backend = backend.id(),
+                    error = %error,
+                    "skipping unconfigured dynamic backend during reshim"
+                );
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        for version in installed {
+            let mut tv = ToolVersion::new(backend.id(), &version);
+            if backend.id().contains(':') {
+                let Some(request) = dynamic_request.as_ref() else {
+                    continue;
+                };
+                if !request_selects_installed_version(app, backend.as_ref(), request, &version)? {
+                    continue;
+                }
+                tv.options = request.options.clone();
+            }
             total += generate_shims_for(app, backend.as_ref(), &tv)?;
         }
     }
@@ -4361,16 +4397,20 @@ fn routed_bin_names_for_version(
     backend: &dyn Backend,
     version: &ToolVersion,
 ) -> Result<Vec<String>> {
-    let mut names = osdk_core::shim::routed_bin_names(ctx, backend, version)?
+    if version.backend.contains(':') {
+        let request = exact_request_for_version(version);
+        let report = osdk_core::shim::scan_dynamic_installs(ctx)?;
+        return Ok(osdk_core::shim::validated_dynamic_install(
+            ctx,
+            &report,
+            &request,
+            &version.version,
+        )?
+        .bin_names());
+    }
+    let names = osdk_core::shim::routed_bin_names(ctx, backend, version)?
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
-        names.extend(osdk_core::shim::dynamic_manifest_bin_names(
-            ctx,
-            &version.backend,
-            &version.version,
-        )?);
-    }
     Ok(names.into_iter().collect())
 }
 
@@ -4378,18 +4418,87 @@ fn managed_bin_paths(
     ctx: &osdk_core::backend::Ctx,
     backend: &dyn Backend,
     version: &ToolVersion,
+    request: Option<&ToolRequest>,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let mut paths = backend.bin_paths(ctx, version)?;
-    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
-        paths.extend(osdk_core::shim::dynamic_manifest_bin_paths(
+    if version.backend.contains(':') {
+        let fallback_request;
+        let request = match request {
+            Some(request) => request,
+            None => {
+                fallback_request = exact_request_for_version(version);
+                &fallback_request
+            }
+        };
+        let report = osdk_core::shim::scan_dynamic_installs(ctx)?;
+        return Ok(osdk_core::shim::validated_dynamic_install(
             ctx,
-            &version.backend,
+            &report,
+            request,
             &version.version,
-        )?);
+        )?
+        .bin_paths());
     }
+    let mut paths = backend.bin_paths(ctx, version)?;
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+fn exact_request_for_version(version: &ToolVersion) -> ToolRequest {
+    ToolRequest {
+        backend: version.backend.clone(),
+        spec: VersionSpec::Exact(version.version.clone()),
+        options: version.options.clone(),
+    }
+}
+
+fn request_selects_installed_version(
+    app: &App,
+    backend: &dyn Backend,
+    request: &ToolRequest,
+    version: &str,
+) -> Result<bool> {
+    let expanded = app
+        .ctx
+        .config
+        .expand_alias(backend.id(), &request.spec.to_string())?;
+    let spec = request_spec_after_alias(&request.spec, &expanded);
+    if let VersionSpec::Exact(selected) = spec {
+        return Ok(selected == version);
+    }
+    request_selects_version_from_candidates(backend.id(), &spec, version, || {
+        Ok(backend.list_installed(&app.ctx)?)
+    })
+}
+
+fn request_selects_version_from_candidates(
+    backend_id: &str,
+    spec: &VersionSpec,
+    version: &str,
+    installed: impl FnOnce() -> Result<Vec<String>>,
+) -> Result<bool> {
+    if let VersionSpec::Exact(selected) = spec {
+        return Ok(selected == version);
+    }
+    let installed = installed()?;
+    let selected = if backend_id == "python" {
+        osdk_core::backend::python::select_installed(&spec.to_string(), &installed)
+    } else {
+        let infos = installed
+            .iter()
+            .map(osdk_core::version::VersionInfo::stable)
+            .collect::<Vec<_>>();
+        osdk_core::version::select_version(spec, &infos).map(|version| version.version.clone())
+    };
+    Ok(selected.as_deref() == Some(version))
+}
+
+fn request_spec_after_alias(original: &VersionSpec, expanded: &str) -> VersionSpec {
+    if matches!(original, VersionSpec::Range(_)) {
+        VersionSpec::parse_range(expanded).unwrap_or_else(|_| VersionSpec::parse(expanded))
+    } else {
+        VersionSpec::parse(expanded)
+    }
 }
 
 fn requested_spec_literal(tool: &str) -> Option<String> {
@@ -4418,10 +4527,30 @@ fn installed_shim_owners(
 ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
     let mut owners =
         std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let dynamic_report = dynamic_scan_report(app)?;
+    let configured_dynamic = osdk_core::shim::configured_dynamic_ids(&app.ctx, &dynamic_report)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for (name, candidates) in osdk_core::shim::dynamic_bin_ownership(&dynamic_report) {
+        let configured_owners = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                configured_dynamic
+                    .contains(&candidate.canonical_id)
+                    .then_some(candidate.canonical_id)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if !configured_owners.is_empty() {
+            owners.insert(name, configured_owners);
+        }
+    }
     let cwd = std::env::current_dir()?;
     for backend in all_display_backends(app)? {
+        if backend.id().contains(':') {
+            continue;
+        }
         let mut selected_versions = std::collections::BTreeSet::new();
-        let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
+        let installed = backend.list_installed(&app.ctx)?;
         if let Some((active_spec, active_is_range)) = osdk_core::version::resolver::resolve_active(
             backend.id(),
             &cwd,
@@ -4429,14 +4558,12 @@ fn installed_shim_owners(
             backend.idiomatic_files(),
         )
         .map(|active| (active.spec, active.is_range))
-        .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)))
         {
             let expanded = app
                 .ctx
                 .config
                 .expand_alias(backend.id(), &active_spec)
                 .unwrap_or(active_spec);
-            let installed = backend.list_installed(&app.ctx)?;
             let selected = if backend.id() == "python" {
                 osdk_core::backend::python::select_installed(&expanded, &installed)
             } else {
@@ -4466,7 +4593,7 @@ fn installed_shim_owners(
                 selected_versions.insert(version);
             }
         } else {
-            selected_versions.extend(backend.list_installed(&app.ctx)?);
+            selected_versions.extend(installed);
         }
         for version in selected_versions {
             let version = ToolVersion::new(backend.id(), version);
@@ -5009,6 +5136,149 @@ mod command_flow_tests {
         assert!(!requests[1]
             .options
             .contains_key(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION));
+    }
+
+    #[test]
+    fn dynamic_request_options_are_bound_to_resolved_version() {
+        let request = ToolRequest {
+            backend: "github:example/tool".into(),
+            spec: VersionSpec::Exact("1.2.3".into()),
+            options: std::collections::BTreeMap::from([(
+                "rename".into(),
+                "configured-name".into(),
+            )]),
+        };
+        let mut resolved = ToolVersion::new(&request.backend, "1.2.3");
+        resolved
+            .options
+            .insert("rename".into(), "backend-name".into());
+        resolved.options.insert(
+            "__osdk_artifact_url".into(),
+            "https://example.invalid/tool".into(),
+        );
+
+        bind_dynamic_request_options(&request, &mut resolved);
+
+        assert_eq!(resolved.options["rename"], "configured-name");
+        assert_eq!(
+            resolved.options["__osdk_artifact_url"],
+            "https://example.invalid/tool"
+        );
+    }
+
+    #[test]
+    fn reshim_selects_only_the_configured_dynamic_version() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            "[tools]\n\"github:example/tool\" = { version = \"1.2.3\", rename = \"configured\" }\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let backend = app.registry.get("github:example/tool").unwrap();
+        let request =
+            osdk_core::shim::dynamic_request_from_config(&app.ctx, "github:example/tool").unwrap();
+
+        assert!(
+            request_selects_installed_version(&app, backend.as_ref(), &request, "1.2.3").unwrap()
+        );
+        assert!(
+            !request_selects_installed_version(&app, backend.as_ref(), &request, "1.2.4").unwrap()
+        );
+        assert_eq!(request.options["rename"], "configured");
+    }
+
+    #[test]
+    fn exact_reshim_selection_does_not_require_a_validated_installed_listing() {
+        let spec = VersionSpec::Exact("1.2.3".into());
+        let selected =
+            request_selects_version_from_candidates("github:example/tool", &spec, "1.2.3", || {
+                anyhow::bail!("inventory listing rejected legacy identity")
+            })
+            .unwrap();
+
+        assert!(selected);
+    }
+
+    fn write_dynamic_install(
+        app: &App,
+        backend: &str,
+        version: &str,
+        bin_name: &str,
+        options: &std::collections::BTreeMap<String, String>,
+    ) {
+        let root = app.ctx.dirs.install_path(backend, version);
+        let bin = root.join("bin").join(bin_name);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend)
+            .unwrap()
+            .with_identity_options(options)
+            .unwrap();
+        manifest.version = Some(version.into());
+        manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
+            name: bin_name.into(),
+            path: format!("bin/{bin_name}"),
+        }];
+        manifest.write_atomic(&root).unwrap();
+    }
+
+    #[test]
+    fn managed_dynamic_paths_require_matching_request_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let backend = app.registry.get("github:example/tool").unwrap();
+        let installed_options =
+            std::collections::BTreeMap::from([("rename".into(), "installed".into())]);
+        write_dynamic_install(&app, backend.id(), "1.2.3", "installed", &installed_options);
+        let version = ToolVersion::new(backend.id(), "1.2.3");
+        let request = ToolRequest {
+            backend: backend.id().into(),
+            spec: VersionSpec::Exact("1.2.3".into()),
+            options: std::collections::BTreeMap::from([("rename".into(), "configured".into())]),
+        };
+
+        let error =
+            managed_bin_paths(&app.ctx, backend.as_ref(), &version, Some(&request)).unwrap_err();
+
+        assert!(error.to_string().contains("different identity"), "{error}");
+    }
+
+    #[test]
+    fn unconfigured_dynamic_inventory_is_not_a_runtime_shim_owner() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        write_dynamic_install(
+            &app,
+            "github:example/tool",
+            "1.2.3",
+            "example-tool",
+            &std::collections::BTreeMap::new(),
+        );
+
+        let owners = installed_shim_owners(&app).unwrap();
+
+        assert!(!owners.contains_key("example-tool"));
     }
 
     #[test]

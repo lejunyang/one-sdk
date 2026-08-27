@@ -11,9 +11,8 @@ commands.
 [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs)
 recognizes `npm:` first. For an unscoped package, the `@` after its name
 separates the version. For a scoped package it first parses `@scope/name`, then
-uses the second `@` as the version separator. Request parsing preserves package
-name casing, while inventory identity is normalized to lowercase; use npm's
-conventional lowercase package spelling to avoid an identity mismatch. Empty
+uses the second `@` as the version separator. Request parsing and inventory
+identity both normalize package names to lowercase. Empty
 names, scope-only names, extra path segments, backslashes, colons, and whitespace
 are rejected. Bare `npm` continues to map to the built-in npm CLI backend and
 cannot be shadowed by the dynamic backend.
@@ -37,6 +36,18 @@ PATH as an implicit dependency.
 that real project. A global request ignores project state and installs under an
 osdk-owned prefix. If local discovery finds no `package.json`, execution falls
 back to the original isolated backend path.
+
+Before resolving or installing an osdk-owned dynamic npm tool,
+[`identity_options`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/dynamic.rs)
+accepts only `installer` and `allow_builds` as public identity inputs. Internal
+`__osdk_*` fields injected while replaying a lock are deliberately excluded. The
+installer value is canonicalized, while `allow_builds` normalizes false-like
+values by omitting the default deny policy, true-like values to `true`, and a
+package list to a lowercase, sorted, deduplicated comma-separated value. An
+`installer=auto` default is omitted as well. Unknown public keys fail before
+installation. A length-prefixed, domain-separated BLAKE3 hash over the canonical
+backend ID and ordered map produces the order-independent `b3-v1:` option
+fingerprint.
 
 ## Installer planning and one-shot delegation
 
@@ -152,10 +163,10 @@ installation error, not a reason to fall back to another mode.
 The Aube cache and store are shared across isolated, project, and global
 operations, while each project or global install retains its own native lock.
 Aube 2.1 global invocation does not receive an offline flag. A new or repaired
-global Aube install is therefore rejected with `--offline`, before registry
-probing or helper launch. A complete matching exact install can be reused
-offline without invoking Aube; npm and pnpm global delegates pass through their
-native offline flags when installation is required.
+  global Aube install is therefore rejected with `--offline`, before registry
+  probing or helper launch. A complete exact install with matching option identity
+  can be reused offline without invoking Aube; npm and pnpm global delegates pass
+  through their native offline flags when installation is required.
 
 ## Automatic source selection and cache identity
 
@@ -216,9 +227,9 @@ fields are not merged. `use -o allow_builds=esbuild,sharp` normalizes and
 persists a string array, while true/false becomes a boolean, keeping generated
 project configuration structured.
 
-## Schema 3, metadata-only locks, and native graph ownership
+## Lock schema 3, metadata-only locks, and native graph ownership
 
-The current write format for `osdk.lock` is schema 3. Each npm tool records its
+The current write format for `osdk.lock` is lock schema 3. Each npm tool records its
 request, exact version, options, and `npm` metadata. It does not write a
 generic `artifact` table, and it no longer stores any graph payload or graph
 path in the main lock:
@@ -235,6 +246,12 @@ kind = "aube"
 format = "aube-v9"
 sha256 = "<64 lowercase hex characters>"
 ```
+
+Public `installer` and `allow_builds` options remain in the lock's `options`
+table and are replayed into the request; internal `__osdk_*` metadata is never
+serialized there. This is separate from dynamic inventory schema 2 below. The
+older “schema 2 sidecar” terminology in this section means lock schema 2's npm
+graph sidecar, not `.osdk-tool.json` inventory schema 2.
 
 On write, the CLI extracts npm metadata from the installed tool or declared
 private options: package name, installer, scope, an optional exact Node
@@ -268,12 +285,12 @@ old inline graph representation, cannot be consumed, merged, or saved and must
 be regenerated instead of being falsely migrated to the current metadata-only
 format.
 
-Schema 2 sidecars remain frozen-read compatible. When an older sidecar entry is
+Legacy lock-schema-2 sidecars remain frozen-read compatible. When an older sidecar entry is
 read, osdk still validates the package, Node version, `aube-v9`, 64-character
 lowercase SHA-256, canonical sidecar path, and non-symlink sidecar directory and
 file, then rereads the full UTF-8 payload with the 16 MiB bound and recomputes
 its digest. Only after that validation does the graph become a compatibility
-input to the backend. A later successful write migrates the entry to schema 3
+input to the backend. A later successful write migrates the entry to lock schema 3
 metadata only; the existing sidecar file is not deleted automatically.
 
 ## Isolated/global inventory, shims, and conflict rejection
@@ -282,14 +299,30 @@ For an isolated install, the backend scans the synthetic project's complete
 `node_modules/.bin`, so recorded bins may come from the root package or
 transitive dependencies. For a global install, normalization instead resets the
 manager-produced bin directory and recreates launchers only for the selected
-root package's declared bins. Both paths write the tool ID, exact version,
-relative bin paths, and stable metadata to `.osdk-tool.json`. A bin name must be
+root package's declared bins. Both paths write dynamic inventory schema 2 to
+`.osdk-tool.json`: tool ID, exact version, canonical `identity_options`, their
+`option_fingerprint`, relative bin paths, and stable metadata. A bin name must be
 a single filename and its resolved canonical target must remain under the install
-root. Missing bins, duplicate names, path traversal, and corrupt inventories are
-rejected. Inventory scans do not follow symlinks and bound traversal depth,
-manifest count, and file size.
+root. Missing bins, duplicate names, path traversal, a missing or tampered
+fingerprint, and other corrupt inventory are rejected. Inventory scans do not
+follow symlinks and bound traversal depth, manifest count, and file size.
 
-The CLI and shim derive a `bin name -> backend owner` map from inventory:
+Install roots remain version-based (`<installs>/<tool>/<version>` for isolated
+tools and `<installs>/npm-global/<package>/<version>` for global tools); the
+fingerprint is not part of the directory name. Reuse checks therefore compare
+schema-2 inventory identity before accepting a complete marker. A different
+option identity cannot reuse the directory, and same-version variants cannot
+coexist in one scope. The npm install/global-use path rebuilds or replaces that
+version when its identity differs. Legacy schema-1 inventories stay readable so
+scanning and migration can identify them, but they cannot authorize reuse,
+activation, or shim execution; rerun the install or global-use operation to
+rebuild the version with schema 2.
+
+The CLI and shim derive a `bin name -> backend owner` map from inventory. For an
+active dynamic request, activation and shim dispatch first require its canonical
+option identity to match the selected install's schema-2 inventory. A missing,
+legacy, or mismatched identity fails closed rather than exposing its bin paths.
+Bin-owner resolution is a separate check:
 
 - one owner routes directly;
 - at runtime, multiple owners with exactly one selected in current configuration
@@ -308,11 +341,13 @@ described as a globally rolled-back installation transaction.
 
 ## Main verification points
 
-Unit and contract tests cover namespaced/scoped parsing, installer planning,
+Unit and contract tests cover namespaced/scoped parsing, option normalization and
+fingerprinting, schema-2 inventory validation, installer planning,
 dependency-section retention, one-shot native delegation, compact lock metadata,
 global-prefix arguments, native-lock identity, curated generation publication
 and revalidation, raw-project-bin exclusion, inventory scanning, and shim
-conflict behavior. Compatibility tests retain the schema 2 sidecar validation
-and schema 1 npm-migration rejection boundaries. Cross-platform changes remain
+conflict behavior. Compatibility tests retain legacy lock-schema-2 sidecar
+validation, schema-1 dynamic-inventory reinstall, and lock-schema-1 npm-migration
+rejection boundaries. Cross-platform changes remain
 subject to the repository's Linux workspace tests and full Windows GNU Wine
 suite.

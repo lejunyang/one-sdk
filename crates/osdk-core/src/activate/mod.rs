@@ -225,6 +225,7 @@ pub fn compute_env_delta(
     let mut set_vars = BTreeMap::new();
     let mut has_generated_shim = false;
     let dynamic_report = crate::shim::scan_dynamic_installs(ctx)?;
+    let project_npm_bin = trusted_project_npm_bin(ctx, cwd)?;
     let mut backend_ids = registry
         .all()
         .iter()
@@ -242,6 +243,17 @@ pub fn compute_env_delta(
             continue;
         };
         let dynamic_request = crate::shim::dynamic_request_from_config(ctx, backend.id());
+        // Project-aware npm `use` is owned by the real project's package
+        // manager and its curated `.osdk/npm-bin` generation below. It has no
+        // osdk-owned install inventory to validate or expose here.
+        if dynamic_request.as_ref().is_some_and(|request| {
+            request.backend.starts_with("npm:")
+                && project_npm_bin.is_some()
+                && crate::shim::configured_npm_scope(ctx, request)
+                    .is_ok_and(|scope| scope == Some(crate::npm_tools::ToolScope::Project))
+        }) {
+            continue;
+        }
         let active = match resolve_active(
             backend.id(),
             cwd,
@@ -249,35 +261,48 @@ pub fn compute_env_delta(
             backend.idiomatic_files(),
         ) {
             Some(a) => Some((a.spec, a.is_range)),
-            None => dynamic_request.map(|request| (request.spec.to_string(), false)),
+            None => dynamic_request
+                .as_ref()
+                .map(|request| (request.spec.to_string(), false)),
         };
         let Some((active_spec, active_is_range)) = active else {
             continue;
         };
         // Resolve to an installed version.
-        let installed = backend.list_installed(ctx).unwrap_or_default();
-        if installed.is_empty() {
-            continue;
-        }
         let expanded = ctx
             .config
             .expand_alias(backend.id(), &active_spec)
             .unwrap_or(active_spec);
         let spec = strip_distribution_prefix(&expanded);
-        let version = if backend.id() == "python" {
-            crate::backend::python::select_installed(spec, &installed)
+        let parsed = if active_is_range {
+            VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
         } else {
-            let parsed = if active_is_range {
-                VersionSpec::parse_range(spec).unwrap_or_else(|_| VersionSpec::parse(spec))
-            } else {
-                VersionSpec::parse(spec)
-            };
-            match &parsed {
-                VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => Some(v.clone()),
-                _ => {
-                    let infos: Vec<VersionInfo> =
-                        installed.iter().map(VersionInfo::stable).collect();
-                    select_version(&parsed, &infos).map(|vi| vi.version.clone())
+            VersionSpec::parse(spec)
+        };
+        // Exact configured dynamic requests are validated at their requested
+        // root even when a backend omits legacy/missing inventories from its
+        // installed list. This turns stale complete roots into explicit errors.
+        let version = match (&dynamic_request, &parsed) {
+            (Some(_), VersionSpec::Exact(version)) => Some(version.clone()),
+            _ => {
+                let installed = if dynamic_request.is_some() {
+                    backend.list_installed(ctx)?
+                } else {
+                    backend.list_installed(ctx).unwrap_or_default()
+                };
+                if backend.id() == "python" {
+                    crate::backend::python::select_installed(spec, &installed)
+                } else {
+                    match &parsed {
+                        VersionSpec::Exact(v) if installed.iter().any(|i| i == v) => {
+                            Some(v.clone())
+                        }
+                        _ => {
+                            let infos: Vec<VersionInfo> =
+                                installed.iter().map(VersionInfo::stable).collect();
+                            select_version(&parsed, &infos).map(|vi| vi.version.clone())
+                        }
+                    }
                 }
             }
         };
@@ -285,35 +310,45 @@ pub fn compute_env_delta(
             Some(v) => v,
             None => continue,
         };
-        let tv = ToolVersion::new(backend.id(), &version);
-        if crate::shim::routed_bin_names(ctx, backend.as_ref(), &tv).is_ok_and(|names| {
-            names
-                .into_iter()
-                .any(|name| shim_exists(&ctx.dirs.shims(), &name))
-        }) {
+        let mut tv = ToolVersion::new(backend.id(), &version);
+        let dynamic_install = if let Some(request) = dynamic_request.as_ref() {
+            tv.options = request.options.clone();
+            Some(crate::shim::validated_dynamic_install(
+                ctx,
+                &dynamic_report,
+                request,
+                &version,
+            )?)
+        } else {
+            None
+        };
+        let routed_names = if let Some(install) = dynamic_install.as_ref() {
+            install.bin_names()
+        } else {
+            crate::shim::routed_bin_names(ctx, backend.as_ref(), &tv).unwrap_or_default()
+        };
+        if routed_names
+            .into_iter()
+            .any(|name| shim_exists(&ctx.dirs.shims(), &name))
+        {
             has_generated_shim = true;
         }
-        let backend_bins = backend
-            .bin_paths(ctx, &tv)
-            .ok()
-            .into_iter()
-            .flatten()
-            .collect::<std::collections::BTreeSet<_>>();
-        let bins = backend_bins
-            .into_iter()
-            .chain(
-                crate::shim::dynamic_manifest_bin_paths(ctx, backend.id(), &version)
-                    .ok()
-                    .into_iter()
-                    .flatten(),
-            )
-            .collect::<std::collections::BTreeSet<_>>();
+        let bins = if let Some(install) = dynamic_install.as_ref() {
+            install.bin_paths()
+        } else {
+            backend.bin_paths(ctx, &tv).unwrap_or_default()
+        };
         for b in bins {
             if b.exists() {
                 path_prepend.push(b);
             }
         }
-        if let Ok(env) = backend.exec_env(ctx, &tv) {
+        let env = if dynamic_request.is_some() {
+            Some(backend.exec_env(ctx, &tv)?)
+        } else {
+            backend.exec_env(ctx, &tv).ok()
+        };
+        if let Some(env) = env {
             for (k, v) in env {
                 set_vars.insert(k, v);
             }
@@ -321,7 +356,7 @@ pub fn compute_env_delta(
     }
 
     prioritize_managed_paths(&mut path_prepend, &ctx.dirs.shims(), has_generated_shim);
-    if let Some(project_bin) = trusted_project_npm_bin(ctx, cwd)? {
+    if let Some(project_bin) = project_npm_bin {
         prioritize_project_bin(&mut path_prepend, project_bin);
     }
 
@@ -1007,6 +1042,141 @@ mod tests {
             message.contains(crate::inventory::INVENTORY_FILE),
             "{message}"
         );
+    }
+
+    fn configured_dynamic_fixture(
+        root: &std::path::Path,
+        configured_options: BTreeMap<String, crate::config::ToolConfigValue>,
+        manifest_options: BTreeMap<String, String>,
+    ) -> (Ctx, std::path::PathBuf, std::path::PathBuf) {
+        let mut ctx = test_ctx(root, &[("npm:fixture-cli", "1.2.3")]);
+        ctx.config.tool_configs.insert(
+            "npm:fixture-cli".into(),
+            crate::config::ToolConfigEntry::structured("1.2.3", configured_options),
+        );
+        let install_root = ctx.dirs.install_path("npm:fixture-cli", "1.2.3");
+        let bin = install_root.join("bin/fixture-cli");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"fixture").unwrap();
+        std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+        let mut manifest = crate::inventory::DynamicToolManifest::new("npm:fixture-cli")
+            .unwrap()
+            .with_identity_options(&manifest_options)
+            .unwrap();
+        manifest.version = Some("1.2.3".into());
+        manifest.bins.push(crate::inventory::DynamicToolBin {
+            name: "fixture-cli".into(),
+            path: "bin/fixture-cli".into(),
+        });
+        manifest.write_atomic(&install_root).unwrap();
+        (ctx, install_root, bin)
+    }
+
+    fn activation_error(ctx: &Ctx, project: &std::path::Path) -> String {
+        match compute_env_delta(ctx, &Registry::new(), project) {
+            Ok(_) => panic!("invalid dynamic install unexpectedly produced an activation delta"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn activation_rejects_configured_dynamic_install_without_inventory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (ctx, install_root, bin) =
+            configured_dynamic_fixture(temporary.path(), BTreeMap::new(), BTreeMap::new());
+        std::fs::remove_file(crate::inventory::DynamicToolManifest::manifest_path(
+            &install_root,
+        ))
+        .unwrap();
+
+        let message = activation_error(&ctx, &project);
+        assert!(
+            message.contains("missing or invalid install identity"),
+            "{message}"
+        );
+        assert!(message.contains("reinstall"), "{message}");
+        assert!(
+            bin.exists(),
+            "fixture must retain the otherwise runnable bin"
+        );
+    }
+
+    #[test]
+    fn activation_rejects_configured_dynamic_install_without_completion_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (ctx, install_root, bin) =
+            configured_dynamic_fixture(temporary.path(), BTreeMap::new(), BTreeMap::new());
+        std::fs::remove_file(install_root.join(".osdk-complete")).unwrap();
+
+        let message = activation_error(&ctx, &project);
+        assert!(
+            message.contains("no complete selected install"),
+            "{message}"
+        );
+        assert!(message.contains("reinstall"), "{message}");
+        assert!(
+            bin.exists(),
+            "fixture must retain the otherwise runnable bin"
+        );
+    }
+
+    #[test]
+    fn activation_rejects_configured_dynamic_schema_one_inventory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (ctx, install_root, _) =
+            configured_dynamic_fixture(temporary.path(), BTreeMap::new(), BTreeMap::new());
+        let path = crate::inventory::DynamicToolManifest::manifest_path(&install_root);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["schema"] = 1.into();
+        value.as_object_mut().unwrap().remove("option_fingerprint");
+        value.as_object_mut().unwrap().remove("identity_options");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let message = activation_error(&ctx, &project);
+        assert!(message.contains("different identity"), "{message}");
+        assert!(message.contains("reinstall"), "{message}");
+    }
+
+    #[test]
+    fn activation_rejects_configured_dynamic_option_mismatch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (ctx, _, _) = configured_dynamic_fixture(
+            temporary.path(),
+            BTreeMap::from([(
+                "installer".into(),
+                crate::config::ToolConfigValue::String("aube".into()),
+            )]),
+            BTreeMap::from([("installer".into(), "npm".into())]),
+        );
+
+        let message = activation_error(&ctx, &project);
+        assert!(message.contains("different identity"), "{message}");
+        assert!(message.contains("reinstall"), "{message}");
+    }
+
+    #[test]
+    fn activation_rejects_configured_dynamic_version_mismatch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let (ctx, install_root, _) =
+            configured_dynamic_fixture(temporary.path(), BTreeMap::new(), BTreeMap::new());
+        let mut manifest = crate::inventory::DynamicToolManifest::load(&install_root).unwrap();
+        manifest.version = Some("9.9.9".into());
+        manifest.write_atomic(&install_root).unwrap();
+
+        let message = activation_error(&ctx, &project);
+        assert!(message.contains("different identity"), "{message}");
+        assert!(message.contains("reinstall"), "{message}");
     }
 
     #[test]

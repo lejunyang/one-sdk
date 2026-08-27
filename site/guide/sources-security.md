@@ -106,11 +106,12 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
   会失败，`model pull` 不会刷新，本就不支持该参数的命令仍忽略它；
 - 缺少缓存时明确报错，不会偷偷联网；
 - 对支持通用 artifact receipt 的 backend，lock 中的 artifact URL/checksum 可支持离线
-  重装；pipeline 实际重装且有 checksum 时重新校验字节，已有完整安装则直接复用；
-- `npm:<package>` 不使用通用 artifact URL。schema 3 `osdk.lock` 只保存 scope、installer
+  重装；pipeline 实际重装且有 checksum 时重新校验字节，已有完整 GitHub 安装仅在 receipt
+  的锁定文件名/checksum 与动态选项身份都匹配时复用；
+- `npm:<package>` 不使用通用 artifact URL。lock schema 3 `osdk.lock` 只保存 scope、installer
   与可选原生 lock 身份，而不携带依赖图；仅靠这些 metadata 不能冷恢复依赖图。已有完整
-  安装可直接复用；支持原生 lock 重放的操作还需要安装器拥有的 lock 与已预热 cache/store。
-  schema 2 graph sidecar 仅用于兼容读取；
+  安装也只在记录的选项匹配时复用；支持原生 lock 重放的操作还需要安装器拥有的 lock 与
+  已预热 cache/store。旧 lock schema 2 graph sidecar 仅用于兼容读取；
 - `attestations=required` 还要求按 artifact SHA-256 缓存的证明 bundle，lock evidence
   不能代替重新验证。
 
@@ -202,6 +203,11 @@ osdk list-remote github:sharkdp/fd
 `asset-regex` 与 `asset-template` 互斥。未给规则时按 host OS、架构、archive 类型
 启发式评分，并排除 checksum、signature 和 source asset；零命中或多命中都失败。
 未知 archive 后缀按裸二进制处理，Windows 自动补 `.exe`。
+对 osdk 自有 GitHub 安装，受支持的 asset、平台、catalog 摘要与布局选项属于动态安装
+身份。`catalog-url` 可用于获取，
+但不会持久化到动态身份；必填的 `catalog-sha256` 标识 catalog 内容。含 userinfo、查询参数或
+fragment 的 HTTP(S) catalog URL 会被拒绝，避免通过这个选项持久化凭据。未知公开选项会在安装前拒绝；若同一版本的现有安装缺少新身份或身份不同，osdk 不会
+执行它，请先卸载再重新安装。物理安装路径仍以版本为键，因此同版本的不同选项变体不能共存。
 
 ```bash
 osdk install github:owner/repo@1.2.3 \

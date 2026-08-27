@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::{Error, Result};
 use crate::http;
+use crate::inventory::{DynamicToolBin, DynamicToolManifest};
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
 use crate::platform::{Arch, Os};
 use crate::source::Source;
@@ -87,6 +88,7 @@ impl GithubBackend {
     /// Parse a `github:owner/repo` id into a backend. Returns None if the id
     /// doesn't carry a valid owner/repo.
     pub fn from_id(id: &str) -> Option<GithubBackend> {
+        let id = crate::inventory::canonical_dynamic_id(id).ok()?;
         let rest = id.strip_prefix("github:")?;
         let mut components = rest.split('/');
         let owner = components.next()?;
@@ -94,16 +96,12 @@ impl GithubBackend {
         if components.next().is_some() {
             return None;
         }
-        let owner = owner.trim();
-        let repo = repo.trim().trim_end_matches(".git");
-        if !valid_repository_component(owner) || !valid_repository_component(repo) {
+        let owner = owner.trim().to_string();
+        let repo = repo.trim().trim_end_matches(".git").to_string();
+        if !valid_repository_component(&owner) || !valid_repository_component(&repo) {
             return None;
         }
-        Some(GithubBackend {
-            id: id.to_string(),
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-        })
+        Some(GithubBackend { id, owner, repo })
     }
 
     fn releases_api(&self, page: usize) -> String {
@@ -458,13 +456,7 @@ impl GithubBackend {
             }
             for asset in &release.assets {
                 if asset.name.trim().is_empty()
-                    || !matches!(
-                        reqwest::Url::parse(&asset.url)
-                            .ok()
-                            .map(|url| url.scheme().to_string())
-                            .as_deref(),
-                        Some("http" | "https")
-                    )
+                    || !static_asset_url_is_persistable(&asset.url)
                     || asset.os.trim().is_empty()
                     || asset.arch.trim().is_empty()
                 {
@@ -588,6 +580,7 @@ impl Backend for GithubBackend {
     }
 
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
+        crate::backend::dynamic::validate_options(self.id(), &req.options)?;
         let prerelease_request = match &req.spec {
             VersionSpec::Exact(version) => crate::backend::python::is_prerelease(version),
             VersionSpec::Prefix(channel) => {
@@ -727,7 +720,18 @@ impl Backend for GithubBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
+        crate::backend::dynamic::validate_options(self.id(), &tv.options)?;
         let rules = Self::rules(&tv.options)?;
+        // The shared archive pipeline only keeps its install lock while it is
+        // materializing files. GitHub-specific post-processing and inventory
+        // publication happen afterwards, and the bare-binary path does not use
+        // that lock at all. Keep a separate outer lock across the whole
+        // operation so two direct backend callers cannot race and bind the
+        // winner's bytes to the loser's option identity.
+        let _identity_lock = acquire_github_install_lock(ctx, self.id(), tv).await?;
+        if validate_complete_install_identity(ctx, self, tv)? {
+            return Ok(());
+        }
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let attestation = self.attestation(ctx, &sources);
         if let Some(artifact) = pipeline::locked_artifact(tv)? {
@@ -756,7 +760,8 @@ impl Backend for GithubBackend {
                     offline: ctx.config.settings.offline,
                     require_checksums: ctx.config.settings.require_checksums,
                 };
-                pipeline::run_with_attestation(&plan, &pctx, attestation.as_ref()).await?;
+                pipeline::run_with_attestation_unfinalized(&plan, &pctx, attestation.as_ref())
+                    .await?;
                 postprocess_archive(ctx, self, &tv.version, &rules)?;
             } else {
                 let checksum = artifact
@@ -768,7 +773,7 @@ impl Backend for GithubBackend {
                     rules.rename.as_deref().unwrap_or(&self.repo),
                     ctx.platform.os,
                 );
-                pipeline::install_single_binary(
+                pipeline::install_single_binary_unfinalized(
                     &ctx.client,
                     &ctx.dirs,
                     self.id(),
@@ -785,6 +790,7 @@ impl Backend for GithubBackend {
                 )
                 .await?;
             }
+            finalize_dynamic_install(ctx, self, tv)?;
             return Ok(());
         }
         let want = tv.version.trim_start_matches('v');
@@ -894,7 +900,8 @@ impl Backend for GithubBackend {
                     offline: ctx.config.settings.offline,
                     require_checksums: ctx.config.settings.require_checksums,
                 };
-                pipeline::run_with_attestation(&plan, &pctx, attestation.as_ref()).await?;
+                pipeline::run_with_attestation_unfinalized(&plan, &pctx, attestation.as_ref())
+                    .await?;
                 postprocess_archive(ctx, self, &tv.version, &rules)?;
             }
             Err(_) => {
@@ -903,7 +910,7 @@ impl Backend for GithubBackend {
                     rules.rename.as_deref().unwrap_or(&self.repo),
                     ctx.platform.os,
                 );
-                pipeline::install_single_binary(
+                pipeline::install_single_binary_unfinalized(
                     &ctx.client,
                     &ctx.dirs,
                     self.id(),
@@ -920,6 +927,18 @@ impl Backend for GithubBackend {
                 )
                 .await?;
             }
+        }
+        finalize_dynamic_install(ctx, self, tv)?;
+        Ok(())
+    }
+
+    fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        if !validate_complete_install_identity(ctx, self, tv)? {
+            return Err(Error::other(format!(
+                "dynamic tool `{}@{}` is not completely installed",
+                self.id(),
+                tv.version
+            )));
         }
         Ok(())
     }
@@ -944,6 +963,189 @@ impl Backend for GithubBackend {
             Ok(discovered)
         }
     }
+}
+
+fn github_install_lock_path(ctx: &Ctx, backend_id: &str, version: &ToolVersion) -> PathBuf {
+    ctx.dirs.lock_dir(backend_id).join(format!(
+        "{}.github-identity.lock",
+        crate::dirs::sanitize_version_component(&version.version)
+    ))
+}
+
+async fn acquire_github_install_lock(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &ToolVersion,
+) -> Result<crate::lock::FileLock> {
+    let path = github_install_lock_path(ctx, backend_id, version);
+    tokio::task::spawn_blocking(move || crate::lock::FileLock::acquire(path))
+        .await
+        .map_err(|error| Error::other(format!("GitHub install lock task failed: {error}")))?
+}
+
+/// Validate an already-complete install without ever upgrading or rewriting
+/// its inventory. Returning `false` means no complete install exists and the
+/// caller may perform a real installation. Any complete install that cannot
+/// prove the requested schema-2 identity is rejected fail-closed.
+fn validate_complete_install_identity(
+    ctx: &Ctx,
+    backend: &GithubBackend,
+    version: &ToolVersion,
+) -> Result<bool> {
+    let install_root = ctx.dirs.install_path(backend.id(), &version.version);
+    if !install_root.join(".osdk-complete").is_file() {
+        return Ok(false);
+    }
+    let manifest = DynamicToolManifest::load(&install_root).map_err(|error| {
+        Error::other(format!(
+            "refusing to reuse complete dynamic tool `{}@{}` with missing, legacy, or invalid install identity; uninstall and reinstall it: {error}",
+            backend.id(),
+            version.version
+        ))
+    })?;
+    if manifest.id != backend.id()
+        || manifest.version.as_deref() != Some(version.version.as_str())
+        || !manifest.matches_identity_options(&version.options)?
+    {
+        return Err(Error::other(format!(
+            "refusing to reuse complete dynamic tool `{}@{}` installed with a different identity or options; uninstall and reinstall it",
+            backend.id(),
+            version.version
+        )));
+    }
+    if let Some(locked) = pipeline::locked_artifact(version)? {
+        let receipt = pipeline::artifact_receipt(&ctx.dirs, backend.id(), &version.version)
+            .ok_or_else(|| {
+                Error::other(format!(
+                    "refusing to reuse complete dynamic tool `{}@{}` without its artifact receipt; uninstall and reinstall it",
+                    backend.id(),
+                    version.version
+                ))
+            })?;
+        let expected_subdir = version
+            .options
+            .get(pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION)
+            .or_else(|| version.options.get("catalog-subdir"));
+        if receipt.file_name != locked.file_name
+            || !matching_locked_checksum(receipt.checksum.as_deref(), locked.checksum.as_deref())
+            || !locked_artifact_url_must_match(
+                &receipt.url,
+                &locked.url,
+                locked.checksum.as_deref(),
+            )
+            || manifest.metadata.get("artifact_subdir") != expected_subdir
+        {
+            return Err(Error::other(format!(
+                "refusing to reuse complete dynamic tool `{}@{}` installed from a different locked artifact; uninstall and reinstall it",
+                backend.id(),
+                version.version
+            )));
+        }
+    }
+    Ok(true)
+}
+
+fn matching_locked_checksum(actual: Option<&str>, expected: Option<&str>) -> bool {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => {
+            let Ok(actual) = pipeline::parse_checksum(actual) else {
+                return false;
+            };
+            let Ok(expected) = pipeline::parse_checksum(expected) else {
+                return false;
+            };
+            actual.algo == expected.algo && actual.hex.eq_ignore_ascii_case(&expected.hex)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn locked_artifact_url_must_match(actual: &str, expected: &str, checksum: Option<&str>) -> bool {
+    checksum.is_some() || actual == expected
+}
+
+fn write_dynamic_inventory(
+    ctx: &Ctx,
+    backend: &GithubBackend,
+    version: &ToolVersion,
+) -> Result<()> {
+    let install_root = ctx.dirs.install_path(backend.id(), &version.version);
+    let mut manifest =
+        DynamicToolManifest::new(backend.id())?.with_identity_options(&version.options)?;
+    manifest.version = Some(version.version.clone());
+    if let Some(subdir) = version
+        .options
+        .get(pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION)
+        .or_else(|| version.options.get("catalog-subdir"))
+    {
+        manifest
+            .metadata
+            .insert("artifact_subdir".into(), subdir.clone());
+    }
+    for bin_dir in backend.bin_paths(ctx, version)? {
+        for name in crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir)) {
+            let target = executable_in_dir(&bin_dir, &name).ok_or_else(|| {
+                Error::other(format!("installed GitHub binary `{name}` disappeared"))
+            })?;
+            let canonical_root = dunce::canonicalize(&install_root)
+                .map_err(|error| Error::io(&install_root, error))?;
+            let canonical_target =
+                dunce::canonicalize(&target).map_err(|error| Error::io(&target, error))?;
+            let relative = canonical_target
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    Error::other(format!(
+                        "installed GitHub binary `{name}` resolves outside {}",
+                        install_root.display()
+                    ))
+                })?;
+            manifest.bins.push(DynamicToolBin {
+                name,
+                path: relative.to_string_lossy().replace('\\', "/"),
+            });
+        }
+    }
+    manifest
+        .bins
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    manifest
+        .bins
+        .dedup_by(|left, right| left.name == right.name);
+    manifest.write_atomic(&install_root)
+}
+
+fn finalize_dynamic_install(
+    ctx: &Ctx,
+    backend: &GithubBackend,
+    version: &ToolVersion,
+) -> Result<()> {
+    let install_root = ctx.dirs.install_path(backend.id(), &version.version);
+    let marker = install_root.join(".osdk-complete");
+    if let Err(error) = write_dynamic_inventory(ctx, backend, version) {
+        let _ = std::fs::remove_dir_all(&install_root);
+        return Err(error);
+    }
+    std::fs::write(&marker, b"").map_err(|error| {
+        let _ = std::fs::remove_dir_all(&install_root);
+        Error::io(&marker, error)
+    })
+}
+
+fn executable_in_dir(directory: &std::path::Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidates = [
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        format!("{name}.bat"),
+        name.to_string(),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [name.to_string()];
+    candidates
+        .into_iter()
+        .map(|candidate| directory.join(candidate))
+        .find(|candidate| candidate.is_file())
 }
 
 fn tag_candidates(version: &str) -> Vec<String> {
@@ -1238,6 +1440,18 @@ fn static_asset_matches(asset: &StaticAsset, ctx: &Ctx, rules: &AssetRules) -> b
             .is_none_or(|libc| libc == rules.libc.as_deref().unwrap_or_else(|| libc_token(ctx)))
 }
 
+fn static_asset_url_is_persistable(value: &str) -> bool {
+    reqwest::Url::parse(value).ok().is_some_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && !url.cannot_be_a_base()
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
+}
+
 fn static_versions(catalog: &StaticCatalog) -> Vec<VersionInfo> {
     let mut versions = catalog
         .releases
@@ -1434,6 +1648,10 @@ mod tests {
         assert_eq!(b.owner, "cli");
         assert_eq!(b.repo, "cli");
         assert_eq!(b.id(), "github:cli/cli");
+        assert_eq!(
+            GithubBackend::from_id("github:Cli/CLI.git").unwrap().id(),
+            "github:cli/cli"
+        );
         assert!(GithubBackend::from_id("github:noslash").is_none());
         assert!(GithubBackend::from_id("node").is_none());
         assert!(GithubBackend::from_id("github:cli/cli/extra").is_none());
@@ -1851,6 +2069,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn static_catalog_asset_urls_must_be_safe_to_persist() {
+        assert!(static_asset_url_is_persistable(
+            "https://artifacts.example/tool.tar.gz"
+        ));
+        for unsafe_url in [
+            "https://user:secret@artifacts.example/tool.tar.gz",
+            "https://artifacts.example/tool.tar.gz?token=secret",
+            "https://artifacts.example/tool.tar.gz#fragment",
+        ] {
+            assert!(
+                !static_asset_url_is_persistable(unsafe_url),
+                "accepted {unsafe_url}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn static_catalog_locked_artifact_installs_offline_with_multiple_bins() {
         let temp = tempfile::tempdir().unwrap();
@@ -1905,6 +2140,287 @@ mod tests {
         assert!(install.join("bin/a").is_file());
         assert!(install.join("bin/b").is_file());
         assert!(install.join(".osdk-complete").is_file());
+        let manifest = DynamicToolManifest::load(&install).unwrap();
+        assert!(manifest.matches_identity_options(&version.options).unwrap());
+        let mut changed = version.options.clone();
+        changed.insert("bins".into(), "pkg/a".into());
+        assert!(!manifest.matches_identity_options(&changed).unwrap());
+    }
+
+    fn complete_install_fixture(
+        ctx: &Ctx,
+        backend: &GithubBackend,
+        version: &ToolVersion,
+        contents: &[u8],
+    ) -> PathBuf {
+        let install = ctx.dirs.install_path(backend.id(), &version.version);
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::write(install.join("bin/tool"), contents).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+        install
+    }
+
+    #[tokio::test]
+    async fn install_refuses_complete_install_without_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let version = ToolVersion::new(backend.id(), "1.2.3");
+        let install = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
+
+        let error = backend
+            .install(&InstallCtx { ctx: &ctx }, &version)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("refusing to reuse complete"));
+        assert!(error.to_string().contains("missing, legacy, or invalid"));
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"original bytes"
+        );
+        assert!(!DynamicToolManifest::manifest_path(&install).exists());
+    }
+
+    #[tokio::test]
+    async fn install_refuses_complete_install_with_legacy_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let version = ToolVersion::new(backend.id(), "1.2.3");
+        let install = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
+        std::fs::write(
+            DynamicToolManifest::manifest_path(&install),
+            r#"{"schema":1,"id":"github:example/tool","version":"1.2.3","bins":[{"name":"tool","path":"bin/tool"}]}"#,
+        )
+        .unwrap();
+
+        let error = backend
+            .install(&InstallCtx { ctx: &ctx }, &version)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("installed with a different identity or options"));
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"original bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_refuses_complete_install_with_mismatched_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let mut installed = ToolVersion::new(backend.id(), "1.2.3");
+        installed.options.insert("rename".into(), "old-name".into());
+        let install = complete_install_fixture(&ctx, &backend, &installed, b"original bytes");
+        let mut manifest = DynamicToolManifest::new(backend.id())
+            .unwrap()
+            .with_identity_options(&installed.options)
+            .unwrap();
+        manifest.version = Some(installed.version.clone());
+        manifest.bins.push(DynamicToolBin {
+            name: "tool".into(),
+            path: "bin/tool".into(),
+        });
+        manifest.write_atomic(&install).unwrap();
+        let original_inventory =
+            std::fs::read(DynamicToolManifest::manifest_path(&install)).unwrap();
+
+        let mut requested = installed.clone();
+        requested.options.insert("rename".into(), "new-name".into());
+        let error = backend
+            .install(&InstallCtx { ctx: &ctx }, &requested)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("installed with a different identity or options"));
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"original bytes"
+        );
+        assert_eq!(
+            std::fs::read(DynamicToolManifest::manifest_path(&install)).unwrap(),
+            original_inventory
+        );
+        let persisted = DynamicToolManifest::load(&install).unwrap();
+        assert!(persisted
+            .matches_identity_options(&installed.options)
+            .unwrap());
+        assert!(!persisted
+            .matches_identity_options(&requested.options)
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn install_refuses_complete_install_with_different_locked_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let mut version = ToolVersion::new(backend.id(), "1.2.3");
+        version.options.extend(std::collections::BTreeMap::from([
+            (
+                pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                "https://invalid.example/new-tool.tar.gz".into(),
+            ),
+            (
+                pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                "new-tool.tar.gz".into(),
+            ),
+            (
+                pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{}", "b".repeat(64)),
+            ),
+        ]));
+        let install = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
+        let mut manifest = DynamicToolManifest::new(backend.id())
+            .unwrap()
+            .with_identity_options(&version.options)
+            .unwrap();
+        manifest.version = Some(version.version.clone());
+        manifest.bins.push(DynamicToolBin {
+            name: "tool".into(),
+            path: "bin/tool".into(),
+        });
+        manifest.write_atomic(&install).unwrap();
+        std::fs::write(
+            install.join(".osdk-artifact.json"),
+            serde_json::to_vec_pretty(&pipeline::ArtifactReceipt {
+                url: "https://invalid.example/old-tool.tar.gz".into(),
+                file_name: "old-tool.tar.gz".into(),
+                checksum: Some(format!("sha256:{}", "a".repeat(64))),
+                evidence: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = backend
+            .install(&InstallCtx { ctx: &ctx }, &version)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("different locked artifact"));
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"original bytes"
+        );
+    }
+
+    #[test]
+    fn checksumless_locked_artifact_requires_the_same_url() {
+        assert!(locked_artifact_url_must_match(
+            "https://example.test/tool",
+            "https://example.test/tool",
+            None,
+        ));
+        assert!(!locked_artifact_url_must_match(
+            "https://mirror.example.test/tool",
+            "https://example.test/tool",
+            None,
+        ));
+        assert!(locked_artifact_url_must_match(
+            "https://mirror.example.test/tool",
+            "https://example.test/tool",
+            Some("sha256:00"),
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_installs_cannot_rebind_existing_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temp.path());
+        ctx.config.settings.offline = true;
+        let ctx = Arc::new(ctx);
+        let backend = Arc::new(GithubBackend::from_id("github:example/tool").unwrap());
+        let archive = temp.path().join("tool.tar.gz");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, contents) in [
+                ("release/pkg/a", b"first".as_slice()),
+                ("release/pkg/b", b"second".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(contents.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder.append_data(&mut header, path, contents).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        let checksum = pipeline::verify::hash_file(&archive, pipeline::HashAlgo::Sha256).unwrap();
+        let file_name = "tool.tar.gz";
+        let cached =
+            pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name).unwrap();
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::copy(&archive, &cached).unwrap();
+
+        let make_version = |bin: &str| {
+            let mut version = ToolVersion::new(backend.id(), "1.2.3");
+            version.options.extend(std::collections::BTreeMap::from([
+                (
+                    pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                    "https://invalid.example/tool.tar.gz".into(),
+                ),
+                (
+                    pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                    file_name.into(),
+                ),
+                (
+                    pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                    format!("sha256:{checksum}"),
+                ),
+                ("bins".into(), bin.into()),
+                ("strip-components".into(), "1".into()),
+            ]));
+            version
+        };
+        let first = make_version("pkg/a");
+        let second = make_version("pkg/b");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let first_task = {
+            let ctx = Arc::clone(&ctx);
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            let version = first.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                backend.install(&InstallCtx { ctx: &ctx }, &version).await
+            })
+        };
+        let second_task = {
+            let ctx = Arc::clone(&ctx);
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            let version = second.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                backend.install(&InstallCtx { ctx: &ctx }, &version).await
+            })
+        };
+        let first_result = first_task.await.unwrap();
+        let second_result = second_task.await.unwrap();
+        assert_ne!(first_result.is_ok(), second_result.is_ok());
+
+        let install = ctx.dirs.install_path(backend.id(), "1.2.3");
+        let manifest = DynamicToolManifest::load(&install).unwrap();
+        if first_result.is_ok() {
+            assert!(manifest.matches_identity_options(&first.options).unwrap());
+            assert!(install.join("bin/a").is_file());
+            assert!(!install.join("bin/b").is_file());
+        } else {
+            assert!(manifest.matches_identity_options(&second.options).unwrap());
+            assert!(install.join("bin/b").is_file());
+            assert!(!install.join("bin/a").is_file());
+        }
     }
 
     #[test]

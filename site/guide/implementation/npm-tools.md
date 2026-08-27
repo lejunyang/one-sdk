@@ -8,9 +8,8 @@ Registry 预检是三个相邻但不同的概念。
 
 [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs)
 会先识别 `npm:`。普通包在包名后的 `@` 分隔版本；scoped 包先解析
-`@scope/name`，再把其后的第二个 `@` 作为版本分隔符。请求解析阶段保留输入的包名
-大小写，inventory 身份会规范为小写；为避免二者不一致，当前应使用 npm 常规的小写
-包名。空包名、只有 scope、多余路径层级、反斜杠、冒号或空白会被拒绝。裸 `npm`
+`@scope/name`，再把其后的第二个 `@` 作为版本分隔符。请求解析与 inventory 身份都会
+把包名规范为小写。空包名、只有 scope、多余路径层级、反斜杠、冒号或空白会被拒绝。裸 `npm`
 继续映射内置 npm CLI backend，因此不会被动态 backend 遮蔽。
 
 [`Registry::get`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs)
@@ -28,6 +27,15 @@ Registry 预检是三个相邻但不同的概念。
 `use` 在该旧流程之前增加两条作用域分支：非全局 `npm:*` 请求会检查最近的
 `package.json`，存在时直接修改该真实项目；全局请求忽略项目状态并安装到 osdk 自有
 前缀。本地查找不到 `package.json` 时，则回到原有隔离 backend 路径。
+
+解析或安装 osdk 自有的动态 npm 工具前，
+[`identity_options`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/dynamic.rs)
+只接受 `installer` 和 `allow_builds` 作为公开身份输入；lock 重放注入的内部
+`__osdk_*` 字段会被刻意排除。installer 会规范化；`allow_builds` 将 false-like 值规范为
+省略默认 deny 策略、true-like 值规范为 `true`，包列表则转为小写、排序、去重的逗号分隔
+值；默认的 `installer=auto` 也会省略。未知公开 key 会在安装前失败。规范 backend ID 与
+有序 map 通过 length prefix、domain separation 的 BLAKE3 计算出与顺序无关的 `b3-v1:`
+选项 fingerprint。
 
 ## 安装器规划与单次委托
 
@@ -116,9 +124,9 @@ Aube 真正的 `add --global --save-exact`。Aube 全局命令会占用工作目
 
 Aube cache/store 会跨隔离、项目和全局操作共享，但每个项目或全局安装仍保留自己的原生
 lock。Aube 2.1 的全局调用不会收到 offline flag，因此在需要新建或修复安装时，
-`--offline` 会在 Registry 探测或辅助进程启动前明确失败；完整且匹配的精确版本可以在不调用
-Aube 的情况下离线复用。确实需要安装时，npm 与 pnpm 的全局委托会传递各自的原生
-offline flag。
+`--offline` 会在 Registry 探测或辅助进程启动前明确失败；完整、精确且选项身份匹配的安装
+可以在不调用 Aube 的情况下离线复用。确实需要安装时，npm 与 pnpm 的全局委托会传递各自
+的原生 offline flag。
 
 ## Source 自动选择与缓存键
 
@@ -163,9 +171,9 @@ scripts。embedded 路径设置 `ignore_scripts = true`。Aube 2.1 在构造内�
 继承。`use -o allow_builds=esbuild,sharp` 会规范化并持久化为字符串数组，true/false
 则持久化为布尔值，使生成的项目配置继续保持结构化。
 
-## schema 3、metadata-only lock 与原生依赖图所有权
+## lock schema 3、metadata-only lock 与原生依赖图所有权
 
-`osdk.lock` 的当前写入 schema 是 3。每个 npm 工具记录 request、精确 version、
+`osdk.lock` 的当前写入格式是 lock schema 3。每个 npm 工具记录 request、精确 version、
 options 和 `npm` 元数据；当前不写通用 `artifact` 子表，也不把 graph payload 或路径写进
 主 lock：
 
@@ -181,6 +189,11 @@ kind = "aube"
 format = "aube-v9"
 sha256 = "<64 lowercase hex characters>"
 ```
+
+公开的 `installer` 与 `allow_builds` 选项仍保存在 lock 的 `options` 表，并在读取时重新注入
+请求；内部 `__osdk_*` metadata 不会写入该表。这与下文动态 inventory schema 2 是两个独立
+格式。本节所说的旧“schema 2 sidecar”专指 lock schema 2 的 npm graph sidecar，不是
+`.osdk-tool.json` inventory schema 2。
 
 写入时，CLI 会从已安装工具或声明的私有 option 中提取 npm 元数据：包名、installer、
 scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA-256。项目感知的
@@ -203,22 +216,33 @@ native lock 的 format/SHA-256 是否满足 owner 的格式约束。主 lock 不
 `npm:*` 的 schema 1 lock（包括旧 inline graph）不能消费、merge 或保存；必须重新生成，
 不能假装安全迁移成当前 metadata-only 格式。
 
-schema 2 sidecar 仍保持冻结读取兼容：读锁时如果遇到旧 sidecar 形式，osdk 会继续校验
+旧 lock schema 2 sidecar 仍保持冻结读取兼容：读锁时如果遇到旧 sidecar 形式，osdk 会继续校验
 `package`、Node 版本、`aube-v9`、64 位小写 SHA-256、规范 sidecar 路径，以及 sidecar
 目录/文件非 symlink，再以 16 MiB 上限读取完整 UTF-8 字节并重算摘要。校验通过后，
 graph 内容会作为兼容输入注入 backend。只有在后续成功写入主 lock 时，条目才迁移成
-schema 3 metadata-only 形式；原有 sidecar 文件不会被自动删除。
+lock schema 3 metadata-only 形式；原有 sidecar 文件不会被自动删除。
 
 ## 隔离/全局 inventory、shim 与冲突拒绝
 
 隔离安装会扫描合成项目完整的 `node_modules/.bin`，因此记录的 bin 可能来自根包或传递
 依赖。全局安装则会在规范化时重置包管理器生成的 bin 目录，只为选中根包声明的 bin 重建
-launcher。两条路径都会把 tool id、精确版本、相对 bin 路径和稳定 metadata 写入
-`.osdk-tool.json`。bin 名必须是单一文件名，解析后的 canonical target 必须仍在安装根内；
-没有任何 bin、重复名称、路径穿越或损坏 inventory 都会拒绝。inventory 扫描不跟随符号
-链接，并对深度、数量和文件大小设限。
+launcher。两条路径都会把动态 inventory schema 2 写入 `.osdk-tool.json`：tool id、精确
+版本、规范 `identity_options`、对应的 `option_fingerprint`、相对 bin 路径和稳定 metadata。
+bin 名必须是单一文件名，解析后的 canonical target 必须仍在安装根内；没有任何 bin、重复
+名称、路径穿越、缺失或被篡改的 fingerprint，以及其他损坏 inventory 都会拒绝。inventory
+扫描不跟随符号链接，并对深度、数量和文件大小设限。
 
-CLI 和 shim 根据 inventory 建立 `bin name -> backend owner` 映射：
+安装根仍以版本为键（隔离工具为 `<installs>/<tool>/<version>`，全局工具为
+`<installs>/npm-global/<package>/<version>`）；fingerprint 不进入目录名。因此复用检查必须先
+比较 schema 2 inventory 身份，再接受完成标记。不同选项身份不能复用该目录，同 scope 的
+同版本变体也不能共存。npm install/全局 use 路径会在身份不同时重建或替换该版本。旧
+schema 1 inventory 仍可读取，以便扫描和迁移时识别，但不能授权复用、activation 或 shim
+执行；请重新运行 install 或全局 use，以 schema 2 重建该版本。
+
+CLI 和 shim 根据 inventory 建立 `bin name -> backend owner` 映射。对活跃动态请求，
+activation 与 shim 分发会先要求其规范选项身份与所选安装的 schema 2 inventory 匹配；
+身份缺失、过旧或不匹配都会 fail closed，不暴露其 bin 路径。bin owner 判定是另一项独立
+检查：
 
 - 一个 owner 时直接路由；
 - 运行时多个 owner 但当前配置只选中一个时，路由到该 owner；
@@ -232,8 +256,9 @@ CLI 和 shim 根据 inventory 建立 `bin name -> backend owner` 映射：
 
 ## 主要验证点
 
-相关单元与契约测试覆盖 namespaced/scoped parser、安装器规划、依赖区段保留、原生委托
-只执行一次、紧凑 lock metadata、全局前缀参数、原生 lock 身份、筛选 generation 发布与
-重新校验、原始项目 bin 排除、inventory 扫描和 shim 冲突行为。兼容性测试继续覆盖
-schema 2 sidecar 校验与 schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行 Linux
-workspace 测试与完整 Windows GNU Wine 套件。
+相关单元与契约测试覆盖 namespaced/scoped parser、选项规范化与 fingerprint、schema 2
+inventory 校验、安装器规划、依赖区段保留、原生委托只执行一次、紧凑 lock metadata、
+全局前缀参数、原生 lock 身份、筛选 generation 发布与重新校验、原始项目 bin 排除、
+inventory 扫描和 shim 冲突行为。兼容性测试继续覆盖旧 lock schema 2 sidecar 校验、动态
+inventory schema 1 重装和 lock schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行
+Linux workspace 测试与完整 Windows GNU Wine 套件。

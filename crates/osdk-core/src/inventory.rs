@@ -17,7 +17,7 @@ use crate::version::ToolRequest;
 /// Name of the per-install dynamic tool inventory file.
 pub const INVENTORY_FILE: &str = ".osdk-tool.json";
 
-const INVENTORY_SCHEMA: u32 = 1;
+const INVENTORY_SCHEMA: u32 = 2;
 const DEFAULT_MAX_DEPTH: usize = 8;
 const DEFAULT_MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 const DEFAULT_MAX_MANIFESTS: usize = 4096;
@@ -34,7 +34,7 @@ pub struct DynamicToolBin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicToolManifest {
-    #[serde(default = "inventory_schema")]
+    #[serde(default = "legacy_inventory_schema")]
     pub schema: u32,
     /// Canonical dynamic backend id such as `npm:@antfu/ni` or
     /// `github:cli/cli`.
@@ -42,6 +42,12 @@ pub struct DynamicToolManifest {
     /// Optional resolved version for the install stored at this root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Canonical public options that determine the installed artifact/layout.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub identity_options: BTreeMap<String, String>,
+    /// Domain-separated BLAKE3 identity of `id` plus `identity_options`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_fingerprint: Option<String>,
     /// Config keys that may refer to this dynamic tool.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_keys: Vec<String>,
@@ -128,10 +134,17 @@ impl BinOwnerCandidate {
 
 impl DynamicToolManifest {
     pub fn new(id: impl Into<String>) -> Result<Self> {
+        let id = canonical_dynamic_id(&id.into())?;
+        let option_fingerprint = Some(crate::backend::dynamic::fingerprint_canonical_options(
+            &id,
+            &BTreeMap::new(),
+        )?);
         Self {
             schema: inventory_schema(),
-            id: id.into(),
+            id,
             version: None,
+            identity_options: BTreeMap::new(),
+            option_fingerprint,
             config_keys: Vec::new(),
             bins: Vec::new(),
             metadata: BTreeMap::new(),
@@ -166,7 +179,7 @@ impl DynamicToolManifest {
     }
 
     pub fn normalize(mut self) -> Result<Self> {
-        if self.schema != inventory_schema() {
+        if !(1..=inventory_schema()).contains(&self.schema) {
             return Err(Error::config(format!(
                 "unsupported dynamic tool inventory schema `{}`",
                 self.schema
@@ -181,7 +194,51 @@ impl DynamicToolManifest {
         normalize_config_keys(&mut self.config_keys)?;
         normalize_bins(&mut self.bins)?;
         normalize_metadata(&mut self.metadata)?;
+        if self.schema == 1 {
+            if !self.identity_options.is_empty() || self.option_fingerprint.is_some() {
+                return Err(Error::config(
+                    "legacy dynamic tool inventory cannot contain option identity",
+                ));
+            }
+            return Ok(self);
+        }
+        let expected = crate::backend::dynamic::fingerprint_canonical_options(
+            &self.id,
+            &self.identity_options,
+        )?;
+        match self.option_fingerprint.as_deref() {
+            Some(actual) if actual == expected => {}
+            Some(_) => return Err(Error::config("dynamic tool option fingerprint mismatch")),
+            None => {
+                return Err(Error::config(
+                    "schema-2 dynamic tool inventory is missing its option fingerprint",
+                ));
+            }
+        }
         Ok(self)
+    }
+
+    /// Bind a newly-created schema-2 manifest to the effective public options.
+    pub fn with_identity_options(mut self, options: &BTreeMap<String, String>) -> Result<Self> {
+        self.identity_options = crate::backend::dynamic::identity_options(&self.id, options)?;
+        self.option_fingerprint = Some(crate::backend::dynamic::fingerprint_canonical_options(
+            &self.id,
+            &self.identity_options,
+        )?);
+        self.normalize()
+    }
+
+    /// Schema-1 manifests are readable for migration but cannot authorize
+    /// option-sensitive reuse.
+    pub fn matches_identity_options(&self, options: &BTreeMap<String, String>) -> Result<bool> {
+        if self.schema != inventory_schema() {
+            return Ok(false);
+        }
+        let expected_options = crate::backend::dynamic::identity_options(&self.id, options)?;
+        let expected =
+            crate::backend::dynamic::fingerprint_canonical_options(&self.id, &expected_options)?;
+        Ok(self.identity_options == expected_options
+            && self.option_fingerprint.as_deref() == Some(expected.as_str()))
     }
 
     pub fn with_metadata_mutation(
@@ -453,6 +510,10 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
 
 fn inventory_schema() -> u32 {
     INVENTORY_SCHEMA
+}
+
+fn legacy_inventory_schema() -> u32 {
+    1
 }
 
 fn normalize_config_keys(keys: &mut Vec<String>) -> Result<()> {
@@ -831,6 +892,115 @@ mod tests {
             canonical_dynamic_id("npm:Prettier").unwrap(),
             "npm:prettier"
         );
+    }
+
+    #[test]
+    fn schema_two_inventory_binds_and_validates_option_identity() {
+        let options = BTreeMap::from([
+            ("installer".into(), "aube".into()),
+            ("allow_builds".into(), "sharp,esbuild".into()),
+        ]);
+        let manifest = DynamicToolManifest::new("npm:prettier")
+            .unwrap()
+            .with_identity_options(&options)
+            .unwrap();
+
+        assert_eq!(manifest.schema, 2);
+        assert_eq!(manifest.identity_options["allow_builds"], "esbuild,sharp");
+        assert!(manifest
+            .option_fingerprint
+            .as_deref()
+            .is_some_and(|value| value.starts_with("b3-v1:")));
+        assert!(manifest.matches_identity_options(&options).unwrap());
+
+        let changed = BTreeMap::from([
+            ("installer".into(), "npm".into()),
+            ("allow_builds".into(), "esbuild,sharp".into()),
+        ]);
+        assert!(!manifest.matches_identity_options(&changed).unwrap());
+    }
+
+    #[test]
+    fn legacy_inventory_is_readable_but_cannot_authorize_reuse() {
+        let bytes = br#"{
+            "schema": 1,
+            "id": "npm:prettier",
+            "version": "3.6.2",
+            "bins": [{"name": "prettier", "path": "bin/prettier"}]
+        }"#;
+        let manifest = DynamicToolManifest::from_slice(bytes).unwrap();
+        assert_eq!(manifest.schema, 1);
+        assert!(!manifest.matches_identity_options(&BTreeMap::new()).unwrap());
+    }
+
+    #[test]
+    fn rejects_tampered_option_fingerprint() {
+        let mut manifest = DynamicToolManifest::new("github:cli/cli")
+            .unwrap()
+            .with_identity_options(&BTreeMap::from([("rename".into(), "gh".into())]))
+            .unwrap();
+        manifest.option_fingerprint = Some("b3-v1:tampered".into());
+        assert!(manifest.normalize().is_err());
+    }
+
+    #[test]
+    fn rejects_schema_two_inventory_without_option_fingerprint() {
+        let bytes = br#"{
+            "schema": 2,
+            "id": "npm:prettier"
+        }"#;
+        let error = DynamicToolManifest::from_slice(bytes).unwrap_err();
+        assert!(error.to_string().contains("missing its option fingerprint"));
+    }
+
+    #[test]
+    fn rejects_non_canonical_persisted_identity_options() {
+        let mut manifest = DynamicToolManifest::new("npm:prettier").unwrap();
+        manifest.identity_options =
+            BTreeMap::from([("allow_builds".into(), "sharp,esbuild".into())]);
+        assert!(manifest
+            .normalize()
+            .unwrap_err()
+            .to_string()
+            .contains("non-canonical"));
+    }
+
+    #[test]
+    fn github_inventory_does_not_persist_catalog_location() {
+        let options = BTreeMap::from([
+            (
+                "catalog-url".into(),
+                "https://example.test/catalog.json".into(),
+            ),
+            ("catalog-sha256".into(), "a".repeat(64)),
+        ]);
+        let manifest = DynamicToolManifest::new("github:owner/repo")
+            .unwrap()
+            .with_identity_options(&options)
+            .unwrap();
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("catalog-url"));
+        assert!(!json.contains("example.test"));
+        assert!(json.contains("catalog-sha256"));
+    }
+
+    #[test]
+    fn manifest_json_never_contains_internal_lock_metadata() {
+        let options = BTreeMap::from([
+            ("rename".into(), "gh".into()),
+            (
+                "__osdk_artifact_url".into(),
+                "https://secret.example/file".into(),
+            ),
+        ]);
+        let manifest = DynamicToolManifest::new("github:cli/cli")
+            .unwrap()
+            .with_identity_options(&options)
+            .unwrap();
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("rename"));
+        assert!(!json.contains("secret.example"));
+        assert!(!json.contains("__osdk_artifact_url"));
     }
 
     #[test]

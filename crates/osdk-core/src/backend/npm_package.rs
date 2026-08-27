@@ -177,13 +177,9 @@ struct IdentityResolution {
 
 impl NpmPackageBackend {
     pub fn from_id(id: &str) -> Option<Self> {
-        let package = id.strip_prefix("npm:")?;
-        validate_npm_package_name(package)?;
-        let package = package.to_ascii_lowercase();
-        Some(Self {
-            id: format!("npm:{package}"),
-            package,
-        })
+        let id = crate::inventory::canonical_dynamic_id(id).ok()?;
+        let package = id.strip_prefix("npm:")?.to_string();
+        Some(Self { id, package })
     }
 
     /// Install root used by the compatibility `osdk install npm:<package>`
@@ -910,7 +906,8 @@ impl NpmPackageBackend {
         graph_identity: &NpmGraphIdentity,
     ) -> Result<DynamicToolManifest> {
         let install_root = self.install_root(ctx, &tv.version);
-        let mut manifest = DynamicToolManifest::new(self.id())?;
+        let mut manifest =
+            DynamicToolManifest::new(self.id())?.with_identity_options(&tv.options)?;
         manifest.version = Some(tv.version.clone());
         manifest.bins = discover_bins(&install_root, bin_dir)?;
         manifest
@@ -1006,7 +1003,8 @@ impl NpmPackageBackend {
                 path = install_root.display()
             )));
         }
-        let mut manifest = DynamicToolManifest::new(self.id())?;
+        let mut manifest =
+            DynamicToolManifest::new(self.id())?.with_identity_options(&tv.options)?;
         manifest.version = Some(tv.version.clone());
         manifest.bins = discover_global_bins(install_root, bin_dir)?;
         manifest
@@ -1131,6 +1129,7 @@ impl Backend for NpmPackageBackend {
     }
 
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
+        crate::backend::dynamic::validate_options(self.id(), &req.options)?;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut version =
             crate::npm::resolve_package_version(ctx, &sources, &self.package, self.id(), req)
@@ -1180,6 +1179,7 @@ impl Backend for NpmPackageBackend {
             locked_graph.as_ref(),
             &build_policy,
             &node_version,
+            &tv.options,
         )? {
             return Ok(());
         }
@@ -1196,6 +1196,7 @@ impl Backend for NpmPackageBackend {
             locked_graph.as_ref(),
             &build_policy,
             &node_version,
+            &tv.options,
         )? {
             return Ok(());
         }
@@ -1507,6 +1508,7 @@ fn selected_node_version(ctx: &Ctx) -> Option<String> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_matches(
     install_root: &Path,
     expected_id: &str,
@@ -1515,6 +1517,7 @@ fn install_matches(
     locked_graph: Option<&LockedNpmGraph<'_>>,
     build_policy: &BuildPolicy,
     node_version: &str,
+    options: &BTreeMap<String, String>,
 ) -> Result<bool> {
     if !install_root.join(".osdk-complete").is_file() {
         return Ok(false);
@@ -1525,6 +1528,7 @@ fn install_matches(
     };
     if manifest.id != expected_id
         || manifest.version.as_deref() != Some(expected_version)
+        || !manifest.matches_identity_options(options)?
         || manifest.metadata.get(METADATA_PROVIDER).map(String::as_str) != Some(PROVIDER)
         || manifest.metadata.get(METADATA_PACKAGE).map(String::as_str) != Some(expected_package)
         || manifest.metadata.get(METADATA_RUNTIME).map(String::as_str) != Some("node")
@@ -4054,7 +4058,8 @@ scope = "project"
             "3.6.2",
             Some(&graph),
             &BuildPolicy::Deny,
-            "20.10.0"
+            "20.10.0",
+            &BTreeMap::new(),
         )
         .unwrap());
         for (id, package, version, node) in [
@@ -4071,6 +4076,7 @@ scope = "project"
                 Some(&graph),
                 &BuildPolicy::Deny,
                 node,
+                &BTreeMap::new(),
             )
             .unwrap());
         }
@@ -4083,7 +4089,8 @@ scope = "project"
                 lockfile: "different"
             }),
             &BuildPolicy::Deny,
-            "20.10.0"
+            "20.10.0",
+            &BTreeMap::new(),
         )
         .unwrap());
         assert!(!install_matches(
@@ -4093,7 +4100,34 @@ scope = "project"
             "3.6.2",
             Some(&graph),
             &BuildPolicy::Packages(vec!["esbuild".into()]),
-            "20.10.0"
+            "20.10.0",
+            &BTreeMap::from([("allow_builds".into(), "esbuild".into())]),
+        )
+        .unwrap());
+
+        let mut changed_options = BTreeMap::from([("installer".into(), "aube".into())]);
+        assert!(!install_matches(
+            &install_root,
+            "npm:prettier",
+            "prettier",
+            "3.6.2",
+            Some(&graph),
+            &BuildPolicy::Deny,
+            "20.10.0",
+            &changed_options,
+        )
+        .unwrap());
+        changed_options.clear();
+        changed_options.insert("allow_builds".into(), "false".into());
+        assert!(install_matches(
+            &install_root,
+            "npm:prettier",
+            "prettier",
+            "3.6.2",
+            Some(&graph),
+            &BuildPolicy::Deny,
+            "20.10.0",
+            &changed_options,
         )
         .unwrap());
     }
@@ -4119,7 +4153,8 @@ scope = "project"
             "3.6.2",
             None,
             &BuildPolicy::Deny,
-            "20.10.0"
+            "20.10.0",
+            &BTreeMap::new(),
         )
         .unwrap());
 
@@ -4136,7 +4171,8 @@ scope = "project"
             "3.6.2",
             None,
             &BuildPolicy::Deny,
-            "20.10.0"
+            "20.10.0",
+            &BTreeMap::new(),
         )
         .unwrap());
     }

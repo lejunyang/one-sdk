@@ -174,10 +174,10 @@ their controlled install directories.
 
 ::: warning Aube global offline support
 Aube 2.1 cannot create or repair a global installation in osdk's offline mode.
-An already complete matching exact installation can be selected again offline
-without launching Aube. Select npm or pnpm when the installation itself must use
-their native global offline mode. The shared Aube store and cache still avoid
-duplicate downloads during supported online installs.
+An already complete exact installation can be selected again offline only when
+its installer and build-policy options also match. Select npm or pnpm when the
+installation itself must use their native global offline mode. The shared Aube
+store and cache still avoid duplicate downloads during supported online installs.
 :::
 
 `where --global` resolves only against global npm installations and ignores a
@@ -260,6 +260,26 @@ The one-shot form is `-o allow_builds=esbuild,sharp`. Native npm cannot enforce
 a package allowlist and accepts only false or true; Aube and pnpm support the
 named-package form.
 
+## Option changes and reinstallation
+
+For osdk-owned isolated and global installs, `installer` and `allow_builds` are
+part of the installation identity, not hints that may be ignored after a version
+match. Changing either option at the same package version prevents reuse of the
+existing installation. Activation and shims also refuse to run an install whose
+recorded options differ from the active configuration.
+
+Installs created before option identity was recorded remain discoverable, but
+they cannot be reused or executed. Re-run the same `install` or global `use`; the
+npm workflow rebuilds or replaces that version and records its current identity.
+An offline rebuild still needs the native lock or graph and warmed cache/store
+that the selected installer normally requires. Do not edit `.osdk-tool.json` by
+hand.
+
+Physical install directories are still keyed by package, exact version, and
+isolated/global scope rather than by options. Two option variants of the same
+package version therefore cannot coexist in one scope; switching options replaces
+that version's installation.
+
 ## Sources and shared storage
 
 Dynamic npm version metadata uses the normal npm source selection across
@@ -283,10 +303,11 @@ project or controlled global install retains its own native lock.
 
 ## What `osdk.lock` guarantees
 
-Project-aware `use` writes a compact schema 3 `osdk.lock` entry containing the
+Project-aware `use` writes a compact lock-schema-3 `osdk.lock` entry containing the
 package, resolved version, concrete installer, scope, exact Node version, and
-the native lock's kind, format, and SHA-256. The user lock for global tools uses
-the same metadata-only model; npm global simply has no native-lock identity.
+the public options plus the native lock's kind, format, and SHA-256. The user lock
+for global tools uses the same metadata-only model; npm global simply has no
+native-lock identity.
 
 ::: warning Graph limitation
 The metadata in `osdk.lock` does **not** itself capture or reconstruct the
@@ -299,8 +320,12 @@ lock, so its transitive selection is not reproducible from the user
 :::
 
 Commit `package.json`, the native project lock, `osdk.toml`, and `osdk.lock` for
-a project workflow. Schema 2 graph sidecars remain readable for compatibility,
-but current schema 3 writes do not create a new sidecar or embed its payload.
+a project workflow. Legacy lock-schema-2 graph sidecars remain readable for
+compatibility, but current lock-schema-3 writes do not create a new sidecar or
+embed its payload.
+This lock schema is independent of `.osdk-tool.json` inventory schema 2: the
+inventory gates local reuse, while `osdk.lock` schema 3 records options and npm
+replay metadata.
 
 For installer planning, metadata validation, native-prefix isolation, and the
 activation safety checks, see [npm tool implementation](./implementation/npm-tools).

@@ -17,6 +17,19 @@ This page is for maintainers who need to understand or extend osdk's download ca
 
 The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo` and `npm:<package>` dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
 
+Those two dynamic namespaces share an option-identity contract for osdk-owned
+installs. Before resolution or installation, osdk projects the supported public options into a
+canonical map, rejects unknown public keys, excludes internal `__osdk_*` lock
+replay metadata, and computes an order-independent, domain-separated BLAKE3
+`b3-v1:` fingerprint over the backend ID and canonical options. A schema-2
+`.osdk-tool.json` inventory persists both the map and fingerprint. Same-version
+reuse, activation, and shim execution require an exact match and otherwise fail
+closed. Schema-1 inventories remain readable for discovery but cannot authorize
+reuse; rebuilding or reinstalling is required to migrate them. npm can rebuild
+through `install` or global `use`, while GitHub requires an explicit uninstall
+before reinstalling. Physical install roots remain
+version-based, so two option variants of one backend/version cannot coexist.
+
 ## Built-in backend matrix
 
 | Backend | Resolution and acquisition | Integrity and installation semantics | Notable behavior or limitation |
@@ -34,13 +47,13 @@ The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core
 | `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then delegated to isolated rustup | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument plus `@deno/<platform>` | npm SRI | Platform package; exports `DENO_DIR` |
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default | Discovers `.bin` dynamically, adds managed Node, and records only scope, installer, and optional native-lock identity in schema 3 |
-| `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
+| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default; schema-2 inventory binds installer/build options for osdk-owned isolated/global installs | Discovers `.bin` dynamically, adds managed Node, and records scope, installer, optional native-lock identity, and public options in lock schema 3 |
+| `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations; schema-2 inventory binds asset/layout options | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
 
 These implementations live under [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/). The npm-backed implementations share packument, version, and SRI handling in [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs). Generic source ranking is in [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 See [npm developer tool implementation](./npm-tools) for the complete dynamic
-backend project/global/isolated installation, cache, metadata-only lock, schema 2
-sidecar compatibility, and shim boundaries.
+backend project/global/isolated installation, cache, metadata-only lock, legacy
+lock-schema-2 sidecar compatibility, and shim boundaries.
 
 ## Declarative and GitHub backends
 
@@ -51,6 +64,18 @@ current templates. This gives declarative tools the same metadata-free offline
 reinstall contract as built-in archive backends.
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
+Its supported asset, platform, catalog-digest, rename, bin, and strip options are
+validated as public identity inputs and stored in the schema-2 dynamic inventory.
+`catalog-url` is accepted for acquisition but deliberately omitted because the
+required `catalog-sha256` identifies content without persisting the catalog
+location in the dynamic inventory. HTTP(S) catalog URLs containing userinfo,
+query parameters, or fragments are rejected.
+Consequently, a complete marker alone cannot reuse a GitHub install produced by
+different options or by a legacy inventory. Locked replay additionally matches
+the persisted artifact receipt's filename, checksum, and subdirectory. The
+caller must uninstall and reinstall that version after a mismatch. Inventory is
+published before the completion marker so an interrupted finalization cannot
+be treated as reusable.
 
 ## Models are separate and provider-specific
 

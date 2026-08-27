@@ -119,13 +119,16 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
 - a cache miss fails explicitly instead of going online;
 - for backends with a generic artifact receipt, a lock's artifact URL/checksum
   can support offline reinstall; bytes are reverified when the pipeline actually
-  reinstalls with a checksum, while an existing complete installation is reused;
-- `npm:<package>` does not use a generic artifact URL. Schema 3 `osdk.lock`
+  reinstalls with a checksum, while an existing complete GitHub installation is
+  reused only when its receipt also matches the locked filename/checksum and its
+  dynamic option identity matches;
+- `npm:<package>` does not use a generic artifact URL. Lock-schema-3 `osdk.lock`
   stores only scope, installer, and optional native-lock identity, not the
   dependency graph, so that metadata alone cannot cold-restore the graph. A
-  complete install can be reused; operations that support native-lock replay
-  additionally need the installer-owned lock and a warmed cache/store. Schema 2
-  graph sidecars are compatibility-read inputs only;
+  complete install can be reused only when its recorded options match; operations
+  that support native-lock replay additionally need the installer-owned lock and
+  a warmed cache/store. Legacy lock-schema-2 graph sidecars are
+  compatibility-read inputs only;
 - `attestations=required` additionally needs the proof bundle cached by artifact SHA-256; lock evidence cannot replace verification.
 
 `OSDK_OFFLINE` controls osdk and compatible environment values managed by its
@@ -224,6 +227,15 @@ Pass every option through repeatable `-o|--opt KEY=VALUE`:
 scores by host OS, architecture, and archive type while excluding checksum,
 signature, and source assets. Zero or multiple matches fail. Unknown archive
 extensions are treated as bare binaries; Windows normalizes `.exe`.
+For osdk-owned GitHub installs, the supported asset, platform, catalog-digest,
+and layout options are part of the dynamic installation identity. `catalog-url` is accepted for acquisition but is
+excluded from the persisted dynamic identity; its required `catalog-sha256` identifies the
+catalog content. HTTP(S) catalog URLs containing userinfo, a query, or a
+fragment are rejected so credentials cannot be persisted through this option. An
+unknown public option is rejected before installation, and an existing
+same-version install with legacy or different
+option identity is not executed; uninstall and reinstall it. Physical install
+paths remain version-based, so same-version option variants do not coexist.
 
 ```bash
 osdk install github:owner/repo@1.2.3 \

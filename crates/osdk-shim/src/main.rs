@@ -111,12 +111,26 @@ fn real_main() -> i32 {
     ) {
         Some(b) => b,
         None => {
+            if let Some((request, version)) =
+                configured_dynamic_request_for_bin(&registry, &ctx, &tool_name, &dynamic_report)
+            {
+                if let Err(error) = osdk_core::shim::validated_dynamic_install(
+                    &ctx,
+                    &dynamic_report,
+                    &request,
+                    &version,
+                ) {
+                    eprintln!("osdk-shim: {error}");
+                    return 1;
+                }
+            }
             eprintln!("osdk-shim: no backend provides `{tool_name}`");
             return 127;
         }
     };
 
     // Resolve the active version spec for this backend.
+    let dynamic_request = osdk_core::shim::dynamic_request_from_config(&ctx, backend.id());
     let active = resolve_active(
         backend.id(),
         &idiomatic_probe_cwd,
@@ -125,7 +139,8 @@ fn real_main() -> i32 {
     )
     .map(|active| (active.spec, active.is_range))
     .or_else(|| {
-        osdk_core::shim::dynamic_request_from_config(&ctx, backend.id())
+        dynamic_request
+            .as_ref()
             .map(|request| (request.spec.to_string(), false))
     });
     let (spec, is_range) = match active {
@@ -148,7 +163,14 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    let version = match resolve_installed(&ctx, backend.as_ref(), &expanded_spec, is_range) {
+    let parsed_dynamic_spec = dynamic_request
+        .as_ref()
+        .map(|_| VersionSpec::parse(strip_distribution_prefix(&expanded_spec)));
+    let version = match parsed_dynamic_spec {
+        Some(VersionSpec::Exact(version)) => Some(version),
+        _ => resolve_installed(&ctx, backend.as_ref(), &expanded_spec, is_range),
+    };
+    let version = match version {
         Some(v) => v,
         None => {
             eprintln!(
@@ -162,11 +184,35 @@ fn real_main() -> i32 {
         }
     };
 
-    let tv = ToolVersion::new(backend.id(), &version);
-    let bin_dirs = managed_bin_paths(&ctx, backend.as_ref(), &tv);
+    let mut tv = ToolVersion::new(backend.id(), &version);
+    let dynamic_install = if let Some(request) = dynamic_request.as_ref() {
+        tv.options = request.options.clone();
+        match osdk_core::shim::validated_dynamic_install(&ctx, &dynamic_report, request, &version) {
+            Ok(install) => Some(install),
+            Err(error) => {
+                eprintln!("osdk-shim: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    let bin_dirs = dynamic_install
+        .as_ref()
+        .map(osdk_core::shim::ValidatedDynamicInstall::bin_paths)
+        .unwrap_or_else(|| managed_bin_paths(&ctx, backend.as_ref(), &tv));
 
     let (executable_name, alias_subcommand) = routed_launcher(&tool_name, backend.id());
-    let exe = match managed_executable_path(&ctx, backend.as_ref(), &tv, executable_name) {
+    let exe = dynamic_install
+        .as_ref()
+        .and_then(|install| install.executable(executable_name))
+        .or_else(|| {
+            dynamic_install
+                .is_none()
+                .then(|| managed_executable_path(&ctx, backend.as_ref(), &tv, executable_name))
+                .flatten()
+        });
+    let exe = match exe {
         Some(p) => p,
         None => {
             eprintln!(
@@ -193,14 +239,20 @@ fn real_main() -> i32 {
     remove_env_path(&mut exec_env, &ctx.dirs.shims());
     if backend.id().starts_with("npm:") {
         let node_backend = registry.get("node").unwrap();
-        let node_bin_paths =
-            match manifest_bound_node_bin_paths(&ctx, backend.id(), &version, &*node_backend) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    eprintln!("osdk-shim: {error}");
-                    return 1;
-                }
-            };
+        let node_bin_paths = match manifest_bound_node_bin_paths(
+            &ctx,
+            backend.id(),
+            dynamic_install
+                .as_ref()
+                .expect("configured npm backend has validated inventory"),
+            &*node_backend,
+        ) {
+            Ok(paths) => paths,
+            Err(error) => {
+                eprintln!("osdk-shim: {error}");
+                return 1;
+            }
+        };
         let mut exact_runtime_path = node_bin_paths;
         exact_runtime_path.extend(bin_dirs.clone());
         prepend_env_path(&mut exec_env, exact_runtime_path);
@@ -267,22 +319,16 @@ fn real_main() -> i32 {
 fn manifest_bound_node_bin_paths(
     ctx: &osdk_core::backend::Ctx,
     npm_backend: &str,
-    npm_version: &str,
+    install: &osdk_core::shim::ValidatedDynamicInstall,
     node_backend: &dyn osdk_core::backend::Backend,
 ) -> Result<Vec<PathBuf>, String> {
     let required = || osdk_core::t!("err.shim_managed_node_required", tool = npm_backend);
-    let manifest = osdk_core::shim::dynamic_manifest_for_version(ctx, npm_backend, npm_version)
-        .map_err(|_| required())?
-        .ok_or_else(&required)?;
-    let recorded = manifest
-        .metadata
-        .get("node_version")
-        .ok_or_else(&required)?;
+    let recorded = install.metadata("node_version").ok_or_else(&required)?;
     let node_version = match VersionSpec::parse(recorded) {
         // The manifest records the concrete runtime identity selected during
         // installation. Reject aliases, ranges, prefixes, and even textual
         // normalization so execution cannot drift to another installed Node.
-        VersionSpec::Exact(version) if version == recorded.as_str() => version,
+        VersionSpec::Exact(version) if version == recorded => version,
         _ => return Err(required()),
     };
     let installed = node_backend.list_installed(ctx).map_err(|_| required())?;
@@ -577,6 +623,44 @@ fn dynamic_backend_for_bin(
     None
 }
 
+fn configured_dynamic_request_for_bin(
+    registry: &Registry,
+    ctx: &osdk_core::backend::Ctx,
+    tool_name: &str,
+    report: &ScanReport,
+) -> Option<(osdk_core::version::ToolRequest, String)> {
+    for backend_id in osdk_core::shim::configured_dynamic_ids(ctx, report) {
+        let Some(request) = osdk_core::shim::dynamic_request_from_config(ctx, &backend_id) else {
+            continue;
+        };
+        let VersionSpec::Exact(version) = request.spec.clone() else {
+            continue;
+        };
+        if registry.get(&backend_id).is_err() {
+            continue;
+        }
+        let directly_configured = ctx.config.tools.iter().any(|(key, value)| {
+            let direct_id = osdk_core::inventory::canonical_dynamic_id(key).ok();
+            let targets_backend = direct_id.as_deref() == Some(backend_id.as_str())
+                || osdk_core::version::ToolRequest::parse(value)
+                    .is_ok_and(|candidate| candidate.backend == backend_id);
+            targets_backend
+                && (key.strip_prefix("tool.") == Some(tool_name)
+                    || direct_id
+                        .as_deref()
+                        .is_some_and(|id| dynamic_default_bin(id) == Some(tool_name)))
+        });
+        if directly_configured {
+            return Some((request, version));
+        }
+    }
+    None
+}
+
+fn dynamic_default_bin(backend_id: &str) -> Option<&str> {
+    backend_id.split_once(':')?.1.rsplit('/').next()
+}
+
 fn make_ctx(dirs: Dirs, platform: Platform, config: Config) -> osdk_core::backend::Ctx {
     use std::sync::Arc;
     // A minimal client is required by Ctx; the shim never uses it for network.
@@ -632,13 +716,6 @@ fn managed_bin_paths(
     version: &ToolVersion,
 ) -> Vec<PathBuf> {
     let mut paths = backend.bin_paths(ctx, version).unwrap_or_default();
-    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
-        if let Ok(dynamic_paths) =
-            osdk_core::shim::dynamic_manifest_bin_paths(ctx, &version.backend, &version.version)
-        {
-            paths.extend(dynamic_paths);
-        }
-    }
     paths.sort();
     paths.dedup();
     paths
@@ -650,18 +727,6 @@ fn managed_executable_path(
     version: &ToolVersion,
     executable_name: &str,
 ) -> Option<PathBuf> {
-    if version.backend.contains(':') && !version.backend.starts_with("npm:") {
-        if let Ok(path) = osdk_core::shim::dynamic_manifest_executable(
-            ctx,
-            &version.backend,
-            &version.version,
-            executable_name,
-        ) {
-            if path.is_some() {
-                return path;
-            }
-        }
-    }
     find_exe(&managed_bin_paths(ctx, backend, version), executable_name)
 }
 

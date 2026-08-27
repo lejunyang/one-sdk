@@ -116,6 +116,11 @@ osdk can also follow existing `.tool-versions`, `.nvmrc`, `.node-version`,
 version declarations in `package.json`.
 Data-only declarative backends use the same locked artifact URL, checksum,
 download cache, and offline reinstall path as built-in archive backends.
+For osdk-owned dynamic `npm:<package>` and `github:owner/repo` installs, options that select
+the installer, build policy, asset, platform, or layout are part of the
+installation identity. If those options change at the same version, osdk
+refuses to run the mismatched install; rebuild or reinstall it instead. GitHub
+Release tools require an explicit uninstall before reinstalling.
 
 Guides: [Project toolchains](site/en/guide/projects.md) ·
 [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
@@ -182,9 +187,9 @@ Global npm, pnpm, and Aube choices each run that manager's real global-add
 operation inside an osdk-controlled prefix, leaving the ambient Node
 installation untouched. Release installs include the `osdk-aube` companion
 needed for Aube global mode. Aube 2.1 needs network access for a new or repaired
-global install, although an already complete exact install can be selected again
-offline without launching Aube; choose npm or pnpm when the install itself must
-use a native offline mode.
+global install, although an already complete exact install with matching options
+can be selected again offline without launching Aube; choose npm or pnpm when
+the install itself must use a native offline mode.
 `where --global` and `uninstall --global` explicitly target the user-wide npm
 installation. Without that flag, the existing project/isolated behavior is
 preserved; a global uninstall also removes its user config, lock entry, and

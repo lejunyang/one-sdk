@@ -17,6 +17,15 @@
 
 [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) 注册内置 backend 和别名，并动态识别 `github:owner/repo` 与 `npm:<package>`。它还从用户配置目录和数据目录的 `plugins/*.toml` 加载声明式 backend；重复 ID 或别名会直接报错，外部定义不能覆盖内置实现。
 
+这两个动态命名空间对 osdk 自有安装共用选项身份合约。解析或安装前，osdk 把受支持的
+公开选项投影成
+规范 map，拒绝未知公开 key，排除内部 `__osdk_*` lock 重放 metadata，并对 backend ID 与
+规范选项计算与顺序无关、带 domain separation 的 BLAKE3 `b3-v1:` fingerprint。schema 2
+`.osdk-tool.json` inventory 同时保存 map 与 fingerprint。同版本复用、activation 与 shim
+执行都要求精确匹配，否则 fail closed。schema 1 inventory 仍可用于发现，但不能授权复用；
+迁移时必须重建或重新安装。npm 可通过 `install` 或全局 `use` 重建，GitHub 则需先显式卸载
+再重新安装。物理安装根仍以版本为键，因此同一 backend/version 的两个选项变体不能共存。
+
 ## 内置 backend 矩阵
 
 | Backend | 解析与获取方式 | 完整性与安装语义 | 重要特性或限制 |
@@ -34,11 +43,12 @@
 | `rust` (`rustup`) | rustup channel/version；官方、rsproxy、TUNA | rustup-init SHA-256；随后委托隔离 rustup | toolchain 不走归档 CAS；支持 `profile`、`components`、`targets`，设置隔离的 `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument + `@deno/<platform>` | npm SRI | 平台包；设置 `DENO_DIR` |
 | `bun` | `bun` packument + `@oven/bun-<platform>` | npm SRI | 平台包；设置 `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument；隔离安装使用 embedded Aube，项目/全局 `use` 可规划 Aube、npm 或 pnpm | 原生 lock 或 Aube graph 携带传递 integrity；默认禁脚本 | 动态发现 `.bin`；自动加入受管 Node；schema 3 只记录 scope、installer 与可选原生 lock 身份 |
-| `github:owner/repo` | GitHub API，限流时回退 Atom/公开 release 页面；也支持静态 catalog | checksum、可选 minisign、GitHub artifact attestation | 自动选择 host asset；支持归档或裸二进制；复杂命名可用 regex/template/bin/rename/strip 规则 |
+| `npm:<package>` | npm packument；隔离安装使用 embedded Aube，项目/全局 `use` 可规划 Aube、npm 或 pnpm | 原生 lock 或 Aube graph 携带传递 integrity；默认禁脚本；osdk 自有隔离/全局安装由 schema 2 inventory 绑定 installer/build 选项 | 动态发现 `.bin`；自动加入受管 Node；lock schema 3 记录 scope、installer、可选原生 lock 身份与公开选项 |
+| `github:owner/repo` | GitHub API，限流时回退 Atom/公开 release 页面；也支持静态 catalog | checksum、可选 minisign、GitHub artifact attestation；schema 2 inventory 绑定 asset/layout 选项 | 自动选择 host asset；支持归档或裸二进制；复杂命名可用 regex/template/bin/rename/strip 规则 |
 
 上述实现位于 [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/)。npm 系列共用 [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs) 的 packument、版本与 SRI 解析。通用来源排序位于 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)。
-动态 npm backend 的项目/全局/隔离安装、缓存、metadata-only lock、schema 2 sidecar 兼容与 shim 边界见 [npm 开发工具实现](./npm-tools)。
+动态 npm backend 的项目/全局/隔离安装、缓存、metadata-only lock、旧 lock schema 2 sidecar
+兼容与 shim 边界见 [npm 开发工具实现](./npm-tools)。
 
 ## 声明式与 GitHub backend
 
@@ -48,6 +58,13 @@ checksum 与子目录，再考虑当前模板。因此声明式工具与内置�
 无 metadata 离线重装契约。
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。GitHub API、网页、Raw、release asset 和 attestation URL 都通过同一组规范化来源候选，但 token 只发给官方 API host。
+其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入
+校验，再写入 schema 2 动态 inventory。`catalog-url` 可用于获取，但会被刻意排除；必填的
+`catalog-sha256` 在不把 catalog 位置写入动态 inventory 时标识内容，且含 userinfo、查询参数或 fragment 的 HTTP(S)
+catalog URL 会被拒绝。因此，单有完成
+标记不能复用由不同选项或旧 inventory 生成的 GitHub 安装；锁定重放还会核对已持久化
+artifact receipt 的文件名、checksum 与子目录。身份不匹配时必须先卸载再重新安装该版本。
+inventory 会先于完成标记发布，因此中断的收尾过程不会被误认为可复用安装。
 
 ## 模型是独立且 provider-specific 的
 

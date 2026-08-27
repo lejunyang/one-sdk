@@ -145,8 +145,9 @@ lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依
 
 ::: warning Aube 全局离线支持
 Aube 2.1 无法在 osdk 离线模式中新建或修复全局安装；已经完整安装的匹配精确版本可以在
-不启动 Aube 的情况下离线再次选中。安装过程本身必须使用原生全局离线模式时，请选择 npm
-或 pnpm。共享的 Aube store 与 cache 仍会在受支持的在线安装中避免重复下载。
+安装器与构建策略选项也匹配时，在不启动 Aube 的情况下离线再次选中。安装过程本身必须
+使用原生全局离线模式时，请选择 npm 或 pnpm。共享的 Aube store 与 cache 仍会在受支持的
+在线安装中避免重复下载。
 :::
 
 `where --global` 只在全局 npm 安装中解析，并忽略项目选择。
@@ -219,6 +220,19 @@ allow_builds = ["@scope/native-tool", "esbuild"]
 单次形式是 `-o allow_builds=esbuild,sharp`。原生 npm 无法实施包级 allowlist，只接受
 false 或 true；Aube 与 pnpm 支持按包放行。
 
+## 选项变更与重新安装
+
+对 osdk 自有的隔离与全局安装，`installer` 和 `allow_builds` 属于安装身份，而不是版本
+匹配后可以忽略的提示。同一包版本下任一选项发生变化时，已有安装不能复用；activation
+与 shim 也会拒绝运行记录选项和当前配置不一致的安装。
+
+在记录选项身份之前创建的安装仍可被发现，但不能复用或执行。请重新运行相同的 `install`
+或全局 `use`，npm 流程会重建或替换该版本并写入当前身份。离线重建仍需满足所选安装器通常
+要求的原生 lock 或 graph，以及已预热的 cache/store。不要手工编辑 `.osdk-tool.json`。
+
+物理安装目录目前仍按 package、精确版本和 isolated/global scope 定位，没有包含选项。
+因此同一 scope 内同一包版本的两个选项变体不能共存；切换选项会替换该版本的安装。
+
 ## Source 与共享存储
 
 动态 npm 版本 metadata 使用常规 npm source 选择，在 npmmirror 与 npmjs 之间选择。
@@ -239,9 +253,10 @@ lock。
 
 ## `osdk.lock` 提供什么保证
 
-项目感知的 `use` 会写入紧凑的 schema 3 `osdk.lock` 条目，包括 package、解析版本、
-具体 installer、scope、精确 Node 版本，以及原生 lock 的 kind、format 与 SHA-256。全局
-工具的用户 lock 使用相同的 metadata-only 模式；npm 全局安装没有原生 lock 身份。
+项目感知的 `use` 会写入紧凑的 lock schema 3 `osdk.lock` 条目，包括 package、解析版本、
+具体 installer、scope、精确 Node 版本、公开选项，以及原生 lock 的 kind、format 与
+SHA-256。全局工具的用户 lock 使用相同的 metadata-only 模式；npm 全局安装没有原生
+lock 身份。
 
 ::: warning 依赖图限制
 `osdk.lock` 中的 metadata 本身**不会**捕获或重建 npm 传递依赖图。安装器的原生 lock
@@ -250,9 +265,11 @@ lock。
 lock。npm 全局安装没有依赖 lock，因此只凭用户 `osdk.lock` 无法复现其传递依赖选择。
 :::
 
-项目工作流应同时提交 `package.json`、原生项目 lock、`osdk.toml` 与 `osdk.lock`。
-schema 2 graph sidecar 仍可兼容读取，但当前 schema 3 不再创建新 sidecar，也不嵌入它的
-payload。
+项目工作流应同时提交 `package.json`、原生项目 lock、`osdk.toml` 与 `osdk.lock`。旧 lock
+schema 2 graph sidecar 仍可兼容读取，但当前 lock schema 3 不再创建新 sidecar，也不嵌入
+它的 payload。
+这里的 lock schema 与 `.osdk-tool.json` inventory schema 2 相互独立：inventory 控制本地
+复用，`osdk.lock` schema 3 保存选项与 npm 重放 metadata。
 
 安装器规划、metadata 校验、原生前缀隔离和激活安全检查见
 [npm 工具实现](./implementation/npm-tools)。

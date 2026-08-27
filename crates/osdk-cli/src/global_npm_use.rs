@@ -3040,6 +3040,7 @@ fn completed_install_matches_at(
     let bin_dir = &layout.bin;
     Ok(manifest.id == version.backend
         && manifest.version.as_deref() == Some(version.version.as_str())
+        && manifest.matches_identity_options(&version.options)?
         && manifest.metadata.get("installer").map(String::as_str) == Some(installer.as_str())
         && manifest.metadata.get("scope").map(String::as_str) == Some("global")
         && manifest.metadata.get("node_version").map(String::as_str) == Some(node_version)
@@ -3381,8 +3382,12 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let final_root = temporary.path().join("npm-global/tool/1.0.0");
         let backend = NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
-        let version = ToolVersion::new("npm:fixture-cli", "1.0.0");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.0.0");
+        version
+            .options
+            .insert(INSTALLER_OPTION.into(), NpmInstaller::Npm.as_str().into());
         let layout = write_valid_npm_global_install(&final_root, b"old");
+        rewrite_manifest_option_identity(&final_root, &version.options);
         assert!(completed_install_matches_at(
             &backend,
             &version,
@@ -3759,7 +3764,13 @@ mod tests {
         let stage_root = staged.root().to_path_buf();
         let staged_layout = write_valid_npm_global_install(&stage_root, b"new");
         let backend = NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
-        let version = ToolVersion::new("npm:fixture-cli", "1.0.0");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.0.0");
+        version
+            .options
+            .insert(INSTALLER_OPTION.into(), NpmInstaller::Npm.as_str().into());
+        for root in [&final_root, &stage_root] {
+            rewrite_manifest_option_identity(root, &version.options);
+        }
         assert!(completed_install_matches_at(
             &backend,
             &version,
@@ -4133,6 +4144,19 @@ mod tests {
         layout
     }
 
+    fn rewrite_manifest_option_identity(root: &Path, options: &BTreeMap<String, String>) {
+        let old = osdk_core::inventory::DynamicToolManifest::load(root).unwrap();
+        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(&old.id)
+            .unwrap()
+            .with_identity_options(options)
+            .unwrap();
+        manifest.version = old.version;
+        manifest.config_keys = old.config_keys;
+        manifest.bins = old.bins;
+        manifest.metadata = old.metadata;
+        manifest.write_atomic(root).unwrap();
+    }
+
     fn write_manifest_with_bins(root: &Path, version: &str, names: &[&str]) {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let mut manifest =
@@ -4265,7 +4289,14 @@ mod tests {
             "@echo off\r\nnode \"%~dp0node_modules\\prettier\\bin.js\" %*\r\n",
         )
         .unwrap();
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend.id()).unwrap();
+        let mut version = version;
+        version
+            .options
+            .insert(INSTALLER_OPTION.into(), NpmInstaller::Npm.as_str().into());
+        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend.id())
+            .unwrap()
+            .with_identity_options(&version.options)
+            .unwrap();
         manifest.version = Some(version.version.clone());
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "prettier".into(),
@@ -4285,6 +4316,40 @@ mod tests {
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
 
         assert!(completed_install_matches_at(
+            &backend,
+            &version,
+            NpmInstaller::Npm,
+            "22.1.0",
+            &layout,
+            None,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn completed_global_install_rejects_different_option_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("npm-global/fixture-cli/1.0.0");
+        let layout = write_valid_npm_global_install(&root, b"installed");
+        let backend = NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
+        let mut version = ToolVersion::new(backend.id(), "1.0.0");
+        version
+            .options
+            .insert(INSTALLER_OPTION.into(), NpmInstaller::Npm.as_str().into());
+        rewrite_manifest_option_identity(&root, &version.options);
+
+        assert!(completed_install_matches_at(
+            &backend,
+            &version,
+            NpmInstaller::Npm,
+            "22.1.0",
+            &layout,
+            None,
+        )
+        .unwrap());
+
+        version.options.insert("allow_builds".into(), "true".into());
+        assert!(!completed_install_matches_at(
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -4365,7 +4430,14 @@ mod tests {
         )
         .unwrap();
         let digest = read_native_lock(&project.join("aube-lock.yaml"), NpmInstaller::Aube).unwrap();
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:prettier").unwrap();
+        let mut version = version;
+        version
+            .options
+            .insert(INSTALLER_OPTION.into(), NpmInstaller::Aube.as_str().into());
+        let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:prettier")
+            .unwrap()
+            .with_identity_options(&version.options)
+            .unwrap();
         manifest.version = Some("3.6.2".into());
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "prettier".into(),

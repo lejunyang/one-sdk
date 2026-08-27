@@ -1029,7 +1029,7 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
 fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     options
         .iter()
-        .filter(|(key, _)| !key.starts_with("__osdk_"))
+        .filter(|(key, _)| !key.starts_with("__osdk_") && key.as_str() != "catalog-url")
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
