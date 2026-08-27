@@ -6,11 +6,13 @@ use std::sync::Arc;
 use crate::dirs::Dirs;
 use crate::error::{Error, Result};
 
+use super::dynamic::{self, DynamicBackendFactory};
 use super::Backend;
 
 pub struct Registry {
     backends: Vec<Arc<dyn Backend>>,
     by_name: HashMap<String, usize>,
+    dynamic_by_prefix: HashMap<&'static str, Arc<dyn DynamicBackendFactory>>,
 }
 
 impl Registry {
@@ -52,6 +54,13 @@ impl Registry {
     }
 
     fn from_backends(backends: Vec<Arc<dyn Backend>>) -> Result<Registry> {
+        Self::from_parts(backends, dynamic::builtin_factories())
+    }
+
+    fn from_parts(
+        backends: Vec<Arc<dyn Backend>>,
+        dynamic_factories: Vec<Arc<dyn DynamicBackendFactory>>,
+    ) -> Result<Registry> {
         let mut by_name = HashMap::new();
         for (i, b) in backends.iter().enumerate() {
             insert_name(&mut by_name, b.id(), i)?;
@@ -59,25 +68,31 @@ impl Registry {
                 insert_name(&mut by_name, alias, i)?;
             }
         }
-        Ok(Registry { backends, by_name })
+
+        let mut dynamic_by_prefix = HashMap::new();
+        for factory in dynamic_factories {
+            let prefix = factory.prefix();
+            if dynamic_by_prefix.insert(prefix, factory).is_some() {
+                return Err(Error::config(format!(
+                    "duplicate dynamic backend prefix `{prefix}`"
+                )));
+            }
+        }
+
+        Ok(Registry {
+            backends,
+            by_name,
+            dynamic_by_prefix,
+        })
     }
 
     pub fn get(&self, name: &str) -> Result<Arc<dyn Backend>> {
-        // Dynamic namespaced backends: `github:owner/repo`, `npm:package`.
-        if name.starts_with("github:") {
-            if let Some(gh) = crate::backend::github::GithubBackend::from_id(name) {
-                return Ok(Arc::new(gh));
-            }
-            return Err(Error::UnknownBackend(name.to_string()));
-        }
-        if name.starts_with("npm:") {
-            let canonical = canonicalize_npm_dynamic_id(name).unwrap_or_else(|| name.to_string());
-            if let Some(package) =
-                crate::backend::npm_package::NpmPackageBackend::from_id(&canonical)
-            {
-                return Ok(Arc::new(package));
-            }
-            return Err(Error::UnknownBackend(name.to_string()));
+        if let Some((prefix, _)) = name.split_once(':') {
+            return self
+                .dynamic_by_prefix
+                .get(prefix)
+                .and_then(|factory| factory.create(name))
+                .ok_or_else(|| Error::UnknownBackend(name.to_string()));
         }
         self.by_name
             .get(name)
@@ -109,11 +124,6 @@ fn insert_name(by_name: &mut HashMap<String, usize>, name: &str, index: usize) -
     Ok(())
 }
 
-fn canonicalize_npm_dynamic_id(id: &str) -> Option<String> {
-    let package = id.strip_prefix("npm:")?;
-    Some(format!("npm:{}", package.to_ascii_lowercase()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +152,25 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("duplicate backend id"));
+    }
+
+    #[test]
+    fn load_preserves_dynamic_backend_factories() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        let registry = Registry::load(&dirs).unwrap();
+        assert_eq!(registry.get("npm:Prettier").unwrap().id(), "npm:prettier");
+        assert_eq!(
+            registry.get("github:cli/cli").unwrap().id(),
+            "github:cli/cli"
+        );
     }
 
     #[test]
@@ -181,8 +210,46 @@ mod tests {
     fn rejects_invalid_dynamic_namespaced_backends() {
         let registry = Registry::new();
 
-        assert!(registry.get("npm:").is_err());
-        assert!(registry.get("npm:@antfu").is_err());
-        assert!(registry.get("npm:@antfu/ni/extra").is_err());
+        for name in [
+            "npm:",
+            "npm:@antfu",
+            "npm:@antfu/ni/extra",
+            "github:",
+            "github:noslash",
+            "github:cli/cli/extra",
+            "cargo:ripgrep",
+            "NPM:prettier",
+        ] {
+            assert!(
+                matches!(registry.get(name), Err(Error::UnknownBackend(id)) if id == name),
+                "expected `{name}` to remain an unknown backend"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_dynamic_backend_prefixes() {
+        struct TestFactory;
+
+        impl DynamicBackendFactory for TestFactory {
+            fn prefix(&self) -> &'static str {
+                "test"
+            }
+
+            fn create(&self, _id: &str) -> Option<Arc<dyn Backend>> {
+                None
+            }
+        }
+
+        let error = match Registry::from_parts(
+            Vec::new(),
+            vec![Arc::new(TestFactory), Arc::new(TestFactory)],
+        ) {
+            Ok(_) => panic!("expected a duplicate dynamic backend prefix error"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("duplicate dynamic backend prefix `test`"));
     }
 }

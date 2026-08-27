@@ -21,6 +21,7 @@ pub mod bun;
 mod contract;
 pub mod declarative;
 pub mod deno;
+mod dynamic;
 pub mod github;
 pub mod go;
 pub mod java;
