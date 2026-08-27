@@ -335,7 +335,11 @@ portable_process_identity() (
   if [ -r "/proc/$identity_pid/stat" ] &&
      [ -r /proc/sys/kernel/random/boot_id ]; then
     identity_stat=$(cat "/proc/$identity_pid/stat") || exit 1
-    identity_rest=${identity_stat##*) }
+    # Keep the closing parenthesis out of the parameter-expansion pattern so
+    # macOS Bash 3.2 can parse this script. The longest-match removal still
+    # selects the last `) `, even when the process name contains that sequence.
+    identity_stat_separator=') '
+    identity_rest=${identity_stat##*"$identity_stat_separator"}
     set -- $identity_rest
     [ "$#" -ge 20 ] || exit 1
     shift 19

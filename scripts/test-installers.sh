@@ -106,6 +106,39 @@ write_portable_lock_record() {
     "token=$token" > "$record"
 }
 
+portable_process_identity() (
+  identity_pid=$1
+  case $identity_pid in
+    ''|*[!0-9]*) exit 1 ;;
+  esac
+
+  if [ -r "/proc/$identity_pid/stat" ] &&
+     [ -r /proc/sys/kernel/random/boot_id ]; then
+    identity_stat=$(cat "/proc/$identity_pid/stat") || exit 1
+    identity_stat_separator=') '
+    identity_rest=${identity_stat##*"$identity_stat_separator"}
+    set -- $identity_rest
+    [ "$#" -ge 20 ] || exit 1
+    shift 19
+    identity_boot=$(cat /proc/sys/kernel/random/boot_id) || exit 1
+    printf 'linux:%s:%s\n' "$identity_boot" "$1"
+    exit 0
+  fi
+
+  identity_start=$(
+    LC_ALL=C ps -o lstart= -p "$identity_pid" 2>/dev/null |
+      awk '{$1=$1; print}'
+  )
+  [ -n "$identity_start" ] || exit 1
+  if command -v sysctl >/dev/null 2>&1; then
+    identity_boot=$(LC_ALL=C sysctl -n kern.boottime 2>/dev/null || :)
+  else
+    identity_boot=
+  fi
+  [ -n "$identity_boot" ] || identity_boot=unknown-boot
+  printf 'posix:%s:%s:%s\n' "$(uname -n)" "$identity_boot" "$identity_start"
+)
+
 write_checksum() {
   local archive_path=$1
   local checksum_path=$2
@@ -306,14 +339,7 @@ assert_no_transaction_dirs "$incomplete_install_dir"
 locked_install_dir="$test_root/locked-bin"
 write_install_set "$locked_install_dir" old
 active_lock_owner="$locked_install_dir/.osdk-install-lock.owner.active"
-live_identity=$(
-  boot_id=$(cat /proc/sys/kernel/random/boot_id)
-  process_stat=$(cat "/proc/$$/stat")
-  process_rest=${process_stat##*) }
-  set -- $process_rest
-  shift 19
-  printf 'linux:%s:%s\n' "$boot_id" "$1"
-)
+live_identity=$(portable_process_identity "$$")
 write_portable_lock_record "$active_lock_owner" "$$" "$live_identity"
 ln "$active_lock_owner" "$locked_install_dir/.osdk-install.lock"
 lock_error="$test_root/lock-error.log"
