@@ -114,6 +114,8 @@ written to the lock.
 osdk can also follow existing `.tool-versions`, `.nvmrc`, `.node-version`,
 `.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`, and Node
 version declarations in `package.json`.
+Data-only declarative backends use the same locked artifact URL, checksum,
+download cache, and offline reinstall path as built-in archive backends.
 
 Guides: [Project toolchains](site/en/guide/projects.md) ·
 [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)

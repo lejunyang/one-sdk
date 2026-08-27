@@ -245,4 +245,8 @@ url = "{archive_url}.sha256"
 
 Declarative backends describe data and cannot execute custom code. Installation
 still uses the shared download, checksum, safe-extraction, and CAS-materialization
-pipeline.
+pipeline. After `osdk lock` records an artifact receipt, a later no-argument
+`osdk install` uses that exact URL, filename, checksum, and optional subdirectory
+before rendering the current plugin templates. A cached artifact can therefore
+be reinstalled offline even if the version/checksum endpoint is unavailable or
+the local plugin definition has since changed.

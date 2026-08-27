@@ -393,30 +393,36 @@ impl Backend for DeclarativeBackend {
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         validate_version(&tv.version)?;
-        let file = self.rendered_file(ctx.platform, &tv.version)?;
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let urls = sources
-            .iter()
-            .map(|source| {
-                self.rendered_url(
-                    &source.download_url,
-                    ctx.platform,
-                    Some(&tv.version),
-                    Some(&file),
-                    None,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let checksum = self.checksum(ctx, &tv.version, &file, &urls).await?;
-        let plan = InstallPlan {
-            tool: self.id.clone(),
-            version: tv.version.clone(),
-            urls,
-            file_name: file,
-            kind: self.archive.kind.into(),
-            checksum: Some(checksum),
-            strip_root: self.archive.strip_root,
-            subdir: None,
+        let plan = if let Some(plan) =
+            pipeline::locked_install_plan(self.id(), tv, self.archive.strip_root)?
+        {
+            plan
+        } else {
+            let file = self.rendered_file(ctx.platform, &tv.version)?;
+            let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+            let urls = sources
+                .iter()
+                .map(|source| {
+                    self.rendered_url(
+                        &source.download_url,
+                        ctx.platform,
+                        Some(&tv.version),
+                        Some(&file),
+                        None,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let checksum = self.checksum(ctx, &tv.version, &file, &urls).await?;
+            InstallPlan {
+                tool: self.id.clone(),
+                version: tv.version.clone(),
+                urls,
+                file_name: file,
+                kind: self.archive.kind.into(),
+                checksum: Some(checksum),
+                strip_root: self.archive.strip_root,
+                subdir: None,
+            }
         };
         let pipeline_ctx = PipelineCtx {
             client: &ctx.client,
@@ -719,7 +725,7 @@ fn render_template(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -836,6 +842,60 @@ url = "{{archive_url}}.sha256"
             [installed.join("bin")]
         );
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn locked_artifact_reinstalls_offline_without_rendering_current_templates() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_dirs(temp.path());
+        dirs.ensure().unwrap();
+
+        let file_name = "locked-acme.tar.gz";
+        let archive_path =
+            pipeline::artifact_cache_path(&dirs, "acme", "1.2.3", file_name).unwrap();
+        std::fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
+        write_fixture_archive(&archive_path);
+        let checksum = pipeline::verify::hash_file(&archive_path, HashAlgo::Sha256).unwrap();
+
+        // These templates deliberately cannot produce the locked artifact. A
+        // lock-restored request must use its recorded URL, filename, and
+        // checksum without consulting current plugin metadata.
+        let backend = DeclarativeBackend::from_toml(
+            &STATIC_FIXTURE
+                .replace("acme-{version}-{os}-{arch}.tar.gz", "changed-{version}.zip")
+                .replace("kind = \"tar.gz\"", "kind = \"zip\""),
+        )
+        .unwrap();
+        let mut ctx = test_ctx(dirs);
+        ctx.config.settings.offline = true;
+        ctx.config.settings.require_checksums = true;
+        let mut tool_version = ToolVersion::new("acme", "1.2.3");
+        tool_version.options.extend(BTreeMap::from([
+            (
+                pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                "https://unreachable.invalid/locked-acme.tar.gz".into(),
+            ),
+            (
+                pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                file_name.into(),
+            ),
+            (
+                pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{checksum}"),
+            ),
+        ]));
+
+        backend
+            .install(&InstallCtx { ctx: &ctx }, &tool_version)
+            .await
+            .unwrap();
+
+        let installed = ctx.dirs.install_path("acme", "1.2.3");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("bin/acme")).unwrap(),
+            "fixture executable\n"
+        );
+        assert!(installed.join(".osdk-complete").is_file());
     }
 
     fn isolated_dirs(root: &Path) -> Dirs {

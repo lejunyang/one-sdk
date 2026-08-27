@@ -45,6 +45,10 @@ sidecar compatibility, and shim boundaries.
 ## Declarative and GitHub backends
 
 [`DeclarativeBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/declarative.rs) is a constrained schema-1 TOML extension point. It supports static or URL version lists, platform template variables, `tar.gz`/`tar.xz`/`tar.zst`/`zip`, fixed or remote checksums, `strip_root`, binary paths, and idiomatic version files. Definitions are limited to 1 MiB, remote lists to 10,000 versions, and URLs, filenames, relative paths, and checksums are strictly validated. It intentionally cannot execute hooks or arbitrary commands; every installation goes through the shared verification and CAS pipeline.
+When a project lock supplies a generic artifact receipt, the backend consumes
+the recorded URL, filename, checksum, and subdirectory before consulting its
+current templates. This gives declarative tools the same metadata-free offline
+reinstall contract as built-in archive backends.
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
 

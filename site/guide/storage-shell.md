@@ -231,4 +231,7 @@ url = "{archive_url}.sha256"
 - schema 使用严格未知字段拒绝，因此不能加入 hook 或 install script。
 
 声明式 backend 只描述数据，不能执行自定义代码；安装仍经过统一下载、checksum、
-受限解压和 CAS 物化管线。
+受限解压和 CAS 物化管线。`osdk lock` 记录 artifact receipt 后，后续不带参数的
+`osdk install` 会先使用其中锁定的 URL、文件名、checksum 与可选子目录，再考虑当前
+插件模板。因此即使版本/checksum 端点不可用，或本地插件定义后来发生变化，已缓存产物
+仍能离线重装。

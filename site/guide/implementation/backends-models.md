@@ -43,6 +43,9 @@
 ## 声明式与 GitHub backend
 
 [`DeclarativeBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/declarative.rs) 是受限的 schema 1 TOML 扩展点。它支持静态或 URL 版本列表、平台模板变量、`tar.gz`/`tar.xz`/`tar.zst`/`zip`、固定或远端 checksum、`strip_root`、bin 路径和惯用版本文件。定义文件最大 1 MiB，远端版本最多 10,000 个，并严格验证 URL、文件名、相对路径和 checksum。它刻意不执行 hook 或任意命令；所有安装必须经过共享验证与 CAS 流水线。
+项目 lock 提供通用 artifact receipt 时，backend 会优先使用其中记录的 URL、文件名、
+checksum 与子目录，再考虑当前模板。因此声明式工具与内置归档 backend 具有相同的
+无 metadata 离线重装契约。
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。GitHub API、网页、Raw、release asset 和 attestation URL 都通过同一组规范化来源候选，但 token 只发给官方 API host。
 

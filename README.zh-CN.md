@@ -109,6 +109,8 @@ osdk exec --tool node@20 -- node --version
 osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 `.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`，以及
 `package.json` 中的 Node 版本声明。
+纯数据声明式 backend 与内置归档 backend 共用锁定产物 URL、checksum、下载缓存和
+离线重装路径。
 
 指南：[项目工具链](site/guide/projects.md) ·
 [锁文件与环境复现](site/guide/lockfiles.md)

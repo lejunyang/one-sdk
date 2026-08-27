@@ -21,7 +21,7 @@
 
 统一契约是 [`Backend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/mod.rs)。归档型 backend 通常先调用 `ranked_source_list`，再生成 [`InstallPlan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs)：工具、精确版本、候选 URL、文件名、归档类型、可选 checksum、是否剥离顶层目录，以及可选安全子目录。Node 的代表实现见 [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs)。
 
-从 lockfile 恢复的请求优先通过 [`locked_install_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs) 使用锁定 URL、文件名、checksum 和 subdirectory，不必重新查询版本 registry。pnpm、Yarn、Deno、Bun 和独立 npm 由 npm registry 包及 SRI 驱动；通用 GitHub backend 可额外要求 Sigstore/Rekor attestation。Rust 是重要例外：它使用隔离的 rustup/Cargo home，委托 rustup 安装工具链，并由 osdk 自己维护完成标记和 shim。
+从 lockfile 恢复的请求优先通过 [`locked_install_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs) 使用锁定 URL、文件名、checksum 和 subdirectory，不必重新查询版本 registry；内置归档 backend 和纯数据声明式 backend 共用这条路径。pnpm、Yarn、Deno、Bun 和独立 npm 由 npm registry 包及 SRI 驱动；通用 GitHub backend 可额外要求 Sigstore/Rekor attestation。Rust 是重要例外：它使用隔离的 rustup/Cargo home，委托 rustup 安装工具链，并由 osdk 自己维护完成标记和 shim。
 
 ## 共享 pipeline 的事务顺序
 
