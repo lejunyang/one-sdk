@@ -8,8 +8,11 @@ pub mod buildkit;
 pub mod cache;
 pub mod containerd;
 pub mod docker;
+pub mod mirror;
+pub mod plan;
 pub mod redact;
 pub mod reference;
+pub mod registry;
 pub mod report;
 pub mod runtime;
 
@@ -30,6 +33,18 @@ pub use containerd::{
 pub use docker::{
     DockerAdapter, DockerContext, DockerContextKind, DockerDiscovery, DockerInfo, DockerParseError,
     DockerVersion,
+};
+pub use mirror::{
+    plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors, BuildkitMirrorPlanRequest,
+    ContainerdMirrorPlanRequest, DockerMirrorPlanRequest, MirrorPlanError,
+};
+pub use plan::{
+    ActivationRequirement, BuildkitTargetDriver, DockerTargetKind, EffectiveResolution,
+    Fingerprint, MirrorChange, MirrorPlan, MirrorPlanBundle, MirrorPlanDraft, MirrorPlanTarget,
+    NativeCandidateFingerprint, NativeConfigCandidate, NativeConfigFormat, NativeConfigSnapshot,
+    NativeInputFingerprint, NativeInputState, PlanApplicability, PlanError, PlanWarning,
+    PlannedCapability, RequiredPrivilege, ValidationStep, MAX_NATIVE_CONFIG_BYTES,
+    MIRROR_PLAN_SCHEMA_VERSION,
 };
 pub use reference::{
     ImageReference, ImageSelector, ImageTag, OciDigest, OciPlatform, ReferenceError, RegistryName,
