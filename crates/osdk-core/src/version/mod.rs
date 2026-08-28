@@ -106,118 +106,16 @@ pub struct ToolRequest {
 }
 
 impl ToolRequest {
-    /// Parse `node`, `node@20`, `node@lts`, `java@temurin-21` (distribution
-    /// carried as an option is backend-specific; here we keep the raw spec).
+    /// Parse and canonicalize `tool[option=value]@selector`. Dynamic namespace
+    /// subjects and inline options are validated through their central schema.
     pub fn parse(s: &str) -> Result<ToolRequest> {
-        if let Some(request) = parse_npm_package_request(s)? {
-            return Ok(request);
-        }
-        let (backend, ver) = match s.split_once('@') {
-            Some((b, v)) => (b.trim(), v.trim()),
-            None => (s.trim(), ""),
-        };
-        if backend.is_empty() {
-            return Err(Error::other(format!("invalid tool request `{s}`")));
-        }
+        let parsed = crate::tool::ToolSpec::parse(s)?;
         Ok(ToolRequest {
-            backend: backend.to_string(),
-            spec: VersionSpec::parse(ver),
-            options: BTreeMap::new(),
+            backend: parsed.id.to_string(),
+            spec: VersionSpec::parse(parsed.selector().unwrap_or_default()),
+            options: parsed.options.into_map(),
         })
     }
-}
-
-fn parse_npm_package_request(input: &str) -> Result<Option<ToolRequest>> {
-    let raw = input.trim();
-    let Some(rest) = raw.strip_prefix("npm:") else {
-        return Ok(None);
-    };
-    let (package, version) = split_npm_package_request(rest)
-        .ok_or_else(|| Error::other(format!("invalid tool request `{input}`")))?;
-    Ok(Some(ToolRequest {
-        backend: format!("npm:{}", package.to_ascii_lowercase()),
-        spec: VersionSpec::parse(version.unwrap_or("")),
-        options: BTreeMap::new(),
-    }))
-}
-
-fn split_npm_package_request(input: &str) -> Option<(String, Option<&str>)> {
-    let input = input.trim();
-    if input.is_empty() {
-        return None;
-    }
-    if let Some(rest) = input.strip_prefix('@') {
-        let (scope, package_and_version) = rest.split_once('/')?;
-        if !valid_npm_name_part(scope) {
-            return None;
-        }
-        let (name, version) = match package_and_version.split_once('@') {
-            Some((name, version)) => (name, Some(version.trim())),
-            None => (package_and_version, None),
-        };
-        if !valid_npm_name_part(name) {
-            return None;
-        }
-        return Some((format!("@{scope}/{name}"), version));
-    }
-    let (name, version) = match input.split_once('@') {
-        Some((name, version)) => (name.trim(), Some(version.trim())),
-        None => (input, None),
-    };
-    if !valid_npm_name_part(name) {
-        return None;
-    }
-    Some((name.to_string(), version))
-}
-
-fn valid_npm_name_part(value: &str) -> bool {
-    if value.is_empty() || value.len() > 214 {
-        return false;
-    }
-    if value == "." || value == ".." || is_windows_reserved_component(value) {
-        return false;
-    }
-    value.chars().all(valid_npm_name_char)
-}
-
-fn valid_npm_name_char(ch: char) -> bool {
-    ch.is_ascii_lowercase()
-        || ch.is_ascii_uppercase()
-        || ch.is_ascii_digit()
-        || matches!(ch, '-' | '_' | '.')
-}
-
-fn is_windows_reserved_component(value: &str) -> bool {
-    let trimmed = value.trim_end_matches([' ', '.']);
-    if trimmed.is_empty() {
-        return true;
-    }
-    let upper = trimmed.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
 }
 
 /// A resolved concrete version, ready to install/activate.
@@ -433,6 +331,36 @@ mod tests {
         let r = ToolRequest::parse("npm:@Antfu/Ni").unwrap();
         assert_eq!(r.backend, "npm:@antfu/ni");
         assert_eq!(r.spec, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn parse_inline_dynamic_options_uses_canonical_schema() {
+        let request =
+            ToolRequest::parse("npm:Prettier[installer=AUBE,allow_builds='Sharp, esbuild']@3")
+                .unwrap();
+        assert_eq!(request.backend, "npm:prettier");
+        assert_eq!(request.spec, VersionSpec::Prefix("3".into()));
+        assert_eq!(request.options["installer"], "aube");
+        assert_eq!(request.options["allow_builds"], "esbuild,sharp");
+    }
+
+    #[test]
+    fn parse_github_request_canonicalizes_id_and_preserves_selector() {
+        let request =
+            ToolRequest::parse("github:Cli/CLI.git[os=darwin,arch=amd64]@2.96.0").unwrap();
+        assert_eq!(request.backend, "github:cli/cli");
+        assert_eq!(request.spec, VersionSpec::Exact("2.96.0".into()));
+        assert_eq!(request.options["os"], "macos");
+        assert_eq!(request.options["arch"], "x64");
+    }
+
+    #[test]
+    fn parse_rejects_unknown_dynamic_namespaces_and_options_early() {
+        assert!(matches!(
+            ToolRequest::parse("cargo:ripgrep@latest"),
+            Err(Error::UnknownBackend(_))
+        ));
+        assert!(ToolRequest::parse("npm:prettier[token=secret]@3").is_err());
     }
 
     #[test]

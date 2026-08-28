@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, fmt::Write as _};
 
 use super::Backend;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 const FINGERPRINT_DOMAIN: &[u8] = b"osdk-dynamic-options-v1";
 
@@ -14,56 +14,8 @@ pub fn identity_options(
     id: &str,
     options: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
-    let id = crate::inventory::canonical_dynamic_id(id)?;
-    let (prefix, _) = id
-        .split_once(':')
-        .ok_or_else(|| Error::config(format!("dynamic tool id must be namespaced: `{id}`")))?;
-    let allowed: &[&str] = match prefix {
-        "npm" => &["allow_builds", "installer"],
-        "github" => &[
-            "arch",
-            "asset-regex",
-            "asset-template",
-            "bin",
-            "bins",
-            "catalog-sha256",
-            "catalog-subdir",
-            "catalog-url",
-            "libc",
-            "os",
-            "rename",
-            "strip-components",
-        ],
-        _ => return Err(Error::UnknownBackend(id.to_string())),
-    };
-    let mut identity = BTreeMap::new();
-    if prefix == "github" && options.contains_key("bin") && options.contains_key("bins") {
-        return Err(Error::config("bin and bins are mutually exclusive"));
-    }
-    for (raw_key, value) in options {
-        if raw_key.starts_with("__osdk_") {
-            continue;
-        }
-        let key = match (prefix, raw_key.as_str()) {
-            ("github", "bin") => "bins",
-            _ => raw_key.as_str(),
-        };
-        if !allowed.contains(&key) {
-            return Err(Error::config(format!(
-                "unsupported option `{raw_key}` for dynamic backend `{id}`"
-            )));
-        }
-        if let Some((key, value)) = normalize_option(prefix, key, value)? {
-            identity.insert(key, value);
-        }
-    }
-    if prefix == "github"
-        && options.keys().any(|key| key == "catalog-url")
-        && !identity.contains_key("catalog-sha256")
-    {
-        return Err(Error::config("catalog-sha256 is required with catalog-url"));
-    }
-    Ok(identity)
+    let id = crate::tool::ToolId::parse(id)?;
+    crate::tool::dynamic_identity_options(&id, options).map(crate::tool::CanonicalOptions::into_map)
 }
 
 /// Validate namespace-specific relationships between otherwise valid public
@@ -87,12 +39,9 @@ pub(crate) fn fingerprint_canonical_options(
     id: &str,
     options: &BTreeMap<String, String>,
 ) -> Result<String> {
-    let id = crate::inventory::canonical_dynamic_id(id)?;
-    if identity_options(&id, options)? != *options {
-        return Err(Error::config(
-            "dynamic tool inventory contains non-canonical identity options",
-        ));
-    }
+    let id = crate::tool::ToolId::parse(id)?;
+    crate::tool::validate_canonical_identity_options(&id, options)?;
+    let id = id.to_string();
     let mut hasher = blake3::Hasher::new();
     update_length_prefixed(&mut hasher, FINGERPRINT_DOMAIN);
     update_length_prefixed(&mut hasher, id.as_bytes());
@@ -104,109 +53,6 @@ pub(crate) fn fingerprint_canonical_options(
     write!(&mut fingerprint, "{}", hasher.finalize().to_hex())
         .expect("writing into a String cannot fail");
     Ok(fingerprint)
-}
-
-fn normalize_option(prefix: &str, key: &str, value: &str) -> Result<Option<(String, String)>> {
-    if prefix == "npm" && key == "allow_builds" {
-        let value = value.trim();
-        if value.is_empty()
-            || matches!(
-                value.to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        {
-            // Missing and an explicit false/empty value both select the
-            // backend's deny-by-default behavior.
-            return Ok(None);
-        }
-        if matches!(
-            value.to_ascii_lowercase().as_str(),
-            "true" | "1" | "yes" | "on"
-        ) {
-            return Ok(Some((key.into(), "true".into())));
-        }
-        let mut packages = value
-            .split(',')
-            .map(str::trim)
-            .filter(|package| !package.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect::<Vec<_>>();
-        packages.sort();
-        packages.dedup();
-        if packages.is_empty() {
-            return Err(Error::config("allow_builds must not be empty"));
-        }
-        return Ok(Some((key.into(), packages.join(","))));
-    }
-    if prefix == "npm" && key == "installer" {
-        let installer = crate::npm_tools::installer_from_request_options(&BTreeMap::from([(
-            key.to_string(),
-            value.to_string(),
-        )]))?;
-        return Ok((installer != crate::npm_tools::NpmInstaller::Auto)
-            .then(|| (key.into(), installer.as_str().to_string())));
-    }
-    if prefix == "github" {
-        let normalized = match key {
-            // The required catalog digest defines its content identity. The
-            // location is acquisition metadata and must never be copied into
-            // an install inventory. Userinfo credentials are rejected here;
-            // callers that persist request options separately must apply their
-            // own URL-redaction policy.
-            "catalog-url" => {
-                let lower = value.to_ascii_lowercase();
-                if lower.starts_with("http://") || lower.starts_with("https://") {
-                    let parsed = reqwest::Url::parse(value).map_err(|error| {
-                        Error::config(format!("invalid GitHub catalog URL: {error}"))
-                    })?;
-                    if !parsed.username().is_empty() || parsed.password().is_some() {
-                        return Err(Error::config(
-                            "GitHub catalog URL must not contain credentials",
-                        ));
-                    }
-                    if parsed.query().is_some() || parsed.fragment().is_some() {
-                        return Err(Error::config(
-                            "GitHub catalog URL must not contain a query or fragment",
-                        ));
-                    }
-                }
-                return Ok(None);
-            }
-            "catalog-sha256" => {
-                let value = value.trim().to_ascii_lowercase();
-                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(Error::config(
-                        "catalog-sha256 must be a 64-character hexadecimal SHA-256 digest",
-                    ));
-                }
-                value
-            }
-            "os" if value == "darwin" => "macos".into(),
-            "arch" if matches!(value, "x86_64" | "amd64") => "x64".into(),
-            "arch" if value == "aarch64" => "arm64".into(),
-            "arch" if value == "i686" => "x86".into(),
-            "arch" if value == "armv7" => "arm".into(),
-            "bins" => {
-                let bins = value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|bin| !bin.is_empty())
-                    .collect::<Vec<_>>();
-                bins.join(",")
-            }
-            "strip-components" => value
-                .parse::<usize>()
-                .map_err(|error| {
-                    Error::config(format!("invalid strip-components `{value}`: {error}"))
-                })?
-                .to_string(),
-            // Whitespace can be significant in regexes, templates, paths, and
-            // executable names. Keep it exactly as the backend consumes it.
-            _ => value.to_string(),
-        };
-        return Ok(Some((key.into(), normalized)));
-    }
-    Ok(Some((key.into(), value.to_string())))
 }
 
 fn update_length_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
