@@ -112,8 +112,10 @@ osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 纯数据声明式 backend 与内置归档 backend 共用锁定产物 URL、checksum、下载缓存和
 离线重装路径。
 对 osdk 自有的动态 `npm:<package>` 与 `github:owner/repo` 安装，选择安装器、构建策略、asset、平台或
-布局的选项也属于安装身份。同一版本下这些选项发生变化时，osdk 会拒绝运行不匹配的
-安装；请重建或重新安装。GitHub Release 工具需要先显式卸载再重新安装。
+布局的选项也属于安装身份。osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
+`b3-v2:` 身份放入独立的指纹化安装根，因此同一 backend/version 的多个身份可以共存。
+复用、activation、shim、`where`、`uninstall` 与 `reshim` 都只选择配置精确匹配的身份。旧
+`.osdk-tool.json` 只用于识别遗留状态，绝不会被复用或执行。
 
 指南：[项目工具链](site/guide/projects.md) ·
 [锁文件与环境复现](site/guide/lockfiles.md)
@@ -174,9 +176,11 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 的 Node 安装。Release 安装会同时提供 Aube 全局模式所需的 `osdk-aube` 辅助程序。Aube
 2.1 新建或修复全局安装时需要联网；已完整安装且选项身份匹配的精确版本可以在不启动
 Aube 的情况下离线再次选中。安装过程本身必须使用原生离线模式时，请选择 npm 或 pnpm。
-`where --global` 与 `uninstall --global` 会显式操作用户级 npm 安装；不带该标志时继续
-保持原有项目/隔离行为。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他
-owner 的 shim。
+`where --global` 与 `uninstall --global` 会显式操作配置精确匹配的用户级 npm 安装；不带
+该标志时继续保持原有项目/隔离行为。卸载只删除选中的身份根，同一包版本的其他身份仍然
+保留。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他 owner 的 shim。
+项目自身包管理器维护的 npm 依赖及其 `.osdk/npm-bin` 筛选 generation 与这些 osdk 自有
+安装根保持独立。
 
 指南：[npm 开发工具](site/guide/npm-tools.md)
 

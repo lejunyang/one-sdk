@@ -15,7 +15,7 @@
 4. 否则调用 backend 的 `install`；
 5. 所有安装完成后生成 shim，并按 backend 名排序结果。
 
-这意味着除上述 Node 前置依赖外，不同工具可以并发；同一个 `tool@version` 的写入仍由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用 embedded Aube、隔离的安装根以及 osdk 自有的共享 Aube cache/store；项目感知或全局 `use` 还可在规划阶段选择 Aube、npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。
+这意味着除上述 Node 前置依赖外，不同工具可以并发；固定 backend 的同一 `tool@version` 写入与动态 backend 的同一完整安装身份写入，仍分别由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用 embedded Aube、隔离的安装根以及 osdk 自有的共享 Aube cache/store；项目感知或全局 `use` 还可在规划阶段选择 Aube、npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。
 
 ## Backend 生成计划
 
@@ -27,7 +27,7 @@
 
 [`pipeline::run_with_attestation`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs) 执行以下步骤：
 
-1. 获取 `<tool>/<version>.lock`，串行化相同版本的并发安装。
+1. 固定 backend 获取 `<tool>/<version>.lock`；动态 backend 则持有带完整身份的 lock，直到后处理、`.osdk-install.json` 发布与完成标记全部结束。
 2. 若直接调用 pipeline 且安装目录已有 `.osdk-complete`，它会提前返回；该次调用带 attestation 时会重新验证并合并证据。普通 CLI 安装通常更早在 `install_one_without_shims` 短路，只执行 `ensure_post_install`。
 3. 删除没有完成标记的陈旧安装目录。
 4. 使用稳定的 artifact cache 路径；离线且缓存缺失时立即失败。

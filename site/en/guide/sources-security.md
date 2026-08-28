@@ -234,8 +234,11 @@ catalog content. HTTP(S) catalog URLs containing userinfo, a query, or a
 fragment are rejected so credentials cannot be persisted through this option. An
 unknown public option is rejected before installation, and an existing
 same-version install with legacy or different
-option identity is not executed; uninstall and reinstall it. Physical install
-paths remain version-based, so same-version option variants do not coexist.
+option identity is not executed. Each canonical identity is recorded in
+`.osdk-install.json` schema 1 with a `b3-v2:` `install_id` and receives its own
+fingerprinted root, so same-version variants coexist. Exact configured identity
+drives reuse, activation, shims, `where`, uninstall, and `reshim`; legacy
+`.osdk-tool.json` state is detected but never reused or executed.
 
 ```bash
 osdk install github:owner/repo@1.2.3 \

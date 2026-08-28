@@ -685,7 +685,7 @@ async fn install_one_without_shims(
     bind_dynamic_request_options(&effective, &mut tv);
 
     if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
-        && !backend.id().starts_with("npm:")
+        && !backend.id().contains(':')
     {
         backend.ensure_post_install(&app.ctx, &tv)?;
         println!("{}", t!("msg.already_installed", tool = tv));
@@ -2003,7 +2003,21 @@ fn structured_tool_option(key: &str, value: &str) -> osdk_core::config::ToolConf
 }
 
 pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
-    let req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
+    let req = if global {
+        resolve_explicit_request(
+            app,
+            &tool,
+            &app.ctx.config.global_tool_configs,
+            &app.ctx.config.global_tools,
+        )?
+    } else {
+        resolve_explicit_request(
+            app,
+            &tool,
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+        )?
+    };
     let backend = app.registry.get(&req.backend)?;
     if global && !req.backend.starts_with("npm:") {
         anyhow::bail!("--global is only supported for npm:<package> uninstall requests");
@@ -2013,21 +2027,30 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
             recover_interrupted_global_npm_uninstalls(app)
         })?;
     }
-    let version = if global {
-        select_global_npm_version(app, &req, requested_spec_literal(&tool).is_some())?
-    } else if let Some(npm) =
-        osdk_core::backend::npm_package::NpmPackageBackend::from_id(&req.backend)
-    {
-        let hint = npm_scope_hint(&req.backend, false);
-        let installed = npm.list_installed_for(&app.ctx, &hint)?;
-        match &req.spec {
-            VersionSpec::Exact(version) => {
-                select_installed_version(&req.backend, &req.spec, installed)?;
-                version.clone()
-            }
-            VersionSpec::Prefix(_) => select_installed_version(&req.backend, &req.spec, installed)?,
+    let npm_backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&req.backend);
+    let selected_npm = if global {
+        Some(select_global_npm_version(
+            app,
+            &req,
+            requested_spec_literal(&tool).is_some(),
+        )?)
+    } else if let Some(npm) = npm_backend.as_ref() {
+        let hint = npm_scope_hint(&req, false);
+        let installed = npm.list_installed_identities_for(&app.ctx, &hint)?;
+        let spec = match &req.spec {
+            VersionSpec::Exact(_) | VersionSpec::Prefix(_) => &req.spec,
             other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
-        }
+        };
+        Some(select_installed_npm_identity(
+            &req.backend,
+            spec,
+            installed,
+        )?)
+    } else {
+        None
+    };
+    let version = if let Some(selected) = selected_npm.as_ref() {
+        selected.version.clone()
     } else {
         match &req.spec {
             VersionSpec::Exact(v) => v.clone(),
@@ -2045,7 +2068,10 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
             other => return Err(anyhow!(t!("err.specify_exact", spec = other))),
         }
     };
-    let tv = ToolVersion::new(&req.backend, &version);
+    let mut tv = selected_npm.unwrap_or_else(|| ToolVersion::new(&req.backend, &version));
+    if tv.options.is_empty() {
+        tv.options = req.options.clone();
+    }
     let question = t!("prompt.uninstall", tool = tv);
     if !app.prompt.confirm(&question)? {
         println!("{}", t!("msg.cancelled"));
@@ -2074,8 +2100,9 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     Ok(())
 }
 
-fn npm_scope_hint(backend: &str, global: bool) -> ToolVersion {
-    let mut hint = ToolVersion::new(backend, "scope-selection");
+fn npm_scope_hint(request: &ToolRequest, global: bool) -> ToolVersion {
+    let mut hint = ToolVersion::new(&request.backend, "scope-selection");
+    hint.options = request.options.clone();
     if global {
         hint.options.insert(
             osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION.into(),
@@ -2089,13 +2116,59 @@ fn select_global_npm_version(
     app: &App,
     request: &ToolRequest,
     explicit_spec: bool,
-) -> Result<String> {
+) -> Result<ToolVersion> {
     let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&request.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?;
-    let hint = npm_scope_hint(&request.backend, true);
-    let installed = backend.list_installed_for(&app.ctx, &hint)?;
+    let hint = npm_scope_hint(request, true);
+    let installed = backend.list_installed_identities_for(&app.ctx, &hint)?;
     let spec = global_npm_selection_spec(app, request, explicit_spec)?;
-    select_installed_version(&request.backend, &spec, installed)
+    let selected_version = select_installed_version(
+        &request.backend,
+        &spec,
+        installed
+            .iter()
+            .map(|candidate| candidate.version.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    )?;
+    if !explicit_spec {
+        let lock_path = app.ctx.dirs.user_lock_file();
+        if lock_path.is_file() {
+            if let Some(locked) = crate::lockfile::locked_requests(&lock_path, app.ctx.platform)?
+                .into_iter()
+                .flatten()
+                .find(|locked| {
+                    locked.backend == request.backend
+                        && locked.spec == VersionSpec::Exact(selected_version.clone())
+                        && locked
+                            .options
+                            .get(osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION)
+                            .map(String::as_str)
+                            == Some(osdk_core::npm_tools::ToolScope::Global.as_str())
+                })
+            {
+                let mut version = ToolVersion::new(&request.backend, &selected_version);
+                version.options = locked.options;
+                if backend
+                    .where_install_root_for(&app.ctx, &version)?
+                    .is_some()
+                {
+                    return Ok(version);
+                }
+            }
+        }
+    }
+    let mut version = select_installed_npm_identity(
+        &request.backend,
+        &VersionSpec::Exact(selected_version),
+        installed,
+    )?;
+    version.options.insert(
+        osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION.into(),
+        osdk_core::npm_tools::ToolScope::Global.as_str().into(),
+    );
+    Ok(version)
 }
 
 fn global_npm_selection_spec(
@@ -2164,6 +2237,32 @@ fn select_installed_version(
         .ok_or_else(|| anyhow!("{backend} is not installed"))
 }
 
+fn select_installed_npm_identity(
+    backend: &str,
+    spec: &VersionSpec,
+    installed: Vec<ToolVersion>,
+) -> Result<ToolVersion> {
+    let versions = installed
+        .iter()
+        .map(|candidate| candidate.version.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let selected = select_installed_version(backend, spec, versions)?;
+    let mut matches = installed
+        .into_iter()
+        .filter(|candidate| candidate.version == selected);
+    let candidate = matches
+        .next()
+        .ok_or_else(|| anyhow!("{backend}@{selected} is not installed"))?;
+    if matches.next().is_some() {
+        anyhow::bail!(
+            "{backend}@{selected} has multiple installed identities; use a lockfile-backed selection or remove an obsolete variant"
+        );
+    }
+    Ok(candidate)
+}
+
 fn uninstall_global_npm(app: &App, version: &ToolVersion) -> Result<()> {
     let backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", version.backend))?;
@@ -2180,8 +2279,10 @@ fn uninstall_global_npm(app: &App, version: &ToolVersion) -> Result<()> {
             .into_iter()
             .flat_map(|manifest| manifest.bins.into_iter().map(|bin| bin.name))
             .collect::<std::collections::BTreeSet<_>>();
-        let installed_before =
-            backend.list_installed_for(&app.ctx, &npm_scope_hint(&version.backend, true))?;
+        let installed_before = backend.list_installed_for(
+            &app.ctx,
+            &npm_scope_hint(&exact_request_for_version(version), true),
+        )?;
         let remove_config = global_config_selects_version(app, version, &installed_before)?;
         let remove_lock = global_lock_selects_version(app, version)?;
         let snapshots = global_npm_metadata_snapshots(app, &bin_names)?;
@@ -2259,6 +2360,8 @@ fn global_npm_install_roots(
 struct GlobalNpmUninstallJournal {
     backend: String,
     version: String,
+    #[serde(default)]
+    options: std::collections::BTreeMap<String, String>,
     roots: Vec<GlobalNpmUninstallRoot>,
     bin_names: Vec<String>,
     config_entry: Option<osdk_core::config::ToolConfigEntry>,
@@ -2316,6 +2419,7 @@ impl GlobalNpmUninstallTransaction {
             journal: GlobalNpmUninstallJournal {
                 backend: version.backend.clone(),
                 version: version.version.clone(),
+                options: version.options.clone(),
                 roots,
                 bin_names: bin_names.iter().cloned().collect(),
                 config_entry: remove_config
@@ -2551,7 +2655,8 @@ pub(crate) fn recover_interrupted_global_npm_uninstalls(app: &App) -> Result<()>
 fn recover_global_npm_uninstall(app: &App, path: &std::path::Path) -> Result<()> {
     let journal = read_global_npm_uninstall_journal(path)?;
     validate_global_npm_uninstall_journal(app, path, &journal)?;
-    let version = ToolVersion::new(&journal.backend, &journal.version);
+    let mut version = ToolVersion::new(&journal.backend, &journal.version);
+    version.options = journal.options.clone();
     let bin_names = journal.bin_names.iter().cloned().collect();
     if journal.committed {
         finish_recovered_global_npm_uninstall(app, path, &journal, &version, &bin_names)
@@ -2577,7 +2682,8 @@ fn validate_global_npm_uninstall_journal(
     if journal.version.is_empty() || journal.roots.is_empty() {
         anyhow::bail!("incomplete global npm uninstall journal {}", path.display());
     }
-    let version = ToolVersion::new(&journal.backend, &journal.version);
+    let mut version = ToolVersion::new(&journal.backend, &journal.version);
+    version.options = journal.options.clone();
     let expected_path = global_npm_uninstall_journal_path(&app.ctx.dirs, &version);
     if path != expected_path {
         anyhow::bail!(
@@ -2587,8 +2693,9 @@ fn validate_global_npm_uninstall_journal(
         );
     }
     let expected_roots = [
-        backend.global_install_root(&app.ctx, &journal.version),
-        backend.isolated_install_root(&app.ctx, &journal.version),
+        backend.global_install_root_for(&app.ctx, &version)?,
+        backend.legacy_global_install_root_path(&app.ctx, &journal.version),
+        backend.legacy_isolated_install_root(&app.ctx, &journal.version),
     ];
     let mut originals = std::collections::BTreeSet::new();
     let mut backups = std::collections::BTreeSet::new();
@@ -3076,28 +3183,48 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
 
 pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
     let explicit_spec = requested_spec_literal(&tool).is_some();
-    let req = ToolRequest::parse(&tool).map_err(|e| anyhow!("{e}"))?;
+    let req = if global {
+        resolve_explicit_request(
+            app,
+            &tool,
+            &app.ctx.config.global_tool_configs,
+            &app.ctx.config.global_tools,
+        )?
+    } else {
+        resolve_explicit_request(
+            app,
+            &tool,
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+        )?
+    };
     let backend = app.registry.get(&req.backend)?;
     if global && !req.backend.starts_with("npm:") {
         anyhow::bail!("--global is only supported for npm:<package> where requests");
     }
     let npm_backend = osdk_core::backend::npm_package::NpmPackageBackend::from_id(backend.id());
-    let mut npm_scope = npm_backend
-        .as_ref()
-        .map(|_| npm_scope_hint(backend.id(), global));
+    let mut selected_npm = None;
     let version = if let Some(npm) = npm_backend.as_ref() {
-        let installed =
-            npm.list_installed_for(&app.ctx, npm_scope.as_ref().expect("npm scope hint exists"))?;
-        let requested = if global {
-            global_npm_selection_spec(app, &req, explicit_spec)?
-        } else if !matches!(req.spec, VersionSpec::Exact(_)) {
-            osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
-                .map(|request| request.spec)
-                .unwrap_or(req.spec.clone())
+        if global {
+            let selected = select_global_npm_version(app, &req, explicit_spec)?;
+            let version = selected.version.clone();
+            selected_npm = Some(selected);
+            version
         } else {
-            req.spec.clone()
-        };
-        select_installed_version(backend.id(), &requested, installed)?
+            let hint = npm_scope_hint(&req, false);
+            let installed = npm.list_installed_identities_for(&app.ctx, &hint)?;
+            let requested = if !matches!(req.spec, VersionSpec::Exact(_)) {
+                osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
+                    .map(|request| request.spec)
+                    .unwrap_or(req.spec.clone())
+            } else {
+                req.spec.clone()
+            };
+            let selected = select_installed_npm_identity(backend.id(), &requested, installed)?;
+            let version = selected.version.clone();
+            selected_npm = Some(selected);
+            version
+        }
     } else {
         match &req.spec {
             VersionSpec::Exact(v) => v.clone(),
@@ -3152,9 +3279,20 @@ pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
         }
     };
     let dir = if let Some(npm) = npm_backend {
-        let mut selected = npm_scope.take().expect("npm scope hint exists");
-        selected.version.clone_from(&version);
+        let selected = selected_npm
+            .take()
+            .expect("npm selection retains its complete install identity");
         npm.where_install_root_for(&app.ctx, &selected)?
+    } else if backend.id().contains(':') {
+        let mut selected = ToolVersion::new(backend.id(), &version);
+        selected.options = req.options.clone();
+        let request = exact_request_for_version(&selected);
+        let report = osdk_core::shim::scan_dynamic_installs(&app.ctx)?;
+        Some(
+            osdk_core::shim::validated_dynamic_install(&app.ctx, &report, &request, &version)?
+                .install_root()
+                .to_path_buf(),
+        )
     } else {
         let path = app.ctx.dirs.install_path(backend.id(), &version);
         path.exists().then_some(path)
@@ -4528,15 +4666,39 @@ fn installed_shim_owners(
     let mut owners =
         std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
     let dynamic_report = dynamic_scan_report(app)?;
-    let configured_dynamic = osdk_core::shim::configured_dynamic_ids(&app.ctx, &dynamic_report)
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
     for (name, candidates) in osdk_core::shim::dynamic_bin_ownership(&dynamic_report) {
         let configured_owners = candidates
             .into_iter()
             .filter_map(|candidate| {
-                configured_dynamic
-                    .contains(&candidate.canonical_id)
+                let request = osdk_core::shim::dynamic_request_from_config(
+                    &app.ctx,
+                    &candidate.canonical_id,
+                )?;
+                let install = dynamic_report.installs.iter().find(|install| {
+                    install.install_root == candidate.install_root
+                        && install.canonical_id == candidate.canonical_id
+                })?;
+                let version = install.manifest.identity.version.as_str();
+                let selected = app
+                    .registry
+                    .get(&candidate.canonical_id)
+                    .ok()
+                    .and_then(|backend| {
+                        request_selects_installed_version(app, backend.as_ref(), &request, version)
+                            .ok()
+                    })
+                    .unwrap_or(false);
+                let mut selected_version = ToolVersion::new(&request.backend, version);
+                selected_version.options = request.options.clone();
+                let selected_root = osdk_core::shim::validated_dynamic_install(
+                    &app.ctx,
+                    &dynamic_report,
+                    &request,
+                    version,
+                )
+                .ok()
+                .map(|install| install.install_root().to_path_buf());
+                (selected && selected_root.as_ref() == Some(&candidate.install_root))
                     .then_some(candidate.canonical_id)
             })
             .collect::<std::collections::BTreeSet<_>>();
@@ -4762,6 +4924,28 @@ mod command_flow_tests {
 
         assert_eq!(request.options["installer"], "npm");
         assert_eq!(request.options["allow_builds"], "project-build");
+    }
+
+    #[test]
+    fn npm_lifecycle_hint_preserves_request_identity_options() {
+        let mut request =
+            ToolRequest::parse("npm:fixture-cli[installer=pnpm,allow_builds='sharp,esbuild']@3")
+                .unwrap();
+        request
+            .options
+            .insert("__osdk_npm_node_version".into(), "22.1.0".into());
+
+        let project = npm_scope_hint(&request, false);
+        assert_eq!(project.options, request.options);
+
+        let global = npm_scope_hint(&request, true);
+        assert_eq!(global.options["installer"], "pnpm");
+        assert_eq!(global.options["allow_builds"], "esbuild,sharp");
+        assert_eq!(global.options["__osdk_npm_node_version"], "22.1.0");
+        assert_eq!(
+            global.options[osdk_core::npm_tools::LOCKED_NPM_SCOPE_OPTION],
+            osdk_core::npm_tools::ToolScope::Global.as_str()
+        );
     }
 
     #[test]
@@ -5211,7 +5395,29 @@ mod command_flow_tests {
         bin_name: &str,
         options: &std::collections::BTreeMap<String, String>,
     ) {
-        let root = app.ctx.dirs.install_path(backend, version);
+        let checksum = format!("sha256:{}", "a".repeat(64));
+        let materials = if backend.starts_with("github:") {
+            std::collections::BTreeMap::from([
+                ("artifact-file".into(), "fixture.bin".into()),
+                ("artifact-checksum".into(), checksum.clone()),
+            ])
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let identity = osdk_core::tool::InstallIdentity::new(
+            backend,
+            version,
+            app.ctx.platform.to_string(),
+            osdk_core::tool::InstallScope::Isolated,
+            options,
+            Vec::new(),
+            materials,
+        )
+        .unwrap();
+        let root = osdk_core::dirs::InstallLocator::new(&app.ctx.dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
         let bin = root.join("bin").join(bin_name);
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, b"fixture").unwrap();
@@ -5221,11 +5427,21 @@ mod command_flow_tests {
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend)
-            .unwrap()
-            .with_identity_options(options)
+        if backend.starts_with("github:") {
+            let receipt = osdk_core::pipeline::ArtifactReceipt {
+                url: "https://example.test/fixture.bin".into(),
+                file_name: "fixture.bin".into(),
+                checksum: Some(checksum),
+                evidence: Vec::new(),
+            };
+            std::fs::write(
+                root.join(".osdk-artifact.json"),
+                serde_json::to_vec_pretty(&receipt).unwrap(),
+            )
             .unwrap();
-        manifest.version = Some(version.into());
+        }
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: bin_name.into(),
             path: format!("bin/{bin_name}"),
@@ -5256,7 +5472,12 @@ mod command_flow_tests {
         let error =
             managed_bin_paths(&app.ctx, backend.as_ref(), &version, Some(&request)).unwrap_err();
 
-        assert!(error.to_string().contains("different identity"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("no complete install matching its unlocked request"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -5360,22 +5581,27 @@ mod command_flow_tests {
 
     fn write_global_npm_uninstall_fixture(
         app: &App,
-        version: &ToolVersion,
+        version: &mut ToolVersion,
         bin_name: &str,
     ) -> std::path::PathBuf {
         let backend =
             osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend).unwrap();
-        let root = backend.global_install_root(&app.ctx, &version.version);
+        version
+            .options
+            .entry(osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into())
+            .or_insert_with(|| "22.1.0".into());
+        let root = backend.global_install_root_for(&app.ctx, version).unwrap();
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::write(root.join("bin").join(bin_name), b"fixture").unwrap();
+        let identity = backend
+            .install_identity(&app.ctx, version, osdk_core::npm_tools::ToolScope::Global)
+            .unwrap();
         let mut manifest =
-            osdk_core::inventory::DynamicToolManifest::new(&version.backend).unwrap();
-        manifest.version = Some(version.version.clone());
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: bin_name.into(),
             path: format!("bin/{bin_name}"),
         }];
-        manifest.metadata.insert("scope".into(), "global".into());
         manifest.write_atomic(&root).unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
         root
@@ -5389,8 +5615,8 @@ mod command_flow_tests {
         std::fs::write(&config_path, "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n").unwrap();
         let config = osdk_core::config::Config::load_user(&config_path).unwrap();
         let app = app_with_config(&temporary, config);
-        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
-        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &mut version, "fixture-cli");
         let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
         let transaction = GlobalNpmUninstallTransaction::prepare(
             &app,
@@ -5423,8 +5649,8 @@ mod command_flow_tests {
         std::fs::write(&config_path, "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n").unwrap();
         let config = osdk_core::config::Config::load_user(&config_path).unwrap();
         let app = app_with_config(&temporary, config);
-        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
-        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &mut version, "fixture-cli");
         let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
         let mut transaction = GlobalNpmUninstallTransaction::prepare(
             &app,
@@ -5458,15 +5684,20 @@ mod command_flow_tests {
             osdk_core::config::Config::load_user(&temporary.path().join("config/config.toml"))
                 .unwrap();
         let app = app_with_config(&temporary, config);
-        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        version.options.insert(
+            osdk_core::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            "22.1.0".into(),
+        );
         let backend =
             osdk_core::backend::npm_package::NpmPackageBackend::from_id(&version.backend).unwrap();
         let path = global_npm_uninstall_journal_path(&app.ctx.dirs, &version);
         let journal = GlobalNpmUninstallJournal {
             backend: version.backend.clone(),
             version: version.version.clone(),
+            options: version.options.clone(),
             roots: vec![GlobalNpmUninstallRoot {
-                original: backend.global_install_root(&app.ctx, &version.version),
+                original: backend.global_install_root_for(&app.ctx, &version).unwrap(),
                 backup: temporary.path().join("outside"),
             }],
             bin_names: vec!["fixture-cli".into()],
@@ -5497,8 +5728,8 @@ mod command_flow_tests {
         .unwrap();
         let config = osdk_core::config::Config::load_user(&config_path).unwrap();
         let app = app_with_config(&temporary, config);
-        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
-        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &mut version, "fixture-cli");
         let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
         let mut transaction = GlobalNpmUninstallTransaction::prepare(
             &app,
@@ -5531,8 +5762,8 @@ mod command_flow_tests {
         std::fs::write(&config_path, "[tools]\n\"npm:fixture-cli\" = \"1.2.3\"\n").unwrap();
         let config = osdk_core::config::Config::load_user(&config_path).unwrap();
         let app = app_with_config(&temporary, config);
-        let version = ToolVersion::new("npm:fixture-cli", "1.2.3");
-        let root = write_global_npm_uninstall_fixture(&app, &version, "fixture-cli");
+        let mut version = ToolVersion::new("npm:fixture-cli", "1.2.3");
+        let root = write_global_npm_uninstall_fixture(&app, &mut version, "fixture-cli");
         let bins = std::collections::BTreeSet::from(["fixture-cli".to_string()]);
         let journal_path = global_npm_uninstall_journal_path(&app.ctx.dirs, &version);
 

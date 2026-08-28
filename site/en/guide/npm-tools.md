@@ -228,10 +228,12 @@ osdk reshim
 ```
 
 Plain `where` follows the explicit/current configuration scope and otherwise
-retains its isolated-first compatibility behavior. Plain `uninstall` removes
-only the isolated installation; both commands require `--global` to target the
-user-wide installation. A package added to a real project remains owned by that
-project and its package manager. Activated commands come from the curated
+retains its isolated-first compatibility behavior. Within that scope, both
+commands select the exact configured install identity; plain `uninstall` removes
+only that isolated identity, while `--global` targets the matching user-wide
+identity. Other identities of the same package version remain installed. A
+package added to a real project remains owned by that project and its package
+manager. Activated commands come from the curated
 generation, whose launchers target the configured package's validated declared
 files under `node_modules/<package>`.
 `osdk list-remote npm:prettier [FILTER]` lists stable registry versions.
@@ -263,22 +265,26 @@ named-package form.
 ## Option changes and reinstallation
 
 For osdk-owned isolated and global installs, `installer` and `allow_builds` are
-part of the installation identity, not hints that may be ignored after a version
-match. Changing either option at the same package version prevents reuse of the
-existing installation. Activation and shims also refuse to run an install whose
-recorded options differ from the active configuration.
+material options in the installation identity, not hints that may be ignored
+after a version match. `.osdk-install.json` schema 1 stores a nested `identity`
+object containing `tool`, `version`, `platform`, `scope`, `material_options`,
+`dependencies`, `materials`, and `install_id`. The `install_id` is a canonical
+`b3-v2:` digest of that identity.
 
-Installs created before option identity was recorded remain discoverable, but
-they cannot be reused or executed. Re-run the same `install` or global `use`; the
-npm workflow rebuilds or replaces that version and records its current identity.
-An offline rebuild still needs the native lock or graph and warmed cache/store
-that the selected installer normally requires. Do not edit `.osdk-tool.json` by
-hand.
+The physical root includes this fingerprint, so two identities of the same npm
+package and exact version can coexist in one scope. Reuse, activation, shim
+dispatch, `where`, `uninstall`, and `reshim` derive the same exact identity from
+the active request and select only its root; they never fall back to a sibling
+identity merely because its version matches.
 
-Physical install directories are still keyed by package, exact version, and
-isolated/global scope rather than by options. Two option variants of the same
-package version therefore cannot coexist in one scope; switching options replaces
-that version's installation.
+Older `.osdk-tool.json` files are scanned only to detect and report legacy
+installs. They cannot authorize reuse or execution, regardless of whether their
+old inventory schema is 1 or 2; there is no dynamic-inventory schema-1/schema-2
+compatibility path. Reinstall to create `.osdk-install.json` schema 1. An offline
+reinstall still needs the native lock or graph and warmed cache/store required by
+the selected installer. Do not edit either identity file by hand. Project-managed
+npm packages remain owned by the real project and its curated `.osdk/npm-bin`
+generation, not by these fingerprinted install roots.
 
 ## Sources and shared storage
 
@@ -323,9 +329,10 @@ Commit `package.json`, the native project lock, `osdk.toml`, and `osdk.lock` for
 a project workflow. Legacy lock-schema-2 graph sidecars remain readable for
 compatibility, but current lock-schema-3 writes do not create a new sidecar or
 embed its payload.
-This lock schema is independent of `.osdk-tool.json` inventory schema 2: the
-inventory gates local reuse, while `osdk.lock` schema 3 records options and npm
-replay metadata.
+This lock schema is independent of `.osdk-install.json` schema 1: the install
+identity selects local storage and lifecycle operations, while `osdk.lock` schema
+3 records options and npm replay metadata. `.osdk-tool.json` is legacy detection
+metadata only.
 
 For installer planning, metadata validation, native-prefix isolation, and the
 activation safety checks, see [npm tool implementation](./implementation/npm-tools).

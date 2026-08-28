@@ -3114,6 +3114,7 @@ dependencies = [
  "globset",
  "hex",
  "indicatif",
+ "libc",
  "minisign-verify",
  "once_cell",
  "reflink-copy",

@@ -206,8 +206,7 @@ osdk list-remote github:sharkdp/fd
 对 osdk 自有 GitHub 安装，受支持的 asset、平台、catalog 摘要与布局选项属于动态安装
 身份。`catalog-url` 可用于获取，
 但不会持久化到动态身份；必填的 `catalog-sha256` 标识 catalog 内容。含 userinfo、查询参数或
-fragment 的 HTTP(S) catalog URL 会被拒绝，避免通过这个选项持久化凭据。未知公开选项会在安装前拒绝；若同一版本的现有安装缺少新身份或身份不同，osdk 不会
-执行它，请先卸载再重新安装。物理安装路径仍以版本为键，因此同版本的不同选项变体不能共存。
+fragment 的 HTTP(S) catalog URL 会被拒绝，避免通过这个选项持久化凭据。未知公开选项会在安装前拒绝；若同一版本的现有安装缺少新身份或身份不同，osdk 不会执行它。每个规范身份都记录在 `.osdk-install.json` schema 1 中，带 `b3-v2:` `install_id` 并使用独立的指纹化根，因此同版本变体可以共存。复用、activation、shim、`where`、uninstall 与 `reshim` 都由配置的精确身份驱动；旧 `.osdk-tool.json` 状态只会被识别，绝不会被复用或执行。
 
 ```bash
 osdk install github:owner/repo@1.2.3 \

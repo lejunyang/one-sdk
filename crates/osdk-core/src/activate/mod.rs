@@ -763,6 +763,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::backend::Backend;
     use crate::config::{Config, Settings, SourcesConfig};
     use crate::dirs::Dirs;
     use crate::platform::Platform;
@@ -1008,9 +1009,33 @@ mod tests {
         let project = temporary.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
 
-        let valid_root = ctx.dirs.install_path("npm:fixture-cli", "1.2.3");
-        let mut manifest = crate::inventory::DynamicToolManifest::new("npm:fixture-cli").unwrap();
-        manifest.version = Some("1.2.3".into());
+        let backend =
+            crate::backend::npm_package::NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
+        let mut version = ToolVersion::new(backend.id(), "1.2.3");
+        version.options.insert(
+            crate::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            "1.0.0".into(),
+        );
+        let identity = crate::tool::InstallIdentity::new(
+            backend.id(),
+            &version.version,
+            ctx.platform.to_string(),
+            crate::tool::InstallScope::Isolated,
+            &version.options,
+            vec![crate::tool::InstallDependency {
+                kind: crate::tool::InstallDependencyKind::Runtime,
+                id: "node".into(),
+                version: "1.0.0".into(),
+                identity: None,
+            }],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let valid_root = crate::dirs::InstallLocator::new(&ctx.dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
+        let mut manifest = crate::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins.push(crate::inventory::DynamicToolBin {
             name: "fixture-cli".into(),
             path: "bin/fixture-cli".into(),
@@ -1050,20 +1075,47 @@ mod tests {
         manifest_options: BTreeMap<String, String>,
     ) -> (Ctx, std::path::PathBuf, std::path::PathBuf) {
         let mut ctx = test_ctx(root, &[("npm:fixture-cli", "1.2.3")]);
+        let mut configured_options = configured_options;
+        configured_options.insert(
+            crate::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            crate::config::ToolConfigValue::String("1.0.0".into()),
+        );
         ctx.config.tool_configs.insert(
             "npm:fixture-cli".into(),
             crate::config::ToolConfigEntry::structured("1.2.3", configured_options),
         );
-        let install_root = ctx.dirs.install_path("npm:fixture-cli", "1.2.3");
+        let backend =
+            crate::backend::npm_package::NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
+        let mut version = ToolVersion::new(backend.id(), "1.2.3");
+        version.options = manifest_options;
+        version.options.insert(
+            crate::backend::npm_package::LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            "1.0.0".into(),
+        );
+        let identity = crate::tool::InstallIdentity::new(
+            backend.id(),
+            &version.version,
+            ctx.platform.to_string(),
+            crate::tool::InstallScope::Isolated,
+            &version.options,
+            vec![crate::tool::InstallDependency {
+                kind: crate::tool::InstallDependencyKind::Runtime,
+                id: "node".into(),
+                version: "1.0.0".into(),
+                identity: None,
+            }],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let install_root = crate::dirs::InstallLocator::new(&ctx.dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
         let bin = install_root.join("bin/fixture-cli");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, b"fixture").unwrap();
         std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
-        let mut manifest = crate::inventory::DynamicToolManifest::new("npm:fixture-cli")
-            .unwrap()
-            .with_identity_options(&manifest_options)
-            .unwrap();
-        manifest.version = Some("1.2.3".into());
+        let mut manifest = crate::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins.push(crate::inventory::DynamicToolBin {
             name: "fixture-cli".into(),
             path: "bin/fixture-cli".into(),
@@ -1125,22 +1177,27 @@ mod tests {
     }
 
     #[test]
-    fn activation_rejects_configured_dynamic_schema_one_inventory() {
+    fn activation_rejects_legacy_dynamic_inventory() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
         let (ctx, install_root, _) =
             configured_dynamic_fixture(temporary.path(), BTreeMap::new(), BTreeMap::new());
-        let path = crate::inventory::DynamicToolManifest::manifest_path(&install_root);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        value["schema"] = 1.into();
-        value.as_object_mut().unwrap().remove("option_fingerprint");
-        value.as_object_mut().unwrap().remove("identity_options");
-        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        std::fs::remove_file(crate::inventory::DynamicToolManifest::manifest_path(
+            &install_root,
+        ))
+        .unwrap();
+        std::fs::write(
+            install_root.join(crate::inventory::LEGACY_INVENTORY_FILE),
+            r#"{"schema":2,"id":"npm:fixture-cli","version":"1.2.3","bins":[{"name":"fixture-cli","path":"bin/fixture-cli"}]}"#,
+        )
+        .unwrap();
 
         let message = activation_error(&ctx, &project);
-        assert!(message.contains("different identity"), "{message}");
+        assert!(
+            message.contains("missing or invalid install identity"),
+            "{message}"
+        );
         assert!(message.contains("reinstall"), "{message}");
     }
 
@@ -1159,7 +1216,10 @@ mod tests {
         );
 
         let message = activation_error(&ctx, &project);
-        assert!(message.contains("different identity"), "{message}");
+        assert!(
+            message.contains("no complete selected install"),
+            "{message}"
+        );
         assert!(message.contains("reinstall"), "{message}");
     }
 
@@ -1170,13 +1230,28 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let (ctx, install_root, _) =
             configured_dynamic_fixture(temporary.path(), BTreeMap::new(), BTreeMap::new());
-        let mut manifest = crate::inventory::DynamicToolManifest::load(&install_root).unwrap();
-        manifest.version = Some("9.9.9".into());
-        manifest.write_atomic(&install_root).unwrap();
+        let old_manifest = crate::inventory::DynamicToolManifest::load(&install_root).unwrap();
+        let identity = crate::tool::InstallIdentity::new(
+            &old_manifest.identity.tool,
+            "9.9.9",
+            &old_manifest.identity.platform,
+            old_manifest.identity.scope,
+            &old_manifest.identity.material_options,
+            old_manifest.identity.dependencies,
+            old_manifest.identity.materials,
+        )
+        .unwrap();
+        let mut manifest = crate::inventory::DynamicToolManifest::from_identity(identity).unwrap();
+        manifest.bins = old_manifest.bins;
+        let path = crate::inventory::DynamicToolManifest::manifest_path(&install_root);
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 
         let message = activation_error(&ctx, &project);
-        assert!(message.contains("different identity"), "{message}");
-        assert!(message.contains("reinstall"), "{message}");
+        assert!(
+            message.contains("refusing dynamic tool inventory scan"),
+            "{message}"
+        );
+        assert!(message.contains("identity root"), "{message}");
     }
 
     #[test]

@@ -323,7 +323,16 @@ fn manifest_bound_node_bin_paths(
     node_backend: &dyn osdk_core::backend::Backend,
 ) -> Result<Vec<PathBuf>, String> {
     let required = || osdk_core::t!("err.shim_managed_node_required", tool = npm_backend);
-    let recorded = install.metadata("node_version").ok_or_else(&required)?;
+    let recorded = install
+        .identity()
+        .dependencies
+        .iter()
+        .find(|dependency| {
+            dependency.kind == osdk_core::tool::InstallDependencyKind::Runtime
+                && dependency.id == "node"
+        })
+        .map(|dependency| dependency.version.as_str())
+        .ok_or_else(&required)?;
     let node_version = match VersionSpec::parse(recorded) {
         // The manifest records the concrete runtime identity selected during
         // installation. Reject aliases, ranges, prefixes, and even textual

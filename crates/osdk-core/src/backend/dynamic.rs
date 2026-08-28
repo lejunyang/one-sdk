@@ -4,9 +4,11 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, fmt::Write as _};
 
 use super::Backend;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::tool::{InstallDependency, InstallIdentity};
 
 const FINGERPRINT_DOMAIN: &[u8] = b"osdk-dynamic-options-v1";
+const INSTALL_ID_DOMAIN: &[u8] = b"osdk-install-identity-v2";
 
 /// Canonical public options that contribute to a dynamic tool's install
 /// identity. Internal lock replay metadata is deliberately kept separate.
@@ -53,6 +55,62 @@ pub(crate) fn fingerprint_canonical_options(
     write!(&mut fingerprint, "{}", hasher.finalize().to_hex())
         .expect("writing into a String cannot fail");
     Ok(fingerprint)
+}
+
+/// Stable identity of the complete materialized install contract.
+pub fn install_identity_fingerprint(identity: &InstallIdentity) -> Result<String> {
+    let tool = crate::tool::ToolId::parse(&identity.tool)?;
+    if !tool.is_dynamic() || tool.to_string() != identity.tool {
+        return Err(Error::config(
+            "install identity contains a non-canonical dynamic tool id",
+        ));
+    }
+    crate::tool::validate_canonical_identity_options(&tool, &identity.material_options)?;
+
+    let mut hasher = blake3::Hasher::new();
+    update_length_prefixed(&mut hasher, INSTALL_ID_DOMAIN);
+    update_length_prefixed(&mut hasher, identity.tool.as_bytes());
+    update_length_prefixed(&mut hasher, identity.version.as_bytes());
+    update_length_prefixed(&mut hasher, identity.platform.as_bytes());
+    update_length_prefixed(
+        &mut hasher,
+        serde_json::to_string(&identity.scope)?.as_bytes(),
+    );
+    update_map(&mut hasher, &identity.material_options);
+    update_length_prefixed(
+        &mut hasher,
+        &(identity.dependencies.len() as u64).to_le_bytes(),
+    );
+    for dependency in &identity.dependencies {
+        update_dependency(&mut hasher, dependency)?;
+    }
+    update_map(&mut hasher, &identity.materials);
+    let mut fingerprint = String::from("b3-v2:");
+    write!(&mut fingerprint, "{}", hasher.finalize().to_hex())
+        .expect("writing into a String cannot fail");
+    Ok(fingerprint)
+}
+
+fn update_map(hasher: &mut blake3::Hasher, values: &BTreeMap<String, String>) {
+    update_length_prefixed(hasher, &(values.len() as u64).to_le_bytes());
+    for (key, value) in values {
+        update_length_prefixed(hasher, key.as_bytes());
+        update_length_prefixed(hasher, value.as_bytes());
+    }
+}
+
+fn update_dependency(hasher: &mut blake3::Hasher, dependency: &InstallDependency) -> Result<()> {
+    update_length_prefixed(hasher, serde_json::to_string(&dependency.kind)?.as_bytes());
+    update_length_prefixed(hasher, dependency.id.as_bytes());
+    update_length_prefixed(hasher, dependency.version.as_bytes());
+    match dependency.identity.as_deref() {
+        Some(identity) => {
+            update_length_prefixed(hasher, b"some");
+            update_length_prefixed(hasher, identity.as_bytes());
+        }
+        None => update_length_prefixed(hasher, b"none"),
+    }
+    Ok(())
 }
 
 fn update_length_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {

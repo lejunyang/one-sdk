@@ -6,8 +6,9 @@ osdk separates persistent installation state, content-addressed objects, and dis
 
 The default layout is below. The data and cache roots are overridable, while store and installs also have dedicated overrides; the remaining paths are derived subdirectories:
 
-- `<installs>/<tool>/<version>`: materialized SDKs and isolated tools; `<installs>` defaults to `<data>/installs` and can be overridden by `OSDK_INSTALL_DIR`.
-- `<installs>/npm-global/<package>/<version>`: canonical root for `use --global npm:<package>`; an older global manifest under `<installs>/npm/<package>/<version>` is recognized only for compatibility and migration.
+- `<installs>/<tool>/<version>`: materialized fixed-backend SDKs; `<installs>` defaults to `<data>/installs` and can be overridden by `OSDK_INSTALL_DIR`.
+- `<installs>/<dynamic-tool>/<version>/b3-v2-<digest>`: fingerprinted roots for osdk-owned isolated dynamic tools.
+- `<installs>/npm-global/<package>/<version>/b3-v2-<digest>`: fingerprinted roots for `use --global npm:<package>`. Older version-only roots containing `.osdk-tool.json` are detected as legacy state but never reused or executed.
 - `<data>/models/<name>/snapshots/<snapshot>`: materialized model snapshots.
 - `<data>/store/<aa>/<bb>/<blake3>`: CAS shared by SDK and model files.
 - `<data>/shims`: command shims.
@@ -18,12 +19,18 @@ The default layout is below. The data and cache roots are overridable, while sto
 - `<cache>/aube/v1/cache` and `<data>/store/aube`: the cache/store shared by Aube-backed isolated, project, and global npm tools; each real project or controlled install root still keeps its own native lock.
 
 `Dirs::ensure` creates the core tree during CLI initialization. Store and installs default to the same data volume so hardlinks work. `OSDK_STORE_DIR` may put the store on another volume, which can force materialization to fall back to reflink or copy.
+Each dynamic root contains `.osdk-install.json` schema 1. Its nested `identity`
+contains `tool`, `version`, `platform`, `scope`, `material_options`,
+`dependencies`, `materials`, and canonical `b3-v2:` `install_id`. This identity
+drives reuse, activation, shim dispatch, `where`, uninstall, and `reshim`; sibling
+identities may coexist. Project-managed npm state under `.osdk/npm-bin` remains a
+separate project-owned layout.
 
 ## SDK pipeline and locking
 
 Archive backends enter [`pipeline::run_with_attestation`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs#L129) in this order:
 
-1. Acquire a blocking exclusive process lock at `installs/<tool>/.locks/<version>.lock`.
+1. Fixed backends acquire a blocking exclusive process lock at `installs/<tool>/.locks/<version>.lock`. Dynamic backends acquire an identity-qualified lock and keep it through backend-specific finalization.
 2. Under the lock, check `.osdk-complete`. A complete install is reused, although requested attestation is still reverified and receipt evidence merged.
 3. Remove a stale partial directory for that version.
 4. Reuse or download the `<cache>/downloads/...` archive and verify checksum/attestation.
@@ -31,7 +38,7 @@ Archive backends enter [`pipeline::run_with_attestation`](https://github.com/lej
 6. Ingest regular files into CAS, materialize the install tree, and write `.osdk-manifest.json`.
 7. Write the artifact receipt, then write `.osdk-complete` last.
 
-The lock covers download, verification, extraction, CAS writes, materialization, and the complete marker. It therefore serializes only the **same tool/version**; different tools or versions can proceed concurrently. [`FileLock`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) is held until the function returns and released on drop. Delegate backends that invoke an upstream manager do not necessarily enter this shared archive pipeline, so the per-version lock is not an unconditional guarantee for every backend.
+The lock covers download, verification, extraction, CAS writes, materialization, and the complete marker. Fixed backends serialize the same **tool/version**; dynamic backends serialize only the same full install identity, so sibling identities can proceed independently. [`FileLock`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) is held until the function returns and released on drop. Delegate backends that invoke an upstream manager do not necessarily enter this shared archive pipeline, so this lock is not an unconditional guarantee for every backend.
 
 ## CAS writes and materialization
 

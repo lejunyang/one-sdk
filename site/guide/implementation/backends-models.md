@@ -20,11 +20,13 @@
 这两个动态命名空间对 osdk 自有安装共用选项身份合约。解析或安装前，osdk 把受支持的
 公开选项投影成
 规范 map，拒绝未知公开 key，排除内部 `__osdk_*` lock 重放 metadata，并对 backend ID 与
-规范选项计算与顺序无关、带 domain separation 的 BLAKE3 `b3-v1:` fingerprint。schema 2
-`.osdk-tool.json` inventory 同时保存 map 与 fingerprint。同版本复用、activation 与 shim
-执行都要求精确匹配，否则 fail closed。schema 1 inventory 仍可用于发现，但不能授权复用；
-迁移时必须重建或重新安装。npm 可通过 `install` 或全局 `use` 重建，GitHub 则需先显式卸载
-再重新安装。物理安装根仍以版本为键，因此同一 backend/version 的两个选项变体不能共存。
+规范选项计算与顺序无关、带 domain separation 的 BLAKE3 `b3-v2:` 身份。该身份覆盖 `tool`、
+精确 `version`、`platform`、`scope`、规范 `material_options`、`dependencies` 与 `materials`。
+`.osdk-install.json` schema 1 在嵌套 `identity` 中保存这些字段及 `install_id`，并把指纹用于
+物理安装根，因此相同 backend/version 的多个身份可以共存。复用、activation、shim 执行、
+`where`、uninstall 与 `reshim` 都要求配置精确匹配，绝不会回退到其他 fingerprint。旧
+`.osdk-tool.json` 无论 schema 1 还是 2，都只用于遗留识别，不能授权复用或执行。项目管理的
+npm 包不属于该 osdk 自有安装身份。
 
 ## 内置 backend 矩阵
 
@@ -43,8 +45,8 @@
 | `rust` (`rustup`) | rustup channel/version；官方、rsproxy、TUNA | rustup-init SHA-256；随后委托隔离 rustup | toolchain 不走归档 CAS；支持 `profile`、`components`、`targets`，设置隔离的 `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument + `@deno/<platform>` | npm SRI | 平台包；设置 `DENO_DIR` |
 | `bun` | `bun` packument + `@oven/bun-<platform>` | npm SRI | 平台包；设置 `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument；隔离安装使用 embedded Aube，项目/全局 `use` 可规划 Aube、npm 或 pnpm | 原生 lock 或 Aube graph 携带传递 integrity；默认禁脚本；osdk 自有隔离/全局安装由 schema 2 inventory 绑定 installer/build 选项 | 动态发现 `.bin`；自动加入受管 Node；lock schema 3 记录 scope、installer、可选原生 lock 身份与公开选项 |
-| `github:owner/repo` | GitHub API，限流时回退 Atom/公开 release 页面；也支持静态 catalog | checksum、可选 minisign、GitHub artifact attestation；schema 2 inventory 绑定 asset/layout 选项 | 自动选择 host asset；支持归档或裸二进制；复杂命名可用 regex/template/bin/rename/strip 规则 |
+| `npm:<package>` | npm packument；隔离安装使用 embedded Aube，项目/全局 `use` 可规划 Aube、npm 或 pnpm | 原生 lock 或 Aube graph 携带传递 integrity；默认禁脚本；`.osdk-install.json` schema 1 在指纹化 osdk 自有隔离/全局根中绑定 installer/build 身份 | 动态发现 `.bin`；自动加入受管 Node；lock schema 3 记录 scope、installer、可选原生 lock 身份与公开选项 |
+| `github:owner/repo` | GitHub API，限流时回退 Atom/公开 release 页面；也支持静态 catalog | checksum、可选 minisign、GitHub artifact attestation；`.osdk-install.json` schema 1 在指纹化根中绑定 asset/layout/material 身份 | 自动选择 host asset；支持归档或裸二进制；复杂命名可用 regex/template/bin/rename/strip 规则 |
 
 上述实现位于 [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/)。npm 系列共用 [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs) 的 packument、版本与 SRI 解析。通用来源排序位于 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)。
 动态 npm backend 的项目/全局/隔离安装、缓存、metadata-only lock、旧 lock schema 2 sidecar
@@ -59,7 +61,7 @@ checksum 与子目录，再考虑当前模板。因此声明式工具与内置�
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。GitHub API、网页、Raw、release asset 和 attestation URL 都通过同一组规范化来源候选，但 token 只发给官方 API host。
 其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入
-校验，再写入 schema 2 动态 inventory。`catalog-url` 可用于获取，但会被刻意排除；必填的
+校验，再写入 schema 1 动态安装 manifest。`catalog-url` 可用于获取，但会被刻意排除；必填的
 `catalog-sha256` 在不把 catalog 位置写入动态 inventory 时标识内容，且含 userinfo、查询参数或 fragment 的 HTTP(S)
 catalog URL 会被拒绝。因此，单有完成
 标记不能复用由不同选项或旧 inventory 生成的 GitHub 安装；锁定重放还会核对已持久化

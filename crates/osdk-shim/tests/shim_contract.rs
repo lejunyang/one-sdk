@@ -45,6 +45,80 @@ fn write_executable(path: &Path, contents: &str) {
 }
 
 #[cfg(unix)]
+fn test_dirs(root: &Path) -> osdk_core::dirs::Dirs {
+    osdk_core::dirs::Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+        "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn dynamic_npm_identity(
+    backend_id: &str,
+    version: &str,
+    scope: osdk_core::tool::InstallScope,
+    options: &std::collections::BTreeMap<String, String>,
+    node_version: Option<&str>,
+) -> osdk_core::tool::InstallIdentity {
+    let options = options.clone();
+    let dependencies = node_version
+        .map(|version| {
+            vec![osdk_core::tool::InstallDependency {
+                kind: osdk_core::tool::InstallDependencyKind::Runtime,
+                id: "node".into(),
+                version: version.into(),
+                identity: None,
+            }]
+        })
+        .unwrap_or_default();
+    osdk_core::tool::InstallIdentity::new(
+        backend_id,
+        version,
+        osdk_core::platform::Platform::current().to_string(),
+        scope,
+        &options,
+        dependencies,
+        std::collections::BTreeMap::new(),
+    )
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn dynamic_npm_root(
+    root: &Path,
+    backend_id: &str,
+    version: &str,
+    scope: osdk_core::tool::InstallScope,
+    options: &std::collections::BTreeMap<String, String>,
+    node_version: Option<&str>,
+) -> PathBuf {
+    osdk_core::dirs::InstallLocator::new(
+        &test_dirs(root),
+        dynamic_npm_identity(backend_id, version, scope, options, node_version),
+    )
+    .unwrap()
+    .install_root()
+    .to_path_buf()
+}
+
+#[cfg(unix)]
+fn isolated_dynamic_npm_root(root: &Path, backend_id: &str, version: &str) -> PathBuf {
+    dynamic_npm_root(
+        root,
+        backend_id,
+        version,
+        osdk_core::tool::InstallScope::Isolated,
+        &std::collections::BTreeMap::new(),
+        Some("1.0.0"),
+    )
+}
+
+#[cfg(unix)]
 fn install_npm_fixture(root: &Path, project: &Path, npm_script: &str, node_script: &str) {
     std::fs::create_dir_all(project).unwrap();
     std::fs::write(
@@ -77,27 +151,67 @@ fn install_dynamic_npm_fixture(
     std::fs::create_dir_all(project).unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        format!("[tools]\n{tool_key:?} = \"{backend_id}@{version}\"\nnode = \"1.0.0\"\n"),
+        format!(
+            "[tools]\n{tool_key:?} = {{ version = \"{backend_id}@{version}\", __osdk_node_version = \"1.0.0\" }}\nnode = \"1.0.0\"\n"
+        ),
     )
     .unwrap();
-    let install_root = root
-        .join("installs")
-        .join(osdk_core::dirs::sanitize_tool_id(backend_id).join(version));
+    let identity = dynamic_npm_identity(
+        backend_id,
+        version,
+        osdk_core::tool::InstallScope::Isolated,
+        &std::collections::BTreeMap::new(),
+        Some("1.0.0"),
+    );
+    let install_root = osdk_core::dirs::InstallLocator::new(&test_dirs(root), identity.clone())
+        .unwrap()
+        .install_root()
+        .to_path_buf();
+    let package = backend_id.strip_prefix("npm:").unwrap();
+    let project_dir = install_root.join("project");
     write_executable(
-        &install_root.join(format!("node_modules/.bin/{executable_name}")),
+        &project_dir.join(format!("node_modules/.bin/{executable_name}")),
         executable_script,
     );
-    let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend_id).unwrap();
-    manifest.version = Some(version.into());
-    manifest.config_keys = vec![tool_key.into()];
+    let package_dir = package.split_once('/').map_or_else(
+        || project_dir.join("node_modules").join(package),
+        |(scope, name)| project_dir.join("node_modules").join(scope).join(name),
+    );
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(
+        project_dir.join("package.json"),
+        format!(
+            r#"{{"name":"osdk-dynamic-npm-tool","private":true,"dependencies":{{{package:?}:{version:?}}}}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        package_dir.join("package.json"),
+        format!(r#"{{"name":{package:?},"version":{version:?}}}"#),
+    )
+    .unwrap();
+    let integrity = "sha512-fixture";
+    let lockfile = format!(
+        "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      '{package}':\n        specifier: {version}\n        version: {version}\n\npackages:\n  '{package}@{version}':\n    resolution: {{integrity: {integrity}}}\n"
+    );
+    std::fs::write(project_dir.join("aube-lock.yaml"), &lockfile).unwrap();
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: executable_name.into(),
-        path: format!("node_modules/.bin/{executable_name}"),
+        path: format!("project/node_modules/.bin/{executable_name}"),
     }];
-    manifest.metadata = [("node_version".into(), "1.0.0".into())]
-        .into_iter()
-        .collect();
     manifest.write_atomic(&install_root).unwrap();
+    let graph_sha256 = osdk_core::pipeline::verify::hash_bytes(
+        lockfile.as_bytes(),
+        osdk_core::pipeline::HashAlgo::Sha256,
+    );
+    std::fs::write(
+        install_root.join(".osdk-npm-receipt.json"),
+        format!(
+            r#"{{"schema":1,"provider":"npm-package","package":{package:?},"installer":"aube","node_version":"1.0.0","build_policy":"deny","graph_sha256":{graph_sha256:?},"root_integrity":{integrity:?},"root_source":"npm:{package}@{version}"}}"#
+        ),
+    )
+    .unwrap();
     std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
 
     write_executable(&root.join("installs/node/1.0.0/bin/node"), node_script);
@@ -370,7 +484,7 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
     );
     std::fs::write(
         project.join("osdk.toml"),
-        "[tools]\n\"tool.ni\" = \"npm:@antfu/ni@1.0.0\"\nnode = \"2.0.0\"\n",
+        "[tools]\n\"tool.ni\" = { version = \"npm:@antfu/ni@1.0.0\", __osdk_node_version = \"1.0.0\" }\nnode = \"2.0.0\"\n",
     )
     .unwrap();
     write_executable(
@@ -383,9 +497,8 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
     )
     .unwrap();
     write_executable(
-        &temporary
-            .path()
-            .join("installs/npm/@antfu/ni/1.0.0/node_modules/.bin/node"),
+        &isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0")
+            .join("project/node_modules/.bin/node"),
         "#!/bin/sh\nexit 99\n",
     );
     let server = ProbeServer::start("200 OK");
@@ -411,9 +524,8 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
                 .path()
                 .join("installs/node/1.0.0/bin/node")
                 .display(),
-            temporary
-                .path()
-                .join("installs/npm/@antfu/ni/1.0.0/node_modules/.bin/ni")
+            isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0")
+                .join("project/node_modules/.bin/ni")
                 .display()
         )
     );
@@ -494,7 +606,7 @@ fn configured_dynamic_shim_rejects_missing_inventory() {
         &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
         "#!/bin/sh\nexit 0\n",
     );
-    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+    let install_root = isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0");
     std::fs::remove_file(osdk_core::inventory::DynamicToolManifest::manifest_path(
         &install_root,
     ))
@@ -524,7 +636,7 @@ fn configured_dynamic_shim_rejects_missing_completion_marker() {
         &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
         "#!/bin/sh\nexit 0\n",
     );
-    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
+    let install_root = isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0");
     std::fs::remove_file(install_root.join(".osdk-complete")).unwrap();
 
     assert_dynamic_identity_rejected(
@@ -537,7 +649,7 @@ fn configured_dynamic_shim_rejects_missing_completion_marker() {
 
 #[cfg(unix)]
 #[test]
-fn configured_dynamic_shim_rejects_schema_one_inventory() {
+fn configured_dynamic_shim_rejects_legacy_inventory() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     let log = temporary.path().join("dynamic.log");
@@ -551,15 +663,23 @@ fn configured_dynamic_shim_rejects_schema_one_inventory() {
         &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
         "#!/bin/sh\nexit 0\n",
     );
-    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
-    let path = osdk_core::inventory::DynamicToolManifest::manifest_path(&install_root);
+    let install_root = isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0");
+    std::fs::remove_file(osdk_core::inventory::DynamicToolManifest::manifest_path(
+        &install_root,
+    ))
+    .unwrap();
     std::fs::write(
-        &path,
+        install_root.join(osdk_core::inventory::LEGACY_INVENTORY_FILE),
         r#"{"schema":1,"id":"npm:@antfu/ni","version":"1.0.0","config_keys":["tool.ni"],"bins":[{"name":"ni","path":"node_modules/.bin/ni"}],"metadata":{"node_version":"1.0.0"}}"#,
     )
     .unwrap();
 
-    assert_dynamic_identity_rejected(temporary.path(), &project, &log, "different identity");
+    assert_dynamic_identity_rejected(
+        temporary.path(),
+        &project,
+        &log,
+        "missing or invalid install identity",
+    );
 }
 
 #[cfg(unix)]
@@ -580,25 +700,40 @@ fn configured_dynamic_shim_rejects_option_identity_mismatch() {
     );
     std::fs::write(
         project.join("osdk.toml"),
-        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\" }\nnode = \"1.0.0\"\n",
+        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\", __osdk_node_version = \"1.0.0\" }\nnode = \"1.0.0\"\n",
     )
     .unwrap();
-    let install_root = temporary.path().join("installs/npm/fixture-cli/1.2.3");
+    let install_root = isolated_dynamic_npm_root(temporary.path(), "npm:fixture-cli", "1.2.3");
     let old_manifest = osdk_core::inventory::DynamicToolManifest::load(&install_root).unwrap();
-    let mut manifest = osdk_core::inventory::DynamicToolManifest::new(&old_manifest.id)
-        .unwrap()
-        .with_identity_options(&std::collections::BTreeMap::from([(
-            "installer".into(),
-            "npm".into(),
-        )]))
-        .unwrap();
-    manifest.version = old_manifest.version;
-    manifest.config_keys = old_manifest.config_keys;
+    let identity = dynamic_npm_identity(
+        &old_manifest.identity.tool,
+        &old_manifest.identity.version,
+        old_manifest.identity.scope,
+        &std::collections::BTreeMap::from([("installer".into(), "npm".into())]),
+        Some("1.0.0"),
+    );
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
     manifest.bins = old_manifest.bins;
-    manifest.metadata = old_manifest.metadata;
-    manifest.write_atomic(&install_root).unwrap();
+    let mismatch_root = osdk_core::dirs::InstallLocator::new(
+        &test_dirs(temporary.path()),
+        manifest.identity.clone(),
+    )
+    .unwrap()
+    .install_root()
+    .to_path_buf();
+    write_executable(
+        &mismatch_root.join("project/node_modules/.bin/ni"),
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+    );
+    manifest.write_atomic(&mismatch_root).unwrap();
+    std::fs::write(mismatch_root.join(".osdk-complete"), b"").unwrap();
 
-    assert_dynamic_identity_rejected(temporary.path(), &project, &log, "different identity");
+    assert_dynamic_identity_rejected(
+        temporary.path(),
+        &project,
+        &log,
+        "no complete selected install",
+    );
 }
 
 #[cfg(unix)]
@@ -611,12 +746,22 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
     std::fs::create_dir_all(temporary.path().join("config")).unwrap();
     std::fs::write(
         temporary.path().join("config/config.toml"),
-        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\" }\nnode = \"1.0.0\"\n",
+        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\", __osdk_node_version = \"1.0.0\" }\nnode = \"1.0.0\"\n",
     )
     .unwrap();
-    let global_root = temporary
-        .path()
-        .join("installs/npm-global/fixture-cli/1.2.3");
+    let global_options = std::collections::BTreeMap::from([("installer".into(), "aube".into())]);
+    let global_identity = dynamic_npm_identity(
+        "npm:fixture-cli",
+        "1.2.3",
+        osdk_core::tool::InstallScope::Global,
+        &global_options,
+        Some("1.0.0"),
+    );
+    let global_root =
+        osdk_core::dirs::InstallLocator::new(&test_dirs(temporary.path()), global_identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
     write_executable(
         &global_root.join("bin/fixture-cli"),
         &format!(
@@ -624,23 +769,33 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
             log.display()
         ),
     );
-    let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:fixture-cli")
-        .unwrap()
-        .with_identity_options(&std::collections::BTreeMap::from([(
-            "installer".into(),
-            "aube".into(),
-        )]))
-        .unwrap();
-    manifest.version = Some("1.2.3".into());
+    let mut manifest =
+        osdk_core::inventory::DynamicToolManifest::from_identity(global_identity).unwrap();
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: "fixture-cli".into(),
         path: "bin/fixture-cli".into(),
     }];
-    manifest.metadata.insert("scope".into(), "global".into());
-    manifest
-        .metadata
-        .insert("node_version".into(), "1.0.0".into());
     manifest.write_atomic(&global_root).unwrap();
+    let global_project = global_root.join("project");
+    let global_package = global_project.join("node_modules/fixture-cli");
+    std::fs::create_dir_all(&global_package).unwrap();
+    std::fs::write(
+        global_package.join("package.json"),
+        r#"{"name":"fixture-cli","version":"1.2.3"}"#,
+    )
+    .unwrap();
+    let native_lock = global_project.join("aube-lock.yaml");
+    std::fs::write(&native_lock, b"fixture").unwrap();
+    let native_lock_sha256 =
+        osdk_core::pipeline::verify::hash_file(&native_lock, osdk_core::pipeline::HashAlgo::Sha256)
+            .unwrap();
+    std::fs::write(
+        global_root.join(".osdk-npm-receipt.json"),
+        format!(
+            r#"{{"schema":1,"provider":"npm-package","package":"fixture-cli","installer":"aube","node_version":"1.0.0","build_policy":"deny","native_lock_format":"aube-v9","native_lock_sha256":{native_lock_sha256:?}}}"#
+        ),
+    )
+    .unwrap();
     std::fs::write(global_root.join(".osdk-complete"), b"").unwrap();
     write_executable(
         &temporary.path().join("installs/node/1.0.0/bin/node"),
@@ -702,7 +857,7 @@ fn dynamic_npm_shim_does_not_fall_back_when_recorded_node_is_missing() {
     .unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        "[tools]\n\"tool.ni\" = \"npm:@antfu/ni@1.0.0\"\nnode = \"2.0.0\"\n",
+        "[tools]\n\"tool.ni\" = { version = \"npm:@antfu/ni@1.0.0\", __osdk_node_version = \"1.0.0\" }\nnode = \"2.0.0\"\n",
     )
     .unwrap();
 
@@ -724,7 +879,7 @@ fn dynamic_npm_shim_does_not_fall_back_when_recorded_node_is_missing() {
 
 #[cfg(unix)]
 #[test]
-fn dynamic_npm_shim_rejects_legacy_manifest_without_node_identity() {
+fn dynamic_npm_shim_rejects_identity_without_node_dependency() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     let log = temporary.path().join("dynamic.log");
@@ -738,8 +893,28 @@ fn dynamic_npm_shim_rejects_legacy_manifest_without_node_identity() {
         &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
         "#!/bin/sh\nexit 0\n",
     );
-    let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
-    osdk_core::inventory::remove_manifest_metadata(&install_root, "node_version").unwrap();
+    let old_root = isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0");
+    let old_manifest = osdk_core::inventory::DynamicToolManifest::load(&old_root).unwrap();
+    let identity = dynamic_npm_identity(
+        "npm:@antfu/ni",
+        "1.0.0",
+        osdk_core::tool::InstallScope::Isolated,
+        &std::collections::BTreeMap::new(),
+        None,
+    );
+    let install_root =
+        osdk_core::dirs::InstallLocator::new(&test_dirs(temporary.path()), identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
+    write_executable(
+        &install_root.join("project/node_modules/.bin/ni"),
+        &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+    );
+    let mut manifest = osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
+    manifest.bins = old_manifest.bins;
+    manifest.write_atomic(&install_root).unwrap();
+    std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
 
     let output = isolated_command(temporary.path(), &project)
         .arg("ni")
@@ -749,14 +924,14 @@ fn dynamic_npm_shim_rejects_legacy_manifest_without_node_identity() {
     assert!(!output.status.success());
     assert!(
         !log.exists(),
-        "legacy manifest unexpectedly launched the CLI"
+        "manifest without a Node dependency unexpectedly launched the CLI"
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn dynamic_npm_shim_rejects_non_exact_manifest_node_identity() {
-    for recorded in ["", "latest", "1", "definitely-not-semver", " 1.0.0 "] {
+    for recorded in ["latest", "1", "definitely-not-semver"] {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");
         let log = temporary.path().join("dynamic.log");
@@ -770,11 +945,28 @@ fn dynamic_npm_shim_rejects_non_exact_manifest_node_identity() {
             &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
             "#!/bin/sh\nexit 0\n",
         );
-        let install_root = temporary.path().join("installs/npm/@antfu/ni/1.0.0");
-        osdk_core::inventory::update_manifest_metadata(&install_root, |metadata| {
-            metadata.insert("node_version".into(), recorded.into());
-        })
-        .unwrap();
+        let old_root = isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0");
+        let old_manifest = osdk_core::inventory::DynamicToolManifest::load(&old_root).unwrap();
+        let identity = dynamic_npm_identity(
+            "npm:@antfu/ni",
+            "1.0.0",
+            osdk_core::tool::InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            Some(recorded),
+        );
+        let install_root =
+            osdk_core::dirs::InstallLocator::new(&test_dirs(temporary.path()), identity.clone())
+                .unwrap();
+        let install_root = install_root.install_root().to_path_buf();
+        write_executable(
+            &install_root.join("project/node_modules/.bin/ni"),
+            &format!("#!/bin/sh\nprintf ran > {}\n", log.display()),
+        );
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
+        manifest.bins = old_manifest.bins;
+        manifest.write_atomic(&install_root).unwrap();
+        std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
 
         let output = isolated_command(temporary.path(), &project)
             .arg("ni")

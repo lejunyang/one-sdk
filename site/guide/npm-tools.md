@@ -194,8 +194,9 @@ osdk reshim
 ```
 
 普通 `where` 按显式/当前配置作用域解析，没有作用域信号时保留 isolated-first 兼容行为；
-普通 `uninstall` 只删除隔离安装。两者都必须通过 `--global` 才会操作用户级全局安装。加入
-真实项目的包仍由项目及其包管理器所有。激活命令来自筛选 generation，其中的 launcher
+在该作用域内，两条命令都会选择配置精确匹配的安装身份。普通 `uninstall` 只删除该隔离
+身份，`--global` 则操作匹配的用户级身份；同一包版本的其他身份仍然保留。加入真实项目的
+包仍由项目及其包管理器所有。激活命令来自筛选 generation，其中的 launcher
 指向 `node_modules/<package>` 下已配置包通过校验的声明文件。
 `osdk list-remote npm:prettier [FILTER]` 可列出 Registry 中的稳定版本。
 
@@ -222,16 +223,20 @@ false 或 true；Aube 与 pnpm 支持按包放行。
 
 ## 选项变更与重新安装
 
-对 osdk 自有的隔离与全局安装，`installer` 和 `allow_builds` 属于安装身份，而不是版本
-匹配后可以忽略的提示。同一包版本下任一选项发生变化时，已有安装不能复用；activation
-与 shim 也会拒绝运行记录选项和当前配置不一致的安装。
+对 osdk 自有的隔离与全局安装，`installer` 和 `allow_builds` 是安装身份中的 material
+options，而不是版本匹配后可以忽略的提示。`.osdk-install.json` schema 1 保存嵌套的
+`identity` 对象，其中包含 `tool`、`version`、`platform`、`scope`、`material_options`、
+`dependencies`、`materials` 与 `install_id`；`install_id` 是该规范身份的 `b3-v2:` 摘要。
 
-在记录选项身份之前创建的安装仍可被发现，但不能复用或执行。请重新运行相同的 `install`
-或全局 `use`，npm 流程会重建或替换该版本并写入当前身份。离线重建仍需满足所选安装器通常
-要求的原生 lock 或 graph，以及已预热的 cache/store。不要手工编辑 `.osdk-tool.json`。
+物理安装根包含该指纹，因此同一 scope 内同一 npm 包精确版本的多个身份可以共存。复用、
+activation、shim 分发、`where`、`uninstall` 与 `reshim` 都从活动请求派生同一精确身份，只
+选择对应根；绝不会仅因版本相同而回退到其他身份。
 
-物理安装目录目前仍按 package、精确版本和 isolated/global scope 定位，没有包含选项。
-因此同一 scope 内同一包版本的两个选项变体不能共存；切换选项会替换该版本的安装。
+旧 `.osdk-tool.json` 只会被扫描以识别和报告遗留安装。无论旧 inventory 的 schema 是 1
+还是 2，都不能授权复用或执行；动态 inventory 不存在 schema 1/2 兼容路径。请重新安装以
+创建 `.osdk-install.json` schema 1。离线重装仍需满足所选安装器要求的原生 lock 或 graph，
+以及已预热的 cache/store。不要手工编辑这些身份文件。项目管理的 npm 包继续由真实项目和
+其 `.osdk/npm-bin` 筛选 generation 所有，不属于这些指纹化安装根。
 
 ## Source 与共享存储
 
@@ -268,8 +273,9 @@ lock。npm 全局安装没有依赖 lock，因此只凭用户 `osdk.lock` 无法
 项目工作流应同时提交 `package.json`、原生项目 lock、`osdk.toml` 与 `osdk.lock`。旧 lock
 schema 2 graph sidecar 仍可兼容读取，但当前 lock schema 3 不再创建新 sidecar，也不嵌入
 它的 payload。
-这里的 lock schema 与 `.osdk-tool.json` inventory schema 2 相互独立：inventory 控制本地
-复用，`osdk.lock` schema 3 保存选项与 npm 重放 metadata。
+这里的 lock schema 与 `.osdk-install.json` schema 1 相互独立：安装身份决定本地存储与
+lifecycle 操作，`osdk.lock` schema 3 保存选项与 npm 重放 metadata；`.osdk-tool.json` 只用于
+遗留状态识别。
 
 安装器规划、metadata 校验、原生前缀隔离和激活安全检查见
 [npm 工具实现](./implementation/npm-tools)。

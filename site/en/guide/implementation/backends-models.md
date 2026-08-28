@@ -21,14 +21,15 @@ Those two dynamic namespaces share an option-identity contract for osdk-owned
 installs. Before resolution or installation, osdk projects the supported public options into a
 canonical map, rejects unknown public keys, excludes internal `__osdk_*` lock
 replay metadata, and computes an order-independent, domain-separated BLAKE3
-`b3-v1:` fingerprint over the backend ID and canonical options. A schema-2
-`.osdk-tool.json` inventory persists both the map and fingerprint. Same-version
-reuse, activation, and shim execution require an exact match and otherwise fail
-closed. Schema-1 inventories remain readable for discovery but cannot authorize
-reuse; rebuilding or reinstalling is required to migrate them. npm can rebuild
-through `install` or global `use`, while GitHub requires an explicit uninstall
-before reinstalling. Physical install roots remain
-version-based, so two option variants of one backend/version cannot coexist.
+`b3-v2:` identity over `tool`, exact `version`, `platform`, `scope`, canonical
+`material_options`, `dependencies`, and `materials`. `.osdk-install.json` schema 1
+stores those fields in a nested `identity` together with `install_id`, and the
+fingerprint is part of the physical root. Same-backend/version identities can
+therefore coexist. Reuse, activation, shim execution, `where`, uninstall, and
+`reshim` require the exact configured identity and never fall back to another
+fingerprint. `.osdk-tool.json`, in either old schema 1 or 2 form, is legacy
+detection only and cannot authorize reuse or execution. Project-managed npm
+packages remain outside this osdk-owned install identity.
 
 ## Built-in backend matrix
 
@@ -47,8 +48,8 @@ version-based, so two option variants of one backend/version cannot coexist.
 | `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then delegated to isolated rustup | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument plus `@deno/<platform>` | npm SRI | Platform package; exports `DENO_DIR` |
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default; schema-2 inventory binds installer/build options for osdk-owned isolated/global installs | Discovers `.bin` dynamically, adds managed Node, and records scope, installer, optional native-lock identity, and public options in lock schema 3 |
-| `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations; schema-2 inventory binds asset/layout options | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
+| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default; `.osdk-install.json` schema 1 binds installer/build identity in fingerprinted osdk-owned isolated/global roots | Discovers `.bin` dynamically, adds managed Node, and records scope, installer, optional native-lock identity, and public options in lock schema 3 |
+| `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations; `.osdk-install.json` schema 1 binds asset/layout/material identity in fingerprinted roots | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
 
 These implementations live under [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/). The npm-backed implementations share packument, version, and SRI handling in [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs). Generic source ranking is in [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 See [npm developer tool implementation](./npm-tools) for the complete dynamic
@@ -65,7 +66,7 @@ reinstall contract as built-in archive backends.
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
 Its supported asset, platform, catalog-digest, rename, bin, and strip options are
-validated as public identity inputs and stored in the schema-2 dynamic inventory.
+validated as public identity inputs and stored in the schema-1 dynamic install manifest.
 `catalog-url` is accepted for acquisition but deliberately omitted because the
 required `catalog-sha256` identifies content without persisting the catalog
 location in the dynamic inventory. HTTP(S) catalog URLs containing userinfo,

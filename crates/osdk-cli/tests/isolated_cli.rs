@@ -2641,9 +2641,22 @@ fn global_aube_use_publishes_relocatable_install_and_reuses_it_offline() {
             .to_string()
     ));
 
-    let final_root = temporary
-        .path()
-        .join("installs/npm-global/fixture-cli/1.2.3");
+    let inventory = osdk_core::inventory::scan_installs(
+        &temporary.path().join("installs"),
+        &osdk_core::inventory::ScanOptions::default(),
+    )
+    .unwrap();
+    let matching = inventory
+        .installs
+        .into_iter()
+        .filter(|install| {
+            install.manifest.identity.tool == "npm:fixture-cli"
+                && install.manifest.identity.version == "1.2.3"
+                && install.manifest.identity.scope == osdk_core::tool::InstallScope::Global
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let final_root = matching[0].install_root.clone();
     assert!(final_root.join("project/aube-lock.yaml").is_file());
     assert!(final_root
         .join("project/node_modules/fixture-cli/package.json")
@@ -3813,20 +3826,43 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
     std::os::unix::fs::symlink(shim_bin_dir.join("osdk-shim"), data_bin.join("osdk-shim")).unwrap();
 
     for version in ["1.0.0", "1.1.0"] {
-        let install_root = temporary
-            .path()
-            .join("installs")
-            .join("npm")
-            .join("@antfu")
-            .join("ni")
-            .join(version);
+        let options = std::collections::BTreeMap::from([
+            ("__osdk_node_version".into(), "1.0.0".into()),
+            ("__osdk_npm_scope".into(), "project".into()),
+        ]);
+        let identity = osdk_core::tool::InstallIdentity::new(
+            "npm:@antfu/ni",
+            version,
+            osdk_core::platform::Platform::current().to_string(),
+            osdk_core::tool::InstallScope::Isolated,
+            &options,
+            vec![osdk_core::tool::InstallDependency {
+                kind: osdk_core::tool::InstallDependencyKind::Runtime,
+                id: "node".into(),
+                version: "1.0.0".into(),
+                identity: None,
+            }],
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(temporary.path().join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        let install_root = osdk_core::dirs::InstallLocator::new(&dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
         write_executable(
             &install_root.join("project/node_modules/.bin/ni"),
             "#!/bin/sh\nexit 0\n",
         );
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:@antfu/ni").unwrap();
-        manifest.version = Some(version.into());
-        manifest.config_keys = vec!["tool.ni".into()];
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "ni".into(),
             path: "project/node_modules/.bin/ni".into(),

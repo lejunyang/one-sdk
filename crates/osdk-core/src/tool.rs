@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 
 /// A canonical backend identity.
@@ -83,6 +85,156 @@ impl std::str::FromStr for ToolId {
     fn from_str(value: &str) -> Result<Self> {
         Self::parse(value)
     }
+}
+
+/// Installation scope participating in a dynamic install's durable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallScope {
+    Isolated,
+    Global,
+    ProjectManaged,
+}
+
+/// Kind of an exact dependency captured by an installation identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallDependencyKind {
+    Runtime,
+    Installer,
+    Tool,
+}
+
+/// An exact dependency whose bytes or behavior contribute to an install.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallDependency {
+    pub kind: InstallDependencyKind,
+    pub id: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+}
+
+/// Complete, reproducible identity of one materialized dynamic installation.
+///
+/// Collections are canonicalized before hashing and serialized in their stable
+/// order. `install_id` is a domain-separated BLAKE3 digest of every preceding
+/// field and is therefore suitable for selecting an on-disk install root. Only
+/// inputs known before publication belong here: post-install observations and
+/// verification evidence belong in receipts, never in locator identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallIdentity {
+    pub tool: String,
+    pub version: String,
+    pub platform: String,
+    pub scope: InstallScope,
+    #[serde(default)]
+    pub material_options: BTreeMap<String, String>,
+    #[serde(default)]
+    pub dependencies: Vec<InstallDependency>,
+    #[serde(default)]
+    pub materials: BTreeMap<String, String>,
+    pub install_id: String,
+}
+
+impl InstallIdentity {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tool: impl AsRef<str>,
+        version: impl Into<String>,
+        platform: impl Into<String>,
+        scope: InstallScope,
+        options: &BTreeMap<String, String>,
+        mut dependencies: Vec<InstallDependency>,
+        materials: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        let tool = ToolId::parse(tool.as_ref())?;
+        if !tool.is_dynamic() {
+            return Err(Error::config(format!(
+                "install identity requires a dynamic tool id: `{tool}`"
+            )));
+        }
+        let material_options = dynamic_identity_options(&tool, options)?.into_map();
+        let version = version.into();
+        let platform = platform.into();
+        validate_identity_text("version", &version)?;
+        validate_identity_text("platform", &platform)?;
+        validate_dependencies(&mut dependencies)?;
+        validate_materials(&materials)?;
+        let mut identity = Self {
+            tool: tool.to_string(),
+            version,
+            platform,
+            scope,
+            material_options,
+            dependencies,
+            materials,
+            install_id: String::new(),
+        };
+        identity.install_id = crate::backend::dynamic::install_identity_fingerprint(&identity)?;
+        Ok(identity)
+    }
+
+    /// Validate canonical persisted fields and the self-authenticating id.
+    pub fn validate(&self) -> Result<()> {
+        let tool = ToolId::parse(&self.tool)?;
+        if !tool.is_dynamic() || tool.to_string() != self.tool {
+            return Err(Error::config(
+                "install identity contains a non-canonical dynamic tool id",
+            ));
+        }
+        validate_identity_text("version", &self.version)?;
+        validate_identity_text("platform", &self.platform)?;
+        validate_canonical_identity_options(&tool, &self.material_options)?;
+        let mut dependencies = self.dependencies.clone();
+        validate_dependencies(&mut dependencies)?;
+        if dependencies != self.dependencies {
+            return Err(Error::config(
+                "install identity dependencies are not canonical",
+            ));
+        }
+        validate_materials(&self.materials)?;
+        let expected = crate::backend::dynamic::install_identity_fingerprint(self)?;
+        if self.install_id != expected {
+            return Err(Error::config(
+                "dynamic install identity fingerprint mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_identity_text(label: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(Error::config(format!(
+            "install identity {label} must be non-empty canonical text"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_dependencies(dependencies: &mut Vec<InstallDependency>) -> Result<()> {
+    for dependency in dependencies.iter_mut() {
+        validate_identity_text("dependency id", &dependency.id)?;
+        dependency.id = ToolId::parse(&dependency.id)?.to_string();
+        validate_identity_text("dependency version", &dependency.version)?;
+        if let Some(identity) = &dependency.identity {
+            validate_identity_text("dependency identity", identity)?;
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    Ok(())
+}
+
+fn validate_materials(materials: &BTreeMap<String, String>) -> Result<()> {
+    for (key, value) in materials {
+        validate_identity_text("material key", key)?;
+        validate_identity_text("material value", value)?;
+    }
+    Ok(())
 }
 
 /// Which lifecycle boundary an option can change.
@@ -1374,5 +1526,42 @@ mod tests {
         ] {
             assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn install_identity_hashes_all_durable_selector_inputs() {
+        let dependencies = vec![InstallDependency {
+            kind: InstallDependencyKind::Runtime,
+            id: "node".into(),
+            version: "24.1.0".into(),
+            identity: Some("runtime-id".into()),
+        }];
+        let materials = BTreeMap::from([("root-sri".into(), "sha512-one".into())]);
+        let first = InstallIdentity::new(
+            "npm:Prettier",
+            "3.6.2",
+            "linux-x64",
+            InstallScope::Isolated,
+            &BTreeMap::from([("installer".into(), "AUBE".into())]),
+            dependencies.clone(),
+            materials.clone(),
+        )
+        .unwrap();
+        assert_eq!(first.tool, "npm:prettier");
+        assert_eq!(first.material_options["installer"], "aube");
+        assert!(first.install_id.starts_with("b3-v2:"));
+        first.validate().unwrap();
+
+        let changed = InstallIdentity::new(
+            "npm:prettier",
+            "3.6.2",
+            "linux-x64",
+            InstallScope::Global,
+            &BTreeMap::from([("installer".into(), "aube".into())]),
+            dependencies,
+            materials,
+        )
+        .unwrap();
+        assert_ne!(first.install_id, changed.install_id);
     }
 }

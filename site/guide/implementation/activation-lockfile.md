@@ -35,12 +35,14 @@ CLI 生成或 `reshim` 则始终对多个已安装 backend owner 移除歧义的
 同一 backend 的多个版本由活跃版本选择处理，不构成 owner 冲突。详见
 [npm 开发工具实现](./npm-tools)。
 
-osdk 自有的动态 `npm:<package>` 与 `github:owner/repo` 安装使用 schema 2
-`.osdk-tool.json` inventory，
-把规范公开选项 map 及其 fingerprint 绑定到已安装版本。activation 加入路径或 shim 执行
-命令前，会把该身份与配置请求比较。旧 schema 1 inventory、缺失身份或选项变化都会 fail
-closed，需要重新安装；这与上面的 bin owner 歧义检查是两个独立条件。物理安装根仍以版本
-为键，因此 fingerprint 控制复用，而不会创建可共存的选项专属目录。
+osdk 自有的动态 `npm:<package>` 与 `github:owner/repo` 安装使用 `.osdk-install.json` schema 1。
+其嵌套 `identity` 记录 `tool`、`version`、`platform`、`scope`、`material_options`、
+`dependencies`、`materials` 与规范 `b3-v2:` `install_id`。该指纹进入物理安装根，因此相同
+backend/version 的多个身份可以共存。activation 加入路径或 shim 执行命令前，osdk 会派生
+配置的精确身份，只选择对应根；复用、`where`、uninstall 与 `reshim` 使用相同选择。身份
+缺失、过旧或不匹配都会 fail closed；`.osdk-tool.json` 只用于识别遗留状态，其 schema 1
+和 schema 2 都不能授权执行。这与上面的 bin owner 歧义检查是两个独立条件。项目管理的 npm
+activation 继续使用单独校验的 `.osdk/npm-bin` generation。
 
 ## 信任边界
 
@@ -50,7 +52,7 @@ CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]`
 
 项目 lockfile 是项目根或其祖先目录中的 `osdk.lock`。[`find`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L255) 从当前目录向祖先查找最近的现有文件。无参数且无 `-o` 的 `osdk install` 才尝试读取这条项目 lock 路径；显式工具或任何 `-o` 都绕过它，改从配置/参数收集请求。另外，`use --global npm:<package>` 维护用户配置目录中的 `osdk.lock`；该用户 lock 不参与上述祖先查找，也不是无参项目 `install` 的输入。
 
-读取时完整解析 TOML，并接受 lock schema 1、2 或当前 lock schema 3；其他版本会被拒绝。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。带通用 artifact 子表的非 npm 工具会被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；npm 工具明确不能带通用 artifact receipt。lock schema 3 的 npm 工具恢复公开选项以及 package、installer、scope、可选精确 Node 版本和原生 lock 身份；主 lock 中没有 graph payload 或路径。lock schema 2 仍是兼容读取格式：其 npm 条目指向 `osdk.lock.d/npm/<sha256>.yaml`，sidecar 通过大小、symlink、UTF-8 与 SHA-256 校验后，完整 graph 才作为内部 option 注入。这个旧 lock schema 2 graph sidecar 与动态 inventory schema 2 无关。含 npm 条目的 lock schema 1 不会被消费，必须重新生成。大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。对带通用 artifact receipt 的 backend，全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum；动态 npm/GitHub 复用还要求 inventory 选项身份匹配。只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model pull` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。lock schema 3 metadata、动态 inventory schema 2 与旧 lock schema 2 sidecar 的兼容边界见 [npm 开发工具实现](./npm-tools)。
+读取时完整解析 TOML，并接受 lock schema 1、2 或当前 lock schema 3；其他版本会被拒绝。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。带通用 artifact 子表的非 npm 工具会被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；npm 工具明确不能带通用 artifact receipt。lock schema 3 的 npm 工具恢复公开选项以及 package、installer、scope、可选精确 Node 版本和原生 lock 身份；主 lock 中没有 graph payload 或路径。lock schema 2 仍是兼容读取格式：其 npm 条目指向 `osdk.lock.d/npm/<sha256>.yaml`，sidecar 通过大小、symlink、UTF-8 与 SHA-256 校验后，完整 graph 才作为内部 option 注入。这个旧 lock schema 2 graph sidecar 与 `.osdk-install.json` schema 1 无关。含 npm 条目的 lock schema 1 不会被消费，必须重新生成。大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。对带通用 artifact receipt 的 backend，全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum；动态 npm/GitHub 复用还要求精确匹配 `.osdk-install.json` 身份。只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model pull` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。lock schema 3 metadata、安装身份 schema 1 与旧 lock schema 2 sidecar 的兼容边界见 [npm 开发工具实现](./npm-tools)。
 
 平台键是 `os-arch`，Linux musl 额外带 `-musl`。`osdk lock` 对 Node 的 `arch` 选项使用目标架构键；普通 `upgrade` 使用当前 host 平台键。
 

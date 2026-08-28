@@ -87,6 +87,8 @@ osdk model remove NAME
 `uninstall`、`cache clean` 和非演练 `prune` 需要确认。交互终端显示提示；非交互
 环境必须使用 `--yes`、`OSDK_YES=true` 或 `settings.yes=true`，否则失败。
 `--quiet` 只关闭进度，不代表同意。`model remove` 当前不要求确认。
+对 osdk 自有动态工具，uninstall 会派生完整配置身份，只删除对应指纹化根；相同 backend 和
+version 的其他身份仍然保留。
 
 ## Shim 与 Shell 激活
 
@@ -95,6 +97,9 @@ osdk model remove NAME
 ```text
 osdk reshim
 ```
+
+对动态工具，`reshim` 只为配置精确匹配的 `.osdk-install.json` schema 1 身份发布 launcher，
+不会选择同版本的其他根，旧 `.osdk-tool.json` 状态也永远不可执行。
 
 shim 在每次执行时按当前目录解析版本，因此 IDE、CI 和未安装 prompt hook 的进程也
 能使用项目 pin。它会避免递归调用自身；Windows `.cmd`/`.bat` 目标通过

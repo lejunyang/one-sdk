@@ -903,13 +903,6 @@ pub async fn install(
     // identity is backed by a locally installed runtime. This path must stay
     // free of source probes, downloads, post-install hooks, and helpers.
     if let VersionSpec::Exact(exact) = &effective.spec {
-        let candidate_layout = GlobalInstallLayout::for_root(
-            backend.global_install_root(&app.ctx, exact),
-            plan.installer,
-            app.ctx.platform,
-        );
-        let lock = acquire_global_version_lock(app, &backend, exact)?;
-        recover_interrupted_promotion_serialized(&app.ctx.dirs, &candidate_layout.root)?;
         if let Some(existing_runtime) =
             load_existing_managed_runtime(app, backend.id(), exact, plan.installer)?
         {
@@ -919,8 +912,16 @@ pub async fn install(
             candidate
                 .options
                 .insert(INSTALLER_OPTION.into(), plan.installer.as_str().into());
+            let candidate_layout = GlobalInstallLayout::for_root(
+                backend.global_install_root_for(&app.ctx, &candidate)?,
+                plan.installer,
+                app.ctx.platform,
+            );
+            let lock = acquire_global_version_lock(app, &backend, &candidate)?;
+            recover_interrupted_promotion_serialized(&app.ctx.dirs, &candidate_layout.root)?;
             let installed_native_lock = native_lock_path(&candidate_layout, plan.installer);
             if completed_install_matches_at(
+                app.ctx.platform,
                 &backend,
                 &candidate,
                 plan.installer,
@@ -942,9 +943,9 @@ pub async fn install(
                 runtime = Some(existing_runtime);
                 version = Some(candidate);
             }
+            mutation_lock = Some(lock);
+            final_layout = Some(candidate_layout);
         }
-        mutation_lock = Some(lock);
-        final_layout = Some(candidate_layout);
     }
 
     if version.is_none() {
@@ -992,7 +993,7 @@ pub async fn install(
             .options
             .insert(INSTALLER_OPTION.into(), plan.installer.as_str().into());
         let resolved_layout = GlobalInstallLayout::for_root(
-            backend.global_install_root(&app.ctx, &resolved.version),
+            backend.global_install_root_for(&app.ctx, &resolved)?,
             plan.installer,
             app.ctx.platform,
         );
@@ -1004,17 +1005,14 @@ pub async fn install(
                 ));
             }
         } else {
-            mutation_lock = Some(acquire_global_version_lock(
-                app,
-                &backend,
-                &resolved.version,
-            )?);
+            mutation_lock = Some(acquire_global_version_lock(app, &backend, &resolved)?);
             recover_interrupted_promotion_serialized(&app.ctx.dirs, &resolved_layout.root)?;
             final_layout = Some(resolved_layout.clone());
         }
 
         let installed_native_lock = native_lock_path(&resolved_layout, plan.installer);
         if !completed_install_matches_at(
+            app.ctx.platform,
             &backend,
             &resolved,
             plan.installer,
@@ -1066,6 +1064,7 @@ pub async fn install(
                 )
                 .map_err(anyhow::Error::new)?;
             if !completed_install_matches_at(
+                app.ctx.platform,
                 &backend,
                 &resolved,
                 plan.installer,
@@ -1118,6 +1117,7 @@ pub async fn install(
             let mut promoted = staged.promote()?;
             let promoted_native_lock = native_lock_path(&final_layout, plan.installer);
             if !completed_install_matches_at(
+                app.ctx.platform,
                 &backend,
                 &version,
                 plan.installer,
@@ -1211,13 +1211,10 @@ pub(crate) fn with_global_npm_state_lock<T>(
 fn acquire_global_version_lock(
     app: &App,
     backend: &NpmPackageBackend,
-    version: &str,
+    version: &ToolVersion,
 ) -> Result<osdk_core::lock::FileLock> {
-    osdk_core::lock::FileLock::acquire(app.ctx.dirs.lock_dir(backend.id()).join(format!(
-        "{}.global.lock",
-        osdk_core::dirs::sanitize_version_component(version)
-    )))
-    .map_err(anyhow::Error::new)
+    let locator = backend.install_locator(&app.ctx, version, ToolScope::Global)?;
+    osdk_core::lock::FileLock::acquire(locator.lock_path()).map_err(anyhow::Error::new)
 }
 
 /// Callers hold the version mutation lock before entering this helper. That
@@ -2812,12 +2809,11 @@ fn selected_global_bin_names(
     let config = osdk_core::config::Config::load_user(&ctx.dirs.user_config_file())
         .context("reloading global config before npm shim publication")?;
     let selected = match config.global_tool_configs.get(backend.id()) {
-        Some(entry) => selected_global_version(ctx, backend, entry.version())?,
+        Some(entry) => selected_global_version(ctx, backend, entry)?,
         None => None,
     };
-    if let Some(selected) = selected {
-        let version = ToolVersion::new(backend.id(), selected);
-        let root = backend.global_install_root(ctx, &version.version);
+    if let Some(version) = selected {
+        let root = backend.global_install_root_for(ctx, &version)?;
         names.extend(manifest_bin_names_best_effort(&root));
         if let Some(legacy_root) = backend.legacy_global_install_root(ctx, &version)? {
             names.extend(manifest_bin_names_best_effort(&legacy_root));
@@ -2831,12 +2827,9 @@ fn selected_global_bin_names(
 fn selected_global_version(
     ctx: &osdk_core::backend::Ctx,
     backend: &NpmPackageBackend,
-    configured_spec: &str,
-) -> Result<Option<String>> {
-    let spec = VersionSpec::parse(configured_spec);
-    if let VersionSpec::Exact(version) = &spec {
-        return Ok(Some(version.clone()));
-    }
+    configured: &osdk_core::config::ToolConfigEntry,
+) -> Result<Option<ToolVersion>> {
+    let spec = VersionSpec::parse(configured.version());
     let lock_path = ctx.dirs.user_lock_file();
     if lock_path.is_file() {
         if let Some(request) = crate::lockfile::locked_requests(&lock_path, ctx.platform)?
@@ -2852,17 +2845,33 @@ fn selected_global_version(
             })
         {
             if let VersionSpec::Exact(version) = request.spec {
-                return Ok(Some(version));
+                let mut selected = ToolVersion::new(backend.id(), version);
+                selected.options = request.options;
+                return Ok(Some(selected));
             }
         }
     }
-    let installed = backend.list_installed(ctx)?;
+    let mut hint = ToolVersion::new(backend.id(), "scope-selection");
+    hint.options = configured.to_request_options();
+    hint.options.insert(
+        LOCKED_NPM_SCOPE_OPTION.into(),
+        ToolScope::Global.as_str().into(),
+    );
+    if let VersionSpec::Exact(version) = &spec {
+        hint.version.clone_from(version);
+        return Ok(Some(hint));
+    }
+    let installed = backend.list_installed_for(ctx, &hint)?;
     let candidates = installed
         .iter()
         .map(osdk_core::version::VersionInfo::stable)
         .collect::<Vec<_>>();
-    Ok(osdk_core::version::select_version(&spec, &candidates)
-        .map(|version| version.version.clone()))
+    Ok(
+        osdk_core::version::select_version(&spec, &candidates).map(|version| {
+            hint.version = version.version.clone();
+            hint
+        }),
+    )
 }
 
 #[derive(Debug)]
@@ -2973,6 +2982,7 @@ fn inject_native_metadata(
 }
 
 fn completed_install_matches_at(
+    platform: osdk_core::platform::Platform,
     backend: &NpmPackageBackend,
     version: &ToolVersion,
     installer: NpmInstaller,
@@ -2989,6 +2999,10 @@ fn completed_install_matches_at(
     }
     let manifest = match osdk_core::inventory::DynamicToolManifest::load(root) {
         Ok(manifest) => manifest,
+        Err(_) => return Ok(false),
+    };
+    let receipt = match osdk_core::backend::npm_package::load_npm_receipt(root) {
+        Ok(receipt) => receipt,
         Err(_) => return Ok(false),
     };
     // Aube's former synthetic-project implementation used a different root
@@ -3026,24 +3040,31 @@ fn completed_install_matches_at(
     };
     let native_matches = match expected_native {
         Some(native) => {
-            manifest.metadata.get("native_lock_format") == Some(&native.format)
-                && manifest.metadata.get("lock_sha256") == Some(&native.sha256)
+            receipt.native_lock_format.as_ref() == Some(&native.format)
+                && receipt.native_lock_sha256.as_ref() == Some(&native.sha256)
         }
-        None => {
-            !manifest.metadata.contains_key("native_lock_format")
-                && !manifest.metadata.contains_key("lock_sha256")
-        }
+        None => receipt.native_lock_format.is_none() && receipt.native_lock_sha256.is_none(),
     };
     let expected_build_policy = npm_build_policy_identity(version)?;
-    let build_policy_matches =
-        manifest.metadata.get("build_policy") == Some(&expected_build_policy);
+    let build_policy_matches = receipt.build_policy == expected_build_policy;
+    let expected_identity = osdk_core::tool::InstallIdentity::new(
+        &version.backend,
+        &version.version,
+        platform.to_string(),
+        osdk_core::tool::InstallScope::Global,
+        &version.options,
+        vec![osdk_core::tool::InstallDependency {
+            kind: osdk_core::tool::InstallDependencyKind::Runtime,
+            id: "node".into(),
+            version: node_version.into(),
+            identity: None,
+        }],
+        BTreeMap::new(),
+    )?;
     let bin_dir = &layout.bin;
-    Ok(manifest.id == version.backend
-        && manifest.version.as_deref() == Some(version.version.as_str())
-        && manifest.matches_identity_options(&version.options)?
-        && manifest.metadata.get("installer").map(String::as_str) == Some(installer.as_str())
-        && manifest.metadata.get("scope").map(String::as_str) == Some("global")
-        && manifest.metadata.get("node_version").map(String::as_str) == Some(node_version)
+    Ok(manifest.matches_identity(&expected_identity)
+        && receipt.installer == installer.as_str()
+        && receipt.node_version == node_version
         && build_policy_matches
         && native_matches
         && bin_dir.is_dir())
@@ -3389,6 +3410,7 @@ mod tests {
         let layout = write_valid_npm_global_install(&final_root, b"old");
         rewrite_manifest_option_identity(&final_root, &version.options);
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -3408,6 +3430,7 @@ mod tests {
 
         assert_eq!(std::fs::read(final_root.join("payload")).unwrap(), b"old");
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -3772,6 +3795,7 @@ mod tests {
             rewrite_manifest_option_identity(root, &version.options);
         }
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -3788,6 +3812,7 @@ mod tests {
             osdk_core::platform::Platform::current(),
         );
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -3943,9 +3968,19 @@ mod tests {
             show_progress: false,
         };
         let backend = NpmPackageBackend::from_id("npm:fixture-cli").unwrap();
-        let old_root = backend.global_install_root(&ctx, "1.0.0");
+        let mut old_version = ToolVersion::new(backend.id(), "1.0.0");
+        old_version
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.1.0".into());
+        let old_root = backend.global_install_root_for(&ctx, &old_version).unwrap();
         write_manifest_with_bins(&old_root, "1.0.0", &["old-command"]);
-        let incoming_root = backend.global_install_root(&ctx, "2.0.0");
+        let mut incoming_version = ToolVersion::new(backend.id(), "2.0.0");
+        incoming_version
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.1.0".into());
+        let incoming_root = backend
+            .global_install_root_for(&ctx, &incoming_version)
+            .unwrap();
         write_manifest_with_bins(&incoming_root, "2.0.0", &["new-command"]);
         let mut locked_version = ToolVersion::new(backend.id(), "1.0.0");
         locked_version
@@ -4121,9 +4156,24 @@ mod tests {
             )
             .unwrap();
         }
+        let options = BTreeMap::from([(INSTALLER_OPTION.into(), "npm".into())]);
+        let identity = osdk_core::tool::InstallIdentity::new(
+            "npm:fixture-cli",
+            "1.0.0",
+            osdk_core::platform::Platform::current().to_string(),
+            osdk_core::tool::InstallScope::Global,
+            &options,
+            vec![osdk_core::tool::InstallDependency {
+                kind: osdk_core::tool::InstallDependencyKind::Runtime,
+                id: "node".into(),
+                version: "22.1.0".into(),
+                identity: None,
+            }],
+            BTreeMap::new(),
+        )
+        .unwrap();
         let mut manifest =
-            osdk_core::inventory::DynamicToolManifest::new("npm:fixture-cli").unwrap();
-        manifest.version = Some("1.0.0".into());
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "fixture-cli".into(),
             path: if cfg!(windows) {
@@ -4132,13 +4182,12 @@ mod tests {
                 "bin/fixture-cli".into()
             },
         }];
-        manifest.metadata = BTreeMap::from([
-            ("installer".into(), "npm".into()),
-            ("scope".into(), "global".into()),
-            ("node_version".into(), "22.1.0".into()),
-            ("build_policy".into(), "deny".into()),
-        ]);
         manifest.write_atomic(root).unwrap();
+        std::fs::write(
+            root.join(".osdk-npm-receipt.json"),
+            r#"{"schema":1,"provider":"npm-package","package":"fixture-cli","installer":"npm","node_version":"22.1.0","build_policy":"deny"}"#,
+        )
+        .unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
         std::fs::write(root.join("payload"), payload).unwrap();
         layout
@@ -4146,22 +4195,36 @@ mod tests {
 
     fn rewrite_manifest_option_identity(root: &Path, options: &BTreeMap<String, String>) {
         let old = osdk_core::inventory::DynamicToolManifest::load(root).unwrap();
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(&old.id)
-            .unwrap()
-            .with_identity_options(options)
-            .unwrap();
-        manifest.version = old.version;
-        manifest.config_keys = old.config_keys;
+        let identity = osdk_core::tool::InstallIdentity::new(
+            &old.identity.tool,
+            &old.identity.version,
+            &old.identity.platform,
+            old.identity.scope,
+            options,
+            old.identity.dependencies,
+            old.identity.materials,
+        )
+        .unwrap();
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = old.bins;
-        manifest.metadata = old.metadata;
         manifest.write_atomic(root).unwrap();
     }
 
     fn write_manifest_with_bins(root: &Path, version: &str, names: &[&str]) {
         std::fs::create_dir_all(root.join("bin")).unwrap();
+        let identity = osdk_core::tool::InstallIdentity::new(
+            "npm:fixture-cli",
+            version,
+            osdk_core::platform::Platform::current().to_string(),
+            osdk_core::tool::InstallScope::Global,
+            &BTreeMap::new(),
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
         let mut manifest =
-            osdk_core::inventory::DynamicToolManifest::new("npm:fixture-cli").unwrap();
-        manifest.version = Some(version.into());
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = names
             .iter()
             .map(|name| {
@@ -4173,7 +4236,6 @@ mod tests {
                 }
             })
             .collect();
-        manifest.metadata.insert("scope".into(), "global".into());
         manifest.write_atomic(root).unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
     }
@@ -4261,8 +4323,11 @@ mod tests {
             show_progress: false,
         };
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new("npm:prettier", "3.6.2");
-        let root = backend.global_install_root(&ctx, &version.version);
+        let mut version = ToolVersion::new("npm:prettier", "3.6.2");
+        version
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.1.0".into());
+        let root = backend.global_install_root_for(&ctx, &version).unwrap();
         let layout = GlobalInstallLayout::for_root(root.clone(), NpmInstaller::Npm, ctx.platform);
         std::fs::create_dir_all(&layout.bin).unwrap();
         let package = if cfg!(windows) {
@@ -4293,11 +4358,11 @@ mod tests {
         version
             .options
             .insert(INSTALLER_OPTION.into(), NpmInstaller::Npm.as_str().into());
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new(backend.id())
-            .unwrap()
-            .with_identity_options(&version.options)
+        let identity = backend
+            .install_identity(&ctx, &version, ToolScope::Global)
             .unwrap();
-        manifest.version = Some(version.version.clone());
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "prettier".into(),
             path: if cfg!(windows) {
@@ -4306,16 +4371,16 @@ mod tests {
                 "bin/prettier".into()
             },
         }];
-        manifest.metadata = BTreeMap::from([
-            ("installer".into(), "npm".into()),
-            ("scope".into(), "global".into()),
-            ("node_version".into(), "22.1.0".into()),
-            ("build_policy".into(), "deny".into()),
-        ]);
         manifest.write_atomic(&root).unwrap();
+        std::fs::write(
+            root.join(".osdk-npm-receipt.json"),
+            r#"{"schema":1,"provider":"npm-package","package":"prettier","installer":"npm","node_version":"22.1.0","build_policy":"deny"}"#,
+        )
+        .unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
 
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -4339,6 +4404,7 @@ mod tests {
         rewrite_manifest_option_identity(&root, &version.options);
 
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -4350,6 +4416,7 @@ mod tests {
 
         version.options.insert("allow_builds".into(), "true".into());
         assert!(!completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Npm,
@@ -4379,8 +4446,11 @@ mod tests {
             show_progress: false,
         };
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new("npm:prettier", "3.6.2");
-        let root = backend.global_install_root(&ctx, &version.version);
+        let mut version = ToolVersion::new("npm:prettier", "3.6.2");
+        version
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.1.0".into());
+        let root = backend.global_install_root_for(&ctx, &version).unwrap();
         let layout = GlobalInstallLayout::for_root(root.clone(), NpmInstaller::Aube, ctx.platform);
         let project = layout.project.clone();
         std::fs::create_dir_all(root.join("bin")).unwrap();
@@ -4434,11 +4504,11 @@ mod tests {
         version
             .options
             .insert(INSTALLER_OPTION.into(), NpmInstaller::Aube.as_str().into());
-        let mut manifest = osdk_core::inventory::DynamicToolManifest::new("npm:prettier")
-            .unwrap()
-            .with_identity_options(&version.options)
+        let identity = backend
+            .install_identity(&ctx, &version, ToolScope::Global)
             .unwrap();
-        manifest.version = Some("3.6.2".into());
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "prettier".into(),
             path: if cfg!(windows) {
@@ -4447,17 +4517,28 @@ mod tests {
                 "bin/prettier".into()
             },
         }];
-        manifest.metadata = BTreeMap::from([
-            ("installer".into(), "aube".into()),
-            ("scope".into(), "global".into()),
-            ("node_version".into(), "22.1.0".into()),
-            ("build_policy".into(), "deny".into()),
-            ("native_lock_format".into(), "aube-v9".into()),
-            ("lock_sha256".into(), digest.sha256),
-        ]);
         manifest.write_atomic(&root).unwrap();
+        std::fs::write(
+            root.join(".osdk-npm-receipt.json"),
+            serde_json::to_vec(&osdk_core::backend::npm_package::NpmInstallReceipt {
+                schema: 1,
+                provider: "npm-package".into(),
+                package: "prettier".into(),
+                installer: "aube".into(),
+                node_version: "22.1.0".into(),
+                build_policy: "deny".into(),
+                graph_sha256: None,
+                root_integrity: None,
+                root_source: None,
+                native_lock_format: Some("aube-v9".into()),
+                native_lock_sha256: Some(digest.sha256),
+            })
+            .unwrap(),
+        )
+        .unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
         assert!(completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Aube,
@@ -4472,6 +4553,7 @@ mod tests {
         )
         .unwrap();
         assert!(!completed_install_matches_at(
+            osdk_core::platform::Platform::current(),
             &backend,
             &version,
             NpmInstaller::Aube,

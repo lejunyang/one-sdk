@@ -40,6 +40,7 @@ which.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
 windows-sys.workspace = true
+libc.workspace = true
 semver.workspace = true
 regex.workspace = true
 globset.workspace = true

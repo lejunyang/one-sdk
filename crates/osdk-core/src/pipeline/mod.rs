@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dirs::{create_dir_all, Dirs};
+use crate::dirs::{create_dir_all, Dirs, InstallLocator};
 use crate::error::{Error, Result};
 use crate::lock::FileLock;
 use crate::store::link::LinkMode;
@@ -56,6 +56,7 @@ pub struct ArtifactReceipt {
 }
 
 const ARTIFACT_RECEIPT_FILE: &str = ".osdk-artifact.json";
+const ARTIFACT_RECEIPT_MAX_BYTES: u64 = 64 * 1024;
 pub const LOCKED_ARTIFACT_URL_OPTION: &str = "__osdk_artifact_url";
 pub const LOCKED_ARTIFACT_FILE_OPTION: &str = "__osdk_artifact_file";
 pub const LOCKED_ARTIFACT_CHECKSUM_OPTION: &str = "__osdk_artifact_checksum";
@@ -135,15 +136,15 @@ pub async fn run_with_attestation(
     run_with_attestation_inner(plan, ctx, attestation, true).await
 }
 
-/// Materialize an archive and write its receipt, but leave the completion
-/// marker to a backend-specific finalizer. This lets dynamic backends publish
-/// required inventory before the directory becomes reusable.
-pub(crate) async fn run_with_attestation_unfinalized(
+/// Materialize an archive and write its receipt at an identity-qualified root,
+/// leaving the completion marker to the dynamic backend finalizer.
+pub(crate) async fn run_with_attestation_unfinalized_at(
     plan: &InstallPlan,
     ctx: &PipelineCtx<'_>,
     attestation: Option<&GithubAttestation>,
+    locator: &InstallLocator,
 ) -> Result<PathBuf> {
-    run_with_attestation_inner(plan, ctx, attestation, false).await
+    run_with_attestation_inner_at(plan, ctx, attestation, false, Some(locator)).await
 }
 
 async fn run_with_attestation_inner(
@@ -152,12 +153,36 @@ async fn run_with_attestation_inner(
     attestation: Option<&GithubAttestation>,
     mark_complete: bool,
 ) -> Result<PathBuf> {
-    let install_dir = ctx.dirs.install_path(&plan.tool, &plan.version);
-    let archive_path = artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name)?;
+    run_with_attestation_inner_at(plan, ctx, attestation, mark_complete, None).await
+}
 
-    // Serialize concurrent installs of the same tool@version.
-    let lock_path = install_lock_path(ctx.dirs, &plan.tool, &plan.version);
-    let _lock = FileLock::acquire(&lock_path)?;
+async fn run_with_attestation_inner_at(
+    plan: &InstallPlan,
+    ctx: &PipelineCtx<'_>,
+    attestation: Option<&GithubAttestation>,
+    mark_complete: bool,
+    locator: Option<&InstallLocator>,
+) -> Result<PathBuf> {
+    let install_dir = locator
+        .map(|locator| locator.install_root().to_path_buf())
+        .unwrap_or_else(|| ctx.dirs.install_path(&plan.tool, &plan.version));
+    let archive_path = match locator {
+        Some(locator) => artifact_cache_path_for_locator(ctx.dirs, locator, &plan.file_name)?,
+        None => artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name)?,
+    };
+
+    // Fixed backends acquire the traditional tool/version lock here. Dynamic
+    // callers hold their locator lock across backend-specific post-processing
+    // and manifest publication, so reacquiring it here would self-deadlock.
+    let _lock = if locator.is_none() {
+        Some(FileLock::acquire(install_lock_path(
+            ctx.dirs,
+            &plan.tool,
+            &plan.version,
+        ))?)
+    } else {
+        None
+    };
 
     // Idempotency: already installed and marked complete.
     if install_dir.join(COMPLETE_MARKER).exists() {
@@ -270,7 +295,9 @@ async fn run_with_attestation_inner(
     }
 
     // 3. Extract into a scratch dir under the cache tmp.
-    let scratch = scratch_path(ctx.dirs, &plan.tool, &plan.version);
+    let scratch = locator
+        .map(|locator| locator.scratch_root().join(std::process::id().to_string()))
+        .unwrap_or_else(|| scratch_path(ctx.dirs, &plan.tool, &plan.version));
     if scratch.exists() {
         let _ = std::fs::remove_dir_all(&scratch);
     }
@@ -365,8 +392,15 @@ pub fn is_installed(dirs: &Dirs, tool: &str, version: &str) -> bool {
 }
 
 pub fn artifact_receipt(dirs: &Dirs, tool: &str, version: &str) -> Option<ArtifactReceipt> {
-    let path = dirs.install_path(tool, version).join(ARTIFACT_RECEIPT_FILE);
-    let bytes = std::fs::read(path).ok()?;
+    artifact_receipt_at(&dirs.install_path(tool, version))
+}
+
+pub fn artifact_receipt_at(install_root: &Path) -> Option<ArtifactReceipt> {
+    let bytes = crate::inventory::read_stable_regular_file(
+        &install_root.join(ARTIFACT_RECEIPT_FILE),
+        ARTIFACT_RECEIPT_MAX_BYTES,
+    )
+    .ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -408,14 +442,13 @@ pub async fn install_single_binary(
     .await
 }
 
-/// Install a bare executable and its receipt without publishing the completion
-/// marker. See [`run_with_attestation_unfinalized`].
+/// Install a bare executable and its receipt at an identity-qualified root
+/// without publishing the completion marker.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn install_single_binary_unfinalized(
+pub(crate) async fn install_single_binary_unfinalized_at(
     client: &reqwest::Client,
     dirs: &Dirs,
-    tool: &str,
-    version: &str,
+    locator: &InstallLocator,
     urls: &[String],
     exe_name: &str,
     download_name: &str,
@@ -426,11 +459,12 @@ pub(crate) async fn install_single_binary_unfinalized(
     require_checksums: bool,
     attestation: Option<&GithubAttestation>,
 ) -> Result<()> {
-    install_single_binary_inner(
+    let identity = locator.identity();
+    install_single_binary_inner_at(
         client,
         dirs,
-        tool,
-        version,
+        &identity.tool,
+        &identity.version,
         urls,
         exe_name,
         download_name,
@@ -441,6 +475,7 @@ pub(crate) async fn install_single_binary_unfinalized(
         require_checksums,
         attestation,
         false,
+        Some(locator),
     )
     .await
 }
@@ -462,9 +497,52 @@ async fn install_single_binary_inner(
     attestation: Option<&GithubAttestation>,
     mark_complete: bool,
 ) -> Result<()> {
-    let install_dir = dirs.install_path(tool, version);
+    install_single_binary_inner_at(
+        client,
+        dirs,
+        tool,
+        version,
+        urls,
+        exe_name,
+        download_name,
+        os,
+        checksum,
+        show_progress,
+        offline,
+        require_checksums,
+        attestation,
+        mark_complete,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn install_single_binary_inner_at(
+    client: &reqwest::Client,
+    dirs: &Dirs,
+    tool: &str,
+    version: &str,
+    urls: &[String],
+    exe_name: &str,
+    download_name: &str,
+    os: crate::platform::Os,
+    checksum: Option<&Checksum>,
+    show_progress: bool,
+    offline: bool,
+    require_checksums: bool,
+    attestation: Option<&GithubAttestation>,
+    mark_complete: bool,
+    locator: Option<&InstallLocator>,
+) -> Result<()> {
+    let install_dir = locator
+        .map(|locator| locator.install_root().to_path_buf())
+        .unwrap_or_else(|| dirs.install_path(tool, version));
     validate_safe_filename("executable name", exe_name)?;
-    let cached = artifact_cache_path(dirs, tool, version, download_name)?;
+    let cached = match locator {
+        Some(locator) => artifact_cache_path_for_locator(dirs, locator, download_name)?,
+        None => artifact_cache_path(dirs, tool, version, download_name)?,
+    };
     if install_dir.join(COMPLETE_MARKER).exists() {
         if let Some(attestation) = attestation {
             let evidence = crate::verification::verify_github_attestation(
@@ -610,8 +688,12 @@ fn merge_artifact_evidence(
         return Ok(());
     };
     let path = install_dir.join(ARTIFACT_RECEIPT_FILE);
-    let bytes = std::fs::read(&path).map_err(|error| Error::io(&path, error))?;
-    let mut receipt: ArtifactReceipt = serde_json::from_slice(&bytes)?;
+    let mut receipt = artifact_receipt_at(install_dir).ok_or_else(|| {
+        Error::other(format!(
+            "artifact receipt is missing or invalid at {}",
+            path.display()
+        ))
+    })?;
     if !receipt.evidence.contains(&evidence) {
         receipt.evidence.push(evidence);
         write_artifact_receipt(install_dir, &receipt)?;
@@ -631,6 +713,35 @@ pub fn artifact_cache_path(
         .join(crate::dirs::sanitize_tool_id(tool))
         .join(crate::dirs::sanitize_version_component(version))
         .join(file_name))
+}
+
+/// Cache path for an identity-qualified dynamic artifact. Keeping the install
+/// fingerprint in this path prevents two material variants that happen to use
+/// the same release filename from sharing unverified cached bytes.
+pub(crate) fn artifact_cache_path_for_locator(
+    dirs: &Dirs,
+    locator: &InstallLocator,
+    file_name: &str,
+) -> Result<PathBuf> {
+    validate_safe_filename("artifact file name", file_name)?;
+    let identity = locator.identity();
+    Ok(dirs
+        .downloads()
+        .join(crate::dirs::sanitize_tool_id(&identity.tool))
+        .join(crate::dirs::sanitize_version_component(&identity.version))
+        .join(crate::dirs::install_id_component(&identity.install_id)?)
+        .join(file_name))
+}
+
+/// Seed or inspect the exact cache entry used by a dynamic install identity.
+/// This is public for lock replay and integration fixtures; callers must still
+/// verify the artifact before trusting cached bytes.
+pub fn dynamic_artifact_cache_path(
+    dirs: &Dirs,
+    locator: &InstallLocator,
+    file_name: &str,
+) -> Result<PathBuf> {
+    artifact_cache_path_for_locator(dirs, locator, file_name)
 }
 
 /// Reject filesystem-facing names that are not exactly one ordinary path
@@ -668,7 +779,7 @@ pub fn parse_checksum(value: &str) -> Result<Checksum> {
         _ => {
             return Err(Error::other(format!(
                 "unsupported locked checksum `{algorithm}`"
-            )))
+            )));
         }
     };
     Ok(Checksum {
@@ -1065,5 +1176,36 @@ mod tests {
         std::fs::create_dir_all(&install).unwrap();
         std::fs::write(install.join(ARTIFACT_RECEIPT_FILE), b"{broken").unwrap();
         assert!(artifact_receipt(&dirs, "tool", "1.0.0").is_none());
+    }
+
+    #[test]
+    fn oversized_receipt_is_not_trusted_as_artifact_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(
+            install.join(ARTIFACT_RECEIPT_FILE),
+            vec![b'x'; (ARTIFACT_RECEIPT_MAX_BYTES + 1) as usize],
+        )
+        .unwrap();
+        assert!(artifact_receipt_at(&install).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_receipt_is_not_trusted_as_artifact_identity() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        let outside = temp.path().join("receipt.json");
+        std::fs::write(
+            &outside,
+            br#"{"url":"https://example.test/tool","file_name":"tool","evidence":[]}"#,
+        )
+        .unwrap();
+        symlink(&outside, install.join(ARTIFACT_RECEIPT_FILE)).unwrap();
+        assert!(artifact_receipt_at(&install).is_none());
     }
 }

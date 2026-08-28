@@ -33,9 +33,9 @@ Registry 预检是三个相邻但不同的概念。
 只接受 `installer` 和 `allow_builds` 作为公开身份输入；lock 重放注入的内部
 `__osdk_*` 字段会被刻意排除。installer 会规范化；`allow_builds` 将 false-like 值规范为
 省略默认 deny 策略、true-like 值规范为 `true`，包列表则转为小写、排序、去重的逗号分隔
-值；默认的 `installer=auto` 也会省略。未知公开 key 会在安装前失败。规范 backend ID 与
-有序 map 通过 length prefix、domain separation 的 BLAKE3 计算出与顺序无关的 `b3-v1:`
-选项 fingerprint。
+值；默认的 `installer=auto` 也会省略。未知公开 key 会在安装前失败。这些规范 material
+options 与 tool、精确 version、platform、scope、dependencies 和 materials 一起构成完整的
+规范安装身份，其带 domain separation 的 BLAKE3 `install_id` 使用 `b3-v2:` 格式。
 
 ## 安装器规划与单次委托
 
@@ -191,9 +191,9 @@ sha256 = "<64 lowercase hex characters>"
 ```
 
 公开的 `installer` 与 `allow_builds` 选项仍保存在 lock 的 `options` 表，并在读取时重新注入
-请求；内部 `__osdk_*` metadata 不会写入该表。这与下文动态 inventory schema 2 是两个独立
-格式。本节所说的旧“schema 2 sidecar”专指 lock schema 2 的 npm graph sidecar，不是
-`.osdk-tool.json` inventory schema 2。
+请求；内部 `__osdk_*` metadata 不会写入该表。这与下文 `.osdk-install.json` schema 1 是两个
+独立格式。本节所说的旧“schema 2 sidecar”专指 lock schema 2 的 npm graph sidecar，不是动态
+安装身份格式。
 
 写入时，CLI 会从已安装工具或声明的私有 option 中提取 npm 元数据：包名、installer、
 scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA-256。项目感知的
@@ -222,26 +222,36 @@ native lock 的 format/SHA-256 是否满足 owner 的格式约束。主 lock 不
 graph 内容会作为兼容输入注入 backend。只有在后续成功写入主 lock 时，条目才迁移成
 lock schema 3 metadata-only 形式；原有 sidecar 文件不会被自动删除。
 
-## 隔离/全局 inventory、shim 与冲突拒绝
+## 隔离/全局安装身份、shim 与冲突拒绝
 
 隔离安装会扫描合成项目完整的 `node_modules/.bin`，因此记录的 bin 可能来自根包或传递
 依赖。全局安装则会在规范化时重置包管理器生成的 bin 目录，只为选中根包声明的 bin 重建
-launcher。两条路径都会把动态 inventory schema 2 写入 `.osdk-tool.json`：tool id、精确
-版本、规范 `identity_options`、对应的 `option_fingerprint`、相对 bin 路径和稳定 metadata。
-bin 名必须是单一文件名，解析后的 canonical target 必须仍在安装根内；没有任何 bin、重复
-名称、路径穿越、缺失或被篡改的 fingerprint，以及其他损坏 inventory 都会拒绝。inventory
-扫描不跟随符号链接，并对深度、数量和文件大小设限。
+launcher。两条路径都会写入 `.osdk-install.json` schema 1。其嵌套 `identity` 包含 `tool`、
+精确 `version`、`platform`、`scope`、规范 `material_options`、`dependencies`、`materials` 与
+`install_id`；`install_id` 是带 domain separation 的规范 `b3-v2:` 身份，也用于物理安装根。
+相对可执行文件路径会针对该根校验；graph integrity、native-lock hash 等 backend-specific
+观测值写入独立 receipt，且不会成为 alias ownership。bin 名必须是单一文件名，解析后的
+canonical target 必须仍在根内；缺失 bin、重复名称、路径穿越或身份被篡改都会拒绝。扫描
+不跟随符号链接，并对深度、数量和文件大小设限。
 
-安装根仍以版本为键（隔离工具为 `<installs>/<tool>/<version>`，全局工具为
-`<installs>/npm-global/<package>/<version>`）；fingerprint 不进入目录名。因此复用检查必须先
-比较 schema 2 inventory 身份，再接受完成标记。不同选项身份不能复用该目录，同 scope 的
-同版本变体也不能共存。npm install/全局 use 路径会在身份不同时重建或替换该版本。旧
-schema 1 inventory 仍可读取，以便扫描和迁移时识别，但不能授权复用、activation 或 shim
-执行；请重新运行 install 或全局 use，以 schema 2 重建该版本。
+动态安装根位于 backend 与精确版本之下，并带身份指纹；隔离与全局 npm 仍属于不同
+namespace。因此，同一 scope 中相同 backend/version 的多个身份可以共存。复用及 lifecycle
+命令会先派生精确身份，绝不会把另一个 fingerprint 当作版本兼容回退。
 
-CLI 和 shim 根据 inventory 建立 `bin name -> backend owner` 映射。对活跃动态请求，
-activation 与 shim 分发会先要求其规范选项身份与所选安装的 schema 2 inventory 匹配；
-身份缺失、过旧或不匹配都会 fail closed，不暴露其 bin 路径。bin owner 判定是另一项独立
+`.osdk-tool.json` 只作为遗留状态识别 metadata。其旧 schema 1 与 schema 2 都不能授权复用、
+activation、shim 执行、`where`、uninstall 或 `reshim`；这些动态 inventory schema 之间没有
+兼容契约。遗留安装必须重新安装，发布 `.osdk-install.json` schema 1。
+
+CLI 和 shim 根据精确安装身份记录建立 `bin name -> backend owner` 映射。对活跃动态请求，
+复用、activation、shim 分发、`where`、uninstall 与 `reshim` 只选择完整 `b3-v2:` 身份与请求
+匹配的指纹化根。身份缺失、过旧或不匹配都会 fail closed，不暴露 bin 路径，也不会选择同版本
+的其他根。
+当前 lock schema 3 过渡中，精确受管 Node 依赖属于 install ID；只有作为安装前输入存在的
+旧冻结 graph digest 才参与路径。紧凑 native-lock hash 在 lock 重放与全新安装后的注入形式相同，
+因此在 lock schema 4 提供 typed provenance 之前，它仍是需要校验的 receipt evidence，而不是
+路径选择器。未锁定安装后观察到的 graph/SRI 数据采用同样规则。
+
+bin owner 判定是另一项独立
 检查：
 
 - 一个 owner 时直接路由；
@@ -256,9 +266,9 @@ activation 与 shim 分发会先要求其规范选项身份与所选安装的 sc
 
 ## 主要验证点
 
-相关单元与契约测试覆盖 namespaced/scoped parser、选项规范化与 fingerprint、schema 2
-inventory 校验、安装器规划、依赖区段保留、原生委托只执行一次、紧凑 lock metadata、
+相关单元与契约测试覆盖 namespaced/scoped parser、选项规范化、规范 `b3-v2:` 安装身份、
+schema 1 身份校验、安装器规划、依赖区段保留、原生委托只执行一次、紧凑 lock metadata、
 全局前缀参数、原生 lock 身份、筛选 generation 发布与重新校验、原始项目 bin 排除、
-inventory 扫描和 shim 冲突行为。兼容性测试继续覆盖旧 lock schema 2 sidecar 校验、动态
-inventory schema 1 重装和 lock schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行
+安装扫描和 shim 冲突行为。兼容性测试继续覆盖旧 lock schema 2 sidecar 校验、旧
+`.osdk-tool.json` 只识别不执行，以及 lock schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行
 Linux workspace 测试与完整 Windows GNU Wine 套件。

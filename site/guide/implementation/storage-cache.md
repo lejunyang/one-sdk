@@ -6,8 +6,9 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 
 默认布局如下。data 与 cache 根目录可覆盖，store 和 installs 另有专用覆盖变量；其余路径是从这些根派生的子目录：
 
-- `<installs>/<tool>/<version>`：已物化的 SDK 与隔离工具；`<installs>` 默认为 `<data>/installs`，也可由 `OSDK_INSTALL_DIR` 覆盖。
-- `<installs>/npm-global/<package>/<version>`：`use --global npm:<package>` 的规范全局安装根；旧版放在 `<installs>/npm/<package>/<version>` 的 global manifest 只用于兼容识别和迁移。
+- `<installs>/<tool>/<version>`：已物化的固定 backend SDK；`<installs>` 默认为 `<data>/installs`，也可由 `OSDK_INSTALL_DIR` 覆盖。
+- `<installs>/<dynamic-tool>/<version>/b3-v2-<digest>`：osdk 自有隔离动态工具的指纹化安装根。
+- `<installs>/npm-global/<package>/<version>/b3-v2-<digest>`：`use --global npm:<package>` 的指纹化安装根。包含 `.osdk-tool.json` 的旧版纯版本根只用于遗留识别，绝不会被复用或执行。
 - `<data>/models/<name>/snapshots/<snapshot>`：已物化的模型快照。
 - `<data>/store/<aa>/<bb>/<blake3>`：SDK 与模型文件共享的 CAS。
 - `<data>/shims`：命令 shim。
@@ -18,12 +19,16 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 - `<cache>/aube/v1/cache` 与 `<data>/store/aube`：Aube 驱动的隔离、项目与全局 npm 工具共享的 cache/store；每个真实项目或受控安装根仍保留自己的原生 lock。
 
 `Dirs::ensure` 在 CLI 初始化时建立核心目录。默认 store 与 installs 同在 data volume，便于 hardlink；`OSDK_STORE_DIR` 可把 store 移到其他卷，但这可能让物化回退到 reflink 或 copy。
+每个动态根包含 `.osdk-install.json` schema 1；其嵌套 `identity` 包含 `tool`、`version`、
+`platform`、`scope`、`material_options`、`dependencies`、`materials` 与规范 `b3-v2:`
+`install_id`。复用、activation、shim 分发、`where`、uninstall 与 `reshim` 都由该身份驱动，
+多个兄弟身份可以共存。`.osdk/npm-bin` 下的项目管理 npm 状态仍是独立的项目所有布局。
 
 ## SDK 安装管线与锁
 
 归档型 backend 进入 [`pipeline::run_with_attestation`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs#L129)，顺序是：
 
-1. 获取 `installs/<tool>/.locks/<version>.lock` 的阻塞式独占进程锁。
+1. 固定 backend 获取 `installs/<tool>/.locks/<version>.lock` 的阻塞式独占进程锁；动态 backend 获取身份限定 lock，并持有到 backend-specific 收尾结束。
 2. 在锁内检查 `.osdk-complete`；已完成安装直接复用，必要时仍重新验证 attestation 并合并 receipt evidence。
 3. 删除同版本残留的不完整安装目录。
 4. 复用或下载 `<cache>/downloads/...` 归档，验证 checksum/attestation。
@@ -31,7 +36,7 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 6. 将普通文件写入 CAS，再物化安装树并写 `.osdk-manifest.json`。
 7. 写 artifact receipt，最后写 `.osdk-complete`。
 
-锁覆盖下载、验证、解压、CAS 写入、物化和完成标记，因此只串行化**相同 tool/version**；不同工具或版本可并发。锁由 [`FileLock`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) 持有至函数返回并在 drop 时释放。委托给外部管理器的 backend 不一定经过这条共享归档管线，不能把 per-version 锁描述为所有 backend 的无条件保证。
+锁覆盖下载、验证、解压、CAS 写入、物化和完成标记。固定 backend 串行化**相同 tool/version**；动态 backend 只串行化相同完整安装身份，因此兄弟身份可以独立执行。锁由 [`FileLock`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/lock.rs) 持有至函数返回并在 drop 时释放。委托给外部管理器的 backend 不一定经过这条共享归档管线，不能把该锁描述为所有 backend 的无条件保证。
 
 ## CAS 写入与物化
 

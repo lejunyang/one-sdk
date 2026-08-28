@@ -5,20 +5,22 @@
 //! (installed directly into `bin/`). Version specs map to release tags
 //! (`latest` → the latest release). Mirrors: a CN GitHub proxy fallback.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::backend::{Backend, Ctx, InstallCtx};
+use crate::dirs::InstallLocator;
 use crate::error::{Error, Result};
 use crate::http;
 use crate::inventory::{DynamicToolBin, DynamicToolManifest};
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
 use crate::platform::{Arch, Os};
 use crate::source::Source;
+use crate::tool::{InstallIdentity, InstallScope};
 use crate::verification::GithubAttestation;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo, VersionSpec};
 
@@ -45,6 +47,13 @@ struct GhRelease {
 struct GhAsset {
     name: String,
     browser_download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedArtifact {
+    asset: GhAsset,
+    urls: Vec<String>,
+    checksum: Option<pipeline::Checksum>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -471,6 +480,116 @@ impl GithubBackend {
         Ok(Some(catalog))
     }
 
+    async fn select_install_artifact(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        rules: &AssetRules,
+        sources: &[Source],
+    ) -> Result<SelectedArtifact> {
+        if let Some(artifact) = pipeline::locked_artifact(tv)? {
+            let checksum = artifact
+                .checksum
+                .as_deref()
+                .map(pipeline::parse_checksum)
+                .transpose()?;
+            return Ok(SelectedArtifact {
+                urls: http::github_url_candidates(sources, &artifact.url),
+                asset: GhAsset {
+                    name: artifact.file_name,
+                    browser_download_url: artifact.url,
+                },
+                checksum,
+            });
+        }
+
+        let want = tv.version.trim_start_matches('v');
+        let (assets, static_checksums) =
+            if let Some(catalog) = self.static_catalog(ctx, &tv.options).await? {
+                let release = catalog
+                    .releases
+                    .into_iter()
+                    .find(|release| release.tag.trim_start_matches('v') == want)
+                    .ok_or_else(|| Error::VersionResolve {
+                        tool: self.id().into(),
+                        spec: tv.version.clone(),
+                        hint: Some("static catalog tag not found".into()),
+                    })?;
+                let matching: Vec<_> = release
+                    .assets
+                    .into_iter()
+                    .filter(|asset| static_asset_matches(asset, ctx, rules))
+                    .collect();
+                (
+                    matching
+                        .iter()
+                        .map(|asset| GhAsset {
+                            name: asset.name.clone(),
+                            browser_download_url: asset.url.clone(),
+                        })
+                        .collect(),
+                    matching
+                        .into_iter()
+                        .map(|asset| (asset.name, asset.checksum))
+                        .collect::<BTreeMap<_, _>>(),
+                )
+            } else {
+                let release = self.release_for_tag(ctx, sources, &tv.version).await?;
+                (release.assets, BTreeMap::new())
+            };
+
+        let asset = select_asset(self, &assets, &tv.version, ctx, rules)?;
+        let urls = http::github_url_candidates(sources, &asset.browser_download_url);
+        let mut checksum = static_checksums
+            .get(&asset.name)
+            .map(|value| pipeline::parse_checksum(value))
+            .transpose()?;
+
+        // Checksum discovery, strongest first:
+        // 1. a minisign-signed checksums manifest (trusted key);
+        // 2. per-asset sidecar / unsigned shared manifest.
+        if ctx.config.settings.verify_signatures && !ctx.config.settings.offline {
+            for url in &urls {
+                let dir = url
+                    .rsplit_once('/')
+                    .map(|(directory, _)| directory)
+                    .unwrap_or("");
+                match pipeline::verify::signed_manifest_checksum(
+                    &ctx.client,
+                    &self.id,
+                    dir,
+                    &asset.name,
+                )
+                .await
+                {
+                    Ok(Some(found)) => {
+                        tracing::info!(source = %self.id, "{}", crate::i18n::tr("log.signature_verified"));
+                        checksum = Some(found);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if checksum.is_none() && !ctx.config.settings.offline {
+            for url in &urls {
+                if let Some(found) =
+                    pipeline::verify::discover_asset_checksum(&ctx.client, url).await
+                {
+                    checksum = Some(found);
+                    break;
+                }
+            }
+        }
+
+        Ok(SelectedArtifact {
+            asset,
+            urls,
+            checksum,
+        })
+    }
+
     /// Score how well an asset name matches the host platform. Higher is better;
     /// None means it clearly doesn't match (wrong os/arch).
     fn score_asset(&self, name: &str, ctx: &Ctx, rules: Option<&AssetRules>) -> Option<i32> {
@@ -722,174 +841,46 @@ impl Backend for GithubBackend {
         let ctx = ictx.ctx;
         crate::backend::dynamic::validate_options(self.id(), &tv.options)?;
         let rules = Self::rules(&tv.options)?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let attestation = self.attestation(ctx, &sources);
+        let selected = self
+            .select_install_artifact(ctx, tv, &rules, &sources)
+            .await?;
+        let locator = github_install_locator_for_artifact(
+            ctx,
+            self.id(),
+            tv,
+            &selected.asset,
+            selected.checksum.as_ref(),
+        )?;
         // The shared archive pipeline only keeps its install lock while it is
         // materializing files. GitHub-specific post-processing and inventory
         // publication happen afterwards, and the bare-binary path does not use
         // that lock at all. Keep a separate outer lock across the whole
         // operation so two direct backend callers cannot race and bind the
         // winner's bytes to the loser's option identity.
-        let _identity_lock = acquire_github_install_lock(ctx, self.id(), tv).await?;
-        if validate_complete_install_identity(ctx, self, tv)? {
+        let _identity_lock = acquire_github_install_lock(&locator).await?;
+        if validate_complete_install_identity(ctx, self, tv, &locator)? {
             return Ok(());
         }
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let attestation = self.attestation(ctx, &sources);
-        if let Some(artifact) = pipeline::locked_artifact(tv)? {
-            let urls = http::github_url_candidates(&sources, &artifact.url);
-            if let Ok(kind) = ArchiveKind::from_name(&artifact.file_name) {
-                let plan = InstallPlan {
-                    tool: self.id().to_string(),
-                    version: tv.version.clone(),
-                    urls,
-                    file_name: artifact.file_name,
-                    kind,
-                    checksum: artifact
-                        .checksum
-                        .as_deref()
-                        .map(pipeline::parse_checksum)
-                        .transpose()?,
-                    strip_root: rules.strip_components == 0,
-                    subdir: tv.options.get("catalog-subdir").map(PathBuf::from),
-                };
-                let pctx = PipelineCtx {
-                    client: &ctx.client,
-                    dirs: &ctx.dirs,
-                    cas: &ctx.cas,
-                    link_mode: ctx.config.settings.link_mode,
-                    show_progress: ctx.show_progress,
-                    offline: ctx.config.settings.offline,
-                    require_checksums: ctx.config.settings.require_checksums,
-                };
-                pipeline::run_with_attestation_unfinalized(&plan, &pctx, attestation.as_ref())
-                    .await?;
-                postprocess_archive(ctx, self, &tv.version, &rules)?;
-            } else {
-                let checksum = artifact
-                    .checksum
-                    .as_deref()
-                    .map(pipeline::parse_checksum)
-                    .transpose()?;
-                let exe_name = normalize_executable_name(
-                    rules.rename.as_deref().unwrap_or(&self.repo),
-                    ctx.platform.os,
-                );
-                pipeline::install_single_binary_unfinalized(
-                    &ctx.client,
-                    &ctx.dirs,
-                    self.id(),
-                    &tv.version,
-                    &urls,
-                    exe_name.trim_end_matches(ctx.platform.os.exe_suffix()),
-                    &artifact.file_name,
-                    ctx.platform.os,
-                    checksum.as_ref(),
-                    ctx.show_progress,
-                    ctx.config.settings.offline,
-                    ctx.config.settings.require_checksums,
-                    attestation.as_ref(),
-                )
-                .await?;
-            }
-            finalize_dynamic_install(ctx, self, tv)?;
-            return Ok(());
-        }
-        let want = tv.version.trim_start_matches('v');
-        let (assets, static_checksums) =
-            if let Some(catalog) = self.static_catalog(ctx, &tv.options).await? {
-                let release = catalog
-                    .releases
-                    .into_iter()
-                    .find(|release| release.tag.trim_start_matches('v') == want)
-                    .ok_or_else(|| Error::VersionResolve {
-                        tool: self.id().into(),
-                        spec: tv.version.clone(),
-                        hint: Some("static catalog tag not found".into()),
-                    })?;
-                let matching: Vec<_> = release
-                    .assets
-                    .into_iter()
-                    .filter(|asset| static_asset_matches(asset, ctx, &rules))
-                    .collect();
-                (
-                    matching
-                        .iter()
-                        .map(|asset| GhAsset {
-                            name: asset.name.clone(),
-                            browser_download_url: asset.url.clone(),
-                        })
-                        .collect(),
-                    matching
-                        .into_iter()
-                        .map(|asset| (asset.name, asset.checksum))
-                        .collect::<std::collections::BTreeMap<_, _>>(),
-                )
-            } else {
-                let release = self.release_for_tag(ctx, &sources, &tv.version).await?;
-                (release.assets, std::collections::BTreeMap::new())
-            };
-
-        let asset = select_asset(self, &assets, &tv.version, ctx, &rules)?;
-
-        let urls = http::github_url_candidates(&sources, &asset.browser_download_url);
-
-        // Checksum discovery, strongest first:
-        // 1. a minisign-signed checksums manifest (trusted key) — the manifest's
-        //    signature is verified before its hashes are trusted;
-        // 2. per-asset sidecar / unsigned shared manifest.
-        let mut checksum = static_checksums
-            .get(&asset.name)
-            .map(|value| pipeline::parse_checksum(value))
-            .transpose()?;
-        if ctx.config.settings.verify_signatures && !ctx.config.settings.offline {
-            for url in &urls {
-                let dir = url
-                    .rsplit_once('/')
-                    .map(|(directory, _)| directory)
-                    .unwrap_or("");
-                match pipeline::verify::signed_manifest_checksum(
-                    &ctx.client,
-                    &self.id,
-                    dir,
-                    &asset.name,
-                )
-                .await
-                {
-                    Ok(Some(cs)) => {
-                        tracing::info!(source = %self.id, "{}", crate::i18n::tr("log.signature_verified"));
-                        checksum = Some(cs);
-                        break;
-                    }
-                    Ok(None) => {}
-                    // Invalid signature is a hard failure — do not silently proceed.
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        if checksum.is_none() && !ctx.config.settings.offline {
-            for url in &urls {
-                if let Some(found) =
-                    pipeline::verify::discover_asset_checksum(&ctx.client, url).await
-                {
-                    checksum = Some(found);
-                    break;
-                }
-            }
-        }
-
         // Archive vs bare binary.
-        match ArchiveKind::from_name(&asset.name) {
+        match ArchiveKind::from_name(&selected.asset.name) {
             Ok(kind) => {
                 let plan = InstallPlan {
                     tool: self.id().to_string(),
                     version: tv.version.clone(),
-                    urls,
-                    file_name: asset.name.clone(),
+                    urls: selected.urls,
+                    file_name: selected.asset.name,
                     kind,
-                    checksum,
+                    checksum: selected.checksum,
                     // Some archives have a top dir, some don't; strip only when a
                     // single root dir is present (extract handles the no-op).
                     strip_root: rules.strip_components == 0,
-                    subdir: None,
+                    subdir: tv
+                        .options
+                        .get(pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION)
+                        .or_else(|| tv.options.get("catalog-subdir"))
+                        .map(PathBuf::from),
                 };
                 let pctx = PipelineCtx {
                     client: &ctx.client,
@@ -900,9 +891,14 @@ impl Backend for GithubBackend {
                     offline: ctx.config.settings.offline,
                     require_checksums: ctx.config.settings.require_checksums,
                 };
-                pipeline::run_with_attestation_unfinalized(&plan, &pctx, attestation.as_ref())
-                    .await?;
-                postprocess_archive(ctx, self, &tv.version, &rules)?;
+                pipeline::run_with_attestation_unfinalized_at(
+                    &plan,
+                    &pctx,
+                    attestation.as_ref(),
+                    &locator,
+                )
+                .await?;
+                postprocess_archive(ctx, &locator, &rules)?;
             }
             Err(_) => {
                 // Treat as a bare executable named after the repo.
@@ -910,16 +906,15 @@ impl Backend for GithubBackend {
                     rules.rename.as_deref().unwrap_or(&self.repo),
                     ctx.platform.os,
                 );
-                pipeline::install_single_binary_unfinalized(
+                pipeline::install_single_binary_unfinalized_at(
                     &ctx.client,
                     &ctx.dirs,
-                    self.id(),
-                    &tv.version,
-                    &urls,
+                    &locator,
+                    &selected.urls,
                     exe_name.trim_end_matches(ctx.platform.os.exe_suffix()),
-                    &asset.name,
+                    &selected.asset.name,
                     ctx.platform.os,
-                    checksum.as_ref(),
+                    selected.checksum.as_ref(),
                     ctx.show_progress,
                     ctx.config.settings.offline,
                     ctx.config.settings.require_checksums,
@@ -928,12 +923,53 @@ impl Backend for GithubBackend {
                 .await?;
             }
         }
-        finalize_dynamic_install(ctx, self, tv)?;
+        finalize_dynamic_install(&locator)?;
         Ok(())
     }
 
+    async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        let locator = github_install_locator(ctx, self.id(), tv)?;
+        let install_root = locator.install_root();
+        match std::fs::symlink_metadata(install_root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                std::fs::remove_dir_all(install_root)
+                    .map_err(|error| Error::io(install_root, error))?;
+            }
+            Ok(_) => {
+                std::fs::remove_file(install_root)
+                    .map_err(|error| Error::io(install_root, error))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(install_root, error)),
+        }
+        Ok(())
+    }
+
+    fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        let report = crate::inventory::scan_installs(
+            &ctx.dirs.installs,
+            &crate::inventory::ScanOptions::default(),
+        )?;
+        Ok(report
+            .installs
+            .iter()
+            .filter(|install| {
+                let identity = &install.manifest.identity;
+                identity.tool == self.id
+                    && identity.platform == ctx.platform.to_string()
+                    && identity.scope == InstallScope::Isolated
+                    && github_install_candidate_is_valid(ctx, &install.install_root, identity)
+                        .unwrap_or(false)
+            })
+            .map(|install| install.manifest.identity.version.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
     fn ensure_post_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
-        if !validate_complete_install_identity(ctx, self, tv)? {
+        let locator = github_install_locator(ctx, self.id(), tv)?;
+        if !validate_complete_install_identity(ctx, self, tv, &locator)? {
             return Err(Error::other(format!(
                 "dynamic tool `{}@{}` is not completely installed",
                 self.id(),
@@ -944,7 +980,9 @@ impl Backend for GithubBackend {
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        let root = ctx.dirs.install_path(self.id(), &tv.version);
+        let root = github_install_locator(ctx, self.id(), tv)?
+            .install_root()
+            .to_path_buf();
         // Archives may put binaries at root or in bin/; expose both.
         let bin = root.join("bin");
         if bin.exists() {
@@ -965,19 +1003,166 @@ impl Backend for GithubBackend {
     }
 }
 
-fn github_install_lock_path(ctx: &Ctx, backend_id: &str, version: &ToolVersion) -> PathBuf {
-    ctx.dirs.lock_dir(backend_id).join(format!(
-        "{}.github-identity.lock",
-        crate::dirs::sanitize_version_component(&version.version)
-    ))
-}
-
-async fn acquire_github_install_lock(
+pub(crate) fn github_install_locator(
     ctx: &Ctx,
     backend_id: &str,
     version: &ToolVersion,
-) -> Result<crate::lock::FileLock> {
-    let path = github_install_lock_path(ctx, backend_id, version);
+) -> Result<InstallLocator> {
+    if pipeline::locked_artifact(version)?.is_some() {
+        return github_install_locator_for(&ctx.dirs, ctx.platform, backend_id, version);
+    }
+    github_installed_locator(ctx, backend_id, version)?.ok_or_else(|| {
+        Error::other(format!(
+            "GitHub install identity for `{backend_id}@{}` has no unique complete artifact candidate; reinstall it or use a lockfile with exact artifact identity",
+            version.version
+        ))
+    })
+}
+
+/// Derive the exact locator for a GitHub request whose locked artifact
+/// material is already present. This variant is used by lockfile serialization
+/// where only directory and platform state are available.
+pub fn github_install_locator_for(
+    dirs: &crate::dirs::Dirs,
+    platform: crate::platform::Platform,
+    backend_id: &str,
+    version: &ToolVersion,
+) -> Result<InstallLocator> {
+    if let Some(artifact) = pipeline::locked_artifact(version)? {
+        return github_install_locator_for_artifact_parts(
+            dirs,
+            platform,
+            backend_id,
+            version,
+            &GhAsset {
+                name: artifact.file_name,
+                browser_download_url: artifact.url,
+            },
+            artifact
+                .checksum
+                .as_deref()
+                .map(pipeline::parse_checksum)
+                .transpose()?
+                .as_ref(),
+        );
+    }
+    Err(Error::other(format!(
+        "GitHub install identity for `{backend_id}@{}` requires locked artifact material",
+        version.version
+    )))
+}
+
+fn github_installed_locator(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &ToolVersion,
+) -> Result<Option<InstallLocator>> {
+    let expected_options = crate::backend::dynamic::identity_options(backend_id, &version.options)?;
+    let report = crate::inventory::scan_installs(
+        &ctx.dirs.installs,
+        &crate::inventory::ScanOptions::default(),
+    )?;
+    let mut candidates = report.installs.into_iter().filter(|install| {
+        let identity = &install.manifest.identity;
+        identity.tool == backend_id
+            && identity.version == version.version
+            && identity.platform == ctx.platform.to_string()
+            && identity.scope == InstallScope::Isolated
+            && identity.material_options == expected_options
+            && github_install_candidate_is_valid(ctx, &install.install_root, identity)
+                .unwrap_or(false)
+    });
+    let Some(first) = candidates.next() else {
+        return Ok(None);
+    };
+    if candidates.next().is_some() {
+        return Err(Error::other(format!(
+            "GitHub install identity for `{backend_id}@{}` is ambiguous across multiple artifact variants; use a lockfile with exact artifact identity or uninstall the unwanted variant",
+            version.version
+        )));
+    }
+    InstallLocator::new(&ctx.dirs, first.manifest.identity).map(Some)
+}
+
+fn github_install_locator_for_artifact(
+    ctx: &Ctx,
+    backend_id: &str,
+    version: &ToolVersion,
+    asset: &GhAsset,
+    checksum: Option<&pipeline::Checksum>,
+) -> Result<InstallLocator> {
+    github_install_locator_for_artifact_parts(
+        &ctx.dirs,
+        ctx.platform,
+        backend_id,
+        version,
+        asset,
+        checksum,
+    )
+}
+
+fn github_install_locator_for_artifact_parts(
+    dirs: &crate::dirs::Dirs,
+    platform: crate::platform::Platform,
+    backend_id: &str,
+    version: &ToolVersion,
+    asset: &GhAsset,
+    checksum: Option<&pipeline::Checksum>,
+) -> Result<InstallLocator> {
+    let subdir = version
+        .options
+        .get(pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION)
+        .or_else(|| version.options.get("catalog-subdir"));
+    let materials = github_artifact_materials(asset, checksum, subdir.map(String::as_str));
+    let identity = InstallIdentity::new(
+        backend_id,
+        &version.version,
+        platform.to_string(),
+        InstallScope::Isolated,
+        &version.options,
+        Vec::new(),
+        materials,
+    )?;
+    InstallLocator::new(dirs, identity)
+}
+
+fn github_artifact_materials(
+    asset: &GhAsset,
+    checksum: Option<&pipeline::Checksum>,
+    subdir: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut materials = BTreeMap::from([("artifact-file".into(), asset.name.clone())]);
+    if let Some(checksum) = checksum {
+        materials.insert("artifact-checksum".into(), format_checksum(checksum));
+    } else {
+        materials.insert(
+            "artifact-url-blake3".into(),
+            github_artifact_url_hash(&asset.browser_download_url),
+        );
+    }
+    if let Some(subdir) = subdir {
+        materials.insert("artifact-subdir".into(), subdir.to_string());
+    }
+    materials
+}
+
+fn github_artifact_url_hash(url: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-github-artifact-url-v1");
+    hasher.update(url.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn format_checksum(checksum: &pipeline::Checksum) -> String {
+    let algorithm = match checksum.algo {
+        pipeline::HashAlgo::Sha256 => "sha256",
+        pipeline::HashAlgo::Sha512 => "sha512",
+        pipeline::HashAlgo::Blake3 => "blake3",
+    };
+    format!("{algorithm}:{}", checksum.hex.to_ascii_lowercase())
+}
+
+async fn acquire_github_install_lock(locator: &InstallLocator) -> Result<crate::lock::FileLock> {
+    let path = locator.lock_path().to_path_buf();
     tokio::task::spawn_blocking(move || crate::lock::FileLock::acquire(path))
         .await
         .map_err(|error| Error::other(format!("GitHub install lock task failed: {error}")))?
@@ -986,63 +1171,139 @@ async fn acquire_github_install_lock(
 /// Validate an already-complete install without ever upgrading or rewriting
 /// its inventory. Returning `false` means no complete install exists and the
 /// caller may perform a real installation. Any complete install that cannot
-/// prove the requested schema-2 identity is rejected fail-closed.
+/// prove the requested schema-1 install identity is rejected fail-closed.
 fn validate_complete_install_identity(
     ctx: &Ctx,
     backend: &GithubBackend,
     version: &ToolVersion,
+    locator: &InstallLocator,
 ) -> Result<bool> {
-    let install_root = ctx.dirs.install_path(backend.id(), &version.version);
-    if !install_root.join(".osdk-complete").is_file() {
+    let install_root = locator.install_root().to_path_buf();
+    if !is_regular_file(&install_root.join(".osdk-complete")) {
         return Ok(false);
     }
-    let manifest = DynamicToolManifest::load(&install_root).map_err(|error| {
-        Error::other(format!(
-            "refusing to reuse complete dynamic tool `{}@{}` with missing, legacy, or invalid install identity; uninstall and reinstall it: {error}",
-            backend.id(),
-            version.version
-        ))
-    })?;
-    if manifest.id != backend.id()
-        || manifest.version.as_deref() != Some(version.version.as_str())
-        || !manifest.matches_identity_options(&version.options)?
-    {
-        return Err(Error::other(format!(
-            "refusing to reuse complete dynamic tool `{}@{}` installed with a different identity or options; uninstall and reinstall it",
-            backend.id(),
-            version.version
-        )));
-    }
-    if let Some(locked) = pipeline::locked_artifact(version)? {
-        let receipt = pipeline::artifact_receipt(&ctx.dirs, backend.id(), &version.version)
-            .ok_or_else(|| {
-                Error::other(format!(
-                    "refusing to reuse complete dynamic tool `{}@{}` without its artifact receipt; uninstall and reinstall it",
-                    backend.id(),
-                    version.version
-                ))
-            })?;
-        let expected_subdir = version
-            .options
-            .get(pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION)
-            .or_else(|| version.options.get("catalog-subdir"));
-        if receipt.file_name != locked.file_name
-            || !matching_locked_checksum(receipt.checksum.as_deref(), locked.checksum.as_deref())
-            || !locked_artifact_url_must_match(
-                &receipt.url,
-                &locked.url,
-                locked.checksum.as_deref(),
-            )
-            || manifest.metadata.get("artifact_subdir") != expected_subdir
-        {
+    match github_install_candidate_is_valid(ctx, &install_root, locator.identity()) {
+        Ok(true) => {}
+        Ok(false) => {
             return Err(Error::other(format!(
-                "refusing to reuse complete dynamic tool `{}@{}` installed from a different locked artifact; uninstall and reinstall it",
-                backend.id(),
-                version.version
+                "refusing to reuse complete dynamic tool `{}@{}` with missing, legacy, or invalid install identity; uninstall and reinstall it",
+                backend.id(), version.version
+            )));
+        }
+        Err(error) => {
+            return Err(Error::other(format!(
+                "refusing to reuse complete dynamic tool `{}@{}` installed with a different identity or invalid receipt; uninstall and reinstall it: {error}",
+                backend.id(), version.version
             )));
         }
     }
     Ok(true)
+}
+
+/// Validate a scanned GitHub candidate without consulting the network. This is
+/// shared by lifecycle reuse and restart-time config/activation recovery.
+pub fn github_install_candidate_is_valid(
+    ctx: &Ctx,
+    install_root: &Path,
+    identity: &InstallIdentity,
+) -> Result<bool> {
+    github_install_candidate_is_valid_for_dirs(&ctx.dirs, install_root, identity)
+}
+
+/// Validate a persisted GitHub candidate when callers only have storage and
+/// platform state (for example lockfile serialization after installation).
+pub fn github_install_candidate_is_valid_for_dirs(
+    dirs: &crate::dirs::Dirs,
+    install_root: &Path,
+    identity: &InstallIdentity,
+) -> Result<bool> {
+    if identity.scope != InstallScope::Isolated
+        || !is_regular_file(&install_root.join(".osdk-complete"))
+        || !is_regular_file(&DynamicToolManifest::manifest_path(install_root))
+        || !is_regular_file(&install_root.join(".osdk-artifact.json"))
+    {
+        return Ok(false);
+    }
+    let locator = InstallLocator::new(dirs, identity.clone())?;
+    if !locator.validates_existing_install_root(install_root) {
+        return Ok(false);
+    }
+    let manifest = match DynamicToolManifest::load(install_root) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(false),
+    };
+    if !manifest.matches_identity(identity) {
+        return Err(Error::other(format!(
+            "GitHub install identity mismatch at {}",
+            DynamicToolManifest::manifest_path(install_root).display()
+        )));
+    }
+    let Some(receipt) = pipeline::artifact_receipt_at(install_root) else {
+        return Ok(false);
+    };
+    if !github_receipt_matches_identity(&receipt, identity) {
+        return Err(Error::other(format!(
+            "GitHub artifact receipt does not match install identity at {}",
+            install_root.display()
+        )));
+    }
+    let canonical_root =
+        dunce::canonicalize(install_root).map_err(|error| Error::io(install_root, error))?;
+    for bin in &manifest.bins {
+        let path = install_root.join(&bin.path);
+        let canonical = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+        if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
+            return Err(Error::other(format!(
+                "GitHub inventory bin `{}` does not resolve inside {}",
+                bin.name,
+                install_root.display()
+            )));
+        }
+    }
+    Ok(true)
+}
+
+fn github_receipt_matches_identity(
+    receipt: &pipeline::ArtifactReceipt,
+    identity: &InstallIdentity,
+) -> bool {
+    let Some(expected_file) = identity.materials.get("artifact-file") else {
+        return false;
+    };
+    if &receipt.file_name != expected_file {
+        return false;
+    }
+    let subdir_is_consistent = match (
+        identity.materials.get("artifact-subdir"),
+        identity.material_options.get("catalog-subdir"),
+    ) {
+        (Some(material), Some(option)) => material == option,
+        (None, None) => true,
+        _ => false,
+    };
+    if !subdir_is_consistent {
+        return false;
+    }
+    match (
+        identity.materials.get("artifact-checksum"),
+        identity.materials.get("artifact-url-blake3"),
+    ) {
+        (Some(expected), None) => {
+            matching_locked_checksum(receipt.checksum.as_deref(), Some(expected))
+        }
+        (None, Some(expected)) => {
+            github_artifact_url_hash(&receipt.url) == *expected
+                && receipt
+                    .checksum
+                    .as_deref()
+                    .is_none_or(|checksum| pipeline::parse_checksum(checksum).is_ok())
+        }
+        _ => false,
+    }
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 fn matching_locked_checksum(actual: Option<&str>, expected: Option<&str>) -> bool {
@@ -1061,29 +1322,21 @@ fn matching_locked_checksum(actual: Option<&str>, expected: Option<&str>) -> boo
     }
 }
 
+#[cfg(test)]
 fn locked_artifact_url_must_match(actual: &str, expected: &str, checksum: Option<&str>) -> bool {
     checksum.is_some() || actual == expected
 }
 
-fn write_dynamic_inventory(
-    ctx: &Ctx,
-    backend: &GithubBackend,
-    version: &ToolVersion,
-) -> Result<()> {
-    let install_root = ctx.dirs.install_path(backend.id(), &version.version);
-    let mut manifest =
-        DynamicToolManifest::new(backend.id())?.with_identity_options(&version.options)?;
-    manifest.version = Some(version.version.clone());
-    if let Some(subdir) = version
-        .options
-        .get(pipeline::LOCKED_ARTIFACT_SUBDIR_OPTION)
-        .or_else(|| version.options.get("catalog-subdir"))
-    {
-        manifest
-            .metadata
-            .insert("artifact_subdir".into(), subdir.clone());
-    }
-    for bin_dir in backend.bin_paths(ctx, version)? {
+fn write_dynamic_inventory(locator: &InstallLocator) -> Result<()> {
+    let install_root = locator.install_root().to_path_buf();
+    let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone())?;
+    let bin = install_root.join("bin");
+    let bin_dirs = if bin.exists() {
+        vec![bin, install_root.clone()]
+    } else {
+        vec![install_root.clone()]
+    };
+    for bin_dir in bin_dirs {
         for name in crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir)) {
             let target = executable_in_dir(&bin_dir, &name).ok_or_else(|| {
                 Error::other(format!("installed GitHub binary `{name}` disappeared"))
@@ -1115,14 +1368,10 @@ fn write_dynamic_inventory(
     manifest.write_atomic(&install_root)
 }
 
-fn finalize_dynamic_install(
-    ctx: &Ctx,
-    backend: &GithubBackend,
-    version: &ToolVersion,
-) -> Result<()> {
-    let install_root = ctx.dirs.install_path(backend.id(), &version.version);
+fn finalize_dynamic_install(locator: &InstallLocator) -> Result<()> {
+    let install_root = locator.install_root().to_path_buf();
     let marker = install_root.join(".osdk-complete");
-    if let Err(error) = write_dynamic_inventory(ctx, backend, version) {
+    if let Err(error) = write_dynamic_inventory(locator) {
         let _ = std::fs::remove_dir_all(&install_root);
         return Err(error);
     }
@@ -1520,16 +1769,11 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&temporary, path).map_err(|error| Error::io(path, error))
 }
 
-fn postprocess_archive(
-    ctx: &Ctx,
-    backend: &GithubBackend,
-    version: &str,
-    rules: &AssetRules,
-) -> Result<()> {
+fn postprocess_archive(ctx: &Ctx, locator: &InstallLocator, rules: &AssetRules) -> Result<()> {
     if rules.bins.is_empty() && rules.rename.is_none() && rules.strip_components == 0 {
         return Ok(());
     }
-    let install = ctx.dirs.install_path(backend.id(), version);
+    let install = locator.install_root().to_path_buf();
     let result = (|| {
         let base = strip_components_root(&install, rules.strip_components)?;
         let bin_dir = install.join("bin");
@@ -1943,10 +2187,12 @@ mod tests {
                     }
                     request.extend_from_slice(&buffer[..size]);
                 }
-                assert!(!String::from_utf8(request)
-                    .unwrap()
-                    .to_ascii_lowercase()
-                    .contains("authorization:"));
+                assert!(
+                    !String::from_utf8(request)
+                        .unwrap()
+                        .to_ascii_lowercase()
+                        .contains("authorization:")
+                );
                 write!(
                     stream,
                     "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -2086,6 +2332,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checksumless_signed_url_is_hashed_in_install_manifest_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let secret_url = "https://artifacts.example/tool?token=do-not-persist";
+        let version = locked_version(&backend, "1.2.3", secret_url, "tool", None);
+        let locator = github_install_locator(&ctx, backend.id(), &version).unwrap();
+        let manifest = DynamicToolManifest::from_identity(locator.identity().clone()).unwrap();
+        let json = serde_json::to_string(&manifest).unwrap();
+
+        assert!(!json.contains(secret_url));
+        assert!(!json.contains("do-not-persist"));
+        assert!(!manifest.identity.materials.contains_key("artifact-url"));
+        assert_eq!(
+            manifest.identity.materials["artifact-url-blake3"],
+            github_artifact_url_hash(secret_url)
+        );
+    }
+
     #[tokio::test]
     async fn static_catalog_locked_artifact_installs_offline_with_multiple_bins() {
         let temp = tempfile::tempdir().unwrap();
@@ -2111,10 +2377,6 @@ mod tests {
         let mut ctx = test_ctx(temp.path());
         ctx.config.settings.offline = true;
         let file_name = "tool.tar.gz";
-        let cached =
-            pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name).unwrap();
-        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
-        std::fs::copy(&archive, &cached).unwrap();
         let mut version = ToolVersion::new(backend.id(), "1.2.3");
         version.options.extend(std::collections::BTreeMap::from([
             (
@@ -2132,19 +2394,26 @@ mod tests {
             ("bins".into(), "pkg/a,pkg/b".into()),
             ("strip-components".into(), "1".into()),
         ]));
+        let locator = github_install_locator(&ctx, backend.id(), &version).unwrap();
+        let cached = pipeline::dynamic_artifact_cache_path(&ctx.dirs, &locator, file_name).unwrap();
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::copy(&archive, &cached).unwrap();
         backend
             .install(&InstallCtx { ctx: &ctx }, &version)
             .await
             .unwrap();
-        let install = ctx.dirs.install_path(backend.id(), "1.2.3");
+        let install = locator.install_root();
         assert!(install.join("bin/a").is_file());
         assert!(install.join("bin/b").is_file());
         assert!(install.join(".osdk-complete").is_file());
-        let manifest = DynamicToolManifest::load(&install).unwrap();
-        assert!(manifest.matches_identity_options(&version.options).unwrap());
-        let mut changed = version.options.clone();
-        changed.insert("bins".into(), "pkg/a".into());
-        assert!(!manifest.matches_identity_options(&changed).unwrap());
+        let manifest = DynamicToolManifest::load(install).unwrap();
+        assert_eq!(manifest.schema, 1);
+        assert!(manifest.matches_identity(locator.identity()));
+        let mut changed = version.clone();
+        changed.options.insert("bins".into(), "pkg/a".into());
+        let changed_locator = github_install_locator(&ctx, backend.id(), &changed).unwrap();
+        assert_ne!(locator.install_root(), changed_locator.install_root());
+        assert!(!manifest.matches_identity(changed_locator.identity()));
     }
 
     fn complete_install_fixture(
@@ -2152,12 +2421,193 @@ mod tests {
         backend: &GithubBackend,
         version: &ToolVersion,
         contents: &[u8],
-    ) -> PathBuf {
-        let install = ctx.dirs.install_path(backend.id(), &version.version);
+    ) -> InstallLocator {
+        let locator = github_install_locator(ctx, backend.id(), version).unwrap();
+        let install = locator.install_root();
         std::fs::create_dir_all(install.join("bin")).unwrap();
         std::fs::write(install.join("bin/tool"), contents).unwrap();
         std::fs::write(install.join(".osdk-complete"), b"").unwrap();
-        install
+        locator
+    }
+
+    fn locked_version(
+        backend: &GithubBackend,
+        version: &str,
+        url: &str,
+        file_name: &str,
+        checksum: Option<&str>,
+    ) -> ToolVersion {
+        let mut version = ToolVersion::new(backend.id(), version);
+        version
+            .options
+            .insert(pipeline::LOCKED_ARTIFACT_URL_OPTION.into(), url.into());
+        version.options.insert(
+            pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+            file_name.into(),
+        );
+        if let Some(checksum) = checksum {
+            version.options.insert(
+                pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                checksum.into(),
+            );
+        }
+        version
+    }
+
+    fn write_complete_install_fixture(
+        ctx: &Ctx,
+        backend: &GithubBackend,
+        version: &ToolVersion,
+        contents: &[u8],
+    ) -> InstallLocator {
+        let locator = complete_install_fixture(ctx, backend, version, contents);
+        let install = locator.install_root();
+        let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone()).unwrap();
+        manifest.bins.push(DynamicToolBin {
+            name: "tool".into(),
+            path: "bin/tool".into(),
+        });
+        manifest.write_atomic(install).unwrap();
+        let receipt = pipeline::ArtifactReceipt {
+            url: version.options[pipeline::LOCKED_ARTIFACT_URL_OPTION].clone(),
+            file_name: version.options[pipeline::LOCKED_ARTIFACT_FILE_OPTION].clone(),
+            checksum: version
+                .options
+                .get(pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION)
+                .cloned(),
+            evidence: Vec::new(),
+        };
+        std::fs::write(
+            install.join(".osdk-artifact.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        locator
+    }
+
+    #[test]
+    fn locked_locator_restarts_with_the_same_material_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let checksum = format!("sha256:{}", "a".repeat(64));
+        let version = locked_version(
+            &backend,
+            "1.2.3",
+            "https://example.test/tool",
+            "tool",
+            Some(&checksum),
+        );
+        let first = github_install_locator(&ctx, backend.id(), &version).unwrap();
+        let restarted = github_install_locator(&ctx, backend.id(), &version).unwrap();
+        assert_eq!(first.identity(), restarted.identity());
+        assert_eq!(first.install_root(), restarted.install_root());
+    }
+
+    #[test]
+    fn unlocked_locator_recovers_one_valid_material_identity_and_rejects_ambiguity() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let first = locked_version(
+            &backend,
+            "1.2.3",
+            "https://example.test/tool-a",
+            "tool",
+            None,
+        );
+        let first_locator =
+            write_complete_install_fixture(&ctx, &backend, &first, b"first material");
+        let unlocked = ToolVersion::new(backend.id(), "1.2.3");
+        assert_eq!(
+            github_install_locator(&ctx, backend.id(), &unlocked)
+                .unwrap()
+                .install_root(),
+            first_locator.install_root()
+        );
+
+        let second = locked_version(
+            &backend,
+            "1.2.3",
+            "https://example.test/tool-b",
+            "tool",
+            None,
+        );
+        let second_locator =
+            write_complete_install_fixture(&ctx, &backend, &second, b"second material");
+        assert_ne!(first_locator.install_root(), second_locator.install_root());
+        let error = github_install_locator(&ctx, backend.id(), &unlocked).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(error.to_string().contains("lockfile"));
+    }
+
+    #[tokio::test]
+    async fn uninstall_removes_only_the_exact_material_variant() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let first = locked_version(
+            &backend,
+            "1.2.3",
+            "https://example.test/tool-a",
+            "tool",
+            None,
+        );
+        let second = locked_version(
+            &backend,
+            "1.2.3",
+            "https://example.test/tool-b",
+            "tool",
+            None,
+        );
+        let first_locator = write_complete_install_fixture(&ctx, &backend, &first, b"first");
+        let second_locator = write_complete_install_fixture(&ctx, &backend, &second, b"second");
+        let version_root = first_locator.install_root().parent().unwrap().to_path_buf();
+
+        backend.uninstall(&ctx, &first).await.unwrap();
+
+        assert!(!first_locator.install_root().exists());
+        assert!(second_locator.install_root().join("bin/tool").is_file());
+        assert!(version_root.is_dir());
+    }
+
+    #[test]
+    fn list_installed_uses_only_valid_current_manifests_and_dedupes_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        for url in ["https://example.test/tool-a", "https://example.test/tool-b"] {
+            let version = locked_version(&backend, "1.2.3", url, "tool", None);
+            write_complete_install_fixture(&ctx, &backend, &version, url.as_bytes());
+        }
+        let current = locked_version(
+            &backend,
+            "2.0.0",
+            "https://example.test/tool-2",
+            "tool",
+            None,
+        );
+        write_complete_install_fixture(&ctx, &backend, &current, b"two");
+
+        let invalid = locked_version(
+            &backend,
+            "3.0.0",
+            "https://example.test/tool-3",
+            "tool",
+            None,
+        );
+        let invalid_locator = write_complete_install_fixture(&ctx, &backend, &invalid, b"invalid");
+        std::fs::remove_file(invalid_locator.install_root().join(".osdk-artifact.json")).unwrap();
+
+        let legacy = ctx.dirs.install_path(backend.id(), "4.0.0");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(".osdk-complete"), b"").unwrap();
+        std::fs::write(legacy.join(".osdk-tool.json"), b"{}").unwrap();
+
+        assert_eq!(
+            backend.list_installed(&ctx).unwrap(),
+            vec!["1.2.3", "2.0.0"]
+        );
     }
 
     #[tokio::test]
@@ -2165,8 +2615,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp.path());
         let backend = GithubBackend::from_id("github:example/tool").unwrap();
-        let version = ToolVersion::new(backend.id(), "1.2.3");
-        let install = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
+        let version = locked_version(&backend, "1.2.3", "https://example.test/tool", "tool", None);
+        let locator = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
+        let install = locator.install_root();
 
         let error = backend
             .install(&InstallCtx { ctx: &ctx }, &version)
@@ -2179,34 +2630,67 @@ mod tests {
             std::fs::read(install.join("bin/tool")).unwrap(),
             b"original bytes"
         );
-        assert!(!DynamicToolManifest::manifest_path(&install).exists());
+        assert!(!DynamicToolManifest::manifest_path(install).exists());
     }
 
     #[tokio::test]
-    async fn install_refuses_complete_install_with_legacy_inventory() {
+    async fn legacy_inventory_is_never_reused() {
         let temp = tempfile::tempdir().unwrap();
-        let ctx = test_ctx(temp.path());
+        let mut ctx = test_ctx(temp.path());
+        ctx.config.settings.offline = true;
         let backend = GithubBackend::from_id("github:example/tool").unwrap();
-        let version = ToolVersion::new(backend.id(), "1.2.3");
-        let install = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
-        std::fs::write(
-            DynamicToolManifest::manifest_path(&install),
-            r#"{"schema":1,"id":"github:example/tool","version":"1.2.3","bins":[{"name":"tool","path":"bin/tool"}]}"#,
-        )
-        .unwrap();
+        let file_name = "tool";
+        let checksum = pipeline::verify::hash_bytes(b"fresh bytes", pipeline::HashAlgo::Sha256);
+        let mut version = ToolVersion::new(backend.id(), "1.2.3");
+        version.options.extend(std::collections::BTreeMap::from([
+            (
+                pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                "https://invalid.example/tool".into(),
+            ),
+            (
+                pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                file_name.into(),
+            ),
+            (
+                pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{checksum}"),
+            ),
+        ]));
+        let locator = github_install_locator(&ctx, backend.id(), &version).unwrap();
+        let cached = pipeline::dynamic_artifact_cache_path(&ctx.dirs, &locator, file_name).unwrap();
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"fresh bytes").unwrap();
+        let legacy_install = locator.legacy_install_root();
+        std::fs::create_dir_all(legacy_install.join("bin")).unwrap();
+        std::fs::write(legacy_install.join("bin/tool"), b"legacy bytes").unwrap();
+        std::fs::write(legacy_install.join(".osdk-complete"), b"").unwrap();
+        let legacy_inventory = legacy_install.join(".osdk-tool.json");
+        let legacy_contents = r#"{"schema":1,"id":"github:example/tool","version":"1.2.3","bins":[{"name":"tool","path":"bin/tool"}]}"#;
+        std::fs::write(&legacy_inventory, legacy_contents).unwrap();
+        assert!(!locator.install_root().exists());
 
-        let error = backend
+        backend
             .install(&InstallCtx { ctx: &ctx }, &version)
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("installed with a different identity or options"));
         assert_eq!(
-            std::fs::read(install.join("bin/tool")).unwrap(),
-            b"original bytes"
+            std::fs::read(legacy_install.join("bin/tool")).unwrap(),
+            b"legacy bytes"
         );
+        assert_eq!(
+            std::fs::read(&legacy_inventory).unwrap(),
+            legacy_contents.as_bytes()
+        );
+        assert!(!DynamicToolManifest::manifest_path(legacy_install).exists());
+        assert_ne!(locator.install_root(), legacy_install);
+        assert!(locator.install_root().join(".osdk-complete").is_file());
+        assert_eq!(
+            std::fs::read(locator.install_root().join("bin/tool")).unwrap(),
+            b"fresh bytes"
+        );
+        let manifest = DynamicToolManifest::load(locator.install_root()).unwrap();
+        assert!(manifest.matches_identity(locator.identity()));
     }
 
     #[tokio::test]
@@ -2214,24 +2698,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp.path());
         let backend = GithubBackend::from_id("github:example/tool").unwrap();
-        let mut installed = ToolVersion::new(backend.id(), "1.2.3");
+        let mut installed =
+            locked_version(&backend, "1.2.3", "https://example.test/tool", "tool", None);
         installed.options.insert("rename".into(), "old-name".into());
-        let install = complete_install_fixture(&ctx, &backend, &installed, b"original bytes");
-        let mut manifest = DynamicToolManifest::new(backend.id())
-            .unwrap()
-            .with_identity_options(&installed.options)
-            .unwrap();
-        manifest.version = Some(installed.version.clone());
+        let mut requested = installed.clone();
+        requested.options.insert("rename".into(), "new-name".into());
+        let locator = complete_install_fixture(&ctx, &backend, &requested, b"original bytes");
+        let install = locator.install_root();
+        let installed_locator = github_install_locator(&ctx, backend.id(), &installed).unwrap();
+        assert_ne!(installed_locator.install_root(), install);
+        let mut manifest =
+            DynamicToolManifest::from_identity(installed_locator.identity().clone()).unwrap();
         manifest.bins.push(DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
         });
-        manifest.write_atomic(&install).unwrap();
+        manifest.write_atomic(install).unwrap();
         let original_inventory =
-            std::fs::read(DynamicToolManifest::manifest_path(&install)).unwrap();
+            std::fs::read(DynamicToolManifest::manifest_path(install)).unwrap();
 
-        let mut requested = installed.clone();
-        requested.options.insert("rename".into(), "new-name".into());
         let error = backend
             .install(&InstallCtx { ctx: &ctx }, &requested)
             .await
@@ -2239,22 +2724,18 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("installed with a different identity or options"));
+            .contains("missing, legacy, or invalid install identity"));
         assert_eq!(
             std::fs::read(install.join("bin/tool")).unwrap(),
             b"original bytes"
         );
         assert_eq!(
-            std::fs::read(DynamicToolManifest::manifest_path(&install)).unwrap(),
+            std::fs::read(DynamicToolManifest::manifest_path(install)).unwrap(),
             original_inventory
         );
-        let persisted = DynamicToolManifest::load(&install).unwrap();
-        assert!(persisted
-            .matches_identity_options(&installed.options)
-            .unwrap());
-        assert!(!persisted
-            .matches_identity_options(&requested.options)
-            .unwrap());
+        let persisted = DynamicToolManifest::load(install).unwrap();
+        assert!(persisted.matches_identity(installed_locator.identity()));
+        assert!(!persisted.matches_identity(locator.identity()));
     }
 
     #[tokio::test]
@@ -2277,17 +2758,14 @@ mod tests {
                 format!("sha256:{}", "b".repeat(64)),
             ),
         ]));
-        let install = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
-        let mut manifest = DynamicToolManifest::new(backend.id())
-            .unwrap()
-            .with_identity_options(&version.options)
-            .unwrap();
-        manifest.version = Some(version.version.clone());
+        let locator = complete_install_fixture(&ctx, &backend, &version, b"original bytes");
+        let install = locator.install_root();
+        let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone()).unwrap();
         manifest.bins.push(DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
         });
-        manifest.write_atomic(&install).unwrap();
+        manifest.write_atomic(install).unwrap();
         std::fs::write(
             install.join(".osdk-artifact.json"),
             serde_json::to_vec_pretty(&pipeline::ArtifactReceipt {
@@ -2305,7 +2783,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("different locked artifact"));
+        assert!(error.to_string().contains("invalid receipt"));
         assert_eq!(
             std::fs::read(install.join("bin/tool")).unwrap(),
             b"original bytes"
@@ -2332,7 +2810,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn concurrent_installs_cannot_rebind_existing_bytes() {
+    async fn concurrent_same_version_distinct_option_installs_coexist() {
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = test_ctx(temp.path());
         ctx.config.settings.offline = true;
@@ -2357,11 +2835,6 @@ mod tests {
         }
         let checksum = pipeline::verify::hash_file(&archive, pipeline::HashAlgo::Sha256).unwrap();
         let file_name = "tool.tar.gz";
-        let cached =
-            pipeline::artifact_cache_path(&ctx.dirs, backend.id(), "1.2.3", file_name).unwrap();
-        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
-        std::fs::copy(&archive, &cached).unwrap();
-
         let make_version = |bin: &str| {
             let mut version = ToolVersion::new(backend.id(), "1.2.3");
             version.options.extend(std::collections::BTreeMap::from([
@@ -2384,6 +2857,13 @@ mod tests {
         };
         let first = make_version("pkg/a");
         let second = make_version("pkg/b");
+        for version in [&first, &second] {
+            let locator = github_install_locator(&ctx, backend.id(), version).unwrap();
+            let cached =
+                pipeline::dynamic_artifact_cache_path(&ctx.dirs, &locator, file_name).unwrap();
+            std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            std::fs::copy(&archive, cached).unwrap();
+        }
         let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
         let first_task = {
@@ -2408,19 +2888,24 @@ mod tests {
         };
         let first_result = first_task.await.unwrap();
         let second_result = second_task.await.unwrap();
-        assert_ne!(first_result.is_ok(), second_result.is_ok());
+        first_result.unwrap();
+        second_result.unwrap();
 
-        let install = ctx.dirs.install_path(backend.id(), "1.2.3");
-        let manifest = DynamicToolManifest::load(&install).unwrap();
-        if first_result.is_ok() {
-            assert!(manifest.matches_identity_options(&first.options).unwrap());
-            assert!(install.join("bin/a").is_file());
-            assert!(!install.join("bin/b").is_file());
-        } else {
-            assert!(manifest.matches_identity_options(&second.options).unwrap());
-            assert!(install.join("bin/b").is_file());
-            assert!(!install.join("bin/a").is_file());
-        }
+        let first_locator = github_install_locator(&ctx, backend.id(), &first).unwrap();
+        let second_locator = github_install_locator(&ctx, backend.id(), &second).unwrap();
+        assert_ne!(first_locator.install_root(), second_locator.install_root());
+
+        let first_install = first_locator.install_root();
+        let first_manifest = DynamicToolManifest::load(first_install).unwrap();
+        assert!(first_manifest.matches_identity(first_locator.identity()));
+        assert!(first_install.join("bin/a").is_file());
+        assert!(!first_install.join("bin/b").is_file());
+
+        let second_install = second_locator.install_root();
+        let second_manifest = DynamicToolManifest::load(second_install).unwrap();
+        assert!(second_manifest.matches_identity(second_locator.identity()));
+        assert!(second_install.join("bin/b").is_file());
+        assert!(!second_install.join("bin/a").is_file());
     }
 
     #[test]
@@ -2428,7 +2913,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp.path());
         let backend = GithubBackend::from_id("github:example/tool").unwrap();
-        let install = ctx.dirs.install_path(backend.id(), "1.0.0");
+        let version = ToolVersion::new(backend.id(), "1.0.0");
+        let asset = GhAsset {
+            name: "tool.tar.gz".into(),
+            browser_download_url: "https://example.test/tool-1".into(),
+        };
+        let locator =
+            github_install_locator_for_artifact(&ctx, backend.id(), &version, &asset, None)
+                .unwrap();
+        let install = locator.install_root();
         std::fs::create_dir_all(install.join("release/pkg")).unwrap();
         std::fs::write(install.join("release/pkg/a"), b"a").unwrap();
         std::fs::write(install.join("release/pkg/b"), b"b").unwrap();
@@ -2442,18 +2935,22 @@ mod tests {
             arch: None,
             libc: None,
         };
-        postprocess_archive(&ctx, &backend, "1.0.0", &rules).unwrap();
+        postprocess_archive(&ctx, &locator, &rules).unwrap();
         assert!(install.join("bin/a").is_file());
         assert!(install.join("bin/b").is_file());
 
-        let bad_install = ctx.dirs.install_path(backend.id(), "2.0.0");
+        let bad_version = ToolVersion::new(backend.id(), "2.0.0");
+        let bad_locator =
+            github_install_locator_for_artifact(&ctx, backend.id(), &bad_version, &asset, None)
+                .unwrap();
+        let bad_install = bad_locator.install_root();
         std::fs::create_dir_all(bad_install.join("release/pkg")).unwrap();
         std::fs::write(bad_install.join("release/pkg/a"), b"a").unwrap();
         let bad = AssetRules {
             bins: vec!["pkg/a".into(), "pkg/missing".into()],
             ..rules.clone()
         };
-        assert!(postprocess_archive(&ctx, &backend, "2.0.0", &bad).is_err());
+        assert!(postprocess_archive(&ctx, &bad_locator, &bad).is_err());
         assert!(!bad_install.exists());
         assert_eq!(normalize_executable_name("tool", Os::Windows), "tool.exe");
         assert_eq!(

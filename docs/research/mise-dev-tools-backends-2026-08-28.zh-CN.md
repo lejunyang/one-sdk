@@ -28,12 +28,12 @@
 它还支持动态命名的 vfox 后端插件。`Unknown` 在源码中作为解析器哨兵存在，并非可用后端。不存在原生 `composer:` 后端；Composer 必须通过其他后端或插件获取。
 
 `osdk` 已具备扎实的生命周期深度：install/use/uninstall、本地和远程列表、current/where、outdated/upgrade、一次性执行、激活、shim、别名、信任、跨平台锁、离线重放、源探测与故障切换、原生包管理器缓存、BLAKE3 内容寻址存储，以及异常严格的制品验证。
-其 13 个固定后端覆盖主要运行时和包管理器，而动态 `npm:<package>` 与 `github:<owner>/<repo>` 支持也已相当完善。已交付的 Phase 0 切片为这两个命名空间提供了经过规范化的安全公开选项身份、schema-2 逐安装清单，以及失败关闭式的复用和执行检查。
+其 13 个固定后端覆盖主要运行时和包管理器，而动态 `npm:<package>` 与 `github:<owner>/<repo>` 支持也已相当完善。已交付的 Phase 0 身份工作为这两个命名空间提供了规范 `b3-v2:` 身份、`.osdk-install.json` schema 1 记录、指纹化根、同版本身份共存，以及精确且失败关闭的 lifecycle 选择。
 
 最大的战略差距是**由完整稳定动态身份支撑的生态广度**，而非基础下载机制。
 `osdk` 目前还无法表达 mise 的大多数包命名空间，其声明式插件也有意比
-mise 的 Lua 工具/后端插件窄得多。现有 npm 和 GitHub 动态安装现在会在其
-逐安装清单中验证选项身份，但统一的规范解析器，以及通用的缓存、锁指纹、
+mise 的 Lua 工具/后端插件窄得多。现有 npm 和 GitHub 动态安装现在会在逐安装记录中
+验证规范身份并使用指纹化物理根，但统一的规范解析器，以及通用的缓存、锁指纹、
 秘密和物理共存规则仍未完成。凡是会改变所选制品、安装布局、依赖图或
 可执行文件集合的后端选项，最终都必须在所有这些边界上一致地参与身份判定。
 
@@ -285,8 +285,8 @@ Mise 与 `osdk` 解决的是不同的来源选择问题。Mise 通常从一个�
 | `yarn` | Classic 和 Berry 元数据/安装、SRI、生成的 Node launcher | 需要受管理的 Node；没有更广泛的 Corepack 生态 |
 | `deno` | npm packument/平台包、SRI、`DENO_DIR` | 没有 musl Linux 包路径 |
 | `bun` | npm packument/平台包、SRI、glibc/musl 选择 | 仅专用运行时 |
-| `npm:<package>` | 内嵌 Aube 和原生 npm/pnpm 模式；隔离/项目/全局作用域；依赖图元数据；带选项身份和 bin 验证的 schema-2 inventory | 唯一完整开发的语言包命名空间；lock schema 3 存储公开选项和紧凑的原生锁身份，而非完整依赖图；物理路径仍以版本为基础 |
-| `github:<owner>/<repo>` | API、Atom 和公开页面回退；平台评分；静态 catalog；归档/二进制安装；校验和/minisign/证明；schema-2 inventory 绑定 asset/layout 选项 | 相比 mise，可移植 asset 控制和 credential/provider 路径更少；没有 GitLab/Forgejo 同类后端；同版本选项变体无法共存 |
+| `npm:<package>` | 内嵌 Aube 和原生 npm/pnpm 模式；隔离/项目/全局作用域；依赖图元数据；带 `b3-v2:` 身份与 bin 校验的 `.osdk-install.json` schema 1 | 唯一完整开发的语言包命名空间；lock schema 3 存储公开选项和紧凑的原生锁身份，而非完整依赖图；osdk 自有同版本身份使用不同指纹化根，项目管理 npm 保持独立 |
+| `github:<owner>/<repo>` | API、Atom 和公开页面回退；平台评分；静态 catalog；归档/二进制安装；校验和/minisign/证明；`.osdk-install.json` 绑定 asset/layout/material 身份 | 相比 mise，可移植 asset 控制和 credential/provider 路径更少；没有 GitLab/Forgejo 同类后端；同版本身份变体可在指纹化根中共存 |
 | 声明式 TOML | 安全的静态/逐行列表归档定义，支持校验和、模板、bin 和惯用文件 | 没有内联命名空间、裸二进制文件、JSON/正则表达式/表达式版本解析、env、依赖、转换、hook 或插件生命周期 |
 
 提交 `bd00af2` 增加了在渲染当前模板之前执行锁定制品重放的能力，
@@ -324,10 +324,12 @@ Mise 与 `osdk` 解决的是不同的来源选择问题。Mise 通常从一个�
 
 `osdk.lock` 的 lock schema 3 在多个方面很强：按平台（包括 musl）划分工具，存储精确请求/版本/选项，可附加制品 URL/名称/校验和/子目录/证据，存储紧凑的 npm 安装器/作用域/原生锁身份，并保留模型 manifest。写入时会验证大小/schema/路径安全，通过临时文件发布、执行同步并原子替换。
 
-Lock schema 3 与新的 `.osdk-tool.json` 动态 inventory schema 2
-彼此独立。锁持久化公开选项和后端重放元数据；inventory 则持久化
-规范选项身份及 `b3-v1:` 指纹，并据此约束本地复用/执行。下文提到的
-schema-2 npm graph sidecar 指较旧的锁兼容格式，而非 inventory schema 2。
+Lock schema 3 与 `.osdk-install.json` schema 1 彼此独立。锁持久化公开选项和后端重放
+metadata；安装记录在嵌套 `identity` 中持久化 `tool`、`version`、`platform`、`scope`、
+`material_options`、`dependencies`、`materials` 与规范 `b3-v2:` `install_id`。该身份选择物理
+根，并约束本地复用和所有 lifecycle 操作。`.osdk-tool.json` schema 1 或 2 只用于遗留识别，
+绝不能授权复用或执行。下文提到的 schema-2 npm graph sidecar 指较旧的锁兼容格式，不是动态
+安装身份格式。
 
 剩余差距是语义上的，而不仅是序列化问题：
 
@@ -406,10 +408,8 @@ schema-2 npm graph sidecar 指较旧的锁兼容格式，而非 inventory schema
 ### 5.3 `osdk` 剩余测试差距
 
 1. **真实后端契约广度。** 每个已注册后端都应针对本地 fixture 元数据运行其真实的 list/resolve/locked-install/bin/execute/uninstall 路径。动态 `github:`、动态 `npm:` 和声明式插件需要显式矩阵行。
-2. **动态身份冲突。** 聚焦的 npm/GitHub 覆盖现已证明
-   规范选项指纹和失败关闭式同版本复用。但仍然没有
-   通用矩阵来证明每个未来命名空间都有不同的 cache/lock 行为，
-   也没有证明两个同版本选项变体可以物理共存。
+2. **动态身份广度。** 聚焦的 npm/GitHub 覆盖现已证明规范 `b3-v2:` 身份、指纹化根共存
+   与精确 lifecycle 选择，但仍需通用矩阵证明每个未来命名空间都有等价的 cache/lock 行为。
 3. **来源命令集成。** `source add/list/test/pin/unpin/remove` 缺少完整的子进程往返、重启持久化、别名规范化、无效写入回滚和双进程变更测试。
 4. **缓存保证。** `cache clean` 测试了下载删除，但没有测试逐字节保留 CAS、元数据、探测缓存、原生管理器缓存、模型快照和安装。
 5. **跨进程写入者。** 锁和全局 npm 代码具备原子写入与强大的进程内事务测试，但项目 `lock/use/upgrade` 竞态需要独立生成的竞争进程和更新丢失检测。
@@ -427,24 +427,20 @@ schema-2 npm graph sidecar 指较旧的锁兼容格式，而非 inventory schema
 
 不要把原始版本作为唯一复用键。后端必须在其物理安装身份中使用选项指纹，或者在复用前通过 manifest 验证完整的选项指纹。规范化规则必须有意处理区分大小写的生态，而不能把 npm 的小写规则全局应用。
 
-当前实现已针对现有 `npm:` 和 `github:` 命名空间完成
-逐安装 manifest 分支：
+当前实现已针对现有 osdk 自有 `npm:` 和 `github:` 命名空间完成物理安装身份分支：
 
 - 它对白名单内的安全公开身份选项进行规范化，在安装前拒绝未知的
   公开选项，并排除内部 `__osdk_*` 重放元数据；
-- 它对规范后端 ID 和规范化选项 map 计算一个与顺序无关、带域分隔的 BLAKE3 `b3-v1:`
-  指纹；
-- 动态 inventory schema 2 同时记录 `identity_options` 和该指纹；
-- osdk 所拥有的安装复用、激活和 shim 执行会比较请求的
-  身份，并在遇到旧版或不匹配的 inventory 时失败关闭；以及
-- 旧版 schema-1 inventory 仍可用于发现，但必须
-  rebuild 或 reinstall 后才能复用或执行；npm 可以原地 rebuild，
-  而 GitHub 要求显式 uninstall/reinstall。
+- 它从 `tool`、精确 `version`、`platform`、`scope`、规范 `material_options`、
+  `dependencies` 与 `materials` 计算与顺序无关、带域分隔的 BLAKE3 `b3-v2:` 身份；
+- `.osdk-install.json` schema 1 在嵌套 `identity` 中记录上述值及 `install_id`，并由该指纹
+  选择物理根；
+- 相同 backend/version 的身份变体可以共存，而复用、activation、shim 执行、`where`、
+  uninstall 与 `reshim` 只选择配置的精确身份；以及
+- 旧 `.osdk-tool.json` schema 1 和 2 只作为遗留状态识别，绝不能授权复用或执行。项目管理
+  的 npm 保持独立。
 
-这有意没有完成整个阶段。物理安装路径仍使用
-`backend/version`（npm 另有隔离/全局根目录），因此同版本
-选项变体无法共存。npm 会 rebuild 或替换不匹配的版本；
-GitHub 会拒绝完整的不匹配项，直至其被 uninstall 并 reinstall。CLI/config/alias 共用的统一解析身份、感知选项的远程元数据和缓存键、
+这有意没有完成整个阶段。CLI/config/alias 共用的统一解析身份、感知选项的远程元数据和缓存键、
 显式的秘密/keyed-hash 策略、超越持久化公开选项的指纹化锁身份，
 以及向 npm/GitHub 之外推广，仍未完成。
 

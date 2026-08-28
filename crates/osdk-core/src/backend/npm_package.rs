@@ -12,9 +12,14 @@ use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::config::ToolConfigOrigin;
 use crate::error::{Error, Result};
 use crate::inventory::{DynamicToolBin, DynamicToolManifest};
-use crate::npm_tools::{ToolScope, LOCKED_NPM_SCOPE_OPTION};
+use crate::npm_tools::{
+    NpmInstaller, ToolScope, LOCKED_NPM_INSTALLER_OPTION, LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION,
+    LOCKED_NPM_NATIVE_LOCK_KIND_OPTION, LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION,
+    LOCKED_NPM_SCOPE_OPTION,
+};
 use crate::pipeline;
 use crate::source::Source;
+use crate::tool::{InstallDependency, InstallDependencyKind, InstallIdentity, InstallScope};
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 const PROVIDER: &str = "npm-package";
@@ -23,14 +28,6 @@ const PROJECT_DIR: &str = "project";
 const AUBE_DIR: &str = "aube";
 const AUBE_CACHE_VERSION: &str = "v1";
 const CACHE_DIR: &str = "cache";
-const METADATA_PROVIDER: &str = "provider";
-const METADATA_PACKAGE: &str = "package";
-const METADATA_RUNTIME: &str = "runtime";
-const METADATA_NODE_VERSION: &str = "node_version";
-const METADATA_LOCK_SHA256: &str = "lock_sha256";
-const METADATA_BUILD_POLICY: &str = "build_policy";
-const METADATA_ROOT_INTEGRITY: &str = "root_integrity";
-const METADATA_ROOT_SOURCE: &str = "root_source";
 const AUBE_LOCKFILE_NAME: &str = "aube-lock.yaml";
 const AUBE_LOCK_FORMAT: &str = "aube-v9";
 const PROJECT_NPM_BIN_ROOT: &str = ".osdk/npm-bin";
@@ -43,6 +40,11 @@ const PROJECT_NPM_BIN_MAX_JSON_BYTES: u64 = 1024 * 1024;
 const PROJECT_NPM_LOCKFILE: &str = "osdk.lock";
 const PROJECT_NPM_LOCK_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const PROJECT_NPM_LAUNCHER_MAX_BYTES: u64 = 256 * 1024;
+const NPM_INSTALL_RECEIPT_FILE: &str = ".osdk-npm-receipt.json";
+const NPM_INSTALL_RECEIPT_SCHEMA: u32 = 1;
+const NPM_INSTALL_RECEIPT_MAX_BYTES: u64 = 64 * 1024;
+const NPM_PACKAGE_MANIFEST_MAX_BYTES: u64 = 1024 * 1024;
+const NPM_NATIVE_LOCK_MAX_BYTES: u64 = 16 * 1024 * 1024;
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 const OSDK_PROJECT_NPM_CMD_MARKER: &str = ":: osdk-project-npm-bin v1";
 static NEXT_PROJECT_NPM_BIN_TEMPORARY: AtomicU64 = AtomicU64::new(0);
@@ -140,10 +142,58 @@ struct NpmGraphIdentity {
     root_tarball: Option<String>,
 }
 
+/// Backend-specific evidence observed after an npm install. None of these
+/// fields select the physical install root unless the corresponding digest was
+/// already present in the request and therefore included in `InstallIdentity`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NpmInstallReceipt {
+    pub schema: u32,
+    pub provider: String,
+    pub package: String,
+    pub installer: String,
+    pub node_version: String,
+    pub build_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_integrity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_lock_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_lock_sha256: Option<String>,
+}
+
 struct UnlockedNpmResolution {
     sources: Vec<Source>,
     root_checksum: pipeline::Checksum,
     root_urls: Vec<String>,
+}
+
+pub fn npm_receipt_path(install_root: &Path) -> PathBuf {
+    install_root.join(NPM_INSTALL_RECEIPT_FILE)
+}
+
+fn write_npm_receipt(install_root: &Path, receipt: &NpmInstallReceipt) -> Result<()> {
+    let path = npm_receipt_path(install_root);
+    let bytes = serde_json::to_vec_pretty(receipt)?;
+    std::fs::write(&path, bytes).map_err(|error| Error::io(path, error))
+}
+
+pub fn load_npm_receipt(install_root: &Path) -> Result<NpmInstallReceipt> {
+    let path = npm_receipt_path(install_root);
+    let bytes = crate::inventory::read_stable_regular_file(&path, NPM_INSTALL_RECEIPT_MAX_BYTES)
+        .map_err(|error| Error::io(&path, error))?;
+    let receipt: NpmInstallReceipt = serde_json::from_slice(&bytes)?;
+    if receipt.schema != NPM_INSTALL_RECEIPT_SCHEMA {
+        return Err(Error::config(format!(
+            "unsupported npm install receipt schema `{}`",
+            receipt.schema
+        )));
+    }
+    Ok(receipt)
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,39 +232,92 @@ impl NpmPackageBackend {
         Some(Self { id, package })
     }
 
-    /// Install root used by the compatibility `osdk install npm:<package>`
-    /// flow. This is intentionally kept at the original location.
-    pub fn isolated_install_root(&self, ctx: &Ctx, version: &str) -> PathBuf {
+    /// Complete identity for an osdk-owned npm install. Project-managed npm
+    /// packages deliberately never call this path or write this manifest.
+    pub fn install_identity(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        scope: ToolScope,
+    ) -> Result<InstallIdentity> {
+        let node_version = tv
+            .options
+            .get(LOCKED_NPM_NODE_VERSION_OPTION)
+            .cloned()
+            .or_else(|| selected_node_version(ctx))
+            .ok_or_else(|| Error::other(crate::t!("err.npm_dynamic_managed_node_required")))?;
+        let dependencies = vec![InstallDependency {
+            kind: InstallDependencyKind::Runtime,
+            id: "node".into(),
+            version: node_version,
+            identity: None,
+        }];
+        let mut materials = BTreeMap::new();
+        if let Some(digest) = tv.options.get(LOCKED_NPM_LOCK_SHA256_OPTION) {
+            materials.insert("lock-graph-sha256".into(), digest.to_ascii_lowercase());
+        }
+        // Compact schema-3 native-lock metadata can be reconstructed from an
+        // install after publication, so it is verification evidence rather than
+        // a locator input. Including it would make the install root change after
+        // the first successful install. The receipt binds the digest back to the
+        // observed native lock on every reuse/selection path. The legacy frozen
+        // graph digest is different: it exists only as a pre-install replay input.
+        InstallIdentity::new(
+            self.id(),
+            &tv.version,
+            ctx.platform.to_string(),
+            match scope {
+                ToolScope::Project => InstallScope::Isolated,
+                ToolScope::Global => InstallScope::Global,
+            },
+            &tv.options,
+            dependencies,
+            materials,
+        )
+    }
+
+    pub fn install_locator(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        scope: ToolScope,
+    ) -> Result<crate::dirs::InstallLocator> {
+        crate::dirs::InstallLocator::new(&ctx.dirs, self.install_identity(ctx, tv, scope)?)
+    }
+
+    pub fn isolated_install_root_for(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<PathBuf> {
+        Ok(self
+            .install_locator(ctx, tv, ToolScope::Project)?
+            .install_root()
+            .to_path_buf())
+    }
+
+    pub fn global_install_root_for(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<PathBuf> {
+        Ok(self
+            .install_locator(ctx, tv, ToolScope::Global)?
+            .install_root()
+            .to_path_buf())
+    }
+
+    /// Version-only npm roots are legacy detection locations. They never
+    /// authorize reuse or execution.
+    pub fn legacy_isolated_install_root(&self, ctx: &Ctx, version: &str) -> PathBuf {
         ctx.dirs.install_path(self.id(), version)
     }
 
-    /// Install root used by `osdk use --global npm:<package>`. Keeping the
-    /// scope in a sibling namespace lets the same package version coexist with
-    /// the compatibility isolated install without sharing completion markers
-    /// or inventory metadata.
-    pub fn global_install_root(&self, ctx: &Ctx, version: &str) -> PathBuf {
-        self.global_install_path(&ctx.dirs, version)
-    }
-
-    pub fn global_install_path(&self, dirs: &crate::dirs::Dirs, version: &str) -> PathBuf {
-        dirs.install_path(
+    pub fn legacy_global_install_root_path(&self, ctx: &Ctx, version: &str) -> PathBuf {
+        ctx.dirs.install_path(
             &format!("{GLOBAL_INSTALL_NAMESPACE}:{}", self.package),
             version,
         )
     }
 
-    /// Backwards-compatible name for the isolated install root. New global
-    /// callers must use [`Self::global_install_root`] explicitly.
-    pub fn install_root(&self, ctx: &Ctx, version: &str) -> PathBuf {
-        self.isolated_install_root(ctx, version)
+    pub fn project_dir_for(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<PathBuf> {
+        Ok(self.isolated_install_root_for(ctx, tv)?.join(PROJECT_DIR))
     }
 
-    pub fn project_dir(&self, ctx: &Ctx, version: &str) -> PathBuf {
-        self.isolated_install_root(ctx, version).join(PROJECT_DIR)
-    }
-
-    pub fn global_project_dir(&self, ctx: &Ctx, version: &str) -> PathBuf {
-        self.global_install_root(ctx, version).join(PROJECT_DIR)
+    pub fn global_project_dir_for(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<PathBuf> {
+        Ok(self.global_install_root_for(ctx, tv)?.join(PROJECT_DIR))
     }
 
     /// Resolve the install root that should serve the current selection. An
@@ -222,19 +325,13 @@ impl NpmPackageBackend {
     /// signal, the compatibility isolated install wins and global is a
     /// fallback. This avoids deriving scope from a deduplicated version list.
     pub fn selected_install_root(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Option<PathBuf>> {
-        match self.selected_scope(ctx, tv)? {
-            Some(ToolScope::Global) => self.existing_global_install_root(ctx, tv),
-            Some(ToolScope::Project) => Ok(self
-                .isolated_install_is_available(ctx, tv)?
-                .then(|| self.isolated_install_root(ctx, &tv.version))),
-            None => {
-                if self.isolated_install_is_available(ctx, tv)? {
-                    Ok(Some(self.isolated_install_root(ctx, &tv.version)))
-                } else {
-                    self.existing_global_install_root(ctx, tv)
-                }
-            }
-        }
+        let scope = self.selected_scope(ctx, tv)?.unwrap_or(ToolScope::Project);
+        let root = match scope {
+            ToolScope::Project => self.isolated_install_root_for(ctx, tv)?,
+            ToolScope::Global => self.global_install_root_for(ctx, tv)?,
+        };
+        self.validate_completed_install(ctx, tv, scope, &root)
+            .map(|available| available.then_some(root))
     }
 
     /// Resolve a path for `osdk where` using an already-resolved selection.
@@ -248,20 +345,52 @@ impl NpmPackageBackend {
     /// `ToolVersion` metadata or config provenance. This prevents callers
     /// from resolving a range against the union of project and global roots.
     pub fn list_installed_for(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        match self.selected_scope(ctx, tv)? {
-            Some(ToolScope::Project) => self.list_isolated_versions(ctx),
-            Some(ToolScope::Global) => self.list_global_versions(ctx),
-            None => self.list_all_versions(ctx),
+        Ok(self
+            .list_installed_identities_for(ctx, tv)?
+            .into_iter()
+            .map(|candidate| candidate.version)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
+    /// Return complete installed npm selections without collapsing distinct
+    /// runtime/material identities that happen to share the same package
+    /// version. Lifecycle callers must retain the selected `ToolVersion` so a
+    /// later active Node change cannot redirect `where` or `uninstall`.
+    pub fn list_installed_identities_for(
+        &self,
+        ctx: &Ctx,
+        selector: &ToolVersion,
+    ) -> Result<Vec<ToolVersion>> {
+        match self.selected_scope(ctx, selector)? {
+            Some(ToolScope::Project) => {
+                self.complete_identities_under(ctx, selector, ToolScope::Project)
+            }
+            Some(ToolScope::Global) => {
+                self.complete_identities_under(ctx, selector, ToolScope::Global)
+            }
+            None => {
+                let mut candidates =
+                    self.complete_identities_under(ctx, selector, ToolScope::Project)?;
+                candidates.extend(self.complete_identities_under(
+                    ctx,
+                    selector,
+                    ToolScope::Global,
+                )?);
+                candidates.sort_by(|left, right| {
+                    (&left.version, &left.options).cmp(&(&right.version, &right.options))
+                });
+                candidates.dedup();
+                Ok(candidates)
+            }
         }
     }
 
     /// Explicitly scope an installed-version query without fabricating lock
     /// metadata. Primarily useful for commands such as `where --global`.
     pub fn list_installed_for_scope(&self, ctx: &Ctx, scope: ToolScope) -> Result<Vec<String>> {
-        match scope {
-            ToolScope::Project => self.list_isolated_versions(ctx),
-            ToolScope::Global => self.list_global_versions(ctx),
-        }
+        self.list_manifest_versions(ctx, Some(scope))
     }
 
     /// Compatibility query for callers that only have an exact version. It
@@ -269,7 +398,10 @@ impl NpmPackageBackend {
     /// from config provenance. New callers should retain a `ToolVersion` and
     /// use [`Self::where_install_root_for`].
     pub fn where_install_root(&self, ctx: &Ctx, version: &str) -> Result<Option<PathBuf>> {
-        let tv = ToolVersion::new(self.id(), version);
+        let mut tv = ToolVersion::new(self.id(), version);
+        if let Some(request) = crate::shim::dynamic_request_from_config(ctx, self.id()) {
+            tv.options = request.options;
+        }
         self.where_install_root_for(ctx, &tv)
     }
 
@@ -280,13 +412,13 @@ impl NpmPackageBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
     ) -> Result<Option<PathBuf>> {
-        let global = self.global_install_root(ctx, &tv.version);
+        let global = self.global_install_root_for(ctx, tv)?;
         if global.join(".osdk-complete").is_file()
-            && self.global_manifest_at(&global, tv)?.is_some()
+            && self.validate_completed_install(ctx, tv, ToolScope::Global, &global)?
         {
             return Ok(Some(global));
         }
-        self.legacy_global_install_root(ctx, tv)
+        Ok(None)
     }
 
     /// Locate a complete pre-isolation global install occupying the legacy
@@ -299,34 +431,24 @@ impl NpmPackageBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
     ) -> Result<Option<PathBuf>> {
-        let legacy = self.isolated_install_root(ctx, &tv.version);
-        if !legacy.join(".osdk-complete").is_file() {
-            return Ok(None);
-        }
-        Ok(self
-            .global_manifest_at(&legacy, tv)?
-            .is_some()
-            .then_some(legacy))
+        let _ = (ctx, tv);
+        Ok(None)
     }
 
     /// Remove only a pre-isolation global root after a replacement global
     /// install has been fully published. Isolated installs are never eligible.
     pub fn remove_legacy_global_install(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<bool> {
-        let Some(root) = self.legacy_global_install_root(ctx, tv)? else {
-            return Ok(false);
-        };
-        let _ = crate::inventory::remove_manifest(&root);
-        std::fs::remove_dir_all(&root).map_err(|error| Error::io(&root, error))?;
-        Ok(true)
+        let _ = (ctx, tv);
+        Ok(false)
     }
 
     /// Remove one global npm install without touching the isolated sibling.
     /// The legacy location is eligible only when its manifest explicitly says
     /// `scope = global`.
     pub fn uninstall_global(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<bool> {
-        let canonical = self.global_install_root(ctx, &tv.version);
+        let canonical = self.global_install_root_for(ctx, tv)?;
         let root = if canonical.join(".osdk-complete").is_file()
-            && self.global_manifest_at(&canonical, tv)?.is_some()
+            && self.validate_completed_install(ctx, tv, ToolScope::Global, &canonical)?
         {
             Some(canonical)
         } else {
@@ -370,85 +492,159 @@ impl NpmPackageBackend {
         })
     }
 
-    fn isolated_install_is_available(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<bool> {
-        let root = self.isolated_install_root(ctx, &tv.version);
-        if !root.join(".osdk-complete").is_file() {
+    /// Validate a complete npm install before reuse, selection, recovery, or
+    /// execution. The identity-addressed path is necessary but not sufficient:
+    /// the receipt, package graph/native lock, published bins, and exact Node
+    /// runtime dependency must all still agree with the manifest.
+    pub fn validate_completed_install(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        scope: ToolScope,
+        root: &Path,
+    ) -> Result<bool> {
+        if !is_regular_file(&root.join(".osdk-complete")) {
             return Ok(false);
         }
-        let Some(manifest) = self.manifest_at(&root, tv)? else {
+        let Some(manifest) = self.manifest_at(ctx, &root, tv)? else {
             return Ok(false);
         };
-        match manifest_scope(&manifest)? {
-            // Manifests written before scoped npm roots did not carry this
-            // field. The legacy location is the only place where absence is
-            // accepted, and it retains its historical isolated meaning.
-            None | Some(ToolScope::Project) => Ok(true),
-            Some(ToolScope::Global) => Ok(false),
+        let expected_scope = match scope {
+            ToolScope::Project => InstallScope::Isolated,
+            ToolScope::Global => InstallScope::Global,
+        };
+        if manifest.identity.scope != expected_scope
+            || !manifest.matches_identity(&self.install_identity(ctx, tv, scope)?)
+        {
+            return Ok(false);
+        }
+        let Some(node_version) = exact_node_dependency(&manifest.identity) else {
+            return Ok(false);
+        };
+        if !managed_node_is_runnable(ctx, node_version)? {
+            return Ok(false);
+        }
+        let receipt = match load_npm_receipt(root) {
+            Ok(receipt) => receipt,
+            Err(_) => return Ok(false),
+        };
+        if !receipt_matches_identity(self, tv, scope, &manifest.identity, &receipt)?
+            || !manifest_bins_are_confined(root, &manifest)?
+        {
+            return Ok(false);
+        }
+        match scope {
+            ToolScope::Project => validate_isolated_install_evidence(
+                root,
+                &self.package,
+                &tv.version,
+                &Self::build_policy(tv)?,
+                &receipt,
+                self.locked_graph(tv)?.as_ref(),
+            ),
+            ToolScope::Global => {
+                validate_global_install_evidence(root, &self.package, &tv.version, &receipt)
+            }
         }
     }
 
-    fn complete_versions_under(&self, base: &Path) -> Result<Vec<String>> {
-        let mut versions = Vec::new();
+    fn complete_identities_under(
+        &self,
+        ctx: &Ctx,
+        selector: &ToolVersion,
+        scope: ToolScope,
+    ) -> Result<Vec<ToolVersion>> {
+        let base = match scope {
+            ToolScope::Project => ctx
+                .dirs
+                .installs
+                .join(crate::dirs::sanitize_tool_id(self.id())),
+            ToolScope::Global => ctx
+                .dirs
+                .installs
+                .join(crate::dirs::sanitize_tool_id(&format!(
+                    "{GLOBAL_INSTALL_NAMESPACE}:{}",
+                    self.package
+                ))),
+        };
+        let mut candidates = Vec::new();
         if !base.exists() {
-            return Ok(versions);
+            return Ok(candidates);
         }
-        for entry in std::fs::read_dir(base).map_err(|error| Error::io(base, error))? {
-            let entry = entry.map_err(|error| Error::io(base, error))?;
-            if !entry.path().is_dir() {
+        let report = crate::inventory::scan_installs(
+            &ctx.dirs.installs,
+            &crate::inventory::ScanOptions::default(),
+        )?;
+        let expected_options =
+            crate::backend::dynamic::identity_options(self.id(), &selector.options)?;
+        for install in report.installs {
+            if !install.install_root.starts_with(&base)
+                || install.manifest.identity.tool != self.id
+                || install.manifest.identity.platform != ctx.platform.to_string()
+                || install.manifest.identity.material_options != expected_options
+                || install.manifest.identity.scope
+                    != match scope {
+                        ToolScope::Project => InstallScope::Isolated,
+                        ToolScope::Global => InstallScope::Global,
+                    }
+            {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with('.') && entry.path().join(".osdk-complete").is_file() {
-                versions.push(crate::dirs::decode_version_component(&name));
+            let mut candidate = if selector
+                .options
+                .contains_key(LOCKED_NPM_NODE_VERSION_OPTION)
+            {
+                selector.clone()
+            } else {
+                let Some(candidate) = inventory_validation_candidate(&install.manifest) else {
+                    continue;
+                };
+                candidate
+            };
+            candidate.version = install.manifest.identity.version.clone();
+            candidate
+                .options
+                .insert(LOCKED_NPM_SCOPE_OPTION.into(), scope.as_str().into());
+            if self.validate_completed_install(ctx, &candidate, scope, &install.install_root)? {
+                candidates.push(candidate);
             }
         }
-        Ok(versions)
+        candidates.sort_by(|left, right| {
+            (&left.version, &left.options).cmp(&(&right.version, &right.options))
+        });
+        candidates.dedup();
+        Ok(candidates)
     }
 
-    fn list_isolated_versions(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let base = ctx
-            .dirs
-            .installs
-            .join(crate::dirs::sanitize_tool_id(self.id()));
+    fn list_manifest_versions(&self, ctx: &Ctx, scope: Option<ToolScope>) -> Result<Vec<String>> {
+        let report = crate::inventory::scan_installs(
+            &ctx.dirs.installs,
+            &crate::inventory::ScanOptions::default(),
+        )?;
+        let expected_scope = scope.map(|scope| match scope {
+            ToolScope::Project => InstallScope::Isolated,
+            ToolScope::Global => InstallScope::Global,
+        });
         let mut versions = BTreeSet::new();
-        for version in self.complete_versions_under(&base)? {
-            let tv = ToolVersion::new(self.id(), &version);
-            if self.isolated_install_is_available(ctx, &tv)? {
-                versions.insert(version);
+        for install in report.installs {
+            if install.manifest.identity.tool != self.id
+                || install.manifest.identity.platform != ctx.platform.to_string()
+                || !expected_scope.is_none_or(|scope| install.manifest.identity.scope == scope)
+            {
+                continue;
+            }
+            let scope = match install.manifest.identity.scope {
+                InstallScope::Isolated => ToolScope::Project,
+                InstallScope::Global => ToolScope::Global,
+                InstallScope::ProjectManaged => continue,
+            };
+            let Some(candidate) = inventory_validation_candidate(&install.manifest) else {
+                continue;
+            };
+            if self.validate_completed_install(ctx, &candidate, scope, &install.install_root)? {
+                versions.insert(candidate.version);
             }
         }
-        Ok(versions.into_iter().collect())
-    }
-
-    fn list_global_versions(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let global_base = ctx
-            .dirs
-            .installs
-            .join(crate::dirs::sanitize_tool_id(&format!(
-                "{GLOBAL_INSTALL_NAMESPACE}:{}",
-                self.package
-            )));
-        let legacy_base = ctx
-            .dirs
-            .installs
-            .join(crate::dirs::sanitize_tool_id(self.id()));
-        let mut candidates = BTreeSet::new();
-        candidates.extend(self.complete_versions_under(&global_base)?);
-        candidates.extend(self.complete_versions_under(&legacy_base)?);
-        let mut versions = Vec::new();
-        for version in candidates {
-            let tv = ToolVersion::new(self.id(), &version);
-            if self.existing_global_install_root(ctx, &tv)?.is_some() {
-                versions.push(version);
-            }
-        }
-        Ok(versions)
-    }
-
-    fn list_all_versions(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let mut versions = BTreeSet::new();
-        versions.extend(self.list_isolated_versions(ctx)?);
-        versions.extend(self.list_global_versions(ctx)?);
         Ok(versions.into_iter().collect())
     }
 
@@ -479,9 +675,12 @@ impl NpmPackageBackend {
     ) -> Result<Vec<ValidatedProjectNpmBin>> {
         let package_dir = package_install_dir(project_dir, &self.package);
         let manifest_path = package_dir.join("package.json");
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&manifest_path).map_err(|error| Error::io(&manifest_path, error))?,
-        )?;
+        let bytes = crate::inventory::read_stable_regular_file(
+            &manifest_path,
+            NPM_PACKAGE_MANIFEST_MAX_BYTES,
+        )
+        .map_err(|error| Error::io(&manifest_path, error))?;
+        let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
         if manifest.get("name").and_then(serde_json::Value::as_str) != Some(&self.package)
             || manifest.get("version").and_then(serde_json::Value::as_str) != Some(expected_version)
         {
@@ -622,7 +821,7 @@ impl NpmPackageBackend {
 
     pub fn write_empty_project_manifest(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         Self::write_project_manifest(
-            &self.project_dir(ctx, &tv.version),
+            &self.project_dir_for(ctx, tv)?,
             None,
             &Self::build_policy(tv)?,
         )
@@ -760,14 +959,13 @@ impl NpmPackageBackend {
         let root = match scope.map(String::as_str) {
             Some("global") => self
                 .existing_global_install_root(ctx, tv)?
-                .unwrap_or_else(|| self.global_install_root(ctx, &tv.version)),
+                .unwrap_or(self.global_install_root_for(ctx, tv)?),
             Some("project") => return Ok(()),
             _ => return Err(Error::other("compact npm lock metadata has invalid scope")),
         };
         let manifest = DynamicToolManifest::load(&root)?;
-        if manifest.metadata.get("scope").map(String::as_str) != Some("global")
-            || manifest.metadata.get("installer").map(String::as_str) != Some(installer)
-        {
+        let receipt = load_npm_receipt(&root)?;
+        if manifest.identity.scope != InstallScope::Global || receipt.installer != *installer {
             return Err(Error::other(format!(
                 "global npm install metadata does not match the lock for {}@{}",
                 self.id, tv.version
@@ -792,8 +990,8 @@ impl NpmPackageBackend {
         }
         let expected_format = present[1].expect("validated above");
         let expected_digest = present[2].expect("validated above");
-        if manifest.metadata.get("native_lock_format") != Some(expected_format)
-            || manifest.metadata.get(METADATA_LOCK_SHA256) != Some(expected_digest)
+        if receipt.native_lock_format.as_ref() != Some(expected_format)
+            || receipt.native_lock_sha256.as_ref() != Some(expected_digest)
         {
             return Err(Error::other(format!(
                 "global npm native lock metadata does not match the lock for {}@{}",
@@ -838,7 +1036,7 @@ impl NpmPackageBackend {
             tool: self.id().to_string(),
             tried: 0,
         })?;
-        let project_dir = self.project_dir(ctx, &tv.version);
+        let project_dir = self.project_dir_for(ctx, tv)?;
         let build_policy = Self::build_policy(tv)?;
         Self::write_project_manifest(
             &project_dir,
@@ -900,45 +1098,31 @@ impl NpmPackageBackend {
         &self,
         ctx: &Ctx,
         tv: &ToolVersion,
+        install_root: &Path,
         bin_dir: &Path,
         node_version: &str,
         build_policy: &BuildPolicy,
         graph_identity: &NpmGraphIdentity,
     ) -> Result<DynamicToolManifest> {
-        let install_root = self.install_root(ctx, &tv.version);
-        let mut manifest =
-            DynamicToolManifest::new(self.id())?.with_identity_options(&tv.options)?;
-        manifest.version = Some(tv.version.clone());
+        let identity = self.install_identity(ctx, tv, ToolScope::Project)?;
+        let mut manifest = DynamicToolManifest::from_identity(identity)?;
         manifest.bins = discover_bins(&install_root, bin_dir)?;
-        manifest
-            .metadata
-            .insert(METADATA_PROVIDER.into(), PROVIDER.into());
-        manifest
-            .metadata
-            .insert(METADATA_PACKAGE.into(), self.package.clone());
-        manifest
-            .metadata
-            .insert(METADATA_RUNTIME.into(), "node".into());
-        manifest
-            .metadata
-            .insert(METADATA_NODE_VERSION.into(), node_version.into());
-        manifest
-            .metadata
-            .insert(METADATA_BUILD_POLICY.into(), build_policy.identity());
-        manifest
-            .metadata
-            .insert(METADATA_LOCK_SHA256.into(), graph_identity.sha256.clone());
-        manifest.metadata.insert(
-            METADATA_ROOT_INTEGRITY.into(),
-            graph_identity.root_integrity.clone(),
-        );
-        manifest.metadata.insert(
-            METADATA_ROOT_SOURCE.into(),
-            graph_identity.root_source.clone(),
-        );
-        manifest
-            .metadata
-            .insert("scope".into(), ToolScope::Project.as_str().into());
+        write_npm_receipt(
+            install_root,
+            &NpmInstallReceipt {
+                schema: NPM_INSTALL_RECEIPT_SCHEMA,
+                provider: PROVIDER.into(),
+                package: self.package.clone(),
+                installer: "aube".into(),
+                node_version: node_version.into(),
+                build_policy: build_policy.identity(),
+                graph_sha256: Some(graph_identity.sha256.clone()),
+                root_integrity: Some(graph_identity.root_integrity.clone()),
+                root_source: Some(graph_identity.root_source.clone()),
+                native_lock_format: None,
+                native_lock_sha256: None,
+            },
+        )?;
         manifest.normalize()
     }
 
@@ -958,7 +1142,7 @@ impl NpmPackageBackend {
         installer: &str,
         native_lock: Option<(&str, &str)>,
     ) -> Result<DynamicToolManifest> {
-        let install_root = self.global_install_root(ctx, &tv.version);
+        let install_root = self.global_install_root_for(ctx, tv)?;
         self.finalize_global_install_at(
             ctx,
             tv,
@@ -977,7 +1161,7 @@ impl NpmPackageBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_global_install_at(
         &self,
-        _ctx: &Ctx,
+        ctx: &Ctx,
         tv: &ToolVersion,
         install_root: &Path,
         bin_dir: &Path,
@@ -1003,38 +1187,25 @@ impl NpmPackageBackend {
                 path = install_root.display()
             )));
         }
-        let mut manifest =
-            DynamicToolManifest::new(self.id())?.with_identity_options(&tv.options)?;
-        manifest.version = Some(tv.version.clone());
+        let identity = self.install_identity(ctx, tv, ToolScope::Global)?;
+        let mut manifest = DynamicToolManifest::from_identity(identity)?;
         manifest.bins = discover_global_bins(install_root, bin_dir)?;
-        manifest
-            .metadata
-            .insert(METADATA_PROVIDER.into(), PROVIDER.into());
-        manifest
-            .metadata
-            .insert(METADATA_PACKAGE.into(), self.package.clone());
-        manifest
-            .metadata
-            .insert(METADATA_RUNTIME.into(), "node".into());
-        manifest
-            .metadata
-            .insert(METADATA_NODE_VERSION.into(), node_version.into());
-        manifest.metadata.insert(
-            METADATA_BUILD_POLICY.into(),
-            Self::build_policy(tv)?.identity(),
-        );
-        manifest
-            .metadata
-            .insert("installer".into(), installer.into());
-        manifest.metadata.insert("scope".into(), "global".into());
-        if let Some((native_lock_format, native_lock_sha256)) = native_lock {
-            manifest
-                .metadata
-                .insert("native_lock_format".into(), native_lock_format.into());
-            manifest
-                .metadata
-                .insert(METADATA_LOCK_SHA256.into(), native_lock_sha256.into());
-        }
+        write_npm_receipt(
+            install_root,
+            &NpmInstallReceipt {
+                schema: NPM_INSTALL_RECEIPT_SCHEMA,
+                provider: PROVIDER.into(),
+                package: self.package.clone(),
+                installer: installer.into(),
+                node_version: node_version.into(),
+                build_policy: Self::build_policy(tv)?.identity(),
+                graph_sha256: None,
+                root_integrity: None,
+                root_source: None,
+                native_lock_format: native_lock.map(|value| value.0.to_string()),
+                native_lock_sha256: native_lock.map(|value| value.1.to_string()),
+            },
+        )?;
         let manifest = manifest.normalize()?;
         manifest.write_atomic(install_root)?;
         std::fs::write(install_root.join(".osdk-complete"), b"")
@@ -1042,22 +1213,9 @@ impl NpmPackageBackend {
         Ok(manifest)
     }
 
-    fn global_manifest_at(
-        &self,
-        install_root: &Path,
-        tv: &ToolVersion,
-    ) -> Result<Option<DynamicToolManifest>> {
-        let Some(manifest) = self.manifest_at(install_root, tv)? else {
-            return Ok(None);
-        };
-        if manifest_scope(&manifest)? != Some(ToolScope::Global) {
-            return Ok(None);
-        }
-        Ok(Some(manifest))
-    }
-
     fn manifest_at(
         &self,
+        ctx: &Ctx,
         install_root: &Path,
         tv: &ToolVersion,
     ) -> Result<Option<DynamicToolManifest>> {
@@ -1066,39 +1224,19 @@ impl NpmPackageBackend {
             return Ok(None);
         }
         let manifest = DynamicToolManifest::load(install_root)?;
-        manifest_scope(&manifest)?;
-        if manifest.id != self.id || manifest.version.as_deref() != Some(tv.version.as_str()) {
+        let scope = match manifest.identity.scope {
+            InstallScope::Isolated => ToolScope::Project,
+            InstallScope::Global => ToolScope::Global,
+            InstallScope::ProjectManaged => return Ok(None),
+        };
+        if !manifest.matches_identity(&self.install_identity(ctx, tv, scope)?) {
             return Err(Error::other(format!(
                 "npm inventory identity mismatch at {}",
                 path.display()
             )));
         }
-        let canonical_root =
-            dunce::canonicalize(install_root).map_err(|error| Error::io(install_root, error))?;
-        for bin in &manifest.bins {
-            let path = install_root.join(&bin.path);
-            let canonical = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
-            if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
-                return Err(Error::other(crate::t!(
-                    "err.npm_bin_outside_install_root",
-                    name = bin.name,
-                    path = install_root.display()
-                )));
-            }
-        }
         Ok(Some(manifest))
     }
-}
-
-/// Missing scope is accepted only as the legacy isolated representation. Any
-/// present value must parse as one of the two known scopes; treating unknown
-/// values as isolated would make corrupt or future metadata executable.
-fn manifest_scope(manifest: &DynamicToolManifest) -> Result<Option<ToolScope>> {
-    manifest
-        .metadata
-        .get("scope")
-        .map(|scope| scope.parse())
-        .transpose()
 }
 
 #[async_trait]
@@ -1146,18 +1284,9 @@ impl Backend for NpmPackageBackend {
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         self.validate_compact_lock_metadata(ctx, tv)?;
-        let install_root = self.isolated_install_root(ctx, &tv.version);
-        let project_dir = self.project_dir(ctx, &tv.version);
-        if self.legacy_global_install_root(ctx, tv)?.is_some() {
-            return Err(Error::other(format!(
-                "cannot install isolated {}@{} while a pre-isolation global install occupies {}; run `osdk use --global {}@{}` to migrate it first",
-                self.id,
-                tv.version,
-                install_root.display(),
-                self.id,
-                tv.version
-            )));
-        }
+        let locator = self.install_locator(ctx, tv, ToolScope::Project)?;
+        let install_root = locator.install_root().to_path_buf();
+        let project_dir = install_root.join(PROJECT_DIR);
         let locked_graph = self.locked_graph(tv)?;
         let build_policy = Self::build_policy(tv)?;
         if ctx.config.settings.offline
@@ -1173,30 +1302,20 @@ impl Backend for NpmPackageBackend {
         let (node_bin_dir, node_version) = managed_node(ctx, tv)?;
         if install_matches(
             &install_root,
-            self.id(),
+            locator.identity(),
             &self.package,
-            &tv.version,
             locked_graph.as_ref(),
             &build_policy,
-            &node_version,
-            &tv.options,
         )? {
             return Ok(());
         }
-        let lock_path = ctx.dirs.lock_dir(self.id()).join(format!(
-            "{}.lock",
-            crate::dirs::sanitize_version_component(&tv.version)
-        ));
-        let _lock = crate::lock::FileLock::acquire(lock_path)?;
+        let _lock = crate::lock::FileLock::acquire(locator.lock_path())?;
         if install_matches(
             &install_root,
-            self.id(),
+            locator.identity(),
             &self.package,
-            &tv.version,
             locked_graph.as_ref(),
             &build_policy,
-            &node_version,
-            &tv.options,
         )? {
             return Ok(());
         }
@@ -1328,6 +1447,7 @@ impl Backend for NpmPackageBackend {
         let manifest = match self.build_manifest(
             ctx,
             tv,
+            &install_root,
             &bin_dir,
             &node_version,
             &build_policy,
@@ -1346,19 +1466,8 @@ impl Backend for NpmPackageBackend {
     }
 
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
-        let install_root = self.isolated_install_root(ctx, &tv.version);
+        let install_root = self.isolated_install_root_for(ctx, tv)?;
         if !install_root.exists() {
-            return Ok(());
-        }
-        // Before scoped roots existed a global installation occupied this
-        // location. The compatibility command has always meant the isolated
-        // install, so an old global manifest must make this a no-op rather
-        // than deleting global state.
-        let legacy_tv = ToolVersion::new(self.id(), &tv.version);
-        if self
-            .global_manifest_at(&install_root, &legacy_tv)?
-            .is_some()
-        {
             return Ok(());
         }
         let _ = crate::inventory::remove_manifest(&install_root);
@@ -1366,14 +1475,14 @@ impl Backend for NpmPackageBackend {
     }
 
     fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        self.list_all_versions(ctx)
+        self.list_manifest_versions(ctx, None)
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         let Some(install_root) = self.selected_install_root(ctx, tv)? else {
             return Ok(Vec::new());
         };
-        if let Some(manifest) = self.manifest_at(&install_root, tv)? {
+        if let Some(manifest) = self.manifest_at(ctx, &install_root, tv)? {
             return Ok(manifest
                 .bins
                 .iter()
@@ -1408,7 +1517,7 @@ impl Backend for NpmPackageBackend {
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         if let Some(install_root) = self.selected_install_root(ctx, tv)? {
-            if let Some(manifest) = self.manifest_at(&install_root, tv)? {
+            if let Some(manifest) = self.manifest_at(ctx, &install_root, tv)? {
                 return Ok(manifest.bins.into_iter().map(|bin| bin.name).collect());
             }
         }
@@ -1508,36 +1617,332 @@ fn selected_node_version(ctx: &Ctx) -> Option<String> {
         })
 }
 
+fn inventory_validation_candidate(manifest: &DynamicToolManifest) -> Option<ToolVersion> {
+    let mut candidate = ToolVersion::new(&manifest.identity.tool, &manifest.identity.version);
+    candidate.options = manifest.identity.material_options.clone();
+    candidate.options.insert(
+        LOCKED_NPM_NODE_VERSION_OPTION.into(),
+        exact_node_dependency(&manifest.identity)?.to_string(),
+    );
+    if let Some(digest) = manifest.identity.materials.get("lock-graph-sha256") {
+        candidate
+            .options
+            .insert(LOCKED_NPM_LOCK_SHA256_OPTION.into(), digest.clone());
+    }
+    Some(candidate)
+}
+
+pub(crate) fn exact_node_dependency(identity: &InstallIdentity) -> Option<&str> {
+    let mut dependencies = identity.dependencies.iter().filter(|dependency| {
+        dependency.kind == InstallDependencyKind::Runtime && dependency.id == "node"
+    });
+    let dependency = dependencies.next()?;
+    dependencies
+        .next()
+        .is_none()
+        .then_some(dependency.version.as_str())
+}
+
+pub(crate) fn managed_node_is_runnable(ctx: &Ctx, version: &str) -> Result<bool> {
+    let node = crate::backend::node::NodeBackend;
+    let tool = ToolVersion::new("node", version);
+    Ok(node.bin_paths(ctx, &tool)?.into_iter().any(|directory| {
+        is_runnable_file(&directory.join(node_executable_name()))
+            && is_regular_file(
+                &ctx.dirs
+                    .install_path("node", version)
+                    .join(".osdk-complete"),
+            )
+    }))
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+#[cfg(unix)]
+fn is_runnable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    is_regular_file(path)
+        && std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn is_runnable_file(path: &Path) -> bool {
+    is_regular_file(path)
+}
+
+fn receipt_matches_identity(
+    backend: &NpmPackageBackend,
+    tv: &ToolVersion,
+    scope: ToolScope,
+    identity: &InstallIdentity,
+    receipt: &NpmInstallReceipt,
+) -> Result<bool> {
+    let Some(node_version) = exact_node_dependency(identity) else {
+        return Ok(false);
+    };
+    let requested_installer = identity
+        .material_options
+        .get("installer")
+        .map(String::as_str);
+    let locked_installer = tv
+        .options
+        .get(LOCKED_NPM_INSTALLER_OPTION)
+        .map(String::as_str);
+    if requested_installer.is_some()
+        && locked_installer.is_some()
+        && requested_installer != locked_installer
+    {
+        return Ok(false);
+    }
+    let expected_installer = locked_installer.or(requested_installer).unwrap_or("aube");
+    if receipt.provider != PROVIDER
+        || receipt.package != backend.package
+        || receipt.node_version != node_version
+        || receipt.installer != expected_installer
+        || receipt.build_policy != NpmPackageBackend::build_policy(tv)?.identity()
+    {
+        return Ok(false);
+    }
+
+    let native = [
+        tv.options.get(LOCKED_NPM_NATIVE_LOCK_KIND_OPTION),
+        tv.options.get(LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION),
+        tv.options.get(LOCKED_NPM_NATIVE_LOCK_SHA256_OPTION),
+    ];
+    if native.iter().any(|value| value.is_some()) {
+        if native.iter().any(|value| value.is_none()) {
+            return Ok(false);
+        }
+        if scope != ToolScope::Global
+            || receipt.native_lock_format.as_ref() != native[1]
+            || receipt.native_lock_sha256.as_ref() != native[2]
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn manifest_bins_are_confined(install_root: &Path, manifest: &DynamicToolManifest) -> Result<bool> {
+    if manifest.bins.is_empty() {
+        return Ok(false);
+    }
+    let canonical_root =
+        dunce::canonicalize(install_root).map_err(|error| Error::io(install_root, error))?;
+    for bin in &manifest.bins {
+        let path = install_root.join(&bin.path);
+        let Ok(canonical) = dunce::canonicalize(&path) else {
+            return Ok(false);
+        };
+        if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_isolated_install_evidence(
+    install_root: &Path,
+    package: &str,
+    version: &str,
+    build_policy: &BuildPolicy,
+    receipt: &NpmInstallReceipt,
+    locked_graph: Option<&LockedNpmGraph<'_>>,
+) -> Result<bool> {
+    if receipt.installer != "aube"
+        || receipt.native_lock_format.is_some()
+        || receipt.native_lock_sha256.is_some()
+    {
+        return Ok(false);
+    }
+    let project_dir = install_root.join(PROJECT_DIR);
+    if validate_project_manifest(&project_dir, package, version, build_policy).is_err()
+        || NpmPackageBackend::validate_install_layout(&project_dir, package).is_err()
+    {
+        return Ok(false);
+    }
+    let graph = match npm_graph_identity(&project_dir, package, version) {
+        Ok(graph) => graph,
+        Err(_) => return Ok(false),
+    };
+    if receipt.graph_sha256.as_deref() != Some(graph.sha256.as_str())
+        || receipt.root_integrity.as_deref() != Some(graph.root_integrity.as_str())
+        || receipt.root_source.as_deref() != Some(graph.root_source.as_str())
+    {
+        return Ok(false);
+    }
+    if let Some(locked_graph) = locked_graph {
+        let expected = pipeline::verify::hash_bytes(
+            locked_graph.lockfile.as_bytes(),
+            pipeline::HashAlgo::Sha256,
+        );
+        if graph.sha256 != expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_global_install_evidence(
+    install_root: &Path,
+    package: &str,
+    version: &str,
+    receipt: &NpmInstallReceipt,
+) -> Result<bool> {
+    if receipt.graph_sha256.is_some()
+        || receipt.root_integrity.is_some()
+        || receipt.root_source.is_some()
+    {
+        return Ok(false);
+    }
+    let installer = match receipt.installer.parse::<NpmInstaller>() {
+        Ok(NpmInstaller::Auto) | Err(_) => return Ok(false),
+        Ok(installer) => installer,
+    };
+    let package_manifest = match global_package_manifest_path(install_root, package, installer) {
+        Some(path) => path,
+        None => return Ok(false),
+    };
+    if !package_manifest_matches(&package_manifest, package, version)? {
+        return Ok(false);
+    }
+
+    let native_lock = global_native_lock_path(install_root, installer);
+    match (
+        receipt.native_lock_format.as_deref(),
+        receipt.native_lock_sha256.as_deref(),
+        native_lock,
+    ) {
+        (None, None, None) => Ok(installer == NpmInstaller::Npm),
+        (Some(format), Some(digest), Some(path)) => {
+            let actual =
+                crate::inventory::read_stable_regular_file(&path, NPM_NATIVE_LOCK_MAX_BYTES)
+                    .map(|bytes| pipeline::verify::hash_bytes(&bytes, pipeline::HashAlgo::Sha256));
+            Ok(native_lock_format_matches(installer, format, &path)
+                && actual.is_ok_and(|actual| actual == digest))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn global_package_manifest_path(
+    install_root: &Path,
+    package: &str,
+    installer: NpmInstaller,
+) -> Option<PathBuf> {
+    match installer {
+        NpmInstaller::Aube => {
+            Some(package_install_dir(&install_root.join(PROJECT_DIR), package).join("package.json"))
+        }
+        NpmInstaller::Npm => {
+            #[cfg(windows)]
+            let modules = install_root.join("node_modules");
+            #[cfg(not(windows))]
+            let modules = install_root.join("lib/node_modules");
+            Some(modules.join(package).join("package.json"))
+        }
+        NpmInstaller::Pnpm => find_unique_descendant(
+            &install_root.join("pnpm-global"),
+            &format!("/node_modules/{package}/package.json"),
+        ),
+        NpmInstaller::Auto => None,
+    }
+}
+
+fn package_manifest_matches(path: &Path, package: &str, version: &str) -> Result<bool> {
+    let manifest: serde_json::Value =
+        match crate::inventory::read_stable_regular_file(path, NPM_PACKAGE_MANIFEST_MAX_BYTES)
+            .map_err(|error| Error::io(path, error))
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(Error::from))
+        {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(false),
+        };
+    Ok(
+        manifest.get("name").and_then(serde_json::Value::as_str) == Some(package)
+            && manifest.get("version").and_then(serde_json::Value::as_str) == Some(version),
+    )
+}
+
+fn global_native_lock_path(install_root: &Path, installer: NpmInstaller) -> Option<PathBuf> {
+    match installer {
+        NpmInstaller::Aube => {
+            let path = install_root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME);
+            path.is_file().then_some(path)
+        }
+        NpmInstaller::Pnpm => {
+            find_unique_descendant(&install_root.join("pnpm-global"), "pnpm-lock.yaml")
+        }
+        NpmInstaller::Npm | NpmInstaller::Auto => None,
+    }
+}
+
+fn find_unique_descendant(root: &Path, suffix: &str) -> Option<PathBuf> {
+    if !root.exists() {
+        return None;
+    }
+    let suffix = suffix.replace('\\', "/");
+    let mut matches = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(8)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| {
+            let portable = path.to_string_lossy().replace('\\', "/");
+            portable == suffix.trim_start_matches('/') || portable.ends_with(&suffix)
+        });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn native_lock_format_matches(installer: NpmInstaller, format: &str, path: &Path) -> bool {
+    let expected_name = match installer {
+        NpmInstaller::Aube => "aube-lock.yaml",
+        NpmInstaller::Pnpm => "pnpm-lock.yaml",
+        NpmInstaller::Npm | NpmInstaller::Auto => return false,
+    };
+    if path.file_name().and_then(std::ffi::OsStr::to_str) != Some(expected_name) {
+        return false;
+    }
+    match installer {
+        NpmInstaller::Aube => format == AUBE_LOCK_FORMAT,
+        NpmInstaller::Pnpm => format == "pnpm-v9",
+        NpmInstaller::Npm | NpmInstaller::Auto => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_matches(
     install_root: &Path,
-    expected_id: &str,
+    expected_identity: &InstallIdentity,
     expected_package: &str,
-    expected_version: &str,
     locked_graph: Option<&LockedNpmGraph<'_>>,
     build_policy: &BuildPolicy,
-    node_version: &str,
-    options: &BTreeMap<String, String>,
 ) -> Result<bool> {
-    if !install_root.join(".osdk-complete").is_file() {
+    if !is_regular_file(&install_root.join(".osdk-complete")) {
         return Ok(false);
     }
     let manifest = match DynamicToolManifest::load(install_root) {
         Ok(manifest) => manifest,
         Err(_) => return Ok(false),
     };
-    if manifest.id != expected_id
-        || manifest.version.as_deref() != Some(expected_version)
-        || !manifest.matches_identity_options(options)?
-        || manifest.metadata.get(METADATA_PROVIDER).map(String::as_str) != Some(PROVIDER)
-        || manifest.metadata.get(METADATA_PACKAGE).map(String::as_str) != Some(expected_package)
-        || manifest.metadata.get(METADATA_RUNTIME).map(String::as_str) != Some("node")
-        || manifest
-            .metadata
-            .get(METADATA_NODE_VERSION)
-            .map(String::as_str)
-            != Some(node_version)
-        || manifest.metadata.get(METADATA_BUILD_POLICY) != Some(&build_policy.identity())
+    let node_version = exact_node_dependency(expected_identity)
+        .ok_or_else(|| Error::other("npm install identity is missing its Node dependency"))?;
+    let receipt = match load_npm_receipt(install_root) {
+        Ok(receipt) => receipt,
+        Err(_) => return Ok(false),
+    };
+    if !manifest.matches_identity(expected_identity)
+        || receipt.provider != PROVIDER
+        || receipt.package != expected_package
+        || receipt.node_version != node_version
+        || receipt.build_policy != build_policy.identity()
+        || !manifest_bins_are_confined(install_root, &manifest)?
     {
         return Ok(false);
     }
@@ -1546,7 +1951,7 @@ fn install_matches(
     if validate_project_manifest(
         &project_dir,
         expected_package,
-        expected_version,
+        &expected_identity.version,
         build_policy,
     )
     .is_err()
@@ -1554,14 +1959,14 @@ fn install_matches(
     {
         return Ok(false);
     }
-    let graph_identity = match npm_graph_identity(&project_dir, expected_package, expected_version)
-    {
-        Ok(identity) => identity,
-        Err(_) => return Ok(false),
-    };
-    if manifest.metadata.get(METADATA_LOCK_SHA256) != Some(&graph_identity.sha256)
-        || manifest.metadata.get(METADATA_ROOT_INTEGRITY) != Some(&graph_identity.root_integrity)
-        || manifest.metadata.get(METADATA_ROOT_SOURCE) != Some(&graph_identity.root_source)
+    let graph_identity =
+        match npm_graph_identity(&project_dir, expected_package, &expected_identity.version) {
+            Ok(identity) => identity,
+            Err(_) => return Ok(false),
+        };
+    if receipt.graph_sha256.as_deref() != Some(graph_identity.sha256.as_str())
+        || receipt.root_integrity.as_deref() != Some(graph_identity.root_integrity.as_str())
+        || receipt.root_source.as_deref() != Some(graph_identity.root_source.as_str())
     {
         return Ok(false);
     }
@@ -1580,7 +1985,8 @@ fn validate_project_manifest(
     build_policy: &BuildPolicy,
 ) -> Result<()> {
     let path = project_dir.join("package.json");
-    let bytes = std::fs::read(&path).map_err(|error| Error::io(&path, error))?;
+    let bytes = crate::inventory::read_stable_regular_file(&path, NPM_PACKAGE_MANIFEST_MAX_BYTES)
+        .map_err(|error| Error::io(&path, error))?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
     if manifest
         .get("dependencies")
@@ -1622,7 +2028,8 @@ fn npm_graph_identity(
     version: &str,
 ) -> Result<NpmGraphIdentity> {
     let path = project_dir.join(AUBE_LOCKFILE_NAME);
-    let bytes = std::fs::read(&path).map_err(|error| Error::io(&path, error))?;
+    let bytes = crate::inventory::read_stable_regular_file(&path, NPM_NATIVE_LOCK_MAX_BYTES)
+        .map_err(|error| Error::io(&path, error))?;
     let lockfile: IdentityLockfile = serde_yaml::from_slice(&bytes).map_err(|error| {
         Error::other(crate::t!(
             "err.npm_graph_parse_invalid",
@@ -2577,21 +2984,12 @@ fn project_lock_binds_selection(
     selection: &ProjectNpmBinSelection,
 ) -> Result<bool> {
     let path = project_root.join(PROJECT_NPM_LOCKFILE);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
+    let bytes = match crate::inventory::read_stable_regular_file(&path, PROJECT_NPM_LOCK_MAX_BYTES)
+    {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(Error::io(&path, error)),
     };
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > PROJECT_NPM_LOCK_MAX_BYTES
-    {
-        return Err(Error::other(format!(
-            "project npm lock is not a bounded regular file: {}",
-            path.display()
-        )));
-    }
-    let bytes = std::fs::read(&path).map_err(|error| Error::io(&path, error))?;
     let lock: ProjectNpmLockfile = toml::from_str(std::str::from_utf8(&bytes).map_err(|_| {
         Error::other(format!("project npm lock is not UTF-8: {}", path.display()))
     })?)?;
@@ -2885,9 +3283,12 @@ fn declared_project_bin_entries(
             )));
         }
         let package_json = package_dir.join("package.json");
-        let package_manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&package_json).map_err(|error| Error::io(&package_json, error))?,
-        )?;
+        let bytes = crate::inventory::read_stable_regular_file(
+            &package_json,
+            NPM_PACKAGE_MANIFEST_MAX_BYTES,
+        )
+        .map_err(|error| Error::io(&package_json, error))?;
+        let package_manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
         if package_manifest
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -3123,17 +3524,8 @@ fn relative_path_from(base: &Path, target: &Path) -> Option<PathBuf> {
 }
 
 fn read_project_bin_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| Error::io(path, error))?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > PROJECT_NPM_BIN_MAX_JSON_BYTES
-    {
-        return Err(Error::other(format!(
-            "project npm bin metadata is not a small regular file: {}",
-            path.display()
-        )));
-    }
-    let bytes = std::fs::read(path).map_err(|error| Error::io(path, error))?;
+    let bytes = crate::inventory::read_stable_regular_file(path, PROJECT_NPM_BIN_MAX_JSON_BYTES)
+        .map_err(|error| Error::io(path, error))?;
     serde_json::from_slice(&bytes).map_err(Into::into)
 }
 
@@ -3497,54 +3889,354 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:@antfu/ni").unwrap();
+        let version = npm_test_version(&backend, "1.0.0");
+        let isolated = backend
+            .install_locator(&ctx, &version, ToolScope::Project)
+            .unwrap();
+        let global = backend
+            .install_locator(&ctx, &version, ToolScope::Global)
+            .unwrap();
 
+        assert_ne!(isolated.install_root(), global.install_root());
         assert_eq!(
-            backend.isolated_install_root(&ctx, "1.0.0"),
-            temporary.path().join("data/installs/npm/@antfu/ni/1.0.0")
+            isolated.install_root(),
+            backend
+                .legacy_isolated_install_root(&ctx, &version.version)
+                .join(crate::dirs::install_id_component(&isolated.identity().install_id).unwrap())
         );
         assert_eq!(
-            backend.global_install_root(&ctx, "1.0.0"),
-            temporary
-                .path()
-                .join("data/installs/npm-global/@antfu/ni/1.0.0")
+            global.install_root(),
+            backend
+                .legacy_global_install_root_path(&ctx, &version.version)
+                .join(crate::dirs::install_id_component(&global.identity().install_id).unwrap())
         );
+        assert_eq!(isolated.identity().scope, InstallScope::Isolated);
+        assert_eq!(global.identity().scope, InstallScope::Global);
+    }
+
+    const TEST_NODE_VERSION: &str = "20.10.0";
+
+    fn npm_test_version(backend: &NpmPackageBackend, version: &str) -> ToolVersion {
+        npm_test_version_with_node(backend, version, TEST_NODE_VERSION)
+    }
+
+    fn npm_test_version_with_node(
+        backend: &NpmPackageBackend,
+        version: &str,
+        node_version: &str,
+    ) -> ToolVersion {
+        let mut tool = ToolVersion::new(backend.id(), version);
+        tool.options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), node_version.into());
+        tool
+    }
+
+    fn with_scope(mut version: ToolVersion, scope: ToolScope) -> ToolVersion {
+        version
+            .options
+            .insert(LOCKED_NPM_SCOPE_OPTION.into(), scope.as_str().into());
+        version
     }
 
     fn write_scope_fixture(
         backend: &NpmPackageBackend,
-        root: &Path,
-        version: &str,
-        scope: Option<&str>,
+        ctx: &Ctx,
+        version: &ToolVersion,
+        scope: ToolScope,
         bin_name: &str,
-    ) {
-        let bin = root.join(format!("bin/{bin_name}"));
+    ) -> PathBuf {
+        let locator = backend.install_locator(ctx, version, scope).unwrap();
+        let root = locator.install_root().to_path_buf();
+        let relative_bin = match scope {
+            ToolScope::Project => format!("project/node_modules/.bin/{bin_name}"),
+            ToolScope::Global => format!("bin/{bin_name}"),
+        };
+        let bin = root.join(&relative_bin);
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, b"fixture").unwrap();
-        let mut manifest = DynamicToolManifest::new(backend.id()).unwrap();
-        manifest.version = Some(version.into());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if scope == ToolScope::Project {
+            let project = root.join(PROJECT_DIR);
+            NpmPackageBackend::write_project_manifest(
+                &project,
+                Some((backend.package(), &version.version)),
+                &NpmPackageBackend::build_policy(version).unwrap(),
+            )
+            .unwrap();
+            std::fs::create_dir_all(package_install_dir(&project, backend.package())).unwrap();
+            let lockfile = npm_test_lockfile(
+                backend.package(),
+                &version.version,
+                "sha512-fixture-integrity",
+            );
+            std::fs::write(project.join(AUBE_LOCKFILE_NAME), &lockfile).unwrap();
+        } else {
+            let project = root.join(PROJECT_DIR);
+            let package = package_install_dir(&project, backend.package());
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "name": backend.package(),
+                    "version": version.version,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                project.join(AUBE_LOCKFILE_NAME),
+                npm_test_lockfile(
+                    backend.package(),
+                    &version.version,
+                    "sha512-fixture-integrity",
+                ),
+            )
+            .unwrap();
+        }
+        write_node_fixture(ctx, &version.options[LOCKED_NPM_NODE_VERSION_OPTION]);
+        let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone()).unwrap();
         manifest.bins = vec![DynamicToolBin {
             name: bin_name.into(),
-            path: format!("bin/{bin_name}"),
+            path: relative_bin,
         }];
-        if let Some(scope) = scope {
-            manifest.metadata.insert("scope".into(), scope.into());
-        }
-        manifest.write_atomic(root).unwrap();
+        manifest.write_atomic(&root).unwrap();
+        write_npm_receipt(
+            &root,
+            &NpmInstallReceipt {
+                schema: NPM_INSTALL_RECEIPT_SCHEMA,
+                provider: PROVIDER.into(),
+                package: backend.package().into(),
+                installer: "aube".into(),
+                node_version: version.options[LOCKED_NPM_NODE_VERSION_OPTION].clone(),
+                build_policy: NpmPackageBackend::build_policy(version).unwrap().identity(),
+                graph_sha256: (scope == ToolScope::Project).then(|| {
+                    pipeline::verify::hash_file(
+                        &root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME),
+                        pipeline::HashAlgo::Sha256,
+                    )
+                    .unwrap()
+                }),
+                root_integrity: (scope == ToolScope::Project)
+                    .then(|| "sha512-fixture-integrity".into()),
+                root_source: (scope == ToolScope::Project)
+                    .then(|| format!("npm:{}@{}", backend.package(), version.version)),
+                native_lock_format: (scope == ToolScope::Global).then(|| AUBE_LOCK_FORMAT.into()),
+                native_lock_sha256: (scope == ToolScope::Global).then(|| {
+                    pipeline::verify::hash_file(
+                        &root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME),
+                        pipeline::HashAlgo::Sha256,
+                    )
+                    .unwrap()
+                }),
+            },
+        )
+        .unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        root
     }
 
-    fn write_isolated_scope_fixture(backend: &NpmPackageBackend, root: &Path, version: &str) {
-        let bin = root.join("project/node_modules/.bin/isolated-bin");
+    fn write_node_fixture(ctx: &Ctx, version: &str) -> PathBuf {
+        let root = ctx.dirs.install_path("node", version);
+        let bin = if cfg!(windows) {
+            root.join(node_executable_name())
+        } else {
+            root.join("bin").join(node_executable_name())
+        };
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        std::fs::write(&bin, b"fixture").unwrap();
-        let mut manifest = DynamicToolManifest::new(backend.id()).unwrap();
-        manifest.version = Some(version.into());
-        manifest.bins = vec![DynamicToolBin {
-            name: "isolated-bin".into(),
-            path: "project/node_modules/.bin/isolated-bin".into(),
-        }];
-        manifest.write_atomic(root).unwrap();
+        std::fs::write(&bin, b"node fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        bin
+    }
+
+    #[test]
+    fn completed_selection_rejects_marker_symlink_tampered_receipt_and_missing_node() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let version = npm_test_version(&backend, "3.6.2");
+        let root = write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "prettier");
+
+        assert_eq!(
+            backend.selected_install_root(&ctx, &version).unwrap(),
+            Some(root.clone())
+        );
+
+        let marker = root.join(".osdk-complete");
+        std::fs::remove_file(&marker).unwrap();
+        #[cfg(unix)]
+        {
+            let marker_target = temporary.path().join("complete");
+            std::fs::write(&marker_target, b"").unwrap();
+            std::os::unix::fs::symlink(&marker_target, &marker).unwrap();
+            assert!(backend
+                .selected_install_root(&ctx, &version)
+                .unwrap()
+                .is_none());
+            std::fs::remove_file(&marker).unwrap();
+        }
+        std::fs::write(&marker, b"").unwrap();
+
+        let mut receipt = load_npm_receipt(&root).unwrap();
+        receipt.package = "typescript".into();
+        write_npm_receipt(&root, &receipt).unwrap();
+        assert!(backend
+            .selected_install_root(&ctx, &version)
+            .unwrap()
+            .is_none());
+
+        receipt.package = backend.package().into();
+        write_npm_receipt(&root, &receipt).unwrap();
+        std::fs::remove_dir_all(ctx.dirs.install_path("node", TEST_NODE_VERSION)).unwrap();
+        assert!(backend
+            .selected_install_root(&ctx, &version)
+            .unwrap()
+            .is_none());
+        assert!(backend
+            .list_installed_for(&ctx, &version)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_selection_rejects_symlinked_or_oversized_receipt_and_native_lock() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let version = npm_test_version(&backend, "3.6.2");
+
+        let isolated =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "prettier");
+        let receipt_path = npm_receipt_path(&isolated);
+        let receipt_copy = temporary.path().join("receipt.json");
+        std::fs::copy(&receipt_path, &receipt_copy).unwrap();
+        std::fs::remove_file(&receipt_path).unwrap();
+        symlink(&receipt_copy, &receipt_path).unwrap();
+        assert!(!backend
+            .validate_completed_install(&ctx, &version, ToolScope::Project, &isolated)
+            .unwrap());
+        std::fs::remove_file(&receipt_path).unwrap();
+        std::fs::write(
+            &receipt_path,
+            vec![b'x'; (NPM_INSTALL_RECEIPT_MAX_BYTES + 1) as usize],
+        )
+        .unwrap();
+        assert!(!backend
+            .validate_completed_install(&ctx, &version, ToolScope::Project, &isolated)
+            .unwrap());
+
+        let global_version = with_scope(version.clone(), ToolScope::Global);
+        let global = write_scope_fixture(
+            &backend,
+            &ctx,
+            &global_version,
+            ToolScope::Global,
+            "prettier",
+        );
+        let lock_path = global.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME);
+        let lock_copy = temporary.path().join("native-lock.yaml");
+        std::fs::copy(&lock_path, &lock_copy).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        symlink(&lock_copy, &lock_path).unwrap();
+        assert!(!backend
+            .validate_completed_install(&ctx, &global_version, ToolScope::Global, &global)
+            .unwrap());
+    }
+
+    #[test]
+    fn installed_version_listing_preserves_manifest_node_identity_after_active_node_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let installed = npm_test_version_with_node(&backend, "3.6.2", "20.10.0");
+        let root = write_scope_fixture(&backend, &ctx, &installed, ToolScope::Project, "prettier");
+        write_node_fixture(&ctx, "22.14.0");
+        ctx.config.tools.insert("node".into(), "22.14.0".into());
+
+        let unbound = ToolVersion::new(backend.id(), "selection");
+        assert_eq!(
+            backend.list_installed_for(&ctx, &unbound).unwrap(),
+            vec!["3.6.2"]
+        );
+
+        let selected = ToolVersion::new(backend.id(), "3.6.2");
+        assert_ne!(
+            backend.isolated_install_root_for(&ctx, &selected).unwrap(),
+            root
+        );
+        assert!(backend
+            .selected_install_root(&ctx, &selected)
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            backend.selected_install_root(&ctx, &installed).unwrap(),
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn installed_identity_listing_preserves_manifest_node_identity_after_active_node_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let installed = npm_test_version_with_node(&backend, "3.6.2", "20.10.0");
+        let root = write_scope_fixture(&backend, &ctx, &installed, ToolScope::Project, "prettier");
+        write_node_fixture(&ctx, "22.14.0");
+        ctx.config.tools.insert("node".into(), "22.14.0".into());
+
+        let hint = ToolVersion::new(backend.id(), "selection");
+        let candidates = backend.list_installed_identities_for(&ctx, &hint).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].version, "3.6.2");
+        assert_eq!(
+            candidates[0].options[LOCKED_NPM_NODE_VERSION_OPTION],
+            "20.10.0"
+        );
+        assert_eq!(
+            backend
+                .where_install_root_for(&ctx, &candidates[0])
+                .unwrap(),
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn same_version_option_and_runtime_variants_have_distinct_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        let baseline = npm_test_version(&backend, "3.6.2");
+        let mut installer = baseline.clone();
+        installer.options.insert("installer".into(), "aube".into());
+        let mut builds = baseline.clone();
+        builds
+            .options
+            .insert("allow_builds".into(), "esbuild".into());
+        let mut newer_node = baseline.clone();
+        newer_node
+            .options
+            .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.14.0".into());
+
+        let roots = [&baseline, &installer, &builds, &newer_node]
+            .map(|version| backend.isolated_install_root_for(&ctx, version).unwrap());
+        for left in 0..roots.len() {
+            for right in left + 1..roots.len() {
+                assert_ne!(roots[left], roots[right]);
+            }
+        }
     }
 
     #[tokio::test]
@@ -3552,31 +4244,30 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new(backend.id(), "3.6.2");
-        let isolated = backend.isolated_install_root(&ctx, &version.version);
-        let global = backend.global_install_root(&ctx, &version.version);
-        write_isolated_scope_fixture(&backend, &isolated, &version.version);
-        write_scope_fixture(
-            &backend,
-            &global,
-            &version.version,
-            Some("global"),
-            "global-bin",
-        );
+        let version = npm_test_version(&backend, "3.6.2");
+        let isolated =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "isolated-bin");
+        let global = write_scope_fixture(&backend, &ctx, &version, ToolScope::Global, "global-bin");
 
-        assert_eq!(backend.list_installed(&ctx).unwrap(), vec!["3.6.2"]);
         assert_eq!(
-            backend.where_install_root(&ctx, &version.version).unwrap(),
+            backend.list_installed_for(&ctx, &version).unwrap(),
+            vec!["3.6.2"]
+        );
+        assert_eq!(
+            backend.where_install_root_for(&ctx, &version).unwrap(),
             Some(isolated.clone())
         );
         backend.uninstall(&ctx, &version).await.unwrap();
         assert!(!isolated.exists());
         assert!(global.exists());
+        let global_version = with_scope(version.clone(), ToolScope::Global);
         assert_eq!(
-            backend.where_install_root(&ctx, &version.version).unwrap(),
+            backend
+                .where_install_root_for(&ctx, &global_version)
+                .unwrap(),
             Some(global.clone())
         );
-        assert!(backend.uninstall_global(&ctx, &version).unwrap());
+        assert!(backend.uninstall_global(&ctx, &global_version).unwrap());
         assert!(!global.exists());
     }
 
@@ -3585,16 +4276,12 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let isolated = backend.isolated_install_root(&ctx, "3.6.2");
-        let global = backend.global_install_root(&ctx, "3.6.2");
-        write_isolated_scope_fixture(&backend, &isolated, "3.6.2");
-        write_scope_fixture(&backend, &global, "3.6.2", Some("global"), "global-bin");
+        let version = npm_test_version(&backend, "3.6.2");
+        let isolated =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "isolated-bin");
+        let global = write_scope_fixture(&backend, &ctx, &version, ToolScope::Global, "global-bin");
 
-        let mut isolated_version = ToolVersion::new(backend.id(), "3.6.2");
-        isolated_version.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Project.as_str().into(),
-        );
+        let isolated_version = with_scope(version.clone(), ToolScope::Project);
         assert_eq!(
             backend
                 .selected_install_root(&ctx, &isolated_version)
@@ -3606,11 +4293,7 @@ scope = "project"
             vec!["isolated-bin"]
         );
 
-        let mut global_version = ToolVersion::new(backend.id(), "3.6.2");
-        global_version.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Global.as_str().into(),
-        );
+        let global_version = with_scope(version, ToolScope::Global);
         assert_eq!(
             backend
                 .selected_install_root(&ctx, &global_version)
@@ -3634,65 +4317,67 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        write_isolated_scope_fixture(
+        write_scope_fixture(
             &backend,
-            &backend.isolated_install_root(&ctx, "3.9.0"),
-            "3.9.0",
+            &ctx,
+            &npm_test_version(&backend, "3.9.0"),
+            ToolScope::Project,
+            "isolated-bin",
         );
         write_scope_fixture(
             &backend,
-            &backend.global_install_root(&ctx, "3.8.0"),
-            "3.8.0",
-            Some("global"),
+            &ctx,
+            &npm_test_version(&backend, "3.8.0"),
+            ToolScope::Global,
             "global-bin",
         );
 
-        let mut global = ToolVersion::new(backend.id(), "ignored");
-        global.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Global.as_str().into(),
+        let global = with_scope(
+            npm_test_version(&backend, "identity-selection"),
+            ToolScope::Global,
         );
         assert_eq!(
             backend.list_installed_for(&ctx, &global).unwrap(),
             vec!["3.8.0"]
         );
 
-        let mut project = ToolVersion::new(backend.id(), "ignored");
-        project.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Project.as_str().into(),
+        let project = with_scope(
+            npm_test_version(&backend, "identity-selection"),
+            ToolScope::Project,
         );
         assert_eq!(
             backend.list_installed_for(&ctx, &project).unwrap(),
             vec!["3.9.0"]
         );
         assert_eq!(
-            backend.list_installed(&ctx).unwrap(),
+            backend
+                .list_installed_for(&ctx, &npm_test_version(&backend, "identity-selection"))
+                .unwrap(),
             vec!["3.8.0", "3.9.0"]
         );
     }
 
     #[test]
-    fn invalid_manifest_scope_fails_closed_while_missing_scope_is_legacy_isolated() {
+    fn invalid_v2_manifest_scope_fails_closed() {
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new(backend.id(), "3.6.2");
-        let isolated = backend.isolated_install_root(&ctx, &version.version);
+        let version = npm_test_version(&backend, "3.6.2");
+        let locator = backend
+            .install_locator(&ctx, &version, ToolScope::Project)
+            .unwrap();
+        let isolated = locator.install_root();
+        std::fs::create_dir_all(isolated).unwrap();
+        let manifest = DynamicToolManifest::from_identity(locator.identity().clone()).unwrap();
+        let mut value = serde_json::to_value(manifest).unwrap();
+        value["identity"]["scope"] = serde_json::json!("future-scope");
+        std::fs::write(
+            DynamicToolManifest::manifest_path(isolated),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(isolated.join(".osdk-complete"), b"").unwrap();
 
-        write_scope_fixture(&backend, &isolated, &version.version, None, "legacy-bin");
-        assert_eq!(
-            backend.where_install_root_for(&ctx, &version).unwrap(),
-            Some(isolated.clone())
-        );
-
-        write_scope_fixture(
-            &backend,
-            &isolated,
-            &version.version,
-            Some("future-scope"),
-            "invalid-bin",
-        );
         assert!(backend.where_install_root_for(&ctx, &version).is_err());
         assert!(backend.list_installed_for(&ctx, &version).is_err());
     }
@@ -3702,26 +4387,18 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let isolated = backend.isolated_install_root(&ctx, "3.6.2");
-        write_isolated_scope_fixture(&backend, &isolated, "3.6.2");
-        let mut global_version = ToolVersion::new(backend.id(), "3.6.2");
-        global_version.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Global.as_str().into(),
-        );
+        let version = npm_test_version(&backend, "3.6.2");
+        let isolated =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "isolated-bin");
+        let global_version = with_scope(version.clone(), ToolScope::Global);
         assert!(backend
             .selected_install_root(&ctx, &global_version)
             .unwrap()
             .is_none());
 
         std::fs::remove_dir_all(&isolated).unwrap();
-        let global = backend.global_install_root(&ctx, "3.6.2");
-        write_scope_fixture(&backend, &global, "3.6.2", Some("global"), "global-bin");
-        let mut isolated_version = ToolVersion::new(backend.id(), "3.6.2");
-        isolated_version.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Project.as_str().into(),
-        );
+        write_scope_fixture(&backend, &ctx, &version, ToolScope::Global, "global-bin");
+        let isolated_version = with_scope(version, ToolScope::Project);
         assert!(backend
             .selected_install_root(&ctx, &isolated_version)
             .unwrap()
@@ -3752,12 +4429,11 @@ scope = "project"
         ctx.config
             .global_tool_configs
             .insert(global_key, crate::config::ToolConfigEntry::legacy("3.6.2"));
-        let isolated = backend.isolated_install_root(&ctx, "3.6.2");
-        let global = backend.global_install_root(&ctx, "3.6.2");
-        write_isolated_scope_fixture(&backend, &isolated, "3.6.2");
-        write_scope_fixture(&backend, &global, "3.6.2", Some("global"), "global-bin");
+        let version = npm_test_version(&backend, "3.6.2");
+        let isolated =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "isolated-bin");
+        write_scope_fixture(&backend, &ctx, &version, ToolScope::Global, "global-bin");
 
-        let version = ToolVersion::new(backend.id(), "3.6.2");
         assert_eq!(
             backend.selected_install_root(&ctx, &version).unwrap(),
             Some(isolated)
@@ -3782,12 +4458,11 @@ scope = "project"
         ctx.config
             .global_tool_configs
             .insert(key, crate::config::ToolConfigEntry::legacy("3.6.2"));
-        let isolated = backend.isolated_install_root(&ctx, "3.6.2");
-        let global = backend.global_install_root(&ctx, "3.6.2");
-        write_isolated_scope_fixture(&backend, &isolated, "3.6.2");
-        write_scope_fixture(&backend, &global, "3.6.2", Some("global"), "global-bin");
+        let version = npm_test_version(&backend, "3.6.2");
+        let isolated =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Project, "isolated-bin");
+        let global = write_scope_fixture(&backend, &ctx, &version, ToolScope::Global, "global-bin");
 
-        let version = ToolVersion::new(backend.id(), "3.6.2");
         assert_eq!(
             backend.where_install_root_for(&ctx, &version).unwrap(),
             Some(global)
@@ -3806,59 +4481,82 @@ scope = "project"
         );
     }
 
-    #[tokio::test]
-    async fn legacy_uninstall_does_not_remove_a_legacy_global_install() {
-        let temporary = tempfile::tempdir().unwrap();
-        let ctx = offline_test_ctx(temporary.path());
-        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new(backend.id(), "3.6.2");
-        let legacy = backend.isolated_install_root(&ctx, &version.version);
-        write_scope_fixture(
-            &backend,
-            &legacy,
-            &version.version,
-            Some("global"),
-            "prettier",
-        );
-
-        backend.uninstall(&ctx, &version).await.unwrap();
-        assert!(legacy.exists());
-        assert_eq!(
-            backend.legacy_global_install_root(&ctx, &version).unwrap(),
-            Some(legacy)
-        );
+    fn write_legacy_inventory_fixture(root: &Path, id: &str, version: &str, scope: &str) {
+        let bin = root.join("bin/prettier");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"legacy executable").unwrap();
+        std::fs::write(
+            root.join(crate::inventory::LEGACY_INVENTORY_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 2,
+                "id": id,
+                "version": version,
+                "bins": [{"name": "prettier", "path": "bin/prettier"}],
+                "metadata": {"scope": scope}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
     }
 
     #[tokio::test]
-    async fn isolated_install_does_not_overwrite_a_legacy_global_root() {
+    async fn legacy_osdk_tool_inventory_is_never_reused_executed_or_uninstalled() {
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let mut version = ToolVersion::new(backend.id(), "3.6.2");
-        version.options.insert(
-            LOCKED_NPM_SCOPE_OPTION.into(),
-            ToolScope::Project.as_str().into(),
-        );
-        let legacy = backend.isolated_install_root(&ctx, &version.version);
-        write_scope_fixture(
-            &backend,
-            &legacy,
-            &version.version,
-            Some("global"),
-            "prettier",
-        );
-        let before = std::fs::read(DynamicToolManifest::manifest_path(&legacy)).unwrap();
+        let version = npm_test_version(&backend, "3.6.2");
+        let legacy_isolated = backend.legacy_isolated_install_root(&ctx, &version.version);
+        let legacy_global = backend.legacy_global_install_root_path(&ctx, &version.version);
+        write_legacy_inventory_fixture(&legacy_isolated, backend.id(), &version.version, "project");
+        write_legacy_inventory_fixture(&legacy_global, backend.id(), &version.version, "global");
 
-        let error = backend
-            .install(&InstallCtx { ctx: &ctx }, &version)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("pre-isolation global install"));
-        assert_eq!(
-            std::fs::read(DynamicToolManifest::manifest_path(&legacy)).unwrap(),
-            before
-        );
-        assert!(legacy.join(".osdk-complete").is_file());
+        let identity = backend
+            .install_identity(&ctx, &version, ToolScope::Project)
+            .unwrap();
+        assert!(!install_matches(
+            &legacy_isolated,
+            &identity,
+            backend.package(),
+            None,
+            &BuildPolicy::Deny,
+        )
+        .unwrap());
+        assert!(backend
+            .where_install_root_for(&ctx, &version)
+            .unwrap()
+            .is_none());
+        assert!(backend.bin_paths(&ctx, &version).unwrap().is_empty());
+        assert!(backend.bin_names(&ctx, &version).is_err());
+
+        let global_version = with_scope(version.clone(), ToolScope::Global);
+        assert!(backend
+            .where_install_root_for(&ctx, &global_version)
+            .unwrap()
+            .is_none());
+        assert!(backend.bin_paths(&ctx, &global_version).unwrap().is_empty());
+        assert!(backend.bin_names(&ctx, &global_version).is_err());
+        assert!(backend
+            .list_installed_for_scope(&ctx, ToolScope::Project)
+            .unwrap()
+            .is_empty());
+        assert!(backend
+            .list_installed_for_scope(&ctx, ToolScope::Global)
+            .unwrap()
+            .is_empty());
+        assert!(backend
+            .legacy_global_install_root(&ctx, &global_version)
+            .unwrap()
+            .is_none());
+
+        backend.uninstall(&ctx, &version).await.unwrap();
+        assert!(!backend.uninstall_global(&ctx, &global_version).unwrap());
+        assert!(legacy_isolated
+            .join(crate::inventory::LEGACY_INVENTORY_FILE)
+            .is_file());
+        assert!(legacy_global
+            .join(crate::inventory::LEGACY_INVENTORY_FILE)
+            .is_file());
     }
 
     #[test]
@@ -3917,6 +4615,10 @@ scope = "project"
 
     fn locked_version(backend: &str, package: &str, version: &str, lockfile: &str) -> ToolVersion {
         let mut tool = ToolVersion::new(backend, version);
+        tool.options.insert(
+            LOCKED_NPM_NODE_VERSION_OPTION.into(),
+            TEST_NODE_VERSION.into(),
+        );
         tool.options
             .insert(LOCKED_NPM_PACKAGE_OPTION.into(), package.into());
         tool.options.insert(
@@ -3980,154 +4682,193 @@ scope = "project"
     }
 
     fn write_reusable_install(
-        install_root: &Path,
-        id: &str,
-        package: &str,
-        version: &str,
-        node_version: &str,
+        backend: &NpmPackageBackend,
+        ctx: &Ctx,
+        version: &ToolVersion,
         build_policy: &BuildPolicy,
         lockfile: &str,
-    ) {
+    ) -> PathBuf {
+        let install_root = backend.isolated_install_root_for(ctx, version).unwrap();
         let project_dir = install_root.join(PROJECT_DIR);
         NpmPackageBackend::write_project_manifest(
             &project_dir,
-            Some((package, version)),
+            Some((backend.package(), &version.version)),
             build_policy,
         )
         .unwrap();
         std::fs::write(project_dir.join(AUBE_LOCKFILE_NAME), lockfile).unwrap();
-        std::fs::create_dir_all(package_install_dir(&project_dir, package)).unwrap();
+        std::fs::create_dir_all(package_install_dir(&project_dir, backend.package())).unwrap();
         std::fs::create_dir_all(project_dir.join("node_modules/.bin")).unwrap();
-        let identity = npm_graph_identity(&project_dir, package, version).unwrap();
-        let mut manifest = DynamicToolManifest::new(id).unwrap();
-        manifest.version = Some(version.into());
-        manifest
-            .metadata
-            .insert(METADATA_PROVIDER.into(), PROVIDER.into());
-        manifest
-            .metadata
-            .insert(METADATA_PACKAGE.into(), package.into());
-        manifest
-            .metadata
-            .insert(METADATA_RUNTIME.into(), "node".into());
-        manifest
-            .metadata
-            .insert(METADATA_NODE_VERSION.into(), node_version.into());
-        manifest
-            .metadata
-            .insert(METADATA_BUILD_POLICY.into(), build_policy.identity());
-        manifest
-            .metadata
-            .insert(METADATA_LOCK_SHA256.into(), identity.sha256);
-        manifest
-            .metadata
-            .insert(METADATA_ROOT_INTEGRITY.into(), identity.root_integrity);
-        manifest
-            .metadata
-            .insert(METADATA_ROOT_SOURCE.into(), identity.root_source);
-        manifest.write_atomic(install_root).unwrap();
+        let bin = project_dir.join("node_modules/.bin/fixture");
+        std::fs::write(&bin, b"fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write_node_fixture(ctx, &version.options[LOCKED_NPM_NODE_VERSION_OPTION]);
+        let graph_identity =
+            npm_graph_identity(&project_dir, backend.package(), &version.version).unwrap();
+        let mut manifest = DynamicToolManifest::from_identity(
+            backend
+                .install_identity(ctx, version, ToolScope::Project)
+                .unwrap(),
+        )
+        .unwrap();
+        manifest.bins = vec![DynamicToolBin {
+            name: "fixture".into(),
+            path: "project/node_modules/.bin/fixture".into(),
+        }];
+        manifest.write_atomic(&install_root).unwrap();
+        write_npm_receipt(
+            &install_root,
+            &NpmInstallReceipt {
+                schema: NPM_INSTALL_RECEIPT_SCHEMA,
+                provider: PROVIDER.into(),
+                package: backend.package().into(),
+                installer: "aube".into(),
+                node_version: version.options[LOCKED_NPM_NODE_VERSION_OPTION].clone(),
+                build_policy: build_policy.identity(),
+                graph_sha256: Some(graph_identity.sha256),
+                root_integrity: Some(graph_identity.root_integrity),
+                root_source: Some(graph_identity.root_source),
+                native_lock_format: None,
+                native_lock_sha256: None,
+            },
+        )
+        .unwrap();
         std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+        install_root
     }
 
     #[test]
     fn completed_install_is_reused_only_for_exact_identity() {
         let temporary = tempfile::tempdir().unwrap();
-        let install_root = temporary.path().join("install");
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
         let lockfile = npm_test_lockfile(
             "prettier",
             "3.6.2",
             "sha512-I7AIg5boAr5R0FFtJ6rCfD+LFsWHp81dolrFD8S79U9tb8Az2nGrJncnMSnys+bpQJfRUzqs9hnA81OAA3hCuQ==",
         );
-        write_reusable_install(
-            &install_root,
-            "npm:prettier",
-            "prettier",
-            "3.6.2",
-            "20.10.0",
-            &BuildPolicy::Deny,
-            &lockfile,
-        );
+        let version = locked_version("npm:prettier", "prettier", "3.6.2", &lockfile);
+        let install_root =
+            write_reusable_install(&backend, &ctx, &version, &BuildPolicy::Deny, &lockfile);
         let graph = LockedNpmGraph {
             lockfile: &lockfile,
         };
+        let identity = backend
+            .install_identity(&ctx, &version, ToolScope::Project)
+            .unwrap();
 
         assert!(install_matches(
             &install_root,
-            "npm:prettier",
+            &identity,
             "prettier",
-            "3.6.2",
             Some(&graph),
             &BuildPolicy::Deny,
-            "20.10.0",
-            &BTreeMap::new(),
         )
         .unwrap());
-        for (id, package, version, node) in [
-            ("npm:typescript", "prettier", "3.6.2", "20.10.0"),
-            ("npm:prettier", "typescript", "3.6.2", "20.10.0"),
-            ("npm:prettier", "prettier", "3.6.1", "20.10.0"),
+        for (tool, package, requested_version, node) in [
+            ("npm:typescript", "prettier", "3.6.2", TEST_NODE_VERSION),
+            ("npm:prettier", "typescript", "3.6.2", TEST_NODE_VERSION),
+            ("npm:prettier", "prettier", "3.6.1", TEST_NODE_VERSION),
             ("npm:prettier", "prettier", "3.6.2", "20.9.0"),
         ] {
+            let options = BTreeMap::from([(LOCKED_NPM_NODE_VERSION_OPTION.into(), node.into())]);
+            let mismatched_identity = InstallIdentity::new(
+                tool,
+                requested_version,
+                ctx.platform.to_string(),
+                InstallScope::Isolated,
+                &options,
+                vec![InstallDependency {
+                    kind: InstallDependencyKind::Runtime,
+                    id: "node".into(),
+                    version: node.into(),
+                    identity: None,
+                }],
+                identity.materials.clone(),
+            )
+            .unwrap();
             assert!(!install_matches(
                 &install_root,
-                id,
+                &mismatched_identity,
                 package,
-                version,
                 Some(&graph),
                 &BuildPolicy::Deny,
-                node,
-                &BTreeMap::new(),
             )
             .unwrap());
         }
         assert!(!install_matches(
             &install_root,
-            "npm:prettier",
+            &identity,
             "prettier",
-            "3.6.2",
             Some(&LockedNpmGraph {
                 lockfile: "different"
             }),
             &BuildPolicy::Deny,
-            "20.10.0",
-            &BTreeMap::new(),
         )
         .unwrap());
+        let changed_build_identity = InstallIdentity::new(
+            backend.id(),
+            &version.version,
+            ctx.platform.to_string(),
+            InstallScope::Isolated,
+            &BTreeMap::from([
+                (
+                    LOCKED_NPM_NODE_VERSION_OPTION.into(),
+                    TEST_NODE_VERSION.into(),
+                ),
+                ("allow_builds".into(), "esbuild".into()),
+            ]),
+            identity.dependencies.clone(),
+            identity.materials.clone(),
+        )
+        .unwrap();
         assert!(!install_matches(
             &install_root,
-            "npm:prettier",
+            &changed_build_identity,
             "prettier",
-            "3.6.2",
             Some(&graph),
             &BuildPolicy::Packages(vec!["esbuild".into()]),
-            "20.10.0",
-            &BTreeMap::from([("allow_builds".into(), "esbuild".into())]),
         )
         .unwrap());
 
-        let mut changed_options = BTreeMap::from([("installer".into(), "aube".into())]);
+        let changed_installer_identity = InstallIdentity::new(
+            backend.id(),
+            &version.version,
+            ctx.platform.to_string(),
+            InstallScope::Isolated,
+            &BTreeMap::from([("installer".into(), "aube".into())]),
+            identity.dependencies.clone(),
+            identity.materials.clone(),
+        )
+        .unwrap();
         assert!(!install_matches(
             &install_root,
-            "npm:prettier",
+            &changed_installer_identity,
             "prettier",
-            "3.6.2",
             Some(&graph),
             &BuildPolicy::Deny,
-            "20.10.0",
-            &changed_options,
         )
         .unwrap());
-        changed_options.clear();
-        changed_options.insert("allow_builds".into(), "false".into());
+        let default_spelling_identity = InstallIdentity::new(
+            backend.id(),
+            &version.version,
+            ctx.platform.to_string(),
+            InstallScope::Isolated,
+            &BTreeMap::from([("allow_builds".into(), "false".into())]),
+            identity.dependencies.clone(),
+            identity.materials.clone(),
+        )
+        .unwrap();
         assert!(install_matches(
             &install_root,
-            "npm:prettier",
+            &default_spelling_identity,
             "prettier",
-            "3.6.2",
             Some(&graph),
             &BuildPolicy::Deny,
-            "20.10.0",
-            &changed_options,
         )
         .unwrap());
     }
@@ -4135,26 +4876,21 @@ scope = "project"
     #[test]
     fn unlocked_reuse_validates_persisted_graph_and_root_identity() {
         let temporary = tempfile::tempdir().unwrap();
-        let install_root = temporary.path().join("install");
+        let ctx = offline_test_ctx(temporary.path());
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
         let lockfile = npm_test_lockfile("prettier", "3.6.2", "sha512-root-integrity");
-        write_reusable_install(
-            &install_root,
-            "npm:prettier",
-            "prettier",
-            "3.6.2",
-            "20.10.0",
-            &BuildPolicy::Deny,
-            &lockfile,
-        );
+        let version = npm_test_version(&backend, "3.6.2");
+        let install_root =
+            write_reusable_install(&backend, &ctx, &version, &BuildPolicy::Deny, &lockfile);
+        let identity = backend
+            .install_identity(&ctx, &version, ToolScope::Project)
+            .unwrap();
         assert!(install_matches(
             &install_root,
-            "npm:prettier",
+            &identity,
             "prettier",
-            "3.6.2",
             None,
             &BuildPolicy::Deny,
-            "20.10.0",
-            &BTreeMap::new(),
         )
         .unwrap());
 
@@ -4166,13 +4902,10 @@ scope = "project"
         .unwrap();
         assert!(!install_matches(
             &install_root,
-            "npm:prettier",
+            &identity,
             "prettier",
-            "3.6.2",
             None,
             &BuildPolicy::Deny,
-            "20.10.0",
-            &BTreeMap::new(),
         )
         .unwrap());
     }
@@ -4335,7 +5068,8 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new("npm:prettier", "3.6.2");
+        let version = npm_test_version(&backend, "3.6.2");
+        let install_root = backend.isolated_install_root_for(&ctx, &version).unwrap();
 
         let error = backend
             .install(&InstallCtx { ctx: &ctx }, &version)
@@ -4344,7 +5078,7 @@ scope = "project"
         assert!(error
             .to_string()
             .contains("without a locked npm dependency graph"));
-        assert!(!backend.install_root(&ctx, &version.version).exists());
+        assert!(!install_root.exists());
     }
 
     #[tokio::test]
@@ -4352,8 +5086,8 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new("npm:prettier", "3.6.2");
-        let install_root = backend.install_root(&ctx, &version.version);
+        let version = npm_test_version(&backend, "3.6.2");
+        let install_root = backend.isolated_install_root_for(&ctx, &version).unwrap();
         std::fs::create_dir_all(&install_root).unwrap();
         std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
 
@@ -4363,7 +5097,8 @@ scope = "project"
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("dynamic npm tools require a managed Node installation"));
+            .contains("managed Node 20.10.0 has no executable bin directory"));
+        assert!(!DynamicToolManifest::manifest_path(&install_root).exists());
     }
 
     #[test]
@@ -4460,27 +5195,13 @@ scope = "project"
     #[cfg(unix)]
     #[test]
     fn global_inventory_drives_native_bin_paths_after_restart() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new("npm:prettier", "3.6.2");
-        let install_root = backend.global_install_root(&ctx, &version.version);
+        let version = with_scope(npm_test_version(&backend, "3.6.2"), ToolScope::Global);
+        let install_root =
+            write_scope_fixture(&backend, &ctx, &version, ToolScope::Global, "prettier");
         let bin_dir = install_root.join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let executable = bin_dir.join("prettier");
-        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut manifest = DynamicToolManifest::new(backend.id()).unwrap();
-        manifest.version = Some(version.version.clone());
-        manifest.bins = vec![DynamicToolBin {
-            name: "prettier".into(),
-            path: "bin/prettier".into(),
-        }];
-        manifest.metadata.insert("scope".into(), "global".into());
-        manifest.write_atomic(&install_root).unwrap();
-        std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
 
         assert_eq!(backend.bin_paths(&ctx, &version).unwrap(), vec![bin_dir]);
         assert_eq!(
@@ -4514,7 +5235,7 @@ scope = "project"
     }
 
     #[test]
-    fn manifest_records_only_npm_graph_identity_metadata() {
+    fn manifest_records_install_identity_and_receipt_records_graph_evidence() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
         let data_root = root.join("data");
@@ -4552,8 +5273,8 @@ scope = "project"
             show_progress: false,
         };
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new("npm:prettier", "3.0.0");
-        let install_root = backend.install_root(&ctx, &version.version);
+        let version = npm_test_version_with_node(&backend, "3.0.0", "24.0.0");
+        let install_root = backend.isolated_install_root_for(&ctx, &version).unwrap();
         let bin_dir = install_root.join("project/node_modules/.bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
@@ -4579,6 +5300,7 @@ scope = "project"
             .build_manifest(
                 &ctx,
                 &version,
+                &install_root,
                 &bin_dir,
                 "24.0.0",
                 &BuildPolicy::Deny,
@@ -4586,22 +5308,30 @@ scope = "project"
             )
             .unwrap();
 
-        assert_eq!(manifest.metadata.get(METADATA_PROVIDER).unwrap(), PROVIDER);
-        assert_eq!(manifest.metadata.get(METADATA_PACKAGE).unwrap(), "prettier");
         assert_eq!(
-            manifest.metadata.get(METADATA_ROOT_INTEGRITY).unwrap(),
-            "sha512-root-integrity"
+            manifest.identity,
+            backend
+                .install_identity(&ctx, &version, ToolScope::Project)
+                .unwrap()
         );
+        assert_eq!(manifest.schema, 1);
+        let receipt = load_npm_receipt(&install_root).unwrap();
         assert_eq!(
-            manifest.metadata.get(METADATA_ROOT_SOURCE).unwrap(),
-            "npm-registry"
+            receipt,
+            NpmInstallReceipt {
+                schema: 1,
+                provider: PROVIDER.into(),
+                package: "prettier".into(),
+                installer: "aube".into(),
+                node_version: "24.0.0".into(),
+                build_policy: "deny".into(),
+                graph_sha256: Some("graph-sha256".into()),
+                root_integrity: Some("sha512-root-integrity".into()),
+                root_source: Some("npm-registry".into()),
+                native_lock_format: None,
+                native_lock_sha256: None,
+            }
         );
-        assert_eq!(
-            manifest.metadata.get(METADATA_LOCK_SHA256).unwrap(),
-            "graph-sha256"
-        );
-        assert_eq!(manifest.metadata["scope"], "project");
-        assert_eq!(manifest.metadata.len(), 9);
     }
 
     #[cfg(unix)]
@@ -4612,7 +5342,7 @@ scope = "project"
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let version = ToolVersion::new(backend.id(), "3.6.2");
+        let version = npm_test_version(&backend, "3.6.2");
         let staging = temporary.path().join("stage");
         let package = staging.join("project/node_modules/prettier");
         let bin_dir = staging.join("bin");
@@ -4639,10 +5369,38 @@ scope = "project"
             )
             .unwrap();
 
-        assert_eq!(manifest.metadata["scope"], "global");
-        assert!(staging.join(".osdk-tool.json").is_file());
+        assert_eq!(manifest.identity.scope, InstallScope::Global);
+        assert_eq!(
+            manifest.identity,
+            backend
+                .install_identity(&ctx, &version, ToolScope::Global)
+                .unwrap()
+        );
+        assert!(DynamicToolManifest::manifest_path(&staging).is_file());
         assert!(staging.join(".osdk-complete").is_file());
-        assert!(!backend.global_install_root(&ctx, "3.6.2").exists());
-        assert!(!backend.isolated_install_root(&ctx, "3.6.2").exists());
+        assert_eq!(
+            load_npm_receipt(&staging).unwrap(),
+            NpmInstallReceipt {
+                schema: 1,
+                provider: PROVIDER.into(),
+                package: "prettier".into(),
+                installer: "aube".into(),
+                node_version: TEST_NODE_VERSION.into(),
+                build_policy: "deny".into(),
+                graph_sha256: None,
+                root_integrity: None,
+                root_source: None,
+                native_lock_format: Some("aube-v9".into()),
+                native_lock_sha256: Some("digest".into()),
+            }
+        );
+        assert!(!backend
+            .global_install_root_for(&ctx, &version)
+            .unwrap()
+            .exists());
+        assert!(!backend
+            .isolated_install_root_for(&ctx, &version)
+            .unwrap()
+            .exists());
     }
 }

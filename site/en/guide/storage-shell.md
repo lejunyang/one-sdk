@@ -93,6 +93,9 @@ interactive terminal displays a prompt; non-interactive use must pass `--yes`,
 set `OSDK_YES=true`, or configure `settings.yes=true`, otherwise it fails.
 `--quiet` hides progress but never grants consent. `model remove` currently asks
 for no confirmation.
+For an osdk-owned dynamic tool, uninstall derives the complete configured
+identity and removes only its fingerprinted root; another identity with the same
+backend and version remains installed.
 
 ## Shims and shell activation
 
@@ -102,6 +105,10 @@ directories with:
 ```text
 osdk reshim
 ```
+
+For dynamic tools, `reshim` publishes launchers only for the exact configured
+`.osdk-install.json` schema-1 identity. It does not select another same-version
+root, and legacy `.osdk-tool.json` state is never executable.
 
 Each shim resolves the version for the current directory at execution time, so
 project pins also work in IDEs, CI, and processes without a prompt hook. Shims

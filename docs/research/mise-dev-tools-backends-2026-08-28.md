@@ -25,14 +25,14 @@ The main lesson from current mise is not merely that it supports more named tool
 
 At the pinned revision, mise recognizes 19 fixed backend types: `core`, `npm`, `pipx`, `cargo`, `gem`, `go`, `dotnet`, `spm`, `aqua`, `github`, `gitlab`, `forgejo`, `http`, `s3`, `conda`, `pkgx`, `asdf`, `vfox`, and deprecated `ubi`. It also supports dynamically named vfox backend plugins. `Unknown` exists in source as a resolver sentinel and is not a usable backend. There is no native `composer:` backend; Composer must be obtained through another backend or plugin.
 
-`osdk` already has strong lifecycle depth: install/use/uninstall, local and remote listing, current/where, outdated/upgrade, one-shot execution, activation, shims, aliases, trust, cross-platform locks, offline replay, source probing and failover, native package-manager caches, a BLAKE3 content-addressed store, and unusually rigorous artifact verification. Its 13 fixed backends cover major runtimes and package managers, while dynamic `npm:<package>` and `github:<owner>/<repo>` support are substantial. The delivered Phase 0 slice gives those two namespaces normalized safe public-option identity, schema-2 per-install inventories, and fail-closed reuse and execution checks.
+`osdk` already has strong lifecycle depth: install/use/uninstall, local and remote listing, current/where, outdated/upgrade, one-shot execution, activation, shims, aliases, trust, cross-platform locks, offline replay, source probing and failover, native package-manager caches, a BLAKE3 content-addressed store, and unusually rigorous artifact verification. Its 13 fixed backends cover major runtimes and package managers, while dynamic `npm:<package>` and `github:<owner>/<repo>` support are substantial. The delivered Phase 0 identity work gives those two namespaces canonical `b3-v2:` identities, `.osdk-install.json` schema-1 records, fingerprinted roots, coexisting same-version identities, and exact fail-closed lifecycle selection.
 
 The largest strategic gap is **ecosystem breadth backed by a complete stable
 dynamic identity**, not basic download mechanics. `osdk` cannot yet express most
 of mise's package namespaces, and its declarative plugins are intentionally much
 narrower than mise's Lua tool/backend plugins. Existing npm and GitHub dynamic
-installs now validate option identity in their per-install manifests, but one
-canonical parser plus universal cache, lock-fingerprint, secret, and physical
+installs now validate canonical identity in their per-install records and use
+fingerprinted physical roots, but one canonical parser plus universal cache, lock-fingerprint, secret, and physical
 coexistence rules remain open. Backend options that change the selected artifact,
 install layout, dependency graph, or executable set must ultimately participate
 consistently across all of those boundaries.
@@ -282,8 +282,8 @@ Current differentiated strengths are worth retaining:
 | `yarn` | Classic and Berry metadata/install, SRI, generated Node launchers | Needs managed Node; no broader Corepack ecosystem |
 | `deno` | npm packument/platform packages, SRI, `DENO_DIR` | No musl Linux package path |
 | `bun` | npm packument/platform packages, SRI, glibc/musl selection | Dedicated runtime only |
-| `npm:<package>` | Embedded Aube and native npm/pnpm modes; isolated/project/global scopes; dependency graph metadata; schema-2 inventory with option identity and bin validation | The only fully developed language-package namespace; lock schema 3 stores public options and compact native-lock identity rather than the full dependency graph; physical paths remain version-based |
-| `github:<owner>/<repo>` | API, Atom, and public-page fallback; platform scoring; static catalogs; archive/binary installs; checksum/minisign/attestation; schema-2 inventory binds asset/layout options | Fewer portable asset controls and credential/provider paths than mise; no GitLab/Forgejo siblings; same-version option variants do not coexist |
+| `npm:<package>` | Embedded Aube and native npm/pnpm modes; isolated/project/global scopes; dependency graph metadata; `.osdk-install.json` schema 1 with `b3-v2:` identity and bin validation | The only fully developed language-package namespace; lock schema 3 stores public options and compact native-lock identity rather than the full dependency graph; osdk-owned same-version identities use distinct fingerprinted roots, while project-managed npm remains separate |
+| `github:<owner>/<repo>` | API, Atom, and public-page fallback; platform scoring; static catalogs; archive/binary installs; checksum/minisign/attestation; `.osdk-install.json` binds asset/layout/material identity | Fewer portable asset controls and credential/provider paths than mise; no GitLab/Forgejo siblings; same-version identity variants coexist in fingerprinted roots |
 | Declarative TOML | Safe static/line-list archive definitions with checksums, templates, bins, and idiomatic files | No inline namespace, bare binaries, JSON/regex/expression version parsing, env, dependencies, transformations, hooks, or plugin lifecycle |
 
 Commit `bd00af2` adds locked-artifact replay before current templates are
@@ -322,11 +322,14 @@ The nearest-project-only behavior is visible in `find_project_config`: the upwar
 
 `osdk.lock` lock schema 3 is strong in several respects: it partitions tools by platform (including musl), stores exact request/version/options, can attach artifact URL/name/checksum/subdirectory/evidence, stores compact npm installer/scope/native-lock identity, and preserves model manifests. Writes validate size/schema/path safety, publish via a temporary file, sync, and atomically replace.
 
-Lock schema 3 is independent of the new `.osdk-tool.json` dynamic inventory
-schema 2. The lock persists public options and backend replay metadata; the
-inventory persists canonical option identity plus a `b3-v1:` fingerprint and
-gates local reuse/execution. References below to a schema-2 npm graph sidecar mean
-the older lock compatibility format, not inventory schema 2.
+Lock schema 3 is independent of `.osdk-install.json` schema 1. The lock persists
+public options and backend replay metadata; the install record persists a nested
+`identity` containing `tool`, `version`, `platform`, `scope`, `material_options`,
+`dependencies`, `materials`, and canonical `b3-v2:` `install_id`. That identity
+selects the physical root and gates local reuse and every lifecycle operation.
+`.osdk-tool.json` schema 1 or 2 is legacy detection only and never authorizes
+reuse or execution. References below to a schema-2 npm graph sidecar mean the
+older lock compatibility format, not a dynamic install identity format.
 
 Remaining gaps are semantic rather than serialization-only:
 
@@ -405,10 +408,10 @@ Additional pinned files contain 11 Conda, 8 S3, and 5 pkgx annotations. The much
 ### 5.3 Remaining `osdk` test gaps
 
 1. **Real-backend contract breadth.** Every registered backend should run its real list/resolve/locked-install/bin/execute/uninstall path against local fixture metadata. Dynamic `github:`, dynamic `npm:`, and declarative plugins need explicit rows.
-2. **Dynamic identity collisions.** Focused npm/GitHub coverage now proves
-   canonical option fingerprints and fail-closed same-version reuse. There is
-   still no generic matrix proving distinct cache/lock behavior for every future
-   namespace, nor physical coexistence for two same-version option variants.
+2. **Dynamic identity breadth.** Focused npm/GitHub coverage proves canonical
+   `b3-v2:` identities, fingerprinted-root coexistence, and exact lifecycle
+   selection. A generic matrix is still needed to prove equivalent cache/lock
+   behavior for every future namespace.
 3. **Source command integration.** `source add/list/test/pin/unpin/remove` lacks a complete subprocess round trip, restart persistence, alias canonicalization, invalid-write rollback, and two-process mutation test.
 4. **Cache guarantees.** `cache clean` tests deletion of downloads but not byte-for-byte preservation of CAS, metadata, probe caches, native-manager caches, model snapshots, and installations.
 5. **Cross-process writers.** Lock and global npm code has atomic writes and strong in-process transaction tests, but project `lock/use/upgrade` races need independently spawned competing processes and lost-update detection.
@@ -426,25 +429,24 @@ Introduce one parsed representation for `backend:package[options]@selector` and 
 
 Do not make the raw version the sole reuse key. A backend must either use an option fingerprint in its physical install identity or validate a complete option fingerprint in a manifest before reuse. Canonicalization rules must handle case-sensitive ecosystems intentionally rather than applying npm's lowercase rule globally.
 
-The current implementation completes the per-install-manifest
-branch for the existing `npm:` and `github:` namespaces:
+The current implementation completes the physical install-identity branch for
+the existing osdk-owned `npm:` and `github:` namespaces:
 
 - it allowlists and normalizes safe public identity options, rejects unknown
   public options before installation, and excludes internal `__osdk_*` replay
   metadata;
-- it computes an order-independent, domain-separated BLAKE3 `b3-v1:`
-  fingerprint over the canonical backend ID and normalized option map;
-- dynamic inventory schema 2 records both `identity_options` and the fingerprint;
-- osdk-owned installation reuse, activation, and shim execution compare the requested
-  identity and fail closed on a legacy or mismatched inventory; and
-- legacy schema-1 inventories remain readable for discovery but require a
-  rebuild or reinstall before reuse or execution; npm can rebuild in place,
-  while GitHub requires explicit uninstall/reinstall.
+- it computes an order-independent, domain-separated BLAKE3 `b3-v2:` identity
+  from `tool`, exact `version`, `platform`, `scope`, normalized
+  `material_options`, `dependencies`, and `materials`;
+- `.osdk-install.json` schema 1 stores those values in nested `identity` plus
+  `install_id`, and the fingerprint selects the physical root;
+- same-backend/version identity variants coexist, while reuse, activation, shim
+  execution, `where`, uninstall, and `reshim` select only the exact configured
+  identity; and
+- old `.osdk-tool.json` schema 1 and 2 records are detection-only legacy state
+  and never authorize reuse or execution. Project-managed npm remains separate.
 
-This is deliberately not the whole phase. Physical install paths still use
-`backend/version` (with npm's separate isolated/global roots), so same-version
-option variants cannot coexist. npm rebuilds or replaces a mismatched version;
-GitHub rejects a complete mismatch until it is uninstalled and reinstalled. A single parsed identity
+This is deliberately not the whole phase. A single parsed identity
 across CLI/config/aliases, option-aware remote metadata and cache keys, an
 explicit secret/keyed-hash policy, fingerprinted lock identity beyond persisted
 public options, and generalization beyond npm/GitHub remain open.

@@ -16,9 +16,9 @@ dynamic npm tool from racing its runtime.
 4. otherwise call the backend's `install`;
 5. after all installs finish, generate shims and sort results by backend name.
 
-Except for that Node dependency barrier, different tools may run concurrently,
-while a pipeline or backend file lock serializes writes to the same
-`tool@version`. If any member of a batch fails, `try_collect` returns the error
+Except for that Node dependency barrier, different tools may run concurrently.
+Pipeline or backend locks serialize fixed-backend writes to one `tool@version`
+and dynamic writes to one complete install identity. If any member of a batch fails, `try_collect` returns the error
 and the final shim-generation phase is not entered. The compatibility isolated
 npm path used by explicit `install`/`exec` bypasses the archive CAS pipeline
 below and uses embedded Aube with an isolated install root and the shared
@@ -36,7 +36,7 @@ A request restored from the lockfile first uses [`locked_install_plan`](https://
 
 [`pipeline::run_with_attestation`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs) performs these steps:
 
-1. Acquire `<tool>/<version>.lock` to serialize concurrent installs of that version.
+1. Acquire `<tool>/<version>.lock` for a fixed backend. A dynamic backend instead holds an identity-qualified lock through post-processing, `.osdk-install.json` publication, and the completion marker.
 2. If the pipeline is invoked directly and `.osdk-complete` exists, it returns early; when that invocation carries attestation, it reverifies and merges evidence. Normal CLI install usually short-circuits earlier in `install_one_without_shims` and runs only `ensure_post_install`.
 3. Remove a stale install directory that has no completion marker.
 4. Use a stable artifact-cache path; fail immediately on an offline cache miss.

@@ -761,6 +761,81 @@ fn validate_exact_node_version(backend: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn installed_artifact_receipt(
+    dirs: &osdk_core::dirs::Dirs,
+    platform: Platform,
+    version: &ToolVersion,
+) -> Result<Option<osdk_core::pipeline::ArtifactReceipt>> {
+    if !version.backend.starts_with("github:") {
+        return Ok(osdk_core::pipeline::artifact_receipt(
+            dirs,
+            &version.backend,
+            &version.version,
+        ));
+    }
+    if osdk_core::pipeline::locked_artifact(version)?.is_some() {
+        let locator = osdk_core::backend::github::github_install_locator_for(
+            dirs,
+            platform,
+            &version.backend,
+            version,
+        )?;
+        let root = locator.install_root();
+        if !root.exists() {
+            return Ok(None);
+        }
+        if !osdk_core::backend::github::github_install_candidate_is_valid_for_dirs(
+            dirs,
+            root,
+            locator.identity(),
+        )? {
+            anyhow::bail!(
+                "cannot lock {}@{} because its exact GitHub install is incomplete or invalid",
+                version.backend,
+                version.version
+            );
+        }
+        return Ok(osdk_core::pipeline::artifact_receipt_at(root));
+    }
+
+    let expected_options =
+        osdk_core::backend::dynamic::identity_options(&version.backend, &version.options)?;
+    let report = osdk_core::inventory::scan_installs(
+        &dirs.installs,
+        &osdk_core::inventory::ScanOptions::default(),
+    )?;
+    let mut candidates = Vec::new();
+    for install in report.installs {
+        let identity = &install.manifest.identity;
+        if identity.tool != version.backend
+            || identity.version != version.version
+            || identity.platform != platform.to_string()
+            || identity.scope != osdk_core::tool::InstallScope::Isolated
+            || identity.material_options != expected_options
+        {
+            continue;
+        }
+        match osdk_core::backend::github::github_install_candidate_is_valid_for_dirs(
+            dirs,
+            &install.install_root,
+            identity,
+        ) {
+            Ok(true) => candidates.push(install.install_root),
+            Ok(false) => {}
+            Err(error) => return Err(anyhow::Error::new(error)),
+        }
+    }
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [root] => Ok(osdk_core::pipeline::artifact_receipt_at(root)),
+        _ => anyhow::bail!(
+            "cannot lock {}@{} because multiple complete GitHub artifact identities match; remove the unwanted variant or provide exact locked artifact metadata",
+            version.backend,
+            version.version
+        ),
+    }
+}
+
 pub fn merge_resolved(
     path: &Path,
     platform: Platform,
@@ -816,7 +891,7 @@ pub fn merge_resolved_with_scope(
                     subdir: version.options.get("catalog-subdir").cloned(),
                     evidence: receipt.evidence,
                 });
-            osdk_core::pipeline::artifact_receipt(dirs, &version.backend, &version.version)
+            installed_artifact_receipt(dirs, platform, version)?
                 .map(|receipt| LockedArtifact {
                     url: receipt.url,
                     file_name: receipt.file_name,
@@ -924,7 +999,7 @@ pub fn upsert_resolved_many_with_scope(
                     subdir: version.options.get("catalog-subdir").cloned(),
                     evidence: receipt.evidence,
                 });
-            osdk_core::pipeline::artifact_receipt(dirs, &version.backend, &version.version)
+            installed_artifact_receipt(dirs, platform, version)?
                 .map(|receipt| LockedArtifact {
                     url: receipt.url,
                     file_name: receipt.file_name,
@@ -2519,6 +2594,76 @@ files = []
     }
 
     #[test]
+    fn merge_recovers_unique_fingerprinted_github_receipt_and_replays_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let request = ToolRequest::parse("github:example/tool[rename=tool]@1.2.3").unwrap();
+        let mut version = ToolVersion::new(&request.backend, "1.2.3");
+        version.options = request.options.clone();
+        let checksum = format!("sha256:{}", "a".repeat(64));
+        write_github_install_fixture(
+            &dirs,
+            linux(),
+            &version,
+            "https://example.test/tool",
+            "tool",
+            Some(&checksum),
+        );
+
+        merge_resolved(&path, linux(), &dirs, &[(request, version)]).unwrap();
+        let lock = load(&path).unwrap();
+        let artifact = lock.platforms["linux-x64"].tools["github:example/tool"]
+            .artifact
+            .as_ref()
+            .unwrap();
+        assert_eq!(artifact.url, "https://example.test/tool");
+        assert_eq!(artifact.file_name, "tool");
+        assert_eq!(artifact.checksum.as_deref(), Some(checksum.as_str()));
+
+        let replayed = locked_requests(&path, linux()).unwrap().unwrap();
+        assert_eq!(
+            replayed[0].options[osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION],
+            "tool"
+        );
+        assert_eq!(
+            replayed[0].options[osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION],
+            checksum
+        );
+    }
+
+    #[test]
+    fn upsert_rejects_ambiguous_fingerprinted_github_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let request = ToolRequest::parse("github:example/tool@1.2.3").unwrap();
+        let version = ToolVersion::new(&request.backend, "1.2.3");
+        for suffix in ["a", "b"] {
+            write_github_install_fixture(
+                &dirs,
+                linux(),
+                &version,
+                &format!("https://example.test/tool-{suffix}"),
+                "tool",
+                None,
+            );
+        }
+
+        let error = upsert_resolved_with_scope(
+            &path,
+            linux(),
+            &dirs,
+            &request,
+            &version,
+            LockScope::Project,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("multiple complete GitHub"));
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn linked_rust_toolchain_is_rejected_from_reproducible_lock() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
@@ -2585,33 +2730,31 @@ subdir = "install"
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         let dirs = test_dirs(temp.path());
-        let install = dirs.install_path("github:cli/cli", "2.96.0");
-        std::fs::create_dir_all(&install).unwrap();
+        let request = ToolRequest::parse("github:cli/cli@2.96.0").unwrap();
+        let version = ToolVersion::new("github:cli/cli", "2.96.0");
+        let install = write_github_install_fixture(
+            &dirs,
+            linux(),
+            &version,
+            "https://example.test/gh.tar.gz",
+            "gh.tar.gz",
+            Some("sha256:00"),
+        );
+        let mut receipt = osdk_core::pipeline::artifact_receipt_at(&install).unwrap();
+        receipt
+            .evidence
+            .push(osdk_core::verification::VerificationEvidence {
+                kind: "sigstore-bundle+rekor".into(),
+                repository: "cli/cli".into(),
+                issuer: "https://token.actions.githubusercontent.com".into(),
+                digest: "sha256:00".into(),
+            });
         std::fs::write(
             install.join(".osdk-artifact.json"),
-            r#"{
-  "url": "https://example.test/gh.tar.gz",
-  "file_name": "gh.tar.gz",
-  "checksum": "sha256:00",
-  "evidence": [{
-    "kind": "sigstore-bundle+rekor",
-    "repository": "cli/cli",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "digest": "sha256:00"
-  }]
-}"#,
+            serde_json::to_vec_pretty(&receipt).unwrap(),
         )
         .unwrap();
-        merge_resolved(
-            &path,
-            linux(),
-            &dirs,
-            &[(
-                ToolRequest::parse("github:cli/cli@2.96.0").unwrap(),
-                ToolVersion::new("github:cli/cli", "2.96.0"),
-            )],
-        )
-        .unwrap();
+        merge_resolved(&path, linux(), &dirs, &[(request, version)]).unwrap();
 
         let lock = load(&path).unwrap();
         let artifact = lock.platforms["linux-x64"].tools["github:cli/cli"]
@@ -2729,5 +2872,77 @@ sha256 = "{sha256}"
             _ => None,
         })
         .unwrap()
+    }
+
+    fn write_github_install_fixture(
+        dirs: &osdk_core::dirs::Dirs,
+        platform: Platform,
+        version: &ToolVersion,
+        url: &str,
+        file_name: &str,
+        checksum: Option<&str>,
+    ) -> PathBuf {
+        let mut materials = BTreeMap::from([("artifact-file".into(), file_name.into())]);
+        if let Some(checksum) = checksum {
+            materials.insert("artifact-checksum".into(), checksum.into());
+        } else {
+            let mut locked_version = version.clone();
+            locked_version.options.insert(
+                osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                url.into(),
+            );
+            locked_version.options.insert(
+                osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                file_name.into(),
+            );
+            materials = osdk_core::backend::github::github_install_locator_for(
+                dirs,
+                platform,
+                &version.backend,
+                &locked_version,
+            )
+            .unwrap()
+            .identity()
+            .materials
+            .clone();
+            assert!(!materials.contains_key("artifact-url"));
+            assert!(materials.contains_key("artifact-url-blake3"));
+            assert!(!materials.values().any(|value| value == url));
+        }
+        let identity = osdk_core::tool::InstallIdentity::new(
+            &version.backend,
+            &version.version,
+            platform.to_string(),
+            osdk_core::tool::InstallScope::Isolated,
+            &version.options,
+            Vec::new(),
+            materials,
+        )
+        .unwrap();
+        let locator = osdk_core::dirs::InstallLocator::new(dirs, identity.clone()).unwrap();
+        let root = locator.install_root().to_path_buf();
+        let bin = root.join("bin/tool");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"fixture").unwrap();
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
+        manifest.bins.push(osdk_core::inventory::DynamicToolBin {
+            name: "tool".into(),
+            path: "bin/tool".into(),
+        });
+        manifest.write_atomic(&root).unwrap();
+        std::fs::write(
+            root.join(".osdk-artifact.json"),
+            serde_json::to_vec_pretty(&osdk_core::pipeline::ArtifactReceipt {
+                url: url.into(),
+                file_name: file_name.into(),
+                checksum: checksum.map(str::to_owned),
+                evidence: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        root
     }
 }

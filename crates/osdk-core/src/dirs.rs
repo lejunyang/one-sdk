@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::tool::{InstallIdentity, InstallScope};
 
 /// Environment variable names for directory overrides.
 pub mod env_keys {
@@ -42,6 +43,181 @@ pub struct Dirs {
     pub store: PathBuf,
     /// Where materialized versions live. Defaults to `data/installs`.
     pub installs: PathBuf,
+}
+
+/// All filesystem locations derived from one validated dynamic install identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallLocator {
+    identity: InstallIdentity,
+    install_root: PathBuf,
+    legacy_install_root: PathBuf,
+    legacy_global_install_root: Option<PathBuf>,
+    lock_path: PathBuf,
+    scratch_root: PathBuf,
+}
+
+impl InstallLocator {
+    pub fn new(dirs: &Dirs, identity: InstallIdentity) -> Result<Self> {
+        identity.validate()?;
+        let component = install_id_component(&identity.install_id)?;
+        let legacy_install_root = dirs.install_path(&identity.tool, &identity.version);
+        let legacy_global_install_root = identity
+            .tool
+            .strip_prefix("npm:")
+            .map(|package| dirs.install_path(&format!("npm-global:{package}"), &identity.version));
+        let install_root = match identity.scope {
+            InstallScope::Isolated => legacy_install_root.join(&component),
+            InstallScope::Global => legacy_global_install_root
+                .as_ref()
+                .ok_or_else(|| Error::config("global dynamic installs are supported only for npm"))?
+                .join(&component),
+            InstallScope::ProjectManaged => {
+                return Err(Error::config(
+                    "project-managed tools do not have an osdk install locator",
+                ));
+            }
+        };
+        let lock_path = dirs
+            .lock_dir(&identity.tool)
+            .join(format!("{component}.lock"));
+        let scratch_root = dirs
+            .tmp()
+            .join(sanitize_tool_id(&identity.tool))
+            .join(sanitize_version_component(&identity.version))
+            .join(component);
+        Ok(Self {
+            identity,
+            install_root,
+            legacy_install_root,
+            legacy_global_install_root,
+            lock_path,
+            scratch_root,
+        })
+    }
+
+    pub fn identity(&self) -> &InstallIdentity {
+        &self.identity
+    }
+
+    pub fn install_root(&self) -> &Path {
+        &self.install_root
+    }
+
+    pub fn legacy_install_root(&self) -> &Path {
+        &self.legacy_install_root
+    }
+
+    pub fn legacy_global_install_root(&self) -> Option<&Path> {
+        self.legacy_global_install_root.as_deref()
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    pub fn scratch_root(&self) -> &Path {
+        &self.scratch_root
+    }
+
+    /// Require a discovered manifest to reside at this identity's canonical
+    /// fingerprinted root. Existing roots are also resolved so aliases and
+    /// symlink substitutions cannot satisfy the identity check.
+    pub fn validates_install_root(&self, root: &Path) -> bool {
+        paths_agree(&self.install_root, root)
+    }
+
+    /// Require the canonical identity root to exist entirely as real
+    /// directories. This is the filesystem trust check for consumers that are
+    /// about to execute or remove content from an install.
+    pub fn validates_existing_install_root(&self, root: &Path) -> bool {
+        paths_agree(&self.install_root, root) && path_has_no_symlink_directories(root)
+    }
+
+    /// Validate a scanned root using only the configured installs directory.
+    pub fn is_canonical_install_root(
+        installs: &Path,
+        identity: &InstallIdentity,
+        root: &Path,
+    ) -> Result<bool> {
+        identity.validate()?;
+        let component = install_id_component(&identity.install_id)?;
+        let base_tool = match identity.scope {
+            InstallScope::Isolated => identity.tool.clone(),
+            InstallScope::Global => {
+                let package = identity.tool.strip_prefix("npm:").ok_or_else(|| {
+                    Error::config("global dynamic installs are supported only for npm")
+                })?;
+                format!("npm-global:{package}")
+            }
+            InstallScope::ProjectManaged => {
+                return Err(Error::config(
+                    "project-managed tools do not have an osdk install locator",
+                ));
+            }
+        };
+        let expected = installs
+            .join(sanitize_tool_id(&base_tool))
+            .join(sanitize_version_component(&identity.version))
+            .join(component);
+        Ok(paths_agree(&expected, root))
+    }
+}
+
+/// Compare a caller-supplied install root with the root derived from trusted
+/// identity fields. Lexical equality is required even when either path does
+/// not exist; once both exist, canonical equality is required as well so a
+/// symlink or path alias cannot silently redirect the locator.
+fn paths_agree(expected: &Path, actual: &Path) -> bool {
+    if expected != actual {
+        return false;
+    }
+
+    match dunce::canonicalize(expected) {
+        Ok(canonical) => canonical == normalize_absolute_path(expected),
+        Err(_) => true,
+    }
+}
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn path_has_no_symlink_directories(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match component {
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => continue,
+            std::path::Component::Normal(_) => {
+                let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+                    return false;
+                };
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+pub fn install_id_component(install_id: &str) -> Result<String> {
+    let Some(digest) = install_id.strip_prefix("b3-v2:") else {
+        return Err(Error::config("dynamic install id must use b3-v2"));
+    };
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::config(
+            "dynamic install id contains an invalid BLAKE3 digest",
+        ));
+    }
+    Ok(format!("b3-v2-{}", digest.to_ascii_lowercase()))
 }
 
 impl Dirs {
@@ -358,5 +534,136 @@ mod tests {
         for legacy in ["release%2F2026", "~v1~broken", "~v1~%FF", "~v1~%2f"] {
             assert_eq!(decode_version_component(legacy), legacy);
         }
+    }
+
+    #[test]
+    fn dynamic_locator_is_fingerprinted_and_keeps_legacy_root_explicit() {
+        let mut env = HashMap::new();
+        env.insert(env_keys::DATA_DIR.to_string(), "/x/data".to_string());
+        env.insert(env_keys::CACHE_DIR.to_string(), "/x/cache".to_string());
+        env.insert(env_keys::CONFIG_DIR.to_string(), "/x/config".to_string());
+        let dirs = Dirs::resolve_from(|key| env.get(key).cloned()).unwrap();
+        let identity = crate::tool::InstallIdentity::new(
+            "npm:prettier",
+            "3.6.2",
+            "linux-x64",
+            crate::tool::InstallScope::Global,
+            &std::collections::BTreeMap::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = InstallLocator::new(&dirs, identity.clone()).unwrap();
+        assert_eq!(locator.identity(), &identity);
+        assert_eq!(
+            locator.install_root().parent(),
+            Some(Path::new("/x/data/installs/npm-global/prettier/3.6.2"))
+        );
+        assert_eq!(
+            locator.legacy_global_install_root(),
+            Some(Path::new("/x/data/installs/npm-global/prettier/3.6.2"))
+        );
+        let leaf = locator
+            .install_root()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert!(leaf.starts_with("b3-v2-"));
+        assert!(!leaf.contains(':'));
+        assert!(locator.lock_path().ends_with(format!("{leaf}.lock")));
+        assert!(locator
+            .scratch_root()
+            .ends_with(Path::new(leaf.as_ref() as &str)));
+        assert!(locator.validates_install_root(locator.install_root()));
+        assert!(!locator.validates_install_root(locator.legacy_install_root()));
+
+        let unsupported = crate::tool::InstallIdentity::new(
+            "github:cli/cli",
+            "2.0.0",
+            "linux-x64",
+            crate::tool::InstallScope::Global,
+            &std::collections::BTreeMap::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(InstallLocator::new(&dirs, unsupported).is_err());
+    }
+
+    #[test]
+    fn dynamic_locator_rejects_changed_and_aliased_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let cache = temporary.path().join("cache");
+        let config = temporary.path().join("config");
+        let dirs = Dirs {
+            store: data.join("store"),
+            installs: data.join("installs"),
+            data,
+            cache,
+            config,
+        };
+        let identity = crate::tool::InstallIdentity::new(
+            "npm:prettier",
+            "3.6.2",
+            "linux-x64",
+            crate::tool::InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = InstallLocator::new(&dirs, identity.clone()).unwrap();
+        assert!(!locator.validates_install_root(&locator.install_root().join("..")));
+        assert!(!InstallLocator::is_canonical_install_root(
+            &dirs.installs,
+            &identity,
+            &dirs.installs.join("changed")
+        )
+        .unwrap());
+
+        std::fs::create_dir_all(locator.install_root()).unwrap();
+        assert!(locator.validates_install_root(locator.install_root()));
+        assert!(locator.validates_existing_install_root(locator.install_root()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dynamic_locator_rejects_a_symlinked_expected_root() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let dirs = Dirs {
+            store: data.join("store"),
+            installs: data.join("installs"),
+            data,
+            cache: temporary.path().join("cache"),
+            config: temporary.path().join("config"),
+        };
+        let identity = crate::tool::InstallIdentity::new(
+            "npm:prettier",
+            "3.6.2",
+            "linux-x64",
+            crate::tool::InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = InstallLocator::new(&dirs, identity.clone()).unwrap();
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir_all(locator.install_root().parent().unwrap()).unwrap();
+        symlink(&outside, locator.install_root()).unwrap();
+
+        assert!(!locator.validates_install_root(locator.install_root()));
+        assert!(!locator.validates_existing_install_root(locator.install_root()));
+        assert!(!InstallLocator::is_canonical_install_root(
+            &dirs.installs,
+            &identity,
+            locator.install_root()
+        )
+        .unwrap());
     }
 }

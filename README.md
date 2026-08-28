@@ -118,9 +118,12 @@ Data-only declarative backends use the same locked artifact URL, checksum,
 download cache, and offline reinstall path as built-in archive backends.
 For osdk-owned dynamic `npm:<package>` and `github:owner/repo` installs, options that select
 the installer, build policy, asset, platform, or layout are part of the
-installation identity. If those options change at the same version, osdk
-refuses to run the mismatched install; rebuild or reinstall it instead. GitHub
-Release tools require an explicit uninstall before reinstalling.
+installation identity. osdk records that identity in `.osdk-install.json`
+schema 1 and places each `b3-v2:` identity under its own fingerprinted install
+root, so multiple identities of the same backend and version can coexist.
+Reuse, activation, shims, `where`, `uninstall`, and `reshim` all select the exact
+configured identity. Older `.osdk-tool.json` manifests are detected only as
+legacy state and are never reused or executed.
 
 Guides: [Project toolchains](site/en/guide/projects.md) ·
 [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
@@ -191,9 +194,12 @@ global install, although an already complete exact install with matching options
 can be selected again offline without launching Aube; choose npm or pnpm when
 the install itself must use a native offline mode.
 `where --global` and `uninstall --global` explicitly target the user-wide npm
-installation. Without that flag, the existing project/isolated behavior is
-preserved; a global uninstall also removes its user config, lock entry, and
-now-unowned shims.
+installation whose exact configured identity matches. Without that flag, the
+existing project/isolated behavior is preserved; uninstall removes only the
+selected identity root, while sibling identities of the same package version
+remain installed. A global uninstall also removes its user config, lock entry,
+and now-unowned shims. Project-managed npm dependencies and their curated
+`.osdk/npm-bin` generation remain separate from these osdk-owned roots.
 
 Guide: [npm developer tools](site/en/guide/npm-tools.md)
 

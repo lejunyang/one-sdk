@@ -45,9 +45,9 @@ installer value is canonicalized, while `allow_builds` normalizes false-like
 values by omitting the default deny policy, true-like values to `true`, and a
 package list to a lowercase, sorted, deduplicated comma-separated value. An
 `installer=auto` default is omitted as well. Unknown public keys fail before
-installation. A length-prefixed, domain-separated BLAKE3 hash over the canonical
-backend ID and ordered map produces the order-independent `b3-v1:` option
-fingerprint.
+installation. Those normalized material options feed the complete canonical
+install identity together with tool, exact version, platform, scope, dependencies,
+and materials; its domain-separated BLAKE3 `install_id` uses the `b3-v2:` format.
 
 ## Installer planning and one-shot delegation
 
@@ -249,9 +249,9 @@ sha256 = "<64 lowercase hex characters>"
 
 Public `installer` and `allow_builds` options remain in the lock's `options`
 table and are replayed into the request; internal `__osdk_*` metadata is never
-serialized there. This is separate from dynamic inventory schema 2 below. The
+serialized there. This is separate from `.osdk-install.json` schema 1 below. The
 older “schema 2 sidecar” terminology in this section means lock schema 2's npm
-graph sidecar, not `.osdk-tool.json` inventory schema 2.
+graph sidecar, not a dynamic install-identity format.
 
 On write, the CLI extracts npm metadata from the installed tool or declared
 private options: package name, installer, scope, an optional exact Node
@@ -293,35 +293,46 @@ its digest. Only after that validation does the graph become a compatibility
 input to the backend. A later successful write migrates the entry to lock schema 3
 metadata only; the existing sidecar file is not deleted automatically.
 
-## Isolated/global inventory, shims, and conflict rejection
+## Isolated/global install identity, shims, and conflict rejection
 
 For an isolated install, the backend scans the synthetic project's complete
 `node_modules/.bin`, so recorded bins may come from the root package or
 transitive dependencies. For a global install, normalization instead resets the
 manager-produced bin directory and recreates launchers only for the selected
-root package's declared bins. Both paths write dynamic inventory schema 2 to
-`.osdk-tool.json`: tool ID, exact version, canonical `identity_options`, their
-`option_fingerprint`, relative bin paths, and stable metadata. A bin name must be
-a single filename and its resolved canonical target must remain under the install
-root. Missing bins, duplicate names, path traversal, a missing or tampered
-fingerprint, and other corrupt inventory are rejected. Inventory scans do not
-follow symlinks and bound traversal depth, manifest count, and file size.
+root package's declared bins. Both paths write `.osdk-install.json` schema 1. Its
+nested `identity` contains `tool`, exact `version`, `platform`, `scope`, canonical
+`material_options`, `dependencies`, `materials`, and `install_id`. `install_id` is
+the domain-separated canonical `b3-v2:` identity and is also used in the physical
+root. Relative executable paths are validated against that root; backend-specific
+observations such as graph integrity and native-lock hashes live in a separate
+receipt and never become alias ownership. A bin name must be a single filename and its resolved canonical target
+must remain inside the root; missing bins, duplicate names, traversal, or a
+tampered identity are rejected. Scans do not follow symlinks and bound traversal
+depth, manifest count, and file size.
 
-Install roots remain version-based (`<installs>/<tool>/<version>` for isolated
-tools and `<installs>/npm-global/<package>/<version>` for global tools); the
-fingerprint is not part of the directory name. Reuse checks therefore compare
-schema-2 inventory identity before accepting a complete marker. A different
-option identity cannot reuse the directory, and same-version variants cannot
-coexist in one scope. The npm install/global-use path rebuilds or replaces that
-version when its identity differs. Legacy schema-1 inventories stay readable so
-scanning and migration can identify them, but they cannot authorize reuse,
-activation, or shim execution; rerun the install or global-use operation to
-rebuild the version with schema 2.
+Dynamic roots are fingerprinted beneath the backend and exact version, with
+isolated and global npm remaining separate namespaces. Consequently, multiple
+same-backend/version identities can coexist in one scope. Reuse and lifecycle
+commands derive the exact identity first and never treat another fingerprint as a
+version-compatible fallback.
+In the current lock-schema-3 bridge, the exact managed Node dependency is part
+of the install ID. A legacy frozen-graph digest participates when it is already
+an input before installation. Compact native-lock hashes are currently injected
+both during replay and after a fresh install, so until typed provenance arrives
+with lock schema 4 they remain validated receipt evidence rather than a path
+selector. Unlocked observed graph/SRI data follows the same rule.
 
-The CLI and shim derive a `bin name -> backend owner` map from inventory. For an
-active dynamic request, activation and shim dispatch first require its canonical
-option identity to match the selected install's schema-2 inventory. A missing,
-legacy, or mismatched identity fails closed rather than exposing its bin paths.
+`.osdk-tool.json` is legacy detection metadata only. Neither its old schema 1 nor
+schema 2 authorizes reuse, activation, shim execution, `where`, uninstall, or
+`reshim`; there is no compatibility contract between those dynamic-inventory
+schemas. A legacy install must be reinstalled to publish `.osdk-install.json`
+schema 1.
+
+The CLI and shim derive a `bin name -> backend owner` map from exact install
+identity records. For an active dynamic request, reuse, activation, shim dispatch,
+`where`, uninstall, and `reshim` select the fingerprinted root whose complete
+`b3-v2:` identity matches the request. A missing, legacy, or mismatched identity
+fails closed rather than exposing its bin paths or selecting a sibling root.
 Bin-owner resolution is a separate check:
 
 - one owner routes directly;
@@ -341,13 +352,13 @@ described as a globally rolled-back installation transaction.
 
 ## Main verification points
 
-Unit and contract tests cover namespaced/scoped parsing, option normalization and
-fingerprinting, schema-2 inventory validation, installer planning,
+Unit and contract tests cover namespaced/scoped parsing, option normalization,
+canonical `b3-v2:` install identity, schema-1 identity validation, installer planning,
 dependency-section retention, one-shot native delegation, compact lock metadata,
 global-prefix arguments, native-lock identity, curated generation publication
 and revalidation, raw-project-bin exclusion, inventory scanning, and shim
 conflict behavior. Compatibility tests retain legacy lock-schema-2 sidecar
-validation, schema-1 dynamic-inventory reinstall, and lock-schema-1 npm-migration
-rejection boundaries. Cross-platform changes remain
+validation, legacy `.osdk-tool.json` detection without execution, and
+lock-schema-1 npm-migration rejection boundaries. Cross-platform changes remain
 subject to the repository's Linux workspace tests and full Windows GNU Wine
 suite.
