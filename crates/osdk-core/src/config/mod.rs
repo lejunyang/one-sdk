@@ -176,6 +176,12 @@ pub struct SourcesConfig {
     #[doc(hidden)]
     #[serde(skip)]
     pub registries: RegistriesConfig,
+    /// Native-container configuration is persisted under the separate
+    /// top-level `[containers]` table. It lives here internally so adding it
+    /// does not break callers that construct [`Config`] directly.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub containers: ContainersConfig,
 }
 
 impl Default for SourcesConfig {
@@ -186,6 +192,7 @@ impl Default for SourcesConfig {
             cache_ttl: "6h".to_string(),
             per_tool: BTreeMap::new(),
             registries: RegistriesConfig::default(),
+            containers: ContainersConfig::default(),
         }
     }
 }
@@ -222,6 +229,193 @@ impl Default for NpmRegistryConfig {
             probe_timeout_ms: 1500,
         }
     }
+}
+
+/// Native-only container integration settings. Higher-precedence configuration
+/// files replace this section as a unit instead of merging registry policies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContainersConfig {
+    pub runtime: ContainerRuntime,
+    /// `auto` or an explicit native builder name.
+    pub builder: crate::container::BuildxBuilderSelector,
+    /// `runtime` or a strict OCI `OS/ARCH[/VARIANT]` selector.
+    pub platform: ContainerPlatform,
+    pub probe_timeout_ms: u64,
+    pub registries: BTreeMap<String, ContainerRegistryConfig>,
+}
+
+impl Default for ContainersConfig {
+    fn default() -> Self {
+        Self {
+            runtime: ContainerRuntime::Auto,
+            builder: crate::container::BuildxBuilderSelector::Auto,
+            platform: ContainerPlatform::Runtime,
+            probe_timeout_ms: 1500,
+            registries: BTreeMap::new(),
+        }
+    }
+}
+
+/// Native runtime selected for container inspection and operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerRuntime {
+    #[default]
+    Auto,
+    Docker,
+    Containerd,
+}
+
+impl std::str::FromStr for ContainerRuntime {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "docker" => Ok(Self::Docker),
+            "containerd" => Ok(Self::Containerd),
+            _ => Err(Error::config(
+                "invalid container runtime (expected auto|docker|containerd)",
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ContainerRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "auto",
+            Self::Docker => "docker",
+            Self::Containerd => "containerd",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ContainerRuntime {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(|_| {
+            serde::de::Error::custom("invalid container runtime (expected auto|docker|containerd)")
+        })
+    }
+}
+
+/// Target platform chosen from the native runtime or an explicit OCI tuple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerPlatform {
+    Runtime,
+    Explicit {
+        os: String,
+        arch: String,
+        variant: Option<String>,
+    },
+}
+
+impl Default for ContainerPlatform {
+    fn default() -> Self {
+        Self::Runtime
+    }
+}
+
+impl std::str::FromStr for ContainerPlatform {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let value = value.trim();
+        if value == "runtime" {
+            return Ok(Self::Runtime);
+        }
+
+        let components = value.split('/').collect::<Vec<_>>();
+        if !(2..=3).contains(&components.len())
+            || components
+                .iter()
+                .any(|component| !is_oci_platform_component(component))
+        {
+            return Err(Error::config(
+                "invalid container platform (expected runtime or OS/ARCH[/VARIANT])",
+            ));
+        }
+
+        Ok(Self::Explicit {
+            os: components[0].to_string(),
+            arch: components[1].to_string(),
+            variant: components.get(2).map(|value| (*value).to_string()),
+        })
+    }
+}
+
+impl std::fmt::Display for ContainerPlatform {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Runtime => formatter.write_str("runtime"),
+            Self::Explicit { os, arch, variant } => {
+                write!(formatter, "{os}/{arch}")?;
+                if let Some(variant) = variant {
+                    write!(formatter, "/{variant}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Serialize for ContainerPlatform {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ContainerPlatform {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+fn is_oci_platform_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        })
+}
+
+/// Mirror policy for one upstream OCI registry namespace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContainerRegistryConfig {
+    pub mirrors: Vec<String>,
+    pub anonymous_only: bool,
+    pub resolve: ContainerResolve,
+}
+
+impl Default for ContainerRegistryConfig {
+    fn default() -> Self {
+        Self {
+            mirrors: Vec::new(),
+            anonymous_only: true,
+            resolve: ContainerResolve::Upstream,
+        }
+    }
+}
+
+/// Whether tags are resolved by the origin registry or by a configured mirror.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerResolve {
+    #[default]
+    Upstream,
+    Mirror,
 }
 
 /// Per-tool source config: an optional pin and any user-added custom sources.
@@ -355,6 +549,7 @@ struct ConfigFile {
     settings: Option<Settings>,
     sources: Option<SourcesConfig>,
     registries: Option<RegistriesConfig>,
+    containers: Option<ContainersConfig>,
     tools: BTreeMap<String, ToolConfigEntry>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -394,11 +589,16 @@ impl Config {
                 cache_ttl: src.cache_ttl,
                 per_tool: merged,
                 registries: self.sources.registries.clone(),
+                containers: self.sources.containers.clone(),
             };
         }
         if let Some(registries) = file.registries {
             // Registry sections replace the lower-precedence layer as a unit.
             self.sources.registries = registries;
+        }
+        if let Some(containers) = file.containers {
+            // Container sections replace the lower-precedence layer as a unit.
+            self.sources.containers = containers;
         }
         self.apply_tool_configs(&file.tools);
         for (tool, aliases) in file.aliases {
@@ -465,6 +665,21 @@ impl Config {
                 _ => Selection::Auto,
             };
         }
+        if let Some(v) = getenv("OSDK_CONTAINER_RUNTIME") {
+            if let Ok(runtime) = v.parse() {
+                self.sources.containers.runtime = runtime;
+            }
+        }
+        if let Some(v) = getenv("OSDK_CONTAINER_BUILDER") {
+            if let Ok(builder) = v.parse() {
+                self.sources.containers.builder = builder;
+            }
+        }
+        if let Some(v) = getenv("OSDK_CONTAINER_PLATFORM") {
+            if let Ok(platform) = v.parse() {
+                self.sources.containers.platform = platform;
+            }
+        }
     }
 
     pub fn tool_sources(&self, tool: &str) -> Option<&ToolSources> {
@@ -479,6 +694,11 @@ impl Config {
     /// Effective package-registry configuration after user/project layering.
     pub fn registries(&self) -> &RegistriesConfig {
         &self.sources.registries
+    }
+
+    /// Effective native-container configuration after user/project layering.
+    pub fn containers(&self) -> &ContainersConfig {
+        &self.sources.containers
     }
 
     pub fn expand_alias(&self, tool: &str, spec: &str) -> Result<String> {
@@ -566,11 +786,121 @@ fn truthy(s: &str) -> bool {
 
 fn read_config_file(path: &Path) -> Result<ConfigFile> {
     let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    let mut file: ConfigFile = toml::from_str(&text)?;
+    let mut file: ConfigFile = toml::from_str(&text).map_err(sanitize_config_parse_error)?;
     if let Some(registries) = &mut file.registries {
         normalize_registry_urls(&mut registries.npm.urls)?;
     }
+    if let Some(containers) = &mut file.containers {
+        validate_containers_config(containers)?;
+    }
     Ok(file)
+}
+
+fn sanitize_config_parse_error(error: toml::de::Error) -> Error {
+    let message = error.message();
+    if message.contains("invalid container runtime") {
+        Error::config("invalid container runtime (expected auto|docker|containerd)")
+    } else if message.contains("invalid Buildx builder selector") {
+        Error::config("invalid container builder (expected auto or a safe ASCII name)")
+    } else if message.contains("invalid container platform") {
+        Error::config("invalid container platform (expected runtime or OS/ARCH[/VARIANT])")
+    } else {
+        Error::TomlDe(error)
+    }
+}
+
+fn validate_containers_config(config: &mut ContainersConfig) -> Result<()> {
+    if config.probe_timeout_ms == 0 {
+        return Err(Error::config(
+            "container probe_timeout_ms must be greater than zero",
+        ));
+    }
+
+    let registries = std::mem::take(&mut config.registries);
+    let mut canonical_registries = BTreeMap::new();
+    for (registry, mut policy) in registries {
+        let registry = canonical_container_registry_name(&registry)?;
+        let mut normalized = Vec::with_capacity(policy.mirrors.len());
+        for mirror in &policy.mirrors {
+            let mirror = normalize_container_mirror_url(mirror)?;
+            if !normalized.contains(&mirror) {
+                normalized.push(mirror);
+            }
+        }
+        policy.mirrors = normalized;
+        if canonical_registries.insert(registry, policy).is_some() {
+            return Err(Error::config(
+                "container registry keys collide after canonicalization",
+            ));
+        }
+    }
+    config.registries = canonical_registries;
+    Ok(())
+}
+
+fn canonical_container_registry_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.contains("://")
+        || value.contains(['/', '?', '#', '@'])
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(Error::config(
+            "invalid container registry (expected a host name with optional port)",
+        ));
+    }
+
+    // URL parsing gives us strict host and port validation while the fixed
+    // scheme prevents registry keys from embedding credentials or paths.
+    let parsed = reqwest::Url::parse(&format!("https://{value}/"))
+        .map_err(|_| Error::config("invalid container registry"))?;
+    if parsed.host_str().is_none() || parsed.port().is_none() && value.ends_with(':') {
+        return Err(Error::config(
+            "invalid container registry (expected a host name with optional port)",
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .expect("host checked above")
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return Err(Error::config("invalid container registry"));
+    }
+    Ok(match parsed.port() {
+        Some(port) if host.contains(':') => format!("[{host}]:{port}"),
+        Some(port) => format!("{host}:{port}"),
+        None if host.contains(':') => format!("[{host}]"),
+        None => host,
+    })
+}
+
+/// Validate and canonicalize a persisted OCI mirror URL. Persisted mirror
+/// policy is HTTPS-only and never carries credentials, query, or fragment.
+pub fn normalize_container_mirror_url(value: &str) -> Result<String> {
+    let original = value.trim();
+    let mut url =
+        reqwest::Url::parse(original).map_err(|_| Error::config("invalid container mirror URL"))?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err(Error::config(
+            "container mirror URL must use https and include a host",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::config(
+            "container mirror URL must not contain credentials",
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(Error::config(
+            "container mirror URL must not contain a query string or fragment",
+        ));
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{path}/"));
+    Ok(url.to_string())
 }
 
 fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Result<Config> {
@@ -767,6 +1097,313 @@ mod tests {
         assert!(cfg.settings.require_checksums);
         assert_eq!(cfg.settings.attestations, AttestationPolicy::Required);
         assert!(cfg.settings.offline);
+    }
+
+    #[test]
+    fn container_config_parses_strict_native_settings() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            r#"
+[containers]
+runtime = "containerd"
+builder = "remote-builder_1"
+platform = "linux/arm64/v8"
+probe_timeout_ms = 750
+
+[containers.registries."docker.io"]
+mirrors = ["https://mirror.example/cache", "https://mirror.example/cache/"]
+anonymous_only = false
+resolve = "mirror"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_user(&config_file).unwrap();
+        assert_eq!(config.containers().runtime, ContainerRuntime::Containerd);
+        assert_eq!(
+            config.containers().builder.as_name(),
+            Some("remote-builder_1")
+        );
+        assert_eq!(
+            config.containers().platform,
+            ContainerPlatform::Explicit {
+                os: "linux".to_string(),
+                arch: "arm64".to_string(),
+                variant: Some("v8".to_string()),
+            }
+        );
+        assert_eq!(config.containers().probe_timeout_ms, 750);
+        assert_eq!(
+            config.containers().registries["docker.io"].mirrors,
+            ["https://mirror.example/cache/"]
+        );
+        assert!(!config.containers().registries["docker.io"].anonymous_only);
+        assert_eq!(
+            config.containers().registries["docker.io"].resolve,
+            ContainerResolve::Mirror
+        );
+    }
+
+    #[test]
+    fn project_container_config_replaces_user_section_as_a_unit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            r#"
+[containers]
+runtime = "docker"
+builder = "global-builder"
+platform = "linux/amd64"
+probe_timeout_ms = 900
+
+[containers.registries."docker.io"]
+mirrors = ["https://global.example"]
+anonymous_only = false
+resolve = "mirror"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("osdk.toml"),
+            r#"
+[containers]
+runtime = "containerd"
+
+[containers.registries."ghcr.io"]
+mirrors = ["https://project.example"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&user_config, &project).unwrap();
+        let containers = config.containers();
+        assert_eq!(containers.runtime, ContainerRuntime::Containerd);
+        assert_eq!(
+            containers.builder,
+            crate::container::BuildxBuilderSelector::Auto
+        );
+        assert_eq!(containers.platform, ContainerPlatform::Runtime);
+        assert_eq!(containers.probe_timeout_ms, 1500);
+        assert!(!containers.registries.contains_key("docker.io"));
+        assert_eq!(
+            containers.registries["ghcr.io"].mirrors,
+            ["https://project.example/"]
+        );
+        assert!(containers.registries["ghcr.io"].anonymous_only);
+        assert_eq!(
+            containers.registries["ghcr.io"].resolve,
+            ContainerResolve::Upstream
+        );
+    }
+
+    #[test]
+    fn project_container_config_requires_trust() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project_config = temporary.path().join("osdk.toml");
+        std::fs::write(&project_config, "[containers]\nruntime = \"auto\"\n").unwrap();
+
+        assert!(crate::trust::requires_trust(&project_config).unwrap());
+    }
+
+    #[test]
+    fn container_env_overrides_only_native_selectors() {
+        let mut cfg = Config {
+            settings: Settings::default(),
+            sources: SourcesConfig::default(),
+            tools: BTreeMap::new(),
+            tool_configs: BTreeMap::new(),
+            global_tools: BTreeMap::new(),
+            global_tool_configs: BTreeMap::new(),
+            tool_origins: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            project_config_path: None,
+        };
+        cfg.sources.containers.registries.insert(
+            "docker.io".to_string(),
+            ContainerRegistryConfig {
+                mirrors: vec!["https://mirror.example/".to_string()],
+                anonymous_only: true,
+                resolve: ContainerResolve::Upstream,
+            },
+        );
+
+        cfg.apply_env(|key| match key {
+            "OSDK_CONTAINER_RUNTIME" => Some("docker".to_string()),
+            "OSDK_CONTAINER_BUILDER" => Some("ci-builder".to_string()),
+            "OSDK_CONTAINER_PLATFORM" => Some("linux/amd64".to_string()),
+            // These deliberately have no supported environment surface.
+            "OSDK_CONTAINER_MIRRORS" => Some("https://evil.example".to_string()),
+            "OSDK_CONTAINER_RESOLVE" => Some("mirror".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(cfg.containers().runtime, ContainerRuntime::Docker);
+        assert_eq!(cfg.containers().builder.as_name(), Some("ci-builder"));
+        assert_eq!(cfg.containers().platform.to_string(), "linux/amd64");
+        assert_eq!(
+            cfg.containers().registries["docker.io"].mirrors,
+            ["https://mirror.example/"]
+        );
+        assert_eq!(
+            cfg.containers().registries["docker.io"].resolve,
+            ContainerResolve::Upstream
+        );
+    }
+
+    #[test]
+    fn invalid_container_env_selectors_leave_config_unchanged() {
+        let mut cfg = Config {
+            settings: Settings::default(),
+            sources: SourcesConfig::default(),
+            tools: BTreeMap::new(),
+            tool_configs: BTreeMap::new(),
+            global_tools: BTreeMap::new(),
+            global_tool_configs: BTreeMap::new(),
+            tool_origins: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            project_config_path: None,
+        };
+
+        cfg.apply_env(|key| match key {
+            "OSDK_CONTAINER_RUNTIME" => Some("podman".to_string()),
+            "OSDK_CONTAINER_BUILDER" => Some("name with spaces".to_string()),
+            "OSDK_CONTAINER_PLATFORM" => Some("linux".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(cfg.containers(), &ContainersConfig::default());
+    }
+
+    #[test]
+    fn container_config_rejects_invalid_values_and_unsafe_mirrors() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+        let invalid = [
+            "[containers]\nruntime = \"podman\"\n",
+            "[containers]\nbuilder = \"name with spaces\"\n",
+            "[containers]\nplatform = \"linux\"\n",
+            "[containers]\nplatform = \"Linux/amd64\"\n",
+            "[containers]\nplatform = \"linux/amd64/v8/extra\"\n",
+            "[containers]\nprobe_timeout_ms = 0\n",
+            "[containers]\nunknown = true\n",
+            "[containers.registries.\"docker.io\"]\nresolve = \"fastest\"\n",
+            "[containers.registries.\"docker.io\"]\nmirrors = [\"http://127.0.0.1:5000\"]\n",
+            "[containers.registries.\"docker.io\"]\nmirrors = [\"https://user:secret@example.test\"]\n",
+            "[containers.registries.\"docker.io\"]\nmirrors = [\"https://example.test?token=secret\"]\n",
+            "[containers.registries.\"docker.io\"]\nmirrors = [\"https://example.test#fragment\"]\n",
+            "[containers.registries.\"https://docker.io/path\"]\nmirrors = [\"https://example.test\"]\n",
+        ];
+
+        for contents in invalid {
+            std::fs::write(&config_file, contents).unwrap();
+            assert!(
+                Config::load_user(&config_file).is_err(),
+                "accepted invalid container config: {contents}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_registry_keys_are_canonicalized_without_losing_ports() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            r#"
+[containers.registries."EXAMPLE.COM."]
+[containers.registries."Registry.Example:5443"]
+[containers.registries."[2001:DB8::1]:5000"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_user(&config_file).unwrap();
+        let registries = &config.containers().registries;
+        assert!(registries.contains_key("example.com"));
+        assert!(registries.contains_key("registry.example:5443"));
+        assert!(registries.contains_key("[2001:db8::1]:5000"));
+    }
+
+    #[test]
+    fn canonical_container_registry_collisions_are_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            r#"
+[containers.registries."docker.io"]
+[containers.registries."DOCKER.IO."]
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load_user(&config_file).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config error: container registry keys collide after canonicalization"
+        );
+    }
+
+    #[test]
+    fn container_validation_errors_do_not_echo_rejected_values() {
+        let cases = [
+            ("runtime", "token-runtime-7d9"),
+            ("builder", "token builder 7d9"),
+            ("platform", "token-platform-7d9"),
+        ];
+        for (field, secret) in cases {
+            let temporary = tempfile::tempdir().unwrap();
+            let config_file = temporary.path().join("config.toml");
+            std::fs::write(
+                &config_file,
+                format!("[containers]\n{field} = {secret:?}\n"),
+            )
+            .unwrap();
+            let error = Config::load_user(&config_file).unwrap_err();
+            assert!(!error.to_string().contains(secret));
+            assert!(!format!("{error:?}").contains(secret));
+        }
+
+        for (contents, secret) in [
+            (
+                "[containers.registries.\"user:registry-secret-7d9@example.test\"]\n",
+                "registry-secret-7d9",
+            ),
+            (
+                "[containers.registries.\"docker.io\"]\nmirrors = [\"https://user:mirror-secret-7d9@example.test\"]\n",
+                "mirror-secret-7d9",
+            ),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let config_file = temporary.path().join("config.toml");
+            std::fs::write(&config_file, contents).unwrap();
+            let error = Config::load_user(&config_file).unwrap_err();
+            assert!(!error.to_string().contains(secret));
+            assert!(!format!("{error:?}").contains(secret));
+        }
+    }
+
+    #[test]
+    fn containers_default_to_runtime_platform() {
+        assert_eq!(
+            ContainersConfig::default().platform,
+            ContainerPlatform::Runtime
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+        std::fs::write(&config_file, "[containers]\nruntime = \"docker\"\n").unwrap();
+        assert_eq!(
+            Config::load_user(&config_file)
+                .unwrap()
+                .containers()
+                .platform,
+            ContainerPlatform::Runtime
+        );
     }
 
     #[test]
