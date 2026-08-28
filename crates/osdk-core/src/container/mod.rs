@@ -8,6 +8,7 @@ pub mod buildkit;
 pub mod containerd;
 pub mod docker;
 pub mod redact;
+pub mod reference;
 pub mod report;
 pub mod runtime;
 
@@ -23,6 +24,10 @@ pub use containerd::{
 pub use docker::{
     DockerAdapter, DockerContext, DockerContextKind, DockerDiscovery, DockerInfo, DockerParseError,
     DockerVersion,
+};
+pub use reference::{
+    ImageReference, ImageSelector, ImageTag, OciDigest, OciPlatform, ReferenceError, RegistryName,
+    RepositoryName,
 };
 
 pub use redact::{
