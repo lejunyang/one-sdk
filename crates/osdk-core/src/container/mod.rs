@@ -5,6 +5,7 @@
 //! injectable process boundaries for later read-only runtime adapters.
 
 pub mod buildkit;
+pub mod cache;
 pub mod containerd;
 pub mod docker;
 pub mod redact;
@@ -15,6 +16,11 @@ pub mod runtime;
 pub use buildkit::{
     BuildPlatform, BuilderDriver, BuilderNode, BuilderNodeStatus, BuildkitAdapter,
     BuildkitDiscovery, BuildxBuilderSelector, BuildxBuilderSelectorError, SelectedBuilder,
+};
+pub use cache::{
+    BuildxCacheQuery, CacheQueryStatus, ContainerdCacheQuery, DockerCacheQuery, NativeCacheOwner,
+    NativeCacheRecord, NativeCacheRecordKind, NativeCacheStatus,
+    NATIVE_CACHE_STATUS_SCHEMA_VERSION,
 };
 pub use containerd::{
     parse_effective_config, parse_hosts_toml, read_hosts_toml, ContainerdAdapter, ContainerdConfig,
