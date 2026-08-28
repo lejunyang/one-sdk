@@ -17,6 +17,7 @@ pub mod activate;
 pub mod backend;
 pub mod cache;
 pub mod config;
+pub mod container;
 pub mod dirs;
 pub mod error;
 pub mod http;
