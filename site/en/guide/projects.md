@@ -165,6 +165,12 @@ urls = [
 ]
 probe_timeout_ms = 1500
 
+[containers]
+runtime = "auto"              # auto|docker|containerd
+builder = "auto"              # auto or a validated Buildx builder name
+platform = "runtime"          # runtime or OS/ARCH[/VARIANT]
+probe_timeout_ms = 1500
+
 [tools]
 node = "20"
 python = "3.12"
@@ -208,6 +214,7 @@ File layers do not use one universal field-by-field merge:
 | `[sources.<tool>]` | Merge by tool key; the higher layer replaces the entire same-tool value (`pin`, `disable`, `custom`, and so on) |
 | Model `env` / `env_force` | Project files cannot change them; user-global values are retained to prevent a repository from silently changing credential environment |
 | `[registries]` | Replace the whole section; project npm URLs are not combined with user URLs |
+| `[containers]` | Replace the whole section; omitted runtime, builder, platform, timeout, and registry-policy fields use built-in defaults |
 | `[tools]` | Merge by backend key; higher same-name key wins |
 | `[aliases.<tool>]` | Merge by tool and alias key; higher same-name alias wins |
 | `.tool-versions` | Fill only tool keys still missing after `[tools]` is merged |
@@ -240,6 +247,9 @@ non-default combination in the higher layer when you need to preserve it.
 | `OSDK_PYTHON_CATALOG_SHA256` | `settings.python.catalog_sha256` |
 | `OSDK_JAVA_CATALOG_URL` | `settings.java.catalog_url` |
 | `OSDK_SELECTION` | `sources.selection`; an unknown value currently falls back to `auto` |
+| `OSDK_CONTAINER_RUNTIME` | `containers.runtime`; `auto|docker|containerd` |
+| `OSDK_CONTAINER_BUILDER` | `containers.builder`; `auto` or a validated Buildx builder name |
+| `OSDK_CONTAINER_PLATFORM` | `containers.platform`; `runtime` or `OS/ARCH[/VARIANT]` |
 | `OSDK_LANG` | Output language, ahead of configuration and locale |
 
 Directory variables are listed under [Directory layout and overrides](./storage-shell#directory-layout-and-overrides).

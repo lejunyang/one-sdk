@@ -15,6 +15,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 | [npm 开发工具](./npm-tools) | 用 `npm:<package>` 安装、固定、执行、升级和离线恢复 npm CLI 包 |
 | [模型快照](./models) | Hugging Face、ModelScope、筛选、校验、锁定与环境适配 |
 | [下载源与供应链安全](./sources-security) | 镜像、离线、预发布、checksum、签名、attestation 与 GitHub Release |
+| [容器运行时与原生缓存](./containers) | Docker/containerd/Buildx 只读诊断与原生缓存用量 |
 | [存储、Shell 与扩展](./storage-shell) | CAS、缓存、目录、shim、激活、临时执行、补全、诊断与声明式 backend |
 
 ## 常见路径
@@ -27,6 +28,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 - 安装 Prettier、TypeScript 或 scoped npm CLI 包：参阅[npm 开发工具](./npm-tools)。
 - 下载模型仓库：参阅[模型快照](./models)。
 - 配置企业镜像或严格校验：参阅[下载源与供应链安全](./sources-security)。
+- 检查 Docker、containerd、Buildx 或原生缓存用量：参阅[容器运行时与原生缓存](./containers)。
 - 配置终端、清理空间或添加数据型 backend：参阅[存储、Shell 与扩展](./storage-shell)。
 
 想了解一次请求内部如何经过解析、下载、验证、CAS 物化和 shim 分派，请阅读

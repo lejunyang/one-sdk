@@ -1,6 +1,6 @@
 //! Clap command tree for the `osdk` binary.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -259,6 +259,12 @@ pub enum Command {
         command: CacheCommand,
     },
 
+    /// Inspect native container runtimes, builders, and their caches.
+    Container {
+        #[command(subcommand)]
+        command: ContainerCommand,
+    },
+
     /// Garbage-collect unreferenced store objects.
     Prune {
         #[arg(long)]
@@ -503,4 +509,56 @@ pub enum CacheCommand {
     Env,
     /// Remove downloaded archives (keeps the CAS store + installs).
     Clean,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContainerCommand {
+    /// Diagnose the selected native runtime and Buildx builder.
+    Doctor {
+        /// Runtime selector; defaults to the effective container configuration.
+        #[arg(long, value_enum, value_name = "RUNTIME")]
+        runtime: Option<ContainerRuntimeArg>,
+        /// Buildx builder name; defaults to the effective container configuration.
+        #[arg(long, value_name = "NAME")]
+        builder: Option<osdk_core::container::BuildxBuilderSelector>,
+        /// Emit deterministic, schema-versioned JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect caches owned by native container components.
+    Cache {
+        #[command(subcommand)]
+        command: ContainerCacheCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContainerCacheCommand {
+    /// Report aggregate native cache usage without scanning private stores.
+    Status {
+        /// Runtime/cache owner; defaults to the effective container configuration.
+        #[arg(long, value_enum, value_name = "RUNTIME")]
+        runtime: Option<ContainerCacheRuntimeArg>,
+        /// Buildx builder name; defaults to the effective container configuration.
+        #[arg(long, value_name = "NAME")]
+        builder: Option<osdk_core::container::BuildxBuilderSelector>,
+        /// Emit deterministic, schema-versioned JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerRuntimeArg {
+    Auto,
+    Docker,
+    Containerd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerCacheRuntimeArg {
+    Auto,
+    Docker,
+    Containerd,
+    Buildkit,
 }

@@ -152,6 +152,12 @@ urls = [
 ]
 probe_timeout_ms = 1500
 
+[containers]
+runtime = "auto"              # auto|docker|containerd
+builder = "auto"              # auto 或经过验证的 Buildx 构建器名称
+platform = "runtime"          # runtime 或 OS/ARCH[/VARIANT]
+probe_timeout_ms = 1500
+
 [tools]
 node = "20"
 python = "3.12"
@@ -192,6 +198,7 @@ CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
 | `[sources.<tool>]` | 按工具键合并；同一工具的 `pin`、`disable`、`custom` 等整项由高优先级层替换 |
 | 模型 `env`/`env_force` | 项目配置不能改变；始终保留用户全局值，避免项目静默改写 shell 凭据环境 |
 | `[registries]` | 整段替换；项目 `[registries.npm]` 不与用户 URL 列表合并 |
+| `[containers]` | 整段替换；省略的运行时、构建器、平台、超时和 Registry 策略字段使用内置默认值 |
 | `[tools]` | 按工具键合并；高优先级同名键覆盖 |
 | `[aliases.<tool>]` | 按工具和别名键合并；高优先级同名别名覆盖 |
 | `.tool-versions` | 只填补合并后 `[tools]` 中缺失的工具 |
@@ -223,6 +230,9 @@ jobs = 2
 | `OSDK_PYTHON_CATALOG_SHA256` | `settings.python.catalog_sha256` |
 | `OSDK_JAVA_CATALOG_URL` | `settings.java.catalog_url` |
 | `OSDK_SELECTION` | `sources.selection`；未知值当前回退为 `auto` |
+| `OSDK_CONTAINER_RUNTIME` | `containers.runtime`；`auto|docker|containerd` |
+| `OSDK_CONTAINER_BUILDER` | `containers.builder`；`auto` 或经过验证的 Buildx 构建器名称 |
+| `OSDK_CONTAINER_PLATFORM` | `containers.platform`；`runtime` 或 `OS/ARCH[/VARIANT]` |
 | `OSDK_LANG` | 输出语言，优先于配置与 locale |
 
 目录变量见[存储、Shell 与扩展](./storage-shell#目录布局与覆盖)。

@@ -70,6 +70,9 @@ osdk prune [--dry-run]
 `cache clean` 不删除 CAS、安装、模型、remote/source metadata 或 `<cache>/pkg`。
 GC 遇到损坏 manifest 会拒绝继续，防止误删仍在使用的对象。
 
+`osdk container cache status` 是另一条路径：它通过受支持的原生聚合接口查询 Docker
+Engine 或 Buildx 构建器自有的存储。详见[容器运行时与原生缓存](./containers)。
+
 通用 shell hook 在用户未设置时还映射
 `npm_config_cache`、`PIP_CACHE_DIR`、`GOMODCACHE`、`GOCACHE`、`CARGO_HOME` 和
 `GRADLE_USER_HOME`。这里没有 Maven `M2_HOME`/`maven.repo.local` 重定向。Rust 的
@@ -180,8 +183,10 @@ osdk registry test [MANAGER]
 | `config list` | 部分最终设置与目录、registry、模型环境、tools、aliases |
 | `source list` | 某 backend/provider 的来源与 pin；`doctor` 不列镜像 |
 | `registry test` | npm-compatible Registry 的匿名探测与选择计划 |
+| `container doctor` | Docker/containerd 只读选择，以及独立的 Buildx 报告 |
 
-`doctor` 当前不直接打印 `link_mode`；使用 `config list` 查看。
+顶层 `doctor` 当前不直接打印 `link_mode`；使用 `config list` 查看。它与诊断原生容器
+控制面的 `container doctor` 不同。
 
 ## 声明式 Backend
 

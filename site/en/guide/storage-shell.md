@@ -73,6 +73,10 @@ osdk prune [--dry-run]
 metadata, or `<cache>/pkg`. GC refuses to continue when it encounters a corrupt
 manifest, preventing deletion of objects that may still be referenced.
 
+`osdk container cache status` is separate: it queries storage owned by Docker
+Engine or a Buildx builder through supported native aggregate interfaces. See
+[Container Runtimes and Native Caches](./containers).
+
 When the user has not set them, the general shell hook also maps
 `npm_config_cache`, `PIP_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `CARGO_HOME`, and
 `GRADLE_USER_HOME`. There is no Maven `M2_HOME`/`maven.repo.local` redirection.
@@ -195,8 +199,11 @@ osdk registry test [MANAGER]
 | `config list` | Selected effective settings/directories, registry, model environment, tools, and aliases |
 | `source list` | Sources and pin for one backend/provider; `doctor` does not list mirrors |
 | `registry test` | Anonymous npm-compatible registry probe and selection plan |
+| `container doctor` | Read-only Docker/containerd selection plus a separate Buildx report |
 
-`doctor` currently does not print `link_mode`; use `config list` to inspect it.
+Top-level `doctor` currently does not print `link_mode`; use `config list` to
+inspect it. It is distinct from `container doctor`, which diagnoses native
+container control planes.
 
 ## Declarative backends
 

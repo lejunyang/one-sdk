@@ -277,8 +277,6 @@ impl ContainerdAdapter {
             Capability::Daemon,
             Capability::RuntimeInfo,
             Capability::Pull,
-            Capability::CacheStatus,
-            Capability::CachePrune,
         ] {
             report.set_capability(
                 capability,
@@ -288,6 +286,13 @@ impl ContainerdAdapter {
                     CapabilityStatus::Unavailable
                 },
             );
+        }
+        // containerd exposes several namespace-dependent content, snapshot,
+        // and CRI views, but no single supported aggregate cache contract.
+        // Keep diagnostics aligned with ContainerdCacheQuery instead of
+        // inferring cache support from daemon reachability.
+        for capability in [Capability::CacheStatus, Capability::CachePrune] {
+            report.set_capability(capability, CapabilityStatus::Unsupported);
         }
         report.set_capability(
             Capability::RegistryHostMapping,
@@ -778,6 +783,14 @@ capabilities = ["pull"]
         assert_eq!(discovery.report.status, DiagnosticStatus::Healthy);
         assert_eq!(discovery.namespace, "k8s.io");
         assert_eq!(discovery.versions.ctr_server, Some(Version::new(1, 7, 22)));
+        assert_eq!(
+            discovery.report.capabilities.get(&Capability::CacheStatus),
+            Some(&CapabilityStatus::Unsupported)
+        );
+        assert_eq!(
+            discovery.report.capabilities.get(&Capability::CachePrune),
+            Some(&CapabilityStatus::Unsupported)
+        );
         let commands = runner.commands.lock().unwrap();
         assert_eq!(
             commands[1],

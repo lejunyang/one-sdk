@@ -29,6 +29,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | [Installation pipeline](./installation) | Concurrent orchestration, download, verification, extraction, commit, and failure cleanup |
 | [Activation, shims, and lockfiles](./activation-lockfile) | Hot-path resolution, reversible shell state, project trust, and platform-aware locks |
 | [Download sources and project registries](./sources-registries) | Two control planes, probe ranking, credential boundaries, and single-launch behavior |
+| [Container diagnostics and native caches](./containers) | Runtime selection, bounded probes, stable reports, redaction, and native cache ownership |
 | [Storage and caches](./storage-cache) | SDK/model CAS, materialization fallbacks, download cache, and manager-native caches |
 | [Verification and supply-chain boundaries](./verification) | Checksums, Minisign, GitHub Artifact Attestations, and archive-safety boundaries |
 | [Backends and model providers](./backends-models) | Built-in, declarative, and GitHub backends plus Hugging Face and ModelScope snapshots |
@@ -41,6 +42,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 - GitHub Artifact Attestation policy defaults to `off` and applies only to GitHub artifact flows that can supply the required bundle and identity constraints.
 - osdk's BLAKE3 CAS deduplicates verified SDK and model files. The native package caches of npm, pnpm, Yarn, Bun, and Deno remain isolated; there is currently no cross-manager package tarball CAS.
 - `osdk cache clean` clears only osdk's download cache. It does not remove native package caches, installations, models, or the CAS.
+- `osdk container cache status` queries runtime-owned aggregate interfaces. It neither reads osdk's CAS nor scans Docker, containerd, or BuildKit private stores.
 - SDK source selection and project dependency registry selection are separate mechanisms. Registry preflight only chooses the environment before one launch: the manager runs at most once, and if every candidate is unhealthy the operation fails closed without starting it.
 - Installation locks narrow contention to specific objects. CAS object publication, manifest publication, and garbage collection are not covered by one global serialization boundary; interpret the GC safety model as documented in [Storage and caches](./storage-cache).
 

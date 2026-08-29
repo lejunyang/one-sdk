@@ -297,6 +297,90 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("label.error", ("error", "错误"));
     m.insert("label.trusted", ("trusted", "已信任"));
     m.insert("label.stale", ("stale", "已失效"));
+    m.insert("label.container.healthy", ("healthy", "健康"));
+    m.insert("label.container.degraded", ("degraded", "降级"));
+    m.insert("label.container.not_installed", ("not installed", "未安装"));
+    m.insert("label.container.client_only", ("client only", "仅客户端"));
+    m.insert("label.container.unreachable", ("unreachable", "不可达"));
+    m.insert(
+        "label.container.permission_denied",
+        ("permission denied", "权限不足"),
+    );
+    m.insert(
+        "label.container.unsupported_version",
+        ("unsupported version", "版本不受支持"),
+    );
+    m.insert("label.container.cache.available", ("available", "可用"));
+    m.insert("label.container.cache.timed_out", ("timed out", "超时"));
+    m.insert(
+        "label.container.cache.unsupported",
+        ("unsupported", "不支持"),
+    );
+    m.insert(
+        "label.container.cache.output_truncated",
+        ("output truncated", "输出已截断"),
+    );
+    m.insert(
+        "label.container.cache.invalid_output",
+        ("invalid output", "输出无效"),
+    );
+    m.insert(
+        "label.container.cache.command_failed",
+        ("command failed", "命令失败"),
+    );
+    m.insert("label.container.cache.images", ("images", "镜像"));
+    m.insert("label.container.cache.containers", ("containers", "容器"));
+    m.insert(
+        "label.container.cache.local_volumes",
+        ("local volumes", "本地卷"),
+    );
+    m.insert(
+        "label.container.cache.build_cache",
+        ("build cache", "构建缓存"),
+    );
+    m.insert(
+        "msg.container.doctor_conclusion",
+        ("selected {runtime}: {status}", "已选择 {runtime}：{status}"),
+    );
+    m.insert(
+        "msg.container.builder_status",
+        ("Buildx builder: {status}", "Buildx 构建器：{status}"),
+    );
+    m.insert(
+        "msg.container.cache_conclusion",
+        (
+            "{runtime} native cache: {status}",
+            "{runtime} 原生缓存：{status}",
+        ),
+    );
+    m.insert(
+        "msg.container.cache_totals",
+        (
+            "total {total}; reclaimable {reclaimable}",
+            "总计 {total}；可回收 {reclaimable}",
+        ),
+    );
+    m.insert(
+        "msg.container.cache_record",
+        (
+            "{count} objects, {active} active, {total} total, {reclaimable} reclaimable",
+            "{count} 个对象，{active} 个活跃，总计 {total}，可回收 {reclaimable}",
+        ),
+    );
+    m.insert(
+        "msg.container.cache_unsupported_hint",
+        (
+            "containerd has no stable aggregate cache-status interface; no private store was scanned",
+            "containerd 没有稳定的聚合缓存状态接口；未扫描任何私有存储目录",
+        ),
+    );
+    m.insert(
+        "err.container.invalid_builder",
+        (
+            "invalid Buildx builder name (use `auto` or a safe ASCII name)",
+            "Buildx 构建器名称无效（请使用 `auto` 或安全的 ASCII 名称）",
+        ),
+    );
     m.insert(
         "label.npm_lock_graph",
         ("locked npm graph for {tool}", "{tool} 的 npm 锁定依赖图"),
@@ -1779,6 +1863,59 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.container.about",
+        (
+            "Inspect native container runtimes, builders, and caches",
+            "检查原生容器运行时、构建器和缓存",
+        ),
+    );
+    m.insert(
+        "help.container.doctor.about",
+        (
+            "Diagnose the selected native runtime and Buildx builder",
+            "诊断选中的原生运行时和 Buildx 构建器",
+        ),
+    );
+    m.insert(
+        "help.container.cache.about",
+        ("Inspect native container caches", "检查原生容器缓存"),
+    );
+    m.insert(
+        "help.container.cache.status.about",
+        (
+            "Report aggregate native cache usage without scanning private stores",
+            "报告原生缓存汇总用量，不扫描私有存储目录",
+        ),
+    );
+    m.insert(
+        "help.container.doctor.flag.runtime",
+        (
+            "Runtime selector: auto|docker|containerd (default: effective config)",
+            "运行时选择：auto|docker|containerd（默认：生效配置）",
+        ),
+    );
+    m.insert(
+        "help.container.cache.status.flag.runtime",
+        (
+            "Cache owner: auto|docker|containerd|buildkit (default: effective config)",
+            "缓存所有者：auto|docker|containerd|buildkit（默认：生效配置）",
+        ),
+    );
+    m.insert(
+        "help.container.flag.builder",
+        (
+            "Buildx builder name (default: effective config)",
+            "Buildx 构建器名称（默认：生效配置）",
+        ),
+    );
+    m.insert(
+        "help.container.flag.json",
+        (
+            "Emit deterministic, schema-versioned JSON",
+            "输出确定且带 schema 版本的 JSON",
+        ),
+    );
+    m.insert(
         "help.prune.about",
         (
             "Garbage-collect unreferenced store objects",
@@ -2003,6 +2140,37 @@ mod tests {
             assert!(
                 option.contains(expected),
                 "Chinese -o help misses {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_cli_messages_are_bilingual_with_matching_placeholders() {
+        let catalog = build();
+        for key in [
+            "help.container.about",
+            "help.container.doctor.about",
+            "help.container.cache.status.about",
+            "help.container.doctor.flag.runtime",
+            "help.container.cache.status.flag.runtime",
+            "help.container.flag.builder",
+            "help.container.flag.json",
+            "msg.container.doctor_conclusion",
+            "msg.container.builder_status",
+            "msg.container.cache_conclusion",
+            "msg.container.cache_totals",
+            "msg.container.cache_record",
+            "msg.container.cache_unsupported_hint",
+            "err.container.invalid_builder",
+        ] {
+            let &(english, chinese) = catalog.get(key).unwrap_or_else(|| panic!("missing {key}"));
+            assert!(!english.is_empty(), "missing English for {key}");
+            assert!(!chinese.is_empty(), "missing Chinese for {key}");
+            assert_ne!(english, chinese, "Chinese is not translated for {key}");
+            assert_eq!(
+                placeholders(english),
+                placeholders(chinese),
+                "placeholder mismatch for {key}"
             );
         }
     }

@@ -194,6 +194,29 @@ fn localize_subcommands(cmd: Command) -> Command {
             .mut_subcommand("env", |s| s.about(h("help.cache.env.about")))
             .mut_subcommand("clean", |s| s.about(h("help.cache.clean.about")))
     })
+    .mut_subcommand("container", |c| {
+        c.about(h("help.container.about"))
+            .mut_subcommand("doctor", |s| {
+                s.about(h("help.container.doctor.about"))
+                    .mut_arg("runtime", |a| {
+                        a.help(h("help.container.doctor.flag.runtime"))
+                    })
+                    .mut_arg("builder", |a| a.help(h("help.container.flag.builder")))
+                    .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+            })
+            .mut_subcommand("cache", |s| {
+                s.about(h("help.container.cache.about"))
+                    .mut_subcommand("status", |status| {
+                        status
+                            .about(h("help.container.cache.status.about"))
+                            .mut_arg("runtime", |a| {
+                                a.help(h("help.container.cache.status.flag.runtime"))
+                            })
+                            .mut_arg("builder", |a| a.help(h("help.container.flag.builder")))
+                            .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                    })
+            })
+    })
     .mut_subcommand("prune", |c| {
         c.about(h("help.prune.about"))
             .mut_arg("dry_run", |a| a.help(h("help.prune.flag.dry_run")))
@@ -249,5 +272,42 @@ mod tests {
             assert!(help.contains("global"), "{subcommand}: {help}");
             assert!(help.contains("npm"), "{subcommand}: {help}");
         }
+    }
+
+    #[test]
+    fn container_help_is_localized_through_nested_status() {
+        let command = localize(crate::cli::Cli::command());
+        let container = command.find_subcommand("container").unwrap();
+        assert!(container
+            .get_about()
+            .unwrap()
+            .to_string()
+            .contains("container"));
+
+        let doctor = container.find_subcommand("doctor").unwrap();
+        for argument in ["runtime", "builder", "json"] {
+            let help = doctor
+                .get_arguments()
+                .find(|candidate| candidate.get_id() == argument)
+                .and_then(|candidate| candidate.get_help())
+                .unwrap()
+                .to_string();
+            assert!(!help.contains("help.container"), "{argument}: {help}");
+        }
+
+        let status = container
+            .find_subcommand("cache")
+            .unwrap()
+            .find_subcommand("status")
+            .unwrap();
+        assert!(status.get_about().unwrap().to_string().contains("cache"));
+        let builder_help = status
+            .get_arguments()
+            .find(|argument| argument.get_id() == "builder")
+            .and_then(|argument| argument.get_help())
+            .unwrap()
+            .to_string();
+        assert!(builder_help.contains("Buildx"));
+        assert!(!builder_help.contains("help.container"));
     }
 }

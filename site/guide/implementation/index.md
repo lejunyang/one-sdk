@@ -29,6 +29,7 @@ CLI 与分层配置
 | [安装管线](./installation) | 并发编排、下载、验证、解压、提交与失败清理 |
 | [激活、shim 与锁文件](./activation-lockfile) | 热路径解析、可逆 shell 状态、项目信任与平台化 lock |
 | [下载源与项目 Registry](./sources-registries) | 两套控制面、测速排序、凭据边界和单次启动语义 |
+| [容器诊断与原生缓存](./containers) | 运行时选择、有界探测、稳定报告、脱敏与原生缓存所有权 |
 | [存储与缓存](./storage-cache) | SDK/模型 CAS、物化回退、下载缓存和各 manager 原生缓存 |
 | [校验与供应链边界](./verification) | checksum、Minisign、GitHub Artifact Attestation 与归档安全边界 |
 | [Backend 与模型 Provider](./backends-models) | 内置/声明式/GitHub backend，以及 Hugging Face、ModelScope 模型快照 |
@@ -41,6 +42,7 @@ CLI 与分层配置
 - GitHub Artifact Attestation 默认是 `off`，且只适用于能提供相应 bundle 和身份约束的 GitHub artifact 流程。
 - osdk 的 BLAKE3 CAS 去重 SDK 与模型的已验证文件；npm、pnpm、Yarn、Bun、Deno 的原生 package cache 仍各自隔离，当前没有跨 manager 的 package tarball CAS。
 - `osdk cache clean` 只清理 osdk 的下载缓存，不会删除原生 package cache、安装目录、模型或 CAS。
+- `osdk container cache status` 查询运行时自有的聚合接口；它既不读取 osdk CAS，也不扫描 Docker、containerd 或 BuildKit 的私有存储。
 - SDK 来源选择与项目依赖 registry 选择是两套机制。registry preflight 只决定单次启动前的环境；manager 最多运行一次，候选全部不健康时 fail closed，根本不启动。
 - 安装锁按具体对象缩小竞争范围；CAS 对象发布、manifest 发布与 GC 没有一个覆盖全局的串行化临界区。GC 的正确性边界应按[存储与缓存](./storage-cache)中的说明理解。
 

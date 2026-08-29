@@ -36,6 +36,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'npm 开发工具', link: '/guide/npm-tools' },
       { text: '模型快照', link: '/guide/models' },
       { text: '来源、离线与安全', link: '/guide/sources-security' },
+      { text: '容器运行时与原生缓存', link: '/guide/containers' },
       { text: '存储、Shell 与诊断', link: '/guide/storage-shell' }
     ]
   },
@@ -47,6 +48,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: '安装管线与并发', link: '/guide/implementation/installation' },
       { text: 'Shim、激活与锁文件', link: '/guide/implementation/activation-lockfile' },
       { text: 'SDK 来源与依赖 Registry', link: '/guide/implementation/sources-registries' },
+      { text: '容器诊断与原生缓存', link: '/guide/implementation/containers' },
       { text: '内容存储与原生缓存', link: '/guide/implementation/storage-cache' },
       { text: '完整性与来源验证', link: '/guide/implementation/verification' },
       { text: 'Backend 与模型快照', link: '/guide/implementation/backends-models' },
@@ -76,6 +78,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'npm Developer Tools', link: '/en/guide/npm-tools' },
       { text: 'Model Snapshots', link: '/en/guide/models' },
       { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
+      { text: 'Container Runtimes and Native Caches', link: '/en/guide/containers' },
       { text: 'Storage, Shell, and Diagnostics', link: '/en/guide/storage-shell' }
     ]
   },
@@ -87,6 +90,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'Install Pipeline and Concurrency', link: '/en/guide/implementation/installation' },
       { text: 'Shims, Activation, and Lockfiles', link: '/en/guide/implementation/activation-lockfile' },
       { text: 'SDK Sources and Registries', link: '/en/guide/implementation/sources-registries' },
+      { text: 'Container Diagnostics and Native Caches', link: '/en/guide/implementation/containers' },
       { text: 'Content Store and Native Caches', link: '/en/guide/implementation/storage-cache' },
       { text: 'Integrity and Provenance', link: '/en/guide/implementation/verification' },
       { text: 'Backends and Model Snapshots', link: '/en/guide/implementation/backends-models' },

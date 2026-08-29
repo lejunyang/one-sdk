@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod commands;
 mod config_edit;
+mod container;
 mod global_npm_use;
 mod localize;
 mod lockfile;
@@ -118,6 +119,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Model { command } => commands::model(app, command).await,
         Command::Rust { command } => commands::rust(app, command),
         Command::Cache { command } => commands::cache(app, command),
+        Command::Container { command } => container::run(app, command),
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor => commands::doctor(app),
     }

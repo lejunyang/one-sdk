@@ -12,6 +12,7 @@ package managers, developer tools, and model snapshots. Use it to:
 - choose responsive SDK mirrors and dependency registries automatically;
 - work from downloaded metadata and artifacts when the network is unavailable;
 - manage Hugging Face and ModelScope snapshots alongside development tools;
+- inspect Docker, containerd, Buildx, and their native caches without changing state;
 - inspect storage, caches, active versions, and environment health in English or
   Chinese.
 
@@ -321,6 +322,23 @@ osdk untrust ./osdk.toml
 
 Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
 
+## Scenario: inspect container runtimes and native caches
+
+```bash
+osdk container doctor
+osdk container doctor --runtime docker --builder my-builder
+osdk container doctor --json
+osdk container cache status
+osdk container cache status --runtime buildkit --builder my-builder
+```
+
+The container commands inspect Docker, containerd, and Buildx through bounded,
+read-only native interfaces. Human output is concise and localized; `--json` is
+deterministic and schema-versioned. These commands do not start builders, prune
+data, rewrite native configuration, or scan private runtime stores.
+
+Guide: [Container runtimes and native caches](site/en/guide/containers.md)
+
 ## Scenario: inspect caches and reclaim storage
 
 ```bash
@@ -364,6 +382,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>` and public GitHub Releases through `github:owner/repo` |
 | Model providers | Hugging Face, ModelScope |
+| Container inspection | Docker Engine, containerd, Docker Buildx, native cache status |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
 | Shells | Bash, zsh, fish, PowerShell |
 | CLI languages | English, Chinese |
@@ -379,6 +398,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [npm developer tools](site/en/guide/npm-tools.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
+- [Container runtimes and native caches](site/en/guide/containers.md)
 - [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
 - [Implementation docs](site/en/guide/implementation/index.md)
 

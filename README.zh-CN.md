@@ -12,6 +12,7 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
 - 自动选择响应更快的 SDK 镜像和依赖 Registry；
 - 在网络不可用时复用已下载的元数据与产物；
 - 像管理开发工具一样管理 Hugging Face 和 ModelScope 模型快照；
+- 在不改变状态的前提下检查 Docker、containerd、Buildx 及其原生缓存；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
 
 从[快速上手](site/guide/getting-started.md)开始，或查看
@@ -298,6 +299,22 @@ osdk untrust ./osdk.toml
 
 指南：[下载源、离线与安全](site/guide/sources-security.md)
 
+## 场景：检查容器运行时与原生缓存
+
+```bash
+osdk container doctor
+osdk container doctor --runtime docker --builder my-builder
+osdk container doctor --json
+osdk container cache status
+osdk container cache status --runtime buildkit --builder my-builder
+```
+
+容器命令通过有界的只读原生接口检查 Docker、containerd 和 Buildx。人类可读输出
+简洁且支持中英文；`--json` 输出确定且带 schema 版本。这些命令不会启动构建器、
+清理数据、改写原生配置或扫描运行时私有存储。
+
+指南：[容器运行时与原生缓存](site/guide/containers.md)
+
 ## 场景：检查缓存并回收空间
 
 ```bash
@@ -340,6 +357,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包，或通过 `github:owner/repo` 安装公开 GitHub Release |
 | 模型平台 | Hugging Face、ModelScope |
+| 容器检查 | Docker Engine、containerd、Docker Buildx 与原生缓存状态 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
 | Shell | Bash、zsh、fish、PowerShell |
 | CLI 语言 | 中文、英文 |
@@ -355,6 +373,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [npm 开发工具](site/guide/npm-tools.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)
+- [容器运行时与原生缓存](site/guide/containers.md)
 - [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
 - [实现文档](site/guide/implementation/index.md)
 
