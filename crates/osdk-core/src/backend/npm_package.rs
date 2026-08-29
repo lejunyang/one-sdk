@@ -1536,6 +1536,30 @@ impl Backend for NpmPackageBackend {
         }
         Ok(names)
     }
+
+    fn dynamic_install_identity(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Option<InstallIdentity>> {
+        let scope = self.selected_scope(ctx, tv)?.unwrap_or(ToolScope::Project);
+        self.install_identity(ctx, tv, scope).map(Some)
+    }
+
+    fn validate_dynamic_install(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        install_root: &Path,
+        identity: &InstallIdentity,
+    ) -> Result<bool> {
+        let scope = match identity.scope {
+            InstallScope::Isolated => ToolScope::Project,
+            InstallScope::Global => ToolScope::Global,
+            InstallScope::ProjectManaged => return Ok(false),
+        };
+        self.validate_completed_install(ctx, tv, scope, install_root)
+    }
 }
 
 fn validate_npm_package_name(package: &str) -> Option<()> {

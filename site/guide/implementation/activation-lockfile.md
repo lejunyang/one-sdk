@@ -50,9 +50,16 @@ CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]`
 
 ## `osdk.lock` 的读取语义
 
+当前 writer 使用 schema 4。它为委托编译的工具增加可选的类型化 `native` 表，
+记录受管 runtime id、精确 runtime 版本，以及 `version-only`、
+`immutable-revision` 或 `floating-ref` 重放等级。已有 schema 1 到 3
+对非 native 工具仍可读取，并在下次成功写入时升级。由于旧 schema 无法表达 runtime
+绑定，其中的 `cargo:` 或 Go module `go:` 条目会失败，并明确要求重新生成 schema 4
+lock。Native metadata 只恢复为内部 request option，不会重复写入公开 `options` 表。
+
 项目 lockfile 是项目根或其祖先目录中的 `osdk.lock`。[`find`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L255) 从当前目录向祖先查找最近的现有文件。无参数且无 `-o` 的 `osdk install` 才尝试读取这条项目 lock 路径；显式工具或任何 `-o` 都绕过它，改从配置/参数收集请求。另外，`use --global npm:<package>` 维护用户配置目录中的 `osdk.lock`；该用户 lock 不参与上述祖先查找，也不是无参项目 `install` 的输入。
 
-读取时完整解析 TOML，并接受 lock schema 1、2 或当前 lock schema 3；其他版本会被拒绝。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。带通用 artifact 子表的非 npm 工具会被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；npm 工具明确不能带通用 artifact receipt。lock schema 3 的 npm 工具恢复公开选项以及 package、installer、scope、可选精确 Node 版本和原生 lock 身份；主 lock 中没有 graph payload 或路径。lock schema 2 仍是兼容读取格式：其 npm 条目指向 `osdk.lock.d/npm/<sha256>.yaml`，sidecar 通过大小、symlink、UTF-8 与 SHA-256 校验后，完整 graph 才作为内部 option 注入。这个旧 lock schema 2 graph sidecar 与 `.osdk-install.json` schema 1 无关。含 npm 条目的 lock schema 1 不会被消费，必须重新生成。大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。对带通用 artifact receipt 的 backend，全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum；动态 npm/GitHub 复用还要求精确匹配 `.osdk-install.json` 身份。只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model pull` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。lock schema 3 metadata、安装身份 schema 1 与旧 lock schema 2 sidecar 的兼容边界见 [npm 开发工具实现](./npm-tools)。
+读取时完整解析 TOML，并接受已有 lock schema 1 到 3 以及当前 lock schema 4；其他版本会被拒绝。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。带通用 artifact 子表的非 npm 工具会被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；npm 工具明确不能带通用 artifact receipt。lock schema 3 或 4 的 npm 工具恢复公开选项以及 package、installer、scope、可选精确 Node 版本和原生 lock 身份；主 lock 中没有 graph payload 或路径。lock schema 2 仍是兼容读取格式：其 npm 条目指向 `osdk.lock.d/npm/<sha256>.yaml`，sidecar 通过大小、symlink、UTF-8 与 SHA-256 校验后，完整 graph 才作为内部 option 注入。这个旧 lock schema 2 graph sidecar 与 `.osdk-install.json` schema 1 无关。含 npm 条目的 lock schema 1 不会被消费，必须重新生成。大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。对带通用 artifact receipt 的 backend，全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum；动态 npm/GitHub 复用还要求精确匹配 `.osdk-install.json` 身份。只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model pull` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。npm metadata、安装身份 schema 1 与旧 lock schema 2 sidecar 的兼容边界见 [npm 开发工具实现](./npm-tools)。
 
 平台键是 `os-arch`，Linux musl 额外带 `-musl`。`osdk lock` 对 Node 的 `arch` 选项使用目标架构键；普通 `upgrade` 使用当前 host 平台键。
 
@@ -60,7 +67,7 @@ CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]`
 
 写入目标由 [`project_lock_path`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs#L614) 决定：如果加载过项目配置，就固定写在该配置旁；否则复用向上找到的最近 lockfile；两者都没有时写当前目录的 `osdk.lock`。
 
-[`merge_resolved`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L771) 先读取整个现有文件，保留其他平台区段与顶层模型记录，但**清空并整体替换目标平台的 tools 表**。因此 `osdk lock node@20` 不是只合并一个 Node 条目：它会移除目标平台原先未包含在本次 resolved 集合里的工具。项目感知 npm `use` 与全局 npm `use` 改走 upsert：前者插入或替换 Node 和 npm 工具，后者在使用原生安装器时还包含受管 npm/pnpm manager；两者都保留同平台其他工具。写出时统一使用 lock schema 3，其中公开选项会在后续读取时注入请求，并与动态 inventory 身份核对；不含 npm 条目的 schema 1 会在下次成功写入时升级，含 npm 条目的 schema 1 则拒绝消费或写入。旧 lock schema 2 npm sidecar 在迁移前会回读校验，但 lock schema 3 写入只原子替换主 lock，不生成新 sidecar，也不删除原有 sidecar。内部 `__osdk_*` 选项不会写出；本地链接的 Rust toolchain 被拒绝，因为它不能形成可复现远程 artifact。模型 pull 则由 `merge_model` 只插入或替换同名 `[models]` 项，并保留平台表与其他模型，但同样不会迁移 schema 1 npm 条目。
+[`merge_resolved`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs#L771) 先读取整个现有文件，保留其他平台区段与顶层模型记录，但**清空并整体替换目标平台的 tools 表**。因此 `osdk lock node@20` 不是只合并一个 Node 条目：它会移除目标平台原先未包含在本次 resolved 集合里的工具。项目感知 npm `use` 与全局 npm `use` 改走 upsert：前者插入或替换 Node 和 npm 工具，后者在使用原生安装器时还包含受管 npm/pnpm manager；两者都保留同平台其他工具。写出时统一使用 lock schema 4，其中公开选项会在后续读取时注入请求，并与动态 inventory 身份核对；已有的非 native schema 1 到 3 仍可读取，并在下次成功写入时升级。不会尝试迁移尚未发布的 schema-4 之前 `cargo:` 或 Go module `go:` 条目，它们必须重新生成。Native 重放 metadata 只通过内部 request option 恢复，不会重复写入公开 options 表。含 npm 条目的 schema 1 仍拒绝消费或写入。旧 schema 2 npm sidecar 在迁移前会回读校验；当前写入只原子替换主 lock，不生成新 sidecar，也不删除旧 sidecar。内部 `__osdk_*` options 不会写出；本地链接的 Rust toolchain 被拒绝，因为它不能形成可复现远程 artifact。模型 pull 则由 `merge_model` 只插入或替换同名 `[models]` 项，并保留平台表与其他模型，但同样不会迁移 schema 1 npm 条目。
 
 保存过程先序列化完整文档，写同目录中包含 PID 和进程内序号的唯一临时文件，sync 文件后 replace `osdk.lock`，Unix 上还会 sync 父目录。项目 lock 的 read-modify-write 周围仍**没有进程锁**：两个并发 writer 可以都读到旧状态，最后一次成功 replace 可能覆盖另一方的合并结果；读取也不持有共享锁。全局 npm `use` 是例外，它在更新用户 lock、shim 和用户配置时持有 `global-npm-state.lock`。
 

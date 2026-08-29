@@ -1001,6 +1001,28 @@ impl Backend for GithubBackend {
             Ok(discovered)
         }
     }
+
+    fn dynamic_install_identity(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Option<InstallIdentity>> {
+        pipeline::locked_artifact(tv)?
+            .is_some()
+            .then(|| github_install_locator_for(&ctx.dirs, ctx.platform, self.id(), tv))
+            .transpose()
+            .map(|locator| locator.map(|locator| locator.identity().clone()))
+    }
+
+    fn validate_dynamic_install(
+        &self,
+        ctx: &Ctx,
+        _tv: &ToolVersion,
+        install_root: &Path,
+        identity: &InstallIdentity,
+    ) -> Result<bool> {
+        github_install_candidate_is_valid(ctx, install_root, identity)
+    }
 }
 
 pub(crate) fn github_install_locator(

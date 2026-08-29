@@ -27,6 +27,7 @@ pub mod go;
 pub mod http;
 pub mod java;
 pub mod jvm_tools;
+pub mod native_tool;
 pub mod node;
 pub mod npm_cli;
 pub mod npm_package;
@@ -149,6 +150,27 @@ pub trait Backend: Send + Sync {
 
     /// Executable names this version exposes (used to generate shims).
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>>;
+
+    /// Exact identity selected for a dynamic install. `None` retains inventory
+    /// discovery for backends whose artifact identity is learned at install.
+    fn dynamic_install_identity(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+    ) -> Result<Option<crate::tool::InstallIdentity>> {
+        Ok(None)
+    }
+
+    /// Validate provider-specific evidence after shared inventory validation.
+    fn validate_dynamic_install(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+        _install_root: &std::path::Path,
+        _identity: &crate::tool::InstallIdentity,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 
     /// Idiomatic version files this backend understands (e.g. `.nvmrc`).
     fn idiomatic_files(&self) -> &[&str] {

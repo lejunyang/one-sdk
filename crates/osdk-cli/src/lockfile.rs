@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use osdk_core::backend::native_tool::{
+    LOCKED_NATIVE_REPLAY_OPTION, LOCKED_NATIVE_RUNTIME_OPTION, LOCKED_NATIVE_RUNTIME_VERSION_OPTION,
+};
 use osdk_core::backend::npm_package::{
     LOCKED_NPM_LOCKFILE_OPTION, LOCKED_NPM_LOCK_FORMAT_OPTION, LOCKED_NPM_LOCK_SHA256_OPTION,
     LOCKED_NPM_NODE_VERSION_OPTION, LOCKED_NPM_PACKAGE_OPTION,
@@ -51,6 +54,43 @@ pub struct LockedTool {
     pub artifact: Option<LockedArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub npm: Option<LockedNpmGraph>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native: Option<LockedNativeTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LockedNativeTool {
+    pub runtime: String,
+    pub runtime_version: String,
+    pub replay: NativeReplay,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeReplay {
+    VersionOnly,
+    ImmutableRevision,
+    FloatingRef,
+}
+
+impl NativeReplay {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::VersionOnly => "version-only",
+            Self::ImmutableRevision => "immutable-revision",
+            Self::FloatingRef => "floating-ref",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "version-only" => Ok(Self::VersionOnly),
+            "immutable-revision" => Ok(Self::ImmutableRevision),
+            "floating-ref" => Ok(Self::FloatingRef),
+            _ => anyhow::bail!("unsupported native lock replay mode `{value}`"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,7 +231,7 @@ pub struct LockedModelFile {
 }
 
 fn schema_version() -> u32 {
-    3
+    4
 }
 
 impl Default for Lockfile {
@@ -212,6 +252,7 @@ impl Default for LockedTool {
             options: BTreeMap::new(),
             artifact: None,
             npm: None,
+            native: None,
         }
     }
 }
@@ -277,8 +318,13 @@ pub fn load(path: &Path) -> Result<Lockfile> {
         );
     }
     match lockfile.schema {
+        1 => {
+            reject_native_backends_before_schema_four(&lockfile)?;
+            reject_native_metadata_before_schema_four(&lockfile)?;
+        }
         2 => validate_schema_two(path, &lockfile, false)?,
         3 => validate_schema_three(&lockfile)?,
+        4 => validate_schema_four(&lockfile)?,
         _ => {}
     }
     Ok(lockfile)
@@ -343,6 +389,9 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
                     }
                 }
             }
+            if let Some(native) = &locked.native {
+                inject_native_metadata(&mut options, native);
+            }
             Ok(ToolRequest {
                 backend: backend.clone(),
                 spec: VersionSpec::Exact(locked.version.clone()),
@@ -379,7 +428,82 @@ fn inject_npm_metadata(options: &mut BTreeMap<String, String>, npm: &LockedNpmMe
     }
 }
 
+fn inject_native_metadata(options: &mut BTreeMap<String, String>, native: &LockedNativeTool) {
+    options.insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), native.runtime.clone());
+    options.insert(
+        LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
+        native.runtime_version.clone(),
+    );
+    options.insert(
+        LOCKED_NATIVE_REPLAY_OPTION.into(),
+        native.replay.as_str().into(),
+    );
+}
+
+fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
+    validate_schema_three_npm(lockfile)?;
+    for (platform, platform_lock) in &lockfile.platforms {
+        for (backend, locked) in &platform_lock.tools {
+            let native_namespace = native_runtime_for_backend(backend);
+            match (native_namespace, locked.native.as_ref()) {
+                (Some(expected_runtime), Some(native)) => {
+                    if locked.artifact.is_some() || locked.npm.is_some() {
+                        anyhow::bail!(
+                            "schema 4 native entry `{backend}` for platform `{platform}` cannot carry artifact or npm metadata"
+                        );
+                    }
+                    if native.runtime != expected_runtime {
+                        anyhow::bail!(
+                            "schema 4 native entry `{backend}` requires runtime `{expected_runtime}`, got `{}`",
+                            native.runtime
+                        );
+                    }
+                    validate_version_identity(&native.runtime, &native.runtime_version)?;
+                    let runtime = platform_lock.tools.get(expected_runtime).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "schema 4 native entry `{backend}` for platform `{platform}` requires `{expected_runtime}` in the same platform lock"
+                        )
+                    })?;
+                    if runtime.version != native.runtime_version {
+                        anyhow::bail!(
+                            "schema 4 native entry `{backend}` runtime version `{}` does not match `{expected_runtime}` entry `{}`",
+                            native.runtime_version,
+                            runtime.version
+                        );
+                    }
+                    if let Some(key) = locked.options.keys().find(|key| {
+                        matches!(
+                            key.as_str(),
+                            LOCKED_NATIVE_RUNTIME_OPTION
+                                | LOCKED_NATIVE_RUNTIME_VERSION_OPTION
+                                | LOCKED_NATIVE_REPLAY_OPTION
+                        )
+                    }) {
+                        anyhow::bail!(
+                            "schema 4 native entry `{backend}` cannot persist internal option `{key}`"
+                        );
+                    }
+                }
+                (Some(_), None) => anyhow::bail!(
+                    "schema 4 native entry `{backend}` for platform `{platform}` is missing native replay metadata"
+                ),
+                (None, Some(_)) => anyhow::bail!(
+                    "schema 4 non-native entry `{backend}` for platform `{platform}` cannot carry native replay metadata"
+                ),
+                (None, None) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
+    validate_schema_three_npm(lockfile)?;
+    reject_native_backends_before_schema_four(lockfile)?;
+    reject_native_metadata_before_schema_four(lockfile)
+}
+
+fn validate_schema_three_npm(lockfile: &Lockfile) -> Result<()> {
     for (platform, platform_lock) in &lockfile.platforms {
         let node = platform_lock.tools.get("node");
         for (backend, locked) in &platform_lock.tools {
@@ -453,6 +577,89 @@ fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
     Ok(())
 }
 
+fn reject_native_metadata_before_schema_four(lockfile: &Lockfile) -> Result<()> {
+    for (platform, platform_lock) in &lockfile.platforms {
+        if let Some((backend, _)) = platform_lock
+            .tools
+            .iter()
+            .find(|(_, locked)| locked.native.is_some())
+        {
+            anyhow::bail!(
+                "lock schema {} entry `{backend}` for platform `{platform}` cannot carry schema 4 native metadata",
+                lockfile.schema
+            );
+        }
+    }
+    Ok(())
+}
+
+fn native_runtime_for_backend(backend: &str) -> Option<&'static str> {
+    backend
+        .strip_prefix("cargo:")
+        .filter(|subject| valid_cargo_lock_subject(subject))
+        .map(|_| "rust")
+        .or_else(|| {
+            backend
+                .strip_prefix("go:")
+                .filter(|subject| valid_go_lock_subject(subject))
+                .map(|_| "go")
+        })
+}
+
+fn has_native_prefix(backend: &str) -> bool {
+    backend.starts_with("cargo:") || backend.starts_with("go:")
+}
+
+fn valid_cargo_lock_subject(subject: &str) -> bool {
+    !subject.is_empty()
+        && subject.len() <= 64
+        && !subject.starts_with(['-', '.'])
+        && !subject.ends_with(['-', '.'])
+        && subject.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn valid_go_lock_subject(subject: &str) -> bool {
+    if subject.is_empty()
+        || subject.len() > 4096
+        || subject.contains(['\\', '@', '?', '#'])
+        || subject.chars().any(char::is_control)
+        || subject.chars().any(char::is_whitespace)
+    {
+        return false;
+    }
+    let mut components = subject.split('/');
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let labels = first.split('.').collect::<Vec<_>>();
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && label
+                    .bytes()
+                    .last()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        && components.all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.ends_with('.')
+                && part.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                })
+        })
+}
+
 fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result<()> {
     let valid_format = match native_lock.kind {
         NpmInstaller::Aube => native_lock.format == "aube-v9",
@@ -474,7 +681,25 @@ fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result
 }
 
 fn validate_schema_two(path: &Path, lockfile: &Lockfile, read_graphs: bool) -> Result<()> {
-    validate_complete_npm_entries(path, lockfile, read_graphs)
+    validate_complete_npm_entries(path, lockfile, read_graphs)?;
+    reject_native_backends_before_schema_four(lockfile)?;
+    reject_native_metadata_before_schema_four(lockfile)
+}
+
+fn reject_native_backends_before_schema_four(lockfile: &Lockfile) -> Result<()> {
+    for (platform, platform_lock) in &lockfile.platforms {
+        if let Some((backend, _)) = platform_lock
+            .tools
+            .iter()
+            .find(|(backend, _)| has_native_prefix(backend))
+        {
+            anyhow::bail!(
+                "lock schema {} cannot represent native tool `{backend}` for platform `{platform}`; regenerate it as schema 4",
+                lockfile.schema
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_complete_npm_entries(
@@ -689,13 +914,15 @@ fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
 }
 
 fn validate_locked_tool_identity(backend: &str, locked: &LockedTool) -> Result<()> {
-    let canonical_http = backend.starts_with("http:")
-        && osdk_core::tool::ToolId::parse(backend)
-            .is_ok_and(|id| id.namespace() == Some("http") && id.to_string() == backend);
-    if (backend.starts_with("http:") && !canonical_http)
-        || (!backend.starts_with("http:")
+    let dynamic = backend.contains(':');
+    let canonical_dynamic = dynamic
+        && ((has_native_prefix(backend) && native_runtime_for_backend(backend).is_some())
+            || osdk_core::tool::ToolId::parse(backend)
+                .is_ok_and(|id| id.is_dynamic() && id.to_string() == backend));
+    if (dynamic && !canonical_dynamic)
+        || (!dynamic
             && (backend.trim().is_empty()
-                || backend.split([':', '/', '\\']).any(|part| {
+                || backend.split(['/', '\\']).any(|part| {
                     part.is_empty()
                         || part == "."
                         || part == ".."
@@ -979,6 +1206,7 @@ pub fn merge_resolved_with_scope(
                 options,
                 artifact,
                 npm: npm_metadata.map(LockedNpmGraph::Metadata),
+                native: locked_native_metadata(version)?,
             },
         );
     }
@@ -1087,6 +1315,7 @@ pub fn upsert_resolved_many_with_scope(
                 options,
                 artifact,
                 npm: npm_metadata.map(LockedNpmGraph::Metadata),
+                native: locked_native_metadata(version)?,
             },
         );
     }
@@ -1265,6 +1494,37 @@ fn locked_npm_metadata(
     }))
 }
 
+fn locked_native_metadata(version: &ToolVersion) -> Result<Option<LockedNativeTool>> {
+    let Some(expected_runtime) = native_runtime_for_backend(&version.backend) else {
+        return Ok(None);
+    };
+    let runtime = version.options.get(LOCKED_NATIVE_RUNTIME_OPTION);
+    let runtime_version = version.options.get(LOCKED_NATIVE_RUNTIME_VERSION_OPTION);
+    let replay = version.options.get(LOCKED_NATIVE_REPLAY_OPTION);
+    if runtime.is_none() && runtime_version.is_none() && replay.is_none() {
+        return Ok(None);
+    }
+    let required = |key: &str, value: Option<&String>| {
+        value
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("native lock metadata is missing `{key}`"))
+    };
+    let metadata = LockedNativeTool {
+        runtime: required(LOCKED_NATIVE_RUNTIME_OPTION, runtime)?,
+        runtime_version: required(LOCKED_NATIVE_RUNTIME_VERSION_OPTION, runtime_version)?,
+        replay: NativeReplay::parse(&required(LOCKED_NATIVE_REPLAY_OPTION, replay)?)?,
+    };
+    if metadata.runtime != expected_runtime {
+        anyhow::bail!(
+            "native tool `{}` requires runtime `{expected_runtime}`, got `{}`",
+            version.backend,
+            metadata.runtime
+        );
+    }
+    validate_version_identity(&metadata.runtime, &metadata.runtime_version)?;
+    Ok(Some(metadata))
+}
+
 fn locked_native_lock_from_options(version: &ToolVersion) -> Result<Option<LockedNativeLock>> {
     let values = [
         version.options.get(LOCKED_NPM_NATIVE_LOCK_KIND_OPTION),
@@ -1301,13 +1561,17 @@ fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
     }
     if lockfile.schema == 1 {
         reject_unmigratable_schema_one_npm_entries(lockfile)?;
+        reject_native_backends_before_schema_four(lockfile)?;
+        reject_native_metadata_before_schema_four(lockfile)?;
     } else if lockfile.schema == 2 {
         validate_schema_two(path, lockfile, true)?;
+    } else if lockfile.schema == 3 {
+        validate_schema_three(lockfile)?;
     }
     let mut lockfile = lockfile.clone();
     migrate_npm_entries_to_schema_three(&mut lockfile)?;
     lockfile.schema = schema_version();
-    validate_schema_three(&lockfile)?;
+    validate_schema_four(&lockfile)?;
     let text = toml::to_string_pretty(&lockfile)?;
     if text.len() as u64 > MAX_LOCKFILE_BYTES {
         anyhow::bail!(osdk_core::t!(
@@ -1498,6 +1762,7 @@ mod tests {
                         options: BTreeMap::new(),
                         artifact: None,
                         npm: None,
+                        native: None,
                     },
                 )]),
             },
@@ -1639,6 +1904,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                             options: BTreeMap::new(),
                             artifact: None,
                             npm: None,
+                            native: None,
                         },
                     )]),
                 },
@@ -1647,7 +1913,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         };
         save(&path, &legacy).unwrap();
         let lock = load(&path).unwrap();
-        assert_eq!(lock.schema, 3);
+        assert_eq!(lock.schema, schema_version());
         assert!(matches!(
             lock.platforms["linux-x64"].tools["npm:prettier"].npm,
             Some(LockedNpmGraph::Metadata(_))
@@ -1712,7 +1978,7 @@ version = "3.6.2"
         )
         .unwrap();
         let migrated = load(&path).unwrap();
-        assert_eq!(migrated.schema, 3);
+        assert_eq!(migrated.schema, schema_version());
         assert!(matches!(
             migrated.platforms["windows-x64"].tools["npm:prettier"].npm,
             Some(LockedNpmGraph::Metadata(_))
@@ -2129,7 +2395,7 @@ lockfile = "lockfileVersion: '9.0'"
 
         merge_model(&path, &test_model_manifest()).unwrap();
         let lock = load(&path).unwrap();
-        assert_eq!(lock.schema, 3);
+        assert_eq!(lock.schema, schema_version());
         assert!(matches!(
             lock.platforms["linux-x64"].tools["npm:prettier"].npm,
             Some(LockedNpmGraph::Metadata(_))
@@ -2673,6 +2939,265 @@ checksum = "sha256:{digest}"
                 },
             )
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn lock_only_native_id_validation_is_strict_without_registering_backends() {
+        for valid in [
+            "cargo:ripgrep",
+            "cargo:cargo_edit",
+            "go:example.com/Acme/tool",
+        ] {
+            let mut locked = LockedTool::default();
+            locked.version = "1.2.3".into();
+            validate_locked_tool_identity(valid, &locked).unwrap();
+        }
+        for invalid in [
+            "cargo:",
+            "cargo:RipGrep",
+            "cargo:foo/bar",
+            "cargo:../tool",
+            "go:",
+            "go:tool",
+            "go:example.com//tool",
+            "go:example.com/../tool",
+            "go:example.com/tool@v1",
+            "go:exa$mple.com/tool",
+            "go:-example.com/tool",
+            "go:example!.com/tool",
+        ] {
+            let mut locked = LockedTool::default();
+            locked.version = "1.2.3".into();
+            assert!(
+                validate_locked_tool_identity(invalid, &locked).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(matches!(
+            ToolRequest::parse("cargo:ripgrep@1.2.3"),
+            Err(osdk_core::Error::UnknownBackend(_))
+        ));
+    }
+
+    #[test]
+    fn schema_four_native_metadata_round_trips_into_private_replay_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(
+            &path,
+            r#"schema = 4
+
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep"]
+request = "14"
+version = "14.1.1"
+options = { locked = "true" }
+
+[platforms.linux-x64.tools."cargo:ripgrep".native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "version-only"
+"#,
+        )
+        .unwrap();
+
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        let cargo = requests
+            .iter()
+            .find(|request| request.backend == "cargo:ripgrep")
+            .unwrap();
+        assert_eq!(cargo.spec, VersionSpec::Exact("14.1.1".into()));
+        assert_eq!(cargo.options["locked"], "true");
+        assert_eq!(cargo.options[LOCKED_NATIVE_RUNTIME_OPTION], "rust");
+        assert_eq!(
+            cargo.options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
+            "1.91.1"
+        );
+        assert_eq!(cargo.options[LOCKED_NATIVE_REPLAY_OPTION], "version-only");
+    }
+
+    #[test]
+    fn native_writer_emits_typed_metadata_without_private_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let request = ToolRequest {
+            backend: "cargo:ripgrep".into(),
+            spec: VersionSpec::Exact("14.1.1".into()),
+            options: BTreeMap::new(),
+        };
+        let mut version = ToolVersion::new("cargo:ripgrep", "14.1.1");
+        version.options.extend(BTreeMap::from([
+            (LOCKED_NATIVE_RUNTIME_OPTION.into(), "rust".into()),
+            (LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(), "1.91.1".into()),
+            (
+                LOCKED_NATIVE_REPLAY_OPTION.into(),
+                "immutable-revision".into(),
+            ),
+            ("locked".into(), "true".into()),
+        ]));
+        merge_resolved(
+            &path,
+            linux(),
+            &test_dirs(temp.path()),
+            &[
+                (
+                    ToolRequest::parse("rust@1.91.1").unwrap(),
+                    ToolVersion::new("rust", "1.91.1"),
+                ),
+                (request, version),
+            ],
+        )
+        .unwrap();
+
+        let lock = load(&path).unwrap();
+        let cargo = &lock.platforms["linux-x64"].tools["cargo:ripgrep"];
+        assert_eq!(
+            cargo.native,
+            Some(LockedNativeTool {
+                runtime: "rust".into(),
+                runtime_version: "1.91.1".into(),
+                replay: NativeReplay::ImmutableRevision,
+            })
+        );
+        assert_eq!(
+            cargo.options,
+            BTreeMap::from([("locked".into(), "true".into())])
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("schema = 4"));
+        assert!(!text.contains("__osdk_native"));
+    }
+
+    #[test]
+    fn schema_four_native_metadata_requires_matching_runtime_and_no_other_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let valid = r#"schema = 4
+
+[platforms.linux-x64.tools.go]
+request = "1.24.0"
+version = "1.24.0"
+
+[platforms.linux-x64.tools."go:example.com/acme/tool"]
+request = "1.2.3"
+version = "1.2.3"
+
+[platforms.linux-x64.tools."go:example.com/acme/tool".native]
+runtime = "go"
+runtime_version = "1.24.0"
+replay = "version-only"
+"#;
+        std::fs::write(&path, valid).unwrap();
+        load(&path).unwrap();
+
+        std::fs::write(
+            &path,
+            valid.replace(
+                "runtime_version = \"1.24.0\"",
+                "runtime_version = \"1.23.0\"",
+            ),
+        )
+        .unwrap();
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
+
+        std::fs::write(
+            &path,
+            valid.replace("runtime = \"go\"", "runtime = \"rust\""),
+        )
+        .unwrap();
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("requires runtime"));
+
+        std::fs::write(
+            &path,
+            valid.replace(
+                "version = \"1.2.3\"\n\n[platforms.linux-x64.tools.\"go:example.com/acme/tool\".native]",
+                "version = \"1.2.3\"\nartifact = { url = \"https://example.test/tool\", file_name = \"tool\" }\n\n[platforms.linux-x64.tools.\"go:example.com/acme/tool\".native]",
+            ),
+        )
+        .unwrap();
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot carry"));
+    }
+
+    #[test]
+    fn schemas_one_through_three_remain_readable_and_upgrade_on_save() {
+        let temp = tempfile::tempdir().unwrap();
+        for schema in [1, 3] {
+            let path = temp.path().join(format!("schema-{schema}.lock"));
+            std::fs::write(
+                &path,
+                format!(
+                    "schema = {schema}\n\n[platforms.linux-x64.tools.node]\nrequest = \"20\"\nversion = \"20.19.0\"\n"
+                ),
+            )
+            .unwrap();
+            let loaded = load(&path).unwrap();
+            assert_eq!(loaded.schema, schema);
+            save(&path, &loaded).unwrap();
+            assert_eq!(load(&path).unwrap().schema, 4);
+        }
+
+        let path = temp.path().join("schema-2.lock");
+        std::fs::write(&path, "schema = 2\n").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.schema, 2);
+        save(&path, &loaded).unwrap();
+        assert_eq!(load(&path).unwrap().schema, 4);
+    }
+
+    #[test]
+    fn schemas_one_through_three_reject_native_tools_without_replay_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        for schema in [1, 2, 3] {
+            let path = temp.path().join(format!("native-schema-{schema}.lock"));
+            std::fs::write(
+                &path,
+                format!(
+                    "schema = {schema}\n\n[platforms.linux-x64.tools.\"cargo:ripgrep\"]\nrequest = \"14\"\nversion = \"14.1.1\"\n"
+                ),
+            )
+            .unwrap();
+            let error = load(&path).unwrap_err();
+            assert!(error.to_string().contains("schema 4"), "{schema}: {error}");
+        }
+    }
+
+    #[test]
+    fn schemas_one_and_two_reject_schema_four_metadata_on_other_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        for schema in [1, 2] {
+            let path = temp.path().join(format!("metadata-schema-{schema}.lock"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"schema = {schema}
+
+[platforms.linux-x64.tools.node]
+request = "20"
+version = "20.19.0"
+
+[platforms.linux-x64.tools.node.native]
+runtime = "go"
+runtime_version = "1.24.0"
+replay = "version-only"
+"#
+                ),
+            )
+            .unwrap();
+            let error = load(&path).unwrap_err();
+            assert!(error.to_string().contains("native metadata"), "{error}");
         }
     }
 

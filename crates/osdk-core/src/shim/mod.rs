@@ -13,7 +13,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::backend::npm_package::NpmPackageBackend;
 use crate::backend::{Backend, Ctx};
 use crate::dirs::{create_dir_all, Dirs};
 use crate::error::{Error, Result};
@@ -154,7 +153,9 @@ pub fn validated_dynamic_install(
     request: &ToolRequest,
     version: &str,
 ) -> Result<ValidatedDynamicInstall> {
-    let (identity, root) = selected_dynamic_install_from_report(ctx, report, request, version)?;
+    let backend = crate::backend::registry::Registry::load(&ctx.dirs)?.get(&request.backend)?;
+    let (identity, root) =
+        selected_dynamic_install_from_report(ctx, report, backend.as_ref(), request, version)?;
     let locator = crate::dirs::InstallLocator::new(&ctx.dirs, identity.clone())?;
     if !std::fs::symlink_metadata(root.join(".osdk-complete"))
         .is_ok_and(|metadata| metadata.file_type().is_file())
@@ -184,35 +185,11 @@ pub fn validated_dynamic_install(
             request.backend
         )));
     }
-    if let Some(backend) = NpmPackageBackend::from_id(&request.backend) {
-        let scope = configured_npm_scope(ctx, request)?.unwrap_or(ToolScope::Project);
-        if let Some(node_version) =
-            crate::backend::npm_package::exact_node_dependency(&manifest.identity)
-        {
-            if !crate::backend::npm_package::managed_node_is_runnable(ctx, node_version)? {
-                return Err(Error::other(crate::t!(
-                    "err.shim_managed_node_required",
-                    tool = request.backend
-                )));
-            }
-        }
-        let mut selected = ToolVersion::new(&request.backend, version);
-        selected.options = request.options.clone();
-        if !backend.validate_completed_install(ctx, &selected, scope, &root)? {
-            return Err(Error::other(format!(
-                "dynamic tool `{}@{version}` has invalid npm install evidence; reinstall it before use",
-                request.backend
-            )));
-        }
-    } else if request.backend.starts_with("http:")
-        && !crate::backend::http::HttpBackend::install_candidate_is_valid(
-            &ctx.dirs,
-            &root,
-            &manifest.identity,
-        )?
-    {
+    let mut selected = ToolVersion::new(&request.backend, version);
+    selected.options = request.options.clone();
+    if !backend.validate_dynamic_install(ctx, &selected, &root, &manifest.identity)? {
         return Err(Error::other(format!(
-            "dynamic tool `{}@{version}` has invalid HTTP artifact evidence; reinstall it before use",
+            "dynamic tool `{}@{version}` has invalid provider evidence; reinstall it before use",
             request.backend
         )));
     }
@@ -247,37 +224,30 @@ pub fn dynamic_bin_ownership(report: &ScanReport) -> BTreeMap<String, Vec<BinOwn
 
 pub fn selected_dynamic_install_identity(
     ctx: &Ctx,
+    backend: &dyn Backend,
     request: &ToolRequest,
     version: &str,
 ) -> Result<crate::tool::InstallIdentity> {
     let mut tv = ToolVersion::new(&request.backend, version);
     tv.options = request.options.clone();
-    if let Some(backend) = NpmPackageBackend::from_id(&request.backend) {
-        let scope = configured_npm_scope(ctx, request)?.unwrap_or(ToolScope::Project);
-        return backend.install_identity(ctx, &tv, scope);
-    }
-    if let Some(backend) = crate::backend::http::HttpBackend::from_id(&request.backend) {
-        return backend
-            .installed_locator(ctx, &tv)
-            .map(|locator| locator.identity().clone());
-    }
-    let backend = crate::backend::github::GithubBackend::from_id(&request.backend)
-        .ok_or_else(|| Error::UnknownBackend(request.backend.clone()))?;
-    crate::backend::github::github_install_locator(ctx, backend.id(), &tv)
-        .map(|locator| locator.identity().clone())
+    backend.dynamic_install_identity(ctx, &tv)?.ok_or_else(|| {
+        Error::other(format!(
+            "dynamic tool `{}@{version}` requires installed identity discovery",
+            request.backend
+        ))
+    })
 }
 
 fn selected_dynamic_install_from_report(
     ctx: &Ctx,
     report: &ScanReport,
+    backend: &dyn Backend,
     request: &ToolRequest,
     version: &str,
 ) -> Result<(crate::tool::InstallIdentity, std::path::PathBuf)> {
-    if request.backend.starts_with("github:")
-        && !request
-            .options
-            .contains_key(crate::pipeline::LOCKED_ARTIFACT_URL_OPTION)
-    {
+    let mut selected = ToolVersion::new(&request.backend, version);
+    selected.options = request.options.clone();
+    if backend.dynamic_install_identity(ctx, &selected)?.is_none() {
         let scope = crate::tool::InstallScope::Isolated;
         let expected_options = crate::tool::dynamic_identity_options(
             &crate::tool::ToolId::parse(&request.backend)?,
@@ -293,12 +263,9 @@ fn selected_dynamic_install_from_report(
                 && identity.material_options == expected_options
                 && std::fs::symlink_metadata(install.install_root.join(".osdk-complete"))
                     .is_ok_and(|metadata| metadata.file_type().is_file())
-                && crate::backend::github::github_install_candidate_is_valid(
-                    ctx,
-                    &install.install_root,
-                    identity,
-                )
-                .unwrap_or(false)
+                && backend
+                    .validate_dynamic_install(ctx, &selected, &install.install_root, identity)
+                    .unwrap_or(false)
         });
         let first = matching.next();
         if matching.next().is_some() {
@@ -318,7 +285,7 @@ fn selected_dynamic_install_from_report(
             request.backend
         )));
     }
-    let identity = selected_dynamic_install_identity(ctx, request, version)?;
+    let identity = selected_dynamic_install_identity(ctx, backend, request, version)?;
     let root = crate::dirs::InstallLocator::new(&ctx.dirs, identity.clone())?
         .install_root()
         .to_path_buf();
@@ -481,6 +448,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::backend::npm_package::NpmPackageBackend;
     use crate::config::{Config, Settings, SourcesConfig, ToolConfigEntry, ToolConfigOrigin};
     use crate::inventory::DynamicToolBin;
     use crate::platform::Platform;

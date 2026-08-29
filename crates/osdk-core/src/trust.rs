@@ -79,24 +79,28 @@ pub fn requires_trust(path: &Path) -> Result<bool> {
         .and_then(toml::Value::as_table)
         .is_some_and(|tools| {
             tools.iter().any(|(key, value)| {
-                key.starts_with("npm:")
-                    || key.starts_with("http:")
-                    || value.as_str().is_some_and(|value| {
-                        value.starts_with("npm:") || value.starts_with("http:")
-                    })
+                is_recognized_dynamic_tool(key)
+                    || value.as_str().is_some_and(is_recognized_dynamic_request)
                     || value
                         .as_table()
                         .and_then(|entry| entry.get("version"))
                         .and_then(toml::Value::as_str)
-                        .is_some_and(|value| {
-                            value.starts_with("npm:") || value.starts_with("http:")
-                        })
+                        .is_some_and(is_recognized_dynamic_request)
             })
         });
     Ok(dynamic_tool_activation
         || table
             .keys()
             .any(|key| !matches!(key.as_str(), "tools" | "aliases")))
+}
+
+fn is_recognized_dynamic_tool(value: &str) -> bool {
+    crate::tool::ToolId::parse(value).is_ok_and(|tool| tool.is_dynamic())
+}
+
+fn is_recognized_dynamic_request(value: &str) -> bool {
+    crate::version::ToolRequest::parse(value)
+        .is_ok_and(|request| is_recognized_dynamic_tool(&request.backend))
 }
 
 pub fn is_trusted(
@@ -513,5 +517,21 @@ mod tests {
         )
         .unwrap();
         assert!(requires_trust(&path).unwrap());
+    }
+
+    #[test]
+    fn every_recognized_dynamic_namespace_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        for tool in [
+            "npm:prettier",
+            "github:cli/cli",
+            "http:https://downloads.example.test/tool-{version}",
+        ] {
+            std::fs::write(&path, format!("[tools]\n{tool:?} = \"1.2.3\"\n")).unwrap();
+            assert!(requires_trust(&path).unwrap(), "{tool}");
+        }
+        std::fs::write(&path, "[tools]\nfixture = \"unknown:tool@1.2.3\"\n").unwrap();
+        assert!(!requires_trust(&path).unwrap());
     }
 }

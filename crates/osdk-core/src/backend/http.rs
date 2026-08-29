@@ -430,6 +430,25 @@ impl Backend for HttpBackend {
                 .collect(),
         )
     }
+
+    fn dynamic_install_identity(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Option<InstallIdentity>> {
+        self.installed_locator(ctx, tv)
+            .map(|locator| Some(locator.identity().clone()))
+    }
+
+    fn validate_dynamic_install(
+        &self,
+        ctx: &Ctx,
+        _tv: &ToolVersion,
+        install_root: &Path,
+        identity: &InstallIdentity,
+    ) -> Result<bool> {
+        Self::install_candidate_is_valid(&ctx.dirs, install_root, identity)
+    }
 }
 
 impl HttpArtifactKind {
