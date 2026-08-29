@@ -225,4 +225,4 @@ size/format/fingerprint，但不包含现有原生配置内容或生成的 candi
 这些命令均为只读：不会拉取完整 image、清理缓存、改写 daemon 配置、启动或重建
 builder、重启 daemon，也不会检查实现私有的存储目录。Registry 测试只执行上文所述
 有界 metadata 与 Range 读取。探测、规划与披露边界见
-[容器诊断实现](./implementation/containers)。
+[容器诊断与规划实现](./implementation/containers)。

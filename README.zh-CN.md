@@ -12,7 +12,7 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
 - 自动选择响应更快的 SDK 镜像和依赖 Registry；
 - 在网络不可用时复用已下载的元数据与产物；
 - 像管理开发工具一样管理 Hugging Face 和 ModelScope 模型快照；
-- 在不改变状态的前提下检查 Docker、containerd、Buildx 及其原生缓存；
+- 在不改变状态的前提下检查 Docker、containerd、Buildx、OCI Registry、mirror plan 与原生缓存；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
 
 从[快速上手](site/guide/getting-started.md)开始，或查看
@@ -351,7 +351,7 @@ Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与�
 顺序检查 mirror。每份 mirror plan 只针对一个已配置 Registry 和一个显式 Docker、
 containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；本来可执行的本地 plan 如果没有
 显式原生配置路径，会标为 `manual-only`。规划不会写原生配置、启动 builder 或重启 daemon。
-Plan JSON 会包含操作所需的绝对路径、builder 名、mirror origin 及是否存在 path prefix，
+Plan JSON 可能包含操作所需的绝对路径、builder 名、mirror origin 及是否存在 path prefix，
 但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。
 
 指南：[容器运行时、Registry 与原生缓存](site/guide/containers.md)

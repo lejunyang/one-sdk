@@ -12,7 +12,7 @@ package managers, developer tools, and model snapshots. Use it to:
 - choose responsive SDK mirrors and dependency registries automatically;
 - work from downloaded metadata and artifacts when the network is unavailable;
 - manage Hugging Face and ModelScope snapshots alongside development tools;
-- inspect Docker, containerd, Buildx, and their native caches without changing state;
+- inspect Docker, containerd, Buildx, OCI registries, mirror plans, and native caches without changing state;
 - inspect storage, caches, active versions, and environment health in English or
   Chinese.
 
@@ -381,7 +381,7 @@ mirror plan always targets one configured registry and one explicit Docker,
 containerd, or BuildKit control plane. It reports a deterministic `plan_id`;
 without an explicit native config path a locally actionable plan is
 `manual-only`. Planning never writes native configuration, starts builders, or
-restarts daemons. Plan JSON contains operational absolute paths, builder names,
+restarts daemons. Plan JSON can expose operational absolute paths, builder names,
 and mirror origins plus whether a path prefix exists; exact mirror prefixes,
 existing configuration contents, and generated candidate bytes remain hidden.
 

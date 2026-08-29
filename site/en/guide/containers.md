@@ -259,5 +259,5 @@ These commands are read-only. They do not pull complete images, prune caches,
 rewrite daemon configuration, start or recreate builders, restart daemons, or
 inspect implementation-private store directories. Registry tests perform only
 the bounded metadata and Range reads described above. See
-[Container diagnostics implementation](./implementation/containers) for the
-probe, planning, and disclosure boundaries.
+[Container diagnostics and planning implementation](./implementation/containers)
+for the probe, planning, and disclosure boundaries.
