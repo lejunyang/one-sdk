@@ -50,6 +50,16 @@ pub use reference::{
     ImageReference, ImageSelector, ImageTag, OciDigest, OciPlatform, ReferenceError, RegistryName,
     RepositoryName,
 };
+pub use registry::{
+    diagnose_registry, ApiCheck, ApiCheckStatus, BlobRangeCheck, BlobRangeStatus, ManifestCheck,
+    ManifestCheckStatus, ManifestKind, MirrorCheck, MirrorCheckStatus, RegistryDiagnosticOptions,
+    RegistryDiagnosticReport, RegistryDiagnosticStatus, RegistryEndpoint, RegistryLimits,
+    RegistryMethod, RegistryProtocolError, RegistryRequest, RegistryResponse, RegistryTransport,
+    RegistryTransportError, RegistryTransportFuture, ReqwestRegistryTransport,
+    DEFAULT_BLOB_SAMPLE_BYTES, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_MANIFEST_BYTES,
+    DEFAULT_MAX_REDIRECTS, DEFAULT_MAX_REQUESTS, DEFAULT_REQUEST_TIMEOUT, DEFAULT_TOTAL_TIMEOUT,
+    REGISTRY_DIAGNOSTIC_SCHEMA_VERSION,
+};
 
 pub use redact::{
     CommandPurpose, HeaderName, NativeProgram, RedactedCommand, RedactedHeader, RedactedUrl,
