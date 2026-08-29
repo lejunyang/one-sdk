@@ -21,13 +21,22 @@ selection probes Docker and containerd in a stable order and ranks their typed
 `DiagnosticStatus`: healthy, degraded, client-only, permission-denied,
 unreachable, unsupported-version, then not-installed. Docker is the fixed
 tie-break. This avoids treating an installed but unusable client as healthier
-than a responsive daemon. The schema-v1 doctor wrapper retains both attempted
-reports, even though human output leads with the selected conclusion.
+than a responsive daemon. The schema-v2 doctor wrapper retains both attempted
+reports and a closed tagged details object for each runtime, even though human
+output leads with the selected conclusion.
 
 Buildx remains a separate optional report. Auto and Docker selection inspect it;
 explicit containerd skips it unless the caller supplied `--builder`. A named
 selector is validated before invocation and never appears in serialized
 evidence.
+
+The details projection reuses data from those same probes and starts no extra
+processes. Docker exposes typed version, context-kind, daemon-platform,
+rootless/Desktop, and origin-only mirror facts. containerd exposes version and
+configuration-state facts but not namespace or config paths. BuildKit replaces
+builder/node names with stable ordinals, validates platform tokens, and reduces
+endpoints to scheme/host/port origins. Missing facts remain absent rather than
+being inferred.
 
 ## Read-only probes
 
@@ -229,8 +238,8 @@ name—is then passed directly to the one native prune launch.
 
 ## Serialization and redaction
 
-`DiagnosticReport` and `NativeCacheStatus` are closed schema-version-1
-contracts. Ordered maps/sets and sorted cache records make repeated JSON output
+`DiagnosticReport` is a closed schema-version-2 contract; `NativeCacheStatus`
+remains schema version 1. Ordered maps/sets and sorted cache records make repeated JSON output
 deterministic. Pull selection and prune previews also use canonical typed inputs
 before native launch; the prune preview identity deliberately includes the exact
 target and warning. JSON field names and enum values are never localized. Human

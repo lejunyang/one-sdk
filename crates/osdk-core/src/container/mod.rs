@@ -19,7 +19,8 @@ pub mod runtime;
 
 pub use buildkit::{
     BuildPlatform, BuilderDriver, BuilderNode, BuilderNodeStatus, BuildkitAdapter,
-    BuildkitDiscovery, BuildxBuilderSelector, BuildxBuilderSelectorError, SelectedBuilder,
+    BuildkitDiagnosticDetails, BuildkitDiscovery, BuildkitNodeDiagnosticDetails,
+    BuildxBuilderSelector, BuildxBuilderSelectorError, SelectedBuilder,
 };
 pub use cache::{
     BuildxCacheQuery, CacheQueryStatus, ContainerdCacheQuery, DockerCacheQuery, NativeCacheOwner,
@@ -28,12 +29,12 @@ pub use cache::{
 };
 pub use containerd::{
     parse_effective_config, parse_hosts_toml, read_hosts_toml, ContainerdAdapter, ContainerdConfig,
-    ContainerdDiscovery, ContainerdParseError, ContainerdVersions, LegacyRegistryWarning,
-    RegistryHost, RegistryHostCapability, RegistryHostTls, RegistryHosts,
+    ContainerdDiagnosticDetails, ContainerdDiscovery, ContainerdParseError, ContainerdVersions,
+    LegacyRegistryWarning, RegistryHost, RegistryHostCapability, RegistryHostTls, RegistryHosts,
 };
 pub use docker::{
-    DockerAdapter, DockerContext, DockerContextKind, DockerDiscovery, DockerInfo, DockerParseError,
-    DockerVersion,
+    DockerAdapter, DockerContext, DockerContextKind, DockerDaemonArchitecture, DockerDaemonOs,
+    DockerDiagnosticDetails, DockerDiscovery, DockerInfo, DockerParseError, DockerVersion,
 };
 pub use mirror::{
     plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors, BuildkitMirrorPlanRequest,
@@ -63,12 +64,13 @@ pub use registry::{
 };
 
 pub use redact::{
-    CommandPurpose, HeaderName, NativeProgram, RedactedCommand, RedactedHeader, RedactedUrl,
-    RedactedUrlError, RedactedValue, REDACTED,
+    CommandPurpose, HeaderName, NativeProgram, RedactedCommand, RedactedHeader, RedactedOrigin,
+    RedactedUrl, RedactedUrlError, RedactedValue, REDACTED,
 };
 pub use report::{
-    Capability, CapabilityStatus, DiagnosticEvidence, DiagnosticReport, DiagnosticStatus, Endpoint,
-    EndpointScope, EndpointTransport, Privilege, RuntimeKind, DIAGNOSTIC_SCHEMA_VERSION,
+    Capability, CapabilityStatus, DiagnosticDetails, DiagnosticEvidence, DiagnosticReport,
+    DiagnosticStatus, Endpoint, EndpointScope, EndpointTransport, Privilege, RuntimeKind,
+    DIAGNOSTIC_SCHEMA_VERSION,
 };
 pub use runtime::{ForegroundCommand, ProbeCommand, RuntimeAdapter};
 

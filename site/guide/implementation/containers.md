@@ -16,12 +16,18 @@ Docker Engine、containerd 和 BuildKit 视为不同所有者；osdk 不会引�
 显式选择 Docker 或 containerd 时只调用对应运行时适配器。自动选择按固定顺序探测
 Docker 与 containerd，并按类型化 `DiagnosticStatus` 排序：健康、降级、仅客户端、
 权限不足、不可达、版本不受支持、未安装；同状态时固定选择 Docker。这样不会把一个
-只安装了客户端但不可用的环境排在可响应的守护进程之前。schema-v1 doctor 包装对象会
-保留两份尝试报告，而人类可读输出首先给出选中结论。
+只安装了客户端但不可用的环境排在可响应的守护进程之前。schema-v2 doctor 包装对象会
+保留两份尝试报告以及各 runtime 的封闭 tagged details，而人类可读输出首先给出选中结论。
 
 Buildx 始终是独立的可选报告。自动选择和 Docker 选择会检查它；显式 containerd
 默认跳过，除非调用方传入 `--builder`。命名选择器在调用前完成验证，且不会进入序列化
 证据。
+
+details 投影只复用同一次探测的数据，不会启动额外进程。Docker 仅暴露类型化版本、
+context 类型、daemon 平台、rootless/Desktop 与只含 origin 的 mirror；containerd 暴露
+版本和配置状态，但不暴露 namespace 或配置路径；BuildKit 用稳定序号代替 builder/node
+名称，校验平台 token，并把 endpoint 缩减为 scheme/host/port origin。缺失事实保持缺失，
+不会被推断补齐。
 
 ## 只读探测
 
@@ -182,7 +188,8 @@ prune 启动的是已经验证的 endpoint 值，而不是可变 context 名称�
 
 ## 序列化与脱敏
 
-`DiagnosticReport` 和 `NativeCacheStatus` 是封闭的 schema version 1 契约。
+`DiagnosticReport` 是封闭的 schema version 2 契约；`NativeCacheStatus` 仍为 schema
+version 1。
 有序 map/set 与已排序缓存记录保证重复 JSON 输出确定一致。Pull 选择与 prune preview 也会
 在原生启动前使用规范类型化输入；prune preview 身份刻意包含精确 target 与 warning。JSON
 字段名和枚举值永不本地化；人类可读标签只在选择完成后通过中英文 catalog 生成。

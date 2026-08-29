@@ -29,11 +29,17 @@ builder. Explicit containerd diagnostics skip Buildx unless `--builder NAME` is
 provided. Builder inspection never uses `--bootstrap`, so it does not start a
 stopped builder.
 
-Human output starts with the selected runtime and its status. `--json` emits a
-deterministic schema-version-1 object containing the selected report, every
-runtime report attempted during auto selection, and the separate optional
-builder report. Field names and enum values remain English regardless of
-`--lang`, so automation receives the same contract in either UI language.
+Human output starts with the selected runtime and its status, followed by typed
+facts already obtained by the same probe. Docker reports versions, context kind,
+daemon platform, rootless/Desktop state, and ordered mirror origins. containerd
+reports version and registry-configuration state. Buildx reports driver and
+ordinal-only node status, versions, redacted endpoint origins, and platforms.
+
+`--json` emits a deterministic schema-version-2 object containing the selected
+report, every runtime report attempted during auto selection, and the separate
+optional builder report. It omits context, builder and node names, containerd
+namespaces and config paths, and endpoint paths or queries. Field names and enum
+values remain English regardless of `--lang`.
 
 ## Inspect native cache usage
 

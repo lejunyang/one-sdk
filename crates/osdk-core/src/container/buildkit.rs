@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::plan::Fingerprint;
-use super::redact::{CommandPurpose, NativeProgram};
+use super::redact::{CommandPurpose, NativeProgram, RedactedOrigin};
 use super::report::{
-    Capability, CapabilityStatus, DiagnosticEvidence, DiagnosticReport, DiagnosticStatus, Endpoint,
-    RuntimeKind,
+    Capability, CapabilityStatus, DiagnosticDetails, DiagnosticEvidence, DiagnosticReport,
+    DiagnosticStatus, Endpoint, RuntimeKind,
 };
 use super::runtime::{ProbeCommand, RuntimeAdapter};
 use crate::process::{CaptureLimits, CommandOutcome, CommandRunner, CommandSpec};
@@ -105,7 +105,8 @@ fn is_safe_builder_name(value: &str) -> bool {
 }
 
 /// The Buildx driver which owns a selected builder.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BuilderDriver {
     Docker,
     DockerContainer,
@@ -140,7 +141,8 @@ impl BuilderDriver {
 }
 
 /// The observed state of a Buildx node.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BuilderNodeStatus {
     Running,
     Stopped,
@@ -169,6 +171,25 @@ pub struct BuildPlatform {
     pub variant: Option<String>,
 }
 
+/// One secret-safe BuildKit node projection. Ordinals are stable within the
+/// native output and avoid disclosing native node names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BuildkitNodeDiagnosticDetails {
+    pub ordinal: usize,
+    pub status: BuilderNodeStatus,
+    pub version: Option<String>,
+    pub endpoint: Option<RedactedOrigin>,
+    pub platforms: Vec<String>,
+}
+
+/// Secret-safe Buildx/BuildKit facts exposed by diagnostic schema v2.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct BuildkitDiagnosticDetails {
+    pub buildx_version: Option<String>,
+    pub driver: Option<BuilderDriver>,
+    pub nodes: Vec<BuildkitNodeDiagnosticDetails>,
+}
+
 impl BuildPlatform {
     fn parse(raw: &str) -> Option<Self> {
         let raw = raw.trim().trim_end_matches('*');
@@ -176,10 +197,10 @@ impl BuildPlatform {
         let os = components.next()?.trim();
         let architecture = components.next()?.trim();
         let variant = components.next().map(str::trim);
-        if os.is_empty()
-            || architecture.is_empty()
+        if !is_safe_platform_component(os)
+            || !is_safe_platform_component(architecture)
             || components.next().is_some()
-            || variant.is_some_and(str::is_empty)
+            || variant.is_some_and(|value| !is_safe_platform_component(value))
         {
             return None;
         }
@@ -189,6 +210,14 @@ impl BuildPlatform {
             variant: variant.map(str::to_ascii_lowercase),
         })
     }
+}
+
+fn is_safe_platform_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        })
 }
 
 /// One node belonging to the selected Buildx builder.
@@ -424,6 +453,29 @@ impl BuildkitAdapter {
             selected_builder: Some(selected),
         }
     }
+
+    fn details(discovery: &BuildkitDiscovery) -> BuildkitDiagnosticDetails {
+        let selected = discovery.selected_builder.as_ref();
+        BuildkitDiagnosticDetails {
+            buildx_version: discovery.buildx_version.as_ref().map(ToString::to_string),
+            driver: selected.map(|builder| builder.driver.clone()),
+            nodes: selected
+                .into_iter()
+                .flat_map(|builder| builder.nodes.iter())
+                .enumerate()
+                .map(|(ordinal, node)| BuildkitNodeDiagnosticDetails {
+                    ordinal,
+                    status: node.status.clone(),
+                    version: node.buildkit_version.as_ref().map(ToString::to_string),
+                    endpoint: node
+                        .endpoint
+                        .as_ref()
+                        .map(|endpoint| RedactedOrigin::from(endpoint.address.clone())),
+                    platforms: node.platforms.iter().map(build_platform_string).collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl RuntimeAdapter for BuildkitAdapter {
@@ -432,8 +484,22 @@ impl RuntimeAdapter for BuildkitAdapter {
     }
 
     fn diagnose(&self, runner: &dyn CommandRunner, limits: CaptureLimits) -> DiagnosticReport {
-        self.inspect(runner, limits).report
+        let mut discovery = self.inspect(runner, limits);
+        let details = Self::details(&discovery);
+        discovery
+            .report
+            .set_details(DiagnosticDetails::Buildkit(details));
+        discovery.report
     }
+}
+
+fn build_platform_string(platform: &BuildPlatform) -> String {
+    let mut value = format!("{}/{}", platform.os, platform.architecture);
+    if let Some(variant) = &platform.variant {
+        value.push('/');
+        value.push_str(variant);
+    }
+    value
 }
 
 fn probe(purpose: CommandPurpose, command: CommandSpec) -> ProbeCommand {
@@ -988,6 +1054,28 @@ mod tests {
             parse_endpoint("tcp://192.0.2.10:1234").unwrap().scope,
             crate::container::EndpointScope::Remote
         );
+    }
+
+    #[test]
+    fn malicious_platform_output_is_not_serialized() {
+        let list = r#"{"Current":true,"Driver":"docker-container","Name":"selected","Nodes":[{"Name":"selected0","Status":"running","Platforms":"linux/amd64, linux/TOKEN_SECRET, linux/arm64/../../secret, linux/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#;
+        let runner = FakeRunner::new([
+            exited(true, "github.com/docker/buildx v0.36.1 deadbeef\n", ""),
+            exited(true, list, ""),
+            exited(
+                true,
+                "Name: selected\nDriver: docker-container\nName: selected0\nStatus: running\nPlatforms: linux/amd64, linux/TOKEN_SECRET, linux/arm64/../../secret\n",
+                "",
+            ),
+        ]);
+
+        let report = BuildkitAdapter::default().diagnose(&runner, CaptureLimits::default());
+        let json = serde_json::to_string(&report).unwrap();
+
+        assert!(json.contains("\"platforms\":[\"linux/amd64\"]"), "{json}");
+        for rejected in ["TOKEN_SECRET", "../../secret", &"a".repeat(65)] {
+            assert!(!json.contains(rejected), "leaked {rejected}: {json}");
+        }
     }
 
     #[test]

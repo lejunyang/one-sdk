@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use super::redact::{RedactedCommand, RedactedHeader, RedactedUrl};
+use super::{BuildkitDiagnosticDetails, ContainerdDiagnosticDetails, DockerDiagnosticDetails};
 
-pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+pub const DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 
 /// The native control plane being inspected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -126,6 +127,17 @@ pub enum DiagnosticEvidence {
     Command(RedactedCommand),
 }
 
+/// Closed, runtime-specific facts collected during the same discovery pass as
+/// the generic status and capabilities. Each variant contains only typed or
+/// redacted fields and represents unavailable facts with `None`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DiagnosticDetails {
+    Docker(DockerDiagnosticDetails),
+    Containerd(ContainerdDiagnosticDetails),
+    Buildkit(BuildkitDiagnosticDetails),
+}
+
 /// Stable diagnostic output. It contains no free-form serializable strings.
 /// Callers must choose typed facts and redacted evidence, keeping report JSON
 /// secret-safe by construction.
@@ -134,6 +146,7 @@ pub struct DiagnosticReport {
     pub schema_version: u32,
     pub runtime: RuntimeKind,
     pub status: DiagnosticStatus,
+    pub details: Option<DiagnosticDetails>,
     pub privilege: Privilege,
     pub capabilities: BTreeMap<Capability, CapabilityStatus>,
     pub endpoints: BTreeSet<Endpoint>,
@@ -146,6 +159,18 @@ impl DiagnosticReport {
             schema_version: DIAGNOSTIC_SCHEMA_VERSION,
             runtime,
             status,
+            details: match runtime {
+                RuntimeKind::Docker => {
+                    Some(DiagnosticDetails::Docker(DockerDiagnosticDetails::default()))
+                }
+                RuntimeKind::Containerd => Some(DiagnosticDetails::Containerd(
+                    ContainerdDiagnosticDetails::default(),
+                )),
+                RuntimeKind::Buildkit => Some(DiagnosticDetails::Buildkit(
+                    BuildkitDiagnosticDetails::default(),
+                )),
+                RuntimeKind::Podman => None,
+            },
             privilege: Privilege::Unknown,
             capabilities: BTreeMap::new(),
             endpoints: BTreeSet::new(),
@@ -156,6 +181,10 @@ impl DiagnosticReport {
     pub fn with_privilege(mut self, privilege: Privilege) -> Self {
         self.privilege = privilege;
         self
+    }
+
+    pub fn set_details(&mut self, details: DiagnosticDetails) {
+        self.details = Some(details);
     }
 
     pub fn set_capability(&mut self, capability: Capability, status: CapabilityStatus) {
@@ -228,7 +257,8 @@ mod tests {
         let right = serde_json::to_string(&report(true)).unwrap();
 
         assert_eq!(left, right);
-        assert!(left.starts_with("{\"schema_version\":1,"));
+        assert!(left.starts_with("{\"schema_version\":2,"));
+        assert!(left.contains("\"details\":{\"kind\":\"docker\""));
         assert!(left.contains("\"daemon\":\"supported\""));
         assert!(left.contains("\"pull\":\"supported\""));
         for secret in ["alice", "password", "private", "token", "secret"] {

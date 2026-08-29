@@ -4,12 +4,13 @@
 //! metadata. It never reads Docker's private state or configuration files.
 
 use semver::Version;
+use serde::Serialize;
 use serde_json::Value;
 
-use super::redact::{CommandPurpose, NativeProgram, RedactedUrl};
+use super::redact::{CommandPurpose, NativeProgram, RedactedOrigin, RedactedUrl};
 use super::report::{
-    Capability, CapabilityStatus, DiagnosticEvidence, DiagnosticReport, DiagnosticStatus, Endpoint,
-    EndpointScope, EndpointTransport, Privilege, RuntimeKind,
+    Capability, CapabilityStatus, DiagnosticDetails, DiagnosticEvidence, DiagnosticReport,
+    DiagnosticStatus, Endpoint, EndpointScope, EndpointTransport, Privilege, RuntimeKind,
 };
 use super::runtime::{ProbeCommand, RuntimeAdapter};
 use crate::process::{CaptureLimits, CapturedOutput, CommandOutcome, CommandRunner, CommandSpec};
@@ -17,13 +18,74 @@ use crate::process::{CaptureLimits, CapturedOutput, CommandOutcome, CommandRunne
 const MINIMUM_DOCKER_VERSION: Version = Version::new(19, 3, 0);
 
 /// The ownership and locality inferred for the selected Docker context.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DockerContextKind {
     Local,
     Remote,
     Rootless,
     Desktop,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerDaemonOs {
+    Linux,
+    Windows,
+    Unknown,
+}
+
+impl DockerDaemonOs {
+    fn from_native(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "linux" => Self::Linux,
+            "windows" => Self::Windows,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DockerDaemonArchitecture {
+    Amd64,
+    Arm64,
+    Arm,
+    I386,
+    Ppc64le,
+    S390x,
+    Riscv64,
+    Unknown,
+}
+
+impl DockerDaemonArchitecture {
+    fn from_native(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "amd64" | "x86_64" | "x86-64" => Self::Amd64,
+            "arm64" | "aarch64" => Self::Arm64,
+            value if value == "arm" || value.starts_with("armv") => Self::Arm,
+            "386" | "i386" | "x86" => Self::I386,
+            "ppc64le" => Self::Ppc64le,
+            "s390x" => Self::S390x,
+            "riscv64" => Self::Riscv64,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Secret-safe Docker facts exposed by diagnostic schema v2. Context names
+/// and raw endpoints are deliberately excluded. Mirror order is preserved.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DockerDiagnosticDetails {
+    pub client_version: Option<String>,
+    pub server_version: Option<String>,
+    pub context_kind: Option<DockerContextKind>,
+    pub daemon_os: Option<DockerDaemonOs>,
+    pub daemon_architecture: Option<DockerDaemonArchitecture>,
+    pub rootless: Option<bool>,
+    pub desktop: Option<bool>,
+    pub registry_mirror_origins: Vec<RedactedOrigin>,
 }
 
 /// Public fields returned by `docker context inspect` for the selected context.
@@ -91,8 +153,8 @@ pub struct DockerInfo {
     pub operating_system: Option<String>,
     pub os_type: Option<String>,
     pub architecture: Option<String>,
-    pub rootless: bool,
-    pub desktop: bool,
+    pub rootless: Option<bool>,
+    pub desktop: Option<bool>,
     pub registry_mirrors: Vec<RedactedUrl>,
 }
 
@@ -220,6 +282,40 @@ impl DockerAdapter {
 
     fn report(&self, discovery: &DockerDiscovery) -> DiagnosticReport {
         let mut report = DiagnosticReport::new(RuntimeKind::Docker, discovery.status);
+        report.set_details(DiagnosticDetails::Docker(DockerDiagnosticDetails {
+            client_version: discovery
+                .version
+                .as_ref()
+                .and_then(|version| version.client.as_ref().map(ToString::to_string)),
+            server_version: discovery
+                .version
+                .as_ref()
+                .and_then(|version| version.server.as_ref().map(ToString::to_string)),
+            context_kind: discovery.context.as_ref().map(|context| context.kind),
+            daemon_os: discovery
+                .info
+                .as_ref()
+                .and_then(|info| info.os_type.as_deref())
+                .map(DockerDaemonOs::from_native),
+            daemon_architecture: discovery
+                .info
+                .as_ref()
+                .and_then(|info| info.architecture.as_deref())
+                .map(DockerDaemonArchitecture::from_native),
+            rootless: discovery.info.as_ref().and_then(|info| info.rootless),
+            desktop: discovery.info.as_ref().and_then(|info| info.desktop),
+            registry_mirror_origins: discovery
+                .info
+                .as_ref()
+                .map(|info| {
+                    info.registry_mirrors
+                        .iter()
+                        .cloned()
+                        .map(RedactedOrigin::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }));
         let client = discovery
             .version
             .as_ref()
@@ -433,13 +529,15 @@ pub fn parse_docker_info(output: &[u8]) -> Result<DockerInfo, DockerParseError> 
     let rootless = object
         .get("SecurityOptions")
         .and_then(Value::as_array)
-        .is_some_and(|options| options.iter().any(value_mentions_rootless));
-    let desktop = operating_system
-        .as_deref()
-        .is_some_and(|value| value.to_ascii_lowercase().contains("docker desktop"))
-        || name
+        .map(|options| options.iter().any(value_mentions_rootless));
+    let desktop = (operating_system.is_some() || name.is_some()).then(|| {
+        operating_system
             .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("docker-desktop"));
+            .is_some_and(|value| value.to_ascii_lowercase().contains("docker desktop"))
+            || name
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("docker-desktop"))
+    });
     let registry_mirrors = object
         .get("RegistryConfig")
         .and_then(|value| value.get("Mirrors"))
@@ -482,9 +580,9 @@ fn refine_context_kind(context: &mut DockerContext, info: Option<&DockerInfo>) {
     let Some(info) = info else {
         return;
     };
-    if info.desktop {
+    if info.desktop == Some(true) {
         context.kind = DockerContextKind::Desktop;
-    } else if info.rootless && context.kind != DockerContextKind::Remote {
+    } else if info.rootless == Some(true) && context.kind != DockerContextKind::Remote {
         context.kind = DockerContextKind::Rootless;
     }
     if context.kind == DockerContextKind::Desktop {
@@ -762,11 +860,19 @@ mod tests {
             br#"{"Name":"docker-desktop","OperatingSystem":"Docker Desktop","OSType":"linux","Architecture":"aarch64","SecurityOptions":["name=rootless"],"RegistryConfig":{"Mirrors":["https://alice:secret@mirror.example/private?token=x"]}}"#,
         )
         .unwrap();
-        assert!(info.rootless);
-        assert!(info.desktop);
+        assert_eq!(info.rootless, Some(true));
+        assert_eq!(info.desktop, Some(true));
         assert_eq!(info.architecture.as_deref(), Some("aarch64"));
         let mirror = serde_json::to_string(&info.registry_mirrors).unwrap();
         assert_eq!(mirror, r#"["https://mirror.example/[redacted]?redacted"]"#);
+    }
+
+    #[test]
+    fn partial_info_preserves_unknown_rootless_and_desktop_facts() {
+        let info = parse_docker_info(br#"{"ServerVersion":"29.0.1"}"#).unwrap();
+
+        assert_eq!(info.rootless, None);
+        assert_eq!(info.desktop, None);
     }
 
     #[test]
@@ -907,6 +1013,37 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.client, Some(Version::new(29, 1, 0)));
         assert_eq!(parsed.server, None);
+    }
+
+    #[test]
+    fn diagnostic_details_are_closed_and_mirror_origins_preserve_order() {
+        let runner = FakeRunner::with_outcomes([
+            success(r#"{"Client":{"Version":"29.0.1"},"Server":{"Version":"29.0.1"}}"#),
+            success(
+                r#"[{"Name":"secret-context","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]"#,
+            ),
+            success(
+                r#"{"OSType":"token-secret-os","Architecture":"token-secret-arch","RegistryConfig":{"Mirrors":["https://first.example/private?token=secret","https://second.example/cache"]}}"#,
+            ),
+        ]);
+
+        let report = DockerAdapter.diagnose(&runner, CaptureLimits::default());
+        let json = serde_json::to_string(&report).unwrap();
+
+        assert!(json.contains("\"daemon_os\":\"unknown\""));
+        assert!(json.contains("\"daemon_architecture\":\"unknown\""));
+        assert!(json.contains(
+            "\"registry_mirror_origins\":[\"https://first.example\",\"https://second.example\"]"
+        ));
+        for secret in [
+            "secret-context",
+            "token-secret-os",
+            "token-secret-arch",
+            "private",
+            "token",
+        ] {
+            assert!(!json.contains(secret), "leaked {secret}: {json}");
+        }
     }
 
     #[test]

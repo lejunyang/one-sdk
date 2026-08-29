@@ -382,6 +382,11 @@ osdk container prune --runtime docker --scope images
 osdk container prune --runtime buildkit --scope build-cache --builder my-builder
 ```
 
+`container doctor` 会先报告选中的 runtime，再展示同一次探测已获得的类型化事实：Docker
+版本/平台/rootless/Desktop 与 mirror origin；containerd 版本和 Registry 配置状态；以及
+Buildx driver、节点状态、BuildKit 版本、endpoint 与平台。其 schema version 2 JSON 不包含
+context、builder、节点名称、namespace、原生配置路径及可能带敏感信息的 endpoint path/query。
+
 Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并按配置
 顺序检查 mirror。每份 mirror plan 只针对一个已配置 Registry 和一个显式 Docker、
 containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；本来可执行的本地 plan 如果没有

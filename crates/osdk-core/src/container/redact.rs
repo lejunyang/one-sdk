@@ -67,6 +67,63 @@ impl fmt::Display for RedactedUrl {
     }
 }
 
+/// An endpoint or mirror origin with only scheme, host, and explicit port.
+/// Unlike [`RedactedUrl`], it never exposes whether a path or query existed.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct RedactedOrigin(String);
+
+impl RedactedOrigin {
+    pub fn parse(raw: &str) -> Result<Self, RedactedUrlError> {
+        let url = reqwest::Url::parse(raw).map_err(|_| RedactedUrlError::Invalid)?;
+        if !matches!(
+            url.scheme(),
+            "http" | "https" | "tcp" | "ssh" | "unix" | "npipe"
+        ) {
+            return Err(RedactedUrlError::UnsupportedScheme);
+        }
+        let value = if let Some(host) = url.host_str() {
+            let host = if host.contains(':') {
+                format!("[{host}]")
+            } else {
+                host.to_owned()
+            };
+            match url.port() {
+                Some(port) => format!("{}://{host}:{port}", url.scheme()),
+                None => format!("{}://{host}", url.scheme()),
+            }
+        } else {
+            format!("{}://[redacted]", url.scheme())
+        };
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<RedactedUrl> for RedactedOrigin {
+    fn from(value: RedactedUrl) -> Self {
+        Self::parse(value.as_str()).expect("RedactedUrl always has a supported URL scheme")
+    }
+}
+
+impl fmt::Debug for RedactedOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("RedactedOrigin")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for RedactedOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RedactedUrlError {
     #[error("invalid endpoint URL")]
@@ -238,6 +295,21 @@ mod tests {
             "xyz",
             "secret",
         ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn origin_serialization_retains_only_scheme_host_and_port() {
+        let raw = "ssh://alice:password@example.test:2222/private?token=secret#fragment";
+        let origin = RedactedOrigin::parse(raw).unwrap();
+        let serialized = serde_json::to_string(&origin).unwrap();
+
+        assert_eq!(serialized, r#""ssh://example.test:2222""#);
+        for secret in ["alice", "password", "private", "token", "fragment"] {
             assert!(
                 !serialized.contains(secret),
                 "leaked {secret}: {serialized}"

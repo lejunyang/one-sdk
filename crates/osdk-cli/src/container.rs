@@ -13,13 +13,15 @@ use osdk_core::container::operations::{
 };
 use osdk_core::container::{
     diagnose_registry, plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors,
-    ActivationRequirement, ApiCheckStatus, BuildkitAdapter, BuildkitMirrorPlanRequest,
-    BuildxBuilderSelector, BuildxCacheQuery, CacheQueryStatus, Capability, CapabilityStatus,
-    ContainerdAdapter, ContainerdCacheQuery, ContainerdMirrorPlanRequest, DiagnosticReport,
-    DiagnosticStatus, DockerAdapter, DockerCacheQuery, DockerMirrorPlanRequest, ImageReference,
-    ManifestCheckStatus, MirrorCheckStatus, MirrorPlan, NativeCacheOwner, NativeCacheRecordKind,
-    NativeCacheStatus, NativeConfigSnapshot, OciPlatform, PlanApplicability, PlanWarning,
-    ProbeCommand, RegistryDiagnosticOptions, RegistryDiagnosticReport, RegistryDiagnosticStatus,
+    ActivationRequirement, ApiCheckStatus, BuilderDriver, BuilderNodeStatus, BuildkitAdapter,
+    BuildkitMirrorPlanRequest, BuildxBuilderSelector, BuildxCacheQuery, CacheQueryStatus,
+    Capability, CapabilityStatus, ContainerdAdapter, ContainerdCacheQuery,
+    ContainerdMirrorPlanRequest, DiagnosticDetails, DiagnosticReport, DiagnosticStatus,
+    DockerAdapter, DockerCacheQuery, DockerContextKind, DockerDaemonArchitecture, DockerDaemonOs,
+    DockerMirrorPlanRequest, ImageReference, LegacyRegistryWarning, ManifestCheckStatus,
+    MirrorCheckStatus, MirrorPlan, NativeCacheOwner, NativeCacheRecordKind, NativeCacheStatus,
+    NativeConfigSnapshot, OciPlatform, PlanApplicability, PlanWarning, ProbeCommand,
+    RegistryDiagnosticOptions, RegistryDiagnosticReport, RegistryDiagnosticStatus,
     RegistryEndpoint, RegistryLimits, RegistryName, RegistryTransport, ReqwestRegistryTransport,
     RuntimeAdapter, RuntimeKind, DEFAULT_MAX_REQUESTS, MAX_NATIVE_CONFIG_BYTES,
 };
@@ -36,7 +38,7 @@ use crate::cli::{
     ContainerRegistryCommand, ContainerRuntimeArg,
 };
 
-const DOCTOR_SCHEMA_VERSION: u32 = 1;
+const DOCTOR_SCHEMA_VERSION: u32 = 2;
 const CAPTURE_BYTES: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -779,18 +781,18 @@ fn doctor(
 ) -> DoctorOutput {
     let (runtime, attempted_runtimes) = match requested {
         RuntimeSelection::Docker => {
-            let report = DockerAdapter.diagnose(runner, limits);
+            let report = docker_diagnostic(runner, limits);
             (report.clone(), vec![report])
         }
         RuntimeSelection::Containerd => {
-            let report = ContainerdAdapter::default().diagnose(runner, limits);
+            let report = containerd_diagnostic(runner, limits);
             (report.clone(), vec![report])
         }
         RuntimeSelection::Auto => {
             // Probe order and tie-breaking are stable. Selection depends on
             // diagnosed status, never binary presence.
-            let docker = DockerAdapter.diagnose(runner, limits);
-            let containerd = ContainerdAdapter::default().diagnose(runner, limits);
+            let docker = docker_diagnostic(runner, limits);
+            let containerd = containerd_diagnostic(runner, limits);
             let selected = if status_rank(docker.status) >= status_rank(containerd.status) {
                 docker.clone()
             } else {
@@ -811,6 +813,14 @@ fn doctor(
         attempted_runtimes,
         builder,
     }
+}
+
+fn docker_diagnostic(runner: &dyn CommandRunner, limits: CaptureLimits) -> DiagnosticReport {
+    DockerAdapter.diagnose(runner, limits)
+}
+
+fn containerd_diagnostic(runner: &dyn CommandRunner, limits: CaptureLimits) -> DiagnosticReport {
+    ContainerdAdapter::default().diagnose(runner, limits)
 }
 
 fn cache_status(
@@ -863,6 +873,7 @@ fn write_doctor_human(
             &[("runtime", runtime), ("status", &status)]
         )
     )?;
+    write_diagnostic_details(output, &report.runtime, lang, "")?;
     if report.attempted_runtimes.len() > 1 {
         for attempted in &report.attempted_runtimes {
             writeln!(
@@ -871,6 +882,9 @@ fn write_doctor_human(
                 runtime_label(attempted.runtime),
                 diagnostic_status_label(lang, attempted.status)
             )?;
+            if attempted.runtime != report.selected_runtime {
+                write_diagnostic_details(output, attempted, lang, "    ")?;
+            }
         }
     }
     if let Some(builder) = &report.builder {
@@ -883,8 +897,253 @@ fn write_doctor_human(
                 &[("status", &diagnostic_status_label(lang, builder.status))]
             )
         )?;
+        write_diagnostic_details(output, builder, lang, "  ")?;
     }
     Ok(())
+}
+
+fn write_diagnostic_details(
+    output: &mut dyn Write,
+    report: &DiagnosticReport,
+    lang: Lang,
+    indent: &str,
+) -> std::io::Result<()> {
+    let Some(details) = &report.details else {
+        return Ok(());
+    };
+    let mut facts = 0usize;
+    match details {
+        DiagnosticDetails::Docker(details) => {
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.client_version",
+                details.client_version.as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.server_version",
+                details.server_version.as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.context_kind",
+                details
+                    .context_kind
+                    .map(|kind| docker_context_kind_label(lang, kind))
+                    .as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.daemon_os",
+                details
+                    .daemon_os
+                    .map(|value| docker_daemon_os_label(lang, value))
+                    .as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.daemon_architecture",
+                details
+                    .daemon_architecture
+                    .map(|value| docker_daemon_architecture_label(lang, value))
+                    .as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.rootless",
+                details
+                    .rootless
+                    .map(|value| boolean_label(lang, value))
+                    .as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.desktop",
+                details
+                    .desktop
+                    .map(|value| boolean_label(lang, value))
+                    .as_deref(),
+            )?;
+            for (index, mirror) in details.registry_mirror_origins.iter().enumerate() {
+                writeln!(
+                    output,
+                    "{indent}  {}",
+                    localized(
+                        lang,
+                        "msg.container.doctor.mirror",
+                        &[
+                            ("order", &(index + 1).to_string()),
+                            ("origin", mirror.as_str()),
+                        ],
+                    )
+                )?;
+                facts += 1;
+            }
+        }
+        DiagnosticDetails::Containerd(details) => {
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.containerd_version",
+                details.containerd_version.as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.ctr_client_version",
+                details.ctr_client_version.as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.ctr_server_version",
+                details.ctr_server_version.as_deref(),
+            )?;
+            let config_version = details.config_version.map(|value| value.to_string());
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.config_version",
+                config_version.as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.config_path_configured",
+                details
+                    .config_path_configured
+                    .map(|value| boolean_label(lang, value))
+                    .as_deref(),
+            )?;
+            if !details.legacy_registry_settings.is_empty() {
+                let values = details
+                    .legacy_registry_settings
+                    .iter()
+                    .map(|warning| legacy_registry_label(lang, *warning))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write_fact(
+                    output,
+                    lang,
+                    indent,
+                    "label.container.doctor.legacy_registry",
+                    &values,
+                )?;
+                facts += 1;
+            }
+        }
+        DiagnosticDetails::Buildkit(details) => {
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.buildx_version",
+                details.buildx_version.as_deref(),
+            )?;
+            facts += write_optional_fact(
+                output,
+                lang,
+                indent,
+                "label.container.doctor.driver",
+                details
+                    .driver
+                    .as_ref()
+                    .map(|driver| builder_driver_label(lang, driver))
+                    .as_deref(),
+            )?;
+            for node in &details.nodes {
+                writeln!(
+                    output,
+                    "{indent}  {}",
+                    localized(
+                        lang,
+                        "msg.container.doctor.node",
+                        &[
+                            ("ordinal", &(node.ordinal + 1).to_string()),
+                            ("status", &builder_node_status_label(lang, &node.status)),
+                        ],
+                    )
+                )?;
+                facts += 1;
+                let node_indent = format!("{indent}    ");
+                facts += write_optional_fact(
+                    output,
+                    lang,
+                    &node_indent,
+                    "label.container.doctor.node_version",
+                    node.version.as_deref(),
+                )?;
+                facts += write_optional_fact(
+                    output,
+                    lang,
+                    &node_indent,
+                    "label.container.doctor.endpoint",
+                    node.endpoint.as_ref().map(|endpoint| endpoint.as_str()),
+                )?;
+                if !node.platforms.is_empty() {
+                    write_fact(
+                        output,
+                        lang,
+                        &node_indent,
+                        "label.container.doctor.platforms",
+                        &node.platforms.join(", "),
+                    )?;
+                    facts += 1;
+                }
+            }
+        }
+    }
+    if facts == 0 {
+        writeln!(
+            output,
+            "{indent}  {}",
+            trl(lang, "msg.container.doctor.details_unavailable")
+        )?;
+    }
+    Ok(())
+}
+
+fn write_optional_fact(
+    output: &mut dyn Write,
+    lang: Lang,
+    indent: &str,
+    label_key: &str,
+    value: Option<&str>,
+) -> std::io::Result<usize> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    write_fact(output, lang, indent, label_key, value)?;
+    Ok(1)
+}
+
+fn write_fact(
+    output: &mut dyn Write,
+    lang: Lang,
+    indent: &str,
+    label_key: &str,
+    value: &str,
+) -> std::io::Result<()> {
+    writeln!(output, "{indent}  {}: {value}", trl(lang, label_key))
 }
 
 fn write_cache_human(
@@ -1274,6 +1533,89 @@ fn diagnostic_status_label(lang: Lang, status: DiagnosticStatus) -> String {
     trl(lang, key)
 }
 
+fn boolean_label(lang: Lang, value: bool) -> String {
+    trl(
+        lang,
+        if value {
+            "label.container.yes"
+        } else {
+            "label.container.no"
+        },
+    )
+}
+
+fn docker_context_kind_label(lang: Lang, kind: DockerContextKind) -> String {
+    trl(
+        lang,
+        match kind {
+            DockerContextKind::Local => "label.container.context.local",
+            DockerContextKind::Remote => "label.container.context.remote",
+            DockerContextKind::Rootless => "label.container.context.rootless",
+            DockerContextKind::Desktop => "label.container.context.desktop",
+            DockerContextKind::Unknown => "label.container.unknown",
+        },
+    )
+}
+
+fn docker_daemon_os_label(lang: Lang, value: DockerDaemonOs) -> String {
+    match value {
+        DockerDaemonOs::Linux => "linux".to_owned(),
+        DockerDaemonOs::Windows => "windows".to_owned(),
+        DockerDaemonOs::Unknown => trl(lang, "label.container.unknown"),
+    }
+}
+
+fn docker_daemon_architecture_label(lang: Lang, value: DockerDaemonArchitecture) -> String {
+    match value {
+        DockerDaemonArchitecture::Amd64 => "amd64".to_owned(),
+        DockerDaemonArchitecture::Arm64 => "arm64".to_owned(),
+        DockerDaemonArchitecture::Arm => "arm".to_owned(),
+        DockerDaemonArchitecture::I386 => "386".to_owned(),
+        DockerDaemonArchitecture::Ppc64le => "ppc64le".to_owned(),
+        DockerDaemonArchitecture::S390x => "s390x".to_owned(),
+        DockerDaemonArchitecture::Riscv64 => "riscv64".to_owned(),
+        DockerDaemonArchitecture::Unknown => trl(lang, "label.container.unknown"),
+    }
+}
+
+fn builder_driver_label(lang: Lang, driver: &BuilderDriver) -> String {
+    trl(
+        lang,
+        match driver {
+            BuilderDriver::Docker => "label.container.driver.docker",
+            BuilderDriver::DockerContainer => "label.container.driver.docker_container",
+            BuilderDriver::Kubernetes => "label.container.driver.kubernetes",
+            BuilderDriver::Remote => "label.container.driver.remote",
+            BuilderDriver::Cloud => "label.container.driver.cloud",
+            BuilderDriver::Unknown => "label.container.unknown",
+        },
+    )
+}
+
+fn builder_node_status_label(lang: Lang, status: &BuilderNodeStatus) -> String {
+    trl(
+        lang,
+        match status {
+            BuilderNodeStatus::Running => "label.container.node.running",
+            BuilderNodeStatus::Stopped => "label.container.node.stopped",
+            BuilderNodeStatus::Inactive => "label.container.node.inactive",
+            BuilderNodeStatus::Error => "label.container.node.error",
+            BuilderNodeStatus::Unknown => "label.container.unknown",
+        },
+    )
+}
+
+fn legacy_registry_label(lang: Lang, warning: LegacyRegistryWarning) -> String {
+    trl(
+        lang,
+        match warning {
+            LegacyRegistryWarning::Auths => "label.container.legacy.auths",
+            LegacyRegistryWarning::Configs => "label.container.legacy.configs",
+            LegacyRegistryWarning::Mirrors => "label.container.legacy.mirrors",
+        },
+    )
+}
+
 fn cache_status_label(lang: Lang, status: CacheQueryStatus) -> String {
     trl(
         lang,
@@ -1514,7 +1856,7 @@ mod tests {
                 r#"[{"Name":"secret-context","Endpoints":{"docker":{"Host":"ssh://alice:password@example.test/private?token=secret"}}}]"#,
             ),
             success(
-                r#"{"OperatingSystem":"Linux","OSType":"linux","Architecture":"amd64","RegistryConfig":{"Mirrors":[]}}"#,
+                r#"{"OperatingSystem":"Linux","OSType":"linux","Architecture":"amd64","SecurityOptions":[],"RegistryConfig":{"Mirrors":[]}}"#,
             ),
         ]
     }
@@ -1526,7 +1868,7 @@ mod tests {
                 r#"[{"Name":"default","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]"#,
             ),
             success(
-                r#"{"OperatingSystem":"Linux","OSType":"linux","Architecture":"amd64","RegistryConfig":{"Mirrors":[]}}"#,
+                r#"{"OperatingSystem":"Linux","OSType":"linux","Architecture":"amd64","SecurityOptions":[],"RegistryConfig":{"Mirrors":[]}}"#,
             ),
         ]
     }
@@ -2531,9 +2873,10 @@ mod tests {
         let english = render(Lang::En);
         let chinese = render(Lang::Zh);
         assert_eq!(english, chinese);
-        assert!(english.starts_with("{\"schema_version\":1,"));
+        assert!(english.starts_with("{\"schema_version\":2,"));
         assert!(english
-            .contains("\"attempted_runtimes\":[{\"schema_version\":1,\"runtime\":\"docker\""));
+            .contains("\"attempted_runtimes\":[{\"schema_version\":2,\"runtime\":\"docker\""));
+        assert!(english.contains("\"details\":{\"kind\":\"docker\",\"client_version\":\"29.0.1\",\"server_version\":\"29.0.1\",\"context_kind\":\"remote\",\"daemon_os\":\"linux\",\"daemon_architecture\":\"amd64\",\"rootless\":false,\"desktop\":false"));
         for secret in [
             "secret-context",
             "alice",
@@ -2550,7 +2893,7 @@ mod tests {
     #[test]
     fn human_output_is_conclusion_first_and_bilingual() {
         let report = DoctorOutput {
-            schema_version: 1,
+            schema_version: 2,
             requested_runtime: RuntimeSelection::Docker,
             selected_runtime: RuntimeKind::Docker,
             runtime: DiagnosticReport::new(RuntimeKind::Docker, DiagnosticStatus::Healthy),
@@ -2572,6 +2915,142 @@ mod tests {
         assert!(String::from_utf8(chinese)
             .unwrap()
             .starts_with("已选择 docker：健康"));
+    }
+
+    #[test]
+    fn doctor_json_contains_closed_partial_details_without_extra_commands() {
+        let docker_runner = FakeRunner::new([
+            success(r#"{"Client":{"Version":"29.0.1"},"Server":null}"#),
+            failure("context unavailable"),
+            failure("daemon unavailable"),
+            CommandOutcome::NotInstalled,
+        ]);
+        let docker = doctor(
+            &docker_runner,
+            CaptureLimits::default(),
+            RuntimeSelection::Docker,
+            BuildxBuilderSelector::Auto,
+            false,
+        );
+        let json = serde_json::to_value(&docker).unwrap();
+        let details = &json["runtime"]["details"];
+        assert_eq!(details["kind"], "docker");
+        assert_eq!(details["client_version"], "29.0.1");
+        assert!(details["server_version"].is_null());
+        assert!(details["rootless"].is_null());
+        assert_eq!(docker_runner.calls().len(), 4);
+
+        let containerd_runner = FakeRunner::new(healthy_containerd());
+        let containerd = doctor(
+            &containerd_runner,
+            CaptureLimits::default(),
+            RuntimeSelection::Containerd,
+            BuildxBuilderSelector::Auto,
+            false,
+        );
+        let json = serde_json::to_string(&containerd).unwrap();
+        assert!(json.contains("\"kind\":\"containerd\""));
+        assert!(json.contains("\"config_path_configured\":false"));
+        assert!(!json.contains("\"namespace\""));
+        assert_eq!(containerd_runner.calls().len(), 3);
+    }
+
+    #[test]
+    fn buildkit_details_omit_names_redact_endpoints_and_sort_platforms() {
+        let builder = "secret-builder";
+        let node = "secret-node";
+        let runner = FakeRunner::new([
+            success("github.com/docker/buildx v0.36.1 deadbeef\n"),
+            success(&format!(
+                r#"{{"Current":true,"Driver":"docker-container","Name":"{builder}","Nodes":[{{"Name":"{node}","Endpoint":"ssh://alice:password@example.test/private?token=secret","Status":"running","Buildkit":"v0.25.0","Platforms":"linux/arm64, linux/amd64"}}]}}"#
+            )),
+            success(&format!(
+                "Name: {builder}\nDriver: docker-container\nName: {node}\nEndpoint: ssh://alice:password@example.test/private?token=secret\nStatus: running\nBuildKit: v0.25.0\nPlatforms: linux/arm64, linux/amd64\n"
+            )),
+        ]);
+        let report = BuildkitAdapter::new(BuildxBuilderSelector::named(builder).unwrap())
+            .diagnose(&runner, CaptureLimits::default());
+        let value = serde_json::to_value(&report).unwrap();
+        let json = value.to_string();
+        assert!(json.contains("\"driver\":\"docker-container\""));
+        assert!(json.contains("\"ordinal\":0"));
+        assert!(json.contains("\"platforms\":[\"linux/amd64\",\"linux/arm64\"]"));
+        assert_eq!(
+            value["details"]["nodes"][0]["endpoint"],
+            "ssh://example.test"
+        );
+        for secret in [builder, node, "alice", "password", "private", "token"] {
+            assert!(!json.contains(secret), "leaked {secret}: {json}");
+        }
+        assert_eq!(runner.calls().len(), 3);
+    }
+
+    #[test]
+    fn human_details_are_compact_conclusion_first_and_bilingual() {
+        let runner = FakeRunner::new(
+            [
+                healthy_local_docker().into_iter().collect(),
+                vec![CommandOutcome::NotInstalled],
+            ]
+            .concat(),
+        );
+        let report = doctor(
+            &runner,
+            CaptureLimits::default(),
+            RuntimeSelection::Docker,
+            BuildxBuilderSelector::Auto,
+            false,
+        );
+        for (lang, conclusion, version, rootless) in [
+            (
+                Lang::En,
+                "selected docker: healthy",
+                "client version: 29.0.1",
+                "rootless: no",
+            ),
+            (
+                Lang::Zh,
+                "已选择 docker：健康",
+                "客户端版本: 29.0.1",
+                "无 root 模式: 否",
+            ),
+        ] {
+            let mut output = Vec::new();
+            write_doctor_human(&mut output, &report, lang).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.starts_with(conclusion), "{output}");
+            assert!(output.contains(version), "{output}");
+            assert!(output.contains(rootless), "{output}");
+            assert!(!output.contains("unknown"), "{output}");
+            assert!(!output.contains("未知"), "{output}");
+        }
+    }
+
+    #[test]
+    fn human_partial_details_emit_one_localized_unavailable_line() {
+        let report = DoctorOutput {
+            schema_version: 2,
+            requested_runtime: RuntimeSelection::Docker,
+            selected_runtime: RuntimeKind::Docker,
+            runtime: DiagnosticReport::new(RuntimeKind::Docker, DiagnosticStatus::NotInstalled),
+            attempted_runtimes: vec![DiagnosticReport::new(
+                RuntimeKind::Docker,
+                DiagnosticStatus::NotInstalled,
+            )],
+            builder: None,
+        };
+
+        for (lang, message) in [
+            (Lang::En, "runtime details unavailable"),
+            (Lang::Zh, "运行时详情不可用"),
+        ] {
+            let mut output = Vec::new();
+            write_doctor_human(&mut output, &report, lang).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert_eq!(output.matches(message).count(), 1, "{output}");
+            assert!(!output.contains("client version"), "{output}");
+            assert!(!output.contains("客户端版本"), "{output}");
+        }
     }
 
     #[test]

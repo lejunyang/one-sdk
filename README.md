@@ -413,6 +413,13 @@ osdk container prune --runtime docker --scope images
 osdk container prune --runtime buildkit --scope build-cache --builder my-builder
 ```
 
+`container doctor` reports the selected runtime first, then the typed facts
+already obtained by that probe: Docker versions/platform/rootless/Desktop and
+mirror origins; containerd versions and registry-config state; and Buildx
+driver, node state, BuildKit versions, endpoints, and platforms. Its
+schema-version-2 JSON omits context, builder and node names, namespaces, native
+config paths, and secret-bearing endpoint paths or queries.
+
 Registry tests use anonymous HTTPS only, can validate image digests, platform
 selection, and bounded Range support, and check configured mirrors in order. A
 mirror plan always targets one configured registry and one explicit Docker,

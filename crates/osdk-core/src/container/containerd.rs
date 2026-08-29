@@ -9,11 +9,12 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use semver::Version;
+use serde::Serialize;
 
 use super::redact::{CommandPurpose, NativeProgram, RedactedUrl};
 use super::report::{
-    Capability, CapabilityStatus, DiagnosticEvidence, DiagnosticReport, DiagnosticStatus, Endpoint,
-    EndpointScope, Privilege, RuntimeKind,
+    Capability, CapabilityStatus, DiagnosticDetails, DiagnosticEvidence, DiagnosticReport,
+    DiagnosticStatus, Endpoint, EndpointScope, Privilege, RuntimeKind,
 };
 use super::runtime::{ProbeCommand, RuntimeAdapter};
 use crate::process::{CaptureLimits, CommandOutcome, CommandRunner, CommandSpec};
@@ -34,11 +35,24 @@ pub struct ContainerdVersions {
 }
 
 /// A typed warning about deprecated inline CRI registry configuration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LegacyRegistryWarning {
-    Mirrors,
-    Configs,
     Auths,
+    Configs,
+    Mirrors,
+}
+
+/// Secret-safe containerd facts exposed by diagnostic schema v2. The selected
+/// namespace and the registry configuration path itself never enter output.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ContainerdDiagnosticDetails {
+    pub containerd_version: Option<String>,
+    pub ctr_client_version: Option<String>,
+    pub ctr_server_version: Option<String>,
+    pub config_version: Option<u32>,
+    pub config_path_configured: Option<bool>,
+    pub legacy_registry_settings: BTreeSet<LegacyRegistryWarning>,
 }
 
 /// Relevant fields from `containerd config dump`.
@@ -315,6 +329,19 @@ impl ContainerdAdapter {
                 .get(&Capability::RegistryHostMapping)
                 .unwrap_or(&CapabilityStatus::Unknown),
         );
+        report.set_details(DiagnosticDetails::Containerd(ContainerdDiagnosticDetails {
+            containerd_version: versions.containerd.as_ref().map(ToString::to_string),
+            ctr_client_version: versions.ctr_client.as_ref().map(ToString::to_string),
+            ctr_server_version: versions.ctr_server.as_ref().map(ToString::to_string),
+            config_version: config.as_ref().and_then(|config| config.version),
+            config_path_configured: config
+                .as_ref()
+                .map(|config| config.registry_config_path.is_some()),
+            legacy_registry_settings: config
+                .as_ref()
+                .map(|config| config.legacy_registry.clone())
+                .unwrap_or_default(),
+        }));
 
         ContainerdDiscovery {
             report,

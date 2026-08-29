@@ -25,9 +25,14 @@ Buildx 会单独报告，因为构建器并不是选中的运行时。自动模�
 `--builder NAME` 时才检查。构建器检查从不使用 `--bootstrap`，因此不会启动已停止的
 构建器。
 
-人类可读输出首先给出选中的运行时和状态。`--json` 输出确定的 schema version 1
-对象，其中包含选中报告、自动选择期间尝试的所有运行时报告，以及独立的可选构建器
-报告。字段名和枚举值不会随 `--lang` 翻译，因此中英文界面下的自动化契约完全一致。
+人类可读输出首先给出选中的运行时和状态，随后展示同一次探测已取得的类型化事实。
+Docker 报告版本、context 类型、daemon 平台、rootless/Desktop 状态和有序 mirror origin；
+containerd 报告版本与 Registry 配置状态；Buildx 报告 driver，以及仅以序号标识的节点
+状态、版本、脱敏 endpoint origin 和平台。
+
+`--json` 输出确定的 schema version 2 对象，其中包含选中报告、自动选择期间尝试的所有
+运行时报告，以及独立的可选构建器报告。它不包含 context、builder、节点名称、containerd
+namespace 与配置路径，也不包含 endpoint path/query。字段名和枚举值不会随 `--lang` 翻译。
 
 ## 检查原生缓存用量
 
