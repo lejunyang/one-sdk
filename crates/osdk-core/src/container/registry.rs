@@ -19,8 +19,8 @@ use sha2::{Digest as _, Sha256};
 
 use super::reference::{ImageReference, ImageSelector, OciDigest, OciPlatform, RegistryName};
 
-pub const REGISTRY_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
-pub const DEFAULT_MAX_REQUESTS: usize = 12;
+pub const REGISTRY_DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
+pub const DEFAULT_MAX_REQUESTS: usize = 48;
 pub const DEFAULT_MAX_REDIRECTS: usize = 3;
 pub const DEFAULT_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
@@ -170,6 +170,23 @@ impl RegistryEndpoint {
 
     fn same_origin(&self, url: &reqwest::Url) -> bool {
         self.origin_key() == url.origin().ascii_serialization()
+    }
+
+    fn allows_anonymous_token_realm(&self, url: &reqwest::Url) -> bool {
+        if self.same_origin(url) {
+            return true;
+        }
+        if self.url.port_or_known_default() != Some(443) || url.port_or_known_default() != Some(443)
+        {
+            return false;
+        }
+        matches!(
+            (
+                self.url.host_str().unwrap_or_default(),
+                url.host_str().unwrap_or_default()
+            ),
+            ("registry-1.docker.io", "auth.docker.io") | ("docker.m.daocloud.io", "m.daocloud.io")
+        )
     }
 }
 
@@ -789,6 +806,9 @@ pub struct MirrorCheck {
     pub origin: String,
     pub status: MirrorCheckStatus,
     pub digest: Option<OciDigest>,
+    pub blob_range: BlobRangeCheck,
+    pub elapsed_micros: u64,
+    pub recommended_rank: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -803,6 +823,7 @@ pub struct RegistryDiagnosticReport {
     pub manifest: ManifestCheck,
     pub blob_range: BlobRangeCheck,
     pub mirrors: Vec<MirrorCheck>,
+    pub recommended_mirror_order: Vec<usize>,
     pub request_count: usize,
 }
 
@@ -862,8 +883,12 @@ pub async fn diagnose_registry<T: RegistryTransport>(
                 origin: mirror.report_origin().to_owned(),
                 status: MirrorCheckStatus::NotTested,
                 digest: None,
+                blob_range: BlobRangeCheck::default(),
+                elapsed_micros: 0,
+                recommended_rank: None,
             })
             .collect(),
+        recommended_mirror_order: Vec::new(),
         request_count: 0,
     };
 
@@ -904,8 +929,16 @@ pub async fn diagnose_registry<T: RegistryTransport>(
 
             if let Some(resolved) = result.resolved_digest {
                 for (index, mirror) in state.options.mirrors.clone().into_iter().enumerate() {
-                    report.mirrors[index] =
-                        check_mirror(&mut state, index, &mirror, &image, &resolved).await;
+                    report.mirrors[index] = check_mirror(
+                        &mut state,
+                        index,
+                        &mirror,
+                        &image,
+                        &resolved,
+                        result.probe_manifest.as_ref(),
+                        result.probe_blob.as_ref(),
+                    )
+                    .await;
                 }
             }
         }
@@ -915,13 +948,19 @@ pub async fn diagnose_registry<T: RegistryTransport>(
         // verifies reachability without inventing a repository or forwarding
         // credentials, and retains configured order in the report.
         for (index, mirror) in state.options.mirrors.clone().into_iter().enumerate() {
+            let started = tokio::time::Instant::now();
             let api = probe_api(&mut state, &mirror).await;
-            report.mirrors[index] =
-                mirror_failure(index, &mirror, mirror_status_from_api(api.check.status));
+            report.mirrors[index] = mirror_failure(
+                index,
+                &mirror,
+                mirror_status_from_api(api.check.status),
+                elapsed_micros(started),
+            );
         }
     }
 
     report.request_count = state.request_count;
+    rank_mirror_checks(&mut report);
     report.status = aggregate_status(&report);
     Ok(report)
 }
@@ -1086,7 +1125,7 @@ async fn obtain_anonymous_token<T: RegistryTransport>(
     let realm =
         reqwest::Url::parse(&challenge.realm).map_err(|_| ApiCheckStatus::InvalidChallenge)?;
     if realm.scheme() != "https"
-        || !endpoint.same_origin(&realm)
+        || !endpoint.allows_anonymous_token_realm(&realm)
         || !realm.username().is_empty()
         || realm.password().is_some()
         || realm.fragment().is_some()
@@ -1289,6 +1328,8 @@ struct ImageInspection {
     manifest: ManifestCheck,
     blob_range: BlobRangeCheck,
     resolved_digest: Option<OciDigest>,
+    probe_manifest: Option<Descriptor>,
+    probe_blob: Option<Descriptor>,
 }
 
 async fn inspect_image<T: RegistryTransport>(
@@ -1310,6 +1351,8 @@ async fn inspect_image<T: RegistryTransport>(
                 },
                 blob_range: BlobRangeCheck::default(),
                 resolved_digest: None,
+                probe_manifest: None,
+                probe_blob: None,
             };
         }
     };
@@ -1324,6 +1367,8 @@ async fn inspect_image<T: RegistryTransport>(
                 },
                 blob_range: BlobRangeCheck::default(),
                 resolved_digest: None,
+                probe_manifest: None,
+                probe_blob: None,
             };
         }
     }
@@ -1334,6 +1379,7 @@ async fn inspect_image<T: RegistryTransport>(
     let mut selected_platform = None;
     let mut selected_os_version = None;
     let mut child_digest = None;
+    let mut probe_manifest = None;
 
     if manifest.kind == ManifestKind::Index {
         let Some(platform) = platform else {
@@ -1348,6 +1394,8 @@ async fn inspect_image<T: RegistryTransport>(
                 },
                 blob_range: BlobRangeCheck::default(),
                 resolved_digest: Some(resolved_digest),
+                probe_manifest: None,
+                probe_blob: None,
             };
         };
         let descriptor = match select_platform_descriptor(&manifest.body, platform) {
@@ -1364,6 +1412,8 @@ async fn inspect_image<T: RegistryTransport>(
                     },
                     blob_range: BlobRangeCheck::default(),
                     resolved_digest: Some(resolved_digest),
+                    probe_manifest: None,
+                    probe_blob: None,
                 };
             }
         };
@@ -1394,6 +1444,8 @@ async fn inspect_image<T: RegistryTransport>(
                     },
                     blob_range: BlobRangeCheck::default(),
                     resolved_digest: Some(resolved_digest),
+                    probe_manifest: None,
+                    probe_blob: None,
                 };
             }
             Err(status) => {
@@ -1412,17 +1464,20 @@ async fn inspect_image<T: RegistryTransport>(
                     },
                     blob_range: BlobRangeCheck::default(),
                     resolved_digest: Some(resolved_digest),
+                    probe_manifest: None,
+                    probe_blob: None,
                 };
             }
         };
-        child_digest = Some(descriptor.digest);
+        child_digest = Some(descriptor.digest.clone());
+        probe_manifest = Some(descriptor.clone());
         selected_platform = Some(platform.clone());
         selected_os_version = descriptor.platform.and_then(|platform| platform.os_version);
     }
 
     let blob = first_layer_descriptor(&manifest.body)
         .expect("a verified image manifest has at least one valid layer");
-    let blob_range = check_blob_range(state, endpoint, image, authorization, blob).await;
+    let blob_range = check_blob_range(state, endpoint, image, authorization, blob.clone()).await;
     ImageInspection {
         manifest: ManifestCheck {
             status: ManifestCheckStatus::Verified,
@@ -1436,6 +1491,8 @@ async fn inspect_image<T: RegistryTransport>(
         },
         blob_range,
         resolved_digest: Some(resolved_digest),
+        probe_manifest,
+        probe_blob: Some(blob),
     }
 }
 
@@ -1720,7 +1777,21 @@ async fn check_blob_range<T: RegistryTransport>(
                 }
             }
         }
-        200 => check.status = BlobRangeStatus::Ignored,
+        200 => {
+            check.status = if requested == descriptor.size {
+                if response.body.len() as u64 != descriptor.size {
+                    BlobRangeStatus::Malformed
+                } else if sha256_digest(&response.body).ok().as_ref() != Some(&descriptor.digest) {
+                    BlobRangeStatus::DigestMismatch
+                } else {
+                    BlobRangeStatus::Ignored
+                }
+            } else if response.body.len() as u64 == requested && response.body_truncated {
+                BlobRangeStatus::Ignored
+            } else {
+                BlobRangeStatus::Malformed
+            };
+        }
         416 => check.status = BlobRangeStatus::Unsatisfiable,
         status => check.status = blob_status_for_http(status),
     }
@@ -1743,76 +1814,214 @@ async fn check_mirror<T: RegistryTransport>(
     mirror: &RegistryEndpoint,
     image: &ImageReference,
     expected: &OciDigest,
+    probe_manifest: Option<&Descriptor>,
+    probe_blob: Option<&Descriptor>,
 ) -> MirrorCheck {
+    let started = tokio::time::Instant::now();
     let api_probe = probe_api(state, mirror).await;
     let authorization = match api_probe.check.status {
         ApiCheckStatus::Available => None,
         ApiCheckStatus::BearerChallenge => {
             let Some(challenge) = api_probe.challenge else {
-                return mirror_failure(order, mirror, MirrorCheckStatus::InvalidResponse);
+                return mirror_failure(
+                    order,
+                    mirror,
+                    MirrorCheckStatus::InvalidResponse,
+                    elapsed_micros(started),
+                );
             };
             if !valid_challenge_scope(challenge.scope.as_deref(), image.repository().as_str()) {
-                return mirror_failure(order, mirror, MirrorCheckStatus::AuthenticationRequired);
+                return mirror_failure(
+                    order,
+                    mirror,
+                    MirrorCheckStatus::AuthenticationRequired,
+                    elapsed_micros(started),
+                );
             }
             match obtain_anonymous_token(state, mirror, &challenge, image).await {
                 Ok(token) => Some(token),
                 Err(status) => {
-                    return mirror_failure(order, mirror, mirror_status_from_api(status));
+                    return mirror_failure(
+                        order,
+                        mirror,
+                        mirror_status_from_api(status),
+                        elapsed_micros(started),
+                    );
                 }
             }
         }
         ApiCheckStatus::AuthenticationRequired | ApiCheckStatus::InvalidChallenge => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::AuthenticationRequired);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::AuthenticationRequired,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::AccessDenied => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::AccessDenied);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::AccessDenied,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::RateLimited => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::RateLimited);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::RateLimited,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::NotFound => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::NotFound);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::NotFound,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::ServerError => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::ServerError);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::ServerError,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::RedirectRejected => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::RedirectRejected);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::RedirectRejected,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::TimedOut => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::TimedOut);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::TimedOut,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::BodyTooLarge => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::BodyTooLarge);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::BodyTooLarge,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::RequestLimit => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::RequestLimit);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::RequestLimit,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::Unreachable => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::Unreachable);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::Unreachable,
+                elapsed_micros(started),
+            );
         }
         ApiCheckStatus::UnexpectedResponse | ApiCheckStatus::NotTested => {
-            return mirror_failure(order, mirror, MirrorCheckStatus::InvalidResponse);
+            return mirror_failure(
+                order,
+                mirror,
+                MirrorCheckStatus::InvalidResponse,
+                elapsed_micros(started),
+            );
         }
     };
     let path = manifest_path(image, expected.as_str());
     let result = fetch_manifest(state, mirror, &path, authorization.as_ref(), None).await;
     match result {
-        Ok(manifest) => MirrorCheck {
-            order,
-            origin: mirror.report_origin().to_owned(),
-            status: if &manifest.digest == expected {
-                MirrorCheckStatus::Equivalent
-            } else {
-                MirrorCheckStatus::Diverged
-            },
-            digest: Some(manifest.digest),
-        },
+        Ok(manifest) => {
+            let equivalent = &manifest.digest == expected;
+            if !equivalent {
+                return MirrorCheck {
+                    order,
+                    origin: mirror.report_origin().to_owned(),
+                    status: MirrorCheckStatus::Diverged,
+                    digest: Some(manifest.digest),
+                    blob_range: BlobRangeCheck::default(),
+                    elapsed_micros: elapsed_micros(started),
+                    recommended_rank: None,
+                };
+            }
+            if let Some(descriptor) = probe_manifest {
+                let child_path = manifest_path(image, descriptor.digest.as_str());
+                match fetch_manifest(
+                    state,
+                    mirror,
+                    &child_path,
+                    authorization.as_ref(),
+                    Some((&descriptor.digest, descriptor.size)),
+                )
+                .await
+                {
+                    Ok(child) if child.kind == ManifestKind::Image => {}
+                    Ok(_) => {
+                        return mirror_failure(
+                            order,
+                            mirror,
+                            MirrorCheckStatus::InvalidResponse,
+                            elapsed_micros(started),
+                        );
+                    }
+                    Err(
+                        ManifestCheckStatus::DigestMismatch | ManifestCheckStatus::SizeMismatch,
+                    ) => {
+                        return mirror_failure(
+                            order,
+                            mirror,
+                            MirrorCheckStatus::Diverged,
+                            elapsed_micros(started),
+                        );
+                    }
+                    Err(status) => {
+                        return mirror_failure(
+                            order,
+                            mirror,
+                            mirror_status_from_manifest(status),
+                            elapsed_micros(started),
+                        );
+                    }
+                }
+            }
+            let blob_range = {
+                match probe_blob {
+                    Some(blob) => {
+                        check_blob_range(state, mirror, image, authorization.as_ref(), blob.clone())
+                            .await
+                    }
+                    None => BlobRangeCheck::default(),
+                }
+            };
+            MirrorCheck {
+                order,
+                origin: mirror.report_origin().to_owned(),
+                status: MirrorCheckStatus::Equivalent,
+                digest: Some(manifest.digest),
+                blob_range,
+                elapsed_micros: elapsed_micros(started),
+                recommended_rank: None,
+            }
+        }
         Err(status) => MirrorCheck {
             order,
             origin: mirror.report_origin().to_owned(),
             status: mirror_status_from_manifest(status),
             digest: None,
+            blob_range: BlobRangeCheck::default(),
+            elapsed_micros: elapsed_micros(started),
+            recommended_rank: None,
         },
     }
 }
@@ -1821,12 +2030,52 @@ fn mirror_failure(
     order: usize,
     mirror: &RegistryEndpoint,
     status: MirrorCheckStatus,
+    elapsed_micros: u64,
 ) -> MirrorCheck {
     MirrorCheck {
         order,
         origin: mirror.report_origin().to_owned(),
         status,
         digest: None,
+        blob_range: BlobRangeCheck::default(),
+        elapsed_micros,
+        recommended_rank: None,
+    }
+}
+
+fn elapsed_micros(started: tokio::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn rank_mirror_checks(report: &mut RegistryDiagnosticReport) {
+    let require_content = report.image.is_some();
+    let mut ranked = report
+        .mirrors
+        .iter()
+        .filter(|mirror| {
+            if require_content {
+                mirror.status == MirrorCheckStatus::Equivalent
+                    && matches!(
+                        mirror.blob_range.status,
+                        BlobRangeStatus::Supported | BlobRangeStatus::Ignored
+                    )
+                    && mirror.blob_range.received_bytes > 0
+            } else {
+                mirror.status == MirrorCheckStatus::Available
+            }
+        })
+        .map(|mirror| (mirror.elapsed_micros, mirror.order))
+        .collect::<Vec<_>>();
+    ranked.sort();
+    report.recommended_mirror_order = ranked.iter().map(|(_, order)| *order).collect();
+    for (rank, (_, order)) in ranked.into_iter().enumerate() {
+        if let Some(mirror) = report
+            .mirrors
+            .iter_mut()
+            .find(|mirror| mirror.order == order)
+        {
+            mirror.recommended_rank = Some(rank + 1);
+        }
     }
 }
 
@@ -2002,13 +2251,29 @@ fn aggregate_status(report: &RegistryDiagnosticReport) -> RegistryDiagnosticStat
     if report.blob_range.status == BlobRangeStatus::DigestMismatch {
         return RegistryDiagnosticStatus::Corrupt;
     }
+    if report
+        .mirrors
+        .iter()
+        .any(|mirror| mirror.blob_range.status == BlobRangeStatus::DigestMismatch)
+    {
+        return RegistryDiagnosticStatus::Corrupt;
+    }
     if !matches!(
         report.blob_range.status,
-        BlobRangeStatus::Supported | BlobRangeStatus::NotAvailable | BlobRangeStatus::NotTested
+        BlobRangeStatus::Supported
+            | BlobRangeStatus::Ignored
+            | BlobRangeStatus::NotAvailable
+            | BlobRangeStatus::NotTested
     ) || report.mirrors.iter().any(|mirror| {
         !matches!(
             mirror.status,
             MirrorCheckStatus::Available | MirrorCheckStatus::Equivalent
+        ) || !matches!(
+            mirror.blob_range.status,
+            BlobRangeStatus::Supported
+                | BlobRangeStatus::Ignored
+                | BlobRangeStatus::NotAvailable
+                | BlobRangeStatus::NotTested
         )
     }) {
         RegistryDiagnosticStatus::Degraded
@@ -2249,6 +2514,12 @@ mod tests {
                 (1, MirrorCheckStatus::Available),
             ]
         );
+        let mut recommended = report.recommended_mirror_order.clone();
+        recommended.sort_unstable();
+        assert_eq!(recommended, [0, 1]);
+        for (rank, order) in report.recommended_mirror_order.iter().enumerate() {
+            assert_eq!(report.mirrors[*order].recommended_rank, Some(rank + 1));
+        }
         let seen = transport.seen();
         assert_eq!(
             seen.iter()
@@ -2260,6 +2531,25 @@ mod tests {
                 ("https://second.example", "/v2/"),
             ]
         );
+    }
+
+    #[test]
+    fn anonymous_token_realms_are_limited_to_audited_registry_pairs() {
+        let docker =
+            RegistryEndpoint::for_registry(RegistryName::parse("docker.io").unwrap()).unwrap();
+        assert!(docker.allows_anonymous_token_realm(
+            &reqwest::Url::parse("https://auth.docker.io/token").unwrap()
+        ));
+        let daocloud = endpoint("docker.m.daocloud.io");
+        assert!(daocloud.allows_anonymous_token_realm(
+            &reqwest::Url::parse("https://m.daocloud.io/token").unwrap()
+        ));
+        assert!(!daocloud.allows_anonymous_token_realm(
+            &reqwest::Url::parse("https://auth.example/token").unwrap()
+        ));
+        assert!(!daocloud.allows_anonymous_token_realm(
+            &reqwest::Url::parse("https://m.daocloud.io:444/token").unwrap()
+        ));
     }
 
     #[tokio::test]
@@ -2384,6 +2674,62 @@ mod tests {
         assert_eq!(report.manifest.child_digest, Some(child_digest.clone()));
         assert_eq!(transport.seen().len(), 4);
         assert!(transport.seen()[2].path.ends_with(child_digest.as_str()));
+    }
+
+    #[tokio::test]
+    async fn index_mirror_verifies_the_selected_child_before_sampling_its_layer() {
+        let layer = b"amd64 layer";
+        let (child, _) = image_manifest(layer);
+        let child_digest = sha256_digest(&child).unwrap();
+        let index = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_INDEX,
+            "manifests": [{
+                "mediaType": OCI_MANIFEST,
+                "digest": child_digest,
+                "size": child.len(),
+                "platform": {"os": "linux", "architecture": "amd64"}
+            }]
+        }))
+        .unwrap();
+        let index_digest = sha256_digest(&index).unwrap();
+        let range = || {
+            MockStep::Response(
+                RegistryResponse::new(206)
+                    .header("content-range", "bytes 0-10/11")
+                    .body(layer.to_vec()),
+            )
+        };
+        let transport = MockTransport::new([
+            response(200),
+            index_response(index.clone()),
+            manifest_response(child.clone()),
+            range(),
+            response(200),
+            index_response(index),
+            manifest_response(child),
+            range(),
+        ]);
+        let report = diagnose_registry(
+            &transport,
+            options(Some(image("registry.example/team/app:latest")))
+                .with_platform(OciPlatform::parse("linux/amd64").unwrap())
+                .with_mirrors(vec![endpoint("mirror.example")]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.mirrors[0].status, MirrorCheckStatus::Equivalent);
+        assert_eq!(
+            report.mirrors[0].blob_range.status,
+            BlobRangeStatus::Supported
+        );
+        assert_eq!(report.recommended_mirror_order, [0]);
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 8);
+        assert!(seen[5].path.ends_with(index_digest.as_str()));
+        assert!(seen[6].path.ends_with(child_digest.as_str()));
+        assert!(seen[7].path.contains("/blobs/"));
     }
 
     #[tokio::test]
@@ -2525,6 +2871,10 @@ mod tests {
                 RegistryResponse::new(200).body(layer.to_vec()),
                 BlobRangeStatus::Ignored,
             ),
+            (
+                RegistryResponse::new(200).body(b"xxxxxxxxxxxxxxxx".to_vec()),
+                BlobRangeStatus::DigestMismatch,
+            ),
             (RegistryResponse::new(416), BlobRangeStatus::Unsatisfiable),
             (
                 RegistryResponse::new(206)
@@ -2597,6 +2947,11 @@ mod tests {
             ),
             response(200),
             manifest_response(manifest),
+            MockStep::Response(
+                RegistryResponse::new(206)
+                    .header("content-range", "bytes 0-4/5")
+                    .body(b"layer".to_vec()),
+            ),
             response(200),
             manifest_response(mirror_two_body),
         ]);
@@ -2614,6 +2969,9 @@ mod tests {
             [MirrorCheckStatus::Equivalent, MirrorCheckStatus::Diverged]
         );
         assert_eq!(report.status, RegistryDiagnosticStatus::Corrupt);
+        assert_eq!(report.recommended_mirror_order, [0]);
+        assert_eq!(report.mirrors[0].recommended_rank, Some(1));
+        assert_eq!(report.mirrors[1].recommended_rank, None);
         let manifest_paths = transport
             .seen()
             .into_iter()
@@ -2624,6 +2982,85 @@ mod tests {
         assert_eq!(manifest_paths[2].origin, "https://mirror-two.example");
         assert!(manifest_paths[1].path.ends_with(digest.as_str()));
         assert!(manifest_paths[2].path.ends_with(digest.as_str()));
+    }
+
+    #[tokio::test]
+    async fn corrupt_mirror_blob_is_excluded_and_marks_the_report_corrupt() {
+        let layer = b"layer";
+        let (manifest, _) = image_manifest(layer);
+        let transport = MockTransport::new([
+            response(200),
+            manifest_response(manifest.clone()),
+            MockStep::Response(
+                RegistryResponse::new(206)
+                    .header("content-range", "bytes 0-4/5")
+                    .body(layer.to_vec()),
+            ),
+            response(200),
+            manifest_response(manifest),
+            MockStep::Response(
+                RegistryResponse::new(206)
+                    .header("content-range", "bytes 0-4/5")
+                    .body(b"xxxxx".to_vec()),
+            ),
+        ]);
+        let report = diagnose_registry(
+            &transport,
+            options(Some(image("registry.example/team/app:v1")))
+                .with_mirrors(vec![endpoint("mirror.example")]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.mirrors[0].status, MirrorCheckStatus::Equivalent);
+        assert_eq!(
+            report.mirrors[0].blob_range.status,
+            BlobRangeStatus::DigestMismatch
+        );
+        assert!(report.recommended_mirror_order.is_empty());
+        assert_eq!(report.status, RegistryDiagnosticStatus::Corrupt);
+    }
+
+    #[test]
+    fn recommendation_is_latency_sorted_with_one_based_display_ranks() {
+        let mut report = RegistryDiagnosticReport {
+            schema_version: REGISTRY_DIAGNOSTIC_SCHEMA_VERSION,
+            status: RegistryDiagnosticStatus::Healthy,
+            upstream: RegistryName::parse("registry.example").unwrap(),
+            upstream_origin: "https://registry.example".into(),
+            image: None,
+            requested_platform: None,
+            api: ApiCheck::default(),
+            manifest: ManifestCheck::default(),
+            blob_range: BlobRangeCheck::default(),
+            mirrors: vec![
+                MirrorCheck {
+                    order: 0,
+                    origin: "https://slow.example".into(),
+                    status: MirrorCheckStatus::Available,
+                    digest: None,
+                    blob_range: BlobRangeCheck::default(),
+                    elapsed_micros: 200,
+                    recommended_rank: None,
+                },
+                MirrorCheck {
+                    order: 1,
+                    origin: "https://fast.example".into(),
+                    status: MirrorCheckStatus::Available,
+                    digest: None,
+                    blob_range: BlobRangeCheck::default(),
+                    elapsed_micros: 100,
+                    recommended_rank: None,
+                },
+            ],
+            recommended_mirror_order: Vec::new(),
+            request_count: 0,
+        };
+
+        rank_mirror_checks(&mut report);
+        assert_eq!(report.recommended_mirror_order, [1, 0]);
+        assert_eq!(report.mirrors[0].recommended_rank, Some(2));
+        assert_eq!(report.mirrors[1].recommended_rank, Some(1));
     }
 
     #[tokio::test]
@@ -2649,6 +3086,11 @@ mod tests {
             MockStep::Response(mirror_challenge),
             MockStep::Response(RegistryResponse::new(200).body(br#"{"token":"mirror-secret"}"#)),
             manifest_response(manifest),
+            MockStep::Response(
+                RegistryResponse::new(206)
+                    .header("content-range", "bytes 0-4/5")
+                    .body(b"layer".to_vec()),
+            ),
         ]);
         let opts = options(Some(image("registry.example/team/app:v1")))
             .with_mirrors(vec![endpoint("mirror.example")]);
@@ -2667,6 +3109,13 @@ mod tests {
             })
             .unwrap();
         assert!(mirror_manifest.authorized);
+        let mirror_blob = seen
+            .iter()
+            .find(|request| {
+                request.origin == "https://mirror.example" && request.path.contains("/blobs/")
+            })
+            .unwrap();
+        assert!(mirror_blob.authorized);
     }
 
     #[tokio::test]
@@ -2819,11 +3268,12 @@ mod tests {
             manifest: ManifestCheck::default(),
             blob_range: BlobRangeCheck::default(),
             mirrors: Vec::new(),
+            recommended_mirror_order: Vec::new(),
             request_count: 1,
         };
         assert_eq!(
             serde_json::to_string(&report).unwrap(),
-            r#"{"schema_version":1,"status":"healthy","upstream":"registry.example","upstream_origin":"https://registry.example","image":null,"requested_platform":null,"api":{"status":"available","http_status":200,"bearer_challenge":false,"challenge_service_present":false,"challenge_scope_matches":null},"manifest":{"status":"not-requested","kind":null,"media_type":null,"digest":null,"child_digest":null,"selected_platform":null,"selected_os_version":null,"byte_size":null},"blob_range":{"status":"not-tested","digest":null,"requested_bytes":0,"received_bytes":0,"total_bytes":null},"mirrors":[],"request_count":1}"#
+            r#"{"schema_version":2,"status":"healthy","upstream":"registry.example","upstream_origin":"https://registry.example","image":null,"requested_platform":null,"api":{"status":"available","http_status":200,"bearer_challenge":false,"challenge_service_present":false,"challenge_scope_matches":null},"manifest":{"status":"not-requested","kind":null,"media_type":null,"digest":null,"child_digest":null,"selected_platform":null,"selected_os_version":null,"byte_size":null},"blob_range":{"status":"not-tested","digest":null,"requested_bytes":0,"received_bytes":0,"total_bytes":null},"mirrors":[],"recommended_mirror_order":[],"request_count":1}"#
         );
     }
 }

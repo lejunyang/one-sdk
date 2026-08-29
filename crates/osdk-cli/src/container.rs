@@ -12,18 +12,20 @@ use osdk_core::container::operations::{
     NativePruneTarget, NativePruneWarning, PruneConfirmation, PrunePreview, UnsupportedPrune,
 };
 use osdk_core::container::{
-    diagnose_registry, plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors,
-    ActivationRequirement, ApiCheckStatus, BuilderDriver, BuilderNodeStatus, BuildkitAdapter,
-    BuildkitMirrorPlanRequest, BuildxBuilderSelector, BuildxCacheQuery, CacheQueryStatus,
-    Capability, CapabilityStatus, ContainerdAdapter, ContainerdCacheQuery,
-    ContainerdMirrorPlanRequest, DiagnosticDetails, DiagnosticReport, DiagnosticStatus,
-    DockerAdapter, DockerCacheQuery, DockerContextKind, DockerDaemonArchitecture, DockerDaemonOs,
-    DockerMirrorPlanRequest, ImageReference, LegacyRegistryWarning, ManifestCheckStatus,
-    MirrorCheckStatus, MirrorPlan, NativeCacheOwner, NativeCacheRecordKind, NativeCacheStatus,
+    apply_mirror_plan, builtin_mirror_policy, diagnose_registry, plan_buildkit_mirrors,
+    plan_containerd_mirrors, plan_docker_mirrors, ActivationRequirement, ApiCheckStatus,
+    BlobRangeStatus, BuilderDriver, BuilderNodeStatus, BuildkitAdapter, BuildkitMirrorPlanRequest,
+    BuildxBuilderSelector, BuildxCacheQuery, CacheQueryStatus, Capability, CapabilityStatus,
+    ContainerdAdapter, ContainerdCacheQuery, ContainerdMirrorPlanRequest, DiagnosticDetails,
+    DiagnosticReport, DiagnosticStatus, DockerAdapter, DockerCacheQuery, DockerContextKind,
+    DockerDaemonArchitecture, DockerDaemonOs, DockerMirrorPlanRequest, ImageReference,
+    LegacyRegistryWarning, ManifestCheckStatus, MirrorApplyReport, MirrorCheckStatus, MirrorPlan,
+    MirrorPlanBundle, NativeCacheOwner, NativeCacheRecordKind, NativeCacheStatus,
     NativeConfigSnapshot, OciPlatform, PlanApplicability, PlanWarning, ProbeCommand,
     RegistryDiagnosticOptions, RegistryDiagnosticReport, RegistryDiagnosticStatus,
     RegistryEndpoint, RegistryLimits, RegistryName, RegistryTransport, ReqwestRegistryTransport,
-    RuntimeAdapter, RuntimeKind, DEFAULT_MAX_REQUESTS, MAX_NATIVE_CONFIG_BYTES,
+    RuntimeAdapter, RuntimeKind, DEFAULT_MAX_REQUESTS, DOCKER_HUB_BENCHMARK_IMAGE,
+    DOCKER_HUB_BENCHMARK_PLATFORM, MAX_NATIVE_CONFIG_BYTES,
 };
 use osdk_core::i18n::{self, interpolate, trl, Lang};
 use osdk_core::process::{
@@ -56,6 +58,24 @@ struct DoctorOutput {
     runtime: DiagnosticReport,
     attempted_runtimes: Vec<DiagnosticReport>,
     builder: Option<DiagnosticReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct MirrorApplyOutput<'a> {
+    schema_version: u32,
+    status: MirrorApplyStatus,
+    plan_id: &'a str,
+    diagnostic: &'a RegistryDiagnosticReport,
+    plan: &'a MirrorPlan,
+    applied: Option<&'a MirrorApplyReport>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum MirrorApplyStatus {
+    Preview,
+    Applied,
+    Cancelled,
 }
 
 pub async fn run(app: &App, command: ContainerCommand) -> Result<Option<ExitStatus>> {
@@ -97,6 +117,59 @@ pub async fn run(app: &App, command: ContainerCommand) -> Result<Option<ExitStat
             accept_preview.as_deref(),
             &mut std::io::stdout(),
         ),
+        ContainerCommand::Mirrors {
+            command:
+                ContainerMirrorsCommand::Apply {
+                    registry,
+                    runtime,
+                    builder,
+                    native_config,
+                    containerd_main_config,
+                    image,
+                    platform,
+                    accept_plan,
+                    dry_run,
+                    json,
+                },
+        } => {
+            if app.ctx.config.settings.offline {
+                return Err(anyhow!(osdk_core::t!("err.container.registry_offline")));
+            }
+            if accept_plan.is_some() && !app.ctx.config.settings.yes {
+                return Err(anyhow!(osdk_core::t!(
+                    "err.container.accept_plan_requires_yes"
+                )));
+            }
+            validate_mirror_options(runtime, builder.as_ref(), containerd_main_config.as_deref())?;
+            let transport = ReqwestRegistryTransport::new().map_err(|error| {
+                anyhow!(osdk_core::t!(
+                    "err.container.registry_transport",
+                    error = error
+                ))
+            })?;
+            mirror_apply(
+                &runner,
+                &transport,
+                app.prompt.as_ref(),
+                app.ctx.config.containers(),
+                app.ctx.config.settings.offline,
+                app.ctx.config.settings.yes,
+                &app.ctx.dirs.data,
+                registry,
+                runtime,
+                builder,
+                &native_config,
+                containerd_main_config.as_deref(),
+                image,
+                platform,
+                accept_plan.as_deref(),
+                dry_run,
+                json,
+                &mut std::io::stdout(),
+            )
+            .await?;
+            Ok(None)
+        }
         command => {
             run_with(
                 &SystemCommandRunner,
@@ -221,6 +294,9 @@ where
                 } else {
                     write_mirror_plan_human(output, &plan, i18n::current())?;
                 }
+            }
+            ContainerMirrorsCommand::Apply { .. } => {
+                unreachable!("mirror apply is dispatched with its prompt before read-only commands")
             }
         },
     }
@@ -618,9 +694,12 @@ async fn registry_test<T: RegistryTransport>(
     }
     let upstream = RegistryEndpoint::for_registry(registry.clone())
         .context("constructing upstream registry endpoint")?;
-    let mirrors = config
+    let builtin_policy = builtin_mirror_policy(&registry);
+    let policy = config
         .registries
         .get(registry.as_str())
+        .or(builtin_policy.as_ref());
+    let mirrors = policy
         .into_iter()
         .flat_map(|policy| policy.mirrors.iter())
         .map(|mirror| RegistryEndpoint::parse_https(mirror))
@@ -679,19 +758,34 @@ fn mirror_plan(
     native_config: Option<&Path>,
     containerd_main_config: Option<&Path>,
 ) -> Result<MirrorPlan> {
+    Ok(mirror_plan_bundle(
+        runner,
+        config,
+        raw_registry,
+        runtime,
+        builder,
+        native_config,
+        containerd_main_config,
+    )?
+    .plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mirror_plan_bundle(
+    runner: &dyn CommandRunner,
+    config: &osdk_core::config::ContainersConfig,
+    raw_registry: &str,
+    runtime: ContainerMirrorRuntimeArg,
+    builder: Option<BuildxBuilderSelector>,
+    native_config: Option<&Path>,
+    containerd_main_config: Option<&Path>,
+) -> Result<MirrorPlanBundle> {
     let registry = RegistryName::parse(raw_registry)
         .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_registry")))?;
     let policy = registry_policy(config, &registry)?;
     let limits = capture_limits(config.probe_timeout_ms);
 
-    if runtime != ContainerMirrorRuntimeArg::Buildkit && builder.is_some() {
-        return Err(anyhow!(osdk_core::t!("err.container.builder_runtime")));
-    }
-    if runtime != ContainerMirrorRuntimeArg::Containerd && containerd_main_config.is_some() {
-        return Err(anyhow!(osdk_core::t!(
-            "err.container.containerd_main_config_runtime"
-        )));
-    }
+    validate_mirror_options(runtime, builder.as_ref(), containerd_main_config)?;
 
     let bundle = match runtime {
         ContainerMirrorRuntimeArg::Docker => {
@@ -699,7 +793,7 @@ fn mirror_plan(
             let snapshot = native_config.map(capture_native_config).transpose()?;
             plan_docker_mirrors(DockerMirrorPlanRequest {
                 registry: &registry,
-                policy,
+                policy: &policy,
                 discovery: &discovery,
                 native_config: snapshot.as_ref(),
             })?
@@ -723,7 +817,7 @@ fn mirror_plan(
                 .transpose()?;
             plan_containerd_mirrors(ContainerdMirrorPlanRequest {
                 registry: &registry,
-                policy,
+                policy: &policy,
                 discovery: &discovery,
                 hosts_config: snapshot.as_ref(),
                 main_config: main_snapshot.as_ref(),
@@ -735,13 +829,258 @@ fn mirror_plan(
             let snapshot = native_config.map(capture_native_config).transpose()?;
             plan_buildkit_mirrors(BuildkitMirrorPlanRequest {
                 registry: &registry,
-                policy,
+                policy: &policy,
                 discovery: &discovery,
                 native_config: snapshot.as_ref(),
             })?
         }
     };
-    Ok(bundle.plan)
+    Ok(bundle)
+}
+
+fn validate_mirror_options(
+    runtime: ContainerMirrorRuntimeArg,
+    builder: Option<&BuildxBuilderSelector>,
+    containerd_main_config: Option<&Path>,
+) -> Result<()> {
+    if runtime != ContainerMirrorRuntimeArg::Buildkit && builder.is_some() {
+        return Err(anyhow!(osdk_core::t!("err.container.builder_runtime")));
+    }
+    if runtime != ContainerMirrorRuntimeArg::Containerd && containerd_main_config.is_some() {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.containerd_main_config_runtime"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn mirror_apply<T: RegistryTransport>(
+    runner: &dyn CommandRunner,
+    transport: &T,
+    prompt: &dyn crate::prompt::Prompt,
+    config: &osdk_core::config::ContainersConfig,
+    offline: bool,
+    assume_yes: bool,
+    data_dir: &Path,
+    raw_registry: String,
+    runtime: ContainerMirrorRuntimeArg,
+    builder: Option<BuildxBuilderSelector>,
+    native_config: &Path,
+    containerd_main_config: Option<&Path>,
+    image: Option<ImageReference>,
+    platform: Option<OciPlatform>,
+    accepted_plan: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<()> {
+    if offline {
+        return Err(anyhow!(osdk_core::t!("err.container.registry_offline")));
+    }
+    if accepted_plan.is_some() && !assume_yes {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.accept_plan_requires_yes"
+        )));
+    }
+    let registry = RegistryName::parse(&raw_registry)
+        .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_registry")))?;
+    let base_policy = registry_policy(config, &registry)?;
+    let benchmark_image = match image {
+        Some(image) => image,
+        None if registry.is_docker_hub() => ImageReference::parse(DOCKER_HUB_BENCHMARK_IMAGE)
+            .expect("the built-in Docker Hub benchmark image is valid"),
+        None => {
+            return Err(anyhow!(osdk_core::t!(
+                "err.container.mirror_image_required"
+            )))
+        }
+    };
+    let benchmark_platform = match platform {
+        Some(platform) => Some(platform),
+        None => match configured_platform(config)? {
+            Some(platform) => Some(platform),
+            None if registry.is_docker_hub() => Some(
+                OciPlatform::parse(DOCKER_HUB_BENCHMARK_PLATFORM)
+                    .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_platform")))?,
+            ),
+            None => None,
+        },
+    };
+    let diagnostic = registry_test(
+        transport,
+        config,
+        &raw_registry,
+        Some(benchmark_image),
+        benchmark_platform,
+    )
+    .await?;
+    if diagnostic.recommended_mirror_order.is_empty() {
+        return Err(anyhow!(osdk_core::t!("err.container.no_verified_mirror")));
+    }
+    let selected_mirrors = diagnostic
+        .recommended_mirror_order
+        .iter()
+        .map(|index| base_policy.mirrors[*index].clone())
+        .collect::<Vec<_>>();
+    let mut selected_config = config.clone();
+    let mut policy = base_policy;
+    policy.mirrors = selected_mirrors;
+    selected_config
+        .registries
+        .insert(registry.as_str().to_owned(), policy);
+
+    let bundle = mirror_plan_bundle(
+        runner,
+        &selected_config,
+        &raw_registry,
+        runtime,
+        builder.clone(),
+        Some(native_config),
+        containerd_main_config,
+    )?;
+    if !json {
+        write_registry_human(output, &diagnostic, i18n::current())?;
+        write_mirror_plan_human(output, &bundle.plan, i18n::current())?;
+    }
+    if dry_run {
+        if json {
+            serde_json::to_writer(
+                &mut *output,
+                &MirrorApplyOutput {
+                    schema_version: 1,
+                    status: MirrorApplyStatus::Preview,
+                    plan_id: bundle.plan.plan_id.as_str(),
+                    diagnostic: &diagnostic,
+                    plan: &bundle.plan,
+                    applied: None,
+                },
+            )
+            .context("serializing native mirror apply preview")?;
+            writeln!(output)?;
+        }
+        return Ok(());
+    }
+    if bundle.plan.applicability != PlanApplicability::Ready {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.mirror_plan_not_ready"
+        )));
+    }
+    if assume_yes {
+        let Some(accepted_plan) = accepted_plan else {
+            return Err(anyhow!(osdk_core::t!(
+                "err.container.accept_plan_required",
+                plan_id = bundle.plan.plan_id.as_str()
+            )));
+        };
+        if accepted_plan != bundle.plan.plan_id.as_str() {
+            return Err(anyhow!(osdk_core::t!(
+                "err.container.accept_plan_mismatch",
+                plan_id = bundle.plan.plan_id.as_str()
+            )));
+        }
+    } else {
+        output.flush()?;
+        let question = osdk_core::t!(
+            "prompt.container_mirror_apply",
+            plan_id = bundle.plan.plan_id.as_str()
+        );
+        if !prompt.confirm(&question)? {
+            if json {
+                serde_json::to_writer(
+                    &mut *output,
+                    &MirrorApplyOutput {
+                        schema_version: 1,
+                        status: MirrorApplyStatus::Cancelled,
+                        plan_id: bundle.plan.plan_id.as_str(),
+                        diagnostic: &diagnostic,
+                        plan: &bundle.plan,
+                        applied: None,
+                    },
+                )
+                .context("serializing cancelled native mirror apply report")?;
+                writeln!(output)?;
+            } else {
+                writeln!(output, "{}", osdk_core::t!("msg.cancelled"))?;
+            }
+            return Ok(());
+        }
+    }
+
+    let refreshed = mirror_plan_bundle(
+        runner,
+        &selected_config,
+        &raw_registry,
+        runtime,
+        builder,
+        Some(native_config),
+        containerd_main_config,
+    )?;
+    if refreshed.plan.plan_id != bundle.plan.plan_id {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.mirror_plan_changed",
+            plan_id = refreshed.plan.plan_id.as_str()
+        )));
+    }
+    let lock_path = data_dir.join("locks/container-mirror-apply.lock");
+    let report = apply_mirror_plan(&refreshed, &lock_path)
+        .context("applying native mirror configuration")?;
+    if json {
+        serde_json::to_writer(
+            &mut *output,
+            &MirrorApplyOutput {
+                schema_version: 1,
+                status: MirrorApplyStatus::Applied,
+                plan_id: bundle.plan.plan_id.as_str(),
+                diagnostic: &diagnostic,
+                plan: &bundle.plan,
+                applied: Some(&report),
+            },
+        )
+        .context("serializing native mirror apply report")?;
+        writeln!(output)?;
+    } else {
+        write_mirror_apply_human(output, &report, bundle.plan.activation, i18n::current())?;
+    }
+    Ok(())
+}
+
+fn write_mirror_apply_human(
+    output: &mut dyn Write,
+    report: &MirrorApplyReport,
+    activation: ActivationRequirement,
+    lang: Lang,
+) -> std::io::Result<()> {
+    writeln!(
+        output,
+        "{}",
+        localized(
+            lang,
+            "msg.container.mirror_apply_success",
+            &[("path", &report.path)]
+        )
+    )?;
+    writeln!(
+        output,
+        "{}",
+        localized(
+            lang,
+            "msg.container.mirror_apply_activation",
+            &[("activation", &activation_label(lang, activation))]
+        )
+    )?;
+    if let Some(backup) = &report.backup_path {
+        writeln!(
+            output,
+            "{}",
+            localized(
+                lang,
+                "msg.container.mirror_apply_backup",
+                &[("path", backup)]
+            )
+        )?;
+    }
+    Ok(())
 }
 
 fn capture_native_config(path: &Path) -> Result<NativeConfigSnapshot> {
@@ -753,16 +1092,21 @@ fn capture_native_config(path: &Path) -> Result<NativeConfigSnapshot> {
     })
 }
 
-fn registry_policy<'a>(
-    config: &'a osdk_core::config::ContainersConfig,
+fn registry_policy(
+    config: &osdk_core::config::ContainersConfig,
     registry: &RegistryName,
-) -> Result<&'a ContainerRegistryConfig> {
-    config.registries.get(registry.as_str()).ok_or_else(|| {
-        anyhow!(osdk_core::t!(
-            "err.container.registry_not_configured",
-            registry = registry
-        ))
-    })
+) -> Result<ContainerRegistryConfig> {
+    config
+        .registries
+        .get(registry.as_str())
+        .cloned()
+        .or_else(|| builtin_mirror_policy(registry))
+        .ok_or_else(|| {
+            anyhow!(osdk_core::t!(
+                "err.container.registry_not_configured",
+                registry = registry
+            ))
+        })
 }
 
 fn capture_limits(timeout_ms: u64) -> CaptureLimits {
@@ -1245,19 +1589,45 @@ fn write_registry_human(
         )?;
     }
     for mirror in &report.mirrors {
-        writeln!(
-            output,
-            "  {}",
-            localized(
-                lang,
-                "msg.container.registry_mirror",
-                &[
-                    ("order", &(mirror.order + 1).to_string()),
-                    ("origin", &mirror.origin),
-                    ("status", &mirror_status_label(lang, mirror.status)),
-                ]
-            )
-        )?;
+        if report.image.is_some() {
+            let rank = mirror
+                .recommended_rank
+                .map(|rank| rank.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            writeln!(
+                output,
+                "  {}",
+                localized(
+                    lang,
+                    "msg.container.registry_mirror_benchmark",
+                    &[
+                        ("order", &(mirror.order + 1).to_string()),
+                        ("origin", &mirror.origin),
+                        ("status", &mirror_status_label(lang, mirror.status)),
+                        ("blob", &blob_status_label(lang, mirror.blob_range.status)),
+                        (
+                            "elapsed_ms",
+                            &format!("{:.1}", mirror.elapsed_micros as f64 / 1000.0)
+                        ),
+                        ("rank", &rank),
+                    ]
+                )
+            )?;
+        } else {
+            writeln!(
+                output,
+                "  {}",
+                localized(
+                    lang,
+                    "msg.container.registry_mirror",
+                    &[
+                        ("order", &(mirror.order + 1).to_string()),
+                        ("origin", &mirror.origin),
+                        ("status", &mirror_status_label(lang, mirror.status)),
+                    ]
+                )
+            )?;
+        }
     }
     Ok(())
 }
@@ -1387,6 +1757,31 @@ fn mirror_status_label(lang: Lang, status: MirrorCheckStatus) -> String {
     )
 }
 
+fn blob_status_label(lang: Lang, status: BlobRangeStatus) -> String {
+    trl(
+        lang,
+        registry_check_label_key(match status {
+            BlobRangeStatus::Supported => "supported",
+            BlobRangeStatus::Ignored => "ignored",
+            BlobRangeStatus::Unsatisfiable => "unsatisfiable",
+            BlobRangeStatus::Malformed => "malformed",
+            BlobRangeStatus::DigestMismatch => "digest_mismatch",
+            BlobRangeStatus::AuthenticationRequired => "authentication_required",
+            BlobRangeStatus::AccessDenied => "access_denied",
+            BlobRangeStatus::RateLimited => "rate_limited",
+            BlobRangeStatus::NotFound => "not_found",
+            BlobRangeStatus::ServerError => "server_error",
+            BlobRangeStatus::RedirectRejected => "redirect_rejected",
+            BlobRangeStatus::BodyTooLarge => "body_too_large",
+            BlobRangeStatus::Unreachable => "unreachable",
+            BlobRangeStatus::TimedOut => "timed_out",
+            BlobRangeStatus::RequestLimit => "request_limit",
+            BlobRangeStatus::NotAvailable => "not_available",
+            BlobRangeStatus::NotTested => "not_tested",
+        }),
+    )
+}
+
 fn registry_check_label_key(name: &str) -> &'static str {
     match name {
         "available" => "label.container.registry_check.available",
@@ -1414,6 +1809,11 @@ fn registry_check_label_key(name: &str) -> &'static str {
         "equivalent" => "label.container.registry_check.equivalent",
         "diverged" => "label.container.registry_check.diverged",
         "invalid_response" => "label.container.registry_check.invalid_response",
+        "supported" => "label.container.registry_check.supported",
+        "ignored" => "label.container.registry_check.ignored",
+        "unsatisfiable" => "label.container.registry_check.unsatisfiable",
+        "malformed" => "label.container.registry_check.malformed",
+        "not_available" => "label.container.registry_check.not_available",
         _ => unreachable!("all registry status labels are explicit"),
     }
 }
@@ -1798,6 +2198,13 @@ mod tests {
 
         fn questions(&self) -> Vec<String> {
             self.questions.lock().unwrap().clone()
+        }
+
+        fn declining() -> Self {
+            Self {
+                answer: false,
+                questions: Mutex::new(Vec::new()),
+            }
         }
     }
 
@@ -2376,6 +2783,15 @@ mod tests {
         fn requests(&self) -> Vec<RegistryRequest> {
             self.requests.lock().unwrap().clone()
         }
+
+        fn from_responses(
+            responses: impl IntoIterator<Item = osdk_core::container::RegistryResponse>,
+        ) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     impl RegistryTransport for FakeTransport {
@@ -2406,11 +2822,61 @@ mod tests {
         }
     }
 
+    fn image_manifest(layer: &[u8]) -> Vec<u8> {
+        let digest = osdk_core::container::Fingerprint::for_bytes(layer);
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": digest.as_str(),
+                "size": layer.len()
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": digest.as_str(),
+                "size": layer.len()
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn manifest_response(body: &[u8]) -> osdk_core::container::RegistryResponse {
+        osdk_core::container::RegistryResponse::new(200)
+            .header("content-type", "application/vnd.oci.image.manifest.v1+json")
+            .header(
+                "docker-content-digest",
+                osdk_core::container::Fingerprint::for_bytes(body).as_str(),
+            )
+            .body(body.to_vec())
+    }
+
+    fn successful_benchmark_transport() -> FakeTransport {
+        let layer = b"layer";
+        let manifest = image_manifest(layer);
+        let range = || {
+            osdk_core::container::RegistryResponse::new(206)
+                .header("content-range", "bytes 0-4/5")
+                .body(layer.to_vec())
+        };
+        FakeTransport::from_responses([
+            osdk_core::container::RegistryResponse::new(200),
+            manifest_response(&manifest),
+            range(),
+            osdk_core::container::RegistryResponse::new(200),
+            manifest_response(&manifest),
+            range(),
+            osdk_core::container::RegistryResponse::new(200),
+            manifest_response(&manifest),
+            range(),
+        ])
+    }
+
     #[test]
     fn registry_limits_honor_probe_timeout_with_hard_bounds() {
         let short = registry_limits(250);
         assert_eq!(short.request_timeout, Duration::from_millis(250));
-        assert_eq!(short.total_timeout, Duration::from_secs(3));
+        assert_eq!(short.total_timeout, Duration::from_secs(12));
 
         let long = registry_limits(90_000);
         assert_eq!(long.request_timeout, Duration::from_secs(60));
@@ -2418,8 +2884,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_test_allows_upstream_only_and_inherits_explicit_platform() {
-        let transport = FakeTransport::available(1);
+    async fn registry_test_uses_builtin_hub_mirrors_and_inherits_explicit_platform() {
+        let transport = FakeTransport::available(3);
         let config = osdk_core::config::ContainersConfig {
             platform: ContainerPlatform::Explicit {
                 os: "linux".into(),
@@ -2437,9 +2903,16 @@ mod tests {
             report.requested_platform.as_ref().map(ToString::to_string),
             Some("linux/amd64".into())
         );
-        assert!(report.mirrors.is_empty());
+        assert_eq!(
+            report
+                .mirrors
+                .iter()
+                .map(|mirror| mirror.origin.as_str())
+                .collect::<Vec<_>>(),
+            ["https://mirror.gcr.io", "https://docker.m.daocloud.io"]
+        );
         let requests = transport.requests();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 3);
         assert!(format!("{:?}", requests[0]).contains("registry-1.docker.io"));
     }
 
@@ -2464,6 +2937,21 @@ mod tests {
             [(0, "https://first.example"), (1, "https://second.example"),]
         );
         assert_eq!(transport.requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn explicit_empty_hub_policy_disables_builtin_mirrors() {
+        let transport = FakeTransport::available(1);
+        let mut config = osdk_core::config::ContainersConfig::default();
+        config
+            .registries
+            .insert("docker.io".into(), registry_policy(&[]));
+        let report = registry_test(&transport, &config, "docker.io", None, None)
+            .await
+            .unwrap();
+
+        assert!(report.mirrors.is_empty());
+        assert_eq!(transport.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -2497,6 +2985,210 @@ mod tests {
         assert_eq!(*factory_calls.lock().unwrap(), 0);
         assert!(runner.calls().is_empty());
         assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mirror_apply_interactive_benchmarks_confirms_and_writes_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("daemon.json");
+        std::fs::write(&target, b"{\"debug\":true}").unwrap();
+        let runner = FakeRunner::new([healthy_local_docker(), healthy_local_docker()].concat());
+        let transport = successful_benchmark_transport();
+        let prompt = FakePrompt::accepting();
+        let mut output = Vec::new();
+        mirror_apply(
+            &runner,
+            &transport,
+            &prompt,
+            &Default::default(),
+            false,
+            false,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            &mut output,
+        )
+        .await
+        .unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let mirrors = written["registry-mirrors"].as_array().unwrap();
+        assert_eq!(mirrors.len(), 2);
+        assert!(mirrors
+            .iter()
+            .all(|mirror| mirror.as_str().is_some_and(|mirror| {
+                osdk_core::container::BUILTIN_DOCKER_HUB_MIRRORS.contains(&mirror)
+            })));
+        assert_eq!(
+            mirrors
+                .iter()
+                .map(|mirror| mirror.as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>(),
+            osdk_core::container::BUILTIN_DOCKER_HUB_MIRRORS
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(prompt.questions().len(), 1);
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("rank"), "{text}");
+        assert!(text.contains("written atomically"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn mirror_apply_yes_requires_the_generated_plan_id() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("daemon.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let runner = FakeRunner::new([healthy_local_docker(), healthy_local_docker()].concat());
+        let transport = successful_benchmark_transport();
+        let prompt = FakePrompt::declining();
+        let error = mirror_apply(
+            &runner,
+            &transport,
+            &prompt,
+            &Default::default(),
+            false,
+            true,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("--accept-plan sha256:"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"{}");
+        assert!(prompt.questions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mirror_apply_dry_run_emits_plan_without_prompt_or_write() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("daemon.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let runner = FakeRunner::new(healthy_local_docker());
+        let transport = successful_benchmark_transport();
+        let prompt = FakePrompt::declining();
+        let mut output = Vec::new();
+        mirror_apply(
+            &runner,
+            &transport,
+            &prompt,
+            &Default::default(),
+            false,
+            false,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            &mut output,
+        )
+        .await
+        .unwrap();
+        let plan: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(plan["status"], "preview");
+        assert!(plan["plan_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:")));
+        assert_eq!(std::fs::read(&target).unwrap(), b"{}");
+        assert!(prompt.questions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mirror_apply_yes_accepts_the_exact_fresh_dry_run_plan() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("daemon.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let prompt = FakePrompt::declining();
+        let mut config = osdk_core::config::ContainersConfig::default();
+        let mut policy = registry_policy(&["https://mirror.gcr.io/"]);
+        policy.resolve = osdk_core::config::ContainerResolve::Mirror;
+        config.registries.insert("docker.io".into(), policy);
+        let mut preview = Vec::new();
+        mirror_apply(
+            &FakeRunner::new(healthy_local_docker()),
+            &successful_benchmark_transport(),
+            &prompt,
+            &config,
+            false,
+            false,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            &mut preview,
+        )
+        .await
+        .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&preview).unwrap();
+        let accepted_plan = preview["plan_id"].as_str().unwrap();
+
+        let runner = FakeRunner::new([healthy_local_docker(), healthy_local_docker()].concat());
+        let mut output = Vec::new();
+        mirror_apply(
+            &runner,
+            &successful_benchmark_transport(),
+            &prompt,
+            &config,
+            false,
+            true,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            Some(accepted_plan),
+            false,
+            true,
+            &mut output,
+        )
+        .await
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(result["status"], "applied");
+        assert_eq!(result["plan_id"], accepted_plan);
+        assert_eq!(result["applied"]["plan_id"], accepted_plan);
+        assert!(result["diagnostic"]["mirrors"].is_array());
+        assert_eq!(prompt.questions().len(), 0);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&target).unwrap()).unwrap()
+                ["registry-mirrors"]
+                .is_array()
+        );
     }
 
     #[tokio::test]
@@ -2641,14 +3333,14 @@ mod tests {
         let missing = mirror_plan(
             &runner,
             &config,
-            "docker.io",
+            "ghcr.io",
             ContainerMirrorRuntimeArg::Docker,
             None,
             None,
             None,
         )
         .unwrap_err();
-        assert!(missing.to_string().contains("docker.io"));
+        assert!(missing.to_string().contains("ghcr.io"));
         assert!(runner.calls().is_empty());
 
         let mut config = config;
@@ -2700,7 +3392,7 @@ mod tests {
     #[test]
     fn registry_and_plan_human_output_use_explicit_bilingual_labels() {
         let report = RegistryDiagnosticReport {
-            schema_version: 1,
+            schema_version: osdk_core::container::REGISTRY_DIAGNOSTIC_SCHEMA_VERSION,
             status: RegistryDiagnosticStatus::Degraded,
             upstream: RegistryName::parse("registry.example").unwrap(),
             upstream_origin: "https://registry.example".into(),
@@ -2720,7 +3412,11 @@ mod tests {
                 origin: "https://mirror.example".into(),
                 status: MirrorCheckStatus::AuthenticationRequired,
                 digest: None,
+                blob_range: Default::default(),
+                elapsed_micros: 1_200,
+                recommended_rank: None,
             }],
+            recommended_mirror_order: Vec::new(),
             request_count: 3,
         };
         let mut english = Vec::new();

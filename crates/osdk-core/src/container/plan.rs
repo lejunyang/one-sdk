@@ -403,6 +403,31 @@ pub struct MirrorPlan {
     pub warnings: BTreeSet<PlanWarning>,
 }
 
+impl MirrorPlan {
+    /// Recompute the self-authenticating plan identifier before a mutating
+    /// consumer trusts any public field.
+    pub fn validate(&self) -> Result<(), PlanError> {
+        let expected = MirrorPlanDraft {
+            target: self.target.clone(),
+            applicability: self.applicability,
+            policy_fingerprint: self.policy_fingerprint.clone(),
+            inputs: self.inputs.clone(),
+            candidates: self.candidates.clone(),
+            changes: self.changes.clone(),
+            privilege: self.privilege,
+            activation: self.activation,
+            validation: self.validation.clone(),
+            warnings: self.warnings.clone(),
+        }
+        .finalize()?;
+        if expected == *self {
+            Ok(())
+        } else {
+            Err(PlanError::InvalidPlan)
+        }
+    }
+}
+
 /// Builder-friendly unsigned plan. Finalization sorts file identities and binds
 /// `plan_id` to every semantic field except the ID itself.
 pub struct MirrorPlanDraft {
@@ -503,6 +528,8 @@ pub fn policy_fingerprint(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
+    #[error("mirror plan identity does not match its contents")]
+    InvalidPlan,
     #[error("native configuration path has no final file name")]
     InvalidPath,
     #[error("native configuration path is not valid UTF-8")]
@@ -760,6 +787,25 @@ mod tests {
         let mut changed = draft(left.inputs[0].clone());
         changed.applicability = PlanApplicability::ManualOnly;
         assert_ne!(left.plan_id, changed.finalize().unwrap().plan_id);
+    }
+
+    #[test]
+    fn validate_rejects_a_tampered_plan_id_or_semantic_field() {
+        let temporary = tempfile::tempdir().unwrap();
+        let input = NativeConfigSnapshot::capture(&temporary.path().join("daemon.json"), 64)
+            .unwrap()
+            .fingerprint()
+            .clone();
+        let plan = draft(input).finalize().unwrap();
+        assert_eq!(plan.validate(), Ok(()));
+
+        let mut bad_id = plan.clone();
+        bad_id.plan_id = Fingerprint::for_bytes(b"different");
+        assert_eq!(bad_id.validate(), Err(PlanError::InvalidPlan));
+
+        let mut bad_semantics = plan;
+        bad_semantics.activation = ActivationRequirement::None;
+        assert_eq!(bad_semantics.validate(), Err(PlanError::InvalidPlan));
     }
 
     #[test]

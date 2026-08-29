@@ -396,6 +396,11 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("equivalent", "equivalent", "内容一致"),
         ("diverged", "diverged", "内容不一致"),
         ("invalid_response", "invalid-response", "响应无效"),
+        ("supported", "supported", "支持"),
+        ("ignored", "range-ignored", "忽略 Range"),
+        ("unsatisfiable", "unsatisfiable", "范围不可满足"),
+        ("malformed", "malformed", "响应格式错误"),
+        ("not_available", "not-available", "不可用"),
     ] {
         m.insert(
             match key {
@@ -426,6 +431,11 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
                 "equivalent" => "label.container.registry_check.equivalent",
                 "diverged" => "label.container.registry_check.diverged",
                 "invalid_response" => "label.container.registry_check.invalid_response",
+                "supported" => "label.container.registry_check.supported",
+                "ignored" => "label.container.registry_check.ignored",
+                "unsatisfiable" => "label.container.registry_check.unsatisfiable",
+                "malformed" => "label.container.registry_check.malformed",
+                "not_available" => "label.container.registry_check.not_available",
                 _ => unreachable!(),
             },
             (english, chinese),
@@ -736,6 +746,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.container.registry_mirror_benchmark",
+        (
+            "mirror {order} {origin}: {status}; layer {blob}; {elapsed_ms} ms; rank {rank}",
+            "镜像 {order} {origin}：{status}；分层 {blob}；{elapsed_ms} 毫秒；排名 {rank}",
+        ),
+    );
+    m.insert(
         "msg.container.mirror_plan_conclusion",
         (
             "{runtime} mirror plan: {applicability}",
@@ -751,6 +768,31 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "{changes} change(s), {candidates} candidate file(s), activation {activation}",
             "{changes} 项变更，{candidates} 个候选文件，激活要求 {activation}",
+        ),
+    );
+    m.insert(
+        "msg.container.mirror_apply_success",
+        (
+            "native mirror configuration written atomically: {path}",
+            "已原子写入原生镜像配置：{path}",
+        ),
+    );
+    m.insert(
+        "msg.container.mirror_apply_activation",
+        (
+            "activation still required: {activation}",
+            "仍需执行激活动作：{activation}",
+        ),
+    );
+    m.insert(
+        "msg.container.mirror_apply_backup",
+        ("backup: {path}", "备份：{path}"),
+    );
+    m.insert(
+        "prompt.container_mirror_apply",
+        (
+            "Apply verified native mirror plan {plan_id}?",
+            "应用已验证的原生镜像计划 {plan_id}？",
         ),
     );
     m.insert(
@@ -861,6 +903,55 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "no container mirror policy is configured for registry {registry}",
             "Registry {registry} 未配置容器镜像策略",
+        ),
+    );
+    m.insert(
+        "err.container.mirror_image_required",
+        (
+            "--image is required to verify mirrors for registries without a built-in benchmark",
+            "没有内置基准镜像的 Registry 必须指定 --image 才能验证镜像源",
+        ),
+    );
+    m.insert(
+        "err.container.no_verified_mirror",
+        (
+            "no mirror passed manifest-equivalence and bounded layer checks",
+            "没有镜像源通过 Manifest 等价性与有界分层检查",
+        ),
+    );
+    m.insert(
+        "err.container.mirror_plan_not_ready",
+        (
+            "the generated native mirror plan is not safe for automatic application",
+            "生成的原生镜像计划不满足安全自动应用条件",
+        ),
+    );
+    m.insert(
+        "err.container.accept_plan_required",
+        (
+            "--yes requires --accept-plan {plan_id}",
+            "--yes 要求同时传入 --accept-plan {plan_id}",
+        ),
+    );
+    m.insert(
+        "err.container.accept_plan_mismatch",
+        (
+            "--accept-plan does not match the generated plan; expected {plan_id}",
+            "--accept-plan 与本次生成的计划不匹配；应为 {plan_id}",
+        ),
+    );
+    m.insert(
+        "err.container.accept_plan_requires_yes",
+        (
+            "--accept-plan is only valid with --yes",
+            "--accept-plan 只能与 --yes 一起使用",
+        ),
+    );
+    m.insert(
+        "err.container.mirror_plan_changed",
+        (
+            "native target or input changed before application; review fresh plan {plan_id}",
+            "应用前原生目标或输入已变化；请审阅新计划 {plan_id}",
         ),
     );
     m.insert(
@@ -2643,8 +2734,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.container.registry.about",
         (
-            "Test OCI registries and configured mirrors",
-            "测试 OCI Registry 和已配置镜像",
+            "Test OCI registries and configured or built-in mirrors",
+            "测试 OCI Registry 和已配置或内置镜像",
         ),
     );
     m.insert(
@@ -2676,10 +2767,17 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.container.registry.test.flag.json",
+        (
+            "Emit schema-versioned JSON; live timing fields vary between runs",
+            "输出带 schema 版本的 JSON；实时耗时字段会随运行变化",
+        ),
+    );
+    m.insert(
         "help.container.mirrors.about",
         (
-            "Plan native registry mirror changes",
-            "规划原生 Registry 镜像变更",
+            "Benchmark, plan, and apply native registry mirror changes",
+            "测速、规划并应用原生 Registry 镜像变更",
         ),
     );
     m.insert(
@@ -2708,6 +2806,48 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Explicit main containerd TOML path when config_path is absent",
             "config_path 缺失时显式指定 containerd 主 TOML 路径",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.apply.about",
+        (
+            "Benchmark, confirm, and atomically apply one ready mirror plan",
+            "测速、确认并原子应用一个 ready 镜像计划",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.apply.flag.native_config",
+        (
+            "Exact native config file to fingerprint and atomically replace",
+            "要进行指纹校验并原子替换的精确原生配置文件",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.apply.flag.image",
+        (
+            "Benchmark image (default for Docker Hub: library/alpine:latest)",
+            "测速镜像（Docker Hub 默认：library/alpine:latest）",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.apply.flag.accept_plan",
+        (
+            "Generated plan id required for unattended --yes application",
+            "无人值守 --yes 应用所需的本次计划 ID",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.apply.flag.dry_run",
+        (
+            "Benchmark and print the generated plan without writing",
+            "仅测速并输出生成的计划，不写入配置",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.apply.flag.json",
+        (
+            "Emit schema-versioned JSON; live benchmark timing fields vary",
+            "输出带 schema 版本的 JSON；实时测速耗时会变化",
         ),
     );
     m.insert(
@@ -2992,11 +3132,18 @@ mod tests {
             "help.container.registry.arg.registry",
             "help.container.registry.test.flag.image",
             "help.container.registry.test.flag.platform",
+            "help.container.registry.test.flag.json",
             "help.container.mirrors.about",
             "help.container.mirrors.plan.about",
             "help.container.mirrors.plan.flag.runtime",
             "help.container.mirrors.plan.flag.native_config",
             "help.container.mirrors.plan.flag.containerd_main_config",
+            "help.container.mirrors.apply.about",
+            "help.container.mirrors.apply.flag.native_config",
+            "help.container.mirrors.apply.flag.image",
+            "help.container.mirrors.apply.flag.accept_plan",
+            "help.container.mirrors.apply.flag.dry_run",
+            "help.container.mirrors.apply.flag.json",
             "help.container.doctor.flag.runtime",
             "help.container.cache.status.flag.runtime",
             "help.container.flag.builder",
@@ -3051,9 +3198,13 @@ mod tests {
             "msg.container.registry_api",
             "msg.container.registry_manifest",
             "msg.container.registry_mirror",
+            "msg.container.registry_mirror_benchmark",
             "msg.container.mirror_plan_conclusion",
             "msg.container.mirror_plan_id",
             "msg.container.mirror_plan_summary",
+            "msg.container.mirror_apply_success",
+            "msg.container.mirror_apply_activation",
+            "msg.container.mirror_apply_backup",
             "msg.container.prune_preview",
             "msg.container.prune_preview_id",
             "msg.container.prune_owner_scope",
@@ -3061,6 +3212,7 @@ mod tests {
             "msg.container.prune_warning",
             "msg.container.prune_unsupported",
             "prompt.container_prune",
+            "prompt.container_mirror_apply",
             "label.container.prune_owner.docker_engine",
             "label.container.prune_owner.buildkit_builder",
             "label.container.prune_owner.containerd",
@@ -3104,6 +3256,11 @@ mod tests {
             "label.container.registry_check.equivalent",
             "label.container.registry_check.diverged",
             "label.container.registry_check.invalid_response",
+            "label.container.registry_check.supported",
+            "label.container.registry_check.ignored",
+            "label.container.registry_check.unsatisfiable",
+            "label.container.registry_check.malformed",
+            "label.container.registry_check.not_available",
             "label.container.activation.none",
             "label.container.activation.restart_daemon",
             "label.container.activation.recreate_builder",
@@ -3125,6 +3282,13 @@ mod tests {
             "err.container.image_registry_mismatch",
             "err.container.invalid_platform",
             "err.container.registry_not_configured",
+            "err.container.mirror_image_required",
+            "err.container.no_verified_mirror",
+            "err.container.mirror_plan_not_ready",
+            "err.container.accept_plan_required",
+            "err.container.accept_plan_mismatch",
+            "err.container.accept_plan_requires_yes",
+            "err.container.mirror_plan_changed",
             "err.container.containerd_main_config_runtime",
             "err.container.containerd_main_config_already_configured",
             "err.container.builder_runtime",

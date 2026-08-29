@@ -1206,6 +1206,25 @@ automatic Phase 6.
 
 ## Decision summary
 
+### Implemented native-mirror slice (2026-08-30)
+
+The native-first portion is now implemented without an osdk-owned OCI store.
+Docker Hub has two built-in, operator-documented candidates (`mirror.gcr.io`
+and `docker.m.daocloud.io`), fully replaced by an explicit user/project policy.
+Registry report schema 2 resolves the upstream once, verifies each mirror by
+the immutable manifest digest (including the selected child for an index),
+samples the same layer with a bounded Range request, and ranks only equivalent
+responses that returned bytes.
+
+`container mirrors apply` composes benchmarking and native planning. Interactive
+use displays and confirms the in-process plan; unattended use requires a fresh
+ID from `--dry-run --json` through `--yes --accept-plan`. Application remains
+limited to ready, single-candidate local plans and uses repeated target discovery,
+a cross-process lock, no-follow stale-input checks, candidate parsing, permission
+preservation, and same-directory atomic replacement. It deliberately performs no
+sudo, daemon restart, builder recreation, Desktop/remote mutation, image storage,
+or OCI GC.
+
 The implementation should begin with native inspection and configuration because
 that produces immediate acceleration value while retaining mature runtime
 semantics. Containerd is the strongest native option for arbitrary per-registry
@@ -1227,6 +1246,8 @@ to the deployed containerd version.
 ### Docker Engine and credentials
 
 - [Mirror the Docker Hub library](https://docs.docker.com/docker-hub/image-library/mirror/)
+- [Google Cloud managed base-image cache (`mirror.gcr.io`)](https://cloud.google.com/artifact-management/docs/managed-base-images)
+- [DaoCloud public image mirror](https://github.com/DaoCloud/public-image-mirror)
 - [`docker image pull`](https://docs.docker.com/reference/cli/docker/image/pull/)
 - [`dockerd` reference](https://docs.docker.com/reference/cli/dockerd/)
 - [`docker login` and credential stores/helpers](https://docs.docker.com/reference/cli/docker/login/)

@@ -822,6 +822,11 @@ fn validate_containers_config(config: &mut ContainersConfig) -> Result<()> {
                 normalized.push(mirror);
             }
         }
+        if normalized.len() > 8 {
+            return Err(Error::config(
+                "container registry policy supports at most 8 mirrors",
+            ));
+        }
         policy.mirrors = normalized;
         if canonical_registries.insert(registry, policy).is_some() {
             return Err(Error::config(
@@ -1301,6 +1306,18 @@ mirrors = ["https://project.example"]
                 "accepted invalid container config: {contents}"
             );
         }
+
+        let mirrors = (0..9)
+            .map(|index| format!("\"https://mirror-{index}.example/\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            &config_file,
+            format!("[containers.registries.\"docker.io\"]\nmirrors = [{mirrors}]\n"),
+        )
+        .unwrap();
+        let error = Config::load_user(&config_file).unwrap_err();
+        assert!(error.to_string().contains("at most 8 mirrors"));
     }
 
     #[test]

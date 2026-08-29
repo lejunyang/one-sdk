@@ -12,8 +12,8 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
 - 自动选择响应更快的 SDK 镜像和依赖 Registry；
 - 在网络不可用时复用已下载的元数据与产物；
 - 像管理开发工具一样管理 Hugging Face 和 ModelScope 模型快照；
-- 检查 Docker、containerd、Buildx、OCI Registry、mirror plan 与原生缓存，并按需直接
-  拉取镜像或确认严格限定范围的原生清理；
+- 检查 Docker、containerd、Buildx、OCI Registry、mirror 测速/计划与原生缓存，并按需
+  安全应用 mirror 配置、直接拉取镜像或确认严格限定范围的原生清理；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
 
 从[快速上手](site/guide/getting-started.md)开始，或查看
@@ -373,8 +373,10 @@ osdk untrust ./osdk.toml
 
 ## 场景：检查并操作原生容器运行时
 
-无需先添加 policy 即可测试 OCI Registry。需要同时测试 mirror 或规划原生配置变更时，
-请在已信任的用户或项目配置中添加有序 mirror policy：
+Docker Hub 开箱内置两个由运营方公开说明的 pull-through cache：`mirror.gcr.io` 和
+`docker.m.daocloud.io`。osdk 会用 `library/alpine:latest` 匿名测速，校验 Manifest 等价性与
+有界分层样本，再按实测延迟推荐通过检查的镜像。已信任的用户或项目配置中的显式 policy
+会完整覆盖这些内置候选：
 
 ```toml
 [containers.registries."docker.io"]
@@ -393,6 +395,13 @@ osdk container registry test docker.io \
 osdk container mirrors plan docker.io --runtime docker
 osdk container mirrors plan docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --json
+osdk container mirrors apply docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json
+# 自动化采用两步流程，并绑定本次生成的精确计划：
+plan_id=$(osdk container mirrors apply docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json --dry-run --json | jq -r .plan_id)
+osdk --yes container mirrors apply docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json --accept-plan "$plan_id" --json
 osdk container cache status
 osdk container cache status --runtime buildkit --builder my-builder
 osdk container pull ubuntu:24.04
@@ -408,12 +417,16 @@ osdk container prune --runtime buildkit --scope build-cache --builder my-builder
 Buildx driver、节点状态、BuildKit 版本、endpoint 与平台。其 schema version 2 JSON 不包含
 context、builder、节点名称、namespace、原生配置路径及可能带敏感信息的 endpoint path/query。
 
-Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并按配置
-顺序检查 mirror。每份 mirror plan 只针对一个已配置 Registry 和一个显式 Docker、
-containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；本来可执行的本地 plan 如果没有
+Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并对通过
+内容校验的 mirror 排序。每份 mirror plan 只针对一个已配置 policy（Docker Hub 也可使用
+内置 policy）和一个显式 Docker、containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；
+本来可执行的本地 plan 如果没有
 显式原生配置路径，会标为 `manual-only`。规划不会写原生配置、启动 builder 或重启 daemon。
 Plan JSON 可能包含操作所需的绝对路径、builder 名、mirror origin 及是否存在 path prefix，
-但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。
+但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。`mirrors apply` 在一次
+调用内完成测速与规划，交互确认时不要求复制 ID；确认后会在锁内复核输入并原子替换文件。
+它不会自动提权，也不会重启 daemon 或重建 builder。无人值守 `--yes` 必须带本次计划对应的
+`--accept-plan`；先用 `--dry-run --json` 获取 ID。
 
 `container pull` 默认使用生效的 runtime 与 platform。`auto` 模式对 Docker 与 containerd
 执行一次有界只读解析，再启动恰好一次原生前台拉取。显式选择 containerd 时必须成对提供
@@ -474,7 +487,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
-| 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、只读 mirror plan、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
+| 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、内置 Docker Hub mirror 测速、安全原生 mirror apply、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
 | Shell | Bash、zsh、fish、PowerShell |
 | CLI 语言 | 中文、英文 |

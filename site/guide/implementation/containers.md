@@ -2,7 +2,8 @@
 
 本页说明 `osdk container doctor`、`osdk container cache status`、
 `osdk container registry test` 与 `osdk container mirrors plan` 背后的只读适配器路径，
-以及 `osdk container pull` 和 `osdk container prune` 背后的受控修改路径。适配器把
+以及 `osdk container mirrors apply`、`osdk container pull` 和 `osdk container prune` 背后的
+受控修改路径。适配器把
 Docker Engine、containerd 和 BuildKit 视为不同所有者；osdk 不会引入共享 OCI 存储，也
 不会静默改变操作所属的原生控制面。
 
@@ -77,8 +78,9 @@ Pull 路径不通过 osdk 传输 Registry 数据，不在 osdk CAS 中创建 ima
 ## 匿名 OCI Registry 诊断
 
 CLI 从位置参数 Registry 构造 HTTPS upstream；逻辑名 `docker.io` 使用传输 host
-`registry-1.docker.io`。`registry test` 的 policy 可省略：没有 policy 时只测试 upstream；
-有匹配 policy 时按配置顺序加入 mirror。只测 API 时在 upstream 和每个 mirror 上请求
+`registry-1.docker.io`。Docker Hub 没有显式 policy 时使用 Google `mirror.gcr.io` 和
+DaoCloud `docker.m.daocloud.io` 两个内置候选；显式 policy 完整覆盖内置值。其他 Registry
+没有 policy 时只测试 upstream。只测 API 时在 upstream 和每个 mirror 上请求
 `/v2/`；指定 image 时先解析并验证 upstream，再按解析出的 digest 请求每个 mirror，不会
 重新解析可变 tag。Image registry 必须与位置参数 Registry 相同。
 
@@ -88,12 +90,14 @@ Mirror path prefix 会在 `/v2/...` 前保留，而序列化诊断只显示 orig
 自动 redirect、proxy、gzip、cookie、client certificate 与环境 Registry credential。Redirect
 只会在同一 HTTPS origin 且仍在固定 budget 内时手动跟随。
 
-`401 Bearer` challenge 只有在 realm 为同 origin HTTPS 时才能请求匿名 pull token；可选
+`401 Bearer` challenge 只有在 realm 为同 origin HTTPS 时才能请求匿名 pull token；另有
+`registry-1.docker.io -> auth.docker.io` 和 `docker.m.daocloud.io -> m.daocloud.io` 两个
+最小跨 origin allowlist。可选
 scope 必须恰好是 `repository:<repository>:pull`。Token 请求本身不带 authorization，结果
 绑定签发 origin。Upstream 和 mirror 独立认证，token 不会跨 origin。
 
 CLI 从 `probe_timeout_ms` 派生 timeout：单请求为 `min(probe_timeout_ms, 60s)`，总 timeout
-为 `min(单请求 × 12, 5 分钟)`。协议还限制整次运行最多 12 个请求、每条请求链最多 3 次
+为 `min(单请求 × 48, 5 分钟)`。协议还限制整次运行默认 48、硬上限 64 个请求，每条请求链最多 3 次
 redirect，API body 8 KiB、匿名 token 64 KiB、manifest 2 MiB、通用 body 4 MiB、layer Range sample
 16 KiB。Offline 模式在构造 transport 前失败。
 
@@ -102,14 +106,17 @@ redirect，API body 8 KiB、匿名 token 64 KiB、manifest 2 MiB、通用 body 4
 恰好选中一个 descriptor。最小 layer 接受精确有界 `Range` 采样；小 layer 被完整采样时
 还会校验 digest。不会拉取或保存完整 image。
 
-`RegistryDiagnosticReport` schema 1 序列化类型化 API、manifest、Range 和有序 mirror 结果，
-以及安全 origin、请求 image/platform、digest、字节数与请求数。Token、原始 header、
+`RegistryDiagnosticReport` schema 2 序列化类型化 API、manifest、Range、每个 mirror 的
+总耗时/排名和推荐顺序，以及安全 origin、请求 image/platform、digest、字节数与请求数。
+测速先用 upstream 固定 tag 的 digest；每个 mirror 必须返回相同 Manifest，再对同一 layer
+做有界 Range 请求，只有等价且返回有效样本者会进入按耗时排序的推荐。Token、原始 header、
 response body、cookie 和原生 credential 都不能进入报告。
 
 ## 原生 Mirror 规划
 
-CLI 要求一个已配置的位置参数 Registry 和一个显式 `docker|containerd|buildkit` runtime。
-缺少 policy 时在原生发现前失败；不存在 auto，也不会把其他 Registry 合并进 plan。
+CLI 要求一个已配置的位置参数 Registry（Docker Hub 可使用内置 policy）和一个显式
+`docker|containerd|buildkit` runtime。缺少 policy 时在原生发现前失败；不存在 auto，也不会
+把其他 Registry 合并进 plan。
 `--builder` 只允许用于 BuildKit。原生发现使用 `probe_timeout_ms`，stdout/stderr 捕获上限
 各为 64 KiB。
 
@@ -139,9 +146,17 @@ prefix，生成 candidate 时其隐藏 bytes 与 fingerprint 也会绑定它。�
 审阅。
 
 `NativeConfigSnapshot` 内容和生成的 `NativeConfigCandidate` bytes 不可序列化；JSON 只保留
-path、state/format、size 与 SHA-256/metadata fingerprint。CLI 丢弃 in-memory candidate
-bundle，只打印 plan，也没有 apply 选项。因此规划只执行有界读取与发现，绝不会写文件、
-提权、重启 daemon 或重建 builder。
+path、state/format、size 与 SHA-256/metadata fingerprint。`mirrors plan` 丢弃 in-memory
+candidate bundle，只打印 plan，因此始终只读。
+
+`mirrors apply` 在同一进程内保留 candidate，且只接受 `ready`、恰好一个 candidate、
+自认证 ID 有效的 plan。交互确认后再执行一次原生发现和 snapshot，要求新 plan ID 与展示给
+用户的 ID 一致；随后获取 osdk apply lock，并在锁内再次以 no-follow 方式捕获输入，比较完整
+metadata/content fingerprint。写入前重新解析完整 JSON/TOML，在同目录创建唯一临时文件，
+写入、保留权限、flush/sync 后再次检查输入，再原子替换并同步父目录（Unix）。替换前失败会
+清理临时文件且不覆盖目标；替换后的父目录同步失败会原样报告。无人值守 `--yes` 额外要求
+`--accept-plan` 等于本次新生成的 ID；`--dry-run` 输出 ID 但不提示、不写入。该路径不提权、
+不重启 daemon、不重建 builder。
 
 ## 原生缓存所有权
 
@@ -189,8 +204,9 @@ prune 启动的是已经验证的 endpoint 值，而不是可变 context 名称�
 ## 序列化与脱敏
 
 `DiagnosticReport` 是封闭的 schema version 2 契约；`NativeCacheStatus` 仍为 schema
-version 1。
-有序 map/set 与已排序缓存记录保证重复 JSON 输出确定一致。Pull 选择与 prune preview 也会
+version 1。Registry report schema version 2 包含实时耗时，因此其结构与排序规则稳定，
+但字节级 JSON 不会跨运行保持相同。
+有序 map/set 与已排序缓存记录保证其他重复 JSON 输出确定一致。Pull 选择与 prune preview 也会
 在原生启动前使用规范类型化输入；prune preview 身份刻意包含精确 target 与 warning。JSON
 字段名和枚举值永不本地化；人类可读标签只在选择完成后通过中英文 catalog 生成。
 
@@ -206,7 +222,8 @@ version 1。
 分类，之后立即丢弃。因此状态查询可以给出有用的机器结果，而不会回显守护进程错误或
 凭据。
 
-Doctor、cache status、Registry 测试、mirror plan 与 prune preview 都不会执行前台修改。
-Pull 和经批准的 prune 是刻意限定的例外：两者都在解析后启动一次选中的原生命令，且不会
-回退。这里没有任何路径会写入原生配置、启动/重建 builder、重启 daemon、扫描 osdk 私有
-存储或实现私有 OCI store。Registry 测试只执行上述有界 metadata 与 Range 读取。
+Doctor、cache status、Registry 测试、mirror plan、mirror apply dry-run 与 prune preview
+都不会修改原生状态。Pull、经批准的 prune 和经批准的 mirror apply 是刻意限定的例外：
+pull/prune 都只启动一个选中的原生命令且不回退，mirror apply 只写精确验证过的配置目标。
+这里没有任何路径会启动/重建 builder、重启 daemon、扫描 osdk 私有存储或实现私有 OCI
+store。Registry 测试只执行上述有界 metadata 与 Range 读取。

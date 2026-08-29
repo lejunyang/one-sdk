@@ -23,6 +23,28 @@ use super::plan::{
 use super::reference::RegistryName;
 use crate::config::{ContainerRegistryConfig, ContainerResolve};
 
+/// Operator-documented public pull-through caches that osdk can benchmark for
+/// Docker Hub when the user has not supplied an explicit policy. An explicit
+/// `[containers.registries."docker.io"]` table always replaces this list.
+pub const BUILTIN_DOCKER_HUB_MIRRORS: [&str; 2] =
+    ["https://mirror.gcr.io/", "https://docker.m.daocloud.io/"];
+
+/// A small public image used to compare Docker Hub mirrors by content and by
+/// a bounded layer range. It is never pulled into an osdk-owned image store.
+pub const DOCKER_HUB_BENCHMARK_IMAGE: &str = "docker.io/library/alpine:latest";
+pub const DOCKER_HUB_BENCHMARK_PLATFORM: &str = "linux/amd64";
+
+pub fn builtin_mirror_policy(registry: &RegistryName) -> Option<ContainerRegistryConfig> {
+    registry.is_docker_hub().then(|| ContainerRegistryConfig {
+        mirrors: BUILTIN_DOCKER_HUB_MIRRORS
+            .iter()
+            .map(|mirror| (*mirror).to_owned())
+            .collect(),
+        anonymous_only: true,
+        resolve: ContainerResolve::Mirror,
+    })
+}
+
 pub struct DockerMirrorPlanRequest<'a> {
     pub registry: &'a RegistryName,
     pub policy: &'a ContainerRegistryConfig,
@@ -810,7 +832,7 @@ mod tests {
     use crate::container::report::{
         DiagnosticReport, DiagnosticStatus, Endpoint, EndpointScope, EndpointTransport, RuntimeKind,
     };
-    use crate::container::RedactedUrl;
+    use crate::container::{ImageReference, OciPlatform, RedactedUrl};
 
     fn policy(resolve: ContainerResolve) -> ContainerRegistryConfig {
         ContainerRegistryConfig {
@@ -821,6 +843,18 @@ mod tests {
             anonymous_only: true,
             resolve,
         }
+    }
+
+    #[test]
+    fn builtin_policy_is_scoped_to_docker_hub_and_has_a_stable_order() {
+        let hub = RegistryName::parse("docker.io").unwrap();
+        let policy = builtin_mirror_policy(&hub).unwrap();
+        assert_eq!(policy.mirrors, BUILTIN_DOCKER_HUB_MIRRORS);
+        assert!(policy.anonymous_only);
+        assert_eq!(policy.resolve, ContainerResolve::Mirror);
+        assert!(builtin_mirror_policy(&RegistryName::parse("ghcr.io").unwrap()).is_none());
+        assert!(ImageReference::parse(DOCKER_HUB_BENCHMARK_IMAGE).is_ok());
+        assert!(OciPlatform::parse(DOCKER_HUB_BENCHMARK_PLATFORM).is_ok());
     }
 
     fn docker(kind: DockerContextKind) -> DockerDiscovery {

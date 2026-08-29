@@ -18,7 +18,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 | [直接 HTTPS 制品](./http-artifacts) | 从严格的 HTTPS `{version}` 模板安装精确 checksum 锁定的文件或归档 |
 | [模型快照](./models) | Hugging Face、ModelScope、筛选、校验、锁定与环境适配 |
 | [下载源与供应链安全](./sources-security) | 镜像、离线、预发布、checksum、签名、attestation 与 GitHub Release |
-| [容器运行时、Registry 与原生操作](./containers) | Runtime/cache 诊断、匿名 OCI Registry 测试、只读原生 mirror plan、直接原生镜像拉取与绑定预览的清理 |
+| [容器运行时、Registry 与原生操作](./containers) | Runtime/cache 诊断、匿名 OCI Registry 测试、内置 Docker Hub mirror 测速、安全原生 mirror apply、直接原生镜像拉取与绑定预览的清理 |
 | [存储、Shell 与扩展](./storage-shell) | CAS、缓存、目录、shim、激活、临时执行、补全、诊断与声明式 backend |
 
 ## 常见路径
@@ -34,7 +34,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 - 从直接 HTTPS URL 安装 checksum 锁定的可执行文件或归档：参阅[直接 HTTPS 制品](./http-artifacts)。
 - 下载模型仓库：参阅[模型快照](./models)。
 - 配置企业镜像或严格校验：参阅[下载源与供应链安全](./sources-security)。
-- 检查 Docker、containerd、Buildx、OCI Registry、mirror plan 或原生缓存用量，或者拉取镜像、严格限定原生清理范围：参阅[容器运行时、Registry 与原生操作](./containers)。
+- 检查 Docker、containerd、Buildx、OCI Registry、mirror plan/测速/应用或原生缓存用量，或者拉取镜像、严格限定原生清理范围：参阅[容器运行时、Registry 与原生操作](./containers)。
 - 配置终端、清理空间或添加数据型 backend：参阅[存储、Shell 与扩展](./storage-shell)。
 
 想了解一次请求内部如何经过解析、下载、验证、CAS 物化和 shim 分派，请阅读

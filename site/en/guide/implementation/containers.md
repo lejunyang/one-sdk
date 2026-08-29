@@ -3,7 +3,7 @@
 This page describes the read-only adapter path behind `osdk container doctor`,
 `osdk container cache status`, `osdk container registry test`, and
 `osdk container mirrors plan`, plus the controlled mutation paths behind
-`osdk container pull` and `osdk container prune`. The adapters treat Docker
+`osdk container mirrors apply`, `osdk container pull`, and `osdk container prune`. The adapters treat Docker
 Engine, containerd, and BuildKit as separate owners. osdk never introduces a
 shared OCI store or silently changes which native control plane owns an
 operation.
@@ -94,9 +94,10 @@ responsibility.
 ## Anonymous OCI registry diagnostics
 
 The CLI constructs the HTTPS upstream from the positional registry; logical
-`docker.io` uses `registry-1.docker.io` for transport. A registry policy is
-optional for `registry test`: without one the run is upstream-only, while a
-matching policy contributes mirrors in configured order. API-only runs probe
+`docker.io` uses `registry-1.docker.io` for transport. Docker Hub uses Google's
+`mirror.gcr.io` and DaoCloud's `docker.m.daocloud.io` when there is no explicit
+policy; an explicit policy completely replaces the built-ins. Other registries
+without policy are upstream-only. API-only runs probe
 `/v2/` on upstream and each mirror. Image runs resolve and verify upstream first,
 then query every mirror by the resolved digest rather than re-resolving a moving
 tag. The image registry must match the positional registry.
@@ -110,15 +111,17 @@ ambient registry credentials. Redirects are followed manually only on the same
 HTTPS origin and within fixed budgets.
 
 A `401 Bearer` challenge can request an anonymous pull token only from a
-same-origin HTTPS realm. An optional scope must exactly equal
+same-origin HTTPS realm, with a minimal cross-origin allowlist for
+`registry-1.docker.io -> auth.docker.io` and
+`docker.m.daocloud.io -> m.daocloud.io`. An optional scope must exactly equal
 `repository:<repository>:pull`; the token request carries no authorization, and
 the result is bound to the issuing origin. Upstream and mirrors authenticate
 independently, so no token crosses between them.
 
 The CLI derives request bounds from `probe_timeout_ms`: per-request timeout is
 `min(probe_timeout_ms, 60s)`, and total timeout is
-`min(per-request × 12, 5 minutes)`. The protocol also caps a run at 12 requests
-and each request chain at three redirects, API bodies at 8 KiB, anonymous-token bodies at 64 KiB,
+`min(per-request × 48, 5 minutes)`. The protocol defaults to 48 requests, caps a
+run at 64 requests and each request chain at three redirects, API bodies at 8 KiB, anonymous-token bodies at 64 KiB,
 manifests at 2 MiB, general bodies at 4 MiB, and the layer Range sample at
 16 KiB. Offline mode fails before transport construction.
 
@@ -128,15 +131,15 @@ applicable. An index requires exactly one descriptor for the requested platform.
 The smallest layer is sampled with an exact bounded `Range`; a complete small
 layer is also digest-checked. No complete image is pulled or stored.
 
-`RegistryDiagnosticReport` schema 1 serializes typed API, manifest, Range, and
-ordered mirror results plus safe origins, requested image/platform, digests,
+`RegistryDiagnosticReport` schema 2 serializes typed API, manifest, Range,
+per-mirror elapsed time/rank, recommended order, safe origins, requested image/platform, digests,
 byte counts, and request count. Tokens, raw headers, response bodies, cookies,
 and native credentials cannot enter the report.
 
 ## Native mirror planning
 
-The CLI requires one configured positional registry and one explicit
-`docker|containerd|buildkit` runtime. Missing policy fails before native
+The CLI requires one configured positional registry (or Docker Hub's built-in
+policy) and one explicit `docker|containerd|buildkit` runtime. Missing policy fails before native
 discovery; there is no auto mode and no sibling registry is folded into the
 plan. `--builder` is BuildKit-only. Native discovery uses `probe_timeout_ms` and
 fixed 64 KiB stdout/stderr capture ceilings.
@@ -172,10 +175,22 @@ should review plan JSON before sharing it.
 
 `NativeConfigSnapshot` contents and generated `NativeConfigCandidate` bytes are
 not serializable. JSON retains only path, state/format, size, and SHA-256/metadata
-fingerprints. The CLI discards the in-memory candidate bundle and prints only
-the plan. It exposes no apply option: planning performs bounded reads and
-discovery but never writes files, elevates privileges, restarts a daemon, or
-recreates a builder.
+fingerprints. `mirrors plan` discards the in-memory candidate bundle and remains
+read-only.
+
+`mirrors apply` retains the candidate in-process and accepts only a `ready`,
+self-authenticating plan with exactly one candidate. After interactive approval
+it repeats native discovery and snapshotting and requires the fresh plan ID to
+equal the displayed ID. It then takes an osdk apply lock and captures the input
+again with no-follow checks, comparing the full metadata/content
+fingerprint. Candidate JSON/TOML is reparsed before a unique sibling temporary
+file is written, permission-preserved, flushed/synced, checked again against the
+input, atomically installed, and the parent directory synced on Unix. Failures
+before replacement remove the temporary file without overwriting the target; a
+post-replacement directory-sync failure is reported as such. Unattended `--yes`
+additionally requires `--accept-plan` to equal the newly generated ID; `--dry-run` prints the ID
+without prompting or writing. This path does not elevate, restart a daemon, or
+recreate a builder.
 
 ## Native cache ownership
 
@@ -239,7 +254,9 @@ name—is then passed directly to the one native prune launch.
 ## Serialization and redaction
 
 `DiagnosticReport` is a closed schema-version-2 contract; `NativeCacheStatus`
-remains schema version 1. Ordered maps/sets and sorted cache records make repeated JSON output
+remains schema version 1. Registry report schema version 2 contains live timing,
+so its shape and ranking rules are stable but its byte-level JSON varies between
+runs. Ordered maps/sets and sorted cache records keep other repeated JSON output
 deterministic. Pull selection and prune previews also use canonical typed inputs
 before native launch; the prune preview identity deliberately includes the exact
 target and warning. JSON field names and enum values are never localized. Human
@@ -262,10 +279,10 @@ stderr is used only for classification and is discarded afterward. A status
 query therefore produces useful machine output without echoing daemon errors or
 credentials.
 
-Doctor, cache status, registry testing, mirror planning, and prune preview never
-call foreground mutation. Pull and approved prune are intentionally narrow
-exceptions: each launches one selected native command after resolution and does
-not fall back. No path here writes native configuration, bootstraps/recreates a
-builder, restarts a daemon, scans osdk's private store, or implements a private
-OCI store. Registry testing performs only the bounded metadata and Range reads
-described above.
+Doctor, cache status, registry testing, mirror planning, mirror-apply dry-run,
+and prune preview never mutate native state. Pull, approved prune, and approved
+mirror apply are intentionally narrow exceptions. Pull and prune each launch one
+selected native command without fallback; mirror apply writes only the exact
+validated config target. No path bootstraps/recreates a builder, restarts a
+daemon, scans osdk's private store, or implements a private OCI store. Registry
+testing performs only the bounded metadata and Range reads described above.

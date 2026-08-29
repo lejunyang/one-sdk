@@ -1201,6 +1201,20 @@ catalog 更新。
 
 ## 决策摘要
 
+### 已实现的原生 mirror 范围（2026-08-30）
+
+原生优先部分已实现，且没有引入 osdk 自有 OCI store。Docker Hub 内置两个由运营方公开
+说明的候选（`mirror.gcr.io` 和 `docker.m.daocloud.io`）；显式用户/项目 policy 会完整覆盖
+它们。Registry report schema 2 只在 upstream 解析一次，再按不可变 Manifest digest 检查每个
+mirror（index 还会检查选中的 child），对同一 layer 做有界 Range 采样，并且只对内容一致且
+确实返回字节的结果排序。
+
+`container mirrors apply` 串联测速与原生规划。交互使用会展示并确认同一进程内的 plan；
+无人值守使用通过 `--dry-run --json` 获取新 ID，再要求 `--yes --accept-plan` 精确接受。应用
+范围仍限制为 ready 且只有一个 candidate 的本地计划，并采用重复目标发现、跨进程锁、
+no-follow 陈旧输入检查、候选解析、权限保留与同目录原子替换。它刻意不执行 sudo、daemon
+重启、builder 重建、Desktop/远程修改、镜像存储或 OCI GC。
+
 实施应从原生检查和配置开始，因为
 这能在保留成熟运行时
 语义的同时立即带来加速价值。containerd 是支持任意按注册表
@@ -1222,6 +1236,8 @@ containerd 版本匹配。
 ### Docker Engine 与凭据
 
 - [镜像 Docker Hub library](https://docs.docker.com/docker-hub/image-library/mirror/)
+- [Google Cloud 托管基础镜像缓存（`mirror.gcr.io`）](https://cloud.google.com/artifact-management/docs/managed-base-images)
+- [DaoCloud 公共镜像加速](https://github.com/DaoCloud/public-image-mirror)
 - [`docker image pull`](https://docs.docker.com/reference/cli/docker/image/pull/)
 - [`dockerd` 参考资料](https://docs.docker.com/reference/cli/dockerd/)
 - [`docker login` 与凭据存储/辅助程序](https://docs.docker.com/reference/cli/docker/login/)

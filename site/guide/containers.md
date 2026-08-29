@@ -1,9 +1,9 @@
 # 容器运行时、Registry 与原生操作
 
 osdk 可以在不修改配置或存储的前提下检查 Docker Engine、containerd 和
-Docker Buildx；也可以匿名测试 OCI Registry 及其已配置 mirror，并生成只读原生 mirror
-plan；还可以把镜像拉取交给一个选中的原生 runtime，并在批准前预览严格限定范围的原生
-清理。检查与规划保持只读；pull 和经批准的 prune 只修改解析出的原生控制面。
+Docker Buildx；也可以匿名测试 OCI Registry、测速并排序 mirror、生成只读原生 mirror
+plan，或在确认后安全写入一个可执行计划。它还可以把镜像拉取交给一个选中的原生 runtime，
+并在批准前预览严格限定范围的原生清理。osdk 不接管 OCI 存储。
 
 ## 诊断运行时与构建器
 
@@ -173,7 +173,10 @@ stdout 和 stderr 各 64 KiB 的上限。
 
 Registry key 是可带端口的规范 host name，不是 URL。Mirror 值必须是 HTTPS URL，不能
 包含 credentials、query 或 fragment；加载时补尾部 `/`，去重但保留首次出现的配置顺序。
-项目级 `[containers]` 需要显式信任，并整段替换低优先级配置。
+每个 Registry 最多配置 8 个 mirror。
+项目级 `[containers]` 需要显式信任，并整段替换低优先级配置。没有显式 Docker Hub policy
+时，osdk 使用 `https://mirror.gcr.io/` 与 `https://docker.m.daocloud.io/` 两个内置候选；
+一旦配置 `[containers.registries."docker.io"]`，包括空 `mirrors` 在内，都会完整覆盖内置值。
 
 `anonymous_only=true` 是 policy 默认值。Registry 测试无论该设置为何都保持匿名。原生
 Docker/containerd/BuildKit 配置无法保证 runtime 永远不附加自己的凭据，因此
@@ -191,7 +194,7 @@ osdk container registry test REGISTRY
 ```
 
 ```bash
-# 只测试 upstream API；不要求 registry policy。
+# 测试 upstream API，并测试 Docker Hub 的内置候选。
 osdk container registry test docker.io
 
 # 校验 tag 或 digest、选择 image index 平台，并测试 Range。
@@ -204,11 +207,13 @@ osdk container registry test ghcr.io \
 ```
 
 `REGISTRY` 是可带端口的 host。命令始终测试其规范 HTTPS upstream；`docker.io` 的传输
-host 是 `registry-1.docker.io`。没有匹配的 `[containers.registries.<registry>]` 时，命令
-只测试 upstream；有 policy 时，按配置顺序依次测试 mirror，不按延迟重新排序。未指定
+host 是 `registry-1.docker.io`。Docker Hub 在没有显式 policy 时加入两个内置候选；其他
+Registry 没有匹配 policy 时只测试 upstream。有 policy 时，按配置顺序测试 mirror。未指定
 image 时，对 upstream 与每个 mirror 调用 `/v2/`。指定 `--image` 时，其 registry 必须与
 `REGISTRY` 一致；osdk 先解析并验证 upstream manifest，再让每个 mirror 按该不可变 digest
-返回内容，不会在 mirror 上重新解析可变 tag。
+返回内容，不会在 mirror 上重新解析可变 tag；随后对相同 layer 执行 Range 采样，并只把
+Manifest 等价且 Range 返回有效字节的 mirror 按总耗时列入推荐顺序。API-only 模式的排序
+只代表连通性延迟，自动应用始终要求 image benchmark。
 
 `--image` 接受 tag 或 digest；digest selector 必须与返回的 manifest 字节一致。对于 image
 index，`--platform` 必须唯一选中一个 child，并校验 descriptor digest 和 size。CLI 参数
@@ -219,18 +224,23 @@ digest。该命令不会拉取或保存完整 image。
 
 诊断保持匿名：不读取原生 credential store、cookie、client certificate 或环境中的
 Registry 凭据，并禁用 proxy。`401 Bearer` challenge 只有在 realm 为 HTTPS 且同 origin 时
-才可获取匿名 pull token；challenge 如果带 scope，必须恰好等于
+才可获取匿名 pull token；另外仅允许经审计的 Docker Hub
+`registry-1.docker.io -> auth.docker.io` 与 DaoCloud
+`docker.m.daocloud.io -> m.daocloud.io` 匿名 token 路径。challenge 如果带 scope，必须恰好等于
 `repository:<repository>:pull`。Token 绑定签发 origin，upstream token 绝不会发送给
 mirror。Redirect 只会在 HTTPS、同 origin 且仍在 request/redirect budget 内时手动跟随。
 
 单次请求 timeout 是 `min(probe_timeout_ms, 60s)`，总 deadline 是
-`min(单次 timeout × 12, 5 分钟)`；默认 1500 ms 对应每次 1.5 秒、总计 18 秒。一次诊断
-最多 12 个请求，每条请求链最多 3 次 redirect，并限制 API/token/manifest body，只读取
+`min(单次 timeout × 48, 5 分钟)`；默认 1500 ms 对应每次 1.5 秒、总计 72 秒。一次诊断
+默认最多 48 个请求、硬上限 64 个请求，每条请求链最多 3 次 redirect，并限制
+API/token/manifest body，只读取
 最多 16 KiB 的 layer sample。`--offline` 会在构造网络 transport 前拒绝该命令。
 `resolve` 与 `anonymous_only` 不会放宽这条命令：upstream 始终是权威来源，测试始终匿名。
 
-人类输出支持中英文并以结论开头。`--json` 输出 Registry report schema version 1，包含
-类型化 API、manifest、blob-range 和有序 mirror 检查；会显示 image、platform、digest、
+人类输出支持中英文并以结论开头。`--json` 输出 Registry report schema version 2，包含
+类型化 API、manifest、blob-range、每个 mirror 的微秒耗时/排名和推荐顺序；实时耗时会变化，
+其余字段结构与排序规则稳定。`recommended_mirror_order` 使用原始 mirror 数组的 0-based
+索引，单项 `recommended_rank` 则是面向用户的 1-based 名次。报告会显示 image、platform、digest、
 字节数、Registry origin 与请求数，但绝不显示 token、原始响应 header 或 response body。
 带 path prefix 的已配置 mirror 会在 `/v2/...` 前保留该 prefix；诊断 report 有意只显示
 origin。
@@ -246,7 +256,8 @@ osdk container mirrors plan REGISTRY
   [--json]
 ```
 
-位置参数 Registry 必须存在匹配的 `[containers.registries.<registry>]` policy。
+位置参数 Registry 必须存在匹配的 `[containers.registries.<registry>]` policy；Docker Hub
+可直接使用内置 policy。
 `--runtime` 必填，没有 `auto`；每次调用只规划该 Registry 与该原生控制面，不会把其他
 已配置 Registry 合并进 plan。`--builder` 只允许配合 `--runtime buildkit`；BuildKit 未提供
 该参数时使用生效的 `[containers].builder`。
@@ -285,8 +296,35 @@ builder 名和 containerd namespace/config path。对于 mirror，只输出脱�
 fingerprint 也会绑定它。JSON 保存 input state、size、SHA-256 fingerprint 与 candidate
 size/format/fingerprint，但不包含现有原生配置内容或生成的 candidate bytes。
 
-`mirrors plan` 只执行有界 no-follow 读取和原生发现，不会写文件、提权、重启 daemon、
-重建 builder 或应用 plan；该命令没有 apply 选项。
+`mirrors plan` 只执行有界 no-follow 读取和原生发现，不会写文件、提权、重启 daemon 或
+重建 builder。
+
+## 测速并应用 mirror
+
+```text
+osdk container mirrors apply REGISTRY --runtime docker|containerd|buildkit
+  --native-config PATH [--builder NAME]
+  [--containerd-main-config PATH]
+  [--image IMAGE] [--platform OS/ARCH[/VARIANT]]
+  [--dry-run] [--accept-plan SHA256] [--json]
+```
+
+Docker Hub 默认使用 `library/alpine:latest` 做内容等价与有界 Range 测速；平台优先采用显式
+`--platform`，其次采用生效配置，均未设置时才默认 `linux/amd64`。
+其他 Registry 必须显式提供 `--image`。只要显式配置了 policy，就只测试该 policy 中的候选，
+并保留该 policy 的 `resolve` 信任语义；测速只负责筛掉失败源并重排通过者，不会擅自把
+`resolve=upstream` 提升为 `resolve=mirror`。
+交互式调用会展示测速结果与本次 plan，确认一次后直接应用，不需要手工复制 plan ID。
+
+无人值守调用采用两步握手：先运行 `--dry-run --json` 取得本次 `plan_id`，再带全局
+`--yes --accept-plan <plan_id>` 重新测速和规划；ID 与新的 runtime identity、policy、input 和
+candidate 任一项不一致都会拒绝。写入仅接受 `ready` 且恰好包含一个 candidate 的计划；
+它获取 osdk apply lock，再以 no-follow 方式重新捕获输入 fingerprint，解析候选 JSON/TOML，
+在目标同目录先创建权限受限的备份，再写入并 flush/sync 临时文件，最后原子替换且保留
+原文件权限；成功输出包含备份路径。
+
+Apply 不使用 sudo、不配置 remote context 或 Docker Desktop，也不自动执行 `restart-daemon`
+或 `recreate-builder`；成功信息会明确列出仍需用户完成的激活动作。`--dry-run` 不提示且不写入。
 
 ## 状态处理建议
 
@@ -315,8 +353,9 @@ size/format/fingerprint，但不包含现有原生配置内容或生成的 candi
 | `invalid-output` | 成功输出不符合类型化聚合 schema |
 | `command-failed` | 原生命令失败，且无法归入更具体的状态 |
 
-Doctor、cache status、registry test、mirror plan 与 prune preview 均为只读。
-`container pull` 与经批准的 `container prune` 是本页说明的两条直接原生修改路径；两者都
-不会改写 daemon 配置、启动或重建 builder、重启 daemon，也不会检查实现私有的存储目录。
+Doctor、cache status、registry test、mirror plan、mirror apply dry-run 与 prune preview 均为只读。
+`container pull`、经批准的 `container prune` 与经批准的 `mirrors apply` 是直接原生修改路径。
+Mirror apply 只写指定配置文件，且三条路径都不会自动提权、启动或重建 builder、重启 daemon，
+也不会检查实现私有的存储目录。
 Registry 测试只执行上文所述有界 metadata 与 Range 读取。选择、启动、plan、preview 与
 披露边界见[原生容器诊断与操作实现](./implementation/containers)。

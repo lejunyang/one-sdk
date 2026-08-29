@@ -1,9 +1,10 @@
 //! Native container-runtime contracts.
 //!
-//! This first foundation deliberately contains no OCI store and performs no
-//! native configuration writes. It provides stable diagnostic, redaction, and
-//! injectable process boundaries for later read-only runtime adapters.
+//! This native-first layer deliberately contains no OCI store. It provides
+//! stable diagnostic, redaction, and injectable process boundaries plus one
+//! stale-checked atomic path for explicitly confirmed mirror configuration.
 
+pub mod apply;
 pub mod buildkit;
 pub mod cache;
 pub mod containerd;
@@ -17,6 +18,9 @@ pub mod registry;
 pub mod report;
 pub mod runtime;
 
+pub use apply::{
+    apply_mirror_plan, MirrorApplyError, MirrorApplyReport, MIRROR_APPLY_SCHEMA_VERSION,
+};
 pub use buildkit::{
     BuildPlatform, BuilderDriver, BuilderNode, BuilderNodeStatus, BuildkitAdapter,
     BuildkitDiagnosticDetails, BuildkitDiscovery, BuildkitNodeDiagnosticDetails,
@@ -37,8 +41,10 @@ pub use docker::{
     DockerDiagnosticDetails, DockerDiscovery, DockerInfo, DockerParseError, DockerVersion,
 };
 pub use mirror::{
-    plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors, BuildkitMirrorPlanRequest,
-    ContainerdMirrorPlanRequest, DockerMirrorPlanRequest, MirrorPlanError,
+    builtin_mirror_policy, plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors,
+    BuildkitMirrorPlanRequest, ContainerdMirrorPlanRequest, DockerMirrorPlanRequest,
+    MirrorPlanError, BUILTIN_DOCKER_HUB_MIRRORS, DOCKER_HUB_BENCHMARK_IMAGE,
+    DOCKER_HUB_BENCHMARK_PLATFORM,
 };
 pub use plan::{
     ActivationRequirement, BuildkitTargetDriver, DockerTargetKind, EffectiveResolution,

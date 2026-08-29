@@ -1,11 +1,11 @@
 # Container Runtimes, Registries, and Native Operations
 
 osdk can inspect Docker Engine, containerd, and Docker Buildx without changing
-their configuration or storage. It can also test an OCI registry and its
-configured mirrors anonymously, produce a read-only native mirror plan, hand an
-image pull to one selected native runtime, and preview narrowly scoped native
-cleanup before approving it. Inspection and planning remain read-only; pull and
-an approved prune change only the resolved native control plane.
+their configuration or storage. It can also test OCI registries anonymously,
+benchmark and rank mirrors, produce a read-only native mirror plan, or safely
+write one ready plan after confirmation. It can hand an image pull to one
+selected native runtime and preview narrowly scoped cleanup. osdk does not own
+an OCI store.
 
 ## Diagnose runtimes and builders
 
@@ -197,8 +197,12 @@ uses `probe_timeout_ms` plus fixed 64 KiB stdout and stderr ceilings.
 Registry keys are canonical host names with an optional port, not URLs. Mirror
 values must be HTTPS URLs without credentials, query strings, or fragments.
 They are normalized with a trailing slash and deduplicated while preserving the
-first configured order. Project-level `[containers]` configuration requires
-explicit trust and replaces the lower-precedence section as a unit.
+first configured order. Each registry accepts at most eight mirrors.
+Project-level `[containers]` configuration requires
+explicit trust and replaces the lower-precedence section as a unit. Without an
+explicit Docker Hub policy, osdk supplies `https://mirror.gcr.io/` and
+`https://docker.m.daocloud.io/`. Any explicit Docker Hub block, including an
+empty mirror list, completely replaces those built-ins.
 
 `anonymous_only=true` is the policy default. Registry tests are always anonymous
 regardless of that setting. A native Docker/containerd/BuildKit configuration
@@ -218,7 +222,7 @@ osdk container registry test REGISTRY
 ```
 
 ```bash
-# API-only upstream test; no registry policy is required.
+# Test the upstream API and the built-in Docker Hub candidates.
 osdk container registry test docker.io
 
 # Verify a tag or digest, select a platform from an image index, and test Range.
@@ -231,14 +235,17 @@ osdk container registry test ghcr.io \
 ```
 
 `REGISTRY` is a host with an optional port. It is always tested at its canonical
-HTTPS upstream; `docker.io` uses `registry-1.docker.io` as the transport host. If
-there is no matching `[containers.registries.<registry>]` block, the command is
-an upstream-only test. When a policy exists, its mirrors are checked
-sequentially in configured order; osdk does not latency-sort them. An API-only
+HTTPS upstream; `docker.io` uses `registry-1.docker.io` as the transport host.
+Docker Hub adds the two built-ins when no explicit policy exists; other
+registries without policy are upstream-only. Mirrors are probed in configured
+order. An API-only
 test calls `/v2/` on the upstream and every configured mirror. With `--image`,
 the image registry must match `REGISTRY`; osdk resolves and verifies the upstream
 manifest, then asks each mirror for that immutable digest rather than resolving
-the moving tag again.
+the moving tag again. It then samples the same layer from each mirror and ranks
+only mirrors whose manifest is equivalent and whose Range response returned
+valid bytes. API-only ranking measures reachability latency only; automatic
+application always requires an image benchmark.
 
 `--image` accepts tags and digests. A digest selector must match the returned
 manifest bytes. For an image index, `--platform` selects exactly one child and
@@ -252,22 +259,29 @@ the layer digest. The command never pulls or stores the complete image.
 The diagnostic is anonymous: it does not read native credential stores, cookies,
 client certificates, or ambient registry credentials, and it disables proxies.
 A `401 Bearer` challenge may obtain an anonymous pull token only when its realm
-is HTTPS and same-origin; any supplied scope must be exactly
+is HTTPS and same-origin, except for the audited Docker Hub
+`registry-1.docker.io -> auth.docker.io` and DaoCloud
+`docker.m.daocloud.io -> m.daocloud.io` token paths. Any supplied scope must be exactly
 `repository:<repository>:pull`. Tokens remain bound to the issuing origin, so an
 upstream token is never sent to a mirror. Redirects are followed manually only
 over HTTPS on the same origin and within the request/redirect budgets.
 
 Each request timeout is `min(probe_timeout_ms, 60s)`. The total deadline is
-`min(request timeout × 12, 5 minutes)`; with the default 1500 ms setting this is
-1.5 seconds per request and 18 seconds overall. The run permits at most 12
-requests and three redirects per request chain, bounds API/token/manifest bodies,
+`min(request timeout × 48, 5 minutes)`; with the default 1500 ms setting this is
+1.5 seconds per request and 72 seconds overall. A run permits 48 requests by
+default, with a hard ceiling of 64, and three redirects per request chain; it
+bounds API/token/manifest bodies,
 and reads at most the 16 KiB layer sample. `--offline` rejects this network
 diagnostic before constructing its transport. `resolve` and `anonymous_only` do
 not relax this command: upstream remains authoritative and the test remains
 anonymous.
 
 Human output is localized and conclusion-first. `--json` emits registry report
-schema version 1 with typed API, manifest, blob-range, and ordered mirror checks.
+schema version 2 with typed API, manifest, blob-range, per-mirror microsecond
+timing/rank, and the recommended order. Live timings vary, while field shape and
+ranking rules remain stable. `recommended_mirror_order` contains zero-based
+indices into the original mirror array, while each `recommended_rank` is a
+one-based display rank.
 It includes image names, platforms, digests, byte counts, registry origins, and
 request count, but never tokens, raw response headers, or response bodies. For a
 path-prefixed configured mirror, requests retain the prefix before `/v2/...`;
@@ -285,7 +299,8 @@ osdk container mirrors plan REGISTRY
 ```
 
 The positional registry must have a matching `[containers.registries.<registry>]`
-policy. `--runtime` is required—there is no `auto` mode—and one invocation plans
+policy, except that Docker Hub can use the built-in policy. `--runtime` is
+required—there is no `auto` mode—and one invocation plans
 exactly that registry for exactly that native control plane. Other configured
 registries are not folded into the plan. `--builder` is valid only with
 `--runtime buildkit`; when omitted there, it uses effective
@@ -333,8 +348,42 @@ SHA-256 fingerprints and candidate size/format/fingerprint, but not existing
 native config contents or generated candidate bytes.
 
 `mirrors plan` performs only bounded, no-follow reads and native discovery. It
-does not write a file, elevate privileges, restart a daemon, recreate a builder,
-or apply the plan. There is no apply option in this command.
+does not write a file, elevate privileges, restart a daemon, or recreate a builder.
+
+## Benchmark and apply mirrors
+
+```text
+osdk container mirrors apply REGISTRY --runtime docker|containerd|buildkit
+  --native-config PATH [--builder NAME]
+  [--containerd-main-config PATH]
+  [--image IMAGE] [--platform OS/ARCH[/VARIANT]]
+  [--dry-run] [--accept-plan SHA256] [--json]
+```
+
+Docker Hub defaults to `library/alpine:latest` for manifest equivalence and
+bounded Range benchmarking. Platform selection prefers explicit `--platform`,
+then effective configuration, and defaults to `linux/amd64` only when neither is
+set. Other registries require `--image`.
+An explicit policy restricts candidates to exactly that list and preserves its
+`resolve` trust semantics. Benchmarking filters failures and reorders passing
+mirrors; it never silently upgrades `resolve=upstream` to `resolve=mirror`.
+Interactive use
+prints the benchmark and fresh plan, asks once, and applies without requiring
+the user to copy a plan ID.
+
+Unattended use is a two-step handshake: obtain the current `plan_id` with
+`--dry-run --json`, then rerun with global `--yes --accept-plan <plan_id>`. Any
+change in runtime identity, policy, input, or candidate produces a different ID
+and is rejected. Apply accepts only a `ready` plan with exactly one candidate,
+takes an osdk apply lock, recaptures the input with no-follow checks, validates
+the candidate JSON/TOML, creates a restricted sibling backup for an existing
+file, flushes and syncs a sibling temporary file, and atomically replaces the
+target while preserving existing permissions. Successful output includes the
+backup path.
+
+Apply never invokes sudo, configures remote contexts or Docker Desktop, or
+automatically performs `restart-daemon`/`recreate-builder`; success output names
+the remaining activation. `--dry-run` neither prompts nor writes.
 
 ## Status guidance
 
@@ -363,11 +412,12 @@ Cache status uses a more specific status set:
 | `invalid-output` | Successful output did not satisfy the typed aggregate schema |
 | `command-failed` | The native command failed without a more specific classification |
 
-Doctor, cache status, registry test, mirror planning, and prune preview are
-read-only. `container pull` and an approved `container prune` are the two direct
-native mutation paths documented here; neither rewrites daemon configuration,
-starts or recreates builders, restarts daemons, or inspects private runtime
-store directories. Registry tests perform only the bounded metadata and Range
+Doctor, cache status, registry test, mirror planning, mirror-apply dry-run, and
+prune preview are read-only. `container pull`, an approved `container prune`, and
+an approved `mirrors apply` are direct native mutation paths. Mirror apply writes
+only the named config file, and none of them elevates privileges, starts or
+recreates builders, restarts daemons, or inspects private runtime store
+directories. Registry tests perform only the bounded metadata and Range
 reads described above. See the [native container diagnostics and operations
 implementation](./implementation/containers) for the selection, launch, plan,
 preview, and disclosure boundaries.

@@ -569,12 +569,12 @@ pub enum ContainerCommand {
         #[command(subcommand)]
         command: ContainerCacheCommand,
     },
-    /// Test an OCI registry and its configured mirrors anonymously.
+    /// Test an OCI registry and its configured or built-in mirrors anonymously.
     Registry {
         #[command(subcommand)]
         command: ContainerRegistryCommand,
     },
-    /// Plan read-only native mirror configuration changes.
+    /// Benchmark, plan, and apply native mirror configuration changes.
     Mirrors {
         #[command(subcommand)]
         command: ContainerMirrorsCommand,
@@ -610,7 +610,7 @@ pub enum ContainerRegistryCommand {
         /// Optional OCI platform: OS/ARCH[/VARIANT].
         #[arg(long, value_name = "PLATFORM")]
         platform: Option<osdk_core::container::OciPlatform>,
-        /// Emit deterministic, schema-versioned JSON.
+        /// Emit schema-versioned JSON; live timing fields vary between runs.
         #[arg(long)]
         json: bool,
     },
@@ -636,6 +636,39 @@ pub enum ContainerMirrorsCommand {
         #[arg(long, value_name = "PATH")]
         containerd_main_config: Option<std::path::PathBuf>,
         /// Emit deterministic, schema-versioned JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Benchmark mirrors, confirm the resulting plan, and atomically write it.
+    Apply {
+        /// Registry whose configured or built-in mirror policy should be applied.
+        #[arg(value_name = "REGISTRY")]
+        registry: String,
+        /// Native control plane to inspect and configure.
+        #[arg(long, value_enum, value_name = "RUNTIME", required = true)]
+        runtime: ContainerMirrorRuntimeArg,
+        /// Buildx builder name; defaults to the effective container configuration.
+        #[arg(long, value_name = "NAME")]
+        builder: Option<osdk_core::container::BuildxBuilderSelector>,
+        /// Exact Docker daemon JSON, containerd hosts.toml, or BuildKit TOML path.
+        #[arg(long, value_name = "PATH", required = true)]
+        native_config: std::path::PathBuf,
+        /// Explicit main containerd TOML input path when config_path is absent.
+        #[arg(long, value_name = "PATH")]
+        containerd_main_config: Option<std::path::PathBuf>,
+        /// OCI image used for manifest-equivalence and bounded layer benchmarking.
+        #[arg(long, value_name = "IMAGE")]
+        image: Option<osdk_core::container::ImageReference>,
+        /// Optional OCI platform: OS/ARCH[/VARIANT].
+        #[arg(long, value_name = "PLATFORM")]
+        platform: Option<osdk_core::container::OciPlatform>,
+        /// Required with --yes; must equal the plan generated in this invocation.
+        #[arg(long, value_name = "SHA256", conflicts_with = "dry_run")]
+        accept_plan: Option<String>,
+        /// Benchmark and emit the resulting plan without prompting or writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit schema-versioned JSON; live benchmark timing fields vary.
         #[arg(long)]
         json: bool,
     },
@@ -887,5 +920,73 @@ mod tests {
             std::path::PathBuf::from("buildkitd.toml")
         );
         assert!(json);
+    }
+
+    #[test]
+    fn parses_unattended_mirror_apply_arguments_and_allows_interactive_apply() {
+        let cli = Cli::try_parse_from([
+            "osdk",
+            "--yes",
+            "container",
+            "mirrors",
+            "apply",
+            "docker.io",
+            "--runtime",
+            "docker",
+            "--native-config",
+            "daemon.json",
+            "--accept-plan",
+            "sha256:example",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Container {
+            command:
+                ContainerCommand::Mirrors {
+                    command:
+                        ContainerMirrorsCommand::Apply {
+                            registry,
+                            runtime,
+                            native_config,
+                            accept_plan,
+                            dry_run,
+                            json,
+                            ..
+                        },
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(registry, "docker.io");
+        assert_eq!(runtime, ContainerMirrorRuntimeArg::Docker);
+        assert_eq!(native_config, std::path::PathBuf::from("daemon.json"));
+        assert_eq!(accept_plan.as_deref(), Some("sha256:example"));
+        assert!(!dry_run);
+        assert!(json);
+
+        let cli = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "mirrors",
+            "apply",
+            "docker.io",
+            "--runtime",
+            "docker",
+            "--native-config",
+            "daemon.json",
+        ])
+        .unwrap();
+        assert!(!cli.global.yes);
+        let Command::Container {
+            command:
+                ContainerCommand::Mirrors {
+                    command: ContainerMirrorsCommand::Apply { accept_plan, .. },
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert!(accept_plan.is_none());
     }
 }

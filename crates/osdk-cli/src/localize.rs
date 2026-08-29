@@ -260,7 +260,9 @@ fn localize_subcommands(cmd: Command) -> Command {
                             .mut_arg("platform", |a| {
                                 a.help(h("help.container.registry.test.flag.platform"))
                             })
-                            .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                            .mut_arg("json", |a| {
+                                a.help(h("help.container.registry.test.flag.json"))
+                            })
                     })
             })
             .mut_subcommand("mirrors", |s| {
@@ -281,6 +283,38 @@ fn localize_subcommands(cmd: Command) -> Command {
                                 a.help(h("help.container.mirrors.plan.flag.containerd_main_config"))
                             })
                             .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                    })
+                    .mut_subcommand("apply", |apply| {
+                        apply
+                            .about(h("help.container.mirrors.apply.about"))
+                            .mut_arg("registry", |a| {
+                                a.help(h("help.container.registry.arg.registry"))
+                            })
+                            .mut_arg("runtime", |a| {
+                                a.help(h("help.container.mirrors.plan.flag.runtime"))
+                            })
+                            .mut_arg("builder", |a| a.help(h("help.container.flag.builder")))
+                            .mut_arg("native_config", |a| {
+                                a.help(h("help.container.mirrors.apply.flag.native_config"))
+                            })
+                            .mut_arg("containerd_main_config", |a| {
+                                a.help(h("help.container.mirrors.plan.flag.containerd_main_config"))
+                            })
+                            .mut_arg("image", |a| {
+                                a.help(h("help.container.mirrors.apply.flag.image"))
+                            })
+                            .mut_arg("platform", |a| {
+                                a.help(h("help.container.registry.test.flag.platform"))
+                            })
+                            .mut_arg("accept_plan", |a| {
+                                a.help(h("help.container.mirrors.apply.flag.accept_plan"))
+                            })
+                            .mut_arg("dry_run", |a| {
+                                a.help(h("help.container.mirrors.apply.flag.dry_run"))
+                            })
+                            .mut_arg("json", |a| {
+                                a.help(h("help.container.mirrors.apply.flag.json"))
+                            })
                     })
             })
     })

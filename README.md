@@ -12,8 +12,9 @@ package managers, developer tools, and model snapshots. Use it to:
 - choose responsive SDK mirrors and dependency registries automatically;
 - work from downloaded metadata and artifacts when the network is unavailable;
 - manage Hugging Face and ModelScope snapshots alongside development tools;
-- inspect Docker, containerd, Buildx, OCI registries, mirror plans, and native
-  caches, then deliberately pull images or approve narrowly scoped native cleanup;
+- inspect Docker, containerd, Buildx, OCI registries, mirror benchmarks/plans,
+  and native caches, then deliberately apply mirror config, pull images, or
+  approve narrowly scoped native cleanup;
 - inspect storage, caches, active versions, and environment health in English or
   Chinese.
 
@@ -406,9 +407,12 @@ Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
 
 ## Scenario: inspect and operate native container runtimes
 
-An OCI registry can be tested without adding policy first. Add an ordered mirror
-policy to trusted user or project configuration when you also want to test
-mirrors or plan a native configuration change:
+Docker Hub works out of the box with two operator-documented public
+pull-through caches, `mirror.gcr.io` and `docker.m.daocloud.io`. osdk benchmarks
+them anonymously against `library/alpine:latest`, verifies manifest equivalence
+and a bounded layer sample, and recommends the passing mirrors by measured
+latency. An explicit policy in trusted user or project configuration fully
+replaces those built-ins:
 
 ```toml
 [containers.registries."docker.io"]
@@ -427,6 +431,13 @@ osdk container registry test docker.io \
 osdk container mirrors plan docker.io --runtime docker
 osdk container mirrors plan docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --json
+osdk container mirrors apply docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json
+# Automation is two-step and binds the exact fresh plan:
+plan_id=$(osdk container mirrors apply docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json --dry-run --json | jq -r .plan_id)
+osdk --yes container mirrors apply docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json --accept-plan "$plan_id" --json
 osdk container cache status
 osdk container cache status --runtime buildkit --builder my-builder
 osdk container pull ubuntu:24.04
@@ -444,15 +455,21 @@ driver, node state, BuildKit versions, endpoints, and platforms. Its
 schema-version-2 JSON omits context, builder and node names, namespaces, native
 config paths, and secret-bearing endpoint paths or queries.
 
-Registry tests use anonymous HTTPS only, can validate image digests, platform
-selection, and bounded Range support, and check configured mirrors in order. A
-mirror plan always targets one configured registry and one explicit Docker,
-containerd, or BuildKit control plane. It reports a deterministic `plan_id`;
+Registry tests use anonymous HTTPS only, validate image digests, platform
+selection, bounded Range support, and rank verified mirrors. A mirror plan
+always targets one configured or Docker Hub built-in registry policy and one
+explicit Docker, containerd, or BuildKit control plane. It reports a
+deterministic `plan_id`;
 without an explicit native config path a locally actionable plan is
 `manual-only`. Planning never writes native configuration, starts builders, or
 restarts daemons. Plan JSON can expose operational absolute paths, builder names,
 and mirror origins plus whether a path prefix exists; exact mirror prefixes,
 existing configuration contents, and generated candidate bytes remain hidden.
+`mirrors apply` performs that benchmark and plan in one invocation, prompts
+interactively without asking you to copy the ID, then rechecks the input under
+a lock and atomically replaces the file. It never elevates privileges or
+restarts/recreates the native service. Unattended `--yes` requires the exact
+fresh `--accept-plan`; use `--dry-run --json` to obtain it.
 
 `container pull` uses the effective runtime and platform unless you override
 them. In `auto` mode it performs one bounded read-only Docker/containerd
@@ -522,7 +539,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
-| Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, read-only mirror plans, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
+| Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, built-in Docker Hub mirror benchmarking, safe native mirror apply, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
 | Shells | Bash, zsh, fish, PowerShell |
 | CLI languages | English, Chinese |

@@ -4144,6 +4144,19 @@ fn native_container_help_is_localized() {
     for expected in ["窄范围原生清理", "精确 sha256 预览 ID", "Docker context"] {
         assert!(prune.contains(expected), "{prune}");
     }
+
+    let apply = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["container", "mirrors", "apply", "--help"],
+        &[("OSDK_LANG", "zh")],
+    );
+    assert!(apply.status.success());
+    let apply = String::from_utf8(apply.stdout).unwrap();
+    for expected in ["测速、确认并原子应用", "精确原生配置文件", "本次计划 ID"]
+    {
+        assert!(apply.contains(expected), "{apply}");
+    }
 }
 
 #[cfg(unix)]

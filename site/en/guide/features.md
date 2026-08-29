@@ -20,7 +20,7 @@ current implementation boundaries.
 | [Direct HTTPS Artifacts](./http-artifacts) | Install an exact checksum-pinned file or archive from a strict HTTPS `{version}` template |
 | [Model Snapshots](./models) | Hugging Face, ModelScope, file filters, verification, locking, and environment adapters |
 | [Sources and Supply-chain Security](./sources-security) | Mirrors, offline mode, pre-releases, checksums, signatures, attestations, and GitHub Releases |
-| [Container Runtimes, Registries, and Native Operations](./containers) | Runtime/cache diagnostics, anonymous OCI registry tests, read-only mirror plans, direct native image pulls, and preview-bound cleanup |
+| [Container Runtimes, Registries, and Native Operations](./containers) | Runtime/cache diagnostics, anonymous OCI registry tests, built-in Docker Hub mirror benchmarking, safe native mirror apply, direct native image pulls, and preview-bound cleanup |
 | [Storage, Shell, and Extensions](./storage-shell) | CAS, caches, directories, shims, activation, temporary execution, completions, diagnostics, and declarative backends |
 
 ## Common paths
@@ -37,7 +37,7 @@ your goal:
 - To install a checksum-pinned executable or archive from a direct HTTPS URL, read [Direct HTTPS Artifacts](./http-artifacts).
 - To download a model repository, read [Model Snapshots](./models).
 - To configure a corporate mirror or strict verification, read [Sources and Supply-chain Security](./sources-security).
-- To inspect Docker, containerd, Buildx, OCI registries, mirror plans, or native cache usage—or to pull an image or narrowly prune native data—read [Container Runtimes, Registries, and Native Operations](./containers).
+- To inspect Docker, containerd, Buildx, OCI registries, mirror plans/benchmarks/application, or native cache usage—or to pull an image or narrowly prune native data—read [Container Runtimes, Registries, and Native Operations](./containers).
 - To configure your shell, reclaim space, or add a data-only backend, read [Storage, Shell, and Extensions](./storage-shell).
 
 For the internal request path through resolution, download, verification, CAS
