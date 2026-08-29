@@ -28,6 +28,7 @@ pub struct CommandSpec {
     args: Vec<OsString>,
     env: BTreeMap<OsString, OsString>,
     cwd: Option<PathBuf>,
+    clear_env: bool,
 }
 
 impl CommandSpec {
@@ -37,6 +38,7 @@ impl CommandSpec {
             args: Vec::new(),
             env: BTreeMap::new(),
             cwd: None,
+            clear_env: false,
         }
     }
 
@@ -79,6 +81,14 @@ impl CommandSpec {
         self
     }
 
+    /// Start the child with an empty environment before applying explicit
+    /// overrides. This keeps ambient package-manager configuration out of
+    /// managed delegate operations.
+    pub fn clear_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
+
     pub fn program(&self) -> &OsStr {
         &self.program
     }
@@ -95,8 +105,15 @@ impl CommandSpec {
         self.cwd.as_deref()
     }
 
+    pub fn environment_is_cleared(&self) -> bool {
+        self.clear_env
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
+        if self.clear_env {
+            command.env_clear();
+        }
         command.args(&self.args).envs(&self.env);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -112,6 +129,7 @@ impl std::fmt::Debug for CommandSpec {
             .field("argument_count", &self.args.len())
             .field("environment_count", &self.env.len())
             .field("has_working_directory", &self.cwd.is_some())
+            .field("clears_environment", &self.clear_env)
             .finish()
     }
 }

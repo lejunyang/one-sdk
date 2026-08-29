@@ -20,7 +20,7 @@ Derived directories are:
 <data>/models                model snapshots
 <data>/shims                 command shims
 <data>/rustup                isolated RUSTUP_HOME
-<data>/cargo                 isolated CARGO_HOME for the Rust backend
+<data>/cargo                 isolated Rust CARGO_HOME; controlled cargo-binstall location
 <data>/plugins               declarative backends
 <cache>/downloads            SDK/model downloads
 <cache>/tmp                  extraction scratch space
@@ -82,6 +82,10 @@ When the user has not set them, the general shell hook also maps
 `GRADLE_USER_HOME`. There is no Maven `M2_HOME`/`maven.repo.local` redirection.
 Direct Rust shims and `exec` override the general `<cache>/pkg/cargo` mapping
 with `<data>/cargo`.
+Cargo developer-tool providers do not use either location as their build cache:
+each install gets a stage-private `HOME`, `CARGO_HOME`, target, and install root.
+Only an eligible controlled `cargo-binstall` executable is discovered at
+`<data>/cargo/bin`; temporary source/build workspace is removed before publication.
 
 ## Deletion and confirmations
 

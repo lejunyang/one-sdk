@@ -13,6 +13,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 | [运行时与生态工具](./runtimes) | Node.js、Python、Java、Go、Rust、Maven、Gradle、Kotlin |
 | [JavaScript 包管理器](./package-managers) | npm、pnpm、Yarn、Bun、Deno、Node 依赖与 Registry 预检 |
 | [npm 开发工具](./npm-tools) | 用 `npm:<package>` 安装、固定、执行、升级和离线恢复 npm CLI 包 |
+| [Cargo 开发工具](./cargo-tools) | 用精确受管 Rust toolchain 安装 Registry crate 或 HTTPS Git 仓库 |
 | [直接 HTTPS 制品](./http-artifacts) | 从严格的 HTTPS `{version}` 模板安装精确 checksum 锁定的文件或归档 |
 | [模型快照](./models) | Hugging Face、ModelScope、筛选、校验、锁定与环境适配 |
 | [下载源与供应链安全](./sources-security) | 镜像、离线、预发布、checksum、签名、attestation 与 GitHub Release |
@@ -27,6 +28,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 - 管理某种语言工具链：参阅[运行时与生态工具](./runtimes)。
 - 固定 npm、pnpm 或 Yarn：参阅[JavaScript 包管理器](./package-managers)。
 - 安装 Prettier、TypeScript 或 scoped npm CLI 包：参阅[npm 开发工具](./npm-tools)。
+- 从 Registry 或 Git 仓库安装 ripgrep 等 Rust CLI：参阅[Cargo 开发工具](./cargo-tools)。
 - 从直接 HTTPS URL 安装 checksum 锁定的可执行文件或归档：参阅[直接 HTTPS 制品](./http-artifacts)。
 - 下载模型仓库：参阅[模型快照](./models)。
 - 配置企业镜像或严格校验：参阅[下载源与供应链安全](./sources-security)。

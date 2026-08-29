@@ -12,6 +12,8 @@ osdk 通过有限并发、源探测与故障转移、可恢复下载、跨进程
 barrier 之后的完成顺序不固定，shim 按该完成顺序生成，只有返回的解析记录随后按
 backend 名称排序。任何任务失败会使批次返回错误，但已完成的独立安装不会回滚，因此
 它是“依赖 barrier + 有界并发 + 每项提交”，不是全批事务。
+Cargo 工具还有独立的 Rust-first barrier。CLI 要求且只允许一个精确受管 Rust 请求，
+在调度依赖它的 `cargo:` 请求前先完成该请求，并把解析后的 Rust 版本绑定进这些身份。
 
 源测速会并发探测全部候选，不受 `jobs` 限制。单次探测默认超时 1500 ms，最多读取约 1 MB，按首字节时间和吞吐量评分；成功结果默认缓存 6 小时。`auto` 使用测速排名，`ordered` 使用配置优先级，pin 会被放在首位，但其余源仍作为 fallback。详见 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)。
 
@@ -37,6 +39,13 @@ backend 名称排序。任何任务失败会使批次返回错误，但已完成
 失败不会写 marker，下一次运行可清理并重建。但 SDK 树是直接 materialize 到最终目录，不是先构建完整目录再整体 rename；中途失败可能留下部分文件，直到下次运行清理。因此 complete marker 是提交判据，不是整个目录的原子替换。后处理发生在核心流水线返回以后；后端若在后处理失败，核心 marker 可能已经存在。
 
 裸二进制安装同样最后写 receipt 和 marker，也会在失败前保留不完整目录供下次清理；不过当前 [`install_single_binary`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs) 没有像归档路径一样自行获取 `tool@version` 文件锁。调用方通常通过有界调度避免同一请求重复，但跨进程并发安装同一个裸二进制不具备归档路径的序列化保证。
+
+Cargo 开发工具使用独立的原生提交协议。精确的身份锁覆盖候选校验、唯一 sibling stage、
+provider 执行与发布。publisher 拒绝 symlink 和保留 metadata，枚举并 hash binary，依次写
+原生 receipt、动态 inventory、完成 marker 与相邻 metadata seal，最后用 no-replace 目录
+rename 暴露安装树。失败或 drop 的未发布 stage 会被删除。复用时会重新校验 seal、
+inventory、receipt、binary SHA-256 与精确受管 Rust 版本/平台及有界构建关键身份；详见
+[Cargo 开发工具实现](./cargo-tools)。
 
 ## CAS 与物化
 

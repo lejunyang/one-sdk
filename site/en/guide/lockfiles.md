@@ -66,10 +66,10 @@ In unusual nested layouts, the nearest readable lock and the project-determined
 write path can differ. Keep `osdk.toml` and `osdk.lock` together at the project
 root.
 
-## Schema 3
+## Schema 4
 
 ```toml
-schema = 3
+schema = 4
 
 [platforms.linux-x64.tools.node]
 request = "20"
@@ -103,6 +103,21 @@ kind = "aube"
 format = "aube-v9"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep"]
+request = "14"
+version = "14.1.1"
+options = { locked = "true" }
+
+[platforms.linux-x64.tools."cargo:ripgrep".native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "version-only"
+source = "sparse+https://index.crates.io/"
+
 [models.qwen]
 provider = "huggingface"
 repository = "Qwen/Qwen2.5-7B-Instruct"
@@ -122,7 +137,8 @@ Platform keys use `linux-*`, `macos-*`, or `windows-*` plus
 other platform sections and top-level model entries. Internal `__osdk_*`
 options are omitted from public `options`; non-npm backends that support generic
 receipts store artifact identity separately.
-Schema 3 requires an `npm` table for every `npm:<package>`. The main lock stores
+Schema 4 retains the schema-3 npm metadata model and requires an `npm` table for
+every `npm:<package>`. The main lock stores
 only basic npm metadata: `package`, `installer`, `scope`, an optional exact
 `node_version`, and optional `native_lock.kind`, `native_lock.format`, and
 `native_lock.sha256`. It no longer stores a graph payload or any graph/path
@@ -138,8 +154,22 @@ mislabeled as the current schema.
 
 Schema 2 npm sidecars remain readable. Reads still validate the sidecar and use
 it as frozen input. Only a later successful write rewrites the entry into the
-schema 3 metadata-only form; the existing `osdk.lock.d/` sidecar is not deleted
+current metadata-only form; the existing `osdk.lock.d/` sidecar is not deleted
 automatically.
+
+Schema 4 adds typed `native` metadata for Cargo and Go-module tools. A Cargo
+entry requires a matching exact `rust` entry in the same platform table.
+Registry versions use `version-only`; full `rev:<40 lowercase hex>` Git
+selectors use `immutable-revision`; Git HEAD, tags, and branches use
+`floating-ref`. These labels state selector strength and do not embed the
+complete dependency/source graph. Consequently, a matching complete Cargo
+install can be reused offline, but a cold offline install or repair is not
+supported. Schemas 1 through 3 cannot represent this native runtime binding and
+reject `cargo:` entries; regenerate them as schema 4. See
+[Cargo Developer Tools](./cargo-tools).
+Registry Cargo entries additionally retain the exact selected canonical,
+credential-free sparse HTTPS index in `native.source`; Git Cargo entries cannot
+carry that field.
 
 For Node, `lock -o arch=...` writes the target-architecture section. osdk has no
 cross-architecture download-only mode, and installation rejects an artifact that
@@ -165,12 +195,13 @@ osdk upgrade    # install re-resolved versions and refresh the lock
 Malformed TOML and unsupported schemas fail explicitly instead of silently
 falling back to configuration. The main lock is currently limited to 16 MiB;
 schema 2 npm sidecars still use the same 16 MiB validation bound when read for
-compatibility. Schema 3 writes only atomically replace the main lock and do not
+compatibility. Schema 4 writes only atomically replace the main lock and do not
 generate a new npm graph sidecar.
 
 ## npm metadata and compatibility boundaries
 
-For `npm:<package>`, the schema 3 main lock records npm metadata rather than a
+For `npm:<package>`, the schema 4 main lock retains schema-3-compatible npm
+metadata rather than a
 complete dependency graph. It preserves the package name, selected installer,
 scope, an optional exact Node version, and optional native-lock owner/format/
 SHA-256 metadata. The native lock payload and filesystem path remain owned by
@@ -182,7 +213,7 @@ recorded `node_version` matches the same-platform Node entry, and validates any
 recorded `native_lock` owner/format/SHA-256. If the lock comes from older
 schema 2 data, reads still validate the sidecar under the old rules and use it
 as a compatibility input; the next successful write rewrites the main lock to
-schema 3 metadata only.
+schema 4 metadata only.
 
 For schema 2 compatibility reads, a missing, corrupt, oversized, or symlinked
 sidecar still fails explicitly. See [npm Developer Tools](./npm-tools) for

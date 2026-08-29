@@ -39,7 +39,8 @@ multiple installed backend owners. Multiple versions of one backend are resolved
 by active version selection and are not an owner conflict. See
 [npm developer tool implementation](./npm-tools#inventory-shims-and-conflict-rejection).
 
-osdk-owned dynamic `npm:<package>` and `github:owner/repo` installs use
+osdk-owned dynamic `npm:<package>`, `cargo:<crate-or-https-url>`, and
+`github:owner/repo` installs use
 `.osdk-install.json` schema 1. Its nested `identity` records `tool`, `version`,
 `platform`, `scope`, `material_options`, `dependencies`, `materials`, and the
 canonical `b3-v2:` `install_id`. That fingerprint is part of the physical root,
@@ -49,7 +50,10 @@ only its root. Reuse, `where`, uninstall, and `reshim` use the same selection. A
 missing, legacy, or mismatched identity fails closed; `.osdk-tool.json` is legacy
 detection only, and neither its schema 1 nor schema 2 authorizes execution. This
 is distinct from the bin-owner ambiguity check above. Project-managed npm
-activation remains on the separately validated `.osdk/npm-bin` generation.
+activation remains on the separately validated `.osdk/npm-bin` generation. A
+Cargo native candidate has additional receipt, metadata-seal, binary-digest,
+and exact Rust version/platform plus bounded build-critical runtime checks; see
+[Cargo developer tool implementation](./cargo-tools).
 
 ## Trust boundary
 
@@ -59,7 +63,9 @@ Both CLI initialization and the shim check trust before loading project configur
 
 The current writer uses schema 4. It adds an optional typed `native` table for
 delegated compiled tools with the managed runtime id, exact runtime version,
-and a `version-only`, `immutable-revision`, or `floating-ref` replay grade.
+and a `version-only`, `immutable-revision`, or `floating-ref` replay grade. A
+Cargo registry entry also records its canonical, credential-free sparse HTTPS
+index in `native.source`; a Cargo Git entry must not carry that field.
 Established schema 1 through 3 locks remain readable for non-native tools and
 upgrade on their next successful write. Because those schemas cannot express
 runtime binding, `cargo:` and Go-module `go:` entries in schemas 1 through 3

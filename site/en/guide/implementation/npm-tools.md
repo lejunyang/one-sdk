@@ -227,9 +227,10 @@ fields are not merged. `use -o allow_builds=esbuild,sharp` normalizes and
 persists a string array, while true/false becomes a boolean, keeping generated
 project configuration structured.
 
-## Lock schema 3, metadata-only locks, and native graph ownership
+## Lock schema 4, compatible npm metadata, and native graph ownership
 
-The current write format for `osdk.lock` is lock schema 3. Each npm tool records its
+The current write format for `osdk.lock` is lock schema 4, retaining schema 3's
+npm metadata model. Each npm tool records its
 request, exact version, options, and `npm` metadata. It does not write a
 generic `artifact` table, and it no longer stores any graph payload or graph
 path in the main lock:
@@ -263,16 +264,16 @@ pnpm lock. Global Aube and pnpm installs retain their native locks under the
 controlled install root and record their identity in the user lock; npm's real
 global mode creates no dependency lock, so that identity is absent. The native
 payload itself is never persisted in
-`osdk.lock`. The main lock is currently limited to 16 MiB, and schema 3 writes
+`osdk.lock`. The main lock is currently limited to 16 MiB, and schema 4 writes
 only atomically replace the main lock.
 
-This is an intentional limitation: schema 3 metadata does not capture the
+This is an intentional limitation: the compatible npm metadata does not capture the
 transitive dependency graph and cannot reconstruct it by itself. The real
 project's native lock, or the Aube/pnpm native lock in a controlled global
 install directory, remains the graph source of truth. npm global installs have
 no equivalent graph lock.
 
-Argument-free `osdk install` reading a schema 3 lock reinjects that metadata as
+Argument-free `osdk install` reading a schema 3 or 4 lock reinjects that metadata as
 private options and validates package/backend identity, installer/scope
 consistency, any exact same-platform Node version, and any recorded native-lock
 format/SHA-256 against the owning installer's constraints. The main lock no
@@ -290,7 +291,7 @@ read, osdk still validates the package, Node version, `aube-v9`, 64-character
 lowercase SHA-256, canonical sidecar path, and non-symlink sidecar directory and
 file, then rereads the full UTF-8 payload with the 16 MiB bound and recomputes
 its digest. Only after that validation does the graph become a compatibility
-input to the backend. A later successful write migrates the entry to lock schema 3
+input to the backend. A later successful write migrates the entry to lock schema 4
 metadata only; the existing sidecar file is not deleted automatically.
 
 ## Isolated/global install identity, shims, and conflict rejection
@@ -315,12 +316,12 @@ isolated and global npm remaining separate namespaces. Consequently, multiple
 same-backend/version identities can coexist in one scope. Reuse and lifecycle
 commands derive the exact identity first and never treat another fingerprint as a
 version-compatible fallback.
-In the current lock-schema-3 bridge, the exact managed Node dependency is part
+In the current schema-4 lock bridge, the exact managed Node dependency is part
 of the install ID. A legacy frozen-graph digest participates when it is already
 an input before installation. Compact native-lock hashes are currently injected
-both during replay and after a fresh install, so until typed provenance arrives
-with lock schema 4 they remain validated receipt evidence rather than a path
-selector. Unlocked observed graph/SRI data follows the same rule.
+both during replay and after a fresh install, so they remain validated receipt
+evidence rather than a path selector. Unlocked observed graph/SRI data follows
+the same rule.
 
 `.osdk-tool.json` is legacy detection metadata only. Neither its old schema 1 nor
 schema 2 authorizes reuse, activation, shim execution, `where`, uninstall, or

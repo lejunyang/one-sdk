@@ -62,8 +62,10 @@ lifecycle commands. Put it in `[tools]` or pass it explicitly.
 node = "20"
 python = "3.12"
 go = "1.22"
+rust = "1.91.1"
 pnpm = "10.15.0"
 "npm:prettier" = "3"
+"cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 
 [aliases.node]
 maintenance = "20"
@@ -74,6 +76,9 @@ default = "maintenance"
 the current directory. `osdk use --global node@20` updates user configuration.
 For `npm:<package>`, local `use` first looks for the nearest `package.json`; the
 next section describes its project-aware behavior.
+Every `cargo:<crate-or-https-url>` entry requires one exact explicit or configured
+`rust` entry. Floating and linked Rust toolchains are rejected; see
+[Cargo Developer Tools](./cargo-tools).
 
 ## npm tools in a real project
 

@@ -430,14 +430,22 @@ impl Backend for RustBackend {
 impl RustBackend {
     /// The rustup toolchain directory for a version/channel. rustup expands a
     /// bare channel like `stable` into `stable-<host-triple>`.
-    fn toolchain_dir(ctx: &Ctx, version: &str) -> PathBuf {
-        let toolchains = ctx.dirs.rustup_home().join("toolchains");
+    pub(crate) fn toolchain_dir(ctx: &Ctx, version: &str) -> PathBuf {
+        Self::toolchain_dir_for_dirs(&ctx.dirs, ctx.platform, version)
+    }
+
+    pub(crate) fn toolchain_dir_for_dirs(
+        dirs: &crate::dirs::Dirs,
+        platform: crate::platform::Platform,
+        version: &str,
+    ) -> PathBuf {
+        let toolchains = dirs.rustup_home().join("toolchains");
         let exact = toolchains.join(version);
         if exact.exists() {
             return exact;
         }
         // Try `<channel>-<host-triple>`.
-        let triple = ctx.platform.llvm_triple();
+        let triple = platform.llvm_triple();
         let with_triple = toolchains.join(format!("{version}-{triple}"));
         if with_triple.exists() {
             return with_triple;
@@ -452,6 +460,35 @@ impl RustBackend {
             }
         }
         exact
+    }
+
+    /// Resolve an installed toolchain without fuzzy prefix matching. Native
+    /// package installs bind compiler bytes into their durable identity, so an
+    /// ambiguous prefix must never select an arbitrary toolchain tree.
+    pub(crate) fn exact_toolchain_dir_for_dirs(
+        dirs: &crate::dirs::Dirs,
+        platform: crate::platform::Platform,
+        version: &str,
+    ) -> Option<PathBuf> {
+        let toolchains = dirs.rustup_home().join("toolchains");
+        let exact = toolchains.join(version);
+        if exact.is_dir() {
+            return Some(exact);
+        }
+        let triple = platform.llvm_triple();
+        let with_triple = toolchains.join(format!("{version}-{triple}"));
+        if with_triple.is_dir() {
+            return Some(with_triple);
+        }
+        let prefix = format!("{version}-");
+        let mut matches = std::fs::read_dir(toolchains)
+            .ok()?
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|entry| entry.path());
+        let selected = matches.next()?;
+        matches.next().is_none().then_some(selected)
     }
 }
 

@@ -113,8 +113,9 @@ osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 `package.json` 中的 Node 版本声明。
 纯数据声明式 backend 与内置归档 backend 共用锁定产物 URL、checksum、下载缓存和
 离线重装路径。
-对 osdk 自有的动态 `npm:<package>` 与 `github:owner/repo` 安装，选择安装器、构建策略、asset、平台或
-布局的选项也属于安装身份。osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
+对 osdk 自有的动态 `npm:<package>`、`cargo:<crate-or-https-url>` 与
+`github:owner/repo` 安装，会改变选择或构建结果的选项与受管 runtime 依赖也属于安装身份。
+osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 `b3-v2:` 身份放入独立的指纹化安装根，因此同一 backend/version 的多个身份可以共存。
 复用、activation、shim、`where`、`uninstall` 与 `reshim` 都只选择配置精确匹配的身份。旧
 `.osdk-tool.json` 只用于识别遗留状态，绝不会被复用或执行。
@@ -207,6 +208,33 @@ Aube 的情况下离线再次选中。安装过程本身必须使用原生离线
 安装根保持独立。
 
 指南：[npm 开发工具](site/guide/npm-tools.md)
+
+## 场景：从 Cargo 安装 Rust CLI
+
+先选择一个精确的受管 Rust 版本，再按精确版本、最新稳定版或数字前缀安装 crate：
+
+```bash
+osdk use rust@1.91.1
+osdk use cargo:ripgrep@14.1 -o features=pcre2 -o locked=true
+eval "$(osdk activate bash)"
+rg --version
+```
+
+Cargo 工具会拒绝浮动或本地链接的 Rust toolchain。Registry 请求使用
+`cargo:<crate>`；HTTPS Git 请求使用 `latest`、`tag:<ref>`、`branch:<ref>`，或者不可变的
+`rev:<40 位小写十六进制>` selector：
+
+```bash
+osdk use \
+  'cargo:https://github.com/BurntSushi/ripgrep.git@rev:0123456789abcdef0123456789abcdef01234567'
+```
+
+支持的构建选项包括 `features`、`default-features`、`bin`、`locked`（默认 `false`），
+以及仅限 Git 的 `crate`。完整且身份精确匹配的安装可以离线复用，但 Cargo lock 不包含
+全新离线构建所需的完整 source graph。Registry 版本记录为 `version-only`，完整 Git
+revision 记录为 `immutable-revision`，Git HEAD/tag/branch 则记录为 `floating-ref`。
+
+指南：[Cargo 开发工具](site/guide/cargo-tools.md)
 
 ## 场景：使用各语言生态
 
@@ -418,7 +446,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 平台 | Windows、macOS、Linux |
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
-| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
+| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
 | 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、只读 mirror plan、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
@@ -434,6 +462,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [运行时与生态工作流](site/guide/runtimes.md)
 - [包管理器与 Registry 选择](site/guide/package-managers.md)
 - [npm 开发工具](site/guide/npm-tools.md)
+- [Cargo 开发工具](site/guide/cargo-tools.md)
 - [直接 HTTPS 制品](site/guide/http-artifacts.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)

@@ -309,7 +309,8 @@ project or controlled global install retains its own native lock.
 
 ## What `osdk.lock` guarantees
 
-Project-aware `use` writes a compact lock-schema-3 `osdk.lock` entry containing the
+Project-aware `use` writes a compact npm metadata entry in the current
+lock-schema-4 `osdk.lock`, containing the
 package, resolved version, concrete installer, scope, exact Node version, and
 the public options plus the native lock's kind, format, and SHA-256. The user lock
 for global tools uses the same metadata-only model; npm global simply has no
@@ -327,11 +328,11 @@ lock, so its transitive selection is not reproducible from the user
 
 Commit `package.json`, the native project lock, `osdk.toml`, and `osdk.lock` for
 a project workflow. Legacy lock-schema-2 graph sidecars remain readable for
-compatibility, but current lock-schema-3 writes do not create a new sidecar or
+compatibility, but current lock-schema-4 writes do not create a new sidecar or
 embed its payload.
 This lock schema is independent of `.osdk-install.json` schema 1: the install
 identity selects local storage and lifecycle operations, while `osdk.lock` schema
-3 records options and npm replay metadata. `.osdk-tool.json` is legacy detection
+4 records the schema-3-compatible npm options and replay metadata. `.osdk-tool.json` is legacy detection
 metadata only.
 
 For installer planning, metadata validation, native-prefix isolation, and the

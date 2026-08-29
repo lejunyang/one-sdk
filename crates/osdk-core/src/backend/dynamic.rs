@@ -307,10 +307,24 @@ pub(super) trait DynamicBackendFactory: Send + Sync {
 
 pub(super) fn builtin_factories() -> Vec<Arc<dyn DynamicBackendFactory>> {
     vec![
+        Arc::new(CargoBackendFactory),
         Arc::new(GithubBackendFactory),
         Arc::new(NpmBackendFactory),
         Arc::new(HttpBackendFactory),
     ]
+}
+
+struct CargoBackendFactory;
+
+impl DynamicBackendFactory for CargoBackendFactory {
+    fn prefix(&self) -> &'static str {
+        "cargo"
+    }
+
+    fn create(&self, id: &str) -> Option<Arc<dyn Backend>> {
+        crate::backend::cargo_package::CargoPackageBackend::from_id(id)
+            .map(|backend| Arc::new(backend) as Arc<dyn Backend>)
+    }
 }
 
 struct GithubBackendFactory;

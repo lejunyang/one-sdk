@@ -25,6 +25,10 @@ contains `tool`, `version`, `platform`, `scope`, `material_options`,
 drives reuse, activation, shim dispatch, `where`, uninstall, and `reshim`; sibling
 identities may coexist. Project-managed npm state under `.osdk/npm-bin` remains a
 separate project-owned layout.
+For Cargo developer tools, the fingerprint also binds the exact managed Rust
+tree and registry/Git materials. Installation uses a sibling stage with private
+`home`, `cargo-home`, `target`, and `tmp` directories; those workspaces are
+deleted before only the validated `bin` output and native metadata are published.
 
 ## SDK pipeline and locking
 
@@ -51,6 +55,9 @@ Models use [`ModelStore::publish`](https://github.com/lejunyang/one-sdk/blob/mai
 ## No cross-manager package CAS
 
 The CAS deduplicates verified, extracted SDK files and model files. It does **not** parse, ingest, or deduplicate project dependency packages across npm, pnpm, Yarn, Bun, Deno, pip, Go, Cargo, Maven, or Gradle. Aube-backed `npm:<package>` operations share `<cache>/aube/v1/cache` and `<data>/store/aube`, while native npm/pnpm use their downstream cache/store paths; none of those package contents enter the BLAKE3 SDK CAS.
+Cargo developer-tool source and build data is likewise stage-private and is not
+promoted to a shared Cargo cache or the CAS; the final fingerprinted root retains
+only published binaries and osdk metadata.
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) and backend `exec_env` methods only redirect each manager's native cache to a separate child of `<cache>/pkg`, including npm, the pnpm store, Yarn, Bun, and Deno. Variables are injected only when the user has not set them, except that a value managed by a previous osdk hook can be refreshed. Sharing a parent directory does not unify content protocols: there is no cross-manager package CAS or cross-manager blob deduplication.
 

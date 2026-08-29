@@ -171,9 +171,10 @@ scripts。embedded 路径设置 `ignore_scripts = true`。Aube 2.1 在构造内�
 继承。`use -o allow_builds=esbuild,sharp` 会规范化并持久化为字符串数组，true/false
 则持久化为布尔值，使生成的项目配置继续保持结构化。
 
-## lock schema 3、metadata-only lock 与原生依赖图所有权
+## lock schema 4、兼容 npm metadata 与原生依赖图所有权
 
-`osdk.lock` 的当前写入格式是 lock schema 3。每个 npm 工具记录 request、精确 version、
+`osdk.lock` 的当前写入格式是 lock schema 4，并保留 schema 3 的 npm metadata 模型。
+每个 npm 工具记录 request、精确 version、
 options 和 `npm` 元数据；当前不写通用 `artifact` 子表，也不把 graph payload 或路径写进
 主 lock：
 
@@ -203,11 +204,11 @@ scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA
 npm 的真实全局模式不会创建依赖 lock，因此没有该身份。原生 payload 本身不会进入
 `osdk.lock`。主 lock 当前限制为 16 MiB，写入时只原子替换主 lock。
 
-这是有意保留的限制：schema 3 metadata 不捕获传递依赖图，单靠它无法重建该图。真实
+这是有意保留的限制：兼容的 npm metadata 不捕获传递依赖图，单靠它无法重建该图。真实
 项目的原生 lock，或受控全局安装目录中的 Aube/pnpm 原生 lock，仍是依赖图事实来源。
 npm 全局安装没有对应的 graph lock。
 
-无参数 `osdk install` 读取 schema 3 lock 后，会把这些字段重新注入私有 option，并先校验
+无参数 `osdk install` 读取 schema 3 或 4 lock 后，会把这些字段重新注入私有 option，并先校验
 package/backend、一致的 installer/scope、可选的同平台 Node 精确版本，以及可选
 native lock 的 format/SHA-256 是否满足 owner 的格式约束。主 lock 不再提供 graph/path，
 因此这里恢复的是 metadata，而不是 sidecar 路径。
@@ -220,7 +221,7 @@ native lock 的 format/SHA-256 是否满足 owner 的格式约束。主 lock 不
 `package`、Node 版本、`aube-v9`、64 位小写 SHA-256、规范 sidecar 路径，以及 sidecar
 目录/文件非 symlink，再以 16 MiB 上限读取完整 UTF-8 字节并重算摘要。校验通过后，
 graph 内容会作为兼容输入注入 backend。只有在后续成功写入主 lock 时，条目才迁移成
-lock schema 3 metadata-only 形式；原有 sidecar 文件不会被自动删除。
+lock schema 4 metadata-only 形式；原有 sidecar 文件不会被自动删除。
 
 ## 隔离/全局安装身份、shim 与冲突拒绝
 
@@ -246,10 +247,10 @@ CLI 和 shim 根据精确安装身份记录建立 `bin name -> backend owner` �
 复用、activation、shim 分发、`where`、uninstall 与 `reshim` 只选择完整 `b3-v2:` 身份与请求
 匹配的指纹化根。身份缺失、过旧或不匹配都会 fail closed，不暴露 bin 路径，也不会选择同版本
 的其他根。
-当前 lock schema 3 过渡中，精确受管 Node 依赖属于 install ID；只有作为安装前输入存在的
+当前 schema 4 lock bridge 中，精确受管 Node 依赖属于 install ID；只有作为安装前输入存在的
 旧冻结 graph digest 才参与路径。紧凑 native-lock hash 在 lock 重放与全新安装后的注入形式相同，
-因此在 lock schema 4 提供 typed provenance 之前，它仍是需要校验的 receipt evidence，而不是
-路径选择器。未锁定安装后观察到的 graph/SRI 数据采用同样规则。
+因此它仍是需要校验的 receipt evidence，而不是路径选择器。未锁定安装后观察到的
+graph/SRI 数据采用同样规则。
 
 bin owner 判定是另一项独立
 检查：

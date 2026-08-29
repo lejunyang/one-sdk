@@ -15,9 +15,9 @@ This page is for maintainers who need to understand or extend osdk's download ca
 5. ingest content into the BLAKE3 CAS and materialize with hardlink, reflink, or copy;
 6. write an artifact receipt and `.osdk-complete` marker for idempotent and offline reinstall behavior.
 
-The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo` and `npm:<package>` dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
+The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo`, `npm:<package>`, strict `http:https://...{version}...`, and `cargo:<crate-or-https-url>` IDs dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
 
-Those two dynamic namespaces share an option-identity contract for osdk-owned
+These dynamic namespaces share an option-identity contract for osdk-owned
 installs. Before resolution or installation, osdk projects the supported public options into a
 canonical map, rejects unknown public keys, excludes internal `__osdk_*` lock
 replay metadata, and computes an order-independent, domain-separated BLAKE3
@@ -48,13 +48,16 @@ packages remain outside this osdk-owned install identity.
 | `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then delegated to isolated rustup | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument plus `@deno/<platform>` | npm SRI | Platform package; exports `DENO_DIR` |
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
-| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default; `.osdk-install.json` schema 1 binds installer/build identity in fingerprinted osdk-owned isolated/global roots | Discovers `.bin` dynamically, adds managed Node, and records scope, installer, optional native-lock identity, and public options in lock schema 3 |
+| `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default; `.osdk-install.json` schema 1 binds installer/build identity in fingerprinted osdk-owned isolated/global roots | Discovers `.bin` dynamically, adds managed Node, and records scope, installer, optional native-lock identity, and public options in lock schema 4 |
+| `cargo:<crate-or-https-url>` | crates.io-compatible metadata with paired sparse index, or canonical HTTPS Git URL | Exact osdk-managed Rust dependency; isolated `cargo-binstall`/`cargo install`; native receipt, inventory, and metadata seal | Registry exact/latest/prefix or Git latest/tag/branch/full revision; schema 4 records runtime, replay class, and registry source |
 | `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations; `.osdk-install.json` schema 1 binds asset/layout/material identity in fingerprinted roots | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
 
 These implementations live under [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/). The npm-backed implementations share packument, version, and SRI handling in [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs). Generic source ranking is in [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 See [npm developer tool implementation](./npm-tools) for the complete dynamic
 backend project/global/isolated installation, cache, metadata-only lock, legacy
 lock-schema-2 sidecar compatibility, and shim boundaries.
+See [Cargo developer tool implementation](./cargo-tools) for strict selectors,
+exact Rust binding, controlled provider fallback, and native publication.
 
 ## Declarative and GitHub backends
 

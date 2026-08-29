@@ -29,6 +29,12 @@ pub const LOCKED_NATIVE_REPLAY_OPTION: &str = "__osdk_native_replay";
 const NATIVE_TOOL_RECEIPT_SCHEMA: u32 = 1;
 const MAX_NATIVE_TOOL_RECEIPT_BYTES: u64 = 256 * 1024;
 const NATIVE_TOOL_SEAL_SUFFIX: &str = ".native-seal";
+const RUST_RUNTIME_RECEIPT_FILE: &str = ".osdk-rust-runtime-receipt.json";
+const RUST_RUNTIME_RECEIPT_SCHEMA: u32 = 1;
+const MAX_RUST_RUNTIME_RECEIPT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RUSTC_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_RUST_RUNTIME_FILES: usize = 65_536;
+const MAX_RUST_RUNTIME_PATH_BYTES: usize = 4 * 1024;
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,10 +80,634 @@ const CARGO_PROVIDERS: &[NativeToolProvider] = &[
 ];
 const GO_PROVIDERS: &[NativeToolProvider] = &[NativeToolProvider::GoInstall];
 
-/// Stable content identity for an installed managed runtime tree. Native
-/// backend adapters may bind this value into `InstallDependency::identity`.
+/// Stable content identity for a bounded runtime root. This remains the Go
+/// implementation; Rust uses [`rust_runtime_identity`] so shim validation does
+/// not traverse an entire toolchain.
 pub fn runtime_tree_identity(root: &Path) -> Result<String> {
     hash_runtime_tree(root)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RustRuntimeFileReceipt {
+    path: String,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RustRuntimeReceipt {
+    schema: u32,
+    version: String,
+    platform: String,
+    toolchain_root: String,
+    files: Vec<RustRuntimeFileReceipt>,
+    identity: String,
+    integrity_blake3: String,
+}
+
+#[derive(Debug)]
+struct RustRuntimeFile {
+    receipt: RustRuntimeFileReceipt,
+    absolute: PathBuf,
+}
+
+/// Content identity for the build-critical portion of an exact managed Rust
+/// toolchain. The compiler payload comes from rustup's `manifest-rustc-*`, and
+/// every regular file below the selected target's `lib` directory is included.
+/// Symlinks and non-regular payloads fail closed.
+///
+/// Hashing a target sysroot can read hundreds of MiB, so the managed runtime's
+/// adjacent marker directory holds an atomic receipt. Its full sorted
+/// path/size/mtime inventory is checked on every call; unchanged metadata lets
+/// us reuse the content identity, while any drift triggers a full rehash. The
+/// receipt is an integrity-checked cache for osdk-managed, immutable runtimes,
+/// not a same-user security boundary (a process able to rewrite both payload
+/// timestamps and osdk state is outside this boundary).
+pub fn rust_runtime_identity(dirs: &Dirs, platform: Platform, version: &str) -> Result<String> {
+    let marker = dirs.install_path("rust", version);
+    validate_managed_rust_marker(&marker, version)?;
+    let lock_path = rust_runtime_receipt_lock_path(dirs, version);
+    let _lock = crate::lock::FileLock::acquire(&lock_path)?;
+    validate_managed_rust_marker(&marker, version)?;
+
+    let root =
+        crate::backend::rust::RustBackend::exact_toolchain_dir_for_dirs(dirs, platform, version)
+            .ok_or_else(|| Error::NotInstalled {
+                tool: "rust".into(),
+                version: version.into(),
+            })?;
+    let root_metadata =
+        std::fs::symlink_metadata(&root).map_err(|error| Error::io(&root, error))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(Error::other(format!(
+            "managed Rust toolchain root is not a regular directory: {}",
+            root.display()
+        )));
+    }
+    let canonical_root = dunce::canonicalize(&root).map_err(|error| Error::io(&root, error))?;
+    validate_rust_runtime_directory_path(&canonical_root, &canonical_root.join("bin"))?;
+    let root_name = canonical_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::config("managed Rust toolchain path is not valid UTF-8"))?;
+    let platform_name = platform.to_string();
+    let files = collect_rust_runtime_files(&canonical_root, platform)?;
+    let receipt_path = marker.join(RUST_RUNTIME_RECEIPT_FILE);
+    match std::fs::symlink_metadata(&receipt_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(&receipt_path, error)),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(Error::other(format!(
+                "managed Rust runtime receipt is not a regular non-symlink file: {}",
+                receipt_path.display()
+            )));
+        }
+        Ok(_) => {
+            let receipt = load_rust_runtime_receipt(&receipt_path)?;
+            validate_rust_runtime_receipt(&receipt, version, &platform_name, root_name)?;
+            let current = files
+                .iter()
+                .map(|file| file.receipt.clone())
+                .collect::<Vec<_>>();
+            if receipt.files == current {
+                return Ok(receipt.identity);
+            }
+        }
+    }
+
+    let identity = hash_rust_runtime_files(version, &platform_name, root_name, &files)?;
+    let after = collect_rust_runtime_files(&canonical_root, platform)?;
+    let before_metadata = files
+        .iter()
+        .map(|file| file.receipt.clone())
+        .collect::<Vec<_>>();
+    let after_metadata = after
+        .iter()
+        .map(|file| file.receipt.clone())
+        .collect::<Vec<_>>();
+    if before_metadata != after_metadata {
+        return Err(Error::other(format!(
+            "managed Rust runtime changed while its identity was being computed: {}",
+            canonical_root.display()
+        )));
+    }
+    validate_managed_rust_marker(&marker, version)?;
+
+    let mut receipt = RustRuntimeReceipt {
+        schema: RUST_RUNTIME_RECEIPT_SCHEMA,
+        version: version.to_string(),
+        platform: platform_name,
+        toolchain_root: root_name.to_string(),
+        files: before_metadata,
+        identity: identity.clone(),
+        integrity_blake3: String::new(),
+    };
+    receipt.integrity_blake3 = rust_runtime_receipt_integrity(&receipt);
+    write_rust_runtime_receipt_atomic(&receipt_path, &receipt)?;
+    Ok(identity)
+}
+
+fn validate_managed_rust_marker(marker: &Path, version: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(marker).map_err(|error| Error::io(marker, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::other(format!(
+            "managed Rust marker is not a regular directory: {}",
+            marker.display()
+        )));
+    }
+    if !is_regular_file(&marker.join(".osdk-complete"))
+        || std::fs::symlink_metadata(marker.join(".osdk-linked")).is_ok()
+    {
+        return Err(Error::config(format!(
+            "Rust runtime `{version}` is not a complete osdk-managed toolchain"
+        )));
+    }
+    Ok(())
+}
+
+fn rust_runtime_receipt_lock_path(dirs: &Dirs, version: &str) -> PathBuf {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-rust-runtime-receipt-lock-v1");
+    hash_identity_value(&mut hasher, version.as_bytes());
+    dirs.lock_dir("rust")
+        .join(format!("runtime-{}.lock", hasher.finalize().to_hex()))
+}
+
+fn collect_rust_runtime_files(
+    canonical_root: &Path,
+    platform: Platform,
+) -> Result<Vec<RustRuntimeFile>> {
+    let bin = canonical_root.join("bin");
+    validate_rust_runtime_directory_path(canonical_root, &bin)?;
+    let mut paths = BTreeMap::<String, PathBuf>::new();
+    for name in ["cargo", "rustc"] {
+        let path = bin.join(format!("{name}{}", platform.os.exe_suffix()));
+        insert_rust_runtime_file(canonical_root, &path, &mut paths)?;
+    }
+
+    let rustlib = canonical_root.join("lib/rustlib");
+    validate_rust_runtime_directory_path(canonical_root, &rustlib)?;
+    let rustc_manifest = find_rustc_component_manifest(&rustlib, platform)?;
+    if let Some(manifest) = rustc_manifest {
+        insert_rust_runtime_file(canonical_root, &manifest, &mut paths)?;
+        let bytes = crate::inventory::read_stable_regular_file(&manifest, MAX_RUSTC_MANIFEST_BYTES)
+            .map_err(|error| Error::io(&manifest, error))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::config("managed Rust rustc manifest is not valid UTF-8"))?;
+        for line in text.lines() {
+            let relative = line.strip_prefix("file:").ok_or_else(|| {
+                Error::config(format!(
+                    "managed Rust rustc manifest contains an unsupported entry: {line}"
+                ))
+            })?;
+            let path = checked_rust_manifest_path(canonical_root, relative)?;
+            insert_rust_runtime_file(canonical_root, &path, &mut paths)?;
+        }
+    } else {
+        // Minimal fixture toolchains and older layouts may omit rustup's
+        // component manifest. Hash the conservative compiler payload instead.
+        for name in ["rustdoc", "clippy-driver"] {
+            let path = bin.join(format!("{name}{}", platform.os.exe_suffix()));
+            if path.exists() {
+                insert_rust_runtime_file(canonical_root, &path, &mut paths)?;
+            }
+        }
+        let lib = canonical_root.join("lib");
+        collect_rust_runtime_tree(canonical_root, &lib, &mut paths, false)?;
+    }
+
+    let target_lib = rustlib.join(platform.llvm_triple()).join("lib");
+    collect_rust_runtime_tree(canonical_root, &target_lib, &mut paths, true)?;
+    if paths.len() > MAX_RUST_RUNTIME_FILES {
+        return Err(Error::other(format!(
+            "managed Rust identity exceeds the {MAX_RUST_RUNTIME_FILES} file limit"
+        )));
+    }
+
+    paths
+        .into_iter()
+        .map(|(path, absolute)| {
+            let metadata = rust_runtime_file_metadata(&absolute)?;
+            let (modified_seconds, modified_nanoseconds) = modified_parts(&metadata, &absolute)?;
+            Ok(RustRuntimeFile {
+                receipt: RustRuntimeFileReceipt {
+                    path,
+                    size: metadata.len(),
+                    modified_seconds,
+                    modified_nanoseconds,
+                },
+                absolute,
+            })
+        })
+        .collect()
+}
+
+fn find_rustc_component_manifest(rustlib: &Path, platform: Platform) -> Result<Option<PathBuf>> {
+    let canonical_root = rustlib
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::other("managed Rust rustlib path has no toolchain root"))?;
+    let exact = rustlib.join(format!("manifest-rustc-{}", platform.llvm_triple()));
+    if exact.exists() {
+        validate_rust_runtime_file_path(canonical_root, &exact)?;
+        return Ok(Some(exact));
+    }
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(rustlib).map_err(|error| Error::io(rustlib, error))? {
+        let entry = entry.map_err(|error| Error::io(rustlib, error))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(Error::config(
+                "managed Rust rustlib contains a non-UTF-8 filename",
+            ));
+        };
+        if name.starts_with("manifest-rustc-") {
+            validate_rust_runtime_file_path(canonical_root, &entry.path())?;
+            matches.push(entry.path());
+        }
+    }
+    matches.sort();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(Error::other(format!(
+            "managed Rust toolchain has no unambiguous rustc manifest for {}",
+            platform.llvm_triple()
+        ))),
+    }
+}
+
+fn checked_rust_manifest_path(canonical_root: &Path, value: &str) -> Result<PathBuf> {
+    if value.is_empty()
+        || value.len() > MAX_RUST_RUNTIME_PATH_BYTES
+        || value.contains('\\')
+        || value.contains(':')
+        || value.chars().any(char::is_control)
+    {
+        return Err(Error::config(
+            "managed Rust rustc manifest contains an invalid path",
+        ));
+    }
+    let relative = Path::new(value);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(Error::config(format!(
+            "managed Rust rustc manifest contains an unsafe path: {value}"
+        )));
+    }
+    Ok(canonical_root.join(relative))
+}
+
+fn collect_rust_runtime_tree(
+    canonical_root: &Path,
+    directory: &Path,
+    paths: &mut BTreeMap<String, PathBuf>,
+    require_file: bool,
+) -> Result<()> {
+    validate_rust_runtime_directory_path(canonical_root, directory)?;
+    let mut found_file = false;
+    for entry in walkdir::WalkDir::new(directory).follow_links(false) {
+        let entry = entry.map_err(|error| Error::other(format!("walkdir: {error}")))?;
+        if entry.file_type().is_symlink() {
+            return Err(Error::other(format!(
+                "managed Rust identity contains a forbidden symlink: {}",
+                entry.path().display()
+            )));
+        }
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            return Err(Error::other(format!(
+                "managed Rust identity contains a non-regular payload: {}",
+                entry.path().display()
+            )));
+        }
+        insert_rust_runtime_file(canonical_root, entry.path(), paths)?;
+        found_file = true;
+        if paths.len() > MAX_RUST_RUNTIME_FILES {
+            return Err(Error::other(format!(
+                "managed Rust identity exceeds the {MAX_RUST_RUNTIME_FILES} file limit"
+            )));
+        }
+    }
+    if require_file && !found_file {
+        return Err(Error::other(format!(
+            "managed Rust target library is empty: {}",
+            directory.display()
+        )));
+    }
+    Ok(())
+}
+
+fn insert_rust_runtime_file(
+    canonical_root: &Path,
+    path: &Path,
+    paths: &mut BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    validate_rust_runtime_file_path(canonical_root, path)?;
+    let canonical = dunce::canonicalize(path).map_err(|error| Error::io(path, error))?;
+    let relative = canonical.strip_prefix(canonical_root).map_err(|_| {
+        Error::other(format!(
+            "managed Rust identity path escapes toolchain: {}",
+            path.display()
+        ))
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| Error::config("managed Rust identity contains a non-UTF-8 filename"))?;
+    let portable = relative.replace('\\', "/");
+    if portable.is_empty() || portable.len() > MAX_RUST_RUNTIME_PATH_BYTES {
+        return Err(Error::config(
+            "managed Rust identity contains an invalid relative path",
+        ));
+    }
+    paths.insert(portable, canonical);
+    Ok(())
+}
+
+fn validate_rust_runtime_directory_path(canonical_root: &Path, path: &Path) -> Result<()> {
+    validate_rust_runtime_path(canonical_root, path, true).map(|_| ())
+}
+
+fn validate_rust_runtime_file_path(canonical_root: &Path, path: &Path) -> Result<()> {
+    validate_rust_runtime_path(canonical_root, path, false).map(|_| ())
+}
+
+fn validate_rust_runtime_path(
+    canonical_root: &Path,
+    path: &Path,
+    expect_directory: bool,
+) -> Result<std::fs::Metadata> {
+    let relative = path.strip_prefix(canonical_root).map_err(|_| {
+        Error::other(format!(
+            "managed Rust identity path escapes toolchain: {}",
+            path.display()
+        ))
+    })?;
+    let mut current = canonical_root.to_path_buf();
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(Error::other("managed Rust identity path is empty"));
+    }
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(Error::other(format!(
+                "managed Rust identity path is not canonical: {}",
+                path.display()
+            )));
+        };
+        current.push(component);
+        let metadata =
+            std::fs::symlink_metadata(&current).map_err(|error| Error::io(&current, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::other(format!(
+                "managed Rust identity contains a forbidden symlink: {}",
+                current.display()
+            )));
+        }
+        let final_component = index + 1 == components.len();
+        if !final_component && !metadata.is_dir() {
+            return Err(Error::other(format!(
+                "managed Rust identity path has a non-directory ancestor: {}",
+                current.display()
+            )));
+        }
+        if final_component {
+            let valid_kind = if expect_directory {
+                metadata.is_dir()
+            } else {
+                metadata.is_file()
+            };
+            if !valid_kind {
+                return Err(Error::other(format!(
+                    "managed Rust identity path has the wrong file type: {}",
+                    current.display()
+                )));
+            }
+            return Ok(metadata);
+        }
+    }
+    Err(Error::other("managed Rust identity path is empty"))
+}
+
+fn rust_runtime_file_metadata(path: &Path) -> Result<std::fs::Metadata> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| Error::io(path, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(Error::other(format!(
+            "managed Rust identity path is not a regular non-symlink file: {}",
+            path.display()
+        )));
+    }
+    Ok(metadata)
+}
+
+fn modified_parts(metadata: &std::fs::Metadata, path: &Path) -> Result<(i64, u32)> {
+    let modified = metadata
+        .modified()
+        .map_err(|error| Error::io(path, error))?;
+    match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            let seconds = i64::try_from(duration.as_secs())
+                .map_err(|_| Error::other("managed Rust file timestamp exceeds i64"))?;
+            Ok((seconds, duration.subsec_nanos()))
+        }
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs())
+                .map_err(|_| Error::other("managed Rust file timestamp exceeds i64"))?;
+            Ok((
+                -seconds - i64::from(duration.subsec_nanos() != 0),
+                duration.subsec_nanos(),
+            ))
+        }
+    }
+}
+
+fn hash_rust_runtime_files(
+    version: &str,
+    platform: &str,
+    root_name: &str,
+    files: &[RustRuntimeFile],
+) -> Result<String> {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-rust-runtime-essential-v2");
+    hash_identity_value(&mut hasher, version.as_bytes());
+    hash_identity_value(&mut hasher, platform.as_bytes());
+    hash_identity_value(&mut hasher, root_name.as_bytes());
+    hash_identity_value(&mut hasher, &(files.len() as u64).to_le_bytes());
+    for file in files {
+        hash_identity_value(&mut hasher, file.receipt.path.as_bytes());
+        let digest = crate::pipeline::verify::hash_file(&file.absolute, HashAlgo::Sha256)?;
+        hash_identity_value(&mut hasher, digest.as_bytes());
+    }
+    Ok(format!("b3-rust-v2:{}", hasher.finalize().to_hex()))
+}
+
+fn rust_runtime_receipt_integrity(receipt: &RustRuntimeReceipt) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-rust-runtime-receipt-v1");
+    hash_identity_value(&mut hasher, &receipt.schema.to_le_bytes());
+    hash_identity_value(&mut hasher, receipt.version.as_bytes());
+    hash_identity_value(&mut hasher, receipt.platform.as_bytes());
+    hash_identity_value(&mut hasher, receipt.toolchain_root.as_bytes());
+    hash_identity_value(&mut hasher, &(receipt.files.len() as u64).to_le_bytes());
+    for file in &receipt.files {
+        hash_identity_value(&mut hasher, file.path.as_bytes());
+        hash_identity_value(&mut hasher, &file.size.to_le_bytes());
+        hash_identity_value(&mut hasher, &file.modified_seconds.to_le_bytes());
+        hash_identity_value(&mut hasher, &file.modified_nanoseconds.to_le_bytes());
+    }
+    hash_identity_value(&mut hasher, receipt.identity.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn load_rust_runtime_receipt(path: &Path) -> Result<RustRuntimeReceipt> {
+    let bytes = crate::inventory::read_stable_regular_file(path, MAX_RUST_RUNTIME_RECEIPT_BYTES)
+        .map_err(|error| Error::io(path, error))?;
+    let receipt: RustRuntimeReceipt = serde_json::from_slice(&bytes)?;
+    if receipt.schema != RUST_RUNTIME_RECEIPT_SCHEMA
+        || receipt.files.is_empty()
+        || receipt.files.len() > MAX_RUST_RUNTIME_FILES
+        || receipt
+            .identity
+            .strip_prefix("b3-rust-v2:")
+            .is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            })
+        || receipt.integrity_blake3 != rust_runtime_receipt_integrity(&receipt)
+    {
+        return Err(Error::config(format!(
+            "managed Rust runtime receipt is invalid at {}",
+            path.display()
+        )));
+    }
+    Ok(receipt)
+}
+
+fn validate_rust_runtime_receipt(
+    receipt: &RustRuntimeReceipt,
+    version: &str,
+    platform: &str,
+    root_name: &str,
+) -> Result<()> {
+    if receipt.version != version
+        || receipt.platform != platform
+        || receipt.toolchain_root != root_name
+    {
+        return Err(Error::config(
+            "managed Rust runtime receipt does not match the selected runtime",
+        ));
+    }
+    let mut previous = None;
+    for file in &receipt.files {
+        if file.path.is_empty()
+            || file.path.len() > MAX_RUST_RUNTIME_PATH_BYTES
+            || file.modified_nanoseconds >= 1_000_000_000
+            || previous.is_some_and(|path: &str| path >= file.path.as_str())
+        {
+            return Err(Error::config(
+                "managed Rust runtime receipt contains an invalid file inventory",
+            ));
+        }
+        let path = Path::new(&file.path);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(Error::config(
+                "managed Rust runtime receipt contains an unsafe file path",
+            ));
+        }
+        previous = Some(file.path.as_str());
+    }
+    Ok(())
+}
+
+fn write_rust_runtime_receipt_atomic(path: &Path, receipt: &RustRuntimeReceipt) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(receipt)?;
+    if bytes.len() as u64 > MAX_RUST_RUNTIME_RECEIPT_BYTES {
+        return Err(Error::other(
+            "managed Rust runtime receipt exceeds its size limit",
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::other(format!("path has no parent: {}", path.display())))?;
+    let serial = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{RUST_RUNTIME_RECEIPT_FILE}.tmp-{}-{serial}",
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| Error::io(&temporary, error))?;
+        use std::io::Write as _;
+        file.write_all(&bytes)
+            .map_err(|error| Error::io(&temporary, error))?;
+        file.sync_all()
+            .map_err(|error| Error::io(&temporary, error))?;
+        atomic_replace_rust_runtime_receipt(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_rust_runtime_receipt(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::rename(source, destination).map_err(|error| Error::io(destination, error))
+}
+
+#[cfg(windows)]
+fn atomic_replace_rust_runtime_receipt(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source_wide = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(Error::io(destination, std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+fn hash_identity_value(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 /// Lifecycle state derived entirely from inputs known before installation.
@@ -182,6 +812,10 @@ impl NativeToolLifecycle {
 
     pub fn install_root(&self) -> &Path {
         self.locator.install_root()
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        self.locator.lock_path()
     }
 
     pub fn metadata_seal_path(&self) -> PathBuf {
@@ -482,7 +1116,7 @@ pub fn validate_install_candidate(
             install_root.display()
         )));
     }
-    if !runtime_is_installed(dirs, &receipt.runtime) {
+    if !runtime_is_installed(dirs, &receipt.runtime, identity.platform.as_str()) {
         return Ok(false);
     }
     let expected_bins = manifest
@@ -620,17 +1254,9 @@ fn validate_runtime_dependency(runtime: &InstallDependency) -> Result<()> {
 
 fn validate_family_tool_id(family: NativeToolFamily, tool: &str) -> Result<()> {
     let subject = match family {
-        NativeToolFamily::Cargo => tool.strip_prefix("cargo:").filter(|subject| {
-            let bytes = subject.as_bytes();
-            !bytes.is_empty()
-                && bytes.len() <= 64
-                && bytes[0].is_ascii_lowercase()
-                && bytes.iter().all(|byte| {
-                    byte.is_ascii_lowercase()
-                        || byte.is_ascii_digit()
-                        || matches!(byte, b'-' | b'_')
-                })
-        }),
+        NativeToolFamily::Cargo => tool
+            .strip_prefix("cargo:")
+            .filter(|_| crate::tool::ToolId::parse(tool).is_ok_and(|id| id.to_string() == tool)),
         NativeToolFamily::Go => tool
             .strip_prefix("go:")
             .filter(|subject| valid_go_module_subject(subject)),
@@ -685,20 +1311,35 @@ fn valid_go_module_subject(subject: &str) -> bool {
         })
 }
 
-fn runtime_is_installed(dirs: &Dirs, runtime: &InstallDependency) -> bool {
+fn runtime_is_installed(dirs: &Dirs, runtime: &InstallDependency, identity_platform: &str) -> bool {
     let marker_root = dirs.install_path(&runtime.id, &runtime.version);
     if !is_regular_file(&marker_root.join(".osdk-complete")) {
         return false;
     }
     match runtime.identity.as_deref() {
         None => false,
-        Some(expected) => runtime_identity_at(dirs, runtime).as_deref() == Some(expected),
+        Some(expected) => {
+            runtime_identity_at(dirs, runtime, identity_platform).as_deref() == Some(expected)
+        }
     }
 }
 
-fn runtime_identity_at(dirs: &Dirs, runtime: &InstallDependency) -> Option<String> {
+fn runtime_identity_at(
+    dirs: &Dirs,
+    runtime: &InstallDependency,
+    identity_platform: &str,
+) -> Option<String> {
     let runtime_root = match runtime.id.as_str() {
-        "rust" => dirs.rustup_home().join("toolchains").join(&runtime.version),
+        "rust" => {
+            let marker = dirs.install_path("rust", &runtime.version);
+            if marker.join(".osdk-linked").exists() {
+                return None;
+            }
+            if identity_platform != Platform::current().to_string() {
+                return None;
+            }
+            return rust_runtime_identity(dirs, Platform::current(), &runtime.version).ok();
+        }
         "go" => dirs.install_path("go", &runtime.version),
         _ => return None,
     };
@@ -1194,11 +1835,43 @@ mod tests {
     fn cargo_lifecycle(root: &Path, runtime_version: &str) -> NativeToolLifecycle {
         let dirs = dirs(root);
         let runtime_root = dirs.rustup_home().join("toolchains").join(runtime_version);
-        std::fs::create_dir_all(&runtime_root).unwrap();
-        std::fs::write(runtime_root.join("runtime"), b"rust").unwrap();
-        let runtime_identity = runtime_tree_identity(&runtime_root).unwrap();
+        write_executable(&runtime_root.join("bin/cargo"), b"cargo");
+        write_executable(&runtime_root.join("bin/rustc"), b"rustc");
+        let target_lib = runtime_root
+            .join("lib/rustlib")
+            .join(Platform::current().llvm_triple())
+            .join("lib");
+        std::fs::create_dir_all(&target_lib).unwrap();
+        std::fs::write(target_lib.join("libstd-fixture.rlib"), b"std").unwrap();
+        std::fs::write(target_lib.join("libcore-fixture.rlib"), b"core").unwrap();
+        std::fs::write(target_lib.join("liballoc-fixture.rlib"), b"alloc").unwrap();
+        std::fs::write(
+            runtime_root.join("lib/librustc_driver-fixture.so"),
+            b"driver",
+        )
+        .unwrap();
+        std::fs::write(
+            runtime_root.join("lib/rustlib/manifest-rustc-fixture"),
+            b"file:bin/rustc\nfile:lib/librustc_driver-fixture.so",
+        )
+        .unwrap();
+        std::fs::write(
+            runtime_root.join("lib/rustlib/manifest-rust-std-fixture"),
+            b"file:libstd-fixture.rlib",
+        )
+        .unwrap();
+        std::fs::write(
+            runtime_root.join("lib/rustlib/manifest-cargo-fixture"),
+            b"file:bin/cargo",
+        )
+        .unwrap();
+        let marker = dirs.install_path("rust", runtime_version);
+        std::fs::create_dir_all(&marker).unwrap();
+        std::fs::write(marker.join(".osdk-complete"), b"").unwrap();
+        let runtime_identity =
+            rust_runtime_identity(&dirs, Platform::current(), runtime_version).unwrap();
         let identity = InstallIdentity::new(
-            "github:example/ripgrep",
+            "cargo:ripgrep",
             "14.1.1",
             Platform::current().to_string(),
             InstallScope::Isolated,
@@ -1286,6 +1959,135 @@ mod tests {
         let second = lifecycle(temporary.path(), "1.23.0");
         assert_ne!(first.install_root(), second.install_root());
         assert_ne!(first.identity().install_id, second.identity().install_id);
+    }
+
+    #[test]
+    fn rust_runtime_identity_covers_complete_build_critical_payloads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let lifecycle = cargo_lifecycle(temporary.path(), "1.91.1");
+        let dirs = dirs(temporary.path());
+        let runtime_root = dirs.rustup_home().join("toolchains/1.91.1");
+        let first = rust_runtime_identity(&dirs, Platform::current(), "1.91.1").unwrap();
+        assert!(first.starts_with("b3-rust-v2:"));
+        let receipt_path = dirs
+            .install_path("rust", "1.91.1")
+            .join(RUST_RUNTIME_RECEIPT_FILE);
+        let first_receipt = std::fs::read(&receipt_path).unwrap();
+
+        std::fs::create_dir_all(runtime_root.join("share/doc")).unwrap();
+        std::fs::write(runtime_root.join("share/doc/unrelated.html"), b"one").unwrap();
+        let unrelated = rust_runtime_identity(&dirs, Platform::current(), "1.91.1").unwrap();
+        assert_eq!(first, unrelated);
+        assert_eq!(first_receipt, std::fs::read(&receipt_path).unwrap());
+        assert_eq!(
+            lifecycle.identity().dependencies[0].identity.as_deref(),
+            Some(first.as_str())
+        );
+
+        write_executable(&runtime_root.join("bin/rustc"), b"changed rustc");
+        let changed = rust_runtime_identity(&dirs, Platform::current(), "1.91.1").unwrap();
+        assert_ne!(first, changed);
+
+        let lifecycle = cargo_lifecycle(temporary.path(), "1.91.2");
+        let runtime_root = dirs.rustup_home().join("toolchains/1.91.2");
+        let first = lifecycle.identity().dependencies[0]
+            .identity
+            .clone()
+            .unwrap();
+        std::fs::write(
+            runtime_root.join("lib/librustc_driver-fixture.so"),
+            b"changed driver",
+        )
+        .unwrap();
+        assert_ne!(
+            first,
+            rust_runtime_identity(&dirs, Platform::current(), "1.91.2").unwrap()
+        );
+
+        let lifecycle = cargo_lifecycle(temporary.path(), "1.91.3");
+        let runtime_root = dirs.rustup_home().join("toolchains/1.91.3");
+        let first = lifecycle.identity().dependencies[0]
+            .identity
+            .clone()
+            .unwrap();
+        let target_lib = runtime_root
+            .join("lib/rustlib")
+            .join(Platform::current().llvm_triple())
+            .join("lib/libstd-fixture.rlib");
+        std::fs::write(target_lib, b"changed std").unwrap();
+        assert_ne!(
+            first,
+            rust_runtime_identity(&dirs, Platform::current(), "1.91.3").unwrap()
+        );
+
+        for (version, file, changed) in [
+            ("1.91.4", "libcore-fixture.rlib", b"CORE".as_slice()),
+            ("1.91.5", "liballoc-fixture.rlib", b"ALLOC".as_slice()),
+        ] {
+            let lifecycle = cargo_lifecycle(temporary.path(), version);
+            let first = lifecycle.identity().dependencies[0]
+                .identity
+                .clone()
+                .unwrap();
+            let path = dirs
+                .rustup_home()
+                .join("toolchains")
+                .join(version)
+                .join("lib/rustlib")
+                .join(Platform::current().llvm_triple())
+                .join("lib")
+                .join(file);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::write(path, changed).unwrap();
+            assert_ne!(
+                first,
+                rust_runtime_identity(&dirs, Platform::current(), version).unwrap(),
+                "{file} mutation must change the runtime identity"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_runtime_identity_rejects_corrupt_or_symlinked_receipts() {
+        let temporary = tempfile::tempdir().unwrap();
+        cargo_lifecycle(temporary.path(), "1.91.6");
+        let dirs = dirs(temporary.path());
+        let receipt = dirs
+            .install_path("rust", "1.91.6")
+            .join(RUST_RUNTIME_RECEIPT_FILE);
+        std::fs::write(&receipt, b"{}").unwrap();
+        assert!(rust_runtime_identity(&dirs, Platform::current(), "1.91.6").is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            std::fs::remove_file(&receipt).unwrap();
+            let outside = temporary.path().join("outside-receipt");
+            std::fs::write(&outside, b"{}").unwrap();
+            symlink(&outside, &receipt).unwrap();
+            let error = rust_runtime_identity(&dirs, Platform::current(), "1.91.6").unwrap_err();
+            assert!(error.to_string().contains("non-symlink"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_runtime_identity_rejects_target_lib_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        cargo_lifecycle(temporary.path(), "1.91.7");
+        let dirs = dirs(temporary.path());
+        let target_lib = dirs
+            .rustup_home()
+            .join("toolchains/1.91.7/lib/rustlib")
+            .join(Platform::current().llvm_triple())
+            .join("lib");
+        let outside = temporary.path().join("outside-payload");
+        std::fs::write(&outside, b"payload").unwrap();
+        symlink(&outside, target_lib.join("libinjected.rlib")).unwrap();
+        assert!(rust_runtime_identity(&dirs, Platform::current(), "1.91.7").is_err());
     }
 
     #[test]

@@ -17,6 +17,7 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub mod aube_host;
 pub mod bun;
+pub mod cargo_package;
 #[cfg(test)]
 mod contract;
 pub mod declarative;

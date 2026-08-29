@@ -2,6 +2,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
+use osdk_core::backend::native_tool::{
+    LOCKED_NATIVE_RUNTIME_OPTION, LOCKED_NATIVE_RUNTIME_VERSION_OPTION,
+};
 use osdk_core::backend::{Backend, InstallCtx};
 use osdk_core::inventory::ScanReport;
 use osdk_core::package_registry::{self, PackageManager, RegistryPlan, RegistryProbe};
@@ -505,7 +508,7 @@ async fn install_requests(
     opts: Vec<String>,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
-    let mut requests = inject_node_dependency(app, requests)?;
+    let mut requests = inject_managed_dependencies(app, requests)?;
     if requests.is_empty() {
         println!("{}", t!("msg.nothing_to_install"));
         return Ok(Vec::new());
@@ -538,7 +541,15 @@ async fn install_requests(
         generate_shims_for(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
+    let (rust_requests, mut remaining_requests) =
+        partition_runtime_dependency(remaining_requests, "rust", "cargo:");
+    for request in rust_requests {
+        let (backend, version) = install_one_without_shims(app, &request).await?;
+        generate_shims_for(app, backend.as_ref(), &version)?;
+        resolved.push((request, version));
+    }
     bind_request_node_version(&mut remaining_requests, &resolved);
+    bind_request_rust_version(&mut remaining_requests, &resolved)?;
     let jobs = app.ctx.config.settings.jobs.max(1);
     let installed = stream::iter(remaining_requests.into_iter().map(|req| {
         let app_ref: &App = app;
@@ -562,6 +573,25 @@ fn resolved_node_version(resolved: &[(ToolRequest, ToolVersion)]) -> Option<Stri
     resolved
         .iter()
         .find_map(|(_, version)| (version.backend == "node").then_some(version.version.clone()))
+}
+
+fn resolved_rust_version(resolved: &[(ToolRequest, ToolVersion)]) -> Option<String> {
+    resolved
+        .iter()
+        .find_map(|(_, version)| (version.backend == "rust").then_some(version.version.clone()))
+}
+
+fn exact_rust_version(version: &str) -> bool {
+    matches!(VersionSpec::parse(version), VersionSpec::Exact(exact) if exact == version)
+}
+
+fn require_exact_rust_spec(spec: &VersionSpec) -> Result<()> {
+    if matches!(spec, VersionSpec::Exact(version) if exact_rust_version(version)) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Cargo tools require one exact managed Rust version; configure `rust = \"1.91.1\"` or include `rust@1.91.1`"
+    )
 }
 
 fn bind_request_node_version(
@@ -595,6 +625,77 @@ fn bind_resolved_node_version(resolved: &mut [(ToolRequest, ToolVersion)]) {
     }
 }
 
+fn bind_resolved_rust_version(resolved: &mut [(ToolRequest, ToolVersion)]) -> Result<()> {
+    if !resolved
+        .iter()
+        .any(|(_, version)| version.backend.starts_with("cargo:"))
+    {
+        return Ok(());
+    }
+    let rust_version = resolved_rust_version(resolved)
+        .ok_or_else(|| anyhow!("Cargo tools require exactly one managed Rust dependency"))?;
+    if !exact_rust_version(&rust_version) {
+        anyhow::bail!("Cargo tools require an exact resolved Rust version, got `{rust_version}`");
+    }
+    for (_, version) in resolved {
+        if version.backend.starts_with("cargo:") {
+            version
+                .options
+                .insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), "rust".into());
+            version.options.insert(
+                LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
+                rust_version.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn bind_request_rust_version(
+    requests: &mut [ToolRequest],
+    resolved: &[(ToolRequest, ToolVersion)],
+) -> Result<()> {
+    if !requests
+        .iter()
+        .any(|request| request.backend.starts_with("cargo:"))
+    {
+        return Ok(());
+    }
+    let rust_version = resolved_rust_version(resolved)
+        .ok_or_else(|| anyhow!("Cargo tools require exactly one managed Rust dependency"))?;
+    if !exact_rust_version(&rust_version) {
+        anyhow::bail!("Cargo tools require an exact resolved Rust version, got `{rust_version}`");
+    }
+    for request in requests {
+        if request.backend.starts_with("cargo:") {
+            request
+                .options
+                .insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), "rust".into());
+            request.options.insert(
+                LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
+                rust_version.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn partition_runtime_dependency(
+    requests: Vec<ToolRequest>,
+    runtime: &str,
+    dependent_prefix: &str,
+) -> (Vec<ToolRequest>, Vec<ToolRequest>) {
+    if !requests
+        .iter()
+        .any(|request| request.backend.starts_with(dependent_prefix))
+    {
+        return (Vec::new(), requests);
+    }
+    requests
+        .into_iter()
+        .partition(|request| request.backend == runtime)
+}
+
 fn mark_isolated_npm_scope(requests: &mut [ToolRequest]) {
     for request in requests {
         if request.backend.starts_with("npm:") {
@@ -612,11 +713,16 @@ async fn resolve_requests(
     opts: Vec<String>,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
+    let requests = inject_managed_dependencies(app, requests)?;
+    let (rust_requests, remaining_requests) =
+        partition_runtime_dependency(requests, "rust", "cargo:");
+    let requests = rust_requests.into_iter().chain(remaining_requests);
     let mut resolved = Vec::new();
     for mut request in requests {
         for (key, value) in &parsed_opts {
             request.options.insert(key.clone(), value.clone());
         }
+        bind_request_rust_version(std::slice::from_mut(&mut request), &resolved)?;
         mark_isolated_npm_scope(std::slice::from_mut(&mut request));
         apply_source_override(app, &request.backend);
         let backend = app.registry.get(&request.backend)?;
@@ -625,6 +731,7 @@ async fn resolve_requests(
         bind_dynamic_request_options(&effective, &mut version);
         resolved.push((request, version));
     }
+    bind_resolved_rust_version(&mut resolved)?;
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
     Ok(resolved)
 }
@@ -777,7 +884,7 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        return inject_node_dependency(app, requests);
+        return inject_managed_dependencies(app, requests);
     }
     // From config pins.
     let mut out = Vec::new();
@@ -852,7 +959,7 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
                 .unwrap_or_default(),
         });
     }
-    inject_node_dependency(app, out)
+    inject_managed_dependencies(app, out)
 }
 
 fn inherit_configured_options_from(
@@ -976,6 +1083,75 @@ fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<V
             .config
             .tool_configs
             .get("node")
+            .map(|entry| entry.to_request_options())
+            .unwrap_or_default(),
+    });
+    Ok(requests)
+}
+
+fn inject_managed_dependencies(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
+    let requests = inject_node_dependency(app, requests)?;
+    inject_rust_dependency(app, requests)
+}
+
+fn inject_rust_dependency(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
+    let cwd = std::env::current_dir()?;
+    inject_rust_dependency_at(app, requests, &cwd)
+}
+
+fn inject_rust_dependency_at(
+    app: &App,
+    mut requests: Vec<ToolRequest>,
+    cwd: &std::path::Path,
+) -> Result<Vec<ToolRequest>> {
+    if !requests
+        .iter()
+        .any(|request| request.backend.starts_with("cargo:"))
+    {
+        return Ok(requests);
+    }
+    let rust_requests = requests
+        .iter()
+        .filter(|request| request.backend == "rust")
+        .count();
+    if rust_requests > 1 {
+        anyhow::bail!("Cargo tools require exactly one managed Rust request");
+    }
+    if rust_requests == 1 {
+        let rust = requests
+            .iter()
+            .find(|request| request.backend == "rust")
+            .expect("counted one Rust request");
+        require_exact_rust_spec(&rust.spec)?;
+        return Ok(requests);
+    }
+
+    let backend = app.registry.get("rust")?;
+    let active = osdk_core::version::resolver::resolve_active(
+        "rust",
+        cwd,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "Cargo tools require one exact managed Rust version; configure `rust = \"1.91.1\"` or include `rust@1.91.1`"
+        )
+    })?;
+    let spec = if active.is_range {
+        VersionSpec::parse_range(&active.spec)?
+    } else {
+        VersionSpec::parse(&active.spec)
+    };
+    require_exact_rust_spec(&spec)?;
+    requests.push(ToolRequest {
+        backend: "rust".into(),
+        spec,
+        options: app
+            .ctx
+            .config
+            .tool_configs
+            .get("rust")
             .map(|entry| entry.to_request_options())
             .unwrap_or_default(),
     });
@@ -5303,6 +5479,166 @@ mod command_flow_tests {
             "20.10.0"
         );
         assert!(requests[1].options.is_empty());
+    }
+
+    fn request(backend: &str, spec: VersionSpec) -> ToolRequest {
+        ToolRequest {
+            backend: backend.into(),
+            spec,
+            options: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn cargo_requests_inject_exactly_one_configured_rust_request() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            "[tools]\nrust = { version = \"1.91.1\", profile = \"minimal\" }\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let cargo = request(
+            "cargo:https://github.com/BurntSushi/ripgrep.git",
+            VersionSpec::Exact("rev:0123456789abcdef0123456789abcdef01234567".into()),
+        );
+
+        let requests = inject_rust_dependency_at(&app, vec![cargo], &project).unwrap();
+        let rust = requests
+            .iter()
+            .filter(|request| request.backend == "rust")
+            .collect::<Vec<_>>();
+
+        assert_eq!(rust.len(), 1);
+        assert_eq!(rust[0].spec, VersionSpec::Exact("1.91.1".into()));
+        assert_eq!(rust[0].options["profile"], "minimal");
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn cargo_requests_preserve_one_explicit_rust_and_reject_duplicates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let cargo = request("cargo:ripgrep", VersionSpec::Exact("14.1.1".into()));
+        let rust = ToolRequest::parse("rust@1.91.1").unwrap();
+
+        let requests = inject_rust_dependency(&app, vec![cargo.clone(), rust.clone()]).unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.backend == "rust")
+                .count(),
+            1
+        );
+        let error = inject_rust_dependency(&app, vec![cargo, rust.clone(), rust]).unwrap_err();
+        assert!(error.to_string().contains("exactly one managed Rust"));
+    }
+
+    #[test]
+    fn cargo_requests_reject_missing_or_floating_rust_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let cargo = request("cargo:ripgrep", VersionSpec::Exact("14.1.1".into()));
+
+        let missing = inject_rust_dependency_at(&app, vec![cargo.clone()], &project).unwrap_err();
+        assert!(missing.to_string().contains("configure `rust"), "{missing}");
+
+        for rust in [
+            ToolRequest::parse("rust@stable").unwrap(),
+            request("rust", VersionSpec::Latest),
+        ] {
+            let floating =
+                inject_rust_dependency_at(&app, vec![cargo.clone(), rust], &project).unwrap_err();
+            assert!(
+                floating.to_string().contains("exact managed Rust version"),
+                "{floating}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_cargo_requests_do_not_inject_or_require_rust() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let npm = ToolRequest::parse("npm:prettier@3.6.2").unwrap();
+
+        let requests = inject_rust_dependency_at(&app, vec![npm.clone()], &project).unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].backend, npm.backend);
+        assert!(requests[0].options.is_empty());
+    }
+
+    #[test]
+    fn cargo_runtime_partition_and_binding_are_exact_and_npm_neutral() {
+        let cargo = request("cargo:ripgrep", VersionSpec::Exact("14.1.1".into()));
+        let npm = ToolRequest::parse("npm:prettier@3.6.2").unwrap();
+        let rust = ToolRequest::parse("rust@1.91.1").unwrap();
+        let node = ToolRequest::parse("node@20.10.0").unwrap();
+        let (runtime, mut remaining) =
+            partition_runtime_dependency(vec![cargo, npm, rust, node], "rust", "cargo:");
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].backend, "rust");
+        assert!(remaining.iter().all(|request| request.backend != "rust"));
+
+        let resolved = vec![(runtime[0].clone(), ToolVersion::new("rust", "1.91.1"))];
+        bind_request_rust_version(&mut remaining, &resolved).unwrap();
+        let cargo = remaining
+            .iter()
+            .find(|request| request.backend.starts_with("cargo:"))
+            .unwrap();
+        assert_eq!(cargo.options[LOCKED_NATIVE_RUNTIME_OPTION], "rust");
+        assert_eq!(
+            cargo.options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
+            "1.91.1"
+        );
+        let npm = remaining
+            .iter()
+            .find(|request| request.backend.starts_with("npm:"))
+            .unwrap();
+        assert!(npm.options.is_empty());
+    }
+
+    #[test]
+    fn resolved_cargo_lock_metadata_uses_the_same_exact_rust_version() {
+        let mut resolved = vec![
+            (
+                request("cargo:ripgrep", VersionSpec::Exact("14.1.1".into())),
+                ToolVersion::new("cargo:ripgrep", "14.1.1"),
+            ),
+            (
+                ToolRequest::parse("rust@1.91.1").unwrap(),
+                ToolVersion::new("rust", "1.91.1"),
+            ),
+        ];
+
+        bind_resolved_rust_version(&mut resolved).unwrap();
+
+        assert_eq!(
+            resolved[0].1.options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
+            "1.91.1"
+        );
+        assert_eq!(resolved[0].1.options[LOCKED_NATIVE_RUNTIME_OPTION], "rust");
+        assert!(resolved[1].1.options.is_empty());
     }
 
     #[test]

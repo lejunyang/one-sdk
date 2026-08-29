@@ -118,11 +118,11 @@ osdk reshim
 
 | Command | Exact semantics |
 | --- | --- |
-| `list [TOOL]` | List local versions with completion markers; without a tool, include registered backends and GitHub backends found on disk |
+| `list [TOOL]` | List local versions with completion markers; without a tool, include registered backends and inventory-backed dynamic tools found on disk, including GitHub and Cargo tools |
 | `list-remote TOOL [FILTER]` | List stable remote versions; optional `FILTER` is a string prefix |
 | `current [TOOL]` | Show the raw request and discovery source for the current directory; the request need not be installed or remotely resolved |
 | `where TOOL[@VERSION]` | Locate an exact version; a bare/non-exact request ignores the project selection and chooses the last string-sorted installed entry |
-| `reshim` | Regenerate shims for installed built-in backends and coordinate npm/npx routing |
+| `reshim` | Regenerate shims for installed built-in and inventory-backed dynamic tools, and coordinate npm/npx routing |
 
 `current node` and `where node` answer different questions. Use an exact version
 with `where` when a script needs a deterministic path.

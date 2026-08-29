@@ -16,6 +16,9 @@ are sorted by backend name afterward. A failed task makes the batch return an
 error, but completed independent installs are not rolled back. This is a
 dependency barrier plus bounded concurrency and per-item commits, not an
 all-or-nothing batch transaction.
+Cargo tools add an independent Rust-first barrier. The CLI requires exactly one
+exact managed Rust request, completes it before scheduling the dependent
+`cargo:` requests, and binds the resolved Rust version into those identities.
 
 Source speed tests probe all candidates concurrently and are not bounded by `jobs`. Each probe defaults to a 1500 ms deadline, reads at most about 1 MB, and scores time to first byte plus throughput. Successful rankings are cached for 6 hours by default. `auto` uses probe ranking, `ordered` uses configured priority, and a pin moves one source first while retaining the others as fallback. See [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 
@@ -41,6 +44,15 @@ Archive installation in [`pipeline::run_with_attestation`](https://github.com/le
 A failure does not write the marker, so the next run can clean and rebuild. The SDK tree is nevertheless materialized directly into its final directory, not assembled completely and renamed as a unit. An interruption can therefore leave partial files until the next cleanup. The marker is the commit criterion, not an atomic directory replacement. Backend post-processing runs after the core pipeline returns, so a later post-processing failure can occur after the core marker exists.
 
 Bare-binary installation also writes its receipt and marker last and leaves incomplete state for a later cleanup on failure. However, the current [`install_single_binary`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs) does not acquire the per-`tool@version` lock used by the archive path. Normal callers avoid duplicate work through bounded scheduling, but same-version bare-binary installs in separate processes do not have the archive path's serialization guarantee.
+
+Cargo developer tools use a separate native commit protocol. An exact
+identity-qualified lock covers candidate validation, a unique sibling stage,
+provider execution, and publication. The publisher rejects symlinks and reserved
+metadata, inventories and hashes binaries, writes the native receipt, dynamic
+inventory, completion marker, and adjacent metadata seal, then exposes the tree
+with a no-replace directory rename. A failed or dropped unpublished stage is
+removed. Reuse revalidates the seal, inventory, receipt, binary SHA-256 values,
+and exact managed Rust version/platform plus bounded build-critical runtime identity; see [Cargo developer tool implementation](./cargo-tools).
 
 ## CAS and materialization
 

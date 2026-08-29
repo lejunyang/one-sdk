@@ -60,10 +60,10 @@ backend 选项，也会绕过 lock；建议先用相同选项重新 `lock`。
 在特殊嵌套布局中，最近可读 lock 与项目配置决定的写入位置可能不同。建议把
 `osdk.toml` 与 `osdk.lock` 放在同一项目根目录。
 
-## Schema 3
+## Schema 4
 
 ```toml
-schema = 3
+schema = 4
 
 [platforms.linux-x64.tools.node]
 request = "20"
@@ -97,6 +97,21 @@ kind = "aube"
 format = "aube-v9"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep"]
+request = "14"
+version = "14.1.1"
+options = { locked = "true" }
+
+[platforms.linux-x64.tools."cargo:ripgrep".native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "version-only"
+source = "sparse+https://index.crates.io/"
+
 [models.qwen]
 provider = "huggingface"
 repository = "Qwen/Qwen2.5-7B-Instruct"
@@ -115,7 +130,8 @@ sha256 = "..."
 musl Linux 追加 `-musl`。更新一个平台会保留其他平台和顶层模型记录。内部
 `__osdk_*` 选项不写入公开 `options`；支持通用 receipt 的非 npm backend 会单独保存
 artifact 身份。
-schema 3 要求每个 `npm:<package>` 都有 `npm` 子表；主 lock 只保存基础 npm 元数据：
+schema 4 保留 schema 3 的 npm metadata 模型，并要求每个 `npm:<package>` 都有 `npm`
+子表；主 lock 只保存基础 npm 元数据：
 `package`、`installer`、`scope`、可选的精确 `node_version`，以及可选的
 `native_lock.kind`、`native_lock.format`、`native_lock.sha256`。它不再保存 graph
 payload，也不保存 graph/path 字段。npm 工具条目不能写通用 `artifact` 子表。
@@ -127,8 +143,18 @@ native lock 内容继续保留在 installer 自己管理的目录中；`osdk.loc
 避免把没有可验证依赖图的旧记录误标成当前 schema。
 
 schema 2 的 npm sidecar 仍可读取：读取时会继续校验 sidecar，并把内容作为冻结输入。
-只有在后续成功写回 `osdk.lock` 时，osdk 才会把条目迁移成 schema 3 的 metadata-only
+只有在后续成功写回 `osdk.lock` 时，osdk 才会把条目迁移成当前 metadata-only
 格式；原有 `osdk.lock.d/` sidecar 不会被自动删除。
+
+schema 4 为 Cargo 与 Go module 工具新增类型化 `native` metadata。Cargo 条目要求同一
+平台表中存在匹配的精确 `rust` 条目。Registry 版本使用 `version-only`，完整的
+`rev:<40 位小写十六进制>` Git selector 使用 `immutable-revision`，Git HEAD、tag 和
+branch 使用 `floating-ref`。这些标签只说明 selector 强度，不包含完整 dependency/source
+graph。因此，身份匹配的完整 Cargo 安装可离线复用，但不支持全新离线安装或修复。
+schema 1 到 3 无法表达这种原生 runtime 绑定，会拒绝其中的 `cargo:` 条目；请重新生成
+schema 4。详见 [Cargo 开发工具](./cargo-tools)。
+Registry Cargo 条目还会在 `native.source` 中保留精确选择的规范、无凭据 sparse HTTPS
+index；Git Cargo 条目不能携带该字段。
 
 Node 的 `lock -o arch=...` 会写入目标架构区段；osdk 没有跨架构“只下载”模式，
 随后在不匹配 host 上安装会拒绝。当前 `upgrade -o arch=...` 始终写 host 平台区段，
@@ -149,21 +175,22 @@ osdk upgrade    # 安装重新解析的版本并刷新 lock
 ```
 
 损坏的 TOML 或不支持的 schema 会直接报错，不会静默回退配置。主 lock 当前限制为
-16 MiB；schema 2 npm sidecar 在兼容读取时仍按 16 MiB 上限校验。写入 schema 3 时只会
+16 MiB；schema 2 npm sidecar 在兼容读取时仍按 16 MiB 上限校验。写入 schema 4 时只会
 原子替换主 lock，不会为 npm graph 再生成 sidecar。
 
 ## npm 元数据与兼容边界
 
-对 `npm:<package>`，schema 3 主 lock 记录的是 npm 元数据，而不是完整依赖图。它会
+对 `npm:<package>`，schema 4 主 lock 保留与 schema 3 兼容的 npm 元数据，而不是完整
+依赖图。它会
 保存包名、选定 installer、作用域、可选的精确 Node 版本，以及可选 native lock 的 owner/
 format/SHA-256。native lock 的实际 payload 和路径继续由 installer 自己管理，不会写回
 `osdk.lock`。
 
-无参数 `osdk install` 从 schema 3 lock 恢复 npm 工具时，会先验证 package 与 backend
+无参数 `osdk install` 从 lock 恢复 npm 工具时，会先验证 package 与 backend
 一致、`installer` 与 `scope` 合法、可选 `node_version` 与同平台 Node 条目一致，以及可选
 `native_lock` 的 owner/format/SHA-256 是否自洽。若 lock 来自较旧的 schema 2，读取时仍会
 按旧规则校验 sidecar，并把它作为兼容输入；但下一次成功写入会改写成 metadata-only 的
-schema 3 主 lock。
+schema 4 主 lock。
 
 对于 schema 2 兼容读取，缺少或损坏 sidecar、超过大小限制，都会明确失败；详情见
 [npm 开发工具](./npm-tools)。

@@ -59,8 +59,10 @@ osdk config list
 node = "20"
 python = "3.12"
 go = "1.22"
+rust = "1.91.1"
 pnpm = "10.15.0"
 "npm:prettier" = "3"
+"cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 
 [aliases.node]
 maintenance = "20"
@@ -71,6 +73,8 @@ default = "maintenance"
 `osdk.toml`。`osdk use --global node@20` 修改用户配置。
 对于 `npm:<package>`，本地 `use` 会先查找最近的 `package.json`；下一节说明其项目感知
 行为。
+每个 `cargo:<crate-or-https-url>` 条目都必须对应一个精确、显式请求或配置的 `rust`
+条目；浮动和本地链接的 Rust toolchain 会被拒绝。详见 [Cargo 开发工具](./cargo-tools)。
 
 ## 在真实项目中使用 npm 工具
 

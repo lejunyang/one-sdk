@@ -11,6 +11,12 @@
 `npm:<package>`；裸 `npm` 仍是包管理器 backend。细节见
 [npm 开发工具实现](./npm-tools#身份解析与生命周期编排)。
 
+`cargo:` 使用同一套 URL-aware 语法解析器，并带更严格的命名空间 schema。Registry
+subject 接受精确/latest/数字前缀 selector；规范 HTTPS Git subject 只接受 latest、tag、
+branch 或完整小写 revision。Cargo 请求还会注入或保留且只保留一个配置/显式的精确
+Rust 请求；Rust 会优先解析，其精确版本在 Cargo 继续解析前绑定到所有 Cargo 请求。
+详见 [Cargo 开发工具实现](./cargo-tools#解析与精确-rust-绑定)。
+
 `VersionSpec` 的语义在 [`version/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 中定义：
 
 - 空值、`latest`、`stable`、`current` 表示最新稳定版；
@@ -42,7 +48,7 @@
 
 CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolve_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/mod.rs)。默认实现对精确版本直接返回，不请求远端列表，并保留所有 request options；非精确请求通过 `list_remote_versions` 和 `select_version` 解析。精确版本“免查列表”并不决定加密验证保证：安装阶段会应用当前 checksum/attestation 策略；在没有可用证据且 `require_checksums=false` 时仍可能继续。
 
-部分 backend 覆盖默认算法。例如 Node 处理目标架构与 npm range，Python 处理实现、变体、catalog 和预发布策略，Java 处理发行版及 JDK/JRE，Rust 则把 channel 或版本交给隔离的 rustup。入口分别见 [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs)、[`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs)、[`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs) 和 [`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs)。
+部分 backend 覆盖默认算法。例如 Node 处理目标架构与 npm range，Python 处理实现、变体、catalog 和预发布策略，Java 处理发行版及 JDK/JRE，Rust 则把 channel 或版本交给隔离的 rustup。Cargo Registry 工具获取配对的 metadata/index source 数据，排除 yanked release，再解析精确/latest/数字前缀 selector；Cargo Git selector 则按原文保留。入口分别见 [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs)、[`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs)、[`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs)、[`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs) 和 [`cargo_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/cargo_package.rs)。
 
 ## Lockfile 快路径与边界
 

@@ -62,6 +62,20 @@ pub async fn get_cached_source_json<T: serde::de::DeserializeOwned>(
     get_cached_json_inner(ctx, url, false, Some(source)).await
 }
 
+/// Source-aware metadata cache path. Explicit header values are represented by
+/// hashes so callers can persist bounded responses without leaking secrets or
+/// aliasing differently authenticated metadata.
+pub(crate) fn source_metadata_cache_path(
+    ctx: &Ctx,
+    source: &Source,
+    url: &str,
+) -> Result<std::path::PathBuf> {
+    Ok(metadata_cache_path(
+        ctx,
+        &source_metadata_cache_identity(url, source)?,
+    ))
+}
+
 /// Fetch text with the same stale-cache behavior as [`get_cached_json`].
 pub async fn get_cached_text(ctx: &Ctx, url: &str) -> Result<String> {
     let cache_file = metadata_cache_path(ctx, url);

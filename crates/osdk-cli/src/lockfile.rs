@@ -64,6 +64,8 @@ pub struct LockedNativeTool {
     pub runtime: String,
     pub runtime_version: String,
     pub replay: NativeReplay,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -438,6 +440,12 @@ fn inject_native_metadata(options: &mut BTreeMap<String, String>, native: &Locke
         LOCKED_NATIVE_REPLAY_OPTION.into(),
         native.replay.as_str().into(),
     );
+    if let Some(source) = &native.source {
+        options.insert(
+            osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION.into(),
+            source.clone(),
+        );
+    }
 }
 
 fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
@@ -459,6 +467,19 @@ fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
                         );
                     }
                     validate_version_identity(&native.runtime, &native.runtime_version)?;
+                    if expected_runtime == "rust" {
+                        validate_exact_rust_version(backend, &native.runtime_version)?;
+                        validate_cargo_native_replay(backend, locked, native)?;
+                        match (backend.starts_with("cargo:https://"), native.source.as_deref()) {
+                            (true, Some(_)) => anyhow::bail!(
+                                "schema 4 Cargo Git entry `{backend}` cannot carry a registry source"
+                            ),
+                            (false, Some(source)) => {
+                                validate_cargo_registry_source(backend, source)?
+                            }
+                            _ => {}
+                        }
+                    }
                     let runtime = platform_lock.tools.get(expected_runtime).ok_or_else(|| {
                         anyhow::anyhow!(
                             "schema 4 native entry `{backend}` for platform `{platform}` requires `{expected_runtime}` in the same platform lock"
@@ -472,12 +493,7 @@ fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
                         );
                     }
                     if let Some(key) = locked.options.keys().find(|key| {
-                        matches!(
-                            key.as_str(),
-                            LOCKED_NATIVE_RUNTIME_OPTION
-                                | LOCKED_NATIVE_RUNTIME_VERSION_OPTION
-                                | LOCKED_NATIVE_REPLAY_OPTION
-                        )
+                        key.starts_with("__osdk_")
                     }) {
                         anyhow::bail!(
                             "schema 4 native entry `{backend}` cannot persist internal option `{key}`"
@@ -611,13 +627,9 @@ fn has_native_prefix(backend: &str) -> bool {
 }
 
 fn valid_cargo_lock_subject(subject: &str) -> bool {
-    !subject.is_empty()
-        && subject.len() <= 64
-        && !subject.starts_with(['-', '.'])
-        && !subject.ends_with(['-', '.'])
-        && subject.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
+    let backend = format!("cargo:{subject}");
+    osdk_core::tool::ToolId::parse(&backend)
+        .is_ok_and(|identity| identity.is_dynamic() && identity.to_string() == backend)
 }
 
 fn valid_go_lock_subject(subject: &str) -> bool {
@@ -994,6 +1006,74 @@ fn validate_exact_node_version(backend: &str, value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_exact_rust_version(backend: &str, value: &str) -> Result<()> {
+    validate_version_identity(backend, value)?;
+    if !matches!(VersionSpec::parse(value), VersionSpec::Exact(version) if version == value) {
+        anyhow::bail!(
+            "schema 4 native entry `{backend}` requires an exact Rust runtime version, got `{value}`"
+        );
+    }
+    Ok(())
+}
+
+fn validate_cargo_registry_source(backend: &str, value: &str) -> Result<()> {
+    osdk_core::backend::cargo_package::validate_registry_index(value).map_err(|error| {
+        anyhow::anyhow!("Cargo registry source for `{backend}` is invalid: {error}")
+    })
+}
+
+fn validate_cargo_native_replay(
+    backend: &str,
+    locked: &LockedTool,
+    native: &LockedNativeTool,
+) -> Result<()> {
+    let id = osdk_core::tool::ToolId::parse(backend)?;
+    validate_cargo_requested_selector(&id, &locked.request)?;
+    osdk_core::tool::validate_dynamic_selector(&id, Some(&locked.version))?;
+    let git = backend.starts_with("cargo:https://");
+    let expected = if git {
+        if locked.version.strip_prefix("rev:").is_some_and(|revision| {
+            revision.len() == 40
+                && revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        }) {
+            NativeReplay::ImmutableRevision
+        } else if locked.version == "latest"
+            || locked.version.starts_with("tag:")
+            || locked.version.starts_with("branch:")
+        {
+            NativeReplay::FloatingRef
+        } else {
+            anyhow::bail!("schema 4 Cargo Git entry `{backend}` has an invalid selector");
+        }
+    } else {
+        if !matches!(
+            VersionSpec::parse(&locked.version),
+            VersionSpec::Exact(version) if version == locked.version
+        ) {
+            anyhow::bail!(
+                "schema 4 Cargo registry entry `{backend}` requires an exact semantic version"
+            );
+        }
+        NativeReplay::VersionOnly
+    };
+    if native.replay != expected {
+        anyhow::bail!(
+            "schema 4 Cargo entry `{backend}` replay `{}` does not match its source and selector",
+            native.replay.as_str()
+        );
+    }
+    if !git && native.source.is_none() {
+        anyhow::bail!("schema 4 Cargo registry entry `{backend}` is missing its registry source");
+    }
+    Ok(())
+}
+
+fn validate_cargo_requested_selector(id: &osdk_core::tool::ToolId, selector: &str) -> Result<()> {
+    osdk_core::tool::validate_dynamic_selector(id, Some(selector)).map_err(anyhow::Error::from)
 }
 
 fn installed_artifact_receipt(
@@ -1513,6 +1593,10 @@ fn locked_native_metadata(version: &ToolVersion) -> Result<Option<LockedNativeTo
         runtime: required(LOCKED_NATIVE_RUNTIME_OPTION, runtime)?,
         runtime_version: required(LOCKED_NATIVE_RUNTIME_VERSION_OPTION, runtime_version)?,
         replay: NativeReplay::parse(&required(LOCKED_NATIVE_REPLAY_OPTION, replay)?)?,
+        source: version
+            .options
+            .get(osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION)
+            .cloned(),
     };
     if metadata.runtime != expected_runtime {
         anyhow::bail!(
@@ -1522,6 +1606,20 @@ fn locked_native_metadata(version: &ToolVersion) -> Result<Option<LockedNativeTo
         );
     }
     validate_version_identity(&metadata.runtime, &metadata.runtime_version)?;
+    if expected_runtime == "rust" {
+        validate_exact_rust_version(&version.backend, &metadata.runtime_version)?;
+        match (
+            version.backend.starts_with("cargo:https://"),
+            metadata.source.as_deref(),
+        ) {
+            (true, Some(_)) => anyhow::bail!(
+                "Cargo Git tool `{}` cannot carry a registry source",
+                version.backend
+            ),
+            (false, Some(source)) => validate_cargo_registry_source(&version.backend, source)?,
+            _ => {}
+        }
+    }
     Ok(Some(metadata))
 }
 
@@ -2947,6 +3045,8 @@ checksum = "sha256:{digest}"
         for valid in [
             "cargo:ripgrep",
             "cargo:cargo_edit",
+            "cargo:https://github.com/BurntSushi/ripgrep.git",
+            "cargo:https://git.example.test/Team/tool",
             "go:example.com/Acme/tool",
         ] {
             let mut locked = LockedTool::default();
@@ -2958,6 +3058,13 @@ checksum = "sha256:{digest}"
             "cargo:RipGrep",
             "cargo:foo/bar",
             "cargo:../tool",
+            "cargo:http://example.test/tool.git",
+            "cargo:https://user@example.test/tool.git",
+            "cargo:https://example.test/tool.git?token=secret",
+            "cargo:https://example.test/tool.git#main",
+            "cargo:https://example.test/a/../tool.git",
+            "cargo:https://example.test/%2e%2e/tool.git",
+            "cargo:https://example.test/tool.git/",
             "go:",
             "go:tool",
             "go:example.com//tool",
@@ -2976,8 +3083,144 @@ checksum = "sha256:{digest}"
         }
         assert!(matches!(
             ToolRequest::parse("cargo:ripgrep@1.2.3"),
-            Err(osdk_core::Error::UnknownBackend(_))
+            Ok(request) if request.backend == "cargo:ripgrep"
         ));
+    }
+
+    #[test]
+    fn schema_four_cargo_git_metadata_round_trips_with_matching_rust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let backend = "cargo:https://github.com/BurntSushi/ripgrep.git";
+        std::fs::write(
+            &path,
+            format!(
+                r#"schema = 4
+
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools.{backend:?}]
+request = "rev:0123456789abcdef0123456789abcdef01234567"
+version = "rev:0123456789abcdef0123456789abcdef01234567"
+
+[platforms.linux-x64.tools.{backend:?}.native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "immutable-revision"
+"#
+            ),
+        )
+        .unwrap();
+
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        let cargo = requests
+            .iter()
+            .find(|request| request.backend == backend)
+            .unwrap();
+        assert_eq!(
+            cargo.spec,
+            VersionSpec::Exact("rev:0123456789abcdef0123456789abcdef01234567".into())
+        );
+        assert_eq!(cargo.options[LOCKED_NATIVE_RUNTIME_OPTION], "rust");
+        assert_eq!(
+            cargo.options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
+            "1.91.1"
+        );
+        assert_eq!(
+            cargo.options[LOCKED_NATIVE_REPLAY_OPTION],
+            "immutable-revision"
+        );
+    }
+
+    #[test]
+    fn schema_four_cargo_requires_the_same_locked_rust_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let valid = r#"schema = 4
+
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep"]
+request = "14.1.1"
+version = "14.1.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep".native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "version-only"
+source = "sparse+https://index.crates.io/"
+"#;
+        std::fs::write(&path, valid).unwrap();
+        load(&path).unwrap();
+
+        std::fs::write(
+            &path,
+            valid.replace(
+                "[platforms.linux-x64.tools.rust]\nrequest = \"1.91.1\"\nversion = \"1.91.1\"\n\n",
+                "",
+            ),
+        )
+        .unwrap();
+        let missing = load(&path).unwrap_err();
+        assert!(missing.to_string().contains("requires `rust`"), "{missing}");
+
+        std::fs::write(
+            &path,
+            valid.replace(
+                "runtime_version = \"1.91.1\"",
+                "runtime_version = \"1.90.0\"",
+            ),
+        )
+        .unwrap();
+        let mismatched = load(&path).unwrap_err();
+        assert!(
+            mismatched
+                .to_string()
+                .contains("does not match `rust` entry"),
+            "{mismatched}"
+        );
+
+        std::fs::write(
+            &path,
+            valid
+                .replace("request = \"1.91.1\"", "request = \"stable\"")
+                .replace("version = \"1.91.1\"", "version = \"stable\"")
+                .replace(
+                    "runtime_version = \"1.91.1\"",
+                    "runtime_version = \"stable\"",
+                ),
+        )
+        .unwrap();
+        let floating = load(&path).unwrap_err();
+        assert!(
+            floating.to_string().contains("exact Rust runtime version"),
+            "{floating}"
+        );
+
+        std::fs::write(
+            &path,
+            valid.replace("replay = \"version-only\"", "replay = \"floating-ref\""),
+        )
+        .unwrap();
+        let replay = load(&path).unwrap_err();
+        assert!(replay.to_string().contains("does not match"), "{replay}");
+
+        std::fs::write(
+            &path,
+            valid.replace("source = \"sparse+https://index.crates.io/\"\n", ""),
+        )
+        .unwrap();
+        let missing_source = load(&path).unwrap_err();
+        assert!(
+            missing_source
+                .to_string()
+                .contains("missing its registry source"),
+            "{missing_source}"
+        );
     }
 
     #[test]
@@ -3001,6 +3244,7 @@ options = { locked = "true" }
 runtime = "rust"
 runtime_version = "1.91.1"
 replay = "version-only"
+source = "sparse+https://index.crates.io/"
 "#,
         )
         .unwrap();
@@ -3018,6 +3262,10 @@ replay = "version-only"
             "1.91.1"
         );
         assert_eq!(cargo.options[LOCKED_NATIVE_REPLAY_OPTION], "version-only");
+        assert_eq!(
+            cargo.options[osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION],
+            "sparse+https://index.crates.io/"
+        );
     }
 
     #[test]
@@ -3033,9 +3281,10 @@ replay = "version-only"
         version.options.extend(BTreeMap::from([
             (LOCKED_NATIVE_RUNTIME_OPTION.into(), "rust".into()),
             (LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(), "1.91.1".into()),
+            (LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into()),
             (
-                LOCKED_NATIVE_REPLAY_OPTION.into(),
-                "immutable-revision".into(),
+                osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION.into(),
+                "sparse+https://index.crates.io/".into(),
             ),
             ("locked".into(), "true".into()),
         ]));
@@ -3060,7 +3309,8 @@ replay = "version-only"
             Some(LockedNativeTool {
                 runtime: "rust".into(),
                 runtime_version: "1.91.1".into(),
-                replay: NativeReplay::ImmutableRevision,
+                replay: NativeReplay::VersionOnly,
+                source: Some("sparse+https://index.crates.io/".into()),
             })
         );
         assert_eq!(

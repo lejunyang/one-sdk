@@ -357,9 +357,13 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_dynamic_namespaces_and_options_early() {
         assert!(matches!(
-            ToolRequest::parse("cargo:ripgrep@latest"),
+            ToolRequest::parse("pip:ripgrep@latest"),
             Err(Error::UnknownBackend(_))
         ));
+        assert_eq!(
+            ToolRequest::parse("cargo:ripgrep@latest").unwrap().backend,
+            "cargo:ripgrep"
+        );
         assert!(ToolRequest::parse("npm:prettier[token=secret]@3").is_err());
     }
 

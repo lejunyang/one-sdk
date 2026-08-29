@@ -35,14 +35,17 @@ CLI 生成或 `reshim` 则始终对多个已安装 backend owner 移除歧义的
 同一 backend 的多个版本由活跃版本选择处理，不构成 owner 冲突。详见
 [npm 开发工具实现](./npm-tools)。
 
-osdk 自有的动态 `npm:<package>` 与 `github:owner/repo` 安装使用 `.osdk-install.json` schema 1。
+osdk 自有的动态 `npm:<package>`、`cargo:<crate-or-https-url>` 与 `github:owner/repo`
+安装使用 `.osdk-install.json` schema 1。
 其嵌套 `identity` 记录 `tool`、`version`、`platform`、`scope`、`material_options`、
 `dependencies`、`materials` 与规范 `b3-v2:` `install_id`。该指纹进入物理安装根，因此相同
 backend/version 的多个身份可以共存。activation 加入路径或 shim 执行命令前，osdk 会派生
 配置的精确身份，只选择对应根；复用、`where`、uninstall 与 `reshim` 使用相同选择。身份
 缺失、过旧或不匹配都会 fail closed；`.osdk-tool.json` 只用于识别遗留状态，其 schema 1
 和 schema 2 都不能授权执行。这与上面的 bin owner 歧义检查是两个独立条件。项目管理的 npm
-activation 继续使用单独校验的 `.osdk/npm-bin` generation。
+activation 继续使用单独校验的 `.osdk/npm-bin` generation。Cargo 原生候选还会额外校验
+receipt、metadata seal、binary digest，以及精确 Rust 版本/平台和有界构建关键身份；详见
+[Cargo 开发工具实现](./cargo-tools)。
 
 ## 信任边界
 
@@ -52,7 +55,8 @@ CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]`
 
 当前 writer 使用 schema 4。它为委托编译的工具增加可选的类型化 `native` 表，
 记录受管 runtime id、精确 runtime 版本，以及 `version-only`、
-`immutable-revision` 或 `floating-ref` 重放等级。已有 schema 1 到 3
+`immutable-revision` 或 `floating-ref` 重放等级。Cargo Registry 条目还在 `native.source`
+中记录规范、无凭据的 sparse HTTPS index；Cargo Git 条目不能携带该字段。已有 schema 1 到 3
 对非 native 工具仍可读取，并在下次成功写入时升级。由于旧 schema 无法表达 runtime
 绑定，其中的 `cargo:` 或 Go module `go:` 条目会失败，并明确要求重新生成 schema 4
 lock。Native metadata 只恢复为内部 request option，不会重复写入公开 `options` 表。

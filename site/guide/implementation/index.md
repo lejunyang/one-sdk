@@ -35,13 +35,14 @@ CLI 与分层配置
 | [校验与供应链边界](./verification) | checksum、Minisign、GitHub Artifact Attestation 与归档安全边界 |
 | [Backend 与模型 Provider](./backends-models) | 内置/声明式/GitHub backend，以及 Hugging Face、ModelScope 模型快照 |
 | [npm 开发工具](./npm-tools) | `npm:<package>` 身份、项目/全局/隔离安装器、脚本策略、原生 lock、inventory 与冲突拒绝 |
+| [Cargo 开发工具](./cargo-tools) | `cargo:` 身份、精确 Rust 绑定、受控 provider、原生发布与 schema 4 重放 metadata |
 | [可靠性与并发](./reliability) | 锁、原子发布、重试、离线回退、幂等性和 GC 边界 |
 
 ## 需要先记住的边界
 
 - Lock 文件和安装 receipt 是可复现输入与审计记录，不是信任锚；Rust 的浮动 channel 仍是 rustup channel 名，不构成不可变版本。来自缓存或锁定 artifact 的重装仍应用当前 checksum/attestation 策略；普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新计算 checksum。只有实际进入 pipeline 的调用才可能在该快路径重验请求的 attestation。
 - GitHub Artifact Attestation 默认是 `off`，且只适用于能提供相应 bundle 和身份约束的 GitHub artifact 流程。
-- osdk 的 BLAKE3 CAS 去重 SDK 与模型的已验证文件；npm、pnpm、Yarn、Bun、Deno 的原生 package cache 仍各自隔离，当前没有跨 manager 的 package tarball CAS。
+- osdk 的 BLAKE3 CAS 去重 SDK 与模型的已验证文件；npm、pnpm、Yarn、Bun、Deno 的原生 package cache 仍各自隔离，Cargo 开发工具也在私有 staged Cargo home/target 中构建并在 CAS 外发布 binary。当前没有跨 manager 的 package tarball CAS。
 - `osdk cache clean` 只清理 osdk 的下载缓存，不会删除原生 package cache、安装目录、模型或 CAS。
 - `osdk container cache status` 查询运行时自有的聚合接口。原生镜像拉取仍由所选 Docker
   或 containerd 控制面所有；限定范围的清理只支持 Docker 与 BuildKit。这些路径都不会读取

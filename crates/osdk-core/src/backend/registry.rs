@@ -192,6 +192,14 @@ mod tests {
         assert_eq!(registry.get("npm:prettier").unwrap().id(), "npm:prettier");
         assert_eq!(registry.get("npm:@antfu/ni").unwrap().id(), "npm:@antfu/ni");
         assert_eq!(registry.get("npm:npm").unwrap().id(), "npm:npm");
+        assert_eq!(registry.get("cargo:RipGrep").unwrap().id(), "cargo:ripgrep");
+        assert_eq!(
+            registry
+                .get("cargo:https://github.com/BurntSushi/ripgrep.git")
+                .unwrap()
+                .id(),
+            "cargo:https://github.com/BurntSushi/ripgrep.git"
+        );
         assert_eq!(
             registry
                 .get("http:https://example.test/tool-{version}.tar.gz")
@@ -231,7 +239,7 @@ mod tests {
             "github:",
             "github:noslash",
             "github:cli/cli/extra",
-            "cargo:ripgrep",
+            "cargo:http://example.test/ripgrep",
             "NPM:prettier",
             "http:http://example.test/tool-{version}.zip",
             "http:https://user@example.test/tool-{version}.zip",

@@ -19,7 +19,7 @@
 <data>/models                模型快照
 <data>/shims                 命令 shim
 <data>/rustup                隔离 RUSTUP_HOME
-<data>/cargo                 Rust backend 的隔离 CARGO_HOME
+<data>/cargo                 Rust backend 的隔离 CARGO_HOME；受控 cargo-binstall 位置
 <data>/plugins               声明式 backend
 <cache>/downloads            SDK/模型下载文件
 <cache>/tmp                  临时解压
@@ -77,6 +77,9 @@ Engine 或 Buildx 构建器自有的存储。详见[容器运行时、Registry �
 `npm_config_cache`、`PIP_CACHE_DIR`、`GOMODCACHE`、`GOCACHE`、`CARGO_HOME` 和
 `GRADLE_USER_HOME`。这里没有 Maven `M2_HOME`/`maven.repo.local` 重定向。Rust 的
 直接 shim/`exec` 会以 `<data>/cargo` 覆盖通用 `<cache>/pkg/cargo` 映射。
+Cargo 开发工具 provider 不会把两者当作构建 cache：每次安装都有 stage 私有的 `HOME`、
+`CARGO_HOME`、target 与安装根。只有符合条件的受控 `cargo-binstall` 会从
+`<data>/cargo/bin` 发现；临时 source/build workspace 会在发布前删除。
 
 ## 删除与确认
 

@@ -271,7 +271,7 @@ impl fmt::Debug for OptionDefinition {
 }
 
 type OptionSetValidator = fn(&ToolId, &BTreeMap<String, String>, &CanonicalOptions) -> Result<()>;
-type SelectorValidator = fn(Option<&str>) -> Result<()>;
+type SelectorValidator = fn(&ToolId, Option<&str>) -> Result<()>;
 
 /// The accepted options and cross-option validation for one namespace.
 #[derive(Debug)]
@@ -432,8 +432,8 @@ impl NamespaceSchema {
         (self.subject_canonicalizer)(subject)
     }
 
-    pub fn validate_selector(&self, selector: Option<&str>) -> Result<()> {
-        (self.selector_validator)(selector)
+    pub fn validate_selector(&self, id: &ToolId, selector: Option<&str>) -> Result<()> {
+        (self.selector_validator)(id, selector)
     }
 
     pub fn canonicalize_options(
@@ -501,10 +501,10 @@ impl ToolSpec {
                 )));
             }
         };
-        let selector = parts.selector.filter(|selector| !selector.is_empty());
         if let Some(schema) = id.schema() {
-            schema.validate_selector(selector.as_deref())?;
+            schema.validate_selector(&id, parts.selector.as_deref())?;
         }
+        let selector = parts.selector.filter(|selector| !selector.is_empty());
         Ok(Self {
             id,
             options,
@@ -545,6 +545,7 @@ pub fn namespace_schema(namespace: &str) -> Option<&'static NamespaceSchema> {
         "npm" => Some(&NPM_SCHEMA),
         "github" => Some(&GITHUB_SCHEMA),
         "http" => Some(&HTTP_SCHEMA),
+        "cargo" => Some(&CARGO_SCHEMA),
         _ => None,
     }
 }
@@ -589,6 +590,15 @@ pub fn validate_canonical_identity_options(
         .ok_or_else(|| Error::config(format!("dynamic tool id must be namespaced: `{id}`")))?
         .options
         .validate_canonical_identity(id, options)
+}
+
+/// Validate a selector that has already been split from a canonical dynamic
+/// backend id. Durable config and lock readers use this instead of rebuilding
+/// an ambiguously delimited request string.
+pub fn validate_dynamic_selector(id: &ToolId, selector: Option<&str>) -> Result<()> {
+    id.schema()
+        .ok_or_else(|| Error::config(format!("dynamic tool id must be namespaced: `{id}`")))?
+        .validate_selector(id, selector)
 }
 
 const NPM_OPTIONS: &[OptionDefinition] = &[
@@ -731,6 +741,44 @@ const HTTP_OPTIONS: &[OptionDefinition] = &[
     ),
 ];
 
+const CARGO_OPTIONS: &[OptionDefinition] = &[
+    option(
+        "bin",
+        "bin",
+        OptionEffect::Layout,
+        true,
+        canonical_cargo_bin,
+    ),
+    option(
+        "crate",
+        "crate",
+        OptionEffect::Artifact,
+        true,
+        canonical_cargo_crate,
+    ),
+    option(
+        "default-features",
+        "default-features",
+        OptionEffect::Artifact,
+        true,
+        canonical_cargo_default_features,
+    ),
+    option(
+        "features",
+        "features",
+        OptionEffect::Artifact,
+        true,
+        canonical_cargo_features,
+    ),
+    option(
+        "locked",
+        "locked",
+        OptionEffect::Artifact,
+        true,
+        canonical_cargo_locked,
+    ),
+];
+
 const fn option(
     name: &'static str,
     canonical_name: &'static str,
@@ -774,6 +822,16 @@ static HTTP_SCHEMA: NamespaceSchema = NamespaceSchema {
     options: OptionSchema {
         definitions: HTTP_OPTIONS,
         validator: validate_http_options,
+    },
+};
+
+static CARGO_SCHEMA: NamespaceSchema = NamespaceSchema {
+    namespace: "cargo",
+    subject_canonicalizer: canonical_cargo_subject,
+    selector_validator: validate_cargo_selector,
+    options: OptionSchema {
+        definitions: CARGO_OPTIONS,
+        validator: validate_cargo_options,
     },
 };
 
@@ -888,6 +946,144 @@ fn canonical_github_subject(value: &str) -> Result<String> {
         )));
     }
     Ok(format!("{owner}/{repository}"))
+}
+
+fn canonical_cargo_subject(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.contains("://") || value.starts_with("https:") {
+        canonical_cargo_git_subject(value)
+    } else {
+        canonical_cargo_crate_name(value)
+    }
+}
+
+fn canonical_cargo_crate_name(value: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 64
+        || !bytes[0].is_ascii_alphabetic()
+        || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+        || is_windows_reserved_component(&value)
+    {
+        return Err(Error::config(format!(
+            "invalid Cargo registry crate name `{value}`"
+        )));
+    }
+    Ok(value)
+}
+
+fn canonical_cargo_git_subject(value: &str) -> Result<String> {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.trim() != value
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+        || value.contains(['@', '\\'])
+    {
+        return Err(Error::config(
+            "Cargo Git repository must be canonical HTTPS text without whitespace, credentials, or backslashes",
+        ));
+    }
+
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|error| Error::config(format!("invalid Cargo Git repository URL: {error}")))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(Error::config(
+            "Cargo Git repository must be an absolute HTTPS URL",
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::config(
+            "Cargo Git repository must not contain credentials",
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(Error::config(
+            "Cargo Git repository must not contain a query or fragment",
+        ));
+    }
+    if parsed.as_str() != value {
+        return Err(Error::config(
+            "Cargo Git repository must use its canonical URL spelling",
+        ));
+    }
+    if parsed.path() == "/" || parsed.path().ends_with('/') {
+        return Err(Error::config(
+            "Cargo Git repository URL must identify a repository path",
+        ));
+    }
+    if url_path_has_unsafe_component(value, parsed.path()) {
+        return Err(Error::config(
+            "Cargo Git repository URL must not contain path traversal",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn url_path_has_unsafe_component(raw_url: &str, parsed_path: &str) -> bool {
+    let raw_path = raw_url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.find('/').map(|offset| &rest[offset..]))
+        .unwrap_or_default();
+    [raw_path, parsed_path].into_iter().any(|path| {
+        let mut decoded = path.as_bytes().to_vec();
+        loop {
+            if decoded.iter().any(|byte| byte.is_ascii_control())
+                || decoded.contains(&b'\\')
+                || decoded.windows(2).any(|pair| pair == b"//")
+                || decoded
+                    .split(|byte| *byte == b'/')
+                    .any(|component| component == b"." || component == b"..")
+            {
+                return true;
+            }
+            if !decoded.contains(&b'%') {
+                return false;
+            }
+            let (next, changed) = percent_decode_url_path(&decoded);
+            if !changed {
+                return false;
+            }
+            decoded = next;
+        }
+    })
+}
+
+fn percent_decode_url_path(path: &[u8]) -> (Vec<u8>, bool) {
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut offset = 0;
+    let mut changed = false;
+    while offset < path.len() {
+        if path[offset] == b'%' {
+            if let (Some(high), Some(low)) = (
+                path.get(offset + 1)
+                    .and_then(|byte| hexadecimal_nibble(*byte)),
+                path.get(offset + 2)
+                    .and_then(|byte| hexadecimal_nibble(*byte)),
+            ) {
+                decoded.push(high << 4 | low);
+                offset += 3;
+                changed = true;
+                continue;
+            }
+        }
+        decoded.push(path[offset]);
+        offset += 1;
+    }
+    (decoded, changed)
+}
+
+fn hexadecimal_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn canonical_http_subject(value: &str) -> Result<String> {
@@ -1091,6 +1287,105 @@ fn canonical_npm_installer(value: &str) -> Result<Option<String>> {
     Ok((installer != crate::npm_tools::NpmInstaller::Auto).then(|| installer.as_str().to_string()))
 }
 
+fn canonical_cargo_features(value: &str) -> Result<Option<String>> {
+    let mut features = Vec::new();
+    for raw in value.split(',') {
+        let feature = raw.trim();
+        if !valid_cargo_feature(feature) {
+            return Err(Error::config(format!(
+                "invalid Cargo feature name `{feature}`"
+            )));
+        }
+        features.push(feature.to_string());
+    }
+    features.sort();
+    features.dedup();
+    Ok(Some(features.join(",")))
+}
+
+fn valid_cargo_feature(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 256
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+        || value.contains('\\')
+    {
+        return false;
+    }
+    if let Some(dependency) = value.strip_prefix("dep:") {
+        return valid_cargo_feature_atom(dependency);
+    }
+    if value.contains(':') {
+        return false;
+    }
+    if let Some((dependency, feature)) = value.split_once('/') {
+        let dependency = dependency.strip_suffix('?').unwrap_or(dependency);
+        return !feature.contains('/')
+            && valid_cargo_feature_atom(dependency)
+            && valid_cargo_feature_atom(feature);
+    }
+    valid_cargo_feature_atom(value)
+}
+
+fn valid_cargo_feature_atom(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphanumeric())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '+' | '.')
+        })
+        && value != "."
+        && value != ".."
+}
+
+fn canonical_cargo_default_features(value: &str) -> Result<Option<String>> {
+    canonical_cargo_boolean(value, "default-features", true)
+}
+
+fn canonical_cargo_locked(value: &str) -> Result<Option<String>> {
+    canonical_cargo_boolean(value, "locked", false)
+}
+
+fn canonical_cargo_boolean(value: &str, name: &str, default: bool) -> Result<Option<String>> {
+    let value = value.trim().to_ascii_lowercase();
+    let parsed = match value.as_str() {
+        "true" => true,
+        "false" => false,
+        _ => {
+            return Err(Error::config(format!(
+                "Cargo option `{name}` must be `true` or `false`"
+            )));
+        }
+    };
+    Ok((parsed != default).then(|| parsed.to_string()))
+}
+
+fn canonical_cargo_bin(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    crate::pipeline::validate_safe_filename("Cargo binary name", value)?;
+    if value.len() > 255
+        || value.ends_with([' ', '.'])
+        || is_windows_reserved_component(value)
+        || value.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+        })
+    {
+        return Err(Error::config(format!(
+            "Cargo binary name is not portable: `{value}`"
+        )));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn canonical_cargo_crate(value: &str) -> Result<Option<String>> {
+    canonical_cargo_crate_name(value).map(Some)
+}
+
 fn canonical_exact(value: &str) -> Result<Option<String>> {
     reject_control_characters(value)?;
     Ok(Some(value.to_string()))
@@ -1273,11 +1568,11 @@ fn validate_npm_options(
     Ok(())
 }
 
-fn validate_any_selector(_selector: Option<&str>) -> Result<()> {
+fn validate_any_selector(_id: &ToolId, _selector: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn validate_http_selector(selector: Option<&str>) -> Result<()> {
+fn validate_http_selector(_id: &ToolId, selector: Option<&str>) -> Result<()> {
     let Some(selector) = selector else {
         return Err(Error::config(
             "HTTP artifacts require an exact semantic version selector",
@@ -1288,6 +1583,100 @@ fn validate_http_selector(selector: Option<&str>) -> Result<()> {
     {
         return Err(Error::config(
             "HTTP artifacts require an exact semantic version selector",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cargo_selector(id: &ToolId, selector: Option<&str>) -> Result<()> {
+    let Some(selector) = selector else {
+        return Ok(());
+    };
+    if selector.is_empty() || selector.trim() != selector || selector.len() > 1024 {
+        return Err(Error::config("invalid Cargo selector"));
+    }
+    if id.subject().starts_with("https://") {
+        if selector == "latest" {
+            return Ok(());
+        }
+        let valid = selector
+            .strip_prefix("tag:")
+            .or_else(|| selector.strip_prefix("branch:"))
+            .is_some_and(valid_cargo_git_ref)
+            || selector.strip_prefix("rev:").is_some_and(|revision| {
+                revision.len() == 40
+                    && revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            });
+        if !valid {
+            return Err(Error::config(
+                "Cargo Git selectors must be latest, tag:<ref>, branch:<ref>, or rev:<40 lowercase hex>",
+            ));
+        }
+        return Ok(());
+    }
+
+    let valid = selector == "latest"
+        || matches!(
+            crate::version::VersionSpec::parse(selector),
+            crate::version::VersionSpec::Exact(version)
+                if version == selector
+        )
+        || valid_cargo_semver_prefix(selector);
+    if !valid {
+        return Err(Error::config(
+            "Cargo registry selectors must be latest, an exact semantic version, or a numeric semantic-version prefix",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_cargo_semver_prefix(value: &str) -> bool {
+    let mut components = value.split('.');
+    let first = components.next();
+    let second = components.next();
+    components.next().is_none()
+        && first.is_some_and(valid_cargo_version_component)
+        && second.is_none_or(valid_cargo_version_component)
+}
+
+fn valid_cargo_version_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn valid_cargo_git_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value != "@"
+        && !value.starts_with(['/', '.'])
+        && !value.ends_with(['/', '.'])
+        && !["..", "@{", "//", "\\"]
+            .iter()
+            .any(|needle| value.contains(needle))
+        && !value.ends_with(".lock")
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+        && !value
+            .chars()
+            .any(|character| matches!(character, '~' | '^' | ':' | '?' | '*' | '['))
+        && value.split('/').all(|component| {
+            !component.is_empty()
+                && !component.starts_with('.')
+                && !component.ends_with('.')
+                && !component.ends_with(".lock")
+        })
+}
+
+fn validate_cargo_options(
+    id: &ToolId,
+    _raw: &BTreeMap<String, String>,
+    canonical: &CanonicalOptions,
+) -> Result<()> {
+    if canonical.get("crate").is_some() && !id.subject().starts_with("https://") {
+        return Err(Error::config(
+            "Cargo option `crate` is supported only for Git repositories",
         ));
     }
     Ok(())
@@ -1503,12 +1892,24 @@ fn split_selector(input: &str) -> (&str, Option<&str>) {
         if schema.canonicalize_subject(subject).is_ok() {
             return (input, None);
         }
-        for (offset, character) in subject.char_indices() {
-            if character != '@' {
+        for (offset, character) in subject.char_indices().rev() {
+            if character != '@' || is_url_authority_at(subject, offset) {
                 continue;
             }
             let candidate = &subject[..offset];
-            if schema.canonicalize_subject(candidate).is_ok() {
+            let selector = &subject[offset + 1..];
+            let candidate_id =
+                schema
+                    .canonicalize_subject(candidate)
+                    .ok()
+                    .map(|subject| ToolId::Dynamic {
+                        namespace: namespace.to_string(),
+                        subject,
+                    });
+            if candidate_id
+                .as_ref()
+                .is_some_and(|id| schema.validate_selector(id, Some(selector)).is_ok())
+            {
                 let delimiter = namespace.len() + 1 + offset;
                 return (&input[..delimiter], Some(&input[delimiter + 1..]));
             }
@@ -1776,6 +2177,152 @@ mod tests {
     }
 
     #[test]
+    fn cargo_registry_subjects_and_selectors_are_canonical() {
+        assert_eq!(
+            ToolId::parse("cargo:Cargo_Edit").unwrap().to_string(),
+            "cargo:cargo_edit"
+        );
+        assert_ne!(
+            ToolId::parse("cargo:cargo_edit").unwrap(),
+            ToolId::parse("cargo:cargo-edit").unwrap()
+        );
+
+        for selector in ["latest", "14", "14.1", "14.1.0", "1.0.0-beta.1"] {
+            let request = format!("cargo:ripgrep@{selector}");
+            assert_eq!(
+                ToolSpec::parse(&request).unwrap().selector(),
+                Some(selector),
+                "{request}"
+            );
+        }
+        assert_eq!(ToolSpec::parse("cargo:ripgrep").unwrap().selector(), None);
+
+        let overlong = "a".repeat(65);
+        for invalid in [
+            "cargo:".to_string(),
+            "cargo:1crate".to_string(),
+            "cargo:-crate".to_string(),
+            "cargo:crate-".to_string(),
+            "cargo:foo/bar".to_string(),
+            "cargo:foo.bar".to_string(),
+            "cargo:CON".to_string(),
+            format!("cargo:{overlong}"),
+        ] {
+            assert!(ToolSpec::parse(&invalid).is_err(), "{invalid}");
+        }
+        for invalid in [
+            "cargo:ripgrep@",
+            "cargo:ripgrep@v14.1.0",
+            "cargo:ripgrep@14.1.0.0",
+            "cargo:ripgrep@01",
+            "cargo:ripgrep@^14",
+            "cargo:ripgrep@14.*",
+            "cargo:ripgrep@tag:v14",
+        ] {
+            assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn cargo_git_subjects_and_selectors_are_strict_and_unambiguous() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        for selector in [
+            "latest",
+            "tag:v1.2.3",
+            "branch:release/1.x",
+            &format!("rev:{revision}"),
+        ] {
+            let request = format!("cargo:https://git.example.test/Team/Tool.git@{selector}");
+            let parsed = ToolSpec::parse(&request).unwrap();
+            assert_eq!(
+                parsed.id.to_string(),
+                "cargo:https://git.example.test/Team/Tool.git"
+            );
+            assert_eq!(parsed.selector(), Some(selector), "{request}");
+        }
+        assert_eq!(
+            ToolSpec::parse("cargo:https://git.example.test/Team/Tool.git")
+                .unwrap()
+                .selector(),
+            None
+        );
+
+        for invalid in [
+            "cargo:http://git.example.test/team/tool.git@tag:v1",
+            "cargo:git://git.example.test/team/tool.git@tag:v1",
+            "cargo:file:///tmp/tool@branch:main",
+            "cargo:https://user@git.example.test/team/tool.git",
+            "cargo:https://git.example.test/team/tool.git?token=x@tag:v1",
+            "cargo:https://git.example.test/team/tool.git#main@tag:v1",
+            "cargo:https://git.example.test/team/../tool.git@tag:v1",
+            "cargo:https://git.example.test/team/%2e%2e/tool.git@tag:v1",
+            "cargo:https://git.example.test/team/%252e%252e/tool.git@tag:v1",
+            "cargo:https://git.example.test/@tag:v1",
+            "cargo:https://git.example.test/team/tool.git@1.2.3",
+            "cargo:https://git.example.test/team/tool.git@tag:",
+            "cargo:https://git.example.test/team/tool.git@branch:bad..ref",
+            "cargo:https://git.example.test/team/tool.git@branch:bad.lock",
+            "cargo:https://git.example.test/team/tool.git@rev:01234567",
+            "cargo:https://git.example.test/team/tool.git@rev:0123456789ABCDEF0123456789ABCDEF01234567",
+            "cargo:https://git.example.test/team/tool.git@0123456789abcdef0123456789abcdef01234567",
+        ] {
+            assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn cargo_options_are_canonical_safe_and_identity_bearing() {
+        let parsed = ToolSpec::parse(
+            "cargo:ripgrep[locked=true,features='simd, pcre2,simd',default-features=false,bin=rg]@14.1",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.to_string(),
+            "cargo:ripgrep[bin=rg,default-features=false,features=\"pcre2,simd\",locked=true]@14.1"
+        );
+        assert_eq!(
+            dynamic_identity_options(&parsed.id, parsed.options.as_map()).unwrap(),
+            parsed.options
+        );
+
+        let defaults =
+            ToolSpec::parse("cargo:ripgrep[default-features=TRUE,locked=false]@latest").unwrap();
+        assert!(defaults.options.is_empty());
+
+        let workspace = ToolSpec::parse(
+            "cargo:https://git.example.test/team/workspace.git[crate=Rip_Grep]@tag:v1",
+        )
+        .unwrap();
+        assert_eq!(workspace.options.get("crate").unwrap(), "rip_grep");
+        let qualified =
+            ToolSpec::parse("cargo:ripgrep[features='foo?/bar,dep:baz,plain,foo/bar,dep:baz']@14")
+                .unwrap();
+        assert_eq!(
+            qualified.options.get("features").unwrap(),
+            "dep:baz,foo/bar,foo?/bar,plain"
+        );
+
+        for invalid in [
+            "cargo:ripgrep[crate=ripgrep]@14",
+            "cargo:ripgrep[features=]@14",
+            "cargo:ripgrep[features='simd,,pcre2']@14",
+            "cargo:ripgrep[features='dep:']@14",
+            "cargo:ripgrep[features='foo?']@14",
+            "cargo:ripgrep[features='foo//bar']@14",
+            "cargo:ripgrep[features='../bar']@14",
+            "cargo:ripgrep[features='foo/..']@14",
+            "cargo:ripgrep[default-features=yes]@14",
+            "cargo:ripgrep[locked=1]@14",
+            "cargo:ripgrep[bin=../rg]@14",
+            "cargo:ripgrep[bin=bin/rg]@14",
+            "cargo:ripgrep[bin='rg.']@14",
+            "cargo:ripgrep[bin=CON]@14",
+        ] {
+            assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn syntax_parser_preserves_url_userinfo_at_signs() {
         let parts =
             ToolSpecParts::parse("http:https://user@example.test/releases/tool.tar.gz@1.2.3")
@@ -1959,7 +2506,7 @@ mod tests {
     #[test]
     fn unknown_namespaces_and_options_fail_during_schema_validation() {
         assert!(matches!(
-            ToolSpec::parse("cargo:ripgrep@latest"),
+            ToolSpec::parse("pip:ripgrep@latest"),
             Err(Error::UnknownBackend(_))
         ));
         let error = ToolSpec::parse("npm:prettier[token=secret]@3").unwrap_err();

@@ -258,7 +258,8 @@ lock。
 
 ## `osdk.lock` 提供什么保证
 
-项目感知的 `use` 会写入紧凑的 lock schema 3 `osdk.lock` 条目，包括 package、解析版本、
+项目感知的 `use` 会在当前 lock schema 4 `osdk.lock` 中写入紧凑的 npm metadata 条目，
+包括 package、解析版本、
 具体 installer、scope、精确 Node 版本、公开选项，以及原生 lock 的 kind、format 与
 SHA-256。全局工具的用户 lock 使用相同的 metadata-only 模式；npm 全局安装没有原生
 lock 身份。
@@ -271,10 +272,11 @@ lock。npm 全局安装没有依赖 lock，因此只凭用户 `osdk.lock` 无法
 :::
 
 项目工作流应同时提交 `package.json`、原生项目 lock、`osdk.toml` 与 `osdk.lock`。旧 lock
-schema 2 graph sidecar 仍可兼容读取，但当前 lock schema 3 不再创建新 sidecar，也不嵌入
+schema 2 graph sidecar 仍可兼容读取，但当前 lock schema 4 不再创建新 sidecar，也不嵌入
 它的 payload。
 这里的 lock schema 与 `.osdk-install.json` schema 1 相互独立：安装身份决定本地存储与
-lifecycle 操作，`osdk.lock` schema 3 保存选项与 npm 重放 metadata；`.osdk-tool.json` 只用于
+lifecycle 操作，`osdk.lock` schema 4 保存与 schema 3 兼容的 npm 选项与重放 metadata；
+`.osdk-tool.json` 只用于
 遗留状态识别。
 
 安装器规划、metadata 校验、原生前缀隔离和激活安全检查见

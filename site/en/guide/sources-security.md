@@ -122,13 +122,18 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
   reinstalls with a checksum, while an existing complete GitHub installation is
   reused only when its receipt also matches the locked filename/checksum and its
   dynamic option identity matches;
-- `npm:<package>` does not use a generic artifact URL. Lock-schema-3 `osdk.lock`
-  stores only scope, installer, and optional native-lock identity, not the
+- `npm:<package>` does not use a generic artifact URL. The schema-4 `osdk.lock`
+  retains the schema-3 npm metadata model: it stores only scope, installer, and
+  optional native-lock identity, not the
   dependency graph, so that metadata alone cannot cold-restore the graph. A
   complete install can be reused only when its recorded options match; operations
   that support native-lock replay additionally need the installer-owned lock and
   a warmed cache/store. Legacy lock-schema-2 graph sidecars are
   compatibility-read inputs only;
+- `cargo:` tools can reuse an already complete installation only when source,
+  selector, options, platform, and exact managed Rust identity all match. A cold
+  offline install or repair is unsupported because neither the Cargo native lock
+  nor `osdk.lock` contains the complete source graph;
 - `attestations=required` additionally needs the proof bundle cached by artifact SHA-256; lock evidence cannot replace verification.
 
 `OSDK_OFFLINE` controls osdk and compatible environment values managed by its
@@ -154,6 +159,9 @@ osdk --prerelease never install bun@canary
 The policy applies to pre-release-aware Python, Bun, Deno, and GitHub backends.
 `list-remote` still lists only stable versions. Locks preserve both the original
 request and the exact resolved version.
+Cargo registry resolution has its own fixed rule: yanked releases are always
+removed, `latest` and numeric prefixes select stable releases, and only an exact
+Cargo selector can select an explicit non-yanked prerelease.
 
 ## Integrity, signatures, and Attestation
 

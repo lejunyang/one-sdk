@@ -118,9 +118,10 @@ osdk can also follow existing `.tool-versions`, `.nvmrc`, `.node-version`,
 version declarations in `package.json`.
 Data-only declarative backends use the same locked artifact URL, checksum,
 download cache, and offline reinstall path as built-in archive backends.
-For osdk-owned dynamic `npm:<package>` and `github:owner/repo` installs, options that select
-the installer, build policy, asset, platform, or layout are part of the
-installation identity. osdk records that identity in `.osdk-install.json`
+For osdk-owned dynamic `npm:<package>`, `cargo:<crate-or-https-url>`, and
+`github:owner/repo` installs, options and managed-runtime dependencies that
+change the selected or built output are part of the installation identity. osdk
+records that identity in `.osdk-install.json`
 schema 1 and places each `b3-v2:` identity under its own fingerprinted install
 root, so multiple identities of the same backend and version can coexist.
 Reuse, activation, shims, `where`, `uninstall`, and `reshim` all select the exact
@@ -230,6 +231,36 @@ and now-unowned shims. Project-managed npm dependencies and their curated
 `.osdk/npm-bin` generation remain separate from these osdk-owned roots.
 
 Guide: [npm developer tools](site/en/guide/npm-tools.md)
+
+## Scenario: install a Rust CLI from Cargo
+
+Choose one exact managed Rust version, then install a crate by exact version,
+latest stable release, or numeric prefix:
+
+```bash
+osdk use rust@1.91.1
+osdk use cargo:ripgrep@14.1 -o features=pcre2 -o locked=true
+eval "$(osdk activate bash)"
+rg --version
+```
+
+Cargo tools reject floating or linked Rust toolchains. Registry requests use
+`cargo:<crate>`; HTTPS Git requests use `latest`, `tag:<ref>`, `branch:<ref>`, or
+an immutable `rev:<40 lowercase hex>` selector:
+
+```bash
+osdk use \
+  'cargo:https://github.com/BurntSushi/ripgrep.git@rev:0123456789abcdef0123456789abcdef01234567'
+```
+
+Supported build options are `features`, `default-features`, `bin`, `locked`
+(default `false`), and Git-only `crate`. A complete exact installation can be
+reused offline, but Cargo locks do not contain the complete source graph needed
+for a cold offline build. Registry versions are recorded as `version-only`, full
+Git revisions as `immutable-revision`, and Git HEAD/tags/branches as
+`floating-ref`.
+
+Guide: [Cargo developer tools](site/en/guide/cargo-tools.md)
 
 ## Scenario: work in each language ecosystem
 
@@ -458,7 +489,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Platforms | Windows, macOS, Linux |
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
-| Other developer tools | npm packages through `npm:<package>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
+| Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
 | Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, read-only mirror plans, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
@@ -474,6 +505,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
 - [Package managers and registry selection](site/en/guide/package-managers.md)
 - [npm developer tools](site/en/guide/npm-tools.md)
+- [Cargo developer tools](site/en/guide/cargo-tools.md)
 - [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
