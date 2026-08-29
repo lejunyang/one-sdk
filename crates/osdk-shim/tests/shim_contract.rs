@@ -169,15 +169,15 @@ fn install_dynamic_npm_fixture(
         .to_path_buf();
     let package = backend_id.strip_prefix("npm:").unwrap();
     let project_dir = install_root.join("project");
-    write_executable(
-        &project_dir.join(format!("node_modules/.bin/{executable_name}")),
-        executable_script,
-    );
     let package_dir = package.split_once('/').map_or_else(
         || project_dir.join("node_modules").join(package),
         |(scope, name)| project_dir.join("node_modules").join(scope).join(name),
     );
-    std::fs::create_dir_all(&package_dir).unwrap();
+    let declared_target = package_dir.join(format!("bin/{executable_name}"));
+    write_executable(&declared_target, executable_script);
+    let launcher = project_dir.join(format!("node_modules/.bin/{executable_name}"));
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&declared_target, &launcher).unwrap();
     std::fs::write(
         project_dir.join("package.json"),
         format!(
@@ -187,7 +187,9 @@ fn install_dynamic_npm_fixture(
     .unwrap();
     std::fs::write(
         package_dir.join("package.json"),
-        format!(r#"{{"name":{package:?},"version":{version:?}}}"#),
+        format!(
+            r#"{{"name":{package:?},"version":{version:?},"bin":{{{executable_name:?}:"bin/{executable_name}"}}}}"#
+        ),
     )
     .unwrap();
     let integrity = "sha512-fixture";
@@ -326,7 +328,7 @@ fn configure_registry(root: &Path, url: &str) {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(
         config,
-        format!("[registries.npm]\nurls = [{url:?}]\nprobe_timeout_ms = 250\n"),
+        format!("[registries.npm]\nurls = [{url:?}]\nprobe_timeout_ms = 2000\n"),
     )
     .unwrap();
 }
@@ -627,7 +629,7 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
                 .join("installs/node/1.0.0/bin/node")
                 .display(),
             isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0")
-                .join("project/node_modules/.bin/ni")
+                .join("project/node_modules/@antfu/ni/bin/ni")
                 .display()
         )
     );

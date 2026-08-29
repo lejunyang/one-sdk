@@ -1793,14 +1793,46 @@ fn locked_evidence_is_not_trusted_without_cached_bundle() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let artifact = temp
-        .path()
-        .join("cache/downloads/github/example/tool/1.0.0/tool");
+    let artifact_bytes = b"locked tool fixture";
+    let checksum = osdk_core::pipeline::verify::hash_bytes(
+        artifact_bytes,
+        osdk_core::pipeline::HashAlgo::Sha256,
+    );
+    let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_STORE_DIR" => Some(temp.path().join("store").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let mut version = osdk_core::version::ToolVersion::new("github:example/tool", "1.0.0");
+    version.options.extend(std::collections::BTreeMap::from([
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+            "https://invalid.example/tool".into(),
+        ),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+            "tool".into(),
+        ),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+            format!("sha256:{checksum}"),
+        ),
+    ]));
+    let locator = osdk_core::backend::github::github_install_locator_for(
+        &dirs,
+        osdk_core::platform::Platform::current(),
+        "github:example/tool",
+        &version,
+    )
+    .unwrap();
+    let artifact =
+        osdk_core::pipeline::dynamic_artifact_cache_path(&dirs, &locator, "tool").unwrap();
     std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
-    std::fs::write(&artifact, b"locked tool fixture").unwrap();
-    let checksum =
-        osdk_core::pipeline::verify::hash_file(&artifact, osdk_core::pipeline::HashAlgo::Sha256)
-            .unwrap();
+    std::fs::write(&artifact, artifact_bytes).unwrap();
     std::fs::write(
         project.join("osdk.lock"),
         format!(
@@ -1832,7 +1864,12 @@ digest = "sha256:{checksum}"
         &["--offline", "--attestations", "required", "install"],
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no cached bundle"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no cached bundle"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!temp
         .path()
         .join("installs/github/example/tool/1.0.0/.osdk-complete")
@@ -4162,10 +4199,29 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
             .unwrap()
             .install_root()
             .to_path_buf();
-        write_executable(
-            &install_root.join("project/node_modules/.bin/ni"),
-            "#!/bin/sh\nexit 0\n",
+        let project_root = install_root.join("project");
+        let package_root = project_root.join("node_modules/@antfu/ni");
+        let target = package_root.join("bin/ni.js");
+        write_executable(&target, "#!/bin/sh\nexit 0\n");
+        std::fs::write(
+            package_root.join("package.json"),
+            format!(r#"{{"name":"@antfu/ni","version":"{version}","bin":{{"ni":"bin/ni.js"}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("package.json"),
+            format!(
+                r#"{{"name":"osdk-dynamic-npm-tool","private":true,"dependencies":{{"@antfu/ni":"{version}"}}}}"#
+            ),
+        )
+        .unwrap();
+        let lockfile = format!(
+            "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      '@antfu/ni':\n        specifier: {version}\n        version: {version}\n\npackages:\n  '@antfu/ni@{version}':\n    resolution: {{integrity: sha512-fixture-integrity}}\n"
         );
+        std::fs::write(project_root.join("aube-lock.yaml"), &lockfile).unwrap();
+        let launcher = project_root.join("node_modules/.bin/ni");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &launcher).unwrap();
         let mut manifest =
             osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
@@ -4173,6 +4229,25 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
             path: "project/node_modules/.bin/ni".into(),
         }];
         manifest.write_atomic(&install_root).unwrap();
+        std::fs::write(
+            osdk_core::backend::npm_package::npm_receipt_path(&install_root),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "provider": "npm-package",
+                "package": "@antfu/ni",
+                "installer": "aube",
+                "node_version": "1.0.0",
+                "build_policy": "deny",
+                "graph_sha256": osdk_core::pipeline::verify::hash_bytes(
+                    lockfile.as_bytes(),
+                    osdk_core::pipeline::HashAlgo::Sha256,
+                ),
+                "root_integrity": "sha512-fixture-integrity",
+                "root_source": format!("npm:@antfu/ni@{version}")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
     }
     let node_install = temporary.path().join("installs/node/1.0.0/bin/node");
@@ -4198,7 +4273,17 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
         String::from_utf8_lossy(&output.stderr)
     );
     let shim_path = temporary.path().join("data/shims/ni");
-    assert!(shim_path.exists(), "{}", shim_path.display());
+    assert!(
+        shim_path.exists(),
+        "{}\nshims: {:?}\nstdout:\n{}\nstderr:\n{}",
+        shim_path.display(),
+        std::fs::read_dir(temporary.path().join("data/shims")).map(|entries| entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>()),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(unix)]

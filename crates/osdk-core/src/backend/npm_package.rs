@@ -1553,6 +1553,15 @@ impl Backend for NpmPackageBackend {
         install_root: &Path,
         identity: &InstallIdentity,
     ) -> Result<bool> {
+        let Some(node_version) = exact_node_dependency(identity) else {
+            return Ok(false);
+        };
+        if !managed_node_is_runnable(ctx, node_version)? {
+            return Err(Error::other(crate::t!(
+                "err.shim_managed_node_required",
+                tool = self.id()
+            )));
+        }
         let scope = match identity.scope {
             InstallScope::Isolated => ToolScope::Project,
             InstallScope::Global => ToolScope::Global,
