@@ -1227,6 +1227,10 @@ mod tests {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted sockets inherit nonblocking mode on Windows.
+                        // Restore blocking reads so a partial request cannot be
+                        // mistaken for a failed fixture response under Wine/CI.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();

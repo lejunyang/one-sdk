@@ -167,6 +167,7 @@ fn init_tracing(verbose: u8) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::native_exit_code;
 
     #[cfg(unix)]
