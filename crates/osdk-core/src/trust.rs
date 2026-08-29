@@ -74,23 +74,26 @@ pub fn requires_trust(path: &Path) -> Result<bool> {
     let Some(table) = value.as_table() else {
         return Ok(false);
     };
-    let npm_tool_activation = table
+    let dynamic_tool_activation = table
         .get("tools")
         .and_then(toml::Value::as_table)
         .is_some_and(|tools| {
             tools.iter().any(|(key, value)| {
                 key.starts_with("npm:")
-                    || value
-                        .as_str()
-                        .is_some_and(|value| value.starts_with("npm:"))
+                    || key.starts_with("http:")
+                    || value.as_str().is_some_and(|value| {
+                        value.starts_with("npm:") || value.starts_with("http:")
+                    })
                     || value
                         .as_table()
                         .and_then(|entry| entry.get("version"))
                         .and_then(toml::Value::as_str)
-                        .is_some_and(|value| value.starts_with("npm:"))
+                        .is_some_and(|value| {
+                            value.starts_with("npm:") || value.starts_with("http:")
+                        })
             })
         });
-    Ok(npm_tool_activation
+    Ok(dynamic_tool_activation
         || table
             .keys()
             .any(|key| !matches!(key.as_str(), "tools" | "aliases")))
@@ -490,6 +493,25 @@ mod tests {
         assert!(requires_trust(&path).unwrap());
 
         std::fs::write(&path, "[tools]\nformatter = \"npm:prettier@3\"\n").unwrap();
+        assert!(requires_trust(&path).unwrap());
+    }
+
+    #[test]
+    fn http_project_tool_activation_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        std::fs::write(
+            &path,
+            "[tools.\"http:https://downloads.example.test/tool-{version}\"]\nversion = \"1.2.3\"\nsha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+        )
+        .unwrap();
+        assert!(requires_trust(&path).unwrap());
+
+        std::fs::write(
+            &path,
+            "[tools]\nfixture = \"http:https://downloads.example.test/tool-{version}[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3\"\n",
+        )
+        .unwrap();
         assert!(requires_trust(&path).unwrap());
     }
 }

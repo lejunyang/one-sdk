@@ -689,10 +689,18 @@ fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>> {
 }
 
 fn validate_locked_tool_identity(backend: &str, locked: &LockedTool) -> Result<()> {
-    if backend.trim().is_empty()
-        || backend.split([':', '/', '\\']).any(|part| {
-            part.is_empty() || part == "." || part == ".." || part.chars().any(char::is_whitespace)
-        })
+    let canonical_http = backend.starts_with("http:")
+        && osdk_core::tool::ToolId::parse(backend)
+            .is_ok_and(|id| id.namespace() == Some("http") && id.to_string() == backend);
+    if (backend.starts_with("http:") && !canonical_http)
+        || (!backend.starts_with("http:")
+            && (backend.trim().is_empty()
+                || backend.split([':', '/', '\\']).any(|part| {
+                    part.is_empty()
+                        || part == "."
+                        || part == ".."
+                        || part.chars().any(char::is_whitespace)
+                })))
     {
         anyhow::bail!(osdk_core::t!(
             "err.lock_backend_id_unsafe",
@@ -766,12 +774,74 @@ fn installed_artifact_receipt(
     platform: Platform,
     version: &ToolVersion,
 ) -> Result<Option<osdk_core::pipeline::ArtifactReceipt>> {
-    if !version.backend.starts_with("github:") {
+    if !version.backend.starts_with("github:") && !version.backend.starts_with("http:") {
         return Ok(osdk_core::pipeline::artifact_receipt(
             dirs,
             &version.backend,
             &version.version,
         ));
+    }
+    if version.backend.starts_with("http:") {
+        if osdk_core::pipeline::locked_artifact(version)?.is_some() {
+            let locator = osdk_core::backend::http::HttpBackend::install_locator_for(
+                dirs,
+                platform,
+                &version.backend,
+                version,
+            )?;
+            let root = locator.install_root();
+            if !root.exists() {
+                return Ok(None);
+            }
+            if !osdk_core::backend::http::HttpBackend::install_candidate_is_valid(
+                dirs,
+                root,
+                locator.identity(),
+            )? {
+                anyhow::bail!(
+                    "cannot lock {}@{} because its exact HTTP install is incomplete or invalid",
+                    version.backend,
+                    version.version
+                );
+            }
+            return Ok(osdk_core::pipeline::artifact_receipt_at(root));
+        }
+        let expected_options =
+            osdk_core::backend::dynamic::identity_options(&version.backend, &version.options)?;
+        let report = osdk_core::inventory::scan_installs(
+            &dirs.installs,
+            &osdk_core::inventory::ScanOptions::default(),
+        )?;
+        let mut candidates = Vec::new();
+        for install in report.installs {
+            let identity = &install.manifest.identity;
+            if identity.tool != version.backend
+                || identity.version != version.version
+                || identity.platform != platform.to_string()
+                || identity.scope != osdk_core::tool::InstallScope::Isolated
+                || identity.material_options != expected_options
+            {
+                continue;
+            }
+            match osdk_core::backend::http::HttpBackend::install_candidate_is_valid(
+                dirs,
+                &install.install_root,
+                identity,
+            ) {
+                Ok(true) => candidates.push(install.install_root),
+                Ok(false) => {}
+                Err(error) => return Err(anyhow::Error::new(error)),
+            }
+        }
+        return match candidates.as_slice() {
+            [] => Ok(None),
+            [root] => Ok(osdk_core::pipeline::artifact_receipt_at(root)),
+            _ => anyhow::bail!(
+                "cannot lock {}@{} because multiple complete HTTP artifact identities match; remove the unwanted variant or provide exact locked artifact metadata",
+                version.backend,
+                version.version
+            ),
+        };
     }
     if osdk_core::pipeline::locked_artifact(version)?.is_some() {
         let locator = osdk_core::backend::github::github_install_locator_for(
@@ -2543,6 +2613,70 @@ files = []
     }
 
     #[test]
+    fn locked_requests_accept_canonical_http_keys_and_reject_unsafe_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let digest = "a".repeat(64);
+        let backend = "http:https://downloads.example.test/tool-{version}.zip";
+        std::fs::write(
+            &path,
+            format!(
+                r#"schema = 3
+
+[platforms.linux-x64.tools.{backend:?}]
+request = "1.2.3"
+version = "1.2.3"
+options = {{ sha256 = {digest:?}, kind = "zip", bins = "bin/tool" }}
+
+[platforms.linux-x64.tools.{backend:?}.artifact]
+url = "https://downloads.example.test/tool-1.2.3.zip"
+file_name = "tool-1.2.3.zip"
+checksum = "sha256:{digest}"
+"#
+            ),
+        )
+        .unwrap();
+        let requests = locked_requests(&path, linux()).unwrap().unwrap();
+        assert_eq!(requests[0].backend, backend);
+
+        for unsafe_backend in [
+            "http:https://example.test/../tool-{version}.zip",
+            "http:https://example.test/%2e%2e/tool-{version}.zip",
+            r"http:https:\\example.test\tool-{version}.zip",
+            "http:https://user@example.test/tool-{version}.zip",
+            "http:https://example.test/tool-{version}.zip?token=x",
+            "http:https://example.test/tool.zip",
+        ] {
+            let mut lock = Lockfile::default();
+            lock.platforms.insert(
+                "linux-x64".into(),
+                PlatformLock {
+                    tools: BTreeMap::from([(unsafe_backend.into(), LockedTool::default())]),
+                },
+            );
+            let error = save(&path, &lock).unwrap_err();
+            assert!(
+                error.to_string().contains("unsafe backend id"),
+                "{unsafe_backend}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_backend_validation_keeps_npm_ids_unchanged() {
+        for backend in ["npm:prettier", "npm:@antfu/ni"] {
+            validate_locked_tool_identity(
+                backend,
+                &LockedTool {
+                    version: "1.2.3".into(),
+                    ..LockedTool::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
     fn node_arch_option_selects_the_target_platform_lock() {
         let host = linux();
         let request = ToolRequest::parse("node@20").unwrap();
@@ -2629,6 +2763,84 @@ files = []
         assert_eq!(
             replayed[0].options[osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION],
             checksum
+        );
+    }
+
+    #[test]
+    fn merge_recovers_fingerprinted_http_receipt_and_replays_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let dirs = test_dirs(temp.path());
+        let digest = "a".repeat(64);
+        let request = ToolRequest::parse(&format!(
+            "http:https://downloads.example.test/tool-{{version}}[sha256={digest},kind=file,rename=fixture]@1.2.3"
+        ))
+        .unwrap();
+        let mut version = ToolVersion::new(&request.backend, "1.2.3");
+        version.options = request.options.clone();
+        let receipt_url = "https://downloads.example.test/tool-1.2.3";
+        let mut locked = version.clone();
+        locked.options.extend(BTreeMap::from([
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                receipt_url.into(),
+            ),
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                "tool-1.2.3".into(),
+            ),
+            (
+                osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{digest}"),
+            ),
+        ]));
+        let locator = osdk_core::backend::http::HttpBackend::install_locator_for(
+            &dirs,
+            linux(),
+            &request.backend,
+            &locked,
+        )
+        .unwrap();
+        let root = locator.install_root();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/fixture"), b"fixture").unwrap();
+        let mut manifest =
+            osdk_core::inventory::DynamicToolManifest::from_identity(locator.identity().clone())
+                .unwrap();
+        manifest.bins.push(osdk_core::inventory::DynamicToolBin {
+            name: "fixture".into(),
+            path: "bin/fixture".into(),
+        });
+        manifest.write_atomic(root).unwrap();
+        std::fs::write(
+            root.join(".osdk-artifact.json"),
+            serde_json::to_vec_pretty(&osdk_core::pipeline::ArtifactReceipt {
+                url: receipt_url.into(),
+                file_name: "tool-1.2.3".into(),
+                checksum: Some(format!("sha256:{digest}")),
+                evidence: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+
+        merge_resolved(&path, linux(), &dirs, &[(request, version)]).unwrap();
+        let lock = load(&path).unwrap();
+        let artifact = lock.platforms["linux-x64"].tools
+            ["http:https://downloads.example.test/tool-{version}"]
+            .artifact
+            .as_ref()
+            .unwrap();
+        assert_eq!(artifact.url, receipt_url);
+        assert_eq!(
+            artifact.checksum.as_deref(),
+            Some(format!("sha256:{digest}").as_str())
+        );
+        let replayed = locked_requests(&path, linux()).unwrap().unwrap();
+        assert_eq!(
+            replayed[0].options[osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION],
+            receipt_url
         );
     }
 

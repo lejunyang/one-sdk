@@ -182,6 +182,14 @@ version = "1.2.3"
 installer = "aube"            # auto|aube|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
+[tools."http:https://downloads.example.com/acme-{version}.tar.gz"]
+version = "1.2.3"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+kind = "tar.gz"
+strip-components = "1"
+bin = "bin/acme"
+rename = "acme"
+
 [aliases.node]
 default = "20"
 ```
@@ -196,6 +204,9 @@ the backend. `installer` selects the npm tool installer. `allow_builds` controls
 isolated and global installs; project-aware `use` always disables lifecycle
 scripts. See [npm Developer Tools](./npm-tools#build-script-policy) for the
 complete security boundary.
+The `http:` entry requires an exact semantic version and a SHA-256 for its
+strict HTTPS `{version}` template; see [Direct HTTPS Artifacts](./http-artifacts)
+for file/archive layout and offline replay.
 
 ## Exact override and merge semantics
 

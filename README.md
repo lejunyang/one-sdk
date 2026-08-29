@@ -129,6 +129,32 @@ legacy state and are never reused or executed.
 Guides: [Project toolchains](site/en/guide/projects.md) ·
 [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
 
+## Scenario: install a tool from a direct HTTPS artifact
+
+For a tool without a dedicated backend, bind one exact semantic version to an
+HTTPS `{version}` URL template and the publisher's SHA-256. A bare executable
+can be installed directly:
+
+```bash
+# Replace the example digest with the SHA-256 of the exact 1.2.3 artifact.
+osdk install \
+  'http:https://downloads.example.com/acme-{version}[sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,kind=file,rename=acme]@1.2.3'
+```
+
+The same backend supports `tar.gz`, `tar.xz`, and ZIP archives with explicit
+`bin`/`bins`, `subdir`, `strip-components`, and single-binary `rename` layout
+options. Plain HTTP, credentials, query strings, cross-origin redirects,
+floating versions, and missing checksums fail closed. Downloads bypass proxies,
+pin DNS results only after every address passes a conservative public-address
+check, and have a 512 MiB transfer cap and 10-minute HTTP request timeout.
+Archives are limited to 16,384 entries and 2 GiB of cumulative declared expanded
+size; publication also requires at least one executable, and Windows publishes
+only `.exe`-named outputs. After an online install and `osdk lock`,
+`osdk --offline install` can replay the locked URL, filename, and checksum from
+the exact identity-scoped cache; the lock does not embed the artifact bytes.
+
+Guide: [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
+
 ## Scenario: use package managers with an available registry
 
 Install npm, pnpm, or Yarn independently, or let an exact
@@ -380,7 +406,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Platforms | Windows, macOS, Linux |
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
-| Other developer tools | npm packages through `npm:<package>` and public GitHub Releases through `github:owner/repo` |
+| Other developer tools | npm packages through `npm:<package>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
 | Container inspection | Docker Engine, containerd, Docker Buildx, native cache status |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
@@ -396,6 +422,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
 - [Package managers and registry selection](site/en/guide/package-managers.md)
 - [npm developer tools](site/en/guide/npm-tools.md)
+- [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
 - [Container runtimes and native caches](site/en/guide/containers.md)

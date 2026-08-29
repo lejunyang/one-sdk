@@ -171,6 +171,13 @@ mod tests {
             registry.get("github:cli/cli").unwrap().id(),
             "github:cli/cli"
         );
+        assert_eq!(
+            registry
+                .get("http:https://example.test/tool-{version}.zip")
+                .unwrap()
+                .id(),
+            "http:https://example.test/tool-{version}.zip"
+        );
     }
 
     #[test]
@@ -185,6 +192,13 @@ mod tests {
         assert_eq!(registry.get("npm:prettier").unwrap().id(), "npm:prettier");
         assert_eq!(registry.get("npm:@antfu/ni").unwrap().id(), "npm:@antfu/ni");
         assert_eq!(registry.get("npm:npm").unwrap().id(), "npm:npm");
+        assert_eq!(
+            registry
+                .get("http:https://example.test/tool-{version}.tar.gz")
+                .unwrap()
+                .id(),
+            "http:https://example.test/tool-{version}.tar.gz"
+        );
     }
 
     #[test]
@@ -219,6 +233,9 @@ mod tests {
             "github:cli/cli/extra",
             "cargo:ripgrep",
             "NPM:prettier",
+            "http:http://example.test/tool-{version}.zip",
+            "http:https://user@example.test/tool-{version}.zip",
+            "http:https://example.test/tool.zip",
         ] {
             assert!(
                 matches!(registry.get(name), Err(Error::UnknownBackend(id)) if id == name),

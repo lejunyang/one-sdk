@@ -15,6 +15,7 @@ current implementation boundaries.
 | [Runtimes and Ecosystem Tools](./runtimes) | Node.js, Python, Java, Go, Rust, Maven, Gradle, and Kotlin |
 | [JavaScript Package Managers](./package-managers) | npm, pnpm, Yarn, Bun, Deno, Node dependency handling, and registry preflight |
 | [npm Developer Tools](./npm-tools) | Install, pin, execute, upgrade, and restore npm CLI packages with `npm:<package>` |
+| [Direct HTTPS Artifacts](./http-artifacts) | Install an exact checksum-pinned file or archive from a strict HTTPS `{version}` template |
 | [Model Snapshots](./models) | Hugging Face, ModelScope, file filters, verification, locking, and environment adapters |
 | [Sources and Supply-chain Security](./sources-security) | Mirrors, offline mode, pre-releases, checksums, signatures, attestations, and GitHub Releases |
 | [Container Runtimes and Native Caches](./containers) | Read-only Docker/containerd/Buildx diagnostics and native cache usage |
@@ -29,6 +30,7 @@ your goal:
 - To manage a language toolchain, read [Runtimes and Ecosystem Tools](./runtimes).
 - To pin npm, pnpm, or Yarn, read [JavaScript Package Managers](./package-managers).
 - To install Prettier, TypeScript, or a scoped npm CLI package, read [npm Developer Tools](./npm-tools).
+- To install a checksum-pinned executable or archive from a direct HTTPS URL, read [Direct HTTPS Artifacts](./http-artifacts).
 - To download a model repository, read [Model Snapshots](./models).
 - To configure a corporate mirror or strict verification, read [Sources and Supply-chain Security](./sources-security).
 - To inspect Docker, containerd, Buildx, or native cache usage, read [Container Runtimes and Native Caches](./containers).

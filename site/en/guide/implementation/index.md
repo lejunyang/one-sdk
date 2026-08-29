@@ -29,6 +29,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | [Installation pipeline](./installation) | Concurrent orchestration, download, verification, extraction, commit, and failure cleanup |
 | [Activation, shims, and lockfiles](./activation-lockfile) | Hot-path resolution, reversible shell state, project trust, and platform-aware locks |
 | [Download sources and project registries](./sources-registries) | Two control planes, probe ranking, credential boundaries, and single-launch behavior |
+| [HTTP artifact backend](./http-artifacts) | Strict inline URL parsing, exact identity, SHA-256 cache replay, safe extraction, and publication |
 | [Container diagnostics and native caches](./containers) | Runtime selection, bounded probes, stable reports, redaction, and native cache ownership |
 | [Storage and caches](./storage-cache) | SDK/model CAS, materialization fallbacks, download cache, and manager-native caches |
 | [Verification and supply-chain boundaries](./verification) | Checksums, Minisign, GitHub Artifact Attestations, and archive-safety boundaries |

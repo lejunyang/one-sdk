@@ -121,6 +121,28 @@ osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 指南：[项目工具链](site/guide/projects.md) ·
 [锁文件与环境复现](site/guide/lockfiles.md)
 
+## 场景：从直接 HTTPS 制品安装工具
+
+对于没有专用 backend 的工具，可以把一个精确语义化版本绑定到 HTTPS `{version}` URL
+模板和发布方提供的 SHA-256。裸可执行文件可直接安装：
+
+```bash
+# 请把示例摘要替换为精确 1.2.3 制品的 SHA-256。
+osdk install \
+  'http:https://downloads.example.com/acme-{version}[sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,kind=file,rename=acme]@1.2.3'
+```
+
+同一 backend 也支持 `tar.gz`、`tar.xz` 和 ZIP 归档，以及明确的 `bin`/`bins`、
+`subdir`、`strip-components` 和单 binary `rename` 布局选项。明文 HTTP、凭据、query、
+跨源 redirect、浮动版本和缺失 checksum 都会 fail closed。联网安装并执行 `osdk lock`
+该下载不使用代理；只有 DNS 返回的每个地址都通过保守的公网地址检查后才会固定使用，
+并受 512 MiB 传输上限和 10 分钟 HTTP 请求 timeout 约束。归档最多 16,384 个条目，
+累计声明展开大小最多 2 GiB；发布还要求至少发现一个可执行文件，Windows 只发布以
+`.exe` 命名的输出。联网安装并执行 `osdk lock` 后，`osdk --offline install` 可以从精确
+身份对应的缓存重放锁定 URL、文件名和 checksum；lock 本身不包含制品字节。
+
+指南：[直接 HTTPS 制品](site/guide/http-artifacts.md)
+
 ## 场景：使用包管理器并自动选择可用 Registry
 
 可以独立安装 npm、pnpm 或 Yarn，也可以让 `package.json#packageManager` 中的
@@ -355,7 +377,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 平台 | Windows、macOS、Linux |
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
-| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包，或通过 `github:owner/repo` 安装公开 GitHub Release |
+| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
 | 容器检查 | Docker Engine、containerd、Docker Buildx 与原生缓存状态 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
@@ -371,6 +393,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [运行时与生态工作流](site/guide/runtimes.md)
 - [包管理器与 Registry 选择](site/guide/package-managers.md)
 - [npm 开发工具](site/guide/npm-tools.md)
+- [直接 HTTPS 制品](site/guide/http-artifacts.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)
 - [容器运行时与原生缓存](site/guide/containers.md)

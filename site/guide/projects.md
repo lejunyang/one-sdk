@@ -169,6 +169,14 @@ version = "1.2.3"
 installer = "aube"            # auto|aube|npm|pnpm；隐式默认值为 auto
 allow_builds = ["@scope/native-tool", "esbuild"]
 
+[tools."http:https://downloads.example.com/acme-{version}.tar.gz"]
+version = "1.2.3"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+kind = "tar.gz"
+strip-components = "1"
+bin = "bin/acme"
+rename = "acme"
+
 [aliases.node]
 default = "20"
 ```
@@ -180,6 +188,8 @@ Registry 的选择语义见[JavaScript 包管理器](./package-managers)。
 传给 backend 时会转成逗号分隔值。`installer` 选择 npm 工具安装器。`allow_builds` 控制
 隔离与全局安装；项目感知的 `use` 始终禁用 lifecycle scripts。完整安全边界见
 [npm 开发工具](./npm-tools#构建脚本策略)。
+`http:` 条目要求精确语义化版本，并为严格 HTTPS `{version}` 模板提供 SHA-256；
+文件/归档布局与离线重放见[直接 HTTPS 制品](./http-artifacts)。
 
 ## 精确的覆盖与合并语义
 

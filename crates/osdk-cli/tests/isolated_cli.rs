@@ -1515,6 +1515,108 @@ fn artifact_lock_reinstalls_offline_and_rejects_tampering() {
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("checksum mismatch"));
 }
 
+#[cfg(unix)]
+#[test]
+fn http_artifact_lock_restarts_and_reinstalls_offline() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let backend = "http:https://downloads.example.test/tool-{version}";
+    let bytes = b"#!/bin/sh\nprintf 'http-replay\n'\n";
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(bytes, osdk_core::pipeline::HashAlgo::Sha256);
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[tools.{backend:?}]\nversion = \"1.2.3\"\nsha256 = {digest:?}\nkind = \"file\"\nrename = \"fixture-http\"\n"
+        ),
+    )
+    .unwrap();
+    let mut version = osdk_core::version::ToolVersion::new(backend, "1.2.3");
+    version.options = std::collections::BTreeMap::from([
+        ("sha256".into(), digest.clone()),
+        ("kind".into(), "file".into()),
+        ("rename".into(), "fixture-http".into()),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+            "https://downloads.example.test/tool-1.2.3".into(),
+        ),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+            "tool-1.2.3".into(),
+        ),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+            format!("sha256:{digest}"),
+        ),
+    ]);
+    let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_STORE_DIR" => Some(temp.path().join("store").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let locator = osdk_core::backend::http::HttpBackend::install_locator_for(
+        &dirs,
+        osdk_core::platform::Platform::current(),
+        backend,
+        &version,
+    )
+    .unwrap();
+    let cached =
+        osdk_core::pipeline::dynamic_artifact_cache_path(&dirs, &locator, "tool-1.2.3").unwrap();
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, bytes).unwrap();
+    let trusted = project.to_string_lossy().into_owned();
+
+    let install = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["--offline", "install"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let lock = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["--offline", "lock"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        lock.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+    assert!(std::fs::read_to_string(project.join("osdk.lock"))
+        .unwrap()
+        .contains("https://downloads.example.test/tool-1.2.3"));
+
+    std::fs::remove_dir_all(locator.install_root()).unwrap();
+    let reinstall = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["--offline", "install"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        reinstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reinstall.stderr)
+    );
+    let executable = locator.install_root().join("bin/fixture-http");
+    assert_eq!(
+        Command::new(executable).output().unwrap().stdout,
+        b"http-replay\n"
+    );
+}
+
 #[test]
 fn locked_evidence_is_not_trusted_without_cached_bundle() {
     let temp = tempfile::tempdir().unwrap();

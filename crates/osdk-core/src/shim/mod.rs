@@ -204,6 +204,17 @@ pub fn validated_dynamic_install(
                 request.backend
             )));
         }
+    } else if request.backend.starts_with("http:")
+        && !crate::backend::http::HttpBackend::install_candidate_is_valid(
+            &ctx.dirs,
+            &root,
+            &manifest.identity,
+        )?
+    {
+        return Err(Error::other(format!(
+            "dynamic tool `{}@{version}` has invalid HTTP artifact evidence; reinstall it before use",
+            request.backend
+        )));
     }
     let canonical_root = dunce::canonicalize(&root).map_err(|error| Error::io(&root, error))?;
     let mut bins = BTreeMap::new();
@@ -244,6 +255,11 @@ pub fn selected_dynamic_install_identity(
     if let Some(backend) = NpmPackageBackend::from_id(&request.backend) {
         let scope = configured_npm_scope(ctx, request)?.unwrap_or(ToolScope::Project);
         return backend.install_identity(ctx, &tv, scope);
+    }
+    if let Some(backend) = crate::backend::http::HttpBackend::from_id(&request.backend) {
+        return backend
+            .installed_locator(ctx, &tv)
+            .map(|locator| locator.identity().clone());
     }
     let backend = crate::backend::github::GithubBackend::from_id(&request.backend)
         .ok_or_else(|| Error::UnknownBackend(request.backend.clone()))?;
@@ -801,6 +817,89 @@ mod tests {
         root
     }
 
+    fn write_http_fixture(ctx: &Ctx, receipt_url: &str) -> (ToolRequest, PathBuf) {
+        let backend = "http:https://downloads.example.test/tool-{version}";
+        let digest = "a".repeat(64);
+        let options = BTreeMap::from([
+            ("sha256".into(), digest.clone()),
+            ("kind".into(), "file".into()),
+            ("rename".into(), "fixture".into()),
+        ]);
+        let identity = crate::tool::InstallIdentity::new(
+            backend,
+            "1.2.3",
+            ctx.platform.to_string(),
+            InstallScope::Isolated,
+            &options,
+            Vec::new(),
+            BTreeMap::from([
+                ("artifact-file".into(), "tool-1.2.3".into()),
+                ("artifact-checksum".into(), format!("sha256:{digest}")),
+                ("artifact-url-blake3".into(), {
+                    let mut hasher = blake3::Hasher::new_derive_key("osdk-http-artifact-url-v1");
+                    hasher.update(receipt_url.as_bytes());
+                    hasher.finalize().to_hex().to_string()
+                }),
+            ]),
+        )
+        .unwrap();
+        let root = crate::dirs::InstallLocator::new(&ctx.dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/fixture"), b"fixture").unwrap();
+        let mut manifest = DynamicToolManifest::from_identity(identity).unwrap();
+        manifest.bins = vec![DynamicToolBin {
+            name: "fixture".into(),
+            path: "bin/fixture".into(),
+        }];
+        manifest.write_atomic(&root).unwrap();
+        std::fs::write(
+            root.join(".osdk-artifact.json"),
+            serde_json::to_vec_pretty(&crate::pipeline::ArtifactReceipt {
+                url: receipt_url.into(),
+                file_name: "tool-1.2.3".into(),
+                checksum: Some(format!("sha256:{digest}")),
+                evidence: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        (
+            ToolRequest {
+                backend: backend.into(),
+                spec: VersionSpec::Exact("1.2.3".into()),
+                options,
+            },
+            root,
+        )
+    }
+
+    #[test]
+    fn http_restart_selection_requires_matching_receipt_url_fingerprint() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (ctx, _) = npm_scope_test_ctx(temporary.path(), None);
+        let receipt_url = "https://downloads.example.test/tool-1.2.3";
+        let (request, root) = write_http_fixture(&ctx, receipt_url);
+        let report = scan_dynamic_installs(&ctx).unwrap();
+        let selected = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap();
+        assert_eq!(selected.install_root(), root);
+        assert_eq!(selected.bin_names(), vec!["fixture"]);
+
+        let mut receipt = crate::pipeline::artifact_receipt_at(&root).unwrap();
+        receipt.url = "https://downloads.example.test/substitute-1.2.3".into();
+        std::fs::write(
+            root.join(".osdk-artifact.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        let report = scan_dynamic_installs(&ctx).unwrap();
+        let error = validated_dynamic_install(&ctx, &report, &request, "1.2.3").unwrap_err();
+        assert!(error.to_string().contains("receipt"), "{error}");
+    }
+
     #[test]
     fn unlocked_github_request_recovers_one_complete_identity() {
         let temporary = tempfile::tempdir().unwrap();
@@ -901,6 +1000,44 @@ mod tests {
             configured_dynamic_ids(&ctx, &ScanReport::default()),
             vec!["npm:@antfu/ni"]
         );
+    }
+
+    #[test]
+    fn configured_dynamic_ids_and_requests_support_http_templates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut ctx, _) = npm_scope_test_ctx(temporary.path(), None);
+        let backend = "http:https://downloads.example.test/tool-{version}";
+        let digest = "a".repeat(64);
+        ctx.config.tools = BTreeMap::from([(backend.into(), "1.2.3".into())]);
+        ctx.config.tool_configs = BTreeMap::from([(
+            backend.into(),
+            ToolConfigEntry::structured(
+                "1.2.3",
+                BTreeMap::from([
+                    (
+                        "sha256".into(),
+                        crate::config::ToolConfigValue::String(digest),
+                    ),
+                    (
+                        "kind".into(),
+                        crate::config::ToolConfigValue::String("file".into()),
+                    ),
+                    (
+                        "rename".into(),
+                        crate::config::ToolConfigValue::String("fixture".into()),
+                    ),
+                ]),
+            ),
+        )]);
+
+        assert_eq!(
+            configured_dynamic_ids(&ctx, &ScanReport::default()),
+            vec![backend]
+        );
+        let request = dynamic_request_from_config(&ctx, backend).unwrap();
+        assert_eq!(request.backend, backend);
+        assert_eq!(request.spec, VersionSpec::Exact("1.2.3".into()));
+        assert_eq!(request.options["rename"], "fixture");
     }
 
     #[cfg(unix)]

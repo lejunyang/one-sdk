@@ -270,7 +270,8 @@ impl fmt::Debug for OptionDefinition {
     }
 }
 
-type OptionSetValidator = fn(&BTreeMap<String, String>, &CanonicalOptions) -> Result<()>;
+type OptionSetValidator = fn(&ToolId, &BTreeMap<String, String>, &CanonicalOptions) -> Result<()>;
+type SelectorValidator = fn(Option<&str>) -> Result<()>;
 
 /// The accepted options and cross-option validation for one namespace.
 #[derive(Debug)]
@@ -321,7 +322,7 @@ impl OptionSchema {
             }
         }
         let canonical = CanonicalOptions(canonical);
-        (self.validator)(options, &canonical)?;
+        (self.validator)(id, options, &canonical)?;
         Ok(canonical)
     }
 
@@ -422,12 +423,17 @@ impl fmt::Display for CanonicalOptions {
 pub struct NamespaceSchema {
     pub namespace: &'static str,
     subject_canonicalizer: fn(&str) -> Result<String>,
+    selector_validator: SelectorValidator,
     pub options: OptionSchema,
 }
 
 impl NamespaceSchema {
     pub fn canonicalize_subject(&self, subject: &str) -> Result<String> {
         (self.subject_canonicalizer)(subject)
+    }
+
+    pub fn validate_selector(&self, selector: Option<&str>) -> Result<()> {
+        (self.selector_validator)(selector)
     }
 
     pub fn canonicalize_options(
@@ -495,10 +501,14 @@ impl ToolSpec {
                 )));
             }
         };
+        let selector = parts.selector.filter(|selector| !selector.is_empty());
+        if let Some(schema) = id.schema() {
+            schema.validate_selector(selector.as_deref())?;
+        }
         Ok(Self {
             id,
             options,
-            selector: parts.selector.filter(|selector| !selector.is_empty()),
+            selector,
         })
     }
 
@@ -534,6 +544,7 @@ pub fn namespace_schema(namespace: &str) -> Option<&'static NamespaceSchema> {
     match namespace {
         "npm" => Some(&NPM_SCHEMA),
         "github" => Some(&GITHUB_SCHEMA),
+        "http" => Some(&HTTP_SCHEMA),
         _ => None,
     }
 }
@@ -668,6 +679,58 @@ const GITHUB_OPTIONS: &[OptionDefinition] = &[
     ),
 ];
 
+const HTTP_OPTIONS: &[OptionDefinition] = &[
+    option(
+        "sha256",
+        "sha256",
+        OptionEffect::Artifact,
+        true,
+        canonical_http_sha256,
+    ),
+    option(
+        "kind",
+        "kind",
+        OptionEffect::Artifact,
+        true,
+        canonical_http_kind,
+    ),
+    option(
+        "bin",
+        "bins",
+        OptionEffect::Layout,
+        true,
+        canonical_http_bins,
+    ),
+    option(
+        "bins",
+        "bins",
+        OptionEffect::Layout,
+        true,
+        canonical_http_bins,
+    ),
+    option(
+        "subdir",
+        "subdir",
+        OptionEffect::Layout,
+        true,
+        canonical_http_relative_path,
+    ),
+    option(
+        "rename",
+        "rename",
+        OptionEffect::Layout,
+        true,
+        canonical_http_basename,
+    ),
+    option(
+        "strip-components",
+        "strip-components",
+        OptionEffect::Layout,
+        true,
+        canonical_http_strip_components,
+    ),
+];
+
 const fn option(
     name: &'static str,
     canonical_name: &'static str,
@@ -687,6 +750,7 @@ const fn option(
 static NPM_SCHEMA: NamespaceSchema = NamespaceSchema {
     namespace: "npm",
     subject_canonicalizer: canonical_npm_subject,
+    selector_validator: validate_any_selector,
     options: OptionSchema {
         definitions: NPM_OPTIONS,
         validator: validate_npm_options,
@@ -696,9 +760,20 @@ static NPM_SCHEMA: NamespaceSchema = NamespaceSchema {
 static GITHUB_SCHEMA: NamespaceSchema = NamespaceSchema {
     namespace: "github",
     subject_canonicalizer: canonical_github_subject,
+    selector_validator: validate_any_selector,
     options: OptionSchema {
         definitions: GITHUB_OPTIONS,
         validator: validate_github_options,
+    },
+};
+
+static HTTP_SCHEMA: NamespaceSchema = NamespaceSchema {
+    namespace: "http",
+    subject_canonicalizer: canonical_http_subject,
+    selector_validator: validate_http_selector,
+    options: OptionSchema {
+        definitions: HTTP_OPTIONS,
+        validator: validate_http_options,
     },
 };
 
@@ -771,8 +846,9 @@ fn is_windows_reserved_component(value: &str) -> bool {
     if trimmed.is_empty() {
         return true;
     }
+    let device = trimmed.split('.').next().unwrap_or(trimmed);
     matches!(
-        trimmed.to_ascii_uppercase().as_str(),
+        device.to_ascii_uppercase().as_str(),
         "CON"
             | "PRN"
             | "AUX"
@@ -812,6 +888,152 @@ fn canonical_github_subject(value: &str) -> Result<String> {
         )));
     }
     Ok(format!("{owner}/{repository}"))
+}
+
+fn canonical_http_subject(value: &str) -> Result<String> {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.trim() != value
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+        || value.contains(['@', '\\'])
+    {
+        return Err(Error::config(
+            "HTTP artifact URL template must be canonical HTTPS text without whitespace, credentials, or backslashes",
+        ));
+    }
+
+    let mut rendered = String::with_capacity(value.len());
+    let mut rest = value;
+    let mut version_placeholders = 0usize;
+    while let Some(open) = rest.find('{') {
+        rendered.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let close = after_open
+            .find('}')
+            .ok_or_else(|| Error::config("unterminated HTTP URL template placeholder"))?;
+        let placeholder = &after_open[..close];
+        if placeholder != "version" {
+            return Err(Error::config(format!(
+                "unsupported HTTP URL template placeholder `{{{placeholder}}}`"
+            )));
+        }
+        version_placeholders += 1;
+        if version_placeholders > 8 {
+            return Err(Error::config(
+                "HTTP URL template may contain at most 8 version placeholders",
+            ));
+        }
+        rendered.push_str("1.2.3");
+        rest = &after_open[close + 1..];
+    }
+    if rest.contains('}') {
+        return Err(Error::config("unmatched HTTP URL template brace"));
+    }
+    rendered.push_str(rest);
+    if version_placeholders == 0 {
+        return Err(Error::config(
+            "HTTP artifact URL template must contain `{version}`",
+        ));
+    }
+
+    let parsed = reqwest::Url::parse(&rendered)
+        .map_err(|error| Error::config(format!("invalid HTTP artifact URL template: {error}")))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(Error::config(
+            "HTTP artifact URL template must be an absolute HTTPS URL",
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::config(
+            "HTTP artifact URL template must not contain credentials",
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(Error::config(
+            "HTTP artifact URL template must not contain a query or fragment",
+        ));
+    }
+    if parsed.as_str() != rendered {
+        return Err(Error::config(
+            "HTTP artifact URL template must use its canonical URL spelling",
+        ));
+    }
+    if parsed
+        .host_str()
+        .and_then(|host| {
+            host.strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host)
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| !is_public_ip(address))
+    {
+        return Err(Error::config(
+            "HTTP artifact URL template must not target a non-public IP address",
+        ));
+    }
+    let authority_end = value
+        .strip_prefix("https://")
+        .and_then(|rest| rest.find('/').map(|offset| "https://".len() + offset))
+        .ok_or_else(|| Error::config("HTTP artifact URL template requires a path"))?;
+    if value[..authority_end].contains('{') {
+        return Err(Error::config(
+            "`{version}` is allowed only in the HTTP URL path",
+        ));
+    }
+    let path = parsed.path();
+    if !path.contains("1.2.3") {
+        return Err(Error::config(
+            "`{version}` is allowed only in the HTTP URL path",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// Conservative public-unicast policy shared by HTTP template validation and
+/// the network-time resolver. Rejecting special-use ranges is preferable to
+/// letting an artifact URL reach local, link-local, documentation, transition,
+/// or metadata-service address space.
+pub(crate) fn is_public_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            let [a, b, c, _] = address.octets();
+            !(a == 0
+                || a == 10
+                || a == 127
+                || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 168)
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113))
+        }
+        std::net::IpAddr::V6(address) => {
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return is_public_ip(std::net::IpAddr::V4(mapped));
+            }
+            let segments = address.segments();
+            !(address.is_unspecified()
+                || address.is_loopback()
+                || address.is_multicast()
+                || segments[0] & 0xfe00 == 0xfc00
+                || segments[0] & 0xffc0 == 0xfe80
+                || segments[0] & 0xffc0 == 0xfec0
+                || (segments[0] == 0 && segments[1..5] == [0, 0, 0, 0])
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+                || (segments[0] == 0x2001 && segments[1] <= 0x01ff)
+                || segments[0] == 0x2002
+                || (segments[0] & 0xfff0 == 0x3ff0)
+                || segments[0] == 0x5f00)
+        }
+    }
 }
 
 fn valid_github_component(value: &str) -> bool {
@@ -940,6 +1162,89 @@ fn canonical_sha256(value: &str) -> Result<Option<String>> {
     Ok(Some(value))
 }
 
+fn canonical_http_sha256(value: &str) -> Result<Option<String>> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::config(
+            "sha256 must be a 64-character hexadecimal SHA-256 digest",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn canonical_http_kind(value: &str) -> Result<Option<String>> {
+    let value = value.trim().to_ascii_lowercase();
+    if !matches!(value.as_str(), "tar.gz" | "tar.xz" | "zip" | "file") {
+        return Err(Error::config(
+            "invalid HTTP artifact kind (expected tar.gz|tar.xz|zip|file)",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn canonical_http_bins(value: &str) -> Result<Option<String>> {
+    let mut bins = Vec::new();
+    for raw in value.split(',') {
+        let path = canonical_safe_relative_path("HTTP bin path", raw)?;
+        bins.push(path);
+    }
+    bins.sort();
+    bins.dedup();
+    if bins.is_empty() {
+        return Err(Error::config("HTTP bins must not be empty"));
+    }
+    Ok(Some(bins.join(",")))
+}
+
+fn canonical_http_relative_path(value: &str) -> Result<Option<String>> {
+    canonical_safe_relative_path("HTTP subdir", value).map(Some)
+}
+
+pub(crate) fn canonical_safe_relative_path(label: &str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['\\', ':']) {
+        return Err(Error::config(format!("unsafe {label} `{value}`")));
+    }
+    let path = std::path::Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        || path.components().any(|component| {
+            let component = component.as_os_str().to_string_lossy();
+            component.ends_with([' ', '.']) || is_windows_reserved_component(&component)
+        })
+    {
+        return Err(Error::config(format!("unsafe {label} `{value}`")));
+    }
+    Ok(path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn canonical_http_basename(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    crate::pipeline::validate_safe_filename("HTTP executable rename", value)?;
+    if value.ends_with([' ', '.']) || is_windows_reserved_component(value) {
+        return Err(Error::config(format!(
+            "unsafe HTTP executable rename `{value}`"
+        )));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn canonical_http_strip_components(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    Ok(Some(
+        value
+            .parse::<u32>()
+            .map_err(|error| Error::config(format!("invalid strip-components `{value}`: {error}")))?
+            .to_string(),
+    ))
+}
+
 fn canonical_catalog_url(value: &str) -> Result<Option<String>> {
     reject_control_characters(value)?;
     let lower = value.to_ascii_lowercase();
@@ -961,13 +1266,89 @@ fn canonical_catalog_url(value: &str) -> Result<Option<String>> {
 }
 
 fn validate_npm_options(
+    _id: &ToolId,
     _raw: &BTreeMap<String, String>,
     _canonical: &CanonicalOptions,
 ) -> Result<()> {
     Ok(())
 }
 
+fn validate_any_selector(_selector: Option<&str>) -> Result<()> {
+    Ok(())
+}
+
+fn validate_http_selector(selector: Option<&str>) -> Result<()> {
+    let Some(selector) = selector else {
+        return Err(Error::config(
+            "HTTP artifacts require an exact semantic version selector",
+        ));
+    };
+    if selector.len() > 128
+        || !matches!(crate::version::VersionSpec::parse(selector), crate::version::VersionSpec::Exact(version) if version == selector.trim_start_matches('v'))
+    {
+        return Err(Error::config(
+            "HTTP artifacts require an exact semantic version selector",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_http_options(
+    id: &ToolId,
+    raw: &BTreeMap<String, String>,
+    canonical: &CanonicalOptions,
+) -> Result<()> {
+    if raw.contains_key("bin") && raw.contains_key("bins") {
+        return Err(Error::config("bin and bins are mutually exclusive"));
+    }
+    if canonical.get("sha256").is_none() {
+        return Err(Error::config("sha256 is required for HTTP artifacts"));
+    }
+    let inferred_kind;
+    let kind = if let Some(kind) = canonical.get("kind") {
+        kind.as_str()
+    } else {
+        inferred_kind = match crate::pipeline::ArchiveKind::from_name(id.subject()) {
+            Ok(crate::pipeline::ArchiveKind::TarGz) => "tar.gz",
+            Ok(crate::pipeline::ArchiveKind::TarXz) => "tar.xz",
+            Ok(crate::pipeline::ArchiveKind::Zip) => "zip",
+            Ok(crate::pipeline::ArchiveKind::TarZst) => {
+                return Err(Error::config(
+                    "HTTP artifacts support tar.gz, tar.xz, zip, or file",
+                ));
+            }
+            Err(_) => "file",
+        };
+        inferred_kind
+    };
+    let bins = canonical
+        .get("bins")
+        .map(|value| value.split(',').count())
+        .unwrap_or(0);
+    if kind != "file" && bins == 0 {
+        return Err(Error::config(
+            "HTTP archives require at least one bin or bins entry",
+        ));
+    }
+    if canonical.get("rename").is_some() && kind != "file" && bins != 1 {
+        return Err(Error::config(
+            "rename requires exactly one bin for HTTP archives",
+        ));
+    }
+    if kind == "file"
+        && (bins != 0
+            || canonical.get("subdir").is_some()
+            || canonical.get("strip-components").is_some())
+    {
+        return Err(Error::config(
+            "HTTP file artifacts do not accept bin, bins, subdir, or strip-components",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_github_options(
+    _id: &ToolId,
     raw: &BTreeMap<String, String>,
     canonical: &CanonicalOptions,
 ) -> Result<()> {
@@ -1412,6 +1793,91 @@ mod tests {
             "http:https://user@example.test/releases/tool.tar.gz"
         );
         assert_eq!(without_selector.selector, None);
+    }
+
+    #[test]
+    fn http_specs_require_strict_https_templates_exact_versions_and_checksums() {
+        let digest = "A".repeat(64);
+        let parsed = ToolSpec::parse(&format!(
+            "http:https://downloads.example.test/tool-{{version}}.tar.gz[sha256={digest},kind=tar.gz,bin=pkg/tool,subdir=dist,rename=tool,strip-components=1]@1.2.3"
+        ))
+        .unwrap();
+        assert_eq!(
+            parsed.id.to_string(),
+            "http:https://downloads.example.test/tool-{version}.tar.gz"
+        );
+        assert_eq!(parsed.selector(), Some("1.2.3"));
+        assert_eq!(parsed.options.get("sha256").unwrap(), &"a".repeat(64));
+        assert_eq!(parsed.options.get("bins").unwrap(), "pkg/tool");
+
+        for invalid in [
+            "http:http://example.test/tool-{version}.zip[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3",
+            "http:https://user@example.test/tool-{version}.zip[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3",
+            "http:https://example.test/tool-{version}.zip?token=x[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3",
+            "http:https://example.test/tool-{arch}.zip[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3",
+            "http:https://example.test/tool.zip[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3",
+            "http:https://example.test/tool-{version}.zip@1.2.3",
+            "http:https://example.test/tool-{version}.zip[sha256=bad]@1.2.3",
+            "http:https://example.test/tool-{version}.zip[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@latest",
+            "http:https://example.test/tool-{version}.zip[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2",
+        ] {
+            assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn http_layout_options_are_canonical_and_cannot_escape() {
+        let base = "http:https://example.test/tool-{version}.zip";
+        let digest = "a".repeat(64);
+        let singular = ToolSpec::parse(&format!(
+            "{base}[sha256={digest},kind=zip,bin=dist/tool]@1.2.3"
+        ))
+        .unwrap();
+        let plural = ToolSpec::parse(&format!(
+            "{base}[kind=ZIP,bins=dist/tool,sha256={digest}]@1.2.3"
+        ))
+        .unwrap();
+        assert_eq!(singular, plural);
+        let inferred =
+            ToolSpec::parse(&format!("{base}[sha256={digest},bin=dist/tool]@1.2.3")).unwrap();
+        assert_eq!(inferred.options.get("bins").unwrap(), "dist/tool");
+        assert!(ToolSpec::parse(&format!("{base}[sha256={digest}]@1.2.3")).is_err());
+
+        for option in [
+            "bin=../tool",
+            "bins=/tool",
+            "subdir=../dist",
+            "rename=../tool",
+            "kind=tar.zst",
+            "kind=file,bin=tool",
+            "kind=zip,bin=a,bins=b",
+            "kind=zip,bins=a,b,rename=tool",
+        ] {
+            let request = format!("{base}[sha256={digest},{option}]@1.2.3");
+            assert!(ToolSpec::parse(&request).is_err(), "{request}");
+        }
+    }
+
+    #[test]
+    fn http_templates_reject_noncanonical_paths_and_non_public_literals() {
+        let digest = "a".repeat(64);
+        for template in [
+            "https://example.test/a/../tool-{version}.zip",
+            "https://example.test/a/./tool-{version}.zip",
+            "https://example.test/%2e%2e/tool-{version}.zip",
+            "https://127.0.0.1/tool-{version}.zip",
+            "https://169.254.169.254/tool-{version}.zip",
+            "https://[::1]/tool-{version}.zip",
+            "https://[::ffff:127.0.0.1]/tool-{version}.zip",
+            "https://[::ffff:169.254.169.254]/tool-{version}.zip",
+        ] {
+            let request = format!("http:{template}[sha256={digest}]@1.2.3");
+            assert!(ToolSpec::parse(&request).is_err(), "{request}");
+        }
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:169.254.169.254".parse().unwrap()));
     }
 
     #[test]

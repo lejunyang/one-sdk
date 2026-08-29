@@ -219,6 +219,108 @@ fn install_dynamic_npm_fixture(
 }
 
 #[cfg(unix)]
+fn install_http_fixture(root: &Path, project: &Path, script: &str) -> PathBuf {
+    let backend = "http:https://downloads.example.test/tool-{version}";
+    let receipt_url = "https://downloads.example.test/tool-1.2.3";
+    let digest = "a".repeat(64);
+    let options = std::collections::BTreeMap::from([
+        ("sha256".into(), digest.clone()),
+        ("kind".into(), "file".into()),
+        ("rename".into(), "fixture-http".into()),
+    ]);
+    std::fs::create_dir_all(project).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[tools.{backend:?}]\nversion = \"1.2.3\"\nsha256 = {digest:?}\nkind = \"file\"\nrename = \"fixture-http\"\n"
+        ),
+    )
+    .unwrap();
+    let mut version = osdk_core::version::ToolVersion::new(backend, "1.2.3");
+    version.options = options;
+    version.options.extend(std::collections::BTreeMap::from([
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+            receipt_url.into(),
+        ),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+            "tool-1.2.3".into(),
+        ),
+        (
+            osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+            format!("sha256:{digest}"),
+        ),
+    ]));
+    let locator = osdk_core::backend::http::HttpBackend::install_locator_for(
+        &test_dirs(root),
+        osdk_core::platform::Platform::current(),
+        backend,
+        &version,
+    )
+    .unwrap();
+    let install_root = locator.install_root().to_path_buf();
+    write_executable(&install_root.join("bin/fixture-http"), script);
+    let mut manifest =
+        osdk_core::inventory::DynamicToolManifest::from_identity(locator.identity().clone())
+            .unwrap();
+    manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
+        name: "fixture-http".into(),
+        path: "bin/fixture-http".into(),
+    }];
+    manifest.write_atomic(&install_root).unwrap();
+    std::fs::write(
+        install_root.join(".osdk-artifact.json"),
+        format!(
+            r#"{{"url":{receipt_url:?},"file_name":"tool-1.2.3","checksum":"sha256:{digest}"}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+    install_root
+}
+
+#[cfg(unix)]
+#[test]
+fn http_shim_restarts_offline_and_rejects_tampered_receipt() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("http.log");
+    let install = install_http_fixture(
+        temporary.path(),
+        &project,
+        &format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", log.display()),
+    );
+    let output = isolated_command(temporary.path(), &project)
+        .args(["fixture-http", "restarted"])
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "restarted");
+
+    let receipt_path = install.join(".osdk-artifact.json");
+    let receipt = std::fs::read_to_string(&receipt_path).unwrap().replace(
+        "https://downloads.example.test/tool-1.2.3",
+        "https://downloads.example.test/substitute-1.2.3",
+    );
+    std::fs::write(&receipt_path, receipt).unwrap();
+    std::fs::remove_file(&log).unwrap();
+    let rejected = isolated_command(temporary.path(), &project)
+        .arg("fixture-http")
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("receipt"));
+    assert!(!log.exists());
+}
+
+#[cfg(unix)]
 fn configure_registry(root: &Path, url: &str) {
     let config = root.join("config/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();

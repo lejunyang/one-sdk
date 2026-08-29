@@ -26,7 +26,7 @@ osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 | --- | --- |
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
-| 其他开发工具 | 通过 `npm:<package>` 安装 npm CLI 包，或通过 `github:owner/repo` 安装公开 GitHub Release |
+| 其他开发工具 | 通过 `npm:<package>` 安装 npm CLI 包、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的制品 |
 | 模型平台 | Hugging Face、ModelScope |
 | 项目输入 | `osdk.toml`、`.tool-versions` 和常见生态版本文件 |
 | Shell | Bash、Zsh、Fish、PowerShell |

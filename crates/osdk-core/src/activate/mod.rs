@@ -1255,6 +1255,94 @@ mod tests {
     }
 
     #[test]
+    fn http_activation_uses_inventory_offline_and_rejects_receipt_tampering() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let backend = "http:https://downloads.example.test/tool-{version}";
+        let receipt_url = "https://downloads.example.test/tool-1.2.3";
+        let digest = "a".repeat(64);
+        let mut ctx = test_ctx(temporary.path(), &[(backend, "1.2.3")]);
+        let options: BTreeMap<String, String> = BTreeMap::from([
+            ("sha256".into(), digest.clone()),
+            ("kind".into(), "file".into()),
+            ("rename".into(), "fixture-http".into()),
+        ]);
+        ctx.config.tool_configs.insert(
+            backend.into(),
+            crate::config::ToolConfigEntry::structured(
+                "1.2.3",
+                options
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            crate::config::ToolConfigValue::String(value.clone()),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        ctx.config.settings.offline = true;
+        let mut version = ToolVersion::new(backend, "1.2.3");
+        version.options = options;
+        version.options.extend(BTreeMap::from([
+            (
+                crate::pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+                receipt_url.into(),
+            ),
+            (
+                crate::pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+                "tool-1.2.3".into(),
+            ),
+            (
+                crate::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+                format!("sha256:{digest}"),
+            ),
+        ]));
+        let locator = crate::backend::http::HttpBackend::install_locator_for(
+            &ctx.dirs,
+            ctx.platform,
+            backend,
+            &version,
+        )
+        .unwrap();
+        let root = locator.install_root();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/fixture-http"), b"fixture").unwrap();
+        let mut manifest =
+            crate::inventory::DynamicToolManifest::from_identity(locator.identity().clone())
+                .unwrap();
+        manifest.bins.push(crate::inventory::DynamicToolBin {
+            name: "fixture-http".into(),
+            path: "bin/fixture-http".into(),
+        });
+        manifest.write_atomic(root).unwrap();
+        std::fs::write(
+            root.join(".osdk-artifact.json"),
+            format!(
+                r#"{{"url":{receipt_url:?},"file_name":"tool-1.2.3","checksum":"sha256:{digest}"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        std::fs::create_dir_all(ctx.dirs.shims()).unwrap();
+        std::fs::write(ctx.dirs.shims().join("fixture-http"), b"shim").unwrap();
+
+        let delta = compute_env_delta(&ctx, &Registry::new(), &project).unwrap();
+        assert!(delta.path_prepend.contains(&root.join("bin")));
+
+        let receipt_path = root.join(".osdk-artifact.json");
+        let tampered = std::fs::read_to_string(&receipt_path).unwrap().replace(
+            receipt_url,
+            "https://downloads.example.test/substitute-1.2.3",
+        );
+        std::fs::write(receipt_path, tampered).unwrap();
+        let message = activation_error(&ctx, &project);
+        assert!(message.contains("receipt"), "{message}");
+    }
+
+    #[test]
     fn activation_path_does_not_add_shims_without_an_active_runtime() {
         let mut no_active_bins = Vec::new();
         prioritize_managed_paths(
