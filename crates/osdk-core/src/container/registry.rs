@@ -690,6 +690,7 @@ pub enum BlobRangeStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MirrorCheckStatus {
+    Available,
     Equivalent,
     Diverged,
     AuthenticationRequired,
@@ -884,11 +885,11 @@ pub async fn diagnose_registry<T: RegistryTransport>(
         }
     }
 
-    if matches!(
-        report.api.status,
-        ApiCheckStatus::Available | ApiCheckStatus::BearerChallenge
-    ) {
-        if let Some(image) = state.options.image.clone() {
+    if let Some(image) = state.options.image.clone() {
+        if matches!(
+            report.api.status,
+            ApiCheckStatus::Available | ApiCheckStatus::BearerChallenge
+        ) {
             let platform = state.options.platform.clone();
             let result = inspect_image(
                 &mut state,
@@ -907,8 +908,16 @@ pub async fn diagnose_registry<T: RegistryTransport>(
                         check_mirror(&mut state, index, &mirror, &image, &resolved).await;
                 }
             }
-        } else {
-            report.manifest.status = ManifestCheckStatus::NotRequested;
+        }
+    } else {
+        report.manifest.status = ManifestCheckStatus::NotRequested;
+        // API-only diagnostics still exercise every configured mirror. This
+        // verifies reachability without inventing a repository or forwarding
+        // credentials, and retains configured order in the report.
+        for (index, mirror) in state.options.mirrors.clone().into_iter().enumerate() {
+            let api = probe_api(&mut state, &mirror).await;
+            report.mirrors[index] =
+                mirror_failure(index, &mirror, mirror_status_from_api(api.check.status));
         }
     }
 
@@ -1905,6 +1914,7 @@ fn blob_status_for_http(status: u16) -> BlobRangeStatus {
 
 fn mirror_status_from_api(status: ApiCheckStatus) -> MirrorCheckStatus {
     match status {
+        ApiCheckStatus::Available | ApiCheckStatus::BearerChallenge => MirrorCheckStatus::Available,
         ApiCheckStatus::AuthenticationRequired | ApiCheckStatus::InvalidChallenge => {
             MirrorCheckStatus::AuthenticationRequired
         }
@@ -1917,10 +1927,9 @@ fn mirror_status_from_api(status: ApiCheckStatus) -> MirrorCheckStatus {
         ApiCheckStatus::TimedOut => MirrorCheckStatus::TimedOut,
         ApiCheckStatus::BodyTooLarge => MirrorCheckStatus::BodyTooLarge,
         ApiCheckStatus::RequestLimit => MirrorCheckStatus::RequestLimit,
-        ApiCheckStatus::Available
-        | ApiCheckStatus::BearerChallenge
-        | ApiCheckStatus::UnexpectedResponse
-        | ApiCheckStatus::NotTested => MirrorCheckStatus::InvalidResponse,
+        ApiCheckStatus::UnexpectedResponse | ApiCheckStatus::NotTested => {
+            MirrorCheckStatus::InvalidResponse
+        }
     }
 }
 
@@ -1996,11 +2005,12 @@ fn aggregate_status(report: &RegistryDiagnosticReport) -> RegistryDiagnosticStat
     if !matches!(
         report.blob_range.status,
         BlobRangeStatus::Supported | BlobRangeStatus::NotAvailable | BlobRangeStatus::NotTested
-    ) || report
-        .mirrors
-        .iter()
-        .any(|mirror| mirror.status != MirrorCheckStatus::Equivalent)
-    {
+    ) || report.mirrors.iter().any(|mirror| {
+        !matches!(
+            mirror.status,
+            MirrorCheckStatus::Available | MirrorCheckStatus::Equivalent
+        )
+    }) {
         RegistryDiagnosticStatus::Degraded
     } else {
         RegistryDiagnosticStatus::Healthy
@@ -2211,6 +2221,45 @@ mod tests {
         )]);
         let report = diagnose_registry(&transport, options(None)).await.unwrap();
         assert_eq!(report.api.status, ApiCheckStatus::InvalidChallenge);
+    }
+
+    #[tokio::test]
+    async fn api_only_diagnostic_probes_each_mirror_in_configured_order() {
+        let transport = MockTransport::new([response(200), response(200), response(200)]);
+        let report = diagnose_registry(
+            &transport,
+            options(None).with_mirrors(vec![
+                endpoint("first.example/prefix"),
+                endpoint("second.example"),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.status, RegistryDiagnosticStatus::Healthy);
+        assert_eq!(report.request_count, 3);
+        assert_eq!(
+            report
+                .mirrors
+                .iter()
+                .map(|mirror| (mirror.order, mirror.status))
+                .collect::<Vec<_>>(),
+            [
+                (0, MirrorCheckStatus::Available),
+                (1, MirrorCheckStatus::Available),
+            ]
+        );
+        let seen = transport.seen();
+        assert_eq!(
+            seen.iter()
+                .map(|request| (request.origin.as_str(), request.path.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("https://registry.example", "/v2/"),
+                ("https://first.example", "/prefix/v2/"),
+                ("https://second.example", "/v2/"),
+            ]
+        );
     }
 
     #[tokio::test]

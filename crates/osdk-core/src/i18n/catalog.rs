@@ -330,6 +330,209 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     );
     m.insert("label.container.cache.images", ("images", "镜像"));
     m.insert("label.container.cache.containers", ("containers", "容器"));
+    m.insert("label.container.warning", ("warning", "警告"));
+    m.insert("label.container.plan.ready", ("ready", "可执行"));
+    m.insert(
+        "label.container.plan.manual_only",
+        ("manual only", "仅可手动执行"),
+    );
+    m.insert(
+        "label.container.registry.authentication_required",
+        ("authentication required", "需要认证"),
+    );
+    m.insert(
+        "label.container.registry.access_denied",
+        ("access denied", "访问被拒绝"),
+    );
+    m.insert(
+        "label.container.registry.rate_limited",
+        ("rate limited", "请求受限"),
+    );
+    m.insert(
+        "label.container.registry.not_found",
+        ("not found", "未找到"),
+    );
+    m.insert("label.container.registry.timed_out", ("timed out", "超时"));
+    m.insert(
+        "label.container.registry.protocol_error",
+        ("protocol error", "协议错误"),
+    );
+    m.insert("label.container.registry.corrupt", ("corrupt", "内容损坏"));
+    m.insert(
+        "label.container.registry.limit_exceeded",
+        ("limit exceeded", "超过限制"),
+    );
+    for (key, english, chinese) in [
+        ("available", "available", "可用"),
+        ("bearer_challenge", "bearer-challenge", "Bearer 质询"),
+        (
+            "authentication_required",
+            "authentication-required",
+            "需要认证",
+        ),
+        ("access_denied", "access-denied", "访问被拒绝"),
+        ("rate_limited", "rate-limited", "请求受限"),
+        ("not_found", "not-found", "未找到"),
+        ("server_error", "server-error", "服务端错误"),
+        ("redirect_rejected", "redirect-rejected", "重定向被拒绝"),
+        ("invalid_challenge", "invalid-challenge", "认证质询无效"),
+        (
+            "unexpected_response",
+            "unexpected-response",
+            "响应不符合预期",
+        ),
+        ("unreachable", "unreachable", "不可达"),
+        ("timed_out", "timed-out", "超时"),
+        ("body_too_large", "body-too-large", "响应体过大"),
+        ("request_limit", "request-limit", "超过请求上限"),
+        ("not_tested", "not-tested", "未测试"),
+        ("verified", "verified", "已验证"),
+        ("invalid_media_type", "invalid-media-type", "媒体类型无效"),
+        ("invalid_manifest", "invalid-manifest", "Manifest 无效"),
+        ("digest_mismatch", "digest-mismatch", "摘要不匹配"),
+        ("size_mismatch", "size-mismatch", "大小不匹配"),
+        ("platform_not_found", "platform-not-found", "未找到平台"),
+        ("not_requested", "not-requested", "未请求"),
+        ("equivalent", "equivalent", "内容一致"),
+        ("diverged", "diverged", "内容不一致"),
+        ("invalid_response", "invalid-response", "响应无效"),
+    ] {
+        m.insert(
+            match key {
+                "available" => "label.container.registry_check.available",
+                "bearer_challenge" => "label.container.registry_check.bearer_challenge",
+                "authentication_required" => {
+                    "label.container.registry_check.authentication_required"
+                }
+                "access_denied" => "label.container.registry_check.access_denied",
+                "rate_limited" => "label.container.registry_check.rate_limited",
+                "not_found" => "label.container.registry_check.not_found",
+                "server_error" => "label.container.registry_check.server_error",
+                "redirect_rejected" => "label.container.registry_check.redirect_rejected",
+                "invalid_challenge" => "label.container.registry_check.invalid_challenge",
+                "unexpected_response" => "label.container.registry_check.unexpected_response",
+                "unreachable" => "label.container.registry_check.unreachable",
+                "timed_out" => "label.container.registry_check.timed_out",
+                "body_too_large" => "label.container.registry_check.body_too_large",
+                "request_limit" => "label.container.registry_check.request_limit",
+                "not_tested" => "label.container.registry_check.not_tested",
+                "verified" => "label.container.registry_check.verified",
+                "invalid_media_type" => "label.container.registry_check.invalid_media_type",
+                "invalid_manifest" => "label.container.registry_check.invalid_manifest",
+                "digest_mismatch" => "label.container.registry_check.digest_mismatch",
+                "size_mismatch" => "label.container.registry_check.size_mismatch",
+                "platform_not_found" => "label.container.registry_check.platform_not_found",
+                "not_requested" => "label.container.registry_check.not_requested",
+                "equivalent" => "label.container.registry_check.equivalent",
+                "diverged" => "label.container.registry_check.diverged",
+                "invalid_response" => "label.container.registry_check.invalid_response",
+                _ => unreachable!(),
+            },
+            (english, chinese),
+        );
+    }
+    m.insert("label.container.activation.none", ("none", "无需激活"));
+    m.insert(
+        "label.container.activation.restart_daemon",
+        ("restart-daemon", "重启守护进程"),
+    );
+    m.insert(
+        "label.container.activation.recreate_builder",
+        ("recreate-builder", "重建构建器"),
+    );
+    for (key, english, chinese) in [
+        (
+            "anonymous_only_not_enforced",
+            "anonymous-only-not-enforced",
+            "原生配置无法强制仅匿名访问",
+        ),
+        (
+            "docker_hub_only",
+            "docker-hub-only",
+            "Docker Engine 镜像仅支持 Docker Hub",
+        ),
+        (
+            "resolution_separation_unavailable",
+            "resolution-separation-unavailable",
+            "无法分离标签解析与内容下载",
+        ),
+        ("remote_target", "remote-target", "目标为远程运行时"),
+        (
+            "managed_desktop",
+            "managed-desktop",
+            "目标由 Docker Desktop 管理",
+        ),
+        (
+            "native_config_path_required",
+            "native-config-path-required",
+            "需要显式原生配置路径",
+        ),
+        (
+            "containerd_config_path_missing",
+            "containerd-config-path-missing",
+            "containerd 缺少 registry config_path",
+        ),
+        (
+            "existing_native_entries_preserved",
+            "existing-native-entries-preserved",
+            "保留现有原生配置项",
+        ),
+        (
+            "daemon_restart_required",
+            "daemon-restart-required",
+            "需要重启守护进程",
+        ),
+        (
+            "builder_recreate_required",
+            "builder-recreate-required",
+            "需要重建构建器",
+        ),
+        (
+            "docker_driver_uses_engine_configuration",
+            "docker-driver-uses-engine-configuration",
+            "docker 驱动使用 Docker Engine 配置",
+        ),
+        (
+            "external_builder_configuration",
+            "external-builder-configuration",
+            "构建器配置由外部管理",
+        ),
+    ] {
+        m.insert(
+            match key {
+                "anonymous_only_not_enforced" => {
+                    "label.container.plan_warning.anonymous_only_not_enforced"
+                }
+                "docker_hub_only" => "label.container.plan_warning.docker_hub_only",
+                "resolution_separation_unavailable" => {
+                    "label.container.plan_warning.resolution_separation_unavailable"
+                }
+                "remote_target" => "label.container.plan_warning.remote_target",
+                "managed_desktop" => "label.container.plan_warning.managed_desktop",
+                "native_config_path_required" => {
+                    "label.container.plan_warning.native_config_path_required"
+                }
+                "containerd_config_path_missing" => {
+                    "label.container.plan_warning.containerd_config_path_missing"
+                }
+                "existing_native_entries_preserved" => {
+                    "label.container.plan_warning.existing_native_entries_preserved"
+                }
+                "daemon_restart_required" => "label.container.plan_warning.daemon_restart_required",
+                "builder_recreate_required" => {
+                    "label.container.plan_warning.builder_recreate_required"
+                }
+                "docker_driver_uses_engine_configuration" => {
+                    "label.container.plan_warning.docker_driver_uses_engine_configuration"
+                }
+                "external_builder_configuration" => {
+                    "label.container.plan_warning.external_builder_configuration"
+                }
+                _ => unreachable!(),
+            },
+            (english, chinese),
+        );
+    }
     m.insert(
         "label.container.cache.local_volumes",
         ("local volumes", "本地卷"),
@@ -372,6 +575,119 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "containerd has no stable aggregate cache-status interface; no private store was scanned",
             "containerd 没有稳定的聚合缓存状态接口；未扫描任何私有存储目录",
+        ),
+    );
+    m.insert(
+        "msg.container.registry_conclusion",
+        (
+            "registry {registry}: {status}",
+            "Registry {registry}：{status}",
+        ),
+    );
+    m.insert(
+        "msg.container.registry_api",
+        (
+            "OCI Distribution API: {status}",
+            "OCI Distribution API：{status}",
+        ),
+    );
+    m.insert(
+        "msg.container.registry_manifest",
+        ("manifest: {status}", "Manifest：{status}"),
+    );
+    m.insert(
+        "msg.container.registry_mirror",
+        (
+            "mirror {order} {origin}: {status}",
+            "镜像 {order} {origin}：{status}",
+        ),
+    );
+    m.insert(
+        "msg.container.mirror_plan_conclusion",
+        (
+            "{runtime} mirror plan: {applicability}",
+            "{runtime} 镜像计划：{applicability}",
+        ),
+    );
+    m.insert(
+        "msg.container.mirror_plan_id",
+        ("plan id: {plan_id}", "计划 ID：{plan_id}"),
+    );
+    m.insert(
+        "msg.container.mirror_plan_summary",
+        (
+            "{changes} change(s), {candidates} candidate file(s), activation {activation}",
+            "{changes} 项变更，{candidates} 个候选文件，激活要求 {activation}",
+        ),
+    );
+    m.insert(
+        "err.container.registry_offline",
+        (
+            "container registry testing is unavailable in offline mode",
+            "离线模式下不能测试容器 Registry",
+        ),
+    );
+    m.insert(
+        "err.container.registry_transport",
+        (
+            "could not create the anonymous registry transport: {error}",
+            "无法创建匿名 Registry 传输：{error}",
+        ),
+    );
+    m.insert(
+        "err.container.invalid_registry",
+        (
+            "invalid container registry (expected a host name with optional port)",
+            "容器 Registry 无效（应为主机名，可带端口）",
+        ),
+    );
+    m.insert(
+        "err.container.image_registry_mismatch",
+        (
+            "image must belong to registry {registry}",
+            "镜像必须属于 Registry {registry}",
+        ),
+    );
+    m.insert(
+        "err.container.invalid_platform",
+        (
+            "invalid OCI platform (expected OS/ARCH[/VARIANT])",
+            "OCI 平台无效（应为 OS/ARCH[/VARIANT]）",
+        ),
+    );
+    m.insert(
+        "err.container.registry_not_configured",
+        (
+            "no container mirror policy is configured for registry {registry}",
+            "Registry {registry} 未配置容器镜像策略",
+        ),
+    );
+    m.insert(
+        "err.container.containerd_main_config_runtime",
+        (
+            "--containerd-main-config requires --runtime containerd",
+            "--containerd-main-config 要求使用 --runtime containerd",
+        ),
+    );
+    m.insert(
+        "err.container.containerd_main_config_already_configured",
+        (
+            "--containerd-main-config is only valid when the discovered containerd config_path is absent",
+            "仅当发现的 containerd config_path 缺失时才能使用 --containerd-main-config",
+        ),
+    );
+    m.insert(
+        "err.container.builder_runtime",
+        (
+            "--builder requires --runtime buildkit",
+            "--builder 要求使用 --runtime buildkit",
+        ),
+    );
+    m.insert(
+        "err.container.native_config_snapshot",
+        (
+            "could not safely inspect native configuration {path}",
+            "无法安全检查原生配置 {path}",
         ),
     );
     m.insert(
@@ -1888,6 +2204,76 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.container.registry.about",
+        (
+            "Test OCI registries and configured mirrors",
+            "测试 OCI Registry 和已配置镜像",
+        ),
+    );
+    m.insert(
+        "help.container.registry.test.about",
+        (
+            "Run a bounded anonymous OCI registry diagnostic",
+            "执行有界的匿名 OCI Registry 诊断",
+        ),
+    );
+    m.insert(
+        "help.container.registry.arg.registry",
+        (
+            "Upstream registry host with an optional port",
+            "上游 Registry 主机名，可带端口",
+        ),
+    );
+    m.insert(
+        "help.container.registry.test.flag.image",
+        (
+            "Optional OCI image for manifest and bounded blob checks",
+            "用于 Manifest 和有界 Blob 检查的可选 OCI 镜像",
+        ),
+    );
+    m.insert(
+        "help.container.registry.test.flag.platform",
+        (
+            "OCI platform OS/ARCH[/VARIANT] (default: explicit effective config)",
+            "OCI 平台 OS/ARCH[/VARIANT]（默认：生效配置中的显式平台）",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.about",
+        (
+            "Plan native registry mirror changes",
+            "规划原生 Registry 镜像变更",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.plan.about",
+        (
+            "Plan one registry's native mirror changes without writing",
+            "规划单个 Registry 的原生镜像变更，但不写入",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.plan.flag.runtime",
+        (
+            "Required native control plane: docker|containerd|buildkit",
+            "必选原生控制面：docker|containerd|buildkit",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.plan.flag.native_config",
+        (
+            "Explicit Docker daemon JSON, containerd hosts.toml, or BuildKit TOML path",
+            "显式 Docker daemon JSON、containerd hosts.toml 或 BuildKit TOML 路径",
+        ),
+    );
+    m.insert(
+        "help.container.mirrors.plan.flag.containerd_main_config",
+        (
+            "Explicit main containerd TOML path when config_path is absent",
+            "config_path 缺失时显式指定 containerd 主 TOML 路径",
+        ),
+    );
+    m.insert(
         "help.container.doctor.flag.runtime",
         (
             "Runtime selector: auto|docker|containerd (default: effective config)",
@@ -2151,6 +2537,16 @@ mod tests {
             "help.container.about",
             "help.container.doctor.about",
             "help.container.cache.status.about",
+            "help.container.registry.about",
+            "help.container.registry.test.about",
+            "help.container.registry.arg.registry",
+            "help.container.registry.test.flag.image",
+            "help.container.registry.test.flag.platform",
+            "help.container.mirrors.about",
+            "help.container.mirrors.plan.about",
+            "help.container.mirrors.plan.flag.runtime",
+            "help.container.mirrors.plan.flag.native_config",
+            "help.container.mirrors.plan.flag.containerd_main_config",
             "help.container.doctor.flag.runtime",
             "help.container.cache.status.flag.runtime",
             "help.container.flag.builder",
@@ -2161,6 +2557,74 @@ mod tests {
             "msg.container.cache_totals",
             "msg.container.cache_record",
             "msg.container.cache_unsupported_hint",
+            "msg.container.registry_conclusion",
+            "msg.container.registry_api",
+            "msg.container.registry_manifest",
+            "msg.container.registry_mirror",
+            "msg.container.mirror_plan_conclusion",
+            "msg.container.mirror_plan_id",
+            "msg.container.mirror_plan_summary",
+            "label.container.warning",
+            "label.container.plan.ready",
+            "label.container.plan.manual_only",
+            "label.container.registry.authentication_required",
+            "label.container.registry.access_denied",
+            "label.container.registry.rate_limited",
+            "label.container.registry.not_found",
+            "label.container.registry.timed_out",
+            "label.container.registry.protocol_error",
+            "label.container.registry.corrupt",
+            "label.container.registry.limit_exceeded",
+            "label.container.registry_check.available",
+            "label.container.registry_check.bearer_challenge",
+            "label.container.registry_check.authentication_required",
+            "label.container.registry_check.access_denied",
+            "label.container.registry_check.rate_limited",
+            "label.container.registry_check.not_found",
+            "label.container.registry_check.server_error",
+            "label.container.registry_check.redirect_rejected",
+            "label.container.registry_check.invalid_challenge",
+            "label.container.registry_check.unexpected_response",
+            "label.container.registry_check.unreachable",
+            "label.container.registry_check.timed_out",
+            "label.container.registry_check.body_too_large",
+            "label.container.registry_check.request_limit",
+            "label.container.registry_check.not_tested",
+            "label.container.registry_check.verified",
+            "label.container.registry_check.invalid_media_type",
+            "label.container.registry_check.invalid_manifest",
+            "label.container.registry_check.digest_mismatch",
+            "label.container.registry_check.size_mismatch",
+            "label.container.registry_check.platform_not_found",
+            "label.container.registry_check.not_requested",
+            "label.container.registry_check.equivalent",
+            "label.container.registry_check.diverged",
+            "label.container.registry_check.invalid_response",
+            "label.container.activation.none",
+            "label.container.activation.restart_daemon",
+            "label.container.activation.recreate_builder",
+            "label.container.plan_warning.anonymous_only_not_enforced",
+            "label.container.plan_warning.docker_hub_only",
+            "label.container.plan_warning.resolution_separation_unavailable",
+            "label.container.plan_warning.remote_target",
+            "label.container.plan_warning.managed_desktop",
+            "label.container.plan_warning.native_config_path_required",
+            "label.container.plan_warning.containerd_config_path_missing",
+            "label.container.plan_warning.existing_native_entries_preserved",
+            "label.container.plan_warning.daemon_restart_required",
+            "label.container.plan_warning.builder_recreate_required",
+            "label.container.plan_warning.docker_driver_uses_engine_configuration",
+            "label.container.plan_warning.external_builder_configuration",
+            "err.container.registry_offline",
+            "err.container.registry_transport",
+            "err.container.invalid_registry",
+            "err.container.image_registry_mismatch",
+            "err.container.invalid_platform",
+            "err.container.registry_not_configured",
+            "err.container.containerd_main_config_runtime",
+            "err.container.containerd_main_config_already_configured",
+            "err.container.builder_runtime",
+            "err.container.native_config_snapshot",
             "err.container.invalid_builder",
         ] {
             let &(english, chinese) = catalog.get(key).unwrap_or_else(|| panic!("missing {key}"));

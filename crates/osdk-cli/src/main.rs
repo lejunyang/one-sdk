@@ -119,7 +119,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Model { command } => commands::model(app, command).await,
         Command::Rust { command } => commands::rust(app, command),
         Command::Cache { command } => commands::cache(app, command),
-        Command::Container { command } => container::run(app, command),
+        Command::Container { command } => container::run(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor => commands::doctor(app),
     }

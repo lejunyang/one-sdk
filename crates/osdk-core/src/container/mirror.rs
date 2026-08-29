@@ -67,6 +67,7 @@ pub fn plan_docker_mirrors(
         applicability = PlanApplicability::Unsupported;
         warnings.insert(PlanWarning::DockerHubOnly);
     } else {
+        let mirrors = validated_mirrors(request.policy)?;
         let effective_resolution = match request.policy.resolve {
             ContainerResolve::Mirror => EffectiveResolution::Mirror,
             ContainerResolve::Upstream => {
@@ -77,8 +78,14 @@ pub fn plan_docker_mirrors(
                 EffectiveResolution::RuntimeDefined
             }
         };
+        // Moby accepts only origin URLs for `registry-mirrors`. Preserve a
+        // configured path by refusing to render it instead of silently
+        // truncating the destination. Other native runtimes can express it.
+        if mirrors.iter().any(|mirror| mirror_has_path(mirror)) {
+            return Err(MirrorPlanError::UnsupportedDockerMirrorPath);
+        }
         changes.push(MirrorChange::DockerHubMirrors {
-            mirrors: validated_root_mirrors(request.policy)?,
+            mirrors,
             effective_resolution,
         });
 
@@ -135,7 +142,7 @@ pub fn plan_containerd_mirrors(
 ) -> Result<MirrorPlanBundle, MirrorPlanError> {
     let policy_fingerprint = policy_fingerprint(request.registry, request.policy)?;
     let target = containerd_target(request.discovery);
-    let mirrors = validated_root_mirrors(request.policy)?;
+    let mirrors = validated_mirrors(request.policy)?;
     let capabilities = match request.policy.resolve {
         ContainerResolve::Upstream => BTreeSet::from([PlannedCapability::Pull]),
         ContainerResolve::Mirror => {
@@ -258,7 +265,7 @@ pub fn plan_buildkit_mirrors(
 ) -> Result<MirrorPlanBundle, MirrorPlanError> {
     let policy_fingerprint = policy_fingerprint(request.registry, request.policy)?;
     let target = buildkit_target(request.discovery)?;
-    let mirrors = validated_root_mirrors(request.policy)?;
+    let mirrors = validated_mirrors(request.policy)?;
     let selected = request
         .discovery
         .selected_builder
@@ -426,7 +433,7 @@ fn docker_candidate(
     object.insert(
         "registry-mirrors".to_owned(),
         serde_json::Value::Array(
-            validated_root_mirrors(policy)?
+            validated_mirrors(policy)?
                 .into_iter()
                 .map(serde_json::Value::String)
                 .collect(),
@@ -495,7 +502,8 @@ fn containerd_hosts_candidate(
     }
     let host = ensure_table(&mut document, "host")?;
     for mirror in mirrors {
-        let key = existing_url_key(host, mirror).unwrap_or_else(|| trim_root_url(mirror));
+        let rendered = trim_root_url(mirror);
+        let key = existing_url_key(host, &rendered).unwrap_or(rendered);
         let entry = host
             .entry(&key)
             .or_insert_with(|| Item::Table(Table::new()));
@@ -681,23 +689,21 @@ fn existing_url_key(table: &Table, requested: &str) -> Option<String> {
 }
 
 fn urls_equivalent(left: &str, right: &str) -> bool {
-    match (root_url(left), root_url(right)) {
+    match (mirror_url(left), mirror_url(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
 }
 
-fn validated_root_mirrors(
-    policy: &ContainerRegistryConfig,
-) -> Result<Vec<String>, MirrorPlanError> {
+fn validated_mirrors(policy: &ContainerRegistryConfig) -> Result<Vec<String>, MirrorPlanError> {
     policy
         .mirrors
         .iter()
-        .map(|mirror| root_url(mirror))
+        .map(|mirror| mirror_url(mirror).map(Into::into))
         .collect()
 }
 
-fn root_url(value: &str) -> Result<String, MirrorPlanError> {
+fn mirror_url(value: &str) -> Result<reqwest::Url, MirrorPlanError> {
     let mut url = reqwest::Url::parse(value).map_err(|_| MirrorPlanError::UnsafeMirrorUrl)?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -705,12 +711,16 @@ fn root_url(value: &str) -> Result<String, MirrorPlanError> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || !matches!(url.path(), "" | "/")
     {
         return Err(MirrorPlanError::UnsafeMirrorUrl);
     }
-    url.set_path("/");
-    Ok(url.into())
+    let path = url.path().trim_end_matches('/').to_owned();
+    url.set_path(&format!("{path}/"));
+    Ok(url)
+}
+
+fn mirror_has_path(value: &str) -> bool {
+    reqwest::Url::parse(value).is_ok_and(|url| !matches!(url.path(), "" | "/"))
 }
 
 fn trim_root_url(value: &str) -> String {
@@ -718,7 +728,8 @@ fn trim_root_url(value: &str) -> String {
 }
 
 fn mirror_authority(value: &str) -> Result<String, MirrorPlanError> {
-    trim_root_url(value)
+    let value = mirror_url(value)?.to_string();
+    trim_root_url(&value)
         .strip_prefix("https://")
         .map(str::to_owned)
         .ok_or(MirrorPlanError::UnsafeMirrorUrl)
@@ -748,8 +759,10 @@ fn path_string(path: &Path) -> Result<String, MirrorPlanError> {
 pub enum MirrorPlanError {
     #[error(transparent)]
     Plan(#[from] PlanError),
-    #[error("mirror endpoints must be root HTTPS URLs without credentials, query, or fragment")]
+    #[error("mirror endpoints must be HTTPS URLs without credentials, query, or fragment")]
     UnsafeMirrorUrl,
+    #[error("Docker Engine registry mirrors do not support path-prefixed endpoints")]
+    UnsupportedDockerMirrorPath,
     #[error("native Docker configuration is not a JSON object")]
     InvalidNativeJson,
     #[error("native container configuration is not valid TOML for this semantic change")]
@@ -1103,20 +1116,60 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_path_prefixed_mirrors_are_rejected_even_if_config_was_bypassed() {
+    fn path_prefixed_mirrors_are_rendered_per_runtime_without_truncation() {
         let registry = RegistryName::parse("docker.io").unwrap();
-        let unsafe_policy = ContainerRegistryConfig {
-            mirrors: vec!["https://mirror.example/prefix".into()],
+        let prefixed_policy = ContainerRegistryConfig {
+            mirrors: vec!["https://mirror.example:5443/cache/".into()],
             anonymous_only: true,
             resolve: ContainerResolve::Mirror,
         };
-        let error = plan_docker_mirrors(DockerMirrorPlanRequest {
+        let docker = plan_docker_mirrors(DockerMirrorPlanRequest {
             registry: &registry,
-            policy: &unsafe_policy,
+            policy: &prefixed_policy,
             discovery: &docker(DockerContextKind::Local),
             native_config: None,
         })
         .unwrap_err();
-        assert!(matches!(error, MirrorPlanError::UnsafeMirrorUrl));
+        assert!(matches!(
+            docker,
+            MirrorPlanError::UnsupportedDockerMirrorPath
+        ));
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("certs.d");
+        let namespace = root.join("docker.io");
+        std::fs::create_dir_all(&namespace).unwrap();
+        let hosts = NativeConfigSnapshot::capture(&namespace.join("hosts.toml"), 4096).unwrap();
+        let containerd = plan_containerd_mirrors(ContainerdMirrorPlanRequest {
+            registry: &registry,
+            policy: &prefixed_policy,
+            discovery: &containerd(Some(root), 2),
+            hosts_config: Some(&hosts),
+            main_config: None,
+        })
+        .unwrap();
+        let text = std::str::from_utf8(containerd.candidates[0].bytes()).unwrap();
+        assert!(text.contains("https://mirror.example:5443/cache"), "{text}");
+        assert!(!text.contains("override_path"), "{text}");
+        assert!(
+            text.contains("capabilities = [\"pull\", \"resolve\"]"),
+            "{text}"
+        );
+        assert!(!text.contains("push"), "{text}");
+
+        let buildkit_path = temporary.path().join("buildkitd.toml");
+        let buildkit_snapshot = NativeConfigSnapshot::capture(&buildkit_path, 4096).unwrap();
+        let buildkit = plan_buildkit_mirrors(BuildkitMirrorPlanRequest {
+            registry: &registry,
+            policy: &prefixed_policy,
+            discovery: &buildkit(BuilderDriver::DockerContainer, EndpointScope::Local),
+            native_config: Some(&buildkit_snapshot),
+        })
+        .unwrap();
+        let text = std::str::from_utf8(buildkit.candidates[0].bytes()).unwrap();
+        assert!(
+            text.contains("mirrors = [\"mirror.example:5443/cache\"]"),
+            "{text}"
+        );
     }
 }

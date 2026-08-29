@@ -216,6 +216,42 @@ fn localize_subcommands(cmd: Command) -> Command {
                             .mut_arg("json", |a| a.help(h("help.container.flag.json")))
                     })
             })
+            .mut_subcommand("registry", |s| {
+                s.about(h("help.container.registry.about"))
+                    .mut_subcommand("test", |test| {
+                        test.about(h("help.container.registry.test.about"))
+                            .mut_arg("registry", |a| {
+                                a.help(h("help.container.registry.arg.registry"))
+                            })
+                            .mut_arg("image", |a| {
+                                a.help(h("help.container.registry.test.flag.image"))
+                            })
+                            .mut_arg("platform", |a| {
+                                a.help(h("help.container.registry.test.flag.platform"))
+                            })
+                            .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                    })
+            })
+            .mut_subcommand("mirrors", |s| {
+                s.about(h("help.container.mirrors.about"))
+                    .mut_subcommand("plan", |plan| {
+                        plan.about(h("help.container.mirrors.plan.about"))
+                            .mut_arg("registry", |a| {
+                                a.help(h("help.container.registry.arg.registry"))
+                            })
+                            .mut_arg("runtime", |a| {
+                                a.help(h("help.container.mirrors.plan.flag.runtime"))
+                            })
+                            .mut_arg("builder", |a| a.help(h("help.container.flag.builder")))
+                            .mut_arg("native_config", |a| {
+                                a.help(h("help.container.mirrors.plan.flag.native_config"))
+                            })
+                            .mut_arg("containerd_main_config", |a| {
+                                a.help(h("help.container.mirrors.plan.flag.containerd_main_config"))
+                            })
+                            .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                    })
+            })
     })
     .mut_subcommand("prune", |c| {
         c.about(h("help.prune.about"))
@@ -309,5 +345,52 @@ mod tests {
             .to_string();
         assert!(builder_help.contains("Buildx"));
         assert!(!builder_help.contains("help.container"));
+
+        let registry_test = container
+            .find_subcommand("registry")
+            .unwrap()
+            .find_subcommand("test")
+            .unwrap();
+        assert!(registry_test
+            .get_about()
+            .unwrap()
+            .to_string()
+            .contains("anonymous"));
+        for argument in ["registry", "image", "platform", "json"] {
+            let help = registry_test
+                .get_arguments()
+                .find(|candidate| candidate.get_id() == argument)
+                .and_then(|candidate| candidate.get_help())
+                .unwrap()
+                .to_string();
+            assert!(!help.contains("help.container"), "{argument}: {help}");
+        }
+
+        let mirror_plan = container
+            .find_subcommand("mirrors")
+            .unwrap()
+            .find_subcommand("plan")
+            .unwrap();
+        assert!(mirror_plan
+            .get_about()
+            .unwrap()
+            .to_string()
+            .contains("without writing"));
+        for argument in [
+            "registry",
+            "runtime",
+            "builder",
+            "native_config",
+            "containerd_main_config",
+            "json",
+        ] {
+            let help = mirror_plan
+                .get_arguments()
+                .find(|candidate| candidate.get_id() == argument)
+                .and_then(|candidate| candidate.get_help())
+                .unwrap()
+                .to_string();
+            assert!(!help.contains("help.container"), "{argument}: {help}");
+        }
     }
 }

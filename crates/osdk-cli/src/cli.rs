@@ -530,6 +530,16 @@ pub enum ContainerCommand {
         #[command(subcommand)]
         command: ContainerCacheCommand,
     },
+    /// Test an OCI registry and its configured mirrors anonymously.
+    Registry {
+        #[command(subcommand)]
+        command: ContainerRegistryCommand,
+    },
+    /// Plan read-only native mirror configuration changes.
+    Mirrors {
+        #[command(subcommand)]
+        command: ContainerMirrorsCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -542,6 +552,50 @@ pub enum ContainerCacheCommand {
         /// Buildx builder name; defaults to the effective container configuration.
         #[arg(long, value_name = "NAME")]
         builder: Option<osdk_core::container::BuildxBuilderSelector>,
+        /// Emit deterministic, schema-versioned JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContainerRegistryCommand {
+    /// Test registry API access, an optional image, and configured mirrors.
+    Test {
+        /// Upstream registry host with an optional port.
+        #[arg(value_name = "REGISTRY")]
+        registry: String,
+        /// Optional OCI image reference for manifest and bounded blob checks.
+        #[arg(long, value_name = "IMAGE")]
+        image: Option<osdk_core::container::ImageReference>,
+        /// Optional OCI platform: OS/ARCH[/VARIANT].
+        #[arg(long, value_name = "PLATFORM")]
+        platform: Option<osdk_core::container::OciPlatform>,
+        /// Emit deterministic, schema-versioned JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContainerMirrorsCommand {
+    /// Plan one registry's native mirror configuration without writing it.
+    Plan {
+        /// Registry whose configured mirror policy should be planned.
+        #[arg(value_name = "REGISTRY")]
+        registry: String,
+        /// Native control plane to inspect and plan for.
+        #[arg(long, value_enum, value_name = "RUNTIME", required = true)]
+        runtime: ContainerMirrorRuntimeArg,
+        /// Buildx builder name; defaults to the effective container configuration.
+        #[arg(long, value_name = "NAME")]
+        builder: Option<osdk_core::container::BuildxBuilderSelector>,
+        /// Explicit Docker daemon JSON or BuildKit TOML input path.
+        #[arg(long, value_name = "PATH")]
+        native_config: Option<std::path::PathBuf>,
+        /// Explicit main containerd TOML input path when config_path is absent.
+        #[arg(long, value_name = "PATH")]
+        containerd_main_config: Option<std::path::PathBuf>,
         /// Emit deterministic, schema-versioned JSON.
         #[arg(long)]
         json: bool,
@@ -561,4 +615,102 @@ pub enum ContainerCacheRuntimeArg {
     Docker,
     Containerd,
     Buildkit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerMirrorRuntimeArg {
+    Docker,
+    Containerd,
+    Buildkit,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn parses_container_registry_test_arguments() {
+        let cli = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "registry",
+            "test",
+            "docker.io",
+            "--image",
+            "ubuntu:24.04",
+            "--platform",
+            "linux/x86_64",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Container {
+            command:
+                ContainerCommand::Registry {
+                    command:
+                        ContainerRegistryCommand::Test {
+                            registry,
+                            image,
+                            platform,
+                            json,
+                        },
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(registry, "docker.io");
+        assert_eq!(image.unwrap().to_string(), "docker.io/library/ubuntu:24.04");
+        assert_eq!(platform.unwrap().to_string(), "linux/amd64");
+        assert!(json);
+    }
+
+    #[test]
+    fn mirror_plan_requires_an_explicit_runtime() {
+        let error =
+            Cli::try_parse_from(["osdk", "container", "mirrors", "plan", "docker.io"]).unwrap_err();
+        assert!(error.to_string().contains("--runtime"));
+
+        let cli = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "mirrors",
+            "plan",
+            "docker.io",
+            "--runtime",
+            "buildkit",
+            "--builder",
+            "team-builder",
+            "--native-config",
+            "buildkitd.toml",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Container {
+            command:
+                ContainerCommand::Mirrors {
+                    command:
+                        ContainerMirrorsCommand::Plan {
+                            registry,
+                            runtime,
+                            builder,
+                            native_config,
+                            json,
+                            ..
+                        },
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(registry, "docker.io");
+        assert_eq!(runtime, ContainerMirrorRuntimeArg::Buildkit);
+        assert_eq!(builder.unwrap().to_string(), "team-builder");
+        assert_eq!(
+            native_config.unwrap(),
+            std::path::PathBuf::from("buildkitd.toml")
+        );
+        assert!(json);
+    }
 }
