@@ -25,6 +25,7 @@ pub mod deno;
 pub mod dynamic;
 pub mod github;
 pub mod go;
+pub mod go_package;
 pub mod http;
 pub mod java;
 pub mod jvm_tools;

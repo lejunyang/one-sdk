@@ -31,6 +31,9 @@ metadata/probe cache identity，不明文写入 cache。Aube 2.1 embedded API �
 任意 source header，因此 `npm:<package>` 的 Aube package fetch 不转发
 `Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会拒绝
 认证或私有原生配置透传。
+Go command 工具有更严格的边界：存在 custom source 时只对这些 custom candidate（以及
+显式 pin 的 candidate）排序，避免把私有 module path 发往公开默认 proxy。自定义 header
+会被拒绝，因为 `go install` 无法执行 osdk 的逐请求转发策略。
 
 ## 项目 registry 启动前预检
 

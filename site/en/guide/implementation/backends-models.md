@@ -15,7 +15,7 @@ This page is for maintainers who need to understand or extend osdk's download ca
 5. ingest content into the BLAKE3 CAS and materialize with hardlink, reflink, or copy;
 6. write an artifact receipt and `.osdk-complete` marker for idempotent and offline reinstall behavior.
 
-The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo`, `npm:<package>`, strict `http:https://...{version}...`, and `cargo:<crate-or-https-url>` IDs dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
+The [`Registry`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/registry.rs) registers built-in backends and aliases and recognizes `github:owner/repo`, `npm:<package>`, strict `http:https://...{version}...`, `cargo:<crate-or-https-url>`, and `go:<module-or-command-path>` IDs dynamically. It also loads declarative backends from `plugins/*.toml` in the user config and data directories. Duplicate IDs or aliases are rejected, so an external definition cannot shadow a built-in backend.
 
 These dynamic namespaces share an option-identity contract for osdk-owned
 installs. Before resolution or installation, osdk projects the supported public options into a
@@ -50,6 +50,7 @@ packages remain outside this osdk-owned install identity.
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
 | `npm:<package>` | npm packument; isolated installs use embedded Aube, while project/global `use` can plan Aube, npm, or pnpm | A native lock or Aube graph carries transitive integrity; scripts denied by default; `.osdk-install.json` schema 1 binds installer/build identity in fingerprinted osdk-owned isolated/global roots | Discovers `.bin` dynamically, adds managed Node, and records scope, installer, optional native-lock identity, and public options in lock schema 4 |
 | `cargo:<crate-or-https-url>` | crates.io-compatible metadata with paired sparse index, or canonical HTTPS Git URL | Exact osdk-managed Rust dependency; isolated `cargo-binstall`/`cargo install`; native receipt, inventory, and metadata seal | Registry exact/latest/prefix or Git latest/tag/branch/full revision; schema 4 records runtime, replay class, and registry source |
+| `go:<module-or-command-path>` | Go proxy `@latest`, version-list, and exact `.info` metadata, with longest-module-root discovery | Exact osdk-managed Go dependency; one isolated `go install`; native receipt, inventory, and metadata seal | Exact/latest/prefix/pseudo-version; schema 4 records runtime, `version-only`, selected proxy, and module root |
 | `github:owner/repo` | GitHub API with Atom/public release-page fallback on rate limiting; optional static catalog | Checksums, optional minisign, GitHub artifact attestations; `.osdk-install.json` schema 1 binds asset/layout/material identity in fingerprinted roots | Selects a host asset; supports archives and bare binaries; regex/template/bin/rename/strip rules handle complex releases |
 
 These implementations live under [`backend/`](https://github.com/lejunyang/one-sdk/tree/main/crates/osdk-core/src/backend/). The npm-backed implementations share packument, version, and SRI handling in [`npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm.rs). Generic source ranking is in [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
@@ -58,6 +59,8 @@ backend project/global/isolated installation, cache, metadata-only lock, legacy
 lock-schema-2 sidecar compatibility, and shim boundaries.
 See [Cargo developer tool implementation](./cargo-tools) for strict selectors,
 exact Rust binding, controlled provider fallback, and native publication.
+See [Go developer tool implementation](./go-tools) for module-root discovery,
+proxy routing, build-environment policy, runtime binding, and replay boundaries.
 
 ## Declarative and GitHub backends
 

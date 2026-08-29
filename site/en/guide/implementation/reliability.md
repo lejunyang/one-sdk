@@ -19,6 +19,9 @@ all-or-nothing batch transaction.
 Cargo tools add an independent Rust-first barrier. The CLI requires exactly one
 exact managed Rust request, completes it before scheduling the dependent
 `cargo:` requests, and binds the resolved Rust version into those identities.
+Go command packages add a Go-first barrier with the same shape: one managed Go
+request resolves and installs first, and its exact result is bound into every
+dependent `go:` identity.
 
 Source speed tests probe all candidates concurrently and are not bounded by `jobs`. Each probe defaults to a 1500 ms deadline, reads at most about 1 MB, and scores time to first byte plus throughput. Successful rankings are cached for 6 hours by default. `auto` uses probe ranking, `ordered` uses configured priority, and a pin moves one source first while retaining the others as fallback. See [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs).
 
@@ -53,6 +56,9 @@ inventory, completion marker, and adjacent metadata seal, then exposes the tree
 with a no-replace directory rename. A failed or dropped unpublished stage is
 removed. Reuse revalidates the seal, inventory, receipt, binary SHA-256 values,
 and exact managed Rust version/platform plus bounded build-critical runtime identity; see [Cargo developer tool implementation](./cargo-tools).
+Go developer tools share this commit protocol and additionally bind the selected
+proxy/module root plus a bounded build-critical Go runtime identity; see [Go
+developer tool implementation](./go-tools).
 
 ## CAS and materialization
 

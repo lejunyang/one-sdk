@@ -19,6 +19,12 @@ Rust request. Rust is resolved first and its exact version is bound to every
 Cargo request before Cargo resolution continues. See
 [Cargo developer tool implementation](./cargo-tools#resolution-and-exact-rust-binding).
 
+`go:` has a dedicated namespace schema for canonical module/command paths,
+semantic or pseudo-versions, tags, and a restricted build environment. It
+injects or preserves one managed Go request, resolves that runtime first, and
+then discovers the longest module root through ranked Go proxy metadata. See
+[Go developer tool implementation](./go-tools#canonical-identity-and-selection).
+
 [`version/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) defines `VersionSpec`:
 
 - empty, `latest`, `stable`, and `current` mean the newest stable release;
@@ -50,7 +56,7 @@ Consequently, a parent `osdk.toml` beats a child `.nvmrc`. Plain idiomatic files
 
 After applying version aliases and one-shot backend options, the CLI calls [`Backend::resolve_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/mod.rs). The default implementation returns exact versions without querying a remote list and preserves every request option; non-exact requests call `list_remote_versions` and `select_version`. Skipping the version list for an exact request does not itself establish a cryptographic guarantee: installation applies the active checksum/attestation policy and may proceed with no evidence when `require_checksums=false`.
 
-Some backends override the default. Node handles target architecture and npm ranges; Python handles implementations, variants, catalogs, and prerelease policy; Java handles distributions and JDK/JRE; Rust passes channels or versions to its isolated rustup. Cargo registry tools fetch paired metadata/index source data, remove yanked releases, and resolve exact/latest/numeric-prefix selectors, while Cargo Git selectors are retained verbatim. See [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs), [`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs), [`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs), [`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs), and [`cargo_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/cargo_package.rs).
+Some backends override the default. Node handles target architecture and npm ranges; Python handles implementations, variants, catalogs, and prerelease policy; Java handles distributions and JDK/JRE; Rust passes channels or versions to its isolated rustup. Cargo registry tools fetch paired metadata/index source data, remove yanked releases, and resolve exact/latest/numeric-prefix selectors, while Cargo Git selectors are retained verbatim. Go command tools resolve exact/latest/numeric-prefix/pseudo-version selectors through ranked Go proxies and bind the discovered module root. See [`node.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/node.rs), [`python.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/python.rs), [`java.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/java.rs), [`rust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/rust.rs), [`cargo_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/cargo_package.rs), and [`go_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/go_package.rs).
 
 ## Lockfile fast path and boundary
 

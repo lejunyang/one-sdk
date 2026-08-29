@@ -86,6 +86,9 @@ Cargo developer-tool providers do not use either location as their build cache:
 each install gets a stage-private `HOME`, `CARGO_HOME`, target, and install root.
 Only an eligible controlled `cargo-binstall` executable is discovered at
 `<data>/cargo/bin`; temporary source/build workspace is removed before publication.
+Go developer-tool providers force their module and build caches to
+`<cache>/pkg/go-mod` and `<cache>/pkg/go-build`. Their `HOME`, `GOPATH`, `GOBIN`,
+and temp directories are stage-private and removed before publication.
 
 ## Deletion and confirmations
 

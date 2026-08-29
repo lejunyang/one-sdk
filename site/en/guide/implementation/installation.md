@@ -12,6 +12,9 @@ dynamic npm tool from racing its runtime.
 The same orchestration requires exactly one exact managed Rust request for any
 `cargo:` tool. Rust resolves and installs before Cargo tools enter the concurrent
 remainder, and its exact result is bound into each Cargo install identity.
+Go command packages use the same dependency barrier: one explicit or configured
+managed `go` request resolves and installs before every `go:` request, and its
+exact result is bound into each Go-tool identity.
 
 1. optionally refresh source probes for SDK-installing calls; the `lock`, `outdated`, and `list-remote` resolution-only paths do not execute this flag;
 2. find the backend, expand the version alias, and resolve an exact version;
@@ -33,6 +36,9 @@ lifecycle holds an identity lock across a sibling stage, prefers a controlled
 eligible `cargo-binstall`, falls back to `cargo install` only for exit 94, and
 atomically publishes validated binaries; see
 [Cargo developer tool implementation](./cargo-tools).
+Go developer tools reuse that native transaction and invoke one exact managed
+`go install` with a staged `GOBIN`; see
+[Go developer tool implementation](./go-tools).
 
 ## Backend plans
 
@@ -72,7 +78,7 @@ An artifact-cache hit during an actual pipeline run or reinstall still runs the 
 - The pipeline removes stale install trees and scratch at the start of the next attempt and removes scratch after successful materialization; failed extraction or materialization may leave scratch temporarily. It keeps `.partial` downloads for validated resume.
 - Checksums are policy-dependent unless the backend supplies one, attestation supplies an authenticated digest, or `require_checksums` is enabled. Guarantees therefore differ by backend.
 - `ensure_post_install` may have additional side effects. On a fresh Node install, Corepack failure removes the installation tree; on the already-installed fast path, `ensure_post_install` may fail while the existing completion marker remains.
-- Delegate backends such as Rust do not traverse the complete archive pipeline; Cargo developer tools also use their own native stage/receipt/seal transaction. Inspect those backends for their exact idempotency and verification boundaries.
-- For backends with a generic artifact receipt, a locked artifact URL fixes artifact identity and enables metadata-free reinstall. Reinstallation applies any available or policy-required checksum/attestation checks; with no digest/evidence and `require_checksums=false`, it may proceed without cryptographic integrity verification. npm tools do not use generic artifact receipts. Current schema 4 retains scope, installer, and optional native-lock identity while leaving the dependency-graph payload under installer ownership. Schema 2 graph sidecars remain a compatibility-read path only; see [npm developer tool implementation](./npm-tools). Cargo native metadata likewise describes runtime/source/replay identity rather than a complete graph, so cold offline installation is unsupported; see [Cargo developer tool implementation](./cargo-tools).
+- Delegate backends such as Rust do not traverse the complete archive pipeline; Cargo and Go developer tools also use their own native stage/receipt/seal transaction. Inspect those backends for their exact idempotency and verification boundaries.
+- For backends with a generic artifact receipt, a locked artifact URL fixes artifact identity and enables metadata-free reinstall. Reinstallation applies any available or policy-required checksum/attestation checks; with no digest/evidence and `require_checksums=false`, it may proceed without cryptographic integrity verification. npm tools do not use generic artifact receipts. Current schema 4 retains scope, installer, and optional native-lock identity while leaving the dependency-graph payload under installer ownership. Schema 2 graph sidecars remain a compatibility-read path only; see [npm developer tool implementation](./npm-tools). Cargo and Go native metadata likewise describe runtime/source/replay identity rather than a complete graph, so cold offline installation is unsupported; see [Cargo developer tool implementation](./cargo-tools) and [Go developer tool implementation](./go-tools).
 
 Core coverage is in [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs), [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs), [`backend/contract.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/contract.rs), and end-to-end [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs).

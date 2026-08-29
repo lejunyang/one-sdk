@@ -546,6 +546,7 @@ pub fn namespace_schema(namespace: &str) -> Option<&'static NamespaceSchema> {
         "github" => Some(&GITHUB_SCHEMA),
         "http" => Some(&HTTP_SCHEMA),
         "cargo" => Some(&CARGO_SCHEMA),
+        "go" => Some(&GO_SCHEMA),
         _ => None,
     }
 }
@@ -779,6 +780,23 @@ const CARGO_OPTIONS: &[OptionDefinition] = &[
     ),
 ];
 
+const GO_OPTIONS: &[OptionDefinition] = &[
+    option(
+        "tags",
+        "tags",
+        OptionEffect::Artifact,
+        true,
+        canonical_go_tags,
+    ),
+    option(
+        "env",
+        "env",
+        OptionEffect::Artifact,
+        true,
+        canonical_go_install_env,
+    ),
+];
+
 const fn option(
     name: &'static str,
     canonical_name: &'static str,
@@ -832,6 +850,16 @@ static CARGO_SCHEMA: NamespaceSchema = NamespaceSchema {
     options: OptionSchema {
         definitions: CARGO_OPTIONS,
         validator: validate_cargo_options,
+    },
+};
+
+static GO_SCHEMA: NamespaceSchema = NamespaceSchema {
+    namespace: "go",
+    subject_canonicalizer: canonical_go_subject,
+    selector_validator: validate_go_selector,
+    options: OptionSchema {
+        definitions: GO_OPTIONS,
+        validator: validate_go_options,
     },
 };
 
@@ -955,6 +983,64 @@ fn canonical_cargo_subject(value: &str) -> Result<String> {
     } else {
         canonical_cargo_crate_name(value)
     }
+}
+
+fn canonical_go_subject(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 4096
+        || value != value.trim()
+        || value.contains(['\\', '@', '?', '#', '%', ':', '!'])
+        || value.chars().any(char::is_control)
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err(Error::config(
+            "Go tool path must be canonical module or command-path text",
+        ));
+    }
+    let components = value.split('/').collect::<Vec<_>>();
+    if components.len() < 2 || !valid_go_host(components[0]) {
+        return Err(Error::config(
+            "Go tool path must start with a lowercase DNS module host and contain a path",
+        ));
+    }
+    if components[1..].iter().any(|component| {
+        component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.starts_with('.')
+            || component.ends_with('.')
+            || component.len() > 255
+            || is_windows_reserved_component(component)
+            || !component.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            })
+    }) {
+        return Err(Error::config(
+            "Go tool path contains an unsafe or non-canonical component",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn valid_go_host(host: &str) -> bool {
+    host.contains('.')
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                && label
+                    .bytes()
+                    .last()
+                    .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 fn canonical_cargo_crate_name(value: &str) -> Result<String> {
@@ -1386,6 +1472,84 @@ fn canonical_cargo_crate(value: &str) -> Result<Option<String>> {
     canonical_cargo_crate_name(value).map(Some)
 }
 
+fn canonical_go_tags(value: &str) -> Result<Option<String>> {
+    let mut tags = Vec::new();
+    for raw in value.split(',') {
+        let tag = raw.trim();
+        if tag.is_empty()
+            || tag.len() > 128
+            || !tag
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+        {
+            return Err(Error::config(format!("invalid Go build tag `{tag}`")));
+        }
+        tags.push(tag.to_string());
+    }
+    tags.sort();
+    tags.dedup();
+    Ok(Some(tags.join(",")))
+}
+
+fn canonical_go_install_env(value: &str) -> Result<Option<String>> {
+    let mut values = BTreeMap::new();
+    for assignment in value.split(';') {
+        let (name, value) = assignment.split_once('=').ok_or_else(|| {
+            Error::config("Go install env must use KEY=value assignments separated by `;`")
+        })?;
+        if name.trim() != name || value.trim() != value || value.is_empty() {
+            return Err(Error::config(
+                "Go install env contains a non-canonical assignment",
+            ));
+        }
+        validate_go_install_env_value(name, value)?;
+        if values.insert(name, value).is_some() {
+            return Err(Error::config(format!(
+                "duplicate Go install env key `{name}`"
+            )));
+        }
+    }
+    if values.is_empty() {
+        return Err(Error::config("Go install env must not be empty"));
+    }
+    Ok(Some(
+        values
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    ))
+}
+
+fn validate_go_install_env_value(name: &str, value: &str) -> Result<()> {
+    let valid = match name {
+        // Enabling cgo would make the host C compiler and linker part of the
+        // artifact identity. Until osdk can select and bind that toolchain,
+        // accept only the reproducible pure-Go mode.
+        "CGO_ENABLED" => value == "0",
+        "GOAMD64" => matches!(value, "v1" | "v2" | "v3" | "v4"),
+        "GO386" => matches!(value, "softfloat" | "sse2"),
+        "GOARM" => matches!(value, "5" | "6" | "7"),
+        "GOMIPS" | "GOMIPS64" => matches!(value, "hardfloat" | "softfloat"),
+        "GOEXPERIMENT" => {
+            value.len() <= 512
+                && value.split(',').all(|experiment| {
+                    !experiment.is_empty()
+                        && experiment
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                })
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(Error::config(format!(
+            "unsupported or invalid Go install env `{name}`; credentials and network/cache overrides are not accepted"
+        )));
+    }
+    Ok(())
+}
+
 fn canonical_exact(value: &str) -> Result<Option<String>> {
     reject_control_characters(value)?;
     Ok(Some(value.to_string()))
@@ -1632,6 +1796,112 @@ fn validate_cargo_selector(id: &ToolId, selector: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn validate_go_selector(_id: &ToolId, selector: Option<&str>) -> Result<()> {
+    let Some(selector) = selector else {
+        return Ok(());
+    };
+    if selector == "latest" || valid_cargo_semver_prefix(selector) {
+        return Ok(());
+    }
+    if selector.len() <= 256 && is_canonical_go_module_version(selector) {
+        return Ok(());
+    }
+    Err(Error::config(
+        "Go tool selectors must be latest, an exact semantic or pseudo-version, or a numeric semantic-version prefix",
+    ))
+}
+
+pub fn is_canonical_go_module_version(value: &str) -> bool {
+    if value.starts_with('v') {
+        return false;
+    }
+    let Ok(version) = semver::Version::parse(value) else {
+        return false;
+    };
+    if !version.build.is_empty() && version.build.as_str() != "incompatible" {
+        return false;
+    }
+    !looks_like_go_pseudo_version(&version) || valid_go_pseudo_version_text(value)
+}
+
+fn looks_like_go_pseudo_version(version: &semver::Version) -> bool {
+    let Some((before_revision, _)) = version.pre.as_str().rsplit_once('-') else {
+        return false;
+    };
+    before_revision
+        .rsplit_once('.')
+        .map_or(before_revision, |(_, timestamp)| timestamp)
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_go_pseudo_version_text(value: &str) -> bool {
+    let Ok(version) = semver::Version::parse(value) else {
+        return false;
+    };
+    if !version.build.is_empty() && version.build.as_str() != "incompatible" {
+        return false;
+    }
+    let pre = version.pre.as_str();
+    let Some((before_hash, revision)) = pre.rsplit_once('-') else {
+        return false;
+    };
+    let (prefix, timestamp) = before_hash
+        .rsplit_once('.')
+        .map_or((None, before_hash), |(prefix, timestamp)| {
+            (Some(prefix), timestamp)
+        });
+    let valid_prefix = match prefix {
+        None => version.minor == 0 && version.patch == 0,
+        Some("0") => true,
+        Some(prefix) => prefix.ends_with(".0"),
+    };
+    valid_prefix
+        && timestamp.len() == 14
+        && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        && valid_go_pseudo_timestamp(timestamp)
+        && revision.len() == 12
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_go_pseudo_timestamp(value: &str) -> bool {
+    if value.len() != 14 || !value.is_ascii() {
+        return false;
+    }
+    let parse = |range: std::ops::Range<usize>| value[range].parse::<u32>().ok();
+    let Some(year) = parse(0..4) else {
+        return false;
+    };
+    let Some(month) = parse(4..6) else {
+        return false;
+    };
+    let Some(day) = parse(6..8) else {
+        return false;
+    };
+    let Some(hour) = parse(8..10) else {
+        return false;
+    };
+    let Some(minute) = parse(10..12) else {
+        return false;
+    };
+    let Some(second) = parse(12..14) else {
+        return false;
+    };
+    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=max_day).contains(&day)
+}
+
 fn valid_cargo_semver_prefix(value: &str) -> bool {
     let mut components = value.split('.');
     let first = components.next();
@@ -1679,6 +1949,14 @@ fn validate_cargo_options(
             "Cargo option `crate` is supported only for Git repositories",
         ));
     }
+    Ok(())
+}
+
+fn validate_go_options(
+    _id: &ToolId,
+    _raw: &BTreeMap<String, String>,
+    _canonical: &CanonicalOptions,
+) -> Result<()> {
     Ok(())
 }
 
@@ -1946,7 +2224,7 @@ fn is_url_authority_at(subject: &str, at: usize) -> bool {
     };
     let authority_start = scheme_end + 3;
     let authority_end = subject[authority_start..]
-        .find(|character| matches!(character, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .map_or(subject.len(), |offset| authority_start + offset);
     (authority_start..authority_end).contains(&at)
 }
@@ -2265,6 +2543,88 @@ mod tests {
             "cargo:https://git.example.test/team/tool.git@rev:01234567",
             "cargo:https://git.example.test/team/tool.git@rev:0123456789ABCDEF0123456789ABCDEF01234567",
             "cargo:https://git.example.test/team/tool.git@0123456789abcdef0123456789abcdef01234567",
+        ] {
+            assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn go_module_and_command_paths_are_strict_and_case_preserving() {
+        for value in [
+            "go:example.com/acme/tool@1.2.3",
+            "go:example.com/acme/tool@1.2.3-beta.1",
+            "go:example.com/acme/tool/cmd/Tool@0.0.0-20240801123456-0123456789ab",
+            "go:example.com/acme/tool@latest",
+            "go:example.com/acme/tool@1",
+            "go:example.com/acme/tool@1.2",
+        ] {
+            assert!(ToolSpec::parse(value).is_ok(), "{value}");
+        }
+        assert_eq!(
+            ToolId::parse("go:example.com/Acme/Tool")
+                .unwrap()
+                .to_string(),
+            "go:example.com/Acme/Tool"
+        );
+
+        for invalid in [
+            "go:",
+            "go:example/acme",
+            "go:Example.com/acme/tool",
+            "go:example.com",
+            "go:example.com//tool",
+            "go:example.com/./tool",
+            "go:example.com/../tool",
+            "go:example.com/.hidden/tool",
+            "go:example.com/acme./tool",
+            "go:example.com/acme%2ftool",
+            "go:example.com/acme\\tool",
+            "go:example.com/acme/tool?x=1",
+            "go:example.com/acme/tool#main",
+            "go:example.com:443/acme/tool",
+            "go:example.com/acme/tool@^1",
+            "go:example.com/acme/tool@v1.2.3",
+            "go:example.com/acme/tool@branch:main",
+            "go:example.com/acme/tool@1.2.3+metadata",
+            "go:example.com/acme/tool@0.0.0-2024080112345-0123456789ab",
+            "go:example.com/acme/tool@0.0.0-20240801123456-0123456789aZ",
+            "go:example.com/acme/tool@0.0.0-20241301123456-0123456789ab",
+            "go:example.com/acme/tool@0.0.0-20240230123456-0123456789ab",
+        ] {
+            assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
+        }
+        assert!(ToolSpec::parse("go:example.com/acme/tool@1.2.3+incompatible").is_ok());
+        assert!(ToolSpec::parse(
+            "go:example.com/acme/tool@2.0.0-20240801123456-0123456789ab+incompatible"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn go_tags_and_install_env_are_canonical_identity_options() {
+        let parsed = ToolSpec::parse(
+            "go:example.com/acme/tool[tags='sqlite,netgo,sqlite',env='GOAMD64=v3;CGO_ENABLED=0']@1.2.3",
+        )
+        .unwrap();
+        assert_eq!(parsed.options.get("tags").unwrap(), "netgo,sqlite");
+        assert_eq!(
+            parsed.options.get("env").unwrap(),
+            "CGO_ENABLED=0;GOAMD64=v3"
+        );
+        assert_eq!(
+            dynamic_identity_options(&parsed.id, parsed.options.as_map())
+                .unwrap()
+                .into_map(),
+            parsed.options.into_map()
+        );
+
+        for invalid in [
+            "go:example.com/acme/tool[tags=net-go]@1.2.3",
+            "go:example.com/acme/tool[env=GOBIN=/tmp/bin]@1.2.3",
+            "go:example.com/acme/tool[env=GOPROXY=https://user:secret@example.test]@1.2.3",
+            "go:example.com/acme/tool[env=CGO_ENABLED=2]@1.2.3",
+            "go:example.com/acme/tool[env=CGO_ENABLED=1]@1.2.3",
+            "go:example.com/acme/tool[env=CGO_ENABLED=0;CGO_ENABLED=1]@1.2.3",
         ] {
             assert!(ToolSpec::parse(invalid).is_err(), "{invalid}");
         }

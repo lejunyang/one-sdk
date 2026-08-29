@@ -118,7 +118,7 @@ osdk reshim
 
 | Command | Exact semantics |
 | --- | --- |
-| `list [TOOL]` | List local versions with completion markers; without a tool, include registered backends and inventory-backed dynamic tools found on disk, including GitHub and Cargo tools |
+| `list [TOOL]` | List local versions with completion markers; without a tool, include registered backends and inventory-backed dynamic tools found on disk, including GitHub, Cargo, and Go command tools |
 | `list-remote TOOL [FILTER]` | List stable remote versions; optional `FILTER` is a string prefix |
 | `current [TOOL]` | Show the raw request and discovery source for the current directory; the request need not be installed or remotely resolved |
 | `where TOOL[@VERSION]` | Locate an exact version; a bare/non-exact request ignores the project selection and chooses the last string-sorted installed entry |

@@ -118,6 +118,21 @@ runtime_version = "1.91.1"
 replay = "version-only"
 source = "sparse+https://index.crates.io/"
 
+[platforms.linux-x64.tools.go]
+request = "1.24"
+version = "1.24.6"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls"]
+request = "0.20"
+version = "0.20.0"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls".native]
+runtime = "go"
+runtime_version = "1.24.6"
+replay = "version-only"
+source = "https://proxy.golang.org"
+module = "golang.org/x/tools/gopls"
+
 [models.qwen]
 provider = "huggingface"
 repository = "Qwen/Qwen2.5-7B-Instruct"
@@ -170,6 +185,13 @@ reject `cargo:` entries; regenerate them as schema 4. See
 Registry Cargo entries additionally retain the exact selected canonical,
 credential-free sparse HTTPS index in `native.source`; Git Cargo entries cannot
 carry that field.
+
+Go-module entries require a matching exact `go` entry. They use
+`version-only`, retain the selected canonical credential-free proxy in
+`native.source`, and retain the discovered module root in `native.module`. This
+is compact resolution metadata, not a copied `go.sum` or transitive module
+graph, so only an already complete exact install can be reused offline. Schemas
+1 through 3 reject `go:` entries. See [Go Developer Tools](./go-tools).
 
 For Node, `lock -o arch=...` writes the target-architecture section. osdk has no
 cross-architecture download-only mode, and installation rejects an artifact that

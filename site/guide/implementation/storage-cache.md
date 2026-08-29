@@ -26,6 +26,9 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 对 Cargo 开发工具，指纹还绑定精确受管 Rust 版本/平台、有界构建关键身份与 Registry/Git material。安装使用
 sibling stage，其中包含私有 `home`、`cargo-home`、`target` 与 `tmp` 目录；这些 workspace
 会在发布前删除，最终只保留已校验 `bin` 输出与原生 metadata。
+对 Go 开发工具，指纹会绑定精确受管 Go runtime、所选 proxy/module root、tags 与白名单
+构建环境。私有 home/GOPATH/temp 留在 sibling stage，而 module/build cache 分别共享在
+`<cache>/pkg/go-mod` 与 `<cache>/pkg/go-build`。
 
 ## SDK 安装管线与锁
 
@@ -54,6 +57,8 @@ sibling stage，其中包含私有 `home`、`cargo-home`、`target` 与 `tmp` �
 CAS 去重的是 osdk 已验证并解压的 SDK 文件和模型文件。它**不解析、摄取或跨 npm/pnpm/Yarn/Bun/Deno/pip/Go/Cargo/Maven/Gradle 去重项目依赖包**。Aube 驱动的 `npm:<package>` 操作共享 `<cache>/aube/v1/cache>` 与 `<data>/store/aube`，原生 npm/pnpm 则使用各自的下游 cache/store；这些包内容都不进入 BLAKE3 SDK CAS。
 Cargo 开发工具的 source 与构建数据同样只存在于 stage，不会提升为共享 Cargo cache 或
 CAS；最终指纹化根只保留已发布 binary 与 osdk metadata。
+Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 SDK CAS；发布后的 Go
+工具根只保留已校验 binary 与 osdk metadata。
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) 与 backend 的 `exec_env` 只是把各 manager 的原生缓存重定向到 `<cache>/pkg` 下的独立子目录，例如 npm、pnpm store、Yarn、Bun 和 Deno。变量只有在用户未设置时才注入；若值来自上一轮 osdk hook，则允许刷新。目录共用一个父根不代表内容协议统一，因此不存在跨 manager 的 package CAS 或跨 manager blob 去重。
 

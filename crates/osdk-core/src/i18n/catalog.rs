@@ -2181,36 +2181,40 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
              selection in project osdk.toml and exact Node/npm metadata in osdk.lock. `--global` ignores the current \
              project, installs into an osdk-managed prefix, and updates the user config and lock. \
              Installer auto-selection prefers embedded Aube when the project lock is compatible; npm \
-             package build scripts are disabled by default.\n\nEXAMPLES:\n  osdk use node@20\n  osdk use \
-             npm:prettier@3 -o installer=auto\n  osdk use -g npm:prettier@3 -o allow_builds=false",
+             package build scripts are disabled by default. A `go:<module-or-command-path>` tool \
+             uses one exact managed Go runtime and records its selected proxy/module root in \
+             osdk.lock.\n\nEXAMPLES:\n  osdk use node@20\n  osdk use npm:prettier@3 -o \
+             installer=auto\n  osdk use go@1.24\n  osdk use \
+             go:golang.org/x/tools/gopls@0.20.0\n  osdk use -g npm:prettier@3 -o allow_builds=false",
             "如有需要则安装工具并使其生效。对于普通 SDK，默认写入项目版本固定；--global 写入用户默认值。\
              对 Node 项目中的 `npm:<package>`，默认会修改 package.json 及其原生锁文件，然后在项目 \
              osdk.toml 中记录 npm 选择，并在 osdk.lock 中记录精确的 Node/npm 元数据。`--global` 会忽略当前项目，安装到 \
              osdk 管理的隔离前缀，并更新用户配置和锁文件。安装器自动选择会在项目锁格式兼容时优先使用\
-             内嵌 Aube；npm 包构建脚本默认禁用。\n\n示例：\n  \
-             osdk use node@20\n  osdk use npm:prettier@3 -o installer=auto\n  osdk use -g \
-             npm:prettier@3 -o allow_builds=false",
+             内嵌 Aube；npm 包构建脚本默认禁用。`go:<module-or-command-path>` 工具使用一个精确受管 \
+             Go runtime，并在 osdk.lock 中记录所选 proxy/module root。\n\n示例：\n  osdk use \
+             node@20\n  osdk use npm:prettier@3 -o installer=auto\n  osdk use go@1.24\n  osdk use \
+             go:golang.org/x/tools/gopls@0.20.0\n  osdk use -g npm:prettier@3 -o allow_builds=false",
         ),
     );
     m.insert(
         "help.use.arg.tool",
         (
-            "Tool and version, e.g. `node@20` or `npm:prettier@3`",
-            "工具与版本，例如 `node@20` 或 `npm:prettier@3`",
+            "Tool and version, e.g. `node@20`, `npm:prettier@3`, or `go:golang.org/x/tools/gopls@0.20.0`",
+            "工具与版本，例如 `node@20`、`npm:prettier@3` 或 `go:golang.org/x/tools/gopls@0.20.0`",
         ),
     );
     m.insert(
         "help.use.flag.global",
         (
-            "Use global scope; npm packages ignore the current project and use an osdk-managed prefix and user lock",
-            "使用全局作用域；npm 包会忽略当前项目，使用 osdk 管理的隔离前缀和用户锁文件",
+            "Use global selection; npm packages use a controlled prefix, while Go tools use the user configuration and lock",
+            "使用全局选择；npm 包使用受控前缀，Go 工具使用用户配置与用户锁文件",
         ),
     );
     m.insert(
         "help.use.flag.opt",
         (
-            "Backend option as key=value (repeatable); npm packages support `installer=auto|aube|npm|pnpm` (auto prefers compatible Aube) and `allow_builds=false|true|package,...` for non-project installs (npm accepts booleans only; project installs always disable scripts)",
-            "后端选项，形如 key=value（可重复）；npm 包支持 `installer=auto|aube|npm|pnpm`（auto 优先使用兼容的 Aube），非项目安装支持 `allow_builds=false|true|包名,...`（npm 仅接受布尔值；项目安装始终禁用脚本）",
+            "Backend option as key=value (repeatable); npm packages support `installer=auto|aube|npm|pnpm` (auto prefers compatible Aube) and `allow_builds=false|true|package,...` for non-project installs (npm accepts booleans only; project installs always disable scripts); Go tools support `tags` and allowlisted `env`",
+            "后端选项，形如 key=value（可重复）；npm 包支持 `installer=auto|aube|npm|pnpm`（auto 优先使用兼容的 Aube），非项目安装支持 `allow_builds=false|true|包名,...`（npm 仅接受布尔值；项目安装始终禁用脚本）；Go 工具支持 `tags` 与白名单 `env`",
         ),
     );
     m.insert(
@@ -2227,8 +2231,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.uninstall.flag.global",
         (
-            "Remove a user-global npm package installation, configuration, lock entry, and shims",
-            "删除用户级全局 npm 包安装及其配置、锁条目和 shim",
+            "Remove a user-global npm package installation, configuration, lock entry, and shims; other backends are not supported",
+            "删除用户级全局 npm 包安装及其配置、锁条目和 shim；其他 backend 尚不支持",
         ),
     );
     m.insert(
@@ -2248,8 +2252,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.where.flag.global",
         (
-            "Resolve an npm package from global scope, ignoring project selection",
-            "从全局作用域定位 npm 包，忽略项目选择",
+            "Resolve an npm package from global scope, ignoring project selection; other backends are not supported",
+            "从全局作用域定位 npm 包并忽略项目选择；其他 backend 尚不支持",
         ),
     );
     m.insert(

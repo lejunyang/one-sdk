@@ -113,8 +113,9 @@ osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 `package.json` 中的 Node 版本声明。
 纯数据声明式 backend 与内置归档 backend 共用锁定产物 URL、checksum、下载缓存和
 离线重装路径。
-对 osdk 自有的动态 `npm:<package>`、`cargo:<crate-or-https-url>` 与
-`github:owner/repo` 安装，会改变选择或构建结果的选项与受管 runtime 依赖也属于安装身份。
+对 osdk 自有的动态 `npm:<package>`、`cargo:<crate-or-https-url>`、
+`go:<module-or-command-path>` 与 `github:owner/repo` 安装，会改变选择或构建结果的选项与
+受管 runtime 依赖也属于安装身份。
 osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 `b3-v2:` 身份放入独立的指纹化安装根，因此同一 backend/version 的多个身份可以共存。
 复用、activation、shim、`where`、`uninstall` 与 `reshim` 都只选择配置精确匹配的身份。旧
@@ -235,6 +236,26 @@ osdk use \
 revision 记录为 `immutable-revision`，Git HEAD/tag/branch 则记录为 `floating-ref`。
 
 指南：[Cargo 开发工具](site/guide/cargo-tools.md)
+
+## 场景：安装 Go command package
+
+区分 Go runtime 与 Go command 命名空间，再使用精确的受管 Go toolchain 安装命令：
+
+```bash
+osdk use go@1.24
+osdk use go:golang.org/x/tools/gopls@0.20.0
+eval "$(osdk activate bash)"
+gopls version
+```
+
+`go:` 支持 module 或嵌套 command path、`latest`、数字前缀、精确语义版本和规范伪版本。
+`tags` 与受限 `env` 会参与身份；支持 `CGO_ENABLED=0`，在 C toolchain 能纳入身份绑定前
+拒绝开启 cgo。osdk 会选择并记录一个 Go proxy，以 staged `GOBIN` 只调用一次精确受管
+`go`，module/build cache 留在 osdk cache 根中。紧凑的 schema 4 lock 记录 proxy、module
+root 与精确 Go runtime，不记录传递 module graph；因此可离线复用精确匹配的完整安装，
+但不能进行全新离线构建。
+
+指南：[Go 开发工具](site/guide/go-tools.md)
 
 ## 场景：使用各语言生态
 
@@ -451,7 +472,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 平台 | Windows、macOS、Linux |
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
-| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
+| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
 | 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、只读 mirror plan、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
@@ -468,6 +489,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [包管理器与 Registry 选择](site/guide/package-managers.md)
 - [npm 开发工具](site/guide/npm-tools.md)
 - [Cargo 开发工具](site/guide/cargo-tools.md)
+- [Go 开发工具](site/guide/go-tools.md)
 - [直接 HTTPS 制品](site/guide/http-artifacts.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)

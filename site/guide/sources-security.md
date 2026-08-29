@@ -116,6 +116,9 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
 - `cargo:` 工具只有在来源、selector、选项、平台和精确受管 Rust 身份都匹配时，才能
   复用已有完整安装。全新离线安装或修复不受支持，因为 Cargo 原生 lock 与 `osdk.lock`
   都不包含完整 source graph；
+- `go:` 工具也只能复用身份精确匹配的完整安装。其 schema 4 lock 会记录选中的 Go
+  proxy、发现的 module root、公开构建选项与精确受管 Go 身份，但不记录全新离线构建所需
+  的传递 module graph；
 - `attestations=required` 还要求按 artifact SHA-256 缓存的证明 bundle，lock evidence
   不能代替重新验证。
 

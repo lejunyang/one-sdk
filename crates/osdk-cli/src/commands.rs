@@ -40,12 +40,15 @@ fn apply_source_override(app: &mut App, tool: &str) {
 pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let explicit = !tools.is_empty();
     let use_lock = !explicit && opts.is_empty();
-    let requests = if use_lock {
-        requests_from_lock(app)?.unwrap_or(gather_requests(app, tools)?)
+    let (requests, trusted_replay) = if use_lock {
+        match requests_from_lock(app)? {
+            Some(requests) => (requests, true),
+            None => (gather_requests(app, tools)?, false),
+        }
     } else {
-        gather_requests(app, tools)?
+        (gather_requests(app, tools)?, false)
     };
-    install_requests(app, requests, opts).await?;
+    install_requests(app, requests, opts, trusted_replay).await?;
     Ok(())
 }
 
@@ -133,7 +136,7 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
 
 pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let requests = gather_requests(app, tools)?;
-    let resolved = install_requests(app, requests, opts).await?;
+    let resolved = install_requests(app, requests, opts, false).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &resolved)?;
@@ -143,7 +146,7 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 
 pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
     let requests = gather_requests(app, tools)?;
-    let resolved = install_requests(app, requests, Vec::new()).await?;
+    let resolved = install_requests(app, requests, Vec::new(), false).await?;
     let mut paths = Vec::new();
     let mut env = std::collections::BTreeMap::new();
     for (request, version) in &resolved {
@@ -504,19 +507,25 @@ fn print_registry_plan(manager: PackageManager, plan: &RegistryPlan) {
 
 async fn install_requests(
     app: &mut App,
-    requests: Vec<ToolRequest>,
+    mut requests: Vec<ToolRequest>,
     opts: Vec<String>,
+    trusted_replay: bool,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
+    for request in &mut requests {
+        if !trusted_replay {
+            reject_public_internal_options(&request.options)?;
+        }
+        for (key, value) in &parsed_opts {
+            request.options.insert(key.clone(), value.clone());
+        }
+    }
     let mut requests = inject_managed_dependencies(app, requests)?;
     if requests.is_empty() {
         println!("{}", t!("msg.nothing_to_install"));
         return Ok(Vec::new());
     }
     for req in &mut requests {
-        for (k, v) in &parsed_opts {
-            req.options.insert(k.clone(), v.clone());
-        }
         apply_source_override(app, &req.backend);
     }
     // The compatibility install/exec/lock paths always target the isolated
@@ -541,15 +550,23 @@ async fn install_requests(
         generate_shims_for(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
-    let (rust_requests, mut remaining_requests) =
+    let (rust_requests, remaining_requests) =
         partition_runtime_dependency(remaining_requests, "rust", "cargo:");
     for request in rust_requests {
         let (backend, version) = install_one_without_shims(app, &request).await?;
         generate_shims_for(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
+    let (go_requests, mut remaining_requests) =
+        partition_runtime_dependency(remaining_requests, "go", "go:");
+    for request in go_requests {
+        let (backend, version) = install_one_without_shims(app, &request).await?;
+        generate_shims_for(app, backend.as_ref(), &version)?;
+        resolved.push((request, version));
+    }
     bind_request_node_version(&mut remaining_requests, &resolved);
     bind_request_rust_version(&mut remaining_requests, &resolved)?;
+    bind_request_go_version(&mut remaining_requests, &resolved)?;
     let jobs = app.ctx.config.settings.jobs.max(1);
     let installed = stream::iter(remaining_requests.into_iter().map(|req| {
         let app_ref: &App = app;
@@ -581,6 +598,12 @@ fn resolved_rust_version(resolved: &[(ToolRequest, ToolVersion)]) -> Option<Stri
         .find_map(|(_, version)| (version.backend == "rust").then_some(version.version.clone()))
 }
 
+fn resolved_go_version(resolved: &[(ToolRequest, ToolVersion)]) -> Option<String> {
+    resolved
+        .iter()
+        .find_map(|(_, version)| (version.backend == "go").then_some(version.version.clone()))
+}
+
 fn exact_rust_version(version: &str) -> bool {
     matches!(VersionSpec::parse(version), VersionSpec::Exact(exact) if exact == version)
 }
@@ -592,6 +615,10 @@ fn require_exact_rust_spec(spec: &VersionSpec) -> Result<()> {
     anyhow::bail!(
         "Cargo tools require one exact managed Rust version; configure `rust = \"1.91.1\"` or include `rust@1.91.1`"
     )
+}
+
+fn exact_go_version(version: &str) -> bool {
+    matches!(VersionSpec::parse(version), VersionSpec::Exact(exact) if exact == version)
 }
 
 fn bind_request_node_version(
@@ -651,6 +678,32 @@ fn bind_resolved_rust_version(resolved: &mut [(ToolRequest, ToolVersion)]) -> Re
     Ok(())
 }
 
+fn bind_resolved_go_version(resolved: &mut [(ToolRequest, ToolVersion)]) -> Result<()> {
+    if !resolved
+        .iter()
+        .any(|(_, version)| version.backend.starts_with("go:"))
+    {
+        return Ok(());
+    }
+    let go_version = resolved_go_version(resolved)
+        .ok_or_else(|| anyhow!("Go tools require exactly one managed Go dependency"))?;
+    if !exact_go_version(&go_version) {
+        anyhow::bail!("Go tools require an exact resolved Go version, got `{go_version}`");
+    }
+    for (_, version) in resolved {
+        if version.backend.starts_with("go:") {
+            version
+                .options
+                .insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), "go".into());
+            version.options.insert(
+                LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
+                go_version.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn bind_request_rust_version(
     requests: &mut [ToolRequest],
     resolved: &[(ToolRequest, ToolVersion)],
@@ -674,6 +727,35 @@ fn bind_request_rust_version(
             request.options.insert(
                 LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
                 rust_version.clone(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn bind_request_go_version(
+    requests: &mut [ToolRequest],
+    resolved: &[(ToolRequest, ToolVersion)],
+) -> Result<()> {
+    if !requests
+        .iter()
+        .any(|request| request.backend.starts_with("go:"))
+    {
+        return Ok(());
+    }
+    let go_version = resolved_go_version(resolved)
+        .ok_or_else(|| anyhow!("Go tools require exactly one managed Go dependency"))?;
+    if !exact_go_version(&go_version) {
+        anyhow::bail!("Go tools require an exact resolved Go version, got `{go_version}`");
+    }
+    for request in requests {
+        if request.backend.starts_with("go:") {
+            request
+                .options
+                .insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), "go".into());
+            request.options.insert(
+                LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
+                go_version.clone(),
             );
         }
     }
@@ -709,20 +791,29 @@ fn mark_isolated_npm_scope(requests: &mut [ToolRequest]) {
 
 async fn resolve_requests(
     app: &mut App,
-    requests: Vec<ToolRequest>,
+    mut requests: Vec<ToolRequest>,
     opts: Vec<String>,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
-    let requests = inject_managed_dependencies(app, requests)?;
-    let (rust_requests, remaining_requests) =
-        partition_runtime_dependency(requests, "rust", "cargo:");
-    let requests = rust_requests.into_iter().chain(remaining_requests);
-    let mut resolved = Vec::new();
-    for mut request in requests {
+    for request in &mut requests {
+        reject_public_internal_options(&request.options)?;
         for (key, value) in &parsed_opts {
             request.options.insert(key.clone(), value.clone());
         }
+    }
+    let requests = inject_managed_dependencies(app, requests)?;
+    let (rust_requests, remaining_requests) =
+        partition_runtime_dependency(requests, "rust", "cargo:");
+    let (go_requests, remaining_requests) =
+        partition_runtime_dependency(remaining_requests, "go", "go:");
+    let requests = rust_requests
+        .into_iter()
+        .chain(go_requests)
+        .chain(remaining_requests);
+    let mut resolved = Vec::new();
+    for mut request in requests {
         bind_request_rust_version(std::slice::from_mut(&mut request), &resolved)?;
+        bind_request_go_version(std::slice::from_mut(&mut request), &resolved)?;
         mark_isolated_npm_scope(std::slice::from_mut(&mut request));
         apply_source_override(app, &request.backend);
         let backend = app.registry.get(&request.backend)?;
@@ -732,6 +823,7 @@ async fn resolve_requests(
         resolved.push((request, version));
     }
     bind_resolved_rust_version(&mut resolved)?;
+    bind_resolved_go_version(&mut resolved)?;
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
     Ok(resolved)
 }
@@ -758,21 +850,25 @@ fn project_lock_path(app: &App, cwd: &std::path::Path) -> std::path::PathBuf {
 fn parse_opts(opts: &[String]) -> Result<Vec<(String, String)>> {
     opts.iter()
         .map(|s| {
-            s.split_once('=')
+            let (key, value) = s
+                .split_once('=')
                 .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-                .ok_or_else(|| anyhow!(t!("err.invalid_opt", val = s)))
+                .ok_or_else(|| anyhow!(t!("err.invalid_opt", val = s)))?;
+            if key.starts_with("__osdk_") {
+                anyhow::bail!("internal option `{key}` cannot be set by the user");
+            }
+            Ok((key, value))
         })
         .collect()
 }
 
-/// Resolve, install, and shim a single request.
-async fn install_one(app: &mut App, req: &ToolRequest) -> Result<ToolVersion> {
-    apply_source_override(app, &req.backend);
-    install_requests(app, vec![req.clone()], Vec::new())
-        .await?
-        .into_iter()
-        .find_map(|(request, version)| (request.backend == req.backend).then_some(version))
-        .ok_or_else(|| anyhow!("requested tool was not installed"))
+fn reject_public_internal_options(
+    options: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    if let Some(key) = options.keys().find(|key| key.starts_with("__osdk_")) {
+        anyhow::bail!("internal option `{key}` cannot be set by the user");
+    }
+    Ok(())
 }
 
 async fn install_one_without_shims(
@@ -825,7 +921,11 @@ fn expand_request_alias(
 
 fn bind_dynamic_request_options(request: &ToolRequest, version: &mut ToolVersion) {
     if version.backend.contains(':') {
-        version.options.extend(request.options.clone());
+        for (name, value) in &request.options {
+            if !name.starts_with("__osdk_") || !version.options.contains_key(name) {
+                version.options.insert(name.clone(), value.clone());
+            }
+        }
     }
 }
 
@@ -884,7 +984,7 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        return inject_managed_dependencies(app, requests);
+        return Ok(requests);
     }
     // From config pins.
     let mut out = Vec::new();
@@ -959,7 +1059,7 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
                 .unwrap_or_default(),
         });
     }
-    inject_managed_dependencies(app, out)
+    Ok(out)
 }
 
 fn inherit_configured_options_from(
@@ -1029,7 +1129,7 @@ fn apply_use_options(
     opts: &[String],
     configured_key: Option<&str>,
 ) -> Result<()> {
-    if global && request.backend.starts_with("npm:") {
+    if global && (request.backend.starts_with("npm:") || request.backend.starts_with("go:")) {
         inherit_configured_options_from(
             request,
             &config.global_tool_configs,
@@ -1047,6 +1147,7 @@ fn apply_use_options(
     for (key, value) in parse_opts(opts)? {
         request.options.insert(key, value);
     }
+    reject_public_internal_options(&request.options)?;
     Ok(())
 }
 
@@ -1091,7 +1192,71 @@ fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<V
 
 fn inject_managed_dependencies(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
     let requests = inject_node_dependency(app, requests)?;
-    inject_rust_dependency(app, requests)
+    let requests = inject_rust_dependency(app, requests)?;
+    inject_go_dependency(app, requests)
+}
+
+fn inject_go_dependency(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
+    let cwd = std::env::current_dir()?;
+    inject_go_dependency_at(app, requests, &cwd)
+}
+
+fn inject_go_dependency_at(
+    app: &App,
+    mut requests: Vec<ToolRequest>,
+    cwd: &std::path::Path,
+) -> Result<Vec<ToolRequest>> {
+    if !requests
+        .iter()
+        .any(|request| request.backend.starts_with("go:"))
+    {
+        return Ok(requests);
+    }
+    for request in &mut requests {
+        if request.backend == "golang" {
+            request.backend = "go".into();
+        }
+    }
+    let go_requests = requests
+        .iter()
+        .filter(|request| request.backend == "go")
+        .count();
+    if go_requests > 1 {
+        anyhow::bail!("Go tools require exactly one managed Go request");
+    }
+    if go_requests == 1 {
+        return Ok(requests);
+    }
+
+    let backend = app.registry.get("go")?;
+    let active = osdk_core::version::resolver::resolve_active(
+        "go",
+        cwd,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "Go tools require a managed Go selection; configure `go = \"1.24\"` or include `go@1.24`"
+        )
+    })?;
+    let spec = if active.is_range {
+        VersionSpec::parse_range(&active.spec)?
+    } else {
+        VersionSpec::parse(&active.spec)
+    };
+    requests.push(ToolRequest {
+        backend: "go".into(),
+        spec,
+        options: app
+            .ctx
+            .config
+            .tool_configs
+            .get("go")
+            .map(|entry| entry.to_request_options())
+            .unwrap_or_default(),
+    });
+    Ok(requests)
 }
 
 fn inject_rust_dependency(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
@@ -1287,8 +1452,25 @@ async fn use_legacy_cmd(
     global: bool,
     configured_key: Option<String>,
 ) -> Result<()> {
-    let persisted_options = req.options.clone();
-    let tv = install_one(app, &req).await?;
+    let runtime_override = if global && req.backend.starts_with("go:") {
+        Some(global_go_dependency_request(app)?)
+    } else {
+        None
+    };
+    let mut install_input = vec![req.clone()];
+    if let Some(runtime) = runtime_override {
+        install_input.push(runtime);
+    }
+    let installed = install_requests(app, install_input, Vec::new(), false).await?;
+    let tv = installed
+        .iter()
+        .find_map(|(request, version)| (request.backend == req.backend).then_some(version.clone()))
+        .ok_or_else(|| anyhow!("requested tool was not installed"))?;
+    let persisted_options = if req.backend.starts_with("go:") {
+        osdk_core::backend::dynamic::identity_options(&req.backend, &tv.options)?
+    } else {
+        req.options.clone()
+    };
     // Pin the exact spec string the user typed (verbatim after `@`), so
     // channels like `stable` or `temurin-17` are preserved rather than being
     // normalized to `latest`. Bare `tool` (no `@`) pins the resolved version.
@@ -1328,7 +1510,49 @@ async fn use_legacy_cmd(
             )
         );
     }
+    if req.backend.starts_with("go:") {
+        let lock_path = if global {
+            app.ctx.dirs.user_lock_file()
+        } else {
+            project_lock_path(app, &std::env::current_dir()?)
+        };
+        crate::lockfile::upsert_resolved_many_with_scope(
+            &lock_path,
+            app.ctx.platform,
+            &app.ctx.dirs,
+            &installed,
+            if global {
+                crate::lockfile::LockScope::Global
+            } else {
+                crate::lockfile::LockScope::Project
+            },
+        )?;
+    }
     Ok(())
+}
+
+fn global_go_dependency_request(app: &App) -> Result<ToolRequest> {
+    let spec = app
+        .ctx
+        .config
+        .global_tools
+        .get("go")
+        .ok_or_else(|| {
+            anyhow!(
+                "global Go tools require a global managed Go selection; configure `go = \"1.24\"` globally"
+            )
+        })?;
+    Ok(ToolRequest {
+        backend: "go".into(),
+        spec: VersionSpec::parse(spec),
+        options: app
+            .ctx
+            .config
+            .global_tool_configs
+            .get("go")
+            .map(|entry| entry.to_request_options())
+            .unwrap_or_default(),
+    })
 }
 
 #[derive(Debug)]
@@ -5642,6 +5866,178 @@ mod command_flow_tests {
     }
 
     #[test]
+    fn go_requests_inject_configured_fuzzy_runtime_and_bind_exact_resolution() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(&user_config, "[tools]\ngo = \"1.24\"\n").unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let tool = ToolRequest::parse("go:example.com/acme/tool@1.2.3").unwrap();
+
+        let requests = inject_go_dependency_at(&app, vec![tool], &project).unwrap();
+        let runtime = requests
+            .iter()
+            .find(|request| request.backend == "go")
+            .unwrap();
+        assert_eq!(runtime.spec, VersionSpec::Prefix("1.24".into()));
+
+        let (runtime, mut remaining) = partition_runtime_dependency(requests, "go", "go:");
+        let resolved = vec![(runtime[0].clone(), ToolVersion::new("go", "1.24.6"))];
+        bind_request_go_version(&mut remaining, &resolved).unwrap();
+        assert_eq!(remaining[0].options[LOCKED_NATIVE_RUNTIME_OPTION], "go");
+        assert_eq!(
+            remaining[0].options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
+            "1.24.6"
+        );
+    }
+
+    #[test]
+    fn generic_opts_do_not_pollute_injected_go_runtime() {
+        let mut tool = ToolRequest::parse("go:example.com/acme/tool@1.2.3").unwrap();
+        for (key, value) in parse_opts(&["tags=netgo".into()]).unwrap() {
+            tool.options.insert(key, value);
+        }
+        let requests = vec![tool, ToolRequest::parse("go@1.24").unwrap()];
+        let runtime = requests
+            .iter()
+            .find(|request| request.backend == "go")
+            .unwrap();
+        let tool = requests
+            .iter()
+            .find(|request| request.backend.starts_with("go:"))
+            .unwrap();
+        assert!(runtime.options.is_empty());
+        assert_eq!(tool.options["tags"], "netgo");
+    }
+
+    #[test]
+    fn go_requests_preserve_one_explicit_runtime_and_reject_duplicates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let tool = ToolRequest::parse("go:example.com/acme/tool@1.2.3").unwrap();
+        let runtime = ToolRequest::parse("go@latest").unwrap();
+
+        let requests =
+            inject_go_dependency_at(&app, vec![tool.clone(), runtime.clone()], &project).unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.backend == "go")
+                .count(),
+            1
+        );
+        let error = inject_go_dependency_at(&app, vec![tool, runtime.clone(), runtime], &project)
+            .unwrap_err();
+        assert!(error.to_string().contains("exactly one managed Go"));
+    }
+
+    #[test]
+    fn resolved_go_lock_metadata_requires_an_exact_runtime_result() {
+        let mut resolved = vec![
+            (
+                ToolRequest::parse("go:example.com/acme/tool@1.2.3").unwrap(),
+                ToolVersion::new("go:example.com/acme/tool", "1.2.3"),
+            ),
+            (
+                ToolRequest::parse("go@1.24").unwrap(),
+                ToolVersion::new("go", "1.24.6"),
+            ),
+        ];
+        bind_resolved_go_version(&mut resolved).unwrap();
+        assert_eq!(resolved[0].1.options[LOCKED_NATIVE_RUNTIME_OPTION], "go");
+        assert_eq!(
+            resolved[0].1.options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
+            "1.24.6"
+        );
+
+        resolved[1].1.version = "latest".into();
+        assert!(bind_resolved_go_version(&mut resolved).is_err());
+    }
+
+    #[test]
+    fn user_options_cannot_inject_private_go_replay_metadata() {
+        for key in [
+            "__osdk_native_replay",
+            "__osdk_native_runtime",
+            "__osdk_native_runtime_version",
+            "__osdk_go_proxy",
+            "__osdk_go_module",
+        ] {
+            let option = format!("{key}=value");
+            let error = parse_opts(&[option]).unwrap_err();
+            assert!(error.to_string().contains("internal option"), "{key}");
+            let error = reject_public_internal_options(&std::collections::BTreeMap::from([(
+                key.to_string(),
+                "value".into(),
+            )]))
+            .unwrap_err();
+            assert!(error.to_string().contains("internal option"), "{key}");
+        }
+    }
+
+    #[test]
+    fn global_go_dependency_uses_global_selection_not_project_override() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(&user_config, "[tools]\ngo = \"1.24\"\n").unwrap();
+        std::fs::write(project.join("osdk.toml"), "[tools]\ngo = \"1.23\"\n").unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        assert_eq!(app.ctx.config.tools["go"], "1.23");
+        let request = global_go_dependency_request(&app).unwrap();
+        assert_eq!(request.backend, "go");
+        assert_eq!(request.spec, VersionSpec::Prefix("1.24".into()));
+    }
+
+    #[test]
+    fn go_use_persists_canonical_public_options_only() {
+        let request = ToolRequest {
+            backend: "go:example.com/acme/tool".into(),
+            spec: VersionSpec::Exact("1.2.3".into()),
+            options: std::collections::BTreeMap::from([
+                ("tags".into(), "sqlite,netgo,sqlite".into()),
+                ("env".into(), "GOAMD64=v3;CGO_ENABLED=0".into()),
+            ]),
+        };
+        let mut resolved = ToolVersion::new(&request.backend, "1.2.3");
+        resolved.options.extend(std::collections::BTreeMap::from([
+            ("tags".into(), "netgo,sqlite".into()),
+            ("env".into(), "CGO_ENABLED=0;GOAMD64=v3".into()),
+            (LOCKED_NATIVE_RUNTIME_OPTION.into(), "go".into()),
+            (LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(), "1.24.6".into()),
+            (
+                osdk_core::backend::native_tool::LOCKED_NATIVE_REPLAY_OPTION.into(),
+                "version-only".into(),
+            ),
+            (
+                osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION.into(),
+                "https://proxy.golang.org".into(),
+            ),
+            (
+                osdk_core::backend::go_package::LOCKED_GO_MODULE_OPTION.into(),
+                "example.com/acme/tool".into(),
+            ),
+        ]));
+        bind_dynamic_request_options(&request, &mut resolved);
+        let canonical =
+            osdk_core::backend::dynamic::identity_options(&request.backend, &resolved.options)
+                .unwrap();
+        assert_eq!(canonical["tags"], "netgo,sqlite");
+        assert_eq!(canonical["env"], "CGO_ENABLED=0;GOAMD64=v3");
+        assert!(canonical.keys().all(|key| !key.starts_with("__osdk_")));
+    }
+
+    #[test]
     fn compatibility_requests_are_explicitly_bound_to_isolated_scope() {
         let mut requests = vec![
             ToolRequest::parse("npm:prettier@3.6.2").unwrap(),
@@ -5683,6 +6079,28 @@ mod command_flow_tests {
         assert_eq!(
             resolved.options["__osdk_artifact_url"],
             "https://example.invalid/tool"
+        );
+    }
+
+    #[test]
+    fn dynamic_request_cannot_overwrite_backend_locked_metadata() {
+        let request = ToolRequest {
+            backend: "go:example.com/acme/tool".into(),
+            spec: VersionSpec::Exact("1.2.3".into()),
+            options: std::collections::BTreeMap::from([(
+                osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION.into(),
+                "https://attacker.example".into(),
+            )]),
+        };
+        let mut resolved = ToolVersion::new(&request.backend, "1.2.3");
+        resolved.options.insert(
+            osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION.into(),
+            "https://proxy.golang.org".into(),
+        );
+        bind_dynamic_request_options(&request, &mut resolved);
+        assert_eq!(
+            resolved.options[osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION],
+            "https://proxy.golang.org"
         );
     }
 

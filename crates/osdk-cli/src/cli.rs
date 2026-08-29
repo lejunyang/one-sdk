@@ -143,12 +143,12 @@ pub enum Command {
     /// Install a tool if needed and make it active.
     #[command(alias = "u")]
     Use {
-        /// Tool and version, e.g. `node@20` or `npm:prettier@3`.
+        /// Tool and version, e.g. `node@20`, `npm:prettier@3`, or `go:golang.org/x/tools/gopls@0.20.0`.
         tool: String,
-        /// Use global scope; npm packages ignore the project and use an isolated prefix/user lock.
+        /// Use global selection; npm packages use a controlled global prefix, while Go tools use the user config/lock.
         #[arg(short, long)]
         global: bool,
-        /// Backend option as key=value (repeatable); npm supports installer and allow_builds.
+        /// Backend option as key=value (repeatable); npm supports installer/allow_builds and Go tools support tags/env.
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         opts: Vec<String>,
     },
@@ -158,7 +158,7 @@ pub enum Command {
     Uninstall {
         /// e.g. `node@20.11.1`.
         tool: String,
-        /// Remove a user-global npm package installation and its selection state.
+        /// Remove a user-global npm package installation and its selection state; other backends are not supported.
         #[arg(short, long)]
         global: bool,
     },
@@ -170,7 +170,7 @@ pub enum Command {
     Where {
         /// e.g. `node` or `node@20.11.1`.
         tool: String,
-        /// Resolve an npm package from global scope, ignoring project selection.
+        /// Resolve an npm package from global scope, ignoring project selection; other backends are not supported.
         #[arg(short, long)]
         global: bool,
     },

@@ -66,6 +66,8 @@ pub struct LockedNativeTool {
     pub replay: NativeReplay,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -392,7 +394,7 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
                 }
             }
             if let Some(native) = &locked.native {
-                inject_native_metadata(&mut options, native);
+                inject_native_metadata(backend, &mut options, native);
             }
             Ok(ToolRequest {
                 backend: backend.clone(),
@@ -430,7 +432,11 @@ fn inject_npm_metadata(options: &mut BTreeMap<String, String>, npm: &LockedNpmMe
     }
 }
 
-fn inject_native_metadata(options: &mut BTreeMap<String, String>, native: &LockedNativeTool) {
+fn inject_native_metadata(
+    backend: &str,
+    options: &mut BTreeMap<String, String>,
+    native: &LockedNativeTool,
+) {
     options.insert(LOCKED_NATIVE_RUNTIME_OPTION.into(), native.runtime.clone());
     options.insert(
         LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(),
@@ -441,9 +447,17 @@ fn inject_native_metadata(options: &mut BTreeMap<String, String>, native: &Locke
         native.replay.as_str().into(),
     );
     if let Some(source) = &native.source {
+        let key = if backend.starts_with("go:") {
+            osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION
+        } else {
+            osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION
+        };
+        options.insert(key.into(), source.clone());
+    }
+    if let Some(module) = &native.module {
         options.insert(
-            osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION.into(),
-            source.clone(),
+            osdk_core::backend::go_package::LOCKED_GO_MODULE_OPTION.into(),
+            module.clone(),
         );
     }
 }
@@ -479,6 +493,14 @@ fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
                             }
                             _ => {}
                         }
+                        if native.module.is_some() {
+                            anyhow::bail!(
+                                "schema 4 Cargo entry `{backend}` cannot carry a Go module root"
+                            );
+                        }
+                    } else {
+                        validate_exact_go_version(backend, &native.runtime_version)?;
+                        validate_go_native_replay(backend, locked, native)?;
                     }
                     let runtime = platform_lock.tools.get(expected_runtime).ok_or_else(|| {
                         anyhow::anyhow!(
@@ -610,66 +632,19 @@ fn reject_native_metadata_before_schema_four(lockfile: &Lockfile) -> Result<()> 
 }
 
 fn native_runtime_for_backend(backend: &str) -> Option<&'static str> {
-    backend
-        .strip_prefix("cargo:")
-        .filter(|subject| valid_cargo_lock_subject(subject))
-        .map(|_| "rust")
-        .or_else(|| {
-            backend
-                .strip_prefix("go:")
-                .filter(|subject| valid_go_lock_subject(subject))
-                .map(|_| "go")
-        })
+    let id = osdk_core::tool::ToolId::parse(backend).ok()?;
+    if id.to_string() != backend {
+        return None;
+    }
+    match id.namespace() {
+        Some("cargo") => Some("rust"),
+        Some("go") => Some("go"),
+        _ => None,
+    }
 }
 
 fn has_native_prefix(backend: &str) -> bool {
     backend.starts_with("cargo:") || backend.starts_with("go:")
-}
-
-fn valid_cargo_lock_subject(subject: &str) -> bool {
-    let backend = format!("cargo:{subject}");
-    osdk_core::tool::ToolId::parse(&backend)
-        .is_ok_and(|identity| identity.is_dynamic() && identity.to_string() == backend)
-}
-
-fn valid_go_lock_subject(subject: &str) -> bool {
-    if subject.is_empty()
-        || subject.len() > 4096
-        || subject.contains(['\\', '@', '?', '#'])
-        || subject.chars().any(char::is_control)
-        || subject.chars().any(char::is_whitespace)
-    {
-        return false;
-    }
-    let mut components = subject.split('/');
-    let Some(first) = components.next() else {
-        return false;
-    };
-    let labels = first.split('.').collect::<Vec<_>>();
-    labels.len() >= 2
-        && labels.iter().all(|label| {
-            !label.is_empty()
-                && label
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
-                && label
-                    .bytes()
-                    .last()
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-        && components.all(|part| {
-            !part.is_empty()
-                && part != "."
-                && part != ".."
-                && !part.ends_with('.')
-                && part.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
-                })
-        })
 }
 
 fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result<()> {
@@ -947,6 +922,14 @@ fn validate_locked_tool_identity(backend: &str, locked: &LockedTool) -> Result<(
         ));
     }
     validate_version_identity(backend, &locked.version)?;
+    if let Ok(id) = osdk_core::tool::ToolId::parse(backend) {
+        if id.namespace() == Some("go") {
+            let canonical = osdk_core::tool::canonicalize_dynamic_options(&id, &locked.options)?;
+            if canonical.as_map() != &locked.options {
+                anyhow::bail!("lock entry `{backend}` contains non-canonical options");
+            }
+        }
+    }
     if let Some(artifact) = &locked.artifact {
         let file = std::path::Path::new(&artifact.file_name);
         if file.components().count() != 1
@@ -1018,6 +1001,19 @@ fn validate_exact_rust_version(backend: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_exact_go_version(backend: &str, value: &str) -> Result<()> {
+    validate_version_identity(backend, value)?;
+    let validator = osdk_core::tool::ToolId::parse("go:example.com/runtime/check")?;
+    if osdk_core::tool::validate_dynamic_selector(&validator, Some(value)).is_err()
+        || !matches!(VersionSpec::parse(value), VersionSpec::Exact(version) if version == value)
+    {
+        anyhow::bail!(
+            "schema 4 native entry `{backend}` requires an exact Go runtime version, got `{value}`"
+        );
+    }
+    Ok(())
+}
+
 fn validate_cargo_registry_source(backend: &str, value: &str) -> Result<()> {
     osdk_core::backend::cargo_package::validate_registry_index(value).map_err(|error| {
         anyhow::anyhow!("Cargo registry source for `{backend}` is invalid: {error}")
@@ -1074,6 +1070,40 @@ fn validate_cargo_native_replay(
 
 fn validate_cargo_requested_selector(id: &osdk_core::tool::ToolId, selector: &str) -> Result<()> {
     osdk_core::tool::validate_dynamic_selector(id, Some(selector)).map_err(anyhow::Error::from)
+}
+
+fn validate_go_native_replay(
+    backend: &str,
+    locked: &LockedTool,
+    native: &LockedNativeTool,
+) -> Result<()> {
+    let id = osdk_core::tool::ToolId::parse(backend)?;
+    osdk_core::tool::validate_dynamic_selector(&id, Some(&locked.request))?;
+    if !matches!(
+        VersionSpec::parse(&locked.version),
+        VersionSpec::Exact(version) if version == locked.version
+    ) || osdk_core::tool::validate_dynamic_selector(&id, Some(&locked.version)).is_err()
+    {
+        anyhow::bail!(
+            "schema 4 Go entry `{backend}` requires an exact resolved semantic or pseudo-version"
+        );
+    }
+    if native.replay != NativeReplay::VersionOnly {
+        anyhow::bail!("schema 4 Go entry `{backend}` must use version-only replay");
+    }
+    let source = native.source.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("schema 4 Go entry `{backend}` is missing its proxy source")
+    })?;
+    osdk_core::backend::go_package::validate_go_proxy(source)?;
+    let module = native.module.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("schema 4 Go entry `{backend}` is missing its module root")
+    })?;
+    let module_id = osdk_core::tool::ToolId::parse(&format!("go:{module}"))?;
+    let suffix = id.subject().strip_prefix(module).unwrap_or("!");
+    if module_id.subject() != module || (!suffix.is_empty() && !suffix.starts_with('/')) {
+        anyhow::bail!("schema 4 Go entry `{backend}` has an invalid module root");
+    }
+    Ok(())
 }
 
 fn installed_artifact_receipt(
@@ -1253,7 +1283,7 @@ pub fn merge_resolved_with_scope(
     for (request, version) in resolved {
         reject_linked_rust(dirs, version)?;
         let npm_metadata = locked_npm_metadata(dirs, version, node_version.as_deref(), scope)?;
-        let mut options = public_options(&version.options);
+        let mut options = lock_options(version)?;
         if npm_metadata.is_some() {
             options.remove("node_version");
         }
@@ -1362,7 +1392,7 @@ pub fn upsert_resolved_many_with_scope(
                 .or(node_version.as_deref())
         };
         let npm_metadata = locked_npm_metadata(dirs, version, effective_node, scope)?;
-        let mut options = public_options(&version.options);
+        let mut options = lock_options(version)?;
         if npm_metadata.is_some() {
             options.remove("node_version");
         }
@@ -1488,6 +1518,14 @@ fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String
         .collect()
 }
 
+fn lock_options(version: &ToolVersion) -> Result<BTreeMap<String, String>> {
+    if version.backend.starts_with("go:") {
+        return osdk_core::backend::dynamic::identity_options(&version.backend, &version.options)
+            .map_err(anyhow::Error::from);
+    }
+    Ok(public_options(&version.options))
+}
+
 fn reject_legacy_npm_entries(lockfile: &Lockfile) -> Result<()> {
     for (platform, platform_lock) in &lockfile.platforms {
         if let Some((backend, _)) = platform_lock
@@ -1593,9 +1631,20 @@ fn locked_native_metadata(version: &ToolVersion) -> Result<Option<LockedNativeTo
         runtime: required(LOCKED_NATIVE_RUNTIME_OPTION, runtime)?,
         runtime_version: required(LOCKED_NATIVE_RUNTIME_VERSION_OPTION, runtime_version)?,
         replay: NativeReplay::parse(&required(LOCKED_NATIVE_REPLAY_OPTION, replay)?)?,
-        source: version
+        source: if expected_runtime == "go" {
+            version
+                .options
+                .get(osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION)
+                .cloned()
+        } else {
+            version
+                .options
+                .get(osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION)
+                .cloned()
+        },
+        module: version
             .options
-            .get(osdk_core::backend::cargo_package::LOCKED_CARGO_INDEX_OPTION)
+            .get(osdk_core::backend::go_package::LOCKED_GO_MODULE_OPTION)
             .cloned(),
     };
     if metadata.runtime != expected_runtime {
@@ -1618,6 +1667,27 @@ fn locked_native_metadata(version: &ToolVersion) -> Result<Option<LockedNativeTo
             ),
             (false, Some(source)) => validate_cargo_registry_source(&version.backend, source)?,
             _ => {}
+        }
+        if metadata.module.is_some() {
+            anyhow::bail!(
+                "Cargo tool `{}` cannot carry a Go module root",
+                version.backend
+            );
+        }
+    } else {
+        validate_exact_go_version(&version.backend, &metadata.runtime_version)?;
+        let source = metadata.source.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Go tool `{}` is missing its locked proxy source",
+                version.backend
+            )
+        })?;
+        osdk_core::backend::go_package::validate_go_proxy(source)?;
+        if metadata.module.is_none() {
+            anyhow::bail!(
+                "Go tool `{}` is missing its locked module root",
+                version.backend
+            );
         }
     }
     Ok(Some(metadata))
@@ -3311,6 +3381,7 @@ source = "sparse+https://index.crates.io/"
                 runtime_version: "1.91.1".into(),
                 replay: NativeReplay::VersionOnly,
                 source: Some("sparse+https://index.crates.io/".into()),
+                module: None,
             })
         );
         assert_eq!(
@@ -3340,6 +3411,8 @@ version = "1.2.3"
 runtime = "go"
 runtime_version = "1.24.0"
 replay = "version-only"
+source = "https://proxy.golang.org"
+module = "example.com/acme/tool"
 "#;
         std::fs::write(&path, valid).unwrap();
         load(&path).unwrap();
@@ -3382,6 +3455,112 @@ replay = "version-only"
     }
 
     #[test]
+    fn go_native_writer_round_trips_proxy_module_and_public_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let request = ToolRequest::parse(
+            "go:example.com/acme/tool/cmd/tool[tags='netgo,sqlite',env='CGO_ENABLED=0']@1.2.3",
+        )
+        .unwrap();
+        let mut version = ToolVersion::new(&request.backend, "1.2.3");
+        version.options.extend(request.options.clone());
+        version.options.extend(BTreeMap::from([
+            (LOCKED_NATIVE_RUNTIME_OPTION.into(), "go".into()),
+            (LOCKED_NATIVE_RUNTIME_VERSION_OPTION.into(), "1.24.6".into()),
+            (LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into()),
+            (
+                osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION.into(),
+                "https://proxy.golang.org".into(),
+            ),
+            (
+                osdk_core::backend::go_package::LOCKED_GO_MODULE_OPTION.into(),
+                "example.com/acme/tool".into(),
+            ),
+        ]));
+        merge_resolved(
+            &path,
+            linux(),
+            &test_dirs(temp.path()),
+            &[
+                (
+                    ToolRequest::parse("go@1.24.6").unwrap(),
+                    ToolVersion::new("go", "1.24.6"),
+                ),
+                (request, version),
+            ],
+        )
+        .unwrap();
+
+        let lock = load(&path).unwrap();
+        let tool = &lock.platforms["linux-x64"].tools["go:example.com/acme/tool/cmd/tool"];
+        assert_eq!(tool.options["tags"], "netgo,sqlite");
+        assert_eq!(tool.options["env"], "CGO_ENABLED=0");
+        assert_eq!(
+            tool.native,
+            Some(LockedNativeTool {
+                runtime: "go".into(),
+                runtime_version: "1.24.6".into(),
+                replay: NativeReplay::VersionOnly,
+                source: Some("https://proxy.golang.org".into()),
+                module: Some("example.com/acme/tool".into()),
+            })
+        );
+        let replayed = locked_requests(&path, linux()).unwrap().unwrap();
+        let tool = replayed
+            .iter()
+            .find(|request| request.backend == "go:example.com/acme/tool/cmd/tool")
+            .unwrap();
+        assert_eq!(
+            tool.options[osdk_core::backend::go_package::LOCKED_GO_PROXY_OPTION],
+            "https://proxy.golang.org"
+        );
+        assert_eq!(
+            tool.options[osdk_core::backend::go_package::LOCKED_GO_MODULE_OPTION],
+            "example.com/acme/tool"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains("__osdk_"));
+    }
+
+    #[test]
+    fn go_native_lock_rejects_untruthful_replay_proxy_and_module() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let valid = r#"schema = 4
+
+[platforms.linux-x64.tools.go]
+request = "1.24"
+version = "1.24.6"
+
+[platforms.linux-x64.tools."go:example.com/acme/tool/cmd/tool"]
+request = "latest"
+version = "1.2.3"
+
+[platforms.linux-x64.tools."go:example.com/acme/tool/cmd/tool".native]
+runtime = "go"
+runtime_version = "1.24.6"
+replay = "version-only"
+source = "https://proxy.golang.org"
+module = "example.com/acme/tool"
+"#;
+        std::fs::write(&path, valid).unwrap();
+        load(&path).unwrap();
+
+        for invalid in [
+            valid.replace("replay = \"version-only\"", "replay = \"floating-ref\""),
+            valid.replace("https://proxy.golang.org", "http://evil.example.test"),
+            valid.replace(
+                "module = \"example.com/acme/tool\"",
+                "module = \"example.com/other\"",
+            ),
+            valid.replace("source = \"https://proxy.golang.org\"\n", ""),
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(load(&path).is_err());
+        }
+    }
+
+    #[test]
     fn schemas_one_through_three_remain_readable_and_upgrade_on_save() {
         let temp = tempfile::tempdir().unwrap();
         for schema in [1, 3] {
@@ -3410,17 +3589,25 @@ replay = "version-only"
     #[test]
     fn schemas_one_through_three_reject_native_tools_without_replay_metadata() {
         let temp = tempfile::tempdir().unwrap();
-        for schema in [1, 2, 3] {
-            let path = temp.path().join(format!("native-schema-{schema}.lock"));
-            std::fs::write(
-                &path,
-                format!(
-                    "schema = {schema}\n\n[platforms.linux-x64.tools.\"cargo:ripgrep\"]\nrequest = \"14\"\nversion = \"14.1.1\"\n"
-                ),
-            )
-            .unwrap();
-            let error = load(&path).unwrap_err();
-            assert!(error.to_string().contains("schema 4"), "{schema}: {error}");
+        for (backend, request, version) in [
+            ("cargo:ripgrep", "14", "14.1.1"),
+            ("go:example.com/acme/tool", "1", "1.2.3"),
+        ] {
+            for schema in [1, 2, 3] {
+                let path = temp.path().join(format!("native-schema-{schema}.lock"));
+                std::fs::write(
+                    &path,
+                    format!(
+                        "schema = {schema}\n\n[platforms.linux-x64.tools.{backend:?}]\nrequest = {request:?}\nversion = {version:?}\n"
+                    ),
+                )
+                .unwrap();
+                let error = load(&path).unwrap_err();
+                assert!(
+                    error.to_string().contains("schema 4"),
+                    "{backend}, {schema}: {error}"
+                );
+            }
         }
     }
 

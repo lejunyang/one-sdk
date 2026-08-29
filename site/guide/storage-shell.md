@@ -80,6 +80,9 @@ Engine 或 Buildx 构建器自有的存储。详见[容器运行时、Registry �
 Cargo 开发工具 provider 不会把两者当作构建 cache：每次安装都有 stage 私有的 `HOME`、
 `CARGO_HOME`、target 与安装根。只有符合条件的受控 `cargo-binstall` 会从
 `<data>/cargo/bin` 发现；临时 source/build workspace 会在发布前删除。
+Go 开发工具 provider 则把 module/build cache 固定到 `<cache>/pkg/go-mod` 和
+`<cache>/pkg/go-build`；其 `HOME`、`GOPATH`、`GOBIN` 与临时目录属于 stage 私有状态，
+发布前会删除。
 
 ## 删除与确认
 

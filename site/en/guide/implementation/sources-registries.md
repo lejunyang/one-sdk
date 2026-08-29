@@ -34,6 +34,10 @@ source headers, so `npm:<package>` Aube package fetches do not forward
 `Source.headers`. Project operations may use native trusted configuration;
 global npm-tool installs reject authenticated/private native pass-through while
 running in their isolated prefix.
+Go command tools add one stricter boundary: if custom sources exist, only those
+custom candidates (plus an explicitly pinned candidate) are ranked, so a private
+module path is not sent to public default proxies. Custom headers are rejected
+because `go install` cannot enforce osdk's per-request forwarding policy.
 
 ## Project registry preflight
 

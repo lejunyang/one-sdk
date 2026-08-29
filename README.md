@@ -118,8 +118,8 @@ osdk can also follow existing `.tool-versions`, `.nvmrc`, `.node-version`,
 version declarations in `package.json`.
 Data-only declarative backends use the same locked artifact URL, checksum,
 download cache, and offline reinstall path as built-in archive backends.
-For osdk-owned dynamic `npm:<package>`, `cargo:<crate-or-https-url>`, and
-`github:owner/repo` installs, options and managed-runtime dependencies that
+For osdk-owned dynamic `npm:<package>`, `cargo:<crate-or-https-url>`,
+`go:<module-or-command-path>`, and `github:owner/repo` installs, options and managed-runtime dependencies that
 change the selected or built output are part of the installation identity. osdk
 records that identity in `.osdk-install.json`
 schema 1 and places each `b3-v2:` identity under its own fingerprinted install
@@ -261,6 +261,30 @@ Git revisions as `immutable-revision`, and Git HEAD/tags/branches as
 `floating-ref`.
 
 Guide: [Cargo developer tools](site/en/guide/cargo-tools.md)
+
+## Scenario: install a Go command package
+
+Keep the Go runtime and Go command namespaces separate, then install a command
+with an exact managed Go toolchain:
+
+```bash
+osdk use go@1.24
+osdk use go:golang.org/x/tools/gopls@0.20.0
+eval "$(osdk activate bash)"
+gopls version
+```
+
+`go:` accepts module or nested command paths, `latest`, numeric prefixes, exact
+semantic versions, and canonical pseudo-versions. `tags` and a restricted
+`env` option are identity-bearing; `CGO_ENABLED=0` is supported, while enabling
+cgo is rejected until a C toolchain can be bound to the install identity. osdk
+chooses and records one Go proxy, invokes the exact managed `go` once with a
+staged `GOBIN`, and keeps module/build caches under its cache root. The compact
+schema-4 lock records the proxy, module root, and exact Go runtime—not the
+transitive module graph—so an exact completed install can be reused offline,
+but a cold offline build cannot.
+
+Guide: [Go developer tools](site/en/guide/go-tools.md)
 
 ## Scenario: work in each language ecosystem
 
@@ -496,7 +520,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Platforms | Windows, macOS, Linux |
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
-| Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
+| Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
 | Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, read-only mirror plans, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
@@ -513,6 +537,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Package managers and registry selection](site/en/guide/package-managers.md)
 - [npm developer tools](site/en/guide/npm-tools.md)
 - [Cargo developer tools](site/en/guide/cargo-tools.md)
+- [Go developer tools](site/en/guide/go-tools.md)
 - [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)

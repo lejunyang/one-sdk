@@ -63,6 +63,7 @@ rust = "1.91.1"
 pnpm = "10.15.0"
 "npm:prettier" = "3"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
+"go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
 
 [aliases.node]
 maintenance = "20"
@@ -75,6 +76,8 @@ default = "maintenance"
 行为。
 每个 `cargo:<crate-or-https-url>` 条目都必须对应一个精确、显式请求或配置的 `rust`
 条目；浮动和本地链接的 Rust toolchain 会被拒绝。详见 [Cargo 开发工具](./cargo-tools)。
+每个 `go:<module-or-command-path>` 条目也必须对应一个受管 `go` 选择。osdk 会先解析该
+runtime，再把精确版本绑定到工具；详见 [Go 开发工具](./go-tools)。
 
 ## 在真实项目中使用 npm 工具
 

@@ -84,7 +84,18 @@ pub async fn active_source(ctx: &Ctx, backend: &dyn Backend) -> Result<Source> {
 ///
 /// A config pin (or one-shot `--source`) moves that source to the front.
 pub async fn ranked_source_list(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
-    let sources = effective_sources(ctx, backend);
+    ranked_source_candidates(ctx, backend, effective_sources(ctx, backend)).await
+}
+
+/// Rank an already-filtered effective source set with the same pin, cache,
+/// offline, and live-probe policy as [`ranked_source_list`]. Backends use this
+/// when they must narrow candidates before any network probe, for example to
+/// keep private package names away from public registries.
+pub async fn ranked_source_candidates(
+    ctx: &Ctx,
+    backend: &dyn Backend,
+    sources: Vec<Source>,
+) -> Result<Vec<Source>> {
     if sources.is_empty() {
         return Err(Error::NoUsableSource {
             tool: backend.id().to_string(),

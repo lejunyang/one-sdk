@@ -36,13 +36,14 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | [Backends and model providers](./backends-models) | Built-in, declarative, and GitHub backends plus Hugging Face and ModelScope snapshots |
 | [npm developer tools](./npm-tools) | `npm:<package>` identity, project/global/isolated installers, script policy, native locks, inventory, and conflict rejection |
 | [Cargo developer tools](./cargo-tools) | `cargo:` identity, exact Rust binding, controlled providers, native publication, and schema-4 replay metadata |
+| [Go developer tools](./go-tools) | `go:` command-package identity, exact Go binding, proxy selection, isolated provider execution, and schema-4 replay metadata |
 | [Reliability and concurrency](./reliability) | Locks, atomic publication, retries, offline fallback, idempotency, and GC boundaries |
 
 ## Boundaries to remember
 
 - Lockfiles and installation receipts are reproducibility inputs and audit records, not trust anchors; floating Rust channels remain rustup channel names rather than immutable versions. Reinstallation from cached or locked artifacts still applies the active checksum/attestation policy. The normal CLI reuses an already complete installation before entering the pipeline and does not rehash its checksum; only an invocation that actually reaches the pipeline can reverify requested attestation on that fast path.
 - GitHub Artifact Attestation policy defaults to `off` and applies only to GitHub artifact flows that can supply the required bundle and identity constraints.
-- osdk's BLAKE3 CAS deduplicates verified SDK and model files. The native package caches of npm, pnpm, Yarn, Bun, and Deno remain isolated; Cargo developer tools also build in a private staged Cargo home/target and publish binaries outside CAS. There is currently no cross-manager package tarball CAS.
+- osdk's BLAKE3 CAS deduplicates verified SDK and model files. Native package caches remain manager-owned; Cargo tools build in a private staged Cargo home/target, while Go tools use osdk-controlled shared module/build caches. Both publish binaries outside CAS. There is currently no cross-manager package tarball CAS.
 - `osdk cache clean` clears only osdk's download cache. It does not remove native package caches, installations, models, or the CAS.
 - `osdk container cache status` queries runtime-owned aggregate interfaces.
   Native image pulls remain owned by the selected Docker or containerd control

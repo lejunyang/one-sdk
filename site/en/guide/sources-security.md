@@ -134,6 +134,10 @@ osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
   selector, options, platform, and exact managed Rust identity all match. A cold
   offline install or repair is unsupported because neither the Cargo native lock
   nor `osdk.lock` contains the complete source graph;
+- `go:` tools can likewise reuse only an exact complete installation. Their
+  schema-4 lock records the selected Go proxy, discovered module root, public
+  build options, and exact managed Go identity, but not the transitive module
+  graph needed for a cold offline build;
 - `attestations=required` additionally needs the proof bundle cached by artifact SHA-256; lock evidence cannot replace verification.
 
 `OSDK_OFFLINE` controls osdk and compatible environment values managed by its

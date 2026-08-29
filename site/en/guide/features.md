@@ -16,6 +16,7 @@ current implementation boundaries.
 | [JavaScript Package Managers](./package-managers) | npm, pnpm, Yarn, Bun, Deno, Node dependency handling, and registry preflight |
 | [npm Developer Tools](./npm-tools) | Install, pin, execute, upgrade, and restore npm CLI packages with `npm:<package>` |
 | [Cargo Developer Tools](./cargo-tools) | Install registry crates or HTTPS Git repositories with an exact managed Rust toolchain |
+| [Go Developer Tools](./go-tools) | Install module command packages with one exact managed Go toolchain and a selected proxy |
 | [Direct HTTPS Artifacts](./http-artifacts) | Install an exact checksum-pinned file or archive from a strict HTTPS `{version}` template |
 | [Model Snapshots](./models) | Hugging Face, ModelScope, file filters, verification, locking, and environment adapters |
 | [Sources and Supply-chain Security](./sources-security) | Mirrors, offline mode, pre-releases, checksums, signatures, attestations, and GitHub Releases |
@@ -32,6 +33,7 @@ your goal:
 - To pin npm, pnpm, or Yarn, read [JavaScript Package Managers](./package-managers).
 - To install Prettier, TypeScript, or a scoped npm CLI package, read [npm Developer Tools](./npm-tools).
 - To install ripgrep or another Rust CLI from a registry or Git repository, read [Cargo Developer Tools](./cargo-tools).
+- To install gopls or another Go command package, read [Go Developer Tools](./go-tools).
 - To install a checksum-pinned executable or archive from a direct HTTPS URL, read [Direct HTTPS Artifacts](./http-artifacts).
 - To download a model repository, read [Model Snapshots](./models).
 - To configure a corporate mirror or strict verification, read [Sources and Supply-chain Security](./sources-security).

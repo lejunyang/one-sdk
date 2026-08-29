@@ -66,6 +66,7 @@ rust = "1.91.1"
 pnpm = "10.15.0"
 "npm:prettier" = "3"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
+"go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
 
 [aliases.node]
 maintenance = "20"
@@ -79,6 +80,9 @@ next section describes its project-aware behavior.
 Every `cargo:<crate-or-https-url>` entry requires one exact explicit or configured
 `rust` entry. Floating and linked Rust toolchains are rejected; see
 [Cargo Developer Tools](./cargo-tools).
+Every `go:<module-or-command-path>` entry likewise requires a managed `go`
+selection. osdk resolves that selection first and binds its exact version; see
+[Go Developer Tools](./go-tools).
 
 ## npm tools in a real project
 

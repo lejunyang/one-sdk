@@ -29,6 +29,10 @@ For Cargo developer tools, the fingerprint also binds the exact managed Rust
 tree and registry/Git materials. Installation uses a sibling stage with private
 `home`, `cargo-home`, `target`, and `tmp` directories; those workspaces are
 deleted before only the validated `bin` output and native metadata are published.
+For Go developer tools, the fingerprint binds the exact managed Go runtime,
+selected proxy/module root, tags, and allowlisted build environment. Private
+home/GOPATH/temp directories stay in the sibling stage, while module and build
+caches are shared under `<cache>/pkg/go-mod` and `<cache>/pkg/go-build`.
 
 ## SDK pipeline and locking
 
@@ -58,6 +62,9 @@ The CAS deduplicates verified, extracted SDK files and model files. It does **no
 Cargo developer-tool source and build data is likewise stage-private and is not
 promoted to a shared Cargo cache or the CAS; the final fingerprinted root retains
 only published binaries and osdk metadata.
+Go module and build data use the Go-owned caches above and likewise never enter
+the BLAKE3 SDK CAS; a published Go-tool root retains only validated binaries and
+osdk metadata.
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) and backend `exec_env` methods only redirect each manager's native cache to a separate child of `<cache>/pkg`, including npm, the pnpm store, Yarn, Bun, and Deno. Variables are injected only when the user has not set them, except that a value managed by a previous osdk hook can be refreshed. Sharing a parent directory does not unify content protocols: there is no cross-manager package CAS or cross-manager blob deduplication.
 

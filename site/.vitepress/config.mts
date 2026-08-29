@@ -35,6 +35,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'JavaScript 包管理器', link: '/guide/package-managers' },
       { text: 'npm 开发工具', link: '/guide/npm-tools' },
       { text: 'Cargo 开发工具', link: '/guide/cargo-tools' },
+      { text: 'Go 开发工具', link: '/guide/go-tools' },
       { text: '直接 HTTPS 制品', link: '/guide/http-artifacts' },
       { text: '模型快照', link: '/guide/models' },
       { text: '来源、离线与安全', link: '/guide/sources-security' },
@@ -57,6 +58,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'Backend 与模型快照', link: '/guide/implementation/backends-models' },
       { text: 'npm 开发工具实现', link: '/guide/implementation/npm-tools' },
       { text: 'Cargo 开发工具实现', link: '/guide/implementation/cargo-tools' },
+      { text: 'Go 开发工具实现', link: '/guide/implementation/go-tools' },
       { text: '可靠性与跨平台', link: '/guide/implementation/reliability' }
     ]
   }
@@ -81,6 +83,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'JavaScript Package Managers', link: '/en/guide/package-managers' },
       { text: 'npm Developer Tools', link: '/en/guide/npm-tools' },
       { text: 'Cargo Developer Tools', link: '/en/guide/cargo-tools' },
+      { text: 'Go Developer Tools', link: '/en/guide/go-tools' },
       { text: 'Direct HTTPS Artifacts', link: '/en/guide/http-artifacts' },
       { text: 'Model Snapshots', link: '/en/guide/models' },
       { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
@@ -103,6 +106,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'Backends and Model Snapshots', link: '/en/guide/implementation/backends-models' },
       { text: 'npm Developer Tool Implementation', link: '/en/guide/implementation/npm-tools' },
       { text: 'Cargo Developer Tool Implementation', link: '/en/guide/implementation/cargo-tools' },
+      { text: 'Go Developer Tool Implementation', link: '/en/guide/implementation/go-tools' },
       { text: 'Reliability and Portability', link: '/en/guide/implementation/reliability' }
     ]
   }

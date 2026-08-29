@@ -1354,6 +1354,177 @@ fn install_without_arguments_consumes_matching_platform_lock() {
 
 #[cfg(unix)]
 #[test]
+fn go_tool_use_publishes_locks_reuses_offline_and_uninstalls_exact_identity() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for request_number in 0..3 {
+            let mut stream = accept_fixture_connection(&listener, "Go proxy fixture server");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let expected = match request_number {
+                0 => "/example.com/acme/tool/cmd/tool/@v/v1.2.3.info",
+                1 => "/example.com/acme/tool/cmd/@v/v1.2.3.info",
+                _ => "/example.com/acme/tool/@v/v1.2.3.info",
+            };
+            assert!(
+                request.starts_with(&format!("GET {expected} ")),
+                "{request}"
+            );
+            if request_number < 2 {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            } else {
+                let body = r#"{"Version":"v1.2.3","Time":"2026-01-01T00:00:00Z"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        }
+    });
+
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        format!(
+            r#"[sources]
+selection = "ordered"
+
+[tools]
+go = "1.24.0"
+
+[[sources."go:example.com/acme/tool/cmd/tool".custom]]
+id = "fixture"
+kind = "custom"
+download_url = {endpoint:?}
+"#
+        ),
+    )
+    .unwrap();
+
+    let runtime = temporary.path().join("installs/go/1.24.0");
+    std::fs::create_dir_all(runtime.join("pkg/tool")).unwrap();
+    std::fs::create_dir_all(runtime.join("src/runtime")).unwrap();
+    let calls = temporary.path().join("go-provider.log");
+    write_executable(
+        &runtime.join("bin/go"),
+        &format!(
+            "#!/bin/sh\nset -eu\nmkdir -p \"$GOBIN\"\nprintf '#!/bin/sh\nprintf go-tool-ok\\n\n' > \"$GOBIN/tool\"\nchmod +x \"$GOBIN/tool\"\nprintf '%s|%s|%s|%s|%s\\n' \"$*\" \"$GOROOT\" \"$GOPROXY\" \"$GOTOOLCHAIN\" \"$CGO_ENABLED\" >> '{}'\n",
+            calls.display()
+        ),
+    );
+    write_executable(&runtime.join("bin/gofmt"), "#!/bin/sh\nexit 0\n");
+    write_executable(&runtime.join("pkg/tool/compile"), "#!/bin/sh\nexit 0\n");
+    std::fs::write(runtime.join("src/runtime/runtime.go"), "package runtime\n").unwrap();
+    std::fs::write(runtime.join("VERSION"), "go1.24.0\n").unwrap();
+    std::fs::write(runtime.join("go.env"), "GOTOOLCHAIN=local\n").unwrap();
+    std::fs::write(runtime.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["use", "go:example.com/acme/tool/cmd/tool@1.2.3"],
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+
+    let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
+    assert!(config.contains("\"go:example.com/acme/tool/cmd/tool\" = \"1.2.3\""));
+    let lock = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    for expected in [
+        "schema = 4",
+        "runtime = \"go\"",
+        "runtime_version = \"1.24.0\"",
+        "source = \"http://127.0.0.1:",
+        "module = \"example.com/acme/tool\"",
+    ] {
+        assert!(lock.contains(expected), "missing {expected}: {lock}");
+    }
+    let provider_calls = std::fs::read_to_string(&calls).unwrap();
+    assert!(provider_calls.contains(&format!(
+        "install example.com/acme/tool/cmd/tool@v1.2.3|{}|{}|local|0",
+        runtime.display(),
+        endpoint
+    )));
+
+    let offline = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["--offline", "install"],
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        offline.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&offline.stdout),
+        String::from_utf8_lossy(&offline.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), provider_calls);
+
+    let location = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &["where", "go:example.com/acme/tool/cmd/tool@1.2.3"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap())],
+    );
+    assert!(
+        location.status.success(),
+        "{}",
+        String::from_utf8_lossy(&location.stderr)
+    );
+    let install_root = PathBuf::from(String::from_utf8(location.stdout).unwrap().trim());
+    assert!(install_root.join("bin/tool").is_file());
+
+    let uninstall = run_isolated_in_with_env(
+        temporary.path(),
+        &project,
+        &[
+            "--yes",
+            "uninstall",
+            "go:example.com/acme/tool/cmd/tool@1.2.3",
+        ],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap())],
+    );
+    assert!(
+        uninstall.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    assert!(!install_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn use_preserves_unique_indirect_project_key_for_preinstalled_backend() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");

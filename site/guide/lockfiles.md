@@ -112,6 +112,21 @@ runtime_version = "1.91.1"
 replay = "version-only"
 source = "sparse+https://index.crates.io/"
 
+[platforms.linux-x64.tools.go]
+request = "1.24"
+version = "1.24.6"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls"]
+request = "0.20"
+version = "0.20.0"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls".native]
+runtime = "go"
+runtime_version = "1.24.6"
+replay = "version-only"
+source = "https://proxy.golang.org"
+module = "golang.org/x/tools/gopls"
+
 [models.qwen]
 provider = "huggingface"
 repository = "Qwen/Qwen2.5-7B-Instruct"
@@ -155,6 +170,12 @@ schema 1 到 3 无法表达这种原生 runtime 绑定，会拒绝其中的 `car
 schema 4。详见 [Cargo 开发工具](./cargo-tools)。
 Registry Cargo 条目还会在 `native.source` 中保留精确选择的规范、无凭据 sparse HTTPS
 index；Git Cargo 条目不能携带该字段。
+
+Go module 条目要求同一平台表中存在匹配的精确 `go` 条目。它们使用 `version-only`，
+在 `native.source` 中保留选中的规范无凭据 proxy，并在 `native.module` 中保留发现的
+module root。这是紧凑解析 metadata，不是复制的 `go.sum` 或传递 module graph，因此只支持
+离线复用已完整安装且身份精确匹配的工具。schema 1 到 3 会拒绝 `go:` 条目。详见
+[Go 开发工具](./go-tools)。
 
 Node 的 `lock -o arch=...` 会写入目标架构区段；osdk 没有跨架构“只下载”模式，
 随后在不匹配 host 上安装会拒绝。当前 `upgrade -o arch=...` 始终写 host 平台区段，

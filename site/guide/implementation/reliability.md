@@ -14,6 +14,8 @@ backend 名称排序。任何任务失败会使批次返回错误，但已完成
 它是“依赖 barrier + 有界并发 + 每项提交”，不是全批事务。
 Cargo 工具还有独立的 Rust-first barrier。CLI 要求且只允许一个精确受管 Rust 请求，
 在调度依赖它的 `cargo:` 请求前先完成该请求，并把解析后的 Rust 版本绑定进这些身份。
+Go command package 也有同形态的 Go-first barrier：一个受管 Go 请求会先完成解析与安装，
+其精确结果再绑定进每个依赖它的 `go:` 身份。
 
 源测速会并发探测全部候选，不受 `jobs` 限制。单次探测默认超时 1500 ms，最多读取约 1 MB，按首字节时间和吞吐量评分；成功结果默认缓存 6 小时。`auto` 使用测速排名，`ordered` 使用配置优先级，pin 会被放在首位，但其余源仍作为 fallback。详见 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs)。
 
@@ -46,6 +48,8 @@ provider 执行与发布。publisher 拒绝 symlink 和保留 metadata，枚举�
 rename 暴露安装树。失败或 drop 的未发布 stage 会被删除。复用时会重新校验 seal、
 inventory、receipt、binary SHA-256 与精确受管 Rust 版本/平台及有界构建关键身份；详见
 [Cargo 开发工具实现](./cargo-tools)。
+Go 开发工具共用这套提交协议，并额外绑定选中的 proxy/module root 和有界构建关键 Go
+runtime 身份；详见 [Go 开发工具实现](./go-tools)。
 
 ## CAS 与物化
 

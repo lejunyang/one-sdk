@@ -32,6 +32,11 @@ const NATIVE_TOOL_SEAL_SUFFIX: &str = ".native-seal";
 const RUST_RUNTIME_RECEIPT_FILE: &str = ".osdk-rust-runtime-receipt.json";
 const RUST_RUNTIME_RECEIPT_SCHEMA: u32 = 1;
 const MAX_RUST_RUNTIME_RECEIPT_BYTES: u64 = 8 * 1024 * 1024;
+const GO_RUNTIME_RECEIPT_FILE: &str = ".osdk-go-runtime-receipt.json";
+const GO_RUNTIME_RECEIPT_SCHEMA: u32 = 1;
+const MAX_GO_RUNTIME_RECEIPT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_GO_RUNTIME_FILES: usize = 65_536;
+const MAX_GO_RUNTIME_PATH_BYTES: usize = 4 * 1024;
 const MAX_RUSTC_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RUST_RUNTIME_FILES: usize = 65_536;
 const MAX_RUST_RUNTIME_PATH_BYTES: usize = 4 * 1024;
@@ -80,11 +85,472 @@ const CARGO_PROVIDERS: &[NativeToolProvider] = &[
 ];
 const GO_PROVIDERS: &[NativeToolProvider] = &[NativeToolProvider::GoInstall];
 
-/// Stable content identity for a bounded runtime root. This remains the Go
-/// implementation; Rust uses [`rust_runtime_identity`] so shim validation does
-/// not traverse an entire toolchain.
+/// Stable content identity for a bounded runtime root. Prefer the cached,
+/// layout-aware [`go_runtime_identity`] and [`rust_runtime_identity`] helpers
+/// for managed compiler runtimes.
 pub fn runtime_tree_identity(root: &Path) -> Result<String> {
     hash_runtime_tree(root)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoRuntimeFileReceipt {
+    path: String,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symlink_target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoRuntimeReceipt {
+    schema: u32,
+    version: String,
+    platform: String,
+    files: Vec<GoRuntimeFileReceipt>,
+    identity: String,
+    integrity_blake3: String,
+}
+
+#[derive(Debug)]
+struct GoRuntimeFile {
+    receipt: GoRuntimeFileReceipt,
+    absolute: PathBuf,
+}
+
+/// Content identity for an exact managed Go SDK.
+///
+/// The inventory covers the executable toolchain (`bin` and `pkg/tool`), the
+/// standard-library sources, runtime libraries, and the runtime version/env
+/// files used by `go install`. Symlinks and non-regular payloads fail closed.
+/// An integrity-checked receipt caches file hashes; unchanged path/size/mtime
+/// metadata avoids re-reading the entire SDK during every activation or shim
+/// validation. The receipt itself and other osdk metadata are outside the
+/// payload inventory.
+pub fn go_runtime_identity(dirs: &Dirs, platform: Platform, version: &str) -> Result<String> {
+    let root = dirs.install_path("go", version);
+    validate_managed_go_root(&root, platform, version)?;
+    let _lock = crate::lock::FileLock::acquire(go_runtime_receipt_lock_path(dirs, version))?;
+    validate_managed_go_root(&root, platform, version)?;
+
+    let files = collect_go_runtime_files(&root, &dirs.store, platform)?;
+    let receipt_path = root.join(GO_RUNTIME_RECEIPT_FILE);
+    match std::fs::symlink_metadata(&receipt_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(&receipt_path, error)),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(Error::other(format!(
+                "managed Go runtime receipt is not a regular non-symlink file: {}",
+                receipt_path.display()
+            )));
+        }
+        Ok(_) => {
+            let receipt = load_go_runtime_receipt(&receipt_path)?;
+            validate_go_runtime_receipt(&receipt, version, &platform.to_string())?;
+            let current = files
+                .iter()
+                .map(|file| file.receipt.clone())
+                .collect::<Vec<_>>();
+            if receipt.files == current {
+                return Ok(receipt.identity);
+            }
+        }
+    }
+
+    let platform_name = platform.to_string();
+    let identity = hash_go_runtime_files(version, &platform_name, &files)?;
+    let after = collect_go_runtime_files(&root, &dirs.store, platform)?;
+    let before_metadata = files
+        .iter()
+        .map(|file| file.receipt.clone())
+        .collect::<Vec<_>>();
+    let after_metadata = after
+        .iter()
+        .map(|file| file.receipt.clone())
+        .collect::<Vec<_>>();
+    if before_metadata != after_metadata {
+        return Err(Error::other(format!(
+            "managed Go runtime changed while its identity was being computed: {}",
+            root.display()
+        )));
+    }
+    validate_managed_go_root(&root, platform, version)?;
+
+    let mut receipt = GoRuntimeReceipt {
+        schema: GO_RUNTIME_RECEIPT_SCHEMA,
+        version: version.to_string(),
+        platform: platform_name,
+        files: before_metadata,
+        identity: identity.clone(),
+        integrity_blake3: String::new(),
+    };
+    receipt.integrity_blake3 = go_runtime_receipt_integrity(&receipt);
+    write_go_runtime_receipt_atomic(&receipt_path, &receipt)?;
+    Ok(identity)
+}
+
+fn validate_managed_go_root(root: &Path, platform: Platform, version: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(root).map_err(|error| Error::io(root, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::other(format!(
+            "managed Go runtime root is not a regular directory: {}",
+            root.display()
+        )));
+    }
+    if !is_regular_file(&root.join(".osdk-complete")) {
+        return Err(Error::config(format!(
+            "Go runtime `{version}` is not a complete osdk-managed runtime"
+        )));
+    }
+    for name in ["go", "gofmt"] {
+        let path = root
+            .join("bin")
+            .join(format!("{name}{}", platform.os.exe_suffix()));
+        if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(Error::other(format!(
+                "managed Go runtime `{version}` is missing {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn go_runtime_receipt_lock_path(dirs: &Dirs, version: &str) -> PathBuf {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-go-runtime-receipt-lock-v1");
+    hash_identity_value(&mut hasher, version.as_bytes());
+    dirs.lock_dir("go")
+        .join(format!("runtime-{}.lock", hasher.finalize().to_hex()))
+}
+
+fn collect_go_runtime_files(
+    root: &Path,
+    store: &Path,
+    platform: Platform,
+) -> Result<Vec<GoRuntimeFile>> {
+    let mut paths = BTreeMap::<String, PathBuf>::new();
+    for name in ["VERSION", "go.env"] {
+        let path = root.join(name);
+        if name == "VERSION" || path.exists() {
+            insert_go_runtime_file(root, store, &path, &mut paths)?;
+        }
+    }
+    for directory in ["bin", "pkg", "src"] {
+        collect_go_runtime_tree(root, store, &root.join(directory), &mut paths, true)?;
+    }
+    for directory in ["lib", "misc"] {
+        let path = root.join(directory);
+        if path.exists() {
+            collect_go_runtime_tree(root, store, &path, &mut paths, false)?;
+        }
+    }
+    for name in ["go", "gofmt"] {
+        insert_go_runtime_file(
+            root,
+            store,
+            &root
+                .join("bin")
+                .join(format!("{name}{}", platform.os.exe_suffix())),
+            &mut paths,
+        )?;
+    }
+    if paths.len() > MAX_GO_RUNTIME_FILES {
+        return Err(Error::other(format!(
+            "managed Go identity exceeds the {MAX_GO_RUNTIME_FILES} file limit"
+        )));
+    }
+    paths
+        .into_iter()
+        .map(|(path, absolute)| {
+            let (metadata, symlink_target) = go_runtime_file_metadata(root, store, &absolute)?;
+            let (modified_seconds, modified_nanoseconds) = modified_parts(&metadata, &absolute)?;
+            Ok(GoRuntimeFile {
+                receipt: GoRuntimeFileReceipt {
+                    path,
+                    size: metadata.len(),
+                    modified_seconds,
+                    modified_nanoseconds,
+                    symlink_target,
+                },
+                absolute,
+            })
+        })
+        .collect()
+}
+
+fn collect_go_runtime_tree(
+    root: &Path,
+    store: &Path,
+    directory: &Path,
+    paths: &mut BTreeMap<String, PathBuf>,
+    require_file: bool,
+) -> Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(directory).map_err(|error| Error::io(directory, error))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::other(format!(
+            "managed Go identity directory is unsafe: {}",
+            directory.display()
+        )));
+    }
+    let mut found_file = false;
+    for entry in walkdir::WalkDir::new(directory).follow_links(false) {
+        let entry = entry.map_err(|error| Error::other(format!("walkdir: {error}")))?;
+        if entry.file_type().is_symlink() {
+            go_runtime_file_metadata(root, store, entry.path())?;
+            insert_go_runtime_file(root, store, entry.path(), paths)?;
+            found_file = true;
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            return Err(Error::other(format!(
+                "managed Go identity contains a non-regular payload: {}",
+                entry.path().display()
+            )));
+        }
+        insert_go_runtime_file(root, store, entry.path(), paths)?;
+        found_file = true;
+        if paths.len() > MAX_GO_RUNTIME_FILES {
+            return Err(Error::other(format!(
+                "managed Go identity exceeds the {MAX_GO_RUNTIME_FILES} file limit"
+            )));
+        }
+    }
+    if require_file && !found_file {
+        return Err(Error::other(format!(
+            "managed Go runtime directory is empty: {}",
+            directory.display()
+        )));
+    }
+    Ok(())
+}
+
+fn insert_go_runtime_file(
+    root: &Path,
+    store: &Path,
+    path: &Path,
+    paths: &mut BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    go_runtime_file_metadata(root, store, path)?;
+    let relative = path.strip_prefix(root).map_err(|_| {
+        Error::other(format!(
+            "managed Go identity path escapes runtime: {}",
+            path.display()
+        ))
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| Error::config("managed Go identity contains a non-UTF-8 filename"))?
+        .replace('\\', "/");
+    if relative.is_empty() || relative.len() > MAX_GO_RUNTIME_PATH_BYTES {
+        return Err(Error::config(
+            "managed Go identity contains an invalid relative path",
+        ));
+    }
+    paths.insert(relative, path.to_path_buf());
+    Ok(())
+}
+
+fn go_runtime_file_metadata(
+    root: &Path,
+    store: &Path,
+    path: &Path,
+) -> Result<(std::fs::Metadata, Option<String>)> {
+    let link_metadata = std::fs::symlink_metadata(path).map_err(|error| Error::io(path, error))?;
+    if !link_metadata.file_type().is_symlink() {
+        if !link_metadata.is_file() {
+            return Err(Error::other(format!(
+                "managed Go identity path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        return Ok((link_metadata, None));
+    }
+
+    let target = std::fs::read_link(path).map_err(|error| Error::io(path, error))?;
+    let resolved = if target.is_absolute() {
+        target.clone()
+    } else {
+        path.parent()
+            .ok_or_else(|| Error::other("managed Go symlink has no parent"))?
+            .join(&target)
+    };
+    let canonical = dunce::canonicalize(&resolved).map_err(|error| Error::io(&resolved, error))?;
+    let inside_runtime = canonical.starts_with(root);
+    let inside_store = dunce::canonicalize(store)
+        .ok()
+        .is_some_and(|canonical_store| canonical.starts_with(canonical_store));
+    if !inside_runtime && !inside_store {
+        return Err(Error::other(format!(
+            "managed Go identity symlink escapes osdk-controlled storage: {}",
+            path.display()
+        )));
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| Error::io(path, error))?;
+    if !metadata.is_file() {
+        return Err(Error::other(format!(
+            "managed Go identity symlink does not resolve to a regular file: {}",
+            path.display()
+        )));
+    }
+    let target = target
+        .to_str()
+        .ok_or_else(|| Error::config("managed Go identity contains a non-UTF-8 symlink"))?
+        .replace('\\', "/");
+    if target.len() > MAX_GO_RUNTIME_PATH_BYTES {
+        return Err(Error::config(
+            "managed Go identity contains an overlong symlink target",
+        ));
+    }
+    Ok((metadata, Some(target)))
+}
+
+fn hash_go_runtime_files(version: &str, platform: &str, files: &[GoRuntimeFile]) -> Result<String> {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-go-runtime-essential-v1");
+    hash_identity_value(&mut hasher, version.as_bytes());
+    hash_identity_value(&mut hasher, platform.as_bytes());
+    hash_identity_value(&mut hasher, &(files.len() as u64).to_le_bytes());
+    for file in files {
+        hash_identity_value(&mut hasher, file.receipt.path.as_bytes());
+        hash_identity_value(
+            &mut hasher,
+            file.receipt
+                .symlink_target
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        let digest = crate::pipeline::verify::hash_file(&file.absolute, HashAlgo::Sha256)?;
+        hash_identity_value(&mut hasher, digest.as_bytes());
+    }
+    Ok(format!("b3-go-v1:{}", hasher.finalize().to_hex()))
+}
+
+fn go_runtime_receipt_integrity(receipt: &GoRuntimeReceipt) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-go-runtime-receipt-v1");
+    hash_identity_value(&mut hasher, &receipt.schema.to_le_bytes());
+    hash_identity_value(&mut hasher, receipt.version.as_bytes());
+    hash_identity_value(&mut hasher, receipt.platform.as_bytes());
+    hash_identity_value(&mut hasher, &(receipt.files.len() as u64).to_le_bytes());
+    for file in &receipt.files {
+        hash_identity_value(&mut hasher, file.path.as_bytes());
+        hash_identity_value(&mut hasher, &file.size.to_le_bytes());
+        hash_identity_value(&mut hasher, &file.modified_seconds.to_le_bytes());
+        hash_identity_value(&mut hasher, &file.modified_nanoseconds.to_le_bytes());
+        hash_identity_value(
+            &mut hasher,
+            file.symlink_target
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
+    hash_identity_value(&mut hasher, receipt.identity.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn load_go_runtime_receipt(path: &Path) -> Result<GoRuntimeReceipt> {
+    let bytes = crate::inventory::read_stable_regular_file(path, MAX_GO_RUNTIME_RECEIPT_BYTES)
+        .map_err(|error| Error::io(path, error))?;
+    let receipt: GoRuntimeReceipt = serde_json::from_slice(&bytes)?;
+    if receipt.schema != GO_RUNTIME_RECEIPT_SCHEMA
+        || receipt.files.is_empty()
+        || receipt.files.len() > MAX_GO_RUNTIME_FILES
+        || receipt
+            .identity
+            .strip_prefix("b3-go-v1:")
+            .is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            })
+        || receipt.integrity_blake3 != go_runtime_receipt_integrity(&receipt)
+    {
+        return Err(Error::config(format!(
+            "managed Go runtime receipt is invalid at {}",
+            path.display()
+        )));
+    }
+    Ok(receipt)
+}
+
+fn validate_go_runtime_receipt(
+    receipt: &GoRuntimeReceipt,
+    version: &str,
+    platform: &str,
+) -> Result<()> {
+    if receipt.version != version || receipt.platform != platform {
+        return Err(Error::config(
+            "managed Go runtime receipt does not match the selected runtime",
+        ));
+    }
+    let mut previous = None;
+    for file in &receipt.files {
+        if file.path.is_empty()
+            || file.path.len() > MAX_GO_RUNTIME_PATH_BYTES
+            || file.modified_nanoseconds >= 1_000_000_000
+            || previous.is_some_and(|path: &str| path >= file.path.as_str())
+            || Path::new(&file.path).is_absolute()
+            || Path::new(&file.path)
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || file
+                .symlink_target
+                .as_deref()
+                .is_some_and(|target| target.is_empty() || target.len() > MAX_GO_RUNTIME_PATH_BYTES)
+        {
+            return Err(Error::config(
+                "managed Go runtime receipt contains an invalid file inventory",
+            ));
+        }
+        previous = Some(file.path.as_str());
+    }
+    Ok(())
+}
+
+fn write_go_runtime_receipt_atomic(path: &Path, receipt: &GoRuntimeReceipt) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(receipt)?;
+    if bytes.len() as u64 > MAX_GO_RUNTIME_RECEIPT_BYTES {
+        return Err(Error::other(
+            "managed Go runtime receipt exceeds its size limit",
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::other(format!("path has no parent: {}", path.display())))?;
+    let serial = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{GO_RUNTIME_RECEIPT_FILE}.tmp-{}-{serial}",
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| Error::io(&temporary, error))?;
+        use std::io::Write as _;
+        file.write_all(&bytes)
+            .map_err(|error| Error::io(&temporary, error))?;
+        file.sync_all()
+            .map_err(|error| Error::io(&temporary, error))?;
+        atomic_replace_runtime_receipt(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,7 +1128,7 @@ fn write_rust_runtime_receipt_atomic(path: &Path, receipt: &RustRuntimeReceipt) 
             .map_err(|error| Error::io(&temporary, error))?;
         file.sync_all()
             .map_err(|error| Error::io(&temporary, error))?;
-        atomic_replace_rust_runtime_receipt(&temporary, path)
+        atomic_replace_runtime_receipt(&temporary, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -671,12 +1137,12 @@ fn write_rust_runtime_receipt_atomic(path: &Path, receipt: &RustRuntimeReceipt) 
 }
 
 #[cfg(not(windows))]
-fn atomic_replace_rust_runtime_receipt(source: &Path, destination: &Path) -> Result<()> {
+fn atomic_replace_runtime_receipt(source: &Path, destination: &Path) -> Result<()> {
     std::fs::rename(source, destination).map_err(|error| Error::io(destination, error))
 }
 
 #[cfg(windows)]
-fn atomic_replace_rust_runtime_receipt(source: &Path, destination: &Path) -> Result<()> {
+fn atomic_replace_runtime_receipt(source: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -740,6 +1206,7 @@ impl NativeToolFamily {
 }
 
 /// Result of atomically selecting or preparing one native install identity.
+#[allow(clippy::large_enum_variant)]
 pub enum NativeToolPreparation {
     Reused(PathBuf),
     Staged(NativeToolStage),
@@ -1259,7 +1726,7 @@ fn validate_family_tool_id(family: NativeToolFamily, tool: &str) -> Result<()> {
             .filter(|_| crate::tool::ToolId::parse(tool).is_ok_and(|id| id.to_string() == tool)),
         NativeToolFamily::Go => tool
             .strip_prefix("go:")
-            .filter(|subject| valid_go_module_subject(subject)),
+            .filter(|_| crate::tool::ToolId::parse(tool).is_ok_and(|id| id.to_string() == tool)),
     };
     if subject.is_none() {
         return Err(Error::config(format!(
@@ -1268,47 +1735,6 @@ fn validate_family_tool_id(family: NativeToolFamily, tool: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn valid_go_module_subject(subject: &str) -> bool {
-    if subject.is_empty()
-        || subject.len() > 4096
-        || subject.trim() != subject
-        || subject.contains(['\\', '@', '?', '#', '%', ':'])
-        || subject.chars().any(char::is_control)
-        || subject.chars().any(char::is_whitespace)
-    {
-        return false;
-    }
-    let mut components = subject.split('/');
-    let Some(host) = components.next() else {
-        return false;
-    };
-    let valid_host = host.contains('.')
-        && host.split('.').all(|label| {
-            !label.is_empty()
-                && label
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
-                && label
-                    .bytes()
-                    .last()
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        });
-    valid_host
-        && components.all(|component| {
-            !component.is_empty()
-                && component != "."
-                && component != ".."
-                && !component.ends_with('.')
-                && component.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
-                })
-        })
 }
 
 fn runtime_is_installed(dirs: &Dirs, runtime: &InstallDependency, identity_platform: &str) -> bool {
@@ -1329,7 +1755,7 @@ fn runtime_identity_at(
     runtime: &InstallDependency,
     identity_platform: &str,
 ) -> Option<String> {
-    let runtime_root = match runtime.id.as_str() {
+    match runtime.id.as_str() {
         "rust" => {
             let marker = dirs.install_path("rust", &runtime.version);
             if marker.join(".osdk-linked").exists() {
@@ -1338,12 +1764,16 @@ fn runtime_identity_at(
             if identity_platform != Platform::current().to_string() {
                 return None;
             }
-            return rust_runtime_identity(dirs, Platform::current(), &runtime.version).ok();
+            rust_runtime_identity(dirs, Platform::current(), &runtime.version).ok()
         }
-        "go" => dirs.install_path("go", &runtime.version),
-        _ => return None,
-    };
-    hash_runtime_tree(&runtime_root).ok()
+        "go" => {
+            if identity_platform != Platform::current().to_string() {
+                return None;
+            }
+            go_runtime_identity(dirs, Platform::current(), &runtime.version).ok()
+        }
+        _ => None,
+    }
 }
 
 fn hash_runtime_tree(root: &Path) -> Result<String> {
@@ -1810,9 +2240,9 @@ mod tests {
         let dirs = dirs(root);
         write_runtime(&dirs, runtime_version);
         let runtime_identity =
-            runtime_tree_identity(&dirs.install_path("go", runtime_version)).unwrap();
+            go_runtime_identity(&dirs, Platform::current(), runtime_version).unwrap();
         let identity = InstallIdentity::new(
-            "npm:fixture",
+            "go:example.com/acme/fixture",
             "1.2.3",
             Platform::current().to_string(),
             InstallScope::Isolated,
@@ -1893,15 +2323,37 @@ mod tests {
 
     fn write_runtime(dirs: &Dirs, version: &str) {
         let root = dirs.install_path("go", version);
-        std::fs::create_dir_all(&root).unwrap();
+        for directory in ["bin", "pkg/tool", "src/runtime"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        write_executable(
+            &root
+                .join("bin")
+                .join(format!("go{}", Platform::current().os.exe_suffix())),
+            b"go",
+        );
+        write_executable(
+            &root
+                .join("bin")
+                .join(format!("gofmt{}", Platform::current().os.exe_suffix())),
+            b"gofmt",
+        );
+        write_executable(
+            &root
+                .join("pkg/tool")
+                .join(format!("compile{}", Platform::current().os.exe_suffix())),
+            b"compile",
+        );
+        std::fs::write(root.join("src/runtime/runtime.go"), b"package runtime").unwrap();
+        std::fs::write(root.join("VERSION"), format!("go{version}\n")).unwrap();
+        std::fs::write(root.join("go.env"), b"GOTOOLCHAIN=local\n").unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();
     }
 
     fn write_runtime_with_identity(dirs: &Dirs, version: &str, identity: &str) {
         let root = dirs.install_path("go", version);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
-        std::fs::write(root.join("runtime"), identity).unwrap();
+        write_runtime(dirs, version);
+        std::fs::write(root.join("src/runtime/identity"), identity).unwrap();
     }
 
     fn write_executable(path: &Path, bytes: &[u8]) {
@@ -1945,7 +2397,7 @@ mod tests {
                 &dirs,
                 Platform::current(),
                 NativeToolFamily::Go,
-                "npm:fixture",
+                "go:example.com/acme/fixture",
             )
             .unwrap(),
             vec!["1.2.3"]
@@ -2045,6 +2497,76 @@ mod tests {
                 "{file} mutation must change the runtime identity"
             );
         }
+    }
+
+    #[test]
+    fn go_runtime_identity_caches_inventory_and_rehashes_build_inputs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = dirs(temporary.path());
+        write_runtime(&dirs, "1.24.0");
+        let root = dirs.install_path("go", "1.24.0");
+
+        let first = go_runtime_identity(&dirs, Platform::current(), "1.24.0").unwrap();
+        assert!(first.starts_with("b3-go-v1:"));
+        let receipt = root.join(GO_RUNTIME_RECEIPT_FILE);
+        let first_receipt = std::fs::read(&receipt).unwrap();
+        let second = go_runtime_identity(&dirs, Platform::current(), "1.24.0").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first_receipt, std::fs::read(&receipt).unwrap());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(
+            root.join("src/runtime/runtime.go"),
+            b"package runtime // changed",
+        )
+        .unwrap();
+        let changed = go_runtime_identity(&dirs, Platform::current(), "1.24.0").unwrap();
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn go_runtime_identity_rejects_corrupt_receipt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = dirs(temporary.path());
+        write_runtime(&dirs, "1.24.0");
+        go_runtime_identity(&dirs, Platform::current(), "1.24.0").unwrap();
+        let receipt = dirs
+            .install_path("go", "1.24.0")
+            .join(GO_RUNTIME_RECEIPT_FILE);
+        std::fs::write(&receipt, b"{}").unwrap();
+        assert!(go_runtime_identity(&dirs, Platform::current(), "1.24.0").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn go_runtime_identity_accepts_cas_links_and_rejects_external_links() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = dirs(temporary.path());
+        write_runtime(&dirs, "1.24.0");
+        let root = dirs.install_path("go", "1.24.0");
+        let source = root.join("src/runtime/runtime.go");
+        let cas = dirs.store.join("aa/bb/payload");
+        std::fs::create_dir_all(cas.parent().unwrap()).unwrap();
+        std::fs::write(&cas, b"package runtime").unwrap();
+        std::fs::remove_file(&source).unwrap();
+        symlink(&cas, &source).unwrap();
+        let first = go_runtime_identity(&dirs, Platform::current(), "1.24.0").unwrap();
+
+        let second_cas = dirs.store.join("cc/dd/payload");
+        std::fs::create_dir_all(second_cas.parent().unwrap()).unwrap();
+        std::fs::write(&second_cas, b"package runtime").unwrap();
+        std::fs::remove_file(&source).unwrap();
+        symlink(&second_cas, &source).unwrap();
+        let retargeted = go_runtime_identity(&dirs, Platform::current(), "1.24.0").unwrap();
+        assert_ne!(first, retargeted);
+
+        std::fs::remove_file(&source).unwrap();
+        let outside = temporary.path().join("outside.go");
+        std::fs::write(&outside, b"package runtime").unwrap();
+        symlink(&outside, &source).unwrap();
+        assert!(go_runtime_identity(&dirs, Platform::current(), "1.24.0").is_err());
     }
 
     #[test]
@@ -2266,7 +2788,7 @@ mod tests {
         let error = NativeToolLifecycle::new(
             &dirs(temporary.path()),
             Platform::current(),
-            "npm:fixture",
+            "go:example.com/acme/fixture",
             "1.2.3",
             &BTreeMap::new(),
             NativeToolFamily::Go,
@@ -2289,7 +2811,8 @@ mod tests {
         let runtime_root = dirs.install_path("go", "1.23.4");
         std::fs::create_dir_all(&runtime_root).unwrap();
         std::fs::write(runtime_root.join(".osdk-complete"), b"").unwrap();
-        let runtime_identity = runtime_tree_identity(&runtime_root).unwrap();
+        write_runtime(&dirs, "1.23.4");
+        let runtime_identity = go_runtime_identity(&dirs, Platform::current(), "1.23.4").unwrap();
         for tool in [
             "go:exa$mple.com/tool",
             "go:-example.com/tool",
@@ -2330,7 +2853,7 @@ mod tests {
         write_executable(&executable, b"original");
         let root = stage.publish(NativeToolProvider::GoInstall).unwrap();
         std::fs::write(
-            &executable.with_file_name(executable.file_name().unwrap()),
+            executable.with_file_name(executable.file_name().unwrap()),
             b"bad",
         )
         .ok();
@@ -2348,9 +2871,9 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let dirs = dirs(temporary.path());
         write_runtime_with_identity(&dirs, "1.23.4", "runtime-a");
-        let expected_identity = hash_runtime_tree(&dirs.install_path("go", "1.23.4")).unwrap();
+        let expected_identity = go_runtime_identity(&dirs, Platform::current(), "1.23.4").unwrap();
         let identity = InstallIdentity::new(
-            "npm:fixture",
+            "go:example.com/acme/fixture",
             "1.2.3",
             Platform::current().to_string(),
             InstallScope::Isolated,
@@ -2381,7 +2904,8 @@ mod tests {
         assert!(lifecycle.validate_complete(&dirs).unwrap());
 
         std::fs::write(
-            dirs.install_path("go", "1.23.4").join("runtime"),
+            dirs.install_path("go", "1.23.4")
+                .join("src/runtime/identity"),
             "runtime-b",
         )
         .unwrap();

@@ -185,6 +185,11 @@ mod tests {
         let registry = Registry::new();
 
         assert_eq!(registry.get("npm").unwrap().id(), "npm");
+        assert_eq!(registry.get("go").unwrap().id(), "go");
+        assert_eq!(
+            registry.get("go:example.com/acme/tool").unwrap().id(),
+            "go:example.com/acme/tool"
+        );
         assert_eq!(
             registry.get("github:cli/cli").unwrap().id(),
             "github:cli/cli"
@@ -240,6 +245,8 @@ mod tests {
             "github:noslash",
             "github:cli/cli/extra",
             "cargo:http://example.test/ripgrep",
+            "go:Example.com/acme/tool",
+            "go:example.com/../tool",
             "NPM:prettier",
             "http:http://example.test/tool-{version}.zip",
             "http:https://user@example.test/tool-{version}.zip",

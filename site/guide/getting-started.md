@@ -114,7 +114,7 @@ osdk reshim
 
 | 命令 | 参数与精确语义 |
 | --- | --- |
-| `list [TOOL]` | 列出带完成标记的本地版本；无参数时包括全部已注册 backend 和磁盘上发现的 inventory 型动态工具，包括 GitHub 与 Cargo 工具 |
+| `list [TOOL]` | 列出带完成标记的本地版本；无参数时包括全部已注册 backend 和磁盘上发现的 inventory 型动态工具，包括 GitHub、Cargo 与 Go command 工具 |
 | `list-remote TOOL [FILTER]` | 列出远端稳定版本；可选 `FILTER` 是字符串前缀，不列预发布版本 |
 | `current [TOOL]` | 显示当前目录解析到的原始版本请求和来源；不保证版本已安装，也不是远端解析后的精确版本 |
 | `where TOOL[@VERSION]` | 精确版本直接定位；非精确请求不会读取项目当前版本，而是选择已安装列表的最后一项 |
