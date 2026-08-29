@@ -2265,8 +2265,18 @@ mod tests {
     fn cargo_lifecycle(root: &Path, runtime_version: &str) -> NativeToolLifecycle {
         let dirs = dirs(root);
         let runtime_root = dirs.rustup_home().join("toolchains").join(runtime_version);
-        write_executable(&runtime_root.join("bin/cargo"), b"cargo");
-        write_executable(&runtime_root.join("bin/rustc"), b"rustc");
+        write_executable(
+            &runtime_root
+                .join("bin")
+                .join(format!("cargo{}", Platform::current().os.exe_suffix())),
+            b"cargo",
+        );
+        write_executable(
+            &runtime_root
+                .join("bin")
+                .join(format!("rustc{}", Platform::current().os.exe_suffix())),
+            b"rustc",
+        );
         let target_lib = runtime_root
             .join("lib/rustlib")
             .join(Platform::current().llvm_triple())
@@ -2439,7 +2449,12 @@ mod tests {
             Some(first.as_str())
         );
 
-        write_executable(&runtime_root.join("bin/rustc"), b"changed rustc");
+        write_executable(
+            &runtime_root
+                .join("bin")
+                .join(format!("rustc{}", Platform::current().os.exe_suffix())),
+            b"changed rustc",
+        );
         let changed = rust_runtime_identity(&dirs, Platform::current(), "1.91.1").unwrap();
         assert_ne!(first, changed);
 

@@ -1301,7 +1301,15 @@ mod tests {
         version.options = BTreeMap::from([
             ("sha256".into(), "a".repeat(64)),
             ("kind".into(), "file".into()),
-            ("rename".into(), "fixture".into()),
+            (
+                "rename".into(),
+                if cfg!(windows) {
+                    "fixture.exe"
+                } else {
+                    "fixture"
+                }
+                .into(),
+            ),
         ]);
         let artifact = backend.artifact(&version).unwrap();
         let locator = backend.locator(&ctx, &version, &artifact).unwrap();
@@ -1395,7 +1403,15 @@ mod tests {
                 .into(),
             ),
             ("strip-components".into(), "1".into()),
-            ("rename".into(), "fixture".into()),
+            (
+                "rename".into(),
+                if cfg!(windows) {
+                    "fixture.exe"
+                } else {
+                    "fixture"
+                }
+                .into(),
+            ),
             (
                 pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
                 "https://unreachable.invalid/original.tar.gz".into(),
