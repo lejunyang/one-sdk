@@ -17,8 +17,8 @@ use super::plan::{
     policy_fingerprint, ActivationRequirement, BuildkitTargetDriver, DockerTargetKind,
     EffectiveResolution, Fingerprint, MirrorChange, MirrorPlanBundle, MirrorPlanDraft,
     MirrorPlanTarget, NativeConfigCandidate, NativeConfigFormat, NativeConfigSnapshot,
-    PlanApplicability, PlanError, PlanWarning, PlannedCapability, RequiredPrivilege,
-    ValidationStep,
+    PlanApplicability, PlanError, PlanWarning, PlannedCapability, PlannedMirrorEndpoint,
+    RequiredPrivilege, ValidationStep,
 };
 use super::reference::RegistryName;
 use crate::config::{ContainerRegistryConfig, ContainerResolve};
@@ -85,7 +85,7 @@ pub fn plan_docker_mirrors(
             return Err(MirrorPlanError::UnsupportedDockerMirrorPath);
         }
         changes.push(MirrorChange::DockerHubMirrors {
-            mirrors,
+            mirrors: planned_mirrors(&mirrors)?,
             effective_resolution,
         });
 
@@ -151,7 +151,7 @@ pub fn plan_containerd_mirrors(
     };
     let mut changes = vec![MirrorChange::ContainerdRegistryHosts {
         registry: request.registry.clone(),
-        mirrors: mirrors.clone(),
+        mirrors: planned_mirrors(&mirrors)?,
         capabilities: capabilities.clone(),
     }];
     let mut warnings = BTreeSet::from([PlanWarning::ExistingNativeEntriesPreserved]);
@@ -318,7 +318,7 @@ pub fn plan_buildkit_mirrors(
     if !matches!(selected.driver, BuilderDriver::Docker) {
         changes.push(MirrorChange::BuildkitRegistryMirrors {
             registry: request.registry.clone(),
-            mirrors: mirrors.clone(),
+            mirrors: planned_mirrors(&mirrors)?,
             effective_resolution,
         });
     }
@@ -502,6 +502,10 @@ fn containerd_hosts_candidate(
     }
     let host = ensure_table(&mut document, "host")?;
     for mirror in mirrors {
+        // Configured mirror paths are base prefixes. With containerd's normal
+        // host semantics it appends `/v2/...` after this prefix, matching the
+        // registry diagnostic transport. Do not infer `override_path`; that
+        // flag means the configured path is already the complete API root.
         let rendered = trim_root_url(mirror);
         let key = existing_url_key(host, &rendered).unwrap_or(rendered);
         let entry = host
@@ -721,6 +725,20 @@ fn mirror_url(value: &str) -> Result<reqwest::Url, MirrorPlanError> {
 
 fn mirror_has_path(value: &str) -> bool {
     reqwest::Url::parse(value).is_ok_and(|url| !matches!(url.path(), "" | "/"))
+}
+
+fn planned_mirrors(values: &[String]) -> Result<Vec<PlannedMirrorEndpoint>, MirrorPlanError> {
+    values
+        .iter()
+        .map(|value| {
+            let url = mirror_url(value)?;
+            Ok(PlannedMirrorEndpoint {
+                origin: super::RedactedUrl::parse(value)
+                    .map_err(|_| MirrorPlanError::UnsafeMirrorUrl)?,
+                has_path_prefix: !matches!(url.path(), "" | "/"),
+            })
+        })
+        .collect()
 }
 
 fn trim_root_url(value: &str) -> String {
@@ -1156,6 +1174,13 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("push"), "{text}");
+        let plan_json = serde_json::to_string(&containerd.plan).unwrap();
+        assert!(!plan_json.contains("cache"), "prefix leaked: {plan_json}");
+        assert!(plan_json.contains("[redacted]"), "{plan_json}");
+        assert!(
+            plan_json.contains("\"has_path_prefix\":true"),
+            "{plan_json}"
+        );
 
         let buildkit_path = temporary.path().join("buildkitd.toml");
         let buildkit_snapshot = NativeConfigSnapshot::capture(&buildkit_path, 4096).unwrap();
@@ -1171,5 +1196,8 @@ mod tests {
             text.contains("mirrors = [\"mirror.example:5443/cache\"]"),
             "{text}"
         );
+        let plan_json = serde_json::to_string(&buildkit.plan).unwrap();
+        assert!(!plan_json.contains("cache"), "prefix leaked: {plan_json}");
+        assert!(plan_json.contains("[redacted]"), "{plan_json}");
     }
 }

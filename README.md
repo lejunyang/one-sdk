@@ -348,22 +348,44 @@ osdk untrust ./osdk.toml
 
 Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
 
-## Scenario: inspect container runtimes and native caches
+## Scenario: inspect container runtimes, registries, and native caches
+
+An OCI registry can be tested without adding policy first. Add an ordered mirror
+policy to trusted user or project configuration when you also want to test
+mirrors or plan a native configuration change:
+
+```toml
+[containers.registries."docker.io"]
+mirrors = ["https://mirror.example/"]
+anonymous_only = true
+resolve = "mirror"
+```
 
 ```bash
 osdk container doctor
 osdk container doctor --runtime docker --builder my-builder
 osdk container doctor --json
+osdk container registry test docker.io
+osdk container registry test docker.io \
+  --image ubuntu:24.04 --platform linux/amd64 --json
+osdk container mirrors plan docker.io --runtime docker
+osdk container mirrors plan docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json --json
 osdk container cache status
 osdk container cache status --runtime buildkit --builder my-builder
 ```
 
-The container commands inspect Docker, containerd, and Buildx through bounded,
-read-only native interfaces. Human output is concise and localized; `--json` is
-deterministic and schema-versioned. These commands do not start builders, prune
-data, rewrite native configuration, or scan private runtime stores.
+Registry tests use anonymous HTTPS only, can validate image digests, platform
+selection, and bounded Range support, and check configured mirrors in order. A
+mirror plan always targets one configured registry and one explicit Docker,
+containerd, or BuildKit control plane. It reports a deterministic `plan_id`;
+without an explicit native config path a locally actionable plan is
+`manual-only`. Planning never writes native configuration, starts builders, or
+restarts daemons. Plan JSON contains operational absolute paths, builder names,
+and mirror origins plus whether a path prefix exists; exact mirror prefixes,
+existing configuration contents, and generated candidate bytes remain hidden.
 
-Guide: [Container runtimes and native caches](site/en/guide/containers.md)
+Guide: [Container runtimes, registries, and native caches](site/en/guide/containers.md)
 
 ## Scenario: inspect caches and reclaim storage
 
@@ -408,7 +430,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
-| Container inspection | Docker Engine, containerd, Docker Buildx, native cache status |
+| Container inspection | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, read-only mirror plans, native cache status |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
 | Shells | Bash, zsh, fish, PowerShell |
 | CLI languages | English, Chinese |
@@ -425,7 +447,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
-- [Container runtimes and native caches](site/en/guide/containers.md)
+- [Container runtimes, registries, and native caches](site/en/guide/containers.md)
 - [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
 - [Implementation docs](site/en/guide/implementation/index.md)
 

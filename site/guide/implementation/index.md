@@ -30,7 +30,7 @@ CLI 与分层配置
 | [激活、shim 与锁文件](./activation-lockfile) | 热路径解析、可逆 shell 状态、项目信任与平台化 lock |
 | [下载源与项目 Registry](./sources-registries) | 两套控制面、测速排序、凭据边界和单次启动语义 |
 | [HTTP 制品 backend](./http-artifacts) | 严格内联 URL 解析、精确身份、SHA-256 缓存重放、安全解压与发布 |
-| [容器诊断与原生缓存](./containers) | 运行时选择、有界探测、稳定报告、脱敏与原生缓存所有权 |
+| [容器诊断、Registry 测试与 Mirror Plan](./containers) | 运行时选择、匿名 OCI 校验、原生 plan 身份/披露与 cache 所有权 |
 | [存储与缓存](./storage-cache) | SDK/模型 CAS、物化回退、下载缓存和各 manager 原生缓存 |
 | [校验与供应链边界](./verification) | checksum、Minisign、GitHub Artifact Attestation 与归档安全边界 |
 | [Backend 与模型 Provider](./backends-models) | 内置/声明式/GitHub backend，以及 Hugging Face、ModelScope 模型快照 |

@@ -321,21 +321,40 @@ osdk untrust ./osdk.toml
 
 指南：[下载源、离线与安全](site/guide/sources-security.md)
 
-## 场景：检查容器运行时与原生缓存
+## 场景：检查容器运行时、Registry 与原生缓存
+
+无需先添加 policy 即可测试 OCI Registry。需要同时测试 mirror 或规划原生配置变更时，
+请在已信任的用户或项目配置中添加有序 mirror policy：
+
+```toml
+[containers.registries."docker.io"]
+mirrors = ["https://mirror.example/"]
+anonymous_only = true
+resolve = "mirror"
+```
 
 ```bash
 osdk container doctor
 osdk container doctor --runtime docker --builder my-builder
 osdk container doctor --json
+osdk container registry test docker.io
+osdk container registry test docker.io \
+  --image ubuntu:24.04 --platform linux/amd64 --json
+osdk container mirrors plan docker.io --runtime docker
+osdk container mirrors plan docker.io --runtime docker \
+  --native-config /etc/docker/daemon.json --json
 osdk container cache status
 osdk container cache status --runtime buildkit --builder my-builder
 ```
 
-容器命令通过有界的只读原生接口检查 Docker、containerd 和 Buildx。人类可读输出
-简洁且支持中英文；`--json` 输出确定且带 schema 版本。这些命令不会启动构建器、
-清理数据、改写原生配置或扫描运行时私有存储。
+Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并按配置
+顺序检查 mirror。每份 mirror plan 只针对一个已配置 Registry 和一个显式 Docker、
+containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；本来可执行的本地 plan 如果没有
+显式原生配置路径，会标为 `manual-only`。规划不会写原生配置、启动 builder 或重启 daemon。
+Plan JSON 会包含操作所需的绝对路径、builder 名、mirror origin 及是否存在 path prefix，
+但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。
 
-指南：[容器运行时与原生缓存](site/guide/containers.md)
+指南：[容器运行时、Registry 与原生缓存](site/guide/containers.md)
 
 ## 场景：检查缓存并回收空间
 
@@ -379,7 +398,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
-| 容器检查 | Docker Engine、containerd、Docker Buildx 与原生缓存状态 |
+| 容器检查 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、只读 mirror plan 与原生缓存状态 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
 | Shell | Bash、zsh、fish、PowerShell |
 | CLI 语言 | 中文、英文 |
@@ -396,7 +415,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [直接 HTTPS 制品](site/guide/http-artifacts.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)
-- [容器运行时与原生缓存](site/guide/containers.md)
+- [容器运行时、Registry 与原生缓存](site/guide/containers.md)
 - [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
 - [实现文档](site/guide/implementation/index.md)
 

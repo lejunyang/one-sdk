@@ -327,16 +327,25 @@ pub enum MirrorPlanTarget {
     },
 }
 
+/// Secret-safe identity of a configured mirror endpoint. Native candidate
+/// bytes retain the complete URL, while serialized plans expose only origin
+/// and the presence of a routing prefix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlannedMirrorEndpoint {
+    pub origin: RedactedUrl,
+    pub has_path_prefix: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum MirrorChange {
     DockerHubMirrors {
-        mirrors: Vec<String>,
+        mirrors: Vec<PlannedMirrorEndpoint>,
         effective_resolution: EffectiveResolution,
     },
     ContainerdRegistryHosts {
         registry: RegistryName,
-        mirrors: Vec<String>,
+        mirrors: Vec<PlannedMirrorEndpoint>,
         capabilities: BTreeSet<PlannedCapability>,
     },
     ContainerdConfigPath {
@@ -344,7 +353,7 @@ pub enum MirrorChange {
     },
     BuildkitRegistryMirrors {
         registry: RegistryName,
-        mirrors: Vec<String>,
+        mirrors: Vec<PlannedMirrorEndpoint>,
         effective_resolution: EffectiveResolution,
     },
 }
@@ -655,7 +664,10 @@ mod tests {
             inputs: vec![input],
             candidates: Vec::new(),
             changes: vec![MirrorChange::DockerHubMirrors {
-                mirrors: vec!["https://mirror.example/".into()],
+                mirrors: vec![PlannedMirrorEndpoint {
+                    origin: RedactedUrl::parse("https://mirror.example/").unwrap(),
+                    has_path_prefix: false,
+                }],
                 effective_resolution: EffectiveResolution::RuntimeDefined,
             }],
             privilege: RequiredPrivilege::Root,
