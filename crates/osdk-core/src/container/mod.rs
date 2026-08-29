@@ -9,6 +9,7 @@ pub mod cache;
 pub mod containerd;
 pub mod docker;
 pub mod mirror;
+pub mod operations;
 pub mod plan;
 pub mod redact;
 pub mod reference;
@@ -43,8 +44,8 @@ pub use plan::{
     Fingerprint, MirrorChange, MirrorPlan, MirrorPlanBundle, MirrorPlanDraft, MirrorPlanTarget,
     NativeCandidateFingerprint, NativeConfigCandidate, NativeConfigFormat, NativeConfigSnapshot,
     NativeInputFingerprint, NativeInputState, PlanApplicability, PlanError, PlanWarning,
-    PlannedCapability, RequiredPrivilege, ValidationStep, MAX_NATIVE_CONFIG_BYTES,
-    MIRROR_PLAN_SCHEMA_VERSION,
+    PlannedCapability, PlannedMirrorEndpoint, RequiredPrivilege, ValidationStep,
+    MAX_NATIVE_CONFIG_BYTES, MIRROR_PLAN_SCHEMA_VERSION,
 };
 pub use reference::{
     ImageReference, ImageSelector, ImageTag, OciDigest, OciPlatform, ReferenceError, RegistryName,
