@@ -1301,6 +1301,39 @@ mod tests {
     }
 
     #[test]
+    fn mirror_plan_json_redacts_configured_path_prefixes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let native_config = temporary.path().join("buildkitd.toml");
+        let secret_path = "tenant-secret-7d9";
+        let mut config = osdk_core::config::ContainersConfig::default();
+        config.registries.insert(
+            "docker.io".into(),
+            registry_policy(&[&format!("https://mirror.example/{secret_path}/")]),
+        );
+        let runner = FakeRunner::new([
+            success("github.com/docker/buildx v0.36.1 deadbeef\n"),
+            success(
+                r#"{"Current":true,"Driver":"docker-container","Name":"selected","Nodes":[{"Name":"selected0","Endpoint":"unix:///var/run/docker.sock","Status":"running"}]}"#,
+            ),
+            success("Name: selected\nDriver: docker-container\nName: selected0\nEndpoint: unix:///var/run/docker.sock\nStatus: running\n"),
+        ]);
+        let plan = mirror_plan(
+            &runner,
+            &config,
+            "docker.io",
+            ContainerMirrorRuntimeArg::Buildkit,
+            None,
+            Some(&native_config),
+            None,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(!json.contains(secret_path), "mirror path leaked: {json}");
+        assert!(json.contains("[redacted]"), "{json}");
+        assert!(json.contains("\"has_path_prefix\":true"), "{json}");
+    }
+
+    #[test]
     fn mirror_plan_requires_policy_and_rejects_cross_runtime_options_without_running() {
         let runner = FakeRunner::new([]);
         let config = osdk_core::config::ContainersConfig::default();

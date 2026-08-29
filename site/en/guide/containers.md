@@ -206,7 +206,7 @@ Runtime behavior is intentionally not flattened:
 | --- | --- | --- |
 | Docker | Only `docker.io` is supported. A local/rootless target with `resolve=mirror` and an explicit daemon JSON can be `ready`; `resolve=upstream` is `manual-only` because Moby cannot separate origin resolution from mirror transfer. Applying the described change would require a daemon restart. | Rejected because Moby `registry-mirrors` accepts origin URLs only. |
 | containerd | Plans the exact registry namespace in `hosts.toml`. `resolve=upstream` grants mirrors `pull`; `resolve=mirror` grants `pull, resolve`; `push` is never added. Existing unrelated host/TLS entries are preserved in the in-memory candidate. | Preserved as the full host-table URL. It remains a base prefix before containerd appends `/v2/...`; osdk therefore does not infer `override_path`. |
-| BuildKit | The Docker driver is `unsupported` because it uses Engine policy. A local `docker-container` builder can be `ready` with `resolve=mirror` and an explicit TOML; it reports `recreate-builder`. Kubernetes, remote, cloud, and upstream-resolution cases are `manual-only`. | Serialized without the `https://` scheme as `host[:port]/path`, preserving the path. |
+| BuildKit | The Docker driver is `unsupported` because it uses Engine policy. A local `docker-container` builder can be `ready` with `resolve=mirror` and an explicit TOML; it reports `recreate-builder`. Kubernetes, remote, cloud, and upstream-resolution cases are `manual-only`. | Rendered in the non-serialized candidate TOML without the `https://` scheme as `host[:port]/path`, preserving the path. |
 
 The human report starts with the deterministic `sha256:` `plan_id`, then
 applicability, change/candidate counts, activation requirement, and warnings.

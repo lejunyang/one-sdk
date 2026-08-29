@@ -178,7 +178,7 @@ osdk container mirrors plan docker.io --runtime buildkit \
 | --- | --- | --- |
 | Docker | 只支持 `docker.io`。本地/rootless target 在 `resolve=mirror` 且指定 daemon JSON 时可为 `ready`；Moby 无法分离 origin resolution 与 mirror transfer，所以 `resolve=upstream` 为 `manual-only`。所描述的变更需要重启 daemon 才生效。 | 拒绝，因为 Moby `registry-mirrors` 只接受 origin URL。 |
 | containerd | 在 `hosts.toml` 中按精确 Registry namespace 规划。`resolve=upstream` 给 mirror `pull` capability，`resolve=mirror` 给 `pull, resolve`；永不添加 `push`。in-memory candidate 保留其他无关 host/TLS 条目。 | 完整保留为 host table URL，并作为 containerd 在其后追加 `/v2/...` 的 base prefix；因此 osdk 不会推断 `override_path`。 |
-| BuildKit | Docker driver 为 `unsupported`，因为它使用 Engine policy。本地 `docker-container` builder 在 `resolve=mirror` 且指定 TOML 时可为 `ready`，并报告 `recreate-builder`。Kubernetes、remote、cloud 和 upstream-resolution 场景为 `manual-only`。 | 去掉 `https://` 后序列化为 `host[:port]/path`，保留 path。 |
+| BuildKit | Docker driver 为 `unsupported`，因为它使用 Engine policy。本地 `docker-container` builder 在 `resolve=mirror` 且指定 TOML 时可为 `ready`，并报告 `recreate-builder`。Kubernetes、remote、cloud 和 upstream-resolution 场景为 `manual-only`。 | 在不序列化的 candidate TOML 中去掉 `https://`，写成 `host[:port]/path` 并保留 path。 |
 
 人类输出先打印确定的 `sha256:` `plan_id`，再显示 applicability、change/candidate 数量、
 activation requirement 和 warning。`--json` 输出 mirror-plan schema version 1。ID 绑定规范
