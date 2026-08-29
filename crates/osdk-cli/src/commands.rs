@@ -5899,7 +5899,7 @@ mod command_flow_tests {
         for (key, value) in parse_opts(&["tags=netgo".into()]).unwrap() {
             tool.options.insert(key, value);
         }
-        let requests = vec![tool, ToolRequest::parse("go@1.24").unwrap()];
+        let requests = [tool, ToolRequest::parse("go@1.24").unwrap()];
         let runtime = requests
             .iter()
             .find(|request| request.backend == "go")

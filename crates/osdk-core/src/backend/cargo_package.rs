@@ -275,9 +275,8 @@ impl CargoPackageBackend {
     ) -> Result<Option<NativeToolLifecycle>> {
         if tv
             .options
-            .get(LOCKED_NATIVE_RUNTIME_VERSION_OPTION)
-            .is_some()
-            && tv.options.get(LOCKED_CARGO_INDEX_OPTION).is_some()
+            .contains_key(LOCKED_NATIVE_RUNTIME_VERSION_OPTION)
+            && tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION)
         {
             return self.lifecycle(ctx, tv).map(Some);
         }
@@ -294,9 +293,9 @@ impl CargoPackageBackend {
                 && identity.platform == ctx.platform.to_string()
                 && identity.scope == crate::tool::InstallScope::Isolated
                 && identity.material_options == expected_options
-                && (tv.options.get(LOCKED_CARGO_INDEX_OPTION).is_some()
+                && (tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION)
                     && identity.materials == expected_materials
-                    || tv.options.get(LOCKED_CARGO_INDEX_OPTION).is_none()
+                    || !tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION)
                         && self.materials_match(tv, &identity.materials))
                 && native_tool::validate_install_candidate(
                     &ctx.dirs,
@@ -623,7 +622,7 @@ impl CargoPackageBackend {
     ) -> Result<()> {
         if ctx.config.settings.offline
             && matches!(self.source, CargoSource::Registry { .. })
-            && tv.options.get(LOCKED_CARGO_INDEX_OPTION).is_none()
+            && !tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION)
         {
             if self.selected_lifecycle(ctx, tv)?.is_some() {
                 return Ok(());
@@ -1056,10 +1055,9 @@ impl Backend for CargoPackageBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
     ) -> Result<Option<InstallIdentity>> {
-        if tv
+        if !tv
             .options
-            .get(LOCKED_NATIVE_RUNTIME_VERSION_OPTION)
-            .is_none()
+            .contains_key(LOCKED_NATIVE_RUNTIME_VERSION_OPTION)
         {
             return Ok(None);
         }

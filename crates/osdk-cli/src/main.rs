@@ -77,19 +77,6 @@ fn native_exit_code(status: ExitStatus) -> i32 {
     1
 }
 
-#[cfg(test)]
-mod tests {
-    use super::native_exit_code;
-
-    #[cfg(unix)]
-    #[test]
-    fn native_signal_status_uses_shell_compatible_exit_code() {
-        use std::os::unix::process::ExitStatusExt;
-
-        assert_eq!(native_exit_code(std::process::ExitStatus::from_raw(9)), 137);
-    }
-}
-
 /// Scan raw argv for `--lang <v>` or `--lang=<v>` (before clap parses).
 fn scan_lang_flag(args: &[String]) -> Option<String> {
     let mut it = args.iter();
@@ -176,4 +163,17 @@ fn init_tracing(verbose: u8) {
         .without_time()
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_exit_code;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_signal_status_uses_shell_compatible_exit_code() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert_eq!(native_exit_code(std::process::ExitStatus::from_raw(9)), 137);
+    }
 }

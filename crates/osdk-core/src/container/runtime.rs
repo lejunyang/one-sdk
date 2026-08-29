@@ -90,10 +90,7 @@ mod tests {
 
         fn run_foreground(&self, _command: &CommandSpec) -> io::Result<ExitStatus> {
             self.foreground_calls.fetch_add(1, Ordering::Relaxed);
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "synthetic foreground failure",
-            ))
+            Err(io::Error::other("synthetic foreground failure"))
         }
     }
 

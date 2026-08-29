@@ -568,7 +568,7 @@ fn set_unavailable_capabilities(report: &mut DiagnosticReport) {
 fn parse_buildx_version(bytes: &[u8]) -> Option<Version> {
     String::from_utf8_lossy(bytes)
         .split_whitespace()
-        .filter_map(|token| super::parse_vendor_version(token))
+        .filter_map(super::parse_vendor_version)
         .next()
 }
 

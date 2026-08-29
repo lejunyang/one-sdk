@@ -3119,8 +3119,10 @@ checksum = "sha256:{digest}"
             "cargo:https://git.example.test/Team/tool",
             "go:example.com/Acme/tool",
         ] {
-            let mut locked = LockedTool::default();
-            locked.version = "1.2.3".into();
+            let locked = LockedTool {
+                version: "1.2.3".into(),
+                ..LockedTool::default()
+            };
             validate_locked_tool_identity(valid, &locked).unwrap();
         }
         for invalid in [
@@ -3144,8 +3146,10 @@ checksum = "sha256:{digest}"
             "go:-example.com/tool",
             "go:example!.com/tool",
         ] {
-            let mut locked = LockedTool::default();
-            locked.version = "1.2.3".into();
+            let locked = LockedTool {
+                version: "1.2.3".into(),
+                ..LockedTool::default()
+            };
             assert!(
                 validate_locked_tool_identity(invalid, &locked).is_err(),
                 "{invalid}"

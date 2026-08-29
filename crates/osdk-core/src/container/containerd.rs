@@ -586,22 +586,18 @@ fn classify_status(
         DiagnosticStatus::NotInstalled
     } else if unsupported {
         DiagnosticStatus::UnsupportedVersion
-    } else if outcomes
-        .iter()
-        .any(|outcome| matches!(outcome, CommandOutcome::TimedOut { .. }))
-    {
-        DiagnosticStatus::Unreachable
     } else if outcomes.iter().any(|outcome| {
-        output_contains(
-            outcome,
-            &[
-                "connection refused",
-                "deadline exceeded",
-                "transport is closing",
-                "failed to dial",
-                "context deadline",
-            ],
-        )
+        matches!(outcome, CommandOutcome::TimedOut { .. })
+            || output_contains(
+                outcome,
+                &[
+                    "connection refused",
+                    "deadline exceeded",
+                    "transport is closing",
+                    "failed to dial",
+                    "context deadline",
+                ],
+            )
     }) {
         DiagnosticStatus::Unreachable
     } else if server_reached {

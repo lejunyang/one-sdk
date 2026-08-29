@@ -227,6 +227,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull(
     runner: &dyn CommandRunner,
     config: &osdk_core::config::ContainersConfig,

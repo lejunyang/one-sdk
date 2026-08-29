@@ -305,20 +305,15 @@ impl<'de> Deserialize<'de> for ContainerRuntime {
 }
 
 /// Target platform chosen from the native runtime or an explicit OCI tuple.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ContainerPlatform {
+    #[default]
     Runtime,
     Explicit {
         os: String,
         arch: String,
         variant: Option<String>,
     },
-}
-
-impl Default for ContainerPlatform {
-    fn default() -> Self {
-        Self::Runtime
-    }
 }
 
 impl std::str::FromStr for ContainerPlatform {

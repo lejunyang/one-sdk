@@ -4354,7 +4354,6 @@ mod tests {
             "@echo off\r\nnode \"%~dp0node_modules\\prettier\\bin.js\" %*\r\n",
         )
         .unwrap();
-        let mut version = version;
         version
             .options
             .insert(INSTALLER_OPTION.into(), NpmInstaller::Npm.as_str().into());
@@ -4500,7 +4499,6 @@ mod tests {
         )
         .unwrap();
         let digest = read_native_lock(&project.join("aube-lock.yaml"), NpmInstaller::Aube).unwrap();
-        let mut version = version;
         version
             .options
             .insert(INSTALLER_OPTION.into(), NpmInstaller::Aube.as_str().into());

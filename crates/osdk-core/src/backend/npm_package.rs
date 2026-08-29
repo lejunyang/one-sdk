@@ -506,7 +506,7 @@ impl NpmPackageBackend {
         if !is_regular_file(&root.join(".osdk-complete")) {
             return Ok(false);
         }
-        let Some(manifest) = self.manifest_at(ctx, &root, tv)? else {
+        let Some(manifest) = self.manifest_at(ctx, root, tv)? else {
             return Ok(false);
         };
         let expected_scope = match scope {
@@ -1094,6 +1094,7 @@ impl NpmPackageBackend {
         Ok(bin_dir)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_manifest(
         &self,
         ctx: &Ctx,
@@ -1106,7 +1107,7 @@ impl NpmPackageBackend {
     ) -> Result<DynamicToolManifest> {
         let identity = self.install_identity(ctx, tv, ToolScope::Project)?;
         let mut manifest = DynamicToolManifest::from_identity(identity)?;
-        manifest.bins = discover_bins(&install_root, bin_dir)?;
+        manifest.bins = discover_bins(install_root, bin_dir)?;
         write_npm_receipt(
             install_root,
             &NpmInstallReceipt {
