@@ -75,7 +75,7 @@ manifest, preventing deletion of objects that may still be referenced.
 
 `osdk container cache status` is separate: it queries storage owned by Docker
 Engine or a Buildx builder through supported native aggregate interfaces. See
-[Container Runtimes and Native Caches](./containers).
+[Container Runtimes, Registries, and Native Operations](./containers).
 
 When the user has not set them, the general shell hook also maps
 `npm_config_cache`, `PIP_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `CARGO_HOME`, and

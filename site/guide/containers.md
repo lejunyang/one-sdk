@@ -1,9 +1,9 @@
-# 容器运行时、Registry 与原生缓存
+# 容器运行时、Registry 与原生操作
 
 osdk 可以在不修改配置或存储的前提下检查 Docker Engine、containerd 和
 Docker Buildx；也可以匿名测试 OCI Registry 及其已配置 mirror，并生成只读原生 mirror
-plan。测试与规划是两条独立路径：测试执行有界网络读取，规划只检查一个原生控制面，
-绝不会写入其配置。
+plan；还可以把镜像拉取交给一个选中的原生 runtime，并在批准前预览严格限定范围的原生
+清理。检查与规划保持只读；pull 和经批准的 prune 只修改解析出的原生控制面。
 
 ## 诊断运行时与构建器
 
@@ -54,6 +54,94 @@ Engine；如果选中 containerd，则返回其明确的“不支持”结果。
 缓存 JSON 使用原生缓存 schema version 1，只包含类型化分类、数量、字节总量、可回收
 字节数、状态、所有者和已脱敏的命令证据。原生对象 ID、描述、构建器名称、命令原始
 输出、凭据和私有路径都不会进入输出。
+
+## 使用选中的原生 runtime 拉取镜像
+
+```text
+osdk container pull IMAGE
+  [--runtime auto|docker|containerd]
+  [--platform OS/ARCH[/VARIANT]]
+  [--address ADDRESS --namespace NAMESPACE]
+```
+
+```bash
+# 使用生效的容器 runtime 和 platform。
+osdk container pull ubuntu:24.04
+
+# 同时固定所有者与请求的镜像平台。
+osdk container pull ghcr.io/example/tool:1.0 \
+  --runtime containerd --platform linux/amd64 \
+  --address unix:///run/containerd/containerd.sock --namespace default
+```
+
+Runtime 和 platform 默认来自生效的 `[containers]` 配置。使用 `--runtime auto` 时，osdk
+对 Docker 和 containerd 执行一次有界只读解析并确定地选中一个所有者，然后只启动一次
+原生前台 pull。原生命令一旦启动便不会回退到另一个 runtime，因此认证、网络或拉取失败
+都会由实际运行的所有者报告。
+
+`--offline` 会在解析 runtime 或启动原生命令前拒绝 pull。
+
+显式选择 `--runtime containerd` 时必须同时提供 `--address` 与 `--namespace`；这两个 selector
+始终要求成对出现。使用 `--runtime auto` 时，只有 containerd 胜出才要求二者，Docker 无需
+它们即可继续。
+
+原生子进程继承 stdio，osdk 会等待它结束。Docker 收到直接的 `docker image pull`；
+containerd 收到直接的 `ctr --address ADDRESS --namespace NAMESPACE images pull`。osdk 返回
+子进程的直接退出码；Unix 上若子进程由信号终止，则规范化为 `128 + signal`。osdk 不会自行
+下载镜像 layer、创建 OCI content store，也不会在 runtime 之间复制镜像。
+
+## 预览并执行限定范围的原生清理
+
+```text
+osdk container prune
+  --runtime docker|buildkit|containerd
+  --scope images|build-cache
+  [--context NAME]
+  [--builder NAME]
+  [--execute]
+  [--accept-preview SHA256_ID]
+```
+
+只支持两个 runtime/scope 组合：
+
+| Runtime 与 scope | 精确目标 | 清理边界 |
+| --- | --- | --- |
+| `--runtime docker --scope images` | osdk 发现的 Docker context；`--context NAME` 用于选择发现目标并供展示 | 仅 dangling image；执行要求可通过本地 Unix socket 或 Windows named pipe 直接寻址，且不依赖 context TLS 材料 |
+| `--runtime buildkit --scope build-cache` | 来自 `--builder`、生效配置或当前选择的 Buildx builder | 仅预览该 builder 的未使用 build cache |
+
+虽然通用语法仍要求 `--scope`，但 containerd 没有任何可接受的 scope 组合。任一 scope 下，
+不带 selector、也不带执行参数的请求都会返回类型化“不支持”；containerd 与 `--context`、
+`--builder`、`--execute` 或 `--accept-preview` 的组合都会被拒绝。Docker build cache、
+BuildKit image 等交叉组合同样会被拒绝。命令没有 `all` 或 `system` scope，也不会清理
+container、volume、network、osdk CAS 或 runtime 的实现私有存储。`--context` 只适用于
+Docker，`--builder` 只适用于 BuildKit。
+
+默认调用只执行有界只读发现并打印预览。审阅时应确认精确目标与 warning：
+
+```bash
+osdk container prune --runtime docker --scope images --context desktop-linux
+osdk container prune --runtime buildkit --scope build-cache --builder team-builder
+```
+
+预览会给出确定的 `sha256:` ID，并绑定操作所有者、scope、精确 context 或 builder、warning，
+以及 Docker endpoint 或 Buildx driver/node endpoint 拓扑的敏感信息安全指纹。Docker 执行通过
+`docker --host` 使用发现时捕获的精确原始本地 endpoint；context 名仅用于展示。Remote/SSH/TCP/TLS
+context 与 Docker Desktop 目标会被拒绝，因为直接 `--host` 无法安全复现其 context 连接行为。要应用同一份
+预览，必须同时加入两个执行 gate，再确认执行提示：
+
+```bash
+osdk container prune --runtime docker --scope images \
+  --context desktop-linux --execute \
+  --accept-preview sha256:PREVIEW_ID
+
+```
+
+只有 `--execute` 不够，只有 preview ID 而没有 `--execute` 也不够。若某个 ID 所属预览的
+owner、scope、target、endpoint/拓扑指纹或 warning 与当前预览不同，该预览即已语义陈旧并会被拒绝；其他不匹配
+ID 同样会被拒绝。此时应重新生成并审阅预览。绑定字段不变时会得到相同的确定 ID。全局
+`--yes` 只回答最终执行提示，不能替代上述任一执行 gate。
+确认后 Docker 直接使用已捕获的 endpoint 值，不再根据 context 名查询目标。BuildKit 不支持
+执行，因为唯一可用的执行句柄是可变 builder 名称，无法原子固定。
 
 ## 配置与优先级
 
@@ -222,7 +310,8 @@ size/format/fingerprint，但不包含现有原生配置内容或生成的 candi
 | `invalid-output` | 成功输出不符合类型化聚合 schema |
 | `command-failed` | 原生命令失败，且无法归入更具体的状态 |
 
-这些命令均为只读：不会拉取完整 image、清理缓存、改写 daemon 配置、启动或重建
-builder、重启 daemon，也不会检查实现私有的存储目录。Registry 测试只执行上文所述
-有界 metadata 与 Range 读取。探测、规划与披露边界见
-[容器诊断与规划实现](./implementation/containers)。
+Doctor、cache status、registry test、mirror plan 与 prune preview 均为只读。
+`container pull` 与经批准的 `container prune` 是本页说明的两条直接原生修改路径；两者都
+不会改写 daemon 配置、启动或重建 builder、重启 daemon，也不会检查实现私有的存储目录。
+Registry 测试只执行上文所述有界 metadata 与 Range 读取。选择、启动、plan、preview 与
+披露边界见[原生容器诊断与操作实现](./implementation/containers)。

@@ -621,6 +621,74 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.container.prune_preview",
+        ("Native prune preview", "原生清理预览"),
+    );
+    m.insert(
+        "msg.container.prune_preview_id",
+        ("preview id: {preview_id}", "预览 ID：{preview_id}"),
+    );
+    m.insert(
+        "msg.container.prune_owner_scope",
+        (
+            "owner {owner}; scope {scope}",
+            "所有者 {owner}；范围 {scope}",
+        ),
+    );
+    m.insert(
+        "msg.container.prune_target",
+        ("target {kind}: {name}", "目标 {kind}：{name}"),
+    );
+    m.insert(
+        "msg.container.prune_warning",
+        (
+            "warning: this may remove native state created outside osdk",
+            "警告：这可能移除由 osdk 之外工具创建的原生状态",
+        ),
+    );
+    m.insert(
+        "msg.container.prune_unsupported",
+        (
+            "containerd native prune is unsupported: no stable aggregate prune interface exists",
+            "不支持 containerd 原生清理：不存在稳定的聚合清理接口",
+        ),
+    );
+    m.insert(
+        "label.container.prune_owner.docker_engine",
+        ("Docker Engine", "Docker 引擎"),
+    );
+    m.insert(
+        "label.container.prune_owner.buildkit_builder",
+        ("BuildKit builder", "BuildKit 构建器"),
+    );
+    m.insert(
+        "label.container.prune_owner.containerd",
+        ("containerd", "containerd 运行时"),
+    );
+    m.insert(
+        "label.container.prune_scope.dangling_images",
+        ("dangling images", "dangling 镜像"),
+    );
+    m.insert(
+        "label.container.prune_scope.build_cache",
+        ("unused build cache", "未使用的构建缓存"),
+    );
+    m.insert(
+        "label.container.prune_target.docker_context",
+        ("Docker context", "Docker 上下文"),
+    );
+    m.insert(
+        "label.container.prune_target.buildx_builder",
+        ("Buildx builder", "Buildx 构建器"),
+    );
+    m.insert(
+        "prompt.container_prune",
+        (
+            "Execute native prune preview {preview_id}?",
+            "执行原生清理预览 {preview_id}？",
+        ),
+    );
+    m.insert(
         "err.container.registry_offline",
         (
             "container registry testing is unavailable in offline mode",
@@ -695,6 +763,150 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "invalid Buildx builder name (use `auto` or a safe ASCII name)",
             "Buildx 构建器名称无效（请使用 `auto` 或安全的 ASCII 名称）",
+        ),
+    );
+    m.insert(
+        "err.container.pull_offline",
+        (
+            "native container pull is unavailable in offline mode",
+            "离线模式下不能执行原生容器拉取",
+        ),
+    );
+    m.insert(
+        "err.container.pull_unavailable",
+        (
+            "no native runtime can pull images (docker: {docker}; containerd: {containerd})",
+            "没有可拉取镜像的原生运行时（docker：{docker}；containerd：{containerd}）",
+        ),
+    );
+    m.insert(
+        "err.container.invalid_containerd_target",
+        (
+            "the platform-default containerd target is invalid",
+            "平台默认 containerd 目标无效",
+        ),
+    );
+    m.insert(
+        "err.container.containerd_pull_selectors_required",
+        (
+            "containerd pull requires both --address and --namespace",
+            "containerd 拉取要求同时提供 --address 与 --namespace",
+        ),
+    );
+    m.insert(
+        "err.container.containerd_selectors_runtime",
+        (
+            "--address and --namespace are valid only when containerd is selected",
+            "--address 与 --namespace 仅在选中 containerd 时有效",
+        ),
+    );
+    m.insert(
+        "err.container.native_spawn",
+        (
+            "could not start the selected native operation: {error}",
+            "无法启动选中的原生操作：{error}",
+        ),
+    );
+    m.insert(
+        "err.container.prune_selector_runtime",
+        (
+            "containerd prune is unsupported and does not accept selectors or execution flags",
+            "不支持 containerd 清理，且不接受目标选择器或执行参数",
+        ),
+    );
+    m.insert(
+        "err.container.prune_unsupported",
+        (
+            "containerd has no stable aggregate native prune interface",
+            "containerd 没有稳定的聚合原生清理接口",
+        ),
+    );
+    m.insert(
+        "err.container.prune_docker_scope",
+        (
+            "--runtime docker supports only --scope images",
+            "--runtime docker 仅支持 --scope images",
+        ),
+    );
+    m.insert(
+        "err.container.prune_buildkit_scope",
+        (
+            "--runtime buildkit supports only --scope build-cache",
+            "--runtime buildkit 仅支持 --scope build-cache",
+        ),
+    );
+    m.insert(
+        "err.container.prune_builder_runtime",
+        (
+            "--builder requires --runtime buildkit",
+            "--builder 要求使用 --runtime buildkit",
+        ),
+    );
+    m.insert(
+        "err.container.prune_context_runtime",
+        (
+            "--context requires --runtime docker",
+            "--context 要求使用 --runtime docker",
+        ),
+    );
+    m.insert(
+        "err.container.invalid_docker_context",
+        ("invalid Docker context name", "Docker context 名称无效"),
+    );
+    m.insert(
+        "err.container.docker_context_unavailable",
+        (
+            "could not discover one exact Docker context for native prune",
+            "无法为原生清理发现一个精确的 Docker context",
+        ),
+    );
+    m.insert(
+        "err.container.docker_context_mismatch",
+        (
+            "Docker context discovery did not return the requested context",
+            "Docker context 发现结果与请求目标不一致",
+        ),
+    );
+    m.insert(
+        "err.container.prune_builder_unavailable",
+        (
+            "could not discover one exact Buildx builder for native prune ({status})",
+            "无法为原生清理发现一个精确的 Buildx 构建器（{status}）",
+        ),
+    );
+    m.insert(
+        "err.container.prune_target_identity",
+        (
+            "native prune target has no complete secret-safe endpoint identity",
+            "原生清理目标缺少完整且敏感信息安全的 endpoint 身份",
+        ),
+    );
+    m.insert(
+        "err.container.prune_target_changed",
+        (
+            "native prune target changed after confirmation; rerun the preview",
+            "确认后原生清理目标发生变化；请重新生成预览",
+        ),
+    );
+    m.insert(
+        "err.container.prune_docker_endpoint_unsupported",
+        (
+            "Docker prune execution requires a direct local unix or named-pipe endpoint without context TLS material",
+            "Docker 清理执行要求直接本地 unix 或 named-pipe endpoint，且不能依赖 context TLS 材料",
+        ),
+    );
+    m.insert(
+        "err.container.prune_buildkit_execute_unsupported",
+        (
+            "BuildKit prune is preview-only because a mutable builder name cannot be pinned atomically for execution",
+            "BuildKit 清理仅支持预览，因为可变 builder 名称无法为执行提供原子固定目标",
+        ),
+    );
+    m.insert(
+        "err.container.prune_preview_mismatch",
+        (
+            "--accept-preview must exactly match the current preview id {preview_id}",
+            "--accept-preview 必须与当前预览 ID {preview_id} 完全一致",
         ),
     );
     m.insert(
@@ -2181,8 +2393,96 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.container.about",
         (
-            "Inspect native container runtimes, builders, and caches",
-            "检查原生容器运行时、构建器和缓存",
+            "Inspect and operate native container runtimes, builders, and caches",
+            "检查并操作原生容器运行时、构建器和缓存",
+        ),
+    );
+    m.insert(
+        "help.container.pull.about",
+        (
+            "Pull an image once through a selected native runtime",
+            "通过选中的原生运行时拉取一次镜像",
+        ),
+    );
+    m.insert(
+        "help.container.pull.arg.image",
+        ("OCI image reference to pull", "要拉取的 OCI 镜像引用"),
+    );
+    m.insert(
+        "help.container.pull.flag.runtime",
+        (
+            "Runtime selector: auto|docker|containerd (default: effective config)",
+            "运行时选择：auto|docker|containerd（默认：生效配置）",
+        ),
+    );
+    m.insert(
+        "help.container.pull.flag.platform",
+        (
+            "OCI platform OS/ARCH[/VARIANT] (default: effective config)",
+            "OCI 平台 OS/ARCH[/VARIANT]（默认：生效配置）",
+        ),
+    );
+    m.insert(
+        "help.container.pull.flag.address",
+        (
+            "Explicit containerd daemon address; requires --namespace",
+            "显式 containerd 守护进程地址；要求同时提供 --namespace",
+        ),
+    );
+    m.insert(
+        "help.container.pull.flag.namespace",
+        (
+            "Explicit containerd namespace; requires --address",
+            "显式 containerd namespace；要求同时提供 --address",
+        ),
+    );
+    m.insert(
+        "help.container.prune.about",
+        (
+            "Preview or execute one narrowly scoped native prune",
+            "预览或执行一个窄范围原生清理",
+        ),
+    );
+    m.insert(
+        "help.container.prune.flag.runtime",
+        (
+            "Required owner: docker|buildkit|containerd",
+            "必选所有者：docker|buildkit|containerd",
+        ),
+    );
+    m.insert(
+        "help.container.prune.flag.scope",
+        (
+            "Required narrow scope: images|build-cache",
+            "必选窄范围：images|build-cache",
+        ),
+    );
+    m.insert(
+        "help.container.prune.flag.context",
+        (
+            "Docker context to discover and bind into the preview",
+            "要发现并绑定到预览的 Docker context",
+        ),
+    );
+    m.insert(
+        "help.container.prune.flag.builder",
+        (
+            "Buildx builder to discover and bind into the preview",
+            "要发现并绑定到预览的 Buildx 构建器",
+        ),
+    );
+    m.insert(
+        "help.container.prune.flag.execute",
+        (
+            "Execute after displaying and confirming the preview",
+            "显示并确认预览后执行",
+        ),
+    );
+    m.insert(
+        "help.container.prune.flag.accept_preview",
+        (
+            "Exact sha256 preview id accepted for this execution",
+            "本次执行接受的精确 sha256 预览 ID",
         ),
     );
     m.insert(
@@ -2535,6 +2835,19 @@ mod tests {
         let catalog = build();
         for key in [
             "help.container.about",
+            "help.container.pull.about",
+            "help.container.pull.arg.image",
+            "help.container.pull.flag.runtime",
+            "help.container.pull.flag.platform",
+            "help.container.pull.flag.address",
+            "help.container.pull.flag.namespace",
+            "help.container.prune.about",
+            "help.container.prune.flag.runtime",
+            "help.container.prune.flag.scope",
+            "help.container.prune.flag.context",
+            "help.container.prune.flag.builder",
+            "help.container.prune.flag.execute",
+            "help.container.prune.flag.accept_preview",
             "help.container.doctor.about",
             "help.container.cache.status.about",
             "help.container.registry.about",
@@ -2564,6 +2877,20 @@ mod tests {
             "msg.container.mirror_plan_conclusion",
             "msg.container.mirror_plan_id",
             "msg.container.mirror_plan_summary",
+            "msg.container.prune_preview",
+            "msg.container.prune_preview_id",
+            "msg.container.prune_owner_scope",
+            "msg.container.prune_target",
+            "msg.container.prune_warning",
+            "msg.container.prune_unsupported",
+            "prompt.container_prune",
+            "label.container.prune_owner.docker_engine",
+            "label.container.prune_owner.buildkit_builder",
+            "label.container.prune_owner.containerd",
+            "label.container.prune_scope.dangling_images",
+            "label.container.prune_scope.build_cache",
+            "label.container.prune_target.docker_context",
+            "label.container.prune_target.buildx_builder",
             "label.container.warning",
             "label.container.plan.ready",
             "label.container.plan.manual_only",
@@ -2626,6 +2953,27 @@ mod tests {
             "err.container.builder_runtime",
             "err.container.native_config_snapshot",
             "err.container.invalid_builder",
+            "err.container.pull_offline",
+            "err.container.pull_unavailable",
+            "err.container.invalid_containerd_target",
+            "err.container.containerd_pull_selectors_required",
+            "err.container.containerd_selectors_runtime",
+            "err.container.native_spawn",
+            "err.container.prune_selector_runtime",
+            "err.container.prune_unsupported",
+            "err.container.prune_docker_scope",
+            "err.container.prune_buildkit_scope",
+            "err.container.prune_builder_runtime",
+            "err.container.prune_context_runtime",
+            "err.container.invalid_docker_context",
+            "err.container.docker_context_unavailable",
+            "err.container.docker_context_mismatch",
+            "err.container.prune_builder_unavailable",
+            "err.container.prune_target_identity",
+            "err.container.prune_target_changed",
+            "err.container.prune_docker_endpoint_unsupported",
+            "err.container.prune_buildkit_execute_unsupported",
+            "err.container.prune_preview_mismatch",
         ] {
             let &(english, chinese) = catalog.get(key).unwrap_or_else(|| panic!("missing {key}"));
             assert!(!english.is_empty(), "missing English for {key}");

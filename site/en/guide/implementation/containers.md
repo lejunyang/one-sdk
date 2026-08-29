@@ -1,10 +1,12 @@
-# Container Diagnostics, Registry Tests, and Mirror Plans
+# Native Container Diagnostics and Operations
 
 This page describes the read-only adapter path behind `osdk container doctor`,
 `osdk container cache status`, `osdk container registry test`, and
-`osdk container mirrors plan`. The adapters treat Docker Engine, containerd,
-and BuildKit as separate owners; these commands neither introduce a shared
-container store nor modify native configuration.
+`osdk container mirrors plan`, plus the controlled mutation paths behind
+`osdk container pull` and `osdk container prune`. The adapters treat Docker
+Engine, containerd, and BuildKit as separate owners. osdk never introduces a
+shared OCI store or silently changes which native control plane owns an
+operation.
 
 ## CLI orchestration and selection
 
@@ -46,6 +48,39 @@ The BuildKit adapter uses `docker buildx version`, machine-readable `buildx ls`,
 and `buildx inspect` for the exact selected list result. It deliberately omits
 `--bootstrap`; inspection cannot start a builder. Minimum supported versions are
 Docker 19.3, containerd 1.6, and Buildx 0.10 for diagnostics.
+
+## Direct image-pull launch
+
+`container pull` reads the effective container runtime and platform, with
+explicit `--runtime` and `--platform` values taking precedence. `--address` and
+`--namespace` form a paired explicit containerd target. Explicit Docker or
+containerd selects only that adapter. `auto` performs one bounded read-only
+Docker-plus-containerd resolution using the deterministic diagnostic ordering,
+then freezes the selected owner before any mutating command is constructed.
+Explicit containerd requires the pair immediately; auto requires it only when
+containerd wins, so a Docker winner can launch without containerd selectors.
+
+The selected adapter builds exactly one direct foreground command:
+
+```text
+docker image pull [--platform PLATFORM] IMAGE
+ctr --address ADDRESS --namespace NAMESPACE images pull [--platform PLATFORM] IMAGE
+```
+
+The child inherits stdio instead of using the bounded capture path, and osdk
+waits for it. The process result is the child's direct exit code, or normalized
+to `128 + signal` if it terminates by signal on Unix. A launched command is the
+single attempt: osdk does not catch a Docker failure and retry with containerd,
+or vice versa. Resolution is bounded and read-only, but the foreground command
+itself follows the native client's normal pull lifetime.
+
+Offline mode fails before resolution and foreground command construction.
+
+The pull path performs no registry transfer through osdk, creates no image
+manifest or layer objects in osdk's CAS, and has no osdk OCI store. Platform is
+forwarded to the selected native client; ownership, authentication, content
+verification, unpacking, and local image visibility remain that client's
+responsibility.
 
 ## Anonymous OCI registry diagnostics
 
@@ -148,11 +183,57 @@ snapshot, and CRI views, but no single supported aggregate equivalent. Walking
 would couple osdk to implementation details and can cross privilege boundaries,
 so this path never does that.
 
+## Preview-bound native pruning
+
+Pruning has a closed runtime/scope matrix. `docker + images` and
+`buildkit + build-cache` are the only valid pairs. The shared CLI grammar still
+requires `--scope` for containerd, but neither scope is an accepted pair. With
+no selector or execution flag it returns typed unsupported; `--context`,
+`--builder`, `--execute`, and `--accept-preview` are rejected for containerd.
+Crossed Docker/BuildKit combinations also fail before execution. There is no
+generic `all`/`system` scope and no route that prunes containers, volumes,
+networks, or osdk/private native stores.
+
+The preview phase performs bounded read-only discovery and resolves one exact
+owner target:
+
+- Docker resolves one exact context for display, then privately retains its raw
+  endpoint. Execution is exactly `docker --host ENDPOINT image prune --force`,
+  so later context-name retargeting cannot redirect it. Only a local Unix socket
+  or Windows named pipe without context-held TLS material is executable; remote,
+  SSH, TCP/TLS, Docker Desktop, and incomplete targets fail closed. Its native
+  scope is dangling images.
+- BuildKit resolves one exact Buildx builder for preview. An explicit
+  `--builder NAME` wins; otherwise discovery uses the effective configured
+  builder and then the current builder. Execution is unsupported because the
+  native CLI exposes only the mutable builder name, not an immutable handle.
+
+The default path stops after rendering a schema-version-2 preview. Its deterministic SHA-256 ID
+binds the owner, scope, resolved target, warning, and a secret-safe fingerprint
+of the complete Docker endpoint or Buildx driver plus sorted node-name/endpoint
+topology. Raw endpoints are hashed before diagnostic redaction and never enter
+serialized output. The execute path recomputes
+the preview from current discovery and requires both `--execute` and an exact
+`--accept-preview` match. Consequently, a same-named context or builder retargeted
+to another endpoint, a changed driver/node topology, a changed current context/builder, a
+different explicit selector, a scope/owner change, a warning change, or an ID
+from any differently bound preview all fail closed before the native prune is
+launched. Such a changed preview is semantically stale. The ID has no time
+component: unchanged bound fields reproduce it.
+
+For an executable Docker preview, matching the ID enables only the
+execution-confirmation stage. The normal prompt must still be accepted, while
+global `--yes` may answer that prompt. It does not substitute for `--execute` or
+`--accept-preview`. The already validated endpoint value—not the mutable context
+name—is then passed directly to the one native prune launch.
+
 ## Serialization and redaction
 
 `DiagnosticReport` and `NativeCacheStatus` are closed schema-version-1
 contracts. Ordered maps/sets and sorted cache records make repeated JSON output
-deterministic. JSON field names and enum values are never localized. Human
+deterministic. Pull selection and prune previews also use canonical typed inputs
+before native launch; the prune preview identity deliberately includes the exact
+target and warning. JSON field names and enum values are never localized. Human
 labels come from the English/Chinese catalog after selection is complete.
 
 Raw `CommandSpec`, stdout, and stderr are not serializable. Doctor and cache
@@ -172,7 +253,10 @@ stderr is used only for classification and is discarded afterward. A status
 query therefore produces useful machine output without echoing daemon errors or
 credentials.
 
-No path in these commands calls foreground execution, writes configuration,
-pulls a complete image, prunes native data, bootstraps/recreates a builder,
-restarts a daemon, or scans osdk's private store. Registry testing performs only
-the bounded metadata and Range reads described above.
+Doctor, cache status, registry testing, mirror planning, and prune preview never
+call foreground mutation. Pull and approved prune are intentionally narrow
+exceptions: each launches one selected native command after resolution and does
+not fall back. No path here writes native configuration, bootstraps/recreates a
+builder, restarts a daemon, scans osdk's private store, or implements a private
+OCI store. Registry testing performs only the bounded metadata and Range reads
+described above.

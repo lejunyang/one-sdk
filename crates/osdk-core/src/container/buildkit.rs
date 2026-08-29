@@ -11,6 +11,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::plan::Fingerprint;
 use super::redact::{CommandPurpose, NativeProgram};
 use super::report::{
     Capability, CapabilityStatus, DiagnosticEvidence, DiagnosticReport, DiagnosticStatus, Endpoint,
@@ -125,6 +126,17 @@ impl BuilderDriver {
             _ => Self::Unknown,
         }
     }
+
+    fn identity_name(&self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::DockerContainer => "docker-container",
+            Self::Kubernetes => "kubernetes",
+            Self::Remote => "remote",
+            Self::Cloud => "cloud",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// The observed state of a Buildx node.
@@ -184,6 +196,9 @@ impl BuildPlatform {
 pub struct BuilderNode {
     pub name: String,
     pub endpoint: Option<Endpoint>,
+    /// SHA-256 identity of the complete native endpoint before diagnostic
+    /// redaction. This binds mutation previews without exposing the endpoint.
+    pub endpoint_fingerprint: Option<Fingerprint>,
     pub status: BuilderNodeStatus,
     pub buildkit_version: Option<Version>,
     pub platforms: BTreeSet<BuildPlatform>,
@@ -196,6 +211,56 @@ pub struct SelectedBuilder {
     pub driver: BuilderDriver,
     pub nodes: Vec<BuilderNode>,
     pub has_error: bool,
+}
+
+impl SelectedBuilder {
+    /// Fingerprint the discovered driver and complete node endpoint topology.
+    ///
+    /// Raw endpoints are hashed before entering this projection. Missing node
+    /// endpoints make the target unbindable, so mutating callers must fail
+    /// closed rather than authorizing a name-only target.
+    pub fn topology_fingerprint(&self) -> Result<Option<Fingerprint>, super::plan::PlanError> {
+        if self.nodes.is_empty()
+            || self
+                .nodes
+                .iter()
+                .any(|node| node.endpoint_fingerprint.is_none())
+        {
+            return Ok(None);
+        }
+        let mut nodes = self
+            .nodes
+            .iter()
+            .map(|node| BuilderNodeIdentity {
+                name: node.name.as_str(),
+                endpoint_fingerprint: node.endpoint_fingerprint.as_ref().expect("checked above"),
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| {
+            left.name
+                .cmp(right.name)
+                .then_with(|| left.endpoint_fingerprint.cmp(right.endpoint_fingerprint))
+        });
+        Fingerprint::for_canonical(&BuilderTopologyIdentity {
+            schema_version: 1,
+            driver: self.driver.identity_name(),
+            nodes,
+        })
+        .map(Some)
+    }
+}
+
+#[derive(Serialize)]
+struct BuilderTopologyIdentity<'a> {
+    schema_version: u32,
+    driver: &'static str,
+    nodes: Vec<BuilderNodeIdentity<'a>>,
+}
+
+#[derive(Serialize)]
+struct BuilderNodeIdentity<'a> {
+    name: &'a str,
+    endpoint_fingerprint: &'a Fingerprint,
 }
 
 /// Typed Buildx discovery, alongside its stable secret-safe report.
@@ -484,12 +549,18 @@ fn parse_node_json(value: &Value) -> BuilderNode {
         .get("Platforms")
         .map(platform_values)
         .unwrap_or_default();
+    let raw_endpoint = json_str(value, "Endpoint").map(str::trim);
+    let endpoint = raw_endpoint.and_then(parse_endpoint);
     BuilderNode {
         name: json_str(value, "Name")
             .unwrap_or_default()
             .trim()
             .to_owned(),
-        endpoint: json_str(value, "Endpoint").and_then(parse_endpoint),
+        endpoint_fingerprint: endpoint
+            .as_ref()
+            .and(raw_endpoint)
+            .map(builder_endpoint_fingerprint),
+        endpoint,
         status: BuilderNodeStatus::parse(json_str(value, "Status").unwrap_or_default()),
         buildkit_version: json_str(value, "Buildkit").and_then(super::parse_vendor_version),
         platforms,
@@ -565,6 +636,10 @@ fn merge_inspect_text(builder: &mut SelectedBuilder, bytes: &[u8]) -> bool {
             "Endpoint" => {
                 if let Some(node) = current_node.and_then(|index| builder.nodes.get_mut(index)) {
                     node.endpoint = parse_endpoint(value);
+                    node.endpoint_fingerprint = node
+                        .endpoint
+                        .as_ref()
+                        .map(|_| builder_endpoint_fingerprint(value));
                 }
             }
             "Status" => {
@@ -588,10 +663,17 @@ fn merge_inspect_text(builder: &mut SelectedBuilder, bytes: &[u8]) -> bool {
     true
 }
 
+fn builder_endpoint_fingerprint(raw: &str) -> Fingerprint {
+    let mut identity = b"osdk-buildx-node-endpoint-v1\0".to_vec();
+    identity.extend_from_slice(raw.as_bytes());
+    Fingerprint::for_bytes(&identity)
+}
+
 fn empty_node(name: &str) -> BuilderNode {
     BuilderNode {
         name: name.to_owned(),
         endpoint: None,
+        endpoint_fingerprint: None,
         status: BuilderNodeStatus::Unknown,
         buildkit_version: None,
         platforms: BTreeSet::new(),
@@ -713,6 +795,55 @@ mod tests {
             .iter()
             .flatten()
             .any(|argument| argument == "--bootstrap"));
+    }
+
+    #[test]
+    fn topology_fingerprint_binds_driver_and_unredacted_node_endpoints() {
+        fn builder(driver: &str, endpoint: &str) -> SelectedBuilder {
+            parse_builder_json(serde_json::json!({
+                "Current": true,
+                "Driver": driver,
+                "Name": "selected",
+                "Nodes": [{
+                    "Name": "selected0",
+                    "Endpoint": endpoint,
+                    "Status": "running"
+                }]
+            }))
+            .unwrap()
+        }
+
+        let first = builder(
+            "docker-container",
+            "ssh://alice:secret@host.example/private-a?token=one",
+        );
+        let retargeted = builder(
+            "docker-container",
+            "ssh://alice:secret@host.example/private-b?token=two",
+        );
+        let changed_driver = builder(
+            "remote",
+            "ssh://alice:secret@host.example/private-a?token=one",
+        );
+
+        assert_eq!(first.name, retargeted.name);
+        assert_eq!(first.nodes[0].endpoint, retargeted.nodes[0].endpoint);
+        let first_id = first.topology_fingerprint().unwrap().unwrap();
+        assert_ne!(
+            first_id,
+            retargeted.topology_fingerprint().unwrap().unwrap()
+        );
+        assert_ne!(
+            first_id,
+            changed_driver.topology_fingerprint().unwrap().unwrap()
+        );
+        let serialized = serde_json::to_string(&first_id).unwrap();
+        for secret in ["alice", "secret", "private-a", "token", "one"] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
     }
 
     #[test]

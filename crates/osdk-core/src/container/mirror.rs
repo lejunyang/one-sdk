@@ -835,6 +835,8 @@ mod tests {
                 )),
                 kind,
                 skip_tls_verify: false,
+                has_tls_material: false,
+                raw_endpoint: Some("unix:///var/run/docker.sock".into()),
             }),
             version: Some(DockerVersion {
                 client: Some(Version::new(28, 0, 0)),
@@ -1061,6 +1063,9 @@ mod tests {
                         EndpointTransport::LocalSocket,
                         scope,
                         RedactedUrl::parse("unix:///var/run/docker.sock").unwrap(),
+                    )),
+                    endpoint_fingerprint: Some(Fingerprint::for_bytes(
+                        b"unix:///var/run/docker.sock",
                     )),
                     status: BuilderNodeStatus::Running,
                     buildkit_version: Some(Version::new(0, 25, 0)),

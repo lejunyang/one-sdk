@@ -12,7 +12,8 @@ package managers, developer tools, and model snapshots. Use it to:
 - choose responsive SDK mirrors and dependency registries automatically;
 - work from downloaded metadata and artifacts when the network is unavailable;
 - manage Hugging Face and ModelScope snapshots alongside development tools;
-- inspect Docker, containerd, Buildx, OCI registries, mirror plans, and native caches without changing state;
+- inspect Docker, containerd, Buildx, OCI registries, mirror plans, and native
+  caches, then deliberately pull images or approve narrowly scoped native cleanup;
 - inspect storage, caches, active versions, and environment health in English or
   Chinese.
 
@@ -348,7 +349,7 @@ osdk untrust ./osdk.toml
 
 Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
 
-## Scenario: inspect container runtimes, registries, and native caches
+## Scenario: inspect and operate native container runtimes
 
 An OCI registry can be tested without adding policy first. Add an ordered mirror
 policy to trusted user or project configuration when you also want to test
@@ -373,6 +374,12 @@ osdk container mirrors plan docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --json
 osdk container cache status
 osdk container cache status --runtime buildkit --builder my-builder
+osdk container pull ubuntu:24.04
+osdk container pull ghcr.io/example/tool:1.0 \
+  --runtime containerd --platform linux/amd64 \
+  --address unix:///run/containerd/containerd.sock --namespace default
+osdk container prune --runtime docker --scope images
+osdk container prune --runtime buildkit --scope build-cache --builder my-builder
 ```
 
 Registry tests use anonymous HTTPS only, can validate image digests, platform
@@ -385,7 +392,30 @@ restarts daemons. Plan JSON can expose operational absolute paths, builder names
 and mirror origins plus whether a path prefix exists; exact mirror prefixes,
 existing configuration contents, and generated candidate bytes remain hidden.
 
-Guide: [Container runtimes, registries, and native caches](site/en/guide/containers.md)
+`container pull` uses the effective runtime and platform unless you override
+them. In `auto` mode it performs one bounded read-only Docker/containerd
+resolution, then starts exactly one native foreground pull. Explicit containerd
+selection requires paired `--address` and `--namespace` values; `auto` requires
+them only if containerd wins, so Docker can proceed without them. The child
+inherits stdio and osdk waits for it, returning its direct exit code or, on Unix,
+normalized `128 + signal`; it does not fall back to another runtime or copy the
+image into an osdk store.
+
+`container prune` is preview-only by default. It can preview one discovered
+Docker context or Buildx builder and binds a secret-safe fingerprint of the
+Docker endpoint or Buildx driver/node endpoint topology. Execution is available
+only for Docker contexts backed by a directly addressable local Unix socket or
+Windows named pipe without context-held TLS material; it uses `docker --host`
+and removes only dangling images. To execute, repeat the command with both
+`--execute` and the exact reported `--accept-preview sha256:...`, then
+confirm the execution prompt (or use global `--yes`). BuildKit remains preview-only
+because its mutable builder name cannot be pinned atomically. Although `--scope` remains
+required, containerd has no accepted scope pairing: a selector-free,
+non-executing request reports typed unsupported, while selectors and execution
+flags are rejected. The command never expands into system-wide cleanup of
+containers, volumes, networks, or implementation-private stores.
+
+Guide: [Container runtimes, registries, and native operations](site/en/guide/containers.md)
 
 ## Scenario: inspect caches and reclaim storage
 
@@ -430,7 +460,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
-| Container inspection | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, read-only mirror plans, native cache status |
+| Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, read-only mirror plans, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
 | Shells | Bash, zsh, fish, PowerShell |
 | CLI languages | English, Chinese |
@@ -447,7 +477,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 - [Model snapshots](site/en/guide/models.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
-- [Container runtimes, registries, and native caches](site/en/guide/containers.md)
+- [Container runtimes, registries, and native operations](site/en/guide/containers.md)
 - [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
 - [Implementation docs](site/en/guide/implementation/index.md)
 

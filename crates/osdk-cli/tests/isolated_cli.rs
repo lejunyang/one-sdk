@@ -3906,6 +3906,38 @@ fn registry_help_is_localized() {
     assert!(!stdout.contains("help.registry"), "{stdout}");
 }
 
+#[test]
+fn native_container_help_is_localized() {
+    let temporary = tempfile::tempdir().unwrap();
+    let pull = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["container", "pull", "--help"],
+        &[("OSDK_LANG", "zh")],
+    );
+    assert!(pull.status.success());
+    let pull = String::from_utf8(pull.stdout).unwrap();
+    for expected in [
+        "原生运行时拉取一次镜像",
+        "containerd 守护进程地址",
+        "namespace",
+    ] {
+        assert!(pull.contains(expected), "{pull}");
+    }
+
+    let prune = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["container", "prune", "--help"],
+        &[("OSDK_LANG", "zh")],
+    );
+    assert!(prune.status.success());
+    let prune = String::from_utf8(prune.stdout).unwrap();
+    for expected in ["窄范围原生清理", "精确 sha256 预览 ID", "Docker context"] {
+        assert!(prune.contains(expected), "{prune}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
@@ -3996,4 +4028,183 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
     );
     let shim_path = temporary.path().join("data/shims/ni");
     assert!(shim_path.exists(), "{}", shim_path.display());
+}
+
+#[cfg(unix)]
+#[test]
+fn native_container_pull_preserves_foreground_output_and_exit_code() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bin = temporary.path().join("native-bin");
+    let calls = temporary.path().join("pull.calls");
+    write_executable(
+        &bin.join("docker"),
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$OSDK_NATIVE_CALLS\"\nprintf 'native pull stdout\n'\nprintf 'native pull stderr\n' >&2\nexit 23\n",
+    );
+
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "container",
+            "pull",
+            "ubuntu:24.04",
+            "--runtime",
+            "docker",
+            "--platform",
+            "Linux/X64",
+        ],
+        &[
+            ("PATH", bin.to_str().unwrap()),
+            ("OSDK_NATIVE_CALLS", calls.to_str().unwrap()),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "native pull stdout\n"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "native pull stderr\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap(),
+        "image\npull\n--platform\nlinux/amd64\ndocker.io/library/ubuntu:24.04\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_containerd_pull_requires_and_forwards_target_selectors() {
+    let temporary = tempfile::tempdir().unwrap();
+    let missing = run_isolated(
+        temporary.path(),
+        &["container", "pull", "alpine:3", "--runtime", "containerd"],
+    );
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--address"));
+
+    let bin = temporary.path().join("native-bin");
+    let calls = temporary.path().join("ctr.calls");
+    write_executable(
+        &bin.join("ctr"),
+        "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$OSDK_NATIVE_CALLS\"\nexit 0\n",
+    );
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "container",
+            "pull",
+            "alpine:3",
+            "--runtime",
+            "containerd",
+            "--address",
+            "unix:///run/private/containerd.sock",
+            "--namespace",
+            "k8s.io",
+        ],
+        &[
+            ("PATH", bin.to_str().unwrap()),
+            ("OSDK_NATIVE_CALLS", calls.to_str().unwrap()),
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap(),
+        "--address\nunix:///run/private/containerd.sock\n--namespace\nk8s.io\nimages\npull\ndocker.io/library/alpine:3\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_code() {
+    let temporary = tempfile::tempdir().unwrap();
+    let bin = temporary.path().join("native-bin");
+    let calls = temporary.path().join("prune.calls");
+    write_executable(
+        &bin.join("docker"),
+        "#!/bin/sh\nif [ \"$1\" = context ] && [ \"$2\" = inspect ]; then\n  printf '[{\"Name\":\"team-context\",\"Endpoints\":{\"docker\":{\"Host\":\"unix:///var/run/docker.sock\"}}}]\n'\n  exit 0\nfi\nprintf '%s\n' \"$@\" > \"$OSDK_NATIVE_CALLS\"\nprintf 'native prune stdout\n'\nprintf 'native prune stderr\n' >&2\nexit 37\n",
+    );
+    let common_env = [
+        ("PATH", bin.to_str().unwrap()),
+        ("OSDK_NATIVE_CALLS", calls.to_str().unwrap()),
+    ];
+    let preview = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "container",
+            "prune",
+            "--runtime",
+            "docker",
+            "--scope",
+            "images",
+            "--context",
+            "team-context",
+        ],
+        &common_env,
+    );
+    assert!(preview.status.success());
+    assert!(!calls.exists());
+    let preview_stdout = String::from_utf8(preview.stdout).unwrap();
+    let preview_id = preview_stdout
+        .split_whitespace()
+        .find(|value| value.starts_with("sha256:"))
+        .expect("preview id");
+
+    let mismatch = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "--yes",
+            "container",
+            "prune",
+            "--runtime",
+            "docker",
+            "--scope",
+            "images",
+            "--context",
+            "team-context",
+            "--execute",
+            "--accept-preview",
+            "sha256:wrong",
+        ],
+        &common_env,
+    );
+    assert!(!mismatch.status.success());
+    assert!(!calls.exists());
+
+    let executed = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &[
+            "--yes",
+            "container",
+            "prune",
+            "--runtime",
+            "docker",
+            "--scope",
+            "images",
+            "--context",
+            "team-context",
+            "--execute",
+            "--accept-preview",
+            preview_id,
+        ],
+        &common_env,
+    );
+    assert_eq!(executed.status.code(), Some(37));
+    let stdout = String::from_utf8(executed.stdout).unwrap();
+    assert!(stdout.contains(preview_id), "{stdout}");
+    assert!(stdout.contains("native prune stdout"), "{stdout}");
+    assert_eq!(
+        String::from_utf8(executed.stderr).unwrap(),
+        "native prune stderr\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap(),
+        "--host\nunix:///var/run/docker.sock\nimage\nprune\n--force\n"
+    );
 }

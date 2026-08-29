@@ -1,9 +1,10 @@
-# 容器诊断、Registry 测试与 Mirror Plan 实现
+# 原生容器诊断与操作实现
 
 本页说明 `osdk container doctor`、`osdk container cache status`、
-`osdk container registry test` 与 `osdk container mirrors plan` 背后的只读适配器路径。
-适配器把 Docker Engine、containerd 和 BuildKit 视为不同所有者；这些命令既不会引入
-共享容器存储，也不会修改原生配置。
+`osdk container registry test` 与 `osdk container mirrors plan` 背后的只读适配器路径，
+以及 `osdk container pull` 和 `osdk container prune` 背后的受控修改路径。适配器把
+Docker Engine、containerd 和 BuildKit 视为不同所有者；osdk 不会引入共享 OCI 存储，也
+不会静默改变操作所属的原生控制面。
 
 ## CLI 编排与选择
 
@@ -39,6 +40,33 @@ namespace 以参数传递，不从原生工具的环境变量中隐式推断。
 BuildKit 适配器使用 `docker buildx version`、机器可读的 `buildx ls`，再对列表中
 精确选中的结果执行 `buildx inspect`。它刻意不加 `--bootstrap`，所以检查不会启动
 构建器。诊断的最低版本分别为 Docker 19.3、containerd 1.6 和 Buildx 0.10。
+
+## 直接启动镜像 pull
+
+`container pull` 读取生效的容器 runtime 与 platform，其中显式 `--runtime` 和
+`--platform` 优先。`--address` 与 `--namespace` 共同组成显式 containerd target。显式
+Docker 或 containerd 只选择对应 adapter。`auto` 使用确定的诊断排序对 Docker 与
+containerd 执行一次有界只读解析，并在构造任何修改命令前冻结选中的所有者。显式
+containerd 立即要求这对参数；auto 只在 containerd 胜出时要求它们，因此 Docker 胜出时
+无需 containerd selector 即可启动。
+
+选中 adapter 只构造一个直接前台命令：
+
+```text
+docker image pull [--platform PLATFORM] IMAGE
+ctr --address ADDRESS --namespace NAMESPACE images pull [--platform PLATFORM] IMAGE
+```
+
+子进程继承 stdio，而不是使用有界捕获路径，osdk 会等待它结束。进程结果为子进程的直接
+退出码；Unix 上若由信号终止，则规范化为 `128 + signal`。命令启动后就是唯一一次尝试：
+osdk 不会在 Docker 失败后改用 containerd 重试，反之亦然。解析阶段有界且只读，但前台命令
+本身遵循原生客户端正常的 pull 生命周期。
+
+Offline 模式会在解析和构造前台命令前失败。
+
+Pull 路径不通过 osdk 传输 Registry 数据，不在 osdk CAS 中创建 image manifest 或 layer
+对象，也不存在 osdk OCI store。Platform 只转发给选中的原生客户端；所有权、认证、内容
+验证、unpack 与本地镜像可见性都由该客户端负责。
 
 ## 匿名 OCI Registry 诊断
 
@@ -121,11 +149,43 @@ containerd 不执行缓存命令，直接返回类型化的 `unsupported` 状态
 聚合接口。遍历 `/var/lib/containerd`、Docker 根目录、BuildKit 状态或任何原生私有
 存储，会使 osdk 绑定实现细节并可能跨越权限边界，因此此路径永远不会这样做。
 
+## 绑定预览的原生 prune
+
+Prune 使用封闭的 runtime/scope 矩阵，只有 `docker + images` 与
+`buildkit + build-cache` 合法。通用 CLI 语法仍要求 containerd 提供 `--scope`，但两个 scope
+都不是可接受组合。不带 selector 或执行参数时返回类型化“不支持”；containerd 与
+`--context`、`--builder`、`--execute` 或 `--accept-preview` 的组合会被拒绝。Docker/BuildKit
+交叉组合也会在执行前失败。不存在通用 `all`/`system` scope，也没有任何路径会清理
+container、volume、network、osdk store 或原生私有存储。
+
+预览阶段执行有界只读发现，并解析出唯一精确的所有者目标：
+
+- Docker 解析一个精确 context 用于展示，并在私有字段中保留其原始 endpoint。执行命令恰好是
+  `docker --host ENDPOINT image prune --force`，因此随后对 context 名的重定向无法改变目标。
+  只有不依赖 context TLS 材料的本地 Unix socket 或 Windows named pipe 可执行；remote、SSH、
+  TCP/TLS、Docker Desktop 及信息不完整的目标均 fail closed。原生 scope 仅包含 dangling image。
+- BuildKit 解析一个精确 Buildx builder 用于预览。显式 `--builder NAME` 优先；否则发现过程
+  依次使用生效配置与当前 builder。因为原生 CLI 只提供可变 builder 名称而没有不可变 handle，
+  所以不支持执行。
+
+默认路径在渲染 schema version 2 预览后停止。确定的 SHA-256 ID 绑定 owner、scope、解析出的 target、warning，
+以及完整 Docker endpoint 或 Buildx driver 加排序后 node 名/endpoint 拓扑的敏感信息安全指纹。
+原始 endpoint 在诊断脱敏前即被哈希，绝不进入序列化输出。执行路径根据当前发现重新计算预览，并要求同时提供 `--execute` 和完全匹配的
+`--accept-preview`。因此同名 context 或 builder 被重定向到另一 endpoint、driver/node 拓扑变化、
+当前 context/builder 变化、显式 selector 不同、scope/owner 变化、
+warning 变化，或者 ID 来自任何绑定字段不同的预览，都会在启动原生 prune 前 fail closed。
+这种发生绑定变化的预览属于语义陈旧。ID 不包含时间字段；绑定字段不变时会重新得到相同 ID。
+
+对于可执行的 Docker 预览，ID 匹配后只会进入执行确认阶段：仍需接受普通确认 prompt，也可用
+全局 `--yes` 回答该提示；它不能替代 `--execute` 或 `--accept-preview`。之后传给唯一一次原生
+prune 启动的是已经验证的 endpoint 值，而不是可变 context 名称。
+
 ## 序列化与脱敏
 
 `DiagnosticReport` 和 `NativeCacheStatus` 是封闭的 schema version 1 契约。
-有序 map/set 与已排序缓存记录保证重复 JSON 输出确定一致。JSON 字段名和枚举值永不
-本地化；人类可读标签只在选择完成后通过中英文 catalog 生成。
+有序 map/set 与已排序缓存记录保证重复 JSON 输出确定一致。Pull 选择与 prune preview 也会
+在原生启动前使用规范类型化输入；prune preview 身份刻意包含精确 target 与 warning。JSON
+字段名和枚举值永不本地化；人类可读标签只在选择完成后通过中英文 catalog 生成。
 
 原始 `CommandSpec`、stdout 和 stderr 都不可序列化。doctor 与 cache 报告只包含类型化
 状态/能力事实与脱敏证据。endpoint 构造会去除用户信息、敏感 path/query 与 fragment；命令证据只记录
@@ -139,6 +199,7 @@ containerd 不执行缓存命令，直接返回类型化的 `unsupported` 状态
 分类，之后立即丢弃。因此状态查询可以给出有用的机器结果，而不会回显守护进程错误或
 凭据。
 
-这些命令的任何路径都不会执行前台命令、写入配置、拉取完整 image、清理原生数据、
-启动/重建 builder、重启 daemon 或扫描 osdk 私有存储。Registry 测试只执行上述有界
-metadata 与 Range 读取。
+Doctor、cache status、Registry 测试、mirror plan 与 prune preview 都不会执行前台修改。
+Pull 和经批准的 prune 是刻意限定的例外：两者都在解析后启动一次选中的原生命令，且不会
+回退。这里没有任何路径会写入原生配置、启动/重建 builder、重启 daemon、扫描 osdk 私有
+存储或实现私有 OCI store。Registry 测试只执行上述有界 metadata 与 Range 读取。

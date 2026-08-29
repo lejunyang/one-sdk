@@ -12,7 +12,8 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
 - 自动选择响应更快的 SDK 镜像和依赖 Registry；
 - 在网络不可用时复用已下载的元数据与产物；
 - 像管理开发工具一样管理 Hugging Face 和 ModelScope 模型快照；
-- 在不改变状态的前提下检查 Docker、containerd、Buildx、OCI Registry、mirror plan 与原生缓存；
+- 检查 Docker、containerd、Buildx、OCI Registry、mirror plan 与原生缓存，并按需直接
+  拉取镜像或确认严格限定范围的原生清理；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
 
 从[快速上手](site/guide/getting-started.md)开始，或查看
@@ -321,7 +322,7 @@ osdk untrust ./osdk.toml
 
 指南：[下载源、离线与安全](site/guide/sources-security.md)
 
-## 场景：检查容器运行时、Registry 与原生缓存
+## 场景：检查并操作原生容器运行时
 
 无需先添加 policy 即可测试 OCI Registry。需要同时测试 mirror 或规划原生配置变更时，
 请在已信任的用户或项目配置中添加有序 mirror policy：
@@ -345,6 +346,12 @@ osdk container mirrors plan docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --json
 osdk container cache status
 osdk container cache status --runtime buildkit --builder my-builder
+osdk container pull ubuntu:24.04
+osdk container pull ghcr.io/example/tool:1.0 \
+  --runtime containerd --platform linux/amd64 \
+  --address unix:///run/containerd/containerd.sock --namespace default
+osdk container prune --runtime docker --scope images
+osdk container prune --runtime buildkit --scope build-cache --builder my-builder
 ```
 
 Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并按配置
@@ -354,7 +361,22 @@ containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；本来可执�
 Plan JSON 可能包含操作所需的绝对路径、builder 名、mirror origin 及是否存在 path prefix，
 但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。
 
-指南：[容器运行时、Registry 与原生缓存](site/guide/containers.md)
+`container pull` 默认使用生效的 runtime 与 platform。`auto` 模式对 Docker 与 containerd
+执行一次有界只读解析，再启动恰好一次原生前台拉取。显式选择 containerd 时必须成对提供
+`--address` 与 `--namespace`；`auto` 仅在 containerd 胜出时要求二者，因此 Docker 无需它们
+即可继续。子进程继承 stdio，osdk 等待它结束并返回直接退出码；Unix 上若由信号终止，则
+规范化为 `128 + signal`。启动后不会回退到其他 runtime，也不会把镜像复制到 osdk 存储。
+
+`container prune` 默认只输出预览，可针对一个已发现的 Docker context 或 Buildx builder，
+同时绑定 Docker endpoint 或 Buildx driver/node endpoint 拓扑的敏感信息安全指纹。只有不依赖
+context TLS 材料、可通过本地 Unix socket 或 Windows named pipe 直接寻址的 Docker context
+支持执行；它通过 `docker --host` 仅删除 dangling image。执行时必须同时
+传入 `--execute` 与预览中原样返回的 `--accept-preview sha256:...`，然后确认执行提示（或使用
+全局 `--yes`）。BuildKit 因可变 builder 名称无法原子固定而仅支持预览。虽然 `--scope` 仍是必填参数，但 containerd 没有任何可接受的 scope 组合：
+不带 selector、也不请求执行时返回类型化“不支持”，传入 selector 或执行参数则会被拒绝。
+该命令绝不会扩展为清理全部 system、container、volume、network 或实现私有存储。
+
+指南：[容器运行时、Registry 与原生操作](site/guide/containers.md)
 
 ## 场景：检查缓存并回收空间
 
@@ -398,7 +420,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
-| 容器检查 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、只读 mirror plan 与原生缓存状态 |
+| 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、只读 mirror plan、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
 | Shell | Bash、zsh、fish、PowerShell |
 | CLI 语言 | 中文、英文 |
@@ -415,7 +437,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [直接 HTTPS 制品](site/guide/http-artifacts.md)
 - [模型快照](site/guide/models.md)
 - [下载源、离线与安全](site/guide/sources-security.md)
-- [容器运行时、Registry 与原生缓存](site/guide/containers.md)
+- [容器运行时、Registry 与原生操作](site/guide/containers.md)
 - [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
 - [实现文档](site/guide/implementation/index.md)
 

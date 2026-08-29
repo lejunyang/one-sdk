@@ -1,36 +1,43 @@
-//! User-facing, read-only native container diagnostics.
+//! User-facing native container diagnostics and explicitly gated operations.
 
 use std::io::Write;
 use std::path::Path;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use osdk_core::config::{ContainerPlatform, ContainerRegistryConfig, ContainerRuntime};
+use osdk_core::container::operations::{
+    BuildxPrune, ContainerdPrune, ContainerdPull, DockerImagePrune, DockerPull, NativePruneScope,
+    NativePruneTarget, NativePruneWarning, PruneConfirmation, PrunePreview, UnsupportedPrune,
+};
 use osdk_core::container::{
     diagnose_registry, plan_buildkit_mirrors, plan_containerd_mirrors, plan_docker_mirrors,
     ActivationRequirement, ApiCheckStatus, BuildkitAdapter, BuildkitMirrorPlanRequest,
-    BuildxBuilderSelector, BuildxCacheQuery, CacheQueryStatus, ContainerdAdapter,
-    ContainerdCacheQuery, ContainerdMirrorPlanRequest, DiagnosticReport, DiagnosticStatus,
-    DockerAdapter, DockerCacheQuery, DockerMirrorPlanRequest, ImageReference, ManifestCheckStatus,
-    MirrorCheckStatus, MirrorPlan, NativeCacheRecordKind, NativeCacheStatus, NativeConfigSnapshot,
-    OciPlatform, PlanApplicability, PlanWarning, RegistryDiagnosticOptions,
-    RegistryDiagnosticReport, RegistryDiagnosticStatus, RegistryEndpoint, RegistryLimits,
-    RegistryName, RegistryTransport, ReqwestRegistryTransport, RuntimeAdapter, RuntimeKind,
-    DEFAULT_MAX_REQUESTS, MAX_NATIVE_CONFIG_BYTES,
+    BuildxBuilderSelector, BuildxCacheQuery, CacheQueryStatus, Capability, CapabilityStatus,
+    ContainerdAdapter, ContainerdCacheQuery, ContainerdMirrorPlanRequest, DiagnosticReport,
+    DiagnosticStatus, DockerAdapter, DockerCacheQuery, DockerMirrorPlanRequest, ImageReference,
+    ManifestCheckStatus, MirrorCheckStatus, MirrorPlan, NativeCacheOwner, NativeCacheRecordKind,
+    NativeCacheStatus, NativeConfigSnapshot, OciPlatform, PlanApplicability, PlanWarning,
+    ProbeCommand, RegistryDiagnosticOptions, RegistryDiagnosticReport, RegistryDiagnosticStatus,
+    RegistryEndpoint, RegistryLimits, RegistryName, RegistryTransport, ReqwestRegistryTransport,
+    RuntimeAdapter, RuntimeKind, DEFAULT_MAX_REQUESTS, MAX_NATIVE_CONFIG_BYTES,
 };
 use osdk_core::i18n::{self, interpolate, trl, Lang};
-use osdk_core::process::{CaptureLimits, CommandRunner, SystemCommandRunner};
+use osdk_core::process::{
+    CaptureLimits, CommandOutcome, CommandRunner, CommandSpec, SystemCommandRunner,
+};
 use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::{
     ContainerCacheCommand, ContainerCacheRuntimeArg, ContainerCommand, ContainerMirrorRuntimeArg,
-    ContainerMirrorsCommand, ContainerRegistryCommand, ContainerRuntimeArg,
+    ContainerMirrorsCommand, ContainerPruneRuntimeArg, ContainerPruneScopeArg,
+    ContainerRegistryCommand, ContainerRuntimeArg,
 };
 
 const DOCTOR_SCHEMA_VERSION: u32 = 1;
 const CAPTURE_BYTES: usize = 64 * 1024;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum RuntimeSelection {
@@ -49,23 +56,65 @@ struct DoctorOutput {
     builder: Option<DiagnosticReport>,
 }
 
-pub async fn run(app: &App, command: ContainerCommand) -> Result<()> {
-    run_with(
-        &SystemCommandRunner,
-        || {
-            ReqwestRegistryTransport::new().map_err(|error| {
-                anyhow!(osdk_core::t!(
-                    "err.container.registry_transport",
-                    error = error
-                ))
-            })
-        },
-        app.ctx.config.containers(),
-        app.ctx.config.settings.offline,
-        command,
-        &mut std::io::stdout(),
-    )
-    .await
+pub async fn run(app: &App, command: ContainerCommand) -> Result<Option<ExitStatus>> {
+    let runner = SystemCommandRunner;
+    match command {
+        ContainerCommand::Pull {
+            image,
+            runtime,
+            platform,
+            address,
+            namespace,
+        } => pull(
+            &runner,
+            app.ctx.config.containers(),
+            app.ctx.config.settings.offline,
+            runtime,
+            image,
+            platform,
+            address,
+            namespace,
+        )
+        .map(Some),
+        ContainerCommand::Prune {
+            runtime,
+            scope,
+            context,
+            builder,
+            execute,
+            accept_preview,
+        } => native_prune(
+            &runner,
+            app.prompt.as_ref(),
+            app.ctx.config.containers(),
+            runtime,
+            scope,
+            context,
+            builder,
+            execute,
+            accept_preview.as_deref(),
+            &mut std::io::stdout(),
+        ),
+        command => {
+            run_with(
+                &SystemCommandRunner,
+                || {
+                    ReqwestRegistryTransport::new().map_err(|error| {
+                        anyhow!(osdk_core::t!(
+                            "err.container.registry_transport",
+                            error = error
+                        ))
+                    })
+                },
+                app.ctx.config.containers(),
+                app.ctx.config.settings.offline,
+                command,
+                &mut std::io::stdout(),
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn run_with<T, F>(
@@ -82,6 +131,9 @@ where
 {
     let limits = capture_limits(config.probe_timeout_ms);
     match command {
+        ContainerCommand::Pull { .. } | ContainerCommand::Prune { .. } => {
+            unreachable!("native operations are dispatched before read-only commands")
+        }
         ContainerCommand::Doctor {
             runtime,
             builder,
@@ -171,6 +223,376 @@ where
         },
     }
     Ok(())
+}
+
+fn pull(
+    runner: &dyn CommandRunner,
+    config: &osdk_core::config::ContainersConfig,
+    offline: bool,
+    runtime: Option<ContainerRuntimeArg>,
+    image: ImageReference,
+    platform: Option<OciPlatform>,
+    address: Option<String>,
+    namespace: Option<String>,
+) -> Result<ExitStatus> {
+    if offline {
+        return Err(anyhow!(osdk_core::t!("err.container.pull_offline")));
+    }
+    let runtime = runtime
+        .map(RuntimeSelection::from)
+        .unwrap_or_else(|| RuntimeSelection::from(config.runtime));
+    let platform = platform.or(configured_platform(config)?);
+    let selected = match runtime {
+        RuntimeSelection::Docker => RuntimeKind::Docker,
+        RuntimeSelection::Containerd => RuntimeKind::Containerd,
+        RuntimeSelection::Auto => resolve_pull_runtime(
+            runner,
+            capture_limits(config.probe_timeout_ms),
+            address.as_deref().zip(namespace.as_deref()),
+        )?,
+    };
+    if runtime == RuntimeSelection::Docker && (address.is_some() || namespace.is_some()) {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.containerd_selectors_runtime"
+        )));
+    }
+
+    let operation = match selected {
+        RuntimeKind::Docker => {
+            let mut pull = DockerPull::new(image);
+            if let Some(platform) = platform {
+                pull = pull.with_platform(platform);
+            }
+            pull.into_command()
+        }
+        RuntimeKind::Containerd => {
+            let (address, namespace) = address.zip(namespace).ok_or_else(|| {
+                anyhow!(osdk_core::t!(
+                    "err.container.containerd_pull_selectors_required"
+                ))
+            })?;
+            let mut pull = ContainerdPull::new(address, namespace, image)
+                .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_containerd_target")))?;
+            if let Some(platform) = platform {
+                pull = pull.with_platform(platform);
+            }
+            pull.into_command()
+        }
+        _ => unreachable!("pull selection only returns Docker or containerd"),
+    };
+    operation
+        .execute(runner)
+        .map_err(|error| anyhow!(osdk_core::t!("err.container.native_spawn", error = error)))
+}
+
+fn resolve_pull_runtime(
+    runner: &dyn CommandRunner,
+    limits: CaptureLimits,
+    containerd_target: Option<(&str, &str)>,
+) -> Result<RuntimeKind> {
+    // Resolve exactly once before starting a foreground operation. Both
+    // candidates are inspected in fixed order and there is no post-launch
+    // fallback.
+    let docker = DockerAdapter.diagnose(runner, limits);
+    let containerd = match containerd_target {
+        Some((address, namespace)) => ContainerdAdapter::new(address, namespace)
+            .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_containerd_target")))?
+            .diagnose(runner, limits),
+        None => ContainerdAdapter::default().diagnose(runner, limits),
+    };
+    let supports_pull = |report: &DiagnosticReport| {
+        report.capabilities.get(&Capability::Pull) == Some(&CapabilityStatus::Supported)
+    };
+    match (supports_pull(&docker), supports_pull(&containerd)) {
+        (true, true) => Ok(
+            if status_rank(docker.status) >= status_rank(containerd.status) {
+                RuntimeKind::Docker
+            } else {
+                RuntimeKind::Containerd
+            },
+        ),
+        (true, false) => Ok(RuntimeKind::Docker),
+        (false, true) => Ok(RuntimeKind::Containerd),
+        (false, false) => Err(anyhow!(osdk_core::t!(
+            "err.container.pull_unavailable",
+            docker = diagnostic_status_label(i18n::current(), docker.status),
+            containerd = diagnostic_status_label(i18n::current(), containerd.status)
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_prune(
+    runner: &dyn CommandRunner,
+    prompt: &dyn crate::prompt::Prompt,
+    config: &osdk_core::config::ContainersConfig,
+    runtime: ContainerPruneRuntimeArg,
+    scope: ContainerPruneScopeArg,
+    context: Option<String>,
+    builder: Option<BuildxBuilderSelector>,
+    execute: bool,
+    accepted_preview: Option<&str>,
+    output: &mut dyn Write,
+) -> Result<Option<ExitStatus>> {
+    let limits = capture_limits(config.probe_timeout_ms);
+    match runtime {
+        ContainerPruneRuntimeArg::Containerd => {
+            if context.is_some() || builder.is_some() || execute || accepted_preview.is_some() {
+                return Err(anyhow!(osdk_core::t!(
+                    "err.container.prune_selector_runtime"
+                )));
+            }
+            let unsupported = ContainerdPrune.preview();
+            write_unsupported_prune(output, &unsupported, i18n::current())?;
+            Err(anyhow!(osdk_core::t!("err.container.prune_unsupported")))
+        }
+        ContainerPruneRuntimeArg::Docker => {
+            if scope != ContainerPruneScopeArg::Images {
+                return Err(anyhow!(osdk_core::t!("err.container.prune_docker_scope")));
+            }
+            if builder.is_some() {
+                return Err(anyhow!(osdk_core::t!(
+                    "err.container.prune_builder_runtime"
+                )));
+            }
+            if let Some(requested) = context.as_deref() {
+                // Validate before forwarding the value to the read-only native
+                // discovery command.
+                validate_native_target_name(requested)
+                    .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_docker_context")))?;
+            }
+            let prune = discover_docker_prune(runner, limits, context.as_deref())?;
+            let preview = prune.preview()?;
+            write_prune_preview(output, &preview, i18n::current())?;
+            execute_docker_prune(
+                runner,
+                prompt,
+                prune,
+                &preview,
+                execute,
+                accepted_preview,
+                output,
+            )
+        }
+        ContainerPruneRuntimeArg::Buildkit => {
+            if scope != ContainerPruneScopeArg::BuildCache {
+                return Err(anyhow!(osdk_core::t!("err.container.prune_buildkit_scope")));
+            }
+            if context.is_some() {
+                return Err(anyhow!(osdk_core::t!(
+                    "err.container.prune_context_runtime"
+                )));
+            }
+            let selector = builder.unwrap_or_else(|| config.builder.clone());
+            let prune = discover_buildx_prune(runner, limits, selector)?;
+            let preview = prune.preview()?;
+            write_prune_preview(output, &preview, i18n::current())?;
+            if execute {
+                return Err(anyhow!(osdk_core::t!(
+                    "err.container.prune_buildkit_execute_unsupported"
+                )));
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn discover_buildx_prune(
+    runner: &dyn CommandRunner,
+    limits: CaptureLimits,
+    selector: BuildxBuilderSelector,
+) -> Result<BuildxPrune> {
+    let discovery = BuildkitAdapter::new(selector).inspect(runner, limits);
+    let selected = discovery.selected_builder.as_ref().ok_or_else(|| {
+        anyhow!(osdk_core::t!(
+            "err.container.prune_builder_unavailable",
+            status = diagnostic_status_label(i18n::current(), discovery.report.status)
+        ))
+    })?;
+    let topology_fingerprint = selected
+        .topology_fingerprint()?
+        .ok_or_else(|| anyhow!(osdk_core::t!("err.container.prune_target_identity")))?;
+    let selector = BuildxBuilderSelector::named(selected.name.clone())
+        .map_err(|_| anyhow!(osdk_core::t!("err.container.invalid_builder")))?;
+    BuildxPrune::new(selector, topology_fingerprint).map_err(Into::into)
+}
+
+fn execute_docker_prune(
+    runner: &dyn CommandRunner,
+    prompt: &dyn crate::prompt::Prompt,
+    prune: DockerImagePrune,
+    preview: &PrunePreview,
+    execute: bool,
+    accepted_preview: Option<&str>,
+    output: &mut dyn Write,
+) -> Result<Option<ExitStatus>> {
+    if !execute {
+        return Ok(None);
+    }
+    if accepted_preview != Some(preview.preview_id.as_str()) {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.prune_preview_mismatch",
+            preview_id = preview.preview_id.as_str()
+        )));
+    }
+    output.flush()?;
+    let question = osdk_core::t!(
+        "prompt.container_prune",
+        preview_id = preview.preview_id.as_str()
+    );
+    if !prompt.confirm(&question)? {
+        writeln!(output, "{}", osdk_core::t!("msg.cancelled"))?;
+        return Ok(None);
+    }
+    let confirmation = PruneConfirmation::accept(preview)?;
+    let operation = prune.execute(confirmation)?;
+    operation
+        .execute(runner)
+        .map(Some)
+        .map_err(|error| anyhow!(osdk_core::t!("err.container.native_spawn", error = error)))
+}
+
+fn discover_docker_prune(
+    runner: &dyn CommandRunner,
+    limits: CaptureLimits,
+    requested: Option<&str>,
+) -> Result<DockerImagePrune> {
+    let mut command = CommandSpec::new("docker").args(["context", "inspect"]);
+    if let Some(requested) = requested {
+        command = command.arg(requested);
+    }
+    let outcome = ProbeCommand::new(
+        osdk_core::container::NativeProgram::Docker,
+        osdk_core::container::CommandPurpose::ContextInspect,
+        command,
+    )
+    .execute(runner, limits);
+    let output = match &outcome {
+        CommandOutcome::Exited { status, output }
+            if status.success() && !output.stdout_truncated =>
+        {
+            &output.stdout
+        }
+        _ => {
+            return Err(anyhow!(osdk_core::t!(
+                "err.container.docker_context_unavailable"
+            )))
+        }
+    };
+    let discovered = osdk_core::container::docker::parse_docker_context(output)
+        .map_err(|_| anyhow!(osdk_core::t!("err.container.docker_context_unavailable")))?;
+    if requested.is_some_and(|requested| discovered.name.as_deref() != Some(requested)) {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.docker_context_mismatch"
+        )));
+    }
+    DockerImagePrune::from_context(discovered).map_err(|error| match error {
+        osdk_core::container::operations::PrunePlanError::UnsupportedDockerEndpoint => {
+            anyhow!(osdk_core::t!(
+                "err.container.prune_docker_endpoint_unsupported"
+            ))
+        }
+        _ => anyhow!(osdk_core::t!("err.container.prune_target_identity")),
+    })
+}
+
+fn validate_native_target_name(value: &str) -> Result<()> {
+    if value.len() <= 128
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid native target name"))
+    }
+}
+
+fn write_prune_preview(
+    output: &mut dyn Write,
+    preview: &PrunePreview,
+    lang: Lang,
+) -> std::io::Result<()> {
+    let owner = prune_owner_label(lang, preview.owner);
+    let scope = prune_scope_label(lang, preview.scope);
+    writeln!(output, "{}", trl(lang, "msg.container.prune_preview"))?;
+    writeln!(
+        output,
+        "{}",
+        localized(
+            lang,
+            "msg.container.prune_preview_id",
+            &[("preview_id", preview.preview_id.as_str())]
+        )
+    )?;
+    writeln!(
+        output,
+        "{}",
+        localized(
+            lang,
+            "msg.container.prune_owner_scope",
+            &[("owner", &owner), ("scope", &scope)]
+        )
+    )?;
+    let (kind, name) = match &preview.target {
+        NativePruneTarget::DockerContext { name, .. } => (
+            trl(lang, "label.container.prune_target.docker_context"),
+            name.as_str(),
+        ),
+        NativePruneTarget::BuildxBuilder { name, .. } => (
+            trl(lang, "label.container.prune_target.buildx_builder"),
+            name.as_str(),
+        ),
+    };
+    writeln!(
+        output,
+        "{}",
+        localized(
+            lang,
+            "msg.container.prune_target",
+            &[("kind", &kind), ("name", name)]
+        )
+    )?;
+    debug_assert_eq!(
+        preview.warning,
+        NativePruneWarning::MayRemoveStateCreatedOutsideOsdk
+    );
+    writeln!(output, "{}", trl(lang, "msg.container.prune_warning"))?;
+    Ok(())
+}
+
+fn write_unsupported_prune(
+    output: &mut dyn Write,
+    unsupported: &UnsupportedPrune,
+    lang: Lang,
+) -> std::io::Result<()> {
+    debug_assert_eq!(unsupported.owner, NativeCacheOwner::Containerd);
+    writeln!(output, "{}", trl(lang, "msg.container.prune_unsupported"))
+}
+
+fn prune_owner_label(lang: Lang, owner: NativeCacheOwner) -> String {
+    trl(
+        lang,
+        match owner {
+            NativeCacheOwner::DockerEngine => "label.container.prune_owner.docker_engine",
+            NativeCacheOwner::BuildkitBuilder => "label.container.prune_owner.buildkit_builder",
+            NativeCacheOwner::Containerd => "label.container.prune_owner.containerd",
+        },
+    )
+}
+
+fn prune_scope_label(lang: Lang, scope: NativePruneScope) -> String {
+    trl(
+        lang,
+        match scope {
+            NativePruneScope::DanglingImages => "label.container.prune_scope.dangling_images",
+            NativePruneScope::BuildCache => "label.container.prune_scope.build_cache",
+        },
+    )
 }
 
 async fn registry_test<T: RegistryTransport>(
@@ -942,16 +1364,23 @@ mod tests {
 
     use super::*;
 
+    #[cfg(not(windows))]
+    const DEFAULT_TEST_CONTAINERD_ADDRESS: &str = "unix:///run/containerd/containerd.sock";
+    #[cfg(windows)]
+    const DEFAULT_TEST_CONTAINERD_ADDRESS: &str = "npipe:////./pipe/containerd-containerd";
+    const DEFAULT_CONTAINERD_NAMESPACE: &str = "default";
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Call {
         program: String,
         arguments: Vec<String>,
-        limits: CaptureLimits,
+        limits: Option<CaptureLimits>,
     }
 
     struct FakeRunner {
         outcomes: Mutex<VecDeque<CommandOutcome>>,
         calls: Mutex<Vec<Call>>,
+        foreground_status: ExitStatus,
     }
 
     impl FakeRunner {
@@ -959,6 +1388,18 @@ mod tests {
             Self {
                 outcomes: Mutex::new(outcomes.into_iter().collect()),
                 calls: Mutex::new(Vec::new()),
+                foreground_status: exit_status_code(0),
+            }
+        }
+
+        fn with_foreground_status(
+            outcomes: impl IntoIterator<Item = CommandOutcome>,
+            code: i32,
+        ) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+                foreground_status: exit_status_code(code),
             }
         }
 
@@ -976,7 +1417,7 @@ mod tests {
                     .iter()
                     .map(|argument| argument.to_string_lossy().into_owned())
                     .collect(),
-                limits,
+                limits: Some(limits),
             });
             self.outcomes
                 .lock()
@@ -985,8 +1426,42 @@ mod tests {
                 .expect("unexpected native command")
         }
 
-        fn run_foreground(&self, _command: &CommandSpec) -> io::Result<ExitStatus> {
-            panic!("container inspection must not execute foreground commands")
+        fn run_foreground(&self, command: &CommandSpec) -> io::Result<ExitStatus> {
+            self.calls.lock().unwrap().push(Call {
+                program: command.program().to_string_lossy().into_owned(),
+                arguments: command
+                    .arguments()
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect(),
+                limits: None,
+            });
+            Ok(self.foreground_status)
+        }
+    }
+
+    struct FakePrompt {
+        answer: bool,
+        questions: Mutex<Vec<String>>,
+    }
+
+    impl FakePrompt {
+        fn accepting() -> Self {
+            Self {
+                answer: true,
+                questions: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn questions(&self) -> Vec<String> {
+            self.questions.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::prompt::Prompt for FakePrompt {
+        fn confirm(&self, question: &str) -> Result<bool> {
+            self.questions.lock().unwrap().push(question.to_owned());
+            Ok(self.answer)
         }
     }
 
@@ -1012,14 +1487,24 @@ mod tests {
 
     #[cfg(unix)]
     fn exit_status(success: bool) -> ExitStatus {
+        exit_status_code(i32::from(!success))
+    }
+
+    #[cfg(unix)]
+    fn exit_status_code(code: i32) -> ExitStatus {
         use std::os::unix::process::ExitStatusExt;
-        ExitStatus::from_raw(if success { 0 } else { 1 << 8 })
+        ExitStatus::from_raw(code << 8)
     }
 
     #[cfg(windows)]
     fn exit_status(success: bool) -> ExitStatus {
+        exit_status_code(i32::from(!success))
+    }
+
+    #[cfg(windows)]
+    fn exit_status_code(code: i32) -> ExitStatus {
         use std::os::windows::process::ExitStatusExt;
-        ExitStatus::from_raw(if success { 0 } else { 1 })
+        ExitStatus::from_raw(code as u32)
     }
 
     fn healthy_docker() -> [CommandOutcome; 3] {
@@ -1052,6 +1537,479 @@ mod tests {
             success("Client:\n  Version: v1.7.22\nServer:\n  Version: v1.7.22\n"),
             success("version = 2"),
         ]
+    }
+
+    fn healthy_buildkit(name: &str) -> [CommandOutcome; 3] {
+        healthy_buildkit_at(name, "docker-container", "unix:///var/run/docker.sock")
+    }
+
+    fn healthy_buildkit_at(name: &str, driver: &str, endpoint: &str) -> [CommandOutcome; 3] {
+        [
+            success("github.com/docker/buildx v0.36.1 deadbeef\n"),
+            success(&format!(
+                r#"{{"Current":true,"Driver":"{driver}","Name":"{name}","Nodes":[{{"Name":"{name}0","Endpoint":"{endpoint}","Status":"running"}}]}}"#
+            )),
+            success(&format!(
+                "Name: {name}\nDriver: {driver}\nName: {name}0\nEndpoint: {endpoint}\nStatus: running\n"
+            )),
+        ]
+    }
+
+    #[test]
+    fn explicit_pull_runs_one_foreground_operation_and_returns_native_status() {
+        let runner = FakeRunner::with_foreground_status([], 23);
+        let status = pull(
+            &runner,
+            &Default::default(),
+            false,
+            Some(ContainerRuntimeArg::Docker),
+            ImageReference::parse("ubuntu:24.04").unwrap(),
+            Some(OciPlatform::parse("Linux/X64").unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(status.code(), Some(23));
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "docker");
+        assert_eq!(
+            calls[0].arguments,
+            [
+                "image",
+                "pull",
+                "--platform",
+                "linux/amd64",
+                "docker.io/library/ubuntu:24.04",
+            ]
+        );
+        assert!(calls[0].limits.is_none());
+    }
+
+    #[test]
+    fn auto_pull_resolves_once_then_launches_only_the_selected_runtime() {
+        let runner = FakeRunner::with_foreground_status(
+            [
+                vec![CommandOutcome::NotInstalled],
+                healthy_containerd().into_iter().collect(),
+            ]
+            .concat(),
+            0,
+        );
+        let status = pull(
+            &runner,
+            &Default::default(),
+            false,
+            Some(ContainerRuntimeArg::Auto),
+            ImageReference::parse("alpine:3").unwrap(),
+            None,
+            Some(DEFAULT_TEST_CONTAINERD_ADDRESS.into()),
+            Some(DEFAULT_CONTAINERD_NAMESPACE.into()),
+        )
+        .unwrap();
+
+        assert!(status.success());
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[0].program, "docker");
+        assert_eq!(calls[1].program, "containerd");
+        assert_eq!(calls.last().unwrap().program, "ctr");
+        assert_eq!(
+            calls.last().unwrap().arguments,
+            [
+                "--address",
+                DEFAULT_TEST_CONTAINERD_ADDRESS,
+                "--namespace",
+                DEFAULT_CONTAINERD_NAMESPACE,
+                "images",
+                "pull",
+                "docker.io/library/alpine:3",
+            ]
+        );
+        assert_eq!(calls.iter().filter(|call| call.limits.is_none()).count(), 1);
+    }
+
+    #[test]
+    fn pull_rejects_offline_before_any_probe_or_launch() {
+        let runner = FakeRunner::new([]);
+        let error = pull(
+            &runner,
+            &Default::default(),
+            true,
+            Some(ContainerRuntimeArg::Auto),
+            ImageReference::parse("alpine:3").unwrap(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("offline"));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn containerd_pull_requires_explicit_target_after_auto_resolution() {
+        let runner = FakeRunner::new(
+            [
+                vec![CommandOutcome::NotInstalled],
+                healthy_containerd().into_iter().collect(),
+            ]
+            .concat(),
+        );
+        let error = pull(
+            &runner,
+            &Default::default(),
+            false,
+            Some(ContainerRuntimeArg::Auto),
+            ImageReference::parse("alpine:3").unwrap(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("--address"));
+        assert_eq!(runner.calls().len(), 4);
+        assert!(runner.calls().iter().all(|call| call.limits.is_some()));
+    }
+
+    #[test]
+    fn docker_pull_rejects_containerd_selectors_without_launching() {
+        let runner = FakeRunner::new([]);
+        let error = pull(
+            &runner,
+            &Default::default(),
+            false,
+            Some(ContainerRuntimeArg::Docker),
+            ImageReference::parse("alpine:3").unwrap(),
+            None,
+            Some(DEFAULT_TEST_CONTAINERD_ADDRESS.into()),
+            Some(DEFAULT_CONTAINERD_NAMESPACE.into()),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("containerd"));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn docker_prune_defaults_to_preview_and_binds_discovered_context() {
+        let runner = FakeRunner::new([success(
+            r#"[{"Name":"team-context","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]"#,
+        )]);
+        let prompt = FakePrompt::accepting();
+        let mut output = Vec::new();
+        let status = native_prune(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(status.is_none());
+        assert!(prompt.questions().is_empty());
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, ["context", "inspect", "team-context"]);
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("sha256:"), "{text}");
+        assert!(text.contains("team-context"), "{text}");
+        assert!(text.contains("dangling images"), "{text}");
+    }
+
+    #[test]
+    fn docker_prune_requires_exact_acceptance_then_prompts_and_runs_once() {
+        fn discovery() -> CommandOutcome {
+            success(
+                r#"[{"Name":"team-context","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]"#,
+            )
+        }
+
+        let preview_runner = FakeRunner::new([discovery()]);
+        let prompt = FakePrompt::accepting();
+        let mut preview_output = Vec::new();
+        native_prune(
+            &preview_runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            false,
+            None,
+            &mut preview_output,
+        )
+        .unwrap();
+        let preview_output = String::from_utf8(preview_output).unwrap();
+        let preview_id = preview_output
+            .split_whitespace()
+            .find(|value| value.starts_with("sha256:"))
+            .unwrap()
+            .to_owned();
+
+        let mismatch_runner = FakeRunner::new([discovery()]);
+        let mut mismatch_output = Vec::new();
+        let mismatch = native_prune(
+            &mismatch_runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            true,
+            Some("sha256:wrong"),
+            &mut mismatch_output,
+        )
+        .unwrap_err();
+        assert!(mismatch.to_string().contains(&preview_id));
+        assert_eq!(mismatch_runner.calls().len(), 1);
+        assert!(prompt.questions().is_empty());
+
+        let runner = FakeRunner::with_foreground_status([discovery(), discovery()], 41);
+        let mut output = Vec::new();
+        let status = native_prune(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            true,
+            Some(&preview_id),
+            &mut output,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(status.code(), Some(41));
+        assert_eq!(prompt.questions().len(), 1);
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1].arguments,
+            [
+                "--host",
+                "unix:///var/run/docker.sock",
+                "image",
+                "prune",
+                "--force",
+            ]
+        );
+        assert!(calls[1].limits.is_none());
+    }
+
+    #[test]
+    fn docker_prune_executes_the_endpoint_captured_before_confirmation() {
+        fn discovery(endpoint: &str) -> CommandOutcome {
+            success(&format!(
+                r#"[{{"Name":"team-context","Endpoints":{{"docker":{{"Host":"{endpoint}"}}}}}}]"#
+            ))
+        }
+
+        let prompt = FakePrompt::accepting();
+        let first = FakeRunner::new([discovery("unix:///run/first/docker.sock")]);
+        let mut output = Vec::new();
+        native_prune(
+            &first,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap();
+        let preview_id = String::from_utf8(output)
+            .unwrap()
+            .split_whitespace()
+            .find(|value| value.starts_with("sha256:"))
+            .unwrap()
+            .to_owned();
+
+        let retargeted =
+            FakeRunner::with_foreground_status([discovery("unix:///run/first/docker.sock")], 0);
+        let mut output = Vec::new();
+        let status = native_prune(
+            &retargeted,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            true,
+            Some(&preview_id),
+            &mut output,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(status.success());
+        assert_eq!(retargeted.calls().len(), 2);
+        assert_eq!(
+            retargeted.calls()[1].arguments,
+            [
+                "--host",
+                "unix:///run/first/docker.sock",
+                "image",
+                "prune",
+                "--force",
+            ]
+        );
+        assert!(retargeted.calls()[1].limits.is_none());
+        assert_eq!(prompt.questions().len(), 1);
+    }
+
+    #[test]
+    fn buildkit_prune_execution_is_unsupported_before_prompt_or_launch() {
+        let prompt = FakePrompt::accepting();
+        let first = FakeRunner::new(healthy_buildkit_at(
+            "team-builder",
+            "docker-container",
+            "unix:///run/first/buildkit.sock",
+        ));
+        let mut output = Vec::new();
+        native_prune(
+            &first,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Buildkit,
+            ContainerPruneScopeArg::BuildCache,
+            None,
+            Some(BuildxBuilderSelector::named("team-builder").unwrap()),
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap();
+        let preview_id = String::from_utf8(output)
+            .unwrap()
+            .split_whitespace()
+            .find(|value| value.starts_with("sha256:"))
+            .unwrap()
+            .to_owned();
+
+        let retargeted = FakeRunner::with_foreground_status(
+            healthy_buildkit_at(
+                "team-builder",
+                "docker-container",
+                "unix:///run/first/buildkit.sock",
+            ),
+            0,
+        );
+        let mut output = Vec::new();
+        let error = native_prune(
+            &retargeted,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Buildkit,
+            ContainerPruneScopeArg::BuildCache,
+            None,
+            Some(BuildxBuilderSelector::named("team-builder").unwrap()),
+            true,
+            Some(&preview_id),
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("preview-only"));
+        assert_eq!(retargeted.calls().len(), 3);
+        assert!(retargeted.calls().iter().all(|call| call.limits.is_some()));
+        assert!(prompt.questions().is_empty());
+    }
+
+    #[test]
+    fn buildkit_preview_resolves_one_exact_builder_and_containerd_is_unsupported() {
+        let runner = FakeRunner::new(healthy_buildkit("team-builder"));
+        let prompt = FakePrompt::accepting();
+        let mut output = Vec::new();
+        let status = native_prune(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Buildkit,
+            ContainerPruneScopeArg::BuildCache,
+            Some("unexpected-context".into()),
+            None,
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(status.to_string().contains("--context"));
+        assert!(runner.calls().is_empty());
+
+        let runner = FakeRunner::new(healthy_buildkit("team-builder"));
+        let mut output = Vec::new();
+        native_prune(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Buildkit,
+            ContainerPruneScopeArg::BuildCache,
+            None,
+            None,
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("team-builder"), "{text}");
+        assert!(text.contains("unused build cache"), "{text}");
+        assert_eq!(runner.calls().len(), 3);
+
+        let runner = FakeRunner::new([]);
+        let mut output = Vec::new();
+        let unsupported = native_prune(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Containerd,
+            ContainerPruneScopeArg::BuildCache,
+            None,
+            None,
+            false,
+            None,
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(String::from_utf8(output).unwrap().contains("unsupported"));
+        assert!(unsupported.to_string().contains("no stable aggregate"));
+        assert!(runner.calls().is_empty());
+
+        let runner = FakeRunner::new([]);
+        let mut output = Vec::new();
+        let execute = native_prune(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Containerd,
+            ContainerPruneScopeArg::Images,
+            None,
+            None,
+            true,
+            Some("sha256:unused"),
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(execute.to_string().contains("unsupported"));
+        assert!(output.is_empty());
+        assert!(runner.calls().is_empty());
     }
 
     #[derive(Clone)]
@@ -1505,7 +2463,7 @@ mod tests {
         assert!(runner
             .calls()
             .iter()
-            .all(|call| call.limits == capture_limits(321)));
+            .all(|call| call.limits == Some(capture_limits(321))));
     }
 
     #[test]

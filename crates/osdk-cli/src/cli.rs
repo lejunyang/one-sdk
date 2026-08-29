@@ -513,6 +513,45 @@ pub enum CacheCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ContainerCommand {
+    /// Pull an image through one selected native runtime.
+    Pull {
+        /// Canonical OCI image reference to pull.
+        #[arg(value_name = "IMAGE")]
+        image: osdk_core::container::ImageReference,
+        /// Runtime selector; defaults to the effective container configuration.
+        #[arg(long, value_enum, value_name = "RUNTIME")]
+        runtime: Option<ContainerRuntimeArg>,
+        /// Optional OCI platform: OS/ARCH[/VARIANT].
+        #[arg(long, value_name = "PLATFORM")]
+        platform: Option<osdk_core::container::OciPlatform>,
+        /// Explicit containerd daemon address; must be paired with --namespace.
+        #[arg(long, value_name = "ADDRESS", requires = "namespace")]
+        address: Option<String>,
+        /// Explicit containerd namespace; must be paired with --address.
+        #[arg(long, value_name = "NAMESPACE", requires = "address")]
+        namespace: Option<String>,
+    },
+    /// Preview or execute one narrowly scoped native prune.
+    Prune {
+        /// Native cache owner to target.
+        #[arg(long, value_enum, value_name = "RUNTIME", required = true)]
+        runtime: ContainerPruneRuntimeArg,
+        /// Exact native state category to prune.
+        #[arg(long, value_enum, value_name = "SCOPE", required = true)]
+        scope: ContainerPruneScopeArg,
+        /// Docker context to discover and bind into the preview.
+        #[arg(long, value_name = "NAME")]
+        context: Option<String>,
+        /// Buildx builder to discover and bind into the preview.
+        #[arg(long, value_name = "NAME")]
+        builder: Option<osdk_core::container::BuildxBuilderSelector>,
+        /// Execute the displayed preview after confirmation.
+        #[arg(long, requires = "accept_preview")]
+        execute: bool,
+        /// Accept exactly this previously displayed preview identity.
+        #[arg(long, value_name = "SHA256_ID", requires = "execute")]
+        accept_preview: Option<String>,
+    },
     /// Diagnose the selected native runtime and Buildx builder.
     Doctor {
         /// Runtime selector; defaults to the effective container configuration.
@@ -624,6 +663,19 @@ pub enum ContainerMirrorRuntimeArg {
     Buildkit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerPruneRuntimeArg {
+    Docker,
+    Buildkit,
+    Containerd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ContainerPruneScopeArg {
+    Images,
+    BuildCache,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -664,6 +716,129 @@ mod tests {
         assert_eq!(image.unwrap().to_string(), "docker.io/library/ubuntu:24.04");
         assert_eq!(platform.unwrap().to_string(), "linux/amd64");
         assert!(json);
+    }
+
+    #[test]
+    fn parses_native_pull_and_narrow_prune_arguments() {
+        let pull = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "pull",
+            "ubuntu:24.04",
+            "--runtime",
+            "auto",
+            "--platform",
+            "Linux/X64",
+        ])
+        .unwrap();
+        let Command::Container {
+            command:
+                ContainerCommand::Pull {
+                    image,
+                    runtime,
+                    platform,
+                    address,
+                    namespace,
+                },
+        } = pull.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(image.to_string(), "docker.io/library/ubuntu:24.04");
+        assert_eq!(runtime, Some(ContainerRuntimeArg::Auto));
+        assert_eq!(platform.unwrap().to_string(), "linux/amd64");
+        assert!(address.is_none());
+        assert!(namespace.is_none());
+
+        let prune = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "prune",
+            "--runtime",
+            "docker",
+            "--scope",
+            "images",
+            "--context",
+            "team",
+        ])
+        .unwrap();
+        let Command::Container {
+            command:
+                ContainerCommand::Prune {
+                    runtime,
+                    scope,
+                    context,
+                    execute,
+                    accept_preview,
+                    ..
+                },
+        } = prune.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(runtime, ContainerPruneRuntimeArg::Docker);
+        assert_eq!(scope, ContainerPruneScopeArg::Images);
+        assert_eq!(context.as_deref(), Some("team"));
+        assert!(!execute);
+        assert!(accept_preview.is_none());
+    }
+
+    #[test]
+    fn containerd_pull_selectors_are_paired() {
+        for arguments in [
+            vec![
+                "osdk",
+                "container",
+                "pull",
+                "alpine:3",
+                "--runtime",
+                "containerd",
+                "--address",
+                "unix:///run/containerd/containerd.sock",
+            ],
+            vec![
+                "osdk",
+                "container",
+                "pull",
+                "alpine:3",
+                "--runtime",
+                "containerd",
+                "--namespace",
+                "default",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn native_prune_execution_requires_an_accepted_preview_id() {
+        let missing = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "prune",
+            "--runtime",
+            "docker",
+            "--scope",
+            "images",
+            "--execute",
+        ])
+        .unwrap_err();
+        assert!(missing.to_string().contains("--accept-preview"));
+
+        let detached = Cli::try_parse_from([
+            "osdk",
+            "container",
+            "prune",
+            "--runtime",
+            "buildkit",
+            "--scope",
+            "build-cache",
+            "--accept-preview",
+            "sha256:abc",
+        ])
+        .unwrap_err();
+        assert!(detached.to_string().contains("--execute"));
     }
 
     #[test]

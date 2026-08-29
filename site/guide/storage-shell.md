@@ -71,7 +71,7 @@ osdk prune [--dry-run]
 GC 遇到损坏 manifest 会拒绝继续，防止误删仍在使用的对象。
 
 `osdk container cache status` 是另一条路径：它通过受支持的原生聚合接口查询 Docker
-Engine 或 Buildx 构建器自有的存储。详见[容器运行时与原生缓存](./containers)。
+Engine 或 Buildx 构建器自有的存储。详见[容器运行时、Registry 与原生操作](./containers)。
 
 通用 shell hook 在用户未设置时还映射
 `npm_config_cache`、`PIP_CACHE_DIR`、`GOMODCACHE`、`GOCACHE`、`CARGO_HOME` 和

@@ -196,6 +196,37 @@ fn localize_subcommands(cmd: Command) -> Command {
     })
     .mut_subcommand("container", |c| {
         c.about(h("help.container.about"))
+            .mut_subcommand("pull", |s| {
+                s.about(h("help.container.pull.about"))
+                    .mut_arg("image", |a| a.help(h("help.container.pull.arg.image")))
+                    .mut_arg("runtime", |a| a.help(h("help.container.pull.flag.runtime")))
+                    .mut_arg("platform", |a| {
+                        a.help(h("help.container.pull.flag.platform"))
+                    })
+                    .mut_arg("address", |a| a.help(h("help.container.pull.flag.address")))
+                    .mut_arg("namespace", |a| {
+                        a.help(h("help.container.pull.flag.namespace"))
+                    })
+            })
+            .mut_subcommand("prune", |s| {
+                s.about(h("help.container.prune.about"))
+                    .mut_arg("runtime", |a| {
+                        a.help(h("help.container.prune.flag.runtime"))
+                    })
+                    .mut_arg("scope", |a| a.help(h("help.container.prune.flag.scope")))
+                    .mut_arg("context", |a| {
+                        a.help(h("help.container.prune.flag.context"))
+                    })
+                    .mut_arg("builder", |a| {
+                        a.help(h("help.container.prune.flag.builder"))
+                    })
+                    .mut_arg("execute", |a| {
+                        a.help(h("help.container.prune.flag.execute"))
+                    })
+                    .mut_arg("accept_preview", |a| {
+                        a.help(h("help.container.prune.flag.accept_preview"))
+                    })
+            })
             .mut_subcommand("doctor", |s| {
                 s.about(h("help.container.doctor.about"))
                     .mut_arg("runtime", |a| {

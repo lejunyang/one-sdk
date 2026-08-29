@@ -11,9 +11,11 @@ use serde::Serialize;
 use super::buildkit::BuildxBuilderSelector;
 use super::cache::NativeCacheOwner;
 use super::containerd::{ContainerdAdapter, ContainerdParseError};
+use super::docker::DockerContext;
 use super::plan::Fingerprint;
 use super::redact::{CommandPurpose, NativeProgram};
 use super::reference::{ImageReference, OciPlatform};
+use super::report::{EndpointScope, EndpointTransport};
 use super::runtime::ForegroundCommand;
 use crate::process::CommandSpec;
 
@@ -168,7 +170,7 @@ impl ContainerdPull {
 }
 
 /// Version of the stable native-prune preview contract.
-pub const NATIVE_PRUNE_PREVIEW_SCHEMA_VERSION: u32 = 1;
+pub const NATIVE_PRUNE_PREVIEW_SCHEMA_VERSION: u32 = 2;
 
 /// The exact native state category a prune plan is allowed to affect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -192,10 +194,18 @@ pub enum NativePruneWarning {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum NativePruneTarget {
-    /// The Docker daemon selected by an explicit CLI context name.
-    DockerContext { name: String },
-    /// One explicitly named Buildx builder.
-    BuildxBuilder { name: String },
+    /// The Docker daemon selected by an explicit CLI context name. The
+    /// fingerprint binds the complete discovered endpoint without exposing it.
+    DockerContext {
+        name: String,
+        endpoint_fingerprint: Fingerprint,
+    },
+    /// One explicitly named Buildx builder. The fingerprint binds its driver
+    /// and complete node endpoint topology without exposing raw endpoints.
+    BuildxBuilder {
+        name: String,
+        topology_fingerprint: Fingerprint,
+    },
 }
 
 /// A non-executable description of a narrowly scoped native prune.
@@ -255,6 +265,7 @@ impl PrunePreview {
 #[serde(rename_all = "kebab-case")]
 pub enum PruneUnsupportedReason {
     NoStableAggregateContainerdPrune,
+    NoImmutableBuildxExecutionTarget,
 }
 
 /// Typed, non-executable unsupported result.
@@ -274,6 +285,12 @@ pub enum PrunePlanError {
     ExplicitBuildxBuilderRequired,
     #[error("invalid Buildx builder selector")]
     InvalidBuildxBuilder,
+    #[error("native prune target identity is unavailable")]
+    TargetIdentityUnavailable,
+    #[error("Docker prune requires a direct local unix endpoint without context TLS material")]
+    UnsupportedDockerEndpoint,
+    #[error("Buildx prune execution is unsupported because builder names are mutable")]
+    BuildxExecutionUnsupported,
     #[error("prune preview identity could not be generated")]
     PreviewIdentity,
     #[error("accepted prune preview does not match the current request")]
@@ -344,6 +361,8 @@ fn is_safe_target_name(value: &str) -> bool {
 #[derive(Clone)]
 pub struct DockerImagePrune {
     context: String,
+    endpoint: String,
+    endpoint_fingerprint: Fingerprint,
 }
 
 impl std::fmt::Debug for DockerImagePrune {
@@ -351,17 +370,79 @@ impl std::fmt::Debug for DockerImagePrune {
         formatter
             .debug_struct("DockerImagePrune")
             .field("context", &"explicit")
+            .field("endpoint", &"[redacted]")
             .finish()
     }
 }
 
 impl DockerImagePrune {
-    pub fn new(context: impl Into<String>) -> Result<Self, PrunePlanError> {
+    /// Construct an executable prune from one discovered Docker context. The
+    /// raw endpoint stays private and only local socket transports without
+    /// context-held TLS behavior are accepted.
+    pub fn from_context(context: DockerContext) -> Result<Self, PrunePlanError> {
+        let parts = context
+            .into_prune_parts()
+            .ok_or(PrunePlanError::TargetIdentityUnavailable)?;
+        Self::new(
+            parts.name,
+            parts.raw_endpoint,
+            parts.transport,
+            parts.scope,
+            parts.skip_tls_verify,
+            parts.has_tls_material,
+        )
+    }
+
+    fn new(
+        context: impl Into<String>,
+        endpoint: impl Into<String>,
+        transport: EndpointTransport,
+        scope: EndpointScope,
+        skip_tls_verify: bool,
+        has_tls_material: bool,
+    ) -> Result<Self, PrunePlanError> {
         let context = context.into();
         if !is_safe_target_name(&context) {
             return Err(PrunePlanError::InvalidDockerContext);
         }
-        Ok(Self { context })
+        if scope != EndpointScope::Local
+            || skip_tls_verify
+            || has_tls_material
+            || !matches!(
+                transport,
+                EndpointTransport::LocalSocket | EndpointTransport::NamedPipe
+            )
+        {
+            return Err(PrunePlanError::UnsupportedDockerEndpoint);
+        }
+        let endpoint = endpoint.into();
+        let parsed = reqwest::Url::parse(&endpoint)
+            .map_err(|_| PrunePlanError::UnsupportedDockerEndpoint)?;
+        let valid_scheme = match transport {
+            EndpointTransport::LocalSocket => {
+                parsed.scheme() == "unix"
+                    && parsed.host_str().is_none()
+                    && parsed.path().starts_with('/')
+                    && parsed.path() != "/"
+            }
+            EndpointTransport::NamedPipe => is_canonical_local_named_pipe(&endpoint),
+            _ => false,
+        };
+        if !valid_scheme
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(PrunePlanError::UnsupportedDockerEndpoint);
+        }
+        let mut identity = b"osdk-docker-prune-endpoint-v1\0".to_vec();
+        identity.extend_from_slice(endpoint.as_bytes());
+        Ok(Self {
+            context,
+            endpoint,
+            endpoint_fingerprint: Fingerprint::for_bytes(&identity),
+        })
     }
 
     pub fn preview(&self) -> Result<PrunePreview, PrunePlanError> {
@@ -370,6 +451,7 @@ impl DockerImagePrune {
             NativePruneScope::DanglingImages,
             NativePruneTarget::DockerContext {
                 name: self.context.clone(),
+                endpoint_fingerprint: self.endpoint_fingerprint.clone(),
             },
         )
     }
@@ -384,8 +466,8 @@ impl DockerImagePrune {
             NativeProgram::Docker,
             CommandPurpose::Prune,
             CommandSpec::new("docker").args([
-                "--context",
-                self.context.as_str(),
+                "--host",
+                self.endpoint.as_str(),
                 "image",
                 "prune",
                 "--force",
@@ -394,10 +476,26 @@ impl DockerImagePrune {
     }
 }
 
+fn is_canonical_local_named_pipe(endpoint: &str) -> bool {
+    let Some(name) = endpoint.strip_prefix("npipe:////./pipe/") else {
+        return false;
+    };
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
 /// Narrow BuildKit cache pruning through a validated Buildx selector.
 #[derive(Clone)]
 pub struct BuildxPrune {
     selector: BuildxBuilderSelector,
+    topology_fingerprint: Fingerprint,
 }
 
 impl std::fmt::Debug for BuildxPrune {
@@ -413,7 +511,10 @@ impl std::fmt::Debug for BuildxPrune {
 }
 
 impl BuildxPrune {
-    pub fn new(selector: BuildxBuilderSelector) -> Result<Self, PrunePlanError> {
+    pub fn new(
+        selector: BuildxBuilderSelector,
+        topology_fingerprint: Fingerprint,
+    ) -> Result<Self, PrunePlanError> {
         let name = selector
             .as_name()
             .ok_or(PrunePlanError::ExplicitBuildxBuilderRequired)?;
@@ -421,7 +522,10 @@ impl BuildxPrune {
         // through the validating constructor rather than trusting provenance.
         let selector = BuildxBuilderSelector::named(name.to_owned())
             .map_err(|_| PrunePlanError::InvalidBuildxBuilder)?;
-        Ok(Self { selector })
+        Ok(Self {
+            selector,
+            topology_fingerprint,
+        })
     }
 
     pub fn selector(&self) -> &BuildxBuilderSelector {
@@ -438,25 +542,23 @@ impl BuildxPrune {
                     .as_name()
                     .expect("BuildxPrune always has an explicit builder")
                     .to_owned(),
+                topology_fingerprint: self.topology_fingerprint.clone(),
             },
         )
     }
 
     pub fn execute(
         &self,
-        confirmation: PruneConfirmation,
+        _confirmation: PruneConfirmation,
     ) -> Result<ForegroundCommand, PrunePlanError> {
-        let preview = self.preview()?;
-        validate_confirmation(&preview, &confirmation)?;
-        let name = self
-            .selector
-            .as_name()
-            .expect("BuildxPrune always has an explicit builder");
-        Ok(ForegroundCommand::new(
-            NativeProgram::Buildx,
-            CommandPurpose::Prune,
-            CommandSpec::new("docker").args(["buildx", "prune", "--force", "--builder", name]),
-        ))
+        Err(PrunePlanError::BuildxExecutionUnsupported)
+    }
+
+    pub fn unsupported(&self) -> UnsupportedPrune {
+        UnsupportedPrune {
+            owner: NativeCacheOwner::BuildkitBuilder,
+            reason: PruneUnsupportedReason::NoImmutableBuildxExecutionTarget,
+        }
     }
 }
 
@@ -554,6 +656,26 @@ mod tests {
 
     fn platform(value: &str) -> OciPlatform {
         OciPlatform::parse(value).unwrap()
+    }
+
+    fn identity(value: &str) -> Fingerprint {
+        Fingerprint::for_bytes(value.as_bytes())
+    }
+
+    fn local_docker_prune(context: &str, endpoint: &str) -> DockerImagePrune {
+        DockerImagePrune::new(
+            context,
+            endpoint,
+            if endpoint.starts_with("npipe:") {
+                EndpointTransport::NamedPipe
+            } else {
+                EndpointTransport::LocalSocket
+            },
+            EndpointScope::Local,
+            false,
+            false,
+        )
+        .unwrap()
     }
 
     #[cfg(not(windows))]
@@ -781,8 +903,15 @@ mod tests {
 
     #[test]
     fn docker_prune_preview_is_target_bound_and_contains_no_cache_totals() {
-        let prune = DockerImagePrune::new("desktop-linux").unwrap();
+        let prune = local_docker_prune("desktop-linux", "unix:///run/docker.sock");
         let preview = prune.preview().unwrap();
+        let endpoint_fingerprint = match &preview.target {
+            NativePruneTarget::DockerContext {
+                endpoint_fingerprint,
+                ..
+            } => endpoint_fingerprint.clone(),
+            _ => unreachable!(),
+        };
 
         assert_eq!(preview.schema_version, NATIVE_PRUNE_PREVIEW_SCHEMA_VERSION);
         assert_eq!(preview.owner, NativeCacheOwner::DockerEngine);
@@ -790,7 +919,8 @@ mod tests {
         assert_eq!(
             preview.target,
             NativePruneTarget::DockerContext {
-                name: "desktop-linux".to_owned()
+                name: "desktop-linux".to_owned(),
+                endpoint_fingerprint,
             }
         );
         assert_eq!(
@@ -809,7 +939,7 @@ mod tests {
 
     #[test]
     fn docker_image_prune_requires_matching_preview_and_executes_exactly_once() {
-        let prune = DockerImagePrune::new("desktop-linux").unwrap();
+        let prune = local_docker_prune("desktop-linux", "unix:///run/docker.sock");
         let preview = prune.preview().unwrap();
         let confirmation = PruneConfirmation::accept(&preview).unwrap();
         let operation = prune.execute(confirmation).unwrap();
@@ -826,10 +956,24 @@ mod tests {
         assert_eq!(calls[0].program, "docker");
         assert_eq!(
             calls[0].arguments,
-            ["--context", "desktop-linux", "image", "prune", "--force",]
+            [
+                "--host",
+                "unix:///run/docker.sock",
+                "image",
+                "prune",
+                "--force",
+            ]
         );
         assert_direct(&calls[0]);
-        for forbidden in ["system", "--all", "-a", "volumes", "containers", "networks"] {
+        for forbidden in [
+            "--context",
+            "system",
+            "--all",
+            "-a",
+            "volumes",
+            "containers",
+            "networks",
+        ] {
             assert!(!calls[0]
                 .arguments
                 .iter()
@@ -841,12 +985,20 @@ mod tests {
     fn docker_prune_rejects_unsafe_contexts_and_mutated_previews() {
         for invalid in ["", "--context", "team/context", "context with space"] {
             assert_eq!(
-                DockerImagePrune::new(invalid).unwrap_err(),
+                DockerImagePrune::new(
+                    invalid,
+                    "unix:///run/docker.sock",
+                    EndpointTransport::LocalSocket,
+                    EndpointScope::Local,
+                    false,
+                    false,
+                )
+                .unwrap_err(),
                 PrunePlanError::InvalidDockerContext
             );
         }
 
-        let prune = DockerImagePrune::new("desktop-linux").unwrap();
+        let prune = local_docker_prune("desktop-linux", "unix:///run/docker.sock");
         let mut preview = prune.preview().unwrap();
         preview.scope = NativePruneScope::BuildCache;
         assert_eq!(
@@ -856,15 +1008,107 @@ mod tests {
     }
 
     #[test]
+    fn docker_prune_rejects_endpoints_that_cannot_be_pinned_without_context_state() {
+        for (endpoint, transport, scope, skip_tls, has_tls) in [
+            (
+                "ssh://builder.example",
+                EndpointTransport::Ssh,
+                EndpointScope::Remote,
+                false,
+                false,
+            ),
+            (
+                "tcp://127.0.0.1:2375",
+                EndpointTransport::Tcp,
+                EndpointScope::Local,
+                false,
+                false,
+            ),
+            (
+                "npipe:////server/pipe/docker_engine",
+                EndpointTransport::NamedPipe,
+                EndpointScope::Local,
+                false,
+                false,
+            ),
+            (
+                "npipe:////./pipe/docker/engine",
+                EndpointTransport::NamedPipe,
+                EndpointScope::Local,
+                false,
+                false,
+            ),
+            (
+                "npipe:////./pipe/",
+                EndpointTransport::NamedPipe,
+                EndpointScope::Local,
+                false,
+                false,
+            ),
+            (
+                "unix:///run/docker.sock",
+                EndpointTransport::LocalSocket,
+                EndpointScope::Local,
+                true,
+                false,
+            ),
+            (
+                "unix:///run/docker.sock",
+                EndpointTransport::LocalSocket,
+                EndpointScope::Local,
+                false,
+                true,
+            ),
+        ] {
+            assert_eq!(
+                DockerImagePrune::new("context", endpoint, transport, scope, skip_tls, has_tls,)
+                    .unwrap_err(),
+                PrunePlanError::UnsupportedDockerEndpoint
+            );
+        }
+
+        let local_pipe = DockerImagePrune::new(
+            "default",
+            "npipe:////./pipe/docker_engine",
+            EndpointTransport::NamedPipe,
+            EndpointScope::Local,
+            false,
+            false,
+        )
+        .unwrap();
+        let operation = local_pipe
+            .execute(PruneConfirmation::accept(&local_pipe.preview().unwrap()).unwrap())
+            .unwrap();
+        let runner = FakeRunner::with_status(exit_status(0));
+        operation.execute(&runner).unwrap();
+        assert_eq!(
+            runner.calls()[0].arguments,
+            [
+                "--host",
+                "npipe:////./pipe/docker_engine",
+                "image",
+                "prune",
+                "--force",
+            ]
+        );
+    }
+
+    #[test]
     fn preview_id_is_deterministic_and_binds_target() {
-        let prune = DockerImagePrune::new("desktop-linux").unwrap();
+        let prune = local_docker_prune("desktop-linux", "unix:///run/docker.sock");
         let first = prune.preview().unwrap();
         let second = prune.preview().unwrap();
         assert_eq!(first.preview_id, second.preview_id);
         assert_ne!(
             first.preview_id,
-            DockerImagePrune::new("another-context")
+            local_docker_prune("another-context", "unix:///run/docker.sock")
+                .preview()
                 .unwrap()
+                .preview_id
+        );
+        assert_ne!(
+            first.preview_id,
+            local_docker_prune("desktop-linux", "unix:///run/other.sock")
                 .preview()
                 .unwrap()
                 .preview_id
@@ -874,80 +1118,65 @@ mod tests {
     #[test]
     fn buildx_prune_uses_only_the_validated_selected_builder() {
         let selector = BuildxBuilderSelector::named("team.private-builder").unwrap();
-        let prune = BuildxPrune::new(selector.clone()).unwrap();
+        let topology_fingerprint = identity("builder-topology-a");
+        let prune = BuildxPrune::new(selector.clone(), topology_fingerprint.clone()).unwrap();
         assert_eq!(prune.selector(), &selector);
         let preview = prune.preview().unwrap();
         assert_eq!(
             preview.target,
             NativePruneTarget::BuildxBuilder {
-                name: "team.private-builder".to_owned()
+                name: "team.private-builder".to_owned(),
+                topology_fingerprint,
             }
         );
-        let operation = prune
-            .execute(PruneConfirmation::accept(&preview).unwrap())
-            .unwrap();
-        let evidence = serde_json::to_string(operation.evidence()).unwrap();
-        assert!(!evidence.contains("team.private-builder"));
-        assert!(evidence.contains("\"program\":\"buildx\""));
-
-        let runner = FakeRunner::with_status(exit_status(0));
-        operation.execute(&runner).unwrap();
-        let calls = runner.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].program, "docker");
         assert_eq!(
-            calls[0].arguments,
-            [
-                "buildx",
-                "prune",
-                "--force",
-                "--builder",
-                "team.private-builder",
-            ]
+            prune
+                .execute(PruneConfirmation::accept(&preview).unwrap())
+                .unwrap_err(),
+            PrunePlanError::BuildxExecutionUnsupported
         );
-        assert_direct(&calls[0]);
-        assert!(BuildxBuilderSelector::named("--all").is_err());
-        assert!(!calls[0]
-            .arguments
-            .iter()
-            .any(|argument| argument == "--all"));
     }
 
     #[test]
     fn buildx_prune_revalidates_and_requires_an_explicit_builder() {
         assert_eq!(
-            BuildxPrune::new(BuildxBuilderSelector::Auto).unwrap_err(),
+            BuildxPrune::new(BuildxBuilderSelector::Auto, identity("topology")).unwrap_err(),
             PrunePlanError::ExplicitBuildxBuilderRequired
         );
         assert_eq!(
-            BuildxPrune::new(BuildxBuilderSelector::Named("--all".to_owned())).unwrap_err(),
+            BuildxPrune::new(
+                BuildxBuilderSelector::Named("--all".to_owned()),
+                identity("topology")
+            )
+            .unwrap_err(),
             PrunePlanError::InvalidBuildxBuilder
         );
         assert_eq!(
-            BuildxPrune::new(BuildxBuilderSelector::Named(String::new())).unwrap_err(),
+            BuildxPrune::new(
+                BuildxBuilderSelector::Named(String::new()),
+                identity("topology")
+            )
+            .unwrap_err(),
             PrunePlanError::InvalidBuildxBuilder
         );
     }
 
     #[test]
-    fn prune_confirmation_rejects_changed_target() {
-        let first = DockerImagePrune::new("first").unwrap();
+    fn docker_prune_confirmation_rejects_changed_target() {
+        let first = local_docker_prune("first", "unix:///run/docker.sock");
         let preview = first.preview().unwrap();
         let confirmation = PruneConfirmation::accept(&preview).unwrap();
-        let second = DockerImagePrune::new("second").unwrap();
+        let second = local_docker_prune("second", "unix:///run/docker.sock");
         assert!(matches!(
             second.execute(confirmation),
             Err(PrunePlanError::PreviewNotAccepted)
         ));
 
-        let first =
-            BuildxPrune::new(BuildxBuilderSelector::named("first-builder").unwrap()).unwrap();
-        let preview = first.preview().unwrap();
-        let confirmation = PruneConfirmation::accept(&preview).unwrap();
-        let second =
-            BuildxPrune::new(BuildxBuilderSelector::named("second-builder").unwrap()).unwrap();
+        let first = local_docker_prune("same", "unix:///run/first.sock");
+        let confirmation = PruneConfirmation::accept(&first.preview().unwrap()).unwrap();
+        let retargeted = local_docker_prune("same", "unix:///run/second.sock");
         assert!(matches!(
-            second.execute(confirmation),
+            retargeted.execute(confirmation),
             Err(PrunePlanError::PreviewNotAccepted)
         ));
     }

@@ -1,10 +1,11 @@
-# Container Runtimes, Registries, and Native Caches
+# Container Runtimes, Registries, and Native Operations
 
 osdk can inspect Docker Engine, containerd, and Docker Buildx without changing
 their configuration or storage. It can also test an OCI registry and its
-configured mirrors anonymously, then produce a read-only native mirror plan.
-Testing and planning are separate: a test performs bounded network reads, while
-a plan inspects one native control plane and never writes its configuration.
+configured mirrors anonymously, produce a read-only native mirror plan, hand an
+image pull to one selected native runtime, and preview narrowly scoped native
+cleanup before approving it. Inspection and planning remain read-only; pull and
+an approved prune change only the resolved native control plane.
 
 ## Diagnose runtimes and builders
 
@@ -62,6 +63,107 @@ Cache JSON is the native-cache schema version 1. It contains only typed
 categories, counts, byte totals, reclaimable bytes, status, owner, and redacted
 command evidence. Native object IDs, descriptions, builder names, command
 output, credentials, and private paths are excluded.
+
+## Pull an image with the selected native runtime
+
+```text
+osdk container pull IMAGE
+  [--runtime auto|docker|containerd]
+  [--platform OS/ARCH[/VARIANT]]
+  [--address ADDRESS --namespace NAMESPACE]
+```
+
+```bash
+# Use the effective container runtime and platform.
+osdk container pull ubuntu:24.04
+
+# Pin both the owner and requested image platform.
+osdk container pull ghcr.io/example/tool:1.0 \
+  --runtime containerd --platform linux/amd64 \
+  --address unix:///run/containerd/containerd.sock --namespace default
+```
+
+Runtime and platform default to the effective `[containers]` configuration.
+With `--runtime auto`, osdk performs one bounded, read-only resolution across
+Docker and containerd and deterministically selects one owner. It then launches
+exactly one native foreground pull. Once that command starts there is no
+fallback to the other runtime, so an authentication, network, or pull failure is
+reported by the owner that actually ran.
+
+`--offline` rejects the pull before runtime resolution or native launch.
+
+Explicit `--runtime containerd` requires both `--address` and `--namespace`; the
+two selectors must always be supplied together. With `--runtime auto`, they are
+required only if containerd wins selection—Docker can proceed without them.
+
+The native child inherits stdio and osdk waits for it. Docker receives a direct
+`docker image pull`; containerd receives a direct `ctr --address ADDRESS
+--namespace NAMESPACE images pull`. osdk returns the child's direct exit code,
+or a normalized `128 + signal` when the child terminates by signal on Unix. It
+does not download image layers itself, create an OCI content store, or copy an
+image between runtimes.
+
+## Preview and execute scoped native cleanup
+
+```text
+osdk container prune
+  --runtime docker|buildkit|containerd
+  --scope images|build-cache
+  [--context NAME]
+  [--builder NAME]
+  [--execute]
+  [--accept-preview SHA256_ID]
+```
+
+Only two runtime/scope pairs are supported:
+
+| Runtime and scope | Exact target | Cleanup boundary |
+| --- | --- | --- |
+| `--runtime docker --scope images` | The Docker context discovered by osdk; `--context NAME` selects it for discovery and display | Dangling images only; execution requires a directly addressable local Unix socket or Windows named pipe without context-held TLS material |
+| `--runtime buildkit --scope build-cache` | The Buildx builder discovered from `--builder`, effective configuration, or the current builder | Preview only; unused build cache for that one builder |
+
+`containerd` has no accepted scope pairing, although `--scope` remains required
+by the common syntax. With either scope, a selector-free request without
+execution flags returns the typed unsupported result. `--context`, `--builder`,
+`--execute`, and `--accept-preview` are rejected for containerd. Crossed pairs
+such as Docker build cache or BuildKit images are also rejected. There is no
+`all` or `system` scope, and pruning never includes containers, volumes,
+networks, the osdk CAS, or a runtime's implementation-private store.
+`--context` is Docker-only and `--builder` is BuildKit-only.
+
+The default invocation performs bounded read-only discovery and prints a
+preview. Keep the exact target and warning visible while reviewing it:
+
+```bash
+osdk container prune --runtime docker --scope images --context desktop-linux
+osdk container prune --runtime buildkit --scope build-cache --builder team-builder
+```
+
+The preview reports a deterministic `sha256:` ID bound to the operation owner,
+scope, exact context or builder, warning, and a secret-safe fingerprint of the
+Docker endpoint or Buildx driver/node endpoint topology. Docker execution uses
+the exact raw local endpoint captured during discovery via `docker --host`; the
+context name is display metadata only. Remote/SSH/TCP/TLS contexts and Docker
+Desktop targets are rejected because direct `--host` invocation cannot safely
+reproduce their context-held connection behavior. To apply that same preview, add
+both execution gates and then approve the execution prompt:
+
+```bash
+osdk container prune --runtime docker --scope images \
+  --context desktop-linux --execute \
+  --accept-preview sha256:PREVIEW_ID
+
+```
+
+`--execute` alone is insufficient, as is a preview ID without `--execute`. An ID
+from a preview whose owner, scope, target, endpoint/topology fingerprint, or
+warning differs from the current preview is stale and is rejected, as is any
+otherwise mismatched ID; rerun the preview and review its identity. Unchanged
+bound fields produce the same deterministic ID. Global `--yes` answers only the
+final execution prompt—it does not replace either execution gate. Docker uses
+the captured endpoint value after confirmation, without looking up the context
+name again. BuildKit execution is unsupported because the mutable builder name
+is the only available execution handle and cannot be pinned atomically.
 
 ## Configuration and precedence
 
@@ -255,9 +357,11 @@ Cache status uses a more specific status set:
 | `invalid-output` | Successful output did not satisfy the typed aggregate schema |
 | `command-failed` | The native command failed without a more specific classification |
 
-These commands are read-only. They do not pull complete images, prune caches,
-rewrite daemon configuration, start or recreate builders, restart daemons, or
-inspect implementation-private store directories. Registry tests perform only
-the bounded metadata and Range reads described above. See
-[Container diagnostics and planning implementation](./implementation/containers)
-for the probe, planning, and disclosure boundaries.
+Doctor, cache status, registry test, mirror planning, and prune preview are
+read-only. `container pull` and an approved `container prune` are the two direct
+native mutation paths documented here; neither rewrites daemon configuration,
+starts or recreates builders, restarts daemons, or inspects private runtime
+store directories. Registry tests perform only the bounded metadata and Range
+reads described above. See the [native container diagnostics and operations
+implementation](./implementation/containers) for the selection, launch, plan,
+preview, and disclosure boundaries.

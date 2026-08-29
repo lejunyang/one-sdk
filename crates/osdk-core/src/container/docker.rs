@@ -31,12 +31,51 @@ pub enum DockerContextKind {
 /// This type intentionally does not implement `Serialize`: the context name is
 /// useful to an interactive caller but must not accidentally enter the stable
 /// secret-safe diagnostic JSON contract.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DockerContext {
     pub name: Option<String>,
     pub endpoint: Option<Endpoint>,
     pub kind: DockerContextKind,
     pub skip_tls_verify: bool,
+    pub has_tls_material: bool,
+    pub(crate) raw_endpoint: Option<String>,
+}
+
+impl std::fmt::Debug for DockerContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DockerContext")
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .field("kind", &self.kind)
+            .field("skip_tls_verify", &self.skip_tls_verify)
+            .field("has_tls_material", &self.has_tls_material)
+            .field("raw_endpoint", &"[redacted]")
+            .finish()
+    }
+}
+
+impl DockerContext {
+    pub(crate) fn into_prune_parts(self) -> Option<DockerPruneParts> {
+        let endpoint = self.endpoint?;
+        Some(DockerPruneParts {
+            name: self.name?,
+            raw_endpoint: self.raw_endpoint?,
+            transport: endpoint.transport,
+            scope: endpoint.scope,
+            skip_tls_verify: self.skip_tls_verify,
+            has_tls_material: self.has_tls_material,
+        })
+    }
+}
+
+pub(crate) struct DockerPruneParts {
+    pub name: String,
+    pub raw_endpoint: String,
+    pub transport: EndpointTransport,
+    pub scope: EndpointScope,
+    pub skip_tls_verify: bool,
+    pub has_tls_material: bool,
 }
 
 /// Parsed client and daemon versions.
@@ -332,6 +371,13 @@ pub fn parse_docker_context(output: &[u8]) -> Result<DockerContext, DockerParseE
         .and_then(|endpoint| endpoint.get("SkipTLSVerify"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let has_tls_material = object.get("TLSMaterial").is_some_and(|value| match value {
+        Value::Null => false,
+        Value::Object(values) => !values.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::String(value) => !value.is_empty(),
+        _ => true,
+    });
     let name_lower = name.as_deref().unwrap_or_default().to_ascii_lowercase();
     let endpoint_lower = raw_endpoint.unwrap_or_default().to_ascii_lowercase();
     let desktop = metadata_desktop
@@ -353,12 +399,13 @@ pub fn parse_docker_context(output: &[u8]) -> Result<DockerContext, DockerParseE
         DockerContextKind::Unknown
     };
     let endpoint = raw_endpoint.and_then(|raw| docker_endpoint_from_raw(raw, kind).ok());
-
     Ok(DockerContext {
         name,
         endpoint,
         kind,
         skip_tls_verify,
+        has_tls_material,
+        raw_endpoint: raw_endpoint.map(str::to_owned),
     })
 }
 
@@ -668,6 +715,23 @@ mod tests {
             desktop.endpoint.unwrap().transport,
             EndpointTransport::DockerDesktop
         );
+    }
+
+    #[test]
+    fn context_keeps_raw_endpoint_private_and_redacts_debug_output() {
+        let first = parse_docker_context(
+            br#"[{"Name":"prod","Endpoints":{"docker":{"Host":"ssh://alice:secret@host.example/private-a?token=one"}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            first.raw_endpoint.as_deref(),
+            Some("ssh://alice:secret@host.example/private-a?token=one")
+        );
+        let debug = format!("{first:?}");
+        for secret in ["alice", "secret", "private-a", "token", "one"] {
+            assert!(!debug.contains(secret), "leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]

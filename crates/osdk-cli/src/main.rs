@@ -10,6 +10,7 @@ mod prompt;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
+use std::process::ExitStatus;
 
 use app::{App, GlobalOverrides};
 use cli::{Cli, Command};
@@ -47,14 +48,45 @@ fn main() {
         lang: cli.global.lang.clone(),
     };
 
-    if let Err(e) = run(cli, overrides) {
-        // Localize osdk-core errors; anyhow wrappers show their chain.
-        let msg = e
-            .downcast_ref::<osdk_core::Error>()
-            .map(|oe| oe.localized())
-            .unwrap_or_else(|| format!("{e:#}"));
-        eprintln!("{}: {}", i18n::tr("label.error"), msg);
-        std::process::exit(1);
+    match run(cli, overrides) {
+        Ok(Some(status)) if !status.success() => std::process::exit(native_exit_code(status)),
+        Ok(_) => {}
+        Err(e) => {
+            // Localize osdk-core errors; anyhow wrappers show their chain.
+            let msg = e
+                .downcast_ref::<osdk_core::Error>()
+                .map(|oe| oe.localized())
+                .unwrap_or_else(|| format!("{e:#}"));
+            eprintln!("{}: {}", i18n::tr("label.error"), msg);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn native_exit_code(status: ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_exit_code;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_signal_status_uses_shell_compatible_exit_code() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert_eq!(native_exit_code(std::process::ExitStatus::from_raw(9)), 137);
     }
 }
 
@@ -72,7 +104,7 @@ fn scan_lang_flag(args: &[String]) -> Option<String> {
     None
 }
 
-fn run(cli: Cli, overrides: GlobalOverrides) -> Result<()> {
+fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
     // Commands that need async use a runtime; sync ones don't strictly need it
     // but we build one uniformly for simplicity.
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -90,8 +122,8 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<()> {
     })
 }
 
-async fn dispatch(app: &mut App, command: Command) -> Result<()> {
-    match command {
+async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>> {
+    let result = match command {
         Command::Install { tools, opts } => commands::install(app, tools, opts).await,
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
@@ -119,10 +151,11 @@ async fn dispatch(app: &mut App, command: Command) -> Result<()> {
         Command::Model { command } => commands::model(app, command).await,
         Command::Rust { command } => commands::rust(app, command),
         Command::Cache { command } => commands::cache(app, command),
-        Command::Container { command } => container::run(app, command).await,
+        Command::Container { command } => return container::run(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor => commands::doctor(app),
-    }
+    };
+    result.map(|()| None)
 }
 
 fn init_tracing(verbose: u8) {
