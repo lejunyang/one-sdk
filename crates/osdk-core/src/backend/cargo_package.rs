@@ -1354,7 +1354,7 @@ mod tests {
         std::fs::write(root.join("lib/librustc_driver-fixture.so"), b"driver").unwrap();
         std::fs::write(
             root.join("lib/rustlib/manifest-rustc-fixture"),
-            b"file:bin/rustc",
+            format!("file:bin/rustc{}", ctx.platform.os.exe_suffix()),
         )
         .unwrap();
         std::fs::write(
@@ -1364,7 +1364,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("lib/rustlib/manifest-cargo-fixture"),
-            b"file:bin/cargo",
+            format!("file:bin/cargo{}", ctx.platform.os.exe_suffix()),
         )
         .unwrap();
         let marker = ctx.dirs.install_path("rust", version);

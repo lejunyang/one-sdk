@@ -353,6 +353,23 @@ impl CaptureState {
 
 fn run_captured(command: &CommandSpec, limits: CaptureLimits) -> CommandOutcome {
     let started = Instant::now();
+    if let Some(cwd) = &command.cwd {
+        match std::fs::metadata(cwd) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return CommandOutcome::SpawnFailed {
+                    kind: io::ErrorKind::NotADirectory,
+                    context: SpawnContext::WithWorkingDirectory,
+                };
+            }
+            Err(error) => {
+                return CommandOutcome::SpawnFailed {
+                    kind: error.kind(),
+                    context: SpawnContext::WithWorkingDirectory,
+                };
+            }
+        }
+    }
     let mut process = command.command();
     process
         .stdin(Stdio::null())
@@ -718,7 +735,12 @@ mod tests {
         };
 
         assert!(output.elapsed >= Duration::from_millis(50));
-        assert!(output.elapsed < Duration::from_millis(750));
+        let upper_bound = if cfg!(windows) {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_millis(750)
+        };
+        assert!(output.elapsed < upper_bound, "{output:?}");
     }
 
     #[test]

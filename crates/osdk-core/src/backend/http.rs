@@ -1219,13 +1219,21 @@ mod tests {
         ctx.config.settings.offline = true;
         let backend =
             Arc::new(HttpBackend::from_id("http:https://changed.invalid/tool-{version}").unwrap());
-        let bytes = b"#!/bin/sh\necho fixture\n";
+        let bytes = b"fixture executable";
         let digest = pipeline::verify::hash_bytes(bytes, HashAlgo::Sha256);
         let mut version = ToolVersion::new(backend.id(), "1.2.3");
         version.options = BTreeMap::from([
             ("sha256".into(), digest.clone()),
             ("kind".into(), "file".into()),
-            ("rename".into(), "fixture".into()),
+            (
+                "rename".into(),
+                if cfg!(windows) {
+                    "fixture.exe"
+                } else {
+                    "fixture"
+                }
+                .into(),
+            ),
             (
                 pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
                 "https://unreachable.invalid/original".into(),
@@ -1264,7 +1272,12 @@ mod tests {
         second.await.unwrap().unwrap();
 
         assert_eq!(
-            std::fs::read(locator.install_root().join("bin/fixture")).unwrap(),
+            std::fs::read(locator.install_root().join("bin").join(if cfg!(windows) {
+                "fixture.exe"
+            } else {
+                "fixture"
+            }))
+            .unwrap(),
             bytes
         );
         assert!(locator.install_root().join(".osdk-complete").is_file());
@@ -1361,13 +1374,26 @@ mod tests {
         let backend =
             HttpBackend::from_id("http:https://changed.invalid/tool-{version}.tar.gz").unwrap();
         let archive = temp.path().join("fixture.tar.gz");
-        write_archive(&archive, "package/dist/tool", b"#!/bin/sh\necho archive\n");
+        let archived_name = if cfg!(windows) {
+            "package/dist/tool.exe"
+        } else {
+            "package/dist/tool"
+        };
+        write_archive(&archive, archived_name, b"archive executable");
         let digest = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
         let mut version = ToolVersion::new(backend.id(), "1.2.3");
         version.options = BTreeMap::from([
             ("sha256".into(), digest.clone()),
             ("kind".into(), "tar.gz".into()),
-            ("bins".into(), "dist/tool".into()),
+            (
+                "bins".into(),
+                if cfg!(windows) {
+                    "dist/tool.exe"
+                } else {
+                    "dist/tool"
+                }
+                .into(),
+            ),
             ("strip-components".into(), "1".into()),
             ("rename".into(), "fixture".into()),
             (
@@ -1395,8 +1421,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            std::fs::read(locator.install_root().join("bin/fixture")).unwrap(),
-            b"#!/bin/sh\necho archive\n"
+            std::fs::read(locator.install_root().join("bin").join(if cfg!(windows) {
+                "fixture.exe"
+            } else {
+                "fixture"
+            }))
+            .unwrap(),
+            b"archive executable"
         );
         let manifest = DynamicToolManifest::load(locator.install_root()).unwrap();
         assert_eq!(manifest.bins[0].name, "fixture");
