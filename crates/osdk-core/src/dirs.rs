@@ -49,6 +49,7 @@ pub struct Dirs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallLocator {
     identity: InstallIdentity,
+    installs_root: PathBuf,
     install_root: PathBuf,
     legacy_install_root: PathBuf,
     legacy_global_install_root: Option<PathBuf>,
@@ -87,6 +88,7 @@ impl InstallLocator {
             .join(component);
         Ok(Self {
             identity,
+            installs_root: dirs.installs.clone(),
             install_root,
             legacy_install_root,
             legacy_global_install_root,
@@ -120,17 +122,18 @@ impl InstallLocator {
     }
 
     /// Require a discovered manifest to reside at this identity's canonical
-    /// fingerprinted root. Existing roots are also resolved so aliases and
-    /// symlink substitutions cannot satisfy the identity check.
+    /// fingerprinted root, with no links inside the osdk-managed tree.
     pub fn validates_install_root(&self, root: &Path) -> bool {
         paths_agree(&self.install_root, root)
+            && path_has_no_symlink_directories_from(&self.installs_root, root, true)
     }
 
     /// Require the canonical identity root to exist entirely as real
     /// directories. This is the filesystem trust check for consumers that are
     /// about to execute or remove content from an install.
     pub fn validates_existing_install_root(&self, root: &Path) -> bool {
-        paths_agree(&self.install_root, root) && path_has_no_symlink_directories(root)
+        paths_agree(&self.install_root, root)
+            && path_has_no_symlink_directories_from(&self.installs_root, root, false)
     }
 
     /// Validate a scanned root using only the configured installs directory.
@@ -159,44 +162,43 @@ impl InstallLocator {
             .join(sanitize_tool_id(&base_tool))
             .join(sanitize_version_component(&identity.version))
             .join(component);
-        Ok(paths_agree(&expected, root))
+        Ok(paths_agree(&expected, root)
+            && path_has_no_symlink_directories_from(installs, root, false))
     }
 }
 
 /// Compare a caller-supplied install root with the root derived from trusted
-/// identity fields. Lexical equality is required even when either path does
-/// not exist; once both exist, canonical equality is required as well so a
-/// symlink or path alias cannot silently redirect the locator.
+/// identity fields. The managed path is checked separately from its platform
+/// ancestors: macOS exposes temporary directories below the `/var` alias and
+/// Windows may return an equivalent long path for an 8.3 path.
 fn paths_agree(expected: &Path, actual: &Path) -> bool {
-    if expected != actual {
+    expected == actual
+}
+
+fn path_has_no_symlink_directories_from(base: &Path, path: &Path, allow_missing: bool) -> bool {
+    let Ok(relative) = path.strip_prefix(base) else {
+        return false;
+    };
+    let mut current = base.to_path_buf();
+    let metadata = match std::fs::symlink_metadata(&current) {
+        Ok(metadata) => metadata,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return false;
     }
 
-    match dunce::canonicalize(expected) {
-        Ok(canonical) => canonical == normalize_absolute_path(expected),
-        Err(_) => true,
-    }
-}
-
-fn normalize_absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|current| current.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    }
-}
-
-fn path_has_no_symlink_directories(path: &Path) -> bool {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
+    for component in relative.components() {
         match component {
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => continue,
             std::path::Component::Normal(_) => {
-                let Ok(metadata) = std::fs::symlink_metadata(&current) else {
-                    return false;
+                current.push(component.as_os_str());
+                let metadata = match std::fs::symlink_metadata(&current) {
+                    Ok(metadata) => metadata,
+                    Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                        return true;
+                    }
+                    Err(_) => return false,
                 };
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     return false;
@@ -665,5 +667,39 @@ mod tests {
             locator.install_root()
         )
         .unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dynamic_locator_accepts_a_real_root_below_a_platform_alias() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let real_data = temporary.path().join("real");
+        std::fs::create_dir(&real_data).unwrap();
+        let alias = temporary.path().join("alias");
+        symlink(&real_data, &alias).unwrap();
+        let dirs = Dirs {
+            store: alias.join("store"),
+            installs: alias.join("installs"),
+            data: alias.clone(),
+            cache: alias.join("cache"),
+            config: alias.join("config"),
+        };
+        let identity = crate::tool::InstallIdentity::new(
+            "npm:prettier",
+            "3.6.2",
+            "linux-x64",
+            crate::tool::InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = InstallLocator::new(&dirs, identity).unwrap();
+        std::fs::create_dir_all(locator.install_root()).unwrap();
+
+        assert!(locator.validates_install_root(locator.install_root()));
+        assert!(locator.validates_existing_install_root(locator.install_root()));
     }
 }

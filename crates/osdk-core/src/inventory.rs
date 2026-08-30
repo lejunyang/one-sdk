@@ -365,21 +365,6 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
     validate_regular_directory_path(scan_root).map_err(|error| Error::io(scan_root, error))?;
     let canonical_scan_root =
         dunce::canonicalize(scan_root).map_err(|error| Error::io(scan_root, error))?;
-    let absolute_scan_root = if scan_root.is_absolute() {
-        scan_root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| Error::io(scan_root, error))?
-            .join(scan_root)
-    };
-    if canonical_scan_root != absolute_scan_root {
-        return Err(Error::other(format!(
-            "dynamic tool inventory root must be canonical: expected {}, found {}",
-            canonical_scan_root.display(),
-            scan_root.display()
-        )));
-    }
-
     let mut manifest_paths = Vec::new();
     let mut legacy_installs = Vec::new();
     let mut diagnostics = Vec::new();
@@ -467,8 +452,8 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
             )?;
             continue;
         }
-        let canonical_install_root = match dunce::canonicalize(&install_root) {
-            Ok(root) if root.starts_with(&canonical_scan_root) => root,
+        match dunce::canonicalize(&install_root) {
+            Ok(root) if root.starts_with(&canonical_scan_root) => {}
             Ok(root) => {
                 handle_scan_problem(
                     &mut diagnostics,
@@ -494,27 +479,6 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
                 continue;
             }
         };
-        let absolute_install_root = if install_root.is_absolute() {
-            install_root.clone()
-        } else {
-            std::env::current_dir()
-                .map_err(|error| Error::io(&install_root, error))?
-                .join(&install_root)
-        };
-        if canonical_install_root != absolute_install_root {
-            handle_scan_problem(
-                &mut diagnostics,
-                options,
-                install_root.clone(),
-                InventoryDiagnosticKind::InvalidManifest,
-                format!(
-                    "dynamic install root is not canonical: expected {}",
-                    canonical_install_root.display()
-                ),
-            )?;
-            continue;
-        }
-
         let bytes = match read_stable_regular_file(&manifest_path, options.max_manifest_bytes) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
@@ -748,8 +712,15 @@ fn same_file_metadata(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
 }
 
 fn validate_regular_directory_path(path: &Path) -> std::io::Result<()> {
+    // Reject a link at the security boundary itself, but resolve platform
+    // aliases above it before inspecting ancestors. macOS normally places
+    // temporary directories below `/var` -> `/private/var`, while Windows can
+    // canonicalize an 8.3 path to its long spelling. Neither changes the
+    // identity or containment of the managed directory tree.
+    validate_regular_directory(path)?;
+    let canonical = dunce::canonicalize(path)?;
     let mut current = PathBuf::new();
-    for component in path.components() {
+    for component in canonical.components() {
         current.push(component.as_os_str());
         match component {
             std::path::Component::RootDir | std::path::Component::Prefix(_) => continue,
@@ -757,7 +728,7 @@ fn validate_regular_directory_path(path: &Path) -> std::io::Result<()> {
             _ => {
                 return Err(std::io::Error::other(format!(
                     "inventory path contains a non-canonical component: {}",
-                    path.display()
+                    canonical.display()
                 )));
             }
         }
@@ -1161,6 +1132,36 @@ mod install_manifest_tests {
 
         let error = scan_installs(&linked, &ScanOptions::default()).unwrap_err();
         assert!(error.to_string().contains("non-symlink directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_accepts_a_real_root_below_a_symlinked_platform_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let real_parent = temporary.path().join("real");
+        std::fs::create_dir(&real_parent).unwrap();
+        let alias = temporary.path().join("alias");
+        symlink(&real_parent, &alias).unwrap();
+        let scan_root = alias.join("installs");
+
+        let manifest_identity = identity();
+        let root = scan_root
+            .join(crate::dirs::sanitize_tool_id(&manifest_identity.tool))
+            .join(crate::dirs::sanitize_version_component(
+                &manifest_identity.version,
+            ))
+            .join(crate::dirs::install_id_component(&manifest_identity.install_id).unwrap());
+        DynamicToolManifest::from_identity(manifest_identity)
+            .unwrap()
+            .write_atomic(&root)
+            .unwrap();
+
+        assert!(DynamicToolManifest::load(&root).is_ok());
+        let report = scan_installs(&scan_root, &ScanOptions::default()).unwrap();
+        assert_eq!(report.installs.len(), 1);
+        assert_eq!(report.installs[0].install_root, root);
     }
 
     #[cfg(unix)]
