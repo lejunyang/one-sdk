@@ -233,24 +233,35 @@ else
   run "$osdk_binary" exec "${exec_tools[@]}" -- "${version_command[@]}"
 fi
 
-for cleanup_tool in "${cleanup_tools[@]}"; do
+cleanup_installations() {
+  local cleanup_tool=$1
+  local list_output
+  local installed_versions=()
+  local line
+  local installed_version
+
   printf '\n+ %q list %q\n' "$osdk_binary" "$cleanup_tool"
   list_output=$(timeout --foreground "$command_timeout" \
     "$osdk_binary" list "$cleanup_tool")
   printf '%s\n' "$list_output"
 
-  installed_version=
   while IFS= read -r line; do
     if [[ "$line" == "  "* ]]; then
-      installed_version=${line#"  "}
+      installed_versions+=("${line#"  "}")
     fi
   done <<< "$list_output"
 
-  if [[ -z "$installed_version" ]]; then
+  if [[ ${#installed_versions[@]} -eq 0 ]]; then
     printf 'could not determine installed version for %s\n' "$cleanup_tool" >&2
     exit 1
   fi
-  run "$osdk_binary" --quiet --yes uninstall "$cleanup_tool@$installed_version"
+  for installed_version in "${installed_versions[@]}"; do
+    run "$osdk_binary" --quiet --yes uninstall "$cleanup_tool@$installed_version"
+  done
+}
+
+for cleanup_tool in "${cleanup_tools[@]}"; do
+  cleanup_installations "$cleanup_tool"
 done
 
 remaining_marker=$(find "$OSDK_INSTALL_DIR" -type f -name .osdk-complete -print -quit)

@@ -20,6 +20,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      - name: live smoke harness
+        run: ./scripts/test-live-smoke.sh
 
   msrv:
     runs-on: ubuntu-latest
