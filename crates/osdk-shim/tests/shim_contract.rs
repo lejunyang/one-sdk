@@ -1209,15 +1209,9 @@ fn launcher_aliases_use_managed_canonical_binaries_once() {
         std::fs::write(project.join("osdk.toml"), tools).unwrap();
 
         let managed_log = temporary.path().join("managed.log");
-        let managed = if backend == "pnpm" {
-            temporary
-                .path()
-                .join(format!("installs/{backend}/{version}/{canonical}"))
-        } else {
-            temporary
-                .path()
-                .join(format!("installs/{backend}/{version}/bin/{canonical}"))
-        };
+        let managed = temporary
+            .path()
+            .join(format!("installs/{backend}/{version}/bin/{canonical}"));
         write_executable(
             &managed,
             &format!(
@@ -1812,7 +1806,7 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
         (
             "pnpm",
             "10.15.0",
-            "pnpm",
+            "bin/pnpm",
             "${PNPM_HOME-unset}|${npm_config_store_dir-unset}|${pnpm_config_store_dir-unset}",
             "pnpm|pnpm-store|unset",
             "npm_config_store_dir",
@@ -1820,7 +1814,7 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
         (
             "pnpm",
             "11.0.0",
-            "pnpm",
+            "bin/pnpm",
             "${PNPM_HOME-unset}|${npm_config_store_dir-unset}|${pnpm_config_store_dir-unset}",
             "pnpm|unset|pnpm-store",
             "pnpm_config_store_dir",
