@@ -128,6 +128,7 @@ impl GithubBackend {
         .map_err(|error| Error::other(format!("invalid GitHub release URL: {error}")))?;
         url.path_segments_mut()
             .map_err(|_| Error::other("invalid GitHub release URL"))?
+            .pop_if_empty()
             .push(tag);
         Ok(url.into())
     }
@@ -147,6 +148,7 @@ impl GithubBackend {
         .map_err(|error| Error::other(format!("invalid GitHub assets URL: {error}")))?;
         url.path_segments_mut()
             .map_err(|_| Error::other("invalid GitHub assets URL"))?
+            .pop_if_empty()
             .push(tag);
         Ok(url.into())
     }
@@ -1938,6 +1940,19 @@ mod tests {
         assert_eq!(
             sources[1].index_url.as_deref(),
             Some("https://gh-proxy.com/https://api.github.com/")
+        );
+    }
+
+    #[test]
+    fn release_urls_append_one_encoded_tag_segment() {
+        let backend = GithubBackend::from_id("github:cli/cli").unwrap();
+        assert_eq!(
+            backend.release_api("v2.98.0").unwrap(),
+            "https://api.github.com/repos/cli/cli/releases/tags/v2.98.0"
+        );
+        assert_eq!(
+            backend.expanded_assets("release/2026-08").unwrap(),
+            "https://github.com/cli/cli/releases/expanded_assets/release%2F2026-08"
         );
     }
 
