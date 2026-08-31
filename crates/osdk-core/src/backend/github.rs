@@ -220,8 +220,11 @@ impl GithubBackend {
                     return self.release_for_tag_from_list_cache(ctx, version, error);
                 }
                 Err(error) if error.is_anonymous_github_rate_limit() => {
+                    // A mirror can report its own shared GitHub quota for one
+                    // guessed tag. Preserve that diagnostic, but still try the
+                    // remaining concrete tag spellings and transports.
                     rate_limit_error = Some(error);
-                    break;
+                    continue;
                 }
                 Err(error) if error.status() == Some(404) => continue,
                 Err(error) => return Err(error),
@@ -2209,6 +2212,11 @@ mod tests {
                     r#"{"message":"You have exceeded a secondary rate limit."}"#,
                 ),
                 (
+                    "404 Not Found",
+                    "Content-Type: application/json\r\n",
+                    r#"{"message":"Not Found"}"#,
+                ),
+                (
                     "200 OK",
                     "Content-Type: text/html\r\n",
                     r#"<ul class='list-style-none'><li><a href='/example/tool/releases/download/1.2.3/tool-linux-x86_64.tar.gz'>tool</a></li><li><a href='/example/tool/archive/refs/tags/1.2.3.zip'>source</a></li></ul>"#,
@@ -2250,6 +2258,58 @@ mod tests {
         assert_eq!(release.tag_name, "1.2.3");
         assert_eq!(release.assets.len(), 1);
         assert_eq!(release.assets[0].name, "tool-linux-x86_64.tar.gz");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rate_limited_unprefixed_tag_still_tries_v_prefixed_tag() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for expected_tag in ["1.2.3", "v1.2.3"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let size = stream.read(&mut buffer).unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..size]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.contains(&format!("/releases/tags/{expected_tag}")));
+                if expected_tag == "1.2.3" {
+                    let body = r#"{"message":"API rate limit exceeded"}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 403 Forbidden\r\nX-GitHub-Request-Id: fixture\r\nX-RateLimit-Remaining: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                } else {
+                    let body =
+                        r#"{"tag_name":"v1.2.3","draft":false,"prerelease":false,"assets":[]}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path());
+        let backend = GithubBackend::from_id("github:example/tool").unwrap();
+        let sources = vec![Source::official("fixture", &format!("http://{address}/"))
+            .with_index(&format!("http://{address}/"))];
+
+        let release = backend
+            .release_for_tag(&ctx, &sources, "1.2.3")
+            .await
+            .unwrap();
+        assert_eq!(release.tag_name, "v1.2.3");
         server.join().unwrap();
     }
 
