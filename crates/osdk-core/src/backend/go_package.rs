@@ -1954,12 +1954,16 @@ mod tests {
             assert_eq!(calls.len(), 1);
             let call = &calls[0];
             assert!(call.environment_is_cleared());
-            assert_eq!(
-                call.program(),
-                ctx.dirs
-                    .install_path("go", "1.24.1")
-                    .join("bin")
-                    .join(format!("go{}", ctx.platform.os.exe_suffix()))
+            let expected_go = ctx
+                .dirs
+                .install_path("go", "1.24.1")
+                .join("bin")
+                .join(format!("go{}", ctx.platform.os.exe_suffix()));
+            assert!(
+                same_file::is_same_file(call.program(), &expected_go).unwrap_or(false),
+                "program={} expected={}",
+                call.program().display(),
+                expected_go.display()
             );
             assert_eq!(
                 call.arguments(),

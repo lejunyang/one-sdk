@@ -146,6 +146,10 @@ fn accept_fixture_connection(listener: &TcpListener, context: &str) -> TcpStream
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Accepted sockets may inherit the listener's nonblocking mode
+                // on macOS and Windows. Switch back to blocking I/O before the
+                // fixture reads a complete HTTP request.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(FIXTURE_SERVER_TIMEOUT))
                     .unwrap();

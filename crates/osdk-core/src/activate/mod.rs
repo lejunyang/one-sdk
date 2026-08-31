@@ -1330,7 +1330,11 @@ mod tests {
         std::fs::write(ctx.dirs.shims().join("fixture-http"), b"shim").unwrap();
 
         let delta = compute_env_delta(&ctx, &Registry::new(), &project).unwrap();
-        assert!(delta.path_prepend.contains(&root.join("bin")));
+        let expected_bin = root.join("bin");
+        assert!(delta
+            .path_prepend
+            .iter()
+            .any(|path| same_existing_path(path, &expected_bin)));
 
         let receipt_path = root.join(".osdk-artifact.json");
         let tampered = std::fs::read_to_string(&receipt_path).unwrap().replace(
