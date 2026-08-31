@@ -39,14 +39,14 @@ irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 
 ```bash
 curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
-sh install.sh --version 0.1.0 --install-dir "$HOME/bin"
+sh install.sh --version 0.0.1 --install-dir "$HOME/bin"
 ```
 
 ```powershell
 Invoke-WebRequest `
   https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
   -OutFile install.ps1
-.\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
+.\install.ps1 -Version 0.0.1 -InstallDir "$HOME\bin"
 ```
 
 如果本机已有 Rust，也可以运行 `cargo install osdk-cli --locked` 安装主命令 `osdk`

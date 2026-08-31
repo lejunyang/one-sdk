@@ -44,7 +44,7 @@ arguments.
 curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
 
 sh install.sh \
-  --version 0.1.0 \
+  --version 0.0.1 \
   --install-dir "$HOME/bin" \
   --repository lejunyang/one-sdk \
   --target x86_64-unknown-linux-gnu
@@ -69,7 +69,7 @@ Invoke-WebRequest `
   -OutFile install.ps1
 
 .\install.ps1 `
-  -Version 0.1.0 `
+  -Version 0.0.1 `
   -InstallDir "$HOME\bin" `
   -Repository lejunyang/one-sdk `
   -Target x86_64-pc-windows-msvc

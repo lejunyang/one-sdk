@@ -50,7 +50,7 @@ curl -sSfL \
 
 sh install.sh \
   --base-url https://gh-proxy.com/https://github.com \
-  --version 0.1.0 \
+  --version 0.0.1 \
   --install-dir "$HOME/bin" \
   --repository lejunyang/one-sdk \
   --target x86_64-unknown-linux-gnu
@@ -76,7 +76,7 @@ Invoke-WebRequest `
 
 .\install.ps1 `
   -BaseUrl https://gh-proxy.com/https://github.com `
-  -Version 0.1.0 `
+  -Version 0.0.1 `
   -InstallDir "$HOME\bin" `
   -Repository lejunyang/one-sdk `
   -Target x86_64-pc-windows-msvc

@@ -41,14 +41,14 @@ The installers download the latest release and verify it against
 
 ```bash
 curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
-sh install.sh --version 0.1.0 --install-dir "$HOME/bin"
+sh install.sh --version 0.0.1 --install-dir "$HOME/bin"
 ```
 
 ```powershell
 Invoke-WebRequest `
   https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
   -OutFile install.ps1
-.\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
+.\install.ps1 -Version 0.0.1 -InstallDir "$HOME\bin"
 ```
 
 If Rust is already installed, `cargo install osdk-cli --locked` installs the

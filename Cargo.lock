@@ -3072,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "osdk-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "aube",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "osdk-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "osdk-shim"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "osdk-core",
  "tempfile",
