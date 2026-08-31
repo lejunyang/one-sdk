@@ -143,6 +143,7 @@ case "$backend" in
   pnpm)
     list_tool=pnpm
     request=pnpm@latest
+    cleanup_tools=(node)
     version_command=(pnpm --version)
     ;;
   yarn)

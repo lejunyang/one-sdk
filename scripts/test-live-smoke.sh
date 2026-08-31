@@ -30,10 +30,12 @@ case ${args[0]:-} in
     printf '1.0.0\n'
     ;;
   install)
-    mkdir -p "$OSDK_INSTALL_DIR/node/20.0.0" "$OSDK_INSTALL_DIR/node/22.0.0" "$OSDK_INSTALL_DIR/yarn/1.0.0"
+    spec=${args[1]}
+    tool=${spec%@*}
+    mkdir -p "$OSDK_INSTALL_DIR/node/20.0.0" "$OSDK_INSTALL_DIR/node/22.0.0" "$OSDK_INSTALL_DIR/$tool/1.0.0"
     : > "$OSDK_INSTALL_DIR/node/20.0.0/.osdk-complete"
     : > "$OSDK_INSTALL_DIR/node/22.0.0/.osdk-complete"
-    : > "$OSDK_INSTALL_DIR/yarn/1.0.0/.osdk-complete"
+    : > "$OSDK_INSTALL_DIR/$tool/1.0.0/.osdk-complete"
     ;;
   lock)
     printf 'schema = 4\n' > osdk.lock
@@ -68,9 +70,20 @@ export LIVE_SMOKE_ROOT="$test_root/smoke"
 export LIVE_SMOKE_COMMAND_TIMEOUT=30s
 bash "$repo_root/scripts/live-smoke/run.sh" yarn "$fake_osdk" >/dev/null
 
-for expected in node@20.0.0 node@22.0.0 yarn@1.0.0; do
+for expected in node@20.0.0 node@22.0.0 pnpm@1.0.0; do
   grep -Fxq "$expected" "$test_root/uninstalled.log" || {
     printf 'live smoke did not clean %s\n' "$expected" >&2
+    exit 1
+  }
+done
+
+: > "$test_root/uninstalled.log"
+rm -rf "$LIVE_SMOKE_ROOT"
+bash "$repo_root/scripts/live-smoke/run.sh" pnpm "$fake_osdk" >/dev/null
+
+for expected in node@20.0.0 node@22.0.0 yarn@1.0.0; do
+  grep -Fxq "$expected" "$test_root/uninstalled.log" || {
+    printf 'pnpm live smoke did not clean %s\n' "$expected" >&2
     exit 1
   }
 done
