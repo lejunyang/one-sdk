@@ -106,6 +106,17 @@ Place all three files in the same directory and add that directory to `PATH`.
 `osdk-aube` is a packaged implementation helper, not a command users normally
 invoke directly.
 
+If Rust is already installed, you can install the primary command and private
+Aube helper from crates.io:
+
+```bash
+cargo install osdk-cli --locked
+```
+
+`osdk-shim` is a separate package. The Release installer above remains the
+recommended complete installation because it installs same-version `osdk`,
+`osdk-shim`, and `osdk-aube` programs together.
+
 In mainland China, you may want to configure a rustup mirror first:
 
 ```bash

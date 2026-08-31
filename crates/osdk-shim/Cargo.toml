@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+description = "Execution shim for tools activated by the osdk toolchain manager"
+readme = "../../README.md"
+keywords = ["sdk", "toolchain", "version-manager", "shim"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "osdk-shim"
@@ -14,7 +19,7 @@ path = "src/main.rs"
 # manager commands create a current-thread runtime for their fresh registry
 # preflight only.
 [dependencies]
-osdk-core = { path = "../osdk-core" }
+osdk-core.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

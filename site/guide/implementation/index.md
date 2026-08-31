@@ -37,6 +37,7 @@ CLI 与分层配置
 | [npm 开发工具](./npm-tools) | `npm:<package>` 身份、项目/全局/隔离安装器、脚本策略、原生 lock、inventory 与冲突拒绝 |
 | [Cargo 开发工具](./cargo-tools) | `cargo:` 身份、精确 Rust 绑定、受控 provider、原生发布与 schema 4 重放 metadata |
 | [Go 开发工具](./go-tools) | `go:` command-package 身份、精确 Go 绑定、proxy 选择、隔离 provider 与 schema 4 重放 metadata |
+| [发布流水线](./releasing) | crate 拓扑顺序、首发 token、后续 OIDC Trusted Publishing 与 GitHub Release gate |
 | [可靠性与并发](./reliability) | 锁、原子发布、重试、离线回退、幂等性和 GC 边界 |
 
 ## 需要先记住的边界

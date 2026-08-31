@@ -111,6 +111,15 @@ target/release/osdk-aube
 请把三个文件放在同一目录，并将该目录加入 `PATH`。`osdk-aube` 是随安装包提供的内部
 实现辅助程序，通常不需要由用户直接运行。
 
+如果已经安装 Rust，也可以从 crates.io 安装主命令和内部 Aube 辅助程序：
+
+```bash
+cargo install osdk-cli --locked
+```
+
+`osdk-shim` 是独立 package。需要完整的日常安装时仍推荐上面的 Release 安装器，
+它会把 `osdk`、`osdk-shim` 和 `osdk-aube` 三个同版本程序一起安装。
+
 在中国大陆可以先配置 rustup 镜像：
 
 ```bash

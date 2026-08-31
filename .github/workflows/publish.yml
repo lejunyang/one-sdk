@@ -1,4 +1,4 @@
-name: Publish Binaries
+name: Publish Release
 
 on:
   push:
@@ -36,6 +36,13 @@ jobs:
           ' Cargo.toml)
           if [[ -z "$version" ]]; then
             echo "Could not read workspace.package.version from Cargo.toml" >&2
+            exit 1
+          fi
+          core_dependency=$(sed -n \
+            '/^\[workspace.dependencies\]/,/^\[/s/^osdk-core = { version = "\(=[^"]*\)".*/\1/p' \
+            Cargo.toml)
+          if [[ "$core_dependency" != "=$version" ]]; then
+            echo "workspace osdk-core dependency must be pinned to =$version" >&2
             exit 1
           fi
           if git rev-parse --verify --quiet "refs/tags/v$version"; then
@@ -114,9 +121,72 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  crates:
+    name: publish crates.io
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - name: Authenticate with crates.io
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+        continue-on-error: true
+      - name: Use the official crates.io index for publishing
+        shell: bash
+        run: |
+          if [[ -f .cargo/config.toml ]]; then
+            mv .cargo/config.toml .cargo/config.toml.build-mirror
+          fi
+      - name: Select crates.io credential
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          BOOTSTRAP_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          token="$OIDC_TOKEN"
+          if [[ -z "$token" ]]; then
+            token="$BOOTSTRAP_TOKEN"
+          fi
+          if [[ -z "$token" ]]; then
+            echo "crates.io authentication failed. For the first release, add CARGO_REGISTRY_TOKEN to the crates-io environment; for later releases, configure trusted publishers for publish.yml." >&2
+            exit 1
+          fi
+          echo "CARGO_REGISTRY_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Verify and publish osdk-core
+        run: |
+          cargo publish --locked --registry crates-io --dry-run -p osdk-core
+          cargo publish --locked --registry crates-io -p osdk-core
+      - name: Wait for osdk-core ${{ needs.prepare.outputs.version }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error \
+              -H "User-Agent: one-sdk-publish/${GITHUB_RUN_ID}" \
+              "https://crates.io/api/v1/crates/osdk-core/$VERSION" >/dev/null; then
+              exit 0
+            fi
+            echo "Waiting for osdk-core $VERSION to become visible ($attempt/30)"
+            sleep 10
+          done
+          echo "osdk-core $VERSION did not become visible on crates.io in time" >&2
+          exit 1
+      - name: Verify and publish binary crates
+        run: |
+          cargo publish --locked --registry crates-io --dry-run -p osdk-cli
+          cargo publish --locked --registry crates-io --dry-run -p osdk-shim
+          cargo publish --locked --registry crates-io -p osdk-cli
+          cargo publish --locked --registry crates-io -p osdk-shim
+
   release:
     name: publish v${{ needs.prepare.outputs.version }}
-    needs: [prepare, build]
+    needs: [prepare, build, crates]
     runs-on: ubuntu-latest
     permissions:
       contents: write

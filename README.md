@@ -51,6 +51,10 @@ Invoke-WebRequest `
 .\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
 ```
 
+If Rust is already installed, `cargo install osdk-cli --locked` installs the
+main `osdk` command and its private `osdk-aube` helper. Use the Release
+installer for the complete three-program installation, including `osdk-shim`.
+
 If GitHub downloads are slow, route both the installer and release downloads
 through a trusted proxy:
 

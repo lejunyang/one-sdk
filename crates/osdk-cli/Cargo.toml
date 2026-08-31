@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+description = "Cross-platform manager for language runtimes, developer tools, and model snapshots"
+readme = "../../README.md"
+keywords = ["sdk", "toolchain", "version-manager", "runtime"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "osdk"
@@ -15,7 +20,7 @@ name = "osdk-aube"
 path = "src/bin/osdk-aube.rs"
 
 [dependencies]
-osdk-core = { path = "../osdk-core" }
+osdk-core.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 tokio.workspace = true

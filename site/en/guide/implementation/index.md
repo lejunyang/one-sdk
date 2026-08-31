@@ -37,6 +37,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | [npm developer tools](./npm-tools) | `npm:<package>` identity, project/global/isolated installers, script policy, native locks, inventory, and conflict rejection |
 | [Cargo developer tools](./cargo-tools) | `cargo:` identity, exact Rust binding, controlled providers, native publication, and schema-4 replay metadata |
 | [Go developer tools](./go-tools) | `go:` command-package identity, exact Go binding, proxy selection, isolated provider execution, and schema-4 replay metadata |
+| [Release pipeline](./releasing) | Crate topology order, bootstrap token, later OIDC Trusted Publishing, and the GitHub Release gate |
 | [Reliability and concurrency](./reliability) | Locks, atomic publication, retries, offline fallback, idempotency, and GC boundaries |
 
 ## Boundaries to remember

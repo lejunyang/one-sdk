@@ -11,9 +11,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/lejunyang/one-sdk"
+homepage = "https://lejunyang.github.io/one-sdk/"
 rust-version = "1.91.1"
 
 [workspace.dependencies]
+osdk-core = { version = "=0.1.0", path = "crates/osdk-core" }
 # CLI
 clap = { version = "4", features = ["derive", "env", "string", "wrap_help"] }
 clap_complete = "4"

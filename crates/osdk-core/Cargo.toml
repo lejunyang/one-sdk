@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+description = "Core library for the cross-platform osdk toolchain manager"
+readme = "../../README.md"
+keywords = ["sdk", "toolchain", "version-manager", "runtime"]
+categories = ["development-tools", "development-tools::build-utils"]
 
 [dependencies]
 tokio.workspace = true

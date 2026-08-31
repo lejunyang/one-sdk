@@ -49,6 +49,10 @@ Invoke-WebRequest `
 .\install.ps1 -Version 0.1.0 -InstallDir "$HOME\bin"
 ```
 
+如果本机已有 Rust，也可以运行 `cargo install osdk-cli --locked` 安装主命令 `osdk`
+和内部辅助程序 `osdk-aube`。需要包含 `osdk-shim` 的完整三程序安装时，仍推荐使用
+Release 安装器。
+
 如果 GitHub 下载较慢，可以通过可信代理同时获取安装脚本和 Release：
 
 ```bash

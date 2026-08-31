@@ -59,6 +59,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'npm 开发工具实现', link: '/guide/implementation/npm-tools' },
       { text: 'Cargo 开发工具实现', link: '/guide/implementation/cargo-tools' },
       { text: 'Go 开发工具实现', link: '/guide/implementation/go-tools' },
+      { text: '发布流水线', link: '/guide/implementation/releasing' },
       { text: '可靠性与跨平台', link: '/guide/implementation/reliability' }
     ]
   }
@@ -107,6 +108,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'npm Developer Tool Implementation', link: '/en/guide/implementation/npm-tools' },
       { text: 'Cargo Developer Tool Implementation', link: '/en/guide/implementation/cargo-tools' },
       { text: 'Go Developer Tool Implementation', link: '/en/guide/implementation/go-tools' },
+      { text: 'Release Pipeline', link: '/en/guide/implementation/releasing' },
       { text: 'Reliability and Portability', link: '/en/guide/implementation/reliability' }
     ]
   }
