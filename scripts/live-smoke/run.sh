@@ -148,7 +148,7 @@ case "$backend" in
   yarn)
     list_tool=yarn
     request=yarn@latest
-    exec_tools=(--tool node@lts)
+    exec_tools=(--tool node@latest)
     cleanup_tools=(node)
     version_command=(yarn --version)
     ;;
