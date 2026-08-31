@@ -46,6 +46,12 @@ backend options.
 | Bun | `@oven/bun-*` platform package, SRI | `bun`, `bunx`; the latter routes to `bun x` | No |
 | Deno | `@deno/*` platform package, SRI | `deno` | No |
 
+pnpm, Bun, and Deno resolve `latest`, ranges, and prefixes against the npm
+platform package that is actually installed on the current target, rather than
+only the generic wrapper package. If a wrapper is released before its platform
+artifact, osdk therefore does not select a version that the target cannot yet
+download.
+
 npm and Yarn launchers use Node from `PATH`. Whenever a request contains npm,
 pnpm, or Yarn but not Node, osdk adds Node automatically: it first follows
 project discovery and falls back to `latest`. This also applies to explicit tool

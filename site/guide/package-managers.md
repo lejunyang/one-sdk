@@ -43,6 +43,10 @@ osdk install bun@latest deno@latest
 | Bun | `@oven/bun-*` 平台包，SRI | `bun`、`bunx`；后者路由为 `bun x` | 否 |
 | Deno | `@deno/*` 平台包，SRI | `deno` | 否 |
 
+pnpm、Bun 与 Deno 的 `latest`、范围和前缀解析都以当前平台实际安装的 npm platform
+package 为准，而不是只读取通用 wrapper package。因此 wrapper 先发布、平台制品尚未发布时，
+osdk 不会选择一个当前平台还无法下载的版本。
+
 npm 和 Yarn 的 launcher 调用 `PATH` 中的 Node。只要一次请求含 `npm`、`pnpm` 或
 `yarn` 而没有 Node，osdk 就自动加入 Node：先按项目规则选择版本，找不到时用
 `latest`。该规则也适用于显式工具列表；manager bin 排在受管 Node bin 之前，不依赖

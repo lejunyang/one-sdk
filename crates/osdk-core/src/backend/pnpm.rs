@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
 use crate::platform::{Arch, Os};
 use crate::source::Source;
-use crate::version::{ToolVersion, VersionInfo};
+use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub struct PnpmBackend;
 
@@ -62,8 +62,21 @@ impl Backend for PnpmBackend {
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let versions = crate::npm::list_versions(ctx, &sources, "pnpm").await?;
+        let package = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
+            os: format!("{:?}", ctx.platform.os),
+            arch: format!("{:?}", ctx.platform.arch),
+        })?;
+        let versions = crate::npm::list_versions(ctx, &sources, package).await?;
         Ok(versions.into_iter().map(Self::version_info).collect())
+    }
+
+    async fn resolve_version(&self, ctx: &Ctx, request: &ToolRequest) -> Result<ToolVersion> {
+        let package = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
+            os: format!("{:?}", ctx.platform.os),
+            arch: format!("{:?}", ctx.platform.arch),
+        })?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        crate::npm::resolve_package_version(ctx, &sources, package, self.id(), request).await
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
@@ -177,7 +190,18 @@ fn ensure_executable(install_dir: &std::path::Path, os: Os) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{Libc, Platform};
     use crate::version::{select_version, VersionSpec};
+
+    #[test]
+    fn maps_platform_packages() {
+        let ctx = ctx(Platform {
+            os: Os::Linux,
+            arch: Arch::X64,
+            libc: Libc::Glibc,
+        });
+        assert_eq!(PnpmBackend::platform_package(&ctx), Some("@pnpm/linux-x64"));
+    }
 
     #[test]
     fn latest_ignores_newer_prerelease_versions() {
@@ -216,5 +240,33 @@ mod tests {
             exposed_bin_names(vec!["pnpm".into()]),
             vec!["pnpm".to_string(), "pnpx".to_string()]
         );
+    }
+
+    fn ctx(platform: Platform) -> Ctx {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some("/tmp/osdk-pnpm-test/data".into()),
+            "OSDK_CACHE_DIR" => Some("/tmp/osdk-pnpm-test/cache".into()),
+            "OSDK_CONFIG_DIR" => Some("/tmp/osdk-pnpm-test/config".into()),
+            _ => None,
+        })
+        .unwrap();
+        Ctx {
+            dirs: dirs.clone(),
+            platform,
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                tool_configs: Default::default(),
+                global_tools: Default::default(),
+                global_tool_configs: Default::default(),
+                tool_origins: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store)),
+            show_progress: false,
+        }
     }
 }
