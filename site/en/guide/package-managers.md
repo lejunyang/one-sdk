@@ -40,17 +40,16 @@ backend options.
 | Backend | Installed artifact and verification | Exposed commands | Adds Node automatically |
 | --- | --- | --- | --- |
 | npm | npm registry `npm` package, SRI | `npm`, `npx` | Yes |
-| pnpm | Standalone `@pnpm/<os>-<arch>` package, SRI | `pnpm`, `pnpx`; the latter routes to `pnpm dlx` | Yes |
+| pnpm | Complete `pnpm` npm package, SRI | `pnpm`, `pnpx`; the latter routes to `pnpm dlx` | Yes |
 | Yarn 1 | `yarn` package, SRI | `yarn`, `yarnpkg` | Yes |
 | Yarn 2+ | `@yarnpkg/cli-dist` package, SRI | `yarn`, `yarnpkg` | Yes |
 | Bun | `@oven/bun-*` platform package, SRI | `bun`, `bunx`; the latter routes to `bun x` | No |
 | Deno | `@deno/*` platform package, SRI | `deno` | No |
 
-pnpm, Bun, and Deno resolve `latest`, ranges, and prefixes against the npm
-platform package that is actually installed on the current target, rather than
-only the generic wrapper package. If a wrapper is released before its platform
-artifact, osdk therefore does not select a version that the target cannot yet
-download.
+pnpm resolves and installs the complete `pnpm` JavaScript distribution and runs
+it with managed Node; it does not directly extract the SEA-only
+`@pnpm/<os>-<arch>` package. Bun and Deno resolve directly against the npm
+platform package installed for the current target.
 
 npm and Yarn launchers use Node from `PATH`. Whenever a request contains npm,
 pnpm, or Yarn but not Node, osdk adds Node automatically: it first follows

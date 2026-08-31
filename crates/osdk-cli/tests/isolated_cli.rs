@@ -2529,7 +2529,7 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
         (
             "pnpm",
             "10.15.0",
-            "pnpm",
+            "bin/pnpm",
             "${PNPM_HOME-unset}|${npm_config_store_dir-unset}|${pnpm_config_store_dir-unset}",
             "pnpm|pnpm-store|unset",
             "npm_config_store_dir",
@@ -2537,7 +2537,7 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
         (
             "pnpm",
             "11.0.0",
-            "pnpm",
+            "bin/pnpm",
             "${PNPM_HOME-unset}|${npm_config_store_dir-unset}|${pnpm_config_store_dir-unset}",
             "pnpm|unset|pnpm-store",
             "pnpm_config_store_dir",
@@ -2704,7 +2704,8 @@ fn write_fake_registry_manager(
     let relative = match manager {
         "npm" | "yarn" => format!("bin/{alias}"),
         "bun" => format!("bin/{alias}"),
-        "pnpm" | "deno" => alias.to_string(),
+        "pnpm" => format!("bin/{alias}"),
+        "deno" => alias.to_string(),
         other => panic!("unsupported fixture manager {other}"),
     };
     let install = root.join(format!("installs/{manager}/{version}"));
@@ -3317,7 +3318,7 @@ printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
         let manager_bin = if manager == "npm" {
             temporary.path().join("installs/npm/10.0.0/bin")
         } else {
-            temporary.path().join("installs/pnpm/10.0.0")
+            temporary.path().join("installs/pnpm/10.0.0/bin")
         };
         let expected_path = std::env::join_paths([
             manager_bin,

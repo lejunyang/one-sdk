@@ -37,7 +37,7 @@ packages remain outside this osdk-owned install identity.
 | --- | --- | --- | --- |
 | `node` (`nodejs`) | Node index; official, npmmirror, TUNA, and USTC archives | `SHASUMS256.txt`; shared archive pipeline | Optional `arch` and `corepack`; Corepack is a post-install action |
 | `npm` | `npm` registry packument/tarball | npm SRI, always required; generates `npm`/`npx` launchers | Installed independently of Node, but needs an active Node at runtime |
-| `pnpm` | `@pnpm/<os>-<arch>` platform package | npm SRI; standalone executable | Does not require Node; store variable depends on major version |
+| `pnpm` | Complete `pnpm` JavaScript distribution | npm SRI; osdk-generated Node launcher | Adds managed Node automatically; store variable depends on major version |
 | `yarn` | `yarn` for 1.x, `@yarnpkg/cli-dist` for 2+ | npm SRI; generates Node launchers | Manages Classic and Berry directly instead of delegating to Corepack |
 | `go` (`golang`) | go.dev JSON index; mirrors may reuse the official index | Per-file SHA-256; archive pipeline | Exports `GOROOT` |
 | `python` (`py`, `cpython`) | Built-in PBS release index, Astral, and GitHub proxy | Per-release `SHA256SUMS` | CPython, PyPy, GraalPy, Pyodide, and variants; historical releases can pin `tag` |

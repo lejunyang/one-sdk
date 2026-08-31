@@ -129,7 +129,10 @@ fn real_backend_fixture(id: &str, path: &std::path::Path) {
         "maven" => vec![("root/bin/mvn", b"#!/bin/sh\nprintf maven\n")],
         "gradle" => vec![("root/bin/gradle", b"#!/bin/sh\nprintf gradle\n")],
         "kotlin" => vec![("root/bin/kotlinc", b"#!/bin/sh\nprintf kotlin\n")],
-        "pnpm" => vec![("root/pnpm", b"#!/bin/sh\nprintf pnpm\n")],
+        "pnpm" => vec![
+            ("root/bin/pnpm.mjs", b"// pnpm fixture\n"),
+            ("root/bin/pnpx.mjs", b"// pnpx fixture\n"),
+        ],
         "yarn" => vec![("root/bin/yarn.js", b"")],
         "deno" => vec![("root/deno", b"#!/bin/sh\nprintf deno\n")],
         "bun" => vec![("root/bin/bun", b"#!/bin/sh\nprintf bun\n")],

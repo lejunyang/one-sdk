@@ -37,15 +37,15 @@ osdk install bun@latest deno@latest
 | backend | 安装物与校验 | 暴露命令 | 自动补 Node |
 | --- | --- | --- | --- |
 | npm | npm registry 的 `npm` 包，SRI | `npm`、`npx` | 是 |
-| pnpm | `@pnpm/<os>-<arch>` standalone 包，SRI | `pnpm`、`pnpx`；后者路由为 `pnpm dlx` | 是 |
+| pnpm | 完整 `pnpm` npm package，SRI | `pnpm`、`pnpx`；后者路由为 `pnpm dlx` | 是 |
 | Yarn 1 | `yarn` 包，SRI | `yarn`、`yarnpkg` | 是 |
 | Yarn 2+ | `@yarnpkg/cli-dist` 包，SRI | `yarn`、`yarnpkg` | 是 |
 | Bun | `@oven/bun-*` 平台包，SRI | `bun`、`bunx`；后者路由为 `bun x` | 否 |
 | Deno | `@deno/*` 平台包，SRI | `deno` | 否 |
 
-pnpm、Bun 与 Deno 的 `latest`、范围和前缀解析都以当前平台实际安装的 npm platform
-package 为准，而不是只读取通用 wrapper package。因此 wrapper 先发布、平台制品尚未发布时，
-osdk 不会选择一个当前平台还无法下载的版本。
+pnpm 从完整 `pnpm` package 解析版本和安装 JavaScript distribution，并使用受管 Node
+启动；它不会直接提取只含 SEA 二进制的 `@pnpm/<os>-<arch>` package。Bun 与 Deno 则直接
+以当前平台实际安装的 npm platform package 为准。
 
 npm 和 Yarn 的 launcher 调用 `PATH` 中的 Node。只要一次请求含 `npm`、`pnpm` 或
 `yarn` 而没有 Node，osdk 就自动加入 Node：先按项目规则选择版本，找不到时用

@@ -1,7 +1,6 @@
-//! pnpm backend: installs the standalone pnpm binary from the npm registry's
-//! platform package `@pnpm/<os>-<arch>` (the same artifact `@pnpm/exe` uses).
-//! This keeps the "runs without a managed Node" property while gaining
-//! first-party integrity verification (npm SRI), and stays mirror-friendly.
+//! pnpm backend: installs pnpm's complete JavaScript distribution from the npm
+//! registry with first-party SRI verification. osdk supplies the exact managed
+//! Node runtime and creates portable launchers for `pnpm` and `pnpx`.
 
 use std::path::PathBuf;
 
@@ -10,26 +9,13 @@ use async_trait::async_trait;
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::{Error, Result};
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
-use crate::platform::{Arch, Os};
+use crate::platform::Os;
 use crate::source::Source;
-use crate::version::{ToolRequest, ToolVersion, VersionInfo};
+use crate::version::{ToolVersion, VersionInfo};
 
 pub struct PnpmBackend;
 
 impl PnpmBackend {
-    /// The `@pnpm/<os>-<arch>` platform package that ships the standalone binary.
-    fn platform_package(ctx: &Ctx) -> Option<&'static str> {
-        Some(match (ctx.platform.os, ctx.platform.arch) {
-            (Os::Linux, Arch::X64) => "@pnpm/linux-x64",
-            (Os::Linux, Arch::Arm64) => "@pnpm/linux-arm64",
-            (Os::Macos, Arch::X64) => "@pnpm/macos-x64",
-            (Os::Macos, Arch::Arm64) => "@pnpm/macos-arm64",
-            (Os::Windows, Arch::X64) => "@pnpm/win-x64",
-            (Os::Windows, Arch::Arm64) => "@pnpm/win-arm64",
-            _ => return None,
-        })
-    }
-
     fn version_info(version: String) -> VersionInfo {
         VersionInfo {
             stable: semver::Version::parse(&version)
@@ -62,21 +48,8 @@ impl Backend for PnpmBackend {
 
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let package = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
-            os: format!("{:?}", ctx.platform.os),
-            arch: format!("{:?}", ctx.platform.arch),
-        })?;
-        let versions = crate::npm::list_versions(ctx, &sources, package).await?;
+        let versions = crate::npm::list_versions(ctx, &sources, "pnpm").await?;
         Ok(versions.into_iter().map(Self::version_info).collect())
-    }
-
-    async fn resolve_version(&self, ctx: &Ctx, request: &ToolRequest) -> Result<ToolVersion> {
-        let package = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
-            os: format!("{:?}", ctx.platform.os),
-            arch: format!("{:?}", ctx.platform.arch),
-        })?;
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        crate::npm::resolve_package_version(ctx, &sources, package, self.id(), request).await
     }
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
@@ -84,12 +57,8 @@ impl Backend for PnpmBackend {
         let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
             plan
         } else {
-            let pkg = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
-                os: format!("{:?}", ctx.platform.os),
-                arch: format!("{:?}", ctx.platform.arch),
-            })?;
             let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-            let dist = crate::npm::resolve_dist(ctx, &sources, pkg, &tv.version).await?;
+            let dist = crate::npm::resolve_dist(ctx, &sources, "pnpm", &tv.version).await?;
             InstallPlan {
                 tool: self.id().to_string(),
                 version: tv.version.clone(),
@@ -110,18 +79,16 @@ impl Backend for PnpmBackend {
             offline: ctx.config.settings.offline,
             require_checksums: ctx.config.settings.require_checksums,
         };
-        pipeline::run(&plan, &pctx).await?;
-        // The tarball ships `package/pnpm` -> after strip, `pnpm` at install root.
-        ensure_executable(
-            &ctx.dirs.install_path(self.id(), &tv.version),
-            ctx.platform.os,
-        );
+        let install_dir = pipeline::run(&plan, &pctx).await?;
+        write_launchers(&install_dir.join("bin"), ctx.platform.os)?;
         Ok(())
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        // The `pnpm` binary sits at the install root (npm `package/` stripped).
-        Ok(vec![ctx.dirs.install_path(self.id(), &tv.version)])
+        Ok(vec![ctx
+            .dirs
+            .install_path(self.id(), &tv.version)
+            .join("bin")])
     }
 
     fn exec_env(
@@ -137,17 +104,9 @@ impl Backend for PnpmBackend {
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        let paths = self.bin_paths(ctx, tv)?;
-        Ok(exposed_bin_names(crate::backend::bin_names_in_dirs(&paths)))
+        let _ = (ctx, tv);
+        Ok(vec!["pnpm".into(), "pnpx".into()])
     }
-}
-
-fn exposed_bin_names(discovered: Vec<String>) -> Vec<String> {
-    let mut names = discovered
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    names.extend(["pnpm".into(), "pnpx".into()]);
-    names.into_iter().collect()
 }
 
 fn major_version(version: &str) -> u64 {
@@ -167,41 +126,47 @@ fn cache_mapping(version: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn ensure_executable(install_dir: &std::path::Path, os: Os) {
-    if os == Os::Windows {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = install_dir.join("pnpm");
-        if let Ok(meta) = std::fs::metadata(&bin) {
-            let mut perms = meta.permissions();
-            perms.set_mode(perms.mode() | 0o755);
-            let _ = std::fs::set_permissions(&bin, perms);
+#[cfg(unix)]
+fn write_launchers(bin_dir: &std::path::Path, _os: Os) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["pnpm", "pnpx"] {
+        let path = bin_dir.join(name);
+        let module = bin_dir.join(format!("{name}.mjs"));
+        if !module.is_file() {
+            return Err(Error::other(format!(
+                "pnpm distribution is missing {}",
+                module.display()
+            )));
         }
+        let script = format!("#!/bin/sh\nexec node \"{}\" \"$@\"\n", module.display());
+        std::fs::write(&path, script).map_err(|error| Error::io(&path, error))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| Error::io(&path, error))?;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = install_dir;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_launchers(bin_dir: &std::path::Path, _os: Os) -> Result<()> {
+    for name in ["pnpm", "pnpx"] {
+        let module = bin_dir.join(format!("{name}.mjs"));
+        if !module.is_file() {
+            return Err(Error::other(format!(
+                "pnpm distribution is missing {}",
+                module.display()
+            )));
+        }
+        let path = bin_dir.join(format!("{name}.cmd"));
+        let script = format!("@echo off\r\nnode \"%~dp0{name}.mjs\" %*\r\n");
+        std::fs::write(&path, script).map_err(|error| Error::io(&path, error))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{Libc, Platform};
     use crate::version::{select_version, VersionSpec};
-
-    #[test]
-    fn maps_platform_packages() {
-        let ctx = ctx(Platform {
-            os: Os::Linux,
-            arch: Arch::X64,
-            libc: Libc::Glibc,
-        });
-        assert_eq!(PnpmBackend::platform_package(&ctx), Some("@pnpm/linux-x64"));
-    }
 
     #[test]
     fn latest_ignores_newer_prerelease_versions() {
@@ -236,13 +201,29 @@ mod tests {
 
     #[test]
     fn exposes_pnpx_as_a_routing_alias() {
+        let context = ctx();
         assert_eq!(
-            exposed_bin_names(vec!["pnpm".into()]),
+            PnpmBackend
+                .bin_names(&context, &ToolVersion::new("pnpm", "11.24.0"))
+                .unwrap(),
             vec!["pnpm".to_string(), "pnpx".to_string()]
         );
     }
 
-    fn ctx(platform: Platform) -> Ctx {
+    #[test]
+    fn launchers_target_complete_distribution_modules() {
+        let temporary = tempfile::tempdir().unwrap();
+        let bin = temporary.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("pnpm.mjs"), b"export {};").unwrap();
+        std::fs::write(bin.join("pnpx.mjs"), b"export {};").unwrap();
+        write_launchers(&bin, Os::Linux).unwrap();
+        let pnpm = std::fs::read_to_string(bin.join("pnpm")).unwrap();
+        assert!(pnpm.contains("bin/pnpm.mjs"), "{pnpm}");
+        assert!(std::fs::metadata(bin.join("pnpm")).unwrap().is_file());
+    }
+
+    fn ctx() -> Ctx {
         let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
             "OSDK_DATA_DIR" => Some("/tmp/osdk-pnpm-test/data".into()),
             "OSDK_CACHE_DIR" => Some("/tmp/osdk-pnpm-test/cache".into()),
@@ -252,7 +233,7 @@ mod tests {
         .unwrap();
         Ctx {
             dirs: dirs.clone(),
-            platform,
+            platform: crate::platform::Platform::current(),
             config: crate::config::Config {
                 settings: Default::default(),
                 sources: Default::default(),

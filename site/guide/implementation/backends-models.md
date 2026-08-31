@@ -34,7 +34,7 @@ npm 包不属于该 osdk 自有安装身份。
 | --- | --- | --- | --- |
 | `node` (`nodejs`) | Node index；官方、npmmirror、TUNA、USTC 归档 | `SHASUMS256.txt`；共享归档流水线 | 可选 `arch` 与 `corepack`；Corepack 是安装后动作 |
 | `npm` | `npm` registry packument/tarball | npm SRI，强制校验；生成 `npm`/`npx` launcher | 独立于 Node 版本安装，但运行时仍需要活动 Node |
-| `pnpm` | `@pnpm/<os>-<arch>` 平台包 | npm SRI；独立可执行文件 | 无需 Node；按 major 设置 pnpm store 变量 |
+| `pnpm` | 完整 `pnpm` JavaScript distribution | npm SRI；osdk 生成 Node launcher | 自动加入受管 Node；按 major 设置 pnpm store 变量 |
 | `yarn` | 1.x 用 `yarn`，2+ 用 `@yarnpkg/cli-dist` | npm SRI；生成 Node launcher | 原生管理 Classic 与 Berry，不委托 Corepack |
 | `go` (`golang`) | go.dev JSON index；镜像可复用官方 index | index 中的 SHA-256；归档流水线 | 激活时设置 `GOROOT` |
 | `python` (`py`, `cpython`) | 内置 PBS release index、Astral、GitHub proxy | 每个 release 的 `SHA256SUMS` | 支持 CPython、PyPy、GraalPy、Pyodide 与 variant；历史版本可用 `tag` 固定 |
