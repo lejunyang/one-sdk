@@ -70,7 +70,7 @@ export LIVE_SMOKE_ROOT="$test_root/smoke"
 export LIVE_SMOKE_COMMAND_TIMEOUT=30s
 bash "$repo_root/scripts/live-smoke/run.sh" yarn "$fake_osdk" >/dev/null
 
-for expected in node@20.0.0 node@22.0.0 pnpm@1.0.0; do
+for expected in node@20.0.0 node@22.0.0 yarn@1.0.0; do
   grep -Fxq "$expected" "$test_root/uninstalled.log" || {
     printf 'live smoke did not clean %s\n' "$expected" >&2
     exit 1
@@ -81,7 +81,7 @@ done
 rm -rf "$LIVE_SMOKE_ROOT"
 bash "$repo_root/scripts/live-smoke/run.sh" pnpm "$fake_osdk" >/dev/null
 
-for expected in node@20.0.0 node@22.0.0 yarn@1.0.0; do
+for expected in node@20.0.0 node@22.0.0 pnpm@1.0.0; do
   grep -Fxq "$expected" "$test_root/uninstalled.log" || {
     printf 'pnpm live smoke did not clean %s\n' "$expected" >&2
     exit 1
