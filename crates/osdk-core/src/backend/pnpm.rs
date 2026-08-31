@@ -218,9 +218,18 @@ mod tests {
         std::fs::write(bin.join("pnpm.mjs"), b"export {};").unwrap();
         std::fs::write(bin.join("pnpx.mjs"), b"export {};").unwrap();
         write_launchers(&bin, Os::Linux).unwrap();
-        let pnpm = std::fs::read_to_string(bin.join("pnpm")).unwrap();
-        assert!(pnpm.contains("bin/pnpm.mjs"), "{pnpm}");
-        assert!(std::fs::metadata(bin.join("pnpm")).unwrap().is_file());
+        #[cfg(unix)]
+        {
+            let pnpm = std::fs::read_to_string(bin.join("pnpm")).unwrap();
+            assert!(pnpm.contains("bin/pnpm.mjs"), "{pnpm}");
+            assert!(std::fs::metadata(bin.join("pnpm")).unwrap().is_file());
+        }
+        #[cfg(windows)]
+        {
+            let pnpm = std::fs::read_to_string(bin.join("pnpm.cmd")).unwrap();
+            assert!(pnpm.contains("%~dp0pnpm.mjs"), "{pnpm}");
+            assert!(std::fs::metadata(bin.join("pnpm.cmd")).unwrap().is_file());
+        }
     }
 
     fn ctx() -> Ctx {
