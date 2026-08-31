@@ -799,7 +799,14 @@ fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String,
             let mut command = Command::new(
                 std::env::var_os("ComSpec").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe")),
             );
-            command.args(["/D", "/S", "/C", "call"]).arg(exe);
+            let command_path = match windows_command_path(exe) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("osdk-shim: failed to prepare {}: {error}", exe.display());
+                    return 126;
+                }
+            };
+            command.args(["/D", "/S", "/C", "call"]).arg(command_path);
             command
         } else {
             Command::new(exe)
@@ -813,9 +820,34 @@ fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String,
     }
 }
 
+#[cfg(windows)]
+fn windows_command_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let required = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = vec![0u16; required as usize];
+    let written =
+        unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+    if written == 0 || written as usize >= buffer.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    buffer.truncate(written as usize);
+    Ok(std::ffi::OsString::from_wide(&buffer).into())
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use std::os::windows::ffi::OsStrExt;
 
     #[test]
     fn batch_targets_run_through_comspec() {
@@ -847,7 +879,13 @@ mod tests {
         use std::process::Stdio;
 
         let temporary = tempfile::tempdir().unwrap();
-        let script = temporary.path().join("stream fixture.cmd");
+        let mut long_root = temporary.path().to_path_buf();
+        for index in 0..8 {
+            long_root.push(format!("segment-{index}-abcdefghijklmnopqrstuvwxyz"));
+        }
+        std::fs::create_dir_all(&long_root).unwrap();
+        let script = long_root.join("stream fixture.cmd");
+        assert!(script.as_os_str().encode_wide().count() > 260);
         let stdout_path = temporary.path().join("stdout.txt");
         let stderr_path = temporary.path().join("stderr.txt");
         std::fs::write(

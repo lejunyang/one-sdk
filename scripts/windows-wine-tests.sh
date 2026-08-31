@@ -7,7 +7,7 @@ wine_sha256=e9c307a28575ae01a33610677ddb4708551a9d19d0883af5a255f370df0f7e59
 wine_url="https://github.com/Kron4ek/Wine-Builds/releases/download/${wine_version}/${wine_archive}"
 target=x86_64-pc-windows-gnu
 
-test_root=$(mktemp -d)
+test_root=$(mktemp -d "${OSDK_TEST_TMPDIR:-${TMPDIR:-/tmp}}/one-sdk-wine-tests.XXXXXX")
 cache_root=${OSDK_WINE_CACHE_DIR:-"${TMPDIR:-/tmp}/one-sdk-wine-cache"}
 archive_path="$cache_root/$wine_archive"
 wine_root="$cache_root/wine-${wine_version}-amd64-wow64"

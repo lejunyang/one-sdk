@@ -2040,7 +2040,13 @@ mod tests {
         std::fs::write(&cas, b"go").unwrap();
         std::fs::remove_file(&go).unwrap();
         symlink(&cas, &go).unwrap();
-        assert_eq!(backend.managed_go(&ctx, &version.options).unwrap().1, cas);
+        let managed = backend.managed_go(&ctx, &version.options).unwrap().1;
+        assert!(
+            same_file::is_same_file(&managed, &cas).unwrap_or(false),
+            "managed={} expected={}",
+            managed.display(),
+            cas.display()
+        );
 
         let outside = temporary.path().join("outside-go");
         std::fs::write(&outside, b"go").unwrap();

@@ -25,9 +25,12 @@ function Assert-ContractOutput {
         [string]$StdoutPath,
         [string]$StderrPath
     )
-    $stdout = (Get-Content -LiteralPath $StdoutPath -Raw).Trim()
-    $stderr = (Get-Content -LiteralPath $StderrPath -Raw).Trim()
-    Assert-True ($ExitCode -eq 23) "$Shell wrapper returned $ExitCode instead of 23"
+    # Get-Content -Raw returns $null for an empty file. File.ReadAllText keeps
+    # that valid diagnostic state as an empty string under StrictMode.
+    $stdout = [IO.File]::ReadAllText($StdoutPath).Trim()
+    $stderr = [IO.File]::ReadAllText($StderrPath).Trim()
+    Assert-True ($ExitCode -eq 23) `
+        "$Shell wrapper returned $ExitCode instead of 23 (stdout='$stdout', stderr='$stderr')"
     Assert-True ($stdout -eq "out:first arg:input") "$Shell stdout mismatch: $stdout"
     Assert-True ($stderr -eq "err:second arg") "$Shell stderr mismatch: $stderr"
 }

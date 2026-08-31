@@ -3153,6 +3153,7 @@ dependencies = [
  "osdk-core",
  "tempfile",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

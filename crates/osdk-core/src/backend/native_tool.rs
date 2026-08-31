@@ -3013,20 +3013,44 @@ mod tests {
         assert!(second.install_root().exists());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn publish_rejects_case_collisions_and_reserved_windows_names() {
-        let temporary = tempfile::tempdir().unwrap();
-        let lifecycle = lifecycle(temporary.path(), "1.23.4");
-        let stage = new_stage(&lifecycle);
-        write_executable(&stage.bin_dir().join("Tool"), b"one");
-        write_executable(&stage.bin_dir().join("tool"), b"two");
-        let error = stage.publish(NativeToolProvider::GoInstall).unwrap_err();
-        assert!(error.to_string().contains("duplicate executable"));
+    fn receipt_rejects_case_collisions_and_reserved_windows_names() {
+        let runtime = InstallDependency {
+            kind: InstallDependencyKind::Runtime,
+            id: "go".into(),
+            version: "1.23.4".into(),
+            identity: Some("b3-go-v1:fixture".into()),
+        };
+        let receipt = NativeToolReceipt {
+            schema: NATIVE_TOOL_RECEIPT_SCHEMA,
+            provider: NativeToolProvider::GoInstall,
+            runtime: runtime.clone(),
+            bins: vec![
+                NativeToolBinReceipt {
+                    path: "bin/Tool".into(),
+                    size: 3,
+                    sha256: "0".repeat(64),
+                },
+                NativeToolBinReceipt {
+                    path: "bin/tool".into(),
+                    size: 3,
+                    sha256: "1".repeat(64),
+                },
+            ],
+        };
+        let error = validate_receipt(&receipt).unwrap_err();
+        assert!(error.to_string().contains("case-insensitive"));
 
-        let stage = new_stage(&lifecycle);
-        write_executable(&stage.bin_dir().join("CON"), b"bad");
-        let error = stage.publish(NativeToolProvider::GoInstall).unwrap_err();
+        let receipt = NativeToolReceipt {
+            bins: vec![NativeToolBinReceipt {
+                path: "bin/CON".into(),
+                size: 3,
+                sha256: "0".repeat(64),
+            }],
+            runtime,
+            ..receipt
+        };
+        let error = validate_receipt(&receipt).unwrap_err();
         assert!(error.to_string().contains("not portable"));
     }
 

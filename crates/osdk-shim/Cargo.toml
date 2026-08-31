@@ -22,5 +22,8 @@ path = "src/main.rs"
 osdk-core.workspace = true
 tokio.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
