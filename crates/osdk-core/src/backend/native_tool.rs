@@ -1355,7 +1355,7 @@ impl NativeToolLifecycle {
         let parent = final_root
             .parent()
             .ok_or_else(|| Error::other("native tool install root has no parent"))?;
-        create_directory_chain_no_symlinks(parent)?;
+        create_managed_directory_chain(self.locator.installs_root(), parent)?;
 
         match std::fs::symlink_metadata(final_root) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -1461,7 +1461,8 @@ impl NativeToolStage {
                 path.display()
             )));
         }
-        create_directory_chain_no_symlinks(
+        create_managed_directory_chain(
+            self.locator.installs_root(),
             path.parent()
                 .ok_or_else(|| Error::other("native tool stage has no parent"))?,
         )?;
@@ -2065,16 +2066,31 @@ fn portable_path_key(value: &str) -> String {
     value.replace('\\', "/").to_lowercase()
 }
 
-fn create_directory_chain_no_symlinks(path: &Path) -> Result<()> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        if matches!(
-            component,
-            std::path::Component::RootDir | std::path::Component::Prefix(_)
-        ) {
-            continue;
-        }
+fn create_managed_directory_chain(base: &Path, path: &Path) -> Result<()> {
+    let relative = path.strip_prefix(base).map_err(|_| {
+        Error::other(format!(
+            "native tool install parent is outside the managed root {}: {}",
+            base.display(),
+            path.display()
+        ))
+    })?;
+
+    // The configured install root is the trust boundary. Platform-owned
+    // ancestors may have another spelling (macOS `/var` -> `/private/var`, or
+    // a Windows 8.3 alias), so create them through the OS and begin strict
+    // no-link validation at `base` instead of at the filesystem root.
+    std::fs::create_dir_all(base).map_err(|error| Error::io(base, error))?;
+    validate_native_install_directory(base)?;
+
+    let mut current = base.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(Error::other(format!(
+                "native tool install parent contains a non-canonical component: {}",
+                path.display()
+            )));
+        };
+        current.push(component);
         let metadata = match std::fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2087,12 +2103,25 @@ fn create_directory_chain_no_symlinks(path: &Path) -> Result<()> {
             }
             Err(error) => return Err(Error::io(&current, error)),
         };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(Error::other(format!(
-                "native tool install parent is not a regular directory: {}",
-                current.display()
-            )));
-        }
+        validate_native_install_directory_metadata(&current, &metadata)?;
+    }
+    Ok(())
+}
+
+fn validate_native_install_directory(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| Error::io(path, error))?;
+    validate_native_install_directory_metadata(path, &metadata)
+}
+
+fn validate_native_install_directory_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::other(format!(
+            "native tool install parent is not a regular directory: {}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -3046,5 +3075,21 @@ mod tests {
         let lock = crate::lock::FileLock::acquire(lifecycle.locator.lock_path()).unwrap();
         let error = lifecycle.stage_with_lock(lock).unwrap_err();
         assert!(error.to_string().contains("regular directory"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_accepts_a_real_install_root_below_a_platform_alias() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let real = temporary.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temporary.path().join("alias");
+        symlink(&real, &alias).unwrap();
+
+        let lifecycle = lifecycle(&alias, "1.23.4");
+        let stage = new_stage(&lifecycle);
+        assert!(stage.path().starts_with(alias.join("installs")));
     }
 }

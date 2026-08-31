@@ -105,6 +105,10 @@ impl InstallLocator {
         &self.install_root
     }
 
+    pub(crate) fn installs_root(&self) -> &Path {
+        &self.installs_root
+    }
+
     pub fn legacy_install_root(&self) -> &Path {
         &self.legacy_install_root
     }

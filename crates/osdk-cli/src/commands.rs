@@ -378,10 +378,19 @@ fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
 }
 
 pub fn completions(shell: clap_complete::Shell) -> Result<()> {
-    use clap::CommandFactory;
-    let mut command = crate::cli::Cli::command();
-    clap_complete::generate(shell, &mut command, "osdk", &mut std::io::stdout());
-    Ok(())
+    const COMPLETION_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("osdk-completions".into())
+        .stack_size(COMPLETION_STACK_SIZE)
+        .spawn(move || {
+            use clap::CommandFactory;
+            let mut command = crate::cli::Cli::command();
+            clap_complete::generate(shell, &mut command, "osdk", &mut std::io::stdout());
+        })
+        .context("spawning shell completion generator")?
+        .join()
+        .map_err(|_| anyhow!("shell completion generator panicked"))
 }
 
 pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
