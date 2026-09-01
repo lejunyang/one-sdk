@@ -825,11 +825,11 @@ fn windows_command_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    // `GetShortPathNameW` resolves its argument through the MAX_PATH-limited
+    // path API, so a longer path fails with ERROR_PATH_NOT_FOUND unless it
+    // carries the extended-length prefix. Query with `\\?\`, then strip it
+    // again, because `cmd.exe` cannot consume a verbatim path.
+    let wide = verbatim_wide(path);
     let required = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
     if required == 0 {
         return Err(std::io::Error::last_os_error());
@@ -841,7 +841,58 @@ fn windows_command_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::last_os_error());
     }
     buffer.truncate(written as usize);
-    Ok(std::ffi::OsString::from_wide(&buffer).into())
+    let short: PathBuf = std::ffi::OsString::from_wide(&buffer).into();
+    let short = strip_verbatim_prefix(&short);
+    // A volume with 8.3 name creation disabled returns the long path unchanged.
+    // `cmd.exe` still cannot address it, so fail with an explanatory error
+    // instead of returning a path whose invocation dies as "cannot find path".
+    if short.as_os_str().encode_wide().count() >= MAX_COMMAND_PATH_WIDE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "path needs a short name to stay under {MAX_COMMAND_PATH_WIDE} characters, \
+                 but 8.3 short names are unavailable on this volume"
+            ),
+        ));
+    }
+    Ok(short)
+}
+
+/// `cmd.exe` resolves its target through the MAX_PATH-limited Win32 path API.
+#[cfg(windows)]
+const MAX_COMMAND_PATH_WIDE: usize = 260;
+
+#[cfg(windows)]
+const VERBATIM_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+
+/// Encode `path` for the wide path APIs, adding `\\?\` when that is both needed
+/// and valid. A UNC path would require `\\?\UNC\...` and a relative path cannot
+/// be prefixed at all, so both are passed through unchanged.
+#[cfg(windows)]
+fn verbatim_wide(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let is_verbatim = encoded.starts_with(&VERBATIM_PREFIX);
+    let is_unc = encoded.starts_with(&[b'\\' as u16, b'\\' as u16]);
+    let mut wide = Vec::with_capacity(encoded.len() + VERBATIM_PREFIX.len() + 1);
+    if !is_verbatim && !is_unc && path.is_absolute() {
+        wide.extend_from_slice(&VERBATIM_PREFIX);
+    }
+    wide.extend_from_slice(&encoded);
+    wide.push(0);
+    wide
+}
+
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: &std::path::Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    match encoded.strip_prefix(&VERBATIM_PREFIX[..]) {
+        Some(rest) => std::ffi::OsString::from_wide(rest).into(),
+        None => path.to_path_buf(),
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -886,6 +937,16 @@ mod tests {
         std::fs::create_dir_all(&long_root).unwrap();
         let script = long_root.join("stream fixture.cmd");
         assert!(script.as_os_str().encode_wide().count() > 260);
+        // `cmd.exe` can only reach a path this long through its 8.3 short name.
+        // Volumes created with 8.3 generation disabled cannot produce one, so
+        // the contract under test is unobservable there.
+        if windows_command_path(&script).is_err() {
+            eprintln!(
+                "skipping: {} has no 8.3 short name for a >260 character path",
+                long_root.display()
+            );
+            return;
+        }
         let stdout_path = temporary.path().join("stdout.txt");
         let stderr_path = temporary.path().join("stderr.txt");
         std::fs::write(
