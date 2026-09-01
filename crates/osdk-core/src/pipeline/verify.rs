@@ -3,19 +3,46 @@
 use std::io::Read;
 use std::path::Path;
 
+use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgo {
+    /// Legacy digest kept only for upstreams that publish nothing stronger.
+    ///
+    /// SHA-1 is collision-prone and must never be selected when a source also
+    /// offers SHA-256 or better. The only in-tree user is the Android SDK
+    /// repository, whose manifests carry a per-archive SHA-1 and no stronger
+    /// alternative.
+    Sha1,
     Sha256,
     Sha512,
     Blake3,
 }
 
+impl HashAlgo {
+    /// Whether this digest is strong enough to stand alone as supply-chain
+    /// evidence. SHA-1 is accepted only as an explicit per-source exception.
+    pub fn is_collision_resistant(self) -> bool {
+        !matches!(self, HashAlgo::Sha1)
+    }
+
+    /// The `<algo>:<hex>` token name used in lockfiles and locked options.
+    pub fn token(self) -> &'static str {
+        match self {
+            HashAlgo::Sha1 => "sha1",
+            HashAlgo::Sha256 => "sha256",
+            HashAlgo::Sha512 => "sha512",
+            HashAlgo::Blake3 => "blake3",
+        }
+    }
+}
+
 pub fn hash_bytes(bytes: &[u8], algo: HashAlgo) -> String {
     match algo {
+        HashAlgo::Sha1 => hex::encode(Sha1::digest(bytes)),
         HashAlgo::Sha256 => hex::encode(Sha256::digest(bytes)),
         HashAlgo::Sha512 => hex::encode(Sha512::digest(bytes)),
         HashAlgo::Blake3 => blake3::hash(bytes).to_hex().to_string(),
@@ -27,6 +54,17 @@ pub fn hash_file(path: &Path, algo: HashAlgo) -> Result<String> {
     let mut f = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
     let mut buf = [0u8; 64 * 1024];
     match algo {
+        HashAlgo::Sha1 => {
+            let mut h = Sha1::new();
+            loop {
+                let n = f.read(&mut buf).map_err(|e| Error::io(path, e))?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            Ok(hex::encode(h.finalize()))
+        }
         HashAlgo::Sha256 => {
             let mut h = Sha256::new();
             loop {

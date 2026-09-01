@@ -2153,12 +2153,7 @@ fn validate_unlocked_graph_identity(
 }
 
 fn format_checksum(checksum: &pipeline::Checksum) -> String {
-    let algorithm = match checksum.algo {
-        pipeline::HashAlgo::Sha256 => "sha256",
-        pipeline::HashAlgo::Sha512 => "sha512",
-        pipeline::HashAlgo::Blake3 => "blake3",
-    };
-    format!("{algorithm}:{}", checksum.hex)
+    format!("{}:{}", checksum.algo.token(), checksum.hex)
 }
 
 #[cfg(windows)]

@@ -3126,6 +3126,7 @@ dependencies = [
  "serde_json",
  "serde_json_canonicalizer",
  "serde_yaml",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "sigstore",
  "sigstore-verify",

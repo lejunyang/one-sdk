@@ -760,12 +760,7 @@ pub fn validate_safe_filename(label: &str, value: &str) -> Result<()> {
 }
 
 fn format_checksum(checksum: &Checksum) -> String {
-    let algorithm = match checksum.algo {
-        HashAlgo::Sha256 => "sha256",
-        HashAlgo::Sha512 => "sha512",
-        HashAlgo::Blake3 => "blake3",
-    };
-    format!("{algorithm}:{}", checksum.hex)
+    format!("{}:{}", checksum.algo.token(), checksum.hex)
 }
 
 pub fn parse_checksum(value: &str) -> Result<Checksum> {
@@ -773,6 +768,9 @@ pub fn parse_checksum(value: &str) -> Result<Checksum> {
         .split_once(':')
         .ok_or_else(|| Error::other(format!("invalid locked checksum `{value}`")))?;
     let algo = match algorithm {
+        // Legacy digest, accepted only because some upstreams (Android SDK)
+        // publish nothing stronger. Never emitted for other sources.
+        "sha1" => HashAlgo::Sha1,
         "sha256" => HashAlgo::Sha256,
         "sha512" => HashAlgo::Sha512,
         "blake3" => HashAlgo::Blake3,
@@ -811,11 +809,7 @@ fn read_cached_source_url(archive: &std::path::Path) -> Option<String> {
 }
 
 fn write_cached_checksum(archive: &std::path::Path, checksum: &Checksum) {
-    let algorithm = match checksum.algo {
-        HashAlgo::Sha256 => "sha256",
-        HashAlgo::Sha512 => "sha512",
-        HashAlgo::Blake3 => "blake3",
-    };
+    let algorithm = checksum.algo.token();
     let _ = std::fs::write(
         checksum_cache_path(archive),
         format!("{algorithm} {}\n", checksum.hex),
@@ -826,6 +820,9 @@ fn read_cached_checksum(archive: &std::path::Path) -> Option<Checksum> {
     let value = std::fs::read_to_string(checksum_cache_path(archive)).ok()?;
     let (algorithm, hex) = value.trim().split_once(' ')?;
     let algo = match algorithm {
+        // Legacy digest, accepted only because some upstreams (Android SDK)
+        // publish nothing stronger. Never emitted for other sources.
+        "sha1" => HashAlgo::Sha1,
         "sha256" => HashAlgo::Sha256,
         "sha512" => HashAlgo::Sha512,
         "blake3" => HashAlgo::Blake3,

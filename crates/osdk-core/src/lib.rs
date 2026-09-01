@@ -14,6 +14,7 @@
 //! - [`lock`]     — cross-process file locks.
 
 pub mod activate;
+pub mod android;
 pub mod backend;
 pub mod cache;
 pub mod config;

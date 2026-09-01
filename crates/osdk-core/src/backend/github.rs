@@ -1180,12 +1180,11 @@ fn github_artifact_url_hash(url: &str) -> String {
 }
 
 fn format_checksum(checksum: &pipeline::Checksum) -> String {
-    let algorithm = match checksum.algo {
-        pipeline::HashAlgo::Sha256 => "sha256",
-        pipeline::HashAlgo::Sha512 => "sha512",
-        pipeline::HashAlgo::Blake3 => "blake3",
-    };
-    format!("{algorithm}:{}", checksum.hex.to_ascii_lowercase())
+    format!(
+        "{}:{}",
+        checksum.algo.token(),
+        checksum.hex.to_ascii_lowercase()
+    )
 }
 
 async fn acquire_github_install_lock(locator: &InstallLocator) -> Result<crate::lock::FileLock> {
