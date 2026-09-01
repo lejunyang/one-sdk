@@ -2093,6 +2093,7 @@ npmRegistries:
         )
         .unwrap();
         std::fs::write(&explicit, "cafile=/secure/corporate-ca.pem\n").unwrap();
+        isolate_ancestors(temp.path());
 
         let home_value = home.display().to_string();
         let prefix_value = prefix.display().to_string();
@@ -2163,6 +2164,7 @@ npmRegistries:
             "proxy=http://proxy.example.test:8080\n",
         )
         .unwrap();
+        isolate_ancestors(temp.path());
         let home_value = home.display().to_string();
         let decision = native_registry_candidates(&ctx, &cwd, PackageManager::Npm, |key| {
             (key == "HOME").then(|| home_value.clone())
@@ -2202,6 +2204,7 @@ npmRegistries:
             "//packages.test/:keyfile=/secure/client.key\n",
         )
         .unwrap();
+        isolate_ancestors(temp.path());
         let home_value = home.display().to_string();
         let userprofile_value = userprofile.display().to_string();
         let decision =
@@ -2246,14 +2249,10 @@ npmRegistries:
         let ctx = test_ctx(temp.path(), vec![dead.clone(), healthy.clone()], false);
         let args = vec!["install".into()];
         let home_value = home.display().to_string();
-        let plan = plan(
-            &ctx,
-            temp.path(),
-            PackageManager::Npm,
-            "npm",
-            &args,
-            |key| (key == "HOME").then(|| home_value.clone()),
-        )
+        let cwd = isolated_cwd(temp.path());
+        let plan = plan(&ctx, &cwd, PackageManager::Npm, "npm", &args, |key| {
+            (key == "HOME").then(|| home_value.clone())
+        })
         .await
         .unwrap();
         let RegistryPlan::Selected { url, probes } = plan else {
@@ -2284,14 +2283,10 @@ npmRegistries:
         let ctx = test_ctx(temp.path(), candidates, false);
         let args = vec!["install".into()];
         let home_value = home.display().to_string();
-        let plan = plan(
-            &ctx,
-            temp.path(),
-            PackageManager::Npm,
-            "npm",
-            &args,
-            |key| (key == "HOME").then(|| home_value.clone()),
-        )
+        let cwd = isolated_cwd(temp.path());
+        let plan = plan(&ctx, &cwd, PackageManager::Npm, "npm", &args, |key| {
+            (key == "HOME").then(|| home_value.clone())
+        })
         .await
         .unwrap();
         let RegistryPlan::Unavailable { probes } = plan else {
@@ -2444,16 +2439,12 @@ npmRegistries:
         let candidate = format!("http://{}/", listener.local_addr().unwrap());
         let args = vec!["install".into()];
         let home_value = home.display().to_string();
+        let cwd = isolated_cwd(temp.path());
 
         let ctx = test_ctx(temp.path(), vec![candidate.clone()], false);
-        let private_plan = plan(
-            &ctx,
-            temp.path(),
-            PackageManager::Npm,
-            "npm",
-            &args,
-            |key| (key == "HOME").then(|| home_value.clone()),
-        )
+        let private_plan = plan(&ctx, &cwd, PackageManager::Npm, "npm", &args, |key| {
+            (key == "HOME").then(|| home_value.clone())
+        })
         .await
         .unwrap();
         assert!(matches!(private_plan, RegistryPlan::PassThrough { .. }));
@@ -2461,14 +2452,9 @@ npmRegistries:
 
         std::fs::remove_file(home.join(".npmrc")).unwrap();
         let ctx = test_ctx(temp.path(), vec![candidate], true);
-        let offline_plan = plan(
-            &ctx,
-            temp.path(),
-            PackageManager::Npm,
-            "npm",
-            &args,
-            |key| (key == "HOME").then(|| home_value.clone()),
-        )
+        let offline_plan = plan(&ctx, &cwd, PackageManager::Npm, "npm", &args, |key| {
+            (key == "HOME").then(|| home_value.clone())
+        })
         .await
         .unwrap();
         assert!(matches!(offline_plan, RegistryPlan::PassThrough { .. }));
@@ -2480,17 +2466,10 @@ npmRegistries:
         let temp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
         let args = vec!["install".into()];
-        let plan = plan(
-            &ctx,
-            temp.path(),
-            PackageManager::Pnpm,
-            "pnpm",
-            &args,
-            |key| {
-                (key == "pnpm_config_registry")
-                    .then(|| "https://private.test/token-redacted".into())
-            },
-        )
+        let cwd = isolated_cwd(temp.path());
+        let plan = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |key| {
+            (key == "pnpm_config_registry").then(|| "https://private.test/token-redacted".into())
+        })
         .await
         .unwrap();
         let RegistryPlan::PassThrough { reason } = plan else {
@@ -2542,6 +2521,26 @@ npmRegistries:
             cas: Arc::new(Cas::new(dirs.store)),
             show_progress: false,
         }
+    }
+
+    /// Stop the ancestor search for native package-manager configuration at
+    /// `root`. The platform temp directory can itself sit inside a home
+    /// directory that holds a real `.npmrc`, and `push_nearest` accepts the
+    /// first ancestor that has one. Empty sentinels keep that search inside the
+    /// fixture while contributing no registry, credential, or policy findings.
+    fn isolate_ancestors(root: &Path) {
+        for name in [".npmrc", ".yarnrc", ".yarnrc.yml", "bunfig.toml"] {
+            std::fs::write(root.join(name), b"").unwrap();
+        }
+    }
+
+    /// A working directory whose native-configuration search is confined to the
+    /// fixture rooted at `root`.
+    fn isolated_cwd(root: &Path) -> PathBuf {
+        isolate_ancestors(root);
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        cwd
     }
 
     fn unused_loopback_url() -> String {

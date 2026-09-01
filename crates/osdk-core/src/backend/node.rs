@@ -548,13 +548,23 @@ mod tests {
     fn bundled_npm_uses_the_shared_npm_cache() {
         let temp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(temp.path());
-        let env = NodeBackend
-            .exec_env(&ctx, &ToolVersion::new("node", "20.11.1"))
-            .unwrap();
+        // Resolve against an empty environment: `exec_env` intentionally keeps a
+        // user-provided npm_config_cache, and Windows environment names are
+        // case-insensitive, so an ambient NPM_CONFIG_CACHE would otherwise make
+        // this assertion depend on the developer's shell.
+        let env =
+            crate::cache::manager_env(&ctx.dirs.cache, &[("npm_config_cache", "npm")], |_| None);
         assert_eq!(
             PathBuf::from(env.get("npm_config_cache").unwrap()),
             ctx.dirs.cache.join("pkg/npm")
         );
+
+        // An npm_config_cache that osdk does not own stays untouched.
+        let preserved =
+            crate::cache::manager_env(&ctx.dirs.cache, &[("npm_config_cache", "npm")], |key| {
+                (key == "npm_config_cache").then(|| "/user/cache".to_string())
+            });
+        assert!(!preserved.contains_key("npm_config_cache"));
     }
 
     #[cfg(unix)]
