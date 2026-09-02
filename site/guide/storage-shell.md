@@ -139,6 +139,23 @@ hook 在 prompt/目录变化时重新计算环境。PATH 顺序为：
 它还导出 backend 环境、下游缓存和已启用的模型 adapter。osdk 保存所有被管理变量
 的原值；`deactivate` 移除 hook 并恢复环境。PowerShell hook 带重入保护。
 
+### 挑选要生成的 shim
+
+默认给每个可执行文件都生成 shim。`[settings.shims]` 可以收窄范围：
+
+```toml
+[settings.shims]
+include = []                      # 非空时只生成匹配项
+exclude = ["android-ndk:*"]       # 最后生效，因此总是胜出
+```
+
+模式支持 `*` 与 `?`，忽略大小写；带 `backend:name` 前缀时只作用于该 backend。
+排除只是不生成 shim——工具仍然装着，激活后仍在 PATH 上，`osdk exec` 也可用。
+改完执行 `osdk reshim` 生效。
+
+生成与路由读的是同一份判定，因此被排除的 backend 也不会在运行时抢到某个
+共享的命令名。
+
 ## 临时执行
 
 ```text

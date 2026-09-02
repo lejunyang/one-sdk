@@ -4134,6 +4134,22 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             println!("attestations = {}", s.attestations);
             println!("prerelease  = {}", s.prerelease);
             println!(
+                "shims.include = {}",
+                if s.shims.include.is_empty() {
+                    "all".to_string()
+                } else {
+                    s.shims.include.join(", ")
+                }
+            );
+            println!(
+                "shims.exclude = {}",
+                if s.shims.exclude.is_empty() {
+                    "none".to_string()
+                } else {
+                    s.shims.exclude.join(", ")
+                }
+            );
+            println!(
                 "python_catalog = {}",
                 s.python.catalog_url.as_deref().unwrap_or("built-in")
             );
@@ -5135,21 +5151,28 @@ fn routed_bin_names_for_version(
     backend: &dyn Backend,
     version: &ToolVersion,
 ) -> Result<Vec<String>> {
+    // Both shim generation and the reconciliation pass read names through
+    // here, so filtering once keeps them from disagreeing.
+    let keep = |names: Vec<String>| {
+        names
+            .into_iter()
+            .filter(|name| {
+                osdk_core::shim::shim_is_enabled(&ctx.config.settings.shims, &version.backend, name)
+            })
+            .collect::<Vec<_>>()
+    };
     if version.backend.contains(':') {
         let request = exact_request_for_version(version);
         let report = osdk_core::shim::scan_dynamic_installs(ctx)?;
-        return Ok(osdk_core::shim::validated_dynamic_install(
-            ctx,
-            &report,
-            &request,
-            &version.version,
-        )?
-        .bin_names());
+        return Ok(keep(
+            osdk_core::shim::validated_dynamic_install(ctx, &report, &request, &version.version)?
+                .bin_names(),
+        ));
     }
     let names = osdk_core::shim::routed_bin_names(ctx, backend, version)?
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-    Ok(names.into_iter().collect())
+    Ok(keep(names.into_iter().collect()))
 }
 
 fn managed_bin_paths(

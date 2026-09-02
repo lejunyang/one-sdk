@@ -161,6 +161,46 @@ the rest -- is still generated as usual.
 
 Any other duplicate name is still reported as a conflict for you to resolve.
 
+## Choosing which shims to generate
+
+Every executable a tool exposes gets a shim by default. Some SDKs are
+genuinely large -- one NDK ships 172 executables, a clang wrapper per API
+level -- but that is its real shape, and hiding them by default would break the
+ordinary way of selecting a compiler, so narrowing is opt-in.
+
+Exclude or restrict them in the config:
+
+```toml
+[settings.shims]
+exclude = ["apkanalyzer", "*-clang"]
+```
+
+A non-empty `include` shims only matching names, and `exclude` is applied last,
+so a broad include can be trimmed:
+
+```toml
+[settings.shims]
+include = ["*"]
+exclude = ["d8"]
+```
+
+Patterns accept `*` and `?` and ignore case. Qualifying a pattern with a
+backend narrows just that tool without listing each executable:
+
+```toml
+[settings.shims]
+exclude = ["android-ndk:*"]
+```
+
+Excluding a name only withholds the shim. The tool stays installed, remains on
+PATH under an activated shell, and `osdk exec` still reaches it. Run
+`osdk reshim` to apply a change, and `osdk config list` to see the current
+values.
+
+A command name shared by two families (above) goes to whichever family survives
+the filter: exclude `android-build-tools` and `d8` comes from cmdline-tools
+instead.
+
 ## Java runtime
 
 Google's Android packages ship **no JDK**. `sdkmanager`, `avdmanager`, `d8`,

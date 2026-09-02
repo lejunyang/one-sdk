@@ -153,6 +153,24 @@ adapters. osdk stores the original value of every managed variable; `deactivate`
 removes the hook and restores that environment. The PowerShell hook prevents
 re-entrant command lookup.
 
+### Choosing which shims to generate
+
+Every executable gets a shim by default. `[settings.shims]` narrows that:
+
+```toml
+[settings.shims]
+include = []                      # non-empty shims only matching names
+exclude = ["android-ndk:*"]       # applied last, so it always wins
+```
+
+Patterns accept `*` and `?` and ignore case; a `backend:name` pattern applies to
+that backend only. Excluding a name only withholds the shim -- the tool stays
+installed, stays on PATH once activated, and `osdk exec` still reaches it. Run
+`osdk reshim` to apply a change.
+
+Generation and routing read the same decision, so an excluded backend cannot
+win a shared command name at run time either.
+
 ## Temporary execution
 
 ```text

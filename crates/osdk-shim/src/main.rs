@@ -590,6 +590,12 @@ fn owning_backend(
     // shim would dispatch to a different copy than the one it was written for.
     let mut claimants: Vec<std::sync::Arc<dyn osdk_core::backend::Backend>> = Vec::new();
     for backend in registry.all() {
+        // Routing obeys the same shim filter as generation, so a family the
+        // user excluded cannot still be reached through a name that another
+        // family generated.
+        if !osdk_core::shim::shim_is_enabled(&ctx.config.settings.shims, backend.id(), tool_name) {
+            continue;
+        }
         if let Ok(versions) = backend.list_installed(ctx) {
             for v in versions {
                 let tv = ToolVersion::new(backend.id(), &v);

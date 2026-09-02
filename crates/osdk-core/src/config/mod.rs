@@ -75,6 +75,27 @@ pub struct Settings {
     pub java: JavaSettings,
     /// Pre-release resolution policy shared by supporting backends.
     pub prerelease: PrereleasePolicy,
+    /// Which tools get a shim.
+    pub shims: ShimSettings,
+}
+
+/// Which of an installed tool's executables get a shim.
+///
+/// Both lists are empty by default, which shims everything a tool exposes.
+/// Some SDKs are legitimately large -- an Android NDK ships 172 executables,
+/// one clang wrapper per API level -- and hiding them by default would break
+/// the ordinary way of selecting a compiler, so narrowing is opt-in.
+///
+/// Patterns accept `*` and `?`, are matched case-insensitively, and may be
+/// qualified with an owning backend (`android-ndk:*`) to narrow one tool
+/// without naming each executable.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShimSettings {
+    /// When non-empty, only matching names are shimmed.
+    pub include: Vec<String>,
+    /// Names to skip. Applied after `include`, so it always wins.
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -149,6 +170,7 @@ impl Default for Settings {
             python: PythonSettings::default(),
             java: JavaSettings::default(),
             prerelease: PrereleasePolicy::default(),
+            shims: ShimSettings::default(),
         }
     }
 }

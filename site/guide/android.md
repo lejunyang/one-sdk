@@ -139,6 +139,42 @@ Android 清单只为每个归档提供 **SHA-1**，不提供更强摘要。这�
 
 其余同名情况仍按冲突处理并报错，需要你自行取舍。
 
+## 挑选要生成的 shim
+
+默认给工具暴露的每个可执行文件都生成 shim。个别 SDK 确实很大——一个 NDK 就有
+172 个可执行文件（每个 API level 一个 clang 包装器）——但那是它真实的形状，
+默认隐藏会破坏"按 API level 选编译器"的正常用法，所以收窄是可选项。
+
+在配置里按需排除或限定：
+
+```toml
+[settings.shims]
+exclude = ["apkanalyzer", "*-clang"]
+```
+
+`include` 非空时只生成匹配的名字，`exclude` 最后生效，因此可以先放宽再修剪：
+
+```toml
+[settings.shims]
+include = ["*"]
+exclude = ["d8"]
+```
+
+模式支持 `*` 与 `?`，忽略大小写。加上 backend 前缀可以只收窄某一个工具，
+而不必逐个列出它的可执行文件：
+
+```toml
+[settings.shims]
+exclude = ["android-ndk:*"]
+```
+
+排除只是不生成 shim，工具本身仍然装着，激活 shell 后依旧在 PATH 上，
+`osdk exec` 也照常可用。改完执行 `osdk reshim` 生效，用
+`osdk config list` 可以查看当前取值。
+
+两个族共享的命令名（见上）由排除后仍在场的那一方接管：若排除了
+`android-build-tools`，`d8` 就转由 cmdline-tools 提供。
+
 ## Java 运行时
 
 Google 的 Android 包**不含 JDK**：`sdkmanager`、`avdmanager`、`d8`、`lint`
