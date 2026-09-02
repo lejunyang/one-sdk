@@ -1,2 +1,7 @@
+# `site` is a single standalone package, not a workspace root, but pnpm still
+# requires this key to be present and non-empty when the file exists.
+packages:
+  - .
+
 allowBuilds:
   esbuild: true
