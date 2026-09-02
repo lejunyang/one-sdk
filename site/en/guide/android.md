@@ -151,6 +151,16 @@ values embedded in it remain valid there. Measured throughput from Google
 directly was actually higher, so the mirror ranks below it; the effective order
 is still decided dynamically by [source selection](./sources-security).
 
+## Shared command names
+
+Two families ship the same R8 launchers: `build-tools` and `cmdline-tools` both
+provide `d8`, `r8`, `retrace` and `resourceshrinker`. With both installed, those
+names resolve to the `build-tools` copy, which is the one a build invokes.
+Everything unique to `cmdline-tools` -- `sdkmanager`, `avdmanager`, `lint` and
+the rest -- is still generated as usual.
+
+Any other duplicate name is still reported as a conflict for you to resolve.
+
 ## Environment variables
 
 | Tool | Exported |

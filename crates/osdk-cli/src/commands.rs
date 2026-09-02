@@ -3876,8 +3876,19 @@ pub(crate) fn generate_shims_for(
     };
     let names = routed_bin_names_for_version(&app.ctx, backend, tv)?;
     ensure_no_shim_conflicts(app, backend.id(), &names)?;
+    let owners = installed_shim_owners(app)?;
     let mut count = 0;
     for name in names {
+        // When a name is shared by several tools of one ecosystem, only the
+        // curated winner may own the shim; the other family would otherwise
+        // overwrite it depending on install order.
+        if let Some(owner_ids) = owners.get(&name) {
+            if let Some(winner) = shim_precedence_winner(&name, owner_ids) {
+                if winner != backend.id() {
+                    continue;
+                }
+            }
+        }
         osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim_bin)?;
         count += 1;
     }
@@ -5373,7 +5384,44 @@ fn is_real_shim_conflict(name: &str, owner_ids: &std::collections::BTreeSet<Stri
     {
         return false;
     }
+    if shim_precedence_winner(name, owner_ids).is_some() {
+        return false;
+    }
     true
+}
+
+/// The curated owner for a name that several tools of one ecosystem ship.
+///
+/// Two Android SDK families legitimately ship the same R8 launchers: the
+/// `build-tools` copy is the one a build invokes, while `cmdline-tools` bundles
+/// them alongside `sdkmanager`. Treating that as an unresolvable conflict would
+/// refuse every shim of whichever family is installed second -- including
+/// `sdkmanager` and `avdmanager`, which nothing else provides. Prefer the
+/// build-tools copy and keep the rest of both families working.
+fn shim_precedence_winner<'a>(
+    name: &str,
+    owner_ids: &'a std::collections::BTreeSet<String>,
+) -> Option<&'a str> {
+    const ANDROID_R8_TOOLS: &[&str] = &["d8", "r8", "retrace", "resourceshrinker"];
+    const ANDROID_R8_PRECEDENCE: &[&str] = &["android-build-tools", "android-cmdline-tools"];
+
+    if !ANDROID_R8_TOOLS.contains(&name) {
+        return None;
+    }
+    // Only decide when every claimant is one of the known Android families;
+    // an unexpected third owner is a real conflict the user must resolve.
+    if !owner_ids
+        .iter()
+        .all(|owner_id| ANDROID_R8_PRECEDENCE.contains(&owner_id.as_str()))
+    {
+        return None;
+    }
+    ANDROID_R8_PRECEDENCE.iter().find_map(|preferred| {
+        owner_ids
+            .iter()
+            .find(|owner_id| owner_id.as_str() == *preferred)
+            .map(String::as_str)
+    })
 }
 
 pub fn human_bytes(n: u64) -> String {
@@ -5463,6 +5511,51 @@ mod command_flow_tests {
         }
     }
 
+    #[test]
+    fn android_r8_tools_resolve_to_build_tools_instead_of_conflicting() {
+        // Google ships the same R8 launchers in two families. Without a
+        // precedence rule this refused every shim of whichever family was
+        // installed second, including sdkmanager, which nothing else provides.
+        let both = std::collections::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "android-cmdline-tools".to_string(),
+        ]);
+        for name in ["d8", "r8", "retrace", "resourceshrinker"] {
+            assert!(!is_real_shim_conflict(name, &both), "{name}");
+            assert_eq!(
+                shim_precedence_winner(name, &both),
+                Some("android-build-tools"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_owned_by_one_android_family_have_no_precedence_winner() {
+        // `sdkmanager` and `aapt2` are single-owner; they must stay ordinary.
+        let cmdline = std::collections::BTreeSet::from(["android-cmdline-tools".to_string()]);
+        assert!(!is_real_shim_conflict("sdkmanager", &cmdline));
+        assert_eq!(shim_precedence_winner("sdkmanager", &cmdline), None);
+        // A name outside the curated set stays a real conflict.
+        let unrelated = std::collections::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "node".to_string(),
+        ]);
+        assert!(is_real_shim_conflict("aapt2", &unrelated));
+    }
+
+    #[test]
+    fn an_unexpected_third_owner_is_still_a_real_conflict() {
+        // Precedence only decides among the known Android families; anything
+        // else must still be surfaced to the user.
+        let with_outsider = std::collections::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "android-cmdline-tools".to_string(),
+            "npm:some-d8-clone".to_string(),
+        ]);
+        assert_eq!(shim_precedence_winner("d8", &with_outsider), None);
+        assert!(is_real_shim_conflict("d8", &with_outsider));
+    }
     #[test]
     fn global_npm_use_options_ignore_project_scope_and_apply_cli_last() {
         let (_temporary, config) = layered_npm_tool_config();

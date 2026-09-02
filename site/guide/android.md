@@ -130,6 +130,15 @@ Android 清单只为每个归档提供 **SHA-1**，不提供更强摘要。这�
 实测官方直连吞吐反而更高，故镜像排在其后；实际顺序仍由
 [下载源选优](./sources-security)动态决定。
 
+## 共享命令名
+
+有两个包族会提供同名的 R8 启动器：`build-tools` 与 `cmdline-tools` 都带
+`d8`、`r8`、`retrace`、`resourceshrinker`。两个族都装时，这些名字由
+`build-tools` 提供的那份接管——它才是构建实际调用的副本；`cmdline-tools`
+独有的 `sdkmanager`、`avdmanager`、`lint` 等则照常生成。
+
+其余同名情况仍按冲突处理并报错，需要你自行取舍。
+
 ## 环境变量
 
 | 工具 | 导出变量 |
