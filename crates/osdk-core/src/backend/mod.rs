@@ -15,6 +15,7 @@ use crate::source::Source;
 use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
+pub mod android;
 pub mod aube_host;
 pub mod bun;
 pub mod cargo_package;

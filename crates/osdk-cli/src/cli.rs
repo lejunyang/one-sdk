@@ -241,6 +241,12 @@ pub enum Command {
         command: PythonCommand,
     },
 
+    /// Manage Android SDK-specific workflows.
+    Android {
+        #[command(subcommand)]
+        command: AndroidCommand,
+    },
+
     /// Manage local large-model snapshots.
     Model {
         #[command(subcommand)]
@@ -369,6 +375,35 @@ pub enum PythonCommand {
     Find {
         /// Optional Python request, e.g. `pypy-3.11` or `3.14+freethreaded`.
         request: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AndroidCommand {
+    /// Inspect and record Android SDK license acceptance.
+    Licenses {
+        #[command(subcommand)]
+        command: AndroidLicensesCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AndroidLicensesCommand {
+    /// Print the full agreement text a package requires, without installing.
+    Show {
+        /// Tool request, e.g. `android-ndk@29.0.14206865`.
+        tool: String,
+        /// Print only the license id and digest instead of the full text.
+        #[arg(long)]
+        digest_only: bool,
+    },
+    /// List which licenses are currently recorded as accepted.
+    Status,
+    /// Write the recorded acceptances into an SDK root for Gradle to reuse.
+    Export {
+        /// Destination SDK root; its `licenses/` directory is created.
+        #[arg(long, value_name = "DIR")]
+        sdk_root: std::path::PathBuf,
     },
 }
 

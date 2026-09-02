@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::App;
 use crate::cli::{
-    AliasCommand, ConfigCommand, ModelCommand, ModelEnvCommand, NodeCommand, PythonCommand,
-    RegistryCommand, RustCommand, RustItemCommand, RustOverrideCommand, RustToolchainCommand,
-    SourceCommand, TrustCommand,
+    AliasCommand, AndroidCommand, AndroidLicensesCommand, ConfigCommand, ModelCommand,
+    ModelEnvCommand, NodeCommand, PythonCommand, RegistryCommand, RustCommand, RustItemCommand,
+    RustOverrideCommand, RustToolchainCommand, SourceCommand, TrustCommand,
 };
 
 const GLOBAL_NPM_UNINSTALL_JOURNAL_DIR: &str = "transactions/global-npm-uninstall";
@@ -4163,6 +4163,114 @@ pub fn node(app: &App, command: NodeCommand) -> Result<()> {
 pub fn python(app: &App, command: PythonCommand) -> Result<()> {
     match command {
         PythonCommand::Find { request } => find_python(app, request.as_deref()),
+    }
+}
+
+pub async fn android(app: &App, command: AndroidCommand) -> Result<()> {
+    match command {
+        AndroidCommand::Licenses { command } => android_licenses(app, command).await,
+    }
+}
+
+async fn android_licenses(app: &App, command: AndroidLicensesCommand) -> Result<()> {
+    use osdk_core::android::license;
+    use osdk_core::backend::android::AndroidBackend;
+
+    let sdk_root = AndroidBackend::sdk_root(&app.ctx);
+    match command {
+        AndroidLicensesCommand::Show { tool, digest_only } => {
+            let request = ToolRequest::parse(&tool)?;
+            if !AndroidBackend::owns_id(&request.backend) {
+                return Err(anyhow!(
+                    "`{}` is not an Android SDK tool; expected e.g. `android-ndk@29.0.14206865`",
+                    request.backend
+                ));
+            }
+            let backend = app.registry.get(&request.backend)?;
+            let version = backend.resolve_version(&app.ctx, &request).await?;
+            // Reach the concrete backend for its manifest helpers.
+            let family = request
+                .backend
+                .strip_prefix(osdk_core::backend::android::ID_PREFIX)
+                .unwrap_or_default();
+            let android = AndroidBackend::all()
+                .into_iter()
+                .find(|candidate| candidate.family() == family)
+                .ok_or_else(|| anyhow!("unknown Android family `{family}`"))?;
+            let manifest = android.manifest(&app.ctx).await?;
+            let package = android.package(&manifest, &version.version)?;
+            let Some(license) = manifest.license_for(package) else {
+                println!("{} requires no license agreement", package.path);
+                return Ok(());
+            };
+            let recorded = license::is_recorded(&sdk_root, license);
+            println!("package:  {}", package.path);
+            println!("license:  {}", license.id);
+            println!("digest:   {}", license.hash());
+            println!("accepted: {}", if recorded { "yes" } else { "no" });
+            if !digest_only {
+                println!();
+                println!("{}", license.text);
+            }
+            if !recorded {
+                println!();
+                println!(
+                    "to accept: osdk install {tool} -o accept-license={}",
+                    license.id
+                );
+            }
+            Ok(())
+        }
+        AndroidLicensesCommand::Status => {
+            let dir = sdk_root.join(license::LICENSES_DIR);
+            let mut found = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_file() {
+                        found.push(entry.file_name().to_string_lossy().to_string());
+                    }
+                }
+            }
+            found.sort();
+            if found.is_empty() {
+                println!("no Android licenses recorded under {}", dir.display());
+                return Ok(());
+            }
+            println!("recorded under {}:", dir.display());
+            for id in found {
+                let body = std::fs::read_to_string(dir.join(&id)).unwrap_or_default();
+                let digests: Vec<&str> = body
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                println!("  {id}  ({})", digests.join(", "));
+            }
+            Ok(())
+        }
+        AndroidLicensesCommand::Export { sdk_root: dest } => {
+            let source = sdk_root.join(license::LICENSES_DIR);
+            let target = dest.join(license::LICENSES_DIR);
+            let entries = std::fs::read_dir(&source).map_err(|error| {
+                anyhow!("no recorded licenses at {}: {error}", source.display())
+            })?;
+            std::fs::create_dir_all(&target)?;
+            let mut copied = 0usize;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let to = target.join(entry.file_name());
+                std::fs::copy(&path, &to)?;
+                copied += 1;
+            }
+            println!(
+                "exported {copied} license record(s) to {}",
+                target.display()
+            );
+            Ok(())
+        }
     }
 }
 

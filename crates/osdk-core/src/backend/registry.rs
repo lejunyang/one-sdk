@@ -18,7 +18,7 @@ pub struct Registry {
 impl Registry {
     /// Build the registry with all compiled-in backends.
     pub fn new() -> Registry {
-        Self::from_backends(vec![
+        let mut backends: Vec<Arc<dyn Backend>> = vec![
             Arc::new(crate::backend::node::NodeBackend),
             Arc::new(crate::backend::npm_cli::NpmBackend),
             Arc::new(crate::backend::go::GoBackend),
@@ -32,8 +32,14 @@ impl Registry {
             Arc::new(crate::backend::yarn::YarnBackend),
             Arc::new(crate::backend::deno::DenoBackend),
             Arc::new(crate::backend::bun::BunBackend),
-        ])
-        .expect("compiled-in backend ids and aliases must be unique")
+        ];
+        // One backend per Android SDK package family (`android-ndk`, ...).
+        backends.extend(
+            crate::backend::android::AndroidBackend::all()
+                .into_iter()
+                .map(|backend| Arc::new(backend) as Arc<dyn Backend>),
+        );
+        Self::from_backends(backends).expect("compiled-in backend ids and aliases must be unique")
     }
 
     /// Build the registry with compiled-in backends plus schema-1 TOML

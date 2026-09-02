@@ -151,8 +151,28 @@ fn real_backend_fixture(id: &str, path: &std::path::Path) {
 #[tokio::test]
 async fn all_builtin_backend_ids_satisfy_the_lifecycle_contract() {
     let expected = [
-        "node", "npm", "go", "python", "java", "maven", "gradle", "kotlin", "rust", "pnpm", "yarn",
-        "deno", "bun",
+        "node",
+        "npm",
+        "go",
+        "python",
+        "java",
+        "maven",
+        "gradle",
+        "kotlin",
+        "rust",
+        "pnpm",
+        "yarn",
+        "deno",
+        "bun",
+        // One backend per Android SDK package family.
+        "android-platform-tools",
+        "android-cmdline-tools",
+        "android-build-tools",
+        "android-ndk",
+        "android-cmake",
+        "android-platforms",
+        "android-emulator",
+        "android-sources",
     ];
     assert_eq!(crate::backend::registry::Registry::new().ids(), expected);
 

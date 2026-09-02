@@ -313,6 +313,33 @@ osdk rust check --repair
 
 指南：[运行时与生态工作流](site/guide/runtimes.md)
 
+## 场景：管理 Android SDK
+
+直接从 Google 仓库安装 Android SDK 包（NDK、`adb`/`fastboot`、build-tools 等），
+并通过传参接受所需协议，因此在 CI 中也能无人值守运行：
+
+```bash
+# 先看协议内容，再决定是否接受
+osdk android licenses show android-ndk@29.0.14206865
+
+# 显式接受后安装
+osdk install android-ndk@29.0.14206865 -o accept-licenses=true
+osdk install android-platform-tools@37.0.1 -o accept-license=android-sdk-license
+
+# 使用工具
+osdk exec -t android-platform-tools@37.0.1 -- adb devices
+
+# 把接受记录交给 Gradle 复用
+osdk android licenses export --sdk-root /path/to/sdk
+```
+
+osdk 不会替你接受协议：未传接受选项时，安装会在下载任何内容之前停止。
+可用包族为 `android-ndk`、`android-platform-tools`、`android-build-tools`、
+`android-cmdline-tools`、`android-cmake`、`android-platforms`、
+`android-emulator`、`android-sources`。
+
+指南：[Android SDK 工具](site/guide/android.md)
+
 ## 场景：固定模型快照
 
 从 Hugging Face 或 ModelScope 拉取指定文件、校验本地快照，并获取快照路径：

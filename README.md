@@ -344,6 +344,35 @@ osdk rust check --repair
 
 Guide: [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
 
+## Scenario: manage the Android SDK
+
+Install Android SDK packages — the NDK, `adb`/`fastboot`, build-tools — straight
+from Google's repository, accepting the required agreements by flag so it works
+unattended in CI:
+
+```bash
+# Review the agreement before agreeing to anything
+osdk android licenses show android-ndk@29.0.14206865
+
+# Install with explicit consent
+osdk install android-ndk@29.0.14206865 -o accept-licenses=true
+osdk install android-platform-tools@37.0.1 -o accept-license=android-sdk-license
+
+# Use the tools
+osdk exec -t android-platform-tools@37.0.1 -- adb devices
+
+# Hand the recorded acceptance to Gradle
+osdk android licenses export --sdk-root /path/to/sdk
+```
+
+osdk never accepts a license on your behalf: without one of the accept options
+the install stops before downloading anything. Available families are
+`android-ndk`, `android-platform-tools`, `android-build-tools`,
+`android-cmdline-tools`, `android-cmake`, `android-platforms`,
+`android-emulator` and `android-sources`.
+
+Guide: [Android SDK tools](site/en/guide/android.md)
+
 ## Scenario: pin a model snapshot
 
 Pull selected files from Hugging Face or ModelScope, verify the local snapshot,
