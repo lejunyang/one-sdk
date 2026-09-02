@@ -174,6 +174,7 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         env.extend(backend.exec_env(&app.ctx, version)?);
     }
     paths.sort_by_key(|path| managed_runtime_path_priority(path));
+    let managed_paths = paths.clone();
     let existing_path = std::env::var_os("PATH").unwrap_or_default();
     paths.extend(std::env::split_paths(&existing_path));
     env.insert(
@@ -186,6 +187,11 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         .ok_or_else(|| anyhow!("exec requires a command"))?;
     let (managed_program, managed_args) =
         resolve_managed_launcher_alias(app, &resolved, program, args)?;
+    // A bare name is normally left to the OS, but Windows `CreateProcess` does
+    // not apply PATHEXT, so a tool shipped only as a `.cmd`/`.bat` launcher
+    // (the NDK's per-API clang wrappers, for one) would not be found even
+    // though it is on the PATH we just built. Resolve it ourselves first.
+    let managed_program = resolve_program_in_dirs(&managed_program, &managed_paths);
     apply_package_registry_plan(app, &resolved, program, args, &mut env).await?;
     let status = command_for_program(&managed_program)
         .args(&managed_args)
@@ -254,6 +260,41 @@ fn find_managed_executable(
             .map(|candidate| directory.join(candidate))
             .find(|candidate| candidate.is_file())
     })
+}
+
+/// Resolve a bare program name against managed directories.
+///
+/// Only bare names are resolved: an explicit path is the caller's choice and is
+/// returned untouched. On Windows the executable extensions are tried in
+/// PATHEXT-like order so a `.cmd` wrapper is reachable by its plain name; on
+/// Unix the OS already handles this, so the input is returned unchanged.
+fn resolve_program_in_dirs(
+    program: &std::path::Path,
+    directories: &[std::path::PathBuf],
+) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        if program.components().count() != 1 {
+            return program.to_path_buf();
+        }
+        let name = program.to_string_lossy();
+        for directory in directories {
+            for candidate in [
+                format!("{name}.exe"),
+                format!("{name}.cmd"),
+                format!("{name}.bat"),
+                name.to_string(),
+            ] {
+                let path = directory.join(&candidate);
+                if path.is_file() {
+                    return path;
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = directories;
+    program.to_path_buf()
 }
 
 fn command_for_program(program: &std::path::Path) -> std::process::Command {

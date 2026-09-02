@@ -373,7 +373,9 @@ accept-licenses=true to install it anyway",
             // The NDK exposes its drivers through a toolchain directory rather
             // than a top-level `bin`.
             "ndk" => vec![
-                root.join("toolchains/llvm/prebuilt")
+                root.join("toolchains")
+                    .join("llvm")
+                    .join("prebuilt")
                     .join(ndk_prebuilt_dir(ctx.platform.os))
                     .join("bin"),
                 root.clone(),
@@ -531,6 +533,25 @@ mod tests {
         let mut bogus = ToolVersion::new("android-ndk", "30.0.1");
         bogus.options.insert(CHANNEL_OPTION.into(), "wat".into());
         assert_eq!(AndroidBackend::requested_channel(&bogus), Channel::Stable);
+    }
+
+    #[test]
+    fn ndk_bin_path_uses_native_separators_only() {
+        // A mixed-separator path is rejected by Windows (os error 123), so the
+        // toolchain directory must be joined one component at a time.
+        let root = PathBuf::from("root");
+        let joined = root
+            .join("toolchains")
+            .join("llvm")
+            .join("prebuilt")
+            .join(ndk_prebuilt_dir(crate::platform::Os::Windows))
+            .join("bin");
+        let rendered = joined.to_string_lossy().to_string();
+        assert!(
+            !rendered.contains('/'),
+            "path must not embed a foreign separator: {rendered}"
+        );
+        assert_eq!(joined.components().count(), 6);
     }
 
     #[test]
