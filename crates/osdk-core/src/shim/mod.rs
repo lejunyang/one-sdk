@@ -44,6 +44,48 @@ pub fn routed_bin_names(
     Ok(names.into_iter().collect())
 }
 
+/// The curated owner for an executable name that several tools of one
+/// ecosystem ship, or `None` when no rule applies.
+///
+/// Two Android SDK families legitimately ship the same R8 launchers: the
+/// `build-tools` copy is the one a build invokes, while `cmdline-tools` bundles
+/// them alongside `sdkmanager`. Without a rule this is an unresolvable
+/// conflict, which would refuse every shim of whichever family was installed
+/// second -- including `sdkmanager` and `avdmanager`, which nothing else
+/// provides.
+///
+/// Shim generation and shim routing must agree, otherwise the generated shim
+/// would dispatch to a different copy than the one it was written for, so both
+/// sides call this function.
+pub fn precedence_winner<'a>(name: &str, owner_ids: &'a BTreeSet<String>) -> Option<&'a str> {
+    const ANDROID_R8_TOOLS: &[&str] = &["d8", "r8", "retrace", "resourceshrinker"];
+    const ANDROID_R8_PRECEDENCE: &[&str] = &["android-build-tools", "android-cmdline-tools"];
+
+    // This resolves contention, so a sole owner leaves nothing to decide.
+    // Returning a winner there would also imply an opinion about a name no
+    // other tool claims.
+    if owner_ids.len() < 2 {
+        return None;
+    }
+    if !ANDROID_R8_TOOLS.contains(&name) {
+        return None;
+    }
+    // Only decide when every claimant is one of the known Android families;
+    // an unexpected third owner is a real conflict the user must resolve.
+    if !owner_ids
+        .iter()
+        .all(|owner_id| ANDROID_R8_PRECEDENCE.contains(&owner_id.as_str()))
+    {
+        return None;
+    }
+    ANDROID_R8_PRECEDENCE.iter().find_map(|preferred| {
+        owner_ids
+            .iter()
+            .find(|owner_id| owner_id.as_str() == *preferred)
+            .map(String::as_str)
+    })
+}
+
 /// Scan all persisted dynamic-tool manifests under the installs tree.
 pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
     inventory::scan_installs(&ctx.dirs.installs, &ScanOptions::default())
@@ -443,6 +485,43 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    // Generation and routing must agree on the owner of a shared launcher.
+    // If they diverge, the shim dispatches to a copy other than the one it
+    // was generated for, which is invisible until a build misbehaves.
+    #[test]
+    fn shared_android_r8_launchers_resolve_to_build_tools() {
+        let both = super::BTreeSet::from([
+            "android-cmdline-tools".to_string(),
+            "android-build-tools".to_string(),
+        ]);
+        for name in ["d8", "r8", "retrace", "resourceshrinker"] {
+            assert_eq!(
+                super::precedence_winner(name, &both),
+                Some("android-build-tools"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn precedence_declines_single_owners_and_unknown_claimants() {
+        // Sole owner: nothing to decide, so ordinary handling applies.
+        let only_cmdline = super::BTreeSet::from(["android-cmdline-tools".to_string()]);
+        assert_eq!(super::precedence_winner("d8", &only_cmdline), None);
+        // Names outside the curated set stay real conflicts.
+        let both = super::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "android-cmdline-tools".to_string(),
+        ]);
+        assert_eq!(super::precedence_winner("aapt2", &both), None);
+        // An unexpected third claimant must not be silently overridden.
+        let with_outsider = super::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "android-cmdline-tools".to_string(),
+            "npm:d8-lookalike".to_string(),
+        ]);
+        assert_eq!(super::precedence_winner("d8", &with_outsider), None);
+    }
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Arc;

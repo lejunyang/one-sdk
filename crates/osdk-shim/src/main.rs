@@ -569,20 +569,36 @@ fn owning_backend(
             return Some(backend);
         }
     }
-    // Scan compiled-in backends' installed versions' bin names.
+    // Scan compiled-in backends' installed versions' bin names. Collect every
+    // claimant rather than taking the first: when two families of one ecosystem
+    // ship the same launcher, registry order would otherwise decide, and the
+    // shim would dispatch to a different copy than the one it was written for.
+    let mut claimants: Vec<std::sync::Arc<dyn osdk_core::backend::Backend>> = Vec::new();
     for backend in registry.all() {
         if let Ok(versions) = backend.list_installed(ctx) {
             for v in versions {
                 let tv = ToolVersion::new(backend.id(), &v);
                 if let Ok(names) = backend.bin_names(ctx, &tv) {
                     if names.iter().any(|n| n == tool_name) {
-                        return Some(backend.clone());
+                        claimants.push(backend.clone());
+                        break;
                     }
                 }
             }
         }
     }
-    None
+    if claimants.len() > 1 {
+        let owner_ids = claimants
+            .iter()
+            .map(|backend| backend.id().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(winner) = osdk_core::shim::precedence_winner(tool_name, &owner_ids) {
+            if let Some(backend) = claimants.iter().find(|backend| backend.id() == winner) {
+                return Some(backend.clone());
+            }
+        }
+    }
+    claimants.into_iter().next()
 }
 
 fn dynamic_backend_for_bin(
