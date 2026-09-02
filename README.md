@@ -371,6 +371,10 @@ the install stops before downloading anything. Available families are
 `android-cmdline-tools`, `android-cmake`, `android-platforms`,
 `android-emulator` and `android-sources`.
 
+The Android packages contain no JDK, so `sdkmanager`, `avdmanager`, `d8` and
+the other jar-backed tools run against an osdk-managed `java` when the
+environment has no `JAVA_HOME` of its own. Install one with `osdk install java`.
+
 Guide: [Android SDK tools](site/en/guide/android.md)
 
 ## Scenario: pin a model snapshot

@@ -237,6 +237,21 @@ fn real_main() -> i32 {
     // Remove both lexical and canonical matches so symlinked activation paths
     // cannot retain the shim directory under a different spelling.
     remove_env_path(&mut exec_env, &ctx.dirs.shims());
+    // JVM tools that bundle no runtime abort unless a JDK is visible. An
+    // activated shell already exports JAVA_HOME, and a JAVA_HOME the user set
+    // themselves is a deliberate choice, so only fill the gap when nothing
+    // else has. Injected before the tool's own bins so those stay in front.
+    if osdk_core::shim::requires_external_jdk(backend.id())
+        && !exec_env.contains_key("JAVA_HOME")
+        && std::env::var_os("JAVA_HOME").is_none()
+    {
+        if let Some((jdk_env, jdk_paths)) =
+            osdk_core::shim::managed_jdk_env(&ctx, &registry, &idiomatic_probe_cwd)
+        {
+            exec_env.extend(jdk_env);
+            prepend_env_path(&mut exec_env, jdk_paths);
+        }
+    }
     if backend.id().starts_with("npm:") {
         let node_backend = registry.get("node").unwrap();
         let node_bin_paths = match manifest_bound_node_bin_paths(

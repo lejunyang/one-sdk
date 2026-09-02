@@ -173,6 +173,23 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
         )?);
         env.extend(backend.exec_env(&app.ctx, version)?);
     }
+    // JVM tools that bundle no runtime abort unless a JDK is visible, and no
+    // backend can describe another backend's install. Respect an existing
+    // JAVA_HOME, whether it came from activation or from the user.
+    if resolved
+        .iter()
+        .any(|(_, version)| osdk_core::shim::requires_external_jdk(&version.backend))
+        && !env.contains_key("JAVA_HOME")
+        && std::env::var_os("JAVA_HOME").is_none()
+    {
+        let cwd = std::env::current_dir()?;
+        if let Some((jdk_env, jdk_paths)) =
+            osdk_core::shim::managed_jdk_env(&app.ctx, &app.registry, &cwd)
+        {
+            env.extend(jdk_env);
+            paths.extend(jdk_paths);
+        }
+    }
     paths.sort_by_key(|path| managed_runtime_path_priority(path));
     let managed_paths = paths.clone();
     let existing_path = std::env::var_os("PATH").unwrap_or_default();

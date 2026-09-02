@@ -338,6 +338,9 @@ osdk 不会替你接受协议：未传接受选项时，安装会在下载任何
 `android-cmdline-tools`、`android-cmake`、`android-platforms`、
 `android-emulator`、`android-sources`。
 
+Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基于 jar 的工具
+会在环境未设 `JAVA_HOME` 时使用 osdk 管理的 `java`。用 `osdk install java` 装一个即可。
+
 指南：[Android SDK 工具](site/guide/android.md)
 
 ## 场景：固定模型快照

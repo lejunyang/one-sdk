@@ -139,6 +139,27 @@ Android 清单只为每个归档提供 **SHA-1**，不提供更强摘要。这�
 
 其余同名情况仍按冲突处理并报错，需要你自行取舍。
 
+## Java 运行时
+
+Google 的 Android 包**不含 JDK**：`sdkmanager`、`avdmanager`、`d8`、`lint`
+等是包在 jar 外面的启动脚本（仅 `cmdline-tools` 就有 125 个 jar），包里没有
+`java`，缺少 JDK 时会直接退出。
+
+osdk 会自动补上：运行这类工具时，若环境里还没有 `JAVA_HOME`，就使用 osdk
+管理的 JDK——优先当前目录选定的版本，否则取最新的一个已安装版本。
+
+```powershell
+osdk install java
+osdk install android-cmdline-tools -o accept-licenses=true
+sdkmanager --version   # 无需先激活，也无需手动设 JAVA_HOME
+```
+
+已有的 `JAVA_HOME` 一律不动，无论它来自 shell 激活还是你自己设置，
+因此可以用系统 JDK 覆盖。未安装任何托管 JDK 时，工具仍会报它自己的缺少
+JDK 错误，此时装一个 `java` 即可。
+
+`maven`、`gradle`、`kotlin` 同理。
+
 ## 环境变量
 
 | 工具 | 导出变量 |

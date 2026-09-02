@@ -161,6 +161,29 @@ the rest -- is still generated as usual.
 
 Any other duplicate name is still reported as a conflict for you to resolve.
 
+## Java runtime
+
+Google's Android packages ship **no JDK**. `sdkmanager`, `avdmanager`, `d8`,
+`lint` and friends are launchers around bundled jars -- 125 of them in
+`cmdline-tools` alone -- with no `java` binary, so they exit immediately when no
+JDK is visible.
+
+osdk fills that in: when one of these tools runs and the environment has no
+`JAVA_HOME`, it uses an osdk-managed JDK, preferring the version selected for
+the current directory and otherwise the newest installed one.
+
+```powershell
+osdk install java
+osdk install android-cmdline-tools -o accept-licenses=true
+sdkmanager --version   # no activation, no manual JAVA_HOME
+```
+
+An existing `JAVA_HOME` is never replaced, whether it came from shell
+activation or from you, so a system JDK still wins. With no managed JDK
+installed the tool reports its own missing-JDK error; install `java` to fix it.
+
+The same applies to `maven`, `gradle` and `kotlin`.
+
 ## Environment variables
 
 | Tool | Exported |

@@ -86,6 +86,80 @@ pub fn precedence_winner<'a>(name: &str, owner_ids: &'a BTreeSet<String>) -> Opt
     })
 }
 
+/// Backends whose tools run on a JVM but ship no runtime of their own.
+///
+/// Android distributes `sdkmanager`, `avdmanager`, `d8` and friends as thin
+/// launchers around bundled jars -- 125 of them in `cmdline-tools` alone -- and
+/// includes no `java` binary, so they abort before doing anything unless an
+/// external JDK is visible. Maven, Gradle and Kotlin are in the same position.
+///
+/// A backend cannot describe another backend's install, so the JDK has to be
+/// supplied by whoever launches the tool.
+pub fn requires_external_jdk(backend_id: &str) -> bool {
+    matches!(
+        backend_id,
+        "maven" | "gradle" | "kotlin" | "android-build-tools" | "android-cmdline-tools"
+    )
+}
+
+/// The JDK environment osdk would activate, for launching a tool whose own
+/// backend cannot describe one.
+///
+/// Prefers the version selected for `cwd`, falling back to the newest install,
+/// which is how package-manager shims already locate a managed Node. Returns
+/// the JDK's own `exec_env` rather than rebuilding `JAVA_HOME`, so quirks such
+/// as macOS' `Contents/Home` layout stay in one place.
+pub fn managed_jdk_env(
+    ctx: &Ctx,
+    registry: &crate::backend::registry::Registry,
+    cwd: &Path,
+) -> Option<(BTreeMap<String, String>, Vec<std::path::PathBuf>)> {
+    let java = registry.get("java").ok()?;
+    let installed = java.list_installed(ctx).ok()?;
+    if installed.is_empty() {
+        return None;
+    }
+    let selected = crate::version::resolver::resolve_active(
+        java.id(),
+        cwd,
+        &ctx.config.tools,
+        java.idiomatic_files(),
+    )
+    .and_then(|active| installed_matching(&active.spec, active.is_range, &installed))
+    .or_else(|| installed.last().cloned())?;
+    let version = ToolVersion::new(java.id(), selected);
+    let env = java.exec_env(ctx, &version).ok()?;
+    let paths = java.bin_paths(ctx, &version).ok()?;
+    Some((env, paths))
+}
+
+fn installed_matching(spec: &str, is_range: bool, installed: &[String]) -> Option<String> {
+    // A java spec may carry a distribution prefix (`temurin-21`) that install
+    // directories do not use.
+    let spec = spec.split_once('-').map_or(spec, |(left, right)| {
+        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphabetic()) && !right.is_empty() {
+            right
+        } else {
+            spec
+        }
+    });
+    let parsed = if is_range {
+        VersionSpec::parse_range(spec).ok()?
+    } else {
+        VersionSpec::parse(spec)
+    };
+    match &parsed {
+        VersionSpec::Exact(exact) => installed.iter().find(|value| *value == exact).cloned(),
+        _ => {
+            let infos: Vec<_> = installed
+                .iter()
+                .map(crate::version::VersionInfo::stable)
+                .collect();
+            crate::version::select_version(&parsed, &infos).map(|info| info.version.clone())
+        }
+    }
+}
+
 /// Scan all persisted dynamic-tool manifests under the installs tree.
 pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
     inventory::scan_installs(&ctx.dirs.installs, &ScanOptions::default())
@@ -485,6 +559,119 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jvm_tools_without_a_bundled_runtime_are_flagged() {
+        // Android ships these as launchers around jars with no `java` binary,
+        // and the JVM build tools are in the same position.
+        for id in [
+            "android-build-tools",
+            "android-cmdline-tools",
+            "maven",
+            "gradle",
+            "kotlin",
+        ] {
+            assert!(super::requires_external_jdk(id), "{id}");
+        }
+        // Tools that carry their own runtime, or need none, must not be
+        // handed someone else's JDK.
+        for id in [
+            "java",
+            "node",
+            "python",
+            "android-ndk",
+            "android-platform-tools",
+        ] {
+            assert!(!super::requires_external_jdk(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn managed_jdk_prefers_the_version_selected_for_the_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let registry = crate::backend::registry::Registry::new();
+        let java = registry.get("java").unwrap();
+
+        // With nothing installed there is nothing to offer.
+        let mut ctx = jdk_test_ctx(temporary.path(), &[]);
+        assert!(super::managed_jdk_env(&ctx, &registry, &project).is_none());
+
+        // Two installs present: the newest is the fallback.
+        for version in ["17.0.1+9", "21.0.2+13"] {
+            let home = ctx.dirs.install_path(java.id(), version);
+            std::fs::create_dir_all(home.join("bin")).unwrap();
+            std::fs::write(home.join(".osdk-complete"), b"").unwrap();
+        }
+        let (env, paths) = super::managed_jdk_env(&ctx, &registry, &project).unwrap();
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some(
+                ctx.dirs
+                    .install_path(java.id(), "21.0.2+13")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(!paths.is_empty());
+
+        // An explicit selection wins over the newest install, so a project
+        // pinned to an older JDK builds against that one.
+        ctx.config.tools.insert("java".into(), "17.0.1+9".into());
+        let (env, _) = super::managed_jdk_env(&ctx, &registry, &project).unwrap();
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some(
+                ctx.dirs
+                    .install_path(java.id(), "17.0.1+9")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+
+        // A distribution-prefixed spec addresses the same install.
+        ctx.config
+            .tools
+            .insert("java".into(), "temurin-17.0.1+9".into());
+        let (env, _) = super::managed_jdk_env(&ctx, &registry, &project).unwrap();
+        assert!(env
+            .get("JAVA_HOME")
+            .is_some_and(|home| home.ends_with("17.0.1+9")));
+    }
+
+    fn jdk_test_ctx(root: &std::path::Path, tools: &[(&str, &str)]) -> Ctx {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        Ctx {
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            dirs,
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: tools
+                    .iter()
+                    .map(|(tool, version)| (tool.to_string(), version.to_string()))
+                    .collect(),
+                tool_configs: Default::default(),
+                global_tools: Default::default(),
+                global_tool_configs: Default::default(),
+                tool_origins: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
     // Generation and routing must agree on the owner of a shared launcher.
     // If they diverge, the shim dispatches to a copy other than the one it
     // was generated for, which is invisible until a build misbehaves.
