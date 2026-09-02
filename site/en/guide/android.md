@@ -92,6 +92,24 @@ not hard-code them. A consequence worth knowing: when the agreement text
 changes, an older acceptance record no longer counts and consent is requested
 again — which is what the official tooling does too.
 
+### Lock files and teams
+
+License acceptance is **not** written to `osdk.lock`. A lock file is committed
+and replayed on other machines, so recording acceptance there would accept
+Google's terms on a teammate's behalf. The lock therefore carries only the
+artifact and its checksum, and each machine consents for itself:
+
+```bash
+# A teammate installing for the first time in a repo with a committed lock
+osdk install                            # stops, and says consent is needed
+osdk install -o accept-licenses=true    # consents, then installs the locked artifact
+osdk install                            # fine from now on; consent is recorded locally
+```
+
+Passing only accept options still replays the lock, because consent does not
+select an artifact. Mixing in something that does, such as `channel`, restores
+the usual behaviour of bypassing the lock.
+
 ## Channels
 
 The manifest sorts packages into stable, beta, dev and canary channels. osdk

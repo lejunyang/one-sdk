@@ -81,6 +81,21 @@ osdk android licenses export --sdk-root /path/to/sdk
 快照，Google 修订措辞后即失效；osdk 不硬编码这些值。因此协议文本更新后，旧的接受
 记录会被视为未接受并重新要求确认——这与官方工具行为一致。
 
+### 锁文件与团队协作
+
+许可接受**不会**写入 `osdk.lock`。锁文件会提交并在其他机器上回放，把接受记录进去等于替
+队友同意 Google 的协议，因此它只记录制品与校验和，接受由每台机器各自给出：
+
+```bash
+# 已提交 osdk.lock 的仓库，队友首次安装
+osdk install                            # 被拦下，并提示需要接受
+osdk install -o accept-licenses=true    # 显式同意后，安装锁定的制品
+osdk install                            # 之后照常，接受已记录在本机
+```
+
+仅传接受选项时锁文件照常生效（接受不是制品选择项）；一旦混入 `channel` 等真正影响
+选型的选项，就回到"绕过锁文件"的既有行为。
+
 ## 渠道
 
 清单把包分在 stable / beta / dev / canary 四个渠道。osdk 默认只安装 stable，

@@ -264,34 +264,70 @@ impl Backend for AndroidBackend {
 
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
-        if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
+        // A locked plan pins the exact artifact, but it must never stand in for
+        // consent: lock files are committed and replayed on other machines, and
+        // deliberately carry no acceptance. Every machine agrees for itself, so
+        // the gate runs before the plan is replayed rather than after.
+        let locked = pipeline::locked_install_plan(self.id(), tv, true)?;
+        let manifest = self.manifest(ctx).await?;
+        let sdk_root = Self::sdk_root(ctx);
+        let acceptance = Self::acceptance(tv);
+
+        // Google prunes superseded revisions, so a pinned version can outlive
+        // its manifest entry. That is not a reason to skip the gate.
+        let package = match self.package(&manifest, &tv.version) {
+            Ok(package) => Some(package),
+            Err(error) => {
+                if locked.is_none() {
+                    return Err(error);
+                }
+                None
+            }
+        };
+
+        match package {
+            Some(package) => {
+                // Refuse non-stable packages unless the request opted in, so a
+                // preview build is never installed by a bare version request.
+                let allowed = Self::requested_channel(tv);
+                if package.channel > allowed {
+                    return Err(Error::other(format!(
+                        "{} is published on the {} channel; pass channel={} to install it",
+                        package.path,
+                        package.channel.as_str(),
+                        package.channel.as_str()
+                    )));
+                }
+
+                // License gate, before any bytes are fetched.
+                let pending = license::pending(&manifest, &[package], &acceptance, &sdk_root);
+                if !pending.is_empty() {
+                    return Err(license::blocked_error(&pending));
+                }
+                license::record_accepted(&manifest, &[package], &acceptance, &sdk_root)?;
+            }
+            None => {
+                // Without a manifest entry the applicable agreement is unknown,
+                // so no stored record can prove consent. Require it in this
+                // invocation instead of assuming it.
+                if acceptance == Acceptance::None {
+                    return Err(Error::other(format!(
+                        "{} {} is pinned by the lock file but is no longer in Google's \\
+manifest, so the license it requires cannot be determined; pass \\
+accept-licenses=true to install it anyway",
+                        self.id(),
+                        tv.version
+                    )));
+                }
+            }
+        }
+
+        if let Some(plan) = locked {
             pipeline::run(&plan, &pipeline_ctx(ctx)).await?;
             return Ok(());
         }
 
-        let manifest = self.manifest(ctx).await?;
         let package = self.package(&manifest, &tv.version)?;
-
-        // Refuse non-stable packages unless the request opted in, so a preview
-        // build is never installed by a bare version request.
-        let allowed = Self::requested_channel(tv);
-        if package.channel > allowed {
-            return Err(Error::other(format!(
-                "{} is published on the {} channel; pass channel={} to install it",
-                package.path,
-                package.channel.as_str(),
-                package.channel.as_str()
-            )));
-        }
-
-        // License gate, before any bytes are fetched.
-        let sdk_root = Self::sdk_root(ctx);
-        let acceptance = Self::acceptance(tv);
-        let pending = license::pending(&manifest, &[package], &acceptance, &sdk_root);
-        if !pending.is_empty() {
-            return Err(license::blocked_error(&pending));
-        }
-        license::record_accepted(&manifest, &[package], &acceptance, &sdk_root)?;
 
         let archive = package.archive_for(&ctx.platform).ok_or_else(|| {
             Error::other(format!(

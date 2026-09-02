@@ -37,9 +37,23 @@ fn apply_source_override(app: &mut App, tool: &str) {
     }
 }
 
+/// Whether the supplied options convey nothing but license consent. An empty
+/// list qualifies, so the plain `osdk install` path is unchanged.
+fn opts_are_only_consent(opts: &[String]) -> bool {
+    opts.iter().all(|opt| {
+        opt.split_once('=')
+            .is_some_and(|(key, _)| crate::lockfile::CONSENT_OPTIONS.contains(&key.trim()))
+    })
+}
+
 pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let explicit = !tools.is_empty();
-    let use_lock = !explicit && opts.is_empty();
+    // Options normally mean the caller wants something the lock file does not
+    // describe, so replay is skipped. Consent is the exception: it records a
+    // decision rather than selecting an artifact, and is deliberately absent
+    // from the lock, so requiring it must not make a committed lock file
+    // impossible to install from.
+    let use_lock = !explicit && opts_are_only_consent(&opts);
     let (requests, trusted_replay) = if use_lock {
         match requests_from_lock(app)? {
             Some(requests) => (requests, true),
@@ -6008,6 +6022,28 @@ mod command_flow_tests {
             remaining[0].options[LOCKED_NATIVE_RUNTIME_VERSION_OPTION],
             "1.24.6"
         );
+    }
+
+    #[test]
+    fn consent_only_opts_still_allow_lockfile_replay() {
+        // Consent is absent from the lock by design, so demanding it must not
+        // make a committed lock file unusable.
+        assert!(opts_are_only_consent(&[]));
+        assert!(opts_are_only_consent(&["accept-licenses=true".into()]));
+        assert!(opts_are_only_consent(&[
+            "accept-licenses=true".into(),
+            "accept-license=android-sdk-license".into(),
+        ]));
+
+        // Anything that actually selects an artifact keeps the old behaviour of
+        // bypassing the lock.
+        assert!(!opts_are_only_consent(&["channel=beta".into()]));
+        assert!(!opts_are_only_consent(&[
+            "accept-licenses=true".into(),
+            "profile=minimal".into(),
+        ]));
+        // A malformed option is not consent either.
+        assert!(!opts_are_only_consent(&["accept-licenses".into()]));
     }
 
     #[test]

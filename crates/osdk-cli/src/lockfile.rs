@@ -1510,10 +1510,20 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
     save(path, &lockfile)
 }
 
+/// Options that record a human decision rather than an artifact input. A lock
+/// file is committed and replayed on other machines, so persisting these would
+/// let one person's agreement silently stand in for everybody else's. They are
+/// dropped on write and must be supplied again per machine.
+pub(crate) const CONSENT_OPTIONS: &[&str] = &["accept-licenses", "accept-license"];
+
 fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     options
         .iter()
-        .filter(|(key, _)| !key.starts_with("__osdk_") && key.as_str() != "catalog-url")
+        .filter(|(key, _)| {
+            !key.starts_with("__osdk_")
+                && key.as_str() != "catalog-url"
+                && !CONSENT_OPTIONS.contains(&key.as_str())
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
@@ -3456,6 +3466,28 @@ module = "example.com/acme/tool"
             .unwrap_err()
             .to_string()
             .contains("cannot carry"));
+    }
+
+    #[test]
+    fn license_consent_is_never_persisted_into_the_lockfile() {
+        // A lock file travels to other machines. Recording one person's
+        // agreement would accept Google's terms for everyone who replays it.
+        let mut version = ToolVersion::new("android-platform-tools", "37.0.1");
+        version.options.extend(BTreeMap::from([
+            ("accept-licenses".to_string(), "true".to_string()),
+            (
+                "accept-license".to_string(),
+                "android-sdk-license".to_string(),
+            ),
+            ("channel".to_string(), "beta".to_string()),
+        ]));
+
+        let locked = lock_options(&version).unwrap();
+
+        assert!(!locked.contains_key("accept-licenses"));
+        assert!(!locked.contains_key("accept-license"));
+        // A genuine artifact-selecting option still round-trips.
+        assert_eq!(locked.get("channel").map(String::as_str), Some("beta"));
     }
 
     #[test]

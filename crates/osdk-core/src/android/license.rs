@@ -18,7 +18,7 @@
 //!
 //! 2. **osdk never accepts on the user's behalf.** The agreement requires the
 //!    user to accept before use, so acceptance must be an explicit act:
-//!    `--accept-licenses`, `--accept-license <id>`, or a recorded prior
+//!    `-o accept-licenses=true`, `-o accept-license=<id>`, or a recorded prior
 //!    acceptance. There is no implicit or default-on path.
 
 use std::collections::BTreeSet;
@@ -44,8 +44,8 @@ pub enum Acceptance {
 }
 
 impl Acceptance {
-    /// Build from CLI inputs: `--accept-licenses` (all) and repeated
-    /// `--accept-license <id>`.
+    /// Build from CLI inputs: `-o accept-licenses=true` (all) and
+    /// `-o accept-license=<id>` (comma-separated ids).
     pub fn from_flags(accept_all: bool, ids: &[String]) -> Acceptance {
         if accept_all {
             return Acceptance::All;
@@ -202,10 +202,10 @@ pub fn blocked_error(pending: &[PendingLicense]) -> Error {
     lines.push("review the full text with:".into());
     lines.push("  osdk android licenses show <package>".into());
     lines.push("then accept explicitly with either:".into());
-    lines.push("  --accept-licenses            (all licenses this request needs)".into());
+    lines.push("  -o accept-licenses=true            (all licenses this request needs)".into());
     for entry in pending {
         lines.push(format!(
-            "  --accept-license {}  (just this one)",
+            "  -o accept-license={}  (just this one)",
             entry.license_id
         ));
     }
@@ -431,8 +431,8 @@ mod tests {
             packages: vec!["ndk;29.0.1".into()],
         }])
         .to_string();
-        assert!(message.contains("--accept-licenses"));
-        assert!(message.contains("--accept-license android-sdk-license"));
+        assert!(message.contains("-o accept-licenses=true"));
+        assert!(message.contains("-o accept-license=android-sdk-license"));
         assert!(message.contains("ndk;29.0.1"));
         assert!(message.contains("osdk android licenses show"));
     }
