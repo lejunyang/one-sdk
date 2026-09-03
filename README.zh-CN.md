@@ -354,6 +354,28 @@ osdk install "android-system-images@android-35;google_apis;x86_64" \
 osdk 会把所有 Android 包组织成 Google 工具所期望的那一套目录结构，且不会重复
 存储任何一个包。
 
+用镜像创建并运行虚拟设备：
+
+```bash
+osdk android avd create pixel-35 --image "android-35;google_apis;x86_64"
+osdk android avd list
+emulator -avd pixel-35
+```
+
+设备定义由 osdk 自己写出，而不是调用 `avdmanager`——后者在这套布局下无法工作：
+它靠检视自身路径来定位 SDK，因而找高了一层，而 `create avd` 又没有可纠正它的
+参数。即便它创建成功，写下的镜像路径也是相对的，在这里会解析到错误的目录。
+
+查看 Google 自家工具能看到什么，以及重建它们读取的索引：
+
+```bash
+osdk android sdk-root show
+osdk android sdk-root repair
+```
+
+升级 osdk 后值得跑一次 `repair`：早先版本装下的包没有索引文件，于是
+`sdkmanager` 能列出它们，而 `avdmanager` 会报 `Package path is not valid`。
+
 Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基于 jar 的工具
 会在环境未设 `JAVA_HOME` 时使用 osdk 管理的 `java`。用 `osdk install java` 装一个即可。
 

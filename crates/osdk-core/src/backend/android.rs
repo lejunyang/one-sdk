@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 
 use crate::android::license::{self, Acceptance};
+use crate::android::package_xml;
 use crate::android::repo::{self, Channel, Manifest, RemotePackage};
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::error::{Error, Result};
@@ -367,6 +368,101 @@ impl AndroidBackend {
     #[cfg(not(windows))]
     fn is_reparse_point(_meta: &std::fs::Metadata) -> bool {
         false
+    }
+
+    /// Write the `package.xml` index Google's tools read, into an installed
+    /// package directory.
+    ///
+    /// ## Why an install has to do this
+    ///
+    /// osdk knows what it installed, but Google's tools do not ask a manager --
+    /// they walk the SDK root and parse a `package.xml` inside each package
+    /// directory. Without it a package osdk installed is invisible to them even
+    /// though the layout is correct: measured on 37.1.11, `avdmanager create avd`
+    /// answers `Package path is not valid. Valid system image paths are:` and
+    /// lists nothing, while `sdkmanager --list_installed` shows the same image
+    /// happily -- sdkmanager is satisfied by `source.properties`, avdmanager is
+    /// not.
+    ///
+    /// Written into the real install directory rather than through the SDK-root
+    /// link so it lives with the payload and survives a relink.
+    ///
+    /// Never fatal: the index only buys interoperability with Google's tools, so
+    /// failing an otherwise good install over it would trade a small gap for a
+    /// total one.
+    fn write_package_index(
+        ctx: &Ctx,
+        family: &str,
+        version: &str,
+        package: Option<&RemotePackage>,
+    ) {
+        let dir = ctx
+            .dirs
+            .install_path(&format!("{ID_PREFIX}{family}"), version);
+        // The id Google's tools match on. For most families it is the manifest
+        // path; a system image's path already contains the whole `;` id.
+        let manifest_path = match package {
+            Some(package) => package.path.clone(),
+            None if family == SYSTEM_IMAGES_FAMILY => {
+                format!("{SYSTEM_IMAGES_FAMILY};{version}")
+            }
+            None => family.to_string(),
+        };
+        let display_name = package
+            .map(|package| package.display_name.clone())
+            .unwrap_or_else(|| manifest_path.clone());
+        let revision = package
+            .map(|package| package.revision.clone())
+            .unwrap_or_else(|| version.to_string());
+        let license_id = package.and_then(|package| package.license_ref.as_deref());
+        match package_xml::write_into(&dir, &manifest_path, &display_name, &revision, license_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                // No `source.properties` means the archive did not describe
+                // itself, so any details written would be invented.
+                tracing::debug!(
+                    family,
+                    version,
+                    "no source.properties to describe this package; \
+                     skipping the package.xml index"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    family,
+                    version,
+                    "could not write the package.xml index Google's tools read: {error}"
+                );
+            }
+        }
+    }
+
+    /// Rewrite the `package.xml` index for an already-installed package.
+    ///
+    /// Exposed for `osdk android sdk-root repair`: packages installed before osdk
+    /// wrote this file are invisible to `avdmanager`, and reinstalling gigabytes
+    /// to regain an index would be an absurd remedy. Returns whether a file was
+    /// written.
+    ///
+    /// The manifest is deliberately not consulted: repair has to work offline,
+    /// and everything the index needs is in the `source.properties` that shipped
+    /// inside the archive.
+    pub fn repair_package_index(ctx: &Ctx, family: &str, version: &str) -> bool {
+        let dir = ctx
+            .dirs
+            .install_path(&format!("{ID_PREFIX}{family}"), version);
+        let manifest_path = if family == SYSTEM_IMAGES_FAMILY {
+            format!("{SYSTEM_IMAGES_FAMILY};{version}")
+        } else if matches!(family, "platform-tools" | "emulator") {
+            family.to_string()
+        } else {
+            // Versioned families are addressed as `family;version`.
+            format!("{family};{version}")
+        };
+        // Without the manifest the best display name available is the id itself,
+        // which is what Google's tools fall back to showing anyway.
+        package_xml::write_into(&dir, &manifest_path, &manifest_path, version, None)
+            .unwrap_or(false)
     }
 
     /// The subdirectory the emulator uses to decide a directory is an SDK root.
@@ -757,6 +853,7 @@ accept-licenses=true to install it anyway",
 
         if let Some(plan) = locked {
             pipeline::run(&plan, &pipeline_ctx(ctx)).await?;
+            Self::write_package_index(ctx, self.family, &tv.version, package);
             Self::link_into_sdk_root(ctx, self.family, &tv.version)?;
             return Ok(());
         }
@@ -804,8 +901,10 @@ accept-licenses=true to install it anyway",
             subdir: None,
         };
         pipeline::run(&plan, &pipeline_ctx(ctx)).await?;
-        // Expose the package where Google's own tools expect to find it. Done
-        // after extraction so the target directory exists to be linked.
+        // Make the package visible to Google's own tools, then expose it where
+        // they expect to find it. Both after extraction, so the directory being
+        // described and linked exists.
+        Self::write_package_index(ctx, self.family, &tv.version, Some(package));
         Self::link_into_sdk_root(ctx, self.family, &tv.version)?;
         Self::warn_if_sdk_root_incomplete(ctx, self.family);
         Ok(())

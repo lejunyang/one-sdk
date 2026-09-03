@@ -335,3 +335,82 @@ the faster path, so no image-specific handling was added.
 One caveat worth knowing: the mirror does not carry beta images. A missing
 `x86_64-ps16k-37.2_r04.zip` reflects that gap, not a broken mirror — its copies of
 both the main and sub-site manifests hash identically to Google's.
+
+## Virtual devices
+
+`osdk android avd` creates, lists and deletes AVDs:
+
+```bash
+osdk android avd create pixel-35 --image "android-35;google_apis;x86_64"
+osdk android avd create small --image "android-35;google_apis;x86_64" \
+  --data-size 4G --sdcard-size 256M
+osdk android avd list
+osdk android avd delete pixel-35
+```
+
+`list` reports whether each device's system image is still present, because an
+AVD whose image was uninstalled looks intact until the emulator dies on it.
+
+### Why not avdmanager
+
+`avdmanager` cannot drive an osdk-managed SDK root. Measured against
+cmdline-tools 23.0.0:
+
+- It locates the SDK by canonicalising its own jar path and walking up three
+  levels. osdk exposes `cmdline-tools/latest` as a directory link into the
+  versioned install, so the walk resolves *through* the link and lands one level
+  above the real root. Every package is then reported as being in an
+  "inconsistent location".
+- `ANDROID_SDK_ROOT` and `ANDROID_HOME` do not override that, and `create avd`
+  rejects `--sdk_root` outright — its only global flags are `-s` and `-v`.
+- Even where it succeeds, it writes a **relative** `image.sysdir.1`
+  (`system-images\android-35\google_apis\x86_64\`) that resolves against the root
+  it derived, which is the wrong directory here.
+
+There is therefore no flag and no environment variable that makes it agree with
+this layout. osdk writes the two files it would have written — `config.ini` and
+the `<name>.ini` pointer — using hardware defaults taken from a `config.ini`
+avdmanager itself produced, with an absolute image path substituted.
+
+### The path must be absolute and free of `%`
+
+The emulator performs `%VAR%` environment expansion on `image.sysdir.1`. osdk's
+versioned install directories are percent-encoded, so passing one produced
+
+```text
+WARNING | Environment variable 61 is not set
+WARNING | ...~v1~6E72692D35676F6C5F7073783636%34\ is not a valid directory.
+FATAL   | Broken AVD system path.
+```
+
+— every hex pair expanded to nothing. So the value is written as the bridged path
+under the SDK root, which is both absolute and `%`-free. `create` refuses a path
+containing `%` rather than emitting a config that fails later inside the
+emulator.
+
+## The package index Google's tools read
+
+Google's tools do not ask a manager what is installed: they walk the SDK root and
+parse a `package.xml` inside each package directory. A package osdk installed is
+otherwise invisible to them even though the layout is correct — `avdmanager`
+answers `Package path is not valid` and lists nothing, while `sdkmanager` shows
+the same package happily, because sdkmanager is satisfied by `source.properties`
+and avdmanager is not.
+
+osdk writes that file on install. Everything in it comes from the
+`source.properties` shipped inside the archive, and a field that is absent is
+omitted rather than defaulted: a wrong api level or abi would make avdmanager
+offer an AVD that cannot boot. Two schema shapes are emitted —
+`genericDetailsType` for tools, and `sysImgDetailsType` for system images, which
+carries the api level, tag, vendor and abi an AVD is matched against.
+
+For packages installed by an earlier osdk:
+
+```bash
+osdk android sdk-root show     # what is bridged, and what is indexed
+osdk android sdk-root repair   # rewrite the index, and re-check the links
+```
+
+`repair` deliberately works offline: everything the index needs is already on
+disk, and re-downloading gigabytes to regain a small XML file would be an absurd
+remedy.

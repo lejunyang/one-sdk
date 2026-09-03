@@ -2,7 +2,9 @@
 //!
 //! Google distributes the Android SDK through a versioned XML manifest rather
 //! than a package registry. [`repo`] speaks that protocol; [`license`] handles
-//! the agreement gate that guards most packages.
+//! the agreement gate that guards most packages. [`package_xml`] writes the
+//! on-disk index Google's own tools read, so a package osdk installed is visible
+//! to `avdmanager` and the rest of the command line tools.
 //!
 //! ## Scope
 //!
@@ -13,5 +15,7 @@
 //! binary cache or an internal mirror of the archives would change that and
 //! must not be added here.
 
+pub mod avd;
 pub mod license;
+pub mod package_xml;
 pub mod repo;

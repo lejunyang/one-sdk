@@ -385,6 +385,56 @@ pub enum AndroidCommand {
         #[command(subcommand)]
         command: AndroidLicensesCommand,
     },
+    /// Inspect and repair the shared SDK root Google's tools read.
+    SdkRoot {
+        #[command(subcommand)]
+        command: AndroidSdkRootCommand,
+    },
+    /// Manage Android virtual devices without going through avdmanager.
+    Avd {
+        #[command(subcommand)]
+        command: AndroidAvdCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AndroidSdkRootCommand {
+    /// Print the shared SDK root and what each expected entry resolves to.
+    Show,
+    /// Rewrite the `package.xml` index for every installed package.
+    ///
+    /// Google's tools discover packages by parsing that file rather than by
+    /// asking a manager, so a package installed before osdk wrote it stays
+    /// invisible to `avdmanager` until this runs.
+    Repair,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AndroidAvdCommand {
+    /// List the virtual devices osdk manages.
+    List,
+    /// Create a virtual device from an installed system image.
+    Create {
+        /// Name for the new device, e.g. `pixel-35`.
+        name: String,
+        /// Installed system image, e.g. `android-35;google_apis;x86_64`.
+        #[arg(long, value_name = "IMAGE")]
+        image: String,
+        /// Replace an existing device of the same name.
+        #[arg(long)]
+        force: bool,
+        /// Size of the userdata partition, e.g. `8G`.
+        #[arg(long, value_name = "SIZE")]
+        data_size: Option<String>,
+        /// Size of the emulated SD card, e.g. `512M`.
+        #[arg(long, value_name = "SIZE")]
+        sdcard_size: Option<String>,
+    },
+    /// Delete a virtual device.
+    Delete {
+        /// Name of the device to remove.
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -290,3 +290,73 @@ Google 逐字节一致，速度为 4.38 MB/s，而直连为 5.54 MB/s，加速�
 
 有一点值得记住：镜像站不同步 beta 镜像。找不到 `x86_64-ps16k-37.2_r04.zip` 反映的
 是这一缺口，而不是镜像站坏了——它的主清单与子站点清单哈希均与 Google 完全一致。
+
+## 虚拟设备
+
+`osdk android avd` 负责创建、列出和删除 AVD：
+
+```bash
+osdk android avd create pixel-35 --image "android-35;google_apis;x86_64"
+osdk android avd create small --image "android-35;google_apis;x86_64" \
+  --data-size 4G --sdcard-size 256M
+osdk android avd list
+osdk android avd delete pixel-35
+```
+
+`list` 会报告每个设备的系统镜像是否仍然存在——镜像被卸载后，AVD 看上去依然完好，
+直到模拟器在它上面挂掉。
+
+### 为什么不用 avdmanager
+
+`avdmanager` 无法驱动 osdk 管理的 SDK 根目录。基于 cmdline-tools 23.0.0 实测：
+
+- 它通过规范化自身 jar 路径并向上三级来定位 SDK。osdk 把 `cmdline-tools/latest`
+  暴露为指向版本化安装目录的目录链接，于是这次上溯**穿过**链接，落在真实根目录
+  之上一层。随后每个包都被报成处于 "inconsistent location"。
+- `ANDROID_SDK_ROOT` 与 `ANDROID_HOME` 都无法覆盖这一行为，而 `create avd` 直接
+  拒绝 `--sdk_root`——它的全局参数只有 `-s` 和 `-v`。
+- 即便它成功，写出的 `image.sysdir.1` 也是**相对路径**
+  （`system-images\android-35\google_apis\x86_64\`），只会相对它自己推导出的根
+  解析，而那在这里是错误的目录。
+
+也就是说，没有任何参数或环境变量能让它认同这套布局。osdk 直接写出它本该写的两个
+文件——`config.ini` 和 `<name>.ini` 指针文件——硬件默认值取自 avdmanager 自己
+生成的一份 `config.ini`，只是把镜像路径换成绝对路径。
+
+### 路径必须是绝对的，且不含 `%`
+
+模拟器会对 `image.sysdir.1` 做 `%VAR%` 环境变量展开。osdk 的版本化安装目录名是
+百分号编码的，直接传入会得到：
+
+```text
+WARNING | Environment variable 61 is not set
+WARNING | ...~v1~6E72692D35676F6C5F7073783636%34\ is not a valid directory.
+FATAL   | Broken AVD system path.
+```
+
+——每个十六进制对都被展开成空。因此该值写的是 SDK 根下的桥接路径，它既是绝对路径
+又不含 `%`。`create` 会拒绝含 `%` 的路径，而不是写出一份稍后才在模拟器内部失败的
+配置。
+
+## Google 工具读取的包索引
+
+Google 的工具并不询问某个管理器装了什么：它们遍历 SDK 根目录，解析每个包目录里的
+`package.xml`。否则即使目录布局正确，osdk 装的包对它们也是不可见的——`avdmanager`
+会答 `Package path is not valid` 且列不出任何东西，而 `sdkmanager` 却能正常显示
+同一个包，因为 sdkmanager 认 `source.properties`，avdmanager 不认。
+
+osdk 在安装时写出该文件。其中所有内容都来自归档内自带的 `source.properties`，
+缺失的字段一律省略而非填默认值：错误的 api level 或 abi 会让 avdmanager 提供一个
+根本启动不了的 AVD。只发出两种 schema 形态——工具用 `genericDetailsType`，系统
+镜像用 `sysImgDetailsType`，后者携带 AVD 匹配所依据的 api level、tag、vendor
+和 abi。
+
+对于早先版本 osdk 装下的包：
+
+```bash
+osdk android sdk-root show     # 哪些已桥接、哪些已建索引
+osdk android sdk-root repair   # 重写索引，并重新检查链接
+```
+
+`repair` 刻意做成离线可用：索引所需的一切都已在磁盘上，为了拿回一个小 XML 文件而
+重新下载数 GB 是荒谬的做法。

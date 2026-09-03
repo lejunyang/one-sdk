@@ -389,6 +389,31 @@ install that as well before creating an AVD. osdk arranges every Android package
 into the single directory layout Google's tools expect, without storing any
 package twice.
 
+Create and run a virtual device with the image:
+
+```bash
+osdk android avd create pixel-35 --image "android-35;google_apis;x86_64"
+osdk android avd list
+emulator -avd pixel-35
+```
+
+osdk writes the device definition itself rather than calling `avdmanager`, which
+cannot work against this layout: it locates the SDK by inspecting its own path,
+so it looks one directory too high, and `create avd` accepts no flag to correct
+that. Devices it did manage to create also record a relative image path that
+resolves against the wrong directory here.
+
+To see what Google's own tools can see, and to rebuild the index they read:
+
+```bash
+osdk android sdk-root show
+osdk android sdk-root repair
+```
+
+`repair` is worth running once after upgrading osdk: packages installed by an
+earlier version have no index file, so `sdkmanager` lists them while
+`avdmanager` reports `Package path is not valid`.
+
 The Android packages contain no JDK, so `sdkmanager`, `avdmanager`, `d8` and
 the other jar-backed tools run against an osdk-managed `java` when the
 environment has no `JAVA_HOME` of its own. Install one with `osdk install java`.

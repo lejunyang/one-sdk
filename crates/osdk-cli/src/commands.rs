@@ -15,9 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::App;
 use crate::cli::{
-    AliasCommand, AndroidCommand, AndroidLicensesCommand, ConfigCommand, ModelCommand,
-    ModelEnvCommand, NodeCommand, PythonCommand, RegistryCommand, RustCommand, RustItemCommand,
-    RustOverrideCommand, RustToolchainCommand, SourceCommand, TrustCommand,
+    AliasCommand, AndroidAvdCommand, AndroidCommand, AndroidLicensesCommand, AndroidSdkRootCommand,
+    ConfigCommand, ModelCommand, ModelEnvCommand, NodeCommand, PythonCommand, RegistryCommand,
+    RustCommand, RustItemCommand, RustOverrideCommand, RustToolchainCommand, SourceCommand,
+    TrustCommand,
 };
 
 const GLOBAL_NPM_UNINSTALL_JOURNAL_DIR: &str = "transactions/global-npm-uninstall";
@@ -4291,6 +4292,211 @@ pub fn python(app: &App, command: PythonCommand) -> Result<()> {
 pub async fn android(app: &App, command: AndroidCommand) -> Result<()> {
     match command {
         AndroidCommand::Licenses { command } => android_licenses(app, command).await,
+        AndroidCommand::SdkRoot { command } => android_sdk_root(app, command),
+        AndroidCommand::Avd { command } => android_avd(app, command),
+    }
+}
+
+/// Inspect or rebuild the shared SDK root.
+fn android_sdk_root(app: &App, command: AndroidSdkRootCommand) -> Result<()> {
+    use osdk_core::backend::android::{AndroidBackend, ID_PREFIX, SUPPORTED_FAMILIES};
+
+    let root = AndroidBackend::sdk_root(&app.ctx);
+    match command {
+        AndroidSdkRootCommand::Show => {
+            println!("sdk root: {}", root.display());
+            // Reported first because the emulator rejects the whole root without
+            // it, whatever else is installed.
+            let marker = root.join("platform-tools");
+            println!(
+                "valid for the emulator: {}",
+                if marker.exists() {
+                    "yes"
+                } else {
+                    "no (platform-tools missing)"
+                }
+            );
+            let mut listed = 0usize;
+            for family in SUPPORTED_FAMILIES {
+                let backend = AndroidBackend::new(family);
+                let installed = backend.list_installed(&app.ctx).unwrap_or_default();
+                for version in installed {
+                    let Some(relative) = AndroidBackend::sdk_root_relative_path(family, &version)
+                    else {
+                        continue;
+                    };
+                    let link = root.join(&relative);
+                    let real = app
+                        .ctx
+                        .dirs
+                        .install_path(&format!("{ID_PREFIX}{family}"), &version);
+                    // Whether the bridge is in place, and whether the index
+                    // Google's tools read is present: both are needed for
+                    // avdmanager to see the package at all.
+                    let bridged = std::fs::canonicalize(&link)
+                        .ok()
+                        .zip(std::fs::canonicalize(&real).ok())
+                        .map(|(a, b)| a == b)
+                        .unwrap_or(false);
+                    let indexed = real
+                        .join(osdk_core::android::package_xml::PACKAGE_XML)
+                        .is_file();
+                    println!(
+                        "  {:<22} {:<34} bridged={} indexed={}",
+                        family,
+                        version,
+                        if bridged { "yes" } else { "no " },
+                        if indexed { "yes" } else { "no" }
+                    );
+                    listed += 1;
+                }
+            }
+            if listed == 0 {
+                println!("  (no Android packages installed)");
+            }
+            Ok(())
+        }
+        AndroidSdkRootCommand::Repair => {
+            let mut written = 0usize;
+            let mut linked = 0usize;
+            for family in SUPPORTED_FAMILIES {
+                let backend = AndroidBackend::new(family);
+                for version in backend.list_installed(&app.ctx).unwrap_or_default() {
+                    if AndroidBackend::repair_package_index(&app.ctx, family, &version) {
+                        written += 1;
+                    }
+                    if AndroidBackend::link_into_sdk_root(&app.ctx, family, &version).is_ok() {
+                        linked += 1;
+                    }
+                }
+            }
+            println!(
+                "wrote {written} package index file(s) and checked {linked} SDK root link(s) under {}",
+                root.display()
+            );
+            if written > 0 {
+                // Worth saying explicitly: this is the failure the repair fixes.
+                println!(
+                    "`avdmanager` and `sdkmanager` can now see these packages; \
+                     without the index avdmanager reports `Package path is not valid`"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Create, list and delete AVDs without avdmanager.
+fn android_avd(app: &App, command: AndroidAvdCommand) -> Result<()> {
+    use osdk_core::android::avd::{self, CreateOptions, ImageId};
+    use osdk_core::backend::android::{AndroidBackend, SYSTEM_IMAGES_FAMILY};
+
+    match command {
+        AndroidAvdCommand::List => {
+            let devices = avd::list(&app.ctx.dirs);
+            if devices.is_empty() {
+                println!("no AVDs under {}", avd::avd_home(&app.ctx.dirs).display());
+                return Ok(());
+            }
+            for device in devices {
+                // The image is reported present or missing rather than just
+                // echoed: an AVD whose image was uninstalled looks fine here but
+                // dies inside the emulator.
+                let present = device.image_present();
+                println!(
+                    "{:<24} {:<12} image={}",
+                    device.name,
+                    device.target.as_deref().unwrap_or("-"),
+                    if present { "ok" } else { "MISSING" }
+                );
+                println!("  {}", device.path.display());
+            }
+            Ok(())
+        }
+        AndroidAvdCommand::Create {
+            name,
+            image,
+            force,
+            data_size,
+            sdcard_size,
+        } => {
+            let id = ImageId::parse(&image)?;
+            let backend = AndroidBackend::new(SYSTEM_IMAGES_FAMILY);
+            let version = id.as_version();
+            let installed = backend.list_installed(&app.ctx).unwrap_or_default();
+            if !installed.iter().any(|candidate| candidate == &version) {
+                return Err(anyhow!(
+                    "system image `{version}` is not installed; install it with \
+                     `osdk install \"android-system-images@{version}\"`{}",
+                    if installed.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\ninstalled images: {}", installed.join(", "))
+                    }
+                ));
+            }
+            // Two paths reach the same payload: the versioned install directory,
+            // and the bridged one under the SDK root. The emulator expands
+            // `%VAR%` in `image.sysdir.1`, and osdk's versioned directory names
+            // are percent-encoded, so the bridged path is the only one it can
+            // read. Verified: the install path yields `Broken AVD system path`.
+            let install_dir = app.ctx.dirs.install_path("android-system-images", &version);
+            let bridged = AndroidBackend::sdk_root_relative_path(SYSTEM_IMAGES_FAMILY, &version)
+                .map(|relative| AndroidBackend::sdk_root(&app.ctx).join(relative))
+                .filter(|path| path.join("system.img").is_file());
+            let image_dir = match bridged {
+                Some(path) => path,
+                None => {
+                    // Without the bridge there is no `%`-free path to the image,
+                    // so say what to do rather than writing a config that fails
+                    // later inside the emulator.
+                    return Err(anyhow!(
+                        "the system image is installed at {} but is not exposed \
+                         under the SDK root, and the emulator cannot read that \
+                         path directly; run `osdk android sdk-root repair` first",
+                        install_dir.display()
+                    ));
+                }
+            };
+            // The display name shown by the emulator, read from the image's own
+            // metadata so it matches what Google's tools would show.
+            let tag_display = osdk_core::android::package_xml::read_source_properties(&install_dir)
+                .and_then(|fields| fields.get("SystemImage.TagDisplay").cloned())
+                .unwrap_or_else(|| id.tag.clone());
+            let options = CreateOptions {
+                force,
+                data_size,
+                sdcard_size,
+            };
+            let path = avd::create(
+                &app.ctx.dirs,
+                &name,
+                &id,
+                &image_dir,
+                &tag_display,
+                &options,
+            )?;
+            println!("created AVD `{name}` at {}", path.display());
+            // Both are required to actually boot, and neither is implied by
+            // installing the image.
+            let root = AndroidBackend::sdk_root(&app.ctx);
+            if !root.join("platform-tools").exists() {
+                println!(
+                    "note: the emulator will reject this SDK root until \
+                     platform-tools is installed"
+                );
+            }
+            println!("start it with: emulator -avd {name}");
+            Ok(())
+        }
+        AndroidAvdCommand::Delete { name } => {
+            if avd::delete(&app.ctx.dirs, &name)? {
+                println!("deleted AVD `{name}`");
+            } else {
+                println!("no AVD named `{name}`");
+            }
+            Ok(())
+        }
     }
 }
 
