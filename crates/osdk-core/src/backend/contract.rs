@@ -173,6 +173,7 @@ async fn all_builtin_backend_ids_satisfy_the_lifecycle_contract() {
         "android-platforms",
         "android-emulator",
         "android-sources",
+        "android-system-images",
     ];
     assert_eq!(crate::backend::registry::Registry::new().ids(), expected);
 

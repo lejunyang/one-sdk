@@ -369,7 +369,25 @@ osdk never accepts a license on your behalf: without one of the accept options
 the install stops before downloading anything. Available families are
 `android-ndk`, `android-platform-tools`, `android-build-tools`,
 `android-cmdline-tools`, `android-cmake`, `android-platforms`,
-`android-emulator` and `android-sources`.
+`android-emulator`, `android-sources` and `android-system-images`.
+
+Emulator system images work the same way, and whatever a package declares as a
+dependency is installed with it — asking for an image brings the matching
+`android-emulator` along:
+
+```bash
+# Browse the images (every vendor and form factor in one list)
+osdk list-remote android-system-images
+
+# Installing this also installs the emulator the image requires
+osdk install "android-system-images@android-35;google_apis;x86_64" \
+  -o accept-licenses=true
+```
+
+The emulator only accepts an SDK directory that contains `platform-tools`, so
+install that as well before creating an AVD. osdk arranges every Android package
+into the single directory layout Google's tools expect, without storing any
+package twice.
 
 The Android packages contain no JDK, so `sdkmanager`, `avdmanager`, `d8` and
 the other jar-backed tools run against an osdk-managed `java` when the

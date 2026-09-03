@@ -196,27 +196,115 @@ fn real_manifest_dependencies_stay_rare_and_resolvable() {
         .filter(|p| !p.dependencies.is_empty())
         .collect();
 
-    // Only a handful of packages declare dependencies (4 of 313 in 2026-09), so
-    // a trivial resolver suffices. A large jump here means the assumption broke.
-    assert!(
-        with_deps.len() < 25,
-        "dependency count jumped to {}; revisit the resolver",
-        with_deps.len()
-    );
-
-    // Every declared dependency must name a package that actually exists.
-    for package in with_deps {
+    // Every declared dependency must name a package that actually exists, and
+    // the resolver must reach it.
+    for package in &with_deps {
         for dependency in &package.dependencies {
             assert!(
-                manifest.package(dependency).is_some()
+                manifest.package(&dependency.path).is_some()
                     || manifest
                         .packages
                         .iter()
-                        .any(|p| p.family() == dependency.as_str()),
+                        .any(|p| p.family() == dependency.path.as_str()),
                 "{} depends on unknown {}",
                 package.path,
-                dependency
+                dependency.path
+            );
+        }
+        // Resolution must terminate and never include the package itself.
+        let resolved = manifest.resolve_dependencies(package);
+        assert!(
+            resolved.iter().all(|(dep, _)| dep.path != package.path),
+            "{} resolved to itself",
+            package.path
+        );
+    }
+
+    // In the main manifest only the `emulators;*` preview family declares
+    // dependencies, and every edge points at `emulator`. `emulator` itself
+    // declares none, which is why installing it needs no resolution at all.
+    let emulator = manifest
+        .package("emulator")
+        .expect("emulator is published in the main manifest");
+    assert!(
+        emulator.dependencies.is_empty(),
+        "emulator gained dependencies: {:?}",
+        emulator.dependencies
+    );
+    for package in &with_deps {
+        for dependency in &package.dependencies {
+            assert_eq!(
+                dependency.path, "emulator",
+                "{} declares an unexpected dependency target {}",
+                package.path, dependency.path
             );
         }
     }
+}
+
+/// The system-image sub-site manifests parse, and their archive urls are
+/// rebased so they can be fetched from the repository root.
+///
+/// Set `OSDK_ANDROID_SYSIMG_MANIFEST` to a downloaded `sys-img2-3.xml` to run.
+#[test]
+fn real_system_image_manifest_parses_with_dependencies() {
+    let Ok(path) = std::env::var("OSDK_ANDROID_SYSIMG_MANIFEST") else {
+        eprintln!("skipping: OSDK_ANDROID_SYSIMG_MANIFEST not set");
+        return;
+    };
+    let xml = std::fs::read_to_string(&path).expect("sys-img manifest is readable");
+    let base = "sys-img/google_apis/";
+    let manifest = repo::parse_manifest_with_base(&xml, base).expect("sys-img manifest parses");
+
+    // Every package is a system image, four path segments long.
+    assert!(!manifest.packages.is_empty());
+    for package in &manifest.packages {
+        assert_eq!(package.family(), "system-images", "{}", package.path);
+        assert_eq!(
+            package.path.split(';').count(),
+            4,
+            "unexpected path shape: {}",
+            package.path
+        );
+    }
+
+    // Unlike the main manifest, dependencies here are the norm rather than the
+    // exception, and they carry a minimum revision that must be honoured.
+    let with_deps: Vec<_> = manifest
+        .packages
+        .iter()
+        .filter(|p| !p.dependencies.is_empty())
+        .collect();
+    assert!(
+        with_deps.len() > 20,
+        "expected system images to declare dependencies, found {}",
+        with_deps.len()
+    );
+    let bounded = with_deps
+        .iter()
+        .filter(|p| p.dependencies.iter().any(|d| d.min_revision.is_some()))
+        .count();
+    assert!(bounded > 0, "no system image stated a min-revision");
+    for package in &with_deps {
+        for dependency in &package.dependencies {
+            assert_eq!(dependency.path, "emulator", "{}", package.path);
+        }
+    }
+
+    // Archive urls must be root-relative, otherwise the same file name under
+    // two sub-sites would be ambiguous.
+    for package in &manifest.packages {
+        for archive in &package.archives {
+            assert!(
+                archive.url.starts_with(base),
+                "{} url not rebased: {}",
+                package.path,
+                archive.url
+            );
+        }
+    }
+
+    // Sub-sites publish vendor-specific agreements beyond the two in the main
+    // manifest, which is why the license gate has to cover dependencies.
+    assert!(manifest.licenses.len() > 1, "expected several licenses");
 }

@@ -92,7 +92,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
             let node_request = node_request
                 .ok_or_else(|| anyhow!(t!("err.npm_managed_node_dependency_required")))?;
             let (backend, version) = install_one_without_shims(app, &node_request).await?;
-            generate_shims_for(app, backend.as_ref(), &version)?;
+            generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
             resolved.push((node_request, version));
         } else {
             let node = resolved
@@ -101,7 +101,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
                 .map(|(request, _)| request.clone())
                 .expect("checked above");
             let (backend, version) = install_one_without_shims(app, &node).await?;
-            generate_shims_for(app, backend.as_ref(), &version)?;
+            generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         }
         bind_resolved_node_version(&mut resolved);
         for (_, version) in &resolved {
@@ -628,21 +628,21 @@ async fn install_requests(
     let mut resolved = Vec::new();
     for request in node_requests {
         let (backend, version) = install_one_without_shims(app, &request).await?;
-        generate_shims_for(app, backend.as_ref(), &version)?;
+        generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     let (rust_requests, remaining_requests) =
         partition_runtime_dependency(remaining_requests, "rust", "cargo:");
     for request in rust_requests {
         let (backend, version) = install_one_without_shims(app, &request).await?;
-        generate_shims_for(app, backend.as_ref(), &version)?;
+        generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     let (go_requests, mut remaining_requests) =
         partition_runtime_dependency(remaining_requests, "go", "go:");
     for request in go_requests {
         let (backend, version) = install_one_without_shims(app, &request).await?;
-        generate_shims_for(app, backend.as_ref(), &version)?;
+        generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     bind_request_node_version(&mut remaining_requests, &resolved);
@@ -660,7 +660,7 @@ async fn install_requests(
     .try_collect::<Vec<_>>()
     .await?;
     for (request, (backend, version)) in installed {
-        generate_shims_for(app, backend.as_ref(), &version)?;
+        generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
@@ -1717,7 +1717,7 @@ async fn use_project_npm(
         .to_string();
     let node_request = project_node_request(app, &project.root)?;
     let (node_backend, node_version) = install_one_without_shims(app, &node_request).await?;
-    generate_shims_for(app, node_backend.as_ref(), &node_version)?;
+    generate_shims_including_dependencies(app, node_backend.as_ref(), &node_version)?;
     let node_bin_dir = managed_bin_paths(&app.ctx, node_backend.as_ref(), &node_version, None)?
         .into_iter()
         .find(|path| path.join(node_executable_name()).is_file())
@@ -2262,7 +2262,7 @@ async fn run_project_native_installer(
     let manager_request = project_manager_request(app, manager_id, project_root)?;
     let (manager_backend, manager_version) =
         install_one_without_shims(app, &manager_request).await?;
-    generate_shims_for(app, manager_backend.as_ref(), &manager_version)?;
+    generate_shims_including_dependencies(app, manager_backend.as_ref(), &manager_version)?;
     let manager = find_managed_executable(
         &managed_bin_paths(&app.ctx, manager_backend.as_ref(), &manager_version, None)?,
         manager_id,
@@ -3878,6 +3878,29 @@ fn has_other_shim_owner(
 }
 
 /// Generate shims for all bin names a version exposes. Returns count.
+/// Generate shims for `tv`, plus for anything `backend` installed on its own
+/// behalf while installing it (declared dependencies).
+///
+/// Dependencies are shimmed first: when a name is shared, the precedence rules
+/// decide the owner regardless of order, but doing the requested tool last keeps
+/// its diagnostics the ones the user sees.
+pub(crate) fn generate_shims_including_dependencies(
+    app: &App,
+    backend: &dyn Backend,
+    tv: &ToolVersion,
+) -> Result<usize> {
+    let mut total = 0;
+    for side in backend.take_side_installed() {
+        let side_backend = match app.registry.get(&side.backend) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        total += generate_shims_for(app, side_backend.as_ref(), &side)?;
+    }
+    total += generate_shims_for(app, backend, tv)?;
+    Ok(total)
+}
+
 pub(crate) fn generate_shims_for(
     app: &App,
     backend: &dyn Backend,

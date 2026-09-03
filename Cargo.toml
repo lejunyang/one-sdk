@@ -62,7 +62,14 @@ same-file = "1"
 which = "6"
 tempfile = "3"
 walkdir = "2"
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    # DeviceIoControl + FSCTL_SET_REPARSE_POINT, used to create the
+    # directory junctions that expose Android packages in one SDK root.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
 libc = "0.2"
 # versions
 semver = "1"

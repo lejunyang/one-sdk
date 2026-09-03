@@ -20,6 +20,7 @@ osdk 直接解析 Google 官方仓库清单并从 Google 服务器下载，不�
 | `android-platforms` | `android.jar` | 无可执行文件 |
 | `android-emulator` | `emulator` | — |
 | `android-sources` | — | 源码，无可执行文件 |
+| `android-system-images` | — | 模拟器磁盘镜像，无可执行文件 |
 
 ```bash
 osdk list-remote android-platform-tools
@@ -27,8 +28,15 @@ osdk install android-platform-tools@37.0.1 -o accept-licenses=true
 osdk exec -t android-platform-tools@37.0.1 -- adb version
 ```
 
-已被 side-by-side 布局取代的 `ndk-bundle` 未纳入，以免与 `android-ndk` 混淆；
-系统镜像位于独立的子站点清单，当前也未纳入。
+已被 side-by-side 布局取代的 `ndk-bundle` 未纳入，以免与 `android-ndk` 混淆。
+
+复数形式的 `emulators` 也未纳入，且它并不是 `android-emulator` 的另一种写法。
+按线上清单实测，两者有五处不同：`emulators` 以 `emulators;<build-id>` 形式
+side-by-side 版本化、把 `emulator` 本身声明为依赖、Windows 包体积为 273 MB 而非
+421 MB、文件名是 `emulator_windows_x64-*` 而非 `emulator-windows_x64-*`、且只存在
+于预览渠道。它是叠加在单数包之上的增量组件，因此版本号之间甚至无法直接比较：
+`emulators;latest` 为 37.1.2，而 stable 的 `emulator` 已是 37.1.11。
+
 
 ## 许可协议
 
@@ -205,3 +213,80 @@ JDK 错误，此时装一个 `java` 即可。
 
 `ANDROID_SDK_ROOT` 指向存放许可记录的共享 SDK 根目录，而非单个包目录，
 以便 Gradle 等工具复用接受记录。
+
+## 系统镜像与依赖解析
+
+模拟器系统镜像发布在主清单之外，按厂商分布在各个子站点中。osdk 会把它们合并为
+一个包族，因此一条命令即可列出全部：
+
+```bash
+# 五个子站点共 263 个版本：default、google_apis、
+# google_apis_playstore、android-tv、android-wear
+osdk list-remote android-system-images
+
+osdk install "android-system-images@android-35;google_apis;x86_64" \
+  -o accept-licenses=true
+```
+
+子站点清单只在该包族需要时才拉取。为每次 `osdk install adb` 都额外发起六个请求，
+去换一份别处都不会读的列表，并不值得。
+
+子站点清单中的 archive URL 是相对该清单自身目录的，而两个子站点可能发布同名文件
+——`x86_64-35_r09.zip` 就在多个厂商目录下都存在。osdk 在解析时会把每个 URL 改写为
+相对仓库根，因此不会从错误厂商的目录下载。
+
+### 依赖
+
+主清单中只有三个预览包声明依赖，而这里恰恰相反：`google_apis` 清单中的 56 条依赖
+声明全部指向 `emulator`，多数还带最低修订号。osdk 会解析这个闭包并补装缺失的部分，
+因此安装镜像即可得到可用的模拟器。
+
+以下两条规则源于真实数据的形态：
+
+- **许可门覆盖依赖。** 子站点引用了主清单从未提及的八份协议，包括
+  `intel-android-sysimage-license` 和 `android-googletv-license`。同意镜像自身的
+  协议，不能等同于同意一份从未向你展示过的厂商协议。
+- **依赖按 stable 渠道解析。** `emulator` 发布了两条记录，而预览构建的修订号更高。
+  若按「最新」选取，就会为用户根本没点名的包装上预览版，随后安装又会被自身的渠道
+  校验拒绝。
+
+若某条依赖指向 osdk 未策展的包族，则跳过并告警，而不是让安装失败：清单里的一条边
+不足以成为拒绝一个本可正常安装的包的理由。
+
+### 目录布局
+
+Google 的工具要求共用一个 SDK 目录，而 osdk 把每个包装进各自的版本化目录。两者
+可以同时成立：数据仍留在 osdk 放置的位置，再用目录链接把它发布到 Android 工具期望
+的路径上——`system-images/android-35/google_apis/x86_64`、`platform-tools`、
+`emulator` 等。全程不复制，因此 3.5 GB 的镜像只存一份。
+
+Windows 上使用 NTFS junction 而非符号链接：符号链接需要开发者模式或提权，junction
+两者都不需要，而 Android 工具只是穿越它而已。
+
+如果目标路径上已存在一个真实目录——通常是 Google 自带 `sdkmanager` 装出来的包
+——osdk 会原样保留并告警。接管该路径就意味着删除 osdk 从未拥有的数据。
+
+### 模拟器的 SDK 根校验
+
+模拟器判定一个目录是否为可用 SDK 根，只看它有没有 `platform-tools` 子目录，别无
+其他。它先查 `ANDROID_HOME`，再查 `ANDROID_SDK_ROOT`，然后从自身位置逐级上推，
+凡缺少该子目录的候选一律否决，最终报 `FATAL | Broken AVD system path`。
+
+因此只含 `emulator` 与 `system-images` 的根目录仍然无效。创建 AVD 前请先安装
+platform-tools：
+
+```bash
+osdk install android-platform-tools -o accept-licenses=true
+```
+
+当共用根目录尚不合法时，osdk 会在安装阶段告警——因为模拟器自身的报错只会指出根
+目录，而不会说明缺了什么。
+
+### 镜像源
+
+镜像体积很大，用镜像站看起来很有吸引力，但实测吞吐并非如此：腾讯源提供的包与
+Google 逐字节一致，速度为 4.38 MB/s，而直连为 5.54 MB/s，加速比 0.79 倍。既有的
+源优先级本就会选择更快的一侧，因此没有为镜像单独添加处理。
+
+有一点值得记住：镜像站不同步 beta 镜像。找不到 `x86_64-ps16k-37.2_r04.zip` 反映的
+是这一缺口，而不是镜像站坏了——它的主清单与子站点清单哈希均与 Google 完全一致。

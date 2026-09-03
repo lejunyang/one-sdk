@@ -15,6 +15,15 @@
 //! pull-parser over that subset avoids taking a schema-bound XML dependency
 //! that would need updating on every manifest generation bump.
 //!
+//! ## Sub-site manifests
+//!
+//! The main manifest does not list system images. Those live in separate
+//! sub-site manifests under `sys-img/<variant>/`, using the same element
+//! vocabulary. Their `<url>` values are relative to the **manifest's own
+//! directory**, not to the repository root, so they are rebased at parse time
+//! (see [`parse_manifest_with_base`]) and every [`Archive::url`] in this module
+//! is therefore uniformly root-relative.
+//!
 //! ## Integrity
 //!
 //! Archives carry a **SHA-1** checksum and nothing stronger. That is weaker
@@ -49,6 +58,63 @@ pub const MANIFEST_GENERATIONS: &[u32] = &[8, 7, 6, 5, 4, 3, 2, 1];
 pub fn manifest_url(root: &str, generation: u32) -> String {
     crate::http::join_url(root, &format!("repository2-{generation}.xml"))
 }
+
+/// A sub-site manifest: a directory under the repository root plus the
+/// manifest file names to probe inside it, newest schema first.
+///
+/// System images are published this way rather than in the main manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubSite {
+    /// Directory relative to the repository root, with a trailing slash.
+    pub dir: &'static str,
+    /// Candidate file names inside `dir`, newest schema generation first.
+    pub files: &'static [&'static str],
+}
+
+impl SubSite {
+    /// Full URL of `file` within this sub-site under `root`.
+    pub fn url(&self, root: &str, file: &str) -> String {
+        crate::http::join_url(root, &format!("{}{}", self.dir, file))
+    }
+}
+
+/// Schema generations seen across the sys-img sub-sites, newest first.
+///
+/// Verified 2026-09: every sub-site serves `sys-img2-3.xml`, and some also
+/// still serve the older `sys-img2-1.xml`.
+const SYS_IMG_FILES: &[&str] = &["sys-img2-3.xml", "sys-img2-2.xml", "sys-img2-1.xml"];
+
+/// The system-image sub-sites osdk reads.
+///
+/// Verified 2026-09 by request: all six serve `sys-img2-3.xml`. They are
+/// separate manifests rather than one index, so the full inventory is their
+/// union. Note the hyphen in `google-tv`: the underscore spelling is a 404.
+pub const SYSTEM_IMAGE_SUB_SITES: &[SubSite] = &[
+    SubSite {
+        dir: "sys-img/android/",
+        files: SYS_IMG_FILES,
+    },
+    SubSite {
+        dir: "sys-img/google_apis/",
+        files: SYS_IMG_FILES,
+    },
+    SubSite {
+        dir: "sys-img/google_apis_playstore/",
+        files: SYS_IMG_FILES,
+    },
+    SubSite {
+        dir: "sys-img/android-wear/",
+        files: SYS_IMG_FILES,
+    },
+    SubSite {
+        dir: "sys-img/android-tv/",
+        files: SYS_IMG_FILES,
+    },
+    SubSite {
+        dir: "sys-img/google-tv/",
+        files: SYS_IMG_FILES,
+    },
+];
 
 /// A distribution channel. Ordered stable-first so `<=` expresses "at most as
 /// unstable as".
@@ -108,6 +174,29 @@ impl Archive {
     }
 }
 
+/// A dependency edge declared by a package.
+///
+/// The manifest pairs the target path with an optional minimum revision; the
+/// bound matters because an already-installed older build does not satisfy the
+/// requirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
+    /// Manifest path of the required package, e.g. `emulator`.
+    pub path: String,
+    /// Lowest acceptable revision, when the manifest states one.
+    pub min_revision: Option<String>,
+}
+
+impl Dependency {
+    /// Whether `version` satisfies this dependency's minimum revision.
+    pub fn satisfied_by(&self, version: &str) -> bool {
+        match &self.min_revision {
+            None => true,
+            Some(min) => compare_versions(version, min) != std::cmp::Ordering::Less,
+        }
+    }
+}
+
 /// A package as published in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePackage {
@@ -121,8 +210,8 @@ pub struct RemotePackage {
     pub license_ref: Option<String>,
     /// Channel the package is published on.
     pub channel: Channel,
-    /// Other package paths this package depends on.
-    pub dependencies: Vec<String>,
+    /// Other packages this package requires.
+    pub dependencies: Vec<Dependency>,
     /// All archives declared for the package, across host platforms.
     pub archives: Vec<Archive>,
     /// True when the manifest marks the package obsolete.
@@ -230,6 +319,86 @@ impl Manifest {
             .as_deref()
             .and_then(|id| self.licenses.get(id))
     }
+
+    /// Fold `other` into this manifest.
+    ///
+    /// Used to combine the main manifest with sub-site manifests into one
+    /// inventory. Existing entries win, so the main manifest stays
+    /// authoritative for any path a sub-site happens to repeat.
+    pub fn merge(&mut self, other: Manifest) {
+        for package in other.packages {
+            if !self.packages.iter().any(|p| p.path == package.path) {
+                self.packages.push(package);
+            }
+        }
+        for (id, license) in other.licenses {
+            self.licenses.entry(id).or_insert(license);
+        }
+    }
+
+    /// The newest package in `family` published at or below `channel`.
+    ///
+    /// Dependency resolution needs this because a family's newest build overall
+    /// may be a preview: `emulator`'s dev-channel entry outranks its stable one,
+    /// and picking it would make the install fail the channel gate for a package
+    /// the user never asked for.
+    pub fn newest_in_channel(&self, family: &str, channel: Channel) -> Option<&RemotePackage> {
+        let mut candidates: Vec<&RemotePackage> = self
+            .family(family)
+            .into_iter()
+            .filter(|p| p.channel <= channel && !p.obsolete)
+            .collect();
+        if candidates.is_empty() {
+            // A dependency may name an exact versioned path (`ndk;29.0.1`)
+            // rather than a bare family; honour it as long as the channel fits.
+            candidates = self
+                .packages
+                .iter()
+                .filter(|p| p.path == family && p.channel <= channel && !p.obsolete)
+                .collect();
+            candidates.sort_by(|a, b| compare_versions(&a.version(), &b.version()));
+        }
+        candidates.pop()
+    }
+
+    /// Transitively resolve `package`'s dependencies, nearest-first.
+    ///
+    /// The returned list excludes `package` itself and is ordered so that a
+    /// dependency always precedes whatever required it, which is the order it
+    /// must be installed in. Unknown paths and cycles are skipped rather than
+    /// failing: a manifest edge pointing outside the curated families is not a
+    /// reason to refuse the install.
+    pub fn resolve_dependencies<'m>(
+        &'m self,
+        package: &'m RemotePackage,
+    ) -> Vec<(&'m RemotePackage, Option<String>)> {
+        let mut out: Vec<(&RemotePackage, Option<String>)> = Vec::new();
+        let mut seen: Vec<&str> = vec![package.path.as_str()];
+        let mut queue: Vec<&Dependency> = package.dependencies.iter().collect();
+        while let Some(dep) = queue.pop() {
+            if seen.contains(&dep.path.as_str()) {
+                continue;
+            }
+            seen.push(dep.path.as_str());
+            // A dependency may name either an exact path or a bare family; the
+            // manifest uses the exact form, but resolve the family as a
+            // fallback so a versioned target still finds its newest build.
+            let target = self
+                .newest_in_channel(&dep.path, Channel::Stable)
+                .or_else(|| self.package(&dep.path))
+                .or_else(|| self.family(&dep.path).into_iter().next_back());
+            let Some(target) = target else {
+                continue;
+            };
+            for next in &target.dependencies {
+                if !seen.contains(&next.path.as_str()) {
+                    queue.push(next);
+                }
+            }
+            out.push((target, dep.min_revision.clone()));
+        }
+        out
+    }
 }
 
 /// Compare two dotted revision strings numerically segment by segment.
@@ -322,8 +491,20 @@ pub fn host_bits_token(arch: Arch) -> Option<&'static str> {
     }
 }
 
-/// Parse a repository manifest.
+/// Parse a repository manifest whose archive urls are root-relative.
 pub fn parse_manifest(xml: &str) -> Result<Manifest> {
+    parse_manifest_with_base(xml, "")
+}
+
+/// Parse a manifest served from `base` (a root-relative directory with a
+/// trailing slash, or `""` for the root itself).
+///
+/// Sub-site manifests state archive urls relative to their own directory, so
+/// `base` is prepended to each one. Every [`Archive::url`] this module produces
+/// is therefore root-relative regardless of which manifest it came from --
+/// without this the same file name under two sub-sites would be ambiguous, and
+/// downloads would be attempted against the wrong directory.
+pub fn parse_manifest_with_base(xml: &str, base: &str) -> Result<Manifest> {
     let mut manifest = Manifest::default();
     let mut cursor = 0usize;
     while let Some(start) = find_element(xml, "remotePackage", cursor) {
@@ -331,7 +512,15 @@ pub fn parse_manifest(xml: &str) -> Result<Manifest> {
             Some(found) => found,
             None => break,
         };
-        if let Some(package) = parse_remote_package(xml, start, body) {
+        if let Some(mut package) = parse_remote_package(xml, start, body) {
+            if !base.is_empty() {
+                for archive in &mut package.archives {
+                    // Leave anything already absolute or rooted alone.
+                    if !archive.url.contains("://") && !archive.url.starts_with('/') {
+                        archive.url = format!("{base}{}", archive.url);
+                    }
+                }
+            }
             manifest.packages.push(package);
         }
         cursor = end;
@@ -391,6 +580,11 @@ fn parse_revision(body: &str) -> String {
     let Some((revision_body, _)) = element_body(body, start, "revision") else {
         return String::new();
     };
+    parse_revision_fields(revision_body)
+}
+
+/// Join `<major>/<minor>/<micro>` from an already-narrowed revision body.
+fn parse_revision_fields(revision_body: &str) -> String {
     let mut parts = Vec::new();
     for field in ["major", "minor", "micro"] {
         match first_text(revision_body, field) {
@@ -402,7 +596,7 @@ fn parse_revision(body: &str) -> String {
     parts.join(".")
 }
 
-fn parse_dependencies(body: &str) -> Vec<String> {
+fn parse_dependencies(body: &str) -> Vec<Dependency> {
     let Some(start) = find_element(body, "dependencies", 0) else {
         return Vec::new();
     };
@@ -412,10 +606,24 @@ fn parse_dependencies(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while let Some(at) = find_element(deps_body, "dependency", cursor) {
-        if let Some(path) = attribute(deps_body, at, "path") {
-            out.push(path);
-        }
-        cursor = at + "dependency".len();
+        let Some(path) = attribute(deps_body, at, "path") else {
+            cursor = at + "dependency".len();
+            continue;
+        };
+        // The element may be self-closing or carry a <min-revision> child.
+        let min_revision = element_body(deps_body, at, "dependency")
+            .map(|(dep_body, _)| dep_body)
+            .and_then(|dep_body| {
+                find_element(dep_body, "min-revision", 0)
+                    .and_then(|rev_at| element_body(dep_body, rev_at, "min-revision"))
+                    .map(|(rev_body, _)| parse_revision_fields(rev_body))
+            })
+            .filter(|value| !value.is_empty());
+        out.push(Dependency { path, min_revision });
+        cursor = match element_body(deps_body, at, "dependency") {
+            Some((_, end)) => end,
+            None => at + "dependency".len(),
+        };
     }
     out
 }
@@ -779,12 +987,230 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_only_dependency_shape_the_manifest_uses() {
+    fn parses_dependency_path_and_min_revision() {
         let m = manifest();
         let kvm = m.package("emulators;kvm").unwrap();
-        assert_eq!(kvm.dependencies, vec!["emulator".to_string()]);
+        assert_eq!(kvm.dependencies.len(), 1);
+        assert_eq!(kvm.dependencies[0].path, "emulator");
+        // The bound matters: an older installed build does not satisfy it.
+        assert_eq!(kvm.dependencies[0].min_revision.as_deref(), Some("36"));
         // Packages without a <dependencies> block report none.
         assert!(m.package("platform-tools").unwrap().dependencies.is_empty());
+    }
+
+    #[test]
+    fn min_revision_bound_is_enforced_numerically() {
+        let dep = Dependency {
+            path: "emulator".into(),
+            min_revision: Some("33.1.24".into()),
+        };
+        assert!(dep.satisfied_by("33.1.24"));
+        assert!(dep.satisfied_by("37.1.11"));
+        assert!(!dep.satisfied_by("33.1.9"));
+        assert!(!dep.satisfied_by("32.0.0"));
+        // An unbounded dependency is satisfied by anything installed.
+        let loose = Dependency {
+            path: "emulator".into(),
+            min_revision: None,
+        };
+        assert!(loose.satisfied_by("1.0"));
+    }
+
+    #[test]
+    fn resolve_dependencies_walks_transitively_and_stops_at_cycles() {
+        let xml = r#"<sdk>
+          <remotePackage path="a">
+            <revision><major>1</major></revision>
+            <dependencies><dependency path="b"><min-revision><major>2</major></min-revision></dependency></dependencies>
+            <archives><archive><complete><url>a.zip</url><checksum>aa</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+          <remotePackage path="b">
+            <revision><major>2</major></revision>
+            <dependencies><dependency path="c"/></dependencies>
+            <archives><archive><complete><url>b.zip</url><checksum>bb</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+          <remotePackage path="c">
+            <revision><major>3</major></revision>
+            <dependencies><dependency path="a"/></dependencies>
+            <archives><archive><complete><url>c.zip</url><checksum>cc</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+        </sdk>"#;
+        let m = parse_manifest(xml).unwrap();
+        let a = m.package("a").unwrap();
+        let deps = m.resolve_dependencies(a);
+        let paths: Vec<&str> = deps.iter().map(|(p, _)| p.path.as_str()).collect();
+        // b and c are both reached; the cycle back to `a` is dropped rather
+        // than recursing forever.
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"b"));
+        assert!(paths.contains(&"c"));
+        assert!(!paths.contains(&"a"));
+        // The declared bound travels with the edge.
+        let b = deps.iter().find(|(p, _)| p.path == "b").unwrap();
+        assert_eq!(b.1.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn dependency_resolves_to_a_stable_build_not_the_newest_preview() {
+        // Real trap from the manifest: `emulator` has both a channel-0 (stable)
+        // and a channel-2 (dev) entry, and the dev one has the higher revision.
+        // Resolving to "newest" picked the preview, and the install then died on
+        // the channel gate for a package the user never named.
+        let xml = r#"<sdk>
+          <remotePackage path="img">
+            <revision><major>9</major></revision>
+            <dependencies><dependency path="emulator"><min-revision><major>33</major></min-revision></dependency></dependencies>
+            <archives><archive><complete><url>img.zip</url><checksum>aa</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+          <remotePackage path="emulator">
+            <revision><major>37</major><minor>2</minor><micro>7</micro></revision>
+            <channelRef ref="channel-2"/>
+            <archives><archive><complete><url>emu-dev.zip</url><checksum>bb</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+          <remotePackage path="emulator">
+            <revision><major>37</major><minor>1</minor><micro>11</micro></revision>
+            <channelRef ref="channel-0"/>
+            <archives><archive><complete><url>emu-stable.zip</url><checksum>cc</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+        </sdk>"#;
+        let m = parse_manifest(xml).unwrap();
+        let deps = m.resolve_dependencies(m.package("img").unwrap());
+        assert_eq!(deps.len(), 1);
+        let (target, min) = &deps[0];
+        assert_eq!(target.channel, Channel::Stable);
+        assert_eq!(target.revision, "37.1.11");
+        assert_eq!(target.archives[0].url, "emu-stable.zip");
+        // The bound still travels with the edge, and the stable pick honours it.
+        assert_eq!(min.as_deref(), Some("33"));
+        assert!(Dependency {
+            path: "emulator".into(),
+            min_revision: min.clone()
+        }
+        .satisfied_by(&target.version()));
+    }
+
+    #[test]
+    fn newest_in_channel_widens_only_when_asked() {
+        let xml = r#"<sdk>
+          <remotePackage path="t">
+            <revision><major>2</major></revision>
+            <channelRef ref="channel-2"/>
+            <archives><archive><complete><url>dev.zip</url><checksum>a</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+          <remotePackage path="t">
+            <revision><major>1</major></revision>
+            <channelRef ref="channel-0"/>
+            <archives><archive><complete><url>stable.zip</url><checksum>b</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+        </sdk>"#;
+        let m = parse_manifest(xml).unwrap();
+        assert_eq!(
+            m.newest_in_channel("t", Channel::Stable).unwrap().revision,
+            "1"
+        );
+        // Opting into dev reaches the higher revision.
+        assert_eq!(
+            m.newest_in_channel("t", Channel::Dev).unwrap().revision,
+            "2"
+        );
+        // A family with nothing at or below the channel yields nothing.
+        assert!(m.newest_in_channel("absent", Channel::Stable).is_none());
+    }
+
+    #[test]
+    fn unknown_dependency_targets_are_skipped_not_fatal() {
+        let xml = r#"<sdk>
+          <remotePackage path="a">
+            <revision><major>1</major></revision>
+            <dependencies><dependency path="not-in-manifest"/></dependencies>
+            <archives><archive><complete><url>a.zip</url><checksum>aa</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+        </sdk>"#;
+        let m = parse_manifest(xml).unwrap();
+        assert!(m.resolve_dependencies(m.package("a").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn sub_site_archive_urls_are_rebased_onto_the_repository_root() {
+        // The real trap: two sub-sites both ship `x86_64-35_r09.zip`, so a
+        // bare file name is ambiguous and would download from the wrong dir.
+        let xml = r#"<sdk>
+          <license id="android-sdk-license">terms</license>
+          <remotePackage path="system-images;android-35;google_apis;x86_64">
+            <revision><major>9</major></revision>
+            <uses-license ref="android-sdk-license"/>
+            <dependencies><dependency path="emulator"><min-revision><major>33</major><minor>1</minor><micro>24</micro></min-revision></dependency></dependencies>
+            <archives><archive><complete><url>x86_64-35_r09.zip</url><checksum>0103e6da</checksum><size>1738815903</size></complete></archive></archives>
+          </remotePackage>
+        </sdk>"#;
+        let m = parse_manifest_with_base(xml, "sys-img/google_apis/").unwrap();
+        let p = m
+            .package("system-images;android-35;google_apis;x86_64")
+            .unwrap();
+        assert_eq!(p.archives[0].url, "sys-img/google_apis/x86_64-35_r09.zip");
+        assert_eq!(p.family(), "system-images");
+        assert_eq!(p.dependencies[0].min_revision.as_deref(), Some("33.1.24"));
+
+        // Absolute urls are left alone.
+        let abs = r#"<sdk><remotePackage path="p"><revision><major>1</major></revision>
+          <archives><archive><complete><url>https://example.test/x.zip</url><checksum>a</checksum><size>1</size></complete></archive></archives>
+          </remotePackage></sdk>"#;
+        let m2 = parse_manifest_with_base(abs, "sys-img/android/").unwrap();
+        assert_eq!(
+            m2.package("p").unwrap().archives[0].url,
+            "https://example.test/x.zip"
+        );
+    }
+
+    #[test]
+    fn merging_manifests_keeps_the_first_definition_of_a_path() {
+        let mut main = manifest();
+        let before = main.packages.len();
+        let extra = r#"<sdk>
+          <license id="intel-android-sysimage-license">intel terms</license>
+          <remotePackage path="system-images;android-35;default;x86_64">
+            <revision><major>9</major></revision>
+            <uses-license ref="intel-android-sysimage-license"/>
+            <archives><archive><complete><url>x86_64-35_r09.zip</url><checksum>ab</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+          <remotePackage path="platform-tools">
+            <revision><major>1</major></revision>
+            <archives><archive><complete><url>bogus.zip</url><checksum>cd</checksum><size>1</size></complete></archive></archives>
+          </remotePackage>
+        </sdk>"#;
+        main.merge(parse_manifest_with_base(extra, "sys-img/android/").unwrap());
+        // The new path is added...
+        assert_eq!(main.packages.len(), before + 1);
+        assert!(main
+            .package("system-images;android-35;default;x86_64")
+            .is_some());
+        // ...but the pre-existing platform-tools is NOT replaced by the
+        // sub-site's bogus duplicate.
+        assert_eq!(main.package("platform-tools").unwrap().revision, "37.0.1");
+        // Licenses merge too.
+        assert!(main.licenses.contains_key("intel-android-sysimage-license"));
+        assert_eq!(
+            main.licenses["android-sdk-license"].text,
+            "Terms and Conditions text"
+        );
+    }
+
+    #[test]
+    fn system_image_sub_sites_cover_the_verified_variants() {
+        let dirs: Vec<&str> = SYSTEM_IMAGE_SUB_SITES.iter().map(|s| s.dir).collect();
+        assert!(dirs.contains(&"sys-img/google_apis/"));
+        assert!(dirs.contains(&"sys-img/google_apis_playstore/"));
+        assert!(dirs.contains(&"sys-img/android/"));
+        // Every sub-site must probe the newest schema first.
+        for site in SYSTEM_IMAGE_SUB_SITES {
+            assert_eq!(site.files.first().copied(), Some("sys-img2-3.xml"));
+            assert!(site.dir.ends_with('/'), "dir needs a trailing slash");
+        }
+        let site = SYSTEM_IMAGE_SUB_SITES[1];
+        assert_eq!(
+            site.url(GOOGLE_REPO_ROOT, "sys-img2-3.xml"),
+            "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml"
+        );
     }
 
     #[test]

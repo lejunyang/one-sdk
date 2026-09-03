@@ -336,7 +336,23 @@ osdk android licenses export --sdk-root /path/to/sdk
 osdk 不会替你接受协议：未传接受选项时，安装会在下载任何内容之前停止。
 可用包族为 `android-ndk`、`android-platform-tools`、`android-build-tools`、
 `android-cmdline-tools`、`android-cmake`、`android-platforms`、
-`android-emulator`、`android-sources`。
+`android-emulator`、`android-sources`、`android-system-images`。
+
+模拟器系统镜像同样如此，并且包声明的依赖会随之一起安装——安装镜像时会带上它
+所需的 `android-emulator`：
+
+```bash
+# 浏览可用镜像（各厂商与设备形态都在同一份列表中）
+osdk list-remote android-system-images
+
+# 安装镜像时会一并安装它依赖的模拟器
+osdk install "android-system-images@android-35;google_apis;x86_64" \
+  -o accept-licenses=true
+```
+
+模拟器只接受包含 `platform-tools` 的 SDK 目录，因此创建 AVD 前也要安装它。
+osdk 会把所有 Android 包组织成 Google 工具所期望的那一套目录结构，且不会重复
+存储任何一个包。
 
 Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基于 jar 的工具
 会在环境未设 `JAVA_HOME` 时使用 osdk 管理的 `java`。用 `osdk install java` 装一个即可。

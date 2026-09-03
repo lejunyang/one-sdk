@@ -22,6 +22,7 @@ Each package family maps to one backend, named `android-<family>`:
 | `android-platforms` | `android.jar` | No executables |
 | `android-emulator` | `emulator` | — |
 | `android-sources` | — | Sources; no executables |
+| `android-system-images` | — | Emulator disk images; no executables |
 
 ```bash
 osdk list-remote android-platform-tools
@@ -30,8 +31,18 @@ osdk exec -t android-platform-tools@37.0.1 -- adb version
 ```
 
 `ndk-bundle` is deliberately excluded: it is the pre-side-by-side layout and
-including it would only create ambiguity with `android-ndk`. System images live
-in separate sub-site manifests and are not covered yet either.
+including it would only create ambiguity with `android-ndk`.
+
+The plural `emulators` family is excluded as well, and it is not a spelling
+variant of `android-emulator`. Measured against the live manifest, the two differ
+in five ways: `emulators` is versioned side-by-side as `emulators;<build-id>`,
+declares `emulator` itself as a dependency, ships a 273 MB Windows archive rather
+than 421 MB, names its files `emulator_windows_x64-*` instead of
+`emulator-windows_x64-*`, and exists only on the preview channel. It is an
+incremental component layered on the singular package, so the version numbers do
+not even compare: `emulators;latest` was 37.1.2 while stable `emulator` was
+37.1.11.
+
 
 ## License agreements
 
@@ -234,3 +245,93 @@ The same applies to `maven`, `gradle` and `kotlin`.
 `ANDROID_SDK_ROOT` points at the shared SDK root that holds the license records,
 not at an individual package directory, so tools like Gradle can reuse your
 acceptance.
+
+## System images and dependency resolution
+
+Emulator system images are published outside the main manifest, in per-vendor
+sub-sites. osdk merges them into one family so a single command lists everything:
+
+```bash
+# 263 versions across five sub-sites: default, google_apis,
+# google_apis_playstore, android-tv and android-wear
+osdk list-remote android-system-images
+
+osdk install "android-system-images@android-35;google_apis;x86_64" \
+  -o accept-licenses=true
+```
+
+The sub-site manifests are only fetched for this family. Adding six requests to
+every `osdk install adb` would be a poor trade for a list nothing else reads.
+
+Archive URLs inside a sub-site manifest are relative to that manifest's own
+directory, and two sub-sites can publish the same file name — an
+`x86_64-35_r09.zip` exists under more than one vendor. osdk rewrites every URL to
+be root-relative while parsing, so a package can never be fetched from the wrong
+vendor's directory.
+
+### Dependencies
+
+Unlike the main manifest, where only three preview packages declare a dependency,
+dependencies are the norm here: every one of the 56 declarations in the
+`google_apis` manifest names `emulator`, most with a minimum revision. osdk
+resolves that closure and installs what is missing, so asking for an image gives
+you a working emulator.
+
+Two rules exist because of what the real data does:
+
+- **The license gate covers dependencies.** Sub-sites reference eight agreements
+  the main manifest never mentions, including `intel-android-sysimage-license`
+  and `android-googletv-license`. Consenting to the image's own agreement cannot
+  imply consent to a vendor agreement you were never shown.
+- **A dependency resolves on the stable channel.** `emulator` is published twice,
+  and the preview build carries the higher revision. Following "newest" would
+  install a preview to satisfy a package the user never named, and the install
+  would then fail its own channel check.
+
+An edge pointing at a family osdk does not curate is skipped with a warning
+rather than failing the install: a manifest edge is not a reason to refuse a
+package that is otherwise installable.
+
+### Directory layout
+
+Google's tools require one shared SDK directory, while osdk installs each package
+into its own versioned directory. Both hold at once: the payload stays where osdk
+put it, and a directory link publishes it at the path the Android tools expect —
+`system-images/android-35/google_apis/x86_64`, `platform-tools`, `emulator`, and
+so on. Nothing is copied, so a 3.5 GB image is stored once.
+
+On Windows the link is an NTFS junction rather than a symlink, because a symlink
+needs Developer Mode or elevation while a junction needs neither, and the Android
+tools only ever traverse it.
+
+If a real directory already occupies the target path — most often a package that
+Google's own `sdkmanager` installed — osdk leaves it alone and warns. Taking that
+path over would mean deleting data osdk never owned.
+
+### The emulator's SDK root check
+
+The emulator decides whether a directory is a usable SDK root by looking for a
+`platform-tools` child, and nothing else. It checks `ANDROID_HOME`, then
+`ANDROID_SDK_ROOT`, then walks up from its own location, rejecting every
+candidate that lacks it and ending in `FATAL | Broken AVD system path`.
+
+A root holding only `emulator` and `system-images` is therefore still invalid.
+Install platform-tools before creating an AVD:
+
+```bash
+osdk install android-platform-tools -o accept-licenses=true
+```
+
+osdk warns at install time when the shared root is not yet valid, because the
+emulator's own error names the root rather than the missing piece.
+
+### Mirrors
+
+Images are large, so a mirror looks appealing. Measured throughput says
+otherwise: the Tencent mirror served byte-identical archives at 4.38 MB/s against
+Google's 5.54 MB/s, an 0.79x speed-up. The existing source order already prefers
+the faster path, so no image-specific handling was added.
+
+One caveat worth knowing: the mirror does not carry beta images. A missing
+`x86_64-ps16k-37.2_r04.zip` reflects that gap, not a broken mirror — its copies of
+both the main and sub-site manifests hash identically to Google's.

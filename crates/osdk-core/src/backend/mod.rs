@@ -102,6 +102,18 @@ pub trait Backend: Send + Sync {
     /// Install a concrete version.
     async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
 
+    /// Take the tool versions this backend installed on its own behalf during
+    /// the most recent [`Backend::install`], clearing the record.
+    ///
+    /// A backend that honours a package's declared dependencies installs tools
+    /// the caller never named. Those still need shims, so the backend has to be
+    /// able to report them; otherwise the dependency lands on disk and appears
+    /// in `osdk list` while none of its commands are runnable until the user
+    /// happens to run `osdk reshim`.
+    fn take_side_installed(&self) -> Vec<ToolVersion> {
+        Vec::new()
+    }
+
     /// Apply idempotent post-install actions to an already installed version.
     fn ensure_post_install(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<()> {
         Ok(())
