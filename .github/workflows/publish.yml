@@ -96,11 +96,10 @@ jobs:
           cp \
             "target/${{ matrix.target }}/release/osdk" \
             "target/${{ matrix.target }}/release/osdk-shim" \
-            "target/${{ matrix.target }}/release/osdk-aube" \
             "$stage/"
           tar -C "$stage" -czf \
             "dist/osdk-${{ matrix.target }}.tar.gz" \
-            osdk osdk-shim osdk-aube
+            osdk osdk-shim
       - name: Package Windows binaries
         if: ${{ matrix.archive == 'zip' }}
         shell: pwsh
@@ -109,11 +108,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage, dist | Out-Null
           Copy-Item `
             "target/${{ matrix.target }}/release/osdk.exe", `
-            "target/${{ matrix.target }}/release/osdk-shim.exe", `
-            "target/${{ matrix.target }}/release/osdk-aube.exe" `
+            "target/${{ matrix.target }}/release/osdk-shim.exe" `
             -Destination $stage
           Compress-Archive `
-            -Path "$stage/osdk.exe", "$stage/osdk-shim.exe", "$stage/osdk-aube.exe" `
+            -Path "$stage/osdk.exe", "$stage/osdk-shim.exe" `
             -DestinationPath "dist/osdk-${{ matrix.target }}.zip"
       - uses: actions/upload-artifact@v4
         with:

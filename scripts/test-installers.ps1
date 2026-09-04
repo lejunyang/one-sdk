@@ -9,7 +9,7 @@ $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("osdk-installer-test-" 
 $server = $null
 $target = "x86_64-pc-windows-msvc"
 $archive = "osdk-$target.zip"
-$binaries = @("osdk.exe", "osdk-shim.exe", "osdk-aube.exe")
+$binaries = @("osdk.exe", "osdk-shim.exe")
 
 function Write-BinarySet {
     param(
@@ -131,12 +131,12 @@ function Assert-RecoveryBeforeStagingFailure {
 function New-ReleaseFixture {
     param(
         [Parameter(Mandatory)][string]$Version,
-        [switch]$WithoutAube
+        [switch]$WithoutShim
     )
 
     $releaseDir = Join-Path $testRoot "http/example/one-sdk/releases/download/v$Version"
     $fixtureDir = Join-Path $testRoot "fixture-$Version"
-    $names = if ($WithoutAube) { @("osdk.exe", "osdk-shim.exe") } else { $binaries }
+    $names = if ($WithoutShim) { @("osdk.exe") } else { $binaries }
     Write-BinarySet -Directory $fixtureDir -Label fixture -Names $names
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
     $archivePath = Join-Path $releaseDir $archive
@@ -206,7 +206,7 @@ try {
     }
 
     $releaseDir = New-ReleaseFixture -Version "9.8.7"
-    $null = New-ReleaseFixture -Version "9.8.6" -WithoutAube
+    $null = New-ReleaseFixture -Version "9.8.6" -WithoutShim
     $latestDir = Join-Path $testRoot "http/example/one-sdk/releases/latest/download"
     New-Item -ItemType Directory -Force -Path $latestDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $releaseDir $archive) -Destination $latestDir
@@ -335,8 +335,8 @@ try {
     $incompleteDir = Join-Path $testRoot "incomplete-bin"
     Write-BinarySet -Directory $incompleteDir -Label old
     Invoke-ExpectedFailure `
-        -ExpectedMessage "does not contain osdk-aube.exe" `
-        -Message "Installer accepted an archive without osdk-aube.exe." `
+        -ExpectedMessage "does not contain osdk-shim.exe" `
+        -Message "Installer accepted an archive without osdk-shim.exe." `
         -Operation {
             & $installer `
                 -Version "9.8.6" `

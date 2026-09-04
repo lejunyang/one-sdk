@@ -5,7 +5,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 test_root=$(mktemp -d)
 server_pid=
 lock_holder_pid=
-binaries=(osdk osdk-shim osdk-aube)
+binaries=(osdk osdk-shim)
 
 cleanup() {
   if [[ -n "$server_pid" ]]; then
@@ -198,13 +198,13 @@ latest_dir="$release_root/latest/download"
 fixture_dir="$test_root/fixtures"
 mkdir -p "$asset_dir" "$latest_dir" "$fixture_dir"
 write_install_set "$fixture_dir" fixture
-tar -C "$fixture_dir" -czf "$asset_dir/osdk-$target.tar.gz" osdk osdk-shim osdk-aube
+tar -C "$fixture_dir" -czf "$asset_dir/osdk-$target.tar.gz" osdk osdk-shim
 write_checksum "$asset_dir/osdk-$target.tar.gz" "$asset_dir/SHA256SUMS"
 cp "$asset_dir/osdk-$target.tar.gz" "$asset_dir/SHA256SUMS" "$latest_dir/"
 
 missing_asset_dir="$release_root/download/v9.8.6"
 mkdir -p "$missing_asset_dir"
-tar -C "$fixture_dir" -czf "$missing_asset_dir/osdk-$target.tar.gz" osdk osdk-shim
+tar -C "$fixture_dir" -czf "$missing_asset_dir/osdk-$target.tar.gz" osdk
 write_checksum \
   "$missing_asset_dir/osdk-$target.tar.gz" \
   "$missing_asset_dir/SHA256SUMS"
@@ -330,7 +330,7 @@ if OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
     --version 9.8.6 \
     --target "$target" \
     --install-dir "$incomplete_install_dir"; then
-  printf 'Installer accepted an archive without osdk-aube.\n' >&2
+  printf 'Installer accepted an archive without osdk-shim.\n' >&2
   exit 1
 fi
 assert_install_set "$incomplete_install_dir" old
@@ -422,7 +422,6 @@ if OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
 fi
 [[ ! -e "$test_root/invalid-checksum/osdk" ]]
 [[ ! -e "$test_root/invalid-checksum/osdk-shim" ]]
-[[ ! -e "$test_root/invalid-checksum/osdk-aube" ]]
 
 help_output=$(sh "$repo_root/install.sh" --help)
 grep -F -- "--version <version>" <<<"$help_output" >/dev/null

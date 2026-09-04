@@ -128,7 +128,7 @@ lock_owner_file=
 lock_snapshot_file=
 promotion_active=0
 preserve_transaction=0
-binaries="osdk osdk-shim osdk-aube"
+binaries="osdk osdk-shim"
 
 path_exists() {
   [ -e "$1" ] || [ -L "$1" ]
@@ -670,7 +670,7 @@ promotion_active=0
 rm -rf "$transaction_dir"
 transaction_dir=
 
-printf 'Installed osdk, osdk-shim, and osdk-aube to %s\n' "$INSTALL_DIR"
+printf 'Installed osdk and osdk-shim to %s\n' "$INSTALL_DIR"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *)

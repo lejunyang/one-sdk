@@ -80,15 +80,15 @@ version_command=()
 install_options=()
 exec_tools=()
 cleanup_tools=()
-global_aube=0
-global_aube_cleanup_active=0
+global_install=0
+global_install_cleanup_active=0
 
-cleanup_global_aube_on_exit() {
+cleanup_global_install_on_exit() {
   status=$?
   trap - EXIT
-  if [[ "$global_aube_cleanup_active" = "1" ]]; then
+  if [[ "$global_install_cleanup_active" = "1" ]]; then
     set +e
-    printf '\nGlobal Aube smoke failed; attempting isolated cleanup.\n'
+    printf '\nGlobal install smoke failed; attempting isolated cleanup.\n'
     timeout --foreground "$command_timeout" \
       "$osdk_binary" --quiet --yes uninstall --global "$request"
     node_output=$(timeout --foreground "$command_timeout" \
@@ -111,7 +111,7 @@ cleanup_global_aube_on_exit() {
   exit "$status"
 }
 
-trap cleanup_global_aube_on_exit EXIT
+trap cleanup_global_install_on_exit EXIT
 
 case "$backend" in
   node)
@@ -169,9 +169,9 @@ case "$backend" in
     request=github:cli/cli@latest
     version_command=(gh --version)
     ;;
-  npm-global-aube)
+  npm-global)
     binary_dir=$(cd "$(dirname "$osdk_binary")" && pwd)
-    for sibling in osdk-shim osdk-aube; do
+    for sibling in osdk-shim; do
       if [[ ! -x "$binary_dir/$sibling" ]]; then
         printf 'required sibling binary is not executable: %s\n' \
           "$binary_dir/$sibling" >&2
@@ -180,7 +180,7 @@ case "$backend" in
     done
     request=npm:prettier@3.6.2
     cleanup_tools=(node)
-    global_aube=1
+    global_install=1
     ;;
   *)
     printf 'unsupported live-smoke backend: %s\n' "$backend" >&2
@@ -188,7 +188,7 @@ case "$backend" in
     ;;
 esac
 
-if [[ "$global_aube" = "0" ]]; then
+if [[ "$global_install" = "0" ]]; then
   exec_tools+=(--tool "$request")
   cleanup_tools+=("$list_tool")
 fi
@@ -199,20 +199,20 @@ printf 'smoke_root=%s\n' "$smoke_root"
 printf 'command_timeout=%s\n' "$command_timeout"
 
 cd "$smoke_root/project"
-if [[ "$global_aube" = "1" ]]; then
-  global_aube_cleanup_active=1
-  run "$osdk_binary" --quiet --yes use --global "$request" -o installer=aube
+if [[ "$global_install" = "1" ]]; then
+  global_install_cleanup_active=1
+  run "$osdk_binary" --quiet --yes use --global "$request" -o installer=npm
   run "$osdk_binary" where --global "$request"
   prettier_shim="$OSDK_DATA_DIR/shims/prettier"
   if [[ ! -x "$prettier_shim" ]]; then
-    printf 'global Aube install did not publish an executable shim: %s\n' \
+    printf 'global install did not publish an executable shim: %s\n' \
       "$prettier_shim" >&2
     exit 1
   fi
   run "$prettier_shim" --version
   run "$osdk_binary" --quiet --yes uninstall --global "$request"
   if [[ -e "$prettier_shim" || -L "$prettier_shim" ]]; then
-    printf 'global Aube uninstall left its shim behind: %s\n' \
+    printf 'global uninstall left its shim behind: %s\n' \
       "$prettier_shim" >&2
     exit 1
   fi
@@ -270,5 +270,5 @@ if [[ -n "$remaining_marker" ]]; then
   printf 'complete marker remains after uninstall: %s\n' "$remaining_marker" >&2
   exit 1
 fi
-global_aube_cleanup_active=0
+global_install_cleanup_active=0
 printf '\nno complete markers remain under %s\n' "$OSDK_INSTALL_DIR"

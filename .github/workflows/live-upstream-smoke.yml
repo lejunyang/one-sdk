@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
-    inputs:
-      include_global_aube:
-        description: Run the additional global Aube lifecycle smoke
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   attestations: read
@@ -70,7 +64,6 @@ jobs:
           path: |
             ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk
             ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk-shim
-            ${{ runner.temp }}/one-sdk-live-smoke-build/target/release/osdk-aube
           if-no-files-found: error
           retention-days: 1
 
@@ -94,6 +87,7 @@ jobs:
           - deno
           - bun
           - github
+          - npm-global
     steps:
       - name: Prepare isolated smoke directories
         shell: bash
@@ -135,8 +129,7 @@ jobs:
         run: |
           chmod +x \
             "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk" \
-            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk-shim" \
-            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk-aube"
+            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk-shim"
           bash scripts/live-smoke/run.sh \
             "${{ matrix.backend }}" \
             "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk"
@@ -146,63 +139,5 @@ jobs:
         with:
           name: live-smoke-${{ matrix.backend }}-log
           path: ${{ runner.temp }}/one-sdk-live-smoke/${{ matrix.backend }}/logs/
-          if-no-files-found: error
-          retention-days: 14
-
-  global-aube-smoke:
-    name: smoke (npm-global-aube)
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.include_global_aube) }}
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Prepare isolated smoke directories
-        shell: bash
-        run: |
-          root="$RUNNER_TEMP/one-sdk-live-smoke/npm-global-aube"
-          mkdir -p "$root/home" "$root/tmp" "$root/logs"
-          {
-            printf 'LIVE_SMOKE_ROOT=%s\n' "$root"
-            printf 'HOME=%s\n' "$root/home"
-            printf 'XDG_CACHE_HOME=%s\n' "$root/xdg-cache"
-            printf 'XDG_CONFIG_HOME=%s\n' "$root/xdg-config"
-            printf 'XDG_DATA_HOME=%s\n' "$root/xdg-data"
-            printf 'OSDK_DATA_DIR=%s\n' "$root/osdk/data"
-            printf 'OSDK_CACHE_DIR=%s\n' "$root/osdk/cache"
-            printf 'OSDK_CONFIG_DIR=%s\n' "$root/osdk/config"
-            printf 'OSDK_STORE_DIR=%s\n' "$root/osdk/store"
-            printf 'OSDK_INSTALL_DIR=%s\n' "$root/osdk/installs"
-            printf 'CARGO_HOME=%s\n' "$root/cargo"
-            printf 'RUSTUP_HOME=%s\n' "$root/rustup"
-            printf 'CARGO_TARGET_DIR=%s\n' "$root/build"
-            printf 'TMPDIR=%s\n' "$root/tmp"
-          } >> "$GITHUB_ENV"
-          printf 'backend=npm-global-aube\nroot=%s\n' "$root" \
-            > "$root/logs/setup.log"
-      - uses: actions/checkout@v4
-      - name: Download smoke binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: live-smoke-binaries
-          path: ${{ runner.temp }}/one-sdk-live-smoke-bin
-      - name: Run isolated global Aube smoke
-        shell: bash
-        env:
-          LIVE_SMOKE_COMMAND_TIMEOUT: 20m
-          OSDK_YES: "true"
-        run: |
-          chmod +x \
-            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk" \
-            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk-shim" \
-            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk-aube"
-          bash scripts/live-smoke/run.sh \
-            npm-global-aube \
-            "$RUNNER_TEMP/one-sdk-live-smoke-bin/osdk"
-      - name: Upload smoke log
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: live-smoke-npm-global-aube-log
-          path: ${{ runner.temp }}/one-sdk-live-smoke/npm-global-aube/logs/
           if-no-files-found: error
           retention-days: 14

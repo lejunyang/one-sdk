@@ -4,7 +4,7 @@ Installs osdk from GitHub Releases.
 
 .DESCRIPTION
 Downloads the requested Windows release archive, verifies its SHA-256 checksum,
-and installs osdk.exe, osdk-shim.exe, and osdk-aube.exe.
+and installs osdk.exe and osdk-shim.exe.
 
 .PARAMETER Version
 Release version with or without the v prefix. Defaults to latest.
@@ -74,7 +74,7 @@ $preserveTransaction = $false
 $lockPath = $null
 $installLock = $null
 $lockAcquired = $false
-$binaries = @("osdk.exe", "osdk-shim.exe", "osdk-aube.exe")
+$binaries = @("osdk.exe", "osdk-shim.exe")
 
 function Add-TransactionJournalRecord {
     param(
@@ -378,7 +378,7 @@ try {
         throw $installError
     }
 
-    Write-Host "Installed osdk, osdk-shim, and osdk-aube to $InstallDir"
+    Write-Host "Installed osdk and osdk-shim to $InstallDir"
     $pathEntries = $env:PATH -split [System.IO.Path]::PathSeparator
     if ($InstallDir -notin $pathEntries) {
         Write-Host "Add $InstallDir to PATH to run osdk."
