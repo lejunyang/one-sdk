@@ -338,6 +338,10 @@ osdk 不会替你接受协议：未传接受选项时，安装会在下载任何
 `android-cmdline-tools`、`android-cmake`、`android-platforms`、
 `android-emulator`、`android-sources`、`android-system-images`。
 
+`android-platforms` 与 `android-sources` 的版本形如 `android-37.2`，`latest` 取最新的
+数字 API 级别——`android-CANARY` 这类代号是尚未分配编号的未来版本，需要它请按名字
+显式指定。
+
 模拟器系统镜像同样如此，并且包声明的依赖会随之一起安装——安装镜像时会带上它
 所需的 `android-emulator`：
 

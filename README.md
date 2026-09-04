@@ -371,6 +371,11 @@ the install stops before downloading anything. Available families are
 `android-cmdline-tools`, `android-cmake`, `android-platforms`,
 `android-emulator`, `android-sources` and `android-system-images`.
 
+`android-platforms` and `android-sources` spell their revisions `android-37.2`,
+and `latest` picks the newest numbered API level — codenames such as
+`android-CANARY` are future releases with no number assigned yet, so ask for one
+by name if you want it.
+
 Emulator system images work the same way, and whatever a package declares as a
 dependency is installed with it — asking for an image brings the matching
 `android-emulator` along:

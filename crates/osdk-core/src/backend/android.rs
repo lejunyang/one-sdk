@@ -666,8 +666,11 @@ impl AndroidBackend {
             "build-tools" => PathBuf::from("build-tools").join(version),
             "ndk" => PathBuf::from("ndk").join(version),
             "cmake" => PathBuf::from("cmake").join(version),
-            "platforms" => PathBuf::from("platforms").join(format!("android-{version}")),
-            "sources" => PathBuf::from("sources").join(format!("android-{version}")),
+            // These two are addressed as `platforms;android-35`, so the version
+            // already carries the prefix. Adding another produced
+            // `platforms/android-android-35`, a path no tool looks in.
+            "platforms" => PathBuf::from("platforms").join(api_dir_name(version)),
+            "sources" => PathBuf::from("sources").join(api_dir_name(version)),
             SYSTEM_IMAGES_FAMILY => {
                 // `system-images;android-35;google_apis;x86_64` -> three dirs.
                 let mut path = PathBuf::from(SYSTEM_IMAGES_FAMILY);
@@ -1162,6 +1165,21 @@ fn ndk_prebuilt_dir(os: crate::platform::Os) -> &'static str {
     }
 }
 
+/// The directory name for a `platforms` / `sources` revision.
+///
+/// Both are addressed as `platforms;android-35`, so the version osdk records
+/// already reads `android-35`. Prefixing unconditionally produced
+/// `platforms/android-android-35`, a path neither Gradle nor Google's tools ever
+/// look in -- so accept a version that already carries the prefix, and still add
+/// one for a bare API level in case a caller passes `35`.
+fn api_dir_name(version: &str) -> String {
+    if version.starts_with("android-") {
+        version.to_string()
+    } else {
+        format!("android-{version}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,7 +1394,26 @@ mod tests {
             AndroidBackend::sdk_root_relative_path("build-tools", "37.0.0"),
             Some(PathBuf::from("build-tools").join("37.0.0"))
         );
-        // platforms/sources use the `android-<api>` spelling.
+        // platforms/sources are addressed as `platforms;android-35`, so the
+        // version already reads `android-35`. This assertion used a bare `35`,
+        // a shape the manifest never produces, and so passed while the real
+        // install landed in `platforms/android-android-UpsideDownCake`.
+        assert_eq!(
+            AndroidBackend::sdk_root_relative_path("platforms", "android-35"),
+            Some(PathBuf::from("platforms").join("android-35"))
+        );
+        assert_eq!(
+            AndroidBackend::sdk_root_relative_path("sources", "android-35"),
+            Some(PathBuf::from("sources").join("android-35"))
+        );
+        // A codename revision is a directory name like any other; what must not
+        // happen is a doubled prefix.
+        assert_eq!(
+            AndroidBackend::sdk_root_relative_path("platforms", "android-UpsideDownCake"),
+            Some(PathBuf::from("platforms").join("android-UpsideDownCake"))
+        );
+        // A bare API level still gets one prefix, so a caller passing `35`
+        // is not silently placed at `platforms/35`.
         assert_eq!(
             AndroidBackend::sdk_root_relative_path("platforms", "35"),
             Some(PathBuf::from("platforms").join("android-35"))

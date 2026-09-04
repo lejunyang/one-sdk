@@ -430,7 +430,20 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// Split `1.0-rc1` into (`1.0`, Some(`rc1`)).
+///
+/// `platforms` and `sources` revisions read `android-37.2`, where the leading
+/// `android-` is a namespace, not a version segment. Splitting on the first `-`
+/// treated `android` as the whole release and `37.2` as a pre-release tag, so
+/// every comparison fell through to a lexical one: measured on the real
+/// manifest, that ordered `android-9` above `android-37.2`, put
+/// `android-37.2-beta1` above the finished `android-37.2`, and ranked both
+/// codenames above every numbered release -- which is how `latest` resolved to
+/// the `android-UpsideDownCake` preview.
+///
+/// Stripping the prefix first makes the rest of the comparison see the version
+/// it was written for.
 fn split_prerelease(version: &str) -> (&str, Option<&str>) {
+    let version = version.strip_prefix("android-").unwrap_or(version);
     match version.split_once('-') {
         Some((release, pre)) => (release, Some(pre)),
         None => (version, None),
@@ -459,9 +472,19 @@ fn compare_release(a: &str, b: &str) -> std::cmp::Ordering {
             (Some(x), Some(y)) => match (numeric(x), numeric(y)) {
                 (Some(xn), Some(yn)) if xn != yn => return xn.cmp(&yn),
                 (Some(_), Some(_)) => continue,
-                // Mixed or non-numeric segments fall back to a lexical
-                // comparison rather than guessing.
-                _ => match x.cmp(y) {
+                // A numeric segment against a non-numeric one: the number is
+                // the newer. Measured on the real manifest, `platforms` mixes
+                // API levels with codenames (`android-CANARY`,
+                // `android-UpsideDownCake`), and a lexical fallback ranked every
+                // codename above every number -- so `latest` resolved to
+                // `android-UpsideDownCake`, a preview, for a plain request.
+                // A codename is always a future release whose number is not yet
+                // assigned, so ordering it below the numbered releases is both
+                // correct and what keeps `latest` on a real API level.
+                (Some(_), None) => return Ordering::Greater,
+                (None, Some(_)) => return Ordering::Less,
+                // Neither is numeric: nothing better than lexical is available.
+                (None, None) => match x.cmp(y) {
                     Ordering::Equal => continue,
                     other => return other,
                 },
@@ -1331,5 +1354,60 @@ mod tests {
         assert_eq!(host_os_token(Os::Linux), "linux");
         assert_eq!(host_bits_token(Arch::X64), Some("64"));
         assert_eq!(host_bits_token(Arch::X86), Some("32"));
+    }
+    #[test]
+    fn platform_revisions_order_by_api_level_not_lexically() {
+        // Every string here is a real `platforms` revision from
+        // repository2-4.xml. The bug: `latest` resolved to
+        // `android-UpsideDownCake`, installing a preview for a plain request,
+        // because the `android-` prefix was read as the release and everything
+        // after it as a pre-release tag -- so every comparison became lexical.
+        let mut v = vec![
+            "android-36",
+            "android-37.0",
+            "android-37.2",
+            "android-37.2-beta1",
+            "android-CANARY",
+            "android-UpsideDownCake",
+            "android-35-ext15",
+            "android-9",
+        ];
+        v.sort_by(|a, b| compare_versions(a, b));
+        assert_eq!(
+            v,
+            vec![
+                // Codenames have no assigned number yet, so they sort below
+                // every numbered release rather than above it.
+                "android-CANARY",
+                "android-UpsideDownCake",
+                // Single digit stays smallest; it used to outrank 37.2.
+                "android-9",
+                // An extension level slots between its own level and the next.
+                "android-35-ext15",
+                "android-36",
+                "android-37.0",
+                // A beta ranks below the release it precedes.
+                "android-37.2-beta1",
+                "android-37.2",
+            ]
+        );
+        // What the fix is really for: the newest is a usable API level.
+        assert_eq!(v.last().copied(), Some("android-37.2"));
+    }
+
+    #[test]
+    fn stripping_the_android_prefix_does_not_disturb_plain_revisions() {
+        use std::cmp::Ordering;
+        // The families that carry dotted revisions must be unaffected.
+        assert_eq!(
+            compare_versions("29.0.14206865", "30.0.16138531"),
+            Ordering::Less
+        );
+        assert_eq!(compare_versions("37.1.11", "37.1.11"), Ordering::Equal);
+        assert_eq!(compare_versions("1.2", "1.2.0"), Ordering::Equal);
+        // A genuine pre-release tag still ranks below its release.
+        assert_eq!(compare_versions("1.0-rc1", "1.0"), Ordering::Less);
+        // And a bare API level compares the same as its prefixed spelling.
+        assert_eq!(compare_versions("android-35", "35"), Ordering::Equal);
     }
 }

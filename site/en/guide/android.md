@@ -19,7 +19,7 @@ Each package family maps to one backend, named `android-<family>`:
 | `android-build-tools` | `aapt2`, `d8`, `apksigner`, `zipalign` | — |
 | `android-cmdline-tools` | `avdmanager`, `lint`, `retrace` | — |
 | `android-cmake` | `cmake` | Used by NDK builds |
-| `android-platforms` | `android.jar` | No executables |
+| `android-platforms` | `android.jar` | Revisions read `android-37.2`; no executables |
 | `android-emulator` | `emulator` | — |
 | `android-sources` | — | Sources; no executables |
 | `android-system-images` | — | Emulator disk images; no executables |
@@ -339,6 +339,23 @@ It reports one line per assertion and exits non-zero on the first failure. Set
 One caveat worth stating plainly: this script has been syntax-checked on Linux and
 its logic mirrored against the Windows binary, but it has not yet been run
 end-to-end on a unix host. If it fails, suspect the script before the bridge.
+
+### Revision spelling for `platforms` and `sources`
+
+Both families are addressed as `platforms;android-37.2`, so their revisions carry
+an `android-` prefix that is a namespace rather than a version segment. Two
+consequences worth knowing, because both were bugs found by installing them for
+the first time:
+
+- `latest` resolves to the newest **numbered** API level. Codenames such as
+  `android-CANARY` and `android-UpsideDownCake` are future releases with no
+  assigned number, so they sort below every numbered release rather than above it.
+  Ask for one by name if you want it.
+- Extension levels (`android-35-ext15`) sort between their own level and the
+  next, and a beta (`android-37.2-beta1`) sorts below the release it precedes.
+
+The layout keeps the revision as-is: `platforms/android-37.2/android.jar`, which
+is where Gradle and Google's tools look.
 
 ### The emulator's SDK root check
 

@@ -17,7 +17,7 @@ osdk 直接解析 Google 官方仓库清单并从 Google 服务器下载，不�
 | `android-build-tools` | `aapt2`、`d8`、`apksigner`、`zipalign` | — |
 | `android-cmdline-tools` | `avdmanager`、`lint`、`retrace` | — |
 | `android-cmake` | `cmake` | NDK 构建用 |
-| `android-platforms` | `android.jar` | 无可执行文件 |
+| `android-platforms` | `android.jar` | 版本形如 `android-37.2`；无可执行文件 |
 | `android-emulator` | `emulator` | — |
 | `android-sources` | — | 源码，无可执行文件 |
 | `android-system-images` | — | 模拟器磁盘镜像，无可执行文件 |
@@ -293,6 +293,20 @@ cargo build --release
 
 有一点需要明确说明：这个脚本已在 Linux 上做过语法检查、其逻辑也已用 Windows 二进制
 镜像跑过一遍，但尚未在 unix 主机上端到端真跑。若它失败，请先怀疑脚本而不是桥接本身。
+
+### `platforms` 与 `sources` 的版本写法
+
+这两个族的寻址形式是 `platforms;android-37.2`，因此版本本身带 `android-` 前缀——它
+是命名空间，不是版本段。有两点值得知道，因为都是首次安装它们时暴露出来的 bug：
+
+- `latest` 解析到最新的**数字** API 级别。`android-CANARY`、`android-UpsideDownCake`
+  这类代号是尚未分配编号的未来版本，因此排在所有数字版本**之下**而不是之上。需要它
+  就按名字显式指定。
+- 扩展级别（`android-35-ext15`）排在自身级别与下一级之间；beta（`android-37.2-beta1`）
+  排在对应正式版之下。
+
+布局原样保留该版本号：`platforms/android-37.2/android.jar`，这正是 Gradle 和 Google
+自带工具查找的位置。
 
 ### 模拟器的 SDK 根校验
 
