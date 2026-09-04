@@ -338,6 +338,34 @@ FATAL   | Broken AVD system path.
 又不含 `%`。`create` 会拒绝含 `%` 的路径，而不是写出一份稍后才在模拟器内部失败的
 配置。
 
+### 这些链接是什么，以及包被卸载后会怎样
+
+osdk 把每个族装进各自的版本化目录（`installs/android-ndk/27.3.13750724/`），但
+Google 的工具不询问任何管理器装了什么——它们遍历一套固定布局，要求
+`platform-tools/`、`emulator/`、`ndk/<版本>/` 和
+`system-images/<api>/<tag>/<abi>/` 是**同一个根目录下的兄弟目录**，否则模拟器会报
+`Broken AVD system path`。
+
+为了既不放弃按族版本化、也不重复存储数 GB，osdk 把真实目录链接进这些工具期望的
+布局：Windows 上用 **junction**（symlink 需要开发者模式或提权，junction 两者都不
+需要，而这些工具只会穿越它），其他平台用符号链接。载荷只存一份，SDK 根目录是它的
+一个视图。
+
+`osdk uninstall` 会**先删链接、再删载荷**，并顺带清掉因此变空的骨架目录。顺序很
+关键：先删载荷会让链接变成悬空，而悬空的 junction 对模拟器、`avdmanager`、Gradle
+的 `sdk.dir` 所做的存在性检查<b>依然回答"在"</b>——于是包看起来装着，却在更深处失败，
+报出的错还指向 SDK 而不是那次卸载。
+
+不是 osdk 创建的真实目录，两条路径都不会删，只会报告出来——它要么是 `sdkmanager`
+自己的副本，要么是你的数据。
+
+对于旧版 osdk 留下的、或包被 osdk 之外的手段删掉而留下的链接：
+
+```bash
+osdk android sdk-root show     # 报告悬空链接，不做任何改动
+osdk android sdk-root repair   # 删除它们，并补齐缺失的部分
+```
+
 ## Google 工具读取的包索引
 
 Google 的工具并不询问某个管理器装了什么：它们遍历 SDK 根目录，解析每个包目录里的

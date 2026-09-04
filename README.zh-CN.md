@@ -376,6 +376,11 @@ osdk android sdk-root repair
 升级 osdk 后值得跑一次 `repair`：早先版本装下的包没有索引文件，于是
 `sdkmanager` 能列出它们，而 `avdmanager` 会报 `Package path is not valid`。
 
+osdk 把每个 Android 包链接进 Google 工具期望的那套目录布局（Windows 上是
+junction），载荷只存一份。卸载时会先删链接再删载荷——顺序相反会留下悬空链接，而它
+对模拟器和 Gradle 的存在性检查依然回答"在"。`sdk-root show` 会报告悬空链接，
+`repair` 负责清除。
+
 Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基于 jar 的工具
 会在环境未设 `JAVA_HOME` 时使用 osdk 管理的 `java`。用 `osdk install java` 装一个即可。
 

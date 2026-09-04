@@ -388,6 +388,37 @@ under the SDK root, which is both absolute and `%`-free. `create` refuses a path
 containing `%` rather than emitting a config that fails later inside the
 emulator.
 
+### What the links are, and what happens when a package goes away
+
+osdk installs each family into its own versioned directory
+(`installs/android-ndk/27.3.13750724/`), but Google's tools do not ask a manager
+what is installed — they walk a fixed layout and expect `platform-tools/`,
+`emulator/`, `ndk/<version>/` and `system-images/<api>/<tag>/<abi>/` to be
+siblings under one root. The emulator reports `Broken AVD system path` otherwise.
+
+Rather than abandon per-family versioning or store gigabytes twice, osdk links
+the real directory into the layout those tools expect: a **junction** on Windows
+(a symlink there needs Developer Mode or elevation; a junction needs neither, and
+these tools only ever traverse it), a symlink elsewhere. The payload is stored
+once; the SDK root is a view of it.
+
+`osdk uninstall` removes the link before the payload, and prunes any scaffolding
+directory the removal empties. The order matters: delete the payload first and
+the link becomes dangling, and a dangling junction still answers *yes* to the
+existence checks the emulator, `avdmanager` and Gradle's `sdk.dir` make — so the
+package looks installed and fails deeper in, with an error pointing at the SDK
+rather than at the uninstall.
+
+A real directory osdk did not create is never removed by either path; it is
+reported instead, since it is either `sdkmanager`'s own copy or your data.
+
+For links left by an older osdk, or by a package deleted outside osdk:
+
+```bash
+osdk android sdk-root show     # reports dangling links, changes nothing
+osdk android sdk-root repair   # removes them, and rebuilds what is missing
+```
+
 ## The package index Google's tools read
 
 Google's tools do not ask a manager what is installed: they walk the SDK root and

@@ -414,6 +414,12 @@ osdk android sdk-root repair
 earlier version have no index file, so `sdkmanager` lists them while
 `avdmanager` reports `Package path is not valid`.
 
+osdk links every Android package into the directory layout Google's tools expect
+(a junction on Windows), storing the payload once. Uninstalling removes the link
+before the payload: the other order leaves a dangling link, which still answers
+*yes* to the existence checks the emulator and Gradle make. `sdk-root show`
+reports dangling links and `repair` removes them.
+
 The Android packages contain no JDK, so `sdkmanager`, `avdmanager`, `d8` and
 the other jar-backed tools run against an osdk-managed `java` when the
 environment has no `JAVA_HOME` of its own. Install one with `osdk install java`.

@@ -27,7 +27,7 @@
 //! recorded prior one; see [`crate::android::license`].
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
@@ -463,6 +463,153 @@ impl AndroidBackend {
         // which is what Google's tools fall back to showing anyway.
         package_xml::write_into(&dir, &manifest_path, &manifest_path, version, None)
             .unwrap_or(false)
+    }
+
+    /// Remove the SDK root link a package was exposed through, and any parent
+    /// directories the removal leaves empty.
+    ///
+    /// ## Why this exists
+    ///
+    /// `link_into_sdk_root` has to have a counterpart. Without one, uninstalling
+    /// leaves a junction whose target is gone: measured, the link still answers
+    /// `Test-Path sdk\platform-tools` = True while
+    /// `sdk\platform-tools\adb.exe` = False. A dangling entry is worse than a
+    /// missing one, because everything that probes the layout by existence --
+    /// the emulator's SDK root check, `avdmanager`, Gradle's
+    /// `sdk.dir` -- concludes the package is present and then fails deeper in,
+    /// with an error that points at the SDK rather than at the uninstall.
+    ///
+    /// Returns whether a link was removed.
+    pub fn unlink_from_sdk_root(ctx: &Ctx, family: &str, version: &str) -> bool {
+        let Some(relative) = Self::sdk_root_relative_path(family, version) else {
+            return false;
+        };
+        let root = Self::sdk_root(ctx);
+        let link = root.join(&relative);
+        // `symlink_metadata` deliberately: a dangling junction has no metadata
+        // through `metadata()`, and that is exactly the case being cleaned up.
+        let Ok(meta) = link.symlink_metadata() else {
+            return false;
+        };
+        let is_link = meta.file_type().is_symlink() || Self::is_reparse_point(&meta);
+        if !is_link {
+            // A real directory here was never osdk's to delete -- it is either
+            // sdkmanager's own copy or user data. Leave it and say so.
+            tracing::warn!(
+                family,
+                version,
+                path = %link.display(),
+                "not removing this SDK root entry: it is a real directory, not a link \
+                 osdk created"
+            );
+            return false;
+        }
+        // Removing a junction unlinks it without touching the target. The target
+        // is usually already gone by this point, which is the whole point.
+        if std::fs::remove_dir(&link)
+            .or_else(|_| std::fs::remove_file(&link))
+            .is_err()
+        {
+            return false;
+        }
+        // Families like `ndk/<version>` and `system-images/<a>/<b>/<c>` nest, so
+        // the link's removal can leave empty scaffolding behind. Prune upwards,
+        // stopping at the root itself and at the first non-empty directory.
+        let mut parent = link.parent().map(Path::to_path_buf);
+        while let Some(dir) = parent {
+            if dir == root || !dir.starts_with(&root) {
+                break;
+            }
+            let empty = std::fs::read_dir(&dir)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if !empty || std::fs::remove_dir(&dir).is_err() {
+                break;
+            }
+            parent = dir.parent().map(Path::to_path_buf);
+        }
+        true
+    }
+
+    /// SDK root links whose target no longer exists.
+    ///
+    /// Read-only counterpart of `prune_dangling_sdk_root_links`; both delegate to
+    /// the same walk so that what `show` reports and what `repair` removes can
+    /// never disagree.
+    pub fn dangling_sdk_root_links(ctx: &Ctx) -> Vec<PathBuf> {
+        let root = Self::sdk_root(ctx);
+        let mut found = Vec::new();
+        Self::walk_dangling(&root, &root, false, &mut found);
+        found.sort();
+        found
+    }
+
+    /// Remove SDK root links whose target no longer exists.
+    ///
+    /// Distinct from `unlink_from_sdk_root`, which needs to know the family and
+    /// version: this walks the root itself, so it also catches links left by an
+    /// osdk version that had no unlink step, and links whose package was removed
+    /// by something other than `osdk uninstall`.
+    ///
+    /// Returns the paths that were pruned, relative to the SDK root.
+    pub fn prune_dangling_sdk_root_links(ctx: &Ctx) -> Vec<PathBuf> {
+        let root = Self::sdk_root(ctx);
+        let mut pruned = Vec::new();
+        Self::walk_dangling(&root, &root, true, &mut pruned);
+        pruned.sort();
+        pruned
+    }
+
+    /// Find, and optionally remove, dangling links under `dir`.
+    ///
+    /// One function for both so detection and repair cannot drift apart: a
+    /// reporting pass that disagrees with the fixing pass is how "it says it is
+    /// fine but it is not" bugs happen.
+    fn walk_dangling(root: &Path, dir: &Path, remove: bool, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        for path in children {
+            let Ok(meta) = path.symlink_metadata() else {
+                continue;
+            };
+            let is_link = meta.file_type().is_symlink() || Self::is_reparse_point(&meta);
+            if is_link {
+                // `exists()` follows the link, so a false here is precisely the
+                // dangling case: the entry is present but its target is not.
+                if !path.exists() {
+                    let recorded = if remove {
+                        std::fs::remove_dir(&path)
+                            .or_else(|_| std::fs::remove_file(&path))
+                            .is_ok()
+                    } else {
+                        true
+                    };
+                    if recorded {
+                        if let Ok(relative) = path.strip_prefix(root) {
+                            found.push(relative.to_path_buf());
+                        }
+                    }
+                }
+                // Never descend through a link: the payload below it belongs to
+                // the package, not to the root's scaffolding.
+                continue;
+            }
+            if meta.is_dir() {
+                Self::walk_dangling(root, &path, remove, found);
+                // Prune scaffolding this emptied, but only when removing, and
+                // never the root itself.
+                if remove && path != root {
+                    let empty = std::fs::read_dir(&path)
+                        .map(|mut entries| entries.next().is_none())
+                        .unwrap_or(false);
+                    if empty {
+                        let _ = std::fs::remove_dir(&path);
+                    }
+                }
+            }
+        }
     }
 
     /// The subdirectory the emulator uses to decide a directory is an SDK root.
@@ -910,6 +1057,21 @@ accept-licenses=true to install it anyway",
         Ok(())
     }
 
+    /// Remove the install directory, and the SDK root link that pointed at it.
+    ///
+    /// The link has to go first: once the payload is deleted the junction becomes
+    /// dangling, and a dangling entry still satisfies the existence checks the
+    /// emulator, avdmanager and Gradle use, so the package looks installed and
+    /// fails deeper in.
+    async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        Self::unlink_from_sdk_root(ctx, self.family, &tv.version);
+        let dir = ctx.dirs.install_path(self.id(), &tv.version);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|error| Error::io(&dir, error))?;
+        }
+        Ok(())
+    }
+
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         if self.family == SYSTEM_IMAGES_FAMILY {
             // A system image is data, not tools: it ships no executables, so
@@ -1005,6 +1167,79 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use std::os::windows::fs::MetadataExt;
+
+    #[test]
+    #[cfg(windows)]
+    fn a_link_whose_target_is_gone_is_reported_and_then_pruned() {
+        // The bug this locks in, measured before the fix: `osdk uninstall` left a
+        // junction behind, so `Test-Path sdk\platform-tools` was still True while
+        // `sdk\platform-tools\adb.exe` was False. Everything that probes the
+        // layout by existence then believes the package is installed.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("android-sdk");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A live link, and a nested one, so pruning cannot be confused with
+        // "delete every link".
+        let live = temp.path().join("payload-live");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("adb.exe"), b"x").unwrap();
+        symlink_dir(&live, &root.join("platform-tools")).unwrap();
+
+        let doomed = temp.path().join("payload-doomed");
+        std::fs::create_dir_all(&doomed).unwrap();
+        let nested = root
+            .join("system-images")
+            .join("android-35")
+            .join("google_apis");
+        std::fs::create_dir_all(&nested).unwrap();
+        symlink_dir(&doomed, &nested.join("x86_64")).unwrap();
+
+        // A real directory that osdk never created: it must survive both passes.
+        let foreign = root.join("licenses");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("android-sdk-license"), b"hash").unwrap();
+
+        // Nothing is dangling yet.
+        let mut found = Vec::new();
+        AndroidBackend::walk_dangling(&root, &root, false, &mut found);
+        assert!(found.is_empty(), "unexpected: {found:?}");
+
+        // Now the uninstall: the payload goes, the link stays.
+        std::fs::remove_dir_all(&doomed).unwrap();
+        let link = nested.join("x86_64");
+        assert!(
+            link.symlink_metadata().is_ok(),
+            "the link should still be present -- that is the bug"
+        );
+        assert!(!link.exists(), "but its target should be gone");
+
+        // Reporting must find exactly that one, and must not remove it.
+        let mut found = Vec::new();
+        AndroidBackend::walk_dangling(&root, &root, false, &mut found);
+        assert_eq!(found.len(), 1, "found: {found:?}");
+        assert!(link.symlink_metadata().is_ok(), "show must not mutate");
+
+        // Pruning removes it, and the scaffolding it emptied, but leaves the live
+        // link and the foreign directory alone.
+        let mut pruned = Vec::new();
+        AndroidBackend::walk_dangling(&root, &root, true, &mut pruned);
+        assert_eq!(pruned.len(), 1, "pruned: {pruned:?}");
+        assert!(link.symlink_metadata().is_err(), "the link should be gone");
+        assert!(
+            !root.join("system-images").exists(),
+            "emptied scaffolding should be pruned too"
+        );
+        assert!(
+            root.join("platform-tools").join("adb.exe").is_file(),
+            "the live link must survive"
+        );
+        assert!(
+            foreign.join("android-sdk-license").is_file(),
+            "a real directory osdk did not create must survive"
+        );
+        assert!(root.is_dir(), "the root itself must survive");
+    }
 
     #[test]
     fn tool_ids_are_namespaced_per_family() {

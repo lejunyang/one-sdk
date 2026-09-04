@@ -4354,6 +4354,18 @@ fn android_sdk_root(app: &App, command: AndroidSdkRootCommand) -> Result<()> {
             if listed == 0 {
                 println!("  (no Android packages installed)");
             }
+            // Links whose package is gone are invisible to the loop above, which
+            // only walks what is installed. They matter: a dangling entry still
+            // passes the existence checks the emulator and Gradle make, so the
+            // root looks healthy and fails deeper in.
+            let dangling = AndroidBackend::dangling_sdk_root_links(&app.ctx);
+            if !dangling.is_empty() {
+                println!("dangling links (target no longer installed):");
+                for path in &dangling {
+                    println!("  {}", path.display());
+                }
+                println!("remove them with `osdk android sdk-root repair`");
+            }
             Ok(())
         }
         AndroidSdkRootCommand::Repair => {
@@ -4370,6 +4382,9 @@ fn android_sdk_root(app: &App, command: AndroidSdkRootCommand) -> Result<()> {
                     }
                 }
             }
+            // Relinking only covers packages that are still installed, so it
+            // cannot see a link whose package is gone. Sweep the root itself.
+            let pruned = AndroidBackend::prune_dangling_sdk_root_links(&app.ctx);
             println!(
                 "wrote {written} package index file(s) and checked {linked} SDK root link(s) under {}",
                 root.display()
@@ -4380,6 +4395,17 @@ fn android_sdk_root(app: &App, command: AndroidSdkRootCommand) -> Result<()> {
                     "`avdmanager` and `sdkmanager` can now see these packages; \
                      without the index avdmanager reports `Package path is not valid`"
                 );
+            }
+            if pruned.is_empty() {
+                println!("no dangling links to remove");
+            } else {
+                println!(
+                    "removed {} dangling link(s) left by an uninstall:",
+                    pruned.len()
+                );
+                for path in &pruned {
+                    println!("  {}", path.display());
+                }
             }
             Ok(())
         }
