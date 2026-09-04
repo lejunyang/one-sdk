@@ -42,7 +42,7 @@ both same-version programs in one directory.
 
 What users download is these two executables, so the release profile is tuned
 for size rather than for raw speed. Current sizes are roughly 9.3 MB for `osdk`
-and 7.4 MB for `osdk-shim`.
+and 3.2 MB for `osdk-shim`.
 
 The settings that get there, measured on this workspace:
 
@@ -75,14 +75,62 @@ build, so `hashing_crates_are_pinned_to_a_fast_opt_level` in
 setting for test targets, so `catch_unwind`-based tests still work under
 `cargo test --release`.
 
-The structural limit on how small the shim can get is different from profile
-tuning. The shim only ever reads state, but it holds `Arc<dyn Backend>` values,
-and `Registry::new` instantiates all thirteen backends. Every `Backend` method
-lands in a vtable the linker cannot prove unreachable, which keeps the whole
-install path alive inside the shim, including the sigstore verification subtree
-that accounts for 240 of `osdk-core`'s 314 dependency crates. Narrowing that
-would mean splitting the read-only operations out of `Backend` or putting the
-install path behind a Cargo feature, neither of which is done today.
+## Why the shim is much smaller than the CLI
+
+Profile tuning is only half the story. The shim used to be nearly as large as the
+CLI for a structural reason: it only ever reads state, but it holds
+`Arc<dyn Backend>` values and `Registry::new` instantiates all thirteen backends,
+so every `Backend` method landed in a vtable the linker could not prove
+unreachable. That kept the whole install path alive inside the shim, including the
+sigstore subtree that accounts for 240 of `osdk-core`'s 314 dependency crates.
+
+The cost was measured by building probes that link `osdk-core` and exercise only
+the read-only surface:
+
+| What the probe links | Size |
+| --- | --- |
+| directory resolution only | 0.13 MB |
+| plus `Config::load` | 0.74 MB |
+| plus `http::client` | 1.83 MB |
+| plus `Registry` and `dyn Backend` | 7.02 MB |
+
+That last step looks conclusive but conflates two things: the vtables keeping the
+install path alive, and the backends' own read-only code, which the shim needs
+anyway. Calling the same thirteen backends through static dispatch, where the
+linker can discard the unused `install` bodies, costs 1.83 MB. So the install path
+alone accounted for about 5.15 MB.
+
+The four install-only trait methods -- `list_remote_versions`, `resolve_version`,
+`install` and `uninstall` -- are therefore behind a default-on `install` feature,
+and the shim depends on `osdk-core` with `default-features = false`. The sigstore
+crates are optional and pulled in by that feature, so the shim's dependency graph
+drops from 982 crates to 441 and no longer contains a second copy of `reqwest`.
+
+Compiling the install path out substitutes uninhabited stand-ins for
+`GithubAttestation` and `VerificationEvidence`. Every verification call sits inside
+`if let Some(attestation) = attestation`, and an `Option` of an uninhabited type is
+always `None`, so those branches are statically unreachable while signatures,
+struct fields and callers stay unchanged. The alternative -- `#[cfg]` on
+thirty-odd references including public fields -- would be much harder to follow.
+
+### The shim must be built in its own invocation
+
+Cargo unifies features across a single `cargo build --workspace`, so building both
+binaries in one command re-enables `install` for the shim and silently restores
+the old size. The result still works, and nothing warns.
+
+Release builds therefore run one invocation per binary:
+
+```bash
+cargo build --release -p osdk-cli
+cargo build --release -p osdk-shim
+```
+
+Both may share one target directory; Cargo caches the two feature variants side by
+side and does not rebuild when alternating between them. A compile-time assertion
+in the shim fails the build, with an explanation, if the install path is ever
+linked back in. It is limited to release builds so `cargo check`, `cargo test` and
+`cargo clippy` still work across the whole workspace during development.
 
 ## First-release authentication
 

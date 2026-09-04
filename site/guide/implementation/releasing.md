@@ -33,7 +33,7 @@ cargo install osdk-cli --locked
 
 ## 二进制体积
 
-用户下载到的就是这两个可执行文件，所以发布 profile 是按体积而非按峰值速度调的。当前 `osdk` 约 9.3 MB，`osdk-shim` 约 7.4 MB。
+用户下载到的就是这两个可执行文件，所以发布 profile 是按体积而非按峰值速度调的。当前 `osdk` 约 9.3 MB，`osdk-shim` 约 3.2 MB。
 
 达到这个结果的配置，以及在本仓库实测到的数据：
 
@@ -51,7 +51,37 @@ cargo install osdk-cli --locked
 
 `panic = "abort"` 只作用于发布出去的二进制。Cargo 对测试目标会忽略该设置，因此依赖 `catch_unwind` 的测试在 `cargo test --release` 下仍然正常工作。
 
-shim 体积的结构性下限是另一回事，靠调 profile 解决不了。shim 只读取状态，但它持有 `Arc<dyn Backend>`，而 `Registry::new` 会实例化全部 13 个 backend。`Backend` 的每个方法都会落入 vtable，链接器无法证明其不可达，于是整条安装链路都被留在了 shim 里，包括占 `osdk-core` 314 个依赖 crate 中 240 个的 sigstore 校验子树。要收窄它，需要把只读操作从 `Backend` 拆出去，或者把安装路径放到 Cargo feature 后面 —— 这两件事目前都还没做。
+## shim 为什么比 CLI 小得多
+
+调 profile 只解决了一半问题。shim 曾经和 CLI 几乎一样大，原因是结构性的：它只读取状态，但持有 `Arc<dyn Backend>`，而 `Registry::new` 会实例化全部 13 个 backend，于是 `Backend` 的每个方法都落入 vtable，链接器无法证明其不可达。整条安装链路因此被留在 shim 里，包括占 `osdk-core` 314 个依赖 crate 中 240 个的 sigstore 子树。
+
+这个代价是实测出来的：构建若干只链接 `osdk-core`、且只调用只读接口的探针二进制。
+
+| 探针链接的内容 | 体积 |
+| --- | --- |
+| 仅目录解析 | 0.13 MB |
+| 加上 `Config::load` | 0.74 MB |
+| 加上 `http::client` | 1.83 MB |
+| 加上 `Registry` 与 `dyn Backend` | 7.02 MB |
+
+最后一步看似已经说明问题，但它把两件事混在了一起：一是 vtable 保活的安装链路，二是 13 个 backend 自身的只读代码 —— 后者是 shim 无论如何都需要的。改用静态分发调用同样这 13 个 backend（此时链接器可以丢掉用不到的 `install` 函数体）只需 1.83 MB。所以单独归因于安装链路的部分约为 5.15 MB。
+
+因此，四个仅安装用到的 trait 方法 —— `list_remote_versions`、`resolve_version`、`install`、`uninstall` —— 被放到默认开启的 `install` feature 之后，shim 则以 `default-features = false` 依赖 `osdk-core`。sigstore 相关 crate 改为可选并由该 feature 引入，于是 shim 的依赖图从 982 个 crate 降到 441 个，也不再包含第二份 `reqwest`。
+
+关闭安装路径时，`GithubAttestation` 和 `VerificationEvidence` 会被替换为无法构造（uninhabited）的占位类型。所有校验调用都位于 `if let Some(attestation) = attestation` 之内，而无法构造类型的 `Option` 恒为 `None`，因此这些分支在编译期即不可达，同时函数签名、结构体字段和调用方都保持原样。另一种做法 —— 在三十多处引用（其中包含公开字段）上逐个加 `#[cfg]` —— 会难读得多。
+
+### shim 必须单独构建
+
+Cargo 会在单次 `cargo build --workspace` 内统一（unify）feature，所以把两个二进制放在一条命令里构建，会让 shim 重新启用 `install` 并悄悄退回原来的体积。产物照样能正常工作，且没有任何警告。
+
+因此发布构建对每个二进制各用一次调用：
+
+```bash
+cargo build --release -p osdk-cli
+cargo build --release -p osdk-shim
+```
+
+两者可以共用同一个 target 目录；Cargo 会把两种 feature 变体并存缓存，来回切换时不会重新编译。shim 中还有一条编译期断言：一旦安装路径被重新链接进来，构建会失败并给出原因说明。该断言仅作用于 release 构建，因此开发时 `cargo check`、`cargo test`、`cargo clippy` 仍可照常对整个工作区执行。
 
 ## 首次发布认证
 

@@ -16,15 +16,25 @@
 
 用户下载的就是这两个二进制，体积是产品指标而不是实现细节。以下几条不是风格偏好，而是踩过的坑：忽略其中任何一条都曾让体积成倍增长，或让优化悄悄失效。
 
-- 发布体积的基准线：`osdk` 约 9.3 MB、`osdk-shim` 约 7.4 MB。改动如果让任一个二进制增长超过 10%，要么找出原因，要么在提交说明里讲清为什么这个代价值得付。用独立的构建目录实测，别凭感觉判断：
-  `$env:CARGO_TARGET_DIR="target\size-check"; cargo build --release --bin osdk --bin osdk-shim`
+- 发布体积的基准线：`osdk` 约 9.3 MB、`osdk-shim` 约 3.2 MB。改动如果让任一个二进制增长超过 10%，要么找出原因，要么在提交说明里讲清为什么这个代价值得付。用独立的构建目录实测，**且必须分两次调用**（见下条，用 `--workspace` 一次构建量出来的 shim 体积是错的）：
+  ```powershell
+  $env:CARGO_TARGET_DIR="target\size-check"
+  cargo build --release -p osdk-cli
+  cargo build --release -p osdk-shim
+  ```
 
-- **`Backend` trait 上新增方法，代价会落到 shim 身上。** `Registry::new()` 会把全部 13 个 backend 实例化成 `Arc<dyn Backend>`，于是每个方法都进入 vtable，链接器无法证明它不可达，也就无法裁掉。shim 实际只用其中的只读子集（`list_installed`、`bin_paths`、`bin_names`、`exec_env`、`idiomatic_files`），却因此被动保活了整条安装链路 —— 包括 `pipeline::run` 和它背后的 sigstore 校验（`sigstore` 子树占 `osdk-core` 314 个依赖 crate 中的 240 个）。需要新增只有安装路径才用得到的能力时，优先考虑放进独立 trait 或独立类型，而不是加宽 `Backend`。
+- **shim 必须单独构建，不能和 CLI 放在一条 `--workspace` 命令里。** shim 以 `default-features = false` 依赖 `osdk-core`，从而不链接安装路径（7.4 MB → 3.2 MB）。但 Cargo 会在单次 `--workspace` 构建内统一 feature，把 `install` 重新打开，产物照样能跑、没有任何警告，体积却悄悄退回原样。`crates/osdk-shim/src/main.rs` 里有一条编译期断言专门拦这件事，它只作用于 release 构建，所以开发时 `cargo check/test/clippy --workspace` 不受影响。**遇到这条断言失败时，要改的是构建命令，不是删掉断言。**
 
-- **`osdk-core` 目前没有 `[features]` 段，所有依赖无条件启用。** 这意味着任何新依赖都会同时进入两个二进制，包括根本用不到它的 shim。加重依赖（HTTP 栈、加密、解压、正则引擎）前先确认它是否真的属于两者共同需要；如果只有 `osdk` 需要，正确做法是引入 feature 门控，而不是直接加到默认依赖里。
+- **`Backend` trait 上新增方法，代价会落到 shim 身上。** `Registry::new()` 会把全部 13 个 backend 实例化成 `Arc<dyn Backend>`，于是每个方法都进入 vtable，链接器无法证明它不可达，也就无法裁掉。这条曾让 shim 白背 5.15 MB（实测：同样 13 个 backend，`dyn` 分发 7.02 MB，静态分发 1.83 MB）。现在四个仅安装用到的方法（`list_remote_versions`、`resolve_version`、`install`、`uninstall`）已在 `install` feature 之后。**新增方法时先判断它属于哪一侧**：只有安装路径用得到的，要一并加上 `#[cfg(feature = "install")]`（trait 定义和每个 impl 都要加）；shim 也要用的，才放进无条件部分。
+
+- **新增依赖前先判断它属于哪一侧。** 只有安装路径需要的重依赖（HTTP 栈、加密、签名校验、解压）应写成 `optional = true`，并在 `install = [...]` 里用 `dep:` 引入，这样它完全不进入 shim 的依赖图（sigstore 就是这么处理的：shim 的依赖图因此从 982 个 crate 降到 441 个，并去掉了第二份 `reqwest`）。直接加进默认依赖等于让 shim 也编译它。
+
+- **关闭 `install` feature 时，安装路径留下的死代码是预期的。** `crates/osdk-core/src/lib.rs` 顶部用 `cfg_attr(not(feature = "install"), allow(...))` 收敛了这些告警（否则 shim 构建会有 254 条），默认构建仍保持全部 lint 强度，CI 也按默认 feature 跑 clippy。**不要为了消警告去动这段，也不要把它扩大成无条件的 `allow`。**
+
+- 需要给安装路径的类型加 `#[cfg]` 时，注意 `GithubAttestation` 和 `VerificationEvidence` 采用的是「关闭时替换为无法构造的占位类型」这一手法：调用点都在 `if let Some(attestation) = attestation` 内，`Option<&Never>` 恒为 `None`，因此分支在编译期不可达，函数签名和公开字段都不必改。给这类类型加成员时，用方法而不是字段（占位类型可以有方法，不能有字段）—— `VerificationEvidence::digest` 就是为此从字段改成访问器的。
 
 - **`[profile.release]` 里的 per-package `opt-level` override 是承重结构，不是装饰。** 整体使用 `opt-level = "z"` 换体积，但这会让 sha2 的可移植实现损失约 65% 吞吐（实测 2300 MiB/s 降到 800 MiB/s），而每个下载的归档都要做校验。把哈希相关的几个 crate 固定回 `opt-level = 3` 可以完全恢复速度，代价只有约 0.02 MB。**Cargo 对匹配不到任何包的 override 只发 warning、不报错**，所以依赖改名或手误会让这段保护静默失效；`crates/osdk-core/src/pipeline/verify.rs` 里的 `hashing_crates_are_pinned_to_a_fast_opt_level` 就是为此存在的，改动 profile 后不要绕过它。
 
 - 调整 profile 时，用户真正在意的两个指标要分别测量，因为它们会朝相反方向变化：shim 的启动延迟（进程创建占主导，`opt-level` 影响很小）和归档校验吞吐（对 `opt-level` 极其敏感）。只测一个就下结论会得出错误的取舍。
 
-- 依赖体积的排查手段：`cargo tree -e normal -p osdk-core`（依赖总量）、`cargo tree --duplicates --workspace`（同一 crate 的多版本共存，目前 36 个）、`cargo tree -i <crate>@<version>`（反查是谁引入的）。当前 `reqwest` 同时存在 0.12 和 0.13 两个版本，来源是 sigstore 依赖链。
+- 依赖体积的排查手段：`cargo tree -e normal -p osdk-shim` 与 `-p osdk-cli`（分别看两个二进制的实际依赖图，目前 441 / 1037 行）、`cargo tree --duplicates --workspace`（同一 crate 的多版本共存，目前 36 个）、`cargo tree -i <crate>@<version>`（反查是谁引入的）。注意按二进制分别查：`reqwest` 0.12 与 0.13 双版本来自 sigstore 依赖链，现在只影响 `osdk`，shim 侧已只剩 0.12。
