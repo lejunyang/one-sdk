@@ -46,9 +46,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo build --locked --release \
-            --workspace --bins \
+          # Two invocations, not `--workspace`: Cargo unifies features across a
+          # single build and would link the install path into the shim, which a
+          # compile-time assertion in the shim rejects for release builds.
+          cargo build --locked --release -p osdk-cli \
             2>&1 | tee "$RUNNER_TEMP/one-sdk-live-smoke-build/logs/build.log"
+          cargo build --locked --release -p osdk-shim \
+            2>&1 | tee -a "$RUNNER_TEMP/one-sdk-live-smoke-build/logs/build.log"
       - name: Upload build log
         if: ${{ always() }}
         uses: actions/upload-artifact@v4

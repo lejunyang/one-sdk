@@ -1257,6 +1257,7 @@ impl Backend for NpmPackageBackend {
         crate::backend::npm_cli::NpmBackend.probe_url(ctx, source)
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let versions = crate::npm::list_versions(ctx, &sources, &self.package).await?;
@@ -1270,6 +1271,7 @@ impl Backend for NpmPackageBackend {
             .collect())
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         crate::backend::dynamic::validate_options(self.id(), &req.options)?;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
@@ -1285,6 +1287,7 @@ impl Backend for NpmPackageBackend {
         Ok(version)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         self.validate_compact_lock_metadata(ctx, tv)?;
@@ -1467,6 +1470,7 @@ impl Backend for NpmPackageBackend {
         Ok(())
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let install_root = self.isolated_install_root_for(ctx, tv)?;
         if !install_root.exists() {

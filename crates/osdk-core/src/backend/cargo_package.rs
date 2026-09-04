@@ -897,6 +897,7 @@ impl Backend for CargoPackageBackend {
         }
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let CargoSource::Registry { package } = &self.source else {
             return Ok(Vec::new());
@@ -905,6 +906,7 @@ impl Backend for CargoPackageBackend {
         Ok(version_infos(selection.metadata))
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         let id = ToolId::parse(&req.backend)?;
         crate::tool::validate_dynamic_selector(&id, Some(&req.spec.to_string()))?;
@@ -995,11 +997,13 @@ impl Backend for CargoPackageBackend {
         Ok(resolved)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         self.install_with_runner(ctx.ctx, tv, &SystemCommandRunner)
             .await
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let Some(lifecycle) = self.selected_lifecycle(ctx, tv)? else {
             return Ok(());

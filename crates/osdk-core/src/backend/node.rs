@@ -195,6 +195,7 @@ impl Backend for NodeBackend {
         source.index_url.clone()
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         // Only offer releases that ship an asset for the current platform.
@@ -299,6 +300,7 @@ impl Backend for NodeBackend {
         Ok(out)
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         let target_arch = Self::target_arch(ctx, &req.options)?;
         let corepack = match req.options.get("corepack") {
@@ -357,6 +359,7 @@ impl Backend for NodeBackend {
         Ok(resolved)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let target_arch = Self::target_arch(ctx, &tv.options)?;

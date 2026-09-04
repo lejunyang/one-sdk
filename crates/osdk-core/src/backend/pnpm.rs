@@ -46,12 +46,14 @@ impl Backend for PnpmBackend {
         source.index_url.clone()
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let versions = crate::npm::list_versions(ctx, &sources, "pnpm").await?;
         Ok(versions.into_iter().map(Self::version_info).collect())
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {

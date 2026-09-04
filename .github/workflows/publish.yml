@@ -82,10 +82,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: publish-${{ matrix.target }}
-      - name: Build release binaries
+      # Built in two invocations on purpose. The shim depends on osdk-core with
+      # `default-features = false` so the download pipeline and sigstore
+      # verification stay out of it (7.4 MB -> 3.2 MB), but Cargo unifies
+      # features across a single `--workspace` build and would put them back.
+      # A compile-time assertion in the shim fails the release build if these
+      # are ever merged back into one command.
+      - name: Build release CLI
         run: >-
           cargo build --locked --release
-          --workspace --bins
+          -p osdk-cli
+          --target ${{ matrix.target }}
+      - name: Build release shim
+        run: >-
+          cargo build --locked --release
+          -p osdk-shim
           --target ${{ matrix.target }}
       - name: Package Unix binaries
         if: ${{ matrix.archive == 'tar' }}

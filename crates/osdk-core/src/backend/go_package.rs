@@ -678,10 +678,12 @@ impl Backend for GoPackageBackend {
             .map(|()| format!("{}/", source.download_url.trim_end_matches('/')))
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         Ok(self.proxy_selection(ctx).await?.versions)
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         let id = ToolId::parse(&req.backend)?;
         crate::tool::validate_dynamic_selector(&id, Some(&req.spec.to_string()))?;
@@ -793,11 +795,13 @@ impl Backend for GoPackageBackend {
         Ok(resolved)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         self.install_with_runner(ctx.ctx, tv, &SystemCommandRunner)
             .await
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         if let Some(lifecycle) = self.selected_lifecycle(ctx, tv)? {
             lifecycle.uninstall().await?;

@@ -94,6 +94,7 @@ impl Backend for PythonBackend {
         ))
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let triple = ctx.platform.llvm_triple();
         use std::collections::BTreeSet;
@@ -118,6 +119,7 @@ impl Backend for PythonBackend {
         Ok(out)
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, request: &ToolRequest) -> Result<ToolVersion> {
         if request
             .options
@@ -170,6 +172,7 @@ impl Backend for PythonBackend {
         Ok(resolved)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {

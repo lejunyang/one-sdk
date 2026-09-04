@@ -76,9 +76,11 @@ pub trait Backend: Send + Sync {
     /// download base, return a URL to fetch for measuring throughput.
     fn probe_url(&self, ctx: &Ctx, source: &Source) -> Option<String>;
 
+    #[cfg(feature = "install")]
     /// List installable versions (typically parsed from a remote index).
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>>;
 
+    #[cfg(feature = "install")]
     /// Resolve a request (e.g. `20`, `lts`) to a concrete version.
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         // Default implementation: resolve against list_remote_versions.
@@ -99,6 +101,7 @@ pub trait Backend: Send + Sync {
         Ok(tv)
     }
 
+    #[cfg(feature = "install")]
     /// Install a concrete version.
     async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
 
@@ -119,6 +122,7 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
 
+    #[cfg(feature = "install")]
     /// Remove an installed version. Default removes the install dir.
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let dir = ctx.dirs.install_path(self.id(), &tv.version);

@@ -96,10 +96,12 @@ impl Backend for JvmToolBackend {
         Some(source.download_url.clone())
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         Ok(vec![VersionInfo::stable(self.release().version)])
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         if tv.version != self.release().version {

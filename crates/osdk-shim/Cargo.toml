@@ -19,7 +19,14 @@ path = "src/main.rs"
 # manager commands create a current-thread runtime for their fresh registry
 # preflight only.
 [dependencies]
-osdk-core.workspace = true
+# Deliberately not `osdk-core.workspace = true`: the shim never installs
+# anything, so it opts out of the `install` feature and the download pipeline
+# plus sigstore verification leave its binary entirely.
+#
+# This only holds when the shim is built in its own cargo invocation. Cargo
+# unifies features across one `--workspace` build, which would put the install
+# path back. See .github/workflows/publish.yml.
+osdk-core = { path = "../osdk-core", version = "0.0.1", default-features = false }
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]

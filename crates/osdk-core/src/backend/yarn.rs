@@ -57,6 +57,7 @@ impl Backend for YarnBackend {
         source.index_url.clone()
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         // Merge classic (`yarn`) and berry (`@yarnpkg/cli-dist`) version lines.
         use std::collections::BTreeSet;
@@ -89,6 +90,7 @@ impl Backend for YarnBackend {
         Ok(out)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {

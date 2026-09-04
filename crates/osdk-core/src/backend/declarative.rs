@@ -367,6 +367,7 @@ impl Backend for DeclarativeBackend {
         })
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         match &self.versions {
             VersionSource::Static(values) => {
@@ -390,6 +391,7 @@ impl Backend for DeclarativeBackend {
         }
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         validate_version(&tv.version)?;
@@ -437,6 +439,7 @@ impl Backend for DeclarativeBackend {
         Ok(())
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         validate_version(&tv.version)?;
         let directory = ctx.dirs.install_path(self.id(), &tv.version);

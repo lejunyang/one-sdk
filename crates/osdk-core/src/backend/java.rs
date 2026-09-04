@@ -169,6 +169,7 @@ impl Backend for JavaBackend {
         Some("https://api.foojay.io/disco/v3.0/distributions".to_string())
     }
 
+    #[cfg(feature = "install")]
     /// java version specs can carry a distribution prefix like `temurin-21`.
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         if req
@@ -209,11 +210,13 @@ impl Backend for JavaBackend {
         Ok(tv)
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         self.list_for_distribution(ctx, DEFAULT_DISTRIBUTION, "jdk")
             .await
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {

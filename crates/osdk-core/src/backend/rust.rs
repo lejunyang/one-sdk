@@ -264,6 +264,7 @@ impl Backend for RustBackend {
         ))
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         // rustup resolves channels/versions itself; we surface the common
         // channels plus let exact versions pass through resolve_version.
@@ -274,6 +275,7 @@ impl Backend for RustBackend {
         ])
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(
         &self,
         _ctx: &Ctx,
@@ -294,6 +296,7 @@ impl Backend for RustBackend {
         Ok(tv)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
@@ -362,6 +365,7 @@ impl Backend for RustBackend {
         Ok(())
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let toolchain_dir = Self::toolchain_dir(ctx, &tv.version);
         if toolchain_dir.exists() {

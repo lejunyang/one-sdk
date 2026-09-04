@@ -73,6 +73,7 @@ impl Backend for GoBackend {
         source.index_url.clone()
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut last_err: Option<Error> = None;
@@ -109,6 +110,7 @@ impl Backend for GoBackend {
         }))
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {

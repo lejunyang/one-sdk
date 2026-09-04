@@ -269,6 +269,7 @@ impl AndroidBackend {
         })
     }
 
+    #[cfg(feature = "install")]
     /// Install any declared dependencies that are missing or too old.
     ///
     /// Only dependencies inside [`SUPPORTED_FAMILIES`] are actionable; an edge
@@ -915,6 +916,7 @@ impl Backend for AndroidBackend {
         Some(repo::manifest_url(&source.download_url, 4))
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let manifest = self.manifest(ctx).await?;
         let packages = manifest.family(self.family);
@@ -935,6 +937,7 @@ impl Backend for AndroidBackend {
             .collect())
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         // A locked plan pins the exact artifact, but it must never stand in for
@@ -1060,6 +1063,7 @@ accept-licenses=true to install it anyway",
         Ok(())
     }
 
+    #[cfg(feature = "install")]
     /// Remove the install directory, and the SDK root link that pointed at it.
     ///
     /// The link has to go first: once the payload is deleted the junction becomes

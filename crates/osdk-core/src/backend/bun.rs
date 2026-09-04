@@ -53,6 +53,7 @@ impl Backend for BunBackend {
         source.index_url.clone()
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let package = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
@@ -73,6 +74,7 @@ impl Backend for BunBackend {
             .collect())
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, request: &ToolRequest) -> Result<ToolVersion> {
         let package = Self::platform_package(ctx).ok_or_else(|| Error::UnsupportedPlatform {
             os: format!("{:?}", ctx.platform.os),
@@ -82,6 +84,7 @@ impl Backend for BunBackend {
         crate::npm::resolve_package_version(ctx, &sources, package, self.id(), request).await
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {

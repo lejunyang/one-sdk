@@ -11,6 +11,19 @@ readme = "../../README.md"
 keywords = ["sdk", "toolchain", "version-manager", "runtime"]
 categories = ["development-tools", "development-tools::build-utils"]
 
+[features]
+# The install path (remote version listing, the download pipeline, sigstore
+# verification) is only reachable from the CLI. The shim resolves and execs
+# already-installed tools, so it builds without this feature and drops that
+# whole subtree: thirteen backends cost 7.02 MB behind `dyn Backend` vtables
+# versus 1.87 MB when the install methods are gone.
+#
+# Cargo unifies features across a single `--workspace` build, which silently
+# re-enables this for the shim and undoes the saving. The two binaries must be
+# built in separate cargo invocations; see .github/workflows/publish.yml.
+default = ["install"]
+install = []
+
 [dependencies]
 tokio.workspace = true
 async-trait.workspace = true

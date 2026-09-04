@@ -20,6 +20,26 @@ use osdk_core::platform::Platform;
 use osdk_core::version::resolver::resolve_active;
 use osdk_core::version::{select_version, ToolVersion, VersionSpec};
 
+// The shim resolves and execs already-installed tools; it never installs. Its
+// whole size advantage comes from `osdk-core` being compiled without the
+// `install` feature, which drops the download pipeline and sigstore
+// verification (measured 7.38 MB -> 3.18 MB).
+//
+// Cargo unifies features across a single `cargo build --workspace`, which
+// re-enables `install` for this binary and silently gives back the saving with a
+// perfectly working executable and no warning. Fail the build instead.
+// Only release builds ship, so only they are checked; this keeps
+// `cargo check/test/clippy --workspace` usable during development.
+#[cfg(not(debug_assertions))]
+const _: () = assert!(
+    !osdk_core::INSTALL_PATH_LINKED,
+    "osdk-shim was built with osdk-core's `install` feature enabled, which links \
+     the download pipeline and sigstore verification into the shim and roughly \
+     doubles its size. This is usually Cargo feature unification from building \
+     several workspace members at once: build the shim in its own invocation \
+     (`cargo build -p osdk-shim`) rather than with `--workspace`."
+);
+
 fn main() {
     let code = real_main();
     std::process::exit(code);

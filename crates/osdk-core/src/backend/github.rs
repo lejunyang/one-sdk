@@ -685,6 +685,7 @@ impl Backend for GithubBackend {
         None
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let releases = self.releases(ctx, &sources).await?;
@@ -703,6 +704,7 @@ impl Backend for GithubBackend {
         Ok(out)
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         crate::backend::dynamic::validate_options(self.id(), &req.options)?;
         let prerelease_request = match &req.spec {
@@ -842,6 +844,7 @@ impl Backend for GithubBackend {
         Ok(tv)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         crate::backend::dynamic::validate_options(self.id(), &tv.options)?;
@@ -932,6 +935,7 @@ impl Backend for GithubBackend {
         Ok(())
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let locator = github_install_locator(ctx, self.id(), tv)?;
         let install_root = locator.install_root();

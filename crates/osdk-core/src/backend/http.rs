@@ -229,12 +229,14 @@ impl Backend for HttpBackend {
         None
     }
 
+    #[cfg(feature = "install")]
     async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         Err(Error::other(
             "HTTP artifacts require an exact semantic version selector",
         ))
     }
 
+    #[cfg(feature = "install")]
     async fn resolve_version(&self, _ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
         let VersionSpec::Exact(version) = &req.spec else {
             return Err(Error::VersionResolve {
@@ -249,6 +251,7 @@ impl Backend for HttpBackend {
         Ok(resolved)
     }
 
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         crate::backend::dynamic::validate_options(self.id(), &tv.options)?;
@@ -357,6 +360,7 @@ impl Backend for HttpBackend {
         crate::backend::dynamic::finalize_artifact_install(&locator)
     }
 
+    #[cfg(feature = "install")]
     async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
         let locator = self.installed_locator(ctx, tv)?;
         let _lock = crate::backend::dynamic::acquire_install_lock(&locator, "HTTP").await?;
