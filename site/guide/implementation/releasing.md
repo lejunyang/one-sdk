@@ -31,6 +31,28 @@ cargo install osdk-cli --locked
 这会安装 `osdk`。`osdk-shim` 是独立 package；完整的
 日常安装仍优先使用 GitHub Release 安装器，因为安装器会把两个同版本程序放到同一目录。
 
+## 二进制体积
+
+用户下载到的就是这两个可执行文件，所以发布 profile 是按体积而非按峰值速度调的。当前 `osdk` 约 9.3 MB，`osdk-shim` 约 7.4 MB。
+
+达到这个结果的配置，以及在本仓库实测到的数据：
+
+| Profile | 两个二进制合计 |
+| --- | --- |
+| `opt-level = 3`、`lto = "thin"` | 44.6 MB |
+| `opt-level = 3`、`lto = "fat"`、`codegen-units = 1` | 37.0 MB |
+| `opt-level = "z"`、`lto = "fat"`、`codegen-units = 1`、`panic = "abort"` | 16.7 MB |
+
+按体积优化对 shim 是安全的。shim 是对延迟最敏感的那个二进制，因为每次执行 `node` 或 `npm` 都会经过它；但实测 `opt-level = "z"` 下启动中位数为 48.3 ms，`opt-level = 3` 为 50.5 ms —— 进程创建开销占主导，缩小代码在这里没有可观测的代价。
+
+真正付出代价的地方并不直观：`opt-level = "z"` 会让 sha2 的可移植实现损失约 65% 吞吐，在哈希 256 MiB 时从 2300 MiB/s 降到 800 MiB/s。而每个下载的归档都要做校验，放任不管就等于让每次安装都变慢。因此工作区清单用 per-package profile override 把哈希相关的 crate 固定回 `opt-level = 3`，以约 0.02 MB 的体积代价换回完整吞吐。BLAKE3 实测不受影响（它自带手写 SIMD），但同样做了固定，因为进入内容寻址存储的每个文件都要经它哈希。
+
+当 per-package override 匹配不到任何包时，Cargo 只发 warning、不报错。依赖一旦改名，这项保护就会在构建全绿的情况下静默失效，所以 `crates/osdk-core/src/pipeline/verify.rs` 里的 `hashing_crates_are_pinned_to_a_fast_opt_level` 会断言这些固定项存在。
+
+`panic = "abort"` 只作用于发布出去的二进制。Cargo 对测试目标会忽略该设置，因此依赖 `catch_unwind` 的测试在 `cargo test --release` 下仍然正常工作。
+
+shim 体积的结构性下限是另一回事，靠调 profile 解决不了。shim 只读取状态，但它持有 `Arc<dyn Backend>`，而 `Registry::new` 会实例化全部 13 个 backend。`Backend` 的每个方法都会落入 vtable，链接器无法证明其不可达，于是整条安装链路都被留在了 shim 里，包括占 `osdk-core` 314 个依赖 crate 中 240 个的 sigstore 校验子树。要收窄它，需要把只读操作从 `Backend` 拆出去，或者把安装路径放到 Cargo feature 后面 —— 这两件事目前都还没做。
+
 ## 首次发布认证
 
 截至当前，三个 crate 都尚未在 crates.io 创建。crates.io Trusted Publishing 要求 crate

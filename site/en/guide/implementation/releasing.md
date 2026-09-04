@@ -8,7 +8,7 @@ before releasing; the prepare job refuses to continue if the corresponding
 
 ## What one release publishes
 
-The workflow first builds the three programs for Linux x64/arm64, macOS
+The workflow first builds both programs for Linux x64/arm64, macOS
 Intel/Apple Silicon, and Windows x64 in parallel and uploads temporary
 artifacts. Once every build succeeds, it publishes crates.io packages in this
 dependency order:
@@ -37,6 +37,52 @@ cargo install osdk-cli --locked
 This installs `osdk`. `osdk-shim` is a separate package. For a complete everyday
 installation, the GitHub Release installer remains preferred because it places
 both same-version programs in one directory.
+
+## Binary size
+
+What users download is these two executables, so the release profile is tuned
+for size rather than for raw speed. Current sizes are roughly 9.3 MB for `osdk`
+and 7.4 MB for `osdk-shim`.
+
+The settings that get there, measured on this workspace:
+
+| Profile | Combined size |
+| --- | --- |
+| `opt-level = 3`, `lto = "thin"` | 44.6 MB |
+| `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` | 37.0 MB |
+| `opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"` | 16.7 MB |
+
+Optimizing for size is safe for the shim, which is the latency-sensitive binary
+because it runs on every `node` or `npm` invocation. Measured shim startup is
+48.3 ms median at `opt-level = "z"` against 50.5 ms at `opt-level = 3`: process
+creation dominates, so shrinking the code costs nothing observable here.
+
+One place does pay, and it is not the obvious one. `opt-level = "z"` costs
+sha2's portable backend about 65% of its throughput, dropping from 2300 MiB/s to
+800 MiB/s when hashing 256 MiB. Every downloaded archive is checksummed, so left
+alone this would slow down every install. The workspace manifest therefore pins
+the hashing crates back to `opt-level = 3` with per-package profile overrides,
+which restores full throughput for about 0.02 MB of size. BLAKE3 measured
+unaffected because it ships hand-written SIMD, but it is pinned as well since it
+hashes every file entering the content-addressed store.
+
+Cargo only emits a warning, not an error, when a per-package override matches no
+package. A dependency rename would silently give the slowdown back with a green
+build, so `hashing_crates_are_pinned_to_a_fast_opt_level` in
+`crates/osdk-core/src/pipeline/verify.rs` asserts the pins are present.
+
+`panic = "abort"` applies to the shipped binaries only. Cargo ignores the
+setting for test targets, so `catch_unwind`-based tests still work under
+`cargo test --release`.
+
+The structural limit on how small the shim can get is different from profile
+tuning. The shim only ever reads state, but it holds `Arc<dyn Backend>` values,
+and `Registry::new` instantiates all thirteen backends. Every `Backend` method
+lands in a vtable the linker cannot prove unreachable, which keeps the whole
+install path alive inside the shim, including the sigstore verification subtree
+that accounts for 240 of `osdk-core`'s 314 dependency crates. Narrowing that
+would mean splitting the read-only operations out of `Backend` or putting the
+install path behind a Cargo feature, neither of which is done today.
 
 ## First-release authentication
 
