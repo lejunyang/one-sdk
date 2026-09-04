@@ -22,7 +22,7 @@ categories = ["development-tools", "development-tools::build-utils"]
 # re-enables this for the shim and undoes the saving. The two binaries must be
 # built in separate cargo invocations; see .github/workflows/publish.yml.
 default = ["install"]
-install = []
+install = ["dep:sigstore", "dep:sigstore-verify", "dep:x509-cert"]
 
 [dependencies]
 tokio.workspace = true
@@ -45,9 +45,11 @@ sha1.workspace = true
 blake3.workspace = true
 hex.workspace = true
 minisign-verify.workspace = true
-sigstore.workspace = true
-sigstore-verify.workspace = true
-x509-cert.workspace = true
+# Only the install path verifies attestations. Optional so the shim's build
+# graph drops them entirely (982 crates -> fewer, and no duplicate reqwest).
+sigstore = { workspace = true, optional = true }
+sigstore-verify = { workspace = true, optional = true }
+x509-cert = { workspace = true, optional = true }
 snap.workspace = true
 base64.workspace = true
 directories.workspace = true

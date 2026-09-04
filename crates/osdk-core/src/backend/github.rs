@@ -153,6 +153,9 @@ impl GithubBackend {
         Ok(url.into())
     }
 
+    // Builds the attestation record consumed by the download pipeline, so it
+    // exists only when that path is compiled in.
+    #[cfg(feature = "install")]
     fn attestation(&self, ctx: &Ctx, sources: &[Source]) -> Option<GithubAttestation> {
         let policy = ctx.config.settings.attestations;
         (policy != crate::config::AttestationPolicy::Off).then(|| GithubAttestation {

@@ -280,7 +280,7 @@ async fn run_with_attestation_inner_at(
     };
     let authenticated_checksum = evidence
         .first()
-        .map(|item| parse_checksum(&item.digest))
+        .map(|item| parse_checksum(item.digest()))
         .transpose()?;
     if ctx.require_checksums && verified_checksum.is_none() && authenticated_checksum.is_none() {
         return Err(Error::other(format!(
@@ -634,7 +634,7 @@ async fn install_single_binary_inner_at(
     };
     let authenticated_checksum = evidence
         .first()
-        .map(|item| parse_checksum(&item.digest))
+        .map(|item| parse_checksum(item.digest()))
         .transpose()?;
     if require_checksums && verified_checksum.is_none() && authenticated_checksum.is_none() {
         return Err(Error::other(format!(

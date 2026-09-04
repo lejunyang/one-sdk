@@ -47,7 +47,53 @@ pub mod source;
 pub mod store;
 pub mod tool;
 pub mod trust;
+#[cfg(feature = "install")]
 pub mod verification;
+
+/// Stand-ins for the attestation types when built without `install`.
+///
+/// The shim never verifies attestations, so sigstore and the real
+/// implementation are compiled out. These two names stay available as types that
+/// cannot be constructed, which keeps every signature threading
+/// `Option<&GithubAttestation>` compiling unchanged: an `Option` of an
+/// uninhabited type is always `None`, so the verification branches are
+/// statically unreachable. The alternative -- `#[cfg]` on thirty-odd references
+/// including public struct fields -- would be far harder to follow.
+#[cfg(not(feature = "install"))]
+pub mod verification {
+    /// Uninhabited: with no install path there is no attestation to verify.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum GithubAttestation {}
+
+    /// Uninhabited counterpart of the real evidence record. Still serializable so
+    /// `InstallPlan`'s `Vec<VerificationEvidence>` field needs no `#[cfg]`.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub enum VerificationEvidence {}
+
+    impl VerificationEvidence {
+        /// Unreachable: the type has no values. Mirrors the real accessor so both
+        /// configurations share one spelling at the call sites.
+        pub fn digest(&self) -> &str {
+            match *self {}
+        }
+    }
+
+    /// Never called: its `attestation` argument cannot be constructed.
+    ///
+    /// Present only so the call sites in `pipeline`, which sit inside
+    /// `if let Some(attestation) = attestation` branches that are statically
+    /// unreachable here, still resolve the name.
+    pub async fn verify_github_attestation(
+        _client: &reqwest::Client,
+        _dirs: &crate::dirs::Dirs,
+        _offline: bool,
+        _archive: &std::path::Path,
+        attestation: &GithubAttestation,
+    ) -> crate::error::Result<Option<VerificationEvidence>> {
+        match *attestation {}
+    }
+}
+
 pub mod version;
 
 pub use backend::registry::Registry;

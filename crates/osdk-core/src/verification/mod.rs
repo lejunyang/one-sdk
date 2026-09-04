@@ -45,6 +45,17 @@ pub struct VerificationEvidence {
     pub digest: String,
 }
 
+impl VerificationEvidence {
+    /// The artifact digest this evidence attests to.
+    ///
+    /// An accessor rather than direct field access because the no-install build
+    /// substitutes an uninhabited stand-in for this type, and a method can be
+    /// provided there while a field cannot.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GithubAttestation {
     pub owner: String,
