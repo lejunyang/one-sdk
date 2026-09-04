@@ -87,7 +87,53 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
 once_cell = "1"
 
+# Release builds are what users download, so this profile is tuned for size.
+# The numbers below were measured on this workspace; see
+# site/en/guide/implementation/releasing.md for the method.
+#
+#   opt-level = 3, lto = "thin"   44.6 MB total   (the previous setting)
+#   opt-level = 3, lto = "fat"    37.0 MB total
+#   opt-level = "z", lto = "fat"  16.7 MB total   (this setting)
+#
+# `opt-level = "z"` does not slow the shim down: shim startup measured
+# 48.3 ms median versus 50.5 ms at opt-level 3, because process creation
+# dominates. It does, however, cost dearly in one place -- see the per-package
+# overrides below, which are load-bearing rather than decorative.
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
 strip = true
+panic = "abort"
+
+# `opt-level = "z"` costs SHA-256 roughly 65% of its throughput (2300 MiB/s ->
+# 800 MiB/s measured over 256 MiB), because sha2's portable backend relies on
+# optimizations that "z" disables. Every downloaded archive is checksummed, so
+# that would slow down every install. Compiling just these crates at opt-level 3
+# restores full speed (2325 MiB/s) and costs about 0.02 MB of binary size.
+#
+# blake3 is listed for the same reason even though it measured unaffected (it
+# ships hand-written SIMD): it hashes every file entering the CAS, so it should
+# not silently regress if that implementation detail changes.
+#
+# Cargo only *warns* when one of these names matches no package, so a rename or
+# typo would silently give back the slowdown. The test
+# `hashing_crates_are_pinned_to_a_fast_opt_level` in
+# crates/osdk-core/src/pipeline/verify.rs guards this list.
+[profile.release.package.sha2]
+opt-level = 3
+
+[profile.release.package.sha1]
+opt-level = 3
+
+[profile.release.package.blake3]
+opt-level = 3
+
+[profile.release.package.digest]
+opt-level = 3
+
+[profile.release.package.block-buffer]
+opt-level = 3
+
+[profile.release.package.cpufeatures]
+opt-level = 3

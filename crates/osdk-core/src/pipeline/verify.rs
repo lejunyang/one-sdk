@@ -307,6 +307,86 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// The release profile builds at `opt-level = "z"` for binary size, which
+    /// costs sha2's portable backend about 65% of its throughput (measured:
+    /// 2300 MiB/s -> 800 MiB/s over 256 MiB). Since every downloaded archive is
+    /// checksummed, the workspace manifest pins these crates back to opt-level 3,
+    /// which restores full speed for roughly 0.02 MB of size.
+    ///
+    /// Cargo only emits a *warning* when a `[profile.release.package.X]` name
+    /// matches no package, so a dependency rename or a typo would silently
+    /// reintroduce the slowdown with a green build. This test fails instead.
+    #[test]
+    fn hashing_crates_are_pinned_to_a_fast_opt_level() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root is two levels above this crate")
+            .join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", manifest_path.display()));
+
+        let document: toml::Value = manifest.parse().expect("workspace manifest parses as TOML");
+        let release = document
+            .get("profile")
+            .and_then(|profile| profile.get("release"))
+            .expect("[profile.release] is declared");
+
+        // Only meaningful while the release profile is actually size-first; if it
+        // ever goes back to a speed-first opt-level the pins are redundant.
+        let opt_level = release.get("opt-level").expect("release sets opt-level");
+        if opt_level.as_str() != Some("z") && opt_level.as_str() != Some("s") {
+            return;
+        }
+
+        let packages = release
+            .get("package")
+            .and_then(toml::Value::as_table)
+            .expect("[profile.release.package.*] overrides exist");
+
+        // Every crate that hashes bytes on an install path. `digest`,
+        // `block-buffer` and `cpufeatures` are the generic plumbing sha2 and
+        // sha1 inline through, so they need the same treatment as the leaves.
+        for crate_name in [
+            "sha2",
+            "sha1",
+            "blake3",
+            "digest",
+            "block-buffer",
+            "cpufeatures",
+        ] {
+            let entry = packages.get(crate_name).unwrap_or_else(|| {
+                panic!(
+                    "{crate_name} must keep an opt-level override in the workspace \
+                     Cargo.toml, otherwise release builds hash significantly slower"
+                )
+            });
+            let level = entry.get("opt-level").unwrap_or_else(|| {
+                panic!("[profile.release.package.{crate_name}] must set opt-level")
+            });
+            assert_eq!(
+                level.as_integer(),
+                Some(3),
+                "{crate_name} must build at opt-level 3 so archive verification stays fast"
+            );
+        }
+    }
+
+    /// Guards the other half of the same hazard: the pins above are useless if
+    /// the crates they name are no longer the ones doing the hashing.
+    #[test]
+    fn pinned_hashing_crates_are_the_ones_actually_used() {
+        // Compile-time proof that these crates are still on the hashing path;
+        // if an import here is dropped, the pin list needs revisiting too.
+        let sha256 = hash_bytes(b"abc", HashAlgo::Sha256);
+        assert_eq!(
+            sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let sha1 = hash_bytes(b"abc", HashAlgo::Sha1);
+        assert_eq!(sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
     #[test]
     fn sha256_known_vector() {
         let td = tempfile::tempdir().unwrap();
