@@ -19,7 +19,7 @@ Go command package 使用同样的依赖 barrier：一个显式或配置的受�
 4. 否则调用 backend 的 `install`；
 5. 所有安装完成后生成 shim，并按 backend 名排序结果。
 
-这意味着除上述 runtime 前置依赖外，不同工具可以并发；固定 backend 的同一 `tool@version` 写入与动态 backend 的同一完整安装身份写入，仍分别由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用 embedded Aube、隔离的安装根以及 osdk 自有的共享 Aube cache/store；项目感知或全局 `use` 还可在规划阶段选择 Aube、npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。Cargo 开发工具也绕过 archive CAS pipeline；其原生 lifecycle 在 sibling stage 整个期间持有身份锁，只在符合条件时优先使用受控 `cargo-binstall`，仅对退出码 94 回退到 `cargo install`，最后原子发布已校验 binary，详见 [Cargo 开发工具实现](./cargo-tools)。Go 开发工具复用该原生事务，并以 staged `GOBIN` 调用一次精确受管 `go install`，详见 [Go 开发工具实现](./go-tools)。
+这意味着除上述 runtime 前置依赖外，不同工具可以并发；固定 backend 的同一 `tool@version` 写入与动态 backend 的同一完整安装身份写入，仍分别由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用受管 npm 子进程、隔离的安装根以及 osdk 自有的共享 npm cache/store；项目感知或全局 `use` 还可在规划阶段选择 npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。Cargo 开发工具也绕过 archive CAS pipeline；其原生 lifecycle 在 sibling stage 整个期间持有身份锁，只在符合条件时优先使用受控 `cargo-binstall`，仅对退出码 94 回退到 `cargo install`，最后原子发布已校验 binary，详见 [Cargo 开发工具实现](./cargo-tools)。Go 开发工具复用该原生事务，并以 staged `GOBIN` 调用一次精确受管 `go install`，详见 [Go 开发工具实现](./go-tools)。
 
 ## Backend 生成计划
 
@@ -45,7 +45,7 @@ Go command package 使用同样的依赖 barrier：一个显式或配置的受�
 
 [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs) 先写同级 `.partial` 文件，成功后原子 rename。只有 partial metadata 中保存了同一 URL 的 ETag 或 Last-Modified 时才发送 `Range` + `If-Range`；服务端忽略 range、对象变化或返回不匹配的 `Content-Range` 时会安全重启或失败，不会盲目拼接。敏感请求头只附加在初始请求，跨 host redirect 不继承。
 这里描述的是通用 artifact download plan 携带的下载 header。`Source.headers` 另用于
-osdk metadata/source probe，并按 origin 约束；Aube 驱动的 npm package fetch 当前不转发
+osdk metadata/source probe，并按 origin 约束；受管 npm/pnpm 子进程当前不转发
 任意 `Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会
 拒绝认证或私有原生配置透传。
 

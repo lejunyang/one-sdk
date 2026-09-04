@@ -28,8 +28,8 @@ crates.io index 与仓库 lockfile 校验可发布依赖。只有 crate
 cargo install osdk-cli --locked
 ```
 
-这会安装 `osdk` 和内部辅助程序 `osdk-aube`。`osdk-shim` 是独立 package；完整的
-日常安装仍优先使用 GitHub Release 安装器，因为安装器会把三个同版本程序放到同一目录。
+这会安装 `osdk`。`osdk-shim` 是独立 package；完整的
+日常安装仍优先使用 GitHub Release 安装器，因为安装器会把两个同版本程序放到同一目录。
 
 ## 首次发布认证
 

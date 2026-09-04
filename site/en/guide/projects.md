@@ -95,9 +95,10 @@ osdk use npm:prettier@3
 
 The package stays in its existing `dependencies`, `devDependencies`,
 `optionalDependencies`, or `peerDependencies` section; a new package defaults
-to `devDependencies`. osdk uses Aube when the incumbent lock format is
-compatible, or accepts `-o installer=aube|npm|pnpm` for an explicit choice. It
-does not retry a failed operation through another installer. With no
+to `devDependencies`. osdk follows the project's declared `packageManager`, then
+the installer that owns the incumbent lock, and otherwise the configured
+default; `-o installer=npm|pnpm` forces an explicit choice. It does not retry a
+failed operation through another installer. With no
 `package.json` in the ancestor chain, the command keeps the legacy isolated
 osdk-managed install and shim behavior.
 
@@ -188,7 +189,7 @@ pnpm = "10.15.0"
 
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
-installer = "aube"            # auto|aube|npm|pnpm; auto is the implicit default
+installer = "npm"             # auto|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
 [tools."http:https://downloads.example.com/acme-{version}.tar.gz"]

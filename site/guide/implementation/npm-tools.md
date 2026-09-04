@@ -21,7 +21,7 @@ Registry 预检是三个相邻但不同的概念。
 请求集合包含 npm 工具且没有 Node 时，
 [`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)
 加入当前目录解析到的 Node，未声明时加入 `latest`。安装编排先串行完成 Node，再并发
-调度其余工具。Aube 收到的 runtime selector 只指向该受管 Node；安装和 shim 执行都不
+调度其余工具。受管 npm 子进程只针对该受管 Node 运行；安装和 shim 执行都不
 以系统 PATH 中的 Node 作为隐式依赖。
 
 `use` 在该旧流程之前增加两条作用域分支：非全局 `npm:*` 请求会检查最近的
@@ -40,16 +40,22 @@ options 与 tool、精确 version、platform、scope、dependencies 和 material
 ## 安装器规划与单次委托
 
 [`npm_tools.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/npm_tools.rs)
-会在修改前完成整个安装器规划。`auto` 对新项目或任何受支持的现有原生 lock 选择
-Aube。目前支持 Aube/pnpm v9 与 npm lock v2/v3；已知但不支持的 npm 或 pnpm 格式则
-选择它的原生 owner。`packageManager` 声明会与 lock owner 交叉校验；冲突或多个 lock
-都会 fail closed。显式 `installer=aube|npm|pnpm` 可覆盖声明，但不能绕过 lock 兼容性。
+会在修改前完成整个安装器规划。`auto` 按固定顺序解析三个信号：声明的 `packageManager`、
+拥有现有原生 lock 的安装器，最后是配置的默认值。目前支持 pnpm v9 与 npm lock v2/v3；
+已知但不支持的格式则选择它的原生 owner。`packageManager` 声明会与 lock owner 交叉校验；
+冲突或多个 lock 都会 fail closed。显式 `installer=npm|pnpm` 可覆盖声明，但不能绕过 lock
+兼容性。
+
+兜底默认值来自 `settings.npm.default-installer`（`OSDK_NPM_DEFAULT_INSTALLER`），它被建模为
+独立枚举而不是复用规划器的 installer 类型，这样 `auto` 永远不可能被配置成自己的兜底，
+将来新增 backend 也只需改动一处声明。由于该默认值只在两个项目信号之后才被参考，修改它
+不会迁移任何已声明安装器或已拥有 lockfile 的项目。
 
 首次发现会在不修改项目的前提下选择候选安装器。取得每项目 npm 锁后，osdk 会重新读取
 manifest 与原生 lock，并用用户最初请求的安装器（`auto` 或显式选择）重新规划，避免并发
 lock owner 变化留下过期的具体计划。锁内选出的具体计划随后固定用于调用。原生项目委托
 使用精确的受管 npm 或 pnpm 可执行文件、受管 Node、预检后的 Registry 环境，并且只启动
-一次子进程。非零退出会原样返回，不会改用 Aube 或另一原生管理器重放。依赖区段也在调用前固定：保留已有 production、
+一次子进程。非零退出会原样返回，不会改用另一原生管理器重放。依赖区段也在调用前固定：保留已有 production、
 optional、peer 或 development 位置，缺失包默认作为开发依赖。所有项目 add 路径都禁用
 lifecycle scripts。
 
@@ -91,42 +97,44 @@ generation 身份、自有非软链接目录、精确文件集合、配置 spec�
 目标及每个筛选 launcher。状态缺失或无效时会从激活增量中静默省略。有效筛选 bin 目录
 会位于 osdk shim 与受管运行时之前；若其中包含 `node` 命令，则整个 generation 都会省略。
 
-## 隔离与全局 Aube 执行路径
+## 隔离与全局 npm 执行路径
 
-隔离的 `install` 与 `exec` 继续通过
+隔离的 `install` 与 `exec` 通过
 [`npm_package.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/npm_package.rs)
 和
-[`aube_host.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/aube_host.rs)
-调用 Aube embedded library API。该兼容路径为每个 package/version 建立一个 osdk 私有合成
-项目，并关闭 Aube 的 runtime switching、self engine check 与 self-update；Node、版本选择和
-生命周期编排由 osdk 管理。
+[`native_npm.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/native_npm.rs)
+以子进程方式运行受管 Node 自带的 `npm-cli.js`。该路径为每个 package/version 建立一个 osdk
+私有合成项目；Node、版本选择和生命周期编排由 osdk 管理。
 
-全局 `use` 采用另一条路径：定位与 `osdk` 同目录安装的 `osdk-aube`，并在辅助进程中执行
-Aube 真正的 `add --global --save-exact`。Aube 全局命令会占用工作目录和进程级设置，因此
-需要进程隔离。辅助程序接收 osdk 自有的 home、配置、全局前缀、bin、禁用的 runtime 目录，
-以及共享的 Aube cache/store：
+以子进程而非进程内链接解析器运行 npm 是一条有意划定的边界。`osdk` 是多线程 Tokio
+runtime，任何会修改进程工作目录或环境变量的库都会破坏无关的 worker 线程，而子进程不会；
+它同时也让卡死或崩溃的安装器不会拖垮整个 CLI。
+
+子进程的环境不是继承而来，而是先清空再按最小白名单重建。`NPM_CONFIG_CACHE` 指向 osdk
+自有 cache，`NPM_CONFIG_USERCONFIG` 与 `NPM_CONFIG_GLOBALCONFIG` 同时指向一份 osdk 自有的
+空 `.npmrc`，因此环境中的用户级或全局 `npmrc` 无法改写 registry，也无法重新打开 lifecycle
+scripts。Windows 上 osdk 直接用 `node` 加上解析出的 `npm-cli.js` 路径，而不是 `npm.cmd`，
+从而完全避开 shell wrapper。代理变量按需转发；30 分钟超时与 4 MiB stdout/stderr 捕获上限
+用来约束失控的安装过程。
+
+全局 `use` 会在 osdk 控制的前缀中执行所选管理器真正的 global-add。npm 写出标准前缀布局，
+osdk 随后对其做适配：
 
 ```text
-<global-install-staging>/
-  aube-home/
-  aube-global/global-aube/...    # Aube 原生全局输出
-  bin/                           # Aube 原生 launcher
+<global-install>/lib/node_modules/<package>/    # Unix
+<global-install>/node_modules/<package>/        # Windows
 
-<cache>/aube/v1/cache/
-<store>/aube/
+<cache>/npm/v1/cache/
+<store>/npm/
 ```
 
-辅助进程退出后，osdk 在 Aube 原生 `global-aube` 树中定位选中的根包，并把该安装移动到
-规范的 `<global-install>/project` 布局。随后删除临时 Aube home/global/runtime 目录，清空
-原生 bin 目录，只根据选中包声明的 `bin` 重建可迁移 launcher。staging 根提升和 shim 发布
-之前，还会校验包身份、精确版本、目标路径边界、每个 launcher、Aube 原生 lock、inventory
-与完成状态。同目录缺少 `osdk-aube` 会作为安装错误返回，不会回退到其他模式。
+osdk 在该树中定位选中的根包，清空原生 bin 目录，只根据选中包声明的 `bin` 重建可迁移
+launcher。staging 根提升和 shim 发布之前，还会校验包身份、精确版本、目标路径边界、每个
+launcher、inventory 与完成状态。
 
-Aube cache/store 会跨隔离、项目和全局操作共享，但每个项目或全局安装仍保留自己的原生
-lock。Aube 2.1 的全局调用不会收到 offline flag，因此在需要新建或修复安装时，
-`--offline` 会在 Registry 探测或辅助进程启动前明确失败；完整、精确且选项身份匹配的安装
-可以在不调用 Aube 的情况下离线复用。确实需要安装时，npm 与 pnpm 的全局委托会传递各自
-的原生 offline flag。
+npm cache/store 会跨隔离、项目和全局操作共享，但每个项目或受控全局安装仍保留自己的原生
+lock。`npm install --global` 不会写 lockfile，因此该作用域不会记录原生 lock 身份。确实需要
+安装时，npm 与 pnpm 的全局委托会传递各自的原生 offline flag。
 
 ## Source 自动选择与缓存键
 
@@ -145,8 +153,8 @@ kind、index/download URL、priority、enabled、credential-forwarding 和 heade
 
 osdk 自己发起的 npm metadata 请求和 source probe 会使用显式 `Source.headers`，但只发
 给配置的 index/download origin；同源 redirect 保留 header，第一次跨源 redirect 后永久
-移除。Aube 2.1 无法通过这些集成路径安全接收任意 source header，因此 Aube 真正获取
-package 时不转发 `Source.headers`。全局受管工具安装目前会拒绝原生认证、scope、私有、
+移除。受管的 npm/pnpm 子进程只会收到 registry 覆盖以及一份 osdk 自有的空配置，因此真正
+获取 package 时不转发 `Source.headers`。全局受管工具安装目前会拒绝原生认证、scope、私有、
 自定义 TLS 或代理 Registry 的透传，因为在不扩大凭据边界的前提下无法把这些状态复制进
 隔离前缀；该路径请使用可匿名访问的已配置 Registry。`package_registry.rs` 的 Registry
 preflight 针对用户随后运行的
@@ -154,16 +162,18 @@ npm/pnpm/Yarn/Bun/Deno 命令，每次调用独立判断，不能与这里的 TT
 
 ## 构建脚本策略与结构化配置
 
-对隔离和全局安装，默认 `BuildPolicy::Deny` 都会禁用 root 与传递依赖的 lifecycle/build
-scripts。embedded 路径设置 `ignore_scripts = true`。Aube 2.1 在构造内部 global-add request
-时会丢弃该标志，因此全局辅助程序改传 `--deny-build=*`，覆盖 Aube 内置的可信依赖列表。
+对隔离和全局安装，默认 `BuildPolicy::Deny` 都会通过向受管 npm 子进程传入
+`--ignore-scripts` 来禁用 root 与传递依赖的 lifecycle/build scripts。
 `allow_builds` 从 CLI 字符串或结构化 `[tools]` 读取：
 
 - false 值或空值仍为 deny；
-- 包名数组在进入 request 时转成逗号列表，再写入 embedded 合成项目的
-  `package.json#aube.allowBuilds`，或为全局 Aube 转成重复的 `--allow-build`；
-- true 值在 embedded 路径设置 `dangerously_allow_all_builds`，或在全局路径传入
-  `--dangerously-allow-all-builds`，是显式危险的全图放行。
+- 包名数组会记录进安装身份，但 npm 没有 pnpm `onlyBuiltDependencies` 那样的包级机制——
+  `--ignore-scripts` 只能全开或全关——因此在 npm 下该 allowlist **fail closed 为 deny**，
+  而不会静默放行整个依赖图。确实需要包级 allowlist 时请选择 pnpm；
+- true 值会去掉 `--ignore-scripts`，是显式危险的全图放行。
+
+由于该 allowlist 仍是 material option 身份的一部分，即使 npm 无法实施它，修改它也会重新
+计算安装指纹；这样当该包之后改用 pnpm 重新安装时，被记录的意图依然准确。
 
 `osdk lock` 的 graph-only 阶段无论最终安装策略如何都设置 `ignore_scripts = true`、
 `run_root_lifecycle = false` 和 `lockfile_only = true`。结构化工具项支持字符串、布尔值
@@ -181,13 +191,13 @@ options 和 `npm` 元数据；当前不写通用 `artifact` 子表，也不把 g
 ```toml
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-installer = "aube"
+installer = "npm"
 scope = "project"
 node_version = "24.1.0" # 可省略
 
 [platforms.linux-x64.tools."npm:prettier".npm.native_lock]
-kind = "aube"
-format = "aube-v9"
+kind = "npm"
+format = "package-lock-v3"
 sha256 = "<64 lowercase hex characters>"
 ```
 
@@ -199,13 +209,12 @@ sha256 = "<64 lowercase hex characters>"
 写入时，CLI 会从已安装工具或声明的私有 option 中提取 npm 元数据：包名、installer、
 scope、可选精确 Node 版本，以及可选 native lock 的 owner/format/SHA-256。项目感知的
 `use` 对真实 `package.json` 旁的原生 lock 计算摘要。原生 lock 始终由所选包管理器操作
-拥有；当 Aube 消费兼容的现有 npm 或 pnpm lock 时，其 `kind` 因此可能与具体 installer
-不同。全局 Aube 和 pnpm 把原生 lock 保留在受控安装根内，并将其身份记录到用户 lock；
+拥有。全局 pnpm 把原生 lock 保留在受控安装根内，并将其身份记录到用户 lock；
 npm 的真实全局模式不会创建依赖 lock，因此没有该身份。原生 payload 本身不会进入
 `osdk.lock`。主 lock 当前限制为 16 MiB，写入时只原子替换主 lock。
 
 这是有意保留的限制：兼容的 npm metadata 不捕获传递依赖图，单靠它无法重建该图。真实
-项目的原生 lock，或受控全局安装目录中的 Aube/pnpm 原生 lock，仍是依赖图事实来源。
+项目的原生 lock，或受控全局安装目录中的 pnpm 原生 lock，仍是依赖图事实来源。
 npm 全局安装没有对应的 graph lock。
 
 无参数 `osdk install` 读取 schema 3 或 4 lock 后，会把这些字段重新注入私有 option，并先校验
@@ -218,7 +227,7 @@ native lock 的 format/SHA-256 是否满足 owner 的格式约束。主 lock 不
 不能假装安全迁移成当前 metadata-only 格式。
 
 旧 lock schema 2 sidecar 仍保持冻结读取兼容：读锁时如果遇到旧 sidecar 形式，osdk 会继续校验
-`package`、Node 版本、`aube-v9`、64 位小写 SHA-256、规范 sidecar 路径，以及 sidecar
+`package`、Node 版本、`package-lock-v3`、64 位小写 SHA-256、规范 sidecar 路径，以及 sidecar
 目录/文件非 symlink，再以 16 MiB 上限读取完整 UTF-8 字节并重算摘要。校验通过后，
 graph 内容会作为兼容输入注入 backend。只有在后续成功写入主 lock 时，条目才迁移成
 lock schema 4 metadata-only 形式；原有 sidecar 文件不会被自动删除。

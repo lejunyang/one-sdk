@@ -88,9 +88,9 @@ osdk use npm:prettier@3
 ```
 
 包会保留原有的 `dependencies`、`devDependencies`、`optionalDependencies` 或
-`peerDependencies` 区段；新包默认加入 `devDependencies`。现有 lock 格式兼容时 osdk
-使用 Aube，也可用 `-o installer=aube|npm|pnpm` 显式指定。某个安装器失败后不会换另一个
-安装器重试。祖先目录中没有 `package.json` 时，该命令保留原有的 osdk 隔离安装与 shim
+`peerDependencies` 区段；新包默认加入 `devDependencies`。osdk 依次参考项目声明的
+`packageManager`、现有 lock 的归属安装器，最后使用配置的默认值，也可以用
+`-o installer=npm|pnpm` 显式指定。某个安装器失败后不会换另一个安装器重试。祖先目录中没有 `package.json` 时，该命令保留原有的 osdk 隔离安装与 shim
 行为。
 
 项目感知的 `use` 会更新原生 `package.json` 与包管理器 lock，再把精确 Node 选择和结构化
@@ -173,7 +173,7 @@ pnpm = "10.15.0"
 
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
-installer = "aube"            # auto|aube|npm|pnpm；隐式默认值为 auto
+installer = "npm"             # auto|npm|pnpm；隐式默认值为 auto
 allow_builds = ["@scope/native-tool", "esbuild"]
 
 [tools."http:https://downloads.example.com/acme-{version}.tar.gz"]

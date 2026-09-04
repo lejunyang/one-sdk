@@ -16,7 +16,7 @@ The default layout is below. The data and cache roots are overridable, while sto
 - `<cache>/tmp`: installation extraction scratch space.
 - `<cache>/remote` and `<cache>/sources`: remote metadata and source-probe caches.
 - `<cache>/pkg`: native downstream package-manager and model-client caches.
-- `<cache>/aube/v1/cache` and `<data>/store/aube`: the cache/store shared by Aube-backed isolated, project, and global npm tools; each real project or controlled install root still keeps its own native lock.
+- `<cache>/npm/v1/cache` and `<data>/store/npm`: the cache/store shared by npm-backed isolated, project, and global npm tools; each real project or controlled install root still keeps its own native lock.
 
 `Dirs::ensure` creates the core tree during CLI initialization. Store and installs default to the same data volume so hardlinks work. `OSDK_STORE_DIR` may put the store on another volume, which can force materialization to fall back to reflink or copy.
 Each dynamic root contains `.osdk-install.json` schema 1. Its nested `identity`
@@ -58,7 +58,7 @@ Models use [`ModelStore::publish`](https://github.com/lejunyang/one-sdk/blob/mai
 
 ## No cross-manager package CAS
 
-The CAS deduplicates verified, extracted SDK files and model files. It does **not** parse, ingest, or deduplicate project dependency packages across npm, pnpm, Yarn, Bun, Deno, pip, Go, Cargo, Maven, or Gradle. Aube-backed `npm:<package>` operations share `<cache>/aube/v1/cache` and `<data>/store/aube`, while native npm/pnpm use their downstream cache/store paths; none of those package contents enter the BLAKE3 SDK CAS.
+The CAS deduplicates verified, extracted SDK files and model files. It does **not** parse, ingest, or deduplicate project dependency packages across npm, pnpm, Yarn, Bun, Deno, pip, Go, Cargo, Maven, or Gradle. npm-backed `npm:<package>` operations share `<cache>/npm/v1/cache` and `<data>/store/npm`, while pnpm uses its downstream cache/store paths; none of those package contents enter the BLAKE3 SDK CAS.
 Cargo developer-tool source and build data is likewise stage-private and is not
 promoted to a shared Cargo cache or the CAS; the final fingerprinted root retains
 only published binaries and osdk metadata.

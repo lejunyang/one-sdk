@@ -94,13 +94,13 @@ version = "3.6.2"
 
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-installer = "aube"
+installer = "npm"
 scope = "project"
 node_version = "20.20.0"     # optional
 
 [platforms.linux-x64.tools."npm:prettier".npm.native_lock]
-kind = "aube"
-format = "aube-v9"
+kind = "npm"
+format = "package-lock-v3"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [platforms.linux-x64.tools.rust]

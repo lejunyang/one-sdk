@@ -27,9 +27,9 @@ Pipeline or backend locks serialize fixed-backend writes to one `tool@version`
 and dynamic writes to one complete install identity. If any member of a batch fails, `try_collect` returns the error
 and the final shim-generation phase is not entered. The compatibility isolated
 npm path used by explicit `install`/`exec` bypasses the archive CAS pipeline
-below and uses embedded Aube with an isolated install root and the shared
-osdk-owned Aube cache/store. Project-aware and global `use` can instead select
-Aube, npm, or pnpm during planning; see
+below and uses a managed npm subprocess with an isolated install root and the
+shared osdk-owned npm cache/store. Project-aware and global `use` can instead
+select npm or pnpm during planning; see
 [npm developer tool implementation](./npm-tools).
 Cargo developer tools also bypass the archive CAS pipeline. Their native
 lifecycle holds an identity lock across a sibling stage, prefers a controlled
@@ -65,7 +65,7 @@ A request restored from the lockfile first uses [`locked_install_plan`](https://
 [`pipeline/download.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/download.rs) writes to a sibling `.partial` file and atomically renames it on success. It sends `Range` plus `If-Range` only when partial metadata has an ETag or Last-Modified validator for the same URL. A server that ignores ranges, changes the object, or returns a mismatched `Content-Range` causes a safe restart or failure rather than blind concatenation. Sensitive headers apply only to the initial request and are not retained on cross-host redirects.
 This paragraph concerns download headers carried by a generic artifact download
 plan. `Source.headers` separately applies to osdk metadata/source probes under an
-origin boundary. Aube-backed npm package fetches currently do not forward
+origin boundary. The managed npm/pnpm delegates currently do not forward
 arbitrary `Source.headers`. Project operations may use native trusted
 configuration; global npm-tool installs reject authenticated/private native
 pass-through while running in their isolated prefix.

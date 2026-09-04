@@ -49,9 +49,8 @@ Invoke-WebRequest `
 .\install.ps1 -Version 0.0.1 -InstallDir "$HOME\bin"
 ```
 
-如果本机已有 Rust，也可以运行 `cargo install osdk-cli --locked` 安装主命令 `osdk`
-和内部辅助程序 `osdk-aube`。需要包含 `osdk-shim` 的完整三程序安装时，仍推荐使用
-Release 安装器。
+如果本机已有 Rust，也可以运行 `cargo install osdk-cli --locked` 安装主命令 `osdk`。
+需要包含 `osdk-shim` 的完整两程序安装时，仍推荐使用 Release 安装器。
 
 如果 GitHub 下载较慢，可以通过可信代理同时获取安装脚本和 Release：
 
@@ -189,23 +188,23 @@ prettier --check .
 osdk use npm:eslint@9 -o installer=pnpm
 
 # 安装用户级工具，不修改当前项目。
-osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
+osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=npm
 osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-项目 `use` 会遵循最近的 `package.json` 以及唯一一个兼容的现有原生 lock；自动选择会在
-该 lock 兼容时优先使用 Aube，也可以用 `installer=aube`、`installer=npm`、
-`installer=pnpm` 明确选择。Shell 激活只会暴露由可信项目配置选中、且通过校验的包命令，
+项目 `use` 会遵循最近的 `package.json` 以及唯一一个兼容的现有原生 lock；自动选择依次
+参考项目声明的 `packageManager`、现有原生 lock 的归属安装器，最后才使用配置的默认值，
+也可以用 `installer=npm`、`installer=pnpm` 明确选择。默认值可通过 `config.toml` 中的
+`settings.npm.default-installer` 或 `OSDK_NPM_DEFAULT_INSTALLER` 设置，它只在项目自身
+没有任何声明时生效。Shell 激活只会暴露由可信项目配置选中、且通过校验的包命令，
 不会加入项目的整个 `node_modules/.bin`。当前目录向上没有 `package.json` 时，本地 `use`
 保留原有的 osdk 隔离安装与 shim 行为。生成的 `.osdk/npm-bin/` 是本地派生状态，通常应
 加入版本控制忽略规则。请把包管理器的原生 lock 与 `osdk.lock` 一起提交；后者不能替代
 传递依赖图。
 
-全局 npm、pnpm 与 Aube 都会在 osdk 控制的前缀中调用各自真正的 global-add，不修改环境中
-的 Node 安装。Release 安装会同时提供 Aube 全局模式所需的 `osdk-aube` 辅助程序。Aube
-2.1 新建或修复全局安装时需要联网；已完整安装且选项身份匹配的精确版本可以在不启动
-Aube 的情况下离线再次选中。安装过程本身必须使用原生离线模式时，请选择 npm 或 pnpm。
+全局 npm 与 pnpm 都会在 osdk 控制的前缀中调用各自真正的 global-add，不修改环境中
+的 Node 安装。
 `where --global` 与 `uninstall --global` 会显式操作配置精确匹配的用户级 npm 安装；不带
 该标志时继续保持原有项目/隔离行为。卸载只删除选中的身份根，同一包版本的其他身份仍然
 保留。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他 owner 的 shim。

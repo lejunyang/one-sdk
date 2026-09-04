@@ -57,7 +57,7 @@ osdk 会先解析并安装受管 Node，再把 Prettier 加入最近的项目。
 ```toml
 [tools]
 node = "22.17.0"
-"npm:prettier" = { version = "3", installer = "aube" }
+"npm:prettier" = { version = "3", installer = "npm" }
 ```
 
 精确受管 Node 版本与具体安装器会一起记录；已有 Node 工具项的其他选项会保留。由于
@@ -66,28 +66,40 @@ node = "22.17.0"
 
 ## 安装器选择
 
-修改项目之前，osdk 会读取最近的 `package.json` 及其同目录下可识别的原生 lock。没有
-原生 lock，或恰好存在一个且其格式可由 Aube 读取时，自动选择会使用 Aube。目前兼容
-Aube v9、pnpm v9，以及 npm `package-lock.json` / `npm-shrinkwrap.json` v2 或 v3。若唯一
-现有的 npm 或 pnpm lock 版本过新或 Aube 尚不支持，osdk 会只调用一次拥有该 lock 的原生
-包管理器。
+修改项目之前，osdk 会读取最近的 `package.json` 及其同目录下可识别的原生 lock。
+自动选择会按固定顺序参考三个信号，并在第一个给出答案的地方停止：
 
-`package.json#packageManager`（其次是 `devEngines.packageManager`）用于识别声明的
-owner。声明必须与唯一现有的原生 lock 一致；同时存在两个或更多可识别 lockfile 时，会在
-修改任何内容前因歧义而拒绝。自动模式只接受声明的 Aube、npm 或 pnpm；其他管理器需要
+1. `package.json#packageManager`，其次 `devEngines.packageManager`，即项目自己声明的
+   归属安装器。
+2. 拥有现有可识别 lock 的安装器，这样项目会继续沿用已经写过 lockfile 的管理器。
+3. 配置的默认值，只有在项目没有任何声明时才会用到。
+
+目前可识别的 lock 格式是 npm `package-lock.json` / `npm-shrinkwrap.json` v2 或 v3，以及
+pnpm v9。声明必须与唯一现有的原生 lock 一致；同时存在两个或更多可识别 lockfile 时，会在
+修改任何内容前因歧义而拒绝。自动模式只接受声明的 npm 或 pnpm；其他管理器需要
 先明确选择支持的安装器。
+
+第 3 步中的兜底默认值开箱为 npm，并且可以配置：
+
+```toml
+# config.toml
+[settings.npm]
+default-installer = "npm"   # 或 "pnpm"
+```
+
+`OSDK_NPM_DEFAULT_INSTALLER` 可以为单次调用覆盖它。由于它只在最后才被参考，修改这个值
+不会把已经声明安装器、或已经拥有 lockfile 的项目切换到别的安装器。
 
 需要时可显式选择安装器：
 
 ```bash
-osdk use npm:prettier@3 -o installer=aube
 osdk use npm:prettier@3 -o installer=npm
 osdk use npm:prettier@3 -o installer=pnpm
 ```
 
-显式选择可以覆盖 package-manager 声明，但仍须与当前 lock 兼容：Aube 不会读取不支持
-的格式，npm 或 pnpm 也不会覆盖另一原生管理器的 lock。安装器在修改项目前就已确定，
-且最多只执行一次；Aube/npm/pnpm 失败会直接返回，osdk 不会换一个安装器重放操作。
+显式选择可以覆盖 package-manager 声明，但仍须与当前 lock 兼容：npm 与 pnpm 不会覆盖
+对方的 lock。安装器在修改项目前就已确定，且最多只执行一次；npm/pnpm 失败会直接返回，
+osdk 不会换一个安装器重放操作。
 
 ## 项目激活与信任边界
 
@@ -122,7 +134,7 @@ generation 可能作为可丢弃的本地状态保留。
 全局作用域忽略当前项目的 manifest、声明和 lock：
 
 ```bash
-# Aube 是默认的全局安装器。
+# 使用配置的默认安装器，开箱即为 npm。
 osdk use --global npm:prettier@3
 
 # 显式使用受管原生包管理器。
@@ -132,23 +144,14 @@ osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-osdk 会安装所选 Node，并在需要时安装 npm 或 pnpm。随后每个安装器都会在 osdk 控制的
+osdk 会安装所选 Node 与所需的包管理器。随后每个安装器都会在 osdk 控制的
 前缀中执行自己真正的 global-add：npm 使用 `install --global --prefix ...`，pnpm 使用
-`add --global`，Aube 则通过安装包中同目录的 `osdk-aube` 辅助程序执行
-`add --global`。该辅助进程为 Aube 提供隔离的 home 与前缀，同时复用 osdk 共享的 Aube
-store 和 cache。osdk 会适配生成的原生全局布局，校验选中包及其声明命令，并只通过 shim
-发布这些命令。三种模式都不会修改环境中的 Node 安装或当前项目。
+`add --global`。osdk 会适配生成的原生全局布局，校验选中包及其声明命令，并只通过 shim
+发布这些命令。两种模式都不会修改环境中的 Node 安装或当前项目。
 
 所选版本和安装器写入用户配置；基本的 package、scope、Node、installer 和可选原生
-lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依赖 lock；pnpm 的
-`pnpm-lock.yaml` 与 Aube 的 `aube-lock.yaml` 保留在各自受控安装目录中。
-
-::: warning Aube 全局离线支持
-Aube 2.1 无法在 osdk 离线模式中新建或修复全局安装；已经完整安装的匹配精确版本可以在
-安装器与构建策略选项也匹配时，在不启动 Aube 的情况下离线再次选中。安装过程本身必须
-使用原生全局离线模式时，请选择 npm 或 pnpm。共享的 Aube store 与 cache 仍会在受支持的
-在线安装中避免重复下载。
-:::
+lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依赖 lock，因此不会为它
+记录原生 lock 身份；pnpm 的 `pnpm-lock.yaml` 保留在其受控安装目录中。
 
 `where --global` 只在全局 npm 安装中解析，并忽略项目选择。
 `uninstall --global` 会删除规范全局根和任何明确标记为 global 的旧版根，然后清理匹配的
@@ -202,13 +205,13 @@ osdk reshim
 
 ## 构建脚本策略
 
-本地项目 `use` 始终禁用 lifecycle scripts，无论使用 Aube 还是原生 npm/pnpm。隔离与
+本地项目 `use` 始终禁用 lifecycle scripts，无论使用原生 npm 还是 pnpm。隔离与
 全局安装也默认禁用脚本；已经审阅的包可通过结构化工具项或单次选项放行：
 
 ```toml
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
-installer = "aube"
+installer = "pnpm"
 allow_builds = ["@scope/native-tool", "esbuild"]
 ```
 
@@ -218,8 +221,10 @@ allow_builds = ["@scope/native-tool", "esbuild"]
 | `["pkg-a", "pkg-b"]` | 所选安装器支持 allowlist 时，只允许列出的包 |
 | `true` | 允许整个依赖图执行脚本；只应在完整审阅后使用 |
 
-单次形式是 `-o allow_builds=esbuild,sharp`。原生 npm 无法实施包级 allowlist，只接受
-false 或 true；Aube 与 pnpm 支持按包放行。
+单次形式是 `-o allow_builds=esbuild,sharp`。npm 没有 pnpm `onlyBuiltDependencies` 那样的
+包级机制，它的 `--ignore-scripts` 只能全开或全关，因此在 npm 下按包 allowlist 会被记录但
+按 deny 处理，而不会静默放行整个依赖图。需要在 npm 下放行脚本请使用 `true`；确实需要
+包级 allowlist 时请选择 pnpm。
 
 ## 选项变更与重新安装
 
@@ -246,11 +251,11 @@ activation、shim 分发、`where`、`uninstall` 与 `reshim` 都从活动请求
 拒绝原生私有、认证或 scope Registry 的透传。该作用域请配置可匿名访问的
 `[registries.npm]` endpoint。
 
-所有 Aube 驱动的 npm 工具会跨项目、全局作用域、包和版本共享以下 osdk 自有路径：
+所有 npm 驱动的工具会跨项目、全局作用域、包和版本共享以下 osdk 自有路径：
 
 ```text
-$OSDK_CACHE_DIR/aube/v1/cache
-$OSDK_STORE_DIR/aube
+$OSDK_CACHE_DIR/npm/v1/cache
+$OSDK_STORE_DIR/npm
 ```
 
 共享布局避免重复下载相同包内容，而每个真实项目或受控全局安装仍保留自己的原生
@@ -266,9 +271,8 @@ lock 身份。
 
 ::: warning 依赖图限制
 `osdk.lock` 中的 metadata 本身**不会**捕获或重建 npm 传递依赖图。安装器的原生 lock
-仍是依赖图来源：真实项目中的 `aube-lock.yaml`、`package-lock.json`、
-`npm-shrinkwrap.json` 或 `pnpm-lock.yaml`，或者受控全局安装目录中保留的 Aube/pnpm
-lock。npm 全局安装没有依赖 lock，因此只凭用户 `osdk.lock` 无法复现其传递依赖选择。
+仍是依赖图来源：真实项目中的 `package-lock.json`、`npm-shrinkwrap.json` 或
+`pnpm-lock.yaml`，或者受控全局安装目录中保留的 pnpm lock。npm 全局安装没有依赖 lock，因此只凭用户 `osdk.lock` 无法复现其传递依赖选择。
 :::
 
 项目工作流应同时提交 `package.json`、原生项目 lock、`osdk.toml` 与 `osdk.lock`。旧 lock

@@ -29,9 +29,9 @@ osdk and is independent of `forward_credentials`. Headers are attached only when
 the initial URL has the configured index/download origin, survive same-origin
 redirects, and are permanently stripped after the first cross-origin redirect.
 Only hashes of header values participate in metadata/probe cache identity; clear
-values are not persisted. Aube 2.1's embedded API cannot safely accept arbitrary
-source headers, so `npm:<package>` Aube package fetches do not forward
-`Source.headers`. Project operations may use native trusted configuration;
+values are not persisted. The managed npm/pnpm delegates receive only a registry
+override inside an otherwise empty osdk-owned configuration, so `npm:<package>`
+package fetches do not forward `Source.headers`. Project operations may use native trusted configuration;
 global npm-tool installs reject authenticated/private native pass-through while
 running in their isolated prefix.
 Go command tools add one stricter boundary: if custom sources exist, only those

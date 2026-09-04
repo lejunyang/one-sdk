@@ -52,8 +52,8 @@ Invoke-WebRequest `
 ```
 
 If Rust is already installed, `cargo install osdk-cli --locked` installs the
-main `osdk` command and its private `osdk-aube` helper. Use the Release
-installer for the complete three-program installation, including `osdk-shim`.
+main `osdk` command. Use the Release installer for the complete two-program
+installation, including `osdk-shim`.
 
 If GitHub downloads are slow, route both the installer and release downloads
 through a trusted proxy:
@@ -204,32 +204,32 @@ prettier --check .
 osdk use npm:eslint@9 -o installer=pnpm
 
 # Install a user-wide tool without changing the current project.
-osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=aube
+osdk use --global 'npm:@antfu/ni@0.21.12' -o installer=npm
 osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
 Project `use` respects the nearest `package.json` and exactly one compatible
-existing native lock. Automatic selection prefers Aube when that lock is
-compatible; `installer=aube`, `installer=npm`, and `installer=pnpm` select one
-explicitly. Shell activation exposes only validated commands from packages
-selected by the trusted project configuration, never the project's entire
-`node_modules/.bin`. Without a `package.json`, local `use` retains the isolated
-osdk-managed installation and shim behavior. The generated `.osdk/npm-bin/`
+existing native lock. Automatic selection follows the project's declared
+`packageManager`, then the installer that owns an existing native lock, and
+otherwise the configured default; `installer=npm` and `installer=pnpm` select
+one explicitly. Set the fallback with `settings.npm.default-installer` in
+`config.toml` or `OSDK_NPM_DEFAULT_INSTALLER`; it applies only when a project
+states no preference of its own. Shell activation exposes only validated
+commands from packages selected by the trusted project configuration, never the
+project's entire `node_modules/.bin`. Without a `package.json`, local `use`
+retains the isolated osdk-managed installation and shim behavior. The generated
+`.osdk/npm-bin/`
 directory is local derived state and should normally be ignored by version
 control. Commit the package manager's native lock alongside `osdk.lock`; the
 latter does not replace the transitive dependency graph.
 
-Global npm, pnpm, and Aube choices each run that manager's real global-add
-operation inside an osdk-controlled prefix, leaving the ambient Node
-installation untouched. Release installs include the `osdk-aube` companion
-needed for Aube global mode. Aube 2.1 needs network access for a new or repaired
-global install, although an already complete exact install with matching options
-can be selected again offline without launching Aube; choose npm or pnpm when
-the install itself must use a native offline mode.
-`where --global` and `uninstall --global` explicitly target the user-wide npm
-installation whose exact configured identity matches. Without that flag, the
-existing project/isolated behavior is preserved; uninstall removes only the
+Global npm and pnpm choices each run that manager's real global-add operation
+inside an osdk-controlled prefix, leaving the ambient Node installation
+untouched. `where --global` and `uninstall --global` explicitly target the
+user-wide npm installation whose exact configured identity matches. Without
+that flag, the existing project/isolated behavior is preserved; uninstall
+removes only the
 selected identity root, while sibling identities of the same package version
 remain installed. A global uninstall also removes its user config, lock entry,
 and now-unowned shims. Project-managed npm dependencies and their curated

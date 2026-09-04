@@ -78,8 +78,9 @@ smaller `priority` values come first. Project source settings require
 these headers only when the initial URL has the source's configured
 index/download origin. They survive same-origin redirects, are permanently
 removed after the first cross-origin redirect, and their clear values are not
-written to cache. Aube 2.1's embedded API cannot safely receive arbitrary
-`Source.headers`, so actual `npm:<package>` package fetches do not forward them.
+written to cache. The managed npm and pnpm delegates receive only a registry
+override and an otherwise empty, osdk-owned configuration, so actual
+`npm:<package>` package fetches do not forward `Source.headers`.
 Project package-manager invocations may use native trusted configuration, but
 global npm tools reject authenticated/private native pass-through while their
 prefix is isolated; use an anonymous configured registry for global installs.

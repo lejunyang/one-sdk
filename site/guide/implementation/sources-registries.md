@@ -27,8 +27,8 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 显式 `Source.headers` 用于 osdk 自己发起的 metadata 请求与 source probe，并独立于
 `forward_credentials`。只有初始 URL 与配置的 index/download URL 同 origin 时才附加；
 同源 redirect 继续携带，第一次跨源 redirect 后永久移除。header 值只以 hash 参与
-metadata/probe cache identity，不明文写入 cache。Aube 2.1 embedded API 无法安全接收
-任意 source header，因此 `npm:<package>` 的 Aube package fetch 不转发
+metadata/probe cache identity，不明文写入 cache。受管的 npm/pnpm 子进程只会收到 registry
+覆盖以及一份 osdk 自有的空配置，因此 `npm:<package>` 的 package fetch 不转发
 `Source.headers`。项目操作可以使用原生可信配置；全局 npm 工具在隔离 prefix 下会拒绝
 认证或私有原生配置透传。
 Go command 工具有更严格的边界：存在 custom source 时只对这些 custom candidate（以及

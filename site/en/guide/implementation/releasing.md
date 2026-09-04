@@ -34,10 +34,9 @@ Install the primary commands from crates.io with:
 cargo install osdk-cli --locked
 ```
 
-This installs `osdk` and the private `osdk-aube` helper. `osdk-shim` is a
-separate package. For a complete everyday installation, the GitHub Release
-installer remains preferred because it places all three same-version programs
-in one directory.
+This installs `osdk`. `osdk-shim` is a separate package. For a complete everyday
+installation, the GitHub Release installer remains preferred because it places
+both same-version programs in one directory.
 
 ## First-release authentication
 

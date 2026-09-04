@@ -65,7 +65,7 @@ The operation also writes or updates a structured project selection similar to:
 ```toml
 [tools]
 node = "22.17.0"
-"npm:prettier" = { version = "3", installer = "aube" }
+"npm:prettier" = { version = "3", installer = "npm" }
 ```
 
 The exact managed Node version and concrete installer are recorded together. An
@@ -77,33 +77,45 @@ editing that file changes its trust identity and requires review and
 ## Installer selection
 
 Before changing the project, osdk reads the nearest `package.json` and the
-recognized native locks beside it. With no native lock, or with exactly one
-lock whose format Aube can read, automatic selection chooses Aube. Current
-compatible formats are Aube v9, pnpm v9, and npm `package-lock.json` /
-`npm-shrinkwrap.json` v2 or v3. When the one existing npm or pnpm lock is too
-new or otherwise unsupported by Aube, osdk delegates once to the native manager
-that owns it.
+recognized native locks beside it. Automatic selection consults three signals in
+a fixed order and stops at the first one that answers:
 
-`package.json#packageManager` (then `devEngines.packageManager`) identifies the
-declared owner. A declaration and the one existing native lock must agree; two
-or more recognized lockfiles are rejected as ambiguous before anything is
-changed. Automatic mode accepts declared Aube, npm, or pnpm; another manager
-requires an explicit supported installer choice.
+1. `package.json#packageManager`, then `devEngines.packageManager`, as the
+   project's own statement of which installer owns the tree.
+2. The installer that owns an existing recognized lock, so a project keeps the
+   manager that already wrote its lockfile.
+3. The configured default, which applies only when the project states nothing.
+
+Recognized lock formats are npm `package-lock.json` / `npm-shrinkwrap.json` v2
+or v3, and pnpm v9. A declaration and the one existing native lock must agree;
+two or more recognized lockfiles are rejected as ambiguous before anything is
+changed. Automatic mode accepts declared npm or pnpm; another manager requires
+an explicit supported installer choice.
+
+The fallback in step 3 ships as npm and is configurable:
+
+```toml
+# config.toml
+[settings.npm]
+default-installer = "npm"   # or "pnpm"
+```
+
+`OSDK_NPM_DEFAULT_INSTALLER` overrides it for one invocation. Because it is only
+consulted last, changing it never takes a project away from the installer it
+declares or already has a lockfile for.
 
 Choose an installer explicitly when required:
 
 ```bash
-osdk use npm:prettier@3 -o installer=aube
 osdk use npm:prettier@3 -o installer=npm
 osdk use npm:prettier@3 -o installer=pnpm
 ```
 
 An explicit choice overrides the package-manager declaration, but it still must
-be compatible with the incumbent lock: Aube will not consume an unsupported
-format, and npm or pnpm will not overwrite the other native manager's lock. The
-installer is selected before mutation and is invoked at most once. A failed
-Aube/npm/pnpm operation is returned directly; osdk never replays it through a
-different installer.
+be compatible with the incumbent lock: npm and pnpm will not overwrite each
+other's lock. The installer is selected before mutation and is invoked at most
+once. A failed npm or pnpm operation is returned directly; osdk never replays it
+through a different installer.
 
 ## Project activation and trust boundary
 
@@ -146,7 +158,7 @@ future project metadata under that directory can still be committed deliberately
 Global scope ignores the current project's manifest, declaration, and locks:
 
 ```bash
-# Aube is the default global installer.
+# The configured default installer is used; npm out of the box.
 osdk use --global npm:prettier@3
 
 # Use a managed native package manager explicitly.
@@ -156,29 +168,18 @@ osdk where --global 'npm:@antfu/ni'
 osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```
 
-osdk installs the selected Node and, when requested, npm or pnpm. Each installer
-then runs its real global-add operation in an osdk-controlled prefix: npm uses
-`install --global --prefix ...`, pnpm uses `add --global`, and Aube uses
-`add --global` through the packaged sibling `osdk-aube` helper. The helper gives
-Aube an isolated home and prefix while reusing osdk's shared Aube store and
-cache. osdk adapts the resulting native global layout, validates the selected
-package and its declared commands, and publishes only those commands through
-osdk shims. None of the three modes writes to the ambient Node installation or
-the current project.
+osdk installs the selected Node and the requested package manager. Each
+installer then runs its real global-add operation in an osdk-controlled prefix:
+npm uses `install --global --prefix ...` and pnpm uses `add --global`. osdk
+adapts the resulting native global layout, validates the selected package and
+its declared commands, and publishes only those commands through osdk shims.
+Neither mode writes to the ambient Node installation or the current project.
 
 The selected version and installer are written to the user configuration, and
 basic package, scope, Node, installer, and optional native-lock identity are
 written to `$OSDK_CONFIG_DIR/osdk.lock`. npm global installs do not produce a
-dependency lock. pnpm's `pnpm-lock.yaml` and Aube's `aube-lock.yaml` remain in
-their controlled install directories.
-
-::: warning Aube global offline support
-Aube 2.1 cannot create or repair a global installation in osdk's offline mode.
-An already complete exact installation can be selected again offline only when
-its installer and build-policy options also match. Select npm or pnpm when the
-installation itself must use their native global offline mode. The shared Aube
-store and cache still avoid duplicate downloads during supported online installs.
-:::
+dependency lock, so no native-lock identity is recorded for them. pnpm's
+`pnpm-lock.yaml` remains in its controlled install directory.
 
 `where --global` resolves only against global npm installations and ignores a
 project selection. `uninstall --global` removes the canonical global root and
@@ -240,15 +241,15 @@ files under `node_modules/<package>`.
 
 ## Build-script policy
 
-Local project `use` always disables lifecycle scripts, for Aube as well as the
-native npm and pnpm delegates. For isolated and global installs, scripts are
-also disabled by default. Reviewed packages can opt in with a structured tool
-entry or a one-shot option:
+Local project `use` always disables lifecycle scripts, for both the native npm
+and pnpm delegates. For isolated and global installs, scripts are also disabled
+by default. Reviewed packages can opt in with a structured tool entry or a
+one-shot option:
 
 ```toml
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
-installer = "aube"
+installer = "pnpm"
 allow_builds = ["@scope/native-tool", "esbuild"]
 ```
 
@@ -258,9 +259,12 @@ allow_builds = ["@scope/native-tool", "esbuild"]
 | `["pkg-a", "pkg-b"]` | Allow only named packages where the selected installer supports an allowlist |
 | `true` | Allow scripts throughout the graph; use only after full review |
 
-The one-shot form is `-o allow_builds=esbuild,sharp`. Native npm cannot enforce
-a package allowlist and accepts only false or true; Aube and pnpm support the
-named-package form.
+The one-shot form is `-o allow_builds=esbuild,sharp`. npm has no per-package
+equivalent of pnpm's `onlyBuiltDependencies` -- its `--ignore-scripts` is
+all-or-nothing -- so a named-package allowlist is recorded but treated as deny
+under npm rather than silently allowing the whole graph. Use `true` to allow
+scripts under npm, or select pnpm when a genuine per-package allowlist is
+required.
 
 ## Option changes and reinstallation
 
@@ -296,12 +300,12 @@ configuration inside the osdk-controlled prefix and currently reject native
 private/authenticated/scoped registry pass-through; configure an anonymously
 reachable `[registries.npm]` endpoint for that scope.
 
-All Aube-backed npm tools—across project, global, package, version, and scope—
-share these osdk-owned paths:
+All npm-backed tools—across project, global, package, version, and scope—share
+these osdk-owned paths:
 
 ```text
-$OSDK_CACHE_DIR/aube/v1/cache
-$OSDK_STORE_DIR/aube
+$OSDK_CACHE_DIR/npm/v1/cache
+$OSDK_STORE_DIR/npm
 ```
 
 The shared layout avoids redownloading the same package content while each real
@@ -319,9 +323,9 @@ native-lock identity.
 ::: warning Graph limitation
 The metadata in `osdk.lock` does **not** itself capture or reconstruct the
 transitive npm dependency graph. The installer's native lock remains the source
-of that graph: the real project's `aube-lock.yaml`, `package-lock.json`,
-`npm-shrinkwrap.json`, or `pnpm-lock.yaml`, or the Aube/pnpm lock retained in a
-controlled global install directory. An npm global install has no dependency
+of that graph: the real project's `package-lock.json`, `npm-shrinkwrap.json`, or
+`pnpm-lock.yaml`, or the pnpm lock retained in a controlled global install
+directory. An npm global install has no dependency
 lock, so its transitive selection is not reproducible from the user
 `osdk.lock` alone.
 :::

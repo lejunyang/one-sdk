@@ -1,9 +1,8 @@
 # Installation
 
 osdk provides prebuilt binaries for Windows, macOS, and Linux. Each release
-archive installs three sibling programs: the main `osdk` CLI, `osdk-shim`,
-which launches active tools, and the private `osdk-aube` helper used for
-process-isolated Aube global installs. Keep all three in the same directory.
+archive installs two sibling programs: the main `osdk` CLI and `osdk-shim`,
+which launches active tools. Keep both in the same directory.
 
 ## Linux and macOS
 
@@ -99,23 +98,20 @@ The binaries are written to:
 ```text
 target/release/osdk
 target/release/osdk-shim
-target/release/osdk-aube
 ```
 
-Place all three files in the same directory and add that directory to `PATH`.
-`osdk-aube` is a packaged implementation helper, not a command users normally
-invoke directly.
+Place both files in the same directory and add that directory to `PATH`.
 
-If Rust is already installed, you can install the primary command and private
-Aube helper from crates.io:
+If Rust is already installed, you can install the primary command from
+crates.io:
 
 ```bash
 cargo install osdk-cli --locked
 ```
 
 `osdk-shim` is a separate package. The Release installer above remains the
-recommended complete installation because it installs same-version `osdk`,
-`osdk-shim`, and `osdk-aube` programs together.
+recommended complete installation because it installs same-version `osdk` and
+`osdk-shim` programs together.
 
 In mainland China, you may want to configure a rustup mirror first:
 

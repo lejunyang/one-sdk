@@ -16,7 +16,7 @@ osdk 把持久安装状态、内容寻址对象和可丢弃缓存分开。目录
 - `<cache>/tmp`：安装解压暂存区。
 - `<cache>/remote`、`<cache>/sources`：远程 metadata 与源测速缓存。
 - `<cache>/pkg`：下游包管理器与模型客户端的原生缓存。
-- `<cache>/aube/v1/cache` 与 `<data>/store/aube`：Aube 驱动的隔离、项目与全局 npm 工具共享的 cache/store；每个真实项目或受控安装根仍保留自己的原生 lock。
+- `<cache>/npm/v1/cache` 与 `<data>/store/npm`：npm 驱动的隔离、项目与全局 npm 工具共享的 cache/store；每个真实项目或受控安装根仍保留自己的原生 lock。
 
 `Dirs::ensure` 在 CLI 初始化时建立核心目录。默认 store 与 installs 同在 data volume，便于 hardlink；`OSDK_STORE_DIR` 可把 store 移到其他卷，但这可能让物化回退到 reflink 或 copy。
 每个动态根包含 `.osdk-install.json` schema 1；其嵌套 `identity` 包含 `tool`、`version`、
@@ -54,7 +54,7 @@ sibling stage，其中包含私有 `home`、`cargo-home`、`target` 与 `tmp` �
 
 ## 不存在跨 manager 的包 CAS
 
-CAS 去重的是 osdk 已验证并解压的 SDK 文件和模型文件。它**不解析、摄取或跨 npm/pnpm/Yarn/Bun/Deno/pip/Go/Cargo/Maven/Gradle 去重项目依赖包**。Aube 驱动的 `npm:<package>` 操作共享 `<cache>/aube/v1/cache>` 与 `<data>/store/aube`，原生 npm/pnpm 则使用各自的下游 cache/store；这些包内容都不进入 BLAKE3 SDK CAS。
+CAS 去重的是 osdk 已验证并解压的 SDK 文件和模型文件。它**不解析、摄取或跨 npm/pnpm/Yarn/Bun/Deno/pip/Go/Cargo/Maven/Gradle 去重项目依赖包**。npm 驱动的 `npm:<package>` 操作共享 `<cache>/npm/v1/cache` 与 `<data>/store/npm`，pnpm 则使用自己的下游 cache/store；这些包内容都不进入 BLAKE3 SDK CAS。
 Cargo 开发工具的 source 与构建数据同样只存在于 stage，不会提升为共享 Cargo cache 或
 CAS；最终指纹化根只保留已发布 binary 与 osdk metadata。
 Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 SDK CAS；发布后的 Go
