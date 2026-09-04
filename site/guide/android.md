@@ -279,6 +279,21 @@ Windows 上这个链接是 NTFS junction 而不是符号链接，因为 symlink 
 如果目标路径上已存在一个真实目录——通常是 Google 自带 `sdkmanager` 装出来的包
 ——osdk 会原样保留并告警。接管该路径就意味着删除 osdk 从未拥有的数据。
 
+### 在 Linux 和 macOS 上验证桥接
+
+`scripts/android-sdk-root-smoke.sh` 会在一个临时 `OSDK_*` 根目录里跑完整流程——
+安装、建链、卸载、清理——不会碰你自己的安装：
+
+```bash
+cargo build --release
+./scripts/android-sdk-root-smoke.sh
+```
+
+每条断言输出一行，首个失败即以非零码退出。想测别处的二进制就设 `OSDK_BIN`。
+
+有一点需要明确说明：这个脚本已在 Linux 上做过语法检查、其逻辑也已用 Windows 二进制
+镜像跑过一遍，但尚未在 unix 主机上端到端真跑。若它失败，请先怀疑脚本而不是桥接本身。
+
 ### 模拟器的 SDK 根校验
 
 模拟器判定一个目录是否为可用 SDK 根，只看它有没有 `platform-tools` 子目录，别无

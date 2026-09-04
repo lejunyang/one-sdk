@@ -322,6 +322,24 @@ If a real directory already occupies the target path — most often a package th
 Google's own `sdkmanager` installed — osdk leaves it alone and warns. Taking that
 path over would mean deleting data osdk never owned.
 
+### Checking the bridge on Linux and macOS
+
+`scripts/android-sdk-root-smoke.sh` runs the whole cycle — install, link,
+uninstall, prune — against a throwaway `OSDK_*` root, so your own installation is
+untouched:
+
+```bash
+cargo build --release
+./scripts/android-sdk-root-smoke.sh
+```
+
+It reports one line per assertion and exits non-zero on the first failure. Set
+`OSDK_BIN` to test a binary somewhere other than `target/`.
+
+One caveat worth stating plainly: this script has been syntax-checked on Linux and
+its logic mirrored against the Windows binary, but it has not yet been run
+end-to-end on a unix host. If it fails, suspect the script before the bridge.
+
 ### The emulator's SDK root check
 
 The emulator decides whether a directory is a usable SDK root by looking for a
