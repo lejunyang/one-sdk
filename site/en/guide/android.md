@@ -302,7 +302,21 @@ so on. Nothing is copied, so a 3.5 GB image is stored once.
 
 On Windows the link is an NTFS junction rather than a symlink, because a symlink
 needs Developer Mode or elevation while a junction needs neither, and the Android
-tools only ever traverse it.
+tools only ever traverse it. On Linux and macOS it is an ordinary symlink.
+
+The difference is confined to two places, both verified on real Linux:
+
+- **Detecting a link.** A junction is not reported by `is_symlink()`, so Windows
+  also checks the reparse-point attribute; elsewhere `is_symlink()` is enough.
+- **Removing one.** `remove_dir` unlinks a junction, but on unix a symlink needs
+  `remove_file` — `rmdir` fails there with `ENOTDIR`. osdk tries the first and
+  falls back to the second, so one code path covers both.
+
+Everything the uninstall and prune logic relies on behaves the same either way: a
+link to a directory is distinguishable from a real directory; deleting the target
+leaves the link present but unresolvable, which is how a dangling entry is found;
+creating a link onto an occupied path fails rather than clobbering it (`EEXIST` on
+unix); and pruning stops at the first non-empty directory.
 
 If a real directory already occupies the target path — most often a package that
 Google's own `sdkmanager` installed — osdk leaves it alone and warns. Taking that

@@ -1165,16 +1165,20 @@ fn ndk_prebuilt_dir(os: crate::platform::Os) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(windows)]
-    use std::os::windows::fs::MetadataExt;
 
     #[test]
-    #[cfg(windows)]
     fn a_link_whose_target_is_gone_is_reported_and_then_pruned() {
         // The bug this locks in, measured before the fix: `osdk uninstall` left a
         // junction behind, so `Test-Path sdk\platform-tools` was still True while
         // `sdk\platform-tools\adb.exe` was False. Everything that probes the
         // layout by existence then believes the package is installed.
+        //
+        // Runs on every platform: the link is a junction on Windows and a symlink
+        // elsewhere, but the states being asserted -- present yet unresolvable --
+        // are the same, and both were confirmed on real Linux before this test was
+        // widened. The removal path differs though: `rmdir` on a unix symlink
+        // fails with ENOTDIR, so the `remove_dir` -> `remove_file` fallback in the
+        // walk is load-bearing there, and this test is what guards it.
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("android-sdk");
         std::fs::create_dir_all(&root).unwrap();
@@ -1183,7 +1187,7 @@ mod tests {
         // "delete every link".
         let live = temp.path().join("payload-live");
         std::fs::create_dir_all(&live).unwrap();
-        std::fs::write(live.join("adb.exe"), b"x").unwrap();
+        std::fs::write(live.join("adb"), b"x").unwrap();
         symlink_dir(&live, &root.join("platform-tools")).unwrap();
 
         let doomed = temp.path().join("payload-doomed");
@@ -1231,7 +1235,7 @@ mod tests {
             "emptied scaffolding should be pruned too"
         );
         assert!(
-            root.join("platform-tools").join("adb.exe").is_file(),
+            root.join("platform-tools").join("adb").is_file(),
             "the live link must survive"
         );
         assert!(
@@ -1420,19 +1424,22 @@ mod tests {
         assert!(!AndroidBackend::new("emulator").needs_system_images());
     }
 
-    #[cfg(windows)]
     fn is_link(path: &std::path::Path) -> bool {
         let meta = std::fs::symlink_metadata(path).unwrap();
         AndroidBackend::is_reparse_point(&meta) || meta.file_type().is_symlink()
     }
 
-    #[cfg(windows)]
     #[test]
     fn a_foreign_directory_is_never_replaced_by_a_link() {
         // The real hazard: a user who already installed a system image with
         // Google's sdkmanager has a genuine multi-GB directory exactly where the
         // bridge wants its link. Adopting that path would mean deleting data
         // osdk never owned, so linking must fail rather than clobber it.
+        //
+        // Holds on both platforms for the same reason: junction creation needs an
+        // empty directory it can open, and `symlink(2)` refuses an existing path
+        // with EEXIST (confirmed on Linux: "failed to create symbolic link: File
+        // exists", with the directory left as a real directory).
         let temp = tempfile::tempdir().unwrap();
         let foreign = temp.path().join("foreign");
         std::fs::create_dir_all(&foreign).unwrap();
@@ -1453,17 +1460,21 @@ mod tests {
         symlink_dir(&payload, &fresh).expect("an unoccupied path links cleanly");
         assert!(is_link(&fresh));
 
-        // And a junction we own is detected as a link, so it can be replaced on
-        // a version switch; `is_symlink()` alone does not report junctions.
+        // And a link we own is detected as one, so it can be replaced on a
+        // version switch. On Windows that needs the reparse-point check, because
+        // `is_symlink()` alone does not report junctions.
         let meta = std::fs::symlink_metadata(&fresh).unwrap();
+        #[cfg(windows)]
         assert!(AndroidBackend::is_reparse_point(&meta));
+        #[cfg(not(windows))]
+        assert!(meta.file_type().is_symlink());
     }
 
-    #[cfg(windows)]
     #[test]
     fn directory_link_resolves_to_its_target_without_copying() {
-        // Guards the hand-written reparse-point FFI: a junction that does not
-        // resolve would silently reintroduce the `Broken AVD system path`
+        // Guards the platform link primitive on both sides: the hand-written
+        // reparse-point FFI on Windows, `symlink(2)` elsewhere. A link that does
+        // not resolve would silently reintroduce the `Broken AVD system path`
         // failure this bridge exists to fix.
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("real");
@@ -1471,7 +1482,7 @@ mod tests {
         std::fs::write(target.join("marker.txt"), b"payload").unwrap();
 
         let link = temp.path().join("linked");
-        symlink_dir(&target, &link).expect("junction is created without elevation");
+        symlink_dir(&target, &link).expect("a directory link is created without elevation");
 
         // Readable through the link...
         assert_eq!(
@@ -1479,15 +1490,18 @@ mod tests {
             b"payload".to_vec()
         );
         // ...and it is a link, not a second copy.
-        let meta = std::fs::symlink_metadata(&link).unwrap();
-        assert!(meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0);
+        assert!(is_link(&link));
         assert_eq!(
             std::fs::canonicalize(&link).unwrap(),
             std::fs::canonicalize(&target).unwrap()
         );
 
-        // Removing the link must leave the target intact.
-        std::fs::remove_dir(&link).unwrap();
+        // Removing the link must leave the target intact. The call that works
+        // differs by platform -- `remove_dir` for a junction, `remove_file` for a
+        // symlink -- which is why the production code tries both.
+        std::fs::remove_dir(&link)
+            .or_else(|_| std::fs::remove_file(&link))
+            .expect("the link is removable");
         assert!(target.join("marker.txt").is_file());
     }
 

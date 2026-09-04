@@ -260,8 +260,21 @@ Google 的工具要求共用一个 SDK 目录，而 osdk 把每个包装进各�
 的路径上——`system-images/android-35/google_apis/x86_64`、`platform-tools`、
 `emulator` 等。全程不复制，因此 3.5 GB 的镜像只存一份。
 
-Windows 上使用 NTFS junction 而非符号链接：符号链接需要开发者模式或提权，junction
-两者都不需要，而 Android 工具只是穿越它而已。
+Windows 上这个链接是 NTFS junction 而不是符号链接，因为 symlink 需要开发者模式或
+提权，junction 两者都不需要，而 Android 工具只会穿越它。Linux 和 macOS 上就是普通
+符号链接。
+
+差异只集中在两处，且都已在真实 Linux 上验证：
+
+- **判定"这是不是链接"**：junction 不会被 `is_symlink()` 报出来，所以 Windows 还要
+  额外查 reparse-point 属性；其他平台 `is_symlink()` 就够。
+- **删除链接**：`remove_dir` 能解除 junction，但 unix 上符号链接必须用
+  `remove_file`——那里 `rmdir` 会以 `ENOTDIR` 失败。osdk 先试前者、失败再退到后者，
+  因此一条代码路径覆盖两种平台。
+
+卸载与清理逻辑依赖的其余行为在两边完全一致：指向目录的链接可与真实目录区分；删掉
+目标后链接仍在但无法解析（这正是发现悬空条目的依据）；往已被占用的路径建链接会失败
+而不是覆盖（unix 上是 `EEXIST`）；向上剪空目录会停在第一个非空目录。
 
 如果目标路径上已存在一个真实目录——通常是 Google 自带 `sdkmanager` 装出来的包
 ——osdk 会原样保留并告警。接管该路径就意味着删除 osdk 从未拥有的数据。
