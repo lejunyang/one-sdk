@@ -70,7 +70,7 @@ pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let requests = gather_requests(app, tools)?;
     let mut resolved = resolve_requests(app, requests, opts).await?;
-    // A reproducible npm tool lock includes aube's exact transitive graph.
+    // A reproducible npm tool lock includes npm's exact transitive graph.
     // Ensure managed Node is present first, then ask each npm package backend
     // to generate its lockfile-only graph before serializing osdk.lock.
     if resolved
@@ -1511,6 +1511,7 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
             &cwd,
             requested_installer,
             osdk_core::npm_tools::ToolScope::Project,
+            app.ctx.config.settings.npm.default_installer,
         )?;
         if let Some(project) = plan.project {
             return use_project_npm(
@@ -1766,51 +1767,14 @@ async fn use_project_npm(
         &project.root,
         requested_installer,
         osdk_core::npm_tools::ToolScope::Project,
+        app.ctx.config.settings.npm.default_installer,
     )?
     .installer;
     let section = project_dependency_section(&project.package_json, &package)?;
     let expected_native_lock = expected_project_native_lock(&project, installer);
-    let aube_registry = if installer == osdk_core::npm_tools::NpmInstaller::Aube {
-        plan_project_aube_registry(app, &project.root, &package_spec).await?
-    } else {
-        None
-    };
 
     let result: Result<(String, std::path::PathBuf)> = async {
         match installer {
-            osdk_core::npm_tools::NpmInstaller::Aube => {
-                osdk_core::backend::aube_host::add_to_project(
-                    osdk_core::backend::aube_host::EmbeddedProjectAddRequest {
-                        project_dir: &project.root,
-                        packages: std::slice::from_ref(&package_spec),
-                        cache_dir:
-                            osdk_core::backend::npm_package::NpmPackageBackend::aube_cache_dir(
-                                &app.ctx,
-                            ),
-                        store_dir:
-                            osdk_core::backend::npm_package::NpmPackageBackend::aube_store_dir(
-                                &app.ctx,
-                            ),
-                        node_bin_dir: node_bin_dir.clone(),
-                        save_dev: matches!(
-                            section,
-                            ProjectDependencySection::DevDependencies
-                                | ProjectDependencySection::PeerDependencies { also_dev: true }
-                        ),
-                        save_optional: matches!(
-                            section,
-                            ProjectDependencySection::OptionalDependencies
-                        ),
-                        save_peer: matches!(
-                            section,
-                            ProjectDependencySection::PeerDependencies { .. }
-                        ),
-                        offline: app.ctx.config.settings.offline,
-                        registry: aube_registry,
-                    },
-                )
-                .await?;
-            }
             osdk_core::npm_tools::NpmInstaller::Npm | osdk_core::npm_tools::NpmInstaller::Pnpm => {
                 run_project_native_installer(
                     app,
@@ -1938,7 +1902,6 @@ fn expected_project_native_lock(
         return (lock.kind, lock.path.clone());
     }
     let kind = match installer {
-        osdk_core::npm_tools::NpmInstaller::Aube => osdk_core::npm_tools::NativeLockKind::Aube,
         osdk_core::npm_tools::NpmInstaller::Npm => {
             osdk_core::npm_tools::NativeLockKind::PackageLock
         }
@@ -1998,7 +1961,6 @@ impl ProjectNpmMetadataRollback {
         )?;
         let mut paths = vec![
             package_json.to_path_buf(),
-            project_root.join("aube-lock.yaml"),
             project_root.join("pnpm-lock.yaml"),
             project_root.join("package-lock.json"),
             project_root.join("npm-shrinkwrap.json"),
@@ -2151,33 +2113,6 @@ fn replace_project_file(source: &std::path::Path, destination: &std::path::Path)
             .with_context(|| format!("restoring {}", destination.display()));
     }
     Ok(())
-}
-
-async fn plan_project_aube_registry(
-    app: &App,
-    project_root: &std::path::Path,
-    package_spec: &str,
-) -> Result<Option<String>> {
-    let args = vec!["install".to_string(), package_spec.to_string()];
-    match package_registry::plan(
-        &app.ctx,
-        project_root,
-        PackageManager::Npm,
-        "npm",
-        &args,
-        |key| std::env::var(key).ok(),
-    )
-    .await?
-    {
-        RegistryPlan::PassThrough { reason } => {
-            tracing::info!(manager = %PackageManager::Npm, %reason, "dependency registry pass-through");
-            Ok(None)
-        }
-        RegistryPlan::Selected { url, .. } => Ok(Some(url)),
-        RegistryPlan::Unavailable { probes } => {
-            Err(unavailable_registry_error(PackageManager::Npm, &probes))
-        }
-    }
 }
 
 fn project_dependency_section(
@@ -5838,12 +5773,12 @@ mod command_flow_tests {
             &config,
             &mut overridden,
             true,
-            &["installer=aube".into(), "allow_builds=cli-build".into()],
+            &["installer=pnpm".into(), "allow_builds=cli-build".into()],
             None,
         )
         .unwrap();
 
-        assert_eq!(overridden.options["installer"], "aube");
+        assert_eq!(overridden.options["installer"], "pnpm");
         assert_eq!(overridden.options["allow_builds"], "cli-build");
     }
 
@@ -6101,7 +6036,7 @@ mod command_flow_tests {
     fn project_file_snapshot_restores_old_bytes_and_removes_new_files() {
         let temporary = tempfile::tempdir().unwrap();
         let existing = temporary.path().join("package.json");
-        let created = temporary.path().join("aube-lock.yaml");
+        let created = temporary.path().join("package-lock.json");
         std::fs::write(&existing, b"old manifest").unwrap();
         let existing_snapshot = snapshot_project_file(&existing).unwrap();
         let created_snapshot = snapshot_project_file(&created).unwrap();
@@ -6133,8 +6068,9 @@ mod command_flow_tests {
                 supported: true,
             }),
         };
+        // An incumbent lock wins over what the installer would pick.
         assert_eq!(
-            expected_project_native_lock(&project, NpmInstaller::Aube),
+            expected_project_native_lock(&project, NpmInstaller::Npm),
             (NativeLockKind::Pnpm, root.join("pnpm-lock.yaml"))
         );
 
@@ -6143,12 +6079,12 @@ mod command_flow_tests {
             ..project
         };
         assert_eq!(
-            expected_project_native_lock(&without_lock, NpmInstaller::Aube),
-            (NativeLockKind::Aube, root.join("aube-lock.yaml"))
-        );
-        assert_eq!(
             expected_project_native_lock(&without_lock, NpmInstaller::Npm),
             (NativeLockKind::PackageLock, root.join("package-lock.json"))
+        );
+        assert_eq!(
+            expected_project_native_lock(&without_lock, NpmInstaller::Pnpm),
+            (NativeLockKind::Pnpm, root.join("pnpm-lock.yaml"))
         );
         let switched = NativeLock {
             kind: NativeLockKind::Pnpm,
@@ -6158,7 +6094,7 @@ mod command_flow_tests {
             supported: true,
         };
         let error = validate_installed_project_native_lock(
-            NpmInstaller::Aube,
+            NpmInstaller::Npm,
             &(NativeLockKind::PackageLock, root.join("package-lock.json")),
             &switched,
         )

@@ -335,7 +335,13 @@ mod tests {
         let command = localize(crate::cli::Cli::command());
         let use_command = command.find_subcommand("use").unwrap();
         let long_help = use_command.get_long_about().unwrap().to_string();
-        for expected in ["package.json", "osdk.toml", "osdk.lock", "--global", "Aube"] {
+        for expected in [
+            "package.json",
+            "osdk.toml",
+            "osdk.lock",
+            "--global",
+            "packageManager",
+        ] {
             assert!(long_help.contains(expected), "use help misses {expected}");
         }
 
@@ -345,7 +351,7 @@ mod tests {
             .and_then(|argument| argument.get_help())
             .unwrap()
             .to_string();
-        assert!(option_help.contains("installer=auto|aube|npm|pnpm"));
+        assert!(option_help.contains("installer=auto|npm|pnpm"));
         assert!(option_help.contains("allow_builds"));
 
         let install_command = command.find_subcommand("install").unwrap();

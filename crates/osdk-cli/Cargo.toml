@@ -15,10 +15,6 @@ categories = ["command-line-utilities", "development-tools"]
 name = "osdk"
 path = "src/main.rs"
 
-[[bin]]
-name = "osdk-aube"
-path = "src/bin/osdk-aube.rs"
-
 [dependencies]
 osdk-core.workspace = true
 clap.workspace = true
@@ -36,7 +32,6 @@ tracing-subscriber.workspace = true
 indicatif.workspace = true
 dunce.workspace = true
 walkdir.workspace = true
-aube.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

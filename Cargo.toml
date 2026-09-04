@@ -65,6 +65,9 @@ walkdir = "2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # CreateFileW and the other reparse-point entry points take a
+    # SECURITY_ATTRIBUTES pointer, so they are gated behind Win32_Security.
+    "Win32_Security",
     # DeviceIoControl + FSCTL_SET_REPARSE_POINT, used to create the
     # directory junctions that expose Android packages in one SDK root.
     "Win32_System_IO",
@@ -83,7 +86,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ui
 indicatif = "0.17"
 once_cell = "1"
-aube = { version = "=2.1.0", default-features = false, features = ["rustls"] }
 
 [profile.release]
 opt-level = 3

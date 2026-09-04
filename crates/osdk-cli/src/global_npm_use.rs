@@ -1,10 +1,8 @@
 //! Global `npm:<package>` installation for `osdk use --global`.
 //!
-//! Global means user-selected and shim-visible in osdk. npm, pnpm, and Aube
-//! execute their real global-add modes against an osdk-owned prefix. Aube runs
-//! in the `osdk-aube` helper process because its global command owns process
-//! cwd and process-global settings. No path mutates the caller's project or an
-//! ambient Node installation.
+//! Global means user-selected and shim-visible in osdk. npm and pnpm execute
+//! their real global-add modes against an osdk-owned prefix. No path mutates
+//! the caller's project or an ambient Node installation.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -36,7 +34,6 @@ static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone)]
 struct GlobalInstallLayout {
     root: PathBuf,
-    project: PathBuf,
     bin: PathBuf,
 }
 
@@ -46,14 +43,13 @@ impl GlobalInstallLayout {
         installer: NpmInstaller,
         platform: osdk_core::platform::Platform,
     ) -> Self {
-        let project = root.join("project");
         let bin =
             if installer == NpmInstaller::Npm && platform.os == osdk_core::platform::Os::Windows {
                 root.clone()
             } else {
                 root.join("bin")
             };
-        Self { root, project, bin }
+        Self { root, bin }
     }
 }
 
@@ -888,7 +884,12 @@ pub async fn install(
     }
     let requested_installer = npm_tools::installer_from_request_options(&request.options)?;
     let cwd = std::env::current_dir().context("getting current dir for global npm install")?;
-    let plan = npm_tools::plan_npm_installer(&cwd, requested_installer, ToolScope::Global)?;
+    let plan = npm_tools::plan_npm_installer(
+        &cwd,
+        requested_installer,
+        ToolScope::Global,
+        app.ctx.config.settings.npm.default_installer,
+    )?;
     let backend = NpmPackageBackend::from_id(&request.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?;
     let effective = expand_alias(app, &request)?;
@@ -949,17 +950,9 @@ pub async fn install(
     }
 
     if version.is_none() {
-        // Aube 2.1 global add always resolves online and exposes no offline
-        // switch. Exact local recovery/reuse is allowed above, but a new
-        // helper install must fail before registry or runtime preparation.
-        if plan.installer == NpmInstaller::Aube && app.ctx.config.settings.offline {
-            return Err(anyhow!(osdk_core::t!(
-                "err.npm_global_aube_offline_unsupported"
-            )));
-        }
         let package_spec = format!("{}@{}", backend.package(), request.spec);
         let (registry_manager, registry_alias, registry_command) = match plan.installer {
-            NpmInstaller::Aube | NpmInstaller::Npm => (PackageManager::Npm, "npm", "install"),
+            NpmInstaller::Npm => (PackageManager::Npm, "npm", "install"),
             NpmInstaller::Pnpm => (PackageManager::Pnpm, "pnpm", "add"),
             NpmInstaller::Auto => {
                 unreachable!("global planning always produces a concrete installer")
@@ -1253,7 +1246,6 @@ async fn ensure_managed_runtime(app: &mut App, installer: NpmInstaller) -> Resul
     let manager_id = match installer {
         NpmInstaller::Npm => Some("npm"),
         NpmInstaller::Pnpm => Some("pnpm"),
-        NpmInstaller::Aube => None,
         NpmInstaller::Auto => unreachable!("global planning always produces a concrete installer"),
     };
     let manager = if let Some(manager_id) = manager_id {
@@ -1318,7 +1310,6 @@ fn load_existing_managed_runtime(
     let manager_id = match installer {
         NpmInstaller::Npm => Some("npm"),
         NpmInstaller::Pnpm => Some("pnpm"),
-        NpmInstaller::Aube => None,
         NpmInstaller::Auto => unreachable!("global planning always produces a concrete installer"),
     };
     let manager = if let Some(manager_id) = manager_id {
@@ -1466,10 +1457,6 @@ async fn run_global_install(
     selected_registry: Option<&str>,
 ) -> Result<()> {
     match installer {
-        NpmInstaller::Aube => {
-            run_aube_global_installer(app, backend, version, runtime, layout, selected_registry)
-                .await
-        }
         NpmInstaller::Npm | NpmInstaller::Pnpm => {
             run_native_installer(
                 app,
@@ -1484,587 +1471,6 @@ async fn run_global_install(
         }
         NpmInstaller::Auto => unreachable!("global planning always produces a concrete installer"),
     }
-}
-
-async fn run_aube_global_installer(
-    app: &App,
-    backend: &NpmPackageBackend,
-    version: &ToolVersion,
-    runtime: &ManagedRuntime,
-    layout: &GlobalInstallLayout,
-    selected_registry: Option<&str>,
-) -> Result<()> {
-    let helper = find_aube_helper()?;
-    let package_spec = format!("{}@{}", backend.package(), version.version);
-    let native = layout.root.join(NATIVE_CONFIG_DIR);
-    let aube_home = native.join("home");
-    let aube_global_parent = layout.root.join("aube-global");
-    let aube_bin = layout.bin.clone();
-    let aube_cache = NpmPackageBackend::aube_cache_dir(&app.ctx);
-    let aube_store = NpmPackageBackend::aube_store_dir(&app.ctx);
-    let aube_runtime = layout.root.join("aube-runtime-disabled");
-    let user_config = native.join("aube.npmrc");
-    let global_config = native.join("aube-global.npmrc");
-    let xdg_config = native.join("xdg-config");
-    let xdg_data = native.join("xdg-data");
-    let xdg_cache = native.join("xdg-cache");
-    for path in [
-        &aube_home,
-        &aube_global_parent,
-        &aube_bin,
-        &aube_cache,
-        &aube_store,
-        &aube_runtime,
-        &native,
-        &xdg_config,
-        &xdg_data,
-        &xdg_cache,
-    ] {
-        std::fs::create_dir_all(path)?;
-    }
-    for path in [
-        &native,
-        &aube_home,
-        &aube_global_parent,
-        &aube_bin,
-        &aube_runtime,
-        &xdg_config,
-        &xdg_data,
-        &xdg_cache,
-    ] {
-        validate_owned_stage_directory(&layout.root, path)?;
-    }
-    for path in [&user_config, &global_config] {
-        if !path.exists() {
-            std::fs::write(path, b"")?;
-        }
-    }
-
-    let args = aube_global_args(version, package_spec, selected_registry.map(str::to_owned))?;
-
-    let path = std::env::join_paths(std::iter::once(runtime.node_bin.clone()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))?;
-    let mut env = BTreeMap::from([
-        ("PATH".into(), path.to_string_lossy().into_owned()),
-        ("HOME".into(), aube_home.display().to_string()),
-        ("XDG_CONFIG_HOME".into(), xdg_config.display().to_string()),
-        ("XDG_DATA_HOME".into(), xdg_data.display().to_string()),
-        ("XDG_CACHE_HOME".into(), xdg_cache.display().to_string()),
-        (
-            "NPM_CONFIG_USERCONFIG".into(),
-            user_config.display().to_string(),
-        ),
-        (
-            "NPM_CONFIG_GLOBALCONFIG".into(),
-            global_config.display().to_string(),
-        ),
-        (
-            "NPM_CONFIG_GLOBAL_DIR".into(),
-            aube_global_parent.display().to_string(),
-        ),
-        (
-            "NPM_CONFIG_GLOBAL_BIN_DIR".into(),
-            aube_bin.display().to_string(),
-        ),
-        (
-            "NPM_CONFIG_STORE_DIR".into(),
-            aube_store.display().to_string(),
-        ),
-        (
-            "NPM_CONFIG_CACHE_DIR".into(),
-            aube_cache.display().to_string(),
-        ),
-        (
-            "NPM_CONFIG_NODE_VERSION".into(),
-            runtime.node_version.version.clone(),
-        ),
-        (
-            "AUBE_RUNTIME_DIR".into(),
-            aube_runtime.display().to_string(),
-        ),
-        ("AUBE_NO_UPDATE_CHECK".into(), "1".into()),
-    ]);
-    for key in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "SystemRoot",
-        "WINDIR",
-        "ComSpec",
-        "PATHEXT",
-    ] {
-        if let Ok(value) = std::env::var(key) {
-            env.insert(key.into(), value);
-        }
-    }
-    run_managed_command(&helper, &args, &env, &layout.root)
-        .with_context(|| format!("running bundled Aube helper {}", helper.display()))?;
-
-    let package_root = aube_global_parent.join("global-aube");
-    let resolved = resolve_aube_global_install(
-        &layout.root,
-        &package_root,
-        backend.package(),
-        &version.version,
-    )?;
-    let destination = layout.project.clone();
-    if destination.exists() {
-        remove_path(&destination)?;
-    }
-    // Narrow the pointer-swap race by checking it again immediately before
-    // unlinking the Aube-owned stable pointer and moving its physical tree.
-    let current_target = dunce::canonicalize(&resolved.pointer).with_context(|| {
-        format!(
-            "re-resolving Aube global pointer {}",
-            resolved.pointer.display()
-        )
-    })?;
-    if current_target != resolved.install_dir {
-        return Err(anyhow!(
-            "Aube global pointer {} changed during validation",
-            resolved.pointer.display()
-        ));
-    }
-    remove_aube_hash_pointer(&resolved.pointer)?;
-    std::fs::rename(&resolved.install_dir, &destination).with_context(|| {
-        format!(
-            "moving Aube global install {} to {}",
-            resolved.install_dir.display(),
-            destination.display()
-        )
-    })?;
-    validate_aube_project(&destination, backend.package(), &version.version)?;
-    remove_path_best_effort(&aube_global_parent);
-    remove_path_best_effort(&native);
-    remove_path_best_effort(&aube_runtime);
-    Ok(())
-}
-
-fn find_aube_helper() -> Result<PathBuf> {
-    if let Some(override_path) = std::env::var_os("OSDK_AUBE_BIN") {
-        if override_path.is_empty() {
-            return Err(anyhow!("OSDK_AUBE_BIN must not be empty"));
-        }
-        let override_path = PathBuf::from(override_path);
-        if override_path.is_file() {
-            return Ok(override_path);
-        }
-        return Err(anyhow!(
-            "Aube helper override is not a regular file: {}",
-            override_path.display()
-        ));
-    }
-    let current = std::env::current_exe().context("locating osdk executable")?;
-    let name = if cfg!(windows) {
-        "osdk-aube.exe"
-    } else {
-        "osdk-aube"
-    };
-    let sibling = current
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(name);
-    if sibling.is_file() {
-        Ok(sibling)
-    } else {
-        Err(anyhow!(
-            "required Aube helper is missing at {}; reinstall osdk with osdk-aube",
-            sibling.display()
-        ))
-    }
-}
-
-fn aube_global_args(
-    version: &ToolVersion,
-    package_spec: String,
-    source: Option<String>,
-) -> Result<Vec<String>> {
-    let mut args = vec![
-        "add".to_string(),
-        "--global".to_string(),
-        "--save-exact".to_string(),
-        "--disable-gvs".to_string(),
-        "--config.nodeLinker=hoisted".to_string(),
-    ];
-    match npm_build_policy(version)? {
-        NpmBuildPolicy::Deny => {
-            // Aube 2.1's global wrapper drops --ignore-scripts when it builds
-            // the inner add request. A wildcard deny is the fail-closed
-            // equivalent and overrides the built-in trusted dependency list.
-            args.push("--deny-build=*".into());
-        }
-        NpmBuildPolicy::AllowAll => {
-            args.push("--dangerously-allow-all-builds".into());
-        }
-        NpmBuildPolicy::Packages(packages) => {
-            for package in packages {
-                args.push(format!("--allow-build={package}"));
-            }
-        }
-    }
-    if let Some(source) = source {
-        args.push(format!("--registry={source}"));
-    }
-    args.push(package_spec);
-    Ok(args)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NpmBuildPolicy {
-    Deny,
-    AllowAll,
-    Packages(Vec<String>),
-}
-
-impl NpmBuildPolicy {
-    fn identity(&self) -> String {
-        match self {
-            Self::Deny => "deny".into(),
-            Self::AllowAll => "allow-all".into(),
-            Self::Packages(packages) => format!("packages:{}", packages.join(",")),
-        }
-    }
-}
-
-fn parse_npm_build_policy(raw: Option<&str>) -> Result<NpmBuildPolicy> {
-    let Some(raw) = raw else {
-        return Ok(NpmBuildPolicy::Deny);
-    };
-    let raw = raw.trim();
-    let lower = raw.to_ascii_lowercase();
-    if lower.is_empty() || matches!(lower.as_str(), "false" | "0" | "no" | "off") {
-        return Ok(NpmBuildPolicy::Deny);
-    }
-    if matches!(lower.as_str(), "true" | "1" | "yes" | "on") {
-        return Ok(NpmBuildPolicy::AllowAll);
-    }
-    let mut packages = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|package| !package.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages.dedup();
-    if packages.is_empty() {
-        return Err(anyhow!("allow_builds contains no package names"));
-    }
-    Ok(NpmBuildPolicy::Packages(packages))
-}
-
-fn npm_build_policy(version: &ToolVersion) -> Result<NpmBuildPolicy> {
-    parse_npm_build_policy(version.options.get("allow_builds").map(String::as_str))
-}
-
-fn npm_build_policy_identity(version: &ToolVersion) -> Result<String> {
-    Ok(npm_build_policy(version)?.identity())
-}
-
-#[derive(Debug)]
-struct ResolvedAubeGlobalInstall {
-    pointer: PathBuf,
-    install_dir: PathBuf,
-}
-
-fn resolve_aube_global_install(
-    stage_root: &Path,
-    package_root: &Path,
-    package: &str,
-    version: &str,
-) -> Result<ResolvedAubeGlobalInstall> {
-    let canonical_stage = dunce::canonicalize(stage_root)
-        .with_context(|| format!("canonicalizing Aube stage {}", stage_root.display()))?;
-    let root_metadata = std::fs::symlink_metadata(package_root)
-        .with_context(|| format!("reading Aube global root {}", package_root.display()))?;
-    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
-        return Err(anyhow!(
-            "Aube global package root is not a real directory: {}",
-            package_root.display()
-        ));
-    }
-    let canonical_package_root = dunce::canonicalize(package_root)
-        .with_context(|| format!("canonicalizing Aube global root {}", package_root.display()))?;
-    if canonical_package_root == canonical_stage
-        || !canonical_package_root.starts_with(&canonical_stage)
-    {
-        return Err(anyhow!(
-            "Aube global package root escapes the osdk staging directory: {}",
-            canonical_package_root.display()
-        ));
-    }
-
-    let mut pointer_count = 0usize;
-    let mut valid = Vec::new();
-    let mut rejected = Vec::new();
-    for entry in std::fs::read_dir(&canonical_package_root)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_aube_hash_pointer_name(&name) {
-            continue;
-        }
-        pointer_count += 1;
-        let pointer = entry.path();
-        let result = (|| -> Result<PathBuf> {
-            let metadata = std::fs::symlink_metadata(&pointer)?;
-            if !is_aube_hash_pointer(&metadata) {
-                return Err(anyhow!("hash entry is not a symlink"));
-            }
-            let target = dunce::canonicalize(&pointer)?;
-            let target_metadata = std::fs::symlink_metadata(&target)?;
-            if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
-                return Err(anyhow!("pointer target is not a real directory"));
-            }
-            if target == canonical_package_root
-                || target.parent() != Some(canonical_package_root.as_path())
-            {
-                return Err(anyhow!("pointer target escapes the Aube global root"));
-            }
-            validate_aube_project(&target, package, version)?;
-            Ok(target)
-        })();
-        match result {
-            Ok(install_dir) => valid.push(ResolvedAubeGlobalInstall {
-                pointer,
-                install_dir,
-            }),
-            Err(error) => rejected.push(format!("{name}: {error:#}")),
-        }
-    }
-
-    match valid.len() {
-        1 if pointer_count == 1 => Ok(valid.pop().expect("one candidate exists")),
-        0 => Err(anyhow!(
-            "Aube global install did not produce exactly one valid hash pointer under {} (found {pointer_count}); {}",
-            canonical_package_root.display(),
-            if rejected.is_empty() {
-                "no 64-character lowercase hash pointers found".to_string()
-            } else {
-                rejected.join("; ")
-            }
-        )),
-        _ => Err(anyhow!(
-            "Aube global install is ambiguous under {}: found {} valid hash pointers ({} total)",
-            canonical_package_root.display(),
-            valid.len(),
-            pointer_count
-        )),
-    }
-}
-
-#[cfg(not(windows))]
-fn is_aube_hash_pointer(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
-}
-
-#[cfg(windows)]
-fn is_aube_hash_pointer(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-fn is_aube_hash_pointer_name(name: &str) -> bool {
-    name.len() == 64
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn remove_aube_hash_pointer(pointer: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        std::fs::remove_dir(pointer)
-            .with_context(|| format!("removing Aube global junction {}", pointer.display()))?;
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::remove_file(pointer)
-            .with_context(|| format!("removing Aube global symlink {}", pointer.display()))?;
-    }
-    Ok(())
-}
-
-fn validate_aube_project(project: &Path, package: &str, version: &str) -> Result<()> {
-    let project_metadata = std::fs::symlink_metadata(project)?;
-    if !project_metadata.is_dir() || project_metadata.file_type().is_symlink() {
-        return Err(anyhow!(
-            "Aube install is not a real directory: {}",
-            project.display()
-        ));
-    }
-    let canonical_project = dunce::canonicalize(project)
-        .with_context(|| format!("canonicalizing Aube install {}", project.display()))?;
-    let root_manifest_path = canonical_project.join("package.json");
-    let root_manifest = read_bounded_regular_json(&root_manifest_path, "Aube root manifest")?;
-    let dependencies = root_manifest
-        .get("dependencies")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| anyhow!("Aube root manifest has no dependencies object"))?;
-    if root_manifest
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        != Some("aube-global")
-        || root_manifest
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            != Some("0.0.0")
-        || root_manifest
-            .get("private")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        || dependencies.len() != 1
-        || dependencies
-            .get(package)
-            .and_then(serde_json::Value::as_str)
-            != Some(version)
-    {
-        return Err(anyhow!(
-            "Aube root manifest does not describe exactly {package}@{version}"
-        ));
-    }
-
-    let package_manifest_path = canonical_project
-        .join("node_modules")
-        .join(package)
-        .join("package.json");
-    let package_manifest =
-        read_bounded_regular_json(&package_manifest_path, "installed npm package manifest")?;
-    let canonical_manifest = dunce::canonicalize(&package_manifest_path)?;
-    let canonical_package_dir = canonical_manifest
-        .parent()
-        .ok_or_else(|| anyhow!("installed package manifest has no parent"))?;
-    if !canonical_package_dir.starts_with(&canonical_project)
-        || !canonical_manifest.starts_with(canonical_package_dir)
-        || package_manifest
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            != Some(package)
-        || package_manifest
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            != Some(version)
-    {
-        return Err(anyhow!(
-            "installed package manifest does not match {package}@{version}"
-        ));
-    }
-    validate_aube_lock_identity(&canonical_project.join("aube-lock.yaml"), package, version)
-}
-
-fn read_bounded_regular_json(path: &Path, description: &str) -> Result<serde_json::Value> {
-    const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("reading {description} metadata at {}", path.display()))?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_MANIFEST_BYTES
-    {
-        return Err(anyhow!(
-            "{description} is not a bounded regular file: {}",
-            path.display()
-        ));
-    }
-    serde_json::from_slice(&std::fs::read(path)?)
-        .with_context(|| format!("parsing {description} {}", path.display()))
-}
-
-fn validate_aube_lock_identity(path: &Path, package: &str, version: &str) -> Result<()> {
-    const MAX_LOCK_BYTES: u64 = 64 * 1024 * 1024;
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("reading Aube lock metadata at {}", path.display()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_LOCK_BYTES {
-        return Err(anyhow!(
-            "Aube lock is not a bounded regular file: {}",
-            path.display()
-        ));
-    }
-    let value: serde_yaml::Value = serde_yaml::from_slice(&std::fs::read(path)?)
-        .with_context(|| format!("parsing Aube lock {}", path.display()))?;
-    if yaml_lock_major(
-        value
-            .get("lockfileVersion")
-            .ok_or_else(|| anyhow!("{} is missing lockfileVersion", path.display()))?,
-    )? != 9
-    {
-        return Err(anyhow!("unsupported Aube global lock format"));
-    }
-    let dependencies = value
-        .get("importers")
-        .and_then(|value| value.get("."))
-        .and_then(|value| value.get("dependencies"))
-        .and_then(serde_yaml::Value::as_mapping)
-        .ok_or_else(|| anyhow!("Aube lock has no root dependency map"))?;
-    if dependencies.len() != 1 {
-        return Err(anyhow!(
-            "Aube lock does not contain exactly one root dependency"
-        ));
-    }
-    let dependency_key = serde_yaml::Value::String(package.into());
-    let dependency = dependencies
-        .get(&dependency_key)
-        .ok_or_else(|| anyhow!("Aube lock is missing {package}"))?;
-    let specifier = dependency
-        .get("specifier")
-        .and_then(serde_yaml::Value::as_str)
-        .unwrap_or_default();
-    let resolved = dependency
-        .get("version")
-        .and_then(serde_yaml::Value::as_str)
-        .unwrap_or_default();
-    if specifier != version
-        || !(resolved == version
-            || resolved
-                .strip_prefix(version)
-                .is_some_and(|suffix| suffix.starts_with('(')))
-    {
-        return Err(anyhow!(
-            "Aube lock dependency identity mismatch for {package}@{version}"
-        ));
-    }
-    let package_key = serde_yaml::Value::String(format!("{package}@{version}"));
-    let integrity = value
-        .get("packages")
-        .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|packages| packages.get(&package_key))
-        .and_then(|record| record.get("resolution"))
-        .and_then(|resolution| resolution.get("integrity"))
-        .and_then(serde_yaml::Value::as_str)
-        .unwrap_or_default();
-    if integrity.trim().is_empty() {
-        return Err(anyhow!(
-            "Aube lock is missing integrity for {package}@{version}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_owned_stage_directory(stage_root: &Path, directory: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(directory)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(anyhow!(
-            "Aube staging component is not a real directory: {}",
-            directory.display()
-        ));
-    }
-    let stage = dunce::canonicalize(stage_root)?;
-    let directory = dunce::canonicalize(directory)?;
-    if directory == stage || !directory.starts_with(&stage) {
-        return Err(anyhow!(
-            "Aube staging component escapes {}: {}",
-            stage.display(),
-            directory.display()
-        ));
-    }
-    Ok(())
 }
 
 fn normalize_global_bins(
@@ -2494,9 +1900,60 @@ fn run_managed_command(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NpmBuildPolicy {
+    Deny,
+    AllowAll,
+    Packages(Vec<String>),
+}
+
+impl NpmBuildPolicy {
+    fn identity(&self) -> String {
+        match self {
+            Self::Deny => "deny".into(),
+            Self::AllowAll => "allow-all".into(),
+            Self::Packages(packages) => format!("packages:{}", packages.join(",")),
+        }
+    }
+}
+
+fn parse_npm_build_policy(raw: Option<&str>) -> Result<NpmBuildPolicy> {
+    let Some(raw) = raw else {
+        return Ok(NpmBuildPolicy::Deny);
+    };
+    let raw = raw.trim();
+    let lower = raw.to_ascii_lowercase();
+    if lower.is_empty() || matches!(lower.as_str(), "false" | "0" | "no" | "off") {
+        return Ok(NpmBuildPolicy::Deny);
+    }
+    if matches!(lower.as_str(), "true" | "1" | "yes" | "on") {
+        return Ok(NpmBuildPolicy::AllowAll);
+    }
+    let mut packages = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|package| !package.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    packages.sort();
+    packages.dedup();
+    if packages.is_empty() {
+        return Err(anyhow!("allow_builds contains no package names"));
+    }
+    Ok(NpmBuildPolicy::Packages(packages))
+}
+
+fn npm_build_policy(version: &ToolVersion) -> Result<NpmBuildPolicy> {
+    parse_npm_build_policy(version.options.get("allow_builds").map(String::as_str))
+}
+
+fn npm_build_policy_identity(version: &ToolVersion) -> Result<String> {
+    Ok(npm_build_policy(version)?.identity())
+}
+
 fn native_lock_path(layout: &GlobalInstallLayout, installer: NpmInstaller) -> Option<PathBuf> {
     match installer {
-        NpmInstaller::Aube => Some(layout.project.join("aube-lock.yaml")),
+        // `npm install --global` never writes a lockfile.
         NpmInstaller::Npm => None,
         NpmInstaller::Pnpm => find_lockfile(&layout.root.join("pnpm-global"), "pnpm-lock.yaml"),
         NpmInstaller::Auto => unreachable!(),
@@ -2556,11 +2013,6 @@ fn package_manifest_path(
     layout: &GlobalInstallLayout,
 ) -> Option<PathBuf> {
     Some(match installer {
-        NpmInstaller::Aube => layout
-            .project
-            .join("node_modules")
-            .join(backend.package())
-            .join("package.json"),
         NpmInstaller::Npm => {
             #[cfg(windows)]
             let modules = layout.root.join("node_modules");
@@ -2885,7 +2337,7 @@ fn read_native_lock(path: &Path, installer: NpmInstaller) -> Result<NativeLockId
     let bytes =
         std::fs::read(path).with_context(|| format!("reading native lock {}", path.display()))?;
     let (kind, format) = match installer {
-        NpmInstaller::Aube | NpmInstaller::Pnpm => {
+        NpmInstaller::Pnpm => {
             let value: serde_yaml::Value = serde_yaml::from_slice(&bytes)
                 .with_context(|| format!("parsing native lock {}", path.display()))?;
             let major = yaml_lock_major(
@@ -2893,12 +2345,7 @@ fn read_native_lock(path: &Path, installer: NpmInstaller) -> Result<NativeLockId
                     .get("lockfileVersion")
                     .ok_or_else(|| anyhow!("{} is missing lockfileVersion", path.display()))?,
             )?;
-            let kind = if installer == NpmInstaller::Aube {
-                "aube"
-            } else {
-                "pnpm"
-            };
-            (kind, format!("{kind}-v{major}"))
+            ("pnpm", format!("pnpm-v{major}"))
         }
         NpmInstaller::Npm => {
             let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -2912,7 +2359,7 @@ fn read_native_lock(path: &Path, installer: NpmInstaller) -> Result<NativeLockId
         NpmInstaller::Auto => unreachable!(),
     };
     let supported = match installer {
-        NpmInstaller::Aube | NpmInstaller::Pnpm => format.ends_with("-v9"),
+        NpmInstaller::Pnpm => format.ends_with("-v9"),
         NpmInstaller::Npm => matches!(format.as_str(), "package-lock-v2" | "package-lock-v3"),
         NpmInstaller::Auto => unreachable!(),
     };
@@ -3005,14 +2452,6 @@ fn completed_install_matches_at(
         Ok(receipt) => receipt,
         Err(_) => return Ok(false),
     };
-    // Aube's former synthetic-project implementation used a different root
-    // manifest. Requiring the true global-add manifest and graph prevents an
-    // apparently complete legacy tree from bypassing the sidecar migration.
-    if installer == NpmInstaller::Aube
-        && validate_aube_project(&layout.project, backend.package(), &version.version).is_err()
-    {
-        return Ok(false);
-    }
     if validate_global_package_identity(backend, version, installer, layout).is_err() {
         return Ok(false);
     }
@@ -3211,12 +2650,6 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let cases = [
             (
-                NpmInstaller::Aube,
-                "aube-lock.yaml",
-                "lockfileVersion: '9.0'\n",
-                "aube-v9",
-            ),
-            (
                 NpmInstaller::Pnpm,
                 "pnpm-lock.yaml",
                 "lockfileVersion: '9.0'\n",
@@ -3236,135 +2669,6 @@ mod tests {
             assert_eq!(identity.format, format);
             assert_eq!(identity.sha256.len(), 64);
         }
-    }
-
-    #[test]
-    fn aube_global_arguments_enforce_relocatable_build_policy() {
-        let base = ToolVersion::new("npm:fixture-cli", "1.2.3");
-        let denied = aube_global_args(&base, "fixture-cli@1.2.3".into(), None).unwrap();
-        assert!(denied.iter().any(|arg| arg == "--deny-build=*"));
-        assert!(!denied.iter().any(|arg| arg == "--ignore-scripts"));
-        assert!(denied.iter().any(|arg| arg == "--disable-gvs"));
-        assert!(denied
-            .iter()
-            .any(|arg| arg == "--config.nodeLinker=hoisted"));
-
-        let mut allow_all = base.clone();
-        allow_all
-            .options
-            .insert("allow_builds".into(), " TRUE ".into());
-        let allow_all = aube_global_args(&allow_all, "fixture-cli@1.2.3".into(), None).unwrap();
-        assert!(allow_all
-            .iter()
-            .any(|arg| arg == "--dangerously-allow-all-builds"));
-        assert!(!allow_all.iter().any(|arg| arg.starts_with("--deny-build")));
-
-        let mut selected = base;
-        selected.options.insert(
-            "allow_builds".into(),
-            " @Scope/Native, Plain-Native ".into(),
-        );
-        let selected = aube_global_args(
-            &selected,
-            "fixture-cli@1.2.3".into(),
-            Some("https://registry.example.test/".into()),
-        )
-        .unwrap();
-        assert!(selected
-            .iter()
-            .any(|arg| arg == "--allow-build=@scope/native"));
-        assert!(selected
-            .iter()
-            .any(|arg| arg == "--allow-build=plain-native"));
-        assert!(selected
-            .iter()
-            .any(|arg| arg == "--registry=https://registry.example.test/"));
-    }
-
-    #[cfg(unix)]
-    fn write_valid_aube_candidate(root: &Path, hash: char, package: &str, version: &str) {
-        let install = root.join(format!("fixture-{hash}"));
-        let package_dir = install.join("node_modules").join(package);
-        std::fs::create_dir_all(&package_dir).unwrap();
-        std::fs::write(
-            install.join("package.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "name": "aube-global",
-                "version": "0.0.0",
-                "private": true,
-                "dependencies": { package: version }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            install.join("aube-lock.yaml"),
-            format!(
-                "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      {package}:\n        specifier: {version}\n        version: {version}\npackages:\n  {package}@{version}:\n    resolution: {{integrity: sha512-Zml4dHVyZQ==}}\n"
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            package_dir.join("package.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "name": package,
-                "version": version,
-                "bin": { "fixture-cli": "cli.js" }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(package_dir.join("cli.js"), "fixture").unwrap();
-        std::os::unix::fs::symlink(&install, root.join(hash.to_string().repeat(64))).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn aube_global_resolver_requires_one_contained_exact_hash_pointer() {
-        let temporary = tempfile::tempdir().unwrap();
-        let stage = temporary.path().join("stage");
-        let package_root = stage.join("aube-global/global-aube");
-        std::fs::create_dir_all(&package_root).unwrap();
-
-        let missing =
-            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
-        assert!(missing
-            .to_string()
-            .contains("exactly one valid hash pointer"));
-
-        write_valid_aube_candidate(&package_root, 'a', "fixture-cli", "1.2.3");
-        let selected =
-            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap();
-        assert_eq!(
-            selected.install_dir,
-            dunce::canonicalize(package_root.join("fixture-a")).unwrap()
-        );
-
-        write_valid_aube_candidate(&package_root, 'b', "fixture-cli", "1.2.3");
-        let ambiguous =
-            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
-        assert!(ambiguous.to_string().contains("ambiguous"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn aube_global_resolver_rejects_escape_and_wrong_identity() {
-        let temporary = tempfile::tempdir().unwrap();
-        let stage = temporary.path().join("stage");
-        let package_root = stage.join("aube-global/global-aube");
-        std::fs::create_dir_all(&package_root).unwrap();
-        let outside = temporary.path().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, package_root.join("c".repeat(64))).unwrap();
-        let escaped =
-            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
-        assert!(escaped.to_string().contains("escapes the Aube global root"));
-
-        std::fs::remove_file(package_root.join("c".repeat(64))).unwrap();
-        write_valid_aube_candidate(&package_root, 'd', "fixture-cli", "9.9.9");
-        let mismatch =
-            resolve_aube_global_install(&stage, &package_root, "fixture-cli", "1.2.3").unwrap_err();
-        assert!(mismatch.to_string().contains("does not describe exactly"));
     }
 
     #[test]
@@ -4450,13 +3754,16 @@ mod tests {
             .options
             .insert(LOCKED_NPM_NODE_VERSION_OPTION.into(), "22.1.0".into());
         let root = backend.global_install_root_for(&ctx, &version).unwrap();
-        let layout = GlobalInstallLayout::for_root(root.clone(), NpmInstaller::Aube, ctx.platform);
-        let project = layout.project.clone();
+        // pnpm is the installer that records a native lock digest, so it is the
+        // one that exercises digest matching. Its real global layout lives under
+        // `pnpm-global/`, which is where the lock and manifest lookups search.
+        let layout = GlobalInstallLayout::for_root(root.clone(), NpmInstaller::Pnpm, ctx.platform);
+        let project = root.join("pnpm-global");
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::write(
             project.join("package.json"),
-            r#"{"name":"aube-global","version":"0.0.0","private":true,"dependencies":{"prettier":"3.6.2"}}"#,
+            r#"{"name":"osdk-global","version":"0.0.0","private":true,"dependencies":{"prettier":"3.6.2"}}"#,
         )
         .unwrap();
         let package = project.join("node_modules/prettier");
@@ -4475,7 +3782,7 @@ mod tests {
             )
             .unwrap();
             std::os::unix::fs::symlink(
-                Path::new("../project/node_modules/.bin/prettier"),
+                Path::new("../pnpm-global/node_modules/.bin/prettier"),
                 layout.bin.join("prettier"),
             )
             .unwrap();
@@ -4489,19 +3796,19 @@ mod tests {
             .unwrap();
             std::fs::write(
                 layout.bin.join("prettier.cmd"),
-                "@echo off\r\nnode \"%~dp0..\\project\\node_modules\\prettier\\bin.js\" %*\r\n",
+                "@echo off\r\nnode \"%~dp0..\\pnpm-global\\node_modules\\prettier\\bin.js\" %*\r\n",
             )
             .unwrap();
         }
         std::fs::write(
-            project.join("aube-lock.yaml"),
+            project.join("pnpm-lock.yaml"),
             "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      prettier:\n        specifier: 3.6.2\n        version: 3.6.2\npackages:\n  prettier@3.6.2:\n    resolution: {integrity: sha512-Zml4dHVyZQ==}\n",
         )
         .unwrap();
-        let digest = read_native_lock(&project.join("aube-lock.yaml"), NpmInstaller::Aube).unwrap();
+        let digest = read_native_lock(&project.join("pnpm-lock.yaml"), NpmInstaller::Pnpm).unwrap();
         version
             .options
-            .insert(INSTALLER_OPTION.into(), NpmInstaller::Aube.as_str().into());
+            .insert(INSTALLER_OPTION.into(), NpmInstaller::Pnpm.as_str().into());
         let identity = backend
             .install_identity(&ctx, &version, ToolScope::Global)
             .unwrap();
@@ -4522,13 +3829,13 @@ mod tests {
                 schema: 1,
                 provider: "npm-package".into(),
                 package: "prettier".into(),
-                installer: "aube".into(),
+                installer: "pnpm".into(),
                 node_version: "22.1.0".into(),
                 build_policy: "deny".into(),
                 graph_sha256: None,
                 root_integrity: None,
                 root_source: None,
-                native_lock_format: Some("aube-v9".into()),
+                native_lock_format: Some("pnpm-v9".into()),
                 native_lock_sha256: Some(digest.sha256),
             })
             .unwrap(),
@@ -4539,14 +3846,14 @@ mod tests {
             osdk_core::platform::Platform::current(),
             &backend,
             &version,
-            NpmInstaller::Aube,
+            NpmInstaller::Pnpm,
             "22.1.0",
             &layout,
-            Some(&project.join("aube-lock.yaml"))
+            Some(&project.join("pnpm-lock.yaml"))
         )
         .unwrap());
         std::fs::write(
-            project.join("aube-lock.yaml"),
+            project.join("pnpm-lock.yaml"),
             "lockfileVersion: '9.0'\nchanged: true\n",
         )
         .unwrap();
@@ -4554,10 +3861,10 @@ mod tests {
             osdk_core::platform::Platform::current(),
             &backend,
             &version,
-            NpmInstaller::Aube,
+            NpmInstaller::Pnpm,
             "22.1.0",
             &layout,
-            Some(&project.join("aube-lock.yaml"))
+            Some(&project.join("pnpm-lock.yaml"))
         )
         .unwrap());
     }

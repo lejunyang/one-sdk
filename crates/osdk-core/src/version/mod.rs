@@ -336,11 +336,11 @@ mod tests {
     #[test]
     fn parse_inline_dynamic_options_uses_canonical_schema() {
         let request =
-            ToolRequest::parse("npm:Prettier[installer=AUBE,allow_builds='Sharp, esbuild']@3")
+            ToolRequest::parse("npm:Prettier[installer=PNPM,allow_builds='Sharp, esbuild']@3")
                 .unwrap();
         assert_eq!(request.backend, "npm:prettier");
         assert_eq!(request.spec, VersionSpec::Prefix("3".into()));
-        assert_eq!(request.options["installer"], "aube");
+        assert_eq!(request.options["installer"], "pnpm");
         assert_eq!(request.options["allow_builds"], "esbuild,sharp");
     }
 

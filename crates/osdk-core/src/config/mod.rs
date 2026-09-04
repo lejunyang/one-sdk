@@ -69,6 +69,8 @@ pub struct Settings {
     pub lang: Option<String>,
     /// Node-specific installation behavior.
     pub node: NodeSettings,
+    /// Installer selection for `npm:` tools.
+    pub npm: NpmSettings,
     /// Python catalog refresh and verification.
     pub python: PythonSettings,
     /// Java runtime metadata endpoint.
@@ -103,6 +105,64 @@ pub struct ShimSettings {
 pub struct NodeSettings {
     /// Run the installed Node's own `corepack enable` after installation.
     pub corepack: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct NpmSettings {
+    /// Installer used for `npm:` tools when nothing else decides.
+    ///
+    /// Auto-selection consults, in order, an explicit `-o installer=`, the
+    /// project's declared `packageManager`, and the installer that owns an
+    /// incumbent lockfile. This setting only supplies the final fallback, so
+    /// changing it never overrides a project that states its own installer.
+    /// Only concrete installers are meaningful here; `auto` would be circular
+    /// and is rejected when the value is resolved.
+    pub default_installer: NpmDefaultInstaller,
+}
+
+/// Concrete installer usable as the auto-selection fallback.
+///
+/// This is deliberately separate from [`crate::npm_tools::NpmInstaller`], which
+/// also carries `Auto`. Keeping the configurable set in its own enum means a new
+/// backend (pnpm, bun, ...) is added in one place and cannot accidentally make
+/// `auto` its own fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NpmDefaultInstaller {
+    #[default]
+    Npm,
+    Pnpm,
+}
+
+impl NpmDefaultInstaller {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+        }
+    }
+}
+
+impl std::fmt::Display for NpmDefaultInstaller {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for NpmDefaultInstaller {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "npm" => Ok(Self::Npm),
+            "pnpm" => Ok(Self::Pnpm),
+            other => Err(Error::config(crate::t!(
+                "err.npm_default_installer_invalid",
+                installer = other
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -167,6 +227,7 @@ impl Default for Settings {
             offline: false,
             lang: None,
             node: NodeSettings::default(),
+            npm: NpmSettings::default(),
             python: PythonSettings::default(),
             java: JavaSettings::default(),
             prerelease: PrereleasePolicy::default(),
@@ -664,6 +725,11 @@ impl Config {
         if let Some(v) = getenv("OSDK_PRERELEASE") {
             if let Ok(policy) = v.parse() {
                 self.settings.prerelease = policy;
+            }
+        }
+        if let Some(v) = getenv("OSDK_NPM_DEFAULT_INSTALLER") {
+            if let Ok(installer) = v.parse() {
+                self.settings.npm.default_installer = installer;
             }
         }
         if let Some(v) = getenv("OSDK_PYTHON_CATALOG_URL") {

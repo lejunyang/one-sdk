@@ -666,7 +666,7 @@ mod tests {
         std::fs::create_dir_all(&dirs.config).unwrap();
         std::fs::write(
             dirs.user_config_file(),
-            "[tools]\nnode = \"22\"\n\"npm:prettier\" = { version = \"3\", installer = \"aube\" }\n\n[aliases.node]\nlts = \"22\"\n",
+            "[tools]\nnode = \"22\"\n\"npm:prettier\" = { version = \"3\", installer = \"pnpm\" }\n\n[aliases.node]\nlts = \"22\"\n",
         )
         .unwrap();
         let config = osdk_core::config::Config::load_user(&dirs.user_config_file()).unwrap();

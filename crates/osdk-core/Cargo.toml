@@ -55,7 +55,6 @@ anyhow.workspace = true
 tracing.workspace = true
 indicatif.workspace = true
 once_cell.workspace = true
-aube.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

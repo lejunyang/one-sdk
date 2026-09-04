@@ -2790,15 +2790,15 @@ mod tests {
     #[test]
     fn inline_options_are_schema_validated_sorted_and_canonicalized() {
         let parsed =
-            ToolSpec::parse("npm:Prettier[installer=AUBE,allow_builds='Sharp, esbuild, sharp']@3")
+            ToolSpec::parse("npm:Prettier[installer=PNPM,allow_builds='Sharp, esbuild, sharp']@3")
                 .unwrap();
         assert_eq!(parsed.options.get("allow_builds").unwrap(), "esbuild,sharp");
-        assert_eq!(parsed.options.get("installer").unwrap(), "aube");
+        assert_eq!(parsed.options.get("installer").unwrap(), "pnpm");
         assert!(ToolSpec::parse("npm:prettier[allow_builds='../evil']@3").is_err());
         assert!(ToolSpec::parse("npm:prettier[allow_builds='@scope/AUX']@3").is_err());
         assert_eq!(
             parsed.to_string(),
-            "npm:prettier[allow_builds=\"esbuild,sharp\",installer=aube]@3"
+            "npm:prettier[allow_builds=\"esbuild,sharp\",installer=pnpm]@3"
         );
         assert_eq!(ToolSpec::parse(&parsed.to_string()).unwrap(), parsed);
     }
@@ -2889,11 +2889,11 @@ mod tests {
             "npm:",
             "npm:@scope",
             "npm:foo[installer]",
-            "npm:foo[=aube]",
-            "npm:foo[installer=aube,]",
-            "npm:foo[installer=aube,installer=npm]",
-            "npm:foo[installer='aube]",
-            "npm:foo[installer=aube]trailing@3",
+            "npm:foo[=pnpm]",
+            "npm:foo[installer=pnpm,]",
+            "npm:foo[installer=pnpm,installer=npm]",
+            "npm:foo[installer='pnpm]",
+            "npm:foo[installer=pnpm]trailing@3",
             "github:owner/repo[bin=a,bins=b]@1",
             "github:owner/repo[asset-regex=x,asset-template=y]@1",
         ] {
@@ -2915,13 +2915,13 @@ mod tests {
             "3.6.2",
             "linux-x64",
             InstallScope::Isolated,
-            &BTreeMap::from([("installer".into(), "AUBE".into())]),
+            &BTreeMap::from([("installer".into(), "PNPM".into())]),
             dependencies.clone(),
             materials.clone(),
         )
         .unwrap();
         assert_eq!(first.tool, "npm:prettier");
-        assert_eq!(first.material_options["installer"], "aube");
+        assert_eq!(first.material_options["installer"], "pnpm");
         assert!(first.install_id.starts_with("b3-v2:"));
         first.validate().unwrap();
 
@@ -2930,7 +2930,7 @@ mod tests {
             "3.6.2",
             "linux-x64",
             InstallScope::Global,
-            &BTreeMap::from([("installer".into(), "aube".into())]),
+            &BTreeMap::from([("installer".into(), "pnpm".into())]),
             dependencies,
             materials,
         )

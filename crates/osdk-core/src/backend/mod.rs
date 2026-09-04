@@ -16,7 +16,6 @@ use crate::store::Cas;
 use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 pub mod android;
-pub mod aube_host;
 pub mod bun;
 pub mod cargo_package;
 #[cfg(test)]
@@ -30,6 +29,7 @@ pub mod go_package;
 pub mod http;
 pub mod java;
 pub mod jvm_tools;
+pub mod native_npm;
 pub mod native_tool;
 pub mod node;
 pub mod npm_cli;

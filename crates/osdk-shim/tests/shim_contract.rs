@@ -193,10 +193,11 @@ fn install_dynamic_npm_fixture(
     )
     .unwrap();
     let integrity = "sha512-fixture";
+    let tarball = format!("https://registry.example.test/{package}/-/tool-{version}.tgz");
     let lockfile = format!(
-        "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      '{package}':\n        specifier: {version}\n        version: {version}\n\npackages:\n  '{package}@{version}':\n    resolution: {{integrity: {integrity}}}\n"
+        r#"{{"name":"osdk-dynamic-npm-tool","lockfileVersion":3,"packages":{{"":{{"name":"osdk-dynamic-npm-tool"}},"node_modules/{package}":{{"version":{version:?},"resolved":{tarball:?},"integrity":{integrity:?}}}}}}}"#
     );
-    std::fs::write(project_dir.join("aube-lock.yaml"), &lockfile).unwrap();
+    std::fs::write(project_dir.join("package-lock.json"), &lockfile).unwrap();
     let mut manifest = osdk_core::inventory::DynamicToolManifest::from_identity(identity).unwrap();
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: executable_name.into(),
@@ -210,7 +211,7 @@ fn install_dynamic_npm_fixture(
     std::fs::write(
         install_root.join(".osdk-npm-receipt.json"),
         format!(
-            r#"{{"schema":1,"provider":"npm-package","package":{package:?},"installer":"aube","node_version":"1.0.0","build_policy":"deny","graph_sha256":{graph_sha256:?},"root_integrity":{integrity:?},"root_source":"npm:{package}@{version}"}}"#
+            r#"{{"schema":1,"provider":"npm-package","package":{package:?},"installer":"npm","node_version":"1.0.0","build_policy":"deny","graph_sha256":{graph_sha256:?},"root_integrity":{integrity:?},"root_source":{tarball:?}}}"#
         ),
     )
     .unwrap();
@@ -804,7 +805,10 @@ fn configured_dynamic_shim_rejects_option_identity_mismatch() {
     );
     std::fs::write(
         project.join("osdk.toml"),
-        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\", __osdk_node_version = \"1.0.0\" }\nnode = \"1.0.0\"\n",
+        // A valid installer that differs from the manifest's `npm` below, so the
+        // rejection comes from the option-identity mismatch under test rather
+        // than from failing to parse the installer name at all.
+        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"pnpm\", __osdk_node_version = \"1.0.0\" }\nnode = \"1.0.0\"\n",
     )
     .unwrap();
     let install_root = isolated_dynamic_npm_root(temporary.path(), "npm:fixture-cli", "1.2.3");
@@ -850,10 +854,10 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
     std::fs::create_dir_all(temporary.path().join("config")).unwrap();
     std::fs::write(
         temporary.path().join("config/config.toml"),
-        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"aube\", __osdk_node_version = \"1.0.0\" }\nnode = \"1.0.0\"\n",
+        "[tools]\n\"npm:fixture-cli\" = { version = \"1.2.3\", installer = \"pnpm\", __osdk_node_version = \"1.0.0\" }\nnode = \"1.0.0\"\n",
     )
     .unwrap();
-    let global_options = std::collections::BTreeMap::from([("installer".into(), "aube".into())]);
+    let global_options = std::collections::BTreeMap::from([("installer".into(), "pnpm".into())]);
     let global_identity = dynamic_npm_identity(
         "npm:fixture-cli",
         "1.2.3",
@@ -888,7 +892,7 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
         r#"{"name":"fixture-cli","version":"1.2.3"}"#,
     )
     .unwrap();
-    let native_lock = global_project.join("aube-lock.yaml");
+    let native_lock = global_project.join("pnpm-lock.yaml");
     std::fs::write(&native_lock, b"fixture").unwrap();
     let native_lock_sha256 =
         osdk_core::pipeline::verify::hash_file(&native_lock, osdk_core::pipeline::HashAlgo::Sha256)
@@ -896,7 +900,7 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
     std::fs::write(
         global_root.join(".osdk-npm-receipt.json"),
         format!(
-            r#"{{"schema":1,"provider":"npm-package","package":"fixture-cli","installer":"aube","node_version":"1.0.0","build_policy":"deny","native_lock_format":"aube-v9","native_lock_sha256":{native_lock_sha256:?}}}"#
+            r#"{{"schema":1,"provider":"npm-package","package":"fixture-cli","installer":"pnpm","node_version":"1.0.0","build_policy":"deny","native_lock_format":"pnpm-v9","native_lock_sha256":{native_lock_sha256:?}}}"#
         ),
     )
     .unwrap();

@@ -491,7 +491,7 @@ mod tests {
         let path = temp.path().join("osdk.toml");
         std::fs::write(
             &path,
-            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"aube\"\n",
+            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"pnpm\"\n",
         )
         .unwrap();
         assert!(requires_trust(&path).unwrap());

@@ -17,8 +17,8 @@ use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
 use serde::{Deserialize, Serialize};
 
 pub const LOCKFILE_NAME: &str = "osdk.lock";
-const NPM_LOCK_FORMAT: &str = "aube-v9";
-const NPM_LOCKFILE_PATH: &str = "project/aube-lock.yaml";
+const NPM_LOCK_FORMAT: &str = "package-lock-v3";
+const NPM_LOCKFILE_PATH: &str = "project/package-lock.json";
 const NPM_GRAPH_DIRECTORY: &str = "osdk.lock.d/npm";
 const LOCKED_NPM_INSTALLER_OPTION: &str = "__osdk_npm_installer";
 const LOCKED_NPM_SCOPE_OPTION: &str = "__osdk_npm_scope";
@@ -128,7 +128,6 @@ pub struct LockedNativeLock {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NpmInstaller {
-    Aube,
     #[serde(alias = "package-lock", alias = "npm-shrinkwrap")]
     Npm,
     Pnpm,
@@ -137,7 +136,6 @@ pub enum NpmInstaller {
 impl NpmInstaller {
     fn parse(value: &str) -> Result<Self> {
         match value {
-            "aube" => Ok(Self::Aube),
             "npm" | "package-lock" | "npm-shrinkwrap" => Ok(Self::Npm),
             "pnpm" => Ok(Self::Pnpm),
             _ => anyhow::bail!(osdk_core::t!(
@@ -149,7 +147,6 @@ impl NpmInstaller {
 
     fn as_str(self) -> &'static str {
         match self {
-            Self::Aube => "aube",
             Self::Npm => "npm",
             Self::Pnpm => "pnpm",
         }
@@ -649,7 +646,6 @@ fn has_native_prefix(backend: &str) -> bool {
 
 fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result<()> {
     let valid_format = match native_lock.kind {
-        NpmInstaller::Aube => native_lock.format == "aube-v9",
         NpmInstaller::Npm => matches!(
             native_lock.format.as_str(),
             "package-lock-v2" | "package-lock-v3" | "npm-shrinkwrap-v2" | "npm-shrinkwrap-v3"
@@ -1590,22 +1586,21 @@ fn locked_npm_metadata(
         .get(LOCKED_NPM_INSTALLER_OPTION)
         .map(|value| NpmInstaller::parse(value))
         .transpose()?
-        .unwrap_or(NpmInstaller::Aube);
+        .unwrap_or(NpmInstaller::Npm);
     let declared_native_lock = locked_native_lock_from_options(version)?;
     let lock_path = dirs
         .install_path(&version.backend, &version.version)
         .join(NPM_LOCKFILE_PATH);
     let native_lock = if let Some(native_lock) = declared_native_lock {
         Some(native_lock)
-    } else if installer == NpmInstaller::Aube && lock_path.is_file() {
+    } else if installer == NpmInstaller::Npm && lock_path.is_file() {
         let bytes = read_bounded(&lock_path, MAX_NPM_GRAPH_BYTES).with_context(|| {
             osdk_core::t!("err.npm_lock_payload_read", path = lock_path.display())
         })?;
         Some(LockedNativeLock {
             kind: installer,
             format: match installer {
-                NpmInstaller::Aube => NPM_LOCK_FORMAT.into(),
-                NpmInstaller::Npm => "package-lock-v3".into(),
+                NpmInstaller::Npm => NPM_LOCK_FORMAT.into(),
                 NpmInstaller::Pnpm => "pnpm-v9".into(),
             },
             sha256: osdk_core::pipeline::verify::hash_bytes(&bytes, HashAlgo::Sha256),
@@ -1771,11 +1766,11 @@ fn migrate_npm_entries_to_schema_three(lockfile: &mut Lockfile) -> Result<()> {
                 Some(LockedNpmGraph::Metadata(metadata)) => metadata,
                 Some(LockedNpmGraph::Sidecar(sidecar)) => LockedNpmMetadata {
                     package: sidecar.package,
-                    installer: NpmInstaller::Aube,
+                    installer: NpmInstaller::Npm,
                     scope: LockScope::Project,
                     node_version: Some(sidecar.node_version),
                     native_lock: Some(LockedNativeLock {
-                        kind: NpmInstaller::Aube,
+                        kind: NpmInstaller::Npm,
                         format: sidecar.lock_format,
                         sha256: sidecar.sha256,
                     }),
@@ -1786,7 +1781,7 @@ fn migrate_npm_entries_to_schema_three(lockfile: &mut Lockfile) -> Result<()> {
                         .get(LOCKED_NPM_INSTALLER_OPTION)
                         .map(|value| NpmInstaller::parse(value))
                         .transpose()?
-                        .unwrap_or(NpmInstaller::Aube);
+                        .unwrap_or(NpmInstaller::Npm);
                     LockedNpmMetadata {
                         package: package.to_string(),
                         installer,
@@ -2040,7 +2035,7 @@ version = "../../../../victim"
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
 node_version = "24.1.0"
-lock_format = "aube-v9"
+lock_format = "package-lock-v3"
 sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.yaml"
 "#,
@@ -2222,7 +2217,7 @@ version = "3.6.2"
 
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-lock_format = "aube-v9"
+lock_format = "package-lock-v3"
 lock_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 lockfile = "lockfileVersion: '9.0'"
 "#,
@@ -2292,13 +2287,13 @@ lockfile = "lockfileVersion: '9.0'"
             panic!("schema 3 writes npm metadata");
         };
         assert_eq!(npm.package, "@antfu/ni");
-        assert_eq!(npm.installer, NpmInstaller::Aube);
+        assert_eq!(npm.installer, NpmInstaller::Npm);
         assert_eq!(npm.scope, LockScope::Project);
         assert_eq!(npm.node_version.as_deref(), Some("24.1.0"));
         assert_eq!(
             npm.native_lock,
             Some(LockedNativeLock {
-                kind: NpmInstaller::Aube,
+                kind: NpmInstaller::Npm,
                 format: NPM_LOCK_FORMAT.into(),
                 sha256: expected_sha256.clone(),
             })
@@ -2317,9 +2312,9 @@ lockfile = "lockfileVersion: '9.0'"
             .unwrap()
             .options;
         assert_eq!(options[LOCKED_NPM_PACKAGE_OPTION], "@antfu/ni");
-        assert_eq!(options[LOCKED_NPM_INSTALLER_OPTION], "aube");
+        assert_eq!(options[LOCKED_NPM_INSTALLER_OPTION], "npm");
         assert_eq!(options[LOCKED_NPM_SCOPE_OPTION], "project");
-        assert_eq!(options[LOCKED_NPM_NATIVE_LOCK_KIND_OPTION], "aube");
+        assert_eq!(options[LOCKED_NPM_NATIVE_LOCK_KIND_OPTION], "npm");
         assert_eq!(
             options[LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION],
             NPM_LOCK_FORMAT
@@ -2627,8 +2622,8 @@ lockfile = "lockfileVersion: '9.0'"
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         let text = valid_schema_three_npm_lock()
-            .replace("kind = \"aube\"", "kind = \"pnpm\"")
-            .replace("format = \"aube-v9\"", "format = \"pnpm-v9\"");
+            .replace("kind = \"npm\"", "kind = \"pnpm\"")
+            .replace("format = \"package-lock-v3\"", "format = \"pnpm-v9\"");
         std::fs::write(&path, text).unwrap();
         let lock = load(&path).unwrap();
         let LockedNpmGraph::Metadata(npm) = lock.platforms["linux-x64"].tools["npm:prettier"]
@@ -2638,7 +2633,7 @@ lockfile = "lockfileVersion: '9.0'"
         else {
             panic!("schema 3 reads npm metadata");
         };
-        assert_eq!(npm.installer, NpmInstaller::Aube);
+        assert_eq!(npm.installer, NpmInstaller::Npm);
         assert_eq!(npm.native_lock.as_ref().unwrap().kind, NpmInstaller::Pnpm);
     }
 
@@ -2647,14 +2642,14 @@ lockfile = "lockfileVersion: '9.0'"
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         for (kind, format) in [
-            ("aube", "aube-v10"),
+            ("npm", "package-lock-v99"),
             ("pnpm", "pnpm-v10"),
             ("npm", "package-lock-v4"),
             ("npm", "npm-shrinkwrap-v4"),
         ] {
             let text = valid_schema_three_npm_lock()
-                .replace("kind = \"aube\"", &format!("kind = \"{kind}\""))
-                .replace("format = \"aube-v9\"", &format!("format = \"{format}\""));
+                .replace("kind = \"npm\"", &format!("kind = \"{kind}\""))
+                .replace("format = \"package-lock-v3\"", &format!("format = \"{format}\""));
             std::fs::write(&path, text).unwrap();
             let error = load(&path).unwrap_err().to_string();
             assert!(
@@ -2717,7 +2712,7 @@ lockfile = "lockfileVersion: '9.0'"
             } else if replacement.starts_with("node_version") {
                 base.replace("node_version = \"24.1.0\"", replacement)
             } else if replacement.starts_with("lock_format") {
-                base.replace("lock_format = \"aube-v9\"", replacement)
+                base.replace("lock_format = \"package-lock-v3\"", replacement)
             } else if replacement.starts_with("sha256") {
                 base.replace(&format!("sha256 = \"{}\"", "a".repeat(64)), replacement)
             } else {
@@ -2913,7 +2908,7 @@ lockfile = "lockfileVersion: '9.0'"
     }
 
     #[test]
-    fn npm_metadata_accepts_declared_pnpm_native_lock_without_aube_payload() {
+    fn npm_metadata_accepts_declared_pnpm_native_lock_without_npm_payload() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);
         let mut version = ToolVersion::new("npm:prettier", "3.6.2");
@@ -4002,7 +3997,7 @@ version = "3.6.2"
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
 node_version = "24.1.0"
-lock_format = "aube-v9"
+lock_format = "package-lock-v3"
 sha256 = "{sha256}"
 graph = "osdk.lock.d/npm/{sha256}.yaml"
 "#
@@ -4025,13 +4020,13 @@ version = "3.6.2"
 
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-installer = "aube"
+installer = "npm"
 scope = "project"
 node_version = "24.1.0"
 
 [platforms.linux-x64.tools."npm:prettier".npm.native_lock]
-kind = "aube"
-format = "aube-v9"
+kind = "npm"
+format = "package-lock-v3"
 sha256 = "{sha256}"
 "#
         )

@@ -5,9 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::aube_host::{
-    self, EmbeddedFrozenInstallRequest, EmbeddedInstallRequest, EmbeddedLockGraphRequest,
-};
+use crate::backend::native_npm::{self, NativeNpmInstall, ScriptPolicy};
 use crate::backend::{Backend, Ctx, InstallCtx};
 use crate::config::ToolConfigOrigin;
 use crate::error::{Error, Result};
@@ -25,11 +23,18 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 const PROVIDER: &str = "npm-package";
 const GLOBAL_INSTALL_NAMESPACE: &str = "npm-global";
 const PROJECT_DIR: &str = "project";
-const AUBE_DIR: &str = "aube";
-const AUBE_CACHE_VERSION: &str = "v1";
+const NPM_DIR: &str = "npm";
+const NPM_CACHE_VERSION: &str = "v1";
 const CACHE_DIR: &str = "cache";
-const AUBE_LOCKFILE_NAME: &str = "aube-lock.yaml";
-const AUBE_LOCK_FORMAT: &str = "aube-v9";
+const NPM_LOCKFILE_NAME: &str = "package-lock.json";
+/// Installer recorded by isolated (synthetic-project) installs.
+///
+/// Project-scoped installs always drive npm through the synthetic project, so
+/// the receipt records a fixed value rather than the requested installer. It is
+/// matched on reuse, which means receipts written by older versions -- when this
+/// was `aube` -- no longer match and are reinstalled instead of trusted.
+const ISOLATED_INSTALLER: &str = "npm";
+const NPM_LOCK_FORMAT: &str = "package-lock-v3";
 const PROJECT_NPM_BIN_ROOT: &str = ".osdk/npm-bin";
 const PROJECT_NPM_BIN_GENERATIONS: &str = "generations";
 const PROJECT_NPM_BIN_CURRENT: &str = "current";
@@ -196,33 +201,29 @@ pub fn load_npm_receipt(install_root: &Path) -> Result<NpmInstallReceipt> {
     Ok(receipt)
 }
 
+/// Minimal view of npm's `package-lock.json`.
+///
+/// npm keys `packages` by install path (`""` for the root project,
+/// `node_modules/<name>` for a dependency) and stores `integrity`/`resolved`
+/// directly on the entry. This differs from pnpm-style v9 locks, which nest the
+/// same data under `packages["<name>@<version>"].resolution` and additionally
+/// carry an `importers` table -- so the two formats are not interchangeable and
+/// each needs its own reader.
 #[derive(Debug, Deserialize)]
 struct IdentityLockfile {
-    importers: BTreeMap<String, IdentityImporter>,
+    #[serde(rename = "lockfileVersion")]
+    lockfile_version: u32,
     packages: BTreeMap<String, IdentityPackage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdentityImporter {
-    dependencies: BTreeMap<String, IdentityDependency>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IdentityDependency {
-    specifier: String,
-    version: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct IdentityPackage {
-    resolution: IdentityResolution,
-}
-
-#[derive(Debug, Deserialize)]
-struct IdentityResolution {
-    integrity: String,
     #[serde(default)]
-    tarball: Option<String>,
+    version: Option<String>,
+    #[serde(default)]
+    integrity: Option<String>,
+    #[serde(default)]
+    resolved: Option<String>,
 }
 
 impl NpmPackageBackend {
@@ -424,7 +425,7 @@ impl NpmPackageBackend {
     /// Locate a complete pre-isolation global install occupying the legacy
     /// isolated root. Callers can use this as a compatibility source while
     /// reinstalling into the canonical global root. The directory must not be
-    /// renamed directly because older Aube installs may contain absolute bin
+    /// renamed directly because installs from earlier versions may contain absolute bin
     /// symlinks rooted at the old location.
     pub fn legacy_global_install_root(
         &self,
@@ -766,16 +767,16 @@ impl NpmPackageBackend {
         Ok(validated)
     }
 
-    pub fn aube_cache_dir(ctx: &Ctx) -> PathBuf {
+    pub fn npm_cache_dir(ctx: &Ctx) -> PathBuf {
         ctx.dirs
             .cache
-            .join(AUBE_DIR)
-            .join(AUBE_CACHE_VERSION)
+            .join(NPM_DIR)
+            .join(NPM_CACHE_VERSION)
             .join(CACHE_DIR)
     }
 
-    pub fn aube_store_dir(ctx: &Ctx) -> PathBuf {
-        ctx.dirs.store.join(AUBE_DIR)
+    pub fn npm_store_dir(ctx: &Ctx) -> PathBuf {
+        ctx.dirs.store.join(NPM_DIR)
     }
 
     fn package_spec(&self, tv: &ToolVersion) -> String {
@@ -847,12 +848,17 @@ impl NpmPackageBackend {
                 .collect(),
             );
         }
+        // A per-package build allowlist is recorded under a private key rather
+        // than acted on: npm has no equivalent of pnpm's `onlyBuiltDependencies`
+        // and only offers all-or-nothing `--ignore-scripts`. `script_policy`
+        // therefore treats `Packages` as Deny, and this key exists so the
+        // recorded intent stays visible and verifiable in the manifest.
         if let BuildPolicy::Packages(packages) = build_policy {
             let allow_builds = packages
                 .iter()
                 .map(|package| (package.clone(), serde_json::Value::Bool(true)))
                 .collect::<serde_json::Map<_, _>>();
-            manifest["aube"] = serde_json::json!({ "allowBuilds": allow_builds });
+            manifest["osdk"] = serde_json::json!({ "allowBuilds": allow_builds });
         }
         let package_json = project_dir.join("package.json");
         let bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -892,12 +898,12 @@ impl NpmPackageBackend {
                 actual_package = package
             )));
         }
-        if format != AUBE_LOCK_FORMAT {
+        if format != NPM_LOCK_FORMAT {
             return Err(Error::other(crate::t!(
                 "err.npm_lock_graph_format_unsupported",
                 format = format,
                 tool = self.id,
-                expected = AUBE_LOCK_FORMAT
+                expected = NPM_LOCK_FORMAT
             )));
         }
         if sha256.len() != 64
@@ -1013,7 +1019,7 @@ impl NpmPackageBackend {
             Some((&self.package, &tv.version)),
             build_policy,
         )?;
-        let lockfile_path = project_dir.join(AUBE_LOCKFILE_NAME);
+        let lockfile_path = project_dir.join(NPM_LOCKFILE_NAME);
         std::fs::write(&lockfile_path, graph.lockfile.as_bytes())
             .map_err(|error| Error::io(lockfile_path, error))
     }
@@ -1044,16 +1050,16 @@ impl NpmPackageBackend {
             &build_policy,
         )?;
         Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
-        aube_host::prepare_lock_graph(EmbeddedLockGraphRequest {
+        let node_bin_dir = managed_node(ctx, tv)?.0;
+        native_npm::resolve_lock_only(&NativeNpmInstall {
             project_dir: &project_dir,
-            cache_dir: Self::aube_cache_dir(ctx),
-            store_dir: Self::aube_store_dir(ctx),
-            node_bin_dir: managed_node(ctx, tv)?.0,
+            node_bin_dir: &node_bin_dir,
+            cache_dir: Self::npm_cache_dir(ctx),
             registry: Some(source.download_url.clone()),
+            scripts: ScriptPolicy::Deny,
             offline: ctx.config.settings.offline,
-        })
-        .await?;
-        let lockfile_path = project_dir.join(AUBE_LOCKFILE_NAME);
+        })?;
+        let lockfile_path = project_dir.join(NPM_LOCKFILE_NAME);
         if !lockfile_path.is_file() {
             return Err(Error::other(crate::t!(
                 "err.npm_lock_graph_not_produced",
@@ -1114,7 +1120,7 @@ impl NpmPackageBackend {
                 schema: NPM_INSTALL_RECEIPT_SCHEMA,
                 provider: PROVIDER.into(),
                 package: self.package.clone(),
-                installer: "aube".into(),
+                installer: ISOLATED_INSTALLER.into(),
                 node_version: node_version.into(),
                 build_policy: build_policy.identity(),
                 graph_sha256: Some(graph_identity.sha256.clone()),
@@ -1130,10 +1136,9 @@ impl NpmPackageBackend {
     /// Validate a synthetic-project install produced by an explicitly managed
     /// npm-compatible installer and publish the common dynamic inventory.
     ///
-    /// The caller owns the package-manager invocation and its native lock. This
-    /// method deliberately reuses the same confined bin-target validation as
-    /// embedded Aube installs, so native npm/pnpm cannot publish paths outside
-    /// the osdk install root.
+    /// The caller owns the package-manager invocation and its native lock. The
+    /// confined bin-target validation is applied here rather than in the caller,
+    /// so no installer can publish launcher paths outside the osdk install root.
     pub fn finalize_global_install(
         &self,
         ctx: &Ctx,
@@ -1176,8 +1181,6 @@ impl NpmPackageBackend {
             #[cfg(not(windows))]
             let modules = install_root.join("lib/node_modules");
             modules.join(&self.package)
-        } else if installer == "aube" {
-            package_install_dir(&install_root.join(PROJECT_DIR), &self.package)
         } else {
             install_root.to_path_buf()
         };
@@ -1353,17 +1356,15 @@ impl Backend for NpmPackageBackend {
         if let Some(graph) = locked_graph.as_ref() {
             self.restore_locked_project(&project_dir, tv, &build_policy, graph)?;
             Self::write_project_npmrc(&project_dir, None)?;
-            let request = EmbeddedFrozenInstallRequest {
+            let request = NativeNpmInstall {
                 project_dir: &project_dir,
-                cache_dir: Self::aube_cache_dir(ctx),
-                store_dir: Self::aube_store_dir(ctx),
-                node_bin_dir,
+                node_bin_dir: &node_bin_dir,
+                cache_dir: Self::npm_cache_dir(ctx),
                 registry: None,
-                scripts_enabled: !matches!(build_policy, BuildPolicy::Deny),
-                dangerously_allow_all_builds: matches!(build_policy, BuildPolicy::AllowAll),
+                scripts: script_policy(&build_policy),
                 offline: ctx.config.settings.offline,
             };
-            if let Err(error) = aube_host::install_frozen(request).await {
+            if let Err(error) = native_npm::install_frozen(&request) {
                 let _ = std::fs::remove_dir_all(&install_root);
                 return Err(error);
             }
@@ -1381,18 +1382,18 @@ impl Backend for NpmPackageBackend {
                     .map_err(|error| Error::io(&install_root, error))?;
                 Self::write_project_manifest(&project_dir, None, &build_policy)?;
                 Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
-                let request = EmbeddedInstallRequest {
+                // The package spec is already pinned into the synthetic
+                // manifest, so npm installs from it rather than by argument.
+                let _ = &package_spec;
+                let request = NativeNpmInstall {
                     project_dir: &project_dir,
-                    packages: std::slice::from_ref(&package_spec),
-                    cache_dir: Self::aube_cache_dir(ctx),
-                    store_dir: Self::aube_store_dir(ctx),
-                    node_bin_dir: node_bin_dir.clone(),
+                    node_bin_dir: &node_bin_dir,
+                    cache_dir: Self::npm_cache_dir(ctx),
                     registry: Some(source.download_url.clone()),
-                    scripts_enabled: !matches!(build_policy, BuildPolicy::Deny),
-                    dangerously_allow_all_builds: matches!(build_policy, BuildPolicy::AllowAll),
+                    scripts: script_policy(&build_policy),
                     offline: false,
                 };
-                match aube_host::install_packages(request).await {
+                match native_npm::install(&request) {
                     Ok(()) => {
                         last_error = None;
                         break;
@@ -1507,11 +1508,11 @@ impl Backend for NpmPackageBackend {
         );
         env.insert(
             "npm_config_cache".into(),
-            Self::aube_cache_dir(ctx).display().to_string(),
+            Self::npm_cache_dir(ctx).display().to_string(),
         );
         env.insert(
             "npm_config_store_dir".into(),
-            Self::aube_store_dir(ctx).display().to_string(),
+            Self::npm_store_dir(ctx).display().to_string(),
         );
         Ok(env)
     }
@@ -1600,6 +1601,16 @@ impl BuildPolicy {
             Self::AllowAll => "allow-all".into(),
             Self::Packages(packages) => format!("packages:{}", packages.join(",")),
         }
+    }
+}
+
+/// npm has no per-package build allowlist, so a `Packages(..)` policy cannot
+/// be expressed and stays fail-closed: only an explicit allow-all lets
+/// lifecycle scripts run.
+fn script_policy(policy: &BuildPolicy) -> ScriptPolicy {
+    match policy {
+        BuildPolicy::AllowAll => ScriptPolicy::Allow,
+        BuildPolicy::Deny | BuildPolicy::Packages(_) => ScriptPolicy::Deny,
     }
 }
 
@@ -1731,7 +1742,9 @@ fn receipt_matches_identity(
     {
         return Ok(false);
     }
-    let expected_installer = locked_installer.or(requested_installer).unwrap_or("aube");
+    let expected_installer = locked_installer
+        .or(requested_installer)
+        .unwrap_or(ISOLATED_INSTALLER);
     if receipt.provider != PROVIDER
         || receipt.package != backend.package
         || receipt.node_version != node_version
@@ -1786,7 +1799,10 @@ fn validate_isolated_install_evidence(
     receipt: &NpmInstallReceipt,
     locked_graph: Option<&LockedNpmGraph<'_>>,
 ) -> Result<bool> {
-    if receipt.installer != "aube"
+    // Isolated installs are assembled in a synthetic project and record their
+    // graph digest instead of a native lock, so a receipt carrying native-lock
+    // fields belongs to a global install and must not be reused here.
+    if receipt.installer != ISOLATED_INSTALLER
         || receipt.native_lock_format.is_some()
         || receipt.native_lock_sha256.is_some()
     {
@@ -1868,9 +1884,6 @@ fn global_package_manifest_path(
     installer: NpmInstaller,
 ) -> Option<PathBuf> {
     match installer {
-        NpmInstaller::Aube => {
-            Some(package_install_dir(&install_root.join(PROJECT_DIR), package).join("package.json"))
-        }
         NpmInstaller::Npm => {
             #[cfg(windows)]
             let modules = install_root.join("node_modules");
@@ -1903,13 +1916,11 @@ fn package_manifest_matches(path: &Path, package: &str, version: &str) -> Result
 
 fn global_native_lock_path(install_root: &Path, installer: NpmInstaller) -> Option<PathBuf> {
     match installer {
-        NpmInstaller::Aube => {
-            let path = install_root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME);
-            path.is_file().then_some(path)
-        }
         NpmInstaller::Pnpm => {
             find_unique_descendant(&install_root.join("pnpm-global"), "pnpm-lock.yaml")
         }
+        // `npm install --global` resolves against the prefix and never writes a
+        // lockfile, so a global npm install has no native lock to record.
         NpmInstaller::Npm | NpmInstaller::Auto => None,
     }
 }
@@ -1936,7 +1947,6 @@ fn find_unique_descendant(root: &Path, suffix: &str) -> Option<PathBuf> {
 
 fn native_lock_format_matches(installer: NpmInstaller, format: &str, path: &Path) -> bool {
     let expected_name = match installer {
-        NpmInstaller::Aube => "aube-lock.yaml",
         NpmInstaller::Pnpm => "pnpm-lock.yaml",
         NpmInstaller::Npm | NpmInstaller::Auto => return false,
     };
@@ -1944,7 +1954,6 @@ fn native_lock_format_matches(installer: NpmInstaller, format: &str, path: &Path
         return false;
     }
     match installer {
-        NpmInstaller::Aube => format == AUBE_LOCK_FORMAT,
         NpmInstaller::Pnpm => format == "pnpm-v9",
         NpmInstaller::Npm | NpmInstaller::Auto => false,
     }
@@ -2044,8 +2053,8 @@ fn validate_project_manifest(
         BuildPolicy::Deny | BuildPolicy::AllowAll => None,
     };
     let actual_allow_builds = manifest
-        .get("aube")
-        .and_then(|aube| aube.get("allowBuilds"))
+        .get("osdk")
+        .and_then(|osdk| osdk.get("allowBuilds"))
         .and_then(serde_json::Value::as_object);
     if actual_allow_builds != expected_allow_builds.as_ref() {
         return Err(Error::other(crate::t!(
@@ -2061,56 +2070,66 @@ fn npm_graph_identity(
     package: &str,
     version: &str,
 ) -> Result<NpmGraphIdentity> {
-    let path = project_dir.join(AUBE_LOCKFILE_NAME);
+    let path = project_dir.join(NPM_LOCKFILE_NAME);
     let bytes = crate::inventory::read_stable_regular_file(&path, NPM_NATIVE_LOCK_MAX_BYTES)
         .map_err(|error| Error::io(&path, error))?;
-    let lockfile: IdentityLockfile = serde_yaml::from_slice(&bytes).map_err(|error| {
+    let lockfile: IdentityLockfile = serde_json::from_slice(&bytes).map_err(|error| {
         Error::other(crate::t!(
             "err.npm_graph_parse_invalid",
             path = path.display(),
             error = error
         ))
     })?;
-    let dependency = lockfile
-        .importers
-        .get(".")
-        .and_then(|importer| importer.dependencies.get(package))
-        .ok_or_else(|| Error::other(crate::t!("err.npm_graph_root_missing", package = package)))?;
-    if dependency.specifier != version
-        || !(dependency.version == version
-            || dependency
-                .version
-                .strip_prefix(version)
-                .is_some_and(|suffix| suffix.starts_with('(')))
-    {
+    // v2 mirrors the tree into a legacy `dependencies` table as well; v3 is
+    // `packages`-only. Both keep the fields read below, so either is accepted
+    // and anything newer fails closed rather than being guessed at.
+    if !matches!(lockfile.lockfile_version, 2 | 3) {
+        return Err(Error::other(crate::t!(
+            "err.npm_graph_lock_version_unsupported",
+            path = path.display(),
+            version = lockfile.lockfile_version
+        )));
+    }
+    // npm keys a top-level dependency by its install path. The root project is
+    // `""`, which is deliberately not what is wanted here: the tool itself is a
+    // dependency of the synthetic project.
+    let package_key = format!("node_modules/{package}");
+    let root = lockfile.packages.get(&package_key).ok_or_else(|| {
+        Error::other(crate::t!("err.npm_graph_root_missing", package = package))
+    })?;
+    let locked_version = root.version.as_deref().unwrap_or_default();
+    if locked_version != version {
         return Err(Error::other(crate::t!(
             "err.npm_graph_root_version_mismatch",
             package = package,
             expected = version,
-            actual = dependency.version
+            actual = locked_version
         )));
     }
-    // Aube v9 keeps peer context on the importer's resolved value and in
-    // `snapshots`, while `packages` remains keyed by canonical name/version.
-    let package_key = format!("{package}@{version}");
-    let root = lockfile.packages.get(&package_key).ok_or_else(|| {
-        Error::other(crate::t!(
-            "err.npm_graph_resolved_root_missing",
-            package = package,
-            version = version
-        ))
-    })?;
-    if root.resolution.integrity.trim().is_empty() {
-        return Err(Error::other(crate::t!(
-            "err.npm_graph_root_integrity_missing",
-            package = package,
-            version = version
-        )));
-    }
-    let root_tarball = root.resolution.tarball.clone();
+    let root_integrity = root
+        .integrity
+        .as_deref()
+        .map(str::trim)
+        .filter(|integrity| !integrity.is_empty())
+        .ok_or_else(|| {
+            Error::other(crate::t!(
+                "err.npm_graph_root_integrity_missing",
+                package = package,
+                version = version
+            ))
+        })?
+        .to_string();
+    // `resolved` is the tarball URL for a registry dependency. It is absent for
+    // link/workspace entries, so the canonical spec is used as the fallback.
+    let root_tarball = root
+        .resolved
+        .as_deref()
+        .map(str::trim)
+        .filter(|resolved| !resolved.is_empty())
+        .map(str::to_string);
     Ok(NpmGraphIdentity {
         sha256: pipeline::verify::hash_bytes(&bytes, pipeline::HashAlgo::Sha256),
-        root_integrity: root.resolution.integrity.clone(),
+        root_integrity,
         root_source: root_tarball
             .clone()
             .unwrap_or_else(|| format!("npm:{package}@{version}")),
@@ -2316,7 +2335,7 @@ fn validate_unix_project_launcher(
             })
         {
             return Err(Error::other(format!(
-                "project launcher `{name}` for {package} has an unsafe Aube target"
+                "project launcher `{name}` for {package} has an unsafe shim target"
             )));
         }
         let target = launcher.parent().unwrap_or(Path::new("")).join(relative);
@@ -2470,7 +2489,7 @@ fn parse_windows_project_wrapper(path: &Path) -> Result<PathBuf> {
             path.display()
         )));
     }
-    let recognized = is_aube_windows_wrapper(&text) || is_npm_windows_wrapper(&text);
+    let recognized = is_relative_target_windows_wrapper(&text) || is_npm_windows_wrapper(&text);
     if !recognized {
         return Err(Error::other(format!(
             "project npm wrapper does not match a recognized safe template: {}",
@@ -2556,7 +2575,12 @@ fn valid_osdk_project_cmd_target(relative_target: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn is_aube_windows_wrapper(text: &str) -> bool {
+/// Recognize a `.cmd` wrapper that dispatches through a relative target.
+///
+/// npm writes its own wrapper shape, handled by [`is_npm_windows_wrapper`]; this
+/// one is still accepted so launchers written by earlier versions keep
+/// validating instead of being reported as tampered.
+fn is_relative_target_windows_wrapper(text: &str) -> bool {
     let mut lines = text.lines().map(|line| line.trim_end_matches('\r'));
     if lines.next() != Some("@SETLOCAL") {
         return false;
@@ -3872,7 +3896,7 @@ version = "3.6.2"
 
 [platforms.linux-x64.tools."npm:prettier".npm]
 package = "prettier"
-installer = "aube"
+installer = "npm"
 scope = "project"
 "#,
         )
@@ -3889,7 +3913,7 @@ scope = "project"
     }
 
     #[test]
-    fn aube_storage_is_shared_across_packages_versions_and_scopes() {
+    fn npm_storage_is_shared_across_packages_versions_and_scopes() {
         let temporary = tempfile::tempdir().unwrap();
         let ctx = offline_test_ctx(temporary.path());
         let cases = [
@@ -3909,8 +3933,8 @@ scope = "project"
         });
 
         assert!(paths.iter().all(|path| path == &paths[0]));
-        assert_eq!(paths[0].0, temporary.path().join("cache/aube/v1/cache"));
-        assert_eq!(paths[0].1, temporary.path().join("store/aube"));
+        assert_eq!(paths[0].0, temporary.path().join("cache/npm/v1/cache"));
+        assert_eq!(paths[0].1, temporary.path().join("store/npm"));
     }
 
     #[test]
@@ -4002,10 +4026,15 @@ scope = "project"
                 &version.version,
                 "sha512-fixture-integrity",
             );
-            std::fs::write(project.join(AUBE_LOCKFILE_NAME), &lockfile).unwrap();
+            std::fs::write(project.join(NPM_LOCKFILE_NAME), &lockfile).unwrap();
         } else {
-            let project = root.join(PROJECT_DIR);
-            let package = package_install_dir(&project, backend.package());
+            // A global npm install materializes into the prefix's own
+            // node_modules, not into a synthetic project, and records no lock.
+            #[cfg(windows)]
+            let modules = root.join("node_modules");
+            #[cfg(not(windows))]
+            let modules = root.join("lib/node_modules");
+            let package = modules.join(backend.package());
             std::fs::create_dir_all(&package).unwrap();
             std::fs::write(
                 package.join("package.json"),
@@ -4014,15 +4043,6 @@ scope = "project"
                     "version": version.version,
                 }))
                 .unwrap(),
-            )
-            .unwrap();
-            std::fs::write(
-                project.join(AUBE_LOCKFILE_NAME),
-                npm_test_lockfile(
-                    backend.package(),
-                    &version.version,
-                    "sha512-fixture-integrity",
-                ),
             )
             .unwrap();
         }
@@ -4039,28 +4059,31 @@ scope = "project"
                 schema: NPM_INSTALL_RECEIPT_SCHEMA,
                 provider: PROVIDER.into(),
                 package: backend.package().into(),
-                installer: "aube".into(),
+                installer: "npm".into(),
                 node_version: version.options[LOCKED_NPM_NODE_VERSION_OPTION].clone(),
                 build_policy: NpmPackageBackend::build_policy(version).unwrap().identity(),
                 graph_sha256: (scope == ToolScope::Project).then(|| {
                     pipeline::verify::hash_file(
-                        &root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME),
+                        &root.join(PROJECT_DIR).join(NPM_LOCKFILE_NAME),
                         pipeline::HashAlgo::Sha256,
                     )
                     .unwrap()
                 }),
                 root_integrity: (scope == ToolScope::Project)
                     .then(|| "sha512-fixture-integrity".into()),
-                root_source: (scope == ToolScope::Project)
-                    .then(|| format!("npm:{}@{}", backend.package(), version.version)),
-                native_lock_format: (scope == ToolScope::Global).then(|| AUBE_LOCK_FORMAT.into()),
-                native_lock_sha256: (scope == ToolScope::Global).then(|| {
-                    pipeline::verify::hash_file(
-                        &root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME),
-                        pipeline::HashAlgo::Sha256,
+                // The fixture lock carries `resolved`, so the derived root source
+                // is that tarball URL rather than the canonical `npm:` spec.
+                root_source: (scope == ToolScope::Project).then(|| {
+                    format!(
+                        "https://registry.example.test/{}/-/tool-{}.tgz",
+                        backend.package(),
+                        version.version
                     )
-                    .unwrap()
                 }),
+                // `npm install --global` writes no lockfile, so a global receipt
+                // carries no native-lock evidence.
+                native_lock_format: None,
+                native_lock_sha256: None,
             },
         )
         .unwrap();
@@ -4173,7 +4196,7 @@ scope = "project"
             ToolScope::Global,
             "prettier",
         );
-        let lock_path = global.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME);
+        let lock_path = global.join(PROJECT_DIR).join(NPM_LOCKFILE_NAME);
         let lock_copy = temporary.path().join("native-lock.yaml");
         std::fs::copy(&lock_path, &lock_copy).unwrap();
         std::fs::remove_file(&lock_path).unwrap();
@@ -4249,7 +4272,9 @@ scope = "project"
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
         let baseline = npm_test_version(&backend, "3.6.2");
         let mut installer = baseline.clone();
-        installer.options.insert("installer".into(), "aube".into());
+        // Must differ from the baseline's effective installer so the two roots
+        // are genuinely distinct.
+        installer.options.insert("installer".into(), "pnpm".into());
         let mut builds = baseline.clone();
         builds
             .options
@@ -4637,8 +4662,8 @@ scope = "project"
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(temporary.path().join("package.json")).unwrap())
                 .unwrap();
-        assert_eq!(manifest["aube"]["allowBuilds"]["esbuild"], true);
-        assert_eq!(manifest["aube"]["allowBuilds"]["sharp"], true);
+        assert_eq!(manifest["osdk"]["allowBuilds"]["esbuild"], true);
+        assert_eq!(manifest["osdk"]["allowBuilds"]["sharp"], true);
         assert!(manifest.get("dependencies").is_none());
     }
 
@@ -4652,7 +4677,7 @@ scope = "project"
             .insert(LOCKED_NPM_PACKAGE_OPTION.into(), package.into());
         tool.options.insert(
             LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
-            AUBE_LOCK_FORMAT.into(),
+            NPM_LOCK_FORMAT.into(),
         );
         tool.options.insert(
             LOCKED_NPM_LOCK_SHA256_OPTION.into(),
@@ -4666,7 +4691,7 @@ scope = "project"
     #[test]
     fn locked_graph_validates_identity_format_and_exact_bytes() {
         let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
-        let lockfile = "lockfileVersion: '9.0'\n# preserve trailing newline\n";
+        let lockfile = "{\"lockfileVersion\":3,\"packages\":{}}\n";
         let version = locked_version("npm:prettier", "prettier", "3.6.2", lockfile);
         assert_eq!(
             backend.locked_graph(&version).unwrap().unwrap().lockfile,
@@ -4696,7 +4721,7 @@ scope = "project"
         let mut tampered = version;
         tampered.options.insert(
             LOCKED_NPM_LOCKFILE_OPTION.into(),
-            "lockfileVersion: '9.0'\n# changed\n".into(),
+            "{\"lockfileVersion\":3,\"packages\":{},\"changed\":true}\n".into(),
         );
         assert!(matches!(
             backend.locked_graph(&tampered),
@@ -4704,10 +4729,29 @@ scope = "project"
         ));
     }
 
+    /// Build a `package-lock.json` shaped the way npm actually writes one:
+    /// `packages` keyed by install path, with `version`/`integrity` directly on
+    /// the entry and the root project under the empty key.
     fn npm_test_lockfile(package: &str, version: &str, integrity: &str) -> String {
-        format!(
-            "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      '{package}':\n        specifier: {version}\n        version: {version}\n\npackages:\n  '{package}@{version}':\n    resolution: {{integrity: {integrity}}}\n"
-        )
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": "osdk-dynamic-npm-tool",
+            "lockfileVersion": 3,
+            "requires": true,
+            "packages": {
+                "": {
+                    "name": "osdk-dynamic-npm-tool",
+                    "dependencies": { package: version },
+                },
+                format!("node_modules/{package}"): {
+                    "version": version,
+                    "resolved": format!(
+                        "https://registry.example.test/{package}/-/tool-{version}.tgz"
+                    ),
+                    "integrity": integrity,
+                },
+            },
+        }))
+        .unwrap()
     }
 
     fn write_reusable_install(
@@ -4725,7 +4769,7 @@ scope = "project"
             build_policy,
         )
         .unwrap();
-        std::fs::write(project_dir.join(AUBE_LOCKFILE_NAME), lockfile).unwrap();
+        std::fs::write(project_dir.join(NPM_LOCKFILE_NAME), lockfile).unwrap();
         std::fs::create_dir_all(package_install_dir(&project_dir, backend.package())).unwrap();
         std::fs::create_dir_all(project_dir.join("node_modules/.bin")).unwrap();
         let bin = project_dir.join("node_modules/.bin/fixture");
@@ -4755,7 +4799,7 @@ scope = "project"
                 schema: NPM_INSTALL_RECEIPT_SCHEMA,
                 provider: PROVIDER.into(),
                 package: backend.package().into(),
-                installer: "aube".into(),
+                installer: ISOLATED_INSTALLER.into(),
                 node_version: version.options[LOCKED_NPM_NODE_VERSION_OPTION].clone(),
                 build_policy: build_policy.identity(),
                 graph_sha256: Some(graph_identity.sha256),
@@ -4869,7 +4913,9 @@ scope = "project"
             &version.version,
             ctx.platform.to_string(),
             InstallScope::Isolated,
-            &BTreeMap::from([("installer".into(), "aube".into())]),
+            // Must differ from the baseline identity's installer, otherwise this
+            // asserts nothing.
+            &BTreeMap::from([("installer".into(), "pnpm".into())]),
             identity.dependencies.clone(),
             identity.materials.clone(),
         )
@@ -4925,7 +4971,7 @@ scope = "project"
 
         let tampered = lockfile.replace("sha512-root-integrity", "sha512-tampered");
         std::fs::write(
-            install_root.join(PROJECT_DIR).join(AUBE_LOCKFILE_NAME),
+            install_root.join(PROJECT_DIR).join(NPM_LOCKFILE_NAME),
             tampered,
         )
         .unwrap();
@@ -4940,12 +4986,26 @@ scope = "project"
     }
 
     #[test]
-    fn graph_identity_handles_scoped_root_with_peer_context() {
+    fn graph_identity_reads_scoped_root_from_a_package_lock() {
         let temporary = tempfile::tempdir().unwrap();
         let project_dir = temporary.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
-        let lockfile = "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      '@scope/tool':\n        specifier: 1.2.3\n        version: 1.2.3(peer@4.5.6)\n\npackages:\n  '@scope/tool@1.2.3':\n    resolution: {integrity: sha512-root, tarball: https://registry.example.test/tool.tgz}\n";
-        std::fs::write(project_dir.join(AUBE_LOCKFILE_NAME), lockfile).unwrap();
+        // A scoped name keeps its slash in the install path, so the lookup key
+        // is `node_modules/@scope/tool` rather than a flattened variant.
+        let lockfile = serde_json::json!({
+            "name": "osdk-dynamic-npm-tool",
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "osdk-dynamic-npm-tool" },
+                "node_modules/@scope/tool": {
+                    "version": "1.2.3",
+                    "resolved": "https://registry.example.test/tool.tgz",
+                    "integrity": "sha512-root",
+                },
+            },
+        })
+        .to_string();
+        std::fs::write(project_dir.join(NPM_LOCKFILE_NAME), &lockfile).unwrap();
 
         let identity = npm_graph_identity(&project_dir, "@scope/tool", "1.2.3").unwrap();
         assert_eq!(identity.root_integrity, "sha512-root");
@@ -5011,7 +5071,7 @@ scope = "project"
 
         partial.options.insert(
             LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
-            AUBE_LOCK_FORMAT.into(),
+            NPM_LOCK_FORMAT.into(),
         );
         assert!(backend
             .locked_graph(&partial)
@@ -5019,7 +5079,7 @@ scope = "project"
             .to_string()
             .contains(LOCKED_NPM_LOCK_SHA256_OPTION));
 
-        let lockfile = "lockfileVersion: '9.0'\n";
+        let lockfile = "{\"lockfileVersion\":3,\"packages\":{}}\n";
         let mut uppercase = locked_version("npm:prettier", "prettier", "3.6.2", lockfile);
         let digest = uppercase.options[LOCKED_NPM_LOCK_SHA256_OPTION].to_uppercase();
         uppercase
@@ -5036,7 +5096,7 @@ scope = "project"
     fn restoring_locked_project_preserves_lock_bytes_and_exact_manifest_policy() {
         let temporary = tempfile::tempdir().unwrap();
         let backend = NpmPackageBackend::from_id("npm:@antfu/ni").unwrap();
-        let lockfile = "lockfileVersion: '9.0'\nimporters: {}\n";
+        let lockfile = "{\"lockfileVersion\":3,\"packages\":{}}\n";
         let version = locked_version("npm:@antfu/ni", "@antfu/ni", "0.21.12", lockfile);
         let graph = backend.locked_graph(&version).unwrap().unwrap();
         backend
@@ -5052,9 +5112,9 @@ scope = "project"
             serde_json::from_slice(&std::fs::read(temporary.path().join("package.json")).unwrap())
                 .unwrap();
         assert_eq!(package_json["dependencies"]["@antfu/ni"], "0.21.12");
-        assert_eq!(package_json["aube"]["allowBuilds"]["esbuild"], true);
+        assert_eq!(package_json["osdk"]["allowBuilds"]["esbuild"], true);
         assert_eq!(
-            std::fs::read(temporary.path().join(AUBE_LOCKFILE_NAME)).unwrap(),
+            std::fs::read(temporary.path().join(NPM_LOCKFILE_NAME)).unwrap(),
             lockfile.as_bytes()
         );
     }
@@ -5351,7 +5411,7 @@ scope = "project"
                 schema: 1,
                 provider: PROVIDER.into(),
                 package: "prettier".into(),
-                installer: "aube".into(),
+                installer: ISOLATED_INSTALLER.into(),
                 node_version: "24.0.0".into(),
                 build_policy: "deny".into(),
                 graph_sha256: Some("graph-sha256".into()),
@@ -5393,8 +5453,8 @@ scope = "project"
                 &staging,
                 &bin_dir,
                 "20.10.0",
-                "aube",
-                Some(("aube-v9", "digest")),
+                "pnpm",
+                Some(("pnpm-v9", "digest")),
             )
             .unwrap();
 
@@ -5413,13 +5473,13 @@ scope = "project"
                 schema: 1,
                 provider: PROVIDER.into(),
                 package: "prettier".into(),
-                installer: "aube".into(),
+                installer: ISOLATED_INSTALLER.into(),
                 node_version: TEST_NODE_VERSION.into(),
                 build_policy: "deny".into(),
                 graph_sha256: None,
                 root_integrity: None,
                 root_source: None,
-                native_lock_format: Some("aube-v9".into()),
+                native_lock_format: Some("pnpm-v9".into()),
                 native_lock_sha256: Some("digest".into()),
             }
         );

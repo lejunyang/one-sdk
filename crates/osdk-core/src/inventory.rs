@@ -960,7 +960,7 @@ mod install_manifest_tests {
             "3.6.2",
             "linux-x64",
             InstallScope::Isolated,
-            &BTreeMap::from([("installer".into(), "AUBE".into())]),
+            &BTreeMap::from([("installer".into(), "PNPM".into())]),
             vec![InstallDependency {
                 kind: InstallDependencyKind::Runtime,
                 id: "node".into(),

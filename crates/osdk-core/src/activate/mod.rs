@@ -951,7 +951,7 @@ mod tests {
         std::fs::write(project.join("package.json"), b"{}").unwrap();
         std::fs::write(
             project.join("osdk.toml"),
-            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"aube\"\n",
+            "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"pnpm\"\n",
         )
         .unwrap();
         ctx.config.tools.insert("npm:prettier".into(), "3".into());
@@ -1210,7 +1210,7 @@ mod tests {
             temporary.path(),
             BTreeMap::from([(
                 "installer".into(),
-                crate::config::ToolConfigValue::String("aube".into()),
+                crate::config::ToolConfigValue::String("pnpm".into()),
             )]),
             BTreeMap::from([("installer".into(), "npm".into())]),
         );

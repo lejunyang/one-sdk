@@ -387,12 +387,12 @@ mod tests {
     #[test]
     fn fingerprints_are_order_independent_and_ignore_locked_metadata() {
         let first = BTreeMap::from([
-            ("installer".into(), "aube".into()),
+            ("installer".into(), "pnpm".into()),
             ("allow_builds".into(), "Sharp, esbuild, sharp".into()),
         ]);
         let mut second = BTreeMap::new();
         second.insert("allow_builds".into(), "esbuild,sharp".into());
-        second.insert("installer".into(), "aube".into());
+        second.insert("installer".into(), "pnpm".into());
         second.insert("__osdk_node_version".into(), "24.1.0".into());
 
         assert_eq!(

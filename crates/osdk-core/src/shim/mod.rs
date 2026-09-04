@@ -1164,7 +1164,7 @@ mod tests {
             &ctx,
             &backend,
             ToolScope::Project,
-            BTreeMap::from([("installer".into(), "aube".into())]),
+            BTreeMap::from([("installer".into(), "pnpm".into())]),
             "fixture-cli",
         );
         std::fs::create_dir_all(mismatch_root.join("bin")).unwrap();

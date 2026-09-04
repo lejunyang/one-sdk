@@ -1380,8 +1380,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.npm_installer_invalid",
         (
-            "invalid npm installer `{installer}` (expected auto|aube|npm|pnpm)",
-            "无效的 npm 安装器 `{installer}`（应为 auto|aube|npm|pnpm）",
+            "invalid npm installer `{installer}` (expected auto|npm|pnpm)",
+            "无效的 npm 安装器 `{installer}`（应为 auto|npm|pnpm）",
         ),
     );
     m.insert(
@@ -1394,8 +1394,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.npm_installer_option_type",
         (
-            "npm installer option must be a string (auto|aube|npm|pnpm)",
-            "npm installer 选项必须是字符串（auto|aube|npm|pnpm）",
+            "npm installer option must be a string (auto|npm|pnpm)",
+            "npm installer 选项必须是字符串（auto|npm|pnpm）",
         ),
     );
     m.insert(
@@ -1415,15 +1415,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.npm_declared_installer_unsupported",
         (
-            "{source} declares unsupported npm-tool installer `{installer}`; expected aube, npm, or pnpm",
-            "{source} 声明了不受支持的 npm 工具安装器 `{installer}`；应为 aube、npm 或 pnpm",
-        ),
-    );
-    m.insert(
-        "err.npm_aube_lock_format_unsupported",
-        (
-            "installer `aube` cannot read unsupported lock format `{format}` at {path}; use installer `{owner}`",
-            "安装器 `aube` 无法读取 {path} 中不受支持的锁文件格式 `{format}`；请使用安装器 `{owner}`",
+            "{source} declares unsupported npm-tool installer `{installer}`; expected npm or pnpm",
+            "{source} 声明了不受支持的 npm 工具安装器 `{installer}`；应为 npm 或 pnpm",
         ),
     );
     m.insert(
@@ -1469,10 +1462,45 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "err.npm_aube_lock_version_unsupported",
+        "err.npm_graph_lock_version_unsupported",
         (
-            "{path} uses unsupported aube lockfile version {version}; expected v9",
-            "{path} 使用了不受支持的 aube 锁文件版本 {version}；应为 v9",
+            "{path} uses unsupported npm lockfileVersion {version}; expected 2 or 3",
+            "{path} 使用了不受支持的 npm lockfileVersion {version}；应为 2 或 3",
+        ),
+    );
+    m.insert(
+        "err.npm_default_installer_invalid",
+        (
+            "invalid default npm installer `{installer}` (expected npm or pnpm)",
+            "无效的默认 npm 安装器 `{installer}`（应为 npm 或 pnpm）",
+        ),
+    );
+    m.insert(
+        "err.npm_managed_npm_missing",
+        (
+            "managed npm executable was not found under {path}",
+            "在 {path} 下未找到受管的 npm 可执行文件",
+        ),
+    );
+    m.insert(
+        "err.npm_native_install_failed",
+        (
+            "`{command}` failed with exit status {status}: {stderr}",
+            "`{command}` 执行失败，退出状态 {status}：{stderr}",
+        ),
+    );
+    m.insert(
+        "err.npm_native_install_timeout",
+        (
+            "`{command}` did not finish within {seconds} seconds",
+            "`{command}` 未在 {seconds} 秒内完成",
+        ),
+    );
+    m.insert(
+        "err.npm_native_install_spawn_failed",
+        (
+            "could not run `{command}`",
+            "无法执行 `{command}`",
         ),
     );
     m.insert(
@@ -1588,13 +1616,6 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "err.npm_global_aube_offline_unsupported",
-        (
-            "global Aube installs are unavailable in offline mode because Aube 2.1 does not support offline global add",
-            "Aube 2.1 不支持全局离线添加，因此离线模式下无法执行 Aube 全局安装",
-        ),
-    );
-    m.insert(
         "err.npm_global_registry_isolation",
         (
             "cannot safely isolate global {manager} install: registry preflight passed through ({reason})",
@@ -1639,22 +1660,22 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.npm_lock_graph_not_produced",
         (
-            "aube did not produce a lock graph for {package}@{version}",
-            "aube 未能为 {package}@{version} 生成锁定依赖图",
+            "npm did not produce a lock graph for {package}@{version}",
+            "npm 未能为 {package}@{version} 生成锁定依赖图",
         ),
     );
     m.insert(
         "err.npm_install_package_missing",
         (
-            "embedded npm install did not materialize {package} under {path}",
-            "嵌入式 npm 安装未在 {path} 下生成 {package}",
+            "npm install did not materialize {package} under {path}",
+            "npm 安装未在 {path} 下生成 {package}",
         ),
     );
     m.insert(
         "err.npm_install_bin_dir_missing",
         (
-            "embedded npm install did not produce node_modules/.bin for {package}",
-            "嵌入式 npm 安装未为 {package} 生成 node_modules/.bin",
+            "npm install did not produce node_modules/.bin for {package}",
+            "npm 安装未为 {package} 生成 node_modules/.bin",
         ),
     );
     m.insert(
@@ -2271,7 +2292,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
              project, the default modifies package.json and its native lockfile, then records the npm \
              selection in project osdk.toml and exact Node/npm metadata in osdk.lock. `--global` ignores the current \
              project, installs into an osdk-managed prefix, and updates the user config and lock. \
-             Installer auto-selection prefers embedded Aube when the project lock is compatible; npm \
+             Installer auto-selection follows a declared packageManager, then an incumbent \
+             lockfile, and otherwise defaults to npm; npm \
              package build scripts are disabled by default. A `go:<module-or-command-path>` tool \
              uses one exact managed Go runtime and records its selected proxy/module root in \
              osdk.lock.\n\nEXAMPLES:\n  osdk use node@20\n  osdk use npm:prettier@3 -o \
@@ -2280,8 +2302,9 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "如有需要则安装工具并使其生效。对于普通 SDK，默认写入项目版本固定；--global 写入用户默认值。\
              对 Node 项目中的 `npm:<package>`，默认会修改 package.json 及其原生锁文件，然后在项目 \
              osdk.toml 中记录 npm 选择，并在 osdk.lock 中记录精确的 Node/npm 元数据。`--global` 会忽略当前项目，安装到 \
-             osdk 管理的隔离前缀，并更新用户配置和锁文件。安装器自动选择会在项目锁格式兼容时优先使用\
-             内嵌 Aube；npm 包构建脚本默认禁用。`go:<module-or-command-path>` 工具使用一个精确受管 \
+             osdk 管理的隔离前缀，并更新用户配置和锁文件。安装器自动选择优先遵循已声明的 packageManager，\
+             其次沿用现有锁文件的归属者，否则默认使用 npm；npm 包构建脚本默认禁用。\
+             `go:<module-or-command-path>` 工具使用一个精确受管 \
              Go runtime，并在 osdk.lock 中记录所选 proxy/module root。\n\n示例：\n  osdk use \
              node@20\n  osdk use npm:prettier@3 -o installer=auto\n  osdk use go@1.24\n  osdk use \
              go:golang.org/x/tools/gopls@0.20.0\n  osdk use -g npm:prettier@3 -o allow_builds=false",
@@ -2304,8 +2327,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.use.flag.opt",
         (
-            "Backend option as key=value (repeatable); npm packages support `installer=auto|aube|npm|pnpm` (auto prefers compatible Aube) and `allow_builds=false|true|package,...` for non-project installs (npm accepts booleans only; project installs always disable scripts); Go tools support `tags` and allowlisted `env`",
-            "后端选项，形如 key=value（可重复）；npm 包支持 `installer=auto|aube|npm|pnpm`（auto 优先使用兼容的 Aube），非项目安装支持 `allow_builds=false|true|包名,...`（npm 仅接受布尔值；项目安装始终禁用脚本）；Go 工具支持 `tags` 与白名单 `env`",
+            "Backend option as key=value (repeatable); npm packages support `installer=auto|npm|pnpm` (auto defaults to npm) and `allow_builds=false|true|package,...` for non-project installs (npm accepts booleans only; project installs always disable scripts); Go tools support `tags` and allowlisted `env`",
+            "后端选项，形如 key=value（可重复）；npm 包支持 `installer=auto|npm|pnpm`（auto 默认使用 npm），非项目安装支持 `allow_builds=false|true|包名,...`（npm 仅接受布尔值；项目安装始终禁用脚本）；Go 工具支持 `tags` 与白名单 `env`",
         ),
     );
     m.insert(
@@ -3003,14 +3026,18 @@ mod tests {
         "err.npm_project_file_not_regular",
         "err.npm_manager_lock_owner_conflict",
         "err.npm_declared_installer_unsupported",
-        "err.npm_aube_lock_format_unsupported",
         "err.npm_installer_lock_conflict",
         "err.npm_project_lock_ambiguous",
         "err.npm_native_lock_parse",
         "err.npm_native_lock_version_numeric_required",
         "err.npm_native_lock_version_missing",
         "err.npm_native_lock_version_malformed",
-        "err.npm_aube_lock_version_unsupported",
+        "err.npm_graph_lock_version_unsupported",
+        "err.npm_default_installer_invalid",
+        "err.npm_managed_npm_missing",
+        "err.npm_native_install_failed",
+        "err.npm_native_install_timeout",
+        "err.npm_native_install_spawn_failed",
         "err.package_manager_manifest_read",
         "err.package_manager_manifest_parse",
         "err.package_manager_field_type",
@@ -3086,7 +3113,7 @@ mod tests {
             "--global",
             "忽略当前项目",
             "隔离前缀",
-            "Aube",
+            "packageManager",
             "构建脚本默认禁用",
         ] {
             assert!(
@@ -3096,7 +3123,7 @@ mod tests {
         }
         let option = catalog["help.use.flag.opt"].1;
         for expected in [
-            "installer=auto|aube|npm|pnpm",
+            "installer=auto|npm|pnpm",
             "allow_builds",
             "项目安装始终禁用脚本",
         ] {

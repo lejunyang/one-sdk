@@ -1,8 +1,8 @@
 //! Installer selection for npm-backed developer tools.
 //!
 //! Planning is deliberately side-effect free. The selected installer is fixed
-//! before a project is mutated, so callers must never retry a failed Aube
-//! operation with npm or pnpm (or vice versa).
+//! before a project is mutated, so callers must never retry a failed install
+//! with a different installer.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ToolConfigEntry, ToolConfigValue};
+use crate::config::{NpmDefaultInstaller, ToolConfigEntry, ToolConfigValue};
 use crate::error::{Error, Result};
 use crate::version::resolver::{package_manager_from_package_json, PackageManagerRequest};
 
@@ -32,19 +32,28 @@ pub enum NpmInstaller {
     /// Select an installer from project declarations and lockfile compatibility.
     #[default]
     Auto,
-    /// Use osdk's embedded Aube engine.
-    Aube,
     /// Delegate once to the managed npm executable.
     Npm,
     /// Delegate once to the managed pnpm executable.
     Pnpm,
 }
 
+impl From<NpmDefaultInstaller> for NpmInstaller {
+    /// Widen the configurable default into the requestable set. This is
+    /// intentionally one-way: every configurable default is a concrete
+    /// installer, so the result is never `Auto`.
+    fn from(value: NpmDefaultInstaller) -> Self {
+        match value {
+            NpmDefaultInstaller::Npm => Self::Npm,
+            NpmDefaultInstaller::Pnpm => Self::Pnpm,
+        }
+    }
+}
+
 impl NpmInstaller {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::Aube => "aube",
             Self::Npm => "npm",
             Self::Pnpm => "pnpm",
         }
@@ -54,7 +63,6 @@ impl NpmInstaller {
     pub const fn executable(self) -> Option<&'static str> {
         match self {
             Self::Auto => None,
-            Self::Aube => Some("aube"),
             Self::Npm => Some("npm"),
             Self::Pnpm => Some("pnpm"),
         }
@@ -64,7 +72,6 @@ impl NpmInstaller {
     pub const fn lockfile_name(self) -> Option<&'static str> {
         match self {
             Self::Auto => None,
-            Self::Aube => Some("aube-lock.yaml"),
             Self::Npm => Some("package-lock.json"),
             Self::Pnpm => Some("pnpm-lock.yaml"),
         }
@@ -76,7 +83,6 @@ impl NpmInstaller {
     pub const fn lock_format(self) -> Option<&'static str> {
         match self {
             Self::Auto => None,
-            Self::Aube => Some("aube-v9"),
             Self::Npm => Some("package-lock-v3"),
             Self::Pnpm => Some("pnpm-v9"),
         }
@@ -99,7 +105,6 @@ impl FromStr for NpmInstaller {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "auto" => Ok(Self::Auto),
-            "aube" => Ok(Self::Aube),
             "npm" => Ok(Self::Npm),
             "pnpm" => Ok(Self::Pnpm),
             other => Err(Error::config(crate::t!(
@@ -154,7 +159,6 @@ impl FromStr for ToolScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NativeLockKind {
-    Aube,
     Pnpm,
     PackageLock,
     NpmShrinkwrap,
@@ -163,7 +167,6 @@ pub enum NativeLockKind {
 impl NativeLockKind {
     pub const fn installer(self) -> NpmInstaller {
         match self {
-            Self::Aube => NpmInstaller::Aube,
             Self::Pnpm => NpmInstaller::Pnpm,
             Self::PackageLock | Self::NpmShrinkwrap => NpmInstaller::Npm,
         }
@@ -171,7 +174,6 @@ impl NativeLockKind {
 
     pub const fn file_name(self) -> &'static str {
         match self {
-            Self::Aube => "aube-lock.yaml",
             Self::Pnpm => "pnpm-lock.yaml",
             Self::PackageLock => "package-lock.json",
             Self::NpmShrinkwrap => "npm-shrinkwrap.json",
@@ -180,7 +182,6 @@ impl NativeLockKind {
 
     const fn format_prefix(self) -> &'static str {
         match self {
-            Self::Aube => "aube-v",
             Self::Pnpm => "pnpm-v",
             Self::PackageLock => "package-lock-v",
             Self::NpmShrinkwrap => "npm-shrinkwrap-v",
@@ -203,7 +204,7 @@ pub struct NativeLock {
     pub version: u64,
     /// Stable format identity such as `pnpm-v9` or `package-lock-v2`.
     pub format: String,
-    /// Whether embedded Aube can safely read and round-trip this format.
+    /// Whether osdk can safely read and round-trip this format.
     pub supported: bool,
 }
 
@@ -306,26 +307,32 @@ pub fn inspect_npm_project(start_dir: &Path) -> Result<Option<NpmProject>> {
 }
 
 /// Select an installer without running it. Global tools deliberately ignore
-/// the current project. Project auto-selection uses declarations first, then
-/// lock compatibility; known unsupported npm/pnpm lock versions are delegated
-/// to their native owner.
+/// the current project.
+///
+/// Project auto-selection consults, in order, the project's declared
+/// `packageManager`, the installer that owns an incumbent lockfile, and finally
+/// `default_installer`. Because the configured default is only the last resort,
+/// changing it never takes a project away from the installer it already
+/// declares or already has a lockfile for.
 pub fn plan_npm_installer(
     start_dir: &Path,
     requested: NpmInstaller,
     scope: ToolScope,
+    default_installer: NpmDefaultInstaller,
 ) -> Result<NpmInstallPlan> {
+    let fallback = NpmInstaller::from(default_installer);
     if scope == ToolScope::Global {
         return Ok(NpmInstallPlan {
             scope,
             requested,
-            installer: concrete_or_aube(requested),
+            installer: concrete_or_default(requested, fallback),
             project: None,
         });
     }
 
     let project = inspect_npm_project(start_dir)?;
     let installer = match requested {
-        NpmInstaller::Auto => select_automatic_installer(project.as_ref())?,
+        NpmInstaller::Auto => select_automatic_installer(project.as_ref(), fallback)?,
         concrete => {
             validate_explicit_installer(concrete, project.as_ref())?;
             concrete
@@ -340,18 +347,23 @@ pub fn plan_npm_installer(
     })
 }
 
-fn concrete_or_aube(requested: NpmInstaller) -> NpmInstaller {
+fn concrete_or_default(requested: NpmInstaller, fallback: NpmInstaller) -> NpmInstaller {
     match requested {
-        NpmInstaller::Auto => NpmInstaller::Aube,
+        NpmInstaller::Auto => fallback,
         concrete => concrete,
     }
 }
 
-fn select_automatic_installer(project: Option<&NpmProject>) -> Result<NpmInstaller> {
+fn select_automatic_installer(
+    project: Option<&NpmProject>,
+    fallback: NpmInstaller,
+) -> Result<NpmInstaller> {
     let Some(project) = project else {
-        return Ok(NpmInstaller::Aube);
+        return Ok(fallback);
     };
 
+    // A declared package manager is authoritative: it is the project's own
+    // statement of which installer owns the tree.
     if let Some(declared) = &project.declared_manager {
         let declared_installer = declared_installer(declared)?;
         if let Some(native_lock) = &project.native_lock {
@@ -364,26 +376,20 @@ fn select_automatic_installer(project: Option<&NpmProject>) -> Result<NpmInstall
                     owner = native_lock.installer()
                 )));
             }
-            return if native_lock.supported {
-                Ok(NpmInstaller::Aube)
-            } else {
-                Ok(declared_installer)
-            };
         }
-        // With no incumbent lock there is nothing manager-specific to
-        // preserve, so the default remains the embedded Aube engine.
-        return Ok(NpmInstaller::Aube);
+        return Ok(declared_installer);
     }
 
+    // Otherwise an incumbent lockfile decides, so the installer that wrote it
+    // keeps owning it. With no signal at all, the configured default applies.
     match &project.native_lock {
-        Some(native_lock) if !native_lock.supported => Ok(native_lock.installer()),
-        Some(_) | None => Ok(NpmInstaller::Aube),
+        Some(native_lock) => Ok(native_lock.installer()),
+        None => Ok(fallback),
     }
 }
 
 fn declared_installer(declared: &PackageManagerRequest) -> Result<NpmInstaller> {
     match declared.manager.as_str() {
-        "aube" => Ok(NpmInstaller::Aube),
         "npm" => Ok(NpmInstaller::Npm),
         "pnpm" => Ok(NpmInstaller::Pnpm),
         other => Err(Error::config(crate::t!(
@@ -403,18 +409,6 @@ fn validate_explicit_installer(
         return Ok(());
     };
 
-    if requested == NpmInstaller::Aube {
-        if native_lock.supported {
-            return Ok(());
-        }
-        return Err(Error::config(crate::t!(
-            "err.npm_aube_lock_format_unsupported",
-            format = native_lock.format,
-            path = native_lock.path.display(),
-            owner = native_lock.installer()
-        )));
-    }
-
     if requested.is_native() && native_lock.installer() != requested {
         return Err(Error::config(crate::t!(
             "err.npm_installer_lock_conflict",
@@ -429,7 +423,6 @@ fn validate_explicit_installer(
 fn inspect_native_lock(project_root: &Path) -> Result<Option<NativeLock>> {
     let mut present = Vec::new();
     for kind in [
-        NativeLockKind::Aube,
         NativeLockKind::Pnpm,
         NativeLockKind::PackageLock,
         NativeLockKind::NpmShrinkwrap,
@@ -485,7 +478,7 @@ fn parse_native_lock(kind: NativeLockKind, path: PathBuf) -> Result<NativeLock> 
                     ))
                 })?
         }
-        NativeLockKind::Aube | NativeLockKind::Pnpm => {
+        NativeLockKind::Pnpm => {
             let value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
                 Error::config(crate::t!(
                     "err.npm_native_lock_parse",
@@ -509,18 +502,11 @@ fn parse_native_lock(kind: NativeLockKind, path: PathBuf) -> Result<NativeLock> 
     };
 
     let supported = match kind {
-        NativeLockKind::Aube | NativeLockKind::Pnpm => version == 9,
+        NativeLockKind::Pnpm => version == 9,
         NativeLockKind::PackageLock | NativeLockKind::NpmShrinkwrap => {
             matches!(version, 2 | 3)
         }
     };
-    if kind == NativeLockKind::Aube && !supported {
-        return Err(Error::config(crate::t!(
-            "err.npm_aube_lock_version_unsupported",
-            path = path.display(),
-            version = version
-        )));
-    }
 
     Ok(NativeLock {
         kind,
@@ -558,7 +544,6 @@ mod tests {
     fn installer_parse_display_and_serde_round_trip() {
         for (text, expected) in [
             ("auto", NpmInstaller::Auto),
-            ("aube", NpmInstaller::Aube),
             ("npm", NpmInstaller::Npm),
             ("pnpm", NpmInstaller::Pnpm),
         ] {
@@ -649,15 +634,15 @@ mod tests {
     }
 
     #[test]
-    fn package_manager_wins_over_dev_engines_while_auto_prefers_aube() {
+    fn package_manager_wins_over_dev_engines_and_auto_honors_the_declaration() {
         let temporary = tempfile::tempdir().unwrap();
         write_package(
             temporary.path(),
             r#"{"packageManager":"pnpm@9.15.0","devEngines":{"packageManager":{"name":"npm","version":"11.0.0"}}}"#,
         );
         let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project).unwrap();
-        assert_eq!(plan.installer, NpmInstaller::Aube);
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).unwrap();
+        assert_eq!(plan.installer, NpmInstaller::Pnpm);
         assert_eq!(
             plan.project.unwrap().declared_manager.unwrap().manager,
             "pnpm"
@@ -678,7 +663,6 @@ mod tests {
     #[test]
     fn detects_each_supported_native_lock_format() {
         let cases = [
-            (NativeLockKind::Aube, "lockfileVersion: '9.0'\n", "aube-v9"),
             (NativeLockKind::Pnpm, "lockfileVersion: 9.0\n", "pnpm-v9"),
             (
                 NativeLockKind::PackageLock,
@@ -728,25 +712,40 @@ mod tests {
     }
 
     #[test]
-    fn auto_uses_aube_for_supported_lock_and_native_owner_for_known_unsupported_lock() {
+    fn auto_lets_the_incumbent_lock_owner_keep_the_project() {
         let temporary = tempfile::tempdir().unwrap();
         write_package(temporary.path(), "{}");
         let lock = temporary.path().join("pnpm-lock.yaml");
-        std::fs::write(&lock, "lockfileVersion: '9.0'\n").unwrap();
-        assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project)
-                .unwrap()
-                .installer,
-            NpmInstaller::Aube
-        );
+        for version in ["9.0", "8.0"] {
+            std::fs::write(&lock, format!("lockfileVersion: '{version}'\n")).unwrap();
+            assert_eq!(
+                plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm)
+                    .unwrap()
+                    .installer,
+                NpmInstaller::Pnpm
+            );
+        }
+    }
 
-        std::fs::write(&lock, "lockfileVersion: '8.0'\n").unwrap();
+    #[test]
+    fn auto_defaults_to_npm_without_a_declaration_or_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        write_package(temporary.path(), "{}");
         assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project)
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm)
                 .unwrap()
                 .installer,
-            NpmInstaller::Pnpm
+            NpmInstaller::Npm
         );
+    }
+
+    #[test]
+    fn auto_defaults_to_npm_outside_a_project() {
+        let temporary = tempfile::tempdir().unwrap();
+        let plan =
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).unwrap();
+        assert_eq!(plan.installer, NpmInstaller::Npm);
+        assert!(plan.project.is_none());
     }
 
     #[test]
@@ -759,7 +758,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project).is_err()
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).is_err()
         );
     }
 
@@ -786,7 +785,7 @@ mod tests {
             );
             std::fs::write(temporary.path().join(file), contents).unwrap();
             assert_eq!(
-                plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project)
+                plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm)
                     .unwrap()
                     .installer,
                 expected
@@ -805,32 +804,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Npm, ToolScope::Project)
+            plan_npm_installer(temporary.path(), NpmInstaller::Npm, ToolScope::Project, NpmDefaultInstaller::Npm)
                 .unwrap()
                 .installer,
             NpmInstaller::Npm
         );
-        assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Aube, ToolScope::Project)
-                .unwrap()
-                .installer,
-            NpmInstaller::Aube
-        );
         assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Pnpm, ToolScope::Project).is_err()
+            plan_npm_installer(temporary.path(), NpmInstaller::Pnpm, ToolScope::Project, NpmDefaultInstaller::Npm).is_err()
         );
-    }
-
-    #[test]
-    fn malformed_or_unsupported_aube_locks_fail_without_fallback() {
-        let temporary = tempfile::tempdir().unwrap();
-        write_package(temporary.path(), "{}");
-        let lock = temporary.path().join("aube-lock.yaml");
-        std::fs::write(&lock, "importers: {}\n").unwrap();
-        assert!(inspect_npm_project(temporary.path()).is_err());
-
-        std::fs::write(&lock, "lockfileVersion: '8.0'\n").unwrap();
-        assert!(inspect_npm_project(temporary.path()).is_err());
     }
 
     #[test]
@@ -844,16 +825,12 @@ mod tests {
         .unwrap();
 
         let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project).unwrap();
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).unwrap();
         assert_eq!(plan.installer, NpmInstaller::Npm);
         let lock = plan.project.unwrap().native_lock.unwrap();
         assert!(!lock.supported);
         assert_eq!(lock.installer_name(), "npm");
         assert_eq!(lock.format, "package-lock-v4");
-
-        assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Aube, ToolScope::Project).is_err()
-        );
     }
 
     #[test]
@@ -862,14 +839,87 @@ mod tests {
         write_package(temporary.path(), r#"{"packageManager":"yarn@4.10.3"}"#);
 
         assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project).is_err()
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).is_err()
         );
         assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Aube, ToolScope::Project)
+            plan_npm_installer(temporary.path(), NpmInstaller::Npm, ToolScope::Project, NpmDefaultInstaller::Npm)
                 .unwrap()
                 .installer,
-            NpmInstaller::Aube
+            NpmInstaller::Npm
         );
+    }
+
+    #[test]
+    fn configured_default_installer_only_applies_as_the_last_resort() {
+        // No declaration and no lockfile: the configured default decides, both
+        // for a project and for a global install.
+        let bare = tempfile::tempdir().unwrap();
+        write_package(bare.path(), "{}");
+        for scope in [ToolScope::Project, ToolScope::Global] {
+            assert_eq!(
+                plan_npm_installer(
+                    bare.path(),
+                    NpmInstaller::Auto,
+                    scope,
+                    NpmDefaultInstaller::Pnpm
+                )
+                .unwrap()
+                .installer,
+                NpmInstaller::Pnpm,
+                "configured default ignored for {scope:?}"
+            );
+        }
+
+        // A declared packageManager outranks the configured default.
+        let declared = tempfile::tempdir().unwrap();
+        write_package(declared.path(), r#"{"packageManager":"npm@11.0.0"}"#);
+        assert_eq!(
+            plan_npm_installer(
+                declared.path(),
+                NpmInstaller::Auto,
+                ToolScope::Project,
+                NpmDefaultInstaller::Pnpm
+            )
+            .unwrap()
+            .installer,
+            NpmInstaller::Npm
+        );
+
+        // An incumbent lockfile also outranks the configured default, so
+        // flipping the setting cannot orphan an existing tree.
+        let incumbent = tempfile::tempdir().unwrap();
+        write_package(incumbent.path(), "{}");
+        std::fs::write(
+            incumbent.path().join("package-lock.json"),
+            r#"{"lockfileVersion":3}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plan_npm_installer(
+                incumbent.path(),
+                NpmInstaller::Auto,
+                ToolScope::Project,
+                NpmDefaultInstaller::Pnpm
+            )
+            .unwrap()
+            .installer,
+            NpmInstaller::Npm
+        );
+    }
+
+    #[test]
+    fn configured_default_installer_parses_only_concrete_installers() {
+        assert_eq!(
+            "npm".parse::<NpmDefaultInstaller>().unwrap(),
+            NpmDefaultInstaller::Npm
+        );
+        assert_eq!(
+            " PNPM ".parse::<NpmDefaultInstaller>().unwrap(),
+            NpmDefaultInstaller::Pnpm
+        );
+        // `auto` would make the fallback circular, and yarn is unsupported.
+        assert!("auto".parse::<NpmDefaultInstaller>().is_err());
+        assert!("yarn".parse::<NpmDefaultInstaller>().is_err());
     }
 
     #[test]
@@ -895,8 +945,8 @@ mod tests {
         std::fs::write(temporary.path().join("pnpm-lock.yaml"), "not yaml: [").unwrap();
 
         let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Global).unwrap();
-        assert_eq!(plan.installer, NpmInstaller::Aube);
+            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Global, NpmDefaultInstaller::Npm).unwrap();
+        assert_eq!(plan.installer, NpmInstaller::Npm);
         assert!(plan.project.is_none());
     }
 
@@ -908,7 +958,7 @@ mod tests {
         );
         assert_eq!(
             invalid_installer,
-            "无效的 npm 安装器 `yarn`（应为 auto|aube|npm|pnpm）"
+            "无效的 npm 安装器 `yarn`（应为 auto|npm|pnpm）"
         );
 
         let conflict = crate::i18n::interpolate(
