@@ -353,6 +353,16 @@ impl Dirs {
 
 const ENCODED_VERSION_PREFIX: &str = "~v1~";
 
+/// Cap on how many segments of a tool id become directories. Five keeps every
+/// namespaced id in use today expanded in full -- `github:owner/repo`,
+/// `npm:@scope/pkg`, and a `go:` import path -- while bounding ids built from a
+/// URL, whose segment count is set by the remote server rather than by us.
+const MAX_TOOL_ID_SEGMENTS: usize = 5;
+
+/// Marks a folded tail so a hashed component is never mistaken for a literal
+/// path segment that happens to look like hex.
+const FOLDED_TOOL_ID_PREFIX: &str = "~t1~";
+
 /// Encode a version label as one collision-resistant, portable filesystem
 /// component. Common lowercase semver labels remain readable. Other labels use
 /// a self-identifying prefix followed by percent-encoded UTF-8 bytes, avoiding
@@ -441,13 +451,36 @@ pub(crate) fn create_dir_all(p: &Path) -> Result<()> {
 /// Map a (possibly namespaced) tool id to a filesystem-safe nested path
 /// component. e.g. `github:owner/repo` -> `github/owner/repo`. `:` is replaced
 /// (invalid on Windows) and path traversal is neutralized.
+///
+/// Ids expand one segment per directory because that keeps the install tree
+/// readable and greppable, but an id derived from a URL has as many segments as
+/// the URL does, and the install root already spends three levels on the tool,
+/// the version and the install fingerprint. An `http:` artifact on a path like
+/// `/android/cli/{version}/windows_x86_64/android.exe` therefore landed eleven
+/// levels below the installs root, past the inventory scanner's depth limit:
+/// the install reported success and then every later use failed to find its own
+/// receipt. Deep ids keep their leading segments and fold the remainder into one
+/// digest, so the tree stays bounded without becoming opaque for the short ids
+/// that are the common case.
 pub fn sanitize_tool_id(tool: &str) -> PathBuf {
+    let parts: Vec<&str> = tool
+        .split([':', '/', '\\'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .collect();
     let mut out = PathBuf::new();
-    for part in tool.split([':', '/', '\\']) {
-        let part = part.trim();
-        if part.is_empty() || part == "." || part == ".." {
-            continue;
+    if parts.len() > MAX_TOOL_ID_SEGMENTS {
+        for part in &parts[..MAX_TOOL_ID_SEGMENTS - 1] {
+            out.push(part);
         }
+        // Hash the joined tail rather than each segment, so two ids that differ
+        // only in where a separator falls cannot collide.
+        let tail = parts[MAX_TOOL_ID_SEGMENTS - 1..].join("/");
+        let digest = blake3::hash(tail.as_bytes()).to_hex();
+        out.push(format!("{FOLDED_TOOL_ID_PREFIX}{}", &digest[..32]));
+        return out;
+    }
+    for part in parts {
         out.push(part);
     }
     if out.as_os_str().is_empty() {
@@ -491,6 +524,84 @@ mod tests {
         assert_eq!(d.store, PathBuf::from("/big/store"));
     }
 
+    #[test]
+    fn a_deep_tool_id_stays_within_the_inventory_scan_depth() {
+        // Regression: an `http:` id expands one directory per URL segment, and
+        // Google's Android CLI path pushed the receipt to depth 11 while the
+        // inventory scanner stops at 9. The install then succeeded and every
+        // later use reported a missing install identity, so the depth budget
+        // is a correctness property, not tidiness.
+        let deep = "http:https://dl.google.com/android/cli/{version}/windows_x86_64/android.exe";
+        let path = sanitize_tool_id(deep);
+        let segments = path.components().count();
+        assert!(
+            segments <= MAX_TOOL_ID_SEGMENTS,
+            "{segments} segments: {}",
+            path.display()
+        );
+        // installs + tool segments + version + install fingerprint must leave
+        // the receipt reachable by a scanner bounded at DEFAULT_MAX_DEPTH + 1.
+        assert!(segments + 3 <= 9, "receipt would sit below the scan depth");
+
+        // Short ids keep one directory per segment: the readable layout is the
+        // reason for expanding at all, so folding must not reach them.
+        for (id, expected) in [
+            ("node", "node"),
+            ("github:owner/repo", "github/owner/repo"),
+            ("npm:@scope/pkg", "npm/@scope/pkg"),
+        ] {
+            assert_eq!(
+                sanitize_tool_id(id),
+                PathBuf::from(expected.replace('/', std::path::MAIN_SEPARATOR_STR)),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn folding_a_tail_keeps_distinct_ids_distinct() {
+        // The fold must not merge two different tools into one directory, and
+        // hashing per segment would let a moved separator collide. Both of
+        // these differ only in the tail.
+        let a = sanitize_tool_id("http:https://host/a/b/c/d/e/one.exe");
+        let b = sanitize_tool_id("http:https://host/a/b/c/d/e/two.exe");
+        assert_ne!(a, b);
+
+        // Same characters, different separator placement.
+        let x = sanitize_tool_id("http:https://host/a/b/c/de/f");
+        let y = sanitize_tool_id("http:https://host/a/b/c/d/ef");
+        assert_ne!(x, y);
+
+        // A folded component is self-identifying and stays a single component.
+        let folded = sanitize_tool_id("http:https://host/a/b/c/d/e/f/g");
+        let last = folded
+            .components()
+            .next_back()
+            .unwrap()
+            .as_os_str()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(last.starts_with(FOLDED_TOOL_ID_PREFIX), "{last}");
+        assert!(!last.contains(std::path::MAIN_SEPARATOR), "{last}");
+
+        // Folding is deterministic across calls, or an install would be
+        // unreachable after a restart.
+        assert_eq!(sanitize_tool_id("http:https://host/a/b/c/d/e/f/g"), folded);
+    }
+
+    #[test]
+    fn a_folded_id_cannot_escape_the_installs_root() {
+        // Traversal segments are dropped before folding, so a crafted URL can
+        // neither climb out nor smuggle a separator through the digest.
+        let path = sanitize_tool_id("http:https://host/../../../a/b/c/d/e/f");
+        for component in path.components() {
+            let text = component.as_os_str().to_str().unwrap();
+            assert_ne!(text, "..", "{}", path.display());
+            assert_ne!(text, ".", "{}", path.display());
+        }
+        assert!(!path.is_absolute(), "{}", path.display());
+    }
     #[test]
     fn version_components_cannot_escape_install_root() {
         assert_eq!(sanitize_version_component("20.1.0"), "20.1.0");

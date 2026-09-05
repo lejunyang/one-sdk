@@ -156,6 +156,7 @@ ZIP symlink 也会被拒绝；发布前还会再次扫描物化后的安装，�
 - 只支持裸文件、`tar.gz`、`tar.xz` 与 ZIP；不支持 `tar.zst`、安装器或磁盘镜像。
 - 该 backend 只接受 SHA-256，且不能省略。
 - 所有安装都使用 osdk 的隔离 scope。
+- tool id 按段展开为目录，但只展开前五段；更长的 id 保留前四段，其余折叠为一个 `~t1~` 摘要。这样可以约束由 URL 派生的 id 的安装树深度（URL 有多少段由远端服务器决定），保证每个 receipt 都在 inventory 扫描范围内。
 
 解析、身份、redirect、缓存、解压和发布的实现细节见
 [HTTP 制品 backend 实现](./implementation/http-artifacts)。

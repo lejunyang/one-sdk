@@ -186,6 +186,7 @@ Artifact Attestations.
 - Only bare files, `tar.gz`, `tar.xz`, and ZIP archives are supported; `tar.zst`, installers, and disk images are not.
 - SHA-256 is the only integrity algorithm for this backend and cannot be omitted.
 - Every installation uses osdk's isolated scope.
+- A tool id is expanded one directory per segment, but only for its first five segments; a longer id keeps the leading four and folds the rest into a `~t1~` digest. This bounds the install tree for ids derived from a URL, whose segment count is chosen by the remote server, and keeps each receipt reachable by the inventory scanner.
 
 For the parser, identity, redirect, cache, extraction, and publication details,
 read [HTTP artifact backend internals](./implementation/http-artifacts).
