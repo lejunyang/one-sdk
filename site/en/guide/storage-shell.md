@@ -124,7 +124,11 @@ root, and legacy `.osdk-tool.json` state is never executable.
 Each shim resolves the version for the current directory at execution time, so
 project pins also work in IDEs, CI, and processes without a prompt hook. Shims
 avoid recursively invoking themselves. On Windows, `.cmd`/`.bat` targets run via
-`%ComSpec% /D /S /C call` to preserve arguments, standard I/O, and status.
+`%ComSpec% /D /S /C call` to preserve arguments, standard I/O, and status. The
+generated `.cmd` wrapper writes the install path in the system OEM code page so a
+console-less cmd that falls back to the OEM code page can still reach a non-ASCII
+install path; characters the OEM code page cannot express fall back to a
+`chcp 65001` line before the quoted path and UTF-8 bytes.
 
 Shell activation syntax is:
 

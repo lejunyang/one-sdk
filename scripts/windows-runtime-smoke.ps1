@@ -181,6 +181,15 @@ try {
     $env:PATH = [Environment]::GetEnvironmentVariable("PATH", "Machine")
     $env:OSDK_OFFLINE = "true"
     Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+    # Drop shell-activation bookkeeping inherited from the caller so the
+    # activation/deactivation stage starts clean even when this runs inside an
+    # already osdk-activated parent shell.
+    Get-ChildItem Env: |
+        Where-Object {
+            $_.Name -like 'OSDK_ORIG_*' -or
+            $_.Name -in @('OSDK_ORIGINAL_PATH', 'OSDK_ORIGINAL_PATH_SET', 'OSDK_MANAGED_ENV')
+        } |
+        ForEach-Object { Remove-Item ("Env:" + $_.Name) }
 
     Invoke-Stage "prepare isolated fixtures" {
         New-Item -ItemType Directory -Force -Path $programDir, $project, $runtime | Out-Null
@@ -237,14 +246,34 @@ exit /b 23
             $stderr = Join-Path $root "cmd.stderr"
             $cmdLine = '""{0}" "first arg" "second arg" < "{1}" > "{2}" 2> "{3}""' -f `
                 $shimCmd, $inputPath, $stdout, $stderr
-            & $env:ComSpec /D /S /C $cmdLine
-            $exitCode = $LASTEXITCODE
+            # cmd.exe parses the raw tail after /C itself. Pass that tail as one
+            # raw ProcessStartInfo.Arguments string: PowerShell's `&` invocation
+            # would re-quote the embedded quotes and split on the spaces in these
+            # Chinese/space fixture paths.
+            $cmdStart = [System.Diagnostics.ProcessStartInfo]::new()
+            $cmdStart.FileName = $env:ComSpec
+            $cmdStart.Arguments = "/D /S /C $cmdLine"
+            $cmdStart.WorkingDirectory = $project
+            $cmdStart.UseShellExecute = $false
+            $cmdStart.CreateNoWindow = $true
+            $cmdProcess = [System.Diagnostics.Process]::Start($cmdStart)
+            if (-not $cmdProcess.WaitForExit(30000)) {
+                $cmdProcess.Kill($true)
+                throw "cmd.exe shim contract did not exit within 30s"
+            }
+            $exitCode = $cmdProcess.ExitCode
+            $cmdProcess.Dispose()
             Assert-ContractOutput "cmd.exe" $exitCode $stdout $stderr
         }
 
         Invoke-Stage "Git Bash shim contract" {
             $bashCommandInfo = Get-Command bash.exe -ErrorAction SilentlyContinue
-            $bashPath = if ($bashCommandInfo) {
+            # This stage exercises Git for Windows' MSYS bash (it understands
+            # C:/ paths and the extension-less sh wrapper). On machines where the
+            # WSL/Store bash stub shadows Git under System32 or WindowsApps, fall
+            # back to the installed Git Bash instead of driving WSL.
+            $bashPath = if ($bashCommandInfo -and
+                $bashCommandInfo.Source -notmatch '[\\/](System32|SysWOW64|WindowsApps)[\\/]') {
                 $bashCommandInfo.Source
             } else {
                 Join-Path $env:ProgramFiles "Git\bin\bash.exe"
@@ -268,8 +297,18 @@ exit /b 23
             $activation = (& $osdk activate powershell | Out-String)
             Assert-True ($LASTEXITCODE -eq 0) "PowerShell activation rendering failed"
             Invoke-Expression $activation
-            Assert-True ($env:PATH.StartsWith($runtime, [StringComparison]::OrdinalIgnoreCase)) `
-                "PowerShell activation did not prepend the managed runtime"
+            # Activation deliberately routes through the generated shims first
+            # (see prioritize_managed_paths): the shims directory leads PATH and
+            # the selected runtime's bin directory follows it, ahead of the
+            # inherited PATH. Assert both instead of the raw install directory.
+            $shimsDir = Join-Path $data "shims"
+            Assert-True ($env:PATH.StartsWith($shimsDir, [StringComparison]::OrdinalIgnoreCase)) `
+                "PowerShell activation did not prepend the managed shims directory"
+            Assert-True ($env:PATH.Contains($runtime, [StringComparison]::OrdinalIgnoreCase)) `
+                "PowerShell activation did not expose the selected runtime on PATH"
+            Assert-True ($env:PATH.IndexOf($runtime, [StringComparison]::OrdinalIgnoreCase) -lt `
+                $env:PATH.IndexOf($originalPath, [StringComparison]::Ordinal)) `
+                "PowerShell activation did not place the runtime ahead of the inherited PATH"
             Assert-True ($null -ne $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction) `
                 "PowerShell activation hook was not installed"
             $deactivation = (& $osdk deactivate powershell | Out-String)

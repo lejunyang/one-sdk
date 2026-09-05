@@ -514,7 +514,7 @@ fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()
     create_dir_all(shims)?;
     // .cmd wrapper for cmd.exe / PowerShell
     let cmd_path = shims.join(format!("{name}.cmd"));
-    let cmd = format!("@echo off\r\n\"{}\" %~n0 %*\r\n", osdk_shim_bin.display());
+    let cmd = windows_cmd_wrapper_bytes(osdk_shim_bin);
     std::fs::write(&cmd_path, cmd).map_err(|e| Error::io(&cmd_path, e))?;
 
     // extension-less bash wrapper for Git-Bash / MSYS
@@ -525,6 +525,108 @@ fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()
     );
     std::fs::write(&sh_path, sh).map_err(|e| Error::io(&sh_path, e))?;
     Ok(())
+}
+
+/// Serialize the Windows `.cmd` wrapper so cmd.exe can resolve the shim binary
+/// regardless of its active code page.
+///
+/// cmd.exe decodes a batch file with its active console code page; when the
+/// process has no console (a service, redirected CI output, `CreateNoWindow`),
+/// that falls back to the system OEM code page. Writing the wrapper as UTF-8
+/// therefore breaks as soon as the install path contains characters outside
+/// that code page — for example a non-ASCII user name on a localized Windows.
+/// Encode the quoted path in the OEM code page when it is fully representable
+/// (the common case, with no console side effects); otherwise switch cmd to
+/// UTF-8 with `chcp 65001` before the quoted line and keep UTF-8 bytes.
+#[cfg(windows)]
+fn windows_cmd_wrapper_bytes(osdk_shim_bin: &Path) -> Vec<u8> {
+    let path = osdk_shim_bin.display().to_string();
+    cmd_wrapper_bytes_for_oem(&path, encode_system_oem(&path))
+}
+
+#[cfg(windows)]
+fn cmd_wrapper_bytes_for_oem(path: &str, oem: Option<Vec<u8>>) -> Vec<u8> {
+    const HEADER: &[u8] = b"@echo off\r\n";
+    const TAIL: &[u8] = b"\" %~n0 %*\r\n";
+    // ASCII paths are identical in every OEM code page and need no chcp.
+    if path.is_ascii() {
+        let mut out = Vec::with_capacity(HEADER.len() + 1 + path.len() + TAIL.len());
+        out.extend_from_slice(HEADER);
+        out.push(b'"');
+        out.extend_from_slice(path.as_bytes());
+        out.extend_from_slice(TAIL);
+        return out;
+    }
+    match oem {
+        // The whole path round-trips through the OEM code page: emit it encoded
+        // that way so a default-codepage cmd.exe decodes it correctly.
+        Some(oem_path) => {
+            let mut out = Vec::with_capacity(HEADER.len() + 1 + oem_path.len() + TAIL.len());
+            out.extend_from_slice(HEADER);
+            out.push(b'"');
+            out.extend_from_slice(&oem_path);
+            out.extend_from_slice(TAIL);
+            out
+        }
+        // Characters the OEM code page cannot express: switch cmd to UTF-8
+        // before parsing the quoted path. `chcp` is ASCII and parses under any
+        // code page; `>nul` suppresses its banner.
+        None => {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"@echo off\r\nchcp 65001>nul\r\n");
+            out.push(b'"');
+            out.extend_from_slice(path.as_bytes());
+            out.extend_from_slice(TAIL);
+            out
+        }
+    }
+}
+
+/// Encode `text` in the system OEM code page (CP_OEMCP). Returns None when any
+/// character cannot be represented, so the caller can fall back to UTF-8.
+#[cfg(windows)]
+fn encode_system_oem(text: &str) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Foundation::BOOL;
+    use windows_sys::Win32::Globalization::WideCharToMultiByte;
+    const CP_OEMCP: u32 = 1;
+    if text.is_ascii() {
+        return Some(text.as_bytes().to_vec());
+    }
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let needed = WideCharToMultiByte(
+            CP_OEMCP,
+            0,
+            wide.as_ptr(),
+            wide.len() as i32,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+        if needed <= 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        let mut used_default: BOOL = 0;
+        let written = WideCharToMultiByte(
+            CP_OEMCP,
+            0,
+            wide.as_ptr(),
+            wide.len() as i32,
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            std::ptr::null(),
+            &mut used_default,
+        );
+        // used_default != 0 means at least one character was replaced by the
+        // codepage default char, i.e. the path is lossy in this OEM codepage.
+        if written <= 0 || written as usize > buffer.len() || used_default != 0 {
+            return None;
+        }
+        buffer.truncate(written as usize);
+        Some(buffer)
+    }
 }
 
 /// Remove a shim by name (all its platform variants).
@@ -573,21 +675,34 @@ fn remove_managed_shim_path(path: &Path) -> Result<bool> {
 
 #[cfg(windows)]
 fn remove_managed_shim_path(path: &Path) -> Result<bool> {
-    let contents = match std::fs::read_to_string(path) {
+    // Read bytes rather than a UTF-8 String: the .cmd wrapper encodes its
+    // install path in the system OEM code page (or UTF-8 behind `chcp 65001`),
+    // which is not always valid UTF-8. Only the ASCII template markers matter.
+    let contents = match std::fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(Error::io(path, error)),
     };
-    let lower = contents.to_ascii_lowercase();
+    let lower: Vec<u8> = contents
+        .iter()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect();
     let generated_cmd =
-        lower.starts_with("@echo off\r\n\"") && lower.contains("osdk-shim.exe\" %~n0 %*");
-    let generated_shell = lower.starts_with("#!/bin/sh\nexec \"")
-        && lower.contains("osdk-shim.exe\" \"$(basename \"$0\")\" \"$@\"");
+        lower.starts_with(b"@echo off\r\n") && contains_bytes(&lower, b"osdk-shim.exe\" %~n0 %*");
+    let generated_shell = lower.starts_with(b"#!/bin/sh\nexec \"")
+        && contains_bytes(&lower, b"osdk-shim.exe\" \"$(basename \"$0\")\" \"$@\"");
     if !generated_cmd && !generated_shell {
         return Ok(false);
     }
     std::fs::remove_file(path).map_err(|error| Error::io(path, error))?;
     Ok(true)
+}
+
+#[cfg(windows)]
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// Locate the installed `osdk-shim` binary. It is expected to sit next to the
@@ -1528,6 +1643,81 @@ mod tests {
             std::fs::read(dirs.shims().join("npx")).unwrap(),
             b"user-owned"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ascii_cmd_wrapper_needs_no_codepage_switch() {
+        use super::*;
+        let bytes = cmd_wrapper_bytes_for_oem(
+            r"C:\tools\osdk-shim.exe",
+            Some(br"C:\tools\osdk-shim.exe".to_vec()),
+        );
+        assert_eq!(
+            bytes,
+            b"@echo off\r\n\"C:\\tools\\osdk-shim.exe\" %~n0 %*\r\n"
+        );
+        assert!(!bytes.windows(4).any(|window| window == b"chcp"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn oem_representable_path_is_encoded_without_chcp() {
+        use super::*;
+        // Injected OEM bytes stand in for a localized code page encoding of a
+        // non-ASCII path: they must be embedded verbatim with no chcp line.
+        let oem = vec![0x80u8, 0x81];
+        let bytes = cmd_wrapper_bytes_for_oem("中文\\osdk-shim.exe", Some(oem.clone()));
+        let mut expected = b"@echo off\r\n\"".to_vec();
+        expected.extend_from_slice(&oem);
+        expected.extend_from_slice(b"\" %~n0 %*\r\n");
+        assert_eq!(bytes, expected);
+        assert!(!bytes.windows(4).any(|window| window == b"chcp"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_representable_path_falls_back_to_utf8_and_chcp() {
+        use super::*;
+        let path = "中文\\osdk-shim.exe";
+        let bytes = cmd_wrapper_bytes_for_oem(path, None);
+        let mut expected = b"@echo off\r\nchcp 65001>nul\r\n\"".to_vec();
+        expected.extend_from_slice(path.as_bytes());
+        expected.extend_from_slice(b"\" %~n0 %*\r\n");
+        assert_eq!(bytes, expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn oem_encoding_is_lossless_for_ascii() {
+        use super::*;
+        assert_eq!(
+            encode_system_oem(r"C:\x\osdk-shim.exe").unwrap(),
+            br"C:\x\osdk-shim.exe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generated_cmd_wrapper_roundtrips_cleanup_with_a_non_ascii_dir() {
+        use super::*;
+        let td = tempfile::tempdir().unwrap();
+        // A non-ASCII program directory, as a localized install path would be.
+        let program = td.path().join("程序");
+        std::fs::create_dir_all(&program).unwrap();
+        let shim_exe = program.join("osdk-shim.exe");
+        std::fs::write(&shim_exe, b"bin").unwrap();
+        let shims = td.path().join("shims");
+        generate_shim_in(&shims, "node", &shim_exe).unwrap();
+        let wrapper = shims.join("node.cmd");
+        let raw = std::fs::read(&wrapper).unwrap();
+        assert!(raw.starts_with(b"@echo off\r\n"));
+        let tail = b"osdk-shim.exe\" %~n0 %*";
+        assert!(raw.windows(tail.len()).any(|window| window == tail));
+        // Cleanup must recognize the OEM/UTF-8 wrapper as osdk-managed even
+        // though its path bytes are not UTF-8 (or sit behind `chcp 65001`).
+        assert!(remove_managed_shim_path(&wrapper).unwrap());
+        assert!(!wrapper.exists());
     }
 
     #[cfg(unix)]

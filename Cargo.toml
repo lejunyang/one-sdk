@@ -76,6 +76,9 @@ windows-sys = { version = "0.59", features = [
     # directory junctions that expose Android packages in one SDK root.
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    # WideCharToMultiByte, used to encode Windows .cmd shims in the system OEM
+    # codepage so cmd.exe can reach an install path that is not ASCII.
+    "Win32_Globalization",
 ] }
 libc = "0.2"
 # versions
