@@ -33,7 +33,7 @@ cargo install osdk-cli --locked
 
 ## 二进制体积
 
-用户下载到的就是这两个可执行文件，所以发布 profile 是按体积而非按峰值速度调的。当前 `osdk` 约 9.3 MB，`osdk-shim` 约 3.2 MB。
+用户下载到的就是这两个可执行文件，所以发布 profile 是按体积而非按峰值速度调的。当前 `osdk` 约 8.9 MB，`osdk-shim` 约 3.5 MB。
 
 达到这个结果的配置，以及在本仓库实测到的数据：
 

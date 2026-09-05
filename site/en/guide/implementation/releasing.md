@@ -41,8 +41,8 @@ both same-version programs in one directory.
 ## Binary size
 
 What users download is these two executables, so the release profile is tuned
-for size rather than for raw speed. Current sizes are roughly 9.3 MB for `osdk`
-and 3.2 MB for `osdk-shim`.
+for size rather than for raw speed. Current sizes are roughly 8.9 MB for `osdk`
+and 3.5 MB for `osdk-shim`.
 
 The settings that get there, measured on this workspace:
 

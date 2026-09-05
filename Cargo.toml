@@ -22,7 +22,11 @@ clap_complete = "4"
 # async runtime + http
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "sync"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "json", "http2"] }
+# `rustls` replaces 0.12's `rustls-tls`. It verifies against the platform trust
+# store rather than a bundled copy of the webpki roots, which 0.13 removed: an
+# OS-managed store picks up enterprise CAs and revocations without a release of
+# ours, at the cost of depending on the host being correctly provisioned.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "gzip", "json", "http2"] }
 futures-util = "0.3"
 # serde / config
 serde = { version = "1", features = ["derive"] }

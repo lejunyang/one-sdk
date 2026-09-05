@@ -205,6 +205,23 @@ repository claim. The proof API fetches at most 30 entries per request. Bundle
 URLs and redirects must be HTTPS; compressed input and expanded JSON are each
 limited to 8 MiB.
 
+### TLS certificate verification
+
+TLS certificates are verified against the operating system trust store: the
+Windows certificate store, Keychain on macOS, and the usual OpenSSL locations on
+Linux. osdk does not carry its own copy of the root certificates.
+
+The practical consequence is that certificate trust follows the machine. A
+corporate CA installed system-wide, or a revoked root removed by an OS update, is
+picked up without waiting for an osdk release, which is what makes osdk usable
+behind a TLS-inspecting proxy. In exchange osdk depends on the host being
+provisioned: a minimal container image with no `ca-certificates` package will
+fail every HTTPS download until root certificates are installed.
+
+Verification cannot be turned off. Downloads from an untrusted, expired,
+self-signed, or wrong-host certificate fail before any bytes are written, and the
+error names the specific reason.
+
 ## Arbitrary GitHub Release tools
 
 ```text
