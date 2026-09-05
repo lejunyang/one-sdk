@@ -2649,7 +2649,10 @@ lockfile = "lockfileVersion: '9.0'"
         ] {
             let text = valid_schema_three_npm_lock()
                 .replace("kind = \"npm\"", &format!("kind = \"{kind}\""))
-                .replace("format = \"package-lock-v3\"", &format!("format = \"{format}\""));
+                .replace(
+                    "format = \"package-lock-v3\"",
+                    &format!("format = \"{format}\""),
+                );
             std::fs::write(&path, text).unwrap();
             let error = load(&path).unwrap_err().to_string();
             assert!(

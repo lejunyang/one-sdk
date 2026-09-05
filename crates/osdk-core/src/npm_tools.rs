@@ -640,8 +640,13 @@ mod tests {
             temporary.path(),
             r#"{"packageManager":"pnpm@9.15.0","devEngines":{"packageManager":{"name":"npm","version":"11.0.0"}}}"#,
         );
-        let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).unwrap();
+        let plan = plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Auto,
+            ToolScope::Project,
+            NpmDefaultInstaller::Npm,
+        )
+        .unwrap();
         assert_eq!(plan.installer, NpmInstaller::Pnpm);
         assert_eq!(
             plan.project.unwrap().declared_manager.unwrap().manager,
@@ -719,9 +724,14 @@ mod tests {
         for version in ["9.0", "8.0"] {
             std::fs::write(&lock, format!("lockfileVersion: '{version}'\n")).unwrap();
             assert_eq!(
-                plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm)
-                    .unwrap()
-                    .installer,
+                plan_npm_installer(
+                    temporary.path(),
+                    NpmInstaller::Auto,
+                    ToolScope::Project,
+                    NpmDefaultInstaller::Npm
+                )
+                .unwrap()
+                .installer,
                 NpmInstaller::Pnpm
             );
         }
@@ -732,9 +742,14 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         write_package(temporary.path(), "{}");
         assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm)
-                .unwrap()
-                .installer,
+            plan_npm_installer(
+                temporary.path(),
+                NpmInstaller::Auto,
+                ToolScope::Project,
+                NpmDefaultInstaller::Npm
+            )
+            .unwrap()
+            .installer,
             NpmInstaller::Npm
         );
     }
@@ -742,8 +757,13 @@ mod tests {
     #[test]
     fn auto_defaults_to_npm_outside_a_project() {
         let temporary = tempfile::tempdir().unwrap();
-        let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).unwrap();
+        let plan = plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Auto,
+            ToolScope::Project,
+            NpmDefaultInstaller::Npm,
+        )
+        .unwrap();
         assert_eq!(plan.installer, NpmInstaller::Npm);
         assert!(plan.project.is_none());
     }
@@ -757,9 +777,13 @@ mod tests {
             "lockfileVersion: '9.0'\n",
         )
         .unwrap();
-        assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).is_err()
-        );
+        assert!(plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Auto,
+            ToolScope::Project,
+            NpmDefaultInstaller::Npm
+        )
+        .is_err());
     }
 
     #[test]
@@ -785,9 +809,14 @@ mod tests {
             );
             std::fs::write(temporary.path().join(file), contents).unwrap();
             assert_eq!(
-                plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm)
-                    .unwrap()
-                    .installer,
+                plan_npm_installer(
+                    temporary.path(),
+                    NpmInstaller::Auto,
+                    ToolScope::Project,
+                    NpmDefaultInstaller::Npm
+                )
+                .unwrap()
+                .installer,
                 expected
             );
         }
@@ -804,14 +833,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Npm, ToolScope::Project, NpmDefaultInstaller::Npm)
-                .unwrap()
-                .installer,
+            plan_npm_installer(
+                temporary.path(),
+                NpmInstaller::Npm,
+                ToolScope::Project,
+                NpmDefaultInstaller::Npm
+            )
+            .unwrap()
+            .installer,
             NpmInstaller::Npm
         );
-        assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Pnpm, ToolScope::Project, NpmDefaultInstaller::Npm).is_err()
-        );
+        assert!(plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Pnpm,
+            ToolScope::Project,
+            NpmDefaultInstaller::Npm
+        )
+        .is_err());
     }
 
     #[test]
@@ -824,8 +862,13 @@ mod tests {
         )
         .unwrap();
 
-        let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).unwrap();
+        let plan = plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Auto,
+            ToolScope::Project,
+            NpmDefaultInstaller::Npm,
+        )
+        .unwrap();
         assert_eq!(plan.installer, NpmInstaller::Npm);
         let lock = plan.project.unwrap().native_lock.unwrap();
         assert!(!lock.supported);
@@ -838,13 +881,22 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         write_package(temporary.path(), r#"{"packageManager":"yarn@4.10.3"}"#);
 
-        assert!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Project, NpmDefaultInstaller::Npm).is_err()
-        );
+        assert!(plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Auto,
+            ToolScope::Project,
+            NpmDefaultInstaller::Npm
+        )
+        .is_err());
         assert_eq!(
-            plan_npm_installer(temporary.path(), NpmInstaller::Npm, ToolScope::Project, NpmDefaultInstaller::Npm)
-                .unwrap()
-                .installer,
+            plan_npm_installer(
+                temporary.path(),
+                NpmInstaller::Npm,
+                ToolScope::Project,
+                NpmDefaultInstaller::Npm
+            )
+            .unwrap()
+            .installer,
             NpmInstaller::Npm
         );
     }
@@ -944,8 +996,13 @@ mod tests {
         write_package(temporary.path(), "not json");
         std::fs::write(temporary.path().join("pnpm-lock.yaml"), "not yaml: [").unwrap();
 
-        let plan =
-            plan_npm_installer(temporary.path(), NpmInstaller::Auto, ToolScope::Global, NpmDefaultInstaller::Npm).unwrap();
+        let plan = plan_npm_installer(
+            temporary.path(),
+            NpmInstaller::Auto,
+            ToolScope::Global,
+            NpmDefaultInstaller::Npm,
+        )
+        .unwrap();
         assert_eq!(plan.installer, NpmInstaller::Npm);
         assert!(plan.project.is_none());
     }

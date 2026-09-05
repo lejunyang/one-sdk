@@ -2098,9 +2098,10 @@ fn npm_graph_identity(
     // `""`, which is deliberately not what is wanted here: the tool itself is a
     // dependency of the synthetic project.
     let package_key = format!("node_modules/{package}");
-    let root = lockfile.packages.get(&package_key).ok_or_else(|| {
-        Error::other(crate::t!("err.npm_graph_root_missing", package = package))
-    })?;
+    let root = lockfile
+        .packages
+        .get(&package_key)
+        .ok_or_else(|| Error::other(crate::t!("err.npm_graph_root_missing", package = package)))?;
     let locked_version = root.version.as_deref().unwrap_or_default();
     if locked_version != version {
         return Err(Error::other(crate::t!(
@@ -4679,10 +4680,8 @@ scope = "project"
         );
         tool.options
             .insert(LOCKED_NPM_PACKAGE_OPTION.into(), package.into());
-        tool.options.insert(
-            LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
-            NPM_LOCK_FORMAT.into(),
-        );
+        tool.options
+            .insert(LOCKED_NPM_LOCK_FORMAT_OPTION.into(), NPM_LOCK_FORMAT.into());
         tool.options.insert(
             LOCKED_NPM_LOCK_SHA256_OPTION.into(),
             pipeline::verify::hash_bytes(lockfile.as_bytes(), pipeline::HashAlgo::Sha256),
@@ -5073,10 +5072,9 @@ scope = "project"
             .insert(LOCKED_NPM_PACKAGE_OPTION.into(), "prettier".into());
         assert!(backend.locked_graph(&partial).unwrap().is_none());
 
-        partial.options.insert(
-            LOCKED_NPM_LOCK_FORMAT_OPTION.into(),
-            NPM_LOCK_FORMAT.into(),
-        );
+        partial
+            .options
+            .insert(LOCKED_NPM_LOCK_FORMAT_OPTION.into(), NPM_LOCK_FORMAT.into());
         assert!(backend
             .locked_graph(&partial)
             .unwrap_err()

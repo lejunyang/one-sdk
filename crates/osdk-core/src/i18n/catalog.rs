@@ -1498,10 +1498,7 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     );
     m.insert(
         "err.npm_native_install_spawn_failed",
-        (
-            "could not run `{command}`",
-            "无法执行 `{command}`",
-        ),
+        ("could not run `{command}`", "无法执行 `{command}`"),
     );
     m.insert(
         "err.package_manager_manifest_read",

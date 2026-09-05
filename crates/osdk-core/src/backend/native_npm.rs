@@ -134,7 +134,10 @@ fn npm_env(request: &NativeNpmInstall<'_>) -> Result<BTreeMap<String, String>> {
         "NPM_CONFIG_GLOBALCONFIG".to_string(),
         user_config.display().to_string(),
     );
-    env.insert("NPM_CONFIG_UPDATE_NOTIFIER".to_string(), "false".to_string());
+    env.insert(
+        "NPM_CONFIG_UPDATE_NOTIFIER".to_string(),
+        "false".to_string(),
+    );
     env.insert("NO_UPDATE_NOTIFIER".to_string(), "1".to_string());
     // npm shells out for lifecycle scripts and git dependencies; on Windows a
     // child process without these cannot resolve system libraries at all.
@@ -222,11 +225,12 @@ fn run_npm(request: &NativeNpmInstall<'_>, args: &[String]) -> Result<()> {
         .args(full_args.iter().map(std::ffi::OsString::from))
         .current_dir(request.project_dir)
         .clear_env()
-        .envs(
-            npm_env(request)?
-                .into_iter()
-                .map(|(key, value)| (std::ffi::OsString::from(key), std::ffi::OsString::from(value))),
-        );
+        .envs(npm_env(request)?.into_iter().map(|(key, value)| {
+            (
+                std::ffi::OsString::from(key),
+                std::ffi::OsString::from(value),
+            )
+        }));
     let limits = CaptureLimits::new(NPM_TIMEOUT, NPM_STDOUT_LIMIT, NPM_STDERR_LIMIT);
     let outcome = SystemCommandRunner.run_captured(&command, limits);
     interpret(&program, args, outcome)
