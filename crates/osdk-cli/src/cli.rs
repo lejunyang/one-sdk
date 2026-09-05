@@ -297,6 +297,13 @@ pub enum Command {
         /// default diagnostics.
         #[arg(long)]
         verify: bool,
+        /// Limit `--verify` to one tool, e.g. `--tool node`.
+        ///
+        /// Verification is bound by disk read speed, so a full pass over large
+        /// SDKs takes minutes. Naming the tool you actually suspect keeps the
+        /// check usable.
+        #[arg(long, value_name = "TOOL", requires = "verify")]
+        tool: Option<String>,
     },
 }
 

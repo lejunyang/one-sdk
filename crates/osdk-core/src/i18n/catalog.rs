@@ -1234,6 +1234,11 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         "doctor.verify_title",
         ("  verifying installed files", "  正在校验已安装文件"),
     );
+    m.insert("doctor.verify_item_ok", ("ok", "正常"));
+    m.insert(
+        "doctor.verify_item_drift",
+        ("{count} changed", "{count} 处变化"),
+    );
     m.insert(
         "doctor.verify_drifted",
         (

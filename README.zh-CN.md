@@ -543,7 +543,7 @@ osdk --yes prune
 ## 场景：某个工具自己更新过，已与安装时不一致
 
 ```bash
-osdk doctor --verify
+osdk doctor --verify --tool node
 osdk install --force node@20.11.1
 ```
 

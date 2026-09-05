@@ -605,7 +605,7 @@ Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
 ## Scenario: a tool updated itself and no longer matches
 
 ```bash
-osdk doctor --verify
+osdk doctor --verify --tool node
 osdk install --force node@20.11.1
 ```
 

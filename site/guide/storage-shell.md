@@ -197,6 +197,7 @@ osdk completions fish > ~/.config/fish/completions/osdk.fish
 ```text
 osdk doctor
 osdk doctor --verify
+osdk doctor --verify --tool TOOL
 osdk config path
 osdk config list
 osdk source list TOOL
@@ -207,6 +208,7 @@ osdk registry test [MANAGER]
 | --- | --- |
 | `doctor` | 平台、data/store/install 目录、store 与 install 是否同文件系统、shim 路径及是否在 PATH、backend ID |
 | `doctor --verify` | 以上全部，并重新哈希每个已安装文件，指出不再匹配的部分 |
+| `doctor --verify --tool` | 同样的检查但只针对单个工具；完整校验会读取每个字节，耗时数分钟 |
 | `config path` | 配置目录、用户配置文件、当前项目配置 |
 | `config list` | 部分最终设置与目录、registry、模型环境、tools、aliases |
 | `source list` | 某 backend/provider 的来源与 pin；`doctor` 不列镜像 |
@@ -244,6 +246,16 @@ osdk doctor --verify
 
 这会读取每个文件，因此需要显式开启。普通 `osdk doctor` 仍是快速的环境检查，执行路径上也不做任何
 哈希——运行工具的速度不受影响。
+
+开销来自磁盘读取速度，而不是哈希计算。对 11.6 GB、32,463 个文件的完整校验实测约 4.5 分钟，
+主要耗在两个 NDK 和一个系统镜像上。指定你实际怀疑的工具即可保持可用：
+
+```text
+osdk doctor --verify --tool node
+```
+
+同样的检查用时不到 1 秒。`--tool` 必须与 `--verify` 一起使用，未知的名字会被拒绝，而不是
+静默地什么都不检查。
 
 ### 修复发生漂移的安装
 

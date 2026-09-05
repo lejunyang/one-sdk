@@ -141,7 +141,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Cache { command } => commands::cache(app, command),
         Command::Container { command } => return container::run(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),
-        Command::Doctor { verify } => commands::doctor(app, verify),
+        Command::Doctor { verify, tool } => commands::doctor(app, verify, tool),
     };
     result.map(|()| None)
 }

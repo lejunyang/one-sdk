@@ -5322,7 +5322,7 @@ pub fn prune(app: &App, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn doctor(app: &App, verify: bool) -> Result<()> {
+pub fn doctor(app: &App, verify: bool, tool: Option<String>) -> Result<()> {
     use osdk_core::store::link::same_filesystem;
     println!("{}", t!("doctor.title"));
     println!("  platform     : {}", app.ctx.platform);
@@ -5350,7 +5350,7 @@ pub fn doctor(app: &App, verify: bool) -> Result<()> {
     );
     println!("  backends     : {}", app.registry.ids().join(", "));
     if verify {
-        doctor_verify(app)?;
+        doctor_verify(app, tool.as_deref())?;
     }
     Ok(())
 }
@@ -5362,7 +5362,7 @@ pub fn doctor(app: &App, verify: bool) -> Result<()> {
 /// half-restored backup left osdk reporting the version it installed while a
 /// different one actually ran. Reads every file, so it sits behind
 /// `--verify` rather than in the default diagnostics.
-fn doctor_verify(app: &App) -> Result<()> {
+fn doctor_verify(app: &App, only: Option<&str>) -> Result<()> {
     use osdk_core::store::manifest::Manifest;
 
     println!("{}", t!("doctor.verify_title"));
@@ -5370,7 +5370,13 @@ fn doctor_verify(app: &App) -> Result<()> {
     let mut drifted: Vec<(String, String, Vec<osdk_core::store::manifest::Drift>)> = Vec::new();
     let mut unverifiable: Vec<String> = Vec::new();
 
-    for backend in all_display_backends(app)? {
+    // Reading every file of every SDK takes minutes, so honour a request
+    // to check just the tool the user actually suspects.
+    let backends = match only {
+        Some(tool) => vec![app.registry.get(tool)?],
+        None => all_display_backends(app)?,
+    };
+    for backend in backends {
         for version in backend.list_installed(&app.ctx)? {
             let root = app.ctx.dirs.install_path(backend.id(), &version);
             let label = format!("{}@{}", backend.id(), version);
@@ -5384,7 +5390,19 @@ fn doctor_verify(app: &App) -> Result<()> {
                 }
             };
             checked += 1;
+            // A large SDK takes tens of seconds on its own, so name it before
+            // reading it rather than leaving the terminal silent for minutes.
+            print!("    {label} ... ");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
             let drift = manifest.verify(&root)?;
+            println!(
+                "{}",
+                if drift.is_empty() {
+                    t!("doctor.verify_item_ok")
+                } else {
+                    t!("doctor.verify_item_drift", count = drift.len())
+                }
+            );
             if !drift.is_empty() {
                 drifted.push((label, root.display().to_string(), drift));
             }

@@ -216,6 +216,7 @@ osdk completions fish > ~/.config/fish/completions/osdk.fish
 ```text
 osdk doctor
 osdk doctor --verify
+osdk doctor --verify --tool TOOL
 osdk config path
 osdk config list
 osdk source list TOOL
@@ -226,6 +227,7 @@ osdk registry test [MANAGER]
 | --- | --- |
 | `doctor` | Platform, data/store/install directories, whether store and installs share a filesystem, shim path and PATH presence, and backend IDs |
 | `doctor --verify` | Everything above, then re-hashes every installed file and names what no longer matches |
+| `doctor --verify --tool` | The same check limited to one tool; a full pass reads every byte and takes minutes |
 | `config path` | Config directory, user file, and current project configuration |
 | `config list` | Selected effective settings/directories, registry, model environment, tools, and aliases |
 | `source list` | Sources and pin for one backend/provider; `doctor` does not list mirrors |
@@ -269,6 +271,17 @@ unverifiable rather than silently passing.
 This reads every file, so it is opt-in. Plain `osdk doctor` stays a fast
 environment check, and nothing on the execution path hashes anything — running a
 tool is not slowed down.
+
+The cost is disk read speed, not hashing. A full pass over 11.6 GB across 32,463
+files measured about 4.5 minutes, dominated by two NDKs and a system image.
+Name the tool you actually suspect to keep it usable:
+
+```text
+osdk doctor --verify --tool node
+```
+
+That same check took under a second. `--tool` requires `--verify`, and an
+unknown name is rejected rather than silently checking nothing.
 
 ### Repairing what drifted
 
