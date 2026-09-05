@@ -3657,57 +3657,68 @@ pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
             selected_npm = Some(selected);
             version
         }
+    } else if explicit_spec && !matches!(req.spec, VersionSpec::Latest | VersionSpec::System) {
+        // An explicit `tool@<selector>` asks about that selector among the
+        // installed versions; it must never silently answer with the active
+        // project/global version (previously `where java@21.0.12.1+1` printed
+        // the path of the globally configured java@26).
+        let installed = backend.list_installed(&app.ctx)?;
+        let literal =
+            requested_spec_literal(&tool).expect("explicit_spec is derived from the same operand");
+        let selected = if backend.id() == "python" {
+            osdk_core::backend::python::select_installed(&literal, &installed)
+        } else {
+            let infos: Vec<_> = installed
+                .iter()
+                .map(osdk_core::version::VersionInfo::stable)
+                .collect();
+            osdk_core::version::select_version(&req.spec, &infos).map(|info| info.version.clone())
+        };
+        selected.ok_or_else(|| anyhow!("{}@{} is not installed", req.backend, literal))?
     } else {
-        match &req.spec {
-            VersionSpec::Exact(v) => v.clone(),
-            _ => {
-                let cwd = std::env::current_dir()?;
-                let installed = backend.list_installed(&app.ctx)?;
-                let dynamic_request =
-                    osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
-                let resolved = osdk_core::version::resolver::resolve_active(
-                    backend.id(),
-                    &cwd,
-                    &app.ctx.config.tools,
-                    backend.idiomatic_files(),
-                )
-                .map(|active| (active.spec, active.is_range))
-                .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
-                match resolved {
-                    Some((spec, _is_range)) if backend.id() == "python" => {
-                        osdk_core::backend::python::select_installed(&spec, &installed)
+        let cwd = std::env::current_dir()?;
+        let installed = backend.list_installed(&app.ctx)?;
+        let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
+        let resolved = osdk_core::version::resolver::resolve_active(
+            backend.id(),
+            &cwd,
+            &app.ctx.config.tools,
+            backend.idiomatic_files(),
+        )
+        .map(|active| (active.spec, active.is_range))
+        .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
+        match resolved {
+            Some((spec, _is_range)) if backend.id() == "python" => {
+                osdk_core::backend::python::select_installed(&spec, &installed)
+                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
+            }
+            Some((spec, is_range)) => {
+                let parsed = if is_range {
+                    VersionSpec::parse_range(&spec).unwrap_or_else(|_| VersionSpec::parse(&spec))
+                } else {
+                    VersionSpec::parse(&spec)
+                };
+                match &parsed {
+                    VersionSpec::Exact(version)
+                        if installed.iter().any(|installed| installed == version) =>
+                    {
+                        version.clone()
+                    }
+                    _ => {
+                        let infos: Vec<_> = installed
+                            .iter()
+                            .map(osdk_core::version::VersionInfo::stable)
+                            .collect();
+                        osdk_core::version::select_version(&parsed, &infos)
+                            .map(|version| version.version.clone())
                             .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
                     }
-                    Some((spec, is_range)) => {
-                        let parsed = if is_range {
-                            VersionSpec::parse_range(&spec)
-                                .unwrap_or_else(|_| VersionSpec::parse(&spec))
-                        } else {
-                            VersionSpec::parse(&spec)
-                        };
-                        match &parsed {
-                            VersionSpec::Exact(version)
-                                if installed.iter().any(|installed| installed == version) =>
-                            {
-                                version.clone()
-                            }
-                            _ => {
-                                let infos: Vec<_> = installed
-                                    .iter()
-                                    .map(osdk_core::version::VersionInfo::stable)
-                                    .collect();
-                                osdk_core::version::select_version(&parsed, &infos)
-                                    .map(|version| version.version.clone())
-                                    .ok_or_else(|| anyhow!("{} is not installed", req.backend))?
-                            }
-                        }
-                    }
-                    None => installed
-                        .into_iter()
-                        .last()
-                        .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
                 }
             }
+            None => installed
+                .into_iter()
+                .last()
+                .ok_or_else(|| anyhow!("{} is not installed", req.backend))?,
         }
     };
     let dir = if let Some(npm) = npm_backend {

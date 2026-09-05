@@ -121,11 +121,14 @@ osdk reshim
 | `list [TOOL]` | List local versions with completion markers; without a tool, include registered backends and inventory-backed dynamic tools found on disk, including GitHub, Cargo, and Go command tools |
 | `list-remote TOOL [FILTER]` | List stable remote versions; optional `FILTER` is a string prefix |
 | `current [TOOL]` | Show the raw request and discovery source for the current directory; the request need not be installed or remotely resolved |
-| `where TOOL[@VERSION]` | Locate an exact version; a bare/non-exact request ignores the project selection and chooses the last string-sorted installed entry |
+| `where TOOL[@VERSION]` | With an explicit selector (including prefixes such as `21` or build-number-less `21.0.12`), select only from installed versions using the same matching rules as install and error when nothing matches, without reading the project selection; a bare tool resolves the active version (project ecosystem files, config, dynamic shim request), falling back to the last installed entry |
 | `reshim` | Regenerate shims for installed built-in and inventory-backed dynamic tools, and coordinate npm/npx routing |
 
-`current node` and `where node` answer different questions. Use an exact version
-with `where` when a script needs a deterministic path.
+`current node` and `where node` answer different questions: the former shows the
+project selection (which need not be installed), while the latter prints an
+installed directory — a bare tool follows the active version, and an explicit
+`where node@<selector>` locates strictly among installed versions. Give a
+selector when a script needs a deterministic path.
 
 ## Temporary execution
 

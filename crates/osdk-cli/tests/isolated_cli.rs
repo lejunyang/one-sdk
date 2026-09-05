@@ -2306,6 +2306,89 @@ checksum = "sha256:{checksum}"
 }
 
 #[test]
+fn where_explicit_selector_matches_installed_version_instead_of_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // The project pins java to the 26 install; this must not leak into the
+    // answer for an explicit `where java@...` selector.
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\njava = \"26.0.2.1+1\"\n",
+    )
+    .unwrap();
+    let trusted = [("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap())];
+    let v21 = temp.path().join("installs/java/21.0.12.1+1");
+    let v26 = temp.path().join("installs/java/26.0.2.1+1");
+    for install in [&v21, &v26] {
+        std::fs::create_dir_all(install).unwrap();
+        std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+    }
+
+    // A four-part Java PSU version is not valid semver and parses as a
+    // prefix, but `where` must still locate the matching install.
+    let four_part = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["where", "java@21.0.12.1+1"],
+        &trusted,
+    );
+    assert!(
+        four_part.status.success(),
+        "{}",
+        String::from_utf8_lossy(&four_part.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8(four_part.stdout).unwrap().trim()),
+        v21
+    );
+
+    // A three-part selector reaches the four-part install via the same
+    // semver-aware fallback used at install time.
+    let same_core =
+        run_isolated_in_with_env(temp.path(), &project, &["where", "java@21.0.12"], &trusted);
+    assert!(
+        same_core.status.success(),
+        "{}",
+        String::from_utf8_lossy(&same_core.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8(same_core.stdout).unwrap().trim()),
+        v21
+    );
+
+    // A plain numeric prefix selects among installed versions too.
+    let prefix = run_isolated_in_with_env(temp.path(), &project, &["where", "java@21"], &trusted);
+    assert!(
+        prefix.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prefix.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8(prefix.stdout).unwrap().trim()),
+        v21
+    );
+
+    // An explicit selector without an installed match fails clearly.
+    let missing = run_isolated_in_with_env(temp.path(), &project, &["where", "java@17"], &trusted);
+    assert!(!missing.status.success());
+    let err = String::from_utf8_lossy(&missing.stderr);
+    assert!(err.contains("java@17 is not installed"), "{err}");
+
+    // A bare `where java` keeps active-version semantics and answers 26.
+    let bare = run_isolated_in_with_env(temp.path(), &project, &["where", "java"], &trusted);
+    assert!(
+        bare.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8(bare.stdout).unwrap().trim()),
+        v26
+    );
+}
+
+#[test]
 fn package_manager_field_auto_selects_exact_manager_and_node_in_lock() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
