@@ -2306,6 +2306,55 @@ checksum = "sha256:{checksum}"
 }
 
 #[test]
+fn rust_subcommand_without_managed_rustup_points_at_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run_isolated(
+        temp.path(),
+        &["rust", "target", "list", "--toolchain", "stable"],
+    );
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("osdk install rust"), "{err}");
+    assert!(
+        err.contains("never drives a rustup already on your PATH"),
+        "{err}"
+    );
+}
+
+#[test]
+fn source_pin_rust_notes_managed_scope_in_both_languages() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = run_isolated(temp.path(), &["source", "pin", "rust", "rsproxy"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pinned rust to source rsproxy"), "{stdout}");
+    assert!(
+        stdout.contains("applies only to Rust installed by osdk"),
+        "{stdout}"
+    );
+    let config = std::fs::read_to_string(temp.path().join("config/config.toml")).unwrap();
+    assert!(config.contains("pin = \"rsproxy\""), "{config}");
+
+    let zh = run_isolated_in_with_env(
+        temp.path(),
+        temp.path(),
+        &["source", "pin", "rust", "tuna"],
+        &[("OSDK_LANG", "zh")],
+    );
+    assert!(
+        zh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&zh.stderr)
+    );
+    let zh_out = String::from_utf8_lossy(&zh.stdout);
+    assert!(zh_out.contains("只对 osdk 安装的 Rust 生效"), "{zh_out}");
+}
+
+#[test]
 fn where_explicit_selector_matches_installed_version_instead_of_active() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

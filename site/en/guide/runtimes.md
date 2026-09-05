@@ -226,6 +226,21 @@ The lock preserves those floating channel names too, so reinstalling `stable`,
 `beta`, or `nightly` later may yield a newer toolchain. Use an explicit or dated
 toolchain when the result must be immutable.
 
+### Management boundary versus a system rustup
+
+osdk drives only the isolated rustup under its data directory and never takes
+over a rustup already installed on `PATH`:
+
+- Before `osdk install rust` has run, the isolated rustup does not exist;
+  `osdk rust *` fails with an explicit message pointing at the install command
+  instead of falling through to the system rustup.
+- `osdk source pin rust <source>` changes only the `RUSTUP_DIST_SERVER` injected
+  when osdk installs or updates managed toolchains. It never edits an external
+  rustup, its environment, or its configuration; when no managed Rust exists
+  the command additionally prints this scope note. To mirror a system rustup,
+  set `RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`, and related variables
+  yourself.
+
 ### Components and targets
 
 ```text

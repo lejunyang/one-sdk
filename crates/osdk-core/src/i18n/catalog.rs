@@ -247,6 +247,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("pinned {tool} to source {id}", "已将 {tool} 固定到源 {id}"),
     );
     m.insert(
+        "msg.rust_pin_needs_managed_toolchain",
+        (
+            "note: this pin applies only to Rust installed by osdk (`osdk install rust`); it does not change a rustup already on your PATH",
+            "提示：该固定只对 osdk 安装的 Rust 生效（`osdk install rust`），不会修改 PATH 中已有的 rustup",
+        ),
+    );
+    m.insert(
         "msg.source_unpinned",
         ("unpinned {tool}", "已取消 {tool} 的源固定"),
     );

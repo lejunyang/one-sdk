@@ -211,6 +211,17 @@ toolchain。运行时导出 `RUSTUP_HOME=<data>/rustup` 和 `CARGO_HOME=<data>/c
 Lock 也会原样保存这些浮动 channel，因此以后重装 `stable`、`beta` 或 `nightly` 可能
 得到更新 toolchain；需要不可变结果时请写明确版本或带日期的 toolchain。
 
+### 与系统 rustup 的管理边界
+
+osdk 只驱动数据目录下的隔离 rustup，不接管已经安装在系统 `PATH` 上的 rustup：
+
+- 未执行过 `osdk install rust` 时，隔离 rustup 不存在，`osdk rust *` 会明确报错并
+  提示先安装；它不会转而调用系统 rustup。
+- `osdk source pin rust <源>` 只改变 osdk 安装、更新受管工具链时注入的
+  `RUSTUP_DIST_SERVER`，不会修改外部 rustup 的环境变量或配置；未安装受管 Rust 时
+  命令会额外打印这条作用域提示。要让系统 rustup 走镜像，请自行配置
+  `RUSTUP_DIST_SERVER`、`RUSTUP_UPDATE_ROOT` 等环境变量。
+
 ### Component 与 target
 
 ```text

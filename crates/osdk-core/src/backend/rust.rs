@@ -48,6 +48,11 @@ impl RustBackend {
         ctx.dirs.cargo_home().join("bin").join(exe)
     }
 
+    /// Whether osdk's self-contained rustup has been installed.
+    pub fn isolated_rustup_present(ctx: &Ctx) -> bool {
+        Self::rustup_bin(ctx).is_file()
+    }
+
     pub fn run_rustup(
         ctx: &Ctx,
         args: &[&str],
@@ -56,7 +61,9 @@ impl RustBackend {
         let rustup = Self::rustup_bin(ctx);
         if !rustup.is_file() {
             return Err(Error::other(format!(
-                "isolated rustup is missing at {}; install Rust first",
+                "osdk-managed rustup is missing at {}; run `osdk install rust` \
+                 first. `osdk rust` manages only toolchains installed by osdk \
+                 and never drives a rustup already on your PATH",
                 rustup.display()
             )));
         }

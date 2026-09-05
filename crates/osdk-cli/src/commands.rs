@@ -4010,6 +4010,11 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
             }
             crate::config_edit::set_source_pin(&app.ctx, &tool, Some(&id))?;
             println!("{}", t!("msg.source_pinned", tool = tool, id = id));
+            if tool == "rust"
+                && !osdk_core::backend::rust::RustBackend::isolated_rustup_present(&app.ctx)
+            {
+                println!("{}", t!("msg.rust_pin_needs_managed_toolchain"));
+            }
         }
         SourceCommand::Unpin { tool } => {
             let tool = canonical_source_tool(app, &tool)?;
