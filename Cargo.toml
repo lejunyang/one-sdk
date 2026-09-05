@@ -63,7 +63,7 @@ dunce = "1"
 reflink-copy = "0.1"
 fslock = "0.2"
 same-file = "1"
-which = "6"
+which = "8"
 tempfile = "3"
 walkdir = "2"
 windows-sys = { version = "0.59", features = [
@@ -83,7 +83,7 @@ semver = "1"
 regex = "1"
 globset = "0.4"
 # errors / logging
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
