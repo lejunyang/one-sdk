@@ -423,14 +423,21 @@ impl Backend for RustBackend {
         Ok(env)
     }
 
-    fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {
-        Ok(vec![
-            "rustc".into(),
-            "cargo".into(),
-            "rustup".into(),
-            "clippy-driver".into(),
-            "rustfmt".into(),
-        ])
+    fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
+        // Always advertise the core launchers so they resolve even while the
+        // bin dirs are absent (before install, or in offline tests), then add
+        // every executable the selected toolchain and the isolated cargo home
+        // actually provide. This exposes rustdoc, rust-analyzer, cargo-miri and
+        // similar rustup proxies, plus any CLI installed later with
+        // `cargo install`, as routable shims after a reshim -- not just the five
+        // core commands.
+        const CORE_LAUNCHERS: &[&str] = &["rustc", "cargo", "rustup", "clippy-driver", "rustfmt"];
+        let mut names: std::collections::BTreeSet<String> = CORE_LAUNCHERS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        names.extend(crate::backend::bin_names_in_dirs(&self.bin_paths(ctx, tv)?));
+        Ok(names.into_iter().collect())
     }
 
     fn idiomatic_files(&self) -> &[&str] {
@@ -562,5 +569,78 @@ mod tests {
             "toolchain uninstall stable"
         );
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn bin_names_cover_core_launchers_and_discovered_executables() {
+        use super::*;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let platform = crate::platform::Platform::current();
+        let exe = platform.os.exe_suffix();
+        #[cfg(unix)]
+        fn make_executable(path: &std::path::Path) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        fn make_executable(_path: &std::path::Path) {}
+        let touch = |path: std::path::PathBuf| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+            make_executable(&path);
+        };
+        // The toolchain bin ships rustc/rustdoc, while the isolated cargo bin
+        // holds a rustup proxy and a CLI that was added via `cargo install`.
+        let toolchain_bin = dirs.rustup_home().join("toolchains/1.98.0/bin");
+        touch(toolchain_bin.join(format!("rustc{exe}")));
+        touch(toolchain_bin.join(format!("rustdoc{exe}")));
+        let cargo_bin = dirs.cargo_home().join("bin");
+        touch(cargo_bin.join(format!("rustup{exe}")));
+        touch(cargo_bin.join(format!("cargo-tauri{exe}")));
+
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform,
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                tool_configs: Default::default(),
+                global_tools: Default::default(),
+                global_tool_configs: Default::default(),
+                tool_origins: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+        };
+        let names = RustBackend
+            .bin_names(&ctx, &ToolVersion::new("rust", "1.98.0"))
+            .unwrap();
+        for expected in [
+            "rustc",
+            "cargo",
+            "rustup",
+            "clippy-driver",
+            "rustfmt",
+            "rustdoc",
+            "cargo-tauri",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing {expected}: {names:?}"
+            );
+        }
     }
 }

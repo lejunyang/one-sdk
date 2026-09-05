@@ -211,6 +211,18 @@ toolchain。运行时导出 `RUSTUP_HOME=<data>/rustup` 和 `CARGO_HOME=<data>/c
 Lock 也会原样保存这些浮动 channel，因此以后重装 `stable`、`beta` 或 `nightly` 可能
 得到更新 toolchain；需要不可变结果时请写明确版本或带日期的 toolchain。
 
+### 暴露的命令与 `cargo install`
+
+安装和 `osdk reshim` 时，osdk 会为活动工具链 `bin` 与隔离 `CARGO_HOME/bin` 里的**全部**
+可执行文件生成 shim，而不只是 `rustc`、`cargo`、`rustup`、`rustfmt`、`clippy-driver`
+五个核心命令：`rustdoc`、`rust-analyzer`、`cargo-miri` 等 rustup 代理，以及之后用受管
+`cargo` 安装的 CLI 都会被暴露。这些 shim 运行时同样注入隔离的 `RUSTUP_HOME`、`CARGO_HOME`，
+不会误连到系统 rustup。
+
+用受管 `cargo install` 安装的第三方工具进入 `<data>/cargo/bin`（而不是系统 `~/.cargo`），
+装完执行一次 `osdk reshim` 即可让新命令在 shell 中直接可用；`cargo <子命令>` 形式
+（如 `cargo tauri`）无需 reshim，cargo 会直接在隔离 `CARGO_HOME/bin` 找到对应程序。
+
 ### 与系统 rustup 的管理边界
 
 osdk 只驱动数据目录下的隔离 rustup，不接管已经安装在系统 `PATH` 上的 rustup：

@@ -226,6 +226,22 @@ The lock preserves those floating channel names too, so reinstalling `stable`,
 `beta`, or `nightly` later may yield a newer toolchain. Use an explicit or dated
 toolchain when the result must be immutable.
 
+### Exposed commands and `cargo install`
+
+On install and on `osdk reshim`, osdk generates shims for **every** executable in
+the active toolchain `bin` and the isolated `CARGO_HOME/bin`, not just the five core
+launchers `rustc`, `cargo`, `rustup`, `rustfmt`, and `clippy-driver`. rustup proxies
+such as `rustdoc`, `rust-analyzer`, and `cargo-miri`, together with any CLI installed
+later through the managed `cargo`, are exposed as well. These shims still inject the
+isolated `RUSTUP_HOME`/`CARGO_HOME` at run time, so they can never reach a system
+rustup.
+
+Third-party tools installed with the managed `cargo install` land in `<data>/cargo/bin`
+(not the system `~/.cargo`); run `osdk reshim` once afterwards to make a new command
+directly callable from your shell. The `cargo <subcommand>` form (for example
+`cargo tauri`) needs no reshim, because cargo locates that launcher in the isolated
+`CARGO_HOME/bin` itself.
+
 ### Management boundary versus a system rustup
 
 osdk drives only the isolated rustup under its data directory and never takes
