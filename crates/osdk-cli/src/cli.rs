@@ -77,6 +77,14 @@ pub enum Command {
         /// `-o distribution=zulu` (java). Applied to all listed tools.
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         opts: Vec<String>,
+        /// Reinstall even when the version is already present.
+        ///
+        /// A plain install treats an existing install as done and skips it, so
+        /// it will not repair one whose files changed after installation. Use
+        /// this after `osdk doctor --verify` reports drift, or to force a clean
+        /// copy over a tool that updated itself in place.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Resolve project tools and write exact versions to osdk.lock.
@@ -278,7 +286,18 @@ pub enum Command {
     },
 
     /// Diagnostics: dirs, mirrors, same-fs, link mode.
-    Doctor,
+    Doctor {
+        /// Also re-hash every installed file and report what no longer matches
+        /// what osdk installed.
+        ///
+        /// osdk verifies downloads, but nothing re-checks them afterwards, so a
+        /// tool that updates itself in place, a manual edit, or a partially
+        /// restored backup leaves osdk reporting a version that is no longer on
+        /// disk. This reads every file, so it is opt-in rather than part of the
+        /// default diagnostics.
+        #[arg(long)]
+        verify: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

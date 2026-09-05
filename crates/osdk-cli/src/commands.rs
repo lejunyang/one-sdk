@@ -47,7 +47,12 @@ fn opts_are_only_consent(opts: &[String]) -> bool {
     })
 }
 
-pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+pub async fn install(
+    app: &mut App,
+    tools: Vec<String>,
+    opts: Vec<String>,
+    force: bool,
+) -> Result<()> {
     let explicit = !tools.is_empty();
     // Options normally mean the caller wants something the lock file does not
     // describe, so replay is skipped. Consent is the exception: it records a
@@ -63,7 +68,7 @@ pub async fn install(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
     } else {
         (gather_requests(app, tools)?, false)
     };
-    install_requests(app, requests, opts, trusted_replay).await?;
+    install_requests(app, requests, opts, trusted_replay, force).await?;
     Ok(())
 }
 
@@ -92,7 +97,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
         {
             let node_request = node_request
                 .ok_or_else(|| anyhow!(t!("err.npm_managed_node_dependency_required")))?;
-            let (backend, version) = install_one_without_shims(app, &node_request).await?;
+            let (backend, version) = install_one_without_shims(app, &node_request, false).await?;
             generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
             resolved.push((node_request, version));
         } else {
@@ -101,7 +106,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
                 .find(|(request, _)| request.backend == "node")
                 .map(|(request, _)| request.clone())
                 .expect("checked above");
-            let (backend, version) = install_one_without_shims(app, &node).await?;
+            let (backend, version) = install_one_without_shims(app, &node, false).await?;
             generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         }
         bind_resolved_node_version(&mut resolved);
@@ -151,7 +156,7 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
 
 pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
     let requests = gather_requests(app, tools)?;
-    let resolved = install_requests(app, requests, opts, false).await?;
+    let resolved = install_requests(app, requests, opts, false, false).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &resolved)?;
@@ -161,7 +166,7 @@ pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Re
 
 pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -> Result<()> {
     let requests = gather_requests(app, tools)?;
-    let resolved = install_requests(app, requests, Vec::new(), false).await?;
+    let resolved = install_requests(app, requests, Vec::new(), false, false).await?;
     let mut paths = Vec::new();
     let mut env = std::collections::BTreeMap::new();
     for (request, version) in &resolved {
@@ -592,6 +597,7 @@ async fn install_requests(
     mut requests: Vec<ToolRequest>,
     opts: Vec<String>,
     trusted_replay: bool,
+    force: bool,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
     for request in &mut requests {
@@ -628,21 +634,21 @@ async fn install_requests(
     }
     let mut resolved = Vec::new();
     for request in node_requests {
-        let (backend, version) = install_one_without_shims(app, &request).await?;
+        let (backend, version) = install_one_without_shims(app, &request, force).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     let (rust_requests, remaining_requests) =
         partition_runtime_dependency(remaining_requests, "rust", "cargo:");
     for request in rust_requests {
-        let (backend, version) = install_one_without_shims(app, &request).await?;
+        let (backend, version) = install_one_without_shims(app, &request, force).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
     let (go_requests, mut remaining_requests) =
         partition_runtime_dependency(remaining_requests, "go", "go:");
     for request in go_requests {
-        let (backend, version) = install_one_without_shims(app, &request).await?;
+        let (backend, version) = install_one_without_shims(app, &request, force).await?;
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
@@ -653,7 +659,7 @@ async fn install_requests(
     let installed = stream::iter(remaining_requests.into_iter().map(|req| {
         let app_ref: &App = app;
         async move {
-            let installed = install_one_without_shims(app_ref, &req).await?;
+            let installed = install_one_without_shims(app_ref, &req, force).await?;
             Ok::<_, anyhow::Error>((req, installed))
         }
     }))
@@ -956,6 +962,7 @@ fn reject_public_internal_options(
 async fn install_one_without_shims(
     app: &App,
     req: &ToolRequest,
+    force: bool,
 ) -> Result<(std::sync::Arc<dyn Backend>, ToolVersion)> {
     if app.refresh_sources {
         let backend = app.registry.get(&req.backend)?;
@@ -969,12 +976,20 @@ async fn install_one_without_shims(
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
     bind_dynamic_request_options(&effective, &mut tv);
 
-    if osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
+    if !force
+        && osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
         && !backend.id().contains(':')
     {
         backend.ensure_post_install(&app.ctx, &tv)?;
         println!("{}", t!("msg.already_installed", tool = tv));
     } else {
+        if force {
+            // The marker is what every install path trusts instead of
+            // looking at the bytes, so clearing it is what turns this
+            // into a real reinstall rather than a no-op that prints
+            // success without repairing anything.
+            osdk_core::pipeline::clear_complete_marker(&app.ctx.dirs, backend.id(), &tv.version)?;
+        }
         println!("{}", t!("msg.installing", tool = tv));
         let ictx = InstallCtx { ctx: &app.ctx };
         backend
@@ -1544,7 +1559,7 @@ async fn use_legacy_cmd(
     if let Some(runtime) = runtime_override {
         install_input.push(runtime);
     }
-    let installed = install_requests(app, install_input, Vec::new(), false).await?;
+    let installed = install_requests(app, install_input, Vec::new(), false, false).await?;
     let tv = installed
         .iter()
         .find_map(|(request, version)| (request.backend == req.backend).then_some(version.clone()))
@@ -1718,7 +1733,7 @@ async fn use_project_npm(
         .ok_or_else(|| anyhow!("project npm install requires an npm: package request"))?
         .to_string();
     let node_request = project_node_request(app, &project.root)?;
-    let (node_backend, node_version) = install_one_without_shims(app, &node_request).await?;
+    let (node_backend, node_version) = install_one_without_shims(app, &node_request, false).await?;
     generate_shims_including_dependencies(app, node_backend.as_ref(), &node_version)?;
     let node_bin_dir = managed_bin_paths(&app.ctx, node_backend.as_ref(), &node_version, None)?
         .into_iter()
@@ -2197,7 +2212,7 @@ async fn run_project_native_installer(
         .ok_or_else(|| anyhow!("project native installer must be npm or pnpm"))?;
     let manager_request = project_manager_request(app, manager_id, project_root)?;
     let (manager_backend, manager_version) =
-        install_one_without_shims(app, &manager_request).await?;
+        install_one_without_shims(app, &manager_request, false).await?;
     generate_shims_including_dependencies(app, manager_backend.as_ref(), &manager_version)?;
     let manager = find_managed_executable(
         &managed_bin_paths(&app.ctx, manager_backend.as_ref(), &manager_version, None)?,
@@ -5291,7 +5306,7 @@ pub fn prune(app: &App, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn doctor(app: &App) -> Result<()> {
+pub fn doctor(app: &App, verify: bool) -> Result<()> {
     use osdk_core::store::link::same_filesystem;
     println!("{}", t!("doctor.title"));
     println!("  platform     : {}", app.ctx.platform);
@@ -5318,6 +5333,83 @@ pub fn doctor(app: &App) -> Result<()> {
         on_path
     );
     println!("  backends     : {}", app.registry.ids().join(", "));
+    if verify {
+        doctor_verify(app)?;
+    }
+    Ok(())
+}
+
+/// Re-hash every installed file and report drift.
+///
+/// Downloads are verified on the way in, but nothing looked at the bytes again
+/// afterwards, so a tool that rewrites itself in place, a manual edit or a
+/// half-restored backup left osdk reporting the version it installed while a
+/// different one actually ran. Reads every file, so it sits behind
+/// `--verify` rather than in the default diagnostics.
+fn doctor_verify(app: &App) -> Result<()> {
+    use osdk_core::store::manifest::Manifest;
+
+    println!("{}", t!("doctor.verify_title"));
+    let mut checked = 0usize;
+    let mut drifted: Vec<(String, String, Vec<osdk_core::store::manifest::Drift>)> = Vec::new();
+    let mut unverifiable: Vec<String> = Vec::new();
+
+    for backend in all_display_backends(app)? {
+        for version in backend.list_installed(&app.ctx)? {
+            let root = app.ctx.dirs.install_path(backend.id(), &version);
+            let label = format!("{}@{}", backend.id(), version);
+            // An install predating the manifest, or one whose manifest was
+            // itself removed, cannot be checked. Say so instead of passing it.
+            let manifest = match Manifest::load(&root) {
+                Ok(manifest) => manifest,
+                Err(_) => {
+                    unverifiable.push(label);
+                    continue;
+                }
+            };
+            checked += 1;
+            let drift = manifest.verify(&root)?;
+            if !drift.is_empty() {
+                drifted.push((label, root.display().to_string(), drift));
+            }
+        }
+    }
+
+    for (label, root, drift) in &drifted {
+        println!("  {label} : {}", t!("doctor.verify_drifted"));
+        println!("    {root}");
+        // Cap the per-install listing: a rewritten NDK would otherwise bury
+        // every other finding under thousands of lines.
+        for item in drift.iter().take(10) {
+            println!("      {item}");
+        }
+        if drift.len() > 10 {
+            println!(
+                "      {}",
+                t!("doctor.verify_more", count = drift.len() - 10)
+            );
+        }
+    }
+    for label in &unverifiable {
+        println!("  {label} : {}", t!("doctor.verify_no_manifest"));
+    }
+
+    println!(
+        "  {}",
+        t!(
+            "doctor.verify_summary",
+            checked = checked,
+            drifted = drifted.len()
+        )
+    );
+    if !drifted.is_empty() {
+        // Name the exact command, since the fix is not discoverable: a plain
+        // reinstall skips anything already present.
+        println!("  {}", t!("doctor.verify_hint"));
+        for (label, _, _) in &drifted {
+            println!("    osdk install --force {label}");
+        }
+    }
     Ok(())
 }
 

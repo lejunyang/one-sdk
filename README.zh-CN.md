@@ -540,10 +540,25 @@ osdk --yes prune
 
 指南：[存储、缓存与 Shell 集成](site/guide/storage-shell.md)
 
+## 场景：某个工具自己更新过，已与安装时不一致
+
+```bash
+osdk doctor --verify
+osdk install --force node@20.11.1
+```
+
+`doctor --verify` 会重新哈希每个已安装文件，指出安装之后被改动的那些——工具自更新、手工改动、
+备份只恢复一半都会留下这种痕迹。普通 `install` 把已存在的安装视为已完成，不会修复它；`--force`
+会用锁定的版本覆盖重装。校验会读取每个文件，因此需显式开启——普通 `doctor` 仍然很快，执行路径上
+也不做任何哈希。
+
+指南：[存储、缓存与 Shell 集成](site/guide/storage-shell.md)
+
 ## 场景：诊断环境或切换语言
 
 ```bash
 osdk doctor
+osdk doctor --verify
 osdk current
 osdk where node
 osdk config path

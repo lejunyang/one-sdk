@@ -211,6 +211,7 @@ osdk completions fish > ~/.config/fish/completions/osdk.fish
 
 ```text
 osdk doctor
+osdk doctor --verify
 osdk config path
 osdk config list
 osdk source list TOOL
@@ -220,6 +221,7 @@ osdk registry test [MANAGER]
 | Command | Output |
 | --- | --- |
 | `doctor` | Platform, data/store/install directories, whether store and installs share a filesystem, shim path and PATH presence, and backend IDs |
+| `doctor --verify` | Everything above, then re-hashes every installed file and names what no longer matches |
 | `config path` | Config directory, user file, and current project configuration |
 | `config list` | Selected effective settings/directories, registry, model environment, tools, and aliases |
 | `source list` | Sources and pin for one backend/provider; `doctor` does not list mirrors |
@@ -229,6 +231,69 @@ osdk registry test [MANAGER]
 Top-level `doctor` currently does not print `link_mode`; use `config list` to
 inspect it. It is distinct from `container doctor`, which diagnoses native
 container control planes.
+
+## Verifying installed files
+
+osdk verifies bytes as they are downloaded, but until they are checked again
+nothing notices when an install changes afterwards. Three things do that: a tool
+that updates itself in place, a manual edit, and a half-restored backup or bit
+rot. In each case osdk keeps reporting the version it installed while a
+different binary actually runs.
+
+`osdk doctor --verify` re-hashes every file recorded in each install's
+`.osdk-manifest.json` and reports what no longer matches:
+
+```text
+osdk doctor --verify
+```
+
+```text
+  verifying installed files
+  node@20.11.1 : no longer matches what osdk installed
+    E:\osdk-data\data\installs\node\20.11.1
+      node.exe: contents changed
+  checked 9 install(s), 1 changed
+  reinstall to restore (a plain install skips what is already there):
+    osdk install --force node@20.11.1
+```
+
+It reports four kinds of drift: contents changed, missing, file type changed
+(a file replaced by a link, or the reverse), and a link that now points
+somewhere else. Installs made before the manifest existed are reported as
+unverifiable rather than silently passing.
+
+This reads every file, so it is opt-in. Plain `osdk doctor` stays a fast
+environment check, and nothing on the execution path hashes anything — running a
+tool is not slowed down.
+
+### Repairing what drifted
+
+A plain `osdk install` treats an existing install as done and returns
+immediately, so it will not repair one whose files changed. `--force` reinstalls
+over it:
+
+```text
+osdk install --force node@20.11.1
+```
+
+Only the versions you name are affected. Dependencies that osdk installs on your
+behalf are not forced along with them: bringing a dependency into place is not a
+reason to rebuild it.
+
+Because installs are hardlinked into the CAS, editing an installed file also
+edits the store object behind it. osdk therefore confirms an object still hashes
+to the name it is filed under before reusing it, and discards it if not, so a
+reinstall genuinely repairs instead of linking the damaged bytes back. Intact
+objects are still reused, so deduplication is unaffected.
+
+### What this does not do
+
+Verification is a snapshot, not a policy. It tells you an install no longer
+matches what osdk put there; it cannot tell you whether the change was a
+legitimate self-update or something hostile, because on disk the two are
+identical. Tools that update themselves will keep reporting drift after every
+update — for those, `--force` reinstalls the version osdk has pinned, which is
+the point of pinning it.
 
 ## Declarative backends
 

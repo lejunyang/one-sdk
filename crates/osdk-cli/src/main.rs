@@ -111,7 +111,7 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
 
 async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>> {
     let result = match command {
-        Command::Install { tools, opts } => commands::install(app, tools, opts).await,
+        Command::Install { tools, opts, force } => commands::install(app, tools, opts, force).await,
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
@@ -141,7 +141,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Cache { command } => commands::cache(app, command),
         Command::Container { command } => return container::run(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),
-        Command::Doctor => commands::doctor(app),
+        Command::Doctor { verify } => commands::doctor(app, verify),
     };
     result.map(|()| None)
 }

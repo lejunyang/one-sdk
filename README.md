@@ -602,10 +602,27 @@ content; `prune --dry-run` does not delete anything.
 
 Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
 
+## Scenario: a tool updated itself and no longer matches
+
+```bash
+osdk doctor --verify
+osdk install --force node@20.11.1
+```
+
+`doctor --verify` re-hashes every installed file and names the ones that changed
+after installation, which is what a tool's own self-update, a manual edit or a
+half-restored backup leaves behind. A plain `install` treats an existing install
+as done and will not repair it; `--force` reinstalls the pinned version over it.
+Verification reads every file, so it is opt-in — plain `doctor` stays fast and
+nothing on the execution path hashes anything.
+
+Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
+
 ## Scenario: diagnose an environment or switch language
 
 ```bash
 osdk doctor
+osdk doctor --verify
 osdk current
 osdk where node
 osdk config path

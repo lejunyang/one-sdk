@@ -55,6 +55,30 @@ impl Cas {
     /// Ingest a file's bytes into the store, returning its hash. If an object
     /// with the same content already exists, the source is not duplicated.
     /// Returns `(hash, is_new)`.
+    /// Confirm an existing object still holds the content its name promises,
+    /// discarding it if not.
+    ///
+    /// Installs are hardlinked to these objects, so editing an installed file
+    /// rewrites the object itself and every other install that shares it. The
+    /// name alone therefore cannot be trusted: a reinstall would link the
+    /// damaged bytes straight back and report success without repairing
+    /// anything. Dropping the object instead lets the normal ingest path refill
+    /// it from the extracted archive.
+    ///
+    /// Returns whether a usable object is present afterwards.
+    fn object_is_intact(&self, hash: &str) -> Result<bool> {
+        let obj = self.object_path(hash);
+        if !obj.exists() {
+            return Ok(false);
+        }
+        if hash_file(&obj)?.eq_ignore_ascii_case(hash) {
+            return Ok(true);
+        }
+        // A hardlinked install still points at this inode, so removing the
+        // store's own name for it is what lets a fresh copy take its place.
+        let _ = std::fs::remove_file(&obj);
+        Ok(false)
+    }
     fn ingest_file(&self, src: &Path) -> Result<(String, bool, u64)> {
         let hash = hash_file(src)?;
         let obj = self.object_path(&hash);
@@ -62,7 +86,7 @@ impl Cas {
         if let Ok(m) = std::fs::metadata(src) {
             size = m.len();
         }
-        if obj.exists() {
+        if self.object_is_intact(&hash)? {
             return Ok((hash, false, size));
         }
         if let Some(parent) = obj.parent() {
@@ -96,7 +120,7 @@ impl Cas {
         let size = std::fs::metadata(src)
             .map_err(|error| Error::io(src, error))?
             .len();
-        if object.exists() {
+        if self.object_is_intact(&hash)? {
             return Ok((hash, false, size));
         }
         if let Some(parent) = object.parent() {
@@ -123,6 +147,22 @@ impl Cas {
         if !object.is_file() {
             return Err(Error::other(format!(
                 "content-addressed object is missing: {hash}"
+            )));
+        }
+        // Installs are hardlinked to these objects, so editing an installed file
+        // edits the object itself and every other install sharing it. Trusting
+        // the file name would then hand the corrupted bytes to each new install
+        // and make a reinstall re-link the same damage instead of repairing it,
+        // so confirm the object still hashes to the name it is filed under.
+        let actual = hash_file(&object)?;
+        if !actual.eq_ignore_ascii_case(hash) {
+            // Drop it: it is not the content this hash promises, and leaving it
+            // in place would keep poisoning every later install. The caller can
+            // re-download, which is what the missing-object path already does.
+            let _ = std::fs::remove_file(&object);
+            return Err(Error::other(format!(
+                "content-addressed object {hash} no longer matches its contents \
+                 (found {actual}); it has been discarded, retry to re-download"
             )));
         }
         materialize(&object, destination, mode).map(|_| ())
@@ -395,6 +435,51 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         let mut f = std::fs::File::create(p).unwrap();
         f.write_all(b).unwrap();
+    }
+
+    #[test]
+    fn a_corrupted_object_is_not_handed_to_a_new_install() {
+        // Installs are hardlinked to store objects, so editing an installed
+        // file edits the object. If the store trusted the file name, the next
+        // install -- including a reinstall meant to repair -- would link the
+        // damaged bytes back and report success.
+        let temporary = tempfile::tempdir().unwrap();
+        let cas = Cas::new(temporary.path().join("store"));
+        let source = temporary.path().join("payload.bin");
+        std::fs::write(&source, b"original").unwrap();
+        let (hash, is_new, _) = cas.ingest_preserve(&source).unwrap();
+        assert!(is_new);
+
+        // Simulate the in-place rewrite reaching the object through its link.
+        std::fs::write(cas.object_path(&hash), b"tampered!").unwrap();
+
+        // The object must no longer be considered present under that hash.
+        let (again, is_new_again, _) = cas.ingest_preserve(&source).unwrap();
+        assert_eq!(again, hash);
+        assert!(
+            is_new_again,
+            "a corrupted object must be refilled, not reused"
+        );
+        assert_eq!(
+            std::fs::read(cas.object_path(&hash)).unwrap(),
+            b"original",
+            "the store must end up holding the content its hash promises"
+        );
+    }
+
+    #[test]
+    fn an_intact_object_is_still_reused() {
+        // The repair path must not turn deduplication off: an untouched object
+        // has to stay a cache hit, or every install re-ingests everything.
+        let temporary = tempfile::tempdir().unwrap();
+        let cas = Cas::new(temporary.path().join("store"));
+        let source = temporary.path().join("payload.bin");
+        std::fs::write(&source, b"original").unwrap();
+        let (hash, is_new, _) = cas.ingest_preserve(&source).unwrap();
+        assert!(is_new);
+        let (again, is_new_again, _) = cas.ingest_preserve(&source).unwrap();
+        assert_eq!(again, hash);
+        assert!(!is_new_again, "an intact object must be reused");
     }
 
     #[test]

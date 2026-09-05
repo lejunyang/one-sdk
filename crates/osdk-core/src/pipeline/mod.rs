@@ -385,6 +385,27 @@ fn safe_subdir(root: &std::path::Path, subdir: &std::path::Path) -> Result<PathB
 }
 
 /// Whether a tool@version is installed (complete marker present).
+/// Drop the completion marker so the next install rebuilds the directory.
+///
+/// Every install path treats the marker as proof that the contents are already
+/// correct, and none of them look at the bytes, so a reinstall over an install
+/// whose files changed after the fact would otherwise return immediately and
+/// report success without repairing anything. Removing the marker is what makes
+/// the existing "stale dir, clean it" path take over.
+///
+/// Leaves the directory in place: the pipeline removes it once it gets past the
+/// marker check, and doing it here would throw the install away even if the
+/// download that follows fails.
+pub fn clear_complete_marker(dirs: &Dirs, tool: &str, version: &str) -> Result<()> {
+    let marker = dirs.install_path(tool, version).join(COMPLETE_MARKER);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        // Nothing installed, or already cleared: the caller's goal is met.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::io(&marker, error)),
+    }
+}
+
 pub fn is_installed(dirs: &Dirs, tool: &str, version: &str) -> bool {
     dirs.install_path(tool, version)
         .join(COMPLETE_MARKER)

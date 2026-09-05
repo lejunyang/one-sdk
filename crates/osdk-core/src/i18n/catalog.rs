@@ -1223,6 +1223,42 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("will fall back to copy", "将回退为复制"),
     );
     m.insert("doctor.on_path", ("on PATH", "在 PATH 中"));
+    m.insert(
+        "doctor.verify_title",
+        ("  verifying installed files", "  正在校验已安装文件"),
+    );
+    m.insert(
+        "doctor.verify_drifted",
+        (
+            "no longer matches what osdk installed",
+            "与 osdk 安装时的内容已不一致",
+        ),
+    );
+    m.insert(
+        "doctor.verify_more",
+        ("and {count} more", "还有 {count} 处"),
+    );
+    m.insert(
+        "doctor.verify_no_manifest",
+        (
+            "no manifest recorded, cannot verify",
+            "没有安装清单，无法校验",
+        ),
+    );
+    m.insert(
+        "doctor.verify_summary",
+        (
+            "checked {checked} install(s), {drifted} changed",
+            "已检查 {checked} 个安装，{drifted} 个发生变化",
+        ),
+    );
+    m.insert(
+        "doctor.verify_hint",
+        (
+            "reinstall to restore (a plain install skips what is already there):",
+            "重装即可恢复（普通 install 会跳过已存在的安装）：",
+        ),
+    );
 
     // ---- errors -----------------------------------------------------------
     m.insert(
