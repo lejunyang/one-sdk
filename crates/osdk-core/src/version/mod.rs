@@ -160,7 +160,7 @@ pub fn select_version<'a>(
                 .map(|l| l.eq_ignore_ascii_case(line))
                 .unwrap_or(false)
         }),
-        VersionSpec::Exact(want) => candidates.iter().find(|v| v.version == *want),
+        VersionSpec::Exact(want) => select_exact(want, candidates),
         VersionSpec::Range(requirement) => {
             let requirements = npm_range_requirements(requirement).ok()?;
             candidates.iter().rev().find(|candidate| {
@@ -239,6 +239,44 @@ pub fn select_version_with_prerelease<'a>(
             }
         }
     }
+}
+
+/// Match an exact request against candidates, scanning newest first.
+///
+/// Match tiers, in order:
+/// 1. literal string equality;
+/// 2. semver core equality, ignoring build metadata — `21.0.12` matches
+///    `21.0.12+8` (and prerelease tags must agree);
+/// 3. dotted-component prefix — `21.0.12` matches a four-part `21.0.12.1+1`
+///    PSU when no release with the same semver core exists.
+///
+/// Tiers 2-3 are required for Java, whose published versions carry build
+/// numbers (`+8`) and, for Patch Set Updates, a fourth numeric component that
+/// is not valid semver. Strict-semver toolchains (node, go, ...) only ever
+/// reach tier 1 because their candidate versions never have a fourth part.
+fn select_exact<'a>(want: &str, candidates: &'a [VersionInfo]) -> Option<&'a VersionInfo> {
+    if let Some(found) = candidates.iter().rev().find(|v| v.version == want) {
+        return Some(found);
+    }
+    if let Ok(want_version) = semver::Version::parse(want.trim_start_matches('v')) {
+        if let Some(found) = candidates.iter().rev().find(|v| {
+            semver::Version::parse(v.version.trim_start_matches('v'))
+                .map(|candidate| {
+                    candidate.major == want_version.major
+                        && candidate.minor == want_version.minor
+                        && candidate.patch == want_version.patch
+                        && candidate.pre == want_version.pre
+                })
+                .unwrap_or(false)
+        }) {
+            return Some(found);
+        }
+    }
+    let prefix = want.trim_end_matches('.');
+    candidates
+        .iter()
+        .rev()
+        .find(|v| version_has_prefix(&v.version, prefix))
 }
 
 fn version_has_prefix(version: &str, prefix: &str) -> bool {
@@ -419,6 +457,46 @@ mod tests {
             stable,
             lts: lts.map(String::from),
         }
+    }
+
+    #[test]
+    fn select_exact_ignores_build_metadata_and_prefers_same_core() {
+        let c = vec![
+            vi("21.0.12+8", true, None),
+            vi("21.0.12.1+1", true, None), // four-part PSU, not valid semver
+            vi("21.0.13+4", true, None),
+        ];
+        // `21.0.12` is Exact; it must find the same-core `21.0.12+8` rather
+        // than erroring or jumping to the four-part PSU.
+        let sel = select_version(&VersionSpec::Exact("21.0.12".into()), &c).unwrap();
+        assert_eq!(sel.version, "21.0.12+8");
+    }
+
+    #[test]
+    fn select_exact_picks_highest_build_of_the_same_core() {
+        let c = vec![vi("21.0.12+7", true, None), vi("21.0.12+8", true, None)];
+        let sel = select_version(&VersionSpec::Exact("21.0.12".into()), &c).unwrap();
+        assert_eq!(sel.version, "21.0.12+8");
+    }
+
+    #[test]
+    fn select_exact_falls_back_to_dotted_prefix_for_four_part_versions() {
+        // Only a PSU exists; the dotted-prefix tier still locates it.
+        let c = vec![vi("21.0.12.1+1", true, None), vi("21.0.13+4", true, None)];
+        let sel = select_version(&VersionSpec::Exact("21.0.12".into()), &c).unwrap();
+        assert_eq!(sel.version, "21.0.12.1+1");
+    }
+
+    #[test]
+    fn select_exact_matches_prerelease_build_and_rejects_unrelated() {
+        let c = vec![
+            vi("1.0.0-beta.1+sha.abc", false, None),
+            vi("1.0.0", true, None),
+            vi("2.0.0", true, None),
+        ];
+        let sel = select_version(&VersionSpec::Exact("1.0.0-beta.1".into()), &c).unwrap();
+        assert_eq!(sel.version, "1.0.0-beta.1+sha.abc");
+        assert!(select_version(&VersionSpec::Exact("3.0.0".into()), &c).is_none());
     }
 
     #[test]

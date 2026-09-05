@@ -601,6 +601,27 @@ mod tests {
         assert_ne!(jdk.version, jre.version);
     }
 
+    #[tokio::test]
+    async fn version_without_build_number_matches_same_core_temurin() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = offline_ctx(temp.path());
+
+        // `21.0.12` (no build number) must resolve to the same-core
+        // `21.0.12+8`, not error and not jump to the four-part PSU.
+        let same_core = JavaBackend
+            .resolve_version(&ctx, &ToolRequest::parse("java@21.0.12").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(same_core.version, "21.0.12+8");
+
+        // A fully-qualified version with build number keeps working.
+        let exact = JavaBackend
+            .resolve_version(&ctx, &ToolRequest::parse("java@21.0.12+8").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(exact.version, "21.0.12+8");
+    }
+
     #[test]
     fn package_urls_and_filtering_include_runtime_type_and_libc() {
         let temp = tempfile::tempdir().unwrap();

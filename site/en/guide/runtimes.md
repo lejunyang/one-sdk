@@ -161,6 +161,11 @@ filters distribution, OS, architecture, archive type, JDK/JRE, and Linux libc.
 A JRE uses identity `jre-<resolved-version>` and can coexist with the matching
 JDK. Execution exports `JAVA_HOME`.
 
+Temurin versions carry a build number (such as `21.0.12+8`), and a PSU adds a
+fourth segment (such as `21.0.12.1+1`). You may omit the build number in the
+request: `java@21.0.12` matches the same-core `21.0.12+8`, and only falls back
+to a four-part PSU when no same-core release exists.
+
 The embedded Temurin LTS catalog covers 8, 11, 17, 21, and 25, allowing
 resolution with an empty metadata cache. A locked artifact remains installable
 when Foojay is unavailable. Configure a Foojay-compatible `/packages` endpoint

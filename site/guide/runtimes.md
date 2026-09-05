@@ -152,6 +152,10 @@ osdk install java@21 -o package-type=jre
 架构、archive 类型、JDK/JRE 和 Linux libc 过滤。JRE identity 为
 `jre-<resolved-version>`，可与相同版本的 JDK 共存；执行 JDK/JRE 时导出 `JAVA_HOME`。
 
+Temurin 版本带 build 号（如 `21.0.12+8`），PSU 还会有第四段（如 `21.0.12.1+1`）。
+版本请求可以省略 build 号：`java@21.0.12` 会匹配同一核心版本的 `21.0.12+8`；只有当
+同一核心版本不存在时，才回退匹配四段式 PSU。
+
 内置 Temurin LTS catalog 包含 8、11、17、21、25，可在空 metadata 缓存下解析；
 已锁定的 artifact 在 Foojay 不可用时也可安装。可设置兼容 Foojay `/packages` 的
 端点或静态镜像：

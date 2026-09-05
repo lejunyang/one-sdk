@@ -30,7 +30,7 @@ metadata 发现最长 module root。详见 [Go 开发工具实现](./go-tools#�
 - Node 项目元数据可产生 npm 风格 semver range，并支持 `||`；
 - `system` 是保留的版本规格；当前通用 backend 不会把它解析为 PATH 中的工具，Rust backend 目前会将其映射为 `stable`。在实现真正的 unmanaged/PATH 模式前，不应把它描述为可用的安装选择。
 
-候选列表约定按版本升序排列。[`select_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 从尾部选择最高匹配项：`latest` 只取稳定版，range 也只取稳定版，前缀按点分隔组件匹配而不是字符串前缀匹配。`select_version_with_prerelease` 为选择使用它的 backend 提供预发布策略：默认 `if-explicit`，`never` 拒绝预发布，`allow` 可让 `latest`、range 或前缀选中预发布版。Python、GitHub 和基于 npm package 的自定义 resolver 会显式应用该策略；通用 resolver 和部分 backend 仍使用 `select_version`，所以当前行为依 backend 而异。
+候选列表约定按版本升序排列。[`select_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 从尾部选择最高匹配项：`latest` 只取稳定版，range 也只取稳定版，前缀按点分隔组件匹配而不是字符串前缀匹配。精确版本分三级匹配：先字面相等，再按 semver 核心版本比较（忽略 build metadata，`21.0.12` 可命中 `21.0.12+8`，预发布标识必须一致，同核心多 build 取最高），最后回退到点分隔组件前缀——仅在同核心版本缺失时让 `21.0.12` 命中四段式 PSU `21.0.12.1+1`，主要服务于带 build 号与 PSU 四段版本的 Java；严格三段 semver 的 backend 不会走到第三级。`select_version_with_prerelease` 为选择使用它的 backend 提供预发布策略：默认 `if-explicit`，`never` 拒绝预发布，`allow` 可让 `latest`、range 或前缀选中预发布版。Python、GitHub 和基于 npm package 的自定义 resolver 会显式应用该策略；通用 resolver 和部分 backend 仍使用 `select_version`，所以当前行为依 backend 而异。
 
 ## 工作目录解析优先级
 
