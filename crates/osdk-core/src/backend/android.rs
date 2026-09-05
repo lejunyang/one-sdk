@@ -1107,19 +1107,17 @@ accept-licenses=true to install it anyway",
 
     fn exec_env(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
         let mut env = BTreeMap::new();
-        let root = ctx.dirs.install_path(self.id(), &tv.version);
-        match self.family {
-            "ndk" => {
-                // Both names are in active use by different build systems.
-                env.insert("ANDROID_NDK_ROOT".into(), root.display().to_string());
-                env.insert("ANDROID_NDK_HOME".into(), root.display().to_string());
-            }
-            _ => {
-                // Point tooling at the shared SDK root that holds the license
-                // records, not at the individual package directory.
-                let sdk_root = Self::sdk_root(ctx);
-                env.insert("ANDROID_SDK_ROOT".into(), sdk_root.display().to_string());
-            }
+        // The NDK is addressed at its own install directory; every other family
+        // through the shared SDK root that holds the license records and the
+        // sibling layout Google's tools walk.
+        let root = if self.family == "ndk" {
+            ctx.dirs.install_path(self.id(), &tv.version)
+        } else {
+            Self::sdk_root(ctx)
+        };
+        let root = root.display().to_string();
+        for name in root_env_names(self.family) {
+            env.insert((*name).to_string(), root.clone());
         }
         Ok(env)
     }
@@ -1181,6 +1179,29 @@ fn api_dir_name(version: &str) -> String {
         version.to_string()
     } else {
         format!("android-{version}")
+    }
+}
+
+/// The environment variables that point a family's tools at their root.
+///
+/// One definition rather than a list inlined in `exec_env`, because the names
+/// are a compatibility contract with tools osdk does not control, and a
+/// divergence between what is set and what is asserted is exactly how a tool
+/// ends up reading an unmanaged SDK while the tests stay green.
+///
+/// Every name here is one a real tool was observed to read; none is aspirational.
+fn root_env_names(family: &str) -> &'static [&'static str] {
+    match family {
+        // The NDK is addressed directly, not through the SDK root. Both spellings
+        // are in active use by different build systems.
+        "ndk" => &["ANDROID_NDK_ROOT", "ANDROID_NDK_HOME"],
+        // Everything else is addressed through the shared SDK root, and the
+        // ecosystem does not agree on one name for it. `ANDROID_SDK_ROOT` is what
+        // the emulator and the legacy JVM tools prefer; `ANDROID_HOME` is what
+        // Google's current `android` CLI reads -- and it *ignores*
+        // `ANDROID_SDK_ROOT` entirely, the reverse of the migration Google once
+        // announced. Setting only one leaves the other camp on a stock SDK.
+        _ => &["ANDROID_SDK_ROOT", "ANDROID_HOME"],
     }
 }
 
@@ -1554,5 +1575,36 @@ mod tests {
         assert_eq!(ndk_prebuilt_dir(Os::Windows), "windows-x86_64");
         assert_eq!(ndk_prebuilt_dir(Os::Macos), "darwin-x86_64");
         assert_eq!(ndk_prebuilt_dir(Os::Linux), "linux-x86_64");
+    }
+
+    #[test]
+    fn sdk_families_export_both_root_names() {
+        // The bug this locks in, measured against `android` CLI 1.0.15985488:
+        // with only `ANDROID_SDK_ROOT` exported, `android info` reported the
+        // stock `%LOCALAPPDATA%\Android\Sdk` rather than osdk's root, so a
+        // managed tool silently read an unmanaged SDK. `ANDROID_HOME` fixed it,
+        // and with both set to different values `ANDROID_HOME` won -- the
+        // reverse of the migration Google once announced, which is why neither
+        // name can be dropped as "legacy".
+        for family in ["platform-tools", "cmdline-tools", "build-tools", "emulator"] {
+            let names = root_env_names(family);
+            assert!(
+                names.contains(&"ANDROID_HOME"),
+                "{family} must export ANDROID_HOME: Google's android CLI reads \
+                 only this name"
+            );
+            assert!(
+                names.contains(&"ANDROID_SDK_ROOT"),
+                "{family} must keep ANDROID_SDK_ROOT: the emulator and the JVM \
+                 tools read this one"
+            );
+        }
+        // The NDK is a different root, so the SDK names must not leak onto it --
+        // pointing ANDROID_HOME at an NDK directory would make every SDK tool
+        // resolve a root with no platform-tools child.
+        let ndk = root_env_names("ndk");
+        assert_eq!(ndk, &["ANDROID_NDK_ROOT", "ANDROID_NDK_HOME"]);
+        assert!(!ndk.contains(&"ANDROID_HOME"));
+        assert!(!ndk.contains(&"ANDROID_SDK_ROOT"));
     }
 }

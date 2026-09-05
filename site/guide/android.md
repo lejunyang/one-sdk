@@ -209,10 +209,17 @@ JDK 错误，此时装一个 `java` 即可。
 | 工具 | 导出变量 |
 | --- | --- |
 | `android-ndk` | `ANDROID_NDK_ROOT`、`ANDROID_NDK_HOME` |
-| 其他 Android 包 | `ANDROID_SDK_ROOT` |
+| 其他 Android 包 | `ANDROID_SDK_ROOT`、`ANDROID_HOME` |
 
-`ANDROID_SDK_ROOT` 指向存放许可记录的共享 SDK 根目录，而非单个包目录，
-以便 Gradle 等工具复用接受记录。
+两者都指向存放许可记录的共享 SDK 根目录，而非单个包目录，以便 Gradle 等工具复用
+接受记录。
+
+两个名字都导出，是因为生态对此没有统一，且这种分歧并非纯历史遗留：Google 当前的
+`android` CLI 只读 `ANDROID_HOME`，完全忽略 `ANDROID_SDK_ROOT`——与 Google 当年
+宣布的迁移方向相反；而模拟器和 JVM 系工具偏好 `ANDROID_SDK_ROOT`。针对
+`android` 1.0.15985488 实测：仅设 `ANDROID_SDK_ROOT` 时，`android info` 报告的是
+系统默认的 `%LOCALAPPDATA%\Android\Sdk` 而不是 osdk 的根目录——受管工具悄悄读了
+一个非受管 SDK。它自带的 `--sdk` 参数优先级高于两者。
 
 ## 系统镜像与依赖解析
 

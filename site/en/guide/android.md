@@ -240,11 +240,19 @@ The same applies to `maven`, `gradle` and `kotlin`.
 | Tool | Exported |
 | --- | --- |
 | `android-ndk` | `ANDROID_NDK_ROOT`, `ANDROID_NDK_HOME` |
-| Other Android packages | `ANDROID_SDK_ROOT` |
+| Other Android packages | `ANDROID_SDK_ROOT`, `ANDROID_HOME` |
 
-`ANDROID_SDK_ROOT` points at the shared SDK root that holds the license records,
-not at an individual package directory, so tools like Gradle can reuse your
-acceptance.
+Both point at the shared SDK root that holds the license records, not at an
+individual package directory, so tools like Gradle can reuse your acceptance.
+
+Both names are exported because the ecosystem does not agree on one, and the
+disagreement is not merely historical: Google's current `android` CLI reads
+`ANDROID_HOME` and ignores `ANDROID_SDK_ROOT` entirely, the reverse of the
+migration Google once announced, while the emulator and the JVM tools prefer
+`ANDROID_SDK_ROOT`. Measured against `android` 1.0.15985488: with only
+`ANDROID_SDK_ROOT` set, `android info` reported the stock
+`%LOCALAPPDATA%\Android\Sdk` rather than osdk's root -- a managed tool silently
+reading an unmanaged SDK. Its own `--sdk` flag outranks both.
 
 ## System images and dependency resolution
 
