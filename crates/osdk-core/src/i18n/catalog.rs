@@ -254,6 +254,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.avd_home_mismatch",
+        (
+            "warning: {variable} points at {external}, but osdk keeps its AVDs in {managed}; devices created by `osdk android avd create` will not be found there. Unset {variable} to use the managed location.",
+            "警告：{variable} 指向 {external}，而 osdk 的 AVD 存放在 {managed}；`osdk android avd create` 创建的设备在那里找不到。取消设置 {variable} 即可使用受管目录。",
+        ),
+    );
+    m.insert(
         "warn.env_source_invalid",
         (
             "warning: ignoring {variable} for {tool}: {reason}. osdk will select among its built-in sources instead; pass --source-mode env to require this value.",

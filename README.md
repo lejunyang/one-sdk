@@ -402,6 +402,10 @@ osdk android avd list
 emulator -avd pixel-35
 ```
 
+Devices live under osdk''s data directory, and the emulator and `avdmanager` are
+pointed at it automatically, so `emulator -avd pixel-35` works from an activated
+shell without exporting anything by hand.
+
 osdk writes the device definition itself rather than calling `avdmanager`, which
 cannot work against this layout: it locates the SDK by inspecting its own path,
 so it looks one directory too high, and `create avd` accepts no flag to correct

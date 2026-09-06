@@ -209,10 +209,23 @@ JDK 错误，此时装一个 `java` 即可。
 | 工具 | 导出变量 |
 | --- | --- |
 | `android-ndk` | `ANDROID_NDK_ROOT`、`ANDROID_NDK_HOME` |
+| `android-emulator`、`android-cmdline-tools` | `ANDROID_SDK_ROOT`、`ANDROID_HOME`、`ANDROID_AVD_HOME` |
 | 其他 Android 包 | `ANDROID_SDK_ROOT`、`ANDROID_HOME` |
 
 两者都指向存放许可记录的共享 SDK 根目录，而非单个包目录，以便 Gradle 等工具复用
 接受记录。
+
+`ANDROID_AVD_HOME` 只对带 AVD 相关工具的两个包导出：`emulator` 按名字启动设备，
+`cmdline-tools` 里的 `avdmanager` 负责列出与删除。osdk 把 AVD 放在
+`<data>/avd`，而针对 emulator 37.1.11 与 cmdline-tools 23.0 实测，两者只搜
+`$ANDROID_AVD_HOME`、`$ANDROID_SDK_HOME\avd`、`$HOME\.android\avd` 三处（失败时
+emulator 会自己打印这份顺序），`<data>/avd` 不在其中。因此不导出该名字时，
+`osdk android avd list` 列得出设备，`emulator -avd <名字>` 却报
+`Unknown AVD name`，而 `-list-avds` 反而列出 `~/.android/avd` 下与 osdk 无关的
+设备——症状看起来像名字写错，实际是目录没被搜索。
+
+若你自己设了 `ANDROID_AVD_HOME` 且指向别处，osdk 尊重该显式选择，但会给出一条
+warning，因为此时 osdk 创建的设备在那个目录里同样找不到。
 
 两个名字都导出，是因为生态对此没有统一，且这种分歧并非纯历史遗留：Google 当前的
 `android` CLI 只读 `ANDROID_HOME`，完全忽略 `ANDROID_SDK_ROOT`——与 Google 当年

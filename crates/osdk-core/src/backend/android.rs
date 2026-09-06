@@ -1119,6 +1119,41 @@ accept-licenses=true to install it anyway",
         for name in root_env_names(self.family) {
             env.insert((*name).to_string(), root.clone());
         }
+        if avd_env_applies(self.family) {
+            let managed = crate::android::avd::avd_home(&ctx.dirs);
+            // Measured with emulator 37.1.11 and avdmanager (cmdline-tools 23.0):
+            // both search `$ANDROID_AVD_HOME`, `$ANDROID_SDK_HOME\avd`, then
+            // `$HOME\.android\avd`, and osdk's `<data>/avd` is none of those. So
+            // creating an AVD there without exporting this name left
+            // `osdk android avd list` showing devices that `emulator -avd`
+            // rejected with `Unknown AVD name`, while `-list-avds` still listed
+            // unrelated AVDs from `~/.android/avd`.
+            match std::env::var(AVD_HOME_ENV) {
+                // An explicit choice wins, matching how the downstream cache
+                // variables behave. It is reported rather than silently honoured,
+                // because the symptom of a stale value here is a device that osdk
+                // lists and the emulator cannot find.
+                Ok(existing)
+                    if !existing.trim().is_empty()
+                        && !same_directory(existing.trim(), &managed) =>
+                {
+                    tracing::warn!(
+                        "{}",
+                        crate::i18n::trf(
+                            "warn.avd_home_mismatch",
+                            &[
+                                ("variable", AVD_HOME_ENV),
+                                ("external", existing.trim()),
+                                ("managed", &managed.display().to_string()),
+                            ],
+                        )
+                    );
+                }
+                _ => {
+                    env.insert(AVD_HOME_ENV.to_string(), managed.display().to_string());
+                }
+            }
+        }
         Ok(env)
     }
 
@@ -1179,6 +1214,47 @@ fn api_dir_name(version: &str) -> String {
         version.to_string()
     } else {
         format!("android-{version}")
+    }
+}
+
+/// The name both the emulator and avdmanager read first when locating AVDs.
+const AVD_HOME_ENV: &str = "ANDROID_AVD_HOME";
+
+/// Whether a family ships a tool that resolves AVDs by name.
+///
+/// Only these two were observed to read [`AVD_HOME_ENV`]: `emulator` boots a
+/// device by name, and `cmdline-tools` carries `avdmanager`, which lists and
+/// deletes them. The other families never look at an AVD, and exporting the name
+/// for them would widen the managed-variable set for no behavioural gain.
+fn avd_env_applies(family: &str) -> bool {
+    matches!(family, "emulator" | "cmdline-tools")
+}
+
+/// Whether an externally set AVD home already points at osdk's own directory.
+///
+/// Compared after canonicalization so an equivalent spelling -- a trailing
+/// separator, a different case on Windows, or a path reached through a link --
+/// is not reported as a conflict. Falls back to a literal comparison when a path
+/// cannot be canonicalized, which happens when it does not exist yet.
+fn same_directory(external: &str, managed: &std::path::Path) -> bool {
+    let external = std::path::Path::new(external);
+    match (
+        dunce::canonicalize(external).ok(),
+        dunce::canonicalize(managed).ok(),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => {
+            let normalize = |path: &std::path::Path| {
+                let text = path.to_string_lossy().replace('/', "\\");
+                let trimmed = text.trim_end_matches('\\').to_string();
+                if cfg!(windows) {
+                    trimmed.to_ascii_lowercase()
+                } else {
+                    trimmed
+                }
+            };
+            normalize(external) == normalize(managed)
+        }
     }
 }
 
@@ -1606,5 +1682,61 @@ mod tests {
         assert_eq!(ndk, &["ANDROID_NDK_ROOT", "ANDROID_NDK_HOME"]);
         assert!(!ndk.contains(&"ANDROID_HOME"));
         assert!(!ndk.contains(&"ANDROID_SDK_ROOT"));
+    }
+
+    #[test]
+    fn avd_tools_are_the_only_families_that_export_the_avd_home() {
+        // The bug this locks in, measured with emulator 37.1.11 and
+        // avdmanager from cmdline-tools 23.0: osdk creates AVDs under
+        // `<data>/avd`, but both tools search only `$ANDROID_AVD_HOME`,
+        // `$ANDROID_SDK_HOME\avd` and `$HOME\.android\avd` (the emulator
+        // prints that list itself when it fails). With the name unexported,
+        // `osdk android avd list` showed two devices while
+        // `emulator -avd osdk-test-35` answered `Unknown AVD name`, and
+        // `-list-avds` listed an unrelated device from `~/.android/avd`
+        // instead -- so the failure looked like a wrong name rather than an
+        // unsearched directory. Verified fixed: with the variable set, both
+        // tools list the managed devices and the emulator reaches
+        // `Found AVD name 'osdk-test-35'`.
+        assert!(
+            avd_env_applies("emulator"),
+            "the emulator resolves an AVD by name and must see the managed home"
+        );
+        assert!(
+            avd_env_applies("cmdline-tools"),
+            "cmdline-tools ships avdmanager, which lists and deletes AVDs"
+        );
+        // Widening this set would add a managed variable without changing any
+        // tool behaviour, so the families that never touch an AVD stay out.
+        for family in ["platform-tools", "build-tools", "ndk", "cmake"] {
+            assert!(
+                !avd_env_applies(family),
+                "{family} has no AVD-aware tool and must not export the name"
+            );
+        }
+    }
+
+    #[test]
+    fn an_equivalent_spelling_of_the_avd_home_is_not_a_conflict() {
+        // A trailing separator, a forward slash, or a different case on
+        // Windows all name the same directory. Reporting those as a mismatch
+        // would train the user to ignore the warning.
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temp.path().join("avd");
+        std::fs::create_dir_all(&managed).unwrap();
+
+        let base = managed.display().to_string();
+        assert!(same_directory(&base, &managed));
+        assert!(same_directory(&format!("{base}\\"), &managed));
+        if cfg!(windows) {
+            assert!(same_directory(&base.to_ascii_uppercase(), &managed));
+            assert!(same_directory(&base.replace('\\', "/"), &managed));
+        }
+
+        // A genuinely different directory must still be reported, including
+        // one that does not exist yet (the literal-comparison fallback).
+        let other = temp.path().join("elsewhere");
+        assert!(!same_directory(&other.display().to_string(), &managed));
+        assert!(!same_directory("C:\\definitely\\not\\here", &managed));
     }
 }

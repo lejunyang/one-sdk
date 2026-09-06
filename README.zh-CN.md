@@ -365,6 +365,9 @@ osdk android avd list
 emulator -avd pixel-35
 ```
 
+设备存放在 osdk 的数据目录下，emulator 与 `avdmanager` 会被自动指向该目录，因此在
+已激活的 shell 里直接执行 `emulator -avd pixel-35` 即可，无需手动导出任何变量。
+
 设备定义由 osdk 自己写出，而不是调用 `avdmanager`——后者在这套布局下无法工作：
 它靠检视自身路径来定位 SDK，因而找高了一层，而 `create avd` 又没有可纠正它的
 参数。即便它创建成功，写下的镜像路径也是相对的，在这里会解析到错误的目录。

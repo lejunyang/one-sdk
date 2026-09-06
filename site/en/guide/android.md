@@ -240,10 +240,26 @@ The same applies to `maven`, `gradle` and `kotlin`.
 | Tool | Exported |
 | --- | --- |
 | `android-ndk` | `ANDROID_NDK_ROOT`, `ANDROID_NDK_HOME` |
+| `android-emulator`, `android-cmdline-tools` | `ANDROID_SDK_ROOT`, `ANDROID_HOME`, `ANDROID_AVD_HOME` |
 | Other Android packages | `ANDROID_SDK_ROOT`, `ANDROID_HOME` |
 
 Both point at the shared SDK root that holds the license records, not at an
 individual package directory, so tools like Gradle can reuse your acceptance.
+
+`ANDROID_AVD_HOME` is exported only for the two packages that ship an AVD-aware
+tool: `emulator` boots a device by name, and `cmdline-tools` carries `avdmanager`,
+which lists and deletes them. osdk keeps AVDs in `<data>/avd`, and measured
+against emulator 37.1.11 and cmdline-tools 23.0 both search only
+`$ANDROID_AVD_HOME`, `$ANDROID_SDK_HOME\avd` and `$HOME\.android\avd` -- the
+emulator prints that order itself when it fails -- so `<data>/avd` is not among
+them. Without the name exported, `osdk android avd list` showed devices that
+`emulator -avd <name>` rejected with `Unknown AVD name`, while `-list-avds` listed
+unrelated devices from `~/.android/avd` instead, making the failure look like a
+mistyped name rather than an unsearched directory.
+
+If you set `ANDROID_AVD_HOME` yourself and it points elsewhere, osdk respects that
+explicit choice but warns, because devices it creates will not be found there
+either.
 
 Both names are exported because the ecosystem does not agree on one, and the
 disagreement is not merely historical: Google's current `android` CLI reads
