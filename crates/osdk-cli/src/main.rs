@@ -41,6 +41,7 @@ fn main() {
         quiet: cli.global.quiet,
         source: cli.global.source.clone(),
         refresh_sources: cli.global.refresh_sources,
+        source_mode: cli.global.source_mode,
         offline: cli.global.offline,
         require_checksums: cli.global.require_checksums,
         attestations: cli.global.attestations,

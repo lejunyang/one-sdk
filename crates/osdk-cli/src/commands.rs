@@ -3905,7 +3905,9 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 osdk_core::model::source::effective_sources(&app.ctx, provider)
             } else {
                 let backend = app.registry.get(&tool)?;
-                select::effective_sources(&app.ctx, backend.as_ref())
+                // Show the ambient candidate too: `source list` is where a user
+                // looks to understand why some mirror is being used.
+                select::effective_sources_with_env(&app.ctx, backend.as_ref())?
             };
             let pin = app
                 .ctx
@@ -4001,7 +4003,9 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                     .any(|source| source.id == id)
             } else {
                 let backend = app.registry.get(&tool)?;
-                select::effective_sources(&app.ctx, backend.as_ref())
+                // Show the ambient candidate too: `source list` is where a user
+                // looks to understand why some mirror is being used.
+                select::effective_sources_with_env(&app.ctx, backend.as_ref())?
                     .iter()
                     .any(|source| source.id == id)
             };

@@ -41,11 +41,36 @@ endpoint 或 pin、选择策略为 `auto` 且非 offline 时刷新。当前对 `
 `list-remote` 不生效。
 模型 `source test` 缺少 `--model` 会失败，普通工具使用 `--model` 也会失败。
 
+## 环境变量里的镜像
+
+各工具链本身都支持用环境变量指定镜像：rustup 读 `RUSTUP_DIST_SERVER`
+（以及 `RUSTUP_UPDATE_ROOT`），go 命令读 `GOPROXY`，npm 系读
+`npm_config_registry`、`pnpm_config_registry`、`YARN_REGISTRY`、
+`YARN_NPM_REGISTRY_SERVER`、`BUN_CONFIG_REGISTRY` 等。
+
+默认（`mode = "auto"`）下 osdk 会先校验这些值，再把它们**与内置镜像一起**参与
+探测并按实测速度择优，而不是无条件采用：
+
+- 校验不通过（不是合法 URL、不是 https、带凭据、带 query 或 fragment）时，
+  osdk 打印一条 warning 并忽略该值，继续用内置镜像，而不是静默丢弃；
+- 校验通过则作为 id 为 `env` 的候选加入探测，可在 `osdk source list <工具>`
+  中看到；若它与某个内置镜像地址相同，则不会重复出现；
+- `GOPROXY` 的 `off`、`direct` 以及逗号/竖线分隔的回退列表是合法的 go 设置，
+  但不是单一可探测的镜像，因此会被跳过并给出说明。
+
+需要无条件遵循环境变量时（例如公司内网镜像即使较慢也必须使用）用
+`--source-mode env`，此时缺失或不合法都会**报错**而不是回退，避免配置错误被
+静默忽略。
+
+优先级：显式选择始终高于环境变量。`osdk source pin` 与一次性的 `--source ID`
+仍然优先，环境变量只在没有显式选择时参与竞争。
+
 ## 有效来源列表
 
 ```toml
 [sources]
 selection = "auto"       # auto|pinned|ordered
+mode = "auto"            # auto|env，见下文「环境变量里的镜像」
 probe_timeout_ms = 1500
 cache_ttl = "6h"
 

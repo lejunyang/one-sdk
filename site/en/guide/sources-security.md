@@ -45,11 +45,43 @@ applies, selection is `auto`, and offline mode is disabled. It currently has no
 effect on `lock`, `outdated`, or `list-remote`. Model `source test` fails without
 `--model`, and `--model` is invalid for an SDK tool.
 
+## Mirrors set in the environment
+
+Every toolchain has its own way to point at a mirror through the environment:
+rustup reads `RUSTUP_DIST_SERVER` (and `RUSTUP_UPDATE_ROOT`), the go command
+reads `GOPROXY`, and the npm family reads `npm_config_registry`,
+`pnpm_config_registry`, `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`,
+`BUN_CONFIG_REGISTRY`, and friends.
+
+By default (`mode = "auto"`) osdk validates such a value and then ranks it
+**together with** its built-in mirrors, picking the fastest measured one, instead
+of obeying it unconditionally:
+
+- when validation fails (not a valid URL, not https, embedded credentials, or a
+  query string or fragment) osdk prints a warning and ignores the value, falling
+  back to its built-in mirrors rather than dropping it silently;
+- when validation passes the value joins the probe as a candidate with the id
+  `env`, visible in `osdk source list <tool>`; if it matches a built-in mirror's
+  endpoint it is not listed twice;
+- `GOPROXY` values such as `off`, `direct`, and comma- or pipe-separated
+  fallback lists are legitimate go settings but are not a single probeable
+  mirror, so they are skipped with an explanation.
+
+To obey the environment unconditionally — for example a corporate mirror that
+must be used even when it is slower — pass `--source-mode env`. In that mode a
+missing or unusable value is an **error** rather than a silent fallback, so a
+misconfiguration cannot pass unnoticed.
+
+Precedence: an explicit choice always beats the environment. `osdk source pin`
+and the one-shot `--source ID` still win; the environment only competes when
+nothing was chosen deliberately.
+
 ## Effective source list
 
 ```toml
 [sources]
 selection = "auto"       # auto|pinned|ordered
+mode = "auto"            # auto|env, see "Mirrors set in the environment"
 probe_timeout_ms = 1500
 cache_ttl = "6h"
 

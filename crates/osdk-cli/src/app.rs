@@ -20,6 +20,7 @@ pub struct GlobalOverrides {
     pub quiet: bool,
     pub source: Option<String>,
     pub refresh_sources: bool,
+    pub source_mode: Option<osdk_core::source::SourceMode>,
     pub offline: bool,
     pub require_checksums: bool,
     pub attestations: Option<osdk_core::config::AttestationPolicy>,
@@ -95,6 +96,9 @@ impl App {
         }
         if let Some(policy) = overrides.prerelease {
             config.settings.prerelease = policy;
+        }
+        if let Some(mode) = overrides.source_mode {
+            config.sources.mode = mode;
         }
 
         // Finalize language now that config is loaded. Precedence:

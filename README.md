@@ -476,6 +476,16 @@ osdk source add node --id mycorp \
 osdk --source official install go@1.22
 ```
 
+A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
+`npm_config_registry`, and the like) is validated and then raced against osdk's
+built-in mirrors, so a stale or unreachable value cannot win by default; an
+unusable one is reported instead of being ignored. To obey it as-is, or to fail
+when it is missing, ask for it explicitly:
+
+```bash
+osdk --source-mode env install rust@1.98.0
+```
+
 After a successful online download, require cache-only operation with
 `--offline`. Tighten artifact policy when your environment requires it:
 

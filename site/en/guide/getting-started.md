@@ -45,6 +45,7 @@ Global options may appear before or after the subcommand.
 | `-y`, `--yes` | `OSDK_YES` | Approve uninstall, archive-cache cleanup, and real GC |
 | `--source ID` | — | Put source `ID` first while retaining fallbacks; tool requests must use the canonical backend ID (for example, `node`, not `nodejs`) |
 | `--refresh-sources` | — | Force re-probing for `install`, `use`, `upgrade`, and `exec`; `model pull` refreshes only with no explicit endpoint/pin, `auto` selection, and online mode; no effect on `lock`, `outdated`, or `list-remote` |
+| `--source-mode MODE` | `OSDK_SOURCE_MODE` | `auto` (default) validates a mirror set in the environment and ranks it together with the built-in mirrors; `env` uses only that mirror and fails when it is missing or unusable |
 | `--offline` | `OSDK_OFFLINE` | Prohibit network access and use cached metadata/artifacts only |
 | `--require-checksums` | `OSDK_REQUIRE_CHECKSUMS` | Reject an artifact without a normal checksum or trusted attestation digest |
 | `--attestations POLICY` | `OSDK_ATTESTATIONS` | `off`, `if-available`, or `required` |

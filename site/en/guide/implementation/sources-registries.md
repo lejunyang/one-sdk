@@ -13,6 +13,27 @@ The source for `osdk install pnpm@11` determines where pnpm itself comes from. T
 
 [`effective_sources`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) starts with backend defaults, removes disabled entries, adds custom sources (a matching id replaces a built-in), drops `enabled=false`, and sorts by ascending `priority`.
 
+`effective_sources_with_env` folds a mirror taken from the environment on top of
+that. A backend declares its own native variables through `Backend::env_mirror`
+(rustup's `RUSTUP_DIST_SERVER` / `RUSTUP_UPDATE_ROOT`, go's `GOPROXY`) and its own
+endpoint rule through `Backend::validate_env_endpoint`. The first non-empty
+variable in declaration order wins and is validated before it enters the pool, so
+a malformed value is reported as a configuration problem rather than as an
+unreachable mirror. A value that validates joins the candidates under the
+reserved id `env`, as `SourceKind::Custom` with `forward_credentials = false` and
+`priority = 1`; a value equal to an existing candidate's endpoint is not added
+twice, so one host is never probed twice. Under `mode = "env"` that candidate
+replaces the list outright and a missing or invalid value is an error.
+
+Because the fold happens before pin handling, an explicit pin and `--source`
+still win. The reserved id `env` never appears in a per-tool `custom` list, so Go's
+private-module narrowing (its `retain` keeps only custom and pinned ids) still
+excludes the ambient candidate, and a private module path is not sent to a public
+proxy just because `GOPROXY` is set. `refresh` probes the same set that selection
+ranks; otherwise the candidate-set fingerprint would never match and the cache
+would always be invalid. See
+[`source/env.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/env.rs).
+
 [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) then applies this algorithm:
 
 1. A configured pin or one-shot `--source` moves the matching source first while keeping the others as fallbacks. The one-shot key currently uses the user-supplied tool name, so the invocation must use the canonical backend ID; aliases do not receive that override.

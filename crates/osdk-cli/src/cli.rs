@@ -44,6 +44,13 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub refresh_sources: bool,
 
+    /// How to treat a mirror set in the environment: auto|env.
+    ///
+    /// `auto` (the default) validates it and ranks it against osdk's built-in
+    /// mirrors. `env` uses it as-is and fails if it is missing or unusable.
+    #[arg(long, global = true, value_name = "MODE", env = "OSDK_SOURCE_MODE")]
+    pub source_mode: Option<osdk_core::source::SourceMode>,
+
     /// Disable network access and use cached metadata/artifacts only.
     #[arg(long, global = true, env = "OSDK_OFFLINE")]
     pub offline: bool,

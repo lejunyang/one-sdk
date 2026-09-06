@@ -432,6 +432,15 @@ osdk source add node --id mycorp \
 osdk --source official install go@1.22
 ```
 
+环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
+等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会
+仅因为存在就胜出；不可用时会给出提示而不是被静默忽略。如果需要无条件遵循它，
+或希望它缺失时直接报错：
+
+```bash
+osdk --source-mode env install rust@1.98.0
+```
+
 成功联网下载后，可以用 `--offline` 强制只使用缓存。安全要求更严格时，可收紧
 产物校验策略：
 

@@ -45,6 +45,7 @@ osdk [GLOBAL OPTIONS] <COMMAND> [COMMAND OPTIONS]
 | `-y`, `--yes` | `OSDK_YES` | 自动确认卸载、清缓存和实际 GC 等操作 |
 | `--source ID` | — | 本次调用把 `ID` 移到来源候选首位并保留回退；工具请求须使用规范 backend ID（如 `node`，不能用 `nodejs`） |
 | `--refresh-sources` | — | 为 `install`、`use`、`upgrade`、`exec` 强制重新探测；`model pull` 仅在无显式 endpoint/pin、选择策略为 `auto` 且非 offline 时刷新；当前不影响 `lock`、`outdated`、`list-remote` |
+| `--source-mode MODE` | `OSDK_SOURCE_MODE` | `auto`（默认）校验环境变量里的镜像并与内置镜像一同参与探测择优；`env` 只用环境变量指定的镜像，缺失或不合法时报错 |
 | `--offline` | `OSDK_OFFLINE` | 禁止网络，只使用缓存的 metadata 与 artifact |
 | `--require-checksums` | `OSDK_REQUIRE_CHECKSUMS` | 没有普通 checksum 或可信 attestation 摘要时拒绝 artifact |
 | `--attestations POLICY` | `OSDK_ATTESTATIONS` | `off`、`if-available` 或 `required` |

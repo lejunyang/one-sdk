@@ -13,6 +13,22 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 
 [`effective_sources`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) 从 backend 默认 source 开始，移除 disabled 项，加入用户 custom source（同 id 覆盖内置项），过滤 `enabled=false`，最后按较小 `priority` 排序。
 
+`effective_sources_with_env` 在此之上折叠环境变量提供的镜像：backend 通过
+`Backend::env_mirror` 声明自己的原生变量（rustup 的 `RUSTUP_DIST_SERVER` /
+`RUSTUP_UPDATE_ROOT`，go 的 `GOPROXY`），`Backend::validate_env_endpoint` 给出该
+工具链自己的 endpoint 规则。取值按声明顺序取第一个非空项，先校验再入池，因此格式
+错误会被报成配置问题而不是"镜像不可达"。校验通过的值以保留 id `env`、
+`SourceKind::Custom`、`forward_credentials = false`、`priority = 1` 加入候选；与
+既有候选 endpoint 相同时不重复加入，避免同一主机被探测两次。`mode = "env"` 时该
+候选取代整个列表，缺失或不合法即报错。
+
+由于折叠发生在 pin 处理之前，显式 pin 与 `--source` 仍然优先；`env` 这个保留 id
+不会出现在任何 per-tool `custom` 列表里，所以 Go 的私有 module 收窄逻辑
+（`retain` 只保留 custom 与 pin 的 id）依然能把环境变量候选排除，私有 module path
+不会因为设了 `GOPROXY` 而发往公开 proxy。`refresh` 探测的集合与选择时一致，否则
+候选集合指纹不会匹配、缓存永远失效。实现见
+[`source/env.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/env.rs)。
+
 [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) 的算法是：
 
 1. 显式 pin 或一次性 `--source` 命中时移到首位，其余 source 仍作为 fallback；当前一次性覆盖先按用户输入工具名写入，因此调用必须使用规范 backend ID，别名不会收到该覆盖；
