@@ -314,7 +314,47 @@ strip_root = true
 algorithm = "sha256"     # sha256|sha512|blake3
 url = "{archive_url}.sha256"
 # 或 value = "<固定十六进制摘要>"
+
+# 可选。编译工具链仅靠 PATH 无法使用，需要通过这类变量把构建系统指向它。
+[env]
+CC = "{install_path}/bin/acme-gcc"
+SYSROOT = "{install_path}/sysroot"
 ```
+
+### 描述工具链环境
+
+`PATH` 和 shim 让工具的命令可以运行，对解释器或 CLI 来说这就够了。C/C++ 工具链
+不同：CMake、Autoconf、Make 通过环境变量定位交叉编译器，因此只把 `bin/` 加入
+`PATH` 的定义，装出来的编译器构建系统依然找不到。
+
+可选的 `[env]` 表补上这个缺口。它声明的每个变量都会在该版本激活时导出——包括
+`osdk exec`、shell 激活以及 shim。
+
+```toml
+[env]
+CC = "{install_path}/bin/aarch64-none-elf-gcc"
+CXX = "{install_path}/bin/aarch64-none-elf-g++"
+AR = "{install_path}/bin/aarch64-none-elf-ar"
+SYSROOT = "{install_path}/aarch64-none-elf"
+ACME_RELEASE = "{version}"
+```
+
+`{install_path}` 展开为该版本自己的安装根，因此取值不必写出宿主机绝对路径；
+`{version}` 和 `{id}` 同样可用。
+
+由于这些变量会进入子进程，它是数据式定义唯一可能把构建指向任意宿主状态的地方。
+取值因此受到限制，且下列规则都在**解析定义时**而不是激活时强制执行：
+
+- 变量名只能使用 ASCII 字母、数字和 `_`，且不能以数字开头；
+- `PATH` 为保留名——目录请通过 `bin_paths` 声明，以保证 shim 生成与激活行为一致。
+  `LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_INSERT_LIBRARIES`、`DYLD_LIBRARY_PATH`
+  同样保留，因为它们会把进程或动态加载器重定向到安装根之外。保留名不区分大小写；
+- 取值不能是绝对路径、不能包含 `..`、不能包含控制字符，从而始终留在
+  `{install_path}` 锚定的安装根内；
+- 仅接受 `{install_path}`、`{version}`、`{id}`；其他占位符一律失败，渲染后仍残留
+  占位符会直接报错，而不是导出一个奇怪的值。
+
+声明了 `[env]` 的定义仍然不能执行代码：它只描述变量，由 osdk 负责导出。
 
 ### 验证与安全边界
 
@@ -327,7 +367,10 @@ url = "{archive_url}.sha256"
 - checksum 的 `value` 与 `url` 必须且只能设置一个；长度必须符合算法；
 - versions/archive URL 只接受 HTTP(S)，checksum URL 额外可基于 `{archive_url}`；
 - 允许的模板变量按位置为 `{id}`、`{version}`、`{os}`、`{arch}`、`{libc}`、
-  `{file}`、`{archive_url}`；不支持的变量会失败；
+  `{file}`、`{archive_url}`；不支持的变量会失败；`[env]` 取值仅接受
+  `{install_path}`、`{version}`、`{id}`；
+- `[env]` 变量名不能是 `PATH` 或动态加载器变量，取值必须是相对路径、不含 `..`
+  且锚定在安装根内；
 - schema 使用严格未知字段拒绝，因此不能加入 hook 或 install script。
 
 声明式 backend 只描述数据，不能执行自定义代码；安装仍经过统一下载、checksum、

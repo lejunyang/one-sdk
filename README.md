@@ -122,7 +122,11 @@ osdk can also follow existing `.tool-versions`, `.nvmrc`, `.node-version`,
 `.python-version`, `.java-version`, `go.mod`, `rust-toolchain.toml`, and Node
 version declarations in `package.json`.
 Data-only declarative backends use the same locked artifact URL, checksum,
-download cache, and offline reinstall path as built-in archive backends.
+download cache, and offline reinstall path as built-in archive backends. They can
+also declare the environment a toolchain needs — a C/C++ cross compiler is found
+by build systems through `CC`, `SYSROOT`, and similar variables rather than
+through `PATH` alone — and osdk exports those variables whenever the version is
+active.
 For osdk-owned dynamic `npm:<package>`, `cargo:<crate-or-https-url>`,
 `go:<module-or-command-path>`, and `github:owner/repo` installs, options and managed-runtime dependencies that
 change the selected or built output are part of the installation identity. osdk

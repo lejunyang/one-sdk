@@ -64,6 +64,13 @@ module-root 发现、proxy 路由、构建环境策略、runtime 绑定与重放
 项目 lock 提供通用 artifact receipt 时，backend 会优先使用其中记录的 URL、文件名、
 checksum 与子目录，再考虑当前模板。因此声明式工具与内置归档 backend 具有相同的
 无 metadata 离线重装契约。
+可选的 `[env]` 表允许定义描述其工具链所需的环境，这正是编译器能被用起来的前提：
+构建系统通过 `CC`、`SYSROOT` 等变量而不是 `PATH` 定位交叉编译器。取值只从
+`{install_path}`、`{version}`、`{id}` 渲染，若渲染后仍残留占位符，`exec_env` 会
+失败关闭。变量名按常规环境变量标识符校验；`PATH` 与动态加载器变量
+（`LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_INSERT_LIBRARIES`、`DYLD_LIBRARY_PATH`）
+不区分大小写地保留，绝对路径、`..` 和控制字符在解析阶段即被拒绝，因此数据式定义
+无法把子进程指向安装根之外。
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。GitHub API、网页、Raw、release asset 和 attestation URL 都通过同一组规范化来源候选，但 token 只发给官方 API host。
 其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入

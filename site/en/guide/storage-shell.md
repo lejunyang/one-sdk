@@ -350,7 +350,58 @@ strip_root = true
 algorithm = "sha256"     # sha256|sha512|blake3
 url = "{archive_url}.sha256"
 # Or: value = "<fixed hexadecimal digest>"
+
+# Optional. A compiler toolchain is not usable from PATH alone, so a build
+# system is pointed at it through variables like these.
+[env]
+CC = "{install_path}/bin/acme-gcc"
+SYSROOT = "{install_path}/sysroot"
 ```
+
+### Describing a toolchain environment
+
+`PATH` and shims make a tool's commands runnable, which is all an interpreter or
+a CLI needs. A C/C++ toolchain is different: CMake, Autoconf, and Make locate a
+cross compiler through environment variables, so a definition that only adds
+`bin/` to `PATH` installs a compiler the build system still cannot find.
+
+The optional `[env]` table closes that gap. Every variable it declares is
+exported whenever that version is active — during `osdk exec`, through shell
+activation, and for shims.
+
+```toml
+[env]
+CC = "{install_path}/bin/aarch64-none-elf-gcc"
+CXX = "{install_path}/bin/aarch64-none-elf-g++"
+AR = "{install_path}/bin/aarch64-none-elf-ar"
+SYSROOT = "{install_path}/aarch64-none-elf"
+ACME_RELEASE = "{version}"
+```
+
+`{install_path}` expands to that version's own installation root, so a value
+never has to name an absolute host path. `{version}` and `{id}` are also
+available.
+
+Because these variables reach child processes, they are the one place a
+data-only definition could otherwise aim a build at arbitrary host state. Values
+are therefore restricted, and every rule below is enforced when the definition is
+parsed rather than when it is activated:
+
+- Names use ASCII letters, digits, and `_`, and cannot start with a digit.
+- `PATH` is reserved — declare directories through `bin_paths` so shim generation
+  and activation stay consistent. `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+  `DYLD_INSERT_LIBRARIES`, and `DYLD_LIBRARY_PATH` are reserved as well, because
+  they redirect the process or the dynamic loader outside the installation root.
+  Reserved names are rejected regardless of letter case.
+- Values cannot be absolute, cannot contain `..`, and cannot contain control
+  characters, so they stay inside the installation root that `{install_path}`
+  anchors.
+- Only `{install_path}`, `{version}`, and `{id}` are accepted. Any other
+  placeholder fails, and a value that would still contain an unresolved
+  placeholder after rendering is an error rather than a strange export.
+
+A definition that declares `[env]` still cannot execute code: it describes
+variables, and osdk exports them.
 
 ### Validation and security boundaries
 
@@ -361,7 +412,8 @@ url = "{archive_url}.sha256"
 - Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip`.
 - Exactly one checksum `value` or `url` is required, with digest length matching the algorithm.
 - Versions/archive URLs accept only HTTP(S); a checksum URL may additionally derive from `{archive_url}`.
-- Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail.
+- Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail. `[env]` values accept only `{install_path}`, `{version}`, and `{id}`.
+- `[env]` names cannot be `PATH` or a dynamic-loader variable, and `[env]` values must be relative, free of `..`, and anchored inside the installation root.
 - The schema rejects unknown fields, so it cannot contain hooks or install scripts.
 
 Declarative backends describe data and cannot execute custom code. Installation

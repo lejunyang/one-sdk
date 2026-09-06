@@ -115,7 +115,9 @@ osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 `.python-version`、`.java-version`、`go.mod`、`rust-toolchain.toml`，以及
 `package.json` 中的 Node 版本声明。
 纯数据声明式 backend 与内置归档 backend 共用锁定产物 URL、checksum、下载缓存和
-离线重装路径。
+离线重装路径，并且可以声明工具链所需的环境——C/C++ 交叉编译器是通过 `CC`、
+`SYSROOT` 等变量而非仅靠 `PATH` 被构建系统找到的——osdk 会在该版本激活时导出这些
+变量。
 对 osdk 自有的动态 `npm:<package>`、`cargo:<crate-or-https-url>`、
 `go:<module-or-command-path>` 与 `github:owner/repo` 安装，会改变选择或构建结果的选项与
 受管 runtime 依赖也属于安装身份。

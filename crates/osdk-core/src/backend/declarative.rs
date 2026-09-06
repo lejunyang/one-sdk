@@ -1,10 +1,18 @@
 //! Data-only external backends loaded from TOML.
 //!
 //! Declarative backends can list versions, select a platform archive, verify
-//! its checksum, and expose installed binaries. They intentionally cannot run
-//! hooks or arbitrary commands. Installation always goes through the shared
-//! download, verification, extraction, and CAS pipeline.
+//! its checksum, expose installed binaries, and describe the environment their
+//! toolchain needs. They intentionally cannot run hooks or arbitrary commands.
+//! Installation always goes through the shared download, verification,
+//! extraction, and CAS pipeline.
+//!
+//! The optional `[env]` table exists because a C/C++ toolchain is not usable
+//! from `PATH` alone: build systems locate a cross compiler through `CC`,
+//! `SYSROOT` and similar variables. Values may only interpolate paths that stay
+//! inside the install root, so a definition can point a build at its own
+//! toolchain but cannot inject an arbitrary host path into a child process.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
@@ -34,6 +42,7 @@ pub struct DeclarativeBackend {
     archive: ArchiveDefinition,
     bin_paths: Vec<PathBuf>,
     bin_names: Vec<String>,
+    env: BTreeMap<String, String>,
     idiomatic_files: Vec<&'static str>,
 }
 
@@ -46,6 +55,9 @@ struct BackendDefinition {
     archive: ArchiveDefinition,
     bin_paths: Vec<String>,
     bin_names: Vec<String>,
+    /// Environment a build system needs in order to find this toolchain.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     #[serde(default)]
     idiomatic_files: Vec<String>,
 }
@@ -193,6 +205,8 @@ impl DeclarativeBackend {
             validate_basename("idiomatic file", name)?;
         }
 
+        let env = validate_env(&definition.env)?;
+
         // Backend definitions are process-lifetime registry data. Interning the
         // small idiomatic filename list satisfies the existing Backend trait's
         // borrowed-slice contract without allowing executable plugin code.
@@ -208,6 +222,7 @@ impl DeclarativeBackend {
             archive: definition.archive,
             bin_paths,
             bin_names: definition.bin_names,
+            env,
             idiomatic_files,
         })
     }
@@ -463,6 +478,31 @@ impl Backend for DeclarativeBackend {
         Ok(self.bin_names.clone())
     }
 
+    /// The environment this toolchain needs, with `{install_path}` resolved to
+    /// the version's own install root.
+    fn exec_env(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
+        if self.env.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        validate_version(&tv.version)?;
+        let install = ctx.dirs.install_path(self.id(), &tv.version);
+        let install = install.display().to_string();
+        let mut rendered = BTreeMap::new();
+        for (name, value) in &self.env {
+            let value = value
+                .replace("{install_path}", &install)
+                .replace("{version}", &tv.version)
+                .replace("{id}", &self.id);
+            if value.contains('{') || value.contains('}') {
+                return Err(Error::config(format!(
+                    "env variable `{name}` left an unresolved placeholder: `{value}`"
+                )));
+            }
+            rendered.insert(name.clone(), value);
+        }
+        Ok(rendered)
+    }
+
     fn idiomatic_files(&self) -> &[&str] {
         &self.idiomatic_files
     }
@@ -585,6 +625,93 @@ fn validate_basename(label: &str, value: &str) -> Result<()> {
     {
         return Err(Error::config(format!(
             "{label} must be a single safe filename: `{value}`"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the optional `[env]` table.
+///
+/// A declarative backend may describe the environment its toolchain needs, but
+/// it must not be able to point a child process at arbitrary host state. Names
+/// are restricted to conventional environment identifiers, and every value is
+/// built only from literal text and install-root-relative placeholders, so a
+/// definition can never smuggle in an absolute path or a reference to another
+/// tool's directory.
+fn validate_env(env: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+    let mut validated = BTreeMap::new();
+    for (name, value) in env {
+        validate_env_name(name)?;
+        validate_env_value(name, value)?;
+        validated.insert(name.clone(), value.clone());
+    }
+    Ok(validated)
+}
+
+fn validate_env_name(name: &str) -> Result<()> {
+    let mut characters = name.chars();
+    let valid_start = characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+    if !valid_start
+        || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(Error::config(format!(
+            "invalid env variable name `{name}`; use ASCII letters, digits, or `_`"
+        )));
+    }
+    // PATH is composed from `bin_paths`, and these steer the process or the
+    // dynamic loader at libraries outside the install root.
+    const RESERVED: &[&str] = &[
+        "PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+    ];
+    if RESERVED
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+    {
+        return Err(Error::config(format!(
+            "env variable `{name}` is reserved; declare directories through `bin_paths`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_env_value(name: &str, value: &str) -> Result<()> {
+    let label = format!("env.{name}");
+    validate_template(&label, value, &["id", "version", "install_path"])?;
+    if value.is_empty() {
+        return Err(Error::config(format!("`{label}` must not be empty")));
+    }
+    // An absolute path or a parent traversal would escape the install root that
+    // `{install_path}` anchors, which is the whole point of restricting values.
+    if value.contains("..") {
+        return Err(Error::config(format!(
+            "`{label}` must not contain `..`; values stay inside the install root"
+        )));
+    }
+    // Test the literal prefix, not the placeholder-stripped text: a value that
+    // legitimately starts with `{install_path}` continues with a separator, and
+    // stripping the placeholder first would make it look absolute.
+    let leading_literal = match value.find('{') {
+        Some(0) => "",
+        Some(open) => &value[..open],
+        None => value,
+    };
+    if Path::new(leading_literal).is_absolute()
+        || leading_literal.starts_with('/')
+        || leading_literal.starts_with('\\')
+    {
+        return Err(Error::config(format!(
+            "`{label}` must not use an absolute path; anchor it at `{{install_path}}`"
+        )));
+    }
+    if value.chars().any(|character| character.is_control()) {
+        return Err(Error::config(format!(
+            "`{label}` must not contain control characters"
         )));
     }
     Ok(())
@@ -762,6 +889,96 @@ mod tests {
         let unsafe_path =
             STATIC_FIXTURE.replace("bin_paths = [\"bin\"]", "bin_paths = [\"../bin\"]");
         assert!(DeclarativeBackend::from_toml(&unsafe_path).is_err());
+    }
+
+    /// A C/C++ toolchain is only usable once a build system can find it, so an
+    /// `[env]` table must survive into the activated environment with
+    /// `{install_path}` resolved against the version's own root.
+    #[test]
+    fn env_table_renders_against_the_install_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_dirs(temp.path());
+        let definition = format!(
+            "{STATIC_FIXTURE}\n[env]\nCC = \"{{install_path}}/bin/acme-gcc\"\n\
+             SYSROOT = \"{{install_path}}/sysroot\"\nACME_RELEASE = \"{{version}}\"\n"
+        );
+        let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+        let ctx = test_ctx(dirs);
+        let tv = ToolVersion::new("acme", "1.2.3");
+
+        let env = backend.exec_env(&ctx, &tv).unwrap();
+        let root = ctx.dirs.install_path("acme", "1.2.3");
+        assert_eq!(
+            env.get("CC").unwrap(),
+            &format!("{}/bin/acme-gcc", root.display())
+        );
+        assert_eq!(
+            env.get("SYSROOT").unwrap(),
+            &format!("{}/sysroot", root.display())
+        );
+        assert_eq!(env.get("ACME_RELEASE").unwrap(), "1.2.3");
+        // No placeholder may survive into a child process.
+        for value in env.values() {
+            assert!(!value.contains('{') && !value.contains('}'), "{value}");
+        }
+    }
+
+    /// Absent `[env]` must stay absent rather than becoming an empty export set,
+    /// so existing definitions keep their current activation behavior.
+    #[test]
+    fn absent_env_table_exports_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = DeclarativeBackend::from_toml(STATIC_FIXTURE).unwrap();
+        let ctx = test_ctx(isolated_dirs(temp.path()));
+        let env = backend
+            .exec_env(&ctx, &ToolVersion::new("acme", "1.2.3"))
+            .unwrap();
+        assert!(env.is_empty());
+    }
+
+    /// An `[env]` value is the one place a data-only definition could otherwise
+    /// aim a child process at arbitrary host state, so each escape must be
+    /// refused when the definition is parsed rather than when it is activated.
+    #[test]
+    fn env_table_rejects_escapes_from_the_install_root() {
+        let cases = [
+            // Absolute paths and parent traversal leave the install root.
+            ("CC", "/usr/bin/gcc"),
+            ("CC", "C:\\\\Program Files\\\\gcc.exe"),
+            ("SYSROOT", "{install_path}/../../other-tool/sysroot"),
+            // PATH is owned by bin_paths; loader hooks bypass the install root.
+            ("PATH", "{install_path}/bin"),
+            ("LD_PRELOAD", "{install_path}/lib/evil.so"),
+            ("LD_LIBRARY_PATH", "{install_path}/lib"),
+            ("DYLD_INSERT_LIBRARIES", "{install_path}/lib/evil.dylib"),
+            // Unknown placeholders must not reach a rendered value.
+            ("CC", "{home}/bin/gcc"),
+            ("CC", "{archive_url}"),
+            // Malformed names and values.
+            ("2CC", "{install_path}/bin/gcc"),
+            ("CC-BAD", "{install_path}/bin/gcc"),
+            ("CC", ""),
+        ];
+        for (name, value) in cases {
+            let definition = format!("{STATIC_FIXTURE}\n[env]\n{name} = \"{value}\"\n");
+            assert!(
+                DeclarativeBackend::from_toml(&definition).is_err(),
+                "expected `{name} = {value}` to be rejected"
+            );
+        }
+    }
+
+    /// Case-insensitive spellings must not slip past the reserved-name check.
+    #[test]
+    fn env_table_rejects_reserved_names_case_insensitively() {
+        for name in ["path", "Path", "ld_preload", "Dyld_Library_Path"] {
+            let definition =
+                format!("{STATIC_FIXTURE}\n[env]\n{name} = \"{{install_path}}/bin\"\n");
+            assert!(
+                DeclarativeBackend::from_toml(&definition).is_err(),
+                "expected reserved name `{name}` to be rejected"
+            );
+        }
     }
 
     #[tokio::test]

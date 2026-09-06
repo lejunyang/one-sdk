@@ -69,6 +69,16 @@ When a project lock supplies a generic artifact receipt, the backend consumes
 the recorded URL, filename, checksum, and subdirectory before consulting its
 current templates. This gives declarative tools the same metadata-free offline
 reinstall contract as built-in archive backends.
+An optional `[env]` table lets a definition describe the environment its
+toolchain needs, which is what makes a compiler usable: build systems locate a
+cross compiler through `CC`, `SYSROOT`, and similar variables rather than through
+`PATH`. Values are rendered from `{install_path}`, `{version}`, and `{id}` only,
+and `exec_env` fails closed if rendering would leave an unresolved placeholder.
+Names are validated as conventional environment identifiers; `PATH` and the
+dynamic-loader variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`,
+`DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`) are reserved case-insensitively,
+and absolute paths, `..`, and control characters are rejected at parse time, so a
+data-only definition cannot point a child process outside its installation root.
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
 Its supported asset, platform, catalog-digest, rename, bin, and strip options are
