@@ -250,12 +250,16 @@ over a rustup already installed on `PATH`:
 - Before `osdk install rust` has run, the isolated rustup does not exist;
   `osdk rust *` fails with an explicit message pointing at the install command
   instead of falling through to the system rustup.
-- `osdk source pin rust <source>` changes only the `RUSTUP_DIST_SERVER` injected
-  when osdk installs or updates managed toolchains. It never edits an external
-  rustup, its environment, or its configuration; when no managed Rust exists
-  the command additionally prints this scope note. To mirror a system rustup,
-  set `RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`, and related variables
-  yourself.
+- `osdk source pin rust <source>` and the one-shot `--source <source>` change
+  only the `RUSTUP_DIST_SERVER` injected when osdk drives the managed rustup.
+  Neither edits an external rustup, its environment, or its configuration; when
+  no managed Rust exists the command additionally prints this scope note. To
+  mirror a system rustup, set `RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`, and
+  related variables yourself.
+- Every managed operation that downloads (`osdk install rust`,
+  `osdk rust component add`, `osdk rust target add`) shares one source
+  selection, so a pinned source also applies when you add a component or target
+  later.
 - The managed rustup always uses the source osdk selected: a `RUSTUP_DIST_SERVER`
   or `RUSTUP_UPDATE_ROOT` already exported in your shell does not affect managed
   operations, so an external mirror cannot override osdk's choice. To use a

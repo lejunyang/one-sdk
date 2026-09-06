@@ -4857,17 +4857,36 @@ fn official_model_endpoint(provider: osdk_core::model::ProviderId, endpoint: &st
     }
 }
 
-pub fn rust(app: &App, command: RustCommand) -> Result<()> {
+pub async fn rust(app: &mut App, command: RustCommand) -> Result<()> {
     match command {
-        RustCommand::Component { command } => rust_item(app, "component", command),
-        RustCommand::Target { command } => rust_item(app, "target", command),
+        RustCommand::Component { command } => rust_item(app, "component", command).await,
+        RustCommand::Target { command } => rust_item(app, "target", command).await,
         RustCommand::Check { repair } => rust_check(app, repair),
         RustCommand::Override { command } => rust_override(app, command),
         RustCommand::Toolchain { command } => rust_toolchain(app, command),
     }
 }
 
-fn rust_item(app: &App, kind: &str, command: RustItemCommand) -> Result<()> {
+/// The source `rust` operations should drive, honoring `--source` and the
+/// configured pin. Adding a component or target downloads from the dist server,
+/// so it must use the same selection the install path uses instead of whatever
+/// the ambient environment happens to hold.
+async fn selected_rust_source(app: &mut App) -> Result<Option<osdk_core::source::Source>> {
+    apply_source_override(app, "rust");
+    let backend = app.registry.get("rust")?;
+    match osdk_core::source::select::active_source(&app.ctx, backend.as_ref()).await {
+        Ok(source) => Ok(Some(source)),
+        // Selection needs no network when a pin resolves, but probing can fail
+        // offline. rustup still has its own default host, so a failed selection
+        // must not block a local operation.
+        Err(error) => {
+            tracing::debug!(%error, "falling back to rustup's default dist server");
+            Ok(None)
+        }
+    }
+}
+
+async fn rust_item(app: &mut App, kind: &str, command: RustItemCommand) -> Result<()> {
     let (operation, name, toolchain) = match command {
         RustItemCommand::Add { name, toolchain } => ("add", Some(name), toolchain),
         RustItemCommand::Remove { name, toolchain } => ("remove", Some(name), toolchain),
@@ -4878,13 +4897,29 @@ fn rust_item(app: &App, kind: &str, command: RustItemCommand) -> Result<()> {
         args.push(name);
     }
     args.extend(["--toolchain", &toolchain]);
-    let output = osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &args, None)?;
+    // Only `add` downloads; the others are local and must not pay for a probe.
+    let source = if operation == "add" {
+        selected_rust_source(app).await?
+    } else {
+        None
+    };
+    if let Some(source) = &source {
+        tracing::info!(
+            source = %source.id,
+            dist = %source.download_url,
+            "{}",
+            osdk_core::i18n::tr("log.rustup_dist_server")
+        );
+    }
+    let output =
+        osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &args, None, source.as_ref())?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
     Ok(())
 }
 
 fn rust_check(app: &App, repair: bool) -> Result<()> {
-    let output = osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &["check"], None)?;
+    let output =
+        osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &["check"], None, None)?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
     if repair {
         let (created, removed) =
@@ -4909,6 +4944,7 @@ fn rust_override(app: &App, command: RustOverrideCommand) -> Result<()> {
             let output = osdk_core::backend::rust::RustBackend::run_rustup(
                 &app.ctx,
                 &["override", "list"],
+                None,
                 None,
             )?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -4944,6 +4980,7 @@ fn rust_override(app: &App, command: RustOverrideCommand) -> Result<()> {
                 &app.ctx,
                 &["override", "set", &active.spec, "--path", &path_arg],
                 None,
+                None,
             )?;
             println!(
                 "{}",
@@ -4973,6 +5010,7 @@ fn rust_toolchain(app: &App, command: RustToolchainCommand) -> Result<()> {
             osdk_core::backend::rust::RustBackend::run_rustup(
                 &app.ctx,
                 &["toolchain", "link", &name, &path_arg],
+                None,
                 None,
             )?;
             osdk_core::backend::rust::RustBackend::record_linked_toolchain(

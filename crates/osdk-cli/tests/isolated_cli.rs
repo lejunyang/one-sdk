@@ -2393,6 +2393,61 @@ fn rust_subcommand_without_managed_rustup_points_at_install() {
     );
 }
 
+/// `rust target add` downloads from the dist server, so the selected source has
+/// to reach rustup as `RUSTUP_DIST_SERVER`. It previously did not: the pin was
+/// only consulted by the install path, leaving `add` on whatever the ambient
+/// environment held.
+#[test]
+fn rust_target_add_drives_the_selected_source_over_an_ambient_mirror() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    write_fake_rustup(temp.path(), &project);
+    std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
+
+    // An ambient mirror that must not win, mimicking a shell profile or CI.
+    let ambient = [
+        ("RUSTUP_DIST_SERVER", "https://ambient.example/rustup"),
+        ("RUSTUP_UPDATE_ROOT", "https://ambient.example/rustup/rustup"),
+    ];
+
+    let pinned = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &[
+            "--source",
+            "rsproxy",
+            "rust",
+            "target",
+            "add",
+            "x86_64-linux-android",
+            "--toolchain",
+            "stable",
+        ],
+        &ambient,
+    );
+    assert!(
+        pinned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+
+    let calls = std::fs::read_to_string(temp.path().join("rustup-calls.log")).unwrap();
+    let add = calls
+        .lines()
+        .find(|line| line.contains("target add"))
+        .expect("target add was never delegated to rustup");
+    let fields: Vec<&str> = add.split('|').collect();
+    assert_eq!(
+        fields[2], "https://rsproxy.cn",
+        "--source rsproxy must reach rustup as RUSTUP_DIST_SERVER: {add}"
+    );
+    assert_eq!(
+        fields[3], "https://rsproxy.cn/rustup",
+        "the source index must reach rustup as RUSTUP_UPDATE_ROOT: {add}"
+    );
+}
+
 /// Local rust operations never download, so they must not inherit an ambient
 /// mirror either: leaking one made the managed toolchain answer to a host osdk
 /// had not selected.

@@ -66,15 +66,18 @@ impl RustBackend {
         Self::rustup_bin(ctx).is_file()
     }
 
-    /// Run the managed rustup with osdk's homes, never an ambient mirror.
+    /// Run the managed rustup with osdk's homes and `source` as the mirror.
     ///
-    /// The mirror variables are overwritten even though no source is selected
-    /// here, so a shell-level `RUSTUP_DIST_SERVER` cannot reach the managed
-    /// toolchain.
+    /// `source` is the already-selected source, so callers that can add or
+    /// update components drive the same mirror the install path would use. Pass
+    /// `None` only for operations that never reach the network (local state
+    /// queries, uninstall); the mirror variables are still overwritten so an
+    /// ambient value cannot take over.
     pub fn run_rustup(
         ctx: &Ctx,
         args: &[&str],
         cwd: Option<&std::path::Path>,
+        source: Option<&Source>,
     ) -> Result<std::process::Output> {
         let rustup = Self::rustup_bin(ctx);
         if !rustup.is_file() {
@@ -85,7 +88,7 @@ impl RustBackend {
                 rustup.display()
             )));
         }
-        let env = Self::rustup_env(ctx, None);
+        let env = Self::rustup_env(ctx, source);
         process::output(&rustup.display().to_string(), args, &env, cwd)
     }
 

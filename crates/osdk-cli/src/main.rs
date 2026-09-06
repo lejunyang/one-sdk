@@ -137,7 +137,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Python { command } => commands::python(app, command),
         Command::Android { command } => commands::android(app, command).await,
         Command::Model { command } => commands::model(app, command).await,
-        Command::Rust { command } => commands::rust(app, command),
+        Command::Rust { command } => commands::rust(app, command).await,
         Command::Cache { command } => commands::cache(app, command),
         Command::Container { command } => return container::run(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),

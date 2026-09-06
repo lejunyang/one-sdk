@@ -229,10 +229,13 @@ osdk 只驱动数据目录下的隔离 rustup，不接管已经安装在系统 `
 
 - 未执行过 `osdk install rust` 时，隔离 rustup 不存在，`osdk rust *` 会明确报错并
   提示先安装；它不会转而调用系统 rustup。
-- `osdk source pin rust <源>` 只改变 osdk 安装、更新受管工具链时注入的
-  `RUSTUP_DIST_SERVER`，不会修改外部 rustup 的环境变量或配置；未安装受管 Rust 时
-  命令会额外打印这条作用域提示。要让系统 rustup 走镜像，请自行配置
+- `osdk source pin rust <源>` 与一次性的 `--source <源>` 只改变 osdk 驱动受管
+  rustup 时注入的 `RUSTUP_DIST_SERVER`，不会修改外部 rustup 的环境变量或配置；未安装
+  受管 Rust 时命令会额外打印这条作用域提示。要让系统 rustup 走镜像，请自行配置
   `RUSTUP_DIST_SERVER`、`RUSTUP_UPDATE_ROOT` 等环境变量。
+- 会下载的受管操作（`osdk install rust`、`osdk rust component add`、
+  `osdk rust target add`）共用同一套源选择，因此固定的源对补装 component、target
+  同样生效。
 - 受管 rustup 始终使用 osdk 选定的源：shell 中已经导出的 `RUSTUP_DIST_SERVER`、
   `RUSTUP_UPDATE_ROOT` 不会影响受管操作，避免外部镜像覆盖 osdk 的选择。若要临时改用
   其他源，请使用 `--source <源>`，而不是导出环境变量。
