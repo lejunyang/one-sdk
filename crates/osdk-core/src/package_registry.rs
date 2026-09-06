@@ -15,6 +15,7 @@ use futures_util::StreamExt;
 use crate::backend::Ctx;
 use crate::config::normalize_registry_url;
 use crate::error::{Error, Result};
+use crate::source::env::SourceMode;
 
 const NPMMIRROR: &str = "https://registry.npmmirror.com/";
 const NPMJS: &str = "https://registry.npmjs.org/";
@@ -561,18 +562,63 @@ where
             reason: "osdk is offline".into(),
         });
     }
-    if let Some(name) = explicit_registry_env(manager, getenv) {
-        return Ok(RegistryPlan::PassThrough {
-            reason: format!("registry is explicitly configured by environment variable {name}"),
-        });
+    // An ambient registry variable used to end planning outright. It is now one
+    // more candidate to rank, because an unreachable or wrong mirror in the
+    // environment should lose to a working one rather than win by default. Under
+    // `--source-mode env` the old behaviour is what the user explicitly asked
+    // for, so the variable is still obeyed as-is.
+    let ambient = explicit_registry_env(manager, getenv);
+    if ctx.config.sources.mode == SourceMode::Env {
+        return match ambient {
+            Some(name) => Ok(RegistryPlan::PassThrough {
+                reason: format!(
+                    "registry is explicitly configured by environment variable {name}"
+                ),
+            }),
+            None => Err(Error::config(crate::i18n::trf(
+                "err.env_source_missing",
+                &[("tool", &manager.to_string())],
+            ))),
+        };
     }
+    let ambient = ambient.and_then(|name| {
+        let value = getenv(name)?;
+        match normalize_registry_url(&value) {
+            Ok(url) => Some(url),
+            Err(error) => {
+                // Dropping this silently is what made a stale variable so hard to
+                // notice, so say so and continue with the built-in candidates.
+                tracing::warn!(
+                    "{}",
+                    crate::i18n::trf(
+                        "warn.env_source_invalid",
+                        &[
+                            ("variable", name),
+                            ("tool", &manager.to_string()),
+                            ("reason", &error.to_string()),
+                        ],
+                    )
+                );
+                None
+            }
+        }
+    });
 
     let native = match native_registry_candidates(ctx, cwd, manager, getenv)? {
         NativeDecision::PassThrough(reason) => return Ok(RegistryPlan::PassThrough { reason }),
         NativeDecision::Candidates(native) => native,
     };
     let preserve_order = !native.is_empty() || !ctx.config.registries().npm.urls.is_empty();
-    let candidates = effective_candidates(ctx, native)?;
+    let mut candidates = effective_candidates(ctx, native)?;
+    if let Some(ambient) = ambient {
+        // Prepended so `preserve_order` (a deliberate native or configured
+        // registry) still decides first; when nothing was deliberate, the probe
+        // ranks it against the defaults on measured latency.
+        if !candidates.contains(&ambient) {
+            candidates.insert(0, ambient);
+        }
+    }
+    let candidates = candidates;
     let probes = probe_all(&candidates, ctx.config.registries().npm.probe_timeout_ms).await;
     let selected = select_probe(&probes, preserve_order);
     if let Some(selected) = selected {
@@ -2462,9 +2508,13 @@ npmRegistries:
     }
 
     #[tokio::test]
+    /// Under `--source-mode env` the ambient registry is obeyed as-is, which is
+    /// the whole point of asking for that mode. The reason string must still not
+    /// leak the value, since a registry URL can carry a token.
     async fn explicit_manager_environment_passes_through() {
         let temp = tempfile::tempdir().unwrap();
-        let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let mut ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        ctx.config.sources.mode = SourceMode::Env;
         let args = vec!["install".into()];
         let cwd = isolated_cwd(temp.path());
         let plan = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |key| {
@@ -2477,6 +2527,63 @@ npmRegistries:
         };
         assert!(reason.contains("pnpm_config_registry"));
         assert!(!reason.contains("token-redacted"));
+    }
+
+    #[tokio::test]
+    /// The default mode no longer lets an ambient registry win unchallenged: a
+    /// deliberately configured registry (`npm.urls`, here an unused loopback
+    /// port) still sets `preserve_order`, so the ambient value cannot outrank it
+    /// merely by existing. This is the npm-side equivalent of "pin beats env".
+    async fn an_ambient_registry_does_not_outrank_a_configured_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let args = vec!["install".into()];
+        let cwd = isolated_cwd(temp.path());
+        let plan = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |key| {
+            (key == "pnpm_config_registry").then(|| "https://private.test/".into())
+        })
+        .await
+        .unwrap();
+        // Neither endpoint answers in the test environment, so the interesting
+        // assertion is that planning actually ran instead of short-circuiting.
+        assert!(
+            !matches!(plan, RegistryPlan::PassThrough { .. }),
+            "an ambient registry must be planned, not passed through: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    /// A malformed ambient value must not be handed to the package manager, and
+    /// must not silently disappear either; planning continues with the built-ins.
+    async fn a_malformed_ambient_registry_is_dropped_rather_than_obeyed() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let args = vec!["install".into()];
+        let cwd = isolated_cwd(temp.path());
+        let plan = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |key| {
+            (key == "pnpm_config_registry").then(|| "definitely not a url".into())
+        })
+        .await
+        .unwrap();
+        assert!(
+            !matches!(plan, RegistryPlan::PassThrough { .. }),
+            "a malformed ambient registry must not become a pass-through: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    /// Asking to obey the environment when nothing is set is a configuration
+    /// error rather than a quiet fallback to the built-in registries.
+    async fn env_mode_without_a_variable_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        ctx.config.sources.mode = SourceMode::Env;
+        let args = vec!["install".into()];
+        let cwd = isolated_cwd(temp.path());
+        let error = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |_| None)
+            .await
+            .expect_err("env mode without a variable must fail");
+        assert!(error.to_string().contains("pnpm"), "{error}");
     }
 
     fn test_ctx(root: &Path, candidates: Vec<String>, offline: bool) -> Ctx {

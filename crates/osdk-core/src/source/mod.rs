@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod env;
+pub use env::SourceMode;
 pub mod select;
 
 /// A URL template with `{version}`, `{os}`, `{arch}`, `{file}`, `{ext}`

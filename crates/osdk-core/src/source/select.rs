@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::backend::{Backend, Ctx};
 use crate::error::{Error, Result};
+use crate::source::env::{apply_env_source, read_env_source};
 use crate::source::{
     candidate_fingerprint, ProbeCache, ProbeResult, Selection, Source, SourceKind,
 };
@@ -41,6 +42,36 @@ impl VersionedProbeCache {
             results: self.results,
         }
     }
+}
+
+/// Assemble the effective source list including any ambient mirror variable.
+///
+/// This is [`effective_sources`] plus the environment-derived candidate. It is
+/// fallible because `--source-mode env` turns a missing or malformed variable
+/// into an error instead of a silent fallback.
+///
+/// The ambient candidate is folded in *before* pin handling in
+/// [`ranked_source_candidates`], so an explicit pin or `--source` still wins; the
+/// environment only competes when no source was chosen deliberately.
+pub fn effective_sources_with_env(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
+    let sources = effective_sources(ctx, backend);
+    let Some(mirror) = backend.env_mirror() else {
+        // A backend with no native mirror variable has nothing to reconcile, and
+        // `--source-mode env` cannot apply to it.
+        return Ok(sources);
+    };
+    let env = read_env_source(
+        &mirror,
+        |name| std::env::var(name).ok(),
+        |url| backend.validate_env_endpoint(url),
+    );
+    apply_env_source(
+        ctx.config.sources.mode,
+        backend.id(),
+        sources,
+        env,
+        |message| tracing::warn!("{message}"),
+    )
 }
 
 /// Assemble the effective source list for a backend: defaults minus disabled,
@@ -84,7 +115,7 @@ pub async fn active_source(ctx: &Ctx, backend: &dyn Backend) -> Result<Source> {
 ///
 /// A config pin (or one-shot `--source`) moves that source to the front.
 pub async fn ranked_source_list(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
-    ranked_source_candidates(ctx, backend, effective_sources(ctx, backend)).await
+    ranked_source_candidates(ctx, backend, effective_sources_with_env(ctx, backend)?).await
 }
 
 /// Rank an already-filtered effective source set with the same pin, cache,
@@ -307,7 +338,10 @@ pub async fn refresh(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<ProbeResult
     if ctx.config.settings.offline {
         return Err(Error::other("cannot refresh sources while offline"));
     }
-    let sources = effective_sources(ctx, backend);
+    // Probe exactly what selection will rank, ambient candidate included;
+    // otherwise `source test` would measure a different set than `install` uses
+    // and the cached fingerprint would never match.
+    let sources = effective_sources_with_env(ctx, backend)?;
     let results = probe_all(ctx, backend, &sources).await;
     save_cache(ctx, backend.id(), &sources, &results);
     Ok(results)

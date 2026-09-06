@@ -254,6 +254,34 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "warn.env_source_invalid",
+        (
+            "warning: ignoring {variable} for {tool}: {reason}. osdk will select among its built-in sources instead; pass --source-mode env to require this value.",
+            "警告：已忽略 {tool} 的 {variable}：{reason}。osdk 将改用内置源进行选择；如需强制使用该值，请传入 --source-mode env。",
+        ),
+    );
+    m.insert(
+        "err.env_source_missing",
+        (
+            "--source-mode env requires a mirror environment variable for {tool}, but none is set",
+            "--source-mode env 需要为 {tool} 设置镜像环境变量，但当前未设置",
+        ),
+    );
+    m.insert(
+        "err.env_source_invalid",
+        (
+            "--source-mode env was requested but {variable} is unusable: {reason}",
+            "已指定 --source-mode env，但 {variable} 不可用：{reason}",
+        ),
+    );
+    m.insert(
+        "msg.env_source_selected",
+        (
+            "using the mirror from {variable} for {tool}",
+            "已使用 {variable} 指定的镜像用于 {tool}",
+        ),
+    );
+    m.insert(
         "msg.source_unpinned",
         ("unpinned {tool}", "已取消 {tool} 的源固定"),
     );

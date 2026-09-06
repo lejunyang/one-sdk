@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::source::{Selection, Source};
+use crate::source::{Selection, Source, SourceMode};
 use crate::store::link::LinkMode;
 
 pub const PROJECT_CONFIG_NAMES: &[&str] = &["osdk.toml", ".osdk.toml"];
@@ -247,6 +247,9 @@ fn default_jobs() -> usize {
 #[serde(default)]
 pub struct SourcesConfig {
     pub selection: Selection,
+    /// Whether an ambient mirror environment variable is ranked alongside the
+    /// built-in sources (`auto`) or obeyed on its own (`env`).
+    pub mode: SourceMode,
     pub probe_timeout_ms: u64,
     /// TTL for cached probe results, as a human string like "6h".
     pub cache_ttl: String,
@@ -271,6 +274,7 @@ impl Default for SourcesConfig {
     fn default() -> Self {
         SourcesConfig {
             selection: Selection::Auto,
+            mode: SourceMode::default(),
             probe_timeout_ms: 1500,
             cache_ttl: "6h".to_string(),
             per_tool: BTreeMap::new(),
@@ -663,6 +667,7 @@ impl Config {
             }
             self.sources = SourcesConfig {
                 selection: src.selection,
+                mode: src.mode,
                 probe_timeout_ms: src.probe_timeout_ms,
                 cache_ttl: src.cache_ttl,
                 per_tool: merged,
@@ -747,6 +752,11 @@ impl Config {
                 "ordered" => Selection::Ordered,
                 _ => Selection::Auto,
             };
+        }
+        if let Some(v) = getenv("OSDK_SOURCE_MODE") {
+            if let Some(mode) = SourceMode::parse(&v) {
+                self.sources.mode = mode;
+            }
         }
         if let Some(v) = getenv("OSDK_CONTAINER_RUNTIME") {
             if let Ok(runtime) = v.parse() {

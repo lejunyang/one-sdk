@@ -76,6 +76,24 @@ pub trait Backend: Send + Sync {
     /// download base, return a URL to fetch for measuring throughput.
     fn probe_url(&self, ctx: &Ctx, source: &Source) -> Option<String>;
 
+    /// The native environment variables that point this toolchain at a mirror,
+    /// if it has any. Returning `Some` opts the backend into ranking an ambient
+    /// value alongside its built-in sources; see [`crate::source::env`].
+    ///
+    /// Most backends have no such variable and use the default. This method is
+    /// intentionally not behind the `install` feature because source selection
+    /// also runs for delegated commands that the shim can reach.
+    fn env_mirror(&self) -> Option<crate::source::env::EnvMirror<'static>> {
+        None
+    }
+
+    /// Reject an ambient endpoint that this toolchain could not use anyway, so a
+    /// malformed value is reported as configuration rather than as an unreachable
+    /// mirror. Only consulted when [`Backend::env_mirror`] returns `Some`.
+    fn validate_env_endpoint(&self, url: &str) -> Result<()> {
+        crate::source::env::validate_https_endpoint(url)
+    }
+
     #[cfg(feature = "install")]
     /// List installable versions (typically parsed from a remote index).
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>>;

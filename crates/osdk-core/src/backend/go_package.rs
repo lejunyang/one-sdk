@@ -429,7 +429,10 @@ impl GoPackageBackend {
     }
 
     async fn ranked_proxy_sources(&self, ctx: &Ctx) -> Result<Vec<Source>> {
-        let mut sources = crate::source::select::effective_sources(ctx, self);
+        // `effective_sources_with_env` rather than `effective_sources`, so an
+        // ambient GOPROXY is ranked here too instead of being dropped by this
+        // backend's own candidate narrowing.
+        let mut sources = crate::source::select::effective_sources_with_env(ctx, self)?;
         if let Some(config) = ctx.config.tool_sources(self.id()) {
             if !config.custom.is_empty() {
                 let mut allowed_ids = config
@@ -676,6 +679,32 @@ impl Backend for GoPackageBackend {
         validate_go_source(source)
             .ok()
             .map(|()| format!("{}/", source.download_url.trim_end_matches('/')))
+    }
+
+    fn env_mirror(&self) -> Option<crate::source::env::EnvMirror<'static>> {
+        // The go command has no separate index endpoint; GOPROXY serves both.
+        Some(crate::source::env::EnvMirror {
+            download: &["GOPROXY"],
+            index: &[],
+        })
+    }
+
+    fn validate_env_endpoint(&self, url: &str) -> Result<()> {
+        // GOPROXY accepts `off`, `direct`, and comma/pipe separated fallback
+        // lists that have no single endpoint to probe. Those are legitimate
+        // values, but they are not a mirror we can rank, so they are reported as
+        // unusable-for-ranking rather than silently reinterpreted.
+        if url.contains(',') || url.contains('|') {
+            return Err(Error::config(
+                "GOPROXY holds a fallback list, which cannot be ranked as a single mirror",
+            ));
+        }
+        if matches!(url, "off" | "direct" | "none") {
+            return Err(Error::config(format!(
+                "GOPROXY is set to `{url}`, which is a policy rather than a mirror"
+            )));
+        }
+        validate_go_proxy(url)
     }
 
     #[cfg(feature = "install")]
@@ -1813,6 +1842,61 @@ mod tests {
         let sources = backend.ranked_proxy_sources(&ctx).await.unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].id, "private");
+    }
+
+    #[test]
+    /// `off`, `direct` and comma/pipe fallback lists are legitimate go settings
+    /// but none of them is a single rankable endpoint, so each must be rejected
+    /// as a mirror candidate instead of becoming a bogus source.
+    fn goproxy_policy_values_are_not_usable_as_mirrors() {
+        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
+        for value in [
+            "off",
+            "direct",
+            "none",
+            "https://goproxy.cn,direct",
+            "https://goproxy.cn|https://proxy.golang.org",
+        ] {
+            let error = backend
+                .validate_env_endpoint(value)
+                .expect_err("`{value}` must not be ranked as a mirror");
+            let message = error.to_string();
+            assert!(
+                message.contains("policy") || message.contains("fallback list"),
+                "`{value}` should be explained as a policy or list, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    /// A single canonical proxy URL is a usable candidate, and it inherits the
+    /// go-specific endpoint rules (no credentials, no trailing slash).
+    fn a_single_goproxy_url_is_a_usable_mirror() {
+        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
+        backend
+            .validate_env_endpoint("https://goproxy.io")
+            .expect("a plain https proxy must be usable");
+        backend
+            .validate_env_endpoint("https://user:secret@goproxy.io")
+            .expect_err("credentials must be refused");
+    }
+
+    #[test]
+    /// The narrowing that keeps a private module name away from public hosts runs
+    /// after the ambient candidate is folded in, and the ambient candidate uses a
+    /// reserved id that a per-module `custom` list never names. So an ambient
+    /// GOPROXY cannot widen a narrowed set — verified here on the id contract
+    /// that `ranked_proxy_sources` relies on.
+    fn the_ambient_id_is_never_allowed_by_custom_narrowing() {
+        let custom = [Source::mirror("private", "https://proxy.private.example", 0)];
+        let allowed = custom
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            !allowed.contains(crate::source::env::ENV_SOURCE_ID),
+            "the ambient id must not be reachable through custom narrowing"
+        );
     }
 
     #[tokio::test]

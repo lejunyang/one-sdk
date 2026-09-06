@@ -292,6 +292,15 @@ impl Backend for RustBackend {
         ))
     }
 
+    fn env_mirror(&self) -> Option<crate::source::env::EnvMirror<'static>> {
+        // rustup splits the dist server (toolchains, components, targets) from
+        // the update root (rustup itself), matching our download/index split.
+        Some(crate::source::env::EnvMirror {
+            download: &["RUSTUP_DIST_SERVER"],
+            index: &["RUSTUP_UPDATE_ROOT"],
+        })
+    }
+
     #[cfg(feature = "install")]
     async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
         // rustup resolves channels/versions itself; we surface the common
