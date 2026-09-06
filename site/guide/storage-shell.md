@@ -366,9 +366,13 @@ ACME_RELEASE = "{version}"
 - archive 类型仅为 `tar.gz|tar.xz|tar.zst|zip`；
 - checksum 的 `value` 与 `url` 必须且只能设置一个；长度必须符合算法；
 - versions/archive URL 只接受 HTTP(S)，checksum URL 额外可基于 `{archive_url}`；
-- 允许的模板变量按位置为 `{id}`、`{version}`、`{os}`、`{arch}`、`{libc}`、
-  `{file}`、`{archive_url}`；不支持的变量会失败；`[env]` 取值仅接受
+- 允许的模板变量按位置为 `{id}`、`{version}`、`{os}`、`{arch}`、`{arch_llvm}`、
+  `{libc}`、`{file}`、`{archive_url}`；不支持的变量会失败；`[env]` 取值仅接受
   `{install_path}`、`{version}`、`{id}`；
+- `{arch}` 渲染 osdk 的短 token（`x64`、`arm64`、`x86`、`arm`），`{arch_llvm}` 渲染
+  LLVM target triple 的 CPU 部分（`x86_64`、`aarch64`、`i686`、`armv7`）。编译器与
+  工具链归档通常按 triple 命名发布，这类情况用 `{arch_llvm}`；遵循 Node 式命名的
+  runtime 用 `{arch}`；
 - `[env]` 变量名不能是 `PATH` 或动态加载器变量，取值必须是相对路径、不含 `..`
   且锚定在安装根内；
 - schema 使用严格未知字段拒绝，因此不能加入 hook 或 install script。

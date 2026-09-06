@@ -412,7 +412,8 @@ variables, and osdk exports them.
 - Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip`.
 - Exactly one checksum `value` or `url` is required, with digest length matching the algorithm.
 - Versions/archive URLs accept only HTTP(S); a checksum URL may additionally derive from `{archive_url}`.
-- Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail. `[env]` values accept only `{install_path}`, `{version}`, and `{id}`.
+- Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{arch_llvm}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail. `[env]` values accept only `{install_path}`, `{version}`, and `{id}`.
+- `{arch}` renders osdk's short token (`x64`, `arm64`, `x86`, `arm`), while `{arch_llvm}` renders the CPU part of an LLVM target triple (`x86_64`, `aarch64`, `i686`, `armv7`). Compiler and toolchain archives are usually published with the triple spelling, so use `{arch_llvm}` for those and `{arch}` for runtimes that follow Node-style naming.
 - `[env]` names cannot be `PATH` or a dynamic-loader variable, and `[env]` values must be relative, free of `..`, and anchored inside the installation root.
 - The schema rejects unknown fields, so it cannot contain hooks or install scripts.
 

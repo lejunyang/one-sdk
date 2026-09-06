@@ -162,7 +162,12 @@ impl DeclarativeBackend {
             ));
         }
         let versions = if let Some(url) = definition.versions.url {
-            validate_url_template("versions.url", &url, &["id", "os", "arch", "libc"], false)?;
+            validate_url_template(
+                "versions.url",
+                &url,
+                &["id", "os", "arch", "arch_llvm", "libc"],
+                false,
+            )?;
             VersionSource::Url(url)
         } else {
             validate_versions(&mut definition.versions.values)?;
@@ -172,7 +177,7 @@ impl DeclarativeBackend {
         validate_url_template(
             "archive.url",
             &definition.archive.url,
-            &["id", "version", "os", "arch", "libc", "file"],
+            &["id", "version", "os", "arch", "arch_llvm", "libc", "file"],
             false,
         )?;
         validate_file_template(&definition.archive.file)?;
@@ -332,7 +337,16 @@ impl ChecksumDefinition {
             validate_url_template(
                 "archive.checksum.url",
                 url,
-                &["id", "version", "os", "arch", "libc", "file", "archive_url"],
+                &[
+                    "id",
+                    "version",
+                    "os",
+                    "arch",
+                    "arch_llvm",
+                    "libc",
+                    "file",
+                    "archive_url",
+                ],
                 true,
             )?;
         }
@@ -721,7 +735,7 @@ fn validate_file_template(template: &str) -> Result<()> {
     validate_template(
         "archive.file",
         template,
-        &["id", "version", "os", "arch", "libc"],
+        &["id", "version", "os", "arch", "arch_llvm", "libc"],
     )?;
     if template.contains('/') || template.contains('\\') || template.contains(':') {
         return Err(Error::config(
@@ -840,6 +854,7 @@ fn render_template(
         .replace("{id}", id)
         .replace("{os}", os)
         .replace("{arch}", arch)
+        .replace("{arch_llvm}", platform.arch.llvm_token())
         .replace("{libc}", libc);
     if let Some(version) = version {
         rendered = rendered.replace("{version}", version);
@@ -979,6 +994,59 @@ mod tests {
                 "expected reserved name `{name}` to be rejected"
             );
         }
+    }
+
+    /// Toolchain archives are overwhelmingly named with LLVM triple tokens
+    /// (`x86_64`, `aarch64`) rather than osdk's own short tokens, so a
+    /// definition must be able to ask for either spelling.
+    #[test]
+    fn arch_llvm_renders_triple_tokens_independently_of_arch() {
+        let expectations = [
+            (Arch::X64, "x64", "x86_64"),
+            (Arch::Arm64, "arm64", "aarch64"),
+            (Arch::X86, "x86", "i686"),
+            (Arch::Arm, "arm", "armv7"),
+        ];
+        for (arch, short, llvm) in expectations {
+            let platform = Platform {
+                os: Os::Linux,
+                arch,
+                libc: Libc::Glibc,
+            };
+            // Both tokens must survive in one template: `{arch}` and
+            // `{arch_llvm}` are distinct whole placeholders, so neither
+            // substitution may consume part of the other.
+            let rendered = render_template(
+                "tool-{arch_llvm}-{arch}.tar.gz",
+                "acme",
+                Some("1.0.0"),
+                platform,
+                None,
+                None,
+            );
+            assert_eq!(rendered, format!("tool-{llvm}-{short}.tar.gz"));
+            assert!(!rendered.contains('{'), "{rendered}");
+        }
+    }
+
+    /// The new token has to be accepted everywhere a platform token already is,
+    /// and still rejected where no platform token belongs.
+    #[test]
+    fn arch_llvm_is_accepted_in_platform_template_positions() {
+        let definition = STATIC_FIXTURE
+            .replace(
+                "file = \"acme-{version}-{os}-{arch}.tar.gz\"",
+                "file = \"acme-{version}-{os}-{arch_llvm}.tar.gz\"",
+            )
+            .replace(
+                "url = \"https://example.test/{version}/{file}\"",
+                "url = \"https://example.test/{arch_llvm}/{version}/{file}\"",
+            );
+        assert!(DeclarativeBackend::from_toml(&definition).is_ok());
+
+        // `[env]` values are not platform templates.
+        let in_env = format!("{STATIC_FIXTURE}\n[env]\nCC = \"{{arch_llvm}}/gcc\"\n");
+        assert!(DeclarativeBackend::from_toml(&in_env).is_err());
     }
 
     #[tokio::test]

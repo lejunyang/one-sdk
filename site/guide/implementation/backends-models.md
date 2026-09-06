@@ -60,7 +60,7 @@ module-root 发现、proxy 路由、构建环境策略、runtime 绑定与重放
 
 ## 声明式与 GitHub backend
 
-[`DeclarativeBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/declarative.rs) 是受限的 schema 1 TOML 扩展点。它支持静态或 URL 版本列表、平台模板变量、`tar.gz`/`tar.xz`/`tar.zst`/`zip`、固定或远端 checksum、`strip_root`、bin 路径和惯用版本文件。定义文件最大 1 MiB，远端版本最多 10,000 个，并严格验证 URL、文件名、相对路径和 checksum。它刻意不执行 hook 或任意命令；所有安装必须经过共享验证与 CAS 流水线。
+[`DeclarativeBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/declarative.rs) 是受限的 schema 1 TOML 扩展点。它支持静态或 URL 版本列表、平台模板变量、`tar.gz`/`tar.xz`/`tar.zst`/`zip`、固定或远端 checksum、`strip_root`、bin 路径和惯用版本文件。平台模板同时提供 osdk 短 token `{arch}` 与 LLVM target triple 的 CPU 部分 `{arch_llvm}`，因为编译器与工具链归档通常以 `x86_64`/`aarch64` 而非 `x64`/`arm64` 发布；后者复用 [`Arch::llvm_token`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/platform.rs)，而不是引入第二套命名表。定义文件最大 1 MiB，远端版本最多 10,000 个，并严格验证 URL、文件名、相对路径和 checksum。它刻意不执行 hook 或任意命令；所有安装必须经过共享验证与 CAS 流水线。
 项目 lock 提供通用 artifact receipt 时，backend 会优先使用其中记录的 URL、文件名、
 checksum 与子目录，再考虑当前模板。因此声明式工具与内置归档 backend 具有相同的
 无 metadata 离线重装契约。
