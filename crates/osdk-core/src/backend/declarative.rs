@@ -258,6 +258,23 @@ struct ChecksumDefinition {
     algorithm: ChecksumAlgorithm,
     value: Option<String>,
     url: Option<String>,
+    /// Take the digest from a GitHub artifact attestation instead of a checksum
+    /// file.
+    ///
+    /// Some upstreams publish no digest at all. LLVM is the case in point: its
+    /// releases ship `.sig` (GPG) and, from 19.1.0, `.jsonl` sigstore bundles,
+    /// but no `.sha256`. The bundle's in-toto subject already carries the
+    /// artifact's SHA-256, so the attestation is both the signature and the
+    /// digest source, and no second file has to exist.
+    attestation: Option<AttestationDefinition>,
+}
+
+/// Where an attested digest comes from.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestationDefinition {
+    /// The `owner/repo` whose workflow must have produced the artifact.
+    repo: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -464,21 +481,30 @@ impl DeclarativeBackend {
         Ok(values.into_iter().map(VersionInfo::stable).collect())
     }
 
+    /// Resolve the digest to check the archive against before extraction.
+    ///
+    /// `None` means the digest is not known in advance because it comes from an
+    /// attestation, which can only be verified once the bytes are on disk. The
+    /// pipeline then treats the attested digest as the authenticated checksum,
+    /// so the archive is still never extracted unverified.
     async fn checksum(
         &self,
         ctx: &Ctx,
         version: &str,
         file: &str,
         archive_urls: &[String],
-    ) -> Result<Checksum> {
+    ) -> Result<Option<Checksum>> {
         let definition = self.resolve_archive(ctx.platform, version)?.checksum;
         let algo = definition.algorithm.into();
+        if definition.attestation.is_some() {
+            return Ok(None);
+        }
         if let Some(value) = &definition.value {
             validate_checksum(value, definition.algorithm)?;
-            return Ok(Checksum {
+            return Ok(Some(Checksum {
                 algo,
                 hex: value.clone(),
-            });
+            }));
         }
 
         let template = definition
@@ -500,10 +526,10 @@ impl DeclarativeBackend {
                         Error::other(format!("empty checksum response from {url}"))
                     })?;
                     validate_checksum(value, definition.algorithm)?;
-                    return Ok(Checksum {
+                    return Ok(Some(Checksum {
                         algo,
                         hex: value.to_string(),
-                    });
+                    }));
                 }
                 Err(error) => last_error = Some(error),
             }
@@ -517,10 +543,25 @@ impl DeclarativeBackend {
 
 impl ChecksumDefinition {
     fn validate(&self) -> Result<()> {
-        if self.value.is_some() == self.url.is_some() {
+        let sources = usize::from(self.value.is_some())
+            + usize::from(self.url.is_some())
+            + usize::from(self.attestation.is_some());
+        if sources != 1 {
             return Err(Error::config(
-                "`archive.checksum` must set exactly one of `value` or `url`",
+                "`archive.checksum` must set exactly one of `value`, `url`, or `attestation`",
             ));
+        }
+        if let Some(attestation) = &self.attestation {
+            // A digest from a sigstore bundle is always SHA-256, so accepting
+            // another algorithm here would describe something that cannot
+            // happen.
+            if !matches!(self.algorithm, ChecksumAlgorithm::Sha256) {
+                return Err(Error::config(
+                    "`archive.checksum.attestation` requires `algorithm = \"sha256\"`, \
+                     because a GitHub attestation subject carries a SHA-256 digest",
+                ));
+            }
+            validate_attestation_repo(&attestation.repo)?;
         }
         if let Some(value) = &self.value {
             validate_checksum(value, self.algorithm)?;
@@ -647,7 +688,7 @@ impl Backend for DeclarativeBackend {
                 urls,
                 file_name: file,
                 kind: archive.kind.into(),
-                checksum: Some(checksum),
+                checksum,
                 strip_root: archive.strip_root,
                 subdir: None,
             }
@@ -661,7 +702,22 @@ impl Backend for DeclarativeBackend {
             offline: ctx.config.settings.offline,
             require_checksums: ctx.config.settings.require_checksums,
         };
-        pipeline::run(&plan, &pipeline_ctx).await?;
+        // The digest source and the signature are the same object here, so
+        // verification is not optional; see `attestation_request`.
+        let attestation_repo = self
+            .resolve_archive(ctx.platform, &tv.version)?
+            .checksum
+            .attestation
+            .as_ref()
+            .map(|definition| definition.repo.clone());
+        let attestation = match attestation_repo {
+            None => None,
+            Some(repo) => Some(attestation_request(
+                &repo,
+                crate::source::select::ranked_source_list(ctx, self).await?,
+            )?),
+        };
+        pipeline::run_with_attestation(&plan, &pipeline_ctx, attestation.as_ref()).await?;
         Ok(())
     }
 
@@ -717,6 +773,58 @@ impl Backend for DeclarativeBackend {
     fn idiomatic_files(&self) -> &[&str] {
         &self.idiomatic_files
     }
+}
+
+/// Build the attestation request for a definition whose digest comes from one.
+///
+/// The policy is always [`AttestationPolicy::Required`], never the user's global
+/// `attestations` setting. When the digest source *is* the attestation there is
+/// no separate checksum to fall back on, so honouring a global `off` (the
+/// default) would install an archive with no integrity evidence at all — the
+/// opposite of what choosing attestation as the digest source asked for.
+///
+/// `repo` becomes a sigstore certificate-identity policy
+/// (`GitHubWorkflowRepository`), so a loose value would weaken the guarantee
+/// that the artifact came from the workflow the definition names.
+#[cfg(feature = "install")]
+fn attestation_request(
+    repo: &str,
+    sources: Vec<Source>,
+) -> Result<crate::verification::GithubAttestation> {
+    let (owner, repo) = split_attestation_repo(repo)?;
+    Ok(crate::verification::GithubAttestation {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        policy: crate::config::AttestationPolicy::Required,
+        sources,
+    })
+}
+
+/// Split and validate an `owner/repo` attestation subject.
+fn split_attestation_repo(value: &str) -> Result<(&str, &str)> {
+    let invalid = || {
+        Error::config(format!(
+            "invalid `archive.checksum.attestation.repo` `{value}`; expected `owner/repo`"
+        ))
+    };
+    let (owner, repo) = value.split_once('/').ok_or_else(invalid)?;
+    let segment_ok = |segment: &str| {
+        !segment.is_empty()
+            && segment.len() <= 100
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !segment_ok(owner) || !segment_ok(repo) {
+        return Err(invalid());
+    }
+    Ok((owner, repo))
+}
+
+fn validate_attestation_repo(value: &str) -> Result<()> {
+    split_attestation_repo(value).map(|_| ())
 }
 
 /// Validate every `[[archive.overrides]]` entry at parse time.
@@ -1798,6 +1906,138 @@ file = "acme-old-{{version}}-x86_64-linux-gnu-ubuntu-18.04.tar.gz"
         assert_eq!(receipt_name("2.0.0").as_deref(), Some(new_name));
 
         server.join().unwrap();
+    }
+
+    /// An attested digest replaces a checksum file. LLVM publishes no
+    /// `.sha256`, so the sigstore bundle's subject digest is the only digest
+    /// there is; `checksum()` must report "not known yet" rather than fail.
+    #[tokio::test]
+    async fn an_attestation_defers_the_digest_instead_of_demanding_a_checksum_file() {
+        let definition = STATIC_FIXTURE.replace(
+            "url = \"{archive_url}.sha256\"",
+            "attestation = { repo = \"llvm/llvm-project\" }",
+        );
+        let backend = DeclarativeBackend::from_toml(&definition).expect("attestation accepted");
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_dirs(temp.path());
+        dirs.ensure().unwrap();
+        let ctx = test_ctx(dirs);
+
+        // No network is touched: nothing is fetched because there is no
+        // checksum endpoint to fetch from.
+        let checksum = backend
+            .checksum(&ctx, "1.2.3", "acme-1.2.3-linux-x64.tar.gz", &[])
+            .await
+            .expect("resolving a checksum must not fail");
+        assert!(
+            checksum.is_none(),
+            "an attested digest is only known after the bytes are on disk"
+        );
+    }
+
+    /// The digest source and the signature are the same object here, so the
+    /// policy cannot follow the global `attestations` setting. With `off` —
+    /// which is the default — an attested definition would otherwise install an
+    /// archive with no integrity evidence at all.
+    #[cfg(feature = "install")]
+    #[test]
+    fn attestation_verification_is_required_regardless_of_the_global_policy() {
+        let request = attestation_request("llvm/llvm-project", Vec::new()).unwrap();
+        assert_eq!(request.owner, "llvm");
+        assert_eq!(request.repo, "llvm-project");
+        assert_eq!(
+            request.policy,
+            crate::config::AttestationPolicy::Required,
+            "an attested digest is the only integrity evidence, so it cannot be optional"
+        );
+        // The default the request must not inherit.
+        assert_eq!(
+            crate::config::AttestationPolicy::default(),
+            crate::config::AttestationPolicy::Off
+        );
+    }
+
+    /// The repo becomes a sigstore certificate-identity policy, so a loose
+    /// value would weaken the guarantee that the artifact came from the named
+    /// workflow.
+    #[test]
+    fn attestation_definitions_are_validated_at_parse_time() {
+        let with_checksum =
+            |fragment: &str| STATIC_FIXTURE.replace("url = \"{archive_url}.sha256\"", fragment);
+
+        // A sigstore subject digest is SHA-256; another algorithm describes
+        // something that cannot happen.
+        let wrong_algorithm = with_checksum("attestation = { repo = \"llvm/llvm-project\" }")
+            .replace("algorithm = \"sha256\"", "algorithm = \"sha512\"");
+        let error = DeclarativeBackend::from_toml(&wrong_algorithm)
+            .err()
+            .expect("sha512 rejected")
+            .to_string();
+        assert!(error.contains("sha256"), "got: {error}");
+
+        // Two digest sources at once leaves it ambiguous which one is trusted.
+        let both = STATIC_FIXTURE.replace(
+            "url = \"{archive_url}.sha256\"",
+            "url = \"{archive_url}.sha256\"\nattestation = { repo = \"llvm/llvm-project\" }",
+        );
+        let error = DeclarativeBackend::from_toml(&both)
+            .err()
+            .expect("two sources rejected")
+            .to_string();
+        assert!(error.contains("exactly one"), "got: {error}");
+
+        for repo in [
+            "llvm-project",               // no owner
+            "llvm/llvm-project/extra",    // path traversal into a third segment
+            "llvm/",                      // empty repo
+            "/llvm-project",              // empty owner
+            "llvm/llvm project",          // space
+            "llvm/llvm..project/../evil", // traversal characters
+        ] {
+            let fragment = format!("attestation = {{ repo = \"{repo}\" }}");
+            let error = DeclarativeBackend::from_toml(&with_checksum(&fragment))
+                .err()
+                .unwrap_or_else(|| panic!("`{repo}` should have been rejected"))
+                .to_string();
+            assert!(
+                error.contains("owner/repo"),
+                "error for `{repo}` should explain the shape, got: {error}"
+            );
+        }
+
+        // Dots and dashes are legal in real repository names.
+        for repo in ["llvm/llvm-project", "acme_corp/tool.rs"] {
+            let fragment = format!("attestation = {{ repo = \"{repo}\" }}");
+            DeclarativeBackend::from_toml(&with_checksum(&fragment))
+                .unwrap_or_else(|error| panic!("`{repo}` should be accepted: {error}"));
+        }
+    }
+
+    /// An override may switch the digest source, which is what a tool needs
+    /// when only its newer releases carry attestations.
+    #[test]
+    fn an_override_can_switch_to_an_attested_digest() {
+        let definition = format!(
+            "{STATIC_FIXTURE}\n[[archive.overrides]]\nversions = \">=19.0.0\"\n\
+             file = \"acme-{{version}}.tar.gz\"\n\
+             [archive.overrides.checksum]\nalgorithm = \"sha256\"\n\
+             attestation = {{ repo = \"llvm/llvm-project\" }}\n"
+        );
+        let backend = DeclarativeBackend::from_toml(&definition).expect("accepted");
+        let platform = platform(Os::Linux, Arch::X64);
+
+        // Old versions keep the checksum file.
+        let old = backend.resolve_archive(platform, "1.2.3").unwrap();
+        assert!(old.checksum.url.is_some());
+        assert!(old.checksum.attestation.is_none());
+
+        // New versions switch to the attestation.
+        let new = backend.resolve_archive(platform, "19.1.0").unwrap();
+        assert!(new.checksum.url.is_none());
+        assert_eq!(
+            new.checksum.attestation.as_ref().map(|a| a.repo.as_str()),
+            Some("llvm/llvm-project")
+        );
     }
 
     #[tokio::test]

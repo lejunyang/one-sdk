@@ -84,6 +84,20 @@ override 约束的条件数量排序，因此结果与声明顺序无关；同�
 避免第二套词汇；非 semver 的版本只是匹配不上需求，而不会中断安装。凡是无需具体平台即
 可检查的问题——空条件集、什么都不替换的条目、非法需求、无法随版本变化的模板——都在解析
 期拒绝，使损坏的定义在加载时失败，而不是在恰好匹配到它的那台机器上失败。
+`archive.checksum.attestation` 之所以存在，是因为有些上游根本不发布摘要文件：LLVM 带
+`.sig`、从 19.1.0 起带 `.jsonl` sigstore bundle，但没有 `.sha256`。bundle 的 in-toto
+subject 本身就含该制品的 SHA-256，因此它同时是签名与摘要来源；而
+[`verify_github_attestation`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/verification/mod.rs)
+早已实现了 `gh attestation verify --repo <owner>/<repo>` 所做的检查，且不依赖 `gh`
+CLI。流水线本来就把 attestation 证据当作 authenticated checksum，因此 backend 的
+`checksum` 返回 `Ok(None)`——摘要在字节存在之前确实未知——转而传入一个
+`GithubAttestation`；归档仍然不会在未验证的情况下被解压。策略固定为 `Required` 而不是
+继承 `settings.attestations`（默认 `off`）：当 attestation **就是**摘要来源时，顺从全局
+`off` 会装上毫无完整性证据的归档，因此由 `attestation_request` 自行设定策略，并有测试
+断言它不跟随全局默认值。`repo` 会成为 `GitHubWorkflowRepository` 证书身份策略，因此按
+`owner/repo` 解析校验而非原样插值。覆盖范围并不完整、也不能假设：只有上游启用之后由工
+作流构建的制品才有 attestation，对 LLVM 即 19.1.0 及之后且每个 release 只有部分制品，
+因此"按版本与平台切换摘要来源"是 `[[archive.overrides]]` 的正常用例而非边缘情况。
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。GitHub API、网页、Raw、release asset 和 attestation URL 都通过同一组规范化来源候选，但 token 只发给官方 API host。
 其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入

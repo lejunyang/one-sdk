@@ -98,6 +98,27 @@ of aborting an install. Everything checkable without a concrete platform — an
 empty condition set, an entry that replaces nothing, an invalid requirement, a
 template that cannot vary by version — is rejected at parse time, so a broken
 definition fails on load rather than on whichever machine matches it.
+`archive.checksum.attestation` exists because some upstreams publish no digest
+file at all: LLVM ships `.sig` and, from 19.1.0, `.jsonl` sigstore bundles, but
+no `.sha256`. A bundle's in-toto subject already carries the artifact's SHA-256,
+so it is simultaneously the signature and the digest source, and
+[`verify_github_attestation`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/verification/mod.rs)
+already implemented the check that `gh attestation verify --repo <owner>/<repo>`
+performs, without depending on the `gh` CLI. The pipeline already treated
+attestation evidence as an authenticated checksum, so the backend returns
+`Ok(None)` from `checksum` — the digest is genuinely unknown until the bytes
+exist — and passes a `GithubAttestation` instead; the archive is still never
+extracted unverified. The policy is pinned to `Required` rather than inherited
+from `settings.attestations`, whose default is `off`: when the attestation *is*
+the digest source, deferring to a global `off` would install an archive with no
+integrity evidence, so `attestation_request` sets the policy itself and a test
+asserts it does not follow the global default. `repo` becomes a
+`GitHubWorkflowRepository` certificate-identity policy, so it is parsed and
+validated as `owner/repo` rather than interpolated as given. Coverage is not
+universal and cannot be assumed: attestations exist only for workflow-built
+artifacts after the upstream adopted them, which for LLVM means 19.1.0 onward and
+only some assets per release, so switching digest source per version and platform
+is the `[[archive.overrides]]` case rather than an edge case.
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
 Its supported asset, platform, catalog-digest, rename, bin, and strip options are

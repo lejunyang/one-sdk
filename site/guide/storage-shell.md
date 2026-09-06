@@ -314,6 +314,8 @@ strip_root = true
 algorithm = "sha256"     # sha256|sha512|blake3
 url = "{archive_url}.sha256"
 # 或 value = "<固定十六进制摘要>"
+# 或者当上游根本不发布摘要文件时：
+#   attestation = { repo = "owner/repo" }
 
 # 可选。编译工具链仅靠 PATH 无法使用，需要通过这类变量把构建系统指向它。
 [env]
@@ -405,6 +407,36 @@ override 可替换 `url`、`file`、`kind`、`strip_root` 和 `checksum`。未�
 `{arch_llvm}` 之外再学一套词汇。非 semver 的版本永远不满足 `versions` 需求，此时回退
 到默认值而不是让安装失败。
 
+### 用 attestation 作为摘要来源
+
+有些上游根本不发布摘要文件。LLVM 就是例子：它的 release 带 `.sig`（GPG），从 19.1.0
+起还带 `.jsonl` sigstore bundle，但没有 `.sha256`。而 sigstore bundle 的 in-toto
+subject 里本来就含有该制品的 SHA-256，因此这个 attestation 既是签名也是摘要来源——不需
+要再去取第二个文件。
+
+```toml
+[archive.checksum]
+algorithm = "sha256"
+attestation = { repo = "llvm/llvm-project" }
+```
+
+这与 `gh attestation verify --repo llvm/llvm-project` 做的是同一件事，且**不需要**
+`gh` CLI：osdk 用内嵌的 trusted root 验证 bundle，并要求证书来自 GitHub Actions 的
+OIDC issuer、且来自你指定仓库的工作流。
+
+由于摘要只有在字节落盘之后才能得知，验证发生在下载**之后**而不是之前。但归档仍然不会
+在未验证的情况下被解压——attested 摘要会成为流水线实际强制校验的 checksum。
+
+依赖它之前有两点需要知道：
+
+- **此时验证是强制的。** 当 attestation **就是**摘要来源时，osdk 会无视全局
+  `attestations` 设置（其默认值是 `off`）强制要求验证。否则一个声明了 attestation 的
+  定义反而会装上一个完全没有完整性证据的归档；
+- **覆盖范围并不完整。** 只有上游启用 attestation 之后、由 GitHub Actions 工作流构建
+  的制品才有。对 LLVM 而言意味着 19.1.0 及之后，而且即便如此每个 release 也只有部分
+  制品有——它的 Windows 归档完全没有 attestation。`[[archive.overrides]]` 之所以能按
+  版本和平台切换摘要来源，正是为了应对这种情况。
+
 ### 验证与安全边界
 
 - `versions.values` 与 `versions.url` 必须且只能设置一个，最多 10,000 个版本；
@@ -419,7 +451,11 @@ override 可替换 `url`、`file`、`kind`、`strip_root` 和 `checksum`。未�
   两条同等具体的匹配会报错而不是按顺序取其一；
 - archive 类型仅为 `tar.gz|tar.xz|tar.zst|zip|7z`；支持 `.7z` 是因为 Windows GCC
   工具链通常只以该格式发布，解压时会校验条目路径，归档无法写到解压目录之外；
-- checksum 的 `value` 与 `url` 必须且只能设置一个；长度必须符合算法；
+- checksum 的 `value`、`url`、`attestation` 必须且只能设置一个；长度必须符合算法。
+  `attestation` 要求 `algorithm = "sha256"`，因为 GitHub attestation 的 subject 带的
+  就是 SHA-256 摘要；其 `repo` 必须是纯粹的 `owner/repo`——该值会成为 sigstore 的证书
+  身份策略，因此会被校验而不是原样透传。使用 attestation 时摘要一定会被验证，即使全局
+  `attestations` 设置为 `off`；
 - versions/archive URL 只接受 HTTP(S)，checksum URL 额外可基于 `{archive_url}`；
 - 允许的模板变量按位置为 `{id}`、`{version}`、`{os}`、`{arch}`、`{arch_llvm}`、
   `{libc}`、`{file}`、`{archive_url}`；不支持的变量会失败；`[env]` 取值仅接受

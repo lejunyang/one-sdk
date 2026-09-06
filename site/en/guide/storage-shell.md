@@ -350,6 +350,8 @@ strip_root = true
 algorithm = "sha256"     # sha256|sha512|blake3
 url = "{archive_url}.sha256"
 # Or: value = "<fixed hexadecimal digest>"
+# Or, when the upstream publishes no digest file at all:
+#   attestation = { repo = "owner/repo" }
 
 # Optional. A compiler toolchain is not usable from PATH alone, so a build
 # system is pointed at it through variables like these.
@@ -460,6 +462,40 @@ a definition does not need a second vocabulary alongside `{arch_llvm}`. A versio
 that is not semver never satisfies a `versions` requirement; it falls back to the
 defaults rather than failing the install.
 
+### Taking the digest from an attestation
+
+Some upstreams publish no digest file. LLVM is the example: its releases carry
+`.sig` (GPG) and, from 19.1.0, `.jsonl` sigstore bundles, but no `.sha256`. A
+sigstore bundle's in-toto subject already contains the artifact's SHA-256, so the
+attestation is both the signature and the digest — there is nothing else to fetch.
+
+```toml
+[archive.checksum]
+algorithm = "sha256"
+attestation = { repo = "llvm/llvm-project" }
+```
+
+This is the same check `gh attestation verify --repo llvm/llvm-project` performs,
+and it does not need the `gh` CLI: osdk verifies the bundle against its embedded
+trusted root, requiring the certificate to come from GitHub Actions' OIDC issuer
+and from a workflow in the repository you named.
+
+Because the digest is only known once the bytes are on disk, verification happens
+after the download rather than before it. The archive is still never extracted
+unverified — the attested digest becomes the checksum the pipeline enforces.
+
+Two consequences are worth knowing before relying on it:
+
+- **Verification is mandatory here.** When the attestation *is* the digest source,
+  osdk requires it regardless of the global `attestations` setting (whose default
+  is `off`). Otherwise a definition that named an attestation would install an
+  archive with no integrity evidence at all.
+- **Coverage is not universal.** Attestations only exist for artifacts built by a
+  GitHub Actions workflow after the upstream adopted them. For LLVM that means
+  19.1.0 and later, and even then only some assets per release — its Windows
+  archives are not attested at all. An `[[archive.overrides]]` entry can switch
+  digest source per version and platform for exactly this reason.
+
 ### Validation and security boundaries
 
 - Exactly one of `versions.values` and `versions.url` is required; at most 10,000 versions are accepted.
@@ -468,7 +504,7 @@ defaults rather than failing the install.
 - Either the archive URL or filename must vary with `{version}`. The same applies to each `[[archive.overrides]]` entry, counting the fields it inherits.
 - Every `[[archive.overrides]]` entry must set at least one condition (`versions`, `os`, `arch`, `libc`) and replace at least one field, so an entry can neither shadow the defaults for everything nor claim a match while changing nothing. A `versions` value must be a valid semver requirement. The most specific match wins; two equally specific matches are rejected instead of resolved by order.
 - Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip|7z`. `.7z` exists because Windows GCC toolchains are commonly published in that format only; entry paths are checked so an archive cannot write outside the extraction directory.
-- Exactly one checksum `value` or `url` is required, with digest length matching the algorithm.
+- Exactly one checksum `value`, `url`, or `attestation` is required, with digest length matching the algorithm. `attestation` requires `algorithm = "sha256"`, because a GitHub attestation subject carries a SHA-256 digest, and its `repo` must be a plain `owner/repo` — the value becomes a sigstore certificate-identity policy, so it is validated rather than passed through. An attested digest is always verified, even when the global `attestations` setting is `off`.
 - Versions/archive URLs accept only HTTP(S); a checksum URL may additionally derive from `{archive_url}`.
 - Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{arch_llvm}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail. `[env]` values accept only `{install_path}`, `{version}`, and `{id}`.
 - `{arch}` renders osdk's short token (`x64`, `arm64`, `x86`, `arm`), while `{arch_llvm}` renders the CPU part of an LLVM target triple (`x86_64`, `aarch64`, `i686`, `armv7`). Compiler and toolchain archives are usually published with the triple spelling, so use `{arch_llvm}` for those and `{arch}` for runtimes that follow Node-style naming.
