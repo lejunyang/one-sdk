@@ -72,6 +72,18 @@ checksum 与子目录，再考虑当前模板。因此声明式工具与内置�
 （`LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_INSERT_LIBRARIES`、`DYLD_LIBRARY_PATH`）
 不区分大小写地保留，绝对路径、`..` 和控制字符在解析阶段即被拒绝，因此数据式定义
 无法把子进程指向安装根之外。
+可选的 `[[archive.overrides]]` 列表之所以存在，是因为单一模板无法表达"上游改名"。
+LLVM 是塑造该设计的真实案例：Linux x86-64 在 19.1.0 从
+`clang+llvm-<version>-x86_64-linux-gnu-ubuntu-18.04` 改为 `LLVM-<version>-Linux-X64`，
+而 Windows 保持旧命名，且其中嵌入的发行版号无法从任何平台信息推导——也就是说改名是
+**按平台发生**且部分不可预测的。因此每条 override 以 `versions`（`semver::VersionReq`）
+与 `os`、`arch`、`libc` 联合匹配，并且替换**整个字段**（`url`、`file`、`kind`、
+`strip_root`、`checksum`）而不是片段，未设置的字段回退到 `[archive]`。解析时按各条
+override 约束的条件数量排序，因此结果与声明顺序无关；同等具体则报错而不是按顺序取其
+一，因为顺序很容易被无意改动。arch 条件同时接受 `{arch}` 与 `{arch_llvm}` 两种写法以
+避免第二套词汇；非 semver 的版本只是匹配不上需求，而不会中断安装。凡是无需具体平台即
+可检查的问题——空条件集、什么都不替换的条目、非法需求、无法随版本变化的模板——都在解析
+期拒绝，使损坏的定义在加载时失败，而不是在恰好匹配到它的那台机器上失败。
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) 是运行时创建的命名空间 backend。它最多分页读取 1,000 个 release，忽略 draft，并按预发布策略过滤；随后按 OS、架构和 libc 为 asset 评分。显式规则可解决非标准 asset 名称。在线且启用签名校验时，可用的可信 minisign checksum manifest 会覆盖预载的静态摘要；否则使用静态摘要，再回退到普通 sidecar/shared checksum。配置的 GitHub attestation 策略独立应用。GitHub API、网页、Raw、release asset 和 attestation URL 都通过同一组规范化来源候选，但 token 只发给官方 API host。
 其受支持的 asset、平台、catalog 摘要、rename、bin 与 strip 选项会先作为公开身份输入

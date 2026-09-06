@@ -80,6 +80,24 @@ dynamic-loader variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`,
 `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`) are reserved case-insensitively,
 and absolute paths, `..`, and control characters are rejected at parse time, so a
 data-only definition cannot point a child process outside its installation root.
+An optional `[[archive.overrides]]` list exists because a single template cannot
+express an upstream that renames its assets. LLVM is the case that shaped the
+design: Linux x86-64 moved from `clang+llvm-<version>-x86_64-linux-gnu-ubuntu-18.04`
+to `LLVM-<version>-Linux-X64` in 19.1.0 while Windows kept the earlier spelling,
+and the embedded distro version cannot be derived from any platform fact, so the
+rename is per platform and partly unpredictable. Each entry therefore matches on
+`versions` (a `semver::VersionReq`) combined with `os`, `arch`, and `libc`, and
+replaces whole fields (`url`, `file`, `kind`, `strip_root`, `checksum`) rather
+than fragments, falling back to `[archive]` for anything it leaves unset.
+Resolution ranks matches by how many conditions they constrain, so the outcome
+does not depend on declaration order; a tie is an error rather than an
+order-dependent pick, because ordering is easy to reshuffle by accident. Arch
+conditions accept both the `{arch}` and `{arch_llvm}` spellings to avoid a second
+vocabulary, and a non-semver version simply fails to match a requirement instead
+of aborting an install. Everything checkable without a concrete platform — an
+empty condition set, an entry that replaces nothing, an invalid requirement, a
+template that cannot vary by version — is rejected at parse time, so a broken
+definition fails on load rather than on whichever machine matches it.
 
 [`GithubBackend`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/github.rs) is a namespaced backend constructed at runtime. It reads up to 1,000 paginated releases, ignores drafts, applies prerelease policy, and scores assets for OS, architecture, and libc. Explicit rules handle non-standard asset names. Online, when signature verification is enabled, an available trusted minisign checksum manifest overrides a preloaded static digest; otherwise the static digest is used before ordinary sidecar/shared checksum discovery. The configured GitHub attestation policy is applied independently. GitHub API, page, Raw, release asset, and attestation URLs all use the same normalized source candidates, while credentials are sent only to the official API host.
 Its supported asset, platform, catalog-digest, rename, bin, and strip options are

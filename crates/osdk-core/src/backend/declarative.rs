@@ -84,6 +84,155 @@ struct ArchiveDefinition {
     #[serde(default)]
     strip_root: bool,
     checksum: ChecksumDefinition,
+    /// Per-version and per-platform exceptions to the fields above.
+    ///
+    /// Upstreams do rename their assets, and not always on every platform at
+    /// once. LLVM is the worked example: Linux x86-64 moved from
+    /// `clang+llvm-<version>-x86_64-linux-gnu-ubuntu-18.04.tar.xz` to
+    /// `LLVM-<version>-Linux-X64.tar.xz` in 19.1.0 while Windows kept the older
+    /// spelling, and the embedded distro version is not derivable from any
+    /// platform fact. No single template can express that, so an override
+    /// replaces whole fields for the versions and platforms it matches.
+    #[serde(default)]
+    overrides: Vec<ArchiveOverride>,
+}
+
+/// One conditional replacement of archive fields.
+///
+/// An empty condition would silently shadow the defaults for everything, so at
+/// least one of `versions`, `os`, `arch` or `libc` is required. Fields left
+/// unset fall back to the `[archive]` defaults, so an override that only
+/// renames a file does not have to restate the URL, kind and checksum.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveOverride {
+    /// A semver requirement, e.g. `<19.1.0` or `>=17, <18`.
+    versions: Option<String>,
+    os: Option<OsCondition>,
+    arch: Option<ArchCondition>,
+    libc: Option<LibcCondition>,
+    url: Option<String>,
+    file: Option<String>,
+    kind: Option<ArchiveKindDefinition>,
+    strip_root: Option<bool>,
+    checksum: Option<ChecksumDefinition>,
+}
+
+/// Conditions reuse the spellings the templates already use (`{os}`, `{arch}`,
+/// `{libc}`) so a definition never has to learn a second vocabulary. `arch`
+/// additionally accepts the LLVM CPU tokens that `{arch_llvm}` renders, because
+/// an override matching an `x86_64` asset reads better as `arch = "x86_64"`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OsCondition {
+    Linux,
+    Macos,
+    Windows,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ArchCondition {
+    X64,
+    #[serde(rename = "x86_64")]
+    X86_64,
+    Arm64,
+    Aarch64,
+    X86,
+    I686,
+    Arm,
+    Armv7,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum LibcCondition {
+    Glibc,
+    Musl,
+    None,
+}
+
+impl OsCondition {
+    fn matches(self, os: Os) -> bool {
+        matches!(
+            (self, os),
+            (Self::Linux, Os::Linux) | (Self::Macos, Os::Macos) | (Self::Windows, Os::Windows)
+        )
+    }
+}
+
+impl ArchCondition {
+    fn matches(self, arch: Arch) -> bool {
+        matches!(
+            (self, arch),
+            (Self::X64 | Self::X86_64, Arch::X64)
+                | (Self::Arm64 | Self::Aarch64, Arch::Arm64)
+                | (Self::X86 | Self::I686, Arch::X86)
+                | (Self::Arm | Self::Armv7, Arch::Arm)
+        )
+    }
+}
+
+impl LibcCondition {
+    fn matches(self, libc: Libc) -> bool {
+        matches!(
+            (self, libc),
+            (Self::Glibc, Libc::Glibc) | (Self::Musl, Libc::Musl) | (Self::None, Libc::None)
+        )
+    }
+}
+
+/// The archive fields that apply to one concrete version and platform.
+struct ResolvedArchive<'a> {
+    url: &'a str,
+    file: &'a str,
+    kind: ArchiveKindDefinition,
+    strip_root: bool,
+    checksum: &'a ChecksumDefinition,
+}
+
+impl ArchiveOverride {
+    /// How many conditions this override constrains, used to order matches from
+    /// least to most specific so the most specific one wins.
+    fn specificity(&self) -> usize {
+        usize::from(self.versions.is_some())
+            + usize::from(self.os.is_some())
+            + usize::from(self.arch.is_some())
+            + usize::from(self.libc.is_some())
+    }
+
+    fn matches(&self, platform: Platform, version: &str) -> bool {
+        if let Some(os) = self.os {
+            if !os.matches(platform.os) {
+                return false;
+            }
+        }
+        if let Some(arch) = self.arch {
+            if !arch.matches(platform.arch) {
+                return false;
+            }
+        }
+        if let Some(libc) = self.libc {
+            if !libc.matches(platform.libc) {
+                return false;
+            }
+        }
+        match &self.versions {
+            None => true,
+            Some(requirement) => {
+                // Both were validated at parse time. A version that is not
+                // semver cannot satisfy a semver requirement, so it does not
+                // match rather than erroring during an install.
+                match (
+                    semver::VersionReq::parse(requirement),
+                    semver::Version::parse(version),
+                ) {
+                    (Ok(requirement), Ok(version)) => requirement.matches(&version),
+                    _ => false,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -195,6 +344,7 @@ impl DeclarativeBackend {
             ));
         }
         definition.archive.checksum.validate()?;
+        validate_archive_overrides(&definition.archive)?;
 
         if definition.bin_paths.is_empty() {
             return Err(Error::config("`bin_paths` must not be empty"));
@@ -239,16 +389,53 @@ impl DeclarativeBackend {
 
     fn rendered_file(&self, platform: Platform, version: &str) -> Result<String> {
         validate_version(version)?;
-        let rendered = render_template(
-            &self.archive.file,
-            &self.id,
-            Some(version),
-            platform,
-            None,
-            None,
-        );
+        let archive = self.resolve_archive(platform, version)?;
+        let rendered = render_template(archive.file, &self.id, Some(version), platform, None, None);
         validate_basename("rendered archive file", &rendered)?;
         Ok(rendered)
+    }
+
+    /// Pick the archive fields for one version and platform.
+    ///
+    /// The most specific matching override wins. Two matches with the same
+    /// specificity are rejected rather than resolved by declaration order, so a
+    /// definition cannot depend on an ordering that is easy to reshuffle by
+    /// accident; the error names the ambiguity so it can be narrowed.
+    fn resolve_archive(&self, platform: Platform, version: &str) -> Result<ResolvedArchive<'_>> {
+        let mut winner: Option<(usize, &ArchiveOverride)> = None;
+        for candidate in &self.archive.overrides {
+            if !candidate.matches(platform, version) {
+                continue;
+            }
+            let specificity = candidate.specificity();
+            match winner {
+                Some((best, _)) if specificity < best => {}
+                Some((best, _)) if specificity == best => {
+                    return Err(Error::config(format!(
+                        "two `archive.overrides` entries match {} {:?}/{:?} equally specifically; \
+                         narrow one with `versions`, `os`, `arch`, or `libc`",
+                        version, platform.os, platform.arch
+                    )));
+                }
+                _ => winner = Some((specificity, candidate)),
+            }
+        }
+        let over = winner.map(|(_, candidate)| candidate);
+        Ok(ResolvedArchive {
+            url: over
+                .and_then(|over| over.url.as_deref())
+                .unwrap_or(&self.archive.url),
+            file: over
+                .and_then(|over| over.file.as_deref())
+                .unwrap_or(&self.archive.file),
+            kind: over.and_then(|over| over.kind).unwrap_or(self.archive.kind),
+            strip_root: over
+                .and_then(|over| over.strip_root)
+                .unwrap_or(self.archive.strip_root),
+            checksum: over
+                .and_then(|over| over.checksum.as_ref())
+                .unwrap_or(&self.archive.checksum),
+        })
     }
 
     fn rendered_url(
@@ -284,7 +471,7 @@ impl DeclarativeBackend {
         file: &str,
         archive_urls: &[String],
     ) -> Result<Checksum> {
-        let definition = &self.archive.checksum;
+        let definition = self.resolve_archive(ctx.platform, version)?.checksum;
         let algo = definition.algorithm.into();
         if let Some(value) = &definition.value {
             validate_checksum(value, definition.algorithm)?;
@@ -431,23 +618,26 @@ impl Backend for DeclarativeBackend {
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         validate_version(&tv.version)?;
+        let archive = self.resolve_archive(ctx.platform, &tv.version)?;
         let plan = if let Some(plan) =
-            pipeline::locked_install_plan(self.id(), tv, self.archive.strip_root)?
+            pipeline::locked_install_plan(self.id(), tv, archive.strip_root)?
         {
             plan
         } else {
             let file = self.rendered_file(ctx.platform, &tv.version)?;
             let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+            // A source's `download_url` is the default `archive.url` unless the
+            // user configured a mirror, so an override's URL has to replace the
+            // default rather than every candidate.
             let urls = sources
                 .iter()
                 .map(|source| {
-                    self.rendered_url(
-                        &source.download_url,
-                        ctx.platform,
-                        Some(&tv.version),
-                        Some(&file),
-                        None,
-                    )
+                    let template = if source.download_url == self.archive.url {
+                        archive.url
+                    } else {
+                        source.download_url.as_str()
+                    };
+                    self.rendered_url(template, ctx.platform, Some(&tv.version), Some(&file), None)
                 })
                 .collect::<Result<Vec<_>>>()?;
             let checksum = self.checksum(ctx, &tv.version, &file, &urls).await?;
@@ -456,9 +646,9 @@ impl Backend for DeclarativeBackend {
                 version: tv.version.clone(),
                 urls,
                 file_name: file,
-                kind: self.archive.kind.into(),
+                kind: archive.kind.into(),
                 checksum: Some(checksum),
-                strip_root: self.archive.strip_root,
+                strip_root: archive.strip_root,
                 subdir: None,
             }
         };
@@ -527,6 +717,71 @@ impl Backend for DeclarativeBackend {
     fn idiomatic_files(&self) -> &[&str] {
         &self.idiomatic_files
     }
+}
+
+/// Validate every `[[archive.overrides]]` entry at parse time.
+///
+/// Everything checkable without a concrete platform is checked here, so a
+/// malformed definition fails on load instead of during an install on whichever
+/// machine happens to match the broken entry.
+fn validate_archive_overrides(archive: &ArchiveDefinition) -> Result<()> {
+    for (index, over) in archive.overrides.iter().enumerate() {
+        let label = |field: &str| format!("archive.overrides[{index}].{field}");
+        if over.specificity() == 0 {
+            return Err(Error::config(format!(
+                "`archive.overrides[{index}]` has no condition; \
+                 set at least one of `versions`, `os`, `arch`, or `libc`"
+            )));
+        }
+        // An override that matches but changes nothing is always a mistake:
+        // either the author meant to set a field, or the entry is dead weight
+        // that silently claims a match another entry could have taken.
+        if over.url.is_none()
+            && over.file.is_none()
+            && over.kind.is_none()
+            && over.strip_root.is_none()
+            && over.checksum.is_none()
+        {
+            return Err(Error::config(format!(
+                "`archive.overrides[{index}]` overrides nothing; \
+                 set at least one of `url`, `file`, `kind`, `strip_root`, or `checksum`"
+            )));
+        }
+        if let Some(requirement) = &over.versions {
+            semver::VersionReq::parse(requirement).map_err(|error| {
+                Error::config(format!(
+                    "invalid `{}` requirement `{requirement}`: {error}",
+                    label("versions")
+                ))
+            })?;
+        }
+        if let Some(url) = &over.url {
+            validate_url_template(
+                &label("url"),
+                url,
+                &["id", "version", "os", "arch", "arch_llvm", "libc", "file"],
+                false,
+            )?;
+        }
+        if let Some(file) = &over.file {
+            validate_file_template(file)?;
+        }
+        if let Some(checksum) = &over.checksum {
+            checksum.validate()?;
+        }
+        // The `{version}` requirement that applies to the defaults applies to
+        // an override too: an install that cannot vary by version would reuse
+        // one archive for every version.
+        let url = over.url.as_deref().unwrap_or(&archive.url);
+        let file = over.file.as_deref().unwrap_or(&archive.file);
+        if !url.contains("{version}") && !url.contains("{file}") && !file.contains("{version}") {
+            return Err(Error::config(format!(
+                "`archive.overrides[{index}]` must vary by `{{version}}` \
+                 through its `url` or `file`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Load all regular `.toml` definitions directly inside `directory`.
@@ -913,6 +1168,303 @@ mod tests {
         assert!(DeclarativeBackend::from_toml(&unsafe_path).is_err());
     }
 
+    /// LLVM is the reason `[[archive.overrides]]` exists, so it is the fixture:
+    /// Linux x86-64 changed spelling in 19.1.0 while Windows kept the old one,
+    /// which means version and platform have to be matched together.
+    const LLVM_FIXTURE: &str = r#"
+schema = 1
+id = "llvm"
+bin_paths = ["bin"]
+bin_names = ["clang", "clang++", "lld"]
+
+[versions]
+values = ["17.0.6", "18.1.8", "19.1.0", "21.1.0"]
+
+[archive]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}/{file}"
+file = "LLVM-{version}-Linux-X64.tar.xz"
+kind = "tar.xz"
+strip_root = true
+
+[archive.checksum]
+algorithm = "sha256"
+url = "{archive_url}.sha256"
+
+# Before 19.1.0 Linux used the clang+llvm spelling with an embedded distro
+# version that cannot be derived from any platform fact.
+[[archive.overrides]]
+versions = "<19.1.0"
+os = "linux"
+arch = "x86_64"
+file = "clang+llvm-{version}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+
+# Windows never switched.
+[[archive.overrides]]
+os = "windows"
+arch = "x86_64"
+file = "clang+llvm-{version}-x86_64-pc-windows-msvc.tar.xz"
+"#;
+
+    fn platform(os: Os, arch: Arch) -> Platform {
+        Platform {
+            os,
+            arch,
+            libc: Libc::Glibc,
+        }
+    }
+
+    /// The same version must resolve to different asset names per platform, and
+    /// the same platform to different names across the 19.1.0 boundary.
+    #[test]
+    fn overrides_match_version_and_platform_together() {
+        let backend = DeclarativeBackend::from_toml(LLVM_FIXTURE).unwrap();
+        let file = |os, arch, version: &str| {
+            backend
+                .rendered_file(platform(os, arch), version)
+                .unwrap_or_else(|error| panic!("{version} on {os:?}/{arch:?}: {error}"))
+        };
+
+        // Linux crosses the rename boundary at 19.1.0.
+        assert_eq!(
+            file(Os::Linux, Arch::X64, "18.1.8"),
+            "clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+        );
+        assert_eq!(
+            file(Os::Linux, Arch::X64, "19.1.0"),
+            "LLVM-19.1.0-Linux-X64.tar.xz"
+        );
+        assert_eq!(
+            file(Os::Linux, Arch::X64, "21.1.0"),
+            "LLVM-21.1.0-Linux-X64.tar.xz"
+        );
+
+        // Windows kept the old spelling on both sides of that boundary, which a
+        // version-only override could not express.
+        assert_eq!(
+            file(Os::Windows, Arch::X64, "18.1.8"),
+            "clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
+        );
+        assert_eq!(
+            file(Os::Windows, Arch::X64, "21.1.0"),
+            "clang+llvm-21.1.0-x86_64-pc-windows-msvc.tar.xz"
+        );
+    }
+
+    /// An unmatched platform must fall back to the defaults rather than to the
+    /// last declared override.
+    #[test]
+    fn unmatched_platforms_fall_back_to_the_defaults() {
+        let backend = DeclarativeBackend::from_toml(LLVM_FIXTURE).unwrap();
+        // aarch64 linux matches neither override (both pin x86_64).
+        assert_eq!(
+            backend
+                .rendered_file(platform(Os::Linux, Arch::Arm64), "18.1.8")
+                .unwrap(),
+            "LLVM-18.1.8-Linux-X64.tar.xz"
+        );
+    }
+
+    /// The most specific match wins regardless of declaration order, so
+    /// reordering a definition cannot change which archive is installed.
+    #[test]
+    fn the_most_specific_override_wins_regardless_of_order() {
+        let broad = "[[archive.overrides]]\nos = \"linux\"\nfile = \"broad-{version}.tar.xz\"\n";
+        let narrow = "[[archive.overrides]]\nos = \"linux\"\narch = \"x86_64\"\n\
+                      versions = \">=1.0.0\"\nfile = \"narrow-{version}.tar.xz\"\n";
+        for definition in [
+            format!("{STATIC_FIXTURE}\n{broad}{narrow}"),
+            format!("{STATIC_FIXTURE}\n{narrow}{broad}"),
+        ] {
+            let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+            assert_eq!(
+                backend
+                    .rendered_file(platform(Os::Linux, Arch::X64), "1.2.3")
+                    .unwrap(),
+                "narrow-1.2.3.tar.xz"
+            );
+            // The broader entry still applies where the narrow one misses.
+            assert_eq!(
+                backend
+                    .rendered_file(platform(Os::Linux, Arch::Arm64), "1.2.3")
+                    .unwrap(),
+                "broad-1.2.3.tar.xz"
+            );
+        }
+    }
+
+    /// Two equally specific matches are ambiguous. Resolving them by
+    /// declaration order would make the installed archive depend on an ordering
+    /// that is easy to change by accident, so it is an error instead.
+    #[test]
+    fn equally_specific_overrides_are_rejected_rather_than_ordered() {
+        let definition = format!(
+            "{STATIC_FIXTURE}\n\
+             [[archive.overrides]]\nos = \"linux\"\nfile = \"first-{{version}}.tar.gz\"\n\
+             [[archive.overrides]]\nos = \"linux\"\nfile = \"second-{{version}}.tar.gz\"\n"
+        );
+        // Parsing succeeds: the clash only exists for a platform that matches
+        // both, and the definition may be valid everywhere else.
+        let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+        let error = backend
+            .rendered_file(platform(Os::Linux, Arch::X64), "1.2.3")
+            .expect_err("two equally specific matches must not silently pick one");
+        assert!(
+            error.to_string().contains("equally specifically"),
+            "unhelpful error: {error}"
+        );
+        // A platform that matches neither is unaffected.
+        assert!(backend
+            .rendered_file(platform(Os::Windows, Arch::X64), "1.2.3")
+            .is_ok());
+    }
+
+    /// An override may replace the checksum source too, because a renamed asset
+    /// often moves its digest as well.
+    #[test]
+    fn overrides_can_replace_kind_strip_root_and_checksum() {
+        let definition = format!(
+            "{STATIC_FIXTURE}\n\
+             [[archive.overrides]]\nversions = \"<1.1.0\"\n\
+             file = \"acme-{{version}}-legacy.zip\"\nkind = \"zip\"\nstrip_root = false\n\
+             [archive.overrides.checksum]\nalgorithm = \"sha512\"\nvalue = \"{}\"\n",
+            "b".repeat(128)
+        );
+        let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+        let legacy = backend
+            .resolve_archive(platform(Os::Linux, Arch::X64), "1.0.0")
+            .unwrap();
+        assert_eq!(legacy.file, "acme-{version}-legacy.zip");
+        assert!(matches!(legacy.kind, ArchiveKindDefinition::Zip));
+        assert!(!legacy.strip_root);
+        assert!(matches!(
+            legacy.checksum.algorithm,
+            ChecksumAlgorithm::Sha512
+        ));
+
+        // The newer version keeps every default, including strip_root = true.
+        let current = backend
+            .resolve_archive(platform(Os::Linux, Arch::X64), "1.2.3")
+            .unwrap();
+        assert_eq!(current.file, "acme-{version}-{os}-{arch}.tar.gz");
+        assert!(current.strip_root);
+        assert!(matches!(
+            current.checksum.algorithm,
+            ChecksumAlgorithm::Sha256
+        ));
+    }
+
+    /// Definition mistakes must fail on load, not on whichever machine happens
+    /// to match the broken entry.
+    #[test]
+    fn malformed_overrides_are_rejected_at_parse_time() {
+        let cases = [
+            // No condition: would shadow the defaults for everything.
+            (
+                "[[archive.overrides]]\nfile = \"x-{version}.tar.gz\"\n",
+                "no condition",
+            ),
+            // Matches but changes nothing.
+            ("[[archive.overrides]]\nos = \"linux\"\n", "overrides nothing"),
+            // Not a semver requirement.
+            (
+                "[[archive.overrides]]\nversions = \"not-a-range\"\nfile = \"x-{version}.tar.gz\"\n",
+                "invalid",
+            ),
+            // Cannot vary by version, so every version would share one archive.
+            // Both `url` and `file` must be pinned for this to be true: a fixed
+            // filename under a `{version}` URL still varies per version.
+            (
+                "[[archive.overrides]]\nos = \"linux\"\n\
+                 url = \"https://downloads.example.test/acme/fixed.tar.gz\"\n\
+                 file = \"fixed.tar.gz\"\n",
+                "{version}",
+            ),
+            // Unknown field, guarding against a typo silently doing nothing.
+            (
+                "[[archive.overrides]]\nos = \"linux\"\nfilename = \"x-{version}.tar.gz\"\n",
+                "unknown field",
+            ),
+            // Unknown platform spelling.
+            (
+                "[[archive.overrides]]\nos = \"lunix\"\nfile = \"x-{version}.tar.gz\"\n",
+                "unknown variant",
+            ),
+        ];
+        for (fragment, expected) in cases {
+            let definition = format!("{STATIC_FIXTURE}\n{fragment}");
+            let error = DeclarativeBackend::from_toml(&definition)
+                .err()
+                .unwrap_or_else(|| panic!("should have been rejected: {fragment}"));
+            let text = error.to_string();
+            assert!(
+                text.contains(expected),
+                "error for `{fragment}` should mention `{expected}`, got: {text}"
+            );
+        }
+    }
+
+    /// The mirror image of the rejection above: a fixed filename is fine when
+    /// the URL still carries `{version}`, which is how several upstreams that
+    /// publish a per-release directory actually work.
+    #[test]
+    fn a_fixed_file_name_is_valid_under_a_versioned_url() {
+        let definition = format!(
+            "{STATIC_FIXTURE}\n[[archive.overrides]]\nos = \"linux\"\n\
+             file = \"acme-linux.tar.gz\"\n"
+        );
+        let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+        assert_eq!(
+            backend
+                .rendered_file(platform(Os::Linux, Arch::X64), "1.2.3")
+                .unwrap(),
+            "acme-linux.tar.gz"
+        );
+    }
+
+    /// `arch` accepts both the `{arch}` and `{arch_llvm}` spellings so a
+    /// definition does not have to learn a second vocabulary.
+    #[test]
+    fn arch_conditions_accept_both_spellings() {
+        for spelling in ["x64", "x86_64"] {
+            let definition = format!(
+                "{STATIC_FIXTURE}\n[[archive.overrides]]\narch = \"{spelling}\"\n\
+                 file = \"hit-{{version}}.tar.gz\"\n"
+            );
+            let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+            assert_eq!(
+                backend
+                    .rendered_file(platform(Os::Linux, Arch::X64), "1.2.3")
+                    .unwrap(),
+                "hit-1.2.3.tar.gz",
+                "`{spelling}` should match x86-64"
+            );
+            assert_eq!(
+                backend
+                    .rendered_file(platform(Os::Linux, Arch::Arm64), "1.2.3")
+                    .unwrap(),
+                "acme-1.2.3-linux-arm64.tar.gz"
+            );
+        }
+    }
+
+    /// A version that is not semver cannot satisfy a semver requirement, and
+    /// must not abort the install with a parse error either.
+    #[test]
+    fn non_semver_versions_simply_do_not_match_a_requirement() {
+        let definition = format!(
+            "{STATIC_FIXTURE}\n[[archive.overrides]]\nversions = \"<19.1.0\"\n\
+             file = \"legacy-{{version}}.tar.gz\"\n"
+        );
+        let backend = DeclarativeBackend::from_toml(&definition).unwrap();
+        // `2024a` is a valid declarative version but not semver.
+        assert_eq!(
+            backend
+                .rendered_file(platform(Os::Linux, Arch::X64), "2024a")
+                .unwrap(),
+            "acme-2024a-linux-x64.tar.gz"
+        );
+    }
+
     /// A C/C++ toolchain is only usable once a build system can find it, so an
     /// `[env]` table must survive into the activated environment with
     /// `{install_path}` resolved against the version's own root.
@@ -1152,6 +1704,99 @@ url = "{{archive_url}}.sha256"
             backend.bin_paths(&ctx, &tool_version).unwrap(),
             [installed.join("bin")]
         );
+        server.join().unwrap();
+    }
+
+    /// Resolving the right name is not enough: the override has to drive the
+    /// actual download. Two versions that straddle a rename boundary are
+    /// installed from one definition, and the server only answers the exact
+    /// paths each version is supposed to request.
+    #[tokio::test]
+    async fn overrides_drive_real_installs_across_a_rename_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_dirs(temp.path());
+        dirs.ensure().unwrap();
+
+        let archive_path = temp.path().join("payload.tar.gz");
+        write_fixture_archive(&archive_path);
+        let archive = std::fs::read(&archive_path).unwrap();
+        let checksum = crate::pipeline::verify::hash_file(&archive_path, HashAlgo::Sha256).unwrap();
+
+        // Old spelling for 1.0.0, new spelling for 2.0.0. Nothing else is
+        // served, so a wrong choice fails the install rather than silently
+        // downloading the same bytes from a forgiving route.
+        let old_name = "acme-old-1.0.0-x86_64-linux-gnu-ubuntu-18.04.tar.gz";
+        let new_name = "ACME-2.0.0-Linux-X64.tar.gz";
+        let mut routes = HashMap::new();
+        for name in [old_name, new_name] {
+            routes.insert(format!("/downloads/{name}"), archive.clone());
+            routes.insert(
+                format!("/downloads/{name}.sha256"),
+                format!("{checksum}  {name}\n").into_bytes(),
+            );
+        }
+        let (base_url, server) = serve(routes, 4);
+
+        let plugin_dir = dirs.config.join("plugins");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("acme.toml"),
+            format!(
+                r#"
+schema = 1
+id = "acme"
+bin_paths = ["bin"]
+bin_names = ["acme"]
+
+[versions]
+values = ["1.0.0", "2.0.0"]
+
+[archive]
+url = "{base_url}/downloads/{{file}}"
+file = "ACME-{{version}}-Linux-X64.tar.gz"
+kind = "tar.gz"
+strip_root = true
+
+[archive.checksum]
+algorithm = "sha256"
+url = "{{archive_url}}.sha256"
+
+[[archive.overrides]]
+versions = "<2.0.0"
+os = "linux"
+arch = "x86_64"
+file = "acme-old-{{version}}-x86_64-linux-gnu-ubuntu-18.04.tar.gz"
+"#
+            ),
+        )
+        .unwrap();
+
+        let registry = crate::backend::registry::Registry::load(&dirs).unwrap();
+        let backend = registry.get("acme").unwrap();
+        let ctx = test_ctx(dirs);
+
+        for version in ["1.0.0", "2.0.0"] {
+            let tool_version = ToolVersion::new("acme", version);
+            backend
+                .install(&InstallCtx { ctx: &ctx }, &tool_version)
+                .await
+                .unwrap_or_else(|error| panic!("installing {version}: {error}"));
+            let installed = ctx.dirs.install_path("acme", version);
+            assert_eq!(
+                std::fs::read_to_string(installed.join("bin/acme")).unwrap(),
+                "fixture executable\n",
+                "{version} did not extract"
+            );
+        }
+
+        // Each version recorded the artifact its own rule selected.
+        let receipt_name = |version: &str| {
+            pipeline::artifact_receipt_at(&ctx.dirs.install_path("acme", version))
+                .map(|receipt| receipt.file_name)
+        };
+        assert_eq!(receipt_name("1.0.0").as_deref(), Some(old_name));
+        assert_eq!(receipt_name("2.0.0").as_deref(), Some(new_name));
+
         server.join().unwrap();
     }
 

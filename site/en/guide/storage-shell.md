@@ -403,12 +403,70 @@ parsed rather than when it is activated:
 A definition that declares `[env]` still cannot execute code: it describes
 variables, and osdk exports them.
 
+### When an upstream renames its assets
+
+A single template assumes an upstream names its files consistently forever. Real
+projects do not. LLVM is the worked example: on Linux x86-64 it published
+`clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz` and then switched to
+`LLVM-19.1.0-Linux-X64.tar.xz` in 19.1.0 — a different word order, different
+capitalisation, and an embedded distro version that no platform fact can produce.
+Windows never switched at all, so within one release both spellings are live.
+
+`[[archive.overrides]]` expresses that. Each entry states the conditions it
+applies to and the fields it replaces:
+
+```toml
+[archive]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}/{file}"
+file = "LLVM-{version}-Linux-X64.tar.xz"
+kind = "tar.xz"
+strip_root = true
+
+# Linux used the older spelling before 19.1.0. The `ubuntu-18.04` fragment is
+# not derivable from anything, so it is written out.
+[[archive.overrides]]
+versions = "<19.1.0"
+os = "linux"
+arch = "x86_64"
+file = "clang+llvm-{version}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+
+# Windows kept the older spelling on both sides of that boundary.
+[[archive.overrides]]
+os = "windows"
+arch = "x86_64"
+file = "clang+llvm-{version}-x86_64-pc-windows-msvc.tar.xz"
+```
+
+Conditions are `versions` (a semver requirement such as `<19.1.0` or
+`>=17, <18`), plus `os`, `arch`, and `libc`. They combine: an entry applies only
+where every condition it sets is true, which is what the LLVM case needs, because
+the rename happened per platform rather than for a whole release.
+
+An override may replace `url`, `file`, `kind`, `strip_root`, and `checksum`.
+Anything it leaves unset falls back to `[archive]`, so an entry that only renames
+a file does not restate the rest.
+
+Two rules keep the outcome predictable:
+
+- **The most specific match wins**, counted by how many conditions an entry sets
+  — not by declaration order. Reordering a definition cannot change which archive
+  is installed.
+- **Two equally specific matches are an error**, reported when that version and
+  platform are resolved. Choosing by order would make the result depend on
+  something easy to reshuffle by accident, so osdk asks you to narrow one instead.
+
+Conditions accept both arch spellings (`x64` and `x86_64` both match x86-64), so
+a definition does not need a second vocabulary alongside `{arch_llvm}`. A version
+that is not semver never satisfies a `versions` requirement; it falls back to the
+defaults rather than failing the install.
+
 ### Validation and security boundaries
 
 - Exactly one of `versions.values` and `versions.url` is required; at most 10,000 versions are accepted.
 - An ID starts with a lowercase ASCII letter or digit and then uses only lowercase letters, digits, `-`, and `_`; the `github` namespace is reserved.
 - `bin_paths` and `bin_names` cannot be empty, and every path/name must stay safely inside the installation root.
-- Either the archive URL or filename must vary with `{version}`.
+- Either the archive URL or filename must vary with `{version}`. The same applies to each `[[archive.overrides]]` entry, counting the fields it inherits.
+- Every `[[archive.overrides]]` entry must set at least one condition (`versions`, `os`, `arch`, `libc`) and replace at least one field, so an entry can neither shadow the defaults for everything nor claim a match while changing nothing. A `versions` value must be a valid semver requirement. The most specific match wins; two equally specific matches are rejected instead of resolved by order.
 - Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip|7z`. `.7z` exists because Windows GCC toolchains are commonly published in that format only; entry paths are checked so an archive cannot write outside the extraction directory.
 - Exactly one checksum `value` or `url` is required, with digest length matching the algorithm.
 - Versions/archive URLs accept only HTTP(S); a checksum URL may additionally derive from `{archive_url}`.

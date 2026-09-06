@@ -356,13 +356,67 @@ ACME_RELEASE = "{version}"
 
 声明了 `[env]` 的定义仍然不能执行代码：它只描述变量，由 osdk 负责导出。
 
+### 上游改名时怎么办
+
+单一模板隐含一个假设：上游会永远保持一致的命名。真实项目不会。LLVM 就是活例子：
+Linux x86-64 上它先发布 `clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz`，
+到 19.1.0 改成了 `LLVM-19.1.0-Linux-X64.tar.xz`——词序不同、大小写不同，还嵌了一个
+无法从任何平台信息推导出来的发行版号。而 Windows 至今没改，所以**同一个 release 里
+两套命名同时存在**。
+
+`[[archive.overrides]]` 就是为此存在。每条 override 声明它适用的条件和要替换的字段：
+
+```toml
+[archive]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}/{file}"
+file = "LLVM-{version}-Linux-X64.tar.xz"
+kind = "tar.xz"
+strip_root = true
+
+# 19.1.0 之前 Linux 用旧命名。`ubuntu-18.04` 这段无法推导，只能写死。
+[[archive.overrides]]
+versions = "<19.1.0"
+os = "linux"
+arch = "x86_64"
+file = "clang+llvm-{version}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+
+# Windows 在这个分界线两侧都保持旧命名。
+[[archive.overrides]]
+os = "windows"
+arch = "x86_64"
+file = "clang+llvm-{version}-x86_64-pc-windows-msvc.tar.xz"
+```
+
+条件包括 `versions`（semver 需求，如 `<19.1.0` 或 `>=17, <18`）以及 `os`、`arch`、
+`libc`。它们是**联合**关系：只有一条 override 设置的所有条件都成立时才适用——这正是
+LLVM 需要的，因为改名是按平台发生的，而不是整个 release 一起改。
+
+override 可替换 `url`、`file`、`kind`、`strip_root` 和 `checksum`。未设置的字段回退到
+`[archive]`，所以只改文件名的 override 不必重复其余内容。
+
+两条规则保证结果可预测：
+
+- **最具体的匹配优先**，按设置的条件数量计算，**与声明顺序无关**。重排定义文件不会
+  改变最终安装哪个归档；
+- **两条同等具体的匹配会报错**，在解析该版本与平台时报出。按顺序取其一会让结果依赖
+  一个很容易被无意改动的因素，因此 osdk 要求你收窄其中一条。
+
+条件同时接受两种 arch 写法（`x64` 与 `x86_64` 都匹配 x86-64），因此不必在
+`{arch_llvm}` 之外再学一套词汇。非 semver 的版本永远不满足 `versions` 需求，此时回退
+到默认值而不是让安装失败。
+
 ### 验证与安全边界
 
 - `versions.values` 与 `versions.url` 必须且只能设置一个，最多 10,000 个版本；
 - ID 首字符为小写 ASCII 字母或数字，其余仅小写字母、数字、`-`、`_`，并保留
   `github` namespace；
 - `bin_paths`、`bin_names` 不能为空，所有路径/名称必须安全且留在安装根内；
-- archive URL 或文件名至少一处必须随 `{version}` 变化；
+- archive URL 或文件名至少一处必须随 `{version}` 变化；每条 `[[archive.overrides]]`
+  同样如此，且按其继承后的字段计算；
+- 每条 `[[archive.overrides]]` 必须至少设置一个条件（`versions`、`os`、`arch`、
+  `libc`），并且至少替换一个字段——这样一条 override 既不会无条件覆盖默认值，也不会
+  占用一次匹配却什么都不改；`versions` 必须是合法的 semver 需求。最具体的匹配优先，
+  两条同等具体的匹配会报错而不是按顺序取其一；
 - archive 类型仅为 `tar.gz|tar.xz|tar.zst|zip|7z`；支持 `.7z` 是因为 Windows GCC
   工具链通常只以该格式发布，解压时会校验条目路径，归档无法写到解压目录之外；
 - checksum 的 `value` 与 `url` 必须且只能设置一个；长度必须符合算法；
