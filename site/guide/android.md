@@ -30,6 +30,48 @@ osdk exec -t android-platform-tools@37.0.1 -- adb version
 
 已被 side-by-side 布局取代的 `ndk-bundle` 未纳入，以免与 `android-ndk` 混淆。
 
+## NDK 不是通用交叉编译器
+
+`android-ndk` 自带完整的 Clang，看起来像是可以面向任意目标的工具链。它不是：它提供的是
+**只面向 Android** 的编译器 + sysroot。如果需要面向 Linux 服务器、裸机 MCU 或
+WebAssembly 构建，应安装对应目标的工具链。
+
+这个区别很容易被忽略，因为该编译器确实接受其他目标，甚至能为它们编译代码。以
+`android-ndk@29.0.14206865`（Clang 21）实测，NDK 注册了 aarch64、arm、riscv32/64、
+wasm32/64、x86 和 x86-64 的后端，但只自带五个 sysroot：
+
+```text
+aarch64-linux-android   arm-linux-androideabi   i686-linux-android
+riscv64-linux-android   x86_64-linux-android
+```
+
+不包含任何 libc 头文件的翻译单元，对任意目标都能编译通过——这正是让边界看起来比
+实际更远的原因：
+
+```bash
+# int main(void){ return 0; }
+clang --target=x86_64-unknown-linux-gnu -c bare.c    # exit 0
+clang --target=arm-none-eabi            -c bare.c    # exit 0
+```
+
+只要引入一个 libc 头文件，同样的目标立即失败，且失败发生在编译阶段而不是链接阶段：
+
+```bash
+# #include <stdio.h>
+clang --target=x86_64-unknown-linux-gnu -c libc.c
+# fatal error: 'stdio.h' file not found        (exit 1)
+```
+
+对 `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、
+`x86_64-unknown-linux-musl`、`wasm32-wasi`、`arm-none-eabi` 实测，全部以这种方式
+失败；而 `aarch64-linux-android24` 可以一直走到链接出可执行文件。所以限制来自
+自带 sysroot 的集合，而不是编译器的目标支持：头文件、libc 和运行时只有 Android 那一份。
+
+要用 osdk 管理其他 C/C++ 工具链，按普通工具安装即可——通过 `github:`、`http:` 或声明式
+插件——并用插件的 `[env]` 表导出 `CC`、`SYSROOT` 等变量，因为仅让编译器出现在 `PATH`
+上，CMake 或 Autoconf 依然找不到它。参见
+[声明式 Backend](./storage-shell#声明式-backend)。
+
 复数形式的 `emulators` 也未纳入，且它并不是 `android-emulator` 的另一种写法。
 按线上清单实测，两者有五处不同：`emulators` 以 `emulators;<build-id>` 形式
 side-by-side 版本化、把 `emulator` 本身声明为依赖、Windows 包体积为 273 MB 而非

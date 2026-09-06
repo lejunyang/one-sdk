@@ -33,6 +33,53 @@ osdk exec -t android-platform-tools@37.0.1 -- adb version
 `ndk-bundle` is deliberately excluded: it is the pre-side-by-side layout and
 including it would only create ambiguity with `android-ndk`.
 
+## The NDK is not a general cross compiler
+
+`android-ndk` ships a full Clang, which makes it look like a toolchain for any
+target. It is not: it provides a compiler plus sysroots **for Android only**. To
+build for a Linux server, a bare-metal MCU or WebAssembly, install a toolchain
+for that target instead.
+
+The distinction is easy to miss, because the compiler accepts other targets and
+even compiles code for them. Measured against `android-ndk@29.0.14206865`
+(Clang 21), the NDK registers backends for aarch64, arm, riscv32/64, wasm32/64,
+x86 and x86-64, and ships exactly five sysroots:
+
+```text
+aarch64-linux-android   arm-linux-androideabi   i686-linux-android
+riscv64-linux-android   x86_64-linux-android
+```
+
+A translation unit that includes no libc header compiles for any target, which is
+what makes the boundary look further away than it is:
+
+```bash
+# int main(void){ return 0; }
+clang --target=x86_64-unknown-linux-gnu -c bare.c    # exit 0
+clang --target=arm-none-eabi            -c bare.c    # exit 0
+```
+
+Include one libc header and the same targets fail immediately, during
+compilation rather than at link time:
+
+```bash
+# #include <stdio.h>
+clang --target=x86_64-unknown-linux-gnu -c libc.c
+# fatal error: 'stdio.h' file not found        (exit 1)
+```
+
+Measured across `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-unknown-linux-musl`, `wasm32-wasi` and `arm-none-eabi`, every one fails
+that way, while `aarch64-linux-android24` succeeds through to a linked
+executable. The limit is the set of bundled sysroots, not the compiler's target
+support: headers, libc and runtime exist for Android only.
+
+To manage another C/C++ toolchain with osdk, install it like any other tool --
+through `github:`, `http:`, or a declarative plugin -- and use the plugin's
+`[env]` table to export `CC`, `SYSROOT` and friends, because a compiler on `PATH`
+is not enough for CMake or Autoconf to find it. See
+[declarative backends](./storage-shell#declarative-backends).
+
 The plural `emulators` family is excluded as well, and it is not a spelling
 variant of `android-emulator`. Measured against the live manifest, the two differ
 in five ways: `emulators` is versioned side-by-side as `emulators;<build-id>`,
