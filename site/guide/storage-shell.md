@@ -307,7 +307,7 @@ values = ["1.0.0", "1.2.3"]
 [archive]
 url = "https://example.test/{version}/{file}"
 file = "acme-{version}-{os}-{arch}.tar.gz"
-kind = "tar.gz"          # tar.gz|tar.xz|tar.zst|zip
+kind = "tar.gz"          # tar.gz|tar.xz|tar.zst|zip|7z
 strip_root = true
 
 [archive.checksum]
@@ -363,7 +363,8 @@ ACME_RELEASE = "{version}"
   `github` namespace；
 - `bin_paths`、`bin_names` 不能为空，所有路径/名称必须安全且留在安装根内；
 - archive URL 或文件名至少一处必须随 `{version}` 变化；
-- archive 类型仅为 `tar.gz|tar.xz|tar.zst|zip`；
+- archive 类型仅为 `tar.gz|tar.xz|tar.zst|zip|7z`；支持 `.7z` 是因为 Windows GCC
+  工具链通常只以该格式发布，解压时会校验条目路径，归档无法写到解压目录之外；
 - checksum 的 `value` 与 `url` 必须且只能设置一个；长度必须符合算法；
 - versions/archive URL 只接受 HTTP(S)，checksum URL 额外可基于 `{archive_url}`；
 - 允许的模板变量按位置为 `{id}`、`{version}`、`{os}`、`{arch}`、`{arch_llvm}`、

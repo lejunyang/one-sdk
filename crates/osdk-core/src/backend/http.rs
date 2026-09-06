@@ -485,6 +485,12 @@ fn kind_from_options_or_name(
             Ok(ArchiveKind::TarZst) => Err(Error::config(
                 "HTTP artifacts support tar.gz, tar.xz, zip, or file",
             )),
+            // `.7z` is extractable, but the inline `http:` identity deliberately
+            // exposes a narrower archive set; declarative plugins cover it.
+            #[cfg(feature = "install")]
+            Ok(ArchiveKind::SevenZ) => Err(Error::config(
+                "HTTP artifacts support tar.gz, tar.xz, zip, or file",
+            )),
             Err(_) => Ok(HttpArtifactKind::File),
         },
     }

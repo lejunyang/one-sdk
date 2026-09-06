@@ -106,6 +106,15 @@ and the shim depends on `osdk-core` with `default-features = false`. The sigstor
 crates are optional and pulled in by that feature, so the shim's dependency graph
 drops from 982 crates to 441 and no longer contains a second copy of `reqwest`.
 
+Archive decoders follow the same rule. `.7z` support is needed because Windows
+GCC toolchains are commonly published in that format only, but it carries a
+second LZMA implementation (`lzma-rust2`) alongside the existing `xz2`. Since
+only the install path ever unpacks an archive, `sevenz-rust2` is optional and
+gated behind `install`, and the `ArchiveKind::SevenZ` variant is `#[cfg]`-gated
+with it, so neither crate enters the shim's graph. The encoder half is a
+dev-dependency: tests build a real `.7z` fixture, while the shipped binaries only
+decode.
+
 Compiling the install path out substitutes uninhabited stand-ins for
 `GithubAttestation` and `VerificationEvidence`. Every verification call sits inside
 `if let Some(attestation) = attestation`, and an `Option` of an uninhabited type is

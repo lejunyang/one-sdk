@@ -343,7 +343,7 @@ values = ["1.0.0", "1.2.3"]
 [archive]
 url = "https://example.test/{version}/{file}"
 file = "acme-{version}-{os}-{arch}.tar.gz"
-kind = "tar.gz"          # tar.gz|tar.xz|tar.zst|zip
+kind = "tar.gz"          # tar.gz|tar.xz|tar.zst|zip|7z
 strip_root = true
 
 [archive.checksum]
@@ -409,7 +409,7 @@ variables, and osdk exports them.
 - An ID starts with a lowercase ASCII letter or digit and then uses only lowercase letters, digits, `-`, and `_`; the `github` namespace is reserved.
 - `bin_paths` and `bin_names` cannot be empty, and every path/name must stay safely inside the installation root.
 - Either the archive URL or filename must vary with `{version}`.
-- Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip`.
+- Archive kinds are limited to `tar.gz|tar.xz|tar.zst|zip|7z`. `.7z` exists because Windows GCC toolchains are commonly published in that format only; entry paths are checked so an archive cannot write outside the extraction directory.
 - Exactly one checksum `value` or `url` is required, with digest length matching the algorithm.
 - Versions/archive URLs accept only HTTP(S); a checksum URL may additionally derive from `{archive_url}`.
 - Allowed template variables depend on location and come from `{id}`, `{version}`, `{os}`, `{arch}`, `{arch_llvm}`, `{libc}`, `{file}`, and `{archive_url}`; unsupported variables fail. `[env]` values accept only `{install_path}`, `{version}`, and `{id}`.

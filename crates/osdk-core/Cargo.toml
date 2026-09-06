@@ -22,7 +22,7 @@ categories = ["development-tools", "development-tools::build-utils"]
 # re-enables this for the shim and undoes the saving. The two binaries must be
 # built in separate cargo invocations; see .github/workflows/publish.yml.
 default = ["install"]
-install = ["dep:sigstore", "dep:sigstore-verify", "dep:x509-cert"]
+install = ["dep:sigstore", "dep:sigstore-verify", "dep:x509-cert", "dep:sevenz-rust2"]
 
 [dependencies]
 tokio.workspace = true
@@ -40,6 +40,9 @@ tar.workspace = true
 xz2.workspace = true
 zstd.workspace = true
 zip.workspace = true
+# Only the install path unpacks a .7z. Optional so the shim never links a second
+# LZMA implementation; see the workspace manifest for why 0.19 is pinned.
+sevenz-rust2 = { workspace = true, optional = true }
 sha2.workspace = true
 sha1.workspace = true
 blake3.workspace = true
@@ -73,3 +76,6 @@ once_cell.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The shipped dependency is decode-only. Tests need to *build* a .7z fixture, so
+# the encoder is a dev-dependency and never reaches either binary.
+sevenz-rust2 = { workspace = true, features = ["compress"] }

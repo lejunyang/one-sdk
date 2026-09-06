@@ -68,6 +68,8 @@ cargo install osdk-cli --locked
 
 因此，四个仅安装用到的 trait 方法 —— `list_remote_versions`、`resolve_version`、`install`、`uninstall` —— 被放到默认开启的 `install` feature 之后，shim 则以 `default-features = false` 依赖 `osdk-core`。sigstore 相关 crate 改为可选并由该 feature 引入，于是 shim 的依赖图从 982 个 crate 降到 441 个，也不再包含第二份 `reqwest`。
 
+归档解码器遵循同一条规则。支持 `.7z` 是必要的，因为 Windows GCC 工具链通常只以该格式发布，但它会带来第二份 LZMA 实现（`lzma-rust2`），与现有的 `xz2` 并存。由于只有安装路径会解压归档，`sevenz-rust2` 被设为 optional 并置于 `install` feature 之后，`ArchiveKind::SevenZ` 变体也随之加上 `#[cfg]`，因此这两个 crate 都不会进入 shim 的依赖图。编码器部分仅作为 dev-dependency：测试需要构造真实的 `.7z` fixture，而发布的二进制只做解码。
+
 关闭安装路径时，`GithubAttestation` 和 `VerificationEvidence` 会被替换为无法构造（uninhabited）的占位类型。所有校验调用都位于 `if let Some(attestation) = attestation` 之内，而无法构造类型的 `Option` 恒为 `None`，因此这些分支在编译期即不可达，同时函数签名、结构体字段和调用方都保持原样。另一种做法 —— 在三十多处引用（其中包含公开字段）上逐个加 `#[cfg]` —— 会难读得多。
 
 ### shim 必须单独构建

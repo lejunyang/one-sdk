@@ -1984,6 +1984,13 @@ fn validate_http_options(
                     "HTTP artifacts support tar.gz, tar.xz, zip, or file",
                 ));
             }
+            // Extractable, but not part of the inline `http:` archive set.
+            #[cfg(feature = "install")]
+            Ok(crate::pipeline::ArchiveKind::SevenZ) => {
+                return Err(Error::config(
+                    "HTTP artifacts support tar.gz, tar.xz, zip, or file",
+                ));
+            }
             Err(_) => "file",
         };
         inferred_kind

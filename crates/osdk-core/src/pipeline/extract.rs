@@ -1,6 +1,10 @@
-//! Archive extraction: tar.gz / tar.xz / tar.zst / zip, with optional stripping
-//! of a single top-level directory (node/go/python archives wrap everything in
-//! one root dir like `node-v20-linux-x64/`).
+//! Archive extraction: tar.gz / tar.xz / tar.zst / zip / 7z, with optional
+//! stripping of a single top-level directory (node/go/python archives wrap
+//! everything in one root dir like `node-v20-linux-x64/`).
+//!
+//! `.7z` is only compiled into the install path. Unpacking one costs a second
+//! LZMA implementation, and the shim never extracts anything, so both the
+//! dependency and the `SevenZ` variant sit behind the `install` feature.
 
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -15,6 +19,8 @@ pub enum ArchiveKind {
     TarXz,
     TarZst,
     Zip,
+    #[cfg(feature = "install")]
+    SevenZ,
 }
 
 impl ArchiveKind {
@@ -29,6 +35,17 @@ impl ArchiveKind {
             Ok(ArchiveKind::TarZst)
         } else if n.ends_with(".zip") {
             Ok(ArchiveKind::Zip)
+        } else if n.ends_with(".7z") {
+            // Recognized even without the `install` feature so the shim reports
+            // an unsupported archive rather than a confusing parse failure.
+            #[cfg(feature = "install")]
+            {
+                Ok(ArchiveKind::SevenZ)
+            }
+            #[cfg(not(feature = "install"))]
+            {
+                Err(Error::UnsupportedArchive(name.to_string()))
+            }
         } else {
             Err(Error::UnsupportedArchive(name.to_string()))
         }
@@ -66,6 +83,10 @@ pub fn extract(archive: &Path, dest: &Path, kind: ArchiveKind, strip_root: bool)
         }
         ArchiveKind::Zip => {
             unpack_zip(archive, &scratch)?;
+        }
+        #[cfg(feature = "install")]
+        ArchiveKind::SevenZ => {
+            unpack_7z(archive, &scratch)?;
         }
     }
 
@@ -123,6 +144,79 @@ fn unpack_zip(archive: &Path, dest: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Unpack a `.7z` into `dest`.
+///
+/// Entry paths come from the archive, so each one is checked to stay inside
+/// `dest` before anything is written: a `..` component or an absolute path would
+/// otherwise let an archive write outside the extraction scratch directory.
+#[cfg(feature = "install")]
+fn unpack_7z(archive: &Path, dest: &Path) -> Result<()> {
+    let dest = dest.to_path_buf();
+    sevenz_rust2::decompress_file_with_extract_fn(archive, &dest, |entry, reader, _unused| {
+        let Some(relative) = safe_relative_path(entry.name()) else {
+            // Skip rather than abort: mirrors how the zip path ignores entries
+            // whose names escape the destination.
+            return Ok(true);
+        };
+        let out_path = dest.join(relative);
+        if entry.is_directory() {
+            create_dir_all(&out_path).map_err(sevenz_error)?;
+            return Ok(true);
+        }
+        if let Some(parent) = out_path.parent() {
+            create_dir_all(parent).map_err(sevenz_error)?;
+        }
+        let mut out = File::create(&out_path).map_err(|e| {
+            sevenz_rust2::Error::Io(e, format!("creating {}", out_path.display()).into())
+        })?;
+        std::io::copy(reader, &mut out).map_err(|e| {
+            sevenz_rust2::Error::Io(e, format!("writing {}", out_path.display()).into())
+        })?;
+        Ok(true)
+    })
+    .map_err(|e| Error::other(format!("7z extract: {e}")))?;
+    Ok(())
+}
+
+/// Convert an archive-supplied entry name into a path that cannot escape the
+/// destination, or `None` when it is unusable.
+///
+/// 7z stores `/`-separated names, but an archive built on Windows can carry
+/// `\` too, so both are treated as separators rather than as filename
+/// characters.
+#[cfg(feature = "install")]
+fn safe_relative_path(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut safe = PathBuf::new();
+    for component in name.split(['/', '\\']) {
+        match component {
+            // Leading `/` yields an empty first component.
+            "" | "." => continue,
+            ".." => return None,
+            other => {
+                // A drive-relative or UNC-ish component would make the join
+                // absolute on Windows.
+                if other.contains(':') {
+                    return None;
+                }
+                safe.push(other);
+            }
+        }
+    }
+    if safe.as_os_str().is_empty() {
+        None
+    } else {
+        Some(safe)
+    }
+}
+
+#[cfg(feature = "install")]
+fn sevenz_error(error: Error) -> sevenz_rust2::Error {
+    sevenz_rust2::Error::Other(error.to_string().into())
 }
 
 /// If `dir` contains exactly one entry and it is a directory, return it.
@@ -198,6 +292,100 @@ mod tests {
         );
         assert_eq!(ArchiveKind::from_name("x.zip").unwrap(), ArchiveKind::Zip);
         assert!(ArchiveKind::from_name("x.rar").is_err());
+    }
+
+    /// Windows GCC toolchains publish `.7z` exclusively, so the name must map to
+    /// the archive kind rather than falling through to "unsupported".
+    #[cfg(feature = "install")]
+    #[test]
+    fn kind_from_name_recognizes_7z() {
+        assert_eq!(
+            ArchiveKind::from_name("x86_64-15.1.0-release-posix-seh-ucrt-rt_v12-rev0.7z").unwrap(),
+            ArchiveKind::SevenZ
+        );
+        assert_eq!(ArchiveKind::from_name("X.7Z").unwrap(), ArchiveKind::SevenZ);
+    }
+
+    /// Entry names come from the archive, so a crafted `..`, absolute path, or
+    /// Windows drive prefix must never resolve to a location outside the
+    /// destination.
+    #[cfg(feature = "install")]
+    #[test]
+    fn safe_relative_path_refuses_escapes() {
+        for escape in [
+            "../outside.txt",
+            "a/../../outside.txt",
+            "..\\outside.txt",
+            "a\\..\\..\\outside.txt",
+            "C:\\Windows\\System32\\evil.dll",
+            "c:/windows/evil.dll",
+            "",
+            "/",
+            "./",
+        ] {
+            assert!(
+                safe_relative_path(escape).is_none(),
+                "expected `{escape}` to be refused"
+            );
+        }
+
+        // Ordinary entries survive, with both separators treated as such.
+        assert_eq!(
+            safe_relative_path("bin/gcc.exe").unwrap(),
+            PathBuf::from("bin").join("gcc.exe")
+        );
+        assert_eq!(
+            safe_relative_path("/lib/gcc/x.a").unwrap(),
+            PathBuf::from("lib").join("gcc").join("x.a")
+        );
+        assert_eq!(
+            safe_relative_path("bin\\ld.exe").unwrap(),
+            PathBuf::from("bin").join("ld.exe")
+        );
+        assert_eq!(
+            safe_relative_path("./bin/./as.exe").unwrap(),
+            PathBuf::from("bin").join("as.exe")
+        );
+    }
+
+    /// A real round trip: build a `.7z`, extract it through the pipeline, and
+    /// confirm contents, nesting, and `strip_root` all behave like the other
+    /// archive kinds.
+    #[cfg(feature = "install")]
+    #[test]
+    fn extracts_a_real_7z_archive_with_strip_root() {
+        let temp = tempfile::tempdir().unwrap();
+        // `compress_to_path` stores the *contents* of the directory it is given,
+        // so wrap the payload one level deeper to produce the single top-level
+        // directory that real toolchain archives have.
+        let staging = temp.path().join("staging");
+        let source = staging.join("toolchain-1.0.0");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("lib/gcc")).unwrap();
+        std::fs::write(source.join("bin/gcc.exe"), b"fake compiler").unwrap();
+        std::fs::write(source.join("lib/gcc/libgcc.a"), b"fake archive").unwrap();
+
+        let archive = temp.path().join("toolchain.7z");
+        sevenz_rust2::compress_to_path(&staging, &archive).expect("building fixture archive");
+
+        // strip_root lifts the single `toolchain-1.0.0/` wrapper.
+        let dest = temp.path().join("stripped");
+        extract(&archive, &dest, ArchiveKind::SevenZ, true).unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("bin/gcc.exe")).unwrap(),
+            b"fake compiler"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("lib/gcc/libgcc.a")).unwrap(),
+            b"fake archive"
+        );
+        // The scratch directory must not survive into the install root.
+        assert!(!dest.join(".osdk-extract-tmp").exists());
+
+        // Without stripping, the wrapper directory is preserved.
+        let kept = temp.path().join("kept");
+        extract(&archive, &kept, ArchiveKind::SevenZ, false).unwrap();
+        assert!(kept.join("toolchain-1.0.0/bin/gcc.exe").is_file());
     }
 
     #[test]
