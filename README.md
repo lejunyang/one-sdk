@@ -346,6 +346,22 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 osdk rust check --repair
 ```
 
+### Zig
+
+```bash
+osdk install zig@latest
+osdk exec --tool zig -- zig version
+```
+
+Zig bundles its own libc (musl, several glibc versions, mingw-w64, wasi-libc), so
+a single install cross-compiles C and C++ to many targets without a sysroot per
+target:
+
+```bash
+osdk exec --tool zig -- zig cc -target aarch64-linux-musl -o hello hello.c
+osdk exec --tool zig -- zig cc -target x86_64-windows-gnu -o hello.exe hello.c
+```
+
 Guide: [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
 
 ## Scenario: manage the Android SDK
@@ -661,7 +677,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Area | Supported |
 | --- | --- |
 | Platforms | Windows, macOS, Linux |
-| Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
+| Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun, Zig |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |

@@ -67,7 +67,12 @@ clang --target=x86_64-unknown-linux-gnu -c libc.c
 失败；而 `aarch64-linux-android24` 可以一直走到链接出可执行文件。所以限制来自
 自带 sysroot 的集合，而不是编译器的目标支持：头文件、libc 和运行时只有 Android 那一份。
 
-要用 osdk 管理其他 C/C++ 工具链，按普通工具安装即可——通过 `github:`、`http:` 或声明式
+要用 osdk 管理其他 C/C++ 工具链，最省事的路径是
+[Zig](./runtimes#用-zig-做-c-c-交叉编译)：`zig cc` 自带 musl、多个 glibc 版本、
+mingw-w64 和 wasi-libc，只需 `osdk install zig` 就能覆盖上表中的目标，无需额外
+sysroot。
+
+如果需要特定厂商的工具链，按普通工具安装即可——通过 `github:`、`http:` 或声明式
 插件——并用插件的 `[env]` 表导出 `CC`、`SYSROOT` 等变量，因为仅让编译器出现在 `PATH`
 上，CMake 或 Autoconf 依然找不到它。参见
 [声明式 Backend](./storage-shell#声明式-backend)。

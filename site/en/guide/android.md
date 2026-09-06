@@ -74,7 +74,12 @@ that way, while `aarch64-linux-android24` succeeds through to a linked
 executable. The limit is the set of bundled sysroots, not the compiler's target
 support: headers, libc and runtime exist for Android only.
 
-To manage another C/C++ toolchain with osdk, install it like any other tool --
+To manage another C/C++ toolchain with osdk, the shortest path is
+[Zig](./runtimes#zig-as-a-c-and-c-cross-compiler): `zig cc` bundles musl, several
+glibc versions, mingw-w64 and wasi-libc, so `osdk install zig` alone covers the
+targets above without any extra sysroot.
+
+For a specific vendor toolchain instead, install it like any other tool --
 through `github:`, `http:`, or a declarative plugin -- and use the plugin's
 `[env]` table to export `CC`, `SYSROOT` and friends, because a compiler on `PATH`
 is not enough for CMake or Autoconf to find it. See

@@ -32,6 +32,7 @@ impl Registry {
             Arc::new(crate::backend::yarn::YarnBackend),
             Arc::new(crate::backend::deno::DenoBackend),
             Arc::new(crate::backend::bun::BunBackend),
+            Arc::new(crate::backend::zig::ZigBackend),
         ];
         // One backend per Android SDK package family (`android-ndk`, ...).
         backends.extend(

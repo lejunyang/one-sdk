@@ -41,6 +41,7 @@ mod python_releases;
 pub mod registry;
 pub mod rust;
 pub mod yarn;
+pub mod zig;
 
 /// Read-only context available to every backend operation.
 pub struct Ctx {

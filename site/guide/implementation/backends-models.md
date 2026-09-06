@@ -45,6 +45,7 @@ npm 包不属于该 osdk 自有安装身份。
 | `rust` (`rustup`) | rustup channel/version；官方、rsproxy、TUNA | rustup-init SHA-256；随后委托隔离 rustup | toolchain 不走归档 CAS；支持 `profile`、`components`、`targets`，设置隔离的 `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument + `@deno/<platform>` | npm SRI | 平台包；设置 `DENO_DIR` |
 | `bun` | `bun` packument + `@oven/bun-<platform>` | npm SRI | 平台包；设置 `BUN_INSTALL_CACHE_DIR` |
+| `zig` | `ziglang.org/download/index.json` | 来自索引条目的 SHA-256 | 平台键使用 LLVM CPU token；归档名从索引读取而非拼接（0.14 期间命名布局发生过变化）；`master` 暴露为预发布；设置 `ZIG_GLOBAL_CACHE_DIR` |
 | `npm:<package>` | npm packument；隔离安装使用受管 npm 子进程，项目/全局 `use` 可规划 npm 或 pnpm | 原生 lock 携带传递 integrity；默认禁脚本；`.osdk-install.json` schema 1 在指纹化 osdk 自有隔离/全局根中绑定 installer/build 身份 | 动态发现 `.bin`；自动加入受管 Node；lock schema 4 记录 scope、installer、可选原生 lock 身份与公开选项 |
 | `cargo:<crate-or-https-url>` | crates.io 兼容 metadata 与配套 sparse index，或规范 HTTPS Git URL | 依赖精确 osdk 受管 Rust；隔离执行 `cargo-binstall`/`cargo install`；写原生 receipt、inventory 与 metadata seal | Registry 精确/latest/前缀，或 Git latest/tag/branch/完整 revision；schema 4 记录 runtime、replay 分类与 Registry source |
 | `go:<module-or-command-path>` | Go proxy 的 `@latest`、版本列表与精确 `.info` metadata，并发现最长 module root | 依赖精确 osdk 受管 Go；隔离执行一次 `go install`；写原生 receipt、inventory 与 metadata seal | 精确/latest/前缀/伪版本；schema 4 记录 runtime、`version-only`、所选 proxy 与 module root |

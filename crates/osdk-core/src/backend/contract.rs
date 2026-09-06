@@ -136,6 +136,8 @@ fn real_backend_fixture(id: &str, path: &std::path::Path) {
         "yarn" => vec![("root/bin/yarn.js", b"")],
         "deno" => vec![("root/deno", b"#!/bin/sh\nprintf deno\n")],
         "bun" => vec![("root/bin/bun", b"#!/bin/sh\nprintf bun\n")],
+        // Zig ships its binary at the archive root, next to `lib/`.
+        "zig" => vec![("root/zig", b"#!/bin/sh\nprintf zig\n")],
         _ => vec![("root/bin/tool", b"#!/bin/sh\nprintf tool\n")],
     };
     for (entry, contents) in files {
@@ -164,6 +166,7 @@ async fn all_builtin_backend_ids_satisfy_the_lifecycle_contract() {
         "yarn",
         "deno",
         "bun",
+        "zig",
         // One backend per Android SDK package family.
         "android-platform-tools",
         "android-cmdline-tools",
@@ -230,7 +233,7 @@ async fn all_builtin_backend_ids_satisfy_the_lifecycle_contract() {
 async fn real_builtin_backends_install_and_uninstall_locked_fixtures() {
     for id in [
         "node", "npm", "go", "python", "java", "maven", "gradle", "kotlin", "pnpm", "yarn", "deno",
-        "bun",
+        "bun", "zig",
     ] {
         let temporary = tempfile::tempdir().unwrap();
         let ctx = context(temporary.path());

@@ -312,6 +312,21 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 osdk rust check --repair
 ```
 
+### Zig
+
+```bash
+osdk install zig@latest
+osdk exec --tool zig -- zig version
+```
+
+Zig 自带 libc（musl、多个 glibc 版本、mingw-w64、wasi-libc），因此装一份就能把
+C / C++ 交叉编译到多个目标，无需为每个目标准备 sysroot：
+
+```bash
+osdk exec --tool zig -- zig cc -target aarch64-linux-musl -o hello hello.c
+osdk exec --tool zig -- zig cc -target x86_64-windows-gnu -o hello.exe hello.c
+```
+
 指南：[运行时与生态工作流](site/guide/runtimes.md)
 
 ## 场景：管理 Android SDK
@@ -592,7 +607,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 类别 | 当前支持 |
 | --- | --- |
 | 平台 | Windows、macOS、Linux |
-| 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun |
+| 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun、Zig |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
