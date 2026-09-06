@@ -2038,6 +2038,78 @@ fi
     assert!(calls.contains("install -g typescript@5.5.0"));
 }
 
+/// A stand-in rustup that appends the delegate environment it received, so a
+/// test can assert on the mirror osdk actually passed down.
+///
+/// Windows needs a real executable here (osdk resolves `rustup.exe`, and the
+/// loader rejects a batch file under that name), so the recorder is compiled
+/// with the rustc that is already running the test.
+#[cfg(windows)]
+fn write_fake_rustup(root: &Path, project: &Path) -> PathBuf {
+    let rustup = root.join("data/cargo/bin/rustup.exe");
+    std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
+    let log = root.join("rustup-calls.log");
+    let source = root.join("fake-rustup.rs");
+    // The log path and canned `override list` output are baked in as literals so
+    // the recorder needs no environment of its own.
+    std::fs::write(
+        &source,
+        format!(
+            r##"
+fn main() {{
+    use std::io::Write;
+    let log = std::path::PathBuf::from(r#"{log}"#);
+    let var = |key: &str| std::env::var(key).unwrap_or_default();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    writeln!(
+        file,
+        "{{}}|{{}}|{{}}|{{}}|{{}}",
+        var("RUSTUP_HOME"),
+        var("CARGO_HOME"),
+        var("RUSTUP_DIST_SERVER"),
+        var("RUSTUP_UPDATE_ROOT"),
+        args.join(" ")
+    )
+    .unwrap();
+    let joined = args.join(" ");
+    if joined.starts_with("component list") {{
+        print!("rustfmt-x86_64-pc-windows-msvc (installed)\n");
+    }} else if joined.starts_with("target list") {{
+        print!("x86_64-pc-windows-msvc (installed)\n");
+    }} else if joined.starts_with("check") {{
+        print!("stable - Up to date\n");
+    }} else if joined.starts_with("override list") {{
+        print!(r#"{project}"#);
+        print!(" stable-x86_64-pc-windows-msvc\n");
+    }}
+}}
+"##,
+            log = log.display(),
+            project = project.display()
+        ),
+    )
+    .unwrap();
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let compile = Command::new(rustc)
+        .args(["--crate-name", "fake_rustup", "--edition", "2021", "-O"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&rustup)
+        .output()
+        .expect("failed to spawn rustc to build the fake rustup");
+    assert!(
+        compile.status.success(),
+        "building the fake rustup failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    rustup
+}
+
 #[cfg(unix)]
 fn write_fake_rustup(root: &Path, project: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -2049,7 +2121,7 @@ fn write_fake_rustup(root: &Path, project: &Path) -> PathBuf {
         &rustup,
         format!(
             r#"#!/bin/sh
-printf '%s|%s|%s\n' "$RUSTUP_HOME" "$CARGO_HOME" "$*" >> '{}'
+printf '%s|%s|%s|%s|%s\n' "$RUSTUP_HOME" "$CARGO_HOME" "$RUSTUP_DIST_SERVER" "$RUSTUP_UPDATE_ROOT" "$*" >> '{}'
 case "$1 $2" in
   "component list") printf 'rustfmt-x86_64-unknown-linux-gnu (installed)\n' ;;
   "target list") printf 'x86_64-unknown-linux-gnu (installed)\n' ;;
@@ -2319,6 +2391,46 @@ fn rust_subcommand_without_managed_rustup_points_at_install() {
         err.contains("never drives a rustup already on your PATH"),
         "{err}"
     );
+}
+
+/// Local rust operations never download, so they must not inherit an ambient
+/// mirror either: leaking one made the managed toolchain answer to a host osdk
+/// had not selected.
+#[test]
+fn local_rust_operations_do_not_inherit_an_ambient_mirror() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    write_fake_rustup(temp.path(), &project);
+    std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
+
+    let output = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["rust", "target", "list", "--toolchain", "stable"],
+        &[
+            ("RUSTUP_DIST_SERVER", "https://ambient.example/rustup"),
+            ("RUSTUP_UPDATE_ROOT", "https://ambient.example/rustup/rustup"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = std::fs::read_to_string(temp.path().join("rustup-calls.log")).unwrap();
+    for line in calls.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        assert!(
+            !fields[2].contains("ambient.example"),
+            "ambient RUSTUP_DIST_SERVER leaked into managed rustup: {line}"
+        );
+        assert!(
+            !fields[3].contains("ambient.example"),
+            "ambient RUSTUP_UPDATE_ROOT leaked into managed rustup: {line}"
+        );
+    }
 }
 
 #[test]

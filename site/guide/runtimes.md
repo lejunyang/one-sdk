@@ -233,6 +233,9 @@ osdk 只驱动数据目录下的隔离 rustup，不接管已经安装在系统 `
   `RUSTUP_DIST_SERVER`，不会修改外部 rustup 的环境变量或配置；未安装受管 Rust 时
   命令会额外打印这条作用域提示。要让系统 rustup 走镜像，请自行配置
   `RUSTUP_DIST_SERVER`、`RUSTUP_UPDATE_ROOT` 等环境变量。
+- 受管 rustup 始终使用 osdk 选定的源：shell 中已经导出的 `RUSTUP_DIST_SERVER`、
+  `RUSTUP_UPDATE_ROOT` 不会影响受管操作，避免外部镜像覆盖 osdk 的选择。若要临时改用
+  其他源，请使用 `--source <源>`，而不是导出环境变量。
 
 ### Component 与 target
 

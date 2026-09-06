@@ -20,6 +20,15 @@ pub struct RustBackend;
 impl RustBackend {
     /// Env for driving rustup within osdk's self-contained homes + mirror.
     /// `source` is the chosen dist server (fastest under auto, or the pin).
+    ///
+    /// The mirror variables are always written, even when no source is
+    /// selected. rustup reads `RUSTUP_DIST_SERVER` / `RUSTUP_UPDATE_ROOT` from
+    /// the ambient environment, and osdk's own activation exports neither, so
+    /// leaving them untouched let a shell-level mirror (a user's profile, CI, or
+    /// a previous `rustup` setup) silently outrank the source osdk had
+    /// selected. Writing the empty string restores rustup's built-in default
+    /// rather than passing an invalid host, because rustup treats an empty value
+    /// as unset.
     fn rustup_env(ctx: &Ctx, source: Option<&Source>) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();
         env.insert(
@@ -30,12 +39,16 @@ impl RustBackend {
             "CARGO_HOME".to_string(),
             ctx.dirs.cargo_home().display().to_string(),
         );
-        if let Some(src) = source {
-            env.insert("RUSTUP_DIST_SERVER".to_string(), src.download_url.clone());
-            if let Some(update_root) = &src.index_url {
-                env.insert("RUSTUP_UPDATE_ROOT".to_string(), update_root.clone());
-            }
-        }
+        let dist_server = source.map(|src| src.download_url.clone());
+        let update_root = source.and_then(|src| src.index_url.clone());
+        env.insert(
+            "RUSTUP_DIST_SERVER".to_string(),
+            dist_server.unwrap_or_default(),
+        );
+        env.insert(
+            "RUSTUP_UPDATE_ROOT".to_string(),
+            update_root.unwrap_or_default(),
+        );
         env
     }
 
@@ -53,6 +66,11 @@ impl RustBackend {
         Self::rustup_bin(ctx).is_file()
     }
 
+    /// Run the managed rustup with osdk's homes, never an ambient mirror.
+    ///
+    /// The mirror variables are overwritten even though no source is selected
+    /// here, so a shell-level `RUSTUP_DIST_SERVER` cannot reach the managed
+    /// toolchain.
     pub fn run_rustup(
         ctx: &Ctx,
         args: &[&str],
@@ -642,5 +660,81 @@ mod tests {
                 "missing {expected}: {names:?}"
             );
         }
+    }
+
+    /// rustup reads the mirror from its environment, and osdk exports neither
+    /// variable during activation. So the delegate env must always define both:
+    /// omitting them let an ambient mirror outrank the selected source, and
+    /// pointed the managed toolchain at a host osdk never chose.
+    #[test]
+    fn delegate_env_always_overrides_the_ambient_mirror() {
+        use super::*;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config {
+                settings: Default::default(),
+                sources: Default::default(),
+                tools: Default::default(),
+                tool_configs: Default::default(),
+                global_tools: Default::default(),
+                global_tool_configs: Default::default(),
+                tool_origins: Default::default(),
+                aliases: Default::default(),
+                project_config_path: None,
+            },
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+        };
+
+        // A selected source reaches rustup verbatim.
+        let source = Source::mirror("rsproxy", "https://rsproxy.cn", 5)
+            .with_index("https://rsproxy.cn/rustup");
+        let selected = RustBackend::rustup_env(&ctx, Some(&source));
+        assert_eq!(
+            selected.get("RUSTUP_DIST_SERVER").map(String::as_str),
+            Some("https://rsproxy.cn")
+        );
+        assert_eq!(
+            selected.get("RUSTUP_UPDATE_ROOT").map(String::as_str),
+            Some("https://rsproxy.cn/rustup")
+        );
+
+        // Without a source both keys are still written, so an inherited value
+        // cannot survive. Empty means "use rustup's default", not an invalid
+        // host: `process::run` applies these on top of the inherited env, so a
+        // missing key would leave the ambient one in place.
+        let unset = RustBackend::rustup_env(&ctx, None);
+        assert_eq!(
+            unset.get("RUSTUP_DIST_SERVER").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            unset.get("RUSTUP_UPDATE_ROOT").map(String::as_str),
+            Some("")
+        );
+
+        // A source without an index still neutralizes the ambient update root.
+        let no_index = Source::mirror("bare", "https://example.invalid", 5);
+        let partial = RustBackend::rustup_env(&ctx, Some(&no_index));
+        assert_eq!(
+            partial.get("RUSTUP_DIST_SERVER").map(String::as_str),
+            Some("https://example.invalid")
+        );
+        assert_eq!(
+            partial.get("RUSTUP_UPDATE_ROOT").map(String::as_str),
+            Some("")
+        );
     }
 }

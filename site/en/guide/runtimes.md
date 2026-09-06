@@ -256,6 +256,11 @@ over a rustup already installed on `PATH`:
   the command additionally prints this scope note. To mirror a system rustup,
   set `RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`, and related variables
   yourself.
+- The managed rustup always uses the source osdk selected: a `RUSTUP_DIST_SERVER`
+  or `RUSTUP_UPDATE_ROOT` already exported in your shell does not affect managed
+  operations, so an external mirror cannot override osdk's choice. To use a
+  different source for one run, pass `--source <source>` instead of exporting
+  those variables.
 
 ### Components and targets
 
