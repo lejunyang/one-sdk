@@ -96,6 +96,11 @@ enum ArchiveKindDefinition {
     TarZst,
     #[serde(rename = "zip")]
     Zip,
+    /// Windows GCC toolchains are commonly published as `.7z` only. Only the
+    /// install path can unpack one, so the variant follows that feature.
+    #[cfg(feature = "install")]
+    #[serde(rename = "7z")]
+    SevenZ,
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,6 +366,8 @@ impl From<ArchiveKindDefinition> for ArchiveKind {
             ArchiveKindDefinition::TarXz => ArchiveKind::TarXz,
             ArchiveKindDefinition::TarZst => ArchiveKind::TarZst,
             ArchiveKindDefinition::Zip => ArchiveKind::Zip,
+            #[cfg(feature = "install")]
+            ArchiveKindDefinition::SevenZ => ArchiveKind::SevenZ,
         }
     }
 }
@@ -1047,6 +1054,22 @@ mod tests {
         // `[env]` values are not platform templates.
         let in_env = format!("{STATIC_FIXTURE}\n[env]\nCC = \"{{arch_llvm}}/gcc\"\n");
         assert!(DeclarativeBackend::from_toml(&in_env).is_err());
+    }
+
+    /// The extractor supporting `.7z` is not enough on its own: the TOML `kind`
+    /// field has its own variant list, so a definition must be able to *say*
+    /// `7z` and have it reach the pipeline.
+    #[cfg(feature = "install")]
+    #[test]
+    fn archive_kind_7z_round_trips_from_toml() {
+        let definition = STATIC_FIXTURE
+            .replace("kind = \"tar.gz\"", "kind = \"7z\"")
+            .replace(
+                "file = \"acme-{version}-{os}-{arch}.tar.gz\"",
+                "file = \"acme-{version}-{os}-{arch_llvm}.7z\"",
+            );
+        let backend = DeclarativeBackend::from_toml(&definition).expect("`kind = \"7z\"` accepted");
+        assert_eq!(ArchiveKind::from(backend.archive.kind), ArchiveKind::SevenZ);
     }
 
     #[tokio::test]
