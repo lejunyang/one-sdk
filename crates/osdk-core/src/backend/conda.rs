@@ -32,11 +32,23 @@ const UPSTREAM_BASE: &str = "https://conda.anaconda.org";
 /// `osdk source list/test/pin` works here without a second mechanism. They are
 /// defaults, not policy: a user overrides them with `osdk source`.
 ///
-/// Ranked ahead of upstream by priority because they are substantially faster
-/// from mainland China, which is where the slow path actually hurts: a single
-/// subdir's `repodata.json` is 268 MB uncompressed.
+/// They deliberately rank *behind* upstream, which is the opposite of what a
+/// latency measurement alone would suggest, because latency is not what
+/// dominates this backend. Only upstream publishes CEP-16 sharded repodata; the
+/// mirrors serve whole-subdir `repodata.json` files. Measured from Beijing on
+/// `conda:clang`:
 ///
-/// Every entry here was verified to serve `<channel>/noarch/repodata.json.zst`.
+/// | source            | list time | repodata cached |
+/// |-------------------|-----------|-----------------|
+/// | upstream (shards) |     1.8 s |          1.6 MB |
+/// | mirror (full)     |    27.6 s |        445.9 MB |
+///
+/// The mirrors are genuinely faster per byte (4.5 vs 3.4 MB/s for bulk
+/// transfers), but that 1.3x cannot pay for 278x the bytes. They stay in the
+/// list as failover for when upstream is unreachable, which is the case they
+/// actually help with.
+///
+/// Every entry was verified to serve `<channel>/noarch/repodata.json.zst`.
 /// SJTU is deliberately absent: it refuses connections on `mirror.sjtu.edu.cn`
 /// and its `mirrors.sjtug.sjtu.edu.cn` host 404s for anaconda paths, so listing
 /// it would only spend a probe timeout before failing over.
@@ -148,6 +160,22 @@ pub fn parse_channels(value: &str) -> Result<Vec<ChannelRef>> {
     Ok(out)
 }
 
+/// Whether a channel base is known to publish CEP-16 sharded repodata.
+///
+/// Sharded indexes let a query fetch only the packages it asked about
+/// (`repodata_shards.msgpack.zst` is 0.41 MB) instead of a whole subdir's
+/// `repodata.json` (268 MB for win-64). At the time of writing only
+/// anaconda.org serves them; the Chinese mirrors return 404 for the shard
+/// index and rattler falls back to full repodata.
+///
+/// This is a positive list rather than a live probe: getting it wrong only
+/// costs the fallback that would have happened anyway, whereas probing every
+/// base on every invocation would cost a round trip each time.
+fn serves_sharded_repodata(base: &str) -> bool {
+    let base = base.trim_end_matches('/');
+    base == UPSTREAM_BASE || base.ends_with("//conda.anaconda.org")
+}
+
 /// Whether a conda version denotes a final release.
 ///
 /// Decided structurally rather than by substring matching. In conda's version
@@ -195,16 +223,51 @@ impl CondaBackend {
         }
     }
 
-    /// Build a gateway whose channel alias points at the best-ranked source.
+    /// Choose the base URL to fetch repodata from.
     ///
-    /// Pointing the alias at a mirror is what makes mirroring work for every
+    /// A pin (or any non-`Auto` selection) is a deliberate user choice and is
+    /// always honoured, even when it costs the sharded index. Otherwise the
+    /// first source known to serve shards wins, because that difference is
+    /// worth far more than the latency the probe measured.
+    #[cfg(feature = "install")]
+    fn metadata_base(&self, ctx: &Ctx, sources: &[Source]) -> String {
+        // The pin is recorded against this backend's full id (`conda:clang`),
+        // not the bare namespace, so it has to be looked up by `self.id()`.
+        let user_chose = !matches!(ctx.config.sources.selection, crate::source::Selection::Auto)
+            || ctx
+                .config
+                .tool_sources(self.id())
+                .is_some_and(|tool| tool.pin.is_some());
+        if !user_chose {
+            if let Some(sharded) = sources
+                .iter()
+                .find(|source| serves_sharded_repodata(&source.download_url))
+            {
+                return sharded.download_url.trim_end_matches('/').to_string();
+            }
+        }
+        sources
+            .first()
+            .map(|source| source.download_url.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| UPSTREAM_BASE.to_string())
+    }
+
+    /// metadata from.
+    ///
+    /// Pointing the alias at one base is what makes mirroring work for every
     /// channel at once: plain names such as `conda-forge` and `nvidia` resolve
-    /// beneath it, so a single ranked choice covers a multi-channel solve
-    /// without rewriting each channel individually.
+    /// beneath it, so a single choice covers a multi-channel solve without
+    /// rewriting each channel individually.
     ///
-    /// The gateway keeps its cache under osdk's own cache dir rather than
-    /// `~/.conda`, so nothing here touches a conda installation the user may
-    /// also be running.
+    /// Source order here is *not* the generic latency ranking. The probe
+    /// measures round-trip time to one small file, which would pick a nearby
+    /// mirror and then pay 445 MB of whole-subdir `repodata.json` for it; the
+    /// sharded index upstream costs 1.6 MB for the same answer. So an
+    /// explicitly pinned or user-configured source is honoured, and otherwise
+    /// the sharded source is preferred, with the ranked list kept as failover.
+    ///
+    /// The gateway caches under osdk's own cache dir rather than `~/.conda`,
+    /// so this never disturbs a conda installation the user also runs.
     #[cfg(feature = "install")]
     async fn gateway(
         &self,
@@ -217,12 +280,10 @@ impl CondaBackend {
         use rattler_repodata_gateway::Gateway;
 
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let base = sources
-            .first()
-            .map(|source| source.download_url.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| UPSTREAM_BASE.to_string());
-        let alias = url::Url::parse(&format!("{base}/"))
-            .map_err(|error| Error::config(format!("invalid conda channel base `{base}`: {error}")))?;
+        let base = self.metadata_base(ctx, &sources);
+        let alias = url::Url::parse(&format!("{base}/")).map_err(|error| {
+            Error::config(format!("invalid conda channel base `{base}`: {error}"))
+        })?;
 
         let channel_config = ChannelConfig {
             channel_alias: alias,
@@ -466,10 +527,26 @@ mod tests {
         assert!(parse_channels("  , ,  ").is_err());
     }
 
-    /// Mirrors are ordinary sources so `osdk source` manages them, and they
-    /// outrank upstream because the slow path here is very slow.
+    /// The whole point of preferring upstream: only it serves shards. Getting
+    /// this wrong costs 445.9 MB and 27.6 s instead of 1.6 MB and 1.8 s.
     #[test]
-    fn mirrors_are_ranked_ahead_of_upstream() {
+    fn only_upstream_is_known_to_serve_sharded_repodata() {
+        assert!(serves_sharded_repodata(UPSTREAM_BASE));
+        assert!(serves_sharded_repodata("https://conda.anaconda.org/"));
+        for mirror in MIRRORS {
+            assert!(
+                !serves_sharded_repodata(mirror.1),
+                "{} does not serve shards and must not be treated as if it did",
+                mirror.0
+            );
+        }
+    }
+
+    /// Mirrors must rank behind upstream. `Source::official` uses priority 0
+    /// and lower wins, so a mirror with a *smaller* number would quietly
+    /// become the metadata source and drag in whole-subdir repodata.
+    #[test]
+    fn mirrors_rank_behind_upstream() {
         let backend = CondaBackend::from_id("conda:ruff").unwrap();
         let sources = backend.default_sources();
         let official = sources
@@ -483,7 +560,7 @@ mod tests {
         {
             assert!(
                 source.priority > official.priority,
-                "{} should not outrank upstream by accident",
+                "{} must not outrank upstream",
                 source.id
             );
         }
