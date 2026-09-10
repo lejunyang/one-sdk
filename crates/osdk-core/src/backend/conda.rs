@@ -160,6 +160,76 @@ pub fn parse_channels(value: &str) -> Result<Vec<ChannelRef>> {
     Ok(out)
 }
 
+/// Directories inside a conda prefix that can hold executables.
+///
+/// On Windows a conda prefix classically exposes commands from the prefix root,
+/// `Scripts\` and `Library\bin\` -- but that list is not sufficient. Packages
+/// cross-built from a unix layout (ripgrep is one: its `rg.exe` installs to
+/// `bin\rg.exe`) also use `bin\`, so omitting it makes an install that is
+/// present on disk look like it exports no commands at all. Verified by
+/// installing `conda:ripgrep` on win-64.
+///
+/// Only existing directories are returned, so a prefix that lacks one of these
+/// does not contribute a dead PATH entry.
+fn conda_bin_dirs(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        candidates.push(root.to_path_buf());
+        candidates.push(root.join("Scripts"));
+        candidates.push(root.join("Library").join("bin"));
+        candidates.push(root.join("bin"));
+    } else {
+        candidates.push(root.join("bin"));
+    }
+    candidates.retain(|candidate| candidate.is_dir());
+    candidates
+}
+
+/// The archive file name for a package URL.
+///
+/// Taken from the URL's own path rather than from a server-supplied metadata
+/// field, and rejected outright if it could escape the scratch directory it is
+/// joined onto. A channel is a remote party; a record claiming to be called
+/// `../../evil` must not be able to write outside the download dir.
+#[cfg(feature = "install")]
+fn archive_file_name(url: &url::Url) -> Option<String> {
+    let name = url.path_segments()?.next_back()?;
+    let decoded = percent_decode(name);
+    let candidate = decoded.as_str();
+    if candidate.is_empty()
+        || candidate == "."
+        || candidate == ".."
+        || candidate.contains(['/', '\\', ':'])
+        || candidate.contains('\0')
+    {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Decode `%xx` escapes so a percent-encoded separator cannot slip past the
+/// checks above after the filesystem sees it.
+#[cfg(feature = "install")]
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let high = (bytes[index + 1] as char).to_digit(16);
+            let low = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(high), Some(low)) = (high, low) {
+                out.push((high * 16 + low) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Whether a channel base is known to publish CEP-16 sharded repodata.
 ///
 /// Sharded indexes let a query fetch only the packages it asked about
@@ -296,6 +366,148 @@ impl CondaBackend {
         Ok((gateway, channel_config))
     }
 
+    /// Download and unpack every solved package into one prefix.
+    ///
+    /// Conda's own model is that a prefix is the union of its packages, so all
+    /// of them extract into the same directory rather than into per-package
+    /// subdirectories.
+    ///
+    /// Downloads go through osdk's pipeline rather than rattler's HTTP stack:
+    /// it already does resumable transfers, retries and progress reporting, and
+    /// reusing it keeps conda downloads behaving like every other backend's.
+    /// Each archive is verified against the sha256 from `repodata.json` before
+    /// it is unpacked -- note that anaconda.org's *file metadata* API reports an
+    /// empty sha256, so repodata is the only usable source for these digests.
+    #[cfg(feature = "install")]
+    async fn materialize(
+        &self,
+        ctx: &Ctx,
+        records: &[rattler_conda_types::RepoDataRecord],
+        prefix: &std::path::Path,
+    ) -> Result<()> {
+        let scratch = prefix.join(".osdk-download");
+        std::fs::create_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
+
+        for record in records {
+            let file_name = archive_file_name(&record.url).ok_or_else(|| {
+                Error::other(format!(
+                    "conda record has no usable file name: {}",
+                    record.url
+                ))
+            })?;
+            let file_name = file_name.as_str();
+            let archive = scratch.join(file_name);
+
+            crate::pipeline::download::download(
+                &ctx.client,
+                record.url.as_str(),
+                &archive,
+                file_name,
+                ctx.show_progress,
+            )
+            .await?;
+
+            match record.package_record.sha256 {
+                Some(digest) => crate::pipeline::verify::verify_file(
+                    &archive,
+                    &hex::encode(digest),
+                    crate::pipeline::HashAlgo::Sha256,
+                    file_name,
+                )?,
+                // Refuse rather than install unverified bytes: every
+                // conda-forge record carries a sha256, so a missing one means
+                // something is wrong with the channel, not with this code.
+                None => {
+                    return Err(Error::other(format!(
+                        "conda package `{file_name}` has no sha256 in repodata; refusing to \
+                         install unverified bytes"
+                    )));
+                }
+            }
+
+            let target = prefix.to_path_buf();
+            let archive_for_task = archive.clone();
+            // Extraction is CPU-bound and synchronous; keep it off the runtime.
+            tokio::task::spawn_blocking(move || {
+                rattler_package_streaming::fs::extract(&archive_for_task, &target)
+            })
+            .await
+            .map_err(|error| Error::other(format!("conda extraction task failed: {error}")))?
+            .map_err(|error| {
+                Error::other(format!("could not extract conda package `{file_name}`: {error}"))
+            })?;
+
+            // The archives are large (a single win-64 clang is 132 MB) and the
+            // CAS does not own them, so they go as soon as they are unpacked.
+            let _ = std::fs::remove_file(&archive);
+        }
+
+        std::fs::remove_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
+        Ok(())
+    }
+
+    /// Solve the dependency closure for one exact version.
+    ///
+    /// This is the step that makes conda different from every other backend
+    /// here. `conda:clang` at 23.1.1 is a 0.03 MB metapackage on linux-64; the
+    /// compiler is in its dependencies, expressed as constraints like
+    /// `clang-23 ==23.1.1 default_h7037f76_0` and `libstdcxx >=15`. Nothing
+    /// short of a real solve produces a working install.
+    ///
+    /// Virtual packages describe the host (glibc version, macOS SDK, CUDA
+    /// driver). Without them the solver cannot evaluate constraints such as
+    /// `__glibc >=2.17` and rejects packages that would in fact run here.
+    #[cfg(feature = "install")]
+    async fn solve(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Vec<rattler_conda_types::RepoDataRecord>> {
+        use rattler_conda_types::{MatchSpec, ParseStrictness};
+        use rattler_solve::{SolverImpl as _, SolverTask, resolvo::Solver};
+
+        let (gateway, channel_config) = self.gateway(ctx).await?;
+        let channels = self.resolved_channels(&tv.options, &channel_config)?;
+        let platforms = Self::query_platforms(ctx)?;
+
+        // Pin the exact version the user asked for, and let the solver choose
+        // the build. `==` would also demand an exact build string.
+        let spec_text = format!("{}={}", self.package, tv.version);
+        let spec = MatchSpec::from_str(&spec_text, ParseStrictness::Lenient)
+            .map_err(|error| Error::config(format!("invalid conda spec `{spec_text}`: {error}")))?;
+
+        // Recursive: the whole closure is needed, not just the root match.
+        let available = gateway
+            .query(channels, platforms, [spec.clone()])
+            .recursive(true)
+            .await
+            .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))?;
+
+        let virtual_packages = rattler_virtual_packages::VirtualPackage::detect(
+            &rattler_virtual_packages::VirtualPackageOverrides::default(),
+            Some(&ctx.dirs.cache.join("conda").join("virtual-packages")),
+        )
+        .map_err(|error| Error::other(format!("could not detect virtual packages: {error}")))?
+        .into_iter()
+        .map(rattler_conda_types::GenericVirtualPackage::from)
+        .collect();
+
+        let task = SolverTask {
+            virtual_packages,
+            specs: vec![spec],
+            // Strict priority is what makes `channels = ["nvidia", ...]`
+            // meaningful: nvidia's candidates are exhausted before falling
+            // back, so an explicitly preferred channel actually wins.
+            channel_priority: rattler_solve::ChannelPriority::Strict,
+            ..SolverTask::from_iter(&available)
+        };
+
+        let solved = Solver
+            .solve(task)
+            .map_err(|error| Error::other(format!("conda dependency solve failed: {error}")))?;
+        Ok(solved.records)
+    }
+
     /// Resolve the configured channels against a channel config.
     #[cfg(feature = "install")]
     fn resolved_channels(
@@ -418,29 +630,51 @@ impl Backend for CondaBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, _ctx: &InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
-        Err(Error::other("conda install is not implemented yet"))
+    async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+        let ctx = ctx.ctx;
+        let records = self.solve(ctx, tv).await?;
+        let root = ctx.dirs.install_path(self.id(), &tv.version);
+
+        // Build into a scratch prefix and move it into place only once every
+        // package is unpacked, so an interrupted install never leaves a
+        // half-populated prefix that later looks complete.
+        let staging = ctx
+            .dirs
+            .installs
+            .join(crate::dirs::sanitize_tool_id(self.id()))
+            .join(format!(
+                ".staging-{}",
+                crate::dirs::sanitize_version_component(&tv.version)
+            ));
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging).map_err(|error| Error::io(&staging, error))?;
+        }
+        std::fs::create_dir_all(&staging).map_err(|error| Error::io(&staging, error))?;
+
+        let result = self.materialize(ctx, &records, &staging).await;
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return result;
+        }
+
+        if root.exists() {
+            std::fs::remove_dir_all(&root).map_err(|error| Error::io(&root, error))?;
+        }
+        if let Some(parent) = root.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
+        }
+        std::fs::rename(&staging, &root).map_err(|error| Error::io(&root, error))?;
+
+        // Only now is the version usable: `list_installed`, `is_installed` and
+        // the shim all treat this marker as the completion signal, so writing
+        // it before the rename would advertise a prefix that is not there yet.
+        crate::pipeline::write_complete_marker(&ctx.dirs, self.id(), &tv.version)?;
+        Ok(())
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         let root = ctx.dirs.install_path(self.id(), &tv.version);
-        // A conda prefix puts executables in `bin/` on unix but directly in the
-        // prefix root (plus `Scripts/` and `Library/bin/`) on Windows.
-        let mut dirs = Vec::new();
-        if cfg!(windows) {
-            for candidate in [
-                root.clone(),
-                root.join("Scripts"),
-                root.join("Library").join("bin"),
-            ] {
-                if candidate.is_dir() {
-                    dirs.push(candidate);
-                }
-            }
-        } else if root.join("bin").is_dir() {
-            dirs.push(root.join("bin"));
-        }
-        Ok(dirs)
+        Ok(conda_bin_dirs(&root))
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
@@ -525,6 +759,61 @@ mod tests {
     fn an_empty_channel_list_is_an_error_rather_than_a_silent_default() {
         assert!(parse_channels("").is_err());
         assert!(parse_channels("  , ,  ").is_err());
+    }
+
+    /// Regression: `conda:ripgrep` on win-64 installs its executable to
+    /// `bin\rg.exe`, not to `Scripts\` or the prefix root. An earlier revision
+    /// listed only the three classic Windows locations, so a correctly
+    /// installed tool appeared to export no commands. Every candidate must be
+    /// searched on Windows, and only existing dirs may be returned.
+    #[test]
+    fn windows_prefixes_include_bin_not_just_the_classic_conda_locations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+
+        let dirs = conda_bin_dirs(root);
+        assert!(
+            dirs.contains(&root.join("bin")),
+            "bin/ must be searched on every platform; got {dirs:?}"
+        );
+        // Non-existent candidates must not become dead PATH entries.
+        assert!(!dirs.contains(&root.join("Scripts")));
+        assert!(!dirs.contains(&root.join("Library").join("bin")));
+    }
+
+    /// A channel is a remote party. The archive name becomes a path under the
+    /// scratch dir, so a record that names itself `../../evil` must be refused
+    /// rather than allowed to write outside it -- including when the separator
+    /// arrives percent-encoded.
+    #[test]
+    fn archive_names_that_could_escape_the_download_dir_are_refused() {
+        let ok = |raw: &str| archive_file_name(&url::Url::parse(raw).unwrap());
+
+        assert_eq!(
+            ok("https://conda.anaconda.org/conda-forge/win-64/clang-23.1.1-h1.conda").as_deref(),
+            Some("clang-23.1.1-h1.conda")
+        );
+        assert_eq!(
+            ok("https://conda.anaconda.org/conda-forge/linux-64/x-1.tar.bz2").as_deref(),
+            Some("x-1.tar.bz2")
+        );
+
+        for hostile in [
+            // Trailing slash: no file component at all.
+            "https://conda.anaconda.org/conda-forge/win-64/",
+            // Percent-encoded separators must not survive decoding.
+            "https://conda.anaconda.org/c/%2E%2E%2Fevil",
+            "https://conda.anaconda.org/c/%2Fetc%2Fpasswd",
+            "https://conda.anaconda.org/c/a%5Cb",
+            // A bare dot-dot segment.
+            "https://conda.anaconda.org/c/..",
+        ] {
+            assert!(
+                ok(hostile).is_none(),
+                "`{hostile}` should not yield a usable file name"
+            );
+        }
     }
 
     /// The whole point of preferring upstream: only it serves shards. Getting

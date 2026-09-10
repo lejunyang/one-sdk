@@ -406,6 +406,24 @@ pub fn clear_complete_marker(dirs: &Dirs, tool: &str, version: &str) -> Result<(
     }
 }
 
+/// Mark an install root complete.
+///
+/// Backends that materialize a tree themselves rather than unpacking a single
+/// archive (conda solves a dependency closure into one prefix) never run the
+/// pipeline, but `list_installed`, `is_installed` and the shim all key off this
+/// marker. Exposing the writer keeps the marker's name owned by this module
+/// instead of copied into each such backend.
+///
+/// Write this only once the install is otherwise finished: its presence is what
+/// makes the version count as usable.
+pub fn write_complete_marker(dirs: &Dirs, tool: &str, version: &str) -> Result<()> {
+    let marker = dirs.install_path(tool, version).join(COMPLETE_MARKER);
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
+    }
+    std::fs::write(&marker, b"").map_err(|error| Error::io(&marker, error))
+}
+
 pub fn is_installed(dirs: &Dirs, tool: &str, version: &str) -> bool {
     dirs.install_path(tool, version)
         .join(COMPLETE_MARKER)
