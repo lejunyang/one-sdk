@@ -1094,6 +1094,41 @@ mod tests {
         );
     }
 
+    /// Channels are part of install identity, so the same package solved
+    /// against different channel sets must occupy different prefixes rather
+    /// than overwrite one another. Verified live on win-64: `cuda-nvcc` solves
+    /// to a 27-package closure under `nvidia,conda-forge` and a 26-package one
+    /// under `conda-forge` alone, and both prefixes coexist.
+    #[test]
+    fn channels_are_part_of_identity_so_different_sets_do_not_share_a_prefix() {
+        let options = |channels: &str| {
+            BTreeMap::from([("channels".to_string(), channels.to_string())])
+        };
+        let id = crate::tool::ToolId::parse("conda:cuda-nvcc").unwrap();
+
+        let with_nvidia =
+            crate::tool::dynamic_identity_options(&id, &options("nvidia,conda-forge"))
+                .unwrap()
+                .into_map();
+        let forge_only = crate::tool::dynamic_identity_options(&id, &options("conda-forge"))
+            .unwrap()
+            .into_map();
+        assert_ne!(
+            with_nvidia, forge_only,
+            "channel set must change the identity projection"
+        );
+
+        // Order is solver priority, not a set: reversing it selects different
+        // builds and must therefore be a different identity.
+        let reversed = crate::tool::dynamic_identity_options(&id, &options("conda-forge,nvidia"))
+            .unwrap()
+            .into_map();
+        assert_ne!(
+            with_nvidia, reversed,
+            "channel order is solver priority and must not be normalized away"
+        );
+    }
+
     /// Regression: `conda:ripgrep` on win-64 installs its executable to
     /// `bin\rg.exe`, not to `Scripts\` or the prefix root. An earlier revision
     /// listed only the three classic Windows locations, so a correctly
