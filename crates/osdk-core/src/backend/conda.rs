@@ -10,14 +10,17 @@
 //! a CLI concern, and the shim must never link a solver.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
 use crate::backend::{Backend, Ctx, InstallCtx};
+use crate::dirs::InstallLocator;
 use crate::error::{Error, Result};
+use crate::inventory::{DynamicToolBin, DynamicToolManifest};
 use crate::platform::{Arch, Os, Platform};
 use crate::source::Source;
+use crate::tool::{InstallIdentity, InstallScope};
 use crate::version::{ToolVersion, VersionInfo};
 
 /// The channel used when a definition does not name one.
@@ -160,8 +163,210 @@ pub fn parse_channels(value: &str) -> Result<Vec<ChannelRef>> {
     Ok(out)
 }
 
-/// Directories inside a conda prefix that can hold executables.
+/// A stable digest of the exact package set a solve produced.
 ///
+/// A conda prefix has no single artifact: it is the materialization of N
+/// packages, each with its own URL and sha256. The dynamic install contract
+/// still wants one `artifact-file` / `artifact-checksum` pair to bind the
+/// install root to what was actually installed, so the closure is folded into
+/// one digest. Two solves that produced different builds -- a different channel
+/// order, or the same version rebuilt upstream -- hash differently and land in
+/// different install roots instead of silently overwriting each other.
+///
+/// Package URL and digest are both included, so a channel cannot serve
+/// different bytes under a name that already hashed.
+#[cfg(feature = "install")]
+fn closure_digest(records: &[rattler_conda_types::RepoDataRecord]) -> String {
+    // Sort so solver iteration order cannot change the digest of an identical
+    // package set.
+    let mut lines: Vec<String> = records
+        .iter()
+        .map(|record| {
+            format!(
+                "{}\u{1f}{}",
+                record.url,
+                record.package_record.sha256.map(hex::encode).unwrap_or_default()
+            )
+        })
+        .collect();
+    lines.sort();
+    let mut hasher = blake3::Hasher::new_derive_key("osdk-conda-closure-v1");
+    for line in &lines {
+        hasher.update(&(line.len() as u64).to_le_bytes());
+        hasher.update(line.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Identity materials describing the solved closure behind a prefix.
+#[cfg(feature = "install")]
+fn conda_artifact_materials(digest: &str, package_count: usize) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        // Not a real file: a conda install has no single archive. The name
+        // records what the prefix was built from so a receipt cannot be
+        // mistaken for a single-artifact one.
+        (
+            "artifact-file".into(),
+            format!("conda-closure-{package_count}.json"),
+        ),
+        ("artifact-checksum".into(), format!("blake3:{digest}")),
+    ])
+}
+
+/// The locator for a prefix built from an already-solved closure.
+#[cfg(feature = "install")]
+fn conda_install_locator(
+    ctx: &Ctx,
+    backend_id: &str,
+    tv: &ToolVersion,
+    records: &[rattler_conda_types::RepoDataRecord],
+) -> Result<InstallLocator> {
+    let digest = closure_digest(records);
+    let identity = InstallIdentity::new(
+        backend_id,
+        &tv.version,
+        ctx.platform.to_string(),
+        InstallScope::Isolated,
+        &tv.options,
+        Vec::new(),
+        conda_artifact_materials(&digest, records.len()),
+    )?;
+    InstallLocator::new(&ctx.dirs, identity)
+}
+
+/// Find the installed prefix for a request whose closure has not been solved.
+///
+/// `bin_paths`, `uninstall` and the shim all need the install root without
+/// paying for a network solve, and the closure digest is only knowable after
+/// solving. The inventory already records which identity was installed, so the
+/// root is recovered from it instead. An ambiguous match is an error rather
+/// than a guess: picking the wrong one would run the wrong build.
+#[cfg(feature = "install")]
+fn conda_installed_locator(
+    ctx: &Ctx,
+    backend_id: &str,
+    tv: &ToolVersion,
+) -> Result<Option<InstallLocator>> {
+    let expected_options = crate::backend::dynamic::identity_options(backend_id, &tv.options)?;
+    let report = crate::inventory::scan_installs(
+        &ctx.dirs.installs,
+        &crate::inventory::ScanOptions::default(),
+    )?;
+    let mut candidates = report.installs.into_iter().filter(|install| {
+        let identity = &install.manifest.identity;
+        identity.tool == backend_id
+            && identity.version == tv.version
+            && identity.platform == ctx.platform.to_string()
+            && identity.scope == InstallScope::Isolated
+            && identity.material_options == expected_options
+    });
+    let Some(first) = candidates.next() else {
+        return Ok(None);
+    };
+    if candidates.next().is_some() {
+        return Err(Error::other(format!(
+            "conda install identity for `{backend_id}@{}` is ambiguous across multiple solved closures; uninstall the unwanted prefix or pin the channels that produced the one you want",
+            tv.version
+        )));
+    }
+    InstallLocator::new(&ctx.dirs, first.manifest.identity).map(Some)
+}
+
+/// The prefix root for an installed version, or the legacy flat path.
+///
+/// Falling back keeps `bin_paths` total: it is called on paths that may not be
+/// installed yet, and must not fail merely because nothing is on disk.
+#[cfg(feature = "install")]
+fn conda_prefix_root(ctx: &Ctx, backend_id: &str, tv: &ToolVersion) -> PathBuf {
+    conda_installed_locator(ctx, backend_id, tv)
+        .ok()
+        .flatten()
+        .map(|locator| locator.install_root().to_path_buf())
+        .unwrap_or_else(|| ctx.dirs.install_path(backend_id, &tv.version))
+}
+
+/// Publish inventory and the artifact receipt, then mark the prefix complete.
+///
+/// Deliberately not `dynamic::finalize_artifact_install`, which rejects every
+/// symlink under the install root. Conda packages legitimately contain them:
+/// `zlib` on linux-64 ships `lib/libz.so -> libz.so.1.2.13`, and versioned
+/// shared libraries are the norm rather than the exception, so the shared
+/// helper would make this backend unusable on Linux. The traversal protection
+/// that matters here is applied where the untrusted input actually enters --
+/// archive names are validated before extraction -- and every published bin is
+/// still required to resolve to a real file inside the prefix.
+#[cfg(feature = "install")]
+fn finalize_conda_install(locator: &InstallLocator) -> Result<()> {
+    let root = locator.install_root();
+    let result = (|| -> Result<()> {
+        let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone())?;
+        let canonical_root = dunce::canonicalize(root).map_err(|error| Error::io(root, error))?;
+
+        for directory in conda_bin_dirs(root) {
+            for name in crate::backend::bin_names_in_dirs(std::slice::from_ref(&directory)) {
+                let Some(path) = executable_in_dir(&directory, &name) else {
+                    continue;
+                };
+                // Resolve through any symlink and require the target to stay
+                // inside the prefix: a package must not export a command that
+                // points at the rest of the filesystem.
+                let canonical =
+                    dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+                let Ok(relative) = canonical.strip_prefix(&canonical_root) else {
+                    return Err(Error::other(format!(
+                        "conda command `{name}` resolves outside {}",
+                        root.display()
+                    )));
+                };
+                manifest.bins.push(DynamicToolBin {
+                    name,
+                    path: relative.to_string_lossy().replace('\\', "/"),
+                });
+            }
+        }
+        manifest
+            .bins
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        manifest
+            .bins
+            .dedup_by(|left, right| left.name == right.name);
+
+        let materials = locator.identity().materials.clone();
+        crate::pipeline::write_artifact_receipt_at(
+            root,
+            &crate::pipeline::ArtifactReceipt {
+                // A prefix is solved, not fetched from one address; the channel
+                // set that produced it is already part of the identity.
+                url: String::new(),
+                file_name: materials.get("artifact-file").cloned().unwrap_or_default(),
+                checksum: materials.get("artifact-checksum").cloned(),
+                evidence: Vec::new(),
+            },
+        )?;
+        manifest.write_atomic(root)?;
+        std::fs::write(root.join(".osdk-complete"), b"")
+            .map_err(|error| Error::io(root.join(".osdk-complete"), error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    result
+}
+
+#[cfg(feature = "install")]
+fn executable_in_dir(directory: &Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidates = [format!("{name}.exe")];
+    #[cfg(not(windows))]
+    let candidates = [name.to_string()];
+    candidates
+        .into_iter()
+        .map(|candidate| directory.join(candidate))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Directories inside a conda prefix that can hold executables.
 /// On Windows a conda prefix classically exposes commands from the prefix root,
 /// `Scripts\` and `Library\bin\` -- but that list is not sufficient. Packages
 /// cross-built from a unix layout (ripgrep is one: its `rg.exe` installs to
@@ -633,21 +838,23 @@ impl Backend for CondaBackend {
     async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ctx.ctx;
         let records = self.solve(ctx, tv).await?;
-        let root = ctx.dirs.install_path(self.id(), &tv.version);
+
+        // The install root is fingerprinted by the solved closure, so two
+        // different builds of the same version coexist instead of clobbering
+        // each other. It is knowable only after solving.
+        let locator = conda_install_locator(ctx, self.id(), tv, &records)?;
+        let _lock = crate::backend::dynamic::acquire_install_lock(&locator, "conda").await?;
+        let root = locator.install_root().to_path_buf();
 
         // Build into a scratch prefix and move it into place only once every
         // package is unpacked, so an interrupted install never leaves a
         // half-populated prefix that later looks complete.
-        let staging = ctx
-            .dirs
-            .installs
-            .join(crate::dirs::sanitize_tool_id(self.id()))
-            .join(format!(
-                ".staging-{}",
-                crate::dirs::sanitize_version_component(&tv.version)
-            ));
+        let staging = locator.scratch_root().to_path_buf();
         if staging.exists() {
             std::fs::remove_dir_all(&staging).map_err(|error| Error::io(&staging, error))?;
+        }
+        if let Some(parent) = staging.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
         }
         std::fs::create_dir_all(&staging).map_err(|error| Error::io(&staging, error))?;
 
@@ -665,22 +872,95 @@ impl Backend for CondaBackend {
         }
         std::fs::rename(&staging, &root).map_err(|error| Error::io(&root, error))?;
 
-        // Only now is the version usable: `list_installed`, `is_installed` and
-        // the shim all treat this marker as the completion signal, so writing
-        // it before the rename would advertise a prefix that is not there yet.
-        crate::pipeline::write_complete_marker(&ctx.dirs, self.id(), &tv.version)?;
+        // Only now is the version usable. The inventory manifest and artifact
+        // receipt are what let `osdk exec` resolve this prefix at all; the
+        // completion marker alone is not enough for a dynamic namespace.
+        finalize_conda_install(&locator)
+    }
+
+    #[cfg(feature = "install")]
+    async fn uninstall(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<()> {
+        let Some(locator) = conda_installed_locator(ctx, self.id(), tv)? else {
+            return Ok(());
+        };
+        let _lock = crate::backend::dynamic::acquire_install_lock(&locator, "conda").await?;
+        let root = locator.install_root();
+        match std::fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                std::fs::remove_dir_all(root).map_err(|error| Error::io(root, error))?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(root, error)),
+        }
         Ok(())
     }
 
+    fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        let report = crate::inventory::scan_installs(
+            &ctx.dirs.installs,
+            &crate::inventory::ScanOptions::default(),
+        )?;
+        let mut versions: Vec<String> = report
+            .installs
+            .iter()
+            .filter(|install| {
+                let identity = &install.manifest.identity;
+                identity.tool == self.id()
+                    && identity.platform == ctx.platform.to_string()
+                    && identity.scope == InstallScope::Isolated
+                    && install.install_root.join(".osdk-complete").is_file()
+            })
+            .map(|install| install.manifest.identity.version.clone())
+            .collect();
+        versions.sort();
+        versions.dedup();
+        Ok(versions)
+    }
+
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        let root = ctx.dirs.install_path(self.id(), &tv.version);
-        Ok(conda_bin_dirs(&root))
+        Ok(conda_bin_dirs(&conda_prefix_root(ctx, self.id(), tv)))
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         Ok(crate::backend::bin_names_in_dirs(
             &self.bin_paths(ctx, tv)?,
         ))
+    }
+
+    /// Validate a prefix the shim is about to expose.
+    ///
+    /// This does not delegate to the shared artifact validator, which rejects
+    /// any symlink under the install root: conda packages legitimately ship
+    /// them for versioned shared libraries (`lib/libz.so -> libz.so.1.2.13`),
+    /// so the shared check would reject every correct Linux install. The
+    /// properties that matter are still enforced -- the root must be this
+    /// identity's canonical fingerprinted directory, and the receipt must
+    /// describe the same closure the identity names.
+    fn validate_dynamic_install(
+        &self,
+        ctx: &Ctx,
+        _tv: &ToolVersion,
+        install_root: &Path,
+        identity: &InstallIdentity,
+    ) -> Result<bool> {
+        if identity.scope != InstallScope::Isolated
+            || !install_root.join(".osdk-complete").is_file()
+            || !DynamicToolManifest::manifest_path(install_root).is_file()
+        {
+            return Ok(false);
+        }
+        let locator = InstallLocator::new(&ctx.dirs, identity.clone())?;
+        if !locator.validates_existing_install_root(install_root) {
+            return Ok(false);
+        }
+        let Some(receipt) = crate::pipeline::artifact_receipt_at(install_root) else {
+            return Ok(false);
+        };
+        let expected_file = identity.materials.get("artifact-file");
+        let expected_checksum = identity.materials.get("artifact-checksum");
+        Ok(Some(&receipt.file_name) == expected_file
+            && receipt.checksum.as_ref() == expected_checksum)
     }
 }
 
@@ -759,6 +1039,59 @@ mod tests {
     fn an_empty_channel_list_is_an_error_rather_than_a_silent_default() {
         assert!(parse_channels("").is_err());
         assert!(parse_channels("  , ,  ").is_err());
+    }
+
+    /// A conda prefix has no single artifact, so identity is bound to a digest
+    /// of the whole solved closure. Two solves that produced different builds
+    /// must not collide on one install root, and the digest must not depend on
+    /// the order the solver happened to return packages in.
+    #[test]
+    fn closure_digest_identifies_the_package_set_regardless_of_order() {
+        use rattler_conda_types::{PackageRecord, RepoDataRecord, Version};
+        use std::str::FromStr as _;
+
+        let record = |name: &str, version: &str, sha: Option<[u8; 32]>| {
+            let mut package = PackageRecord::new(
+                rattler_conda_types::PackageName::from_str(name).unwrap(),
+                Version::from_str(version).unwrap(),
+                "h0".to_string(),
+            );
+            package.sha256 = sha.map(Into::into);
+            RepoDataRecord {
+                package_record: package,
+                identifier: rattler_conda_types::package::DistArchiveIdentifier::from_str(
+                    &format!("{name}-{version}-h0.conda"),
+                )
+                .unwrap(),
+                url: url::Url::parse(&format!(
+                    "https://conda.anaconda.org/conda-forge/win-64/{name}-{version}-h0.conda"
+                ))
+                .unwrap(),
+                channel: None,
+            }
+        };
+
+        let a = record("libfoo", "1.0", Some([1u8; 32]));
+        let b = record("libbar", "2.0", Some([2u8; 32]));
+
+        // Order must not matter: the same closure is the same prefix.
+        assert_eq!(
+            closure_digest(&[a.clone(), b.clone()]),
+            closure_digest(&[b.clone(), a.clone()])
+        );
+
+        // A different build of the same version must not reuse the root.
+        let rebuilt = record("libfoo", "1.0", Some([9u8; 32]));
+        assert_ne!(
+            closure_digest(&[a.clone(), b.clone()]),
+            closure_digest(&[rebuilt, b.clone()])
+        );
+
+        // A different closure (one more package) is a different prefix.
+        assert_ne!(
+            closure_digest(&[a.clone(), b.clone()]),
+            closure_digest(&[a, b, record("libbaz", "3.0", Some([3u8; 32]))])
+        );
     }
 
     /// Regression: `conda:ripgrep` on win-64 installs its executable to

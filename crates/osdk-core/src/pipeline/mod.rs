@@ -713,6 +713,19 @@ async fn install_single_binary_inner_at(
     Ok(())
 }
 
+/// Write the artifact receipt for an install root.
+///
+/// Backends that materialize a tree themselves never run the pipeline, but the
+/// dynamic install contract requires this receipt beside the inventory
+/// manifest. Exposing the writer keeps the receipt's filename and encoding
+/// owned by this module rather than duplicated per backend.
+pub fn write_artifact_receipt_at(
+    install_dir: &std::path::Path,
+    receipt: &ArtifactReceipt,
+) -> Result<()> {
+    write_artifact_receipt(install_dir, receipt)
+}
+
 fn write_artifact_receipt(install_dir: &std::path::Path, receipt: &ArtifactReceipt) -> Result<()> {
     let path = install_dir.join(ARTIFACT_RECEIPT_FILE);
     let bytes = serde_json::to_vec_pretty(receipt)?;
