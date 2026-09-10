@@ -22,7 +22,19 @@ categories = ["development-tools", "development-tools::build-utils"]
 # re-enables this for the shim and undoes the saving. The two binaries must be
 # built in separate cargo invocations; see .github/workflows/publish.yml.
 default = ["install"]
-install = ["dep:sigstore", "dep:sigstore-verify", "dep:x509-cert", "dep:sevenz-rust2"]
+install = [
+    "dep:sigstore",
+    "dep:sigstore-verify",
+    "dep:x509-cert",
+    "dep:sevenz-rust2",
+    "dep:rattler",
+    "dep:rattler_conda_types",
+    "dep:rattler_repodata_gateway",
+    "dep:rattler_solve",
+    "dep:rattler_package_streaming",
+    "dep:rattler_virtual_packages",
+    "dep:url",
+]
 
 [dependencies]
 tokio.workspace = true
@@ -53,6 +65,15 @@ minisign-verify.workspace = true
 sigstore = { workspace = true, optional = true }
 sigstore-verify = { workspace = true, optional = true }
 x509-cert = { workspace = true, optional = true }
+# Only the install path solves and unpacks conda packages. Optional so the
+# shim's graph never gains a SAT solver or a second repodata client.
+rattler = { workspace = true, optional = true }
+rattler_conda_types = { workspace = true, optional = true }
+rattler_repodata_gateway = { workspace = true, optional = true }
+rattler_solve = { workspace = true, optional = true }
+rattler_package_streaming = { workspace = true, optional = true }
+rattler_virtual_packages = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 snap.workspace = true
 base64.workspace = true
 directories.workspace = true

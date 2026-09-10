@@ -547,6 +547,7 @@ pub fn namespace_schema(namespace: &str) -> Option<&'static NamespaceSchema> {
         "http" => Some(&HTTP_SCHEMA),
         "cargo" => Some(&CARGO_SCHEMA),
         "go" => Some(&GO_SCHEMA),
+        "conda" => Some(&CONDA_SCHEMA),
         _ => None,
     }
 }
@@ -797,6 +798,18 @@ const GO_OPTIONS: &[OptionDefinition] = &[
     ),
 ];
 
+const CONDA_OPTIONS: &[OptionDefinition] = &[option(
+    "channels",
+    "channels",
+    // The channel set decides which package is downloaded, not merely where it
+    // comes from, so it is part of the artifact identity: the same
+    // `conda:cuda-toolkit` at the same version resolves to different builds
+    // under `nvidia` than under `conda-forge`.
+    OptionEffect::Artifact,
+    true,
+    canonical_conda_channels,
+)];
+
 const fn option(
     name: &'static str,
     canonical_name: &'static str,
@@ -860,6 +873,16 @@ static GO_SCHEMA: NamespaceSchema = NamespaceSchema {
     options: OptionSchema {
         definitions: GO_OPTIONS,
         validator: validate_go_options,
+    },
+};
+
+static CONDA_SCHEMA: NamespaceSchema = NamespaceSchema {
+    namespace: "conda",
+    subject_canonicalizer: canonical_conda_subject,
+    selector_validator: validate_any_selector,
+    options: OptionSchema {
+        definitions: CONDA_OPTIONS,
+        validator: validate_conda_options,
     },
 };
 
@@ -1472,6 +1495,80 @@ fn canonical_cargo_crate(value: &str) -> Result<Option<String>> {
     canonical_cargo_crate_name(value).map(Some)
 }
 
+/// Canonicalize a conda package name.
+///
+/// Conda package names are lowercase and use a restricted character set. The
+/// name becomes a URL path segment during the download, so anything that could
+/// escape it is rejected here rather than at request time.
+fn canonical_conda_subject(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        return Err(Error::config(
+            "conda package name must be between 1 and 128 characters",
+        ));
+    }
+    if value != value.to_ascii_lowercase() {
+        return Err(Error::config(format!(
+            "conda package name must be lowercase: `{value}`"
+        )));
+    }
+    let valid = value
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.'));
+    if !valid || value.starts_with('.') || value == "." || value == ".." {
+        return Err(Error::config(format!(
+            "invalid conda package name `{value}`; expected lowercase letters, \
+             digits, `-`, `_`, or `.`"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+/// Canonicalize the `channels` option.
+///
+/// Unlike Go build tags this deliberately does **not** sort: channel order is
+/// the solver's channel priority, so `nvidia,conda-forge` and
+/// `conda-forge,nvidia` are different requests that can resolve to different
+/// packages. Sorting them would silently change which build gets installed.
+/// Duplicates collapse to their first occurrence for the same reason.
+fn canonical_conda_channels(value: &str) -> Result<Option<String>> {
+    let mut channels: Vec<String> = Vec::new();
+    for raw in value.split(',') {
+        let channel = raw.trim();
+        if channel.is_empty() {
+            continue;
+        }
+        if channel.len() > 128 || channel == "." || channel == ".." {
+            return Err(Error::config(format!(
+                "invalid conda channel name `{channel}`"
+            )));
+        }
+        let valid = channel
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+        if !valid {
+            return Err(Error::config(format!(
+                "invalid conda channel name `{channel}`; expected a plain \
+                 channel name such as `conda-forge` or `nvidia`"
+            )));
+        }
+        if !channels.iter().any(|existing| existing == channel) {
+            channels.push(channel.to_string());
+        }
+    }
+    if channels.is_empty() {
+        return Err(Error::config(
+            "conda option `channels` must name at least one channel",
+        ));
+    }
+    if channels.len() > 8 {
+        return Err(Error::config(
+            "conda option `channels` accepts at most 8 channels",
+        ));
+    }
+    Ok(Some(channels.join(",")))
+}
+
 fn canonical_go_tags(value: &str) -> Result<Option<String>> {
     let mut tags = Vec::new();
     for raw in value.split(',') {
@@ -1953,6 +2050,14 @@ fn validate_cargo_options(
 }
 
 fn validate_go_options(
+    _id: &ToolId,
+    _raw: &BTreeMap<String, String>,
+    _canonical: &CanonicalOptions,
+) -> Result<()> {
+    Ok(())
+}
+
+fn validate_conda_options(
     _id: &ToolId,
     _raw: &BTreeMap<String, String>,
     _canonical: &CanonicalOptions,

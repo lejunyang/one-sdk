@@ -312,7 +312,27 @@ pub(super) fn builtin_factories() -> Vec<Arc<dyn DynamicBackendFactory>> {
         Arc::new(GithubBackendFactory),
         Arc::new(NpmBackendFactory),
         Arc::new(HttpBackendFactory),
+        #[cfg(feature = "install")]
+        Arc::new(CondaBackendFactory),
     ]
+}
+
+/// Conda packages are solved and unpacked only on the install path, so the
+/// namespace is not registered in a shim build; the shim resolves already
+/// installed prefixes through the inventory instead.
+#[cfg(feature = "install")]
+struct CondaBackendFactory;
+
+#[cfg(feature = "install")]
+impl DynamicBackendFactory for CondaBackendFactory {
+    fn prefix(&self) -> &'static str {
+        "conda"
+    }
+
+    fn create(&self, id: &str) -> Option<Arc<dyn Backend>> {
+        crate::backend::conda::CondaBackend::from_id(id)
+            .map(|backend| Arc::new(backend) as Arc<dyn Backend>)
+    }
 }
 
 struct GoBackendFactory;

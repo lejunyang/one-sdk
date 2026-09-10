@@ -63,6 +63,32 @@ sigstore = { version = "0.14", default-features = false, features = ["verify", "
 sigstore-verify = { version = "0.11", default-features = false }
 x509-cert = "0.2"
 snap = "1"
+# conda packages (the `conda:` namespace). A conda package declares versioned
+# dependencies rather than shipping a self-contained archive, so installing one
+# means solving a dependency closure -- hence a SAT solver. Every crate here is
+# optional in osdk-core and reaches the graph only through the `install`
+# feature; the shim must never link a solver.
+#
+# `default-features = false` plus an explicit `rustls` keeps this on the same
+# TLS backend as the rest of the workspace instead of adding a second one via
+# native-tls. The feature is spelled `rustls`, not `rustls-tls`, and it is what
+# brings in reqwest: without it every https URL fails at connect time with the
+# misleading "invalid URL, scheme is not http".
+rattler = { version = "0.48", default-features = false, features = ["rustls"] }
+rattler_conda_types = { version = "0.51", default-features = false }
+rattler_repodata_gateway = { version = "0.33", default-features = false, features = [
+    "gateway",
+    "rustls",
+] }
+rattler_solve = { version = "9", default-features = false, features = ["resolvo"] }
+rattler_package_streaming = { version = "0.27", default-features = false, features = [
+    "rustls",
+] }
+rattler_virtual_packages = { version = "5", default-features = false }
+# `Url` appears in rattler's public API (channel aliases, package URLs), so it
+# is a direct dependency rather than something reached through a re-export.
+# Already in the graph via reqwest, so this adds no new crate.
+url = "2"
 # base64 (npm SRI integrity decoding)
 base64 = "0.22"
 # fs / dirs
