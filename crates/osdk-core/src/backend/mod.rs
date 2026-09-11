@@ -261,7 +261,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 }
 
 /// Basename without the platform executable extension.
-fn exe_stem(path: &std::path::Path) -> Option<String> {
+pub(crate) fn exe_stem(path: &std::path::Path) -> Option<String> {
     let name = path.file_name()?.to_string_lossy().to_string();
     #[cfg(windows)]
     {

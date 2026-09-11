@@ -3613,7 +3613,7 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
+pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()> {
     let explicit_spec = requested_spec_literal(&tool).is_some();
     let req = if global {
         resolve_explicit_request(
@@ -3744,6 +3744,32 @@ pub fn where_cmd(app: &App, tool: String, global: bool) -> Result<()> {
         return Err(anyhow!("{}@{} is not installed", backend.id(), version));
     };
     println!("{}", dir.display());
+    if bins {
+        let mut selected = ToolVersion::new(backend.id(), &version);
+        selected.options = req.options.clone();
+        // What the install publishes, and what its directories actually hold.
+        // For most backends these are the same list; a conda prefix holds its
+        // whole dependency closure, so the difference is the point.
+        let published = backend.bin_names(&app.ctx, &selected)?;
+        let present = osdk_core::backend::bin_names_in_dirs(&backend.bin_paths(&app.ctx, &selected)?);
+        let withheld: Vec<&String> = present
+            .iter()
+            .filter(|name| !published.contains(name))
+            .collect();
+
+        println!("published ({}): {}", published.len(), published.join(", "));
+        if withheld.is_empty() {
+            println!("withheld (0):");
+        } else {
+            let names: Vec<&str> = withheld.iter().map(|name| name.as_str()).collect();
+            println!("withheld ({}): {}", names.len(), names.join(", "));
+            println!(
+                "  re-add one with `[shims] include = [\"{}:{}\"]`",
+                backend.id(),
+                names[0]
+            );
+        }
+    }
     Ok(())
 }
 

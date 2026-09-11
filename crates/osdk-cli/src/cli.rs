@@ -188,6 +188,9 @@ pub enum Command {
         /// Resolve an npm package from global scope, ignoring project selection; other backends are not supported.
         #[arg(short, long)]
         global: bool,
+        /// Also list published commands, and any the install holds back.
+        #[arg(long)]
+        bins: bool,
     },
 
     /// Regenerate shim launchers for all installed tools.

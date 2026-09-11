@@ -306,9 +306,19 @@ fn finalize_conda_install(locator: &InstallLocator) -> Result<()> {
     let result = (|| -> Result<()> {
         let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone())?;
         let canonical_root = dunce::canonicalize(root).map_err(|error| Error::io(root, error))?;
+        // Publish only the requested package's own commands when ownership is
+        // known. The manifest drives shim generation, so leaving the whole
+        // closure here would put every dependency's command on PATH no matter
+        // what `bin_names` reports.
+        let owned = owned_bin_names(root);
 
         for directory in conda_bin_dirs(root) {
             for name in crate::backend::bin_names_in_dirs(std::slice::from_ref(&directory)) {
+                if let Some(owned) = owned.as_ref() {
+                    if !owned.contains(&name) {
+                        continue;
+                    }
+                }
                 let Some(path) = executable_in_dir(&directory, &name) else {
                     continue;
                 };
@@ -393,6 +403,97 @@ fn conda_bin_dirs(root: &std::path::Path) -> Vec<PathBuf> {
     }
     candidates.retain(|candidate| candidate.is_dir());
     candidates
+}
+
+/// File listing the paths the requested package itself installed.
+///
+/// Written beside the other osdk metadata so `bin_names` can tell the package's
+/// own commands from the ones its dependencies contributed.
+const OWNED_PATHS_FILE: &str = ".osdk-conda-paths.json";
+
+/// Read `info/paths.json` for the package that was just unpacked.
+///
+/// Conda records every file a package installs there, which is what makes
+/// ownership answerable at all. A package that omits it (or writes something
+/// unparseable) yields an empty list, and the caller falls back to exposing the
+/// whole prefix rather than silently publishing nothing.
+#[cfg(feature = "install")]
+fn read_package_paths(prefix: &std::path::Path) -> Vec<String> {
+    let manifest = prefix.join("info").join("paths.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    parsed
+        .get("paths")
+        .and_then(|paths| paths.as_array())
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|entry| entry.get("_path").and_then(|path| path.as_str()))
+                .map(|path| path.replace('\\', "/"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist the owned-path list into the prefix.
+#[cfg(feature = "install")]
+fn write_owned_paths(prefix: &std::path::Path, owned: &[String]) -> Result<()> {
+    let target = prefix.join(OWNED_PATHS_FILE);
+    let text = serde_json::to_string(&owned)?;
+    std::fs::write(&target, text).map_err(|error| Error::io(&target, error))
+}
+
+/// Load the owned-path list, if this prefix recorded one.
+fn owned_paths(prefix: &std::path::Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(prefix.join(OWNED_PATHS_FILE)).ok()?;
+    serde_json::from_str::<Vec<String>>(&text).ok()
+}
+
+/// Commands the requested package itself installs, as bare names.
+///
+/// Returns `None` when ownership cannot be established, which the caller must
+/// treat as "expose everything" -- withholding every command would be a worse
+/// failure than exposing a few extra ones.
+fn owned_bin_names(prefix: &std::path::Path) -> Option<Vec<String>> {
+    let owned = owned_paths(prefix)?;
+    if owned.is_empty() {
+        return None;
+    }
+    // Which directories count as command directories is platform-dependent, so
+    // reuse the same list PATH is built from instead of a second opinion.
+    let bin_dirs: Vec<String> = conda_bin_dirs(prefix)
+        .iter()
+        .filter_map(|dir| dir.strip_prefix(prefix).ok())
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    let mut names: Vec<String> = owned
+        .iter()
+        .filter_map(|path| {
+            // A path directly inside one of the bin directories is a command;
+            // anything nested deeper is a resource that merely lives there.
+            //
+            // A path with no separator sits in the prefix root, which is itself
+            // a command directory on Windows. Everything else must match a bin
+            // directory exactly -- matching a prefix would wrongly accept
+            // `lib/libclang.so` as a command just because the root qualifies.
+            let (directory, file) = match path.rsplit_once('/') {
+                Some((directory, file)) => (directory, file),
+                None => ("", path.as_str()),
+            };
+            if !bin_dirs.iter().any(|bin| bin == directory) {
+                return None;
+            }
+            crate::backend::exe_stem(std::path::Path::new(file))
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() { None } else { Some(names) }
 }
 
 /// The archive file name for a package URL.
@@ -597,6 +698,8 @@ impl CondaBackend {
     ) -> Result<()> {
         let scratch = prefix.join(".osdk-download");
         std::fs::create_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
+        // Paths belonging to the requested package itself, captured mid-loop.
+        let mut owned: Vec<String> = Vec::new();
 
         for record in records {
             let file_name = archive_file_name(&record.url).ok_or_else(|| {
@@ -647,12 +750,22 @@ impl CondaBackend {
                 Error::other(format!("could not extract conda package `{file_name}`: {error}"))
             })?;
 
+            // Every package unpacks into the same prefix, so each one's
+            // `info/paths.json` overwrites the last. Record who owns what now,
+            // while the answer is still knowable: it is the only way to tell
+            // the requested package's commands from those its dependencies
+            // happened to drop into the same `bin` directory.
+            if record.package_record.name.as_normalized() == self.package {
+                owned = read_package_paths(prefix);
+            }
+
             // The archives are large (a single win-64 clang is 132 MB) and the
             // CAS does not own them, so they go as soon as they are unpacked.
             let _ = std::fs::remove_file(&archive);
         }
 
         std::fs::remove_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
+        write_owned_paths(prefix, &owned)?;
         Ok(())
     }
 
@@ -927,7 +1040,30 @@ impl Backend for CondaBackend {
         Ok(conda_bin_dirs(&conda_prefix_root(ctx, self.id(), tv)))
     }
 
+    /// Commands this install publishes.
+    ///
+    /// A conda prefix holds the whole dependency closure, so its `bin`
+    /// directories contain far more than the requested package: `conda:clang`
+    /// unpacks 16 packages and its `bin` ends up with `xmllint`, `zstd` and the
+    /// ICU tools alongside the compiler. Publishing all of them pollutes PATH
+    /// and lets unrelated installs collide over names neither package is really
+    /// about.
+    ///
+    /// Conda records what each package installs in `info/paths.json`, captured
+    /// during extraction before the next package overwrites it, so the default
+    /// is to publish only the requested package's own commands. When that
+    /// record is missing or empty the whole prefix is exposed instead: showing
+    /// too much beats publishing nothing at all.
+    ///
+    /// Users who need a dependency's command can re-add it with the existing
+    /// `[shims] include` setting, which already accepts `conda:clang:xmllint`
+    /// style patterns. `osdk where --bins <tool>` prints both lists so the
+    /// difference is visible before editing any configuration.
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
+        let prefix = conda_prefix_root(ctx, self.id(), tv);
+        if let Some(owned) = owned_bin_names(&prefix) {
+            return Ok(owned);
+        }
         Ok(crate::backend::bin_names_in_dirs(
             &self.bin_paths(ctx, tv)?,
         ))
@@ -1133,6 +1269,94 @@ mod tests {
         assert_ne!(
             with_nvidia, reversed,
             "channel order is solver priority and must not be normalized away"
+        );
+    }
+
+    /// A conda prefix holds the whole closure, so its bin directories carry
+    /// far more than the package asked for. Ownership comes from the package's
+    /// own `paths.json`, captured during extraction.
+    #[test]
+    fn only_the_requested_packages_commands_are_published() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let bin = if cfg!(windows) {
+            prefix.join("Library").join("bin")
+        } else {
+            prefix.join("bin")
+        };
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let executable = |name: &str| {
+            let file = if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_string()
+            };
+            std::fs::write(bin.join(&file), b"").unwrap();
+            file
+        };
+        // Two from the requested package, two dropped in by dependencies.
+        let clang = executable("clang");
+        let clang_cl = executable("clang-cl");
+        executable("xmllint");
+        executable("zstd");
+
+        let relative = |file: &str| {
+            let directory = if cfg!(windows) { "Library/bin" } else { "bin" };
+            format!("{directory}/{file}")
+        };
+        write_owned_paths(prefix, &[relative(&clang), relative(&clang_cl)]).unwrap();
+
+        let published = owned_bin_names(prefix).expect("ownership was recorded");
+        assert_eq!(published, vec!["clang".to_string(), "clang-cl".to_string()]);
+    }
+
+    /// Without an ownership record the whole prefix is exposed: showing extra
+    /// commands is recoverable, publishing none would make the install useless.
+    #[test]
+    fn a_prefix_without_an_ownership_record_falls_back_to_everything() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        assert_eq!(owned_bin_names(prefix), None);
+
+        // An empty record means the same thing: it establishes nothing.
+        write_owned_paths(prefix, &[]).unwrap();
+        assert_eq!(owned_bin_names(prefix), None);
+    }
+
+    /// `paths.json` lists every file a package installs, most of which are
+    /// headers and libraries. Only what sits directly in a bin directory is a
+    /// command; a file nested deeper merely lives there.
+    #[test]
+    fn only_files_directly_in_a_bin_directory_count_as_commands() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let bin = if cfg!(windows) {
+            prefix.join("Library").join("bin")
+        } else {
+            prefix.join("bin")
+        };
+        std::fs::create_dir_all(bin.join("nested")).unwrap();
+        let file = if cfg!(windows) { "clang.exe" } else { "clang" };
+        std::fs::write(bin.join(file), b"").unwrap();
+        std::fs::write(bin.join("nested").join(file), b"").unwrap();
+
+        let directory = if cfg!(windows) { "Library/bin" } else { "bin" };
+        write_owned_paths(
+            prefix,
+            &[
+                format!("{directory}/{file}"),
+                format!("{directory}/nested/{file}"),
+                "include/clang/Basic/Version.h".to_string(),
+                "lib/libclang.so".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            owned_bin_names(prefix),
+            Some(vec!["clang".to_string()]),
+            "only the top-level bin entry is a command"
         );
     }
 

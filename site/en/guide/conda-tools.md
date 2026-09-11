@@ -123,6 +123,42 @@ win-arm64 is a newer subdir with noticeably thinner coverage than the others:
 linux-64. When a package has no build for it the solve fails and says why,
 rather than quietly installing a different architecture.
 
+## Which commands get exported
+
+A conda prefix holds the whole dependency closure, so its `bin` directories
+contain much more than the package you asked for. `conda:clang` resolves to 16
+packages, and its `bin` ends up with `xmllint`, `zstd` and the ICU tools next to
+the compiler.
+
+**By default only the requested package's own commands are exported**, based on
+the file list conda records in `info/paths.json`. `conda:clang` therefore
+publishes three:
+
+```bash
+osdk where --bins conda:clang
+# ...\installs\conda\clang\23.1.1\b3-v2-c48200a0...
+# published (3): clang, clang-cl, clang-cpp
+# withheld (21): clang++-23, clang-23, derb, ..., xmllint, zstd
+```
+
+Withheld commands are still installed in the prefix; they simply get no shim and
+stay off PATH. To bring one back, use the existing `[shims] include` setting:
+
+```toml
+[shims]
+include = ["conda:clang:xmllint"]
+```
+
+Both `include` and `exclude` accept `*` and `?` globs, and `exclude` is applied
+after `include` so a broad include can be trimmed. These rules are shared by
+every backend, not specific to conda.
+
+::: tip When paths.json is missing
+A few packages ship without that manifest. osdk then exports the whole prefix
+rather than nothing: a handful of extra commands can be narrowed afterwards,
+whereas publishing none would make the install useless.
+:::
+
 ## Lifecycle commands
 
 ```bash

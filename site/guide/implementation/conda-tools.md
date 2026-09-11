@@ -86,6 +86,31 @@ conda 在 Windows 的经典布局是 prefix 根、`Scripts\`、`Library\bin\`。
 `bin\`。只列经典三处会让装好的工具看起来一个命令都不导出。四处都要搜，且只返回
 真实存在的目录，避免制造无效 PATH 条目。
 
+## 命令归属：谁装的这个可执行文件
+
+其他 backend 里"装了什么"和"该导出什么"是同一件事。conda 不是：prefix 是整个闭包
+共用的，`conda:clang` 的 `bin` 里有 24 个命令，只有 3 个来自 clang 本身，其余是
+libxml2、zstd、ICU 顺带装进来的。全导出会污染 PATH，多装几个包还会互相抢名字。
+
+conda 在每个包的 `info/paths.json` 里记录了它安装的全部文件，这让归属可判定。但有
+一个时序陷阱：所有包都解包进同一个 prefix，**后一个包的 `info/` 会覆盖前一个**。
+所以必须在解包循环内、装完目标包的那一刻立即读取，写进 `.osdk-conda-paths.json`，
+之后再想查就晚了。
+
+判定命令的规则是"直接位于某个 bin 目录下"。这里要求目录**精确相等**而不是前缀匹配：
+Windows 上 prefix 根本身就是命令目录（相对路径为空串），若用前缀匹配，
+`lib/libclang.so` 会因为"以空串开头"被误判成命令。这个 bug 是单测抓出来的，不是推理
+出来的。
+
+manifest 和 `bin_names` 必须用同一套过滤。manifest 决定生成哪些 shim，只改
+`bin_names` 会得到一个"报告 3 个、却仍生成 24 个 shim"的自相矛盾状态。
+
+没有 `paths.json` 或清单为空时回退到导出整个 prefix。方向是刻意的：多导出几个命令
+用户可以再收窄，一个都不导出会让安装彻底失效。
+
+用户要找回某个依赖的命令时，复用已有的 `[shims] include`——它本来就支持
+`backend:name` 形式的 glob，不需要为 conda 新造一套配置。
+
 ## 二进制体积
 
 这是 osdk 里代价最大的一个 backend。引入求解与 repodata 栈后：

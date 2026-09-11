@@ -110,6 +110,39 @@ Listing only the classic three makes a correctly installed tool look like it
 exports no commands. All four are searched, and only directories that exist are
 returned so a prefix cannot contribute a dead PATH entry.
 
+## Command ownership: who installed this executable
+
+For other backends "what was installed" and "what should be exported" are the
+same question. Not for conda: the prefix is shared by the whole closure, and
+`conda:clang` ends up with 24 commands of which only three belong to clang. The
+rest come from libxml2, zstd and ICU. Exporting all of them pollutes PATH and
+lets a few installs start fighting over names.
+
+Conda records every file a package installs in its `info/paths.json`, which
+makes ownership answerable. There is a timing trap, though: every package
+unpacks into the same prefix, so **each package's `info/` overwrites the last**.
+The manifest has to be read inside the extraction loop, the moment the requested
+package lands, and persisted to `.osdk-conda-paths.json`; asking afterwards is
+too late.
+
+A path counts as a command when it sits *directly* in one of the bin
+directories. The directory comparison is exact rather than a prefix match: on
+Windows the prefix root is itself a command directory (empty relative path), so
+a prefix match would accept `lib/libclang.so` on the grounds that it starts with
+the empty string. A unit test caught that; reasoning had not.
+
+The manifest and `bin_names` must apply the same filter. The manifest drives
+shim generation, so narrowing only `bin_names` produces the contradictory state
+of reporting three commands while still generating twenty-four shims.
+
+When `paths.json` is missing or empty, the fallback is to export the whole
+prefix. The asymmetry is deliberate: extra commands can be narrowed later,
+whereas exporting none makes the install useless.
+
+To recover a dependency's command, the existing `[shims] include` setting is
+reused -- it already matches `backend:name` globs, so conda needs no
+configuration surface of its own.
+
 ## Binary size
 
 This is the most expensive backend in osdk. With the solver and repodata stack

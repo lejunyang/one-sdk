@@ -112,6 +112,38 @@ win-arm64 是较新的 subdir，覆盖面明显小于其他平台：`clang` 只�
 16 个构建，而 linux-64 有 123 个版本。某个包在这里没有构建时，求解会失败并列出
 原因，而不是静默装上别的架构。
 
+## 导出哪些命令
+
+一个 conda prefix 装的是整个依赖闭包，所以它的 `bin` 目录里远不止你要的那个包。
+`conda:clang` 会解出 16 个包，`bin` 里除了编译器还有 `xmllint`、`zstd` 和一堆 ICU
+工具。
+
+**默认只导出请求包自己安装的命令**，依据是 conda 在 `info/paths.json` 里记录的
+文件清单。`conda:clang` 因此只导出 3 个：
+
+```bash
+osdk where --bins conda:clang
+# ...\installs\conda\clang\23.1.1\b3-v2-c48200a0...
+# published (3): clang, clang-cl, clang-cpp
+# withheld (21): clang++-23, clang-23, derb, ..., xmllint, zstd
+```
+
+被挡下的命令仍然装在 prefix 里，只是不生成 shim、不进 PATH。需要某一个时，用已有
+的 `[shims] include` 把它加回来：
+
+```toml
+[shims]
+include = ["conda:clang:xmllint"]
+```
+
+`include` 和 `exclude` 都支持 `*` 和 `?` 通配，`exclude` 在 `include` 之后生效，
+所以可以先放宽再收窄。这套规则对所有 backend 通用，不是 conda 专有的。
+
+::: tip 没有 paths.json 时会怎样
+少数包不提供这份清单。这时 osdk 会导出整个 prefix 的命令，而不是一个都不导出——
+多几个命令是可以再收窄的，一个都没有则会让安装直接失效。
+:::
+
 ## 生命周期命令
 
 ```bash

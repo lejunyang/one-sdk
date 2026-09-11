@@ -124,7 +124,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Use { tool, global, opts } => commands::use_cmd(app, tool, global, opts).await,
         Command::Uninstall { tool, global } => commands::uninstall(app, tool, global).await,
         Command::Current { tool } => commands::current(app, tool),
-        Command::Where { tool, global } => commands::where_cmd(app, tool, global),
+        Command::Where { tool, global, bins } => commands::where_cmd(app, tool, global, bins),
         Command::Reshim => commands::reshim(app),
         Command::Activate { shell } => commands::activate(app, shell),
         Command::Deactivate { shell } => commands::deactivate(shell),
