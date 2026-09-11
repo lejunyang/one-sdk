@@ -334,6 +334,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
             "要信任项目配置 {path}，直到其规范化内容或路径发生变化吗？",
         ),
     );
+    m.insert(
+        "prompt.trust_after_set",
+        (
+            "This setting makes {path} trust-required. Trust it now?",
+            "该设置会使 {path} 需要信任。现在信任它吗？",
+        ),
+    );
+    m.insert(
+        "msg.trust_declined_after_set",
+        (
+            "left untrusted; osdk will refuse to run here until you run `osdk trust {path}`",
+            "保持未信任；在你运行 `osdk trust {path}` 之前，osdk 将拒绝在该目录下运行",
+        ),
+    );
     m.insert("prompt.yes_no", ("[y/N]:", "[是/否]："));
     m.insert("label.pinned", ("[pinned]", "[已固定]"));
     m.insert("label.error", ("error", "错误"));

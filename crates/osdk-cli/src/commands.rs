@@ -4166,7 +4166,10 @@ fn unknown_setting(key: &str) -> anyhow::Error {
         .iter()
         .map(|setting| setting.key)
         .collect();
-    anyhow!("unknown setting `{key}`; known settings: {}", known.join(", "))
+    anyhow!(
+        "unknown setting `{key}`; known settings: {}",
+        known.join(", ")
+    )
 }
 
 pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
@@ -4257,8 +4260,7 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             if global {
                 // The global value on its own, not the merged result: with `-g`
                 // the question is what the user config holds.
-                let user =
-                    osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+                let user = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
                 let value =
                     setting_display(&user.settings, &key).ok_or_else(|| unknown_setting(&key))?;
                 println!("{value}");
@@ -4278,14 +4280,20 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             let effective =
                 setting_display(&written.settings, &key).unwrap_or_else(|| value.clone());
             println!("set {key} = {effective} in {}", path.display());
-            warn_if_project_config_needs_trust(app, &path, scope)?;
+            offer_trust_after_set(app, &path, scope)?;
         }
         ConfigCommand::Unset { key, global } => {
             let setting =
                 crate::config_edit::find_setting(&key).ok_or_else(|| unknown_setting(&key))?;
             let scope = setting_scope(global);
             match crate::config_edit::unset_setting(&app.ctx, setting, scope)? {
-                Some(path) => println!("unset {key} in {}", path.display()),
+                Some(path) => {
+                    println!("unset {key} in {}", path.display());
+                    // Removing a key rewrites the file, so a config that stays
+                    // trust-required now hashes differently and has lost its
+                    // trust record.
+                    offer_trust_after_set(app, &path, scope)?;
+                }
                 None => {
                     let path = crate::config_edit::setting_scope_path(&app.ctx, scope)?;
                     println!("{key} was not set in {}", path.display());
@@ -4304,13 +4312,18 @@ fn setting_scope(global: bool) -> crate::config_edit::SettingScope {
     }
 }
 
-/// Tell the user when a project config they just wrote will be refused.
+/// Offer to trust a project config that the user just made trust-required.
 ///
-/// A project `osdk.toml` carrying anything beyond `[tools]` / `[aliases]` is
-/// trust-required, so writing a setting into one silently arms every later
-/// command to fail. Saying so at write time beats an unexplained refusal on the
-/// next unrelated command.
-fn warn_if_project_config_needs_trust(
+/// Writing a setting into a project `osdk.toml` takes it past the
+/// `[tools]`/`[aliases]` whitelist, so every later command in that directory
+/// would be refused until it is trusted. Asking at the point of writing keeps
+/// the gate meaningful -- it exists to catch configs that arrived with someone
+/// else's repository, not the line the user just typed -- while not leaving
+/// them to discover the refusal on an unrelated command later.
+///
+/// Declining is a real answer: the setting stays written but untrusted, which
+/// is what someone preparing a config for a teammate to review would want.
+fn offer_trust_after_set(
     app: &App,
     path: &std::path::Path,
     scope: crate::config_edit::SettingScope,
@@ -4321,17 +4334,39 @@ fn warn_if_project_config_needs_trust(
     if !osdk_core::trust::requires_trust(path)? {
         return Ok(());
     }
-    let trusted = osdk_core::trust::is_trusted(
+    // Trust is content-bound, so a config that is still trusted after this edit
+    // needs no new record and no prompt.
+    if osdk_core::trust::is_trusted(
         &app.ctx.dirs.config,
         path,
         std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS").as_ref(),
-    )?;
-    if !trusted {
-        println!(
-            "note: project settings make this config trust-required; run `osdk --yes trust {}`",
-            path.display()
-        );
+    )? {
+        return Ok(());
     }
+    let question = t!("prompt.trust_after_set", path = path.display());
+    // A non-interactive session cannot answer, and `confirm` reports that as an
+    // error. The write already succeeded, so failing the command here would
+    // report failure for work that was done; treat "could not ask" exactly like
+    // "declined" and say what is still needed.
+    match app.prompt.confirm(&question) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            println!(
+                "{}",
+                t!("msg.trust_declined_after_set", path = path.display())
+            );
+            return Ok(());
+        }
+    }
+    let record = osdk_core::trust::trust(&app.ctx.dirs.config, path)?;
+    println!(
+        "{}",
+        t!(
+            "msg.config_trusted",
+            path = record.path.display(),
+            hash = record.hash
+        )
+    );
     Ok(())
 }
 

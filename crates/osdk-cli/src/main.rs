@@ -99,8 +99,7 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        let bypass_trust_check =
-            matches!(cli.command, Command::Trust { .. } | Command::Untrust { .. });
+        let bypass_trust_check = bypasses_trust_check(&cli.command);
         let mut app = if bypass_trust_check {
             App::init_without_trust_check(overrides)?
         } else {
@@ -108,6 +107,27 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
         };
         dispatch(&mut app, cli.command).await
     })
+}
+
+/// Whether a command runs before the project config is trusted.
+///
+/// Trust management is exempt for the obvious reason. So are `config set` and
+/// `config unset`: they are how an untrusted project config is edited back into
+/// shape, and gating them would leave the only exit route blocked by the very
+/// config the user is undoing. Both address one named key in one named file and
+/// never act on what the untrusted config asks for. `config get` and
+/// `config list` stay behind the gate precisely because they do report the
+/// untrusted config's merged values.
+fn bypasses_trust_check(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Trust { .. }
+            | Command::Untrust { .. }
+            | Command::Config {
+                command: crate::cli::ConfigCommand::Set { .. }
+                    | crate::cli::ConfigCommand::Unset { .. }
+            }
+    )
 }
 
 async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>> {
@@ -169,8 +189,48 @@ fn init_tracing(verbose: u8) {
 
 #[cfg(test)]
 mod tests {
+    use super::bypasses_trust_check;
     #[cfg(unix)]
     use super::native_exit_code;
+    use crate::cli::{Command, ConfigCommand};
+
+    #[test]
+    fn only_trust_management_and_config_writes_skip_the_trust_gate() {
+        // This list is a security boundary: anything exempted here runs with an
+        // untrusted project config present. Reading commands must stay gated,
+        // because they report that config's merged values.
+        assert!(bypasses_trust_check(&Command::Trust {
+            path: None,
+            command: None
+        }));
+        assert!(bypasses_trust_check(&Command::Untrust { path: None }));
+        assert!(bypasses_trust_check(&Command::Config {
+            command: ConfigCommand::Set {
+                key: "jobs".into(),
+                value: "4".into(),
+                global: false
+            }
+        }));
+        assert!(bypasses_trust_check(&Command::Config {
+            command: ConfigCommand::Unset {
+                key: "jobs".into(),
+                global: false
+            }
+        }));
+
+        assert!(!bypasses_trust_check(&Command::Config {
+            command: ConfigCommand::Get {
+                key: "jobs".into(),
+                global: false
+            }
+        }));
+        assert!(!bypasses_trust_check(&Command::Config {
+            command: ConfigCommand::List
+        }));
+        assert!(!bypasses_trust_check(&Command::Config {
+            command: ConfigCommand::Path
+        }));
+    }
 
     #[cfg(unix)]
     #[test]
