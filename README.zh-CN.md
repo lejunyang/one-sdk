@@ -592,6 +592,8 @@ osdk current
 osdk where node
 osdk config path
 osdk config list
+osdk config get jobs
+osdk config set shims.exclude "apkanalyzer"
 osdk --lang en doctor
 OSDK_LANG=zh osdk --help
 osdk completions bash > osdk.bash

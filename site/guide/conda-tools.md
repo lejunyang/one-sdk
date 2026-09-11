@@ -128,16 +128,27 @@ osdk where --bins conda:clang
 # withheld (21): clang++-23, clang-23, derb, ..., xmllint, zstd
 ```
 
-被挡下的命令仍然装在 prefix 里，只是不生成 shim、不进 PATH。需要某一个时，用已有
-的 `[shims] include` 把它加回来：
+被挡下的命令仍然装在 prefix 里，只是不生成 shim、不进 PATH。需要某一个时，用
+`osdk config set` 把它加回来：
 
-```toml
-[shims]
-include = ["conda:clang:xmllint"]
+```bash
+osdk config set shims.include "conda:clang:xmllint"
+osdk reshim
 ```
 
 `include` 和 `exclude` 都支持 `*` 和 `?` 通配，`exclude` 在 `include` 之后生效，
 所以可以先放宽再收窄。这套规则对所有 backend 通用，不是 conda 专有的。
+
+`config set` 默认写入项目配置，加 `-g` 写入用户配置：
+
+```bash
+osdk config set -g shims.include "conda:clang:xmllint"   # 对所有项目生效
+osdk config get shims.include                            # 当前生效值
+osdk config unset shims.include                          # 恢复默认
+```
+
+写进项目配置的设置会让该 `osdk.toml` 需要信任，`config set` 会就地询问是否信任；
+`--yes` 时自动确认。详见[项目与配置](./projects#项目配置信任)。
 
 ::: tip 没有 paths.json 时会怎样
 少数包不提供这份清单。这时 osdk 会导出整个 prefix 的命令，而不是一个都不导出——

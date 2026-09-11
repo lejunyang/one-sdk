@@ -13,10 +13,47 @@ osdk 将用户默认值、项目声明、环境变量和 CLI 覆盖组合成当�
 ```text
 osdk config path
 osdk config list
+osdk config get KEY [-g]
+osdk config set KEY VALUE [-g]
+osdk config unset KEY [-g]
 ```
 
 `config path` 显示配置目录、用户配置文件和当前发现的项目配置。`config list` 显示
 部分解析结果而非原始 TOML；它不会列出 `yes`、`lang`、所有 source 细节等全部字段。
+
+`get` / `set` / `unset` 默认作用于**项目配置**，`-g` 才是用户配置——与 `git config`、
+`npm config` 一致。`get` 默认返回合并后的生效值（含默认值与环境变量覆盖），`-g` 只读
+用户那一层。
+
+```bash
+osdk config set jobs 8                       # 写入 ./osdk.toml
+osdk config set -g jobs 8                     # 写入用户配置
+osdk config get jobs                          # 生效值
+osdk config unset jobs                        # 恢复默认
+```
+
+可写的是下列标量与列表设置：`jobs`、`offline`、`yes`、`verify_signatures`、
+`require_checksums`、`attestations`、`prerelease`、`link_mode`、`lang`、
+`shims.include`、`shims.exclude`。列表用逗号分隔。工具固定、source 固定和别名不在其中，
+它们分别由 `osdk use`、`osdk source pin` 和 `osdk alias` 管理。
+
+枚举取值与各自类型一致，别名会被规范化后写入（`attestations=auto` 存为
+`if-available`）：
+
+| 设置 | 取值 |
+| --- | --- |
+| `attestations` | `off`、`if-available`、`required` |
+| `prerelease` | `never`、`if-explicit`、`allow` |
+| `link_mode` | `auto`、`hardlink`、`reflink`、`copy`、`symlink` |
+| `lang` | `en`、`zh` |
+
+取值会先解析校验再落盘，非法值不会留下改了一半的文件；`unset` 会顺带清掉被清空的表头，
+不会留下一个空的 `[settings]`。
+
+::: warning 写入项目配置会触发信任
+项目配置里出现 `[settings]` 会使该文件需要信任（见下节）。`config set` 会就地询问是否
+信任，`--yes` 时自动确认；非交互环境下写入照常成功，但不授予信任，并提示还需要做什么。
+:::
 
 ## 项目版本发现
 
@@ -284,3 +321,8 @@ trust store 位于 `$OSDK_CONFIG_DIR/trusted-configs.toml`；`trust list` 只报
 CI 可设置 `OSDK_TRUSTED_CONFIG_PATHS`，值是操作系统路径分隔符连接的已审阅文件或
 目录。匹配文件或位于匹配目录下的项目配置会在本次进程中视为 trusted，不写本地
 trust store。`trust`/`untrust` 自身只加载用户配置，防止未信任项目影响自己的审批。
+
+`osdk config set` 和 `osdk config unset` 同样在信任检查之前执行。否则出口会被它自己
+要撤销的那份配置堵死——`unset` 将无法删掉正导致拒绝的那个键。这两个命令只针对指定
+文件里的指定键，不会执行未受信任配置的任何内容。`config get` 和 `config list` 仍受
+限制，因为它们确实会读出并展示那份配置的合并结果。

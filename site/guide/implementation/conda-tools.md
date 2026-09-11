@@ -102,13 +102,21 @@ Windows 上 prefix 根本身就是命令目录（相对路径为空串），若�
 `lib/libclang.so` 会因为"以空串开头"被误判成命令。这个 bug 是单测抓出来的，不是推理
 出来的。
 
-manifest 和 `bin_names` 必须用同一套过滤。manifest 决定生成哪些 shim，只改
-`bin_names` 会得到一个"报告 3 个、却仍生成 24 个 shim"的自相矛盾状态。
+**归属只是标注，不是删除。** manifest 记录 prefix 里的全部命令，每条附一个 `owned`
+标记，真正的过滤下沉到 shim 生成那一层。最初的实现是在安装期就把闭包命令从 manifest
+里删掉，那是错的：manifest 是 shim 层唯一能读到的清单，被删掉的命令再也找不回来，
+于是文档里承诺的 `include` 实际上是个空操作。`owned` 只提供默认值——显式 `include`
+仍然能召回依赖的命令，`exclude` 最后生效。`DynamicToolBin.owned` 在反序列化时默认为
+`true`，旧版本写下的 manifest 因此继续可用。
+
+reconciliation 必须套用完全相同的过滤。它原先比对的是未过滤的集合，结果是刚生成的
+shim 转头就被删掉，而用户 exclude 掉的 shim 反而留着。`where --bins` 现在也报告
+路由后的决策而非 backend 原始列表，否则预览会和下一次 reshim 的产物自相矛盾。
 
 没有 `paths.json` 或清单为空时回退到导出整个 prefix。方向是刻意的：多导出几个命令
 用户可以再收窄，一个都不导出会让安装彻底失效。
 
-用户要找回某个依赖的命令时，复用已有的 `[shims] include`——它本来就支持
+用户要找回某个依赖的命令时，复用已有的 `shims.include`——它本来就支持
 `backend:name` 形式的 glob，不需要为 conda 新造一套配置。
 
 ## 二进制体积
@@ -130,3 +138,18 @@ backend 做不到的事。
 shim 侧的红线始终成立：6 个 rattler crate 全部 `optional = true` 且只进
 `install` feature，shim 的依赖图恒为 427 行，rattler / resolvo / bzip2 出现次数
 恒为 0。
+
+## 门控的边界在方法，不在模块
+
+最初把整个 conda 模块连同 `CondaBackendFactory` 一起放进 `install` feature，理由
+听上去成立：求解和解包确实只发生在安装期。但这条边界划错了位置——shim 需要先把
+`conda:clang` **路由**到这个 backend，才谈得上分发 `clang`。工厂没注册，shim 构建
+里就根本造不出 backend，于是每一条 conda 命令都以 `no backend provides` 失败。
+
+代价高的是求解，不是路由。工厂改为无条件注册，模块与两个只读 inventory 的
+helper（`conda_installed_locator`、`conda_prefix_root`）一并去掉门控；求解与解包
+仍然留在 `install` 之后。红线未受影响，因为这些函数不碰任何 rattler 类型。
+
+这个洞能存在这么久，是因为此前只数过 shim 文件个数，从没真正执行过一个。现在有
+`every_dynamic_namespace_resolves_in_a_shim_build_too` 守着：它在 shim 自己的
+feature 组合下运行，任何命名空间再犯同样的错都会当场失败。

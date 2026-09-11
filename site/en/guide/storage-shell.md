@@ -219,6 +219,7 @@ osdk doctor --verify
 osdk doctor --verify --tool TOOL
 osdk config path
 osdk config list
+osdk config get KEY [-g]
 osdk source list TOOL
 osdk registry test [MANAGER]
 ```

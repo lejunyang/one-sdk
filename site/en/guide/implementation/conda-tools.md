@@ -131,15 +131,27 @@ Windows the prefix root is itself a command directory (empty relative path), so
 a prefix match would accept `lib/libclang.so` on the grounds that it starts with
 the empty string. A unit test caught that; reasoning had not.
 
-The manifest and `bin_names` must apply the same filter. The manifest drives
-shim generation, so narrowing only `bin_names` produces the contradictory state
-of reporting three commands while still generating twenty-four shims.
+**Ownership is a label, not a deletion.** The manifest records every command in
+the prefix and tags each with `owned`; the filtering itself happens during shim
+generation. The first implementation dropped the closure's commands from the
+manifest at install time, which was wrong: the manifest is the only inventory
+the shim layer reads, so a dropped command could never be recovered and the
+`include` escape hatch promised in these docs silently did nothing. `owned` only
+supplies the default -- an explicit `include` still reaches a dependency's
+command, and `exclude` still wins. `DynamicToolBin.owned` defaults to true on
+deserialization, so manifests written by older versions keep working.
+
+Reconciliation has to apply the identical filter. It previously compared against
+the unfiltered set, so it deleted shims generation had just written while
+keeping ones the user had excluded. `where --bins` likewise reports the routed
+decision rather than the raw backend list, or the preview would contradict the
+shims produced by the next reshim.
 
 When `paths.json` is missing or empty, the fallback is to export the whole
 prefix. The asymmetry is deliberate: extra commands can be narrowed later,
 whereas exporting none makes the install useless.
 
-To recover a dependency's command, the existing `[shims] include` setting is
+To recover a dependency's command, the existing `shims.include` setting is
 reused -- it already matches `backend:name` globs, so conda needs no
 configuration surface of its own.
 
@@ -167,3 +179,23 @@ The shim-side red line holds throughout: all six rattler crates are
 `optional = true` and enter only through the `install` feature, the shim's
 dependency graph stays at 427 lines, and rattler, resolvo and bzip2 each appear
 zero times in it.
+
+## The gate belongs on methods, not on the module
+
+The module and `CondaBackendFactory` were initially placed behind the `install`
+feature on reasoning that sounds right: solving and unpacking really do happen
+only during installation. But the boundary was drawn in the wrong place -- the
+shim has to *route* `conda:clang` to this backend before it can dispatch
+`clang`. With the factory unregistered, a shim build could not construct the
+backend at all, and every conda command failed with `no backend provides`.
+
+Solving is expensive; routing is not. The factory is now registered
+unconditionally, and the module along with two read-only inventory helpers
+(`conda_installed_locator`, `conda_prefix_root`) is no longer gated, while
+solving and unpacking stay behind `install`. The red line is unaffected because
+none of those functions touch a rattler type.
+
+The gap survived as long as it did because earlier rounds only counted shim
+files and never executed one. A regression test now covers it:
+`every_dynamic_namespace_resolves_in_a_shim_build_too` runs in the shim's own
+feature configuration and fails if any namespace regresses the same way.

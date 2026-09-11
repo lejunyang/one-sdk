@@ -13,11 +13,53 @@ the editable schema, exact merge granularity, and the trust boundary.
 ```text
 osdk config path
 osdk config list
+osdk config get KEY [-g]
+osdk config set KEY VALUE [-g]
+osdk config unset KEY [-g]
 ```
 
 `config path` prints the config directory, user file, and discovered project
 file. `config list` prints selected resolved settings, not every raw TOML field;
 for example it omits `yes`, `lang`, and full source details.
+
+`get`, `set` and `unset` act on the **project** config by default, with `-g` for
+the user config, the way `git config` and `npm config` behave. `get` reports the
+merged effective value, including defaults and environment overrides; `-g` reads
+the user layer alone.
+
+```bash
+osdk config set jobs 8                        # writes ./osdk.toml
+osdk config set -g jobs 8                     # writes the user config
+osdk config get jobs                          # effective value
+osdk config unset jobs                        # back to the default
+```
+
+The writable settings are the scalar and list ones: `jobs`, `offline`, `yes`,
+`verify_signatures`, `require_checksums`, `attestations`, `prerelease`,
+`link_mode`, `lang`, `shims.include` and `shims.exclude`. Lists take a
+comma-separated value. Tool pins, source pins and aliases are not included;
+`osdk use`, `osdk source pin` and `osdk alias` own those.
+
+The enum vocabularies come from the settings' own types, and accepted aliases
+are normalized on write (`attestations=auto` is stored as `if-available`):
+
+| Setting | Values |
+| --- | --- |
+| `attestations` | `off`, `if-available`, `required` |
+| `prerelease` | `never`, `if-explicit`, `allow` |
+| `link_mode` | `auto`, `hardlink`, `reflink`, `copy`, `symlink` |
+| `lang` | `en`, `zh` |
+
+Values are parsed before the file is touched, so a rejected value leaves nothing
+half-written, and `unset` prunes the table it empties rather than leaving a bare
+`[settings]` header behind.
+
+::: warning Writing a project config makes it trust-required
+A `[settings]` table in a project config puts that file past the trust whitelist
+(next section). `config set` offers to trust it on the spot, and `--yes` accepts.
+In a non-interactive session the write still succeeds but trust is withheld, and
+the output says what is still needed.
+:::
 
 ## Project version discovery
 
@@ -310,3 +352,9 @@ CI may set `OSDK_TRUSTED_CONFIG_PATHS` to an OS path-list of reviewed files or
 directories. Matching project files are trusted for that process without being
 written to the local store. `trust` and `untrust` themselves load only user
 configuration, so an untrusted project cannot influence its own approval.
+
+`osdk config set` and `osdk config unset` also run before the trust check.
+Otherwise the exit would be blocked by the very config being undone -- `unset`
+could not remove the key causing the refusal. Both address one named key in one
+named file and never act on what the untrusted config asks for. `config get` and
+`config list` stay behind the check, because they do report its merged values.

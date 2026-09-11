@@ -142,16 +142,29 @@ osdk where --bins conda:clang
 ```
 
 Withheld commands are still installed in the prefix; they simply get no shim and
-stay off PATH. To bring one back, use the existing `[shims] include` setting:
+stay off PATH. To bring one back, use `osdk config set`:
 
-```toml
-[shims]
-include = ["conda:clang:xmllint"]
+```bash
+osdk config set shims.include "conda:clang:xmllint"
+osdk reshim
 ```
 
 Both `include` and `exclude` accept `*` and `?` globs, and `exclude` is applied
 after `include` so a broad include can be trimmed. These rules are shared by
 every backend, not specific to conda.
+
+`config set` writes to the project config by default; `-g` targets the user
+config:
+
+```bash
+osdk config set -g shims.include "conda:clang:xmllint"   # every project
+osdk config get shims.include                            # effective value
+osdk config unset shims.include                          # back to default
+```
+
+A setting in a project config makes that `osdk.toml` trust-required, so
+`config set` offers to trust it on the spot, and `--yes` accepts. See
+[Projects and configuration](./projects#project-configuration-trust).
 
 ::: tip When paths.json is missing
 A few packages ship without that manifest. osdk then exports the whole prefix
