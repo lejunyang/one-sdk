@@ -1389,6 +1389,7 @@ fn write_dynamic_inventory(locator: &InstallLocator) -> Result<()> {
             manifest.bins.push(DynamicToolBin {
                 name,
                 path: relative.to_string_lossy().replace('\\', "/"),
+                ..Default::default()
             });
         }
     }
@@ -2569,6 +2570,7 @@ mod tests {
         manifest.bins.push(DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
+            ..Default::default()
         });
         manifest.write_atomic(install).unwrap();
         let receipt = pipeline::ArtifactReceipt {
@@ -2815,6 +2817,7 @@ mod tests {
         manifest.bins.push(DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
+            ..Default::default()
         });
         manifest.write_atomic(install).unwrap();
         let original_inventory =
@@ -2867,6 +2870,7 @@ mod tests {
         manifest.bins.push(DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
+            ..Default::default()
         });
         manifest.write_atomic(install).unwrap();
         std::fs::write(

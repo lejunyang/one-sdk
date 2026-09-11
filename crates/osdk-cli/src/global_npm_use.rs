@@ -3485,6 +3485,7 @@ mod tests {
             } else {
                 "bin/fixture-cli".into()
             },
+            ..Default::default()
         }];
         manifest.write_atomic(root).unwrap();
         std::fs::write(
@@ -3537,6 +3538,7 @@ mod tests {
                 osdk_core::inventory::DynamicToolBin {
                     name: (*name).into(),
                     path,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -3673,6 +3675,7 @@ mod tests {
             } else {
                 "bin/prettier".into()
             },
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
         std::fs::write(
@@ -3821,6 +3824,7 @@ mod tests {
             } else {
                 "bin/prettier".into()
             },
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
         std::fs::write(

@@ -242,6 +242,7 @@ pub(crate) fn finalize_artifact_install(locator: &InstallLocator) -> Result<()> 
                 manifest.bins.push(DynamicToolBin {
                     name,
                     path: relative.to_string_lossy().replace('\\', "/"),
+                    ..Default::default()
                 });
             }
         }

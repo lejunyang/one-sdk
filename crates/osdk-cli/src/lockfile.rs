@@ -3806,6 +3806,7 @@ replay = "version-only"
         manifest.bins.push(osdk_core::inventory::DynamicToolBin {
             name: "fixture".into(),
             path: "bin/fixture".into(),
+            ..Default::default()
         });
         manifest.write_atomic(root).unwrap();
         std::fs::write(
@@ -4137,6 +4138,7 @@ sha256 = "{sha256}"
         manifest.bins.push(osdk_core::inventory::DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
+            ..Default::default()
         });
         manifest.write_atomic(&root).unwrap();
         std::fs::write(

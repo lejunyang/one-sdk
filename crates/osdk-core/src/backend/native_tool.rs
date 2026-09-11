@@ -1846,6 +1846,7 @@ fn inspect_bins(root: &Path) -> Result<(Vec<DynamicToolBin>, Vec<NativeToolBinRe
         manifest_bins.push(DynamicToolBin {
             name,
             path: relative.clone(),
+            ..Default::default()
         });
         receipt_bins.push(NativeToolBinReceipt {
             path: relative,

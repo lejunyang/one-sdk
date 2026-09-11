@@ -32,6 +32,37 @@ pub struct DynamicToolBin {
     pub name: String,
     /// Relative path from the install root to the executable.
     pub path: String,
+    /// Whether the requested package installed this command itself.
+    ///
+    /// Backends that share one install root between a package and its
+    /// dependency closure -- conda resolves 16 packages for `clang` -- set this
+    /// false for the closure's commands. Those stay in the manifest so
+    /// `[shims] include` can still reach them and `where --bins` can list them;
+    /// they are only withheld from shims by default. Backends where the
+    /// distinction is meaningless leave it true, preserving the previous
+    /// behaviour of exporting everything.
+    #[serde(default = "owned_by_default", skip_serializing_if = "is_owned")]
+    pub owned: bool,
+}
+
+fn owned_by_default() -> bool {
+    true
+}
+
+fn is_owned(owned: &bool) -> bool {
+    *owned
+}
+
+impl Default for DynamicToolBin {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            path: String::new(),
+            // Matches the serde default: only backends that share a prefix
+            // with a dependency closure ever set this false.
+            owned: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -979,6 +1010,7 @@ mod install_manifest_tests {
         manifest.bins.push(DynamicToolBin {
             name: "prettier".into(),
             path: "bin/prettier".into(),
+            ..Default::default()
         });
         manifest.write_atomic(temporary.path()).unwrap();
         let loaded = DynamicToolManifest::load(temporary.path()).unwrap();
@@ -1026,6 +1058,7 @@ mod install_manifest_tests {
         manifest.bins.push(DynamicToolBin {
             name: " prettier ".into(),
             path: r"bin\prettier".into(),
+            ..Default::default()
         });
         assert_eq!(manifest.normalize().unwrap().bins[0].path, "bin/prettier");
 
@@ -1033,6 +1066,7 @@ mod install_manifest_tests {
         escaped.bins.push(DynamicToolBin {
             name: "prettier".into(),
             path: "../prettier".into(),
+            ..Default::default()
         });
         assert!(escaped.normalize().is_err());
     }

@@ -202,6 +202,7 @@ fn install_dynamic_npm_fixture(
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: executable_name.into(),
         path: format!("project/node_modules/.bin/{executable_name}"),
+        ..Default::default()
     }];
     manifest.write_atomic(&install_root).unwrap();
     let graph_sha256 = osdk_core::pipeline::verify::hash_bytes(
@@ -270,6 +271,7 @@ fn install_http_fixture(root: &Path, project: &Path, script: &str) -> PathBuf {
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: "fixture-http".into(),
         path: "bin/fixture-http".into(),
+        ..Default::default()
     }];
     manifest.write_atomic(&install_root).unwrap();
     std::fs::write(
@@ -882,6 +884,7 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
     manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
         name: "fixture-cli".into(),
         path: "bin/fixture-cli".into(),
+        ..Default::default()
     }];
     manifest.write_atomic(&global_root).unwrap();
     let global_project = global_root.join("project");

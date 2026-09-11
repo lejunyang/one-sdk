@@ -3747,11 +3747,13 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
     if bins {
         let mut selected = ToolVersion::new(backend.id(), &version);
         selected.options = req.options.clone();
-        // What the install publishes, and what its directories actually hold.
-        // For most backends these are the same list; a conda prefix holds its
-        // whole dependency closure, so the difference is the point.
-        let published = backend.bin_names(&app.ctx, &selected)?;
-        let present = osdk_core::backend::bin_names_in_dirs(&backend.bin_paths(&app.ctx, &selected)?);
+        // Report the decision that shim generation will actually make, config
+        // included -- a preview that ignored `include` would contradict the
+        // shims the very next `reshim` produces.
+        let present =
+            osdk_core::backend::bin_names_in_dirs(&backend.bin_paths(&app.ctx, &selected)?);
+        let published = routed_bin_names_for_version(&app.ctx, backend.as_ref(), &selected)
+            .unwrap_or_else(|_| backend.bin_names(&app.ctx, &selected).unwrap_or_default());
         let withheld: Vec<&String> = present
             .iter()
             .filter(|name| !published.contains(name))
@@ -5548,10 +5550,22 @@ fn routed_bin_names_for_version(
     if version.backend.contains(':') {
         let request = exact_request_for_version(version);
         let report = osdk_core::shim::scan_dynamic_installs(ctx)?;
-        return Ok(keep(
-            osdk_core::shim::validated_dynamic_install(ctx, &report, &request, &version.version)?
-                .bin_names(),
-        ));
+        let install =
+            osdk_core::shim::validated_dynamic_install(ctx, &report, &request, &version.version)?;
+        // Ownership travels with the name: a prefix shared with a dependency
+        // closure withholds the closure's commands unless they are included.
+        return Ok(install
+            .bin_names()
+            .into_iter()
+            .filter(|name| {
+                osdk_core::shim::shim_is_enabled_for(
+                    &ctx.config.settings.shims,
+                    &version.backend,
+                    name,
+                    install.owns(name),
+                )
+            })
+            .collect());
     }
     let names = osdk_core::shim::routed_bin_names(ctx, backend, version)?
         .into_iter()
@@ -5705,6 +5719,23 @@ fn installed_shim_owners(
                 )
                 .ok()
                 .map(|install| install.install_root().to_path_buf());
+                // Expected shims must be filtered exactly as generation filters
+                // them, or reconciliation deletes what generation just wrote --
+                // or keeps a shim the user has since excluded.
+                let owned = install
+                    .manifest
+                    .bins
+                    .iter()
+                    .find(|bin| bin.name == name)
+                    .is_none_or(|bin| bin.owned);
+                if !osdk_core::shim::shim_is_enabled_for(
+                    &app.ctx.config.settings.shims,
+                    &candidate.canonical_id,
+                    &name,
+                    owned,
+                ) {
+                    return None;
+                }
                 (selected && selected_root.as_ref() == Some(&candidate.install_root))
                     .then_some(candidate.canonical_id)
             })
@@ -6883,6 +6914,7 @@ mod command_flow_tests {
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: bin_name.into(),
             path: format!("bin/{bin_name}"),
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
     }
@@ -7039,6 +7071,7 @@ mod command_flow_tests {
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: bin_name.into(),
             path: format!("bin/{bin_name}"),
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
         std::fs::write(root.join(".osdk-complete"), b"").unwrap();

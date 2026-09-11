@@ -2682,6 +2682,7 @@ fn discover_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<DynamicToolB
         bins.push(DynamicToolBin {
             name,
             path: relative.to_string_lossy().replace('\\', "/"),
+            ..Default::default()
         });
     }
     if bins.is_empty() {
@@ -2735,6 +2736,7 @@ fn discover_global_bins(install_root: &Path, bin_dir: &Path) -> Result<Vec<Dynam
         bins.push(DynamicToolBin {
             name,
             path: relative.to_string_lossy().replace('\\', "/"),
+            ..Default::default()
         });
     }
     if bins.is_empty() {
@@ -4056,6 +4058,7 @@ scope = "project"
         manifest.bins = vec![DynamicToolBin {
             name: bin_name.into(),
             path: relative_bin,
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
         write_npm_receipt(
@@ -4794,6 +4797,7 @@ scope = "project"
         manifest.bins = vec![DynamicToolBin {
             name: "fixture".into(),
             path: "project/node_modules/.bin/fixture".into(),
+            ..Default::default()
         }];
         manifest.write_atomic(&install_root).unwrap();
         write_npm_receipt(
@@ -5231,6 +5235,7 @@ scope = "project"
             vec![DynamicToolBin {
                 name: "prettier".into(),
                 path: "project/node_modules/prettier/bin/prettier.js".into(),
+                ..Default::default()
             }]
         );
     }
@@ -5272,6 +5277,7 @@ scope = "project"
             vec![DynamicToolBin {
                 name: "prettier".into(),
                 path: "project/node_modules/prettier/bin/prettier.js".into(),
+                ..Default::default()
             }]
         );
         assert_eq!(
@@ -5279,6 +5285,7 @@ scope = "project"
             vec![DynamicToolBin {
                 name: "prettier".into(),
                 path: "bin/prettier".into(),
+                ..Default::default()
             }]
         );
     }

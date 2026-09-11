@@ -4215,6 +4215,7 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
         manifest.bins = vec![osdk_core::inventory::DynamicToolBin {
             name: "ni".into(),
             path: "project/node_modules/.bin/ni".into(),
+            ..Default::default()
         }];
         manifest.write_atomic(&install_root).unwrap();
         std::fs::write(

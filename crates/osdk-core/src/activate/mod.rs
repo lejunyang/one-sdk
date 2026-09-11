@@ -1039,6 +1039,7 @@ mod tests {
         manifest.bins.push(crate::inventory::DynamicToolBin {
             name: "fixture-cli".into(),
             path: "bin/fixture-cli".into(),
+            ..Default::default()
         });
         manifest.write_atomic(&valid_root).unwrap();
         std::fs::create_dir_all(valid_root.join("bin")).unwrap();
@@ -1119,6 +1120,7 @@ mod tests {
         manifest.bins.push(crate::inventory::DynamicToolBin {
             name: "fixture-cli".into(),
             path: "bin/fixture-cli".into(),
+            ..Default::default()
         });
         manifest.write_atomic(&install_root).unwrap();
         (ctx, install_root, bin)
@@ -1316,6 +1318,7 @@ mod tests {
         manifest.bins.push(crate::inventory::DynamicToolBin {
             name: "fixture-http".into(),
             path: "bin/fixture-http".into(),
+            ..Default::default()
         });
         manifest.write_atomic(root).unwrap();
         std::fs::write(

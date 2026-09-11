@@ -311,19 +311,20 @@ fn finalize_conda_install(locator: &InstallLocator) -> Result<()> {
     let result = (|| -> Result<()> {
         let mut manifest = DynamicToolManifest::from_identity(locator.identity().clone())?;
         let canonical_root = dunce::canonicalize(root).map_err(|error| Error::io(root, error))?;
-        // Publish only the requested package's own commands when ownership is
-        // known. The manifest drives shim generation, so leaving the whole
-        // closure here would put every dependency's command on PATH no matter
-        // what `bin_names` reports.
+        // Record the whole prefix but mark who owns what. Dropping the
+        // closure's commands here would be irreversible: the manifest is the
+        // only inventory the shim layer reads, so a withheld command could
+        // never be recovered, and `[shims] include` would silently do nothing.
         let owned = owned_bin_names(root);
 
         for directory in conda_bin_dirs(root) {
             for name in crate::backend::bin_names_in_dirs(std::slice::from_ref(&directory)) {
-                if let Some(owned) = owned.as_ref() {
-                    if !owned.contains(&name) {
-                        continue;
-                    }
-                }
+                let owned_by_request = owned
+                    .as_ref()
+                    .map(|owned| owned.contains(&name))
+                    // No ownership record: treat everything as the package's
+                    // own, which exports too much rather than nothing at all.
+                    .unwrap_or(true);
                 let Some(path) = executable_in_dir(&directory, &name) else {
                     continue;
                 };
@@ -341,6 +342,7 @@ fn finalize_conda_install(locator: &InstallLocator) -> Result<()> {
                 manifest.bins.push(DynamicToolBin {
                     name,
                     path: relative.to_string_lossy().replace('\\', "/"),
+                    owned: owned_by_request,
                 });
             }
         }
@@ -1060,10 +1062,9 @@ impl Backend for CondaBackend {
     /// record is missing or empty the whole prefix is exposed instead: showing
     /// too much beats publishing nothing at all.
     ///
-    /// Users who need a dependency's command can re-add it with the existing
-    /// `[shims] include` setting, which already accepts `conda:clang:xmllint`
-    /// style patterns. `osdk where --bins <tool>` prints both lists so the
-    /// difference is visible before editing any configuration.
+    /// The closure's commands stay in the install manifest and are withheld at
+    /// the shim layer rather than dropped here, so `[shims] include` can still
+    /// reach them. `osdk where --bins <tool>` prints both lists.
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let prefix = conda_prefix_root(ctx, self.id(), tv);
         if let Some(owned) = owned_bin_names(&prefix) {

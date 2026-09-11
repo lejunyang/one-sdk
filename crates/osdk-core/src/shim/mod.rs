@@ -94,6 +94,22 @@ pub fn precedence_winner<'a>(name: &str, owner_ids: &'a BTreeSet<String>) -> Opt
 /// fight each other. Excluding a name only withholds the shim: the tool is
 /// still installed and still on PATH under an activated shell.
 pub fn shim_is_enabled(settings: &ShimSettings, backend_id: &str, name: &str) -> bool {
+    shim_is_enabled_for(settings, backend_id, name, true)
+}
+
+/// As [`shim_is_enabled`], but for a command whose install root is shared with
+/// a dependency closure.
+///
+/// `owned` is only a *default*. A closure's command is withheld unless the user
+/// names it, while an explicit `include` still wins -- otherwise the withheld
+/// list would be unreachable and the setting a no-op. `exclude` is applied last
+/// either way, so it can still trim an owned command.
+pub fn shim_is_enabled_for(
+    settings: &ShimSettings,
+    backend_id: &str,
+    name: &str,
+    owned: bool,
+) -> bool {
     let qualified = format!("{backend_id}:{name}");
     let matches_any = |patterns: &[String]| {
         patterns.iter().any(|pattern| {
@@ -107,7 +123,13 @@ pub fn shim_is_enabled(settings: &ShimSettings, backend_id: &str, name: &str) ->
             glob_matches(pattern, subject)
         })
     };
-    if !settings.include.is_empty() && !matches_any(&settings.include) {
+    let included = matches_any(&settings.include);
+    if !settings.include.is_empty() && !included {
+        return false;
+    }
+    // A dependency's command needs to be asked for by name; being left in the
+    // manifest is what makes asking possible.
+    if !owned && !included {
         return false;
     }
     // Exclude is applied last so a broad include can be trimmed.
@@ -282,6 +304,8 @@ pub fn dynamic_request_from_config(ctx: &Ctx, backend_id: &str) -> Option<ToolRe
 pub struct ValidatedDynamicInstall {
     install_root: std::path::PathBuf,
     bins: BTreeMap<String, std::path::PathBuf>,
+    /// Commands the requested package did not install itself.
+    unowned: BTreeSet<String>,
     identity: crate::tool::InstallIdentity,
 }
 
@@ -292,6 +316,14 @@ impl ValidatedDynamicInstall {
 
     pub fn bin_names(&self) -> Vec<String> {
         self.bins.keys().cloned().collect()
+    }
+
+    /// Whether the requested package installed `name` itself.
+    ///
+    /// Backends sharing a prefix with a dependency closure report false for the
+    /// closure's commands, which shims withhold unless the user includes them.
+    pub fn owns(&self, name: &str) -> bool {
+        !self.unowned.contains(name)
     }
 
     pub fn bin_paths(&self) -> Vec<std::path::PathBuf> {
@@ -364,6 +396,7 @@ pub fn validated_dynamic_install(
     }
     let canonical_root = dunce::canonicalize(&root).map_err(|error| Error::io(&root, error))?;
     let mut bins = BTreeMap::new();
+    let mut unowned = BTreeSet::new();
     for bin in &manifest.bins {
         let path = root.join(&bin.path);
         let canonical = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
@@ -375,11 +408,15 @@ pub fn validated_dynamic_install(
                 root.display()
             )));
         }
+        if !bin.owned {
+            unowned.insert(bin.name.clone());
+        }
         bins.insert(bin.name.clone(), canonical);
     }
     Ok(ValidatedDynamicInstall {
         install_root: root,
         bins,
+        unowned,
         identity,
     })
 }
@@ -727,6 +764,71 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dependency_command_is_withheld_but_reachable_by_name() {
+        // Regression: filtering the closure out of the install manifest made
+        // the withheld commands unrecoverable, so `include` silently did
+        // nothing. They must stay listed and be withheld here instead.
+        let default = ShimSettings::default();
+        assert!(
+            super::shim_is_enabled_for(&default, "conda:clang", "clang", true),
+            "the requested package's own command is published"
+        );
+        assert!(
+            !super::shim_is_enabled_for(&default, "conda:clang", "xmllint", false),
+            "a dependency's command is withheld by default"
+        );
+
+        let included = ShimSettings {
+            include: vec!["conda:clang:xmllint".into()],
+            exclude: Vec::new(),
+        };
+        assert!(
+            super::shim_is_enabled_for(&included, "conda:clang", "xmllint", false),
+            "naming it explicitly must bring it back"
+        );
+
+        // A non-empty include still restricts everything else, ownership or not.
+        assert!(!super::shim_is_enabled_for(
+            &included,
+            "conda:clang",
+            "clang",
+            true
+        ));
+
+        // Exclude is applied last and still wins over an explicit include.
+        let both = ShimSettings {
+            include: vec!["conda:clang:*".into()],
+            exclude: vec!["conda:clang:xmllint".into()],
+        };
+        assert!(!super::shim_is_enabled_for(
+            &both,
+            "conda:clang",
+            "xmllint",
+            false
+        ));
+        assert!(super::shim_is_enabled_for(
+            &both,
+            "conda:clang",
+            "clang",
+            true
+        ));
+    }
+
+    #[test]
+    fn ownership_does_not_change_behaviour_for_ordinary_backends() {
+        // Every other backend passes owned = true, so the added parameter must
+        // leave their behaviour identical.
+        let settings = ShimSettings::default();
+        for name in ["node", "d8", "aarch64-linux-android21-clang", "sdkmanager"] {
+            assert_eq!(
+                super::shim_is_enabled(&settings, "android-ndk", name),
+                super::shim_is_enabled_for(&settings, "android-ndk", name, true),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn excluding_a_family_also_stops_it_winning_a_shared_name() {
         // Regression: filtering only generation left `d8` generated by
@@ -1139,6 +1241,7 @@ mod tests {
         manifest.bins = vec![DynamicToolBin {
             name: bin_name.into(),
             path: format!("bin/{bin_name}"),
+            ..Default::default()
         }];
         (root, manifest)
     }
@@ -1361,6 +1464,7 @@ mod tests {
         manifest.bins = vec![DynamicToolBin {
             name: "tool".into(),
             path: "bin/tool".into(),
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
         let artifact_file = identity.materials["artifact-file"].clone();
@@ -1416,6 +1520,7 @@ mod tests {
         manifest.bins = vec![DynamicToolBin {
             name: "fixture".into(),
             path: "bin/fixture".into(),
+            ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
         std::fs::write(
