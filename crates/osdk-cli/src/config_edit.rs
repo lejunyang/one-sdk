@@ -389,6 +389,280 @@ fn set_tool_config_in_doc(
     Ok(())
 }
 
+/// A setting that `osdk config set` understands.
+///
+/// Settings are declared rather than derived from `Settings` so the writable
+/// surface stays deliberate: `set` must not expose derived state such as
+/// resolved directories, and each entry states how its text is validated
+/// before anything is written.
+pub struct SettingSpec {
+    /// Dotted name as the user types it.
+    pub key: &'static str,
+    /// Path into the TOML document.
+    pub path: &'static [&'static str],
+    /// How the value is parsed and validated.
+    pub kind: SettingKind,
+}
+
+pub enum SettingKind {
+    Bool,
+    /// A positive integer; zero would stall the work it bounds.
+    PositiveInt,
+    /// One of a fixed set of words.
+    Enum(&'static [&'static str]),
+    /// A comma-separated list stored as a TOML array.
+    List,
+}
+
+/// Every setting `config set` accepts.
+///
+/// Deliberately narrower than the full `Settings` struct: tool pins go through
+/// `use`, source pins through `source pin`, and aliases through `alias`, each
+/// of which validates far more than a scalar assignment could.
+pub const SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        key: "jobs",
+        path: &["settings", "jobs"],
+        kind: SettingKind::PositiveInt,
+    },
+    SettingSpec {
+        key: "offline",
+        path: &["settings", "offline"],
+        kind: SettingKind::Bool,
+    },
+    SettingSpec {
+        key: "yes",
+        path: &["settings", "yes"],
+        kind: SettingKind::Bool,
+    },
+    SettingSpec {
+        key: "verify_signatures",
+        path: &["settings", "verify_signatures"],
+        kind: SettingKind::Bool,
+    },
+    SettingSpec {
+        key: "require_checksums",
+        path: &["settings", "require_checksums"],
+        kind: SettingKind::Bool,
+    },
+    SettingSpec {
+        key: "attestations",
+        path: &["settings", "attestations"],
+        kind: SettingKind::Enum(&["off", "preferred", "required"]),
+    },
+    SettingSpec {
+        key: "prerelease",
+        path: &["settings", "prerelease"],
+        kind: SettingKind::Enum(&["deny", "allow"]),
+    },
+    SettingSpec {
+        key: "link_mode",
+        path: &["settings", "link_mode"],
+        kind: SettingKind::Enum(&["auto", "hardlink", "copy", "symlink"]),
+    },
+    SettingSpec {
+        key: "lang",
+        path: &["settings", "lang"],
+        kind: SettingKind::Enum(&["en", "zh"]),
+    },
+    SettingSpec {
+        key: "shims.include",
+        path: &["settings", "shims", "include"],
+        kind: SettingKind::List,
+    },
+    SettingSpec {
+        key: "shims.exclude",
+        path: &["settings", "shims", "exclude"],
+        kind: SettingKind::List,
+    },
+];
+
+pub fn find_setting(key: &str) -> Option<&'static SettingSpec> {
+    SETTINGS.iter().find(|setting| setting.key == key)
+}
+
+/// Parse and validate `value` for `setting`.
+///
+/// Validation happens before the file is touched, so a rejected value leaves
+/// the config exactly as it was rather than writing something the loader would
+/// later refuse to parse.
+fn setting_value(setting: &SettingSpec, value: &str) -> Result<toml_edit::Item> {
+    let value = value.trim();
+    Ok(match setting.kind {
+        SettingKind::Bool => {
+            let parsed = match value.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => true,
+                "false" | "0" | "no" | "off" => false,
+                _ => anyhow::bail!("`{}` expects a boolean, got `{value}`", setting.key),
+            };
+            toml_edit::value(parsed)
+        }
+        SettingKind::PositiveInt => {
+            let parsed: i64 = value
+                .parse()
+                .with_context(|| format!("`{}` expects a number, got `{value}`", setting.key))?;
+            if parsed < 1 {
+                anyhow::bail!("`{}` must be at least 1, got {parsed}", setting.key);
+            }
+            toml_edit::value(parsed)
+        }
+        SettingKind::Enum(allowed) => {
+            let lowered = value.to_ascii_lowercase();
+            if !allowed.contains(&lowered.as_str()) {
+                anyhow::bail!(
+                    "`{}` expects one of {}, got `{value}`",
+                    setting.key,
+                    allowed.join(", ")
+                );
+            }
+            toml_edit::value(lowered)
+        }
+        SettingKind::List => {
+            let mut array = toml_edit::Array::default();
+            for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                array.push(entry);
+            }
+            array.fmt();
+            toml_edit::Item::Value(toml_edit::Value::Array(array))
+        }
+    })
+}
+
+/// Which config file a setting is written to.
+///
+/// Project is the default, matching how `git config` and `npm config` behave:
+/// the common case is a setting that belongs to the checkout in front of you,
+/// and writing to the user config by default silently edits state shared by
+/// every project on the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingScope {
+    Project,
+    Global,
+}
+
+/// The file a scope resolves to.
+///
+/// For the project scope this is the nearest existing `osdk.toml`, or one in
+/// the current directory when none exists yet -- the same file `use` writes.
+pub fn setting_scope_path(ctx: &Ctx, scope: SettingScope) -> Result<PathBuf> {
+    match scope {
+        SettingScope::Global => Ok(ctx.dirs.user_config_file()),
+        SettingScope::Project => {
+            let cwd = std::env::current_dir().context("resolving current directory")?;
+            Ok(find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml")))
+        }
+    }
+}
+
+/// Write one setting into the config for `scope`.
+pub fn set_setting(
+    ctx: &Ctx,
+    setting: &SettingSpec,
+    value: &str,
+    scope: SettingScope,
+) -> Result<PathBuf> {
+    // Parse first: an invalid value must not leave a half-edited file behind.
+    let item = setting_value(setting, value)?;
+    let path = setting_scope_path(ctx, scope)?;
+    let write = || -> Result<PathBuf> {
+        let mut doc = load_doc(&path)?;
+        let (last, parents) = setting
+            .path
+            .split_last()
+            .expect("every setting has at least one path segment");
+
+        let mut table = doc.as_table_mut();
+        for parent in parents {
+            let entry = table
+                .entry(parent)
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+            table = entry
+                .as_table_mut()
+                .with_context(|| format!("`{parent}` is not a table in config"))?;
+            // Implicit tables render their header only while they hold keys, so
+            // unsetting the last key leaves no empty `[settings]` stanza behind.
+            table.set_implicit(true);
+        }
+        table.insert(last, item);
+        save_doc(&path, &doc)?;
+        Ok(path.clone())
+    };
+    match scope {
+        // Only the user config is shared between concurrent osdk processes.
+        SettingScope::Global => with_global_config_lock(ctx, write),
+        SettingScope::Project => write(),
+    }
+}
+
+/// Remove one setting from the config for `scope`.
+///
+/// Reports whether the key was present so the caller can distinguish a real
+/// unset from a no-op instead of claiming to have changed something.
+pub fn unset_setting(
+    ctx: &Ctx,
+    setting: &SettingSpec,
+    scope: SettingScope,
+) -> Result<Option<PathBuf>> {
+    let path = setting_scope_path(ctx, scope)?;
+    let remove = || -> Result<Option<PathBuf>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let mut doc = load_doc(&path)?;
+        let (last, parents) = setting
+            .path
+            .split_last()
+            .expect("every setting has at least one path segment");
+
+        let mut table = doc.as_table_mut();
+        for parent in parents {
+            match table.get_mut(parent).and_then(|item| item.as_table_mut()) {
+                Some(child) => table = child,
+                // A missing parent means the key was never written.
+                None => return Ok(None),
+            }
+        }
+        if table.remove(last).is_none() {
+            return Ok(None);
+        }
+        prune_empty_tables(doc.as_table_mut(), parents);
+        save_doc(&path, &doc)?;
+        Ok(Some(path.clone()))
+    };
+    match scope {
+        SettingScope::Global => with_global_config_lock(ctx, remove),
+        SettingScope::Project => remove(),
+    }
+}
+
+/// Drop parent tables that the removal just emptied.
+///
+/// Without this, unsetting the last key under `[settings.shims]` leaves the
+/// bare header behind, so a config the user has fully reset still looks edited.
+/// Walks outward from the deepest parent, and stops at the first table that
+/// still holds something -- an emptied `shims` must not take a populated
+/// `settings` with it.
+fn prune_empty_tables(root: &mut toml_edit::Table, parents: &[&str]) {
+    for depth in (0..parents.len()).rev() {
+        let mut table = &mut *root;
+        for parent in &parents[..depth] {
+            match table.get_mut(parent).and_then(|item| item.as_table_mut()) {
+                Some(child) => table = child,
+                None => return,
+            }
+        }
+        let name = parents[depth];
+        let empty = table
+            .get(name)
+            .and_then(|item| item.as_table())
+            .is_some_and(|child| child.is_empty());
+        if !empty {
+            return;
+        }
+        table.remove(name);
+    }
+}
+
 fn to_toml_value(value: &ToolConfigValue) -> Result<toml_edit::Value> {
     Ok(match value {
         ToolConfigValue::String(value) => toml_edit::Value::from(value.as_str()),
@@ -538,6 +812,95 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value))
                 .collect::<BTreeMap<_, _>>(),
         }
+    }
+
+    #[test]
+    fn rejected_values_are_caught_before_any_write() {
+        let jobs = find_setting("jobs").unwrap();
+        assert!(setting_value(jobs, "0").is_err(), "zero jobs stalls work");
+        assert!(setting_value(jobs, "abc").is_err());
+        assert!(setting_value(jobs, "4").is_ok());
+
+        let offline = find_setting("offline").unwrap();
+        assert!(setting_value(offline, "maybe").is_err());
+        for truthy in ["true", "1", "yes", "ON"] {
+            assert_eq!(
+                setting_value(offline, truthy).unwrap().to_string().trim(),
+                "true",
+                "{truthy} should parse as true"
+            );
+        }
+
+        let attestations = find_setting("attestations").unwrap();
+        assert!(setting_value(attestations, "sometimes").is_err());
+        assert!(setting_value(attestations, "REQUIRED").is_ok(), "case-insensitive");
+    }
+
+    #[test]
+    fn list_settings_split_on_commas_and_drop_blanks() {
+        let include = find_setting("shims.include").unwrap();
+        let item = setting_value(include, " conda:clang:xmllint , , conda:clang:* ").unwrap();
+        let array = item.as_array().expect("list settings store an array");
+        let entries: Vec<&str> = array.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(entries, ["conda:clang:xmllint", "conda:clang:*"]);
+    }
+
+    #[test]
+    fn unsetting_the_last_key_removes_the_empty_table_it_leaves() {
+        // A reset config should look untouched, not keep bare `[settings]`
+        // headers that suggest something is still configured.
+        let mut doc: toml_edit::DocumentMut =
+            "[tools]\nrust = \"1.98.0\"\n\n[settings]\njobs = 3\n\n[settings.shims]\ninclude = [\"a\"]\n"
+                .parse()
+                .unwrap();
+
+        let shims = doc["settings"]["shims"].as_table_mut().unwrap();
+        shims.remove("include");
+        prune_empty_tables(doc.as_table_mut(), &["settings", "shims"]);
+        // `settings` still holds `jobs`, so only `shims` may disappear.
+        assert!(!doc.to_string().contains("[settings.shims]"));
+        assert!(doc.to_string().contains("jobs = 3"));
+
+        let settings = doc["settings"].as_table_mut().unwrap();
+        settings.remove("jobs");
+        prune_empty_tables(doc.as_table_mut(), &["settings"]);
+        let rendered = doc.to_string();
+        assert!(!rendered.contains("[settings]"), "got: {rendered}");
+        // Unrelated content must survive the pruning.
+        assert!(rendered.contains("rust = \"1.98.0\""), "got: {rendered}");
+    }
+
+    #[test]
+    fn every_declared_setting_is_readable_by_the_same_key() {
+        // `config get` matches on these keys; a typo in either table would make
+        // a setting writable but permanently unreadable.
+        for setting in SETTINGS {
+            assert!(
+                find_setting(setting.key).is_some(),
+                "{} is not findable",
+                setting.key
+            );
+            assert!(
+                !setting.path.is_empty(),
+                "{} has no document path",
+                setting.key
+            );
+        }
+    }
+
+    #[test]
+    fn project_is_the_default_scope_and_global_is_opt_in() {
+        // Writing to the user config by default would edit state shared by
+        // every project on the machine, which is not what `set` should mean.
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("osdk.toml");
+        std::fs::write(&project, "[tools]\nrust = \"1.98.0\"\n").unwrap();
+
+        // A project config that already exists is the one that gets edited.
+        assert_eq!(
+            find_project_config(temporary.path()).as_deref(),
+            Some(project.as_path())
+        );
     }
 
     #[test]

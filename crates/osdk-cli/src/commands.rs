@@ -3766,7 +3766,7 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
             let names: Vec<&str> = withheld.iter().map(|name| name.as_str()).collect();
             println!("withheld ({}): {}", names.len(), names.join(", "));
             println!(
-                "  re-add one with `[shims] include = [\"{}:{}\"]`",
+                "  re-add one with `osdk config set shims.include \"{}:{}\"`",
                 backend.id(),
                 names[0]
             );
@@ -4133,6 +4133,42 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
     Ok(())
 }
 
+/// The effective value of one setting, as osdk resolved it.
+///
+/// Read from the resolved config rather than re-parsed from the file so `get`
+/// answers "what will osdk do" instead of "what does the file happen to say" --
+/// the two differ whenever a default applies or an env var overrides.
+fn resolved_setting(app: &App, key: &str) -> Option<String> {
+    setting_display(&app.ctx.config.settings, key)
+}
+
+/// Render one setting from a resolved [`Settings`].
+fn setting_display(s: &osdk_core::config::Settings, key: &str) -> Option<String> {
+    Some(match key {
+        "jobs" => s.jobs.to_string(),
+        "offline" => s.offline.to_string(),
+        "yes" => s.yes.to_string(),
+        "verify_signatures" => s.verify_signatures.to_string(),
+        "require_checksums" => s.require_checksums.to_string(),
+        "attestations" => s.attestations.to_string(),
+        "prerelease" => s.prerelease.to_string(),
+        "link_mode" => s.link_mode.to_string(),
+        "lang" => s.lang.clone().unwrap_or_else(|| "auto".to_string()),
+        "shims.include" => s.shims.include.join(", "),
+        "shims.exclude" => s.shims.exclude.join(", "),
+        _ => return None,
+    })
+}
+
+/// Error text listing the settings that can be read or written.
+fn unknown_setting(key: &str) -> anyhow::Error {
+    let known: Vec<&str> = crate::config_edit::SETTINGS
+        .iter()
+        .map(|setting| setting.key)
+        .collect();
+    anyhow!("unknown setting `{key}`; known settings: {}", known.join(", "))
+}
+
 pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Path => {
@@ -4217,6 +4253,84 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 }
             }
         }
+        ConfigCommand::Get { key, global } => {
+            if global {
+                // The global value on its own, not the merged result: with `-g`
+                // the question is what the user config holds.
+                let user =
+                    osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+                let value =
+                    setting_display(&user.settings, &key).ok_or_else(|| unknown_setting(&key))?;
+                println!("{value}");
+            } else {
+                let value = resolved_setting(app, &key).ok_or_else(|| unknown_setting(&key))?;
+                println!("{value}");
+            }
+        }
+        ConfigCommand::Set { key, value, global } => {
+            let setting =
+                crate::config_edit::find_setting(&key).ok_or_else(|| unknown_setting(&key))?;
+            let scope = setting_scope(global);
+            let path = crate::config_edit::set_setting(&app.ctx, setting, &value, scope)?;
+            // Re-read from disk: printing the argument back would claim success
+            // even if the value landed somewhere the loader ignores.
+            let written = osdk_core::config::Config::load_user(&path)?;
+            let effective =
+                setting_display(&written.settings, &key).unwrap_or_else(|| value.clone());
+            println!("set {key} = {effective} in {}", path.display());
+            warn_if_project_config_needs_trust(app, &path, scope)?;
+        }
+        ConfigCommand::Unset { key, global } => {
+            let setting =
+                crate::config_edit::find_setting(&key).ok_or_else(|| unknown_setting(&key))?;
+            let scope = setting_scope(global);
+            match crate::config_edit::unset_setting(&app.ctx, setting, scope)? {
+                Some(path) => println!("unset {key} in {}", path.display()),
+                None => {
+                    let path = crate::config_edit::setting_scope_path(&app.ctx, scope)?;
+                    println!("{key} was not set in {}", path.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn setting_scope(global: bool) -> crate::config_edit::SettingScope {
+    if global {
+        crate::config_edit::SettingScope::Global
+    } else {
+        crate::config_edit::SettingScope::Project
+    }
+}
+
+/// Tell the user when a project config they just wrote will be refused.
+///
+/// A project `osdk.toml` carrying anything beyond `[tools]` / `[aliases]` is
+/// trust-required, so writing a setting into one silently arms every later
+/// command to fail. Saying so at write time beats an unexplained refusal on the
+/// next unrelated command.
+fn warn_if_project_config_needs_trust(
+    app: &App,
+    path: &std::path::Path,
+    scope: crate::config_edit::SettingScope,
+) -> Result<()> {
+    if scope != crate::config_edit::SettingScope::Project {
+        return Ok(());
+    }
+    if !osdk_core::trust::requires_trust(path)? {
+        return Ok(());
+    }
+    let trusted = osdk_core::trust::is_trusted(
+        &app.ctx.dirs.config,
+        path,
+        std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS").as_ref(),
+    )?;
+    if !trusted {
+        println!(
+            "note: project settings make this config trust-required; run `osdk --yes trust {}`",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -5866,6 +5980,20 @@ mod command_flow_tests {
     use std::sync::Arc;
 
     use crate::prompt::TerminalPrompt;
+
+    #[test]
+    fn every_writable_setting_can_also_be_read_back() {
+        // `set` and `get` are driven by two separate lists. If they drift, a
+        // key accepts a value and then reports `unknown setting` on read.
+        let defaults = osdk_core::config::Settings::default();
+        for setting in crate::config_edit::SETTINGS {
+            assert!(
+                setting_display(&defaults, setting.key).is_some(),
+                "`{}` is settable but `config get` cannot render it",
+                setting.key
+            );
+        }
+    }
 
     fn layered_npm_tool_config() -> (tempfile::TempDir, osdk_core::config::Config) {
         let temporary = tempfile::tempdir().unwrap();

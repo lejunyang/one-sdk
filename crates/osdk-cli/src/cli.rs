@@ -381,6 +381,32 @@ pub enum ConfigCommand {
     Path,
     /// Print resolved settings.
     List,
+    /// Print one resolved setting.
+    Get {
+        /// Setting name, e.g. `jobs` or `shims.include`.
+        key: String,
+        /// Read the user-global config instead of the project config.
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Write one setting to the project config (or the user config with `-g`).
+    Set {
+        /// Setting name, e.g. `jobs` or `shims.include`.
+        key: String,
+        /// New value. List settings accept a comma-separated value.
+        value: String,
+        /// Write to the user-global config instead of the project config.
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Remove one setting, restoring its default.
+    Unset {
+        /// Setting name, e.g. `jobs` or `shims.include`.
+        key: String,
+        /// Remove from the user-global config instead of the project config.
+        #[arg(short, long)]
+        global: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
