@@ -128,7 +128,7 @@ by build systems through `CC`, `SYSROOT`, and similar variables rather than
 through `PATH` alone — and osdk exports those variables whenever the version is
 active.
 For osdk-owned dynamic `npm:<package>`, `cargo:<crate-or-https-url>`,
-`go:<module-or-command-path>`, and `github:owner/repo` installs, options and managed-runtime dependencies that
+`go:<module-or-command-path>`, `conda:<package>`, and `github:owner/repo` installs, options and managed-runtime dependencies that
 change the selected or built output are part of the installation identity. osdk
 records that identity in `.osdk-install.json`
 schema 1 and places each `b3-v2:` identity under its own fingerprinted install
@@ -679,7 +679,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Platforms | Windows, macOS, Linux |
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun, Zig |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
-| Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
+| Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, conda packages and toolchains such as CUDA through `conda:<package>`, public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
 | Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, built-in Docker Hub mirror benchmarking, safe native mirror apply, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |

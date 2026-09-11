@@ -119,7 +119,7 @@ osdk 也能读取已有的 `.tool-versions`、`.nvmrc`、`.node-version`、
 `SYSROOT` 等变量而非仅靠 `PATH` 被构建系统找到的——osdk 会在该版本激活时导出这些
 变量。
 对 osdk 自有的动态 `npm:<package>`、`cargo:<crate-or-https-url>`、
-`go:<module-or-command-path>` 与 `github:owner/repo` 安装，会改变选择或构建结果的选项与
+`go:<module-or-command-path>`、`conda:<package>` 与 `github:owner/repo` 安装，会改变选择或构建结果的选项与
 受管 runtime 依赖也属于安装身份。
 osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 `b3-v2:` 身份放入独立的指纹化安装根，因此同一 backend/version 的多个身份可以共存。
@@ -609,7 +609,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 平台 | Windows、macOS、Linux |
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun、Zig |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
-| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
+| 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `conda:<package>` 安装 conda 包与 CUDA 等工具链、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
 | 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、内置 Docker Hub mirror 测速、安全原生 mirror apply、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |

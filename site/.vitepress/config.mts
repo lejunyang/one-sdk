@@ -37,6 +37,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'npm 开发工具', link: '/guide/npm-tools' },
       { text: 'Cargo 开发工具', link: '/guide/cargo-tools' },
       { text: 'Go 开发工具', link: '/guide/go-tools' },
+      { text: 'Conda 开发工具', link: '/guide/conda-tools' },
       { text: '直接 HTTPS 制品', link: '/guide/http-artifacts' },
       { text: '模型快照', link: '/guide/models' },
       { text: '来源、离线与安全', link: '/guide/sources-security' },
@@ -60,6 +61,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'npm 开发工具实现', link: '/guide/implementation/npm-tools' },
       { text: 'Cargo 开发工具实现', link: '/guide/implementation/cargo-tools' },
       { text: 'Go 开发工具实现', link: '/guide/implementation/go-tools' },
+      { text: 'Conda 开发工具实现', link: '/guide/implementation/conda-tools' },
       { text: '发布流水线', link: '/guide/implementation/releasing' },
       { text: '可靠性与跨平台', link: '/guide/implementation/reliability' }
     ]
@@ -87,6 +89,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'npm Developer Tools', link: '/en/guide/npm-tools' },
       { text: 'Cargo Developer Tools', link: '/en/guide/cargo-tools' },
       { text: 'Go Developer Tools', link: '/en/guide/go-tools' },
+      { text: 'Conda Developer Tools', link: '/en/guide/conda-tools' },
       { text: 'Direct HTTPS Artifacts', link: '/en/guide/http-artifacts' },
       { text: 'Model Snapshots', link: '/en/guide/models' },
       { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
@@ -110,6 +113,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'npm Developer Tool Implementation', link: '/en/guide/implementation/npm-tools' },
       { text: 'Cargo Developer Tool Implementation', link: '/en/guide/implementation/cargo-tools' },
       { text: 'Go Developer Tool Implementation', link: '/en/guide/implementation/go-tools' },
+      { text: 'Conda Developer Tool Implementation', link: '/en/guide/implementation/conda-tools' },
       { text: 'Release Pipeline', link: '/en/guide/implementation/releasing' },
       { text: 'Reliability and Portability', link: '/en/guide/implementation/reliability' }
     ]
