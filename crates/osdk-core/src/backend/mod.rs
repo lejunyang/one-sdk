@@ -18,7 +18,6 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 pub mod android;
 pub mod bun;
 pub mod cargo_package;
-#[cfg(feature = "install")]
 pub mod conda;
 #[cfg(test)]
 mod contract;

@@ -312,18 +312,20 @@ pub(super) fn builtin_factories() -> Vec<Arc<dyn DynamicBackendFactory>> {
         Arc::new(GithubBackendFactory),
         Arc::new(NpmBackendFactory),
         Arc::new(HttpBackendFactory),
-        #[cfg(feature = "install")]
         Arc::new(CondaBackendFactory),
     ]
 }
 
-/// Conda packages are solved and unpacked only on the install path, so the
-/// namespace is not registered in a shim build; the shim resolves already
-/// installed prefixes through the inventory instead.
-#[cfg(feature = "install")]
+/// Solving and unpacking conda packages is install-only, but *routing* to an
+/// already-installed prefix is not: the shim has to resolve `conda:clang` to a
+/// backend before it can dispatch `clang`. Registering this only under the
+/// `install` feature made every conda shim fail with "no backend provides",
+/// because the shim build could not construct the backend at all. The methods
+/// the shim needs -- `from_id`, `list_installed`, `bin_paths`, `bin_names` --
+/// carry no install-only dependencies; the heavy ones stay gated inside the
+/// backend itself.
 struct CondaBackendFactory;
 
-#[cfg(feature = "install")]
 impl DynamicBackendFactory for CondaBackendFactory {
     fn prefix(&self) -> &'static str {
         "conda"
@@ -403,6 +405,31 @@ impl DynamicBackendFactory for HttpBackendFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_dynamic_namespace_resolves_in_a_shim_build_too() {
+        // Regression: `conda` was registered only under the `install` feature,
+        // so a shim build could not construct the backend and every conda
+        // command died with "no backend provides". Routing to an installed
+        // prefix is not an install-only concern, and this test fails in the
+        // shim's own feature configuration if a namespace regresses that way.
+        for (prefix, id) in [
+            ("cargo", "cargo:ripgrep"),
+            ("go", "go:golang.org/x/tools/cmd/goimports"),
+            ("github", "github:cli/cli"),
+            ("npm", "npm:prettier"),
+            ("conda", "conda:clang"),
+        ] {
+            let factory = builtin_factories()
+                .into_iter()
+                .find(|factory| factory.prefix() == prefix)
+                .unwrap_or_else(|| panic!("`{prefix}:` is not a registered namespace"));
+            assert!(
+                factory.create(id).is_some(),
+                "`{id}` must resolve to a backend"
+            );
+        }
+    }
 
     #[test]
     fn fingerprints_are_order_independent_and_ignore_locked_metadata() {

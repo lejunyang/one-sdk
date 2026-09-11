@@ -6,8 +6,12 @@
 //! means solving that closure first. That is why this backend carries a SAT
 //! solver while every other archive backend does not.
 //!
-//! The whole module is behind the `install` feature: resolving and unpacking is
-//! a CLI concern, and the shim must never link a solver.
+//! Solving and unpacking are behind the `install` feature: those are CLI
+//! concerns and the shim must never link a solver. The module itself is not
+//! gated, because the shim still has to *route* `conda:clang` to this backend
+//! before it can dispatch `clang`; gating the whole module made every conda
+//! shim fail with "no backend provides". What the shim needs -- `from_id`,
+//! `list_installed`, `bin_paths`, `bin_names` -- touches no rattler type.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -246,7 +250,9 @@ fn conda_install_locator(
 /// solving. The inventory already records which identity was installed, so the
 /// root is recovered from it instead. An ambiguous match is an error rather
 /// than a guess: picking the wrong one would run the wrong build.
-#[cfg(feature = "install")]
+///
+/// Not install-gated: this is exactly the lookup the shim performs, and it
+/// reads only the inventory.
 fn conda_installed_locator(
     ctx: &Ctx,
     backend_id: &str,
@@ -281,7 +287,6 @@ fn conda_installed_locator(
 ///
 /// Falling back keeps `bin_paths` total: it is called on paths that may not be
 /// installed yet, and must not fail merely because nothing is on disk.
-#[cfg(feature = "install")]
 fn conda_prefix_root(ctx: &Ctx, backend_id: &str, tv: &ToolVersion) -> PathBuf {
     conda_installed_locator(ctx, backend_id, tv)
         .ok()
