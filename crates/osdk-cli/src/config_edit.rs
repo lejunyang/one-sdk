@@ -410,8 +410,48 @@ pub enum SettingKind {
     PositiveInt,
     /// One of a fixed set of words.
     Enum(&'static [&'static str]),
+    /// Validated by the setting type's own parser.
+    ///
+    /// A hand-copied list of variants here would be a second source of truth
+    /// for the same vocabulary, and it drifted immediately: the first version
+    /// accepted `preferred` for `attestations` (the real word is
+    /// `if-available`), invented `deny` for `prerelease`, and omitted
+    /// `reflink` from `link_mode`. Because validation passed, the bad value was
+    /// written, and every later command then failed to load the config it had
+    /// just produced. Delegating keeps the vocabulary in one place, and the
+    /// aliases each parser already accepts keep working.
+    Parsed(ParsedSetting),
     /// A comma-separated list stored as a TOML array.
     List,
+}
+
+/// Settings whose vocabulary belongs to a type in `osdk-core`.
+#[derive(Clone, Copy)]
+pub enum ParsedSetting {
+    Attestations,
+    Prerelease,
+    LinkMode,
+}
+
+impl ParsedSetting {
+    /// Parse `value`, returning the canonical spelling to store.
+    ///
+    /// Round-tripping through `Display` normalizes accepted aliases, so
+    /// `attestations=auto` is stored as `if-available` -- the form the loader
+    /// reads back.
+    fn canonical(self, value: &str) -> Result<String> {
+        Ok(match self {
+            Self::Attestations => value
+                .parse::<osdk_core::config::AttestationPolicy>()
+                .map(|parsed| parsed.to_string())?,
+            Self::Prerelease => value
+                .parse::<osdk_core::config::PrereleasePolicy>()
+                .map(|parsed| parsed.to_string())?,
+            Self::LinkMode => value
+                .parse::<osdk_core::store::link::LinkMode>()
+                .map(|parsed| parsed.to_string())?,
+        })
+    }
 }
 
 /// Every setting `config set` accepts.
@@ -448,17 +488,17 @@ pub const SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         key: "attestations",
         path: &["settings", "attestations"],
-        kind: SettingKind::Enum(&["off", "preferred", "required"]),
+        kind: SettingKind::Parsed(ParsedSetting::Attestations),
     },
     SettingSpec {
         key: "prerelease",
         path: &["settings", "prerelease"],
-        kind: SettingKind::Enum(&["deny", "allow"]),
+        kind: SettingKind::Parsed(ParsedSetting::Prerelease),
     },
     SettingSpec {
         key: "link_mode",
         path: &["settings", "link_mode"],
-        kind: SettingKind::Enum(&["auto", "hardlink", "copy", "symlink"]),
+        kind: SettingKind::Parsed(ParsedSetting::LinkMode),
     },
     SettingSpec {
         key: "lang",
@@ -517,6 +557,7 @@ fn setting_value(setting: &SettingSpec, value: &str) -> Result<toml_edit::Item> 
             }
             toml_edit::value(lowered)
         }
+        SettingKind::Parsed(parsed) => toml_edit::value(parsed.canonical(value)?),
         SettingKind::List => {
             let mut array = toml_edit::Array::default();
             for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
@@ -833,7 +874,10 @@ mod tests {
 
         let attestations = find_setting("attestations").unwrap();
         assert!(setting_value(attestations, "sometimes").is_err());
-        assert!(setting_value(attestations, "REQUIRED").is_ok(), "case-insensitive");
+        assert!(
+            setting_value(attestations, "REQUIRED").is_ok(),
+            "case-insensitive"
+        );
     }
 
     #[test]
@@ -884,6 +928,73 @@ mod tests {
                 !setting.path.is_empty(),
                 "{} has no document path",
                 setting.key
+            );
+        }
+    }
+
+    #[test]
+    fn every_accepted_value_can_be_loaded_back() {
+        // The original table hand-copied each enum's variants and got three of
+        // them wrong, so `set` accepted a word, wrote it, and every later
+        // command failed to parse the file it had just written. Validation that
+        // disagrees with the loader is worse than no validation.
+        let cases: &[(&str, &str)] = &[
+            ("attestations", "off"),
+            ("attestations", "if-available"),
+            ("attestations", "auto"),
+            ("attestations", "required"),
+            ("prerelease", "never"),
+            ("prerelease", "if-explicit"),
+            ("prerelease", "allow"),
+            ("link_mode", "auto"),
+            ("link_mode", "hardlink"),
+            ("link_mode", "reflink"),
+            ("link_mode", "copy"),
+            ("link_mode", "symlink"),
+            ("jobs", "4"),
+            ("offline", "true"),
+            ("lang", "en"),
+            ("shims.include", "conda:clang:xmllint"),
+        ];
+        for (key, value) in cases {
+            let setting = find_setting(key).unwrap();
+            let item = setting_value(setting, value)
+                .unwrap_or_else(|error| panic!("`{key} = {value}` was rejected: {error}"));
+
+            // Build the document the writer would produce, then load it the way
+            // the CLI does on the next command.
+            let mut doc = toml_edit::DocumentMut::new();
+            let mut table = doc.as_table_mut();
+            let (last, parents) = setting.path.split_last().unwrap();
+            for parent in parents {
+                let entry = table
+                    .entry(parent)
+                    .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+                table = entry.as_table_mut().unwrap();
+            }
+            table.insert(last, item);
+
+            let temporary = tempfile::tempdir().unwrap();
+            let path = temporary.path().join("config.toml");
+            std::fs::write(&path, doc.to_string()).unwrap();
+            osdk_core::config::Config::load_user(&path).unwrap_or_else(|error| {
+                panic!("`{key} = {value}` was written but does not load: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn a_rejected_value_is_named_with_its_alternatives() {
+        for (key, bad) in [
+            ("attestations", "preferred"),
+            ("prerelease", "deny"),
+            ("link_mode", "hardlinkk"),
+            ("jobs", "0"),
+        ] {
+            let setting = find_setting(key).unwrap();
+            assert!(
+                setting_value(setting, bad).is_err(),
+                "`{key} = {bad}` must be rejected before it reaches the file"
             );
         }
     }
