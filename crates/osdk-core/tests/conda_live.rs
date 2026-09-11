@@ -31,12 +31,14 @@ fn every_supported_platform_maps_to_a_real_conda_subdir() {
         (Os::Macos, Arch::X64, "osx-64"),
         (Os::Macos, Arch::Arm64, "osx-arm64"),
         (Os::Windows, Arch::X64, "win-64"),
+        // conda-forge really does publish win-arm64: its `repodata.json.zst`
+        // is served, and clang, python and ripgrep all have builds there.
+        (Os::Windows, Arch::Arm64, "win-arm64"),
     ] {
         assert_eq!(subdir_for(platform(os, arch)), Some(expected));
     }
-    // conda-forge builds neither of these; claiming otherwise would produce an
-    // empty solve rather than a clear error.
-    assert_eq!(subdir_for(platform(Os::Windows, Arch::Arm64)), None);
+    // 32-bit is the genuine gap; claiming support would produce an empty solve
+    // rather than a clear error.
     assert_eq!(subdir_for(platform(Os::Linux, Arch::X86)), None);
 }
 
@@ -44,6 +46,57 @@ fn every_supported_platform_maps_to_a_real_conda_subdir() {
 fn a_conda_id_round_trips_through_the_backend() {
     let backend = CondaBackend::from_id("conda:clang").expect("valid id");
     assert_eq!(backend.package(), "clang");
+}
+
+/// `clang` is the package that motivated this backend: vfox-clang installs it
+/// by shelling out to pixi against conda-forge, and it is the C/C++ toolchain
+/// osdk users actually ask for. Every platform osdk maps must really have a
+/// build, or `conda:clang` would be a promise the backend cannot keep.
+#[tokio::test]
+#[ignore = "requires network access to conda channels"]
+async fn clang_has_a_build_for_every_platform_osdk_maps() {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .expect("build a client");
+
+    let body: serde_json::Value = client
+        .get("https://api.anaconda.org/package/conda-forge/clang")
+        .send()
+        .await
+        .expect("reach anaconda.org")
+        .json()
+        .await
+        .expect("parse the package listing");
+    let files = body
+        .get("files")
+        .and_then(|files| files.as_array())
+        .expect("a file list");
+
+    for (os, arch) in [
+        (Os::Linux, Arch::X64),
+        (Os::Linux, Arch::Arm64),
+        (Os::Macos, Arch::X64),
+        (Os::Macos, Arch::Arm64),
+        (Os::Windows, Arch::X64),
+        (Os::Windows, Arch::Arm64),
+    ] {
+        let subdir = subdir_for(platform(os, arch)).expect("a mapped platform");
+        let count = files
+            .iter()
+            .filter(|file| {
+                file.get("attrs")
+                    .and_then(|attrs| attrs.get("subdir"))
+                    .and_then(|value| value.as_str())
+                    == Some(subdir)
+            })
+            .count();
+        println!("clang {subdir}: {count} builds");
+        assert!(
+            count > 0,
+            "conda-forge has no `clang` build for {subdir}, which osdk claims to support"
+        );
+    }
 }
 
 /// The mirrors this backend ships as defaults must actually serve conda

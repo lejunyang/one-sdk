@@ -78,7 +78,12 @@ pub fn subdir_for(platform: Platform) -> Option<&'static str> {
         (Os::Macos, Arch::X64) => Some("osx-64"),
         (Os::Macos, Arch::Arm64) => Some("osx-arm64"),
         (Os::Windows, Arch::X64) => Some("win-64"),
-        // conda-forge publishes no win-arm64 and no 32-bit builds.
+        // conda-forge added win-arm64 and it is a real subdir with its own
+        // repodata, carrying clang, python and ripgrep among others. Whether a
+        // *particular* package has a build there is for the solver to answer,
+        // not for this mapping to pre-judge.
+        (Os::Windows, Arch::Arm64) => Some("win-arm64"),
+        // No 32-bit builds: conda-forge dropped win-32 and never had linux-32.
         _ => None,
     }
 }
@@ -985,8 +990,10 @@ mod tests {
             (Os::Macos, Arch::X64, Some("osx-64")),
             (Os::Macos, Arch::Arm64, Some("osx-arm64")),
             (Os::Windows, Arch::X64, Some("win-64")),
-            // No conda-forge builds exist for these.
-            (Os::Windows, Arch::Arm64, None),
+            // conda-forge publishes a real win-arm64 subdir; verified against
+            // the live channel, which serves its repodata and carries clang.
+            (Os::Windows, Arch::Arm64, Some("win-arm64")),
+            // 32-bit is the real gap.
             (Os::Linux, Arch::X86, None),
         ];
         for (os, arch, expected) in cases {

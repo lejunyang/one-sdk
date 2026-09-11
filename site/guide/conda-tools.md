@@ -103,9 +103,14 @@ conda 的版本号不是 semver（存在 `2024.06.1`、`1!1.2` 这类 epoch 形�
 | macOS x64 | `osx-64` |
 | macOS arm64 | `osx-arm64` |
 | Windows x64 | `win-64` |
+| Windows arm64 | `win-arm64` |
 
-conda-forge 不构建 Windows arm64，也不构建 32 位。请求这些平台会得到明确报错，
-而不是一个空的求解结果。
+conda-forge 不构建任何 32 位目标，请求这些平台会得到明确报错，而不是一个空的
+求解结果。
+
+win-arm64 是较新的 subdir，覆盖面明显小于其他平台：`clang` 只有 22.1.8 起的
+16 个构建，而 linux-64 有 123 个版本。某个包在这里没有构建时，求解会失败并列出
+原因，而不是静默装上别的架构。
 
 ## 生命周期命令
 

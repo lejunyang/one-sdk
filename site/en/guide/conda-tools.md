@@ -113,9 +113,15 @@ That is why `9.0.1` sorts before `10.0.0` rather than lexicographically.
 | macOS x64 | `osx-64` |
 | macOS arm64 | `osx-arm64` |
 | Windows x64 | `win-64` |
+| Windows arm64 | `win-arm64` |
 
-conda-forge builds neither Windows arm64 nor any 32-bit target. Requesting those
-produces a clear error rather than an empty solve.
+conda-forge builds no 32-bit targets, and requesting one produces a clear error
+rather than an empty solve.
+
+win-arm64 is a newer subdir with noticeably thinner coverage than the others:
+`clang` has 16 builds there starting at 22.1.8, against 123 versions on
+linux-64. When a package has no build for it the solve fails and says why,
+rather than quietly installing a different architecture.
 
 ## Lifecycle commands
 
