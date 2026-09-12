@@ -259,9 +259,15 @@ fn conda_installed_locator(
     tv: &ToolVersion,
 ) -> Result<Option<InstallLocator>> {
     let expected_options = crate::backend::dynamic::identity_options(backend_id, &tv.options)?;
-    let report = crate::inventory::scan_installs(
+    // Scan only this tool's own subtree: the filter below already requires
+    // `identity.tool == backend_id`, so walking every other tool's installs
+    // could never contribute a candidate. `reshim` reaches this once per version
+    // through `bin_paths`, and again through `bin_names`, so on a machine with
+    // large SDKs installed the full walk dominated the whole command.
+    let report = crate::inventory::scan_installs_for_tool(
         &ctx.dirs.installs,
-        &crate::inventory::ScanOptions::default(),
+        backend_id,
+        &crate::inventory::ScanOptions::tolerant(),
     )?;
     let mut candidates = report.installs.into_iter().filter(|install| {
         let identity = &install.manifest.identity;
@@ -1075,9 +1081,18 @@ impl Backend for CondaBackend {
     }
 
     fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let report = crate::inventory::scan_installs(
+        // Scan only this backend's own subtree. Scanning from the installs
+        // root walked every unrelated tool as well, and `reshim` calls this
+        // once per backend per version, so a machine with large SDKs installed
+        // paid tens of thousands of directory reads per call for installs it
+        // then filtered out anyway.
+        // Tolerant: listing what is installed must not fail wholesale because
+        // one install is damaged, or the user cannot even see the rest to
+        // uninstall the broken one.
+        let report = crate::inventory::scan_installs_for_tool(
             &ctx.dirs.installs,
-            &crate::inventory::ScanOptions::default(),
+            self.id(),
+            &crate::inventory::ScanOptions::tolerant(),
         )?;
         let mut versions: Vec<String> = report
             .installs

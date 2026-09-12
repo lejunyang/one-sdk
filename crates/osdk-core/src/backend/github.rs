@@ -958,9 +958,15 @@ impl Backend for GithubBackend {
     }
 
     fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
-        let report = crate::inventory::scan_installs(
+        // Scan only this backend's own subtree, and tolerate a damaged
+        // neighbour. Scanning from the installs root walked every unrelated tool
+        // as well, and `reshim` calls this once per backend per version, so a
+        // machine with large SDKs installed paid tens of thousands of directory
+        // reads per call for installs it then filtered out anyway.
+        let report = crate::inventory::scan_installs_for_tool(
             &ctx.dirs.installs,
-            &crate::inventory::ScanOptions::default(),
+            self.id(),
+            &crate::inventory::ScanOptions::tolerant(),
         )?;
         Ok(report
             .installs
