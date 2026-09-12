@@ -182,6 +182,9 @@ try {
     $env:OSDK_STORE_DIR = Join-Path $testRoot "osdk/store"
     $env:OSDK_INSTALL_DIR = Join-Path $testRoot "osdk/installs"
     $env:OSDK_SKIP_VERIFY = "0"
+    # These cases exercise binary placement, not shell setup. Say so explicitly
+    # rather than relying on the host being non-interactive.
+    $env:OSDK_SETUP_SHELLS = "none"
     $env:CARGO_HOME = Join-Path $testRoot "cargo"
     $env:RUSTUP_HOME = Join-Path $testRoot "rustup"
     $env:CARGO_TARGET_DIR = Join-Path $testRoot "target"
@@ -417,6 +420,243 @@ try {
     }
     Assert-BinarySet -Directory $rollbackDir -Label old
     Assert-NoTransactionDirectory -Directory $rollbackDir
+
+    # ----------------------------------------------------------------------
+    # Shell setup
+    # ----------------------------------------------------------------------
+
+    $beginMarker = "# >>> osdk initialize >>>"
+    $endMarker = "# <<< osdk initialize <<<"
+
+    # A separate USERPROFILE per case keeps one case's startup files out of
+    # another's, and keeps all of them out of the developer's real profile.
+    function New-ShellHome {
+        param([Parameter(Mandatory)][string]$Name)
+        # Not $home: that is a read-only automatic variable in PowerShell.
+        $shellHome = Join-Path $testRoot "shell-home-$Name"
+        New-Item -ItemType Directory -Force -Path $shellHome | Out-Null
+        return $shellHome
+    }
+
+    function Install-WithShellSetup {
+        param(
+            [Parameter(Mandatory)][string]$ShellHome,
+            [Parameter(Mandatory)][hashtable]$Arguments
+        )
+
+        $savedProfile = $env:USERPROFILE
+        $savedSetup = $env:OSDK_SETUP_SHELLS
+        $savedConfig = $env:OSDK_CONFIG_DIR
+        $savedData = $env:OSDK_DATA_DIR
+        $savedCache = $env:OSDK_CACHE_DIR
+        try {
+            $env:USERPROFILE = $ShellHome
+            # Clear the seeds the harness exports globally, or every case would
+            # inherit an explicit-looking value and never exercise the defaults.
+            $env:OSDK_SETUP_SHELLS = ""
+            $env:OSDK_CONFIG_DIR = ""
+            $env:OSDK_DATA_DIR = ""
+            $env:OSDK_CACHE_DIR = ""
+            $merged = @{
+                Version = "9.8.7"
+                Target = $script:target
+                BaseUrl = $baseUrl
+                Repository = "example/one-sdk"
+            }
+            foreach ($key in $Arguments.Keys) {
+                $merged[$key] = $Arguments[$key]
+            }
+            & $installer @merged
+        } finally {
+            $env:USERPROFILE = $savedProfile
+            $env:OSDK_SETUP_SHELLS = $savedSetup
+            $env:OSDK_CONFIG_DIR = $savedConfig
+            $env:OSDK_DATA_DIR = $savedData
+            $env:OSDK_CACHE_DIR = $savedCache
+        }
+    }
+
+    function Assert-ManagedBlock {
+        param([Parameter(Mandatory)][string]$ProfilePath)
+
+        if (-not (Test-Path -LiteralPath $ProfilePath -PathType Leaf)) {
+            throw "Expected startup file $ProfilePath"
+        }
+        $lines = [System.IO.File]::ReadAllLines($ProfilePath)
+        $begins = @($lines | Where-Object { $_ -eq $beginMarker }).Count
+        $ends = @($lines | Where-Object { $_ -eq $endMarker }).Count
+        # Exactly one block, or a reinstall is appending instead of replacing.
+        if ($begins -ne 1 -or $ends -ne 1) {
+            throw "Expected one osdk block in ${ProfilePath}: $begins begin, $ends end"
+        }
+    }
+
+    # The three directories, activation and PATH all land in the profile, and a
+    # run with -AcceptDefaults never blocks on a prompt.
+    $defaultsHome = New-ShellHome defaults
+    $defaultsBin = Join-Path $testRoot "defaults-bin"
+    Install-WithShellSetup -ShellHome $defaultsHome -Arguments @{
+        InstallDir = $defaultsBin
+        Shells = "pwsh,powershell,bash,fish"
+        AcceptDefaults = $true
+    }
+    $pwshProfile = Join-Path $defaultsHome "Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
+    $windowsProfile = Join-Path $defaultsHome "Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1"
+    $bashProfile = Join-Path $defaultsHome ".bashrc"
+    $fishProfile = Join-Path $defaultsHome ".config\fish\config.fish"
+    Assert-ManagedBlock -ProfilePath $pwshProfile
+    Assert-ManagedBlock -ProfilePath $windowsProfile
+    Assert-ManagedBlock -ProfilePath $bashProfile
+    Assert-ManagedBlock -ProfilePath $fishProfile
+
+    # Each shell's block must be written in that shell's own syntax.
+    $pwshText = [System.IO.File]::ReadAllText($pwshProfile)
+    if (-not $pwshText.Contains('$env:OSDK_CONFIG_DIR = ')) {
+        throw "PowerShell profile does not set OSDK_CONFIG_DIR."
+    }
+    # New-Module keeps the hook alive past the profile's own scope; a plain
+    # Invoke-Expression would leave every later prompt raising CommandNotFound.
+    if (-not $pwshText.Contains("New-Module")) {
+        throw "PowerShell profile does not import the activation hook globally."
+    }
+    $bashText = [System.IO.File]::ReadAllText($bashProfile)
+    if (-not $bashText.Contains("export OSDK_CONFIG_DIR=")) {
+        throw "bash startup file does not export OSDK_CONFIG_DIR."
+    }
+    # A POSIX shell on Windows cannot use a drive-letter path or CRLF.
+    if ($bashText.Contains("`r")) {
+        throw "bash startup file contains CRLF line endings."
+    }
+    if ($bashText -match "export OSDK_CONFIG_DIR='[A-Za-z]:") {
+        throw "bash startup file used a Windows drive path."
+    }
+    $fishText = [System.IO.File]::ReadAllText($fishProfile)
+    if (-not $fishText.Contains("set -gx OSDK_CONFIG_DIR ")) {
+        throw "fish startup file does not set OSDK_CONFIG_DIR."
+    }
+
+    # Defaults must match what osdk itself derives, or accepting the default
+    # would silently relocate state.
+    $expectedConfig = Join-Path ([Environment]::GetFolderPath("ApplicationData")) "osdk\config"
+    if (-not $pwshText.Contains($expectedConfig)) {
+        throw "PowerShell profile did not use the derived default config dir."
+    }
+    if (-not (Test-Path -LiteralPath $expectedConfig -PathType Container)) {
+        throw "The proposed config directory was not created."
+    }
+
+    # Explicit directories are honored verbatim, and only the named shell is
+    # touched. This is the unattended path CI and provisioning scripts use.
+    $explicitHome = New-ShellHome explicit
+    $explicitConfig = Join-Path $testRoot "explicit state\config"
+    $explicitData = Join-Path $testRoot "explicit state\data"
+    $explicitCache = Join-Path $testRoot "explicit state\cache"
+    Install-WithShellSetup -ShellHome $explicitHome -Arguments @{
+        InstallDir = (Join-Path $testRoot "explicit-bin")
+        Shells = "pwsh"
+        ConfigDir = $explicitConfig
+        DataDir = $explicitData
+        CacheDir = $explicitCache
+    }
+    $explicitProfile = Join-Path $explicitHome "Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
+    Assert-ManagedBlock -ProfilePath $explicitProfile
+    $explicitText = [System.IO.File]::ReadAllText($explicitProfile)
+    # A path with a space must survive quoting into the profile.
+    if (-not $explicitText.Contains("'$explicitConfig'")) {
+        throw "Explicit config directory was not written verbatim."
+    }
+    if (-not $explicitText.Contains("'$explicitData'")) {
+        throw "Explicit data directory was not written verbatim."
+    }
+    if (Test-Path -LiteralPath (Join-Path $explicitHome ".bashrc")) {
+        throw "An unselected shell was configured."
+    }
+
+    # Rerunning replaces the block instead of stacking a second copy, and
+    # leaves the user's own lines alone.
+    $rerunHome = New-ShellHome rerun
+    $rerunProfile = Join-Path $rerunHome "Documents\PowerShell\Microsoft.PowerShell_profile.ps1"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $rerunProfile) | Out-Null
+    [System.IO.File]::WriteAllText($rerunProfile, "`$env:USER_SENTINEL = '1'`r`n")
+    foreach ($attempt in 1..2) {
+        Install-WithShellSetup -ShellHome $rerunHome -Arguments @{
+            InstallDir = (Join-Path $testRoot "rerun-bin")
+            Shells = "pwsh"
+            AcceptDefaults = $true
+        }
+    }
+    Assert-ManagedBlock -ProfilePath $rerunProfile
+    if (-not ([System.IO.File]::ReadAllText($rerunProfile)).Contains("USER_SENTINEL")) {
+        throw "Rerunning the installer discarded the user's own profile lines."
+    }
+
+    # -NoModifyShell installs binaries only.
+    $noneHome = New-ShellHome none
+    $noneBin = Join-Path $testRoot "none-bin"
+    Install-WithShellSetup -ShellHome $noneHome -Arguments @{
+        InstallDir = $noneBin
+        NoModifyShell = $true
+    }
+    Assert-BinarySet -Directory $noneBin -Label fixture
+    if (Test-Path -LiteralPath (Join-Path $noneHome "Documents\PowerShell")) {
+        throw "-NoModifyShell still wrote a PowerShell profile."
+    }
+
+    # An unusable directory must fail loudly rather than write a broken
+    # profile. A plain file where a directory belongs cannot be created.
+    $blockedHome = New-ShellHome blocked
+    $blockedPath = Join-Path $testRoot "blocked-config"
+    [System.IO.File]::WriteAllText($blockedPath, "")
+    $blockedBin = Join-Path $testRoot "blocked-bin"
+    Invoke-ExpectedFailure `
+        -ExpectedMessage "exists and is not a directory" `
+        -Message "Installer accepted a non-directory ConfigDir." `
+        -Operation {
+            Install-WithShellSetup -ShellHome $blockedHome -Arguments @{
+                InstallDir = $blockedBin
+                Shells = "pwsh"
+                AcceptDefaults = $true
+                ConfigDir = $blockedPath
+            }
+        }
+    if (Test-Path -LiteralPath (Join-Path $blockedHome "Documents\PowerShell\Microsoft.PowerShell_profile.ps1")) {
+        throw "A rejected directory still produced a profile."
+    }
+    # The binaries still installed: shell setup runs after promotion commits.
+    Assert-BinarySet -Directory $blockedBin -Label fixture
+
+    # A relative path is refused: a profile is read from any directory.
+    Invoke-ExpectedFailure `
+        -ExpectedMessage "must be absolute" `
+        -Message "Installer accepted a relative DataDir." `
+        -Operation {
+            Install-WithShellSetup -ShellHome (New-ShellHome relative) -Arguments @{
+                InstallDir = (Join-Path $testRoot "relative-bin")
+                Shells = "pwsh"
+                AcceptDefaults = $true
+                DataDir = "relative\dir"
+            }
+        }
+
+    # An unknown shell name is rejected before anything is written.
+    Invoke-ExpectedFailure `
+        -ExpectedMessage "unknown shell selection" `
+        -Message "Installer accepted an unknown shell name." `
+        -Operation {
+            Install-WithShellSetup -ShellHome (New-ShellHome unknown) -Arguments @{
+                InstallDir = (Join-Path $testRoot "unknown-bin")
+                Shells = "tcsh"
+            }
+        }
+
+    # The emitted PowerShell block must parse, or every future session would
+    # start with a syntax error in its profile.
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        $pwshProfile, [ref]$null, [ref]$parseErrors)
+    if ($parseErrors) {
+        throw "Generated PowerShell profile does not parse: $($parseErrors[0].Message)"
+    }
 
     [System.IO.File]::WriteAllText(
         (Join-Path $releaseDir "SHA256SUMS"),
