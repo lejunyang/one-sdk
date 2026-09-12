@@ -236,8 +236,19 @@ fn installed_matching(spec: &str, is_range: bool, installed: &[String]) -> Optio
 }
 
 /// Scan all persisted dynamic-tool manifests under the installs tree.
+///
+/// Fail-closed: use this where the result decides what gets executed.
 pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
     inventory::scan_installs(&ctx.dirs.installs, &ScanOptions::default())
+}
+
+/// Same scan, but skipping damaged manifests instead of refusing outright.
+///
+/// For commands that enumerate or reconcile the tree -- `list`, shim ownership,
+/// `reshim`, `uninstall` -- where one broken install must not deny service to
+/// every other tool, or block the command needed to remove it.
+pub fn scan_dynamic_installs_tolerant(ctx: &Ctx) -> Result<ScanReport> {
+    inventory::scan_installs(&ctx.dirs.installs, &ScanOptions::tolerant())
 }
 
 /// Dynamic backend ids referenced by the current config. Persisted install

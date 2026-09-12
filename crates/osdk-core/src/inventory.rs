@@ -186,12 +186,40 @@ pub struct ScanOptions {
     pub corrupt_manifest_policy: CorruptManifestPolicy,
 }
 
+impl ScanOptions {
+    /// Keep scanning past a damaged manifest, reporting it as a diagnostic.
+    ///
+    /// For the paths that enumerate or reconcile rather than resolve one tool for
+    /// execution: `list`, shim ownership, `reshim`, and crucially `uninstall`.
+    /// Under the fail-closed default a single unparsable file made all of those
+    /// fail, so one damaged install left every other dynamic tool unusable and
+    /// blocked the very command needed to remove it -- the only way out was
+    /// deleting the directory by hand.
+    ///
+    /// This is not a weaker guarantee, because the scan was never what made an
+    /// install trustworthy: anything about to be executed still goes through
+    /// `validated_dynamic_install`, which re-reads the manifest and re-checks the
+    /// identity, completion marker and provider evidence on its own. Skipping a
+    /// broken neighbour therefore hides nothing; it only stops it from denying
+    /// service to the rest.
+    pub fn tolerant() -> Self {
+        Self {
+            corrupt_manifest_policy: CorruptManifestPolicy::CollectDiagnostics,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             max_depth: DEFAULT_MAX_DEPTH,
             max_manifest_bytes: DEFAULT_MAX_MANIFEST_BYTES,
             max_manifests: DEFAULT_MAX_MANIFESTS,
+            // Stays fail-closed: resolving a specific tool that is about to be
+            // executed must refuse a damaged inventory rather than guess. The
+            // enumeration paths that only list or reconcile use
+            // `ScanOptions::tolerant()` instead -- see its comment.
             corrupt_manifest_policy: CorruptManifestPolicy::FailClosed,
         }
     }
@@ -217,6 +245,40 @@ pub struct ScanReport {
     pub installs: Vec<InstalledDynamicTool>,
     pub legacy_installs: Vec<LegacyDynamicInstall>,
     pub diagnostics: Vec<InventoryDiagnostic>,
+}
+
+/// Scan only one tool's subtree instead of the whole installs root.
+///
+/// A backend's `list_installed` only ever cares about its own installs, but
+/// scanning from the installs root walks every other tool as well: on a machine
+/// with zig and the Android SDK installed that is ~80,000 unrelated files per
+/// call, and `reshim` makes one such call per backend per version. Because the
+/// layout is `installs/<sanitized tool id>/<version>/<fingerprint>/`, the tool's
+/// own subtree is addressable directly, which turns those scans into a fraction
+/// of the work while returning the same installs.
+///
+/// A missing directory is not an error -- a tool that was never installed simply
+/// has no subtree, and `scan_installs` already reports that as an empty report.
+/// Scan only one tool's subtree, without weakening identity validation.
+///
+/// `reshim` calls `list_installed` once per backend per version, and scanning
+/// from the installs root walked every unrelated tool each time; on a machine
+/// with large SDKs installed that turned into tens of thousands of directory
+/// reads per call for installs that were then filtered out anyway.
+///
+/// Note that the identity root stays `installs_root`: an install root is
+/// canonical relative to the installs root, so validating against the subtree
+/// would drop the tool component and reject every manifest.
+pub fn scan_installs_for_tool(
+    installs_root: &Path,
+    tool: &str,
+    options: &ScanOptions,
+) -> Result<ScanReport> {
+    let tool_root = installs_root.join(crate::dirs::sanitize_tool_id(tool));
+    if !tool_root.exists() {
+        return Ok(ScanReport::default());
+    }
+    scan_installs_within(installs_root, &tool_root, options)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,6 +442,17 @@ pub fn build_bin_ownership_candidates(
 }
 
 pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanReport> {
+    scan_installs_within(scan_root, scan_root, options)
+}
+
+/// `identity_root` is what an install root is checked to be canonical against;
+/// `scan_root` is only where the walk starts. They differ when scanning a single
+/// tool's subtree -- see `scan_installs_for_tool`.
+fn scan_installs_within(
+    identity_root: &Path,
+    scan_root: &Path,
+    options: &ScanOptions,
+) -> Result<ScanReport> {
     match std::fs::symlink_metadata(scan_root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ScanReport::default());
@@ -473,7 +546,7 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
                 ))
             })?
             .to_path_buf();
-        if let Err(error) = validate_regular_directory_path_from(scan_root, &install_root) {
+        if let Err(error) = validate_regular_directory_path_from(identity_root, &install_root) {
             handle_scan_problem(
                 &mut diagnostics,
                 options,
@@ -565,7 +638,7 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
             }
         };
         let canonical_root = crate::dirs::InstallLocator::is_canonical_install_root(
-            scan_root,
+            identity_root,
             &manifest.identity,
             &install_root,
         );
@@ -619,7 +692,8 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
 
     let mut validated_legacy_installs = Vec::with_capacity(legacy_installs.len());
     for legacy in legacy_installs {
-        if let Err(error) = validate_regular_directory_path_from(scan_root, &legacy.install_root) {
+        if let Err(error) = validate_regular_directory_path_from(identity_root, &legacy.install_root)
+        {
             handle_scan_problem(
                 &mut diagnostics,
                 options,
@@ -1078,17 +1152,144 @@ mod install_manifest_tests {
             .unwrap()
             .write_atomic(&temporary.path().join("wrong"))
             .unwrap();
+        // The default stays fail-closed for execution paths.
         assert!(scan_installs(temporary.path(), &ScanOptions::default()).is_err());
-        let report = scan_installs(
-            temporary.path(),
-            &ScanOptions {
-                corrupt_manifest_policy: CorruptManifestPolicy::CollectDiagnostics,
-                ..ScanOptions::default()
-            },
-        )
-        .unwrap();
+        // The tolerant option keeps walking and reports the bad entry instead.
+        let report = scan_installs(temporary.path(), &ScanOptions::tolerant()).unwrap();
         assert!(report.installs.is_empty());
         assert_eq!(report.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn one_damaged_manifest_does_not_hide_healthy_installs() {
+        // The regression that motivated the default change: a single unparsable
+        // manifest used to make the scan fail outright, so every healthy install
+        // disappeared with it. Two tools are needed to catch it -- with only the
+        // damaged one present, an empty result looks correct either way.
+        let temporary = tempfile::tempdir().unwrap();
+        let healthy = identity();
+        let root = temporary
+            .path()
+            .join(crate::dirs::sanitize_tool_id(&healthy.tool))
+            .join(crate::dirs::sanitize_version_component(&healthy.version))
+            .join(crate::dirs::install_id_component(&healthy.install_id).unwrap());
+        DynamicToolManifest::from_identity(healthy.clone())
+            .unwrap()
+            .write_atomic(&root)
+            .unwrap();
+
+        let damaged = temporary
+            .path()
+            .join("conda")
+            .join("broken")
+            .join("1.0")
+            .join("b3-v2-deadbeef");
+        std::fs::create_dir_all(&damaged).unwrap();
+        std::fs::write(
+            DynamicToolManifest::manifest_path(&damaged),
+            br#"{"schema":"#,
+        )
+        .unwrap();
+
+        let report = scan_installs(temporary.path(), &ScanOptions::tolerant()).unwrap();
+        assert_eq!(report.installs.len(), 1);
+        assert_eq!(report.installs[0].manifest.identity.tool, healthy.tool);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0].kind,
+            InventoryDiagnosticKind::InvalidManifest
+        );
+    }
+
+    /// The scoped scan must find the same installs the full scan finds.
+    ///
+    /// The first attempt passed the tool subtree as the scan root, which also
+    /// became the root that install paths were validated against -- so
+    /// `<tool>/<version>/<id>` lost its tool component and every manifest was
+    /// rejected as "not stored under its identity root". `list_installed` then
+    /// returned an empty list rather than an error, which is exactly the kind of
+    /// silent wrong answer that looks like "nothing is installed".
+    #[test]
+    fn scoped_scan_finds_what_the_full_scan_finds() {
+        let temporary = tempfile::tempdir().unwrap();
+        let wanted = identity();
+        let root = temporary
+            .path()
+            .join(crate::dirs::sanitize_tool_id(&wanted.tool))
+            .join(crate::dirs::sanitize_version_component(&wanted.version))
+            .join(crate::dirs::install_id_component(&wanted.install_id).unwrap());
+        DynamicToolManifest::from_identity(wanted.clone())
+            .unwrap()
+            .write_atomic(&root)
+            .unwrap();
+
+        let scoped =
+            scan_installs_for_tool(temporary.path(), &wanted.tool, &ScanOptions::default()).unwrap();
+        assert_eq!(
+            scoped.installs.len(),
+            1,
+            "scoped scan must still validate the identity root against the installs root"
+        );
+        assert_eq!(scoped.installs[0].install_root, root);
+
+        let full = scan_installs(temporary.path(), &ScanOptions::default()).unwrap();
+        assert_eq!(
+            full.installs.iter().map(|i| &i.install_root).collect::<Vec<_>>(),
+            scoped.installs.iter().map(|i| &i.install_root).collect::<Vec<_>>(),
+        );
+    }
+
+    /// The point of scoping: an unrelated tool's subtree must not be walked.
+    /// Without scoping this returns two installs.
+    #[test]
+    fn scoped_scan_ignores_other_tools() {
+        let temporary = tempfile::tempdir().unwrap();
+        for (tool, version) in [("npm:Prettier", "3.6.2"), ("conda:nasm", "2.16.3")] {
+            let other = InstallIdentity::new(
+                tool,
+                version,
+                "linux-x64",
+                InstallScope::Isolated,
+                &BTreeMap::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            let root = temporary
+                .path()
+                .join(crate::dirs::sanitize_tool_id(&other.tool))
+                .join(crate::dirs::sanitize_version_component(&other.version))
+                .join(crate::dirs::install_id_component(&other.install_id).unwrap());
+            DynamicToolManifest::from_identity(other)
+                .unwrap()
+                .write_atomic(&root)
+                .unwrap();
+        }
+
+        let scoped =
+            scan_installs_for_tool(temporary.path(), "conda:nasm", &ScanOptions::default()).unwrap();
+        assert_eq!(scoped.installs.len(), 1);
+        assert_eq!(scoped.installs[0].manifest.identity.tool, "conda:nasm");
+        assert_eq!(
+            scan_installs(temporary.path(), &ScanOptions::default())
+                .unwrap()
+                .installs
+                .len(),
+            2,
+            "fixture must really contain two tools, or this proves nothing"
+        );
+    }
+
+    /// A tool that has never been installed has no subtree at all; that is an
+    /// empty inventory, not an error.
+    #[test]
+    fn scoped_scan_of_a_missing_tool_is_empty() {
+        let temporary = tempfile::tempdir().unwrap();
+        let report =
+            scan_installs_for_tool(temporary.path(), "conda:absent", &ScanOptions::default())
+                .unwrap();
+        assert!(report.installs.is_empty());
+        assert!(report.diagnostics.is_empty());
     }
 
     #[test]
