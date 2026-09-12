@@ -717,6 +717,34 @@ pub enum PkgCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Inspect mirrors for a system package manager's sources.
+    Mirrors {
+        #[command(subcommand)]
+        command: PkgMirrorsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PkgMirrorsCommand {
+    /// Measure each known mirror and rank them, fastest first.
+    ///
+    /// Only measures. Nothing is configured, and the host's package manager is
+    /// not touched.
+    Test {
+        /// Which manager's mirrors to measure.
+        #[arg(long, value_enum, value_name = "MANAGER", default_value = "winget")]
+        manager: PkgManagerArg,
+        /// Emit the measurements as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum PkgManagerArg {
+    Winget,
 }
 
 #[derive(Debug, Subcommand)]

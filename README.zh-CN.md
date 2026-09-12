@@ -590,10 +590,15 @@ context TLS 材料、可通过本地 Unix socket 或 Windows named pipe 直接�
 ```bash
 osdk pkg doctor
 osdk pkg doctor --json
+osdk pkg mirrors test
 ```
 
 报告宿主上有哪些系统包管理器（目前是 winget）、版本、已配置的源及其信任级别。
+`mirrors test` 实测各镜像源速度并排名，官方源一同参与比较。
 只读：不安装、不改配置、不提权。`--json` 的输出带 schema 版本号，且与界面语言无关。
+
+注意 winget 的镜像只加速搜索和列表，不加速安装包下载——manifest 里的下载地址指向
+各软件厂商自己的服务器。osdk 会在输出里说明这一点。
 
 指南：[系统包管理器](site/guide/system-packages.md)
 

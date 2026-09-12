@@ -660,13 +660,19 @@ Guide: [Container runtimes, registries, and native operations](site/en/guide/con
 ```bash
 osdk pkg doctor
 osdk pkg doctor --json
+osdk pkg mirrors test
 ```
 
 Reports which system package managers the host has (winget today), their
 version, and the sources they have configured along with each source's trust
-level. Read-only: nothing is installed, no configuration changes, no elevation.
-The `--json` output carries a schema version and does not vary with the display
-language.
+level. `mirrors test` measures each mirror and ranks them, with the official
+source measured alongside. Read-only: nothing is installed, no configuration
+changes, no elevation. The `--json` output carries a schema version and does
+not vary with the display language.
+
+Note that a winget mirror speeds up search and list, not installer downloads:
+the URLs inside a manifest point at each vendor's own servers. osdk says so in
+its output.
 
 Guide: [System Package Managers](site/en/guide/system-packages.md)
 

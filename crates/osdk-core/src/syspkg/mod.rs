@@ -25,9 +25,16 @@
 //! - **Discovery never writes and never elevates.** This phase runs two
 //!   read-only probes.
 
+pub mod mirror;
 pub mod report;
 pub mod winget;
 
+pub use mirror::{
+    acceleration_of, effective_winget_sources, probe_winget_sources, winget_probe_url,
+    winget_sources, Acceleration, MirrorCandidate,
+    MirrorMeasurement, WINGET_MIRRORS, WINGET_OFFICIAL_ENDPOINT, WINGET_PROBE_FILE,
+    WINGET_SOURCE_TOOL,
+};
 pub use report::{
     Capability, CapabilityStatus, ManagerDetails, ManagerKind, ManagerReport, ManagerStatus,
     ProbeOutcome, ProbePurpose, ProbeRecord, SourceRecord, SourceTrust, SystemPackageReport,

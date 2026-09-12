@@ -5,9 +5,9 @@ toolchain sometimes needs things osdk has no business owning — shared
 libraries, build prerequisites — and those belong to the host's own package
 manager.
 
-`osdk pkg` reports which system package managers the host has and what state
-they are in. For now it only inspects: it runs a couple of query commands and
-installs nothing, changes no configuration, and never elevates.
+`osdk pkg` reports which system package managers the host has, what state they
+are in, and which mirror serves them fastest. For now it only inspects and
+measures: it installs nothing, changes no configuration, and never elevates.
 
 ## Inspecting the host's package managers
 
@@ -79,10 +79,54 @@ Three things in osdk are called a "source", and they govern different things:
 | `osdk registry` | which registry project dependencies come from |
 | `osdk pkg` | the host package manager's sources and mirrors (read-only today) |
 
+## Measuring mirrors
+
+```bash
+osdk pkg mirrors test
+osdk pkg mirrors test --json
+```
+
+osdk fetches each candidate's index package concurrently and ranks them by
+measured speed:
+
+```text
+Mirrors for winget
+  1. huaweicloud        11.5 MiB/s  ttfb 338ms
+  2. ustc                3.6 MiB/s  ttfb 457ms
+  3. nju                 1.3 MiB/s  ttfb 444ms
+  4. official            1.1 MiB/s  ttfb 620ms
+
+These mirrors carry the package index only. Installers are downloaded
+from each vendor's own servers, so switching source speeds up finding
+a package, not downloading it.
+```
+
+The official source is measured alongside the mirrors. That is deliberate: if
+no mirror beats it, you should be told so rather than nudged into switching.
+
+::: warning A winget mirror speeds up finding packages, not downloading them
+A winget source is a manifest index, and the `InstallerUrl` in each manifest
+points at the software vendor's own servers. After switching sources, search
+and list get faster and **installer download speed is completely unchanged**.
+
+Homebrew differs here: bottles are hosted centrally, so a mirror accelerates
+both halves. osdk reports the distinction rather than glossing over it, so you
+do not switch sources, see downloads crawl, and conclude the feature is broken.
+:::
+
+Measuring only issues HTTP requests; it changes no winget configuration.
+Offline, the command fails outright instead of returning a ranking it never
+measured.
+
+Endpoints their operator does not document (today: nju and huaweicloud) rank
+below documented ones when no measurement separates them. They work, but
+nobody has promised they will keep working.
+
 ## Current boundaries
 
-- Read-only. Installing and writing mirror configuration are not available yet.
-- Only winget is inspected today. Homebrew is planned.
+- Read-only. Inspection and measurement work; writing a chosen mirror into
+  winget's configuration is not available yet.
+- Only winget is covered today. Homebrew is planned.
 - osdk does not elevate on your behalf. When a later operation needs
   administrator rights, osdk will print the command for you to run rather than
   attempting to elevate.

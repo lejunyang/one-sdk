@@ -7,14 +7,14 @@ use std::io::Write;
 use anyhow::{Context, Result};
 use osdk_core::process::SystemCommandRunner;
 use osdk_core::syspkg::{
-    self, Capability, CapabilityStatus, ManagerDetails, ManagerKind, ManagerReport, ManagerStatus,
-    SourceRecord, SourceTrust, SystemPackageReport,
+    self, Acceleration, Capability, CapabilityStatus, ManagerDetails, ManagerKind, ManagerReport,
+    ManagerStatus, MirrorMeasurement, SourceRecord, SourceTrust, SystemPackageReport,
 };
 
 use crate::app::App;
-use crate::cli::PkgCommand;
+use crate::cli::{PkgCommand, PkgManagerArg, PkgMirrorsCommand};
 
-pub fn run(app: &App, command: PkgCommand) -> Result<()> {
+pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
     let mut stdout = std::io::stdout();
     match command {
         PkgCommand::Doctor { json } => {
@@ -27,10 +27,88 @@ pub fn run(app: &App, command: PkgCommand) -> Result<()> {
             } else {
                 write_human(&mut stdout, &report)?;
             }
-            let _ = app;
             Ok(())
         }
+        PkgCommand::Mirrors { command } => match command {
+            PkgMirrorsCommand::Test { manager, json } => {
+                let manager = match manager {
+                    PkgManagerArg::Winget => ManagerKind::Winget,
+                };
+                let measurements = syspkg::probe_winget_sources(&app.ctx).await?;
+                if json {
+                    serde_json::to_writer(&mut stdout, &measurements)
+                        .context("serializing mirror measurements")?;
+                    writeln!(stdout)?;
+                } else {
+                    write_mirrors_human(&mut stdout, manager, &measurements)?;
+                }
+                Ok(())
+            }
+        },
     }
+}
+
+fn human_throughput(bytes_per_second: f64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes_per_second;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Render measured mirrors, fastest first.
+///
+/// The acceleration note is not decoration. A winget source mirror carries only
+/// the manifest index; the installers those manifests point at still come from
+/// the vendor. Someone who switches sources to fix a slow download and is not
+/// told this will conclude the feature is broken.
+fn write_mirrors_human(
+    output: &mut dyn Write,
+    manager: ManagerKind,
+    measurements: &[MirrorMeasurement],
+) -> Result<()> {
+    writeln!(output, "Mirrors for {}", manager_label(manager))?;
+
+    if measurements.is_empty() {
+        writeln!(output, "  no candidates configured")?;
+        return Ok(());
+    }
+
+    for (position, measurement) in measurements.iter().enumerate() {
+        match (measurement.reachable, measurement.throughput) {
+            (Some(true), Some(throughput)) => writeln!(
+                output,
+                "  {}. {:<14} {:>12}/s  ttfb {}ms",
+                position + 1,
+                measurement.source_id,
+                human_throughput(throughput),
+                measurement.ttfb_ms.unwrap_or_default()
+            )?,
+            (Some(false), _) => writeln!(
+                output,
+                "  -. {:<14} unreachable",
+                measurement.source_id
+            )?,
+            _ => writeln!(output, "  -. {:<14} not probed", measurement.source_id)?,
+        }
+    }
+
+    if measurements
+        .iter()
+        .all(|m| m.acceleration == Acceleration::IndexOnly)
+    {
+        writeln!(
+            output,
+            "\nThese mirrors carry the package index only. Installers are downloaded\n\
+             from each vendor's own servers, so switching source speeds up finding\n\
+             a package, not downloading it."
+        )?;
+    }
+
+    Ok(())
 }
 
 fn status_label(status: ManagerStatus) -> &'static str {
@@ -241,6 +319,69 @@ mod tests {
         assert_eq!(
             value["schema_version"],
             serde_json::json!(osdk_core::syspkg::SYSPKG_DIAGNOSTIC_SCHEMA_VERSION)
+        );
+    }
+
+    fn measurement(id: &str, throughput: Option<f64>) -> MirrorMeasurement {
+        MirrorMeasurement {
+            source_id: id.to_owned(),
+            endpoint: format!("https://example.invalid/{id}"),
+            kind: osdk_core::source::SourceKind::Mirror,
+            acceleration: Acceleration::IndexOnly,
+            reachable: Some(throughput.is_some()),
+            ttfb_ms: throughput.map(|_| 42),
+            throughput,
+        }
+    }
+
+    fn render_mirrors(measurements: &[MirrorMeasurement]) -> String {
+        let mut buffer = Vec::new();
+        write_mirrors_human(&mut buffer, ManagerKind::Winget, measurements).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn index_only_mirrors_say_so_plainly() {
+        let text = render_mirrors(&[measurement("ustc", Some(5_000_000.0))]);
+
+        // Without this the user switches source, sees downloads unchanged, and
+        // concludes osdk's mirror support does not work.
+        assert!(
+            text.contains("not downloading it"),
+            "the index-only limit must be stated, not implied"
+        );
+    }
+
+    #[test]
+    fn unreachable_mirrors_are_listed_rather_than_hidden() {
+        let text = render_mirrors(&[
+            measurement("ustc", Some(5_000_000.0)),
+            measurement("nju", None),
+        ]);
+
+        assert!(text.contains("unreachable"));
+        assert!(
+            text.contains("nju"),
+            "a mirror that failed is information, not noise"
+        );
+    }
+
+    #[test]
+    fn throughput_is_rendered_in_readable_units() {
+        let text = render_mirrors(&[measurement("ustc", Some(5_242_880.0))]);
+
+        assert!(text.contains("5.0 MiB/s"), "got: {text}");
+        assert!(text.contains("ttfb 42ms"));
+    }
+
+    #[test]
+    fn an_empty_candidate_set_does_not_claim_anything() {
+        let text = render_mirrors(&[]);
+
+        assert!(text.contains("no candidates"));
+        assert!(
+            !text.contains("not downloading it"),
+            "with nothing measured there is no acceleration claim to qualify"
         );
     }
 }

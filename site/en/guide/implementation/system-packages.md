@@ -93,6 +93,75 @@ documented. A test in `winget.rs` asserts osdk never passes `--no-progress`.
   the exit code, not the arguments, so it neither goes stale when flags change
   nor leaks an argument value.
 
+## Why mirror probing reuses `source::select`
+
+`osdk pkg mirrors test` has no measurement logic of its own. It goes through
+`source::select`'s `effective_sources_for` and `refresh_with_timeout`, with the
+pseudo-tool id `pkg:winget-source` standing in for the backend a real download
+would name.
+
+Those entry points exist precisely for downloaders that are not backends —
+osdk's own self-update was the first. They already handle pins, the probe cache
+and its fingerprint, `--refresh-sources`, offline mode, and the one-shot
+`--source` override. A second measurement path would immediately diverge on
+those semantics, and `select.rs` says so outright: the path exists so that "a
+non-backend downloader cannot drift into its own mirror policy".
+
+The `pkg:` prefix keeps these pseudo-ids out of the namespace real tools occupy,
+so `osdk source` configuration for a tool can never collide with a package
+manager's mirror configuration.
+
+### Why the probe deadline is 12 seconds, not the default 1.5
+
+The default `probe_timeout_ms` is tuned for small version indexes. A winget
+source probe pulls `source.msix`, a real index package. Inside a 1.5s window
+every candidate times out, all of them are marked unreachable, and ranking
+silently degrades to fixed priority order — **the exact opposite of measuring
+which route is faster**.
+
+`self_update` hit the same problem earlier (a CN proxy measured at 6.1s just to
+first byte), and this reuses its conclusion. Probes run concurrently, so 12s
+bounds the whole command rather than each source. A configuration that raises
+`probe_timeout_ms` is honoured; one that lowers it cannot go below this floor.
+
+## Why index acceleration and artifact acceleration are distinguished
+
+The `Acceleration` enum exists for one reason: winget and Homebrew differ
+structurally.
+
+- A winget source is a manifest index, and each manifest's `InstallerUrl`
+  points at the vendor's own servers. A mirror **can only** speed up finding a
+  package; it does nothing for downloading the installer.
+- Homebrew bottles are hosted centrally and can be redirected wholesale, so a
+  mirror accelerates both halves.
+
+Hiding this has a concrete cost: a user switches sources to fix slow downloads,
+sees no change, and concludes the feature is broken. So `MirrorCandidate`
+records which half each candidate accelerates, and the human-readable output
+appends an explanation when every candidate is `IndexOnly`. A test in `pkg.rs`
+asserts that text is present.
+
+For the same reason `acceleration_of` returns `None` for Homebrew rather than
+guessing. Homebrew is not wired up yet, and inventing a value would be a lie.
+
+## Why the official source is among the candidates
+
+The official endpoint is measured alongside the mirrors. This is not redundant:
+**"no mirror beats the official source" is a real and useful conclusion**,
+especially outside China. Ranking mirrors alone nudges users toward switching
+even when switching is slower.
+
+The candidate set is itself evidence-based. The widely cited TUNA and Tencent
+Cloud winget sources both return 404 and are therefore absent, with a test in
+`mirror.rs` pinning that fact. The circulating Tencent Cloud walkthrough also
+recommends a `winget source pin` command that does not exist, which is reason
+enough to distrust the whole source.
+
+Endpoints their operator does not document (nju, huaweicloud) rank below
+documented ones when no measurement separates them. They work today, but nobody
+has promised they will keep working, and saying so is more honest than quietly
+ranking them first.
+
 ## Missing from a platform is not missing from a host
 
 `ManagerStatus` separates `NotApplicable` from `NotInstalled` because they call
