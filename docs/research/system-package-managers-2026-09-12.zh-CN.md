@@ -829,7 +829,7 @@ osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
 
 **winget 调用约定**：
 
-- 一律附加 `--no-progress`（抑制 stdout 的 spinner 污染）、`--disable-interactivity`。
+- 一律附加 `--disable-interactivity`、`--nowarn`。**`--no-progress` 不作为必需项**（V-8 实测：重定向后无 ANSI 污染，且该标志已从帮助中移除，详见 §8.4.1）。
 - 安装时附加 `--silent`、`--accept-package-agreements`、`--accept-source-agreements`；查询时只需 `--accept-source-agreements`。
 - 一律使用 `--id <ID> --exact` 精确匹配，**绝不接受模糊匹配**（借鉴 mise：「bootstrap never accepts an ambiguous fuzzy match」）。
 - **退出码按 HRESULT 白名单分类**，而非「非零即失败」：
@@ -843,10 +843,45 @@ osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
 | 歧义 | `MULTIPLE_APPLICATIONS_FOUND` (-1978335210) | 报错并要求用户给出精确 ID |
 | 其他 | — | 原样透出 winget 的错误文本与退出码 |
 
-- **不解析 `winget list` 的表格输出做版本判定**——如果一定要做，解析层必须单独成模块并配足回归测试。优先路径是先用退出码判定存在性。
+- **绝不解析 `winget list` / `show` / `source list` 的表格输出**。V-8 实测确认这些输出是**界面语言本地化**的（中文系统上列头为「名称/ID/版本/可用/源」），按英文列头解析会在非英文宿主上直接失效。优先级顺序：退出码 → `winget source export` 的 JSON Lines → `winget export -o` 的 schema 2.0 JSON → （最后手段）表格解析，且必须单独成模块并配足回归测试。
 
-> **待验证 V-8**：`--no-progress` 具体支持哪些子命令、自哪个版本引入（Learn 各子命令选项表未列，仅见于 Settings.md 注记），以及它能否完全消除 issue #6054 描述的污染。
-> 验证方法：实机 `winget install -?` / `winget list -?` 查看是否列出该标志；`winget list --no-progress > out.txt` 后用 `Get-Content out.txt -AsByteStream` 检查 ESC 序列残留。**这一条会影响输出解析层的设计，应在实现 Phase 1 前完成验证。**
+#### 8.4.1 V-8 实测结论（已验证，阻塞解除）
+
+实测环境：Windows 11 Build 26200.9445 / X64，winget **v1.29.290**（`Microsoft.DesktopAppInstaller v1.29.290.0`），界面语言为简体中文。
+
+| 观察项 | 实测结果 |
+| --- | --- |
+| 重定向到文件后的 ANSI 污染 | **ESC = 0**。`list`（无标志）、`list --no-progress`、`list --disable-interactivity`、`search --no-progress` 四种情形下，输出字节完全一致（927 / 927 / 927 bytes），均无 `0x1B`、无退格符 |
+| `--no-progress` 是否仍在帮助中 | **否**。`list`/`search`/`show`/`install`/`upgrade`/`uninstall`/`source` 七个子命令的 `-?` 输出均**不再列出** `--no-progress` |
+| `--no-progress` 是否仍被接受 | **是**，退出码 `0`。对照组：未知参数 `--definitely-not-a-flag` 报 `0x8A150002` 并打印帮助 |
+| `--disable-interactivity` | 上述七个子命令**全部**列出该标志 |
+
+**结论一：`--no-progress` 不必依赖。** 进度渲染在 stdout 非 TTY 时本就不发生，重定向场景下加不加该标志输出完全相同。它已从文档化选项中移除但仍被静默接受——这正是不应依赖的形态：既无文档保证，又无实际收益。osdk 采用 `--disable-interactivity` + `--nowarn`，两者都是当前文档化的稳定选项。
+
+**结论二（文档此前未预见的风险）：winget 的人类可读输出是界面语言本地化的。** 中文宿主上 `winget list` 的列头是「名称 / ID / 版本 / 可用 / 源」，`winget source list` 是「名称 / 参数 / 显式」。**任何按英文列头编写的表格解析器都会在非英文 Windows 上失效**，而这类失效是静默的——解析不到列就当作"包未安装"，比报错更危险。
+
+**结论三：存在与语言无关的结构化通路，应优先使用。**
+
+- `winget source export` 直接输出 **JSON Lines**，键名为英文且不随界面语言变化，实测含 `Name` / `Identifier` / `Arg` / `Type` / `TrustLevel` / `Explicit` / `Data`：
+
+  ```json
+  {"Arg":"https://cdn.winget.microsoft.com/cache","Data":"Microsoft.Winget.Source_8wekyb3d8bbwe","Explicit":false,"Identifier":"Microsoft.Winget.Source_8wekyb3d8bbwe","Name":"winget","TrustLevel":["Trusted","StoreOrigin"],"Type":"Microsoft.PreIndexed.Package"}
+  ```
+
+  这**同时解决了 V-5**：`TrustLevel` 是结构化字段而非需要解析的文本，镜像源接入后的信任级别可直接读取比对。
+
+- `winget export -o <file> [--include-versions]` 输出 `https://aka.ms/winget-packages.schema.2.0.json` 的带版本 schema，实测退出码 `0`（对于无法溯源到任何 source 的已装程序，仅在 stderr 打印「无法从任何源获得已安装的程序包: X」告警，**不影响退出码**）。
+
+**结论四：退出码目录（本机实测补充）。**
+
+| 场景 | 退出码 | HRESULT |
+| --- | --- | --- |
+| `list` / `show` 查询无匹配 | -1978335212 | `0x8A150014` |
+| `source list --name <不存在的源>` | -1978335214 | `0x8A150012` |
+| 未知命令行参数 | -1978335230 | `0x8A150002` |
+| 查询有匹配 / `source export` / `export -o` 成功 | 0 | — |
+
+**对实现的影响**：Phase 1 的输出层按「退出码优先 → JSON 通路 → 绝不依赖本地化表格」三级设计。解析器不得包含任何中英文列头字面量。
 
 **brew 调用约定**：
 
@@ -934,6 +969,8 @@ osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
 **Phase 0：验证待确认项（不产生提交）**
 先完成 §12 中标记为「阻塞实现」的验证项（V-2、V-8 优先）。这些结论直接决定 Phase 1 与 Phase 4 的解析层与幂等逻辑形状，先写代码会返工。
 
+**进度**：V-8 已于 2026-09-12 在 Windows 11 / winget 1.29.290 上实测完成（§8.4.1），Phase 1 的阻塞已解除，并附带发现「输出本地化」这一文档此前未预见的风险；V-5 部分解决。V-2 属 Homebrew 侧，需 macOS 实机，阻塞的是 Phase 6 而非 Phase 1。
+
 **Phase 1：只读发现与诊断**
 `syspkg/{mod,manager,discovery,winget,brew,report}.rs` 骨架 + `osdk pkg doctor [--json]`。
 只做发现：管理器是否存在、版本、可用性、当前 source/prefix、权限与策略状态。不读配置、不装任何东西。
@@ -980,10 +1017,10 @@ VitePress 用户指南（`guide/system-packages.md` 中英成对）与实现说�
 | V-2 | `brew install <已装且最新>` 的退出码 | 实机 `brew install hello; echo $?` | **阻塞 Phase 6**（决定幂等判定） |
 | V-3 | winget 对 MSIX 传 `--location` 是静默忽略还是报 `UNSUPPORTED_ARGUMENT` | 实机 `winget install --id <MSIX 包> -l C:\tmp\x -e`，记录退出码与 verbose 日志 | 中（决定 §4.2 的拒绝逻辑精度） |
 | V-4 | 华为云是否提供官方 winget 帮助页与推荐命令 | 访问 `https://mirrors.huaweicloud.com/home` 搜索 winget | 低（决定是否纳入内置候选集） |
-| V-5 | 镜像 source 除 `--trust-level` 外的签名/证书校验差异 | 实机加镜像源后 `winget source list --name winget` 对比 Trust Level；`winget source update --verbose-logs` | 中（影响 §8.6 的信任告知内容） |
+| ~~V-5~~ | ~~镜像 source 除 `--trust-level` 外的签名/证书校验差异~~ | **部分已验证（§8.4.1）**：`winget source export` 以结构化字段直出 `TrustLevel`（内置 winget 源为 `["Trusted","StoreOrigin"]`），无需解析文本。**仍待验证**：接入第三方镜像源后该字段的实际取值与证书校验差异 | 中（影响 §8.6 的信任告知内容） |
 | V-6 | 阿里云两个 API 路径的新鲜度是否一致、是否其一为遗留别名 | 分别取 `formula.jws.json` 比对 `Last-Modified`/内容哈希 | 低 |
 | V-7 | 阿里云 homebrew 镜像是否仍活跃同步 | 对比其 `formula.jws.json` 与 `formulae.brew.sh` 同一 formula 的 stable 版本号 | 低 |
-| V-8 | `--no-progress` 支持哪些子命令、自哪个版本引入、能否完全消除 stdout 污染 | 实机 `winget list -?` 等查看标志；`winget list --no-progress > out.txt` 后检查 ESC 残留 | **阻塞 Phase 1**（决定解析层设计） |
+| ~~V-8~~ | ~~`--no-progress` 支持哪些子命令、自哪个版本引入、能否完全消除 stdout 污染~~ | **已验证，阻塞解除（§8.4.1）**：winget 1.29.290 实测重定向后 ESC=0，该标志已从七个子命令的帮助中移除但仍被接受；改用 `--disable-interactivity` + `--nowarn`。**附带发现**：人类可读输出为界面语言本地化，须改走 JSON 通路 | ~~阻塞 Phase 1~~ → 已解除 |
 | V-9 | mise winget manager 传递的确切 flag 组合 | Windows 实机 `mise bootstrap packages apply --dry-run --manager winget` 读取记录的完整命令行；或读 mise 源码 `system/` 下实现 | 低（仅作参照，不构成 osdk 的依据） |
 | V-10 | Windows Server 2019/2022 与 LTSC/无 Store 镜像上 App Installer 的安装步骤与受支持程度 | 干净环境执行 `Add-AppxProvisionedPackage -online -PackagePath <msixbundle> -LicensePath <license> -DependencyPackagePath <VCLibs>`，登录后 `winget --info` | 中（影响 doctor 的引导文案） |
 | V-11 | Rust 侧是否存在等价 ruby-macho `MachO.codesign!` 的 ad-hoc 签名实现（不依赖 CLT、不牵入 XAR/CMS/X.509 全链） | 检索 crates.io 具备 Mach-O 写入与 code signature 构造能力的 crate；若有则按 §6.4.1 测净增量 | 低（当前设计不依赖；仅在重新考虑自实现时需要） |
