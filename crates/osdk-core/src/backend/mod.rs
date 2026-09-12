@@ -247,9 +247,17 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 #[cfg(windows)]
 fn is_executable(path: &std::path::Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
+    path.is_file() && has_executable_extension(path)
+}
+
+/// Whether a Windows file name carries an executable extension.
+///
+/// Split out from [`is_executable`] so callers that judge a name without a file
+/// on disk -- a package's own manifest of installed paths, for instance -- apply
+/// the same rule as a directory scan instead of a second opinion that can drift
+/// from it.
+#[cfg(windows)]
+pub(crate) fn has_executable_extension(path: &std::path::Path) -> bool {
     matches!(
         path.extension()
             .and_then(|e| e.to_str())

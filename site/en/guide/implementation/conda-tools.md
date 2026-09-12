@@ -160,6 +160,23 @@ Windows the prefix root is itself a command directory (empty relative path), so
 a prefix match would accept `lib/libclang.so` on the grounds that it starts with
 the empty string. A unit test caught that; reasoning had not.
 
+Being in a bin directory is necessary but not sufficient. A conda bin directory
+is a plain directory, so packages ship their libraries next to the executables
+that load them: `zstd` records `Library/bin/zstd.dll` and
+`Library/bin/libzstd.dll` beside `Library/bin/zstd.exe`, and the MSYS2 packages
+put `msys-2.0.dll` next to every tool in `Library\usr\bin`. `exe_stem` cannot
+reject these -- it strips a known executable suffix and otherwise returns the
+name unchanged -- so `zstd.dll` survived as the command name `zstd.dll` and the
+shim layer would generate a shim for a library.
+
+On Windows, ownership therefore applies the same extension test
+(`has_executable_extension`) that the directory scan in `bin_names_in_dirs`
+already used. The two are halves of one decision -- `bin_names` returns the
+ownership list when a record exists and the scan otherwise -- so letting them
+disagree makes the published set depend on which path answered. Unix is left
+alone deliberately: the mode bit is the real test there, extensionless commands
+are normal, and this record describes files that need not be present to stat.
+
 **Ownership is a label, not a deletion.** The manifest records every command in
 the prefix and tags each with `owned`; the filtering itself happens during shim
 generation. The first implementation dropped the closure's commands from the

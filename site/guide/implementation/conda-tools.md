@@ -128,6 +128,19 @@ Windows 上 prefix 根本身就是命令目录（相对路径为空串），若�
 `lib/libclang.so` 会因为"以空串开头"被误判成命令。这个 bug 是单测抓出来的，不是推理
 出来的。
 
+但"在 bin 目录里"是必要条件，不是充分条件。conda 的 bin 目录就是普通目录，包会把库
+和加载它的可执行文件放在一起：`zstd` 记录的 `Library/bin/zstd.dll` 和
+`Library/bin/libzstd.dll` 就紧挨着 `Library/bin/zstd.exe`，MSYS2 系列则在
+`Library\usr\bin` 里给每个工具配一份 `msys-2.0.dll`。`exe_stem` 拦不住它们——它只
+剥掉已知的可执行后缀，其余原样返回——于是 `zstd.dll` 会作为命令名 `zstd.dll` 活下来，
+shim 层就给一个库生成了 shim。
+
+所以 Windows 上的归属判定改为复用目录扫描早已在用的同一个扩展名检查
+（`has_executable_extension`）。这两条是同一个决定的两半——`bin_names` 在有归属记录
+时返回归属列表，否则返回扫描结果——让它们各执一词，就等于让最终发布的命令集取决于是
+哪条路径回答的。Unix 有意不动：那边真正的判据是 mode 位，无扩展名的命令是常态，而且
+这份记录描述的文件未必存在于磁盘上供 stat。
+
 **归属只是标注，不是删除。** manifest 记录 prefix 里的全部命令，每条附一个 `owned`
 标记，真正的过滤下沉到 shim 生成那一层。最初的实现是在安装期就把闭包命令从 manifest
 里删掉，那是错的：manifest 是 shim 层唯一能读到的清单，被删掉的命令再也找不回来，

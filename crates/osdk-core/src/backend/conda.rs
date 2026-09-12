@@ -525,6 +525,29 @@ fn owned_bin_names(prefix: &std::path::Path) -> Option<Vec<String>> {
             if !bin_dirs.iter().any(|bin| bin == directory) {
                 return None;
             }
+            // Sitting in a bin directory is not enough to be a command. A conda
+            // bin directory is a plain directory, so packages ship their
+            // libraries next to the executables that load them: conda-forge'
+            // `zstd` records `Library/bin/zstd.dll` and `Library/bin/libzstd.dll`
+            // beside `Library/bin/zstd.exe`, and the MSYS2 packages put
+            // `msys-2.0.dll` next to every tool in `Library/usr/bin`.
+            //
+            // `exe_stem` cannot reject these: it only strips a known executable
+            // suffix and returns the name unchanged otherwise, so `zstd.dll`
+            // survives as the command name `zstd.dll` and the shim layer
+            // generates a shim for a library. The directory scan in
+            // `bin_names_in_dirs` already filters by extension, so this path
+            // has to apply the same rule or the two disagree about what a
+            // command is -- and this is the path `bin_names` returns from when
+            // ownership is known, which is exactly when shims are generated.
+            //
+            // Unix is deliberately left alone: the mode bit is the real test
+            // there, extensionless commands are the norm, and this record
+            // describes files that may not be present to stat.
+            #[cfg(windows)]
+            if !crate::backend::has_executable_extension(std::path::Path::new(file)) {
+                return None;
+            }
             crate::backend::exe_stem(std::path::Path::new(file))
         })
         .collect();
@@ -1526,6 +1549,129 @@ mod tests {
             Some(vec!["bash".to_string(), "make".to_string()]),
             "commands in Library\\usr\\bin must be attributable to their package"
         );
+    }
+
+    /// Regression: a bin directory holds libraries as well as commands, and
+    /// `exe_stem` passes an unrecognised suffix through unchanged. conda-forge'
+    /// `zstd` records `zstd.dll` and `libzstd.dll` beside `zstd.exe`, so the
+    /// published set used to contain `zstd.dll` and `libzstd.dll` as command
+    /// names and the shim layer would generate shims for libraries. Probed
+    /// against a real win-64 prefix: `owned_bin_names` returned
+    /// `["bashbug", "libzstd.dll", "zstd", "zstd.dll"]`.
+    #[cfg(windows)]
+    #[test]
+    fn libraries_beside_a_command_are_not_themselves_commands() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let bin = prefix.join("Library").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for file in ["zstd.exe", "zstd.dll", "libzstd.dll"] {
+            std::fs::write(bin.join(file), b"").unwrap();
+        }
+
+        write_owned_paths(
+            prefix,
+            &[
+                "Library/bin/zstd.exe".to_string(),
+                "Library/bin/zstd.dll".to_string(),
+                "Library/bin/libzstd.dll".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            owned_bin_names(prefix),
+            Some(vec!["zstd".to_string()]),
+            "a DLL beside an executable must not be published as a command"
+        );
+    }
+
+    /// The same rule covers everything else a package drops in a bin
+    /// directory. `m2-bash` installs the extensionless script `bashbug` into
+    /// `Library\usr\bin`; on Windows it is not directly executable, and the
+    /// directory scan already refuses it, so ownership must refuse it too or
+    /// the two paths to a command name disagree.
+    #[cfg(windows)]
+    #[test]
+    fn windows_ownership_matches_what_a_directory_scan_would_find() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let bin = prefix.join("Library").join("usr").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for file in ["bash.exe", "bashbug", "msys-2.0.dll", "profile.ps1"] {
+            std::fs::write(bin.join(file), b"").unwrap();
+        }
+
+        write_owned_paths(
+            prefix,
+            &[
+                "Library/usr/bin/bash.exe".to_string(),
+                "Library/usr/bin/bashbug".to_string(),
+                "Library/usr/bin/msys-2.0.dll".to_string(),
+                "Library/usr/bin/profile.ps1".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let owned = owned_bin_names(prefix).unwrap();
+        assert_eq!(owned, vec!["bash".to_string()]);
+        // The directory scan is the other half of the same decision; the two
+        // must not disagree about what counts as a command.
+        assert_eq!(
+            owned,
+            crate::backend::bin_names_in_dirs(&conda_bin_dirs(prefix)),
+            "ownership and directory scan must agree on the command set"
+        );
+    }
+
+    /// `.cmd` and `.bat` are executable on Windows just as `.exe` is, and the
+    /// suffix is stripped from the published name so the shim carries the name
+    /// a user actually types.
+    #[cfg(windows)]
+    #[test]
+    fn windows_scripts_are_commands_and_lose_their_suffix() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let scripts = prefix.join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("pip.exe"), b"").unwrap();
+        std::fs::write(scripts.join("activate.bat"), b"").unwrap();
+        std::fs::write(scripts.join("wheel.cmd"), b"").unwrap();
+
+        write_owned_paths(
+            prefix,
+            &[
+                "Scripts/pip.exe".to_string(),
+                "Scripts/activate.bat".to_string(),
+                "Scripts/wheel.cmd".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            owned_bin_names(prefix),
+            Some(vec![
+                "activate".to_string(),
+                "pip".to_string(),
+                "wheel".to_string()
+            ])
+        );
+    }
+
+    /// Unix has no name-level test -- the mode bit is the real one -- and
+    /// extensionless commands are the norm there, so the Windows extension
+    /// filter must not leak onto it and silently publish nothing.
+    #[cfg(unix)]
+    #[test]
+    fn unix_commands_need_no_extension() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::write(prefix.join("bin").join("make"), b"").unwrap();
+
+        write_owned_paths(prefix, &["bin/make".to_string()]).unwrap();
+
+        assert_eq!(owned_bin_names(prefix), Some(vec!["make".to_string()]));
     }
 
     /// A channel is a remote party. The archive name becomes a path under the
