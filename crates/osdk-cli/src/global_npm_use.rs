@@ -1230,13 +1230,13 @@ fn refreshed_app(app: &App) -> Result<App> {
         cas: app.ctx.cas.clone(),
         show_progress: app.ctx.show_progress,
     };
-    Ok(App {
+    Ok(App::from_parts(
         ctx,
-        registry: osdk_core::Registry::load(&app.ctx.dirs)?,
-        prompt: app.prompt.clone(),
-        source_override: app.source_override.clone(),
-        refresh_sources: app.refresh_sources,
-    })
+        osdk_core::Registry::load(&app.ctx.dirs)?,
+        app.prompt.clone(),
+        app.source_override.clone(),
+        app.refresh_sources,
+    ))
 }
 
 async fn ensure_managed_runtime(app: &mut App, installer: NpmInstaller) -> Result<ManagedRuntime> {
@@ -1443,6 +1443,7 @@ async fn install_backend(
             .install(&InstallCtx { ctx: &app.ctx }, &version)
             .await
             .with_context(|| format!("installing {}", version))?;
+        app.invalidate_dynamic_scan();
     }
     Ok((backend, version))
 }

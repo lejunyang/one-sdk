@@ -996,6 +996,9 @@ async fn install_one_without_shims(
             .install(&ictx, &tv)
             .await
             .with_context(|| format!("installing {}", tv))?;
+        // The tree just changed; a later read in this same command (an install
+        // followed by shim generation, say) must not see the pre-install memo.
+        app.invalidate_dynamic_scan();
         println!("{}", t!("msg.installed", tool = tv));
     }
     Ok((backend, tv))
@@ -2513,6 +2516,7 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
         uninstall_global_npm(app, &tv)?;
     } else {
         backend.uninstall(&app.ctx, &tv).await?;
+        app.invalidate_dynamic_scan();
         reconcile_managed_shims(app)?;
     }
     println!("{}", t!("msg.uninstalled", tool = tv));
@@ -3267,13 +3271,13 @@ fn refreshed_global_npm_app(app: &App) -> Result<App> {
         cas: app.ctx.cas.clone(),
         show_progress: app.ctx.show_progress,
     };
-    Ok(App {
+    Ok(App::from_parts(
         ctx,
-        registry: osdk_core::Registry::load(&app.ctx.dirs)?,
-        prompt: app.prompt.clone(),
-        source_override: app.source_override.clone(),
-        refresh_sources: app.refresh_sources,
-    })
+        osdk_core::Registry::load(&app.ctx.dirs)?,
+        app.prompt.clone(),
+        app.source_override.clone(),
+        app.refresh_sources,
+    ))
 }
 
 fn generate_global_npm_shims_for(
@@ -3389,13 +3393,13 @@ fn remove_unowned_global_npm_shims(
         cas: app.ctx.cas.clone(),
         show_progress: app.ctx.show_progress,
     };
-    let refreshed = App {
+    let refreshed = App::from_parts(
         ctx,
-        registry: osdk_core::Registry::load(&app.ctx.dirs)?,
-        prompt: app.prompt.clone(),
-        source_override: app.source_override.clone(),
-        refresh_sources: app.refresh_sources,
-    };
+        osdk_core::Registry::load(&app.ctx.dirs)?,
+        app.prompt.clone(),
+        app.source_override.clone(),
+        app.refresh_sources,
+    );
     let owners = installed_shim_owners(&refreshed)?;
     for name in bin_names {
         if !owners
@@ -3730,7 +3734,7 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         let mut selected = ToolVersion::new(backend.id(), &version);
         selected.options = req.options.clone();
         let request = exact_request_for_version(&selected);
-        let report = osdk_core::shim::scan_dynamic_installs(&app.ctx)?;
+        let report = app.dynamic_scan_report()?;
         Some(
             osdk_core::shim::validated_dynamic_install(&app.ctx, &report, &request, &version)?
                 .install_root()
@@ -3752,7 +3756,11 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         // shims the very next `reshim` produces.
         let present =
             osdk_core::backend::bin_names_in_dirs(&backend.bin_paths(&app.ctx, &selected)?);
-        let published = routed_bin_names_for_version(&app.ctx, backend.as_ref(), &selected)
+        let published = app
+            .dynamic_scan_report()
+            .and_then(|report| {
+                routed_bin_names_for_version(&app.ctx, &report, backend.as_ref(), &selected)
+            })
             .unwrap_or_else(|_| backend.bin_names(&app.ctx, &selected).unwrap_or_default());
         let withheld: Vec<&String> = present
             .iter()
@@ -3813,8 +3821,9 @@ pub fn reshim(app: &App) -> Result<()> {
 pub(crate) fn reconcile_managed_shims(app: &App) -> Result<()> {
     let owners = installed_shim_owners(app)?;
     let expected = owners
-        .into_iter()
-        .filter_map(|(name, owner_ids)| (!is_real_shim_conflict(&name, &owner_ids)).then_some(name))
+        .iter()
+        .filter(|(name, owner_ids)| !is_real_shim_conflict(name, owner_ids))
+        .map(|(name, _)| name.clone())
         .collect::<std::collections::BTreeSet<_>>();
     let shims = app.ctx.dirs.shims();
     let read_dir = match std::fs::read_dir(&shims) {
@@ -3904,7 +3913,8 @@ pub(crate) fn generate_shims_for(
             return Ok(0);
         }
     };
-    let names = routed_bin_names_for_version(&app.ctx, backend, tv)?;
+    let dynamic_report = app.dynamic_scan_report()?;
+    let names = routed_bin_names_for_version(&app.ctx, &dynamic_report, backend, tv)?;
     ensure_no_shim_conflicts(app, backend.id(), &names)?;
     let owners = installed_shim_owners(app)?;
     let mut count = 0;
@@ -5789,12 +5799,13 @@ fn describe_origin(origin: &osdk_core::version::resolver::VersionOrigin) -> Stri
     }
 }
 
-fn dynamic_scan_report(app: &App) -> Result<ScanReport> {
-    Ok(osdk_core::shim::scan_dynamic_installs(&app.ctx)?)
+fn dynamic_scan_report(app: &App) -> Result<std::sync::Arc<ScanReport>> {
+    app.dynamic_scan_report()
 }
 
 fn routed_bin_names_for_version(
     ctx: &osdk_core::backend::Ctx,
+    dynamic_report: &ScanReport,
     backend: &dyn Backend,
     version: &ToolVersion,
 ) -> Result<Vec<String>> {
@@ -5810,9 +5821,12 @@ fn routed_bin_names_for_version(
     };
     if version.backend.contains(':') {
         let request = exact_request_for_version(version);
-        let report = osdk_core::shim::scan_dynamic_installs(ctx)?;
-        let install =
-            osdk_core::shim::validated_dynamic_install(ctx, &report, &request, &version.version)?;
+        let install = osdk_core::shim::validated_dynamic_install(
+            ctx,
+            dynamic_report,
+            &request,
+            &version.version,
+        )?;
         // Ownership travels with the name: a prefix shared with a dependency
         // closure withholds the closure's commands unless they are included.
         return Ok(install
@@ -5944,10 +5958,20 @@ fn requested_spec_literal(tool: &str) -> Option<String> {
 
 fn installed_shim_owners(
     app: &App,
-) -> Result<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
+) -> Result<std::sync::Arc<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>>
+{
+    if let Some(cached) = app.cached_shim_owners() {
+        return Ok(cached);
+    }
     let mut owners =
         std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
     let dynamic_report = dynamic_scan_report(app)?;
+    // `dynamic_bin_ownership` yields one entry per published command, and a conda
+    // prefix publishes hundreds of them (m2-gawk alone accounts for over 800
+    // scans here). The selection answer only depends on the tool and version, so
+    // resolve each pair once instead of once per name.
+    let mut selection_memo =
+        std::collections::HashMap::<(String, String), bool>::new();
     for (name, candidates) in osdk_core::shim::dynamic_bin_ownership(&dynamic_report) {
         let configured_owners = candidates
             .into_iter()
@@ -5961,15 +5985,28 @@ fn installed_shim_owners(
                         && install.canonical_id == candidate.canonical_id
                 })?;
                 let version = install.manifest.identity.version.as_str();
-                let selected = app
-                    .registry
-                    .get(&candidate.canonical_id)
-                    .ok()
-                    .and_then(|backend| {
-                        request_selects_installed_version(app, backend.as_ref(), &request, version)
+                let memo_key = (candidate.canonical_id.clone(), version.to_string());
+                let selected = match selection_memo.get(&memo_key) {
+                    Some(known) => *known,
+                    None => {
+                        let resolved = app
+                            .registry
+                            .get(&candidate.canonical_id)
                             .ok()
-                    })
-                    .unwrap_or(false);
+                            .and_then(|backend| {
+                                request_selects_installed_version(
+                                    app,
+                                    backend.as_ref(),
+                                    &request,
+                                    version,
+                                )
+                                .ok()
+                            })
+                            .unwrap_or(false);
+                        selection_memo.insert(memo_key, resolved);
+                        resolved
+                    }
+                };
                 let mut selected_version = ToolVersion::new(&request.backend, version);
                 selected_version.options = request.options.clone();
                 let selected_root = osdk_core::shim::validated_dynamic_install(
@@ -6058,7 +6095,9 @@ fn installed_shim_owners(
         }
         for version in selected_versions {
             let version = ToolVersion::new(backend.id(), version);
-            for name in routed_bin_names_for_version(&app.ctx, backend.as_ref(), &version)? {
+            for name in
+                routed_bin_names_for_version(&app.ctx, &dynamic_report, backend.as_ref(), &version)?
+            {
                 owners
                     .entry(name)
                     .or_default()
@@ -6066,7 +6105,7 @@ fn installed_shim_owners(
             }
         }
     }
-    Ok(owners)
+    Ok(app.cache_shim_owners(owners))
 }
 
 fn ensure_no_shim_conflicts(app: &App, backend_id: &str, names: &[String]) -> Result<()> {
@@ -6198,13 +6237,7 @@ mod command_flow_tests {
             cas,
             show_progress: false,
         };
-        crate::app::App {
-            ctx,
-            registry,
-            prompt: Arc::new(TerminalPrompt::new(false)),
-            source_override: None,
-            refresh_sources: false,
-        }
+        crate::app::App::from_parts(ctx, registry, Arc::new(TerminalPrompt::new(false)), None, false)
     }
 
     #[test]
