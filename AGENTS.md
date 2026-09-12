@@ -16,7 +16,7 @@
 
 用户下载的就是这两个二进制，体积是产品指标而不是实现细节。以下几条不是风格偏好，而是踩过的坑：忽略其中任何一条都曾让体积成倍增长，或让优化悄悄失效。
 
-- 发布体积的基准线：`osdk` 约 8.9 MB、`osdk-shim` 约 3.5 MB。改动如果让任一个二进制增长超过 10%，要么找出原因，要么在提交说明里讲清为什么这个代价值得付。用独立的构建目录实测，**且必须分两次调用**（见下条，用 `--workspace` 一次构建量出来的 shim 体积是错的）：
+- 发布体积的基准线：`osdk` 约 11.95 MB、`osdk-shim` 约 3.5 MB（2026-09-12 于 Windows x64 实测）。改动如果让任一个二进制增长超过 10%，要么找出原因，要么在提交说明里讲清为什么这个代价值得付。**基准线会随功能增长而变，引用前先按下面的命令实测当前值，不要直接采信本文写下的数字。** 用独立的构建目录实测，**且必须分两次调用**（见下条，用 `--workspace` 一次构建量出来的 shim 体积是错的）：
   ```powershell
   $env:CARGO_TARGET_DIR="target\size-check"
   cargo build --release -p osdk-cli
@@ -37,7 +37,7 @@
 
 - 调整 profile 时，用户真正在意的两个指标要分别测量，因为它们会朝相反方向变化：shim 的启动延迟（进程创建占主导，`opt-level` 影响很小）和归档校验吞吐（对 `opt-level` 极其敏感）。只测一个就下结论会得出错误的取舍。
 
-- 依赖体积的排查手段：`cargo tree -e normal -p osdk-shim` 与 `-p osdk-cli`（分别看两个二进制的实际依赖图，目前 436 / 1012 行）、`cargo tree --duplicates --workspace`（同一 crate 的多版本共存，目前 35 个）、`cargo tree -i <crate>@<version>`（反查是谁引入的）。注意按二进制分别查，两个二进制的图差别很大。
+- 依赖体积的排查手段：`cargo tree -e normal -p osdk-shim` 与 `-p osdk-cli`（分别看两个二进制的实际依赖图，2026-09-12 实测 427 / 1550 行）、`cargo tree --duplicates --workspace`（同一 crate 的多版本共存，实测 39 个；注意该命令按 crate 分块输出，数的是不同 crate 名而非行数）、`cargo tree -i <crate>@<version>`（反查是谁引入的）。注意按二进制分别查，两个二进制的图差别很大。
 
 - **升级依赖时要跟着 sigstore 走，别自己钉版本。** `reqwest` 曾长期双版本（0.12 + 0.13）编译，原因不是某个 feature 多拉了一份，而是我们钉 0.12 而 sigstore 全家钉 0.13，且 `sigstore-rekor` / `sigstore-tsa` 对它是**非 optional** 依赖，任何 feature 组合都躲不掉。跟随上游升到 0.13 后单版本，顺带把 `ring` 也消掉了（此前 `ring` 与 `aws-lc-rs` 两个加密后端同时在编）。遇到重复依赖先用 `cargo tree -i` 看是谁引入，若是上游已整体前进，正确做法是跟随而不是钉住。
 
