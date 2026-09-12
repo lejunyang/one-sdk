@@ -11,6 +11,7 @@
 //! - [`pipeline`] — download → verify → extract → CAS ingest orchestrator.
 //! - [`backend`]  — the `Backend` trait, contexts, registry, and SDK impls.
 //! - [`shim`]     — shim launcher generation.
+//! - `syspkg`     — read-only discovery of host package managers (winget/brew).
 //! - [`lock`]     — cross-process file locks.
 //! - `self_update` — replacing osdk's own binaries from its GitHub releases.
 
@@ -51,6 +52,11 @@ pub mod self_update;
 pub mod shim;
 pub mod source;
 pub mod store;
+// Inspecting the host's package managers is a CLI diagnostic: the shim only
+// launches tools and never asks what winget or brew are doing. Gating the
+// subsystem here keeps it, and its process probes, out of the shim's build.
+#[cfg(feature = "install")]
+pub mod syspkg;
 pub mod tool;
 pub mod trust;
 #[cfg(feature = "install")]

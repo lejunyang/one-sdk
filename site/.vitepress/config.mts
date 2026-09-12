@@ -42,6 +42,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: '模型快照', link: '/guide/models' },
       { text: '来源、离线与安全', link: '/guide/sources-security' },
       { text: '容器运行时、Registry 与原生操作', link: '/guide/containers' },
+      { text: '系统包管理器', link: '/guide/system-packages' },
       { text: '存储、Shell 与诊断', link: '/guide/storage-shell' }
     ]
   },
@@ -55,6 +56,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
       { text: 'SDK 来源与依赖 Registry', link: '/guide/implementation/sources-registries' },
       { text: 'HTTP 制品 backend', link: '/guide/implementation/http-artifacts' },
       { text: '原生容器诊断与操作', link: '/guide/implementation/containers' },
+      { text: '系统包管理器的检查机制', link: '/guide/implementation/system-packages' },
       { text: '内容存储与原生缓存', link: '/guide/implementation/storage-cache' },
       { text: '完整性与来源验证', link: '/guide/implementation/verification' },
       { text: 'Backend 与模型快照', link: '/guide/implementation/backends-models' },
@@ -94,6 +96,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'Model Snapshots', link: '/en/guide/models' },
       { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
       { text: 'Container Runtimes, Registries, and Native Operations', link: '/en/guide/containers' },
+      { text: 'System Package Managers', link: '/en/guide/system-packages' },
       { text: 'Storage, Shell, and Diagnostics', link: '/en/guide/storage-shell' }
     ]
   },
@@ -107,6 +110,7 @@ const enSidebar: DefaultTheme.Sidebar = [
       { text: 'SDK Sources and Registries', link: '/en/guide/implementation/sources-registries' },
       { text: 'HTTP Artifact Backend', link: '/en/guide/implementation/http-artifacts' },
       { text: 'Native Container Diagnostics and Operations', link: '/en/guide/implementation/containers' },
+      { text: 'How System Package Managers Are Inspected', link: '/en/guide/implementation/system-packages' },
       { text: 'Content Store and Native Caches', link: '/en/guide/implementation/storage-cache' },
       { text: 'Integrity and Provenance', link: '/en/guide/implementation/verification' },
       { text: 'Backends and Model Snapshots', link: '/en/guide/implementation/backends-models' },

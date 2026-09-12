@@ -585,6 +585,18 @@ context TLS 材料、可通过本地 Unix socket 或 Windows named pipe 直接�
 
 指南：[容器运行时、Registry 与原生操作](site/guide/containers.md)
 
+## 场景：查看宿主自带的包管理器
+
+```bash
+osdk pkg doctor
+osdk pkg doctor --json
+```
+
+报告宿主上有哪些系统包管理器（目前是 winget）、版本、已配置的源及其信任级别。
+只读：不安装、不改配置、不提权。`--json` 的输出带 schema 版本号，且与界面语言无关。
+
+指南：[系统包管理器](site/guide/system-packages.md)
+
 ## 场景：检查缓存并回收空间
 
 ```bash

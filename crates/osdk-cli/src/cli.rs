@@ -289,6 +289,14 @@ pub enum Command {
         command: ContainerCommand,
     },
 
+    /// Inspect the host's own package managers (winget, Homebrew).
+    ///
+    /// These manage the host, not osdk's store, so osdk only reports on them.
+    Pkg {
+        #[command(subcommand)]
+        command: PkgCommand,
+    },
+
     /// Garbage-collect unreferenced store objects.
     Prune {
         #[arg(long)]
@@ -694,6 +702,21 @@ pub enum CacheCommand {
     Env,
     /// Remove downloaded archives (keeps the CAS store + installs).
     Clean,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PkgCommand {
+    /// Report which system package managers this host has, and their state.
+    ///
+    /// Read-only: it runs a couple of query commands and installs nothing.
+    Doctor {
+        /// Emit the report as JSON.
+        ///
+        /// The schema is versioned and locale-independent, unlike the
+        /// managers' own output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

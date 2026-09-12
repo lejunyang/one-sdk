@@ -655,6 +655,21 @@ containers, volumes, networks, or implementation-private stores.
 
 Guide: [Container runtimes, registries, and native operations](site/en/guide/containers.md)
 
+## Scenario: see what package managers the host has
+
+```bash
+osdk pkg doctor
+osdk pkg doctor --json
+```
+
+Reports which system package managers the host has (winget today), their
+version, and the sources they have configured along with each source's trust
+level. Read-only: nothing is installed, no configuration changes, no elevation.
+The `--json` output carries a schema version and does not vary with the display
+language.
+
+Guide: [System Package Managers](site/en/guide/system-packages.md)
+
 ## Scenario: inspect caches and reclaim storage
 
 ```bash

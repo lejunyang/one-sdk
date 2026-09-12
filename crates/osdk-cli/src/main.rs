@@ -6,6 +6,7 @@ mod container;
 mod global_npm_use;
 mod localize;
 mod lockfile;
+mod pkg;
 mod prompt;
 
 use anyhow::Result;
@@ -161,6 +162,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Rust { command } => commands::rust(app, command).await,
         Command::Cache { command } => commands::cache(app, command),
         Command::Container { command } => return container::run(app, command).await,
+        Command::Pkg { command } => pkg::run(app, command),
         Command::SelfCmd { command } => commands::self_command(app, command).await,
         Command::Prune { dry_run } => commands::prune(app, dry_run),
         Command::Doctor { verify, tool } => commands::doctor(app, verify, tool),
