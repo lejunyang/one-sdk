@@ -388,22 +388,52 @@ fn executable_in_dir(directory: &Path, name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// The MSYS2 environments conda repackages, in conda's own preference order.
+///
+/// Only the first one present in a prefix is used. Conda warns when a prefix
+/// carries more than one, because two of these are two incompatible runtimes
+/// and putting both on PATH would decide per command which of them wins.
+const MSYS2_ENVIRONMENTS: &[&str] = &["ucrt64", "clang64", "mingw64", "clangarm64"];
+
 /// Directories inside a conda prefix that can hold executables.
-/// On Windows a conda prefix classically exposes commands from the prefix root,
-/// `Scripts\` and `Library\bin\` -- but that list is not sufficient. Packages
-/// cross-built from a unix layout (ripgrep is one: its `rg.exe` installs to
-/// `bin\rg.exe`) also use `bin\`, so omitting it makes an install that is
-/// present on disk look like it exports no commands at all. Verified by
-/// installing `conda:ripgrep` on win-64.
+///
+/// There is no single conda bin directory. On Windows a prefix has up to seven,
+/// and which one a package uses is a property of how that package was built,
+/// not something the prefix declares. This list and its order are conda's own
+/// (`_get_path_dirs` in `conda/activate.py`); the order matters because it is
+/// what decides which binary wins when two directories carry the same name.
+/// Getting the set wrong fails silently: the package installs correctly and
+/// then exports nothing.
+///
+/// Beyond the three classic locations (prefix root, `Scripts\`, `Library\bin\`):
+///
+/// * `Library\<msys2 env>\bin` -- the modern MSYS2 environments, see
+///   [`MSYS2_ENVIRONMENTS`].
+/// * `Library\mingw-w64\bin` -- the legacy MSYS2 variant, used by the `m2w64-*`
+///   packages; `conda:m2w64-toolchain` puts its whole GCC cross toolchain there.
+/// * `Library\usr\bin` -- where every `m2-*` package lands. Verified on win-64:
+///   without it `conda:m2-make`, `conda:m2-bash` and `conda:m2-pkg-config` each
+///   install correctly and then publish zero commands.
+/// * `bin\` -- packages cross-built from a unix layout (ripgrep installs
+///   `bin\rg.exe`). Verified by installing `conda:ripgrep` on win-64.
 ///
 /// Only existing directories are returned, so a prefix that lacks one of these
 /// does not contribute a dead PATH entry.
 fn conda_bin_dirs(root: &std::path::Path) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
+        let library = root.join("Library");
         candidates.push(root.to_path_buf());
+        if let Some(variant) = MSYS2_ENVIRONMENTS
+            .iter()
+            .find(|variant| library.join(variant).is_dir())
+        {
+            candidates.push(library.join(variant).join("bin"));
+        }
+        candidates.push(library.join("mingw-w64").join("bin"));
+        candidates.push(library.join("usr").join("bin"));
+        candidates.push(library.join("bin"));
         candidates.push(root.join("Scripts"));
-        candidates.push(root.join("Library").join("bin"));
         candidates.push(root.join("bin"));
     } else {
         candidates.push(root.join("bin"));
@@ -1385,6 +1415,117 @@ mod tests {
         // Non-existent candidates must not become dead PATH entries.
         assert!(!dirs.contains(&root.join("Scripts")));
         assert!(!dirs.contains(&root.join("Library").join("bin")));
+    }
+
+    /// Regression: every `m2-*` package installs into `Library\usr\bin`, which
+    /// was missing from the candidate list. The install succeeded and then
+    /// published nothing, which is the silent half of this failure mode:
+    /// `osdk where --bins conda:m2-make` reported `published (0)` for a prefix
+    /// whose `make.exe` was on disk the whole time. Verified against
+    /// `conda:m2-make`, `conda:m2-bash` and `conda:m2-pkg-config` on win-64.
+    #[cfg(windows)]
+    #[test]
+    fn windows_prefixes_include_the_msys2_and_mingw_library_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let usr_bin = root.join("Library").join("usr").join("bin");
+        let mingw_bin = root.join("Library").join("mingw-w64").join("bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::create_dir_all(&mingw_bin).unwrap();
+
+        let dirs = conda_bin_dirs(root);
+        assert!(
+            dirs.contains(&usr_bin),
+            "m2-* packages live in Library\\usr\\bin; got {dirs:?}"
+        );
+        assert!(
+            dirs.contains(&mingw_bin),
+            "m2w64-* packages live in Library\\mingw-w64\\bin; got {dirs:?}"
+        );
+    }
+
+    /// A prefix may carry one of several MSYS2 environments, and conda puts
+    /// only the first match on PATH. Two of them are two incompatible runtimes,
+    /// so exposing both would decide per command which one wins.
+    #[cfg(windows)]
+    #[test]
+    fn only_the_first_msys2_environment_present_is_exposed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let library = root.join("Library");
+        // `ucrt64` outranks `mingw64` in conda's own order.
+        std::fs::create_dir_all(library.join("mingw64").join("bin")).unwrap();
+        std::fs::create_dir_all(library.join("ucrt64").join("bin")).unwrap();
+
+        let dirs = conda_bin_dirs(root);
+        assert!(dirs.contains(&library.join("ucrt64").join("bin")));
+        assert!(
+            !dirs.contains(&library.join("mingw64").join("bin")),
+            "only the highest-priority MSYS2 env may be exposed; got {dirs:?}"
+        );
+    }
+
+    /// The order is conda's activation order, which is what decides the winner
+    /// when the same command name exists in two of these directories. A set
+    /// with the right members in the wrong order still resolves incorrectly.
+    #[cfg(windows)]
+    #[test]
+    fn windows_candidate_order_matches_conda_activation_order() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let library = root.join("Library");
+        for directory in [
+            library.join("ucrt64").join("bin"),
+            library.join("mingw-w64").join("bin"),
+            library.join("usr").join("bin"),
+            library.join("bin"),
+            root.join("Scripts"),
+            root.join("bin"),
+        ] {
+            std::fs::create_dir_all(&directory).unwrap();
+        }
+
+        assert_eq!(
+            conda_bin_dirs(root),
+            vec![
+                root.to_path_buf(),
+                library.join("ucrt64").join("bin"),
+                library.join("mingw-w64").join("bin"),
+                library.join("usr").join("bin"),
+                library.join("bin"),
+                root.join("Scripts"),
+                root.join("bin"),
+            ]
+        );
+    }
+
+    /// `bin_names` derives ownership by matching `paths.json` entries against
+    /// the same directory list, so a directory missing from it is invisible
+    /// twice over: absent from PATH and unattributable as a command.
+    #[cfg(windows)]
+    #[test]
+    fn ownership_resolves_for_packages_installed_under_library_usr_bin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let bin = prefix.join("Library").join("usr").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("make.exe"), b"").unwrap();
+        std::fs::write(bin.join("bash.exe"), b"").unwrap();
+
+        write_owned_paths(
+            prefix,
+            &[
+                "Library/usr/bin/make.exe".to_string(),
+                "Library/usr/bin/bash.exe".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            owned_bin_names(prefix),
+            Some(vec!["bash".to_string(), "make".to_string()]),
+            "commands in Library\\usr\\bin must be attributable to their package"
+        );
     }
 
     /// A channel is a remote party. The archive name becomes a path under the

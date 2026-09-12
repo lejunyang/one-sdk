@@ -81,10 +81,36 @@ backend 在 Linux 上基本不可用。
 
 ## Windows 上的 bin 目录
 
-conda 在 Windows 的经典布局是 prefix 根、`Scripts\`、`Library\bin\`。但这不够：
-从 unix 布局交叉构建的包（ripgrep 就是，它的 `rg.exe` 装在 `bin\rg.exe`）也用
-`bin\`。只列经典三处会让装好的工具看起来一个命令都不导出。四处都要搜，且只返回
-真实存在的目录，避免制造无效 PATH 条目。
+conda 没有唯一的 bin 目录。Windows 上一个 prefix 最多有七个，包用哪一个取决于它
+当初怎么构建，prefix 自身并不声明。这个列表和顺序来自 conda 自己的实现
+（`conda/activate.py` 里的 `_get_path_dirs`）：
+
+1. prefix 根
+2. `Library\<msys2 env>\bin`
+3. `Library\mingw-w64\bin`
+4. `Library\usr\bin`
+5. `Library\bin`
+6. `Scripts\`
+7. `bin\`
+
+顺序和集合同样重要：同名命令同时存在于两个目录时，是顺序决定谁生效，所以成员正确
+但顺序错误的列表一样会解析错。
+
+集合搞错是静默失败——包照常下载、校验、安装成功，然后什么都不导出。有两个案例实际
+踩到过：
+
+- `bin\`：从 unix 布局交叉构建的包用它（ripgrep 装的是 `bin\rg.exe`）。已用
+  `conda:ripgrep` 在 win-64 验证。
+- `Library\usr\bin`：所有 `m2-*` 包都装在这里。缺了它，`conda:m2-make`、
+  `conda:m2-bash`、`conda:m2-pkg-config` 都能装成功，然后报 `published (0)`，而
+  可执行文件一直好好地躺在磁盘上。`Library\mingw-w64\bin` 是同一个问题的旧版变体，
+  供 `m2w64-*` 包使用：`conda:m2w64-toolchain` 的整套 GCC 交叉工具链都在那里。
+
+几个 MSYS2 环境（`ucrt64`、`clang64`、`mingw64`、`clangarm64`）是互斥的，只暴露
+存在的第一个。同一个 prefix 里出现两个意味着两套不兼容的运行时，把它们都放进 PATH
+会变成逐个命令去赌哪边生效。
+
+只返回真实存在的目录，避免制造无效 PATH 条目。
 
 ## 命令归属：谁装的这个可执行文件
 

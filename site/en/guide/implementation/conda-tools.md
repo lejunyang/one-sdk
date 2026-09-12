@@ -103,12 +103,41 @@ receipt matches the identity, but performs no whole-tree symlink scan.
 
 ## Bin directories on Windows
 
-The classic conda layout on Windows is the prefix root, `Scripts\` and
-`Library\bin\`. That is not sufficient: packages cross-built from a unix layout
-(ripgrep is one -- its `rg.exe` installs to `bin\rg.exe`) use `bin\` as well.
-Listing only the classic three makes a correctly installed tool look like it
-exports no commands. All four are searched, and only directories that exist are
-returned so a prefix cannot contribute a dead PATH entry.
+There is no single conda bin directory. On Windows a prefix has up to seven, and
+which one a package uses is a property of how that package was built, not
+something the prefix declares. The list and its order are conda's own
+(`_get_path_dirs` in `conda/activate.py`):
+
+1. the prefix root
+2. `Library\<msys2 env>\bin`
+3. `Library\mingw-w64\bin`
+4. `Library\usr\bin`
+5. `Library\bin`
+6. `Scripts\`
+7. `bin\`
+
+The order matters as much as the set: it is what decides the winner when the
+same command name exists in two of these directories, so a list with the right
+members in the wrong order still resolves incorrectly.
+
+Getting the set wrong fails silently -- the package downloads, verifies and
+installs correctly, and then exports nothing. Two cases proved this in practice:
+
+- `bin\` -- packages cross-built from a unix layout use it (ripgrep installs
+  `bin\rg.exe`). Verified with `conda:ripgrep` on win-64.
+- `Library\usr\bin` -- where every `m2-*` package lands. Without it
+  `conda:m2-make`, `conda:m2-bash` and `conda:m2-pkg-config` each installed
+  correctly and reported `published (0)` while their executables sat on disk.
+  `Library\mingw-w64\bin` is the same story for the legacy `m2w64-*` packages:
+  `conda:m2w64-toolchain` keeps its whole GCC cross toolchain there.
+
+The MSYS2 environments (`ucrt64`, `clang64`, `mingw64`, `clangarm64`) are
+mutually exclusive: only the first one present is exposed. Two of them in one
+prefix are two incompatible runtimes, and putting both on PATH would decide per
+command which of them wins.
+
+Only directories that exist are returned, so a prefix cannot contribute a dead
+PATH entry.
 
 ## Command ownership: who installed this executable
 
