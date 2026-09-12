@@ -31,6 +31,10 @@
 `OSDK_BIN_DIR` 属于 osdk 二进制安装脚本，不是 SDK 状态目录；不要把它与
 `OSDK_INSTALL_DIR` 混用。
 
+安装脚本会在安装完成后询问 `OSDK_CONFIG_DIR`、`OSDK_DATA_DIR` 和 `OSDK_CACHE_DIR`，
+并把选定值写进所选 shell 的启动文件，因此这三项通常不必手工设置。详见
+[安装后的 shell 配置](./installation#安装后的-shell-配置)。
+
 ## CAS 与物化
 
 验证、解压后的 SDK 文件和模型文件按 BLAKE3 内容哈希写入 CAS，路径形如

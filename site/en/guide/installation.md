@@ -13,13 +13,8 @@ curl --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh | sh
 ```
 
-The default destination is `~/.local/bin`. Make sure it is on `PATH`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Add that line to `~/.bashrc` or `~/.zshrc` to persist it.
+The default destination is `~/.local/bin`. The installer then walks you through
+shell setup, described in [Shell setup](#shell-setup) below.
 
 ## Windows
 
@@ -29,8 +24,87 @@ Run this in PowerShell:
 irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
-The default destination is `%LOCALAPPDATA%\Programs\osdk\bin`. Add it to your
-user `PATH` if the installer reports that it is missing.
+The default destination is `%LOCALAPPDATA%\Programs\osdk\bin`.
+
+## Shell setup
+
+Once the binaries are in place, the installer:
+
+1. detects the shells present on your system, lists each one's startup file,
+   and lets you select which of them to configure;
+2. asks for `OSDK_CONFIG_DIR`, `OSDK_DATA_DIR` and `OSDK_CACHE_DIR`, proposing
+   a default for each that you can accept by pressing Enter;
+3. validates every directory: it must be absolute, creatable, and actually
+   writable. An unusable answer is explained and asked again;
+4. writes a marked block into each selected shell's startup file, exporting
+   those variables, putting the binary directory on `PATH`, and invoking
+   `osdk activate`.
+
+The proposed defaults are the locations osdk derives on its own, so accepting
+them relocates nothing — it only makes the layout explicit. The per-platform
+defaults are listed in
+[Storage, Shell, and Diagnostics](./storage-shell#directory-layout-and-overrides).
+
+bash, zsh, fish, and PowerShell are supported. On Windows, Windows PowerShell
+and PowerShell 7 keep separate profiles and are offered separately.
+
+The block looks like this:
+
+```text
+# >>> osdk initialize >>>
+...
+# <<< osdk initialize <<<
+```
+
+Rerunning the installer **replaces** that block rather than appending a second
+one. Everything outside it is preserved, and the original file is first backed
+up as `<startup file>.osdk-backup`. Delete the whole block to remove the
+integration.
+
+### Activating the shell you are in
+
+Writing a startup file only affects new shells. The Windows installer also
+activates the session that launched it. On Unix a child process cannot modify
+its parent shell, so `--print-activation` writes the activation code to stdout
+and diverts everything else to stderr, making it safe to eval:
+
+```bash
+eval "$(sh install.sh --print-activation)"
+```
+
+You can also activate the current shell by hand after installing:
+
+```bash
+eval "$(osdk activate bash)"        # zsh works the same way
+osdk activate fish | source
+osdk activate powershell | Invoke-Expression
+```
+
+### Unattended installation
+
+Every prompt has a matching flag, and passing it suppresses that prompt:
+
+```bash
+sh install.sh --shells bash,zsh \
+  --config-dir "$HOME/.config/osdk" \
+  --data-dir "$HOME/.local/share/osdk" \
+  --cache-dir "$HOME/.cache/osdk"
+
+sh install.sh --accept-defaults     # configure every detected shell, all defaults
+sh install.sh --no-modify-shell     # install the binaries, touch no startup file
+```
+
+```powershell
+.\install.ps1 -Shells pwsh -ConfigDir "D:\osdk\config" `
+  -DataDir "D:\osdk\data" -CacheDir "D:\osdk\cache"
+
+.\install.ps1 -AcceptDefaults
+.\install.ps1 -NoModifyShell
+```
+
+Unix prompts read `/dev/tty` rather than stdin, so the piped `curl ... | sh`
+form stays interactive. With no terminal and no shell-setup flags, no startup
+file is modified.
 
 ## Customize the installation
 
@@ -57,6 +131,17 @@ sh install.sh \
 | `--base-url` | `OSDK_DOWNLOAD_BASE_URL` | GitHub or mirror base URL |
 | `--target` | `OSDK_TARGET` | Override automatic platform detection |
 | `--skip-verify` | `OSDK_SKIP_VERIFY=1` | Skip SHA-256 verification; not recommended |
+| `--shells` | `OSDK_SETUP_SHELLS` | Shells to configure: `all`, `none`, or a comma-separated list |
+| `--no-modify-shell` | — | Equivalent to `--shells none` |
+| `--config-dir` | — | Value to export as `OSDK_CONFIG_DIR` |
+| `--data-dir` | — | Value to export as `OSDK_DATA_DIR` |
+| `--cache-dir` | — | Value to export as `OSDK_CACHE_DIR` |
+| `-y`, `--accept-defaults` | `OSDK_ACCEPT_DEFAULTS=1` | Never prompt; accept every default |
+| `--print-activation` | — | Print activation code for the current shell to stdout |
+
+The `OSDK_CONFIG_DIR`, `OSDK_DATA_DIR` and `OSDK_CACHE_DIR` variables only
+replace the proposed defaults with your existing setup; they do **not** suppress
+their prompts. Use the flags above for that.
 
 Run `sh install.sh --help` for the complete help text.
 
@@ -75,7 +160,8 @@ Invoke-WebRequest `
 ```
 
 PowerShell accepts `-Version`, `-InstallDir`, `-Repository`, `-BaseUrl`,
-`-Target`, and `-SkipVerify`, plus the environment variables in the table.
+`-Target`, `-SkipVerify`, `-Shells`, `-NoModifyShell`, `-ConfigDir`, `-DataDir`,
+`-CacheDir`, and `-AcceptDefaults`, plus the environment variables in the table.
 
 ::: tip Verification
 Both installers download `SHA256SUMS` from the release and verify the archive
@@ -145,7 +231,8 @@ osdk use -g node@20
 node --version
 ```
 
-You can use shell activation instead of relying on fixed shims:
+You can use shell activation instead of relying on fixed shims. The installer
+already wires this up for the shells you selected; to do it by hand:
 
 ```bash
 eval "$(osdk activate bash)" # zsh, fish, and powershell are supported too

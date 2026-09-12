@@ -36,8 +36,18 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
-The installers download the latest release and verify it against
-`SHA256SUMS`. To choose a version or destination, download the script first:
+The installers download the latest release and verify it against `SHA256SUMS`.
+They then detect the shells on your system, ask which to configure, and let you
+confirm or change where osdk keeps its config, data, and cache. Each selected
+shell gets the environment variables plus `osdk activate`, so a new shell is
+ready to use. On Windows the current session is activated too; on Unix, add
+`--print-activation` and eval the output to activate the shell you are in:
+
+```bash
+eval "$(sh install.sh --print-activation)"
+```
+
+To choose a version or destination, download the script first:
 
 ```bash
 curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
@@ -49,6 +59,18 @@ Invoke-WebRequest `
   https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
   -OutFile install.ps1
 .\install.ps1 -Version 0.0.1 -InstallDir "$HOME\bin"
+```
+
+Every prompt has a flag, so unattended installs never block:
+
+```bash
+sh install.sh --shells bash,zsh --config-dir ~/.config/osdk --accept-defaults
+sh install.sh --no-modify-shell   # install the binaries only
+```
+
+```powershell
+.\install.ps1 -Shells pwsh -AcceptDefaults
+.\install.ps1 -NoModifyShell
 ```
 
 If Rust is already installed, `cargo install osdk-cli --locked` installs the

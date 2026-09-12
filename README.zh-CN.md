@@ -34,8 +34,16 @@ Windows PowerShell：
 irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
-安装器会下载最新版本，并使用 `SHA256SUMS` 校验。需要指定版本或安装目录时，
-先下载脚本再执行：
+安装器会下载最新版本并用 `SHA256SUMS` 校验，随后检测本机已有的 shell，询问需要
+配置哪些，并让你确认或修改 osdk 存放配置、数据和缓存的位置。被选中的 shell 会写入
+这些环境变量和 `osdk activate`，新开的 shell 即可直接使用。Windows 上还会激活当前
+会话；Unix 上加 `--print-activation` 并 eval 其输出，即可激活正在使用的 shell：
+
+```bash
+eval "$(sh install.sh --print-activation)"
+```
+
+需要指定版本或安装目录时，先下载脚本再执行：
 
 ```bash
 curl -sSfLO https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.sh
@@ -47,6 +55,18 @@ Invoke-WebRequest `
   https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 `
   -OutFile install.ps1
 .\install.ps1 -Version 0.0.1 -InstallDir "$HOME\bin"
+```
+
+每个交互项都有对应参数，因此无人值守安装不会卡住：
+
+```bash
+sh install.sh --shells bash,zsh --config-dir ~/.config/osdk --accept-defaults
+sh install.sh --no-modify-shell   # 只安装二进制
+```
+
+```powershell
+.\install.ps1 -Shells pwsh -AcceptDefaults
+.\install.ps1 -NoModifyShell
 ```
 
 如果本机已有 Rust，也可以运行 `cargo install osdk-cli --locked` 安装主命令 `osdk`。

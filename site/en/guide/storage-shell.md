@@ -32,6 +32,11 @@ Derived directories are:
 `OSDK_BIN_DIR` belongs to the osdk executable installer; it is not an SDK state
 directory and must not be confused with `OSDK_INSTALL_DIR`.
 
+The installer asks for `OSDK_CONFIG_DIR`, `OSDK_DATA_DIR` and `OSDK_CACHE_DIR`
+after installing, and writes the chosen values into the startup files of the
+shells you select, so these three rarely need to be set by hand. See
+[Shell setup](./installation#shell-setup).
+
 ## CAS and materialization
 
 After verification and extraction, SDK and model files enter the BLAKE3 CAS at

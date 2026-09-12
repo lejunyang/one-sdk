@@ -14,13 +14,8 @@ curl --proto '=https' --tlsv1.2 -sSf \
   OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
 ```
 
-默认安装到 `~/.local/bin`。请确认该目录已加入 `PATH`：
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-建议将这行加入 `~/.bashrc` 或 `~/.zshrc`。
+默认安装到 `~/.local/bin`。安装器随后会引导完成 shell 配置，见
+[安装后的 shell 配置](#安装后的-shell-配置)。
 
 ## Windows
 
@@ -34,8 +29,80 @@ irm https://gh-proxy.com/https://raw.githubusercontent.com/lejunyang/one-sdk/mai
 这些示例既代理 Raw 安装脚本，也通过 `OSDK_DOWNLOAD_BASE_URL` 代理脚本后续
 下载的 GitHub Release 二进制和 `SHA256SUMS`。
 
-默认安装到 `%LOCALAPPDATA%\Programs\osdk\bin`。如果安装器提示该目录不在
-`PATH`，请将它加入当前用户的 `PATH`。
+默认安装到 `%LOCALAPPDATA%\Programs\osdk\bin`。
+
+## 安装后的 shell 配置
+
+二进制就位后，安装器会：
+
+1. 检测本机已存在的 shell，列出各自的启动文件路径，让你批量选择要配置哪些；
+2. 依次询问 `OSDK_CONFIG_DIR`、`OSDK_DATA_DIR`、`OSDK_CACHE_DIR`，每项都给出
+   默认值，直接回车即接受；
+3. 校验每个目录：必须是绝对路径、能够创建、并且实际可写。不满足时说明原因并
+   重新询问；
+4. 向每个选中的 shell 写入一段带标记的配置块，内容包括上述环境变量、把二进制
+   目录加入 `PATH`，以及调用 `osdk activate`。
+
+默认值与 osdk 自身推导的位置一致，因此接受默认不会改变任何东西的落盘位置，只是
+把它显式写出来。各平台默认值见
+[存储、Shell 与扩展](./storage-shell#目录布局与覆盖)。
+
+支持 bash、zsh、fish 和 PowerShell。Windows 上 Windows PowerShell 与 PowerShell 7
+使用各自独立的 profile，因此分别列出。
+
+配置块形如：
+
+```text
+# >>> osdk initialize >>>
+...
+# <<< osdk initialize <<<
+```
+
+重复运行安装器会**替换**这个块，而不是追加第二份；块以外的内容原样保留，原文件
+也会先备份为 `<启动文件>.osdk-backup`。删除整个块即可移除集成。
+
+### 在当前 shell 立即生效
+
+写入启动文件只对新开的 shell 生效。Windows 安装器会顺带激活运行它的那个会话；
+Unix 上子进程无法修改父 shell，因此提供 `--print-activation`——它把激活代码写到
+stdout、其余输出转到 stderr，于是可以直接 eval：
+
+```bash
+eval "$(sh install.sh --print-activation)"
+```
+
+也可以在安装完成后手动激活当前 shell：
+
+```bash
+eval "$(osdk activate bash)"        # zsh 同理
+osdk activate fish | source
+osdk activate powershell | Invoke-Expression
+```
+
+### 无人值守安装
+
+每个交互项都有对应参数，传了参数就不再询问：
+
+```bash
+sh install.sh --shells bash,zsh \
+  --config-dir "$HOME/.config/osdk" \
+  --data-dir "$HOME/.local/share/osdk" \
+  --cache-dir "$HOME/.cache/osdk"
+
+sh install.sh --accept-defaults     # 配置检测到的全部 shell，全部使用默认目录
+sh install.sh --no-modify-shell     # 只安装二进制，不改动任何启动文件
+```
+
+```powershell
+.\install.ps1 -Shells pwsh -ConfigDir "D:\osdk\config" `
+  -DataDir "D:\osdk\data" -CacheDir "D:\osdk\cache"
+
+.\install.ps1 -AcceptDefaults
+.\install.ps1 -NoModifyShell
+```
+
+Unix 提示读的是 `/dev/tty` 而不是 stdin，因此 `curl ... | sh` 这种管道用法仍然可以
+交互。没有终端且未传任何 shell 相关参数时，安装器不会改动任何启动文件。
 
 ## 自定义安装
 
@@ -64,6 +131,16 @@ sh install.sh \
 | `--base-url` | `OSDK_DOWNLOAD_BASE_URL` | GitHub 或下载镜像根地址 |
 | `--target` | `OSDK_TARGET` | 覆盖自动识别的平台目标 |
 | `--skip-verify` | `OSDK_SKIP_VERIFY=1` | 跳过 SHA-256 校验，不推荐 |
+| `--shells` | `OSDK_SETUP_SHELLS` | 要配置的 shell：`all`、`none` 或逗号分隔列表 |
+| `--no-modify-shell` | — | 等价于 `--shells none` |
+| `--config-dir` | — | 写入为 `OSDK_CONFIG_DIR` 的值 |
+| `--data-dir` | — | 写入为 `OSDK_DATA_DIR` 的值 |
+| `--cache-dir` | — | 写入为 `OSDK_CACHE_DIR` 的值 |
+| `-y`, `--accept-defaults` | `OSDK_ACCEPT_DEFAULTS=1` | 不询问，全部接受默认值 |
+| `--print-activation` | — | 把当前 shell 的激活代码输出到 stdout |
+
+`OSDK_CONFIG_DIR`、`OSDK_DATA_DIR`、`OSDK_CACHE_DIR` 这三个环境变量只把默认值换成
+你已有的设置，**不会**跳过询问；要跳过请使用上表中对应的参数。
 
 运行 `sh install.sh --help` 查看完整帮助。
 
@@ -83,7 +160,8 @@ Invoke-WebRequest `
 ```
 
 PowerShell 参数为 `-Version`、`-InstallDir`、`-Repository`、`-BaseUrl`、
-`-Target` 和 `-SkipVerify`，也支持上表中的环境变量。
+`-Target`、`-SkipVerify`、`-Shells`、`-NoModifyShell`、`-ConfigDir`、`-DataDir`、
+`-CacheDir` 和 `-AcceptDefaults`，也支持上表中的环境变量。
 
 ::: tip 安装校验
 两个安装器默认下载 Release 中的 `SHA256SUMS` 并验证归档。只有在你已经通过
@@ -150,7 +228,8 @@ osdk use -g node@20
 node --version
 ```
 
-也可以使用 shell 激活，不依赖固定 shim：
+也可以使用 shell 激活，不依赖固定 shim。安装器已经为选中的 shell 写好了这一步，
+手动接入时：
 
 ```bash
 eval "$(osdk activate bash)" # 也支持 zsh、fish、powershell
