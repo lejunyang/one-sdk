@@ -8,14 +8,29 @@ BASE_URL=${OSDK_DOWNLOAD_BASE_URL:-https://github.com}
 TARGET=${OSDK_TARGET:-}
 SKIP_VERIFY=${OSDK_SKIP_VERIFY:-0}
 
+# Post-install shell setup. The three directory variables seed the proposed
+# defaults from the environment, so a shell that already exports them keeps its
+# own layout; the flags below are the prompt-suppressing form.
+SETUP_SHELLS=${OSDK_SETUP_SHELLS:-}
+SHELLS_EXPLICIT=0
+[ -z "$SETUP_SHELLS" ] || SHELLS_EXPLICIT=1
+CONFIG_DIR=${OSDK_CONFIG_DIR:-}
+DATA_DIR=${OSDK_DATA_DIR:-}
+CACHE_DIR=${OSDK_CACHE_DIR:-}
+CONFIG_DIR_EXPLICIT=0
+DATA_DIR_EXPLICIT=0
+CACHE_DIR_EXPLICIT=0
+ACCEPT_DEFAULTS=${OSDK_ACCEPT_DEFAULTS:-0}
+PRINT_ACTIVATION=0
+
 usage() {
   cat <<'EOF'
-Install osdk from GitHub Releases.
+Install osdk from GitHub Releases, then set up shell integration.
 
 Usage:
   install.sh [options]
 
-Options:
+Download options:
   --version <version>       Release version, with or without "v" (default: latest)
   --install-dir <path>      Binary directory (default: $HOME/.local/bin)
   --repository <owner/repo> GitHub repository (default: lejunyang/one-sdk)
@@ -24,15 +39,45 @@ Options:
   --skip-verify             Skip SHA-256 verification
   -h, --help                Show this help
 
+Shell setup options. Every prompt has a flag, so passing the flags you care
+about lets the installer run unattended:
+  --shells <list>           Shells to configure: "all", "none", or a comma
+                            separated list of bash, zsh, fish, pwsh
+  --no-modify-shell         Same as --shells none: write no shell startup file
+  --config-dir <path>       Value exported as OSDK_CONFIG_DIR
+  --data-dir <path>         Value exported as OSDK_DATA_DIR
+  --cache-dir <path>        Value exported as OSDK_CACHE_DIR
+  -y, --accept-defaults     Never prompt; accept every proposed default
+  --print-activation        Print activation code for the current shell on
+                            stdout and send all other output to stderr, so
+                              eval "$(sh install.sh --print-activation)"
+                            also activates osdk in the shell you are in now
+
 Environment equivalents:
-  OSDK_VERSION, OSDK_BIN_DIR, OSDK_REPOSITORY,
-  OSDK_DOWNLOAD_BASE_URL, OSDK_TARGET, OSDK_SKIP_VERIFY
+  OSDK_VERSION, OSDK_BIN_DIR, OSDK_REPOSITORY, OSDK_DOWNLOAD_BASE_URL,
+  OSDK_TARGET, OSDK_SKIP_VERIFY, OSDK_SETUP_SHELLS, OSDK_ACCEPT_DEFAULTS
+
+OSDK_CONFIG_DIR, OSDK_DATA_DIR and OSDK_CACHE_DIR seed the proposed defaults
+instead of suppressing their prompts; use the flags above to suppress them.
+
+Prompts are read from /dev/tty, so `curl ... | sh` stays interactive. With no
+terminal and no shell-setup flags, no shell startup file is modified.
 EOF
 }
 
 fail() {
   printf 'osdk installer: %s\n' "$*" >&2
   exit 1
+}
+
+# Progress belongs on stdout, except under --print-activation, where stdout
+# carries the shell code the caller is about to eval.
+say() {
+  if [ "$PRINT_ACTIVATION" = 1 ]; then
+    printf "$@" >&2
+  else
+    printf "$@"
+  fi
 }
 
 need_value() {
@@ -68,6 +113,43 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-verify)
       SKIP_VERIFY=1
+      shift
+      ;;
+    --shells)
+      need_value "$@"
+      SETUP_SHELLS=$2
+      SHELLS_EXPLICIT=1
+      shift 2
+      ;;
+    --no-modify-shell)
+      SETUP_SHELLS=none
+      SHELLS_EXPLICIT=1
+      shift
+      ;;
+    --config-dir)
+      need_value "$@"
+      CONFIG_DIR=$2
+      CONFIG_DIR_EXPLICIT=1
+      shift 2
+      ;;
+    --data-dir)
+      need_value "$@"
+      DATA_DIR=$2
+      DATA_DIR_EXPLICIT=1
+      shift 2
+      ;;
+    --cache-dir)
+      need_value "$@"
+      CACHE_DIR=$2
+      CACHE_DIR_EXPLICIT=1
+      shift 2
+      ;;
+    -y|--accept-defaults)
+      ACCEPT_DEFAULTS=1
+      shift
+      ;;
+    --print-activation)
+      PRINT_ACTIVATION=1
       shift
       ;;
     -h|--help)
@@ -527,6 +609,29 @@ acquire_portable_lock() {
   fail "another installer may be updating $INSTALL_DIR (lock: $lock_file)"
 }
 
+# Shell setup prompts for a directory and can therefore block for an unbounded
+# time. Handing the lock back first keeps a concurrent installer from waiting on
+# a human, and leaves cleanup's own release a no-op.
+release_installer_lock() {
+  released_mode=$lock_mode
+  lock_mode=
+  case $released_mode in
+    portable|portable-flock)
+      if [ -n "$lock_owner_file" ] && path_exists "$lock_file" &&
+         [ "$lock_owner_file" -ef "$lock_file" ]; then
+        rm -f "$lock_file"
+      fi
+      ;;
+  esac
+  if [ "$released_mode" = portable-flock ]; then
+    exec 9<&- || :
+  fi
+  if [ -n "$lock_owner_file" ]; then
+    rm -f "$lock_owner_file"
+    lock_owner_file=
+  fi
+}
+
 rollback_install() {
   [ "$promotion_active" = "1" ] || return 0
   promotion_active=0
@@ -572,7 +677,406 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal HUP INT TERM
 
-printf 'Downloading %s\n' "$release_url/$archive"
+# ---------------------------------------------------------------------------
+# Shell setup
+# ---------------------------------------------------------------------------
+
+BEGIN_MARKER='# >>> osdk initialize >>>'
+END_MARKER='# <<< osdk initialize <<<'
+SUPPORTED_SHELLS='bash zsh fish pwsh'
+
+tty_readable=0
+if [ -r /dev/tty ] && [ -w /dev/tty ] && { : >/dev/tty; } 2>/dev/null; then
+  tty_readable=1
+fi
+
+# Single-quote for POSIX shells: only `'` is special inside '...'.
+posix_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# fish treats both `\` and `'` as escapes inside '...', so order matters.
+fish_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")"
+}
+
+powershell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+expand_tilde() {
+  case $1 in
+    '~') printf '%s\n' "$HOME" ;;
+    '~/'*) printf '%s\n' "$HOME/${1#'~/'}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# Mirror what osdk itself derives from the `directories` crate, so accepting the
+# proposed value changes where nothing lands -- it only makes it explicit.
+default_state_dir() {
+  case "$(uname -s)" in
+    Darwin)
+      case $1 in
+        config|data) printf '%s\n' "$HOME/Library/Application Support/osdk" ;;
+        cache) printf '%s\n' "$HOME/Library/Caches/osdk" ;;
+      esac
+      ;;
+    *)
+      case $1 in
+        config) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/osdk" ;;
+        data) printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/osdk" ;;
+        cache) printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/osdk" ;;
+      esac
+      ;;
+  esac
+}
+
+# `[ -w ]` consults permission bits, which read-only mounts, full filesystems
+# and ACLs all disagree with. Create the directory and a probe file instead.
+directory_is_usable() {
+  candidate=$1
+  directory_error=
+  case $candidate in
+    '')
+      directory_error='the path must not be empty'
+      return 1
+      ;;
+    /*) ;;
+    *)
+      directory_error='the path must be absolute'
+      return 1
+      ;;
+  esac
+  case $candidate in
+    *[!-A-Za-z0-9_./\ @+:]*)
+      # Shell startup files are re-read by every session; refusing exotic bytes
+      # here is cheaper than debugging a quoting failure at every login.
+      directory_error='the path may only contain letters, digits, spaces and - _ . / @ + :'
+      return 1
+      ;;
+  esac
+  if path_exists "$candidate" && [ ! -d "$candidate" ]; then
+    directory_error='the path exists and is not a directory'
+    return 1
+  fi
+  if ! mkdir -p "$candidate" 2>/dev/null; then
+    directory_error='the directory could not be created'
+    return 1
+  fi
+  directory_probe="$candidate/.osdk-write-probe.$$"
+  if ! : > "$directory_probe" 2>/dev/null; then
+    directory_error='the directory is not writable'
+    return 1
+  fi
+  rm -f "$directory_probe" 2>/dev/null || :
+  return 0
+}
+
+detect_installed_shells() {
+  DETECTED_SHELLS=
+  for shell_candidate in $SUPPORTED_SHELLS; do
+    if command -v "$shell_candidate" >/dev/null 2>&1; then
+      DETECTED_SHELLS="${DETECTED_SHELLS:+$DETECTED_SHELLS }$shell_candidate"
+    fi
+  done
+}
+
+shell_rc_path() {
+  case $1 in
+    bash)
+      # A macOS Terminal tab is a login shell and never reads .bashrc.
+      if [ "$(uname -s)" = Darwin ]; then
+        printf '%s\n' "$HOME/.bash_profile"
+      else
+        printf '%s\n' "$HOME/.bashrc"
+      fi
+      ;;
+    zsh) printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" ;;
+    fish) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ;;
+    pwsh)
+      printf '%s\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/powershell/Microsoft.PowerShell_profile.ps1"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve "all", "none", names and (interactively) 1-based indices into a
+# deduplicated shell list. Sets SELECTED_SHELLS, or selection_error on refusal.
+resolve_shell_selection() {
+  raw_selection=$1
+  allow_indices=$2
+  selection_error=
+  SELECTED_SHELLS=
+
+  case $raw_selection in
+    ''|all|ALL|All)
+      SELECTED_SHELLS=$DETECTED_SHELLS
+      return 0
+      ;;
+    none|NONE|None)
+      return 0
+      ;;
+  esac
+
+  for selection_token in $(printf '%s' "$raw_selection" | tr ',' ' '); do
+    resolved_shell=
+    case $selection_token in
+      [0-9]*)
+        if [ "$allow_indices" != 1 ]; then
+          selection_error="expected a shell name, not \`$selection_token\`"
+          return 1
+        fi
+        selection_index=0
+        for shell_candidate in $DETECTED_SHELLS; do
+          selection_index=$((selection_index + 1))
+          if [ "$selection_index" = "$selection_token" ]; then
+            resolved_shell=$shell_candidate
+            break
+          fi
+        done
+        ;;
+      powershell)
+        resolved_shell=pwsh
+        ;;
+      *)
+        for shell_candidate in $SUPPORTED_SHELLS; do
+          if [ "$shell_candidate" = "$selection_token" ]; then
+            resolved_shell=$shell_candidate
+            break
+          fi
+        done
+        ;;
+    esac
+    if [ -z "$resolved_shell" ]; then
+      selection_error="unknown shell selection \`$selection_token\`"
+      return 1
+    fi
+    case " $SELECTED_SHELLS " in
+      *" $resolved_shell "*) ;;
+      *) SELECTED_SHELLS="${SELECTED_SHELLS:+$SELECTED_SHELLS }$resolved_shell" ;;
+    esac
+  done
+  return 0
+}
+
+ask_tty() {
+  printf '%s' "$1" > /dev/tty
+  ANSWER=
+  IFS= read -r ANSWER < /dev/tty || return 1
+  # Trim surrounding blanks so a stray space cannot become part of a path.
+  ANSWER=$(printf '%s' "$ANSWER" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  return 0
+}
+
+prompt_shell_selection() {
+  printf 'Detected shells:\n' > /dev/tty
+  selection_index=0
+  for shell_candidate in $DETECTED_SHELLS; do
+    selection_index=$((selection_index + 1))
+    printf '  %s) %-5s %s\n' \
+      "$selection_index" "$shell_candidate" "$(shell_rc_path "$shell_candidate")" \
+      > /dev/tty
+  done
+  while :; do
+    if ! ask_tty 'Configure which shells? [numbers/names, all, none] (all): '; then
+      printf '\n' > /dev/tty
+      return 1
+    fi
+    if resolve_shell_selection "$ANSWER" 1; then
+      return 0
+    fi
+    printf '  %s\n' "$selection_error" > /dev/tty
+  done
+}
+
+# Sets the named variable to a validated directory, prompting until the answer
+# is usable. Non-interactive callers get one validation pass and a hard failure.
+resolve_directory() {
+  variable_label=$1
+  current_value=$2
+  is_explicit=$3
+  default_value=$(default_state_dir "$4")
+  RESOLVED_DIRECTORY=
+
+  if [ "$is_explicit" = 1 ] || { [ -n "$current_value" ] && [ "$prompt_enabled" != 1 ]; }; then
+    candidate_value=$(expand_tilde "$current_value")
+    directory_is_usable "$candidate_value" ||
+      fail "$variable_label=$candidate_value is unusable: $directory_error"
+    RESOLVED_DIRECTORY=$candidate_value
+    return 0
+  fi
+
+  proposed_value=${current_value:-$default_value}
+  proposed_value=$(expand_tilde "$proposed_value")
+
+  if [ "$prompt_enabled" != 1 ]; then
+    directory_is_usable "$proposed_value" ||
+      fail "$variable_label=$proposed_value is unusable: $directory_error"
+    RESOLVED_DIRECTORY=$proposed_value
+    return 0
+  fi
+
+  while :; do
+    if ! ask_tty "$variable_label [$proposed_value]: "; then
+      printf '\n' > /dev/tty
+      return 1
+    fi
+    candidate_value=${ANSWER:-$proposed_value}
+    candidate_value=$(expand_tilde "$candidate_value")
+    if directory_is_usable "$candidate_value"; then
+      RESOLVED_DIRECTORY=$candidate_value
+      return 0
+    fi
+    printf '  %s: %s\n' "$candidate_value" "$directory_error" > /dev/tty
+  done
+}
+
+render_block_posix() {
+  activate_shell=$1
+  quoted_bin=$(posix_quote "$INSTALL_DIR")
+  cat <<EOF
+export OSDK_CONFIG_DIR=$(posix_quote "$CONFIG_DIR")
+export OSDK_DATA_DIR=$(posix_quote "$DATA_DIR")
+export OSDK_CACHE_DIR=$(posix_quote "$CACHE_DIR")
+_osdk_bin=$quoted_bin
+case ":\$PATH:" in
+  *":\$_osdk_bin:"*) ;;
+  *) PATH="\$_osdk_bin:\$PATH" ;;
+esac
+export PATH
+if [ -x "\$_osdk_bin/osdk" ]; then
+  eval "\$("\$_osdk_bin/osdk" activate $activate_shell)"
+fi
+unset _osdk_bin
+EOF
+}
+
+render_block_fish() {
+  quoted_bin=$(fish_quote "$INSTALL_DIR")
+  cat <<EOF
+set -gx OSDK_CONFIG_DIR $(fish_quote "$CONFIG_DIR")
+set -gx OSDK_DATA_DIR $(fish_quote "$DATA_DIR")
+set -gx OSDK_CACHE_DIR $(fish_quote "$CACHE_DIR")
+set -l _osdk_bin $quoted_bin
+if not contains -- \$_osdk_bin \$PATH
+    set -gx PATH \$_osdk_bin \$PATH
+end
+if test -x "\$_osdk_bin/osdk"
+    "\$_osdk_bin/osdk" activate fish | source
+end
+set -e _osdk_bin
+EOF
+}
+
+render_block_powershell() {
+  quoted_bin=$(powershell_quote "$INSTALL_DIR")
+  cat <<EOF
+\$env:OSDK_CONFIG_DIR = $(powershell_quote "$CONFIG_DIR")
+\$env:OSDK_DATA_DIR = $(powershell_quote "$DATA_DIR")
+\$env:OSDK_CACHE_DIR = $(powershell_quote "$CACHE_DIR")
+\$osdkBinDir = $quoted_bin
+if (-not ((\$env:PATH -split [IO.Path]::PathSeparator) -contains \$osdkBinDir)) {
+  \$env:PATH = \$osdkBinDir + [IO.Path]::PathSeparator + \$env:PATH
+}
+\$osdkExe = Join-Path \$osdkBinDir 'osdk'
+if (Test-Path -LiteralPath \$osdkExe) {
+  (& \$osdkExe activate powershell | Out-String) | Invoke-Expression
+}
+Remove-Variable osdkBinDir, osdkExe -ErrorAction SilentlyContinue
+EOF
+}
+
+render_block() {
+  case $1 in
+    bash|zsh) render_block_posix "$1" ;;
+    fish) render_block_fish ;;
+    pwsh) render_block_powershell ;;
+    *) fail "no activation block for shell: $1" ;;
+  esac
+}
+
+# Replace any previous managed block rather than appending a second one, so a
+# reinstall is idempotent and the user's own edits outside it are preserved.
+write_shell_block() {
+  target_shell=$1
+  rc_path=$(shell_rc_path "$target_shell")
+  rc_parent=${rc_path%/*}
+  [ "$rc_parent" = "$rc_path" ] || mkdir -p "$rc_parent" ||
+    fail "could not create $rc_parent"
+
+  rc_staged="$work_dir/rc.$target_shell"
+  : > "$rc_staged" || fail "could not stage a startup file for $target_shell"
+  if [ -f "$rc_path" ]; then
+    awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" '
+      $0 == begin { skip = 1; next }
+      $0 == end { skip = 0; next }
+      skip == 0 { print }
+    ' "$rc_path" > "$rc_staged" || fail "could not read $rc_path"
+    # A file whose last line lacks a newline would otherwise absorb our marker.
+    if [ -s "$rc_staged" ]; then
+      rc_last_byte=$(tail -c 1 "$rc_staged" | od -An -t u1 | tr -d ' ')
+      [ "$rc_last_byte" = 10 ] || printf '\n' >> "$rc_staged"
+    fi
+  fi
+
+  {
+    printf '%s\n' "$BEGIN_MARKER"
+    printf '%s\n' '# Written by the osdk installer. Rerunning it replaces this'
+    printf '%s\n' '# block; delete the block to remove the integration.'
+    render_block "$target_shell"
+    printf '%s\n' "$END_MARKER"
+  } >> "$rc_staged" || fail "could not render the osdk block for $target_shell"
+
+  if [ -f "$rc_path" ]; then
+    cp "$rc_path" "$rc_path.osdk-backup" ||
+      fail "could not back up $rc_path"
+  fi
+  cp "$rc_staged" "$rc_path" || fail "could not write $rc_path"
+
+  # Read the destination back rather than trusting the write we just made.
+  grep -F -- "$BEGIN_MARKER" "$rc_path" >/dev/null 2>&1 &&
+    grep -F -- "$END_MARKER" "$rc_path" >/dev/null 2>&1 &&
+    grep -F -- "OSDK_CONFIG_DIR" "$rc_path" >/dev/null 2>&1 ||
+    fail "verification of $rc_path failed after writing the osdk block"
+  CONFIGURED_RC_PATH=$rc_path
+}
+
+# The shell the user is typing in, for --print-activation. `$SHELL` is the login
+# shell, which is only a fallback: it is wrong whenever someone runs another one.
+detect_current_shell() {
+  CURRENT_SHELL=
+  shell_probe=
+  if [ -r "/proc/$PPID/comm" ]; then
+    shell_probe=$(cat "/proc/$PPID/comm" 2>/dev/null || :)
+  fi
+  if [ -z "$shell_probe" ]; then
+    shell_probe=$(ps -o comm= -p "$PPID" 2>/dev/null || :)
+  fi
+  for shell_probe in "$shell_probe" "${SHELL:-}"; do
+    shell_probe=${shell_probe##*/}
+    shell_probe=${shell_probe#-}
+    case $shell_probe in
+      bash|zsh|fish|pwsh)
+        CURRENT_SHELL=$shell_probe
+        return 0
+        ;;
+      powershell)
+        CURRENT_SHELL=pwsh
+        return 0
+        ;;
+      sh|dash)
+        # `sh` has no hook mechanism of its own; bash's snippet is POSIX enough.
+        CURRENT_SHELL=bash
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+say 'Downloading %s\n' "$release_url/$archive"
 download() {
   output=$1
   url=$2
@@ -670,10 +1174,76 @@ promotion_active=0
 rm -rf "$transaction_dir"
 transaction_dir=
 
-printf 'Installed osdk and osdk-shim to %s\n' "$INSTALL_DIR"
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *)
-    printf 'Add %s to PATH to run osdk.\n' "$INSTALL_DIR"
-    ;;
-esac
+say 'Installed osdk and osdk-shim to %s\n' "$INSTALL_DIR"
+release_installer_lock
+
+# ---------------------------------------------------------------------------
+# Shell setup, after the binaries are in place and the lock is handed back
+# ---------------------------------------------------------------------------
+
+prompt_enabled=0
+if [ "$ACCEPT_DEFAULTS" != 1 ] && [ "$tty_readable" = 1 ]; then
+  prompt_enabled=1
+fi
+
+detect_installed_shells
+SELECTED_SHELLS=
+selection_declined=0
+
+if [ "$SHELLS_EXPLICIT" = 1 ]; then
+  resolve_shell_selection "$SETUP_SHELLS" 0 || fail "$selection_error"
+elif [ "$ACCEPT_DEFAULTS" = 1 ]; then
+  SELECTED_SHELLS=$DETECTED_SHELLS
+elif [ "$prompt_enabled" = 1 ] && [ -n "$DETECTED_SHELLS" ]; then
+  if ! prompt_shell_selection; then
+    selection_declined=1
+  fi
+else
+  selection_declined=1
+fi
+
+if [ -n "$SELECTED_SHELLS" ] || [ "$PRINT_ACTIVATION" = 1 ]; then
+  resolve_directory OSDK_CONFIG_DIR "$CONFIG_DIR" "$CONFIG_DIR_EXPLICIT" config ||
+    fail 'shell setup was interrupted before OSDK_CONFIG_DIR was chosen'
+  CONFIG_DIR=$RESOLVED_DIRECTORY
+  resolve_directory OSDK_DATA_DIR "$DATA_DIR" "$DATA_DIR_EXPLICIT" data ||
+    fail 'shell setup was interrupted before OSDK_DATA_DIR was chosen'
+  DATA_DIR=$RESOLVED_DIRECTORY
+  resolve_directory OSDK_CACHE_DIR "$CACHE_DIR" "$CACHE_DIR_EXPLICIT" cache ||
+    fail 'shell setup was interrupted before OSDK_CACHE_DIR was chosen'
+  CACHE_DIR=$RESOLVED_DIRECTORY
+fi
+
+for target_shell in $SELECTED_SHELLS; do
+  write_shell_block "$target_shell"
+  say 'Configured %s in %s\n' "$target_shell" "$CONFIGURED_RC_PATH"
+done
+
+if [ "$PRINT_ACTIVATION" = 1 ]; then
+  detect_current_shell ||
+    fail 'could not identify the current shell; rerun without --print-activation'
+  render_block "$CURRENT_SHELL"
+  say 'Activated osdk in the current %s session.\n' "$CURRENT_SHELL"
+elif [ -n "$SELECTED_SHELLS" ]; then
+  say '\nosdk is configured for the next shell session. To use it right now:\n'
+  if detect_current_shell && [ "$CURRENT_SHELL" = fish ]; then
+    say '  %s/osdk activate fish | source\n' "$INSTALL_DIR"
+  elif detect_current_shell && [ "$CURRENT_SHELL" = pwsh ]; then
+    say '  & %s/osdk activate powershell | Out-String | Invoke-Expression\n' \
+      "$INSTALL_DIR"
+  else
+    say '  eval "$(%s/osdk activate %s)"\n' \
+      "$INSTALL_DIR" "${CURRENT_SHELL:-bash}"
+  fi
+  say 'Or rerun this installer with --print-activation and eval its output.\n'
+else
+  if [ "$selection_declined" = 1 ] && [ "$SHELLS_EXPLICIT" != 1 ]; then
+    say 'No shell was configured. Pass --shells to set one up unattended.\n'
+  fi
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *)
+      say 'Add %s to PATH to run osdk.\n' "$INSTALL_DIR"
+      ;;
+  esac
+fi

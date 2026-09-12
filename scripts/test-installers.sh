@@ -161,6 +161,10 @@ export OSDK_CONFIG_DIR="$test_root/osdk/config"
 export OSDK_STORE_DIR="$test_root/osdk/store"
 export OSDK_INSTALL_DIR="$test_root/osdk/installs"
 export OSDK_SKIP_VERIFY=0
+# These cases exercise binary placement, not shell setup. Say so explicitly
+# rather than relying on the runner happening to have no terminal: CI has none,
+# but a developer's shell does, and the installer prompts through /dev/tty.
+export OSDK_SETUP_SHELLS=none
 export CARGO_HOME="$test_root/cargo"
 export RUSTUP_HOME="$test_root/rustup"
 export CARGO_TARGET_DIR="$test_root/target"
@@ -410,6 +414,240 @@ fi
 assert_install_set "$rollback_install_dir" old
 assert_no_transaction_dirs "$rollback_install_dir"
 
+help_output=$(sh "$repo_root/install.sh" --help)
+grep -F -- "--version <version>" <<<"$help_output" >/dev/null
+grep -F -- "--install-dir <path>" <<<"$help_output" >/dev/null
+grep -F -- "--shells <list>" <<<"$help_output" >/dev/null
+grep -F -- "--config-dir <path>" <<<"$help_output" >/dev/null
+grep -F -- "--print-activation" <<<"$help_output" >/dev/null
+
+# --------------------------------------------------------------------------
+# Shell setup
+# --------------------------------------------------------------------------
+
+begin_marker='# >>> osdk initialize >>>'
+end_marker='# <<< osdk initialize <<<'
+
+# Every shell the installer can configure, so a selection test does not depend
+# on which shells the runner happens to have. `pwsh` is a real executable name
+# on Unix, so the fakes make the detector's answer deterministic.
+fake_shell_dir="$test_root/fake-shells"
+mkdir -p "$fake_shell_dir"
+for fake_shell in bash zsh fish pwsh; do
+  write_executable "$fake_shell_dir/$fake_shell" "fake $fake_shell"
+done
+
+# A separate HOME per case keeps one case's startup files out of another's.
+new_shell_home() {
+  local home="$test_root/shell-home-$1"
+  mkdir -p "$home"
+  printf '%s\n' "$home"
+}
+
+install_with_shell_setup() {
+  local home=$1
+  shift
+  HOME="$home" \
+    XDG_CONFIG_HOME="$home/.config" \
+    XDG_DATA_HOME="$home/.local/share" \
+    XDG_CACHE_HOME="$home/.cache" \
+    PATH="$fake_shell_dir:$PATH" \
+    OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
+    OSDK_REPOSITORY=example/one-sdk \
+    OSDK_SETUP_SHELLS= \
+    OSDK_CONFIG_DIR= \
+    OSDK_DATA_DIR= \
+    OSDK_CACHE_DIR= \
+    sh "$repo_root/install.sh" \
+      --version 9.8.7 \
+      --target "$target" \
+      "$@"
+}
+
+assert_managed_block() {
+  local rc_path=$1
+  [[ -f "$rc_path" ]] || {
+    printf 'Expected startup file %s\n' "$rc_path" >&2
+    exit 1
+  }
+  # Exactly one block, or a reinstall is appending instead of replacing.
+  local begin_count end_count
+  begin_count=$(grep -c -F -- "$begin_marker" "$rc_path" || true)
+  end_count=$(grep -c -F -- "$end_marker" "$rc_path" || true)
+  [[ $begin_count == 1 && $end_count == 1 ]] || {
+    printf 'Expected one osdk block in %s, found %s\n' "$rc_path" "$begin_count" >&2
+    exit 1
+  }
+}
+
+# The three directories, activation and PATH all land in the startup file, and
+# a non-interactive run accepts the defaults without blocking on a prompt.
+defaults_home=$(new_shell_home defaults)
+defaults_bin="$test_root/defaults-bin"
+install_with_shell_setup "$defaults_home" \
+  --install-dir "$defaults_bin" \
+  --shells bash,zsh,fish,pwsh \
+  --accept-defaults
+bash_rc="$defaults_home/.bashrc"
+[[ $(uname -s) == Darwin ]] && bash_rc="$defaults_home/.bash_profile"
+assert_managed_block "$bash_rc"
+assert_managed_block "$defaults_home/.zshrc"
+assert_managed_block "$defaults_home/.config/fish/config.fish"
+assert_managed_block \
+  "$defaults_home/.config/powershell/Microsoft.PowerShell_profile.ps1"
+# Defaults must match what osdk itself derives, or "accept the default" would
+# silently relocate state.
+if [[ $(uname -s) == Darwin ]]; then
+  expected_config="$defaults_home/Library/Application Support/osdk"
+  expected_cache="$defaults_home/Library/Caches/osdk"
+else
+  expected_config="$defaults_home/.config/osdk"
+  expected_cache="$defaults_home/.cache/osdk"
+fi
+grep -F -- "export OSDK_CONFIG_DIR='$expected_config'" "$bash_rc" >/dev/null
+grep -F -- "export OSDK_CACHE_DIR='$expected_cache'" "$bash_rc" >/dev/null
+grep -F -- 'activate bash' "$bash_rc" >/dev/null
+grep -F -- 'activate fish' \
+  "$defaults_home/.config/fish/config.fish" >/dev/null
+grep -F -- 'activate powershell' \
+  "$defaults_home/.config/powershell/Microsoft.PowerShell_profile.ps1" >/dev/null
+# Each shell's block must be written in that shell's own syntax.
+grep -F -- "set -gx OSDK_CONFIG_DIR" \
+  "$defaults_home/.config/fish/config.fish" >/dev/null
+grep -F -- '$env:OSDK_CONFIG_DIR' \
+  "$defaults_home/.config/powershell/Microsoft.PowerShell_profile.ps1" >/dev/null
+# The directories are created, not merely named.
+[[ -d "$expected_config" && -d "$expected_cache" ]]
+
+# Explicit directories are honored verbatim, and only the named shell is
+# touched. This is the unattended path CI and provisioning scripts use.
+explicit_home=$(new_shell_home explicit)
+explicit_config="$test_root/explicit state/config"
+explicit_data="$test_root/explicit state/data"
+explicit_cache="$test_root/explicit state/cache"
+install_with_shell_setup "$explicit_home" \
+  --install-dir "$test_root/explicit-bin" \
+  --shells zsh \
+  --config-dir "$explicit_config" \
+  --data-dir "$explicit_data" \
+  --cache-dir "$explicit_cache"
+assert_managed_block "$explicit_home/.zshrc"
+# A path with a space must survive quoting into the startup file.
+grep -F -- "export OSDK_CONFIG_DIR='$explicit_config'" \
+  "$explicit_home/.zshrc" >/dev/null
+grep -F -- "export OSDK_DATA_DIR='$explicit_data'" \
+  "$explicit_home/.zshrc" >/dev/null
+[[ ! -e "$explicit_home/.bashrc" ]]
+[[ ! -e "$explicit_home/.config/fish/config.fish" ]]
+
+# Rerunning replaces the block instead of stacking a second copy, and leaves
+# the user's own lines alone.
+rerun_home=$(new_shell_home rerun)
+mkdir -p "$rerun_home"
+printf '%s\n' 'export USER_SENTINEL=1' > "$rerun_home/.zshrc"
+for _ in 1 2; do
+  install_with_shell_setup "$rerun_home" \
+    --install-dir "$test_root/rerun-bin" \
+    --shells zsh \
+    --accept-defaults
+done
+assert_managed_block "$rerun_home/.zshrc"
+grep -F -- 'export USER_SENTINEL=1' "$rerun_home/.zshrc" >/dev/null
+
+# A startup file whose last line has no newline must not absorb the marker.
+noeol_home=$(new_shell_home noeol)
+mkdir -p "$noeol_home"
+printf 'export USER_SENTINEL=2' > "$noeol_home/.zshrc"
+install_with_shell_setup "$noeol_home" \
+  --install-dir "$test_root/noeol-bin" \
+  --shells zsh \
+  --accept-defaults
+assert_managed_block "$noeol_home/.zshrc"
+grep -x -F -- 'export USER_SENTINEL=2' "$noeol_home/.zshrc" >/dev/null
+
+# --no-modify-shell and --shells none install binaries only.
+none_home=$(new_shell_home none)
+install_with_shell_setup "$none_home" \
+  --install-dir "$test_root/none-bin" \
+  --no-modify-shell
+assert_install_set "$test_root/none-bin" fixture
+[[ ! -e "$none_home/.bashrc" ]]
+[[ ! -e "$none_home/.zshrc" ]]
+
+# An unusable directory must fail loudly rather than write a broken startup
+# file. A plain file where a directory belongs cannot be created or written.
+# --accept-defaults keeps the run non-interactive on a developer machine, where
+# /dev/tty exists and the other two directories would otherwise be prompted for.
+blocked_home=$(new_shell_home blocked)
+blocked_path="$test_root/blocked-config"
+: > "$blocked_path"
+blocked_error="$test_root/blocked.error"
+if install_with_shell_setup "$blocked_home" \
+  --install-dir "$test_root/blocked-bin" \
+  --shells zsh \
+  --accept-defaults \
+  --config-dir "$blocked_path" 2>"$blocked_error"; then
+  printf 'Installer accepted a non-directory OSDK_CONFIG_DIR.\n' >&2
+  exit 1
+fi
+grep -F -- 'exists and is not a directory' "$blocked_error" >/dev/null
+[[ ! -e "$blocked_home/.zshrc" ]]
+# The binaries still installed: shell setup runs after promotion commits.
+assert_install_set "$test_root/blocked-bin" fixture
+
+# A relative path is refused: a startup file is read from any directory.
+relative_error="$test_root/relative.error"
+if install_with_shell_setup "$(new_shell_home relative)" \
+  --install-dir "$test_root/relative-bin" \
+  --shells zsh \
+  --accept-defaults \
+  --data-dir "relative/dir" 2>"$relative_error"; then
+  printf 'Installer accepted a relative OSDK_DATA_DIR.\n' >&2
+  exit 1
+fi
+grep -F -- 'must be absolute' "$relative_error" >/dev/null
+
+# An unknown shell name is rejected before anything is written.
+unknown_error="$test_root/unknown-shell.error"
+if install_with_shell_setup "$(new_shell_home unknown)" \
+  --install-dir "$test_root/unknown-bin" \
+  --shells tcsh 2>"$unknown_error"; then
+  printf 'Installer accepted an unknown shell name.\n' >&2
+  exit 1
+fi
+grep -F -- 'unknown shell selection' "$unknown_error" >/dev/null
+
+# --print-activation must put shell code on stdout and nothing else, so that
+# `eval "$(install.sh --print-activation)"` is safe to run directly.
+activation_home=$(new_shell_home activation)
+activation_stdout="$test_root/activation.out"
+activation_stderr="$test_root/activation.err"
+install_with_shell_setup "$activation_home" \
+  --install-dir "$test_root/activation-bin" \
+  --shells none \
+  --accept-defaults \
+  --print-activation \
+  >"$activation_stdout" 2>"$activation_stderr"
+grep -F -- 'export OSDK_CONFIG_DIR=' "$activation_stdout" >/dev/null
+grep -F -- 'activate' "$activation_stdout" >/dev/null
+# Progress must not leak into the code being evaluated.
+if grep -F -- 'Downloading' "$activation_stdout" >/dev/null; then
+  printf 'Activation stdout contained installer progress output.\n' >&2
+  exit 1
+fi
+grep -F -- 'Downloading' "$activation_stderr" >/dev/null
+# The emitted code must be valid in the shell that will evaluate it, and must
+# actually export the variables when sourced.
+sh -n "$activation_stdout"
+activation_probe=$(
+  HOME="$activation_home" sh -c \
+    ". \"$activation_stdout\" >/dev/null 2>&1; printf '%s' \"\$OSDK_CONFIG_DIR\""
+)
+[[ -n "$activation_probe" ]] || {
+  printf 'Sourcing the activation output did not export OSDK_CONFIG_DIR.\n' >&2
+  exit 1
+}
+
 printf '%064d  %s\n' 0 "osdk-$target.tar.gz" > "$asset_dir/SHA256SUMS"
 if OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
   OSDK_REPOSITORY=example/one-sdk \
@@ -422,9 +660,5 @@ if OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
 fi
 [[ ! -e "$test_root/invalid-checksum/osdk" ]]
 [[ ! -e "$test_root/invalid-checksum/osdk-shim" ]]
-
-help_output=$(sh "$repo_root/install.sh" --help)
-grep -F -- "--version <version>" <<<"$help_output" >/dev/null
-grep -F -- "--install-dir <path>" <<<"$help_output" >/dev/null
 
 printf 'Unix installer smoke tests passed.\n'
