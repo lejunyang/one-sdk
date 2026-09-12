@@ -1232,6 +1232,109 @@ fn completions_emit_target_shell_script() {
 }
 
 #[test]
+fn self_upgrade_offline_reports_the_blocker_without_touching_the_binaries() {
+    // `self upgrade` replaces the running programs, so the failure mode that
+    // matters most is a half-applied upgrade. Offline is the cheapest way to
+    // make the download fail deterministically: the command must refuse before
+    // it writes anything next to the binaries.
+    let temp = tempfile::tempdir().unwrap();
+    let install_dir = osdk().parent().unwrap().to_path_buf();
+    let before = installed_program_snapshot(&install_dir);
+
+    let output = run_isolated(temp.path(), &["--offline", "self", "upgrade"]);
+    assert!(
+        !output.status.success(),
+        "offline upgrade unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("offline"),
+        "offline upgrade must explain the blocker, got: {stderr}"
+    );
+    assert_eq!(
+        installed_program_snapshot(&install_dir),
+        before,
+        "a failed upgrade must leave the installed programs untouched"
+    );
+}
+
+#[test]
+fn self_upgrade_help_documents_the_mirror_choice_in_both_languages() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let english = run_isolated(temp.path(), &["self", "upgrade", "--help"]);
+    assert!(
+        english.status.success(),
+        "{}",
+        String::from_utf8_lossy(&english.stderr)
+    );
+    let english = String::from_utf8(english.stdout).unwrap();
+    for expected in ["--version", "--dry-run", "--force", "osdk-shim", "mirror"] {
+        assert!(english.contains(expected), "missing {expected}: {english}");
+    }
+
+    let chinese = run_isolated(temp.path(), &["--lang", "zh", "self", "upgrade", "--help"]);
+    assert!(
+        chinese.status.success(),
+        "{}",
+        String::from_utf8_lossy(&chinese.stderr)
+    );
+    let chinese = String::from_utf8(chinese.stdout).unwrap();
+    assert!(chinese.contains("镜像"), "{chinese}");
+    assert!(!chinese.contains("help.self."), "{chinese}");
+}
+
+#[test]
+fn self_is_a_configurable_download_source_of_its_own() {
+    // The upgrade path must be steerable the same way a tool download is, and
+    // must not share state with a `github:` install of the same repository.
+    let temp = tempfile::tempdir().unwrap();
+
+    let listed = run_isolated(temp.path(), &["source", "list", "self"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    assert!(listed.contains("github"), "{listed}");
+    assert!(listed.contains("ghproxy"), "{listed}");
+
+    let pinned = run_isolated(temp.path(), &["source", "pin", "self", "ghproxy"]);
+    assert!(
+        pinned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let config = std::fs::read_to_string(temp.path().join("config/config.toml")).unwrap();
+    assert!(config.contains("[sources.self]"), "{config}");
+    assert!(config.contains("pin = \"ghproxy\""), "{config}");
+
+    let unknown = run_isolated(temp.path(), &["source", "pin", "self", "nope"]);
+    assert!(!unknown.status.success());
+}
+
+/// File name plus length for every program beside the test binary, which is
+/// enough to notice a replacement without depending on content.
+fn installed_program_snapshot(dir: &Path) -> Vec<(String, u64)> {
+    let mut snapshot: Vec<(String, u64)> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("osdk") {
+                return None;
+            }
+            Some((name, entry.metadata().ok()?.len()))
+        })
+        .collect();
+    snapshot.sort();
+    snapshot
+}
+
+#[test]
 fn deactivate_emits_shell_restoration_code() {
     let temp = tempfile::tempdir().unwrap();
     let output = run_isolated(temp.path(), &["deactivate", "bash"]);
@@ -2408,7 +2511,10 @@ fn rust_target_add_drives_the_selected_source_over_an_ambient_mirror() {
     // An ambient mirror that must not win, mimicking a shell profile or CI.
     let ambient = [
         ("RUSTUP_DIST_SERVER", "https://ambient.example/rustup"),
-        ("RUSTUP_UPDATE_ROOT", "https://ambient.example/rustup/rustup"),
+        (
+            "RUSTUP_UPDATE_ROOT",
+            "https://ambient.example/rustup/rustup",
+        ),
     ];
 
     let pinned = run_isolated_in_with_env(
@@ -2465,7 +2571,10 @@ fn local_rust_operations_do_not_inherit_an_ambient_mirror() {
         &["rust", "target", "list", "--toolchain", "stable"],
         &[
             ("RUSTUP_DIST_SERVER", "https://ambient.example/rustup"),
-            ("RUSTUP_UPDATE_ROOT", "https://ambient.example/rustup/rustup"),
+            (
+                "RUSTUP_UPDATE_ROOT",
+                "https://ambient.example/rustup/rustup",
+            ),
         ],
     );
     assert!(

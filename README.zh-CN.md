@@ -80,6 +80,17 @@ curl --proto '=https' --tlsv1.2 -sSf \
   OSDK_DOWNLOAD_BASE_URL=https://gh-proxy.com/https://github.com sh
 ```
 
+装好之后 osdk 可以自行更新，不需要再跑一遍安装脚本：
+
+```bash
+osdk self upgrade --dry-run   # 看看有什么可用版本
+osdk self upgrade             # 下载并替换当前安装
+```
+
+两个程序会一起替换，下载内容会做校验和比对。更新源与工具下载一样会做测速，因此
+GitHub 镜像更快时会自动走镜像；`osdk source test self` 可以看到实测结果，
+`osdk source pin self <id>` 可以固定选择。
+
 PATH 设置、安装器参数、源码构建和校验方式见
 [安装指南](site/guide/installation.md)。
 

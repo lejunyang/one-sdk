@@ -168,6 +168,71 @@ workflow retains the first-release token as a bootstrap fallback while OIDC is
 not configured; removing the secret leaves Trusted Publishing as the only
 path.
 
+## Updating an existing installation
+
+`osdk self upgrade` consumes exactly what the workflow above uploads: the
+platform archive plus the `SHA256SUMS` next to it. That coupling is the reason
+the command lives in the same document as the pipeline. The asset name it asks
+for is derived from the host, and the mapping is asserted against the build
+matrix by a unit test, so a platform that the workflow stops publishing becomes
+an "unsupported platform" error rather than a download of a 404 page.
+
+An upgrade proceeds in four steps:
+
+1. **Resolve.** `releases/latest` gives the newest tag; `--version` selects a
+   specific one instead and may move backwards, which is how a bad release is
+   rolled back. Without `--version`, a target that is not strictly newer ends
+   the command as a no-op unless `--force` is passed.
+2. **Rank sources.** The same speed probe, probe cache, pin handling, and
+   `--source` override that tool downloads use. See below.
+3. **Verify.** The archive is checked against the release's `SHA256SUMS`. With
+   `--require-checksums`, a release that publishes no usable entry is refused
+   instead of installed.
+4. **Replace.** `osdk` and `osdk-shim` are replaced as a pair.
+
+### Why the mirror is measured, not assumed
+
+The upgrade downloads from GitHub, which is exactly where a user in a region
+with poor connectivity needs a proxy. Rather than growing a second mirror
+policy, the command reuses `source::select` through its non-backend entry
+points, so `osdk source list self` and `osdk source test self` describe it, and
+`osdk source pin self <id>` or `osdk source add self ...` steer it. The tool id
+is `self`, deliberately distinct from `github:lejunyang/one-sdk`: pinning a
+mirror for upgrades should not silently change where a `github:` install of the
+same repository comes from.
+
+Two details differ from a backend, both forced by what is being measured:
+
+- **The probe target is the release asset**, not a version index. The `github:`
+  backend declines to probe at all because the API is rate-limited; measuring
+  the artifact costs no API quota, and a source that cannot serve it cannot
+  serve the upgrade either, so failing it is the correct answer.
+- **The probe window is wider than `probe_timeout_ms`.** That setting defaults
+  to 1.5s, which suits a small index. Measured against the real sources, a CN
+  proxy fronting github.com needed 6.1s just to first byte. At 1.5s every
+  candidate times out, all of them are recorded unreachable, and ranking
+  degrades silently to the fixed priority order — the opposite of choosing the
+  faster route. A floor of 12s applies here; a larger configured value is still
+  honoured. Probes run concurrently, so this bounds the whole step.
+
+### Why replacement is all-or-nothing
+
+`osdk-shim` resolves installs that `osdk` wrote, so a pair at two different
+versions is a broken installation, not a partial success. The running program
+also cannot be deleted on Windows, and overwriting a mapped executable in place
+is unsafe on Unix. Each destination is therefore renamed aside before the new
+file is moved in, and a failure part-way rolls every rename back; a regression
+test asserts that a failure on the second program leaves the first one at its
+old contents. Backups are removed only after the whole set is in place. A
+backup that Windows refuses to delete because the process is still running is
+left behind and cleaned up at the start of the next upgrade.
+
+This is also why the command is not a `Backend`. A backend installs a tool into
+the store under a version directory; this replaces the two programs the user is
+running, wherever they live. Registering it would additionally put another
+entry in `Registry::new()`, whose vtables the shim pays for, in exchange for a
+tool id no request can name.
+
 ## Release checklist
 
 1. Update both the workspace version and the exact `osdk-core` version under `[workspace.dependencies]`, plus the relevant user-facing release notes.

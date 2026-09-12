@@ -57,6 +57,56 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     );
     m.insert("msg.cancelled", ("cancelled", "已取消"));
     m.insert(
+        "msg.self_versions",
+        (
+            "osdk {current} installed; {available} available",
+            "已安装 osdk {current}；可用版本 {available}",
+        ),
+    );
+    m.insert(
+        "msg.self_source",
+        ("source: {id} ({url})", "下载源：{id}（{url}）"),
+    );
+    m.insert(
+        "msg.self_up_to_date",
+        (
+            "osdk {version} is already the newest version",
+            "osdk {version} 已是最新版本",
+        ),
+    );
+    m.insert(
+        "msg.self_dry_run",
+        (
+            "would upgrade to osdk {version}; rerun without --dry-run to apply",
+            "将升级到 osdk {version}；去掉 --dry-run 后重新运行即可执行",
+        ),
+    );
+    m.insert(
+        "msg.self_upgrading",
+        (
+            "upgrading osdk to {version} ...",
+            "正在升级 osdk 到 {version} ...",
+        ),
+    );
+    m.insert(
+        "msg.self_checksum_missing",
+        (
+            "warning: no published checksum for {file}; installed without verification",
+            "警告：{file} 没有发布校验和；已在未校验的情况下安装",
+        ),
+    );
+    m.insert(
+        "msg.self_upgraded",
+        (
+            "upgraded osdk to {version} in {dir}",
+            "已在 {dir} 将 osdk 升级到 {version}",
+        ),
+    );
+    m.insert(
+        "msg.self_programs",
+        ("replaced programs: {programs}", "已替换的程序：{programs}"),
+    );
+    m.insert(
         "msg.config_trusted",
         (
             "trusted project config {path} ({hash})",
@@ -1204,6 +1254,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "log.signature_verified",
         ("signature verified (minisign)", "签名已验证（minisign）"),
+    );
+    m.insert(
+        "log.self_checksum_missing",
+        (
+            "the release published no usable SHA256SUMS entry; the download was not verified",
+            "该发行版没有可用的 SHA256SUMS 条目；本次下载未经校验",
+        ),
     );
     m.insert(
         "log.rustup_dist_server",
@@ -3014,6 +3071,60 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         (
             "Diagnostics: dirs, mirrors, same-fs, link mode",
             "诊断：目录、镜像、同文件系统、链接模式",
+        ),
+    );
+    m.insert(
+        "help.self.about",
+        (
+            "Manage the osdk installation itself",
+            "管理 osdk 自身的安装",
+        ),
+    );
+    m.insert(
+        "help.self.upgrade.about",
+        (
+            "Download the latest release and replace this osdk installation",
+            "下载最新发行版并替换当前的 osdk 安装",
+        ),
+    );
+    m.insert(
+        "help.self.upgrade.long",
+        (
+            "Download the latest osdk release and replace this installation.\n\n\
+             Both `osdk` and `osdk-shim` are replaced together, from the release \
+             asset built for this platform; a failure part-way restores the \
+             previous pair. Download sources are speed-probed exactly as tool \
+             downloads are, so a configured or built-in GitHub mirror is used \
+             when it is the faster route. Inspect that choice with \
+             `osdk source list self` and `osdk source test self`, and override \
+             it with `osdk source pin self <id>` or `--source <id>`.",
+            "下载最新的 osdk 发行版并替换当前安装。\n\n\
+             `osdk` 与 `osdk-shim` 会一起替换，使用为当前平台构建的发行包；中途失败会\
+             恢复原来的两个程序。下载源与工具下载一样会做测速，因此当配置的或内置的 \
+             GitHub 镜像更快时会走镜像。可用 `osdk source list self` 和 \
+             `osdk source test self` 查看选择结果，并用 `osdk source pin self <id>` \
+             或 `--source <id>` 覆盖。",
+        ),
+    );
+    m.insert(
+        "help.self.upgrade.flag.version",
+        (
+            "Install this release instead of the latest one, e.g. 0.0.2",
+            "安装指定发行版而非最新版，例如 0.0.2",
+        ),
+    );
+    m.insert(
+        "help.self.upgrade.flag.dry_run",
+        (
+            "Report the available version without downloading or replacing it",
+            "只报告可用版本，不下载也不替换",
+        ),
+    );
+    m.insert(
+        "help.self.upgrade.flag.force",
+        (
+            "Reinstall even when the running version is already the target",
+            "即使当前版本已是目标版本也重新安装",
         ),
     );
 

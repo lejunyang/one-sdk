@@ -295,6 +295,16 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Manage the osdk installation itself.
+    ///
+    /// `Self` is a reserved word, so the variant is spelled differently from
+    /// the `self` the user types; `command(name)` carries the real spelling.
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        command: SelfCommand,
+    },
+
     /// Diagnostics: dirs, mirrors, same-fs, link mode.
     Doctor {
         /// Also re-hash every installed file and report what no longer matches
@@ -314,6 +324,34 @@ pub enum Command {
         /// check usable.
         #[arg(long, value_name = "TOOL", requires = "verify")]
         tool: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SelfCommand {
+    /// Download the latest osdk release and replace this installation.
+    ///
+    /// Both `osdk` and `osdk-shim` are replaced together, from the release
+    /// asset for this platform. Download sources are speed-probed exactly as
+    /// tool downloads are, so a configured or built-in GitHub mirror is used
+    /// when it is the faster route; `osdk source test self` shows the ranking.
+    ///
+    /// The root command sets `propagate_version`, which would give this
+    /// subcommand an inherited `--version` that prints osdk's version and
+    /// collides with the release selector below. Here `--version` can only
+    /// sensibly mean "which release to install", so the inherited flag is
+    /// turned off rather than renaming the selector.
+    #[command(disable_version_flag = true)]
+    Upgrade {
+        /// Install this release instead of the latest one, e.g. `0.0.2`.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Report the available version without downloading or replacing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Reinstall even when the running version is already the target.
+        #[arg(long)]
+        force: bool,
     },
 }
 

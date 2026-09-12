@@ -77,8 +77,19 @@ pub fn effective_sources_with_env(ctx: &Ctx, backend: &dyn Backend) -> Result<Ve
 /// Assemble the effective source list for a backend: defaults minus disabled,
 /// plus user custom sources, honoring per-tool config.
 pub fn effective_sources(ctx: &Ctx, backend: &dyn Backend) -> Vec<Source> {
-    let mut sources = backend.default_sources();
-    if let Some(tool_cfg) = ctx.config.tool_sources(backend.id()) {
+    effective_sources_for(ctx, backend.id(), backend.default_sources())
+}
+
+/// [`effective_sources`] for a downloader that is not a [`Backend`].
+///
+/// osdk's own release download is the one such case. It wants the same
+/// disable / custom / priority handling as any tool, but it replaces the
+/// running binaries instead of installing into the store. Making it a backend
+/// would add another `dyn Backend` to the registry -- and so to the shim's
+/// vtables -- for something no tool request can ever name.
+pub fn effective_sources_for(ctx: &Ctx, tool: &str, sources: Vec<Source>) -> Vec<Source> {
+    let mut sources = sources;
+    if let Some(tool_cfg) = ctx.config.tool_sources(tool) {
         if !tool_cfg.disable.is_empty() {
             sources.retain(|s| !tool_cfg.disable.iter().any(|d| d == &s.id));
         }
@@ -127,15 +138,53 @@ pub async fn ranked_source_candidates(
     backend: &dyn Backend,
     sources: Vec<Source>,
 ) -> Result<Vec<Source>> {
+    ranked_source_candidates_for(ctx, backend.id(), sources, |ctx, source| {
+        backend.probe_url(ctx, source)
+    })
+    .await
+}
+
+/// [`ranked_source_candidates`] for a downloader that is not a [`Backend`].
+///
+/// `probe_url` plays the part of [`Backend::probe_url`]: it returns the URL
+/// whose download speed stands in for this source, or `None` to leave the
+/// source unranked. Everything else -- the pin, the probe cache and its
+/// fingerprint, offline behaviour -- is shared with the backend path, so a
+/// non-backend downloader cannot drift into its own mirror policy.
+pub async fn ranked_source_candidates_for(
+    ctx: &Ctx,
+    tool: &str,
+    sources: Vec<Source>,
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Result<Vec<Source>> {
+    ranked_source_candidates_with_timeout(
+        ctx,
+        tool,
+        sources,
+        Duration::from_millis(ctx.config.sources.probe_timeout_ms),
+        probe_url,
+    )
+    .await
+}
+
+/// [`ranked_source_candidates_for`] with an explicit probe deadline; see
+/// [`probe_all_with_timeout`] for why an artifact probe needs a longer one.
+pub async fn ranked_source_candidates_with_timeout(
+    ctx: &Ctx,
+    tool: &str,
+    sources: Vec<Source>,
+    probe_timeout: Duration,
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Result<Vec<Source>> {
     if sources.is_empty() {
         return Err(Error::NoUsableSource {
-            tool: backend.id().to_string(),
+            tool: tool.to_string(),
             tried: 0,
         });
     }
 
     // Explicit pin wins: put it first, keep the rest as fallbacks.
-    if let Some(tool_cfg) = ctx.config.tool_sources(backend.id()) {
+    if let Some(tool_cfg) = ctx.config.tool_sources(tool) {
         if let Some(pin) = &tool_cfg.pin {
             if let Some(idx) = sources.iter().position(|s| &s.id == pin) {
                 let mut ordered = sources.clone();
@@ -149,7 +198,7 @@ pub async fn ranked_source_candidates(
 
     if ctx.config.settings.offline {
         if matches!(ctx.config.sources.selection, Selection::Auto) {
-            if let Some(cache) = load_cache(ctx, backend.id(), &sources) {
+            if let Some(cache) = load_cache(ctx, tool, &sources) {
                 return Ok(order_sources_by_probe_results(sources, cache.results));
             }
         }
@@ -159,7 +208,7 @@ pub async fn ranked_source_candidates(
     match ctx.config.sources.selection {
         Selection::Ordered | Selection::Pinned => Ok(sources),
         Selection::Auto => {
-            let ranked_ids = ranked_sources(ctx, backend, &sources).await;
+            let ranked_ids = ranked_sources(ctx, tool, &sources, probe_timeout, &probe_url).await;
             Ok(order_sources_by_ids(sources, &ranked_ids))
         }
     }
@@ -196,9 +245,15 @@ fn order_sources_by_ids(sources: Vec<Source>, ids: &[String]) -> Vec<Source> {
 }
 
 /// Return source ids ranked best-first, using fresh cache or a live probe.
-async fn ranked_sources(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) -> Vec<String> {
+async fn ranked_sources(
+    ctx: &Ctx,
+    tool: &str,
+    sources: &[Source],
+    probe_timeout: Duration,
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Vec<String> {
     // Try fresh cache first.
-    if let Some(cache) = load_cache(ctx, backend.id(), sources) {
+    if let Some(cache) = load_cache(ctx, tool, sources) {
         let ttl = ctx.config.sources.cache_ttl_secs();
         let now = crate::source::now_secs();
         let fresh = cache
@@ -218,8 +273,8 @@ async fn ranked_sources(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) ->
     }
 
     // Live probe.
-    let results = probe_all(ctx, backend, sources).await;
-    save_cache(ctx, backend.id(), sources, &results);
+    let results = probe_all_with_timeout(ctx, sources, probe_timeout, probe_url).await;
+    save_cache(ctx, tool, sources, &results);
     let mut ok: Vec<ProbeResult> = results.into_iter().filter(|r| r.ok).collect();
     ok.sort_by(|a, b| b.score().total_cmp(&a.score()));
     ok.into_iter().map(|r| r.source_id).collect()
@@ -227,10 +282,42 @@ async fn ranked_sources(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) ->
 
 /// Probe every source concurrently, returning results (failed ones included).
 pub async fn probe_all(ctx: &Ctx, backend: &dyn Backend, sources: &[Source]) -> Vec<ProbeResult> {
-    let timeout = Duration::from_millis(ctx.config.sources.probe_timeout_ms);
+    probe_all_with(ctx, sources, |ctx, source| backend.probe_url(ctx, source)).await
+}
+
+/// [`probe_all`] for a downloader that is not a [`Backend`]; `probe_url` stands
+/// in for [`Backend::probe_url`] and may return `None` to fail a source.
+pub async fn probe_all_with(
+    ctx: &Ctx,
+    sources: &[Source],
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Vec<ProbeResult> {
+    probe_all_with_timeout(
+        ctx,
+        sources,
+        Duration::from_millis(ctx.config.sources.probe_timeout_ms),
+        probe_url,
+    )
+    .await
+}
+
+/// [`probe_all_with`] with an explicit per-source deadline.
+///
+/// The configured `probe_timeout_ms` (1.5s) is tuned for a version index, which
+/// is small and served from a CDN edge. A probe that measures a release binary
+/// instead has to get through a much slower first byte -- a CN proxy fronting
+/// github.com was measured at 6.1s TTFB -- and timing that out marks *every*
+/// source unreachable, which silently drops ranking back to the fixed priority
+/// order. A caller whose probe target is an artifact passes its own bound here.
+pub async fn probe_all_with_timeout(
+    ctx: &Ctx,
+    sources: &[Source],
+    timeout: Duration,
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Vec<ProbeResult> {
     let mut handles = Vec::new();
     for s in sources {
-        let url = backend.probe_url(ctx, s);
+        let url = probe_url(ctx, s);
         let client = ctx.client.clone();
         let source = s.clone();
         let to = timeout;
@@ -342,8 +429,45 @@ pub async fn refresh(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<ProbeResult
     // otherwise `source test` would measure a different set than `install` uses
     // and the cached fingerprint would never match.
     let sources = effective_sources_with_env(ctx, backend)?;
-    let results = probe_all(ctx, backend, &sources).await;
-    save_cache(ctx, backend.id(), &sources, &results);
+    refresh_for(ctx, backend.id(), sources, |ctx, source| {
+        backend.probe_url(ctx, source)
+    })
+    .await
+}
+
+/// [`refresh`] for a downloader that is not a [`Backend`], so that
+/// `osdk source test` can measure it the same way an install would.
+pub async fn refresh_for(
+    ctx: &Ctx,
+    tool: &str,
+    sources: Vec<Source>,
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Result<Vec<ProbeResult>> {
+    refresh_with_timeout(
+        ctx,
+        tool,
+        sources,
+        Duration::from_millis(ctx.config.sources.probe_timeout_ms),
+        probe_url,
+    )
+    .await
+}
+
+/// [`refresh_for`] with an explicit probe deadline. `source test` must use the
+/// same bound as selection does, or it would report a ranking the install path
+/// never produces.
+pub async fn refresh_with_timeout(
+    ctx: &Ctx,
+    tool: &str,
+    sources: Vec<Source>,
+    probe_timeout: Duration,
+    probe_url: impl Fn(&Ctx, &Source) -> Option<String>,
+) -> Result<Vec<ProbeResult>> {
+    if ctx.config.settings.offline {
+        return Err(Error::other("cannot refresh sources while offline"));
+    }
+    let results = probe_all_with_timeout(ctx, &sources, probe_timeout, probe_url).await;
+    save_cache(ctx, tool, &sources, &results);
     Ok(results)
 }
 
@@ -375,6 +499,23 @@ mod tests {
     struct FixtureBackend {
         id: &'static str,
         sources: Vec<Source>,
+    }
+
+    /// The backend-shaped spelling of [`ranked_sources`], so these tests keep
+    /// exercising the path a real backend takes.
+    async fn ranked_backend_sources(
+        ctx: &Ctx,
+        backend: &dyn Backend,
+        sources: &[Source],
+    ) -> Vec<String> {
+        ranked_sources(
+            ctx,
+            backend.id(),
+            sources,
+            Duration::from_millis(ctx.config.sources.probe_timeout_ms),
+            |ctx, source| backend.probe_url(ctx, source),
+        )
+        .await
     }
 
     #[async_trait]
@@ -541,17 +682,17 @@ mod tests {
             sources: vec![Source::mirror("fixture", &format!("http://{address}"), 1)],
         };
 
-        let first = ranked_sources(&ctx, &backend, &backend.sources).await;
+        let first = ranked_backend_sources(&ctx, &backend, &backend.sources).await;
         assert_eq!(first, vec!["fixture"]);
 
-        let second = ranked_sources(&ctx, &backend, &backend.sources).await;
+        let second = ranked_backend_sources(&ctx, &backend, &backend.sources).await;
         assert_eq!(second, vec!["fixture"]);
 
         let changed_sources = vec![
             Source::mirror("fixture", &format!("http://{address}"), 1),
             Source::mirror("new", &format!("http://{address}"), 2),
         ];
-        let mut third = ranked_sources(&ctx, &backend, &changed_sources).await;
+        let mut third = ranked_backend_sources(&ctx, &backend, &changed_sources).await;
         third.sort();
         assert_eq!(third, vec!["fixture", "new"]);
 
@@ -630,7 +771,7 @@ mod tests {
             ],
         );
 
-        let ranked = ranked_sources(&online_ctx, &backend, &effective).await;
+        let ranked = ranked_backend_sources(&online_ctx, &backend, &effective).await;
         assert_eq!(ranked, vec!["first", "second"]);
 
         let mut offline_ctx = test_ctx(temporary.path(), true);

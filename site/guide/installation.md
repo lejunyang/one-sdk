@@ -206,6 +206,38 @@ curl --proto '=https' --tlsv1.2 -sSf \
   https://rsproxy.cn/rustup-init.sh | sh -s -- -y
 ```
 
+## 保持 osdk 更新
+
+装好之后，osdk 可以自行更新，不需要再跑一遍安装脚本：
+
+```bash
+# 只查看有什么可用版本，不做任何改动
+osdk self upgrade --dry-run
+
+# 下载最新发行版并替换当前安装
+osdk self upgrade
+```
+
+`osdk` 与 `osdk-shim` 始终一起替换，下载内容会与发行版校验和比对。下载源会像工具
+下载一样做测速，因此当 GitHub 镜像更快时会自动走镜像：
+
+```bash
+osdk source test self          # 实测各个候选源
+osdk source pin self ghproxy   # 固定使用镜像
+osdk --source github self upgrade   # 只对这一次生效
+```
+
+要安装指定版本（包括退回到更早的版本）：
+
+```bash
+osdk self upgrade --version 0.0.1
+```
+
+::: tip
+`cargo install osdk-cli` 只安装主命令，这样装出来的环境里没有 `osdk-shim` 可供
+更新。请改用 Release 安装脚本，或用 `cargo install` 自行管理。
+:::
+
 ## 验证安装
 
 ```bash

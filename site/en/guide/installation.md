@@ -208,6 +208,42 @@ curl --proto '=https' --tlsv1.2 -sSf \
   https://rsproxy.cn/rustup-init.sh | sh -s -- -y
 ```
 
+## Keep osdk up to date
+
+Once osdk is installed, it updates itself; there is no need to rerun the
+installer:
+
+```bash
+# Check what is available without changing anything
+osdk self upgrade --dry-run
+
+# Download the latest release and replace this installation
+osdk self upgrade
+```
+
+`osdk` and `osdk-shim` are always replaced together, and the download is
+verified against the release checksums. Downloads are speed-probed the same way
+tool downloads are, so a GitHub mirror is used automatically when it is the
+faster route:
+
+```bash
+osdk source test self          # measure the candidates
+osdk source pin self ghproxy   # always use the mirror
+osdk --source github self upgrade   # override once
+```
+
+To install a specific release, including going back to an earlier one:
+
+```bash
+osdk self upgrade --version 0.0.1
+```
+
+::: tip
+`cargo install osdk-cli` installs only the main command, so an installation
+made that way has no `osdk-shim` to update. Use the Release installer, or
+`cargo install`, to manage it instead.
+:::
+
 ## Verify the installation
 
 ```bash

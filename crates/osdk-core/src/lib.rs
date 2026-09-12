@@ -12,6 +12,7 @@
 //! - [`backend`]  — the `Backend` trait, contexts, registry, and SDK impls.
 //! - [`shim`]     — shim launcher generation.
 //! - [`lock`]     — cross-process file locks.
+//! - `self_update` — replacing osdk's own binaries from its GitHub releases.
 
 // Compiling without the `install` feature intentionally removes the download
 // pipeline and every backend method that reaches it, which leaves their helpers,
@@ -42,6 +43,11 @@ pub mod package_registry;
 pub mod pipeline;
 pub mod platform;
 pub mod process;
+// Updating osdk itself downloads and unpacks a release, which is exactly the
+// machinery the shim drops. Keeping it behind `install` means the shim's build
+// never links it; `osdk self upgrade` is a CLI-only command anyway.
+#[cfg(feature = "install")]
+pub mod self_update;
 pub mod shim;
 pub mod source;
 pub mod store;

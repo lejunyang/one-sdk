@@ -3925,11 +3925,108 @@ pub(crate) fn generate_shims_for(
     Ok(count)
 }
 
+/// `osdk self ...`: operations on the osdk installation itself.
+pub async fn self_command(app: &mut App, command: crate::cli::SelfCommand) -> Result<()> {
+    match command {
+        crate::cli::SelfCommand::Upgrade {
+            version,
+            dry_run,
+            force,
+        } => self_upgrade(app, version, dry_run, force).await,
+    }
+}
+
+async fn self_upgrade(
+    app: &mut App,
+    version: Option<String>,
+    dry_run: bool,
+    force: bool,
+) -> Result<()> {
+    use osdk_core::self_update;
+
+    // Locate the installation before anything is downloaded: an osdk that
+    // cannot find its own directory (a deleted or relocated binary) must say so
+    // rather than fetch a release it has nowhere to put.
+    let install_dir = self_update::install_dir()?;
+    // Windows cannot delete the running program, so a previous upgrade may have
+    // left the file it replaced behind. It is no longer running now.
+    self_update::clean_replaced_programs(&install_dir);
+
+    apply_source_override(app, self_update::SOURCE_ID);
+    if app.refresh_sources {
+        self_update::refresh_sources(&app.ctx).await?;
+    }
+    // The same speed probe tool downloads use, so a user behind a slow route to
+    // github.com upgrades through the ranked mirror instead of timing out.
+    let sources = self_update::ranked_sources(&app.ctx).await?;
+    tracing::info!(
+        source = %sources.first().map(|source| source.id.as_str()).unwrap_or("none"),
+        "selected source for the osdk upgrade"
+    );
+
+    let target = self_update::resolve_target(&app.ctx, version.as_deref(), &sources).await?;
+    let current = self_update::CURRENT_VERSION;
+    println!(
+        "{}",
+        t!(
+            "msg.self_versions",
+            current = current,
+            available = target.version
+        )
+    );
+    if let Some(source) = sources.first() {
+        println!(
+            "{}",
+            t!("msg.self_source", id = source.id, url = source.download_url)
+        );
+    }
+
+    let same_version = target.version == current;
+    // An explicit `--version` is a deliberate choice, including a downgrade, so
+    // only the implicit "latest" path treats "not newer" as nothing to do.
+    let nothing_to_do = if version.is_some() {
+        same_version
+    } else {
+        !self_update::is_newer(&target.version, current)
+    };
+    if nothing_to_do && !force {
+        println!("{}", t!("msg.self_up_to_date", version = current));
+        return Ok(());
+    }
+    if dry_run {
+        println!("{}", t!("msg.self_dry_run", version = target.version));
+        return Ok(());
+    }
+
+    println!("{}", t!("msg.self_upgrading", version = target.version));
+    let staged = self_update::stage_release(&app.ctx, &target).await?;
+    if !staged.checksum_verified() {
+        println!("{}", t!("msg.self_checksum_missing", file = target.asset));
+    }
+    let replaced = self_update::install(&staged, &install_dir)?;
+
+    println!(
+        "{}",
+        t!(
+            "msg.self_upgraded",
+            version = target.version,
+            dir = install_dir.display()
+        )
+    );
+    println!(
+        "{}",
+        t!("msg.self_programs", programs = replaced.join(", "))
+    );
+    Ok(())
+}
+
 pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
     match command {
         SourceCommand::List { tool } => {
             let tool = canonical_source_tool(app, &tool)?;
-            let sources = if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
+            let sources = if tool == osdk_core::self_update::SOURCE_ID {
+                osdk_core::self_update::effective_sources(&app.ctx)
+            } else if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
                 osdk_core::model::source::effective_sources(&app.ctx, provider)
             } else {
                 let backend = app.registry.get(&tool)?;
@@ -3968,7 +4065,12 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
         SourceCommand::Test { tool, model } => {
             let tool = canonical_source_tool(app, &tool)?;
             println!("{}", t!("msg.probing", tool = tool));
-            let mut ranked = if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
+            let mut ranked = if tool == osdk_core::self_update::SOURCE_ID {
+                if model.is_some() {
+                    return Err(anyhow!("--model is only valid for model providers"));
+                }
+                osdk_core::self_update::refresh_sources(&app.ctx).await?
+            } else if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
                 let model = model.ok_or_else(|| {
                     anyhow!("`osdk source test {tool}` requires --model owner/repo@revision")
                 })?;
@@ -4025,7 +4127,11 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
         }
         SourceCommand::Pin { tool, id } => {
             let tool = canonical_source_tool(app, &tool)?;
-            let known = if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
+            let known = if tool == osdk_core::self_update::SOURCE_ID {
+                osdk_core::self_update::effective_sources(&app.ctx)
+                    .iter()
+                    .any(|source| source.id == id)
+            } else if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
                 osdk_core::model::source::effective_sources(&app.ctx, provider)
                     .iter()
                     .any(|source| source.id == id)
@@ -4058,6 +4164,12 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
 }
 
 fn canonical_source_tool(app: &App, tool: &str) -> Result<String> {
+    // `self` is osdk's own release download. It is not a backend, so the
+    // registry cannot canonicalize it, but it does carry per-tool source
+    // configuration and must stay reachable from `osdk source ...`.
+    if tool == osdk_core::self_update::SOURCE_ID {
+        return Ok(tool.to_string());
+    }
     match tool.parse::<osdk_core::model::ProviderId>() {
         Ok(provider) => Ok(provider.as_str().to_string()),
         Err(_) => Ok(app.registry.get(tool)?.id().to_string()),

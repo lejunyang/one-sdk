@@ -318,6 +318,16 @@ fn localize_subcommands(cmd: Command) -> Command {
                     })
             })
     })
+    .mut_subcommand("self", |c| {
+        c.about(h("help.self.about"))
+            .mut_subcommand("upgrade", |s| {
+                s.about(h("help.self.upgrade.about"))
+                    .long_about(h("help.self.upgrade.long"))
+                    .mut_arg("version", |a| a.help(h("help.self.upgrade.flag.version")))
+                    .mut_arg("dry_run", |a| a.help(h("help.self.upgrade.flag.dry_run")))
+                    .mut_arg("force", |a| a.help(h("help.self.upgrade.flag.force")))
+            })
+    })
     .mut_subcommand("prune", |c| {
         c.about(h("help.prune.about"))
             .mut_arg("dry_run", |a| a.help(h("help.prune.flag.dry_run")))
