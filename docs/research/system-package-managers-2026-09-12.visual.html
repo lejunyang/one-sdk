@@ -1,0 +1,1456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osdk 系统包管理器集成 · 设计可视化附件（2026-09-12）</title>
+<style>
+/* ===== 设计令牌 ===== */
+:root{
+  --ink:#16191c;
+  --ink2:#394046;
+  --muted:#6d747a;
+  --faint:#8f959a;
+  --line:#dad6cd;
+  --line2:#c6c1b6;
+  --paper:#f4f2ed;
+  --card:#fffefb;
+  --card2:#faf8f3;
+
+  --rust:#a8442a;
+  --rust-soft:#f5e4dd;
+  --teal:#1f6b63;
+  --teal-soft:#dcebe9;
+  --steel:#44606e;
+  --steel-soft:#dfe8ec;
+
+  /* 四档热力 */
+  --g1:#2f6d4a; --g1b:#dceae1;   /* 原生支持 */
+  --g2:#6b7a1e; --g2b:#ebeed3;   /* 部分支持 */
+  --g3:#a8601f; --g3b:#f6e6d2;   /* 需变通   */
+  --g4:#8c2f2f; --g4b:#f0dada;   /* 不可行   */
+
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono","Cascadia Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Source Han Sans SC","Noto Sans CJK SC",sans-serif;
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:auto}
+body{
+  margin:0;background:var(--paper);color:var(--ink);
+  font-family:var(--sans);font-size:15px;line-height:1.75;
+  -webkit-font-smoothing:antialiased;
+}
+code,.mono{font-family:var(--mono);font-size:.9em}
+code{background:#eceae3;border:1px solid var(--line);border-radius:3px;padding:.05em .32em;color:#4a3f36}
+
+.wrap{max-width:1220px;margin:0 auto;padding:0 28px 96px}
+
+/* ===== 页眉 ===== */
+.masthead{border-bottom:2px solid var(--ink);background:var(--card);}
+.masthead .wrap{padding-top:34px;padding-bottom:26px}
+.kicker{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--rust);margin-bottom:12px}
+h1{font-size:30px;line-height:1.3;margin:0 0 10px;letter-spacing:-.01em;font-weight:700}
+.subtitle{font-size:16px;color:var(--ink2);margin:0 0 20px;max-width:70ch}
+.meta{display:flex;flex-wrap:wrap;gap:8px 26px;font-family:var(--mono);font-size:12px;color:var(--muted);
+  border-top:1px solid var(--line);padding-top:14px}
+.meta b{color:var(--ink2);font-weight:600}
+
+/* ===== 导航 ===== */
+nav.toc{position:sticky;top:0;z-index:50;background:rgba(244,242,237,.96);
+  border-bottom:1px solid var(--line2);backdrop-filter:saturate(1.2) blur(6px)}
+nav.toc .wrap{display:flex;gap:0;overflow-x:auto;padding:0 28px;scrollbar-width:thin}
+nav.toc a{flex:0 0 auto;padding:11px 15px;font-size:13px;color:var(--ink2);text-decoration:none;
+  border-bottom:2px solid transparent;white-space:nowrap}
+nav.toc a:hover{color:var(--rust);border-bottom-color:var(--rust);background:#eeebe3}
+nav.toc a .n{font-family:var(--mono);font-size:11px;color:var(--faint);margin-right:6px}
+
+/* ===== 区块 ===== */
+section{padding-top:52px}
+.sechead{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line2);padding-bottom:10px;margin-bottom:22px}
+.sechead .idx{font-family:var(--mono);font-size:12px;color:#fff;background:var(--ink);
+  padding:3px 9px;border-radius:3px;letter-spacing:.06em;flex:0 0 auto}
+h2{font-size:21px;margin:0;font-weight:700;letter-spacing:-.005em}
+.sechead .tag{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--line2);padding:2px 8px;border-radius:3px;white-space:nowrap}
+.lede{font-size:15px;color:var(--ink2);max-width:82ch;margin:0 0 22px}
+.lede strong{color:var(--ink);font-weight:600;background:linear-gradient(transparent 62%,#f0e2d0 62%)}
+
+.fig{background:var(--card);border:1px solid var(--line2);border-radius:5px;padding:22px;margin:0 0 16px;
+  box-shadow:0 1px 0 rgba(0,0,0,.03)}
+.figcap{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:0 0 18px;
+  padding-bottom:9px;border-bottom:1px dashed var(--line2);letter-spacing:.02em}
+.figcap b{color:var(--ink);font-weight:600}
+.note{font-size:13.5px;color:var(--muted);border-left:2px solid var(--line2);padding:2px 0 2px 14px;margin:16px 0 0;max-width:84ch}
+.note b{color:var(--ink2)}
+
+/* ===== 结论卡 ===== */
+.stance{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:14px;margin-bottom:8px}
+.stance .c{background:var(--card);border:1px solid var(--line2);border-top:3px solid var(--teal);
+  border-radius:4px;padding:15px 16px}
+.stance .c.warn{border-top-color:var(--rust)}
+.stance .c h4{margin:0 0 7px;font-size:13.5px;font-weight:700;letter-spacing:.01em}
+.stance .c p{margin:0;font-size:13px;color:var(--ink2);line-height:1.65}
+
+/* ===== 图1 架构 ===== */
+.arch{font-size:13px}
+.crate{border:1.5px solid var(--line2);border-radius:5px;background:var(--card2);padding:34px 16px 16px;position:relative}
+.crate + .connrow{margin:0}
+.crate-tag{position:absolute;top:-1px;left:-1px;font-family:var(--mono);font-size:11px;letter-spacing:.05em;
+  background:var(--ink);color:#fff;padding:3px 11px;border-radius:4px 0 5px 0}
+.crate.cli{border-color:var(--steel)}
+.crate.cli .crate-tag{background:var(--steel)}
+.crate.core{border-color:var(--ink2);background:#f7f5f0}
+.crate.shim{border-color:var(--steel);max-width:560px}
+.crate.shim .crate-tag{background:var(--steel)}
+
+.chiprow{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font-family:var(--mono);font-size:11.5px;background:#fff;border:1px solid var(--line2);
+  border-radius:3px;padding:4px 10px;color:var(--ink2)}
+.chip.new{border-color:var(--rust);background:var(--rust-soft);color:var(--rust);font-weight:600}
+
+.connrow{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;height:38px}
+.connrow .c{position:relative}
+.connrow .c i{position:absolute;left:50%;top:0;bottom:0;width:0;border-left:1.5px solid var(--line2);transform:translateX(-50%)}
+.connrow .c i::after{content:"";position:absolute;left:-4.5px;bottom:0;border:4.5px solid transparent;border-top-color:var(--line2)}
+.connrow .c.accent i{border-left-color:var(--rust)}
+.connrow .c.accent i::after{border-top-color:var(--rust)}
+.connrow .c .lbl{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  background:var(--card);padding:1px 7px;font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:nowrap}
+
+.lanes{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.lane{border:1.5px solid var(--line2);border-radius:4px;background:#fff;padding:13px 14px;display:flex;flex-direction:column}
+.lane.primary{border-color:var(--steel)}
+.lane.mirror{border-color:var(--teal);border-style:dashed}
+.lane.newsys{border-color:var(--rust);box-shadow:0 0 0 3px var(--rust-soft)}
+.lane h5{margin:0 0 3px;font-family:var(--mono);font-size:13px;font-weight:700}
+.lane.primary h5{color:var(--steel)} .lane.mirror h5{color:var(--teal)} .lane.newsys h5{color:var(--rust)}
+.lane .role{font-size:11px;color:var(--faint);margin:0 0 10px;letter-spacing:.02em}
+.lane ul{margin:0;padding:0;list-style:none;font-size:12.5px;color:var(--ink2)}
+.lane ul li{padding:3px 0 3px 13px;position:relative;line-height:1.55}
+.lane ul li::before{content:"";position:absolute;left:0;top:11px;width:5px;height:1.5px;background:var(--line2)}
+.lane .flag{margin-top:auto;padding-top:11px;font-family:var(--mono);font-size:10.5px;line-height:1.5}
+.lane .flag .k{display:inline-block;padding:2px 7px;border-radius:3px;background:#f0ede6;color:var(--ink2);border:1px solid var(--line)}
+.lane.newsys .flag .k{background:var(--rust-soft);border-color:#e3c4b8;color:var(--rust)}
+.lane.mirror .flag .k{background:var(--teal-soft);border-color:#bcd7d3;color:var(--teal)}
+
+.vtable-band{margin:14px 0 0;border:1px dashed var(--steel);background:var(--steel-soft);border-radius:4px;
+  padding:9px 13px;font-size:12.5px;color:#2f4854}
+.vtable-band b{font-family:var(--mono);font-size:12px}
+
+.infra{margin-top:16px;border:1.5px solid var(--line2);border-radius:4px;background:#fff;padding:12px 14px}
+.infra .t{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.06em;margin-bottom:9px}
+.infra .items{display:flex;flex-wrap:wrap;gap:8px}
+.infra .items .chip{background:var(--card2)}
+
+.shimrow{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;height:52px;margin-top:2px}
+.shimrow .c{position:relative}
+.shimrow .c i{position:absolute;left:50%;top:0;bottom:0;width:0;transform:translateX(-50%)}
+.shimrow .c.solid i{border-left:1.5px solid var(--steel)}
+.shimrow .c.solid i::after{content:"";position:absolute;left:-4.5px;top:0;border:4.5px solid transparent;border-bottom-color:var(--steel)}
+.shimrow .c.cut i{border-left:1.5px dashed var(--line2)}
+.shimrow .c .lbl{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:var(--card);
+  padding:2px 8px;font-family:var(--mono);font-size:10.5px;white-space:nowrap;border-radius:3px}
+.shimrow .c.solid .lbl{color:var(--steel);border:1px solid var(--steel-soft)}
+.shimrow .c.cut .lbl{color:var(--g4);border:1px solid #e6cfcf;background:#fdf6f5}
+.shim-body{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.shim-body .pill{font-family:var(--mono);font-size:11.5px;padding:4px 10px;border-radius:3px;
+  background:var(--steel-soft);border:1px solid #cbd9df;color:#2f4854}
+.shim-body .pill.zero{background:var(--g1b);border-color:#c2dbcc;color:var(--g1);font-weight:600}
+
+.legend{display:flex;flex-wrap:wrap;gap:7px 20px;margin-top:16px;padding-top:13px;border-top:1px dashed var(--line2);
+  font-family:var(--mono);font-size:11px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.legend .sw{width:16px;height:0;border-top-width:2px;border-top-style:solid;display:inline-block}
+
+/* ===== 图2 能力矩阵 ===== */
+.mx-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table.mx{border-collapse:separate;border-spacing:0;width:100%;min-width:860px;font-size:13px}
+table.mx th,table.mx td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:0}
+table.mx thead th{position:sticky;top:44px;background:var(--card);z-index:5;border-bottom:2px solid var(--ink);
+  padding:9px 12px;font-size:12px;font-weight:700;letter-spacing:.02em}
+table.mx thead th.dim{width:19%;color:var(--muted);font-family:var(--mono);font-size:11px;letter-spacing:.06em;font-weight:500}
+table.mx thead th .pm{display:block;font-size:14px}
+table.mx thead th .os{display:block;font-family:var(--mono);font-size:10.5px;color:var(--faint);font-weight:400;margin-top:1px}
+table.mx tbody tr:hover td{background:#faf8f2}
+td.dim{padding:11px 12px;width:19%;border-right:1px solid var(--line)}
+td.dim .d{font-weight:600;font-size:13px;display:block;line-height:1.4}
+td.dim .sub{font-size:11px;color:var(--faint);display:block;margin-top:2px;line-height:1.45}
+td.cell{padding:11px 13px;width:40.5%;border-left:3px solid transparent}
+td.cell .badge{display:inline-block;font-family:var(--mono);font-size:10.5px;font-weight:700;
+  padding:1.5px 7px;border-radius:3px;margin-bottom:5px;letter-spacing:.03em}
+td.cell p{margin:0;font-size:12.5px;line-height:1.6;color:var(--ink2)}
+td.cell code{font-size:11.5px}
+.lv1{background:#f2f8f4;border-left-color:var(--g1)} .lv1 .badge{background:var(--g1b);color:var(--g1)}
+.lv2{background:#f8f9ee;border-left-color:var(--g2)} .lv2 .badge{background:var(--g2b);color:var(--g2)}
+.lv3{background:#fdf6ec;border-left-color:var(--g3)} .lv3 .badge{background:var(--g3b);color:var(--g3)}
+.lv4{background:#fbf1f1;border-left-color:var(--g4)} .lv4 .badge{background:var(--g4b);color:var(--g4)}
+.scale{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.scale .s{flex:1 1 170px;border:1px solid var(--line2);border-radius:4px;padding:8px 11px;font-size:12px;background:#fff}
+.scale .s b{display:block;font-family:var(--mono);font-size:11px;margin-bottom:2px}
+.scale .s span{color:var(--muted);font-size:11.5px;line-height:1.45;display:block}
+.scale .s.lv1{border-left:3px solid var(--g1)} .scale .s.lv1 b{color:var(--g1)}
+.scale .s.lv2{border-left:3px solid var(--g2)} .scale .s.lv2 b{color:var(--g2)}
+.scale .s.lv3{border-left:3px solid var(--g3)} .scale .s.lv3 b{color:var(--g3)}
+.scale .s.lv4{border-left:3px solid var(--g4)} .scale .s.lv4 b{color:var(--g4)}
+
+/* 五列紧凑矩阵 */
+table.mx5{min-width:1180px;font-size:12px}
+table.mx5 thead th{padding:8px 9px}
+table.mx5 thead th.dim{width:15%}
+table.mx5 thead th .pm{font-size:13px}
+table.mx5 thead th .os{font-size:9.5px;letter-spacing:0}
+table.mx5 td.dim{width:15%;padding:9px 10px}
+table.mx5 td.dim .d{font-size:12.5px}
+table.mx5 td.dim .sub{font-size:10px}
+table.mx5 td.cell{width:17%;padding:9px 10px;border-left-width:3px}
+table.mx5 td.cell p{font-size:11.5px;line-height:1.55}
+table.mx5 td.cell code{font-size:10.5px;padding:.02em .25em}
+table.mx5 td.cell .badge{font-size:9.5px;padding:1px 6px;margin-bottom:4px}
+.lv0{background:#f6f5f1;border-left-color:var(--line2)}
+.lv0 .badge{background:#e8e5dd;color:var(--faint)}
+.lv0 p{color:var(--faint)!important}
+.scale .s.lv0{border-left:3px solid var(--line2)} .scale .s.lv0 b{color:var(--faint)}
+.tallywrap .row .nm.sm{font-size:11px}
+.tally{display:flex;gap:2px;margin-top:14px;border-radius:3px;overflow:hidden;min-height:28px;font-family:var(--mono);font-size:10.5px}
+.tally .seg{display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;
+  padding:5px 2px;text-align:center;line-height:1.3;min-width:0}
+.tallywrap{margin-top:16px;padding-top:14px;border-top:1px dashed var(--line2)}
+.tallywrap .row{display:grid;grid-template-columns:96px 1fr;gap:12px;align-items:center;margin-bottom:7px}
+.tallywrap .row .nm{font-family:var(--mono);font-size:12px;font-weight:600;text-align:right}
+
+@media (max-width:640px){
+  table.mx thead th{position:static}
+}
+
+/* ===== 图3 流程图 ===== */
+.flow{display:grid;grid-template-columns:1fr 320px;gap:22px;align-items:start}
+.flowcol{min-width:0}
+.fnode{border:1.5px solid var(--line2);background:#fff;border-radius:4px;padding:10px 14px;position:relative}
+.fnode .fh{font-size:13.5px;font-weight:700;margin:0 0 3px;display:flex;align-items:center;gap:8px}
+.fnode .fh .st{font-family:var(--mono);font-size:10px;background:#efece5;color:var(--muted);
+  padding:1px 6px;border-radius:3px;font-weight:600;flex:0 0 auto}
+.fnode p{margin:0;font-size:12.5px;color:var(--ink2);line-height:1.6}
+.fnode.dec{border-color:var(--g3);background:#fdf8f1}
+.fnode.dec .fh .st{background:var(--g3b);color:var(--g3)}
+.fnode.act{border-color:var(--teal);background:#f4faf9}
+.fnode.act .fh .st{background:var(--teal-soft);color:var(--teal)}
+.fnode.good{border-color:var(--g1);background:#f3f9f5}
+.fnode.good .fh .st{background:var(--g1b);color:var(--g1)}
+.fnode.bad{border-color:var(--g4);background:#fcf3f3}
+.fnode.bad .fh .st{background:var(--g4b);color:var(--g4)}
+
+.farrow{height:30px;position:relative;margin:0}
+.farrow i{position:absolute;left:26px;top:0;bottom:0;border-left:1.5px solid var(--line2)}
+.farrow i::after{content:"";position:absolute;left:-4.5px;bottom:0;border:4.5px solid transparent;border-top-color:var(--line2)}
+.farrow .yes,.farrow .no{position:absolute;left:40px;top:50%;transform:translateY(-50%);
+  font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:3px;white-space:nowrap}
+.farrow .yes{background:var(--g1b);color:var(--g1)}
+.farrow .no{background:#efece5;color:var(--muted)}
+
+.branch{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:0}
+.branch .bcol{min-width:0}
+.bhead{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:3px;display:inline-block;margin-bottom:7px}
+.bhead.y{background:var(--g1b);color:var(--g1)}
+.bhead.n{background:#efece5;color:var(--muted)}
+
+.probe-split{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:11px}
+.pside{border:1px solid var(--line2);border-radius:4px;padding:10px 12px;background:var(--card2)}
+.pside h6{margin:0 0 6px;font-family:var(--mono);font-size:12px;font-weight:700;display:flex;align-items:center;gap:7px}
+.pside.w h6{color:var(--steel)} .pside.b h6{color:var(--teal)}
+.pside h6 .os{font-size:9.5px;color:var(--faint);font-weight:400;letter-spacing:.04em}
+.pside ul{margin:0;padding:0;list-style:none;font-size:12px;color:var(--ink2)}
+.pside ul li{padding:3px 0 3px 14px;position:relative;line-height:1.55}
+.pside ul li::before{content:"▸";position:absolute;left:0;top:3px;color:var(--faint);font-size:10px}
+.pside .warnline{margin-top:8px;padding:7px 9px;border-radius:3px;font-size:11.5px;line-height:1.55;
+  background:var(--g3b);color:#7a460f;border-left:2px solid var(--g3)}
+.pside .okline{margin-top:8px;padding:7px 9px;border-radius:3px;font-size:11.5px;line-height:1.55;
+  background:var(--g1b);color:#1f5237;border-left:2px solid var(--g1)}
+
+.sidebox{border:1.5px solid var(--line2);border-radius:4px;background:var(--card2);padding:14px 15px;position:sticky;top:56px}
+.sidebox h5{margin:0 0 10px;font-size:13px;font-weight:700;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.sidebox .kv{font-size:12.5px;margin-bottom:11px;line-height:1.6}
+.sidebox .kv b{display:block;font-family:var(--mono);font-size:11px;color:var(--rust);margin-bottom:2px;letter-spacing:.03em}
+.sidebox .kv span{color:var(--ink2)}
+.sidebox .kv:last-child{margin-bottom:0}
+.rank{list-style:none;margin:0;padding:0;counter-reset:r}
+.rank li{counter-increment:r;position:relative;padding:5px 0 5px 26px;font-size:12.5px;color:var(--ink2);line-height:1.55}
+.rank li::before{content:counter(r);position:absolute;left:0;top:6px;width:17px;height:17px;border-radius:50%;
+  background:var(--ink);color:#fff;font-family:var(--mono);font-size:10px;display:flex;align-items:center;justify-content:center}
+
+@media (max-width:900px){
+  .flow{grid-template-columns:1fr}
+  .sidebox{position:static}
+  .probe-split,.branch{grid-template-columns:1fr}
+}
+
+/* ===== 图4 体积 ===== */
+.sizegrid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.sizepanel{border:1px solid var(--line2);border-radius:4px;background:var(--card2);padding:15px 16px}
+.sizepanel h5{margin:0 0 3px;font-size:13.5px;font-weight:700}
+.sizepanel .sh{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin:0 0 14px;letter-spacing:.03em}
+.bars{display:flex;flex-direction:column;gap:13px}
+.bar .bl{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;margin-bottom:4px;gap:10px}
+.bar .bl .nm{color:var(--ink2);line-height:1.4}
+.bar .bl .nm b{display:block;font-weight:600;color:var(--ink)}
+.bar .bl .vl{font-family:var(--mono);font-size:12.5px;font-weight:700;flex:0 0 auto}
+.track{height:22px;background:#eae7df;border-radius:2px;overflow:hidden;display:flex}
+.track .f{height:100%;display:flex;align-items:center;padding-left:8px;
+  font-family:var(--mono);font-size:10px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.track .f.base{background:var(--steel)}
+.track .f.cost{background:var(--g4)}
+.track .f.ok{background:var(--g1)}
+.track .f.zero{background:repeating-linear-gradient(45deg,#cfd8cf,#cfd8cf 4px,#e2e8e2 4px,#e2e8e2 8px)}
+.bar .bn{font-size:11.5px;color:var(--muted);margin:5px 0 0;line-height:1.55}
+.bar.hl{background:#fff;border:1px solid var(--g4);border-radius:4px;padding:11px 12px;margin:0 -1px}
+.bar.hl2{background:#fff;border:1px solid var(--g1);border-radius:4px;padding:11px 12px;margin:0 -1px}
+.axis{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--faint);
+  margin-top:9px;padding-top:6px;border-top:1px solid var(--line)}
+.verdict{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.verdict .v{border-radius:4px;padding:12px 14px;font-size:12.5px;line-height:1.6}
+.verdict .v.bad{background:#fbf1f1;border-left:3px solid var(--g4);color:#6d2727}
+.verdict .v.good{background:#f2f8f4;border-left:3px solid var(--g1);color:#1f5237}
+.verdict .v b{display:block;font-size:13px;margin-bottom:4px}
+.guard{margin-top:16px;border:1px dashed var(--line2);background:#fff;border-radius:4px;padding:12px 14px;font-size:12.5px;color:var(--ink2);line-height:1.65}
+.guard b{color:var(--ink)}
+
+/* ===== 图5 路线图 ===== */
+.gantt{min-width:780px}
+.gwrap{overflow-x:auto}
+.grow{display:grid;grid-template-columns:230px 1fr;gap:14px;align-items:stretch;border-bottom:1px dashed var(--line);padding:11px 0}
+.grow:last-child{border-bottom:none}
+.grow.head{border-bottom:2px solid var(--ink);padding-bottom:7px;align-items:end}
+.gname .ph{font-family:var(--mono);font-size:10.5px;color:#fff;background:var(--ink);padding:1.5px 7px;border-radius:3px;margin-right:7px}
+.gname .tt{font-weight:700;font-size:13px}
+.gname .ds{font-size:11.5px;color:var(--muted);line-height:1.55;margin-top:4px;display:block}
+.gtrack{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;align-items:center;position:relative}
+.gtrack .slot{height:100%;border-left:1px solid #eeebe4}
+.gtick{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;font-family:var(--mono);font-size:10px;color:var(--faint)}
+.gtick div{border-left:1px solid var(--line);padding-left:6px}
+.gbar{position:absolute;height:26px;border-radius:3px;display:flex;align-items:center;
+  padding:0 10px;font-size:11.5px;color:#fff;white-space:nowrap;overflow:hidden;font-weight:500}
+.gb1{background:var(--teal)} .gb2{background:#2c7a70} .gb3{background:var(--steel)}
+.gb4{background:#5a7280} .gb5{background:var(--rust)} .gb6{background:#8a5a3c}
+.gmeta{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.gmeta .m{font-family:var(--mono);font-size:10px;padding:1.5px 7px;border-radius:3px;
+  background:#efece5;color:var(--muted);border:1px solid var(--line)}
+.gmeta .m.ro{background:var(--g1b);color:var(--g1);border-color:#c2dbcc}
+.gmeta .m.wr{background:var(--g3b);color:var(--g3);border-color:#e6cfae}
+.phasegrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-top:20px}
+.pcard{border:1px solid var(--line2);border-radius:4px;background:#fff;padding:13px 14px}
+.pcard .n{font-family:var(--mono);font-size:10.5px;color:var(--rust);letter-spacing:.05em;margin-bottom:5px}
+.pcard h6{margin:0 0 6px;font-size:13px;font-weight:700}
+.pcard p{margin:0;font-size:12.5px;color:var(--ink2);line-height:1.6}
+.pcard .ck{margin-top:9px;padding-top:8px;border-top:1px dashed var(--line);font-size:11.5px;color:var(--muted);line-height:1.55}
+.pcard .ck b{color:var(--ink2)}
+
+.endnote{margin-top:44px;border-top:2px solid var(--ink);padding-top:18px;font-size:12.5px;color:var(--muted);line-height:1.7}
+.endnote b{color:var(--ink)}
+
+/* ===== 图6 自实现体积实测 ===== */
+.measbar{--gutter:196px}
+.mrow{display:grid;grid-template-columns:var(--gutter) 1fr 116px;gap:12px;align-items:center;
+  padding:9px 0;border-bottom:1px dashed var(--line)}
+.mrow:last-of-type{border-bottom:none}
+.mrow.mhead{border-bottom:2px solid var(--ink);padding-bottom:7px;font-family:var(--mono);
+  font-size:10.5px;color:var(--muted);letter-spacing:.05em}
+.mrow.mhead .mr{text-align:right}
+.mname{min-width:0}
+.mname .t{font-size:13px;font-weight:600;line-height:1.4;display:block}
+.mname .c{font-family:var(--mono);font-size:10.5px;color:var(--faint);display:block;margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mtrack{position:relative;height:24px;background:#eeebe4;border-radius:2px;overflow:hidden}
+.mtrack .mf{position:absolute;left:0;top:0;height:100%;border-radius:2px}
+.mf.big{background:var(--g4)} .mf.mid{background:var(--g3)}
+.mf.nil{background:repeating-linear-gradient(45deg,#cfd8cf,#cfd8cf 4px,#e3e9e3 4px,#e3e9e3 8px);
+  box-shadow:inset 0 0 0 1px #bcccbf}
+.mf.total{background:var(--ink2)}
+.mtrack .zl{position:absolute;left:6px;top:50%;transform:translateY(-50%);
+  font-family:var(--mono);font-size:10px;color:var(--g1);font-weight:700;white-space:nowrap}
+.mval{text-align:right;font-family:var(--mono);font-size:13px;font-weight:700;white-space:nowrap}
+.mval.big{color:var(--g4)} .mval.mid{color:var(--g3)} .mval.nil{color:var(--g1)} .mval.total{color:var(--ink)}
+.mval .sub{display:block;font-size:9.5px;font-weight:400;color:var(--faint);margin-top:1px;letter-spacing:.02em}
+.mrow.sep{border-top:2px solid var(--ink);border-bottom:none;margin-top:6px;padding-top:11px}
+.maxis{display:grid;grid-template-columns:var(--gutter) 1fr 116px;gap:12px;margin-top:8px}
+.maxis .ax{grid-column:2;display:flex;justify-content:space-between;font-family:var(--mono);
+  font-size:9.5px;color:var(--faint);border-top:1px solid var(--line);padding-top:5px}
+.depcols{display:grid;grid-template-columns:var(--gutter) 1fr 116px;gap:12px;margin-top:4px}
+
+.insight{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}
+.ins{border:1px solid var(--line2);border-radius:4px;padding:12px 14px;background:#fff}
+.ins.a{border-left:3px solid var(--g1)} .ins.b{border-left:3px solid var(--g4)} .ins.c{border-left:3px solid var(--rust)}
+.ins .h{font-size:12.5px;font-weight:700;margin-bottom:5px;line-height:1.45}
+.ins p{margin:0;font-size:12px;color:var(--ink2);line-height:1.6}
+.ins .fig-n{font-family:var(--mono);font-size:15px;font-weight:700;display:block;margin-bottom:3px}
+.ins.a .fig-n{color:var(--g1)} .ins.b .fig-n{color:var(--g4)} .ins.c .fig-n{color:var(--rust)}
+
+.synergy{margin-top:16px;border:1px dashed var(--g3);background:#fdf8f0;border-radius:4px;
+  padding:11px 14px;font-size:12.5px;color:#74491a;line-height:1.65}
+.synergy b{color:#5c380f}
+
+.scen table{border-collapse:separate;border-spacing:0;width:100%;font-size:12.5px;min-width:520px}
+.scen th{text-align:left;font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.04em;
+  padding:0 10px 7px;border-bottom:2px solid var(--ink);font-weight:500}
+.scen th.r,.scen td.r{text-align:right}
+.scen td{padding:9px 10px;border-bottom:1px solid var(--line);line-height:1.5}
+.scen tr:last-child td{border-bottom:none}
+.scen .sc{font-weight:600;font-size:12.5px}
+.scen .sz{font-family:var(--mono);font-weight:700}
+.scen .dt{font-family:var(--mono);font-size:12px}
+.scen .vd{font-family:var(--mono);font-size:10.5px;padding:2px 8px;border-radius:3px;white-space:nowrap;font-weight:600}
+.vd.no{background:var(--g4b);color:var(--g4)} .vd.edge{background:var(--g3b);color:var(--g3)}
+.vd.ok{background:var(--g1b);color:var(--g1)} .vd.na{background:#efece5;color:var(--faint)}
+.scen tr.cur td{background:#f4f2ec}
+.scen tr.pick td{background:#f2f8f4}
+.redline{margin-top:12px;padding:9px 12px;border-left:3px solid var(--g4);background:#fbf2f2;
+  font-size:12px;color:#6d2727;line-height:1.6;border-radius:0 3px 3px 0}
+
+.dupe{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:2px}
+.verblock{font-family:var(--mono);font-size:11.5px;background:#1d2226;color:#d8d3c8;border-radius:4px;
+  padding:12px 14px;line-height:1.75;overflow-x:auto}
+.verblock .v12{color:#e2a08a} .verblock .v13{color:#8fc7a8}
+.verblock .ar{color:#6f7a80}
+.dupcount{display:flex;align-items:center;gap:10px;margin-top:11px;flex-wrap:wrap}
+.dupcount .n{font-family:var(--mono);font-size:19px;font-weight:700;color:var(--g4)}
+.dupcount .ar2{font-family:var(--mono);color:var(--faint);font-size:14px}
+.dupcount .n0{font-family:var(--mono);font-size:19px;font-weight:700;color:var(--muted)}
+.dupcount .lbl2{font-size:12px;color:var(--ink2);line-height:1.5}
+.duplist{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}
+.duplist .d{font-family:var(--mono);font-size:10.5px;background:#f3efe8;border:1px solid var(--line);
+  border-radius:3px;padding:2px 7px;color:var(--ink2)}
+.duplist .d b{color:var(--g4)}
+
+.caveats{margin-top:18px;border:1px solid var(--line2);border-radius:4px;background:var(--card2);padding:14px 16px}
+.caveats h5{margin:0 0 10px;font-size:12.5px;font-family:var(--mono);letter-spacing:.05em;color:var(--muted);
+  padding-bottom:8px;border-bottom:1px solid var(--line)}
+.caveats ul{margin:0;padding:0;list-style:none}
+.caveats li{position:relative;padding:6px 0 6px 20px;font-size:12.5px;color:var(--ink2);line-height:1.65;
+  border-bottom:1px dashed var(--line)}
+.caveats li:last-child{border-bottom:none}
+.caveats li::before{content:"";position:absolute;left:4px;top:14px;width:5px;height:5px;
+  border-radius:50%;background:var(--rust)}
+.caveats li b{color:var(--ink)}
+.trap{background:#fdf8f0;border-left:3px solid var(--g3);padding:10px 12px;border-radius:0 3px 3px 0;
+  margin:8px 0 2px;font-size:12.5px;color:#74491a;line-height:1.65}
+.trap b{color:#5c380f}
+.trap .x100{font-family:var(--mono);font-weight:700;color:var(--g4)}
+
+@media (max-width:900px){
+  .sizegrid,.verdict{grid-template-columns:1fr}
+  .insight,.dupe{grid-template-columns:1fr}
+  .measbar{--gutter:130px}
+}
+@media (max-width:640px){
+  .measbar{--gutter:1fr}
+  .mrow,.maxis,.depcols{grid-template-columns:1fr;gap:6px}
+  .mrow .mval{text-align:left}
+  .mrow.mhead{display:none}
+  .maxis .ax{grid-column:1}
+}
+
+@media (max-width:900px){
+  .lanes,.connrow,.shimrow{grid-template-columns:1fr}
+  .connrow,.shimrow{height:auto;gap:0}
+  .connrow .c,.shimrow .c{height:30px}
+  .crate.shim{max-width:none}
+}
+@media (max-width:640px){
+  .wrap{padding-left:16px;padding-right:16px}
+  nav.toc .wrap{padding-left:16px;padding-right:16px}
+  h1{font-size:23px}
+  /* 移动端提升正文可读性：正文与卡片文字提到 14px 以上 */
+  body{font-size:16px}
+  .subtitle{font-size:15.5px}
+  .meta{font-size:13px}
+  .lede{font-size:15px}
+  .stance .c p,.lane ul,.pside ul,.pcard p,.sidebox .kv,.rank li,
+  .fnode p,.verdict .v,.guard,.note,.endnote,td.cell p,td.dim .d{font-size:14px}
+  .figcap,.gname .ds,.bar .bn,.pcard .ck,.pside .warnline,.pside .okline{font-size:13px}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="kicker">osdk · design note visual annex · 2026-09-12</div>
+    <h1>系统包管理器集成：架构定位、能力边界与分阶段落地</h1>
+    <p class="subtitle">本页是中文设计文档的可视化附件。核心命题只有一个：<strong>winget 与 Homebrew 是宿主设施，不是 osdk 的 backend。</strong>下面六张图分别回答它挂在哪、能做到什么、镜像怎么选、体积代价多大、自实现要付多少、按什么顺序落地。</p>
+    <div class="meta">
+      <span><b>文档类型</b> 可视化附件（不含实现代码）</span>
+      <span><b>涉及 crate</b> osdk-cli / osdk-core / osdk-shim</span>
+      <span><b>体积基线</b> osdk 实测 11.92 MB · osdk-shim 实测 3.50 MB</span>
+      <span><b>对 shim 增量</b> 0 MB</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#stance"><span class="n">00</span>设计立场</a>
+    <a href="#arch"><span class="n">01</span>架构定位</a>
+    <a href="#matrix"><span class="n">02</span>能力对比矩阵</a>
+    <a href="#mirror"><span class="n">03</span>镜像探测与回退</a>
+    <a href="#size"><span class="n">04</span>feature 门控与体积</a>
+    <a href="#selfimpl"><span class="n">05</span>自实现体积实测</a>
+    <a href="#roadmap"><span class="n">06</span>分阶段路线图</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+<!-- ===== 00 设计立场 ===== -->
+<section id="stance">
+  <div class="sechead">
+    <span class="idx">00</span>
+    <h2>设计立场：四条不可协商的边界</h2>
+    <span class="tag">先读这里，后面六张图都是它的展开</span>
+  </div>
+  <p class="lede">osdk 对系统包管理器只做四件事：<strong>发现、状态查询、镜像探测与配置建议、显式 apply</strong>。反过来说，有四件事它明确不做——这不是能力缺口，是定义边界。</p>
+  <div class="stance">
+    <div class="c">
+      <h4>不接管安装目录</h4>
+      <p>Homebrew 的 prefix 事实上固定，winget 仅 portable 类型可控。诚实的结论是不去争夺这个控制权。</p>
+    </div>
+    <div class="c">
+      <h4>不纳入 shim 体系</h4>
+      <p>系统包不产生 shim、不参与 <code>Backend</code> 的 vtable，因此对 <code>osdk-shim</code> 的体积增量是 0 MB。</p>
+    </div>
+    <div class="c">
+      <h4>不进 lockfile 的可复现性承诺</h4>
+      <p>宿主包管理器的版本解析不在 osdk 控制之下，写进 lockfile 只会给出虚假的可复现保证。</p>
+    </div>
+    <div class="c warn">
+      <h4>永不隐式安装</h4>
+      <p>只有显式 <code>apply</code> 会改动系统，且过程非事务性。诊断与状态查询永远是只读的。</p>
+    </div>
+  </div>
+  <p class="note"><b>需要真正的目录控制与可复现性时怎么办？</b>走 osdk 自有的下载安装通道（现有 backend 体系），而不是系统包管理器。两条路径的能力承诺不同，混用才是问题的根源。</p>
+</section>
+
+<!-- ===== 01 架构 ===== -->
+<section id="arch">
+  <div class="sechead">
+    <span class="idx">01</span>
+    <h2>架构定位：第二条平行路径，而非第十四个 backend</h2>
+    <span class="tag">图 1 / 6</span>
+  </div>
+  <p class="lede">新增的系统包管理器子系统<strong>不实现 <code>Backend</code> trait</strong>，它与现有的 <code>container/</code> 子系统同构——都是由 CLI 直接调用的独立入口，共享 <code>source/</code>、<code>config/</code>、<code>http/</code> 等基础设施，但都不经过 <code>Registry</code> 的 <code>Arc&lt;dyn Backend&gt;</code> 分发。这一条决定了后面第 4 节的全部体积结论。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 1</b> · crate 边界与两条平行路径 —— 实线为链接可达，虚线为编译期不可达</p>
+    <div class="arch">
+
+      <div class="crate cli">
+        <span class="crate-tag">crate · osdk-cli</span>
+        <div class="chiprow">
+          <span class="chip">osdk install / use / ls</span>
+          <span class="chip">osdk activate</span>
+          <span class="chip">osdk container ...</span>
+          <span class="chip new">osdk syspkg doctor</span>
+          <span class="chip new">osdk syspkg status</span>
+          <span class="chip new">osdk syspkg apply</span>
+        </div>
+      </div>
+
+      <div class="connrow">
+        <div class="c"><i></i><span class="lbl">工具解析 / 安装</span></div>
+        <div class="c"><i></i><span class="lbl">运行时诊断</span></div>
+        <div class="c accent"><i></i><span class="lbl">宿主设施诊断</span></div>
+      </div>
+
+      <div class="crate core">
+        <span class="crate-tag">crate · osdk-core</span>
+        <div class="lanes">
+
+          <div class="lane primary">
+            <h5>backend/</h5>
+            <p class="role">既有路径 · 动态分发</p>
+            <ul>
+              <li><code>Backend</code> trait + <code>Registry</code></li>
+              <li>13 个 backend（node / rust / java / python …）</li>
+              <li><code>Registry::new()</code> 全量实例化为 <code>Arc&lt;dyn Backend&gt;</code></li>
+              <li>四个安装侧方法在 <code>install</code> feature 之后</li>
+            </ul>
+            <div class="flag"><span class="k">vtable 分发 · 无法裁剪</span></div>
+          </div>
+
+          <div class="lane mirror">
+            <h5>container/</h5>
+            <p class="role">既有先例 · 独立入口</p>
+            <ul>
+              <li>刻意<b>不</b>实现 <code>Backend</code> trait</li>
+              <li>docker / containerd / buildkit 运行时探测</li>
+              <li>mirror 探测 + 显式确认的 apply</li>
+              <li>只做诊断与配置，不持有 OCI store</li>
+            </ul>
+            <div class="flag"><span class="k">同构参照物</span></div>
+          </div>
+
+          <div class="lane newsys">
+            <h5>syspkg/ <span style="font-size:10px;color:var(--rust)">（新增）</span></h5>
+            <p class="role">新增子系统 · 平行路径</p>
+            <ul>
+              <li>同样<b>不</b>实现 <code>Backend</code> trait</li>
+              <li><code>winget.rs</code> · 代理调用宿主 CLI</li>
+              <li><code>homebrew.rs</code> · JSON API 优先</li>
+              <li><code>detect / status / mirror / apply</code></li>
+            </ul>
+            <div class="flag"><span class="k">feature = "syspkg" 门控</span></div>
+          </div>
+
+        </div>
+
+        <div class="vtable-band">
+          <b>关键不变量：</b><code>syspkg/</code> 与 <code>container/</code> 都不向 <code>Backend</code> trait 新增方法。每新增一个 trait 方法都会进入 13 个 backend 的 vtable，链接器无法证明其不可达，也就无法裁剪——这正是第 4 节要量化的代价。
+        </div>
+
+        <div class="infra">
+          <div class="t">共享基础设施 · 两条路径都复用，均不属于任一路径私有</div>
+          <div class="items">
+            <span class="chip">source/ · 镜像候选与探测排序</span>
+            <span class="chip">config/ · 配置分层与写回</span>
+            <span class="chip">http/ · 统一客户端与超时</span>
+            <span class="chip">process/ · 子进程与输出收敛</span>
+            <span class="chip">i18n/ · 中英文案</span>
+            <span class="chip">error/ · 错误分类</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="shimrow">
+        <div class="c solid"><i></i><span class="lbl">解析已安装工具并 exec</span></div>
+        <div class="c cut"><i></i><span class="lbl">无调用入口</span></div>
+        <div class="c cut"><i></i><span class="lbl">不链接 · 增量 0 MB</span></div>
+      </div>
+
+      <div class="crate shim">
+        <span class="crate-tag">crate · osdk-shim</span>
+        <div class="shim-body">
+          <span class="pill">default-features = false</span>
+          <span class="pill">不启用 install</span>
+          <span class="pill">不启用 syspkg</span>
+          <span class="pill zero">syspkg 增量 0 MB</span>
+        </div>
+        <p class="note" style="margin-top:12px">shim 只负责把已安装工具解析出来再 exec。<code>syspkg/</code> 既不在 vtable 里，也没有任何从 shim 出发的调用路径，因此在 release 构建中被整体裁掉——前提是 shim 仍然独立于 CLI 单独构建。</p>
+      </div>
+
+      <div class="legend">
+        <span><i class="sw" style="border-top-color:var(--steel)"></i>链接可达 · 动态分发</span>
+        <span><i class="sw" style="border-top-color:var(--rust)"></i>新增路径 · CLI 显式调用</span>
+        <span><i class="sw" style="border-top-color:var(--line2);border-top-style:dashed"></i>编译期不可达 · 可整体裁剪</span>
+      </div>
+
+    </div>
+  </div>
+  <p class="note"><b>为什么不复用 <code>Backend</code>？</b>表面上「装一个包」和「装一个 SDK」很像，但两者的承诺完全不同：backend 承诺目录布局、版本解析与可复现性，系统包管理器这三项一项都给不了。强行套用同一个 trait，得到的不是复用，而是一个处处需要返回「不支持」的实现，外加下一节列出的全部体积代价。</p>
+</section>
+
+<!-- ===== 02 能力矩阵 ===== -->
+<section id="matrix">
+  <div class="sechead">
+    <span class="idx">02</span>
+    <h2>能力对比矩阵：五家包管理器的逐维度实况</h2>
+    <span class="tag">图 2 / 6 · 全文信息密度最高</span>
+  </div>
+  <p class="lede">十三个维度 × 五家包管理器。两侧的短板落在不同位置：<strong>winget 弱在输出契约与退出码，Homebrew 弱在目录控制</strong>；而 Linux 三家虽在输出与镜像上更强，却在<strong>权限与事务性</strong>上是结构性劣势。全表共同的硬边界是「安装目录」这一行——五家中四家「不可行」，这正是第 00 节「不接管安装目录」的由来。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 2</b> · 能力热力矩阵 —— 颜色为支持等级，格内为该判定的具体依据</p>
+
+    <div class="scale">
+      <div class="s lv1"><b>原生支持</b><span>官方提供且契约稳定，可直接依赖</span></div>
+      <div class="s lv2"><b>部分支持</b><span>能用，但有条件限制或覆盖不全</span></div>
+      <div class="s lv3"><b>需变通</b><span>须绕道实现，成本与脆弱性显著</span></div>
+      <div class="s lv4"><b>不可行</b><span>机制上不存在，不应尝试</span></div>
+      <div class="s lv0"><b>未评估</b><span>本轮未取得该格判定，不做推测</span></div>
+    </div>
+
+    <div class="mx-scroll">
+    <table class="mx mx5">
+      <thead>
+        <tr>
+          <th class="dim">维度</th>
+          <th><span class="pm">winget</span><span class="os">Windows · Microsoft</span></th>
+          <th><span class="pm">Homebrew</span><span class="os">macOS / Linux · 社区</span></th>
+          <th><span class="pm">apt / dpkg</span><span class="os">Debian · Ubuntu</span></th>
+          <th><span class="pm">apk</span><span class="os">Alpine</span></th>
+          <th><span class="pm">pacman</span><span class="os">Arch</span></th>
+        </tr>
+      </thead>
+      <tbody>
+
+        <tr>
+          <td class="dim"><span class="d">非交互调用</span><span class="sub">能否在无人值守下完成</span></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>以 <code>--id --exact</code> 精确定位，配合静默安装与协议接受参数即可无人值守。mise 的 winget 侧正是走这条真代理路径，shell out 到 <code>winget.exe</code>。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>命令行天然非交互。唯一硬约束是 <code>brew</code> 拒绝以 sudo 运行，调用方必须以普通用户身份执行。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p><code>-y</code> 与 <code>DEBIAN_FRONTEND=noninteractive</code> 是<b>两套机制各管一段</b>：前者管 apt 自身提示，后者管 debconf 配置问题。两者都要给才算真非交互。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><b>默认即非交互</b>，五家中唯一一家无需额外开关。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>需显式 <code>--noconfirm</code>。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">退出码契约</span><span class="sub">能否据此判别结果</span></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p>退出码是 <b>HRESULT 而非 0/1 体系</b>（如 <code>0x8A150061</code> / <code>-1978335135</code> PACKAGE_ALREADY_INSTALLED）。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p><b>无编号化退出码表</b>，调用方难以精确区分「已安装」与真实失败。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p><b>apt 仅 0 / 100 两值</b>；dpkg 有 0 / 1 / 2 且含断言语义。粒度不足以驱动自动化决策。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p><b>无成文 EXIT STATUS 节</b>（待验证 V-12）。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p><b>无成文 EXIT STATUS 节</b>（待验证 V-13）。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">机器可读输出</span><span class="sub">能否不解析人类文本</span></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p><b>无通用 <code>--output json</code></b>。JSON 面只有三条：<code>winget export</code>（写文件）、<code>winget dscv3</code>、以及 <code>Microsoft.WinGet.Client</code> PowerShell 模块。维护者明确推荐后两者，而非解析 CLI 文本。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>4.x 起 JSON API 优先，<code>formulae.brew.sh</code> 提供结构化元数据。mise 的 brew 侧甚至完全不 shell out 到 <code>brew</code>。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p><b>apt 官方成文警告 CLI 无稳定接口</b>。稳定面是 <code>dpkg-query -W -f=</code> 与 <code>dpkg --robot</code>，须绕开 apt 本身。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><b>五家中最强</b>：<code>apk query --format json|yaml</code>，并支持 <code>--fields</code> / <code>--match</code> 精确取值。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>无 JSON，但有格式精确定义的 <code>--print-format</code> 与 <code>-F --machinereadable</code>。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">版本查询</span><span class="sub">可用版本与已装版本</span></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>查询能力存在，但结果要落到结构化数据仍受限于上一行的输出契约，须经 PowerShell 模块或 dscv3 取得。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>JSON API 直接给出版本与依赖信息，无需解析终端输出。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><code>dpkg-query -W -f=</code> 自定义字段输出。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><code>apk info -e -v</code> 与 <code>apk query</code>。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><code>pacman -Q</code> 与 <code>pacman -T</code>。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">版本固定（pin）</span><span class="sub">能否锁定不随升级漂移</span></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p>无面向 osdk 的稳定 pin 语义可依赖。这也是 osdk 不把系统包纳入 lockfile 可复现性承诺的直接原因。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>生态以滚动更新为基本假设，pin 与 osdk 的项目级版本语义并不对齐。mise 同样刻意不按项目 pin 系统包。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><code>apt-mark hold</code>（可被 <code>--ignore-hold</code> 越过）；另有 APT pinning 的 <code>Pin-Priority</code>。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>world 约束 <code>name=version</code>，并支持文件身份哈希约束。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p><code>--ignore</code> / <code>IgnorePkg</code> 可用，但 <b>Arch 官方明确警告其风险</b>。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">安装指定版本</span><span class="sub">能否装非最新版</span></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><code>pkg=version</code> 语法；但 pinning 需 ≥ 1000 才允许降级。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>原生 <code>name=version</code>。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p><b>Arch 仓库只存最新版</b>，机制上不提供历史版本。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">安装目录控制</span><span class="sub">osdk 能否指定落盘位置</span></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p><code>--location</code> 的官方措辞就是 <b>"if supported"</b>：MSI 只翻译成 <code>TARGETDIR</code>，而很多包实际需要 <code>INSTALLDIR</code>（issue #1857 仍 Open）；EXE 类不确定；MSIX 无自定义目录概念。<b>只有 portable 类型</b>有完整文档化的目录模型（<code>portablePackageUserRoot</code> / <code>portablePackageMachineRoot</code>，必须绝对路径且不展开环境变量）。不存在 <code>WINGET_*</code> 安装目录环境变量。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p>prefix 事实上固定：Apple Silicon <code>/opt/homebrew</code>、Intel <code>/usr/local</code>、Linux <code>/home/linuxbrew/.linuxbrew</code>。非默认 prefix 会让 bottle 失效、退化为源码编译，官方定性为「<b>耗时、易失败、且不受支持</b>」，并在 Support Tiers 中降为 Tier 2/3。<code>HOMEBREW_PREFIX</code> / <code>HOMEBREW_CELLAR</code> 是 <code>brew shellenv</code> 的<b>输出</b>而非配置输入；<code>HOMEBREW_CASK_OPTS --appdir</code> 只作用于 cask。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p>作为「安装前缀」不可行：<code>--instdir</code> / <code>--root</code> 是 <b>chroot / rootfs 语义</b>，不是安装前缀。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p>同上，<code>--root</code> 也是 rootfs 语义，非前缀。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p><b>官方明文禁止</b>将其用作 <code>/usr/local</code> 前缀。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">卸载残留处理</span><span class="sub">卸载后是否干净</span></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>卸载行为取决于各包自带的 installer 类型，winget 本身不统一保证清理结果。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>Cellar 内产物卸载清晰，但依赖与 cask 残留仍需额外动作，非单命令闭合。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">重复安装幂等性</span><span class="sub">再装一次是否安全</span></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p>「已安装」这一正常状态是<b>用错误码表达的</b>，因此幂等必须靠<b>白名单退出码</b>实现，不能简单判断非零即失败。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>重复安装行为可接受，但缺少编号化退出码，难以精确区分「已安装」与真实失败。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>靠 <code>--no-upgrade</code> / <code>--only-upgrade</code> 组合近似表达，无单一幂等开关。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>world 约束模型<b>天然接近幂等</b>。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><code>--needed</code> 是<b>官方幂等开关</b>。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">权限提升模型</span><span class="sub">谁来提权、何时提权</span></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p><code>source add/remove/reset</code> 需要管理员权限；组策略 <code>EnableAllowedSources</code> 可完全禁止换源。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>模型明确：<b>brew 拒绝以 sudo 运行</b>，权限边界由 prefix 目录归属决定。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p>就「用户态安装」而言不可行：<b>变更一律需 root</b>（查询可免 root）。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p>变更需 root；<code>--usermode</code> 提供有限非 root 能力，但官方注明<b>「可能不完全可用」</b>。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p><b>变更一律需 root</b>，无用户态安装路径。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">首次可用性引导</span><span class="sub">未安装时能否自举</span></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>现代 Windows 随系统提供，osdk 侧基本只需做存在性探测与版本诊断。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p>需用户自行完成安装与 <code>shellenv</code> 接入，osdk 只能给出诊断与引导。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">镜像加速可行性</span><span class="sub">国内网络下的可用性</span></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>镜像存在：USTC <code>mirrors.ustc.edu.cn/winget-source</code>（winget ≥ 1.8 需 <code>--trust-level trusted</code>），NJU 与华为云可用；<b>TUNA 与腾讯云实测 404</b>。关键限制：<b>只镜像 manifest/索引，不镜像安装包本身</b>——<code>InstallerUrl</code> 仍指向上游，<b>只加速「找包」不加速「下包」</b>。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>4.x 起重心转到 <code>HOMEBREW_API_DOMAIN</code>。TUNA / USTC / 阿里云均提供，实测 <code>formula.jws.json</code> 返回 200。USTC 另提供 legacy flat 与 OCI 两套<b>互斥</b>配置。元数据与 bottle 均可加速。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p><b>镜像包本体</b>（非仅索引）。TUNA / USTC / 阿里云均有官方帮助页。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>一条 sed 改 <code>/etc/apk/repositories</code> 即可。</p></td>
+          <td class="cell lv1"><span class="badge">原生支持</span>
+            <p>改 <code>/etc/pacman.d/mirrorlist</code> 即可。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">事务性 / 回滚</span><span class="sub">失败后能否撤销</span></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p><b>无 undo</b>，仅有日志；且存在 <code>half-installed</code> 等<b>非原子中间状态</b>。</p></td>
+          <td class="cell lv4"><span class="badge">不可行</span>
+            <p><b>无 undo</b>。</p></td>
+          <td class="cell lv3"><span class="badge">需变通</span>
+            <p>无 undo，只能从 cache 手工降级，<b>官方称之为 last resort</b>。</p></td>
+        </tr>
+
+        <tr>
+          <td class="dim"><span class="d">包 ID 命名空间</span><span class="sub">跨平台能否统一标识</span></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>以 <code>--id --exact</code> 可精确无歧义定位，但命名体系与 Homebrew 完全不同，无法跨平台复用。</p></td>
+          <td class="cell lv2"><span class="badge">部分支持</span>
+            <p>formula / cask 双命名空间各自稳定，但无法与 winget 的 ID 对齐。跨平台统一命名须由 osdk 自建映射承担。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+          <td class="cell lv0"><span class="badge">未评估</span>
+            <p>本轮未取得该格判定。</p></td>
+        </tr>
+
+      </tbody>
+    </table>
+    </div>
+
+    <div class="tallywrap">
+      <div class="row">
+        <span class="nm">winget</span>
+        <div class="tally">
+          <div class="seg" style="background:var(--g1);flex:2">原生 2</div>
+          <div class="seg" style="background:var(--g2);flex:5">部分 5</div>
+          <div class="seg" style="background:var(--g3);flex:4">需变通 4</div>
+        </div>
+      </div>
+      <div class="row">
+        <span class="nm">Homebrew</span>
+        <div class="tally">
+          <div class="seg" style="background:var(--g1);flex:5">原生 5</div>
+          <div class="seg" style="background:var(--g2);flex:4">部分 4</div>
+          <div class="seg" style="background:var(--g3);flex:1">变通 1</div>
+          <div class="seg" style="background:var(--g4);flex:1">不可行 1</div>
+        </div>
+      </div>
+      <div class="row">
+        <span class="nm sm">apt / dpkg</span>
+        <div class="tally">
+          <div class="seg" style="background:var(--g1);flex:4">原生 4</div>
+          <div class="seg" style="background:var(--g2);flex:3">部分 3</div>
+          <div class="seg" style="background:var(--g3);flex:1">变通 1</div>
+          <div class="seg" style="background:var(--g4);flex:3">不可行 3</div>
+        </div>
+      </div>
+      <div class="row">
+        <span class="nm sm">apk</span>
+        <div class="tally">
+          <div class="seg" style="background:var(--g1);flex:7">原生 7</div>
+          <div class="seg" style="background:var(--g3);flex:2">变通 2</div>
+          <div class="seg" style="background:var(--g4);flex:2">不可行 2</div>
+        </div>
+      </div>
+      <div class="row">
+        <span class="nm sm">pacman</span>
+        <div class="tally">
+          <div class="seg" style="background:var(--g1);flex:3">原生 3</div>
+          <div class="seg" style="background:var(--g2);flex:3">部分 3</div>
+          <div class="seg" style="background:var(--g3);flex:2">变通 2</div>
+          <div class="seg" style="background:var(--g4);flex:3">不可行 3</div>
+        </div>
+      </div>
+      <p style="margin:10px 0 0;font-size:11px;color:var(--faint);line-height:1.55;font-family:var(--mono)">
+        统计口径：每列各按其 11 项已判定维度计数，「未评估」格不计入。winget 与 Homebrew 沿用原有 11 维口径，数值不变。
+      </p>
+    </div>
+
+    <div class="synergy" style="border-color:var(--steel);background:var(--steel-soft);color:#2f4854">
+      <b>Linux 三家为何不能与 winget / Homebrew 同级：</b>它们在<b>机器可读输出</b>与<b>镜像换源</b>两个维度上反而<b>强于 winget</b>（apk 的 <code>--format json</code> 是全表最强，三家都能镜像包本体而非仅索引）。但在<b>权限</b>与<b>事务性 / 回滚</b>上是结构性劣势——<b>变更一律需 root，且都没有事务撤销</b>（仅 dnf 有 <code>history undo</code>，不在本矩阵内）。这决定了它们在 osdk 中应<b>降级为「只读检测 + 建议命令」</b>，而不是与 winget / Homebrew 同级的 provider。
+    </div>
+
+    <p class="note"><b>读这张图的方式：</b>Homebrew 在输出契约上明显更好，却在安装目录上与 Linux 三家同为「不可行」；winget 反过来——目录尚有 portable 一线可能，但输出与退出码全线需要变通。<b>没有任何一侧是「更适合做 backend」的</b>，短板只是落在不同位置。这就是结论只能是「另立子系统」而非「扩展 Backend trait」的实证依据。</p>
+  </div>
+
+  <div class="stance" style="margin-top:18px">
+    <div class="c">
+      <h4>mise 的两套做法</h4>
+      <p>winget 侧是<b>真代理</b>（shell out 到 <code>winget.exe</code>，用 <code>--id --exact</code> + silent + 接受协议）；brew 侧<b>完全自实现</b>——从 <code>formulae.brew.sh</code> 取元数据、从 <code>ghcr.io</code> 下 bottle、自己做 relocate / 重签名 / link，从不 shell out 到 <code>brew</code>。</p>
+    </div>
+    <div class="c">
+      <h4>mise 的定位选择</h4>
+      <p>系统包放在独立的 <code>[bootstrap.packages]</code> 而非 <code>[tools]</code> backend，刻意不给 shim、不按项目 pin。明确不支持 Intel Mac，明确「永不隐式安装」（只有 apply 会装东西），非事务性。</p>
+    </div>
+    <div class="c warn">
+      <h4>osdk 的取舍</h4>
+      <p>与 mise 的定位一致但更保守：两侧都以代理与诊断为主，不复制 brew 自实现那套 relocate / 重签名负担。需要真正的目录控制与可复现性时，走 osdk 自有下载安装通道。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 03 镜像探测 ===== -->
+<section id="mirror">
+  <div class="sechead">
+    <span class="idx">03</span>
+    <h2>镜像探测与回退：复用 source/ 的既有决策链</h2>
+    <span class="tag">图 3 / 6</span>
+  </div>
+  <p class="lede">这条链路不是新发明的，它与 <code>source/</code> 现有的「pin → 缓存 → 并发探测 → 打分排序 → 写回缓存」完全同构，<strong>syspkg 只是换了探测对象</strong>。真正需要在图上讲清的差异有两处：两侧探测的目标域名不同，以及 winget 镜像存在一个无法回避的加速上限。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 3</b> · 镜像选择决策流 —— 从配置读取到全部失败的完整路径</p>
+    <div class="flow">
+      <div class="flowcol">
+
+        <div class="fnode"><h4 class="fh"><span class="st">START</span>读取配置</h4>
+          <p>按 osdk 既有配置分层解析 syspkg 镜像设置，得到候选列表与策略（pin / auto / offline）。</p></div>
+        <div class="farrow"><i></i></div>
+
+        <div class="fnode dec"><h4 class="fh"><span class="st">判定</span>是否存在显式 pin？</h4>
+          <p>用户显式指定镜像时，osdk 不做任何自作主张的重排。</p></div>
+        <div class="farrow"><i></i><span class="yes">是 → 直接采用，跳过全部探测</span></div>
+
+        <div class="fnode dec"><h4 class="fh"><span class="st">判定</span>探测缓存命中且未过期？</h4>
+          <p>按候选集指纹与 TTL 校验。命中即复用上次排序结果，避免每次命令都打网络。</p></div>
+        <div class="farrow"><i></i><span class="yes">是 → 直接用缓存排序</span></div>
+
+        <div class="fnode act"><h4 class="fh"><span class="st">探测</span>并发探测候选镜像（含官方源）</h4>
+          <p>官方源<b>始终作为候选之一参与排序</b>，而不是仅作兜底——网络良好时它未必更慢。两侧探测对象不同：</p>
+          <div class="probe-split">
+            <div class="pside w">
+              <h6>winget<span class="os">探测 manifest 索引源</span></h6>
+              <ul>
+                <li>USTC <code>mirrors.ustc.edu.cn/winget-source</code></li>
+                <li>NJU 与华为云路径可用</li>
+                <li>TUNA / 腾讯云实测 404，不入候选</li>
+                <li>winget ≥ 1.8 需 <code>--trust-level trusted</code></li>
+              </ul>
+              <div class="warnline"><b>关键限制：</b>winget 镜像只镜像 manifest / 索引，<b>不镜像安装包本身</b>。manifest 的 <code>InstallerUrl</code> 仍指向上游原始地址，因此探测再快也<b>只加速「找包」，不加速「下包」</b>。</div>
+            </div>
+            <div class="pside b">
+              <h6>Homebrew<span class="os">探测 API 域名与 bottle 域名</span></h6>
+              <ul>
+                <li>API 域名：<code>HOMEBREW_API_DOMAIN</code></li>
+                <li>TUNA / USTC / 阿里云均提供</li>
+                <li>实测 <code>formula.jws.json</code> 返回 200</li>
+                <li>USTC 另提供 legacy flat 与 OCI 两套</li>
+              </ul>
+              <div class="okline"><b>两套互斥：</b><code>HOMEBREW_BOTTLE_DOMAIN</code>（legacy flat）与 <code>HOMEBREW_ARTIFACT_DOMAIN</code>（OCI）不可同时配置，须二选一。元数据与 bottle 均可加速。</div>
+            </div>
+          </div>
+        </div>
+        <div class="farrow"><i></i></div>
+
+        <div class="fnode act"><h4 class="fh"><span class="st">排序</span>按吞吐 / TTFB 打分排序</h4>
+          <p>沿用 <code>source/</code> 的既有评分口径：<b>吞吐量主导，再减去一个较小的 TTFB 惩罚项</b>；探测失败的候选排到末尾但仍保留可用性，不被直接丢弃。</p></div>
+        <div class="farrow"><i></i></div>
+
+        <div class="fnode act"><h4 class="fh"><span class="st">写回</span>写回探测缓存</h4>
+          <p>连同候选集指纹与测量时间戳一并落盘，供 TTL 判定使用。缓存带 schema 版本，结构变更时自动失效。</p></div>
+        <div class="farrow"><i></i></div>
+
+        <div class="fnode dec"><h4 class="fh"><span class="st">执行</span>使用首选镜像</h4>
+          <p>按排序结果取第一个候选执行实际请求。</p></div>
+
+        <div class="branch" style="margin-top:14px">
+          <div class="bcol">
+            <span class="bhead y">成功</span>
+            <div class="fnode good"><h4 class="fh"><span class="st">DONE</span>正常返回</h4>
+              <p>结果可用，排序缓存在 TTL 内继续复用。</p></div>
+          </div>
+          <div class="bcol">
+            <span class="bhead n">失败</span>
+            <div class="fnode"><h4 class="fh"><span class="st">回退</span>按序取下一候选</h4>
+              <p>沿排序列表逐个回退，官方源作为列表中的常规一项同样参与回退。</p></div>
+            <div class="farrow"><i></i><span class="no">候选全部耗尽</span></div>
+            <div class="fnode bad"><h4 class="fh"><span class="st">ERROR</span>报错并给出诊断</h4>
+              <p>不静默降级、不隐式改写用户配置；明确报出每个候选的失败原因。</p></div>
+          </div>
+        </div>
+
+      </div>
+
+      <aside class="sidebox">
+        <h5>这条链路的设计约束</h5>
+        <div class="kv"><b>复用而非新建</b><span>探测、打分、缓存、回退全部走 <code>source/</code> 既有实现，syspkg 只提供候选集与探测 URL。</span></div>
+        <div class="kv"><b>探测 ≠ 改配置</b><span>探测结果默认只作为<b>建议</b>呈现。真正写入宿主配置必须经显式 apply，与 <code>container/</code> 的镜像 apply 同样要求确认。</span></div>
+        <div class="kv"><b>换源本身可能被禁</b><span>winget 的 <code>source add/remove/reset</code> 需要管理员权限，组策略 <code>EnableAllowedSources</code> 可完全禁止换源。osdk 须把这种情况作为正常结果诊断出来，而不是当作失败重试。</span></div>
+        <div class="kv"><b>显式优先级</b>
+          <ol class="rank">
+            <li>用户显式 pin</li>
+            <li>新鲜缓存中的排序结果</li>
+            <li>本次并发探测的打分排序</li>
+            <li>按序回退的下一候选</li>
+          </ol>
+        </div>
+      </aside>
+    </div>
+
+    <p class="note"><b>winget 侧必须说清的期望管理：</b>用户配置镜像后若发现「搜索变快了但安装还是慢」，这不是配置错误，而是 winget 镜像模型的固有属性。osdk 的诊断输出应当<b>主动说明这一点</b>，避免用户反复折腾本就无法通过换源解决的下载速度问题。</p>
+  </div>
+</section>
+
+<!-- ===== 04 体积 ===== -->
+<section id="size">
+  <div class="sechead">
+    <span class="idx">04</span>
+    <h2>feature 门控与体积影响：为什么这条路不能走 Backend trait</h2>
+    <span class="tag">图 4 / 6</span>
+  </div>
+  <p class="lede">用户下载的就是两个二进制，体积是产品指标而非实现细节。这一节用项目内已有的实测数据说明：<strong>把能力挂到 <code>Backend</code> trait 上，代价会转嫁给完全用不到它的 <code>osdk-shim</code></strong>；而独立子系统加 feature 门控，对 shim 的增量是 0 MB。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4</b> · 左：项目内已发生的历史实测；右：本次三种方案对 <code>osdk-shim</code> 的增量</p>
+    <div class="sizegrid">
+
+      <div class="sizepanel">
+        <h5>历史实测 · 13 个 backend 的两种分发方式</h5>
+        <p class="sh">同样 13 个 backend，仅分发方式不同 · 单位 MB</p>
+        <div class="bars">
+          <div class="bar hl">
+            <div class="bl"><span class="nm"><b><code>dyn Backend</code> 动态分发</b>全部方法进入 vtable</span><span class="vl" style="color:var(--g4)">7.02 MB</span></div>
+            <div class="track"><div class="f cost" style="width:87.8%">链接器无法证明不可达</div></div>
+            <p class="bn"><code>Registry::new()</code> 会把全部 13 个 backend 实例化成 <code>Arc&lt;dyn Backend&gt;</code>，于是<b>每一个 trait 方法都进入 vtable</b>，链接器无法裁剪。</p>
+          </div>
+          <div class="bar hl2">
+            <div class="bl"><span class="nm"><b>静态分发 / install feature 门控后</b>安装侧方法移出无条件部分</span><span class="vl" style="color:var(--g1)">1.83 MB</span></div>
+            <div class="track"><div class="f ok" style="width:22.9%">可裁剪</div></div>
+            <p class="bn">四个仅安装用到的方法（<code>list_remote_versions</code>、<code>resolve_version</code>、<code>install</code>、<code>uninstall</code>）置于 <code>install</code> feature 之后。</p>
+          </div>
+          <div class="bar">
+            <div class="bl"><span class="nm"><b>差额 · shim 曾经白背的体积</b></span><span class="vl" style="color:var(--g4)">5.15 MB</span></div>
+            <div class="track"><div class="f cost" style="width:64.4%">纯粹的无效负重</div></div>
+            <p class="bn">shim 从不安装任何东西，却为这些方法付了 5.15 MB。这是本节全部结论的实证来源。</p>
+          </div>
+        </div>
+        <div class="axis"><span>0</span><span>2</span><span>4</span><span>6</span><span>8 MB</span></div>
+      </div>
+
+      <div class="sizepanel">
+        <h5>本次方案 · 对 <code>osdk-shim</code> 的增量</h5>
+        <p class="sh">基线 osdk 实测 11.92 MB · osdk-shim 实测 3.50 MB</p>
+        <div class="bars">
+          <div class="bar">
+            <div class="bl"><span class="nm"><b>方案甲：扩展 <code>Backend</code> trait</b>把 syspkg 能力做成 trait 方法</span><span class="vl" style="color:var(--g4)">不可裁剪</span></div>
+            <div class="track"><div class="f cost" style="width:100%">每加一个方法 → 进 13 份 vtable → 无上界</div></div>
+            <p class="bn">重蹈左图覆辙：增量随方法数量增长，且 shim 必然全额承担。<b>这条路被排除。</b></p>
+          </div>
+          <div class="bar">
+            <div class="bl"><span class="nm"><b>方案乙：独立子系统，但不做 feature 门控</b></span><span class="vl" style="color:var(--g3)">有条件增量</span></div>
+            <div class="track"><div class="f" style="width:34%;background:var(--g3)">仅当 shim 侧存在调用路径</div></div>
+            <p class="bn">不进 vtable，已经好得多；但代码仍在依赖图内，重依赖（HTTP 栈等）有被带入的风险。</p>
+          </div>
+          <div class="bar hl2">
+            <div class="bl"><span class="nm"><b>方案丙：独立子系统 + feature 门控</b>与 <code>container/</code> 同构 · <b>采用</b></span><span class="vl" style="color:var(--g1)">0 MB</span></div>
+            <div class="track"><div class="f zero" style="width:100%"></div></div>
+            <p class="bn">不实现 <code>Backend</code> trait → 不进 vtable；shim 无调用路径 + feature 关闭 → 编译期整体不可达，被完整裁掉。</p>
+          </div>
+          <div class="bar">
+            <div class="bl"><span class="nm"><b>osdk-shim 最终体积</b>方案丙下</span><span class="vl">≈ 3.5 MB（不变）</span></div>
+            <div class="track"><div class="f base" style="width:39.3%">基线保持</div></div>
+            <p class="bn">syspkg 的全部成本落在 <code>osdk-cli</code> 侧——那里本来就要为安装路径付费，是正确的承担方。</p>
+          </div>
+        </div>
+        <div class="axis"><span>0</span><span>相对量级示意</span><span>无上界 →</span></div>
+      </div>
+
+    </div>
+
+    <div class="verdict">
+      <div class="v bad"><b>若走方案甲，会发生什么</b>新增的每个 trait 方法都会进入 13 个 backend 的 vtable。即便 shim 永远不会调用任何一个包管理器方法，链接器也无法证明这一点，因此无法裁剪——与 5.15 MB 那次的成因完全一致。</div>
+      <div class="v good"><b>方案丙为什么能做到 0 MB</b>两道独立的保险：① 不实现 <code>Backend</code> trait，从根上不进 vtable；② feature 门控 + shim 侧无调用路径，使整棵子树在编译期不可达。任一条单独成立都有效，两条叠加则更稳。</div>
+    </div>
+
+    <div class="guard">
+      <b>配套的工程约束（沿用项目既有纪律）：</b>syspkg 若引入仅安装路径需要的重依赖，须写成 <code>optional = true</code> 并经 feature 以 <code>dep:</code> 引入，使其完全不进入 shim 的依赖图；<b>两个二进制必须分两次 cargo 调用构建</b>——Cargo 会在单次 <code>--workspace</code> 构建内统一 feature，把门控悄悄打开，产物照样能跑、没有警告，体积却退回原样。体积校验应使用独立构建目录分别构建 <code>osdk-cli</code> 与 <code>osdk-shim</code>。
+    </div>
+  </div>
+</section>
+
+<!-- ===== 05 自实现体积实测 ===== -->
+<section id="selfimpl">
+  <div class="sechead">
+    <span class="idx">05</span>
+    <h2>自实现 Homebrew 的体积实测：为什么代理路线是唯一可行解</h2>
+    <span class="tag">图 5 / 6 · 实测数据</span>
+  </div>
+  <p class="lede">上一节论证的是「不要扩展 <code>Backend</code> trait」。这一节回答另一个问题：假如 Homebrew 侧也照 mise 那样<b>完全自实现</b>（自取元数据、自下 bottle、自做 relocate 与重签名），要付多少体积？<strong>这组数字是逐组构建探针实测出来的，不是估算。</strong>本轮按版本对齐后的结果重测：完整自实现让 osdk 增长 24.3%，即便取最便宜的可行组合也仍超红线 1.31 倍。</p>
+
+  <div class="synergy" style="border-color:var(--steel);background:var(--steel-soft);color:#2f4854;margin-bottom:18px">
+    <b>本轮重测的起因：</b>上一版测的 <code>oci-client 0.15</code> 钉 reqwest 0.12，与 osdk 的 0.13 冲突。查明上游自 <b>0.16.0（2026-01-27）起已转向 reqwest ^0.13</b>，改用 0.17 重测后数字发生变化，<b>同时另一条结论被推翻</b>（见下方「签名 shell out 的前提」）。
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 5a</b> · 逐组能力的净增量（按大小排序）—— probe 基线 2,217,984 B，控制组 2,294,272 B（+74 KB，仅探针代码、不新增依赖），下列净增量<b>均已扣除控制组</b></p>
+
+    <div class="measbar">
+      <div class="mrow mhead">
+        <div>能力分组 / 候选 crate</div>
+        <div>净增量（相对控制组）</div>
+        <div class="mr">依赖图 · 重复</div>
+      </div>
+
+      <div class="mrow">
+        <div class="mname"><span class="t">OCI registry 客户端 <span style="font-weight:400;color:var(--faint);font-size:11px">（旧测 · 版本失配）</span></span><span class="c">oci-client 0.15</span></div>
+        <div class="mtrack"><div class="mf big" style="width:70.3%"></div></div>
+        <div class="mval big" style="opacity:.55">+1.92 MB<span class="sub">409 行 · 4 重复</span></div>
+      </div>
+
+      <div class="mrow" style="background:#fdf8f1;border-left:3px solid var(--rust);padding-left:10px;margin-left:-13px">
+        <div class="mname"><span class="t">OCI registry 客户端 <span style="font-weight:700;color:var(--rust);font-size:10.5px;font-family:var(--mono)">版本对齐后</span></span><span class="c">oci-client 0.17</span></div>
+        <div class="mtrack"><div class="mf big" style="width:74.5%"></div></div>
+        <div class="mval big">+1.43 MB<span class="sub">387 行 · 8 重复</span></div>
+      </div>
+
+      <div class="mrow">
+        <div class="mname"><span class="t">代码签名（纯 Rust）</span><span class="c">apple-codesign 0.29</span></div>
+        <div class="mtrack"><div class="mf big" style="width:81.8%"></div></div>
+        <div class="mval big">+1.57 MB<span class="sub">836 行 · 13 重复</span></div>
+      </div>
+
+      <div class="mrow">
+        <div class="mname"><span class="t">ELF interpreter/rpath 改写</span><span class="c">object（+elf）</span></div>
+        <div class="mtrack"><div class="mf nil" style="width:3.6%"></div><span class="zl" style="left:5.5%">≈ 0 · 合计 +70 KB，仍低于控制组</span></div>
+        <div class="mval nil">≈ 0<span class="sub">278 行 · 3 重复</span></div>
+      </div>
+
+      <div class="mrow">
+        <div class="mname"><span class="t">Mach-O load command 重写</span><span class="c">object 0.36</span></div>
+        <div class="mtrack"><div class="mf nil" style="width:3.3%"></div><span class="zl" style="left:5.5%">≈ 0 · +65 KB，低于控制组 74 KB</span></div>
+        <div class="mval nil">≈ 0<span class="sub">278 行 · 3 重复</span></div>
+      </div>
+
+      <div class="mrow">
+        <div class="mname"><span class="t">依赖闭包求解</span><span class="c">resolvo 0.12</span></div>
+        <div class="mtrack"><div class="mf nil" style="width:1.6%"></div><span class="zl" style="left:5.5%">0 MB · 已因 rattler 在依赖图中</span></div>
+        <div class="mval nil">0 MB<span class="sub">310 行 · 4 重复</span></div>
+      </div>
+
+      <div class="mrow">
+        <div class="mname"><span class="t">代码签名（shell out 到系统 codesign）</span><span class="c">无新增 crate</span></div>
+        <div class="mtrack"><div class="mf nil" style="width:1.6%"></div><span class="zl" style="left:5.5%;color:var(--g3)">0 KB —— <b>但前提不成立</b>，见下方警示</span></div>
+        <div class="mval nil">0 KB<span class="sub">272 行 · 2 重复</span></div>
+      </div>
+
+      <div class="maxis"><div class="ax"><span>0</span><span>0.5 MB</span><span>1 MB</span><span>1.5 MB</span><span>1.92 MB</span></div></div>
+    </div>
+
+    <p class="note" style="margin-top:14px"><b>为什么保留旧行：</b>第一行 <code>oci-client 0.15</code> 是版本失配下的旧测值，保留用于与第二行对照——同一能力仅因版本对齐，净增量就从 <b>1.92 MB 降到 1.43 MB</b>。下方图 5b 专门拆解这 0.49 MB 的来源。合并配置的绝对预算见图 5c。</p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 5b</b> · 原 1.92 MB 的成因拆解 —— 版本对齐可消除的部分 vs 无法回避的本体成本</p>
+
+    <div class="measbar" style="--gutter:220px">
+      <div class="mrow mhead">
+        <div>构成</div>
+        <div>占原 1.92 MB 的比例</div>
+        <div class="mr">体积</div>
+      </div>
+      <div class="mrow">
+        <div class="mname"><span class="t">重复 reqwest + TLS 栈</span><span class="c">版本对齐即可消除</span></div>
+        <div class="mtrack"><div class="mf" style="width:25.5%;background:var(--g3)"></div><span class="zl" style="left:28%;color:var(--g3)">约 26% · 可消除</span></div>
+        <div class="mval mid">0.49 MB</div>
+      </div>
+      <div class="mrow">
+        <div class="mname"><span class="t">OCI 客户端本体</span><span class="c">协议实现 · manifest/media-type 处理 · olpc-cjson · 正则</span></div>
+        <div class="mtrack"><div class="mf big" style="width:74.5%"></div><span class="zl" style="left:77%;color:var(--g4)">约 74% · 无法回避</span></div>
+        <div class="mval big">1.43 MB</div>
+      </div>
+      <div class="maxis"><div class="ax"><span>0</span><span>0.5 MB</span><span>1 MB</span><span>1.5 MB</span><span>1.92 MB</span></div></div>
+    </div>
+
+    <p class="note" style="margin-top:14px"><b>对照组佐证：</b>单独引入第二份 <code>reqwest 0.12</code>（不带 OCI）实测 <b>+0.85 MB</b>，与上述 0.49 MB 的重复栈开销同属一个量级的现象。</p>
+
+    <div class="synergy" style="margin-top:14px">
+      <b>反直觉现象 —— 重复 crate 个数不是体积的良好代理：</b>版本对齐后重复 crate 数<b>反而从 4 升到 8</b>，体积却<b>下降 0.49 MB</b>。原因是 <code>reqwest</code> 从重复列表中消失了，而新增的 8 项是 <code>block-buffer</code> / <code>cpufeatures</code> / <code>crypto-common</code> / <code>digest</code> / <code>sha2</code> / <code>untrusted</code> 这类<b>小型哈希与加密原语</b>。<b>判断体积必须看字节数，不能数重复条目。</b>
+    </div>
+
+    <div class="insight">
+      <div class="ins a">
+        <span class="fig-n">≈ 0</span>
+        <div class="h">二进制重写几乎免费</div>
+        <p>Mach-O / ELF 重写是直觉里「最底层最贵」的部分，实测却低于控制组噪声。<code>object</code> 是纯解析库，依赖图只 +6 行。<b>「二进制重写很贵」是直觉误判。</b></p>
+      </div>
+      <div class="ins b">
+        <span class="fig-n">272 → 836</span>
+        <div class="h">真正贵的是签名与 OCI</div>
+        <p>apple-codesign 与 oci-client 才是成本主体。仅 apple-codesign 一项就把依赖图从 272 拉到 836 行、重复 crate 从 2 涨到 13。</p>
+      </div>
+      <div class="ins c">
+        <span class="fig-n">1.92 → 1.43</span>
+        <div class="h">版本对齐省下 0.49 MB</div>
+        <p>同一个 OCI 能力，仅把 <code>oci-client</code> 从 0.15 升到 0.17，就消除了重复 reqwest + TLS 栈。<b>但剩下的 1.43 MB 是本体成本，升级救不了。</b></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 5c</b> · 折算到真实二进制与红线对比 —— <b>基线更正：</b>AGENTS.md 记录 osdk ≈ 8.9 MB，本次实测为 <b>11.92 MB</b>（12,503,552 B）；osdk-shim 实测 3.50 MB，与记录一致。下列百分比均以 11.92 MB 为分母，10% 红线 = 1.19 MB</p>
+
+    <div class="scen" style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr><th>场景</th><th class="r">osdk 体积</th><th class="r">相对 11.92 MB</th><th class="r">是否越线</th></tr>
+        </thead>
+        <tbody>
+          <tr class="cur"><td class="sc">当前</td><td class="r sz">11.92 MB</td><td class="r dt">—</td><td class="r"><span class="vd na">基线</span></td></tr>
+          <tr><td class="sc">自实现，纯 Rust 签名<span style="font-family:var(--mono);font-size:10.5px;color:var(--faint);display:block;margin-top:2px">F2 · 实测 5,336,064 B · 943 行 · 21 重复</span></td><td class="r sz" style="color:var(--g4)">14.83 MB</td><td class="r dt" style="color:var(--g4)">+2.90 MB · <b>+24.3%</b></td><td class="r"><span class="vd no">超线 2.4 倍</span></td></tr>
+          <tr><td class="sc">自实现，<b>最便宜可行组合</b><span style="font-family:var(--mono);font-size:10.5px;color:var(--faint);display:block;margin-top:2px">F1 · oci-client 0.17 + object + 签名 shell out + resolvo<br>实测 3,935,232 B · 422 行 · 10 重复</span></td><td class="r sz" style="color:var(--g4)">13.49 MB</td><td class="r dt" style="color:var(--g4)">+1.56 MB · <b>+13.1%</b></td><td class="r"><span class="vd no">仍超线 1.31 倍</span></td></tr>
+          <tr><td class="sc">再省掉 oci-client（手写 OCI 协议）</td><td class="r sz">≈ 12.0 MB</td><td class="r dt">+0.07 MB</td><td class="r"><span class="vd ok">通过</span></td></tr>
+          <tr class="pick"><td class="sc">代理路线（本设计）</td><td class="r sz" style="color:var(--g1)">≈ 11.92 MB</td><td class="r dt" style="color:var(--g1)">≈ 0</td><td class="r"><span class="vd ok">通过</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="redline">
+      <b>本轮最重要的修正 —— 从「贴线」变成「明确越线」：</b>上一版说「签名 shell out 后约 +1.16 MB，贴着红线」，那是由<b>分组数字推算</b>得来的。F1 是<b>直接测量的合并配置</b>，结果为 +1.56 MB / +13.1%，即<b>超红线 1.31 倍</b>。也就是说：<b>即便取最便宜的可行组合，自实现路线也已经越线</b>，不存在「勉强能接受」的中间选项。
+    </div>
+
+    <p class="note" style="margin-top:14px"><b>对 osdk-shim：以上全部为 0 增量</b>，已实测验证 —— sigstore / rattler / resolvo / sevenz-rust2 / x509-cert 在 shim 依赖图中均为 <b>0 处</b>；cli 依赖图 1550 行 vs shim 依赖图 427 行。这印证了第 04 节的门控结论：成本全部落在 <code>osdk-cli</code> 侧，shim 不受影响。</p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 5d</b> · reqwest 双版本冲突 —— <b>一半已解决，一半无解</b></p>
+    <div class="dupe">
+      <div>
+        <div class="fnode good" style="margin-bottom:12px">
+          <h4 class="fh"><span class="st">已解决</span><code>oci-client</code> 已跟上上游</h4>
+          <p>0.15 → <code>^0.12.4</code>；<b>0.16.0（2026-01-27）→ <code>^0.13</code></b>；0.16.1、0.17.0 均为 <code>^0.13</code>。对齐后 <code>cargo tree --duplicates</code> 中<b>不再出现 reqwest</b>（0.16 甚至回落到与基线相同的 2 项）。</p>
+        </div>
+        <div class="fnode bad">
+          <h4 class="fh"><span class="st">无解</span><code>apple-codesign</code> 无上游可跟随</h4>
+          <p>最新仍是 <b>0.29.0（2024-11-29 发布）</b>，依赖 reqwest <code>^0.12</code>，至今未升。F2 配置实测重复 crate <b>21 项</b>，reqwest 仍在其中。</p>
+        </div>
+        <div class="verblock" style="margin-top:12px">
+<span class="v12">reqwest v0.12.x</span> <span class="ar">←</span> apple-codesign / apple-xar /<br>
+<span class="ar">                   </span>cryptographic-message-syntax<br>
+<span class="v13">reqwest v0.13.x</span> <span class="ar">←</span> osdk 自己 / <span class="v13">oci-client ≥ 0.16</span>
+        </div>
+      </div>
+      <div>
+        <div class="dupcount" style="margin-top:0">
+          <span class="n0">2</span><span class="ar2">→</span><span class="n">21</span>
+          <span class="lbl2">F2 配置的重复 crate 数量<br><span style="color:var(--faint);font-size:11px">（F1 为 10 项）</span></span>
+        </div>
+        <p style="margin:14px 0 10px;font-size:13px;color:var(--ink2);line-height:1.65">版本失配时连带产生的重复依赖：</p>
+        <div class="duplist">
+          <span class="d">base64 <b>×3</b></span>
+          <span class="d">getrandom <b>×3</b></span>
+          <span class="d">hashbrown <b>×3</b></span>
+          <span class="d">windows-sys <b>×3</b></span>
+          <span class="d">rustls-native-certs <b>×2</b></span>
+          <span class="d">syn <b>×2</b></span>
+          <span class="d">thiserror <b>×2</b></span>
+        </div>
+        <div class="trap" style="margin-top:14px">
+          <b>AGENTS.md 的指导恰好只适用一半：</b>那条「若上游已整体前进，应跟随而不是钉住」的纪律，<b>恰好适用于 oci-client</b>（跟随升级即消除重复），<b>但不适用于 apple-codesign</b>——它自 2024-11 起未再发布，osdk 侧无法通过升级或 feature 调整消除这份重复。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fig" style="border-color:var(--g3);box-shadow:0 0 0 3px #fdf3e4">
+    <p class="figcap" style="color:var(--g3)"><b>图 5e</b> · 本轮第二个重要修正 —— 「签名 shell out 归零」的前提被推翻</p>
+
+    <div class="trap" style="margin:0 0 14px;font-size:13px">
+      <b>前提不成立：</b><code>codesign</code> <b>需要 Xcode Command Line Tools</b>。依据是 Homebrew 2026-08 的 PR #23429 原文：「<b>as <code>codesign</code> requires the Command Line Tools while ruby-macho does not</b>」。因此图 5a 中「0 KB」那一行<b>只在纯体积口径下成立</b>，它带来的是另一种代价。
+    </div>
+
+    <p style="font-size:13px;color:var(--ink2);line-height:1.7;margin:0 0 14px"><b>更关键的是：需要签名的平台恰好最不该依赖它。</b>macOS arm64 是唯一硬性要求重签名的平台，而 Homebrew 正是<b>为消除 CLT 依赖</b>，在 arm64 改用 ruby-macho 的纯实现 <code>MachO.codesign!</code>；Intel 侧则因 ruby-macho 6.0 的签名被拒（<code>CODESIGNING, Invalid Page</code>）才回退使用 <code>codesign</code>。</p>
+
+    <div class="stance" style="margin-bottom:14px">
+      <div class="c warn">
+        <h4>shell out 到 codesign</h4>
+        <p><b>0 KB</b>，但<b>需要 CLT</b>，并因此<b>破坏「bottle 免开发者工具」</b>这一前提。</p>
+      </div>
+      <div class="c warn">
+        <h4>纯 Rust 签名</h4>
+        <p><b>+1.57 MB</b>，无 CLT 依赖，但直接把 F2 推到 +24.3%。</p>
+      </div>
+      <div class="c">
+        <h4>自行实现 ad-hoc 签名</h4>
+        <p><b>未测</b>。本轮未取得数据，不做推测。</p>
+      </div>
+    </div>
+
+    <div class="synergy" style="border-color:var(--g1);background:var(--g1b);color:#1f5237">
+      <b>同时要排除一个误解：Linux 侧不存在「缺少 codesign」的缺口。</b>ad-hoc 重签名是 <b>macOS arm64 独有的硬要求</b>（Apple 官方：「any executable must be signed before it's allowed to run」，且不适用于 Rosetta 2 与 Intel）；Linux 的 ELF 改写<b>不涉及签名</b>；Linux 也<b>无默认生效的用户态强制签名校验</b>（<code>CONFIG_IMA_APPRAISE</code> 上游 <code>default n</code>，且 arch policy 只覆盖 kexec / module / firmware / policy，<b>不含一般可执行文件</b>）。<b>需要它的平台恰好就是有它的平台。</b>
+    </div>
+  </div>
+
+  <div class="caveats">
+    <h5>测量口径与已知偏差 · 必读</h5>
+    <ul>
+      <li><b>最终二进制口径：</b>全部数字为链接 + strip 后的 <code>.exe</code> 字节数，在 Windows <code>x86_64-pc-windows-msvc</code>、cargo/rustc 1.98.0 上实测。probe 复制了 osdk <code>[profile.release]</code> 的全部设置（<code>opt-level="z"</code>、<code>lto="fat"</code>、<code>codegen-units=1</code>、<code>strip</code>、<code>panic="abort"</code>，以及六条 per-package <code>opt-level=3</code>）。</li>
+      <li><b>Windows 上的数字是偏小的下界：</b>apple-codesign 与 object 的 Mach-O 路径在 macOS 目标上会有更多平台相关代码进入链接，<b>真实 macOS 产物只会更大</b>。</li>
+      <li><div class="trap"><b>方法论陷阱（这组数字为何可信）：</b><code>lto="fat"</code> 会裁掉未被真正调用的代码。浅探针测 apple-codesign 只有 <b>+15 KB</b>，改成真实调用签名路径后是 <b>+1,680 KB</b>，<span class="x100">相差约 100 倍</span>；resolvo 用 <code>size_of</code> 探测时甚至与基线<b>逐字节相同</b>。因此本节数字全部来自「真实驱动主路径」的<b>深探针</b>，而非浅引用。</div></li>
+      <li><b>resolvo 的 0 MB 仅对 osdk-cli 成立</b>——它已经因 rattler 的 conda 支持存在于依赖图中，对其他项目不可直接套用。</li>
+      <li><b><code>codesign</code> shell out 的 0 KB 是纯体积口径</b>，<b>不含可用性代价</b>（见图 5e：它需要 Xcode Command Line Tools）。测量时探针在 Windows 上必然走 <code>Err</code> 分支，这<b>不影响体积结论，但未验证该命令的实际行为</b>。</li>
+      <li><b>F1 / F2 是直接测量的合并配置</b>，而<b>分组数字不可相加</b>——各组之间共享传递依赖，逐项累加会高估。绝对预算必须以 F1 / F2 的合并测量为准。</li>
+      <li><b>未测源码构建路径：</b>「无 bottle 时的源码构建」（mise 用了内嵌 ruby + 自有 Formula-DSL shim）未纳入测量，因为 osdk 不可能做这块，<b>已从预算中剔除</b>。</li>
+    </ul>
+  </div>
+
+  <p class="note" style="margin-top:16px"><b>这一节如何支撑设计结论：</b>本轮重测把结论推得更硬了。自实现路线在体积上不是「贵一点」——纯 Rust 签名越线 <b>2.4 倍</b>，而<b>即便取最便宜的可行组合 F1，也仍越线 1.31 倍</b>，中间不存在「勉强能接受」的选项。更重要的是，上一版寄望的两条退路都被本轮否掉：版本对齐只能省下 0.49 MB，<b>剩余 1.43 MB 是 OCI 本体成本</b>；而「签名 shell out 归零」要以<b>依赖 Xcode Command Line Tools</b>为代价，恰好破坏 bottle 免开发者工具这一前提。mise 能承担 brew 侧完全自实现，是因为它的体积约束与 osdk 不同；<b>osdk 选择代理路线，是被这组实测数字确定下来的，而非偏好。</b></p>
+</section>
+<section id="roadmap">
+  <div class="sechead">
+    <span class="idx">06</span>
+    <h2>分阶段路线图：六个可独立提交的行为变更</h2>
+    <span class="tag">图 6 / 6</span>
+  </div>
+  <p class="lede">顺序的依据是<strong>风险递增</strong>：前三阶段完全只读，第四阶段才首次触碰宿主系统。每个阶段自身构成一处完整的行为变更，可独立提交、独立回滚，并各自携带测试与中英文档。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 6</b> · 阶段泳道与依赖关系 —— 横轴为相对推进顺序，重叠表示可并行起步</p>
+    <div class="gwrap">
+    <div class="gantt">
+      <div class="grow head">
+        <div class="gname" style="font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.05em">阶段 / 交付内容</div>
+        <div class="gtick"><div>只读期</div><div></div><div>配置期</div><div></div><div>写入期</div><div>收口</div></div>
+      </div>
+
+      <div class="grow">
+        <div class="gname"><span class="ph">01</span><span class="tt">只读发现与诊断</span>
+          <span class="ds">探测宿主是否存在 winget / Homebrew、版本与可用性，输出 doctor / status。不读取任何用户配置意图，不产生任何副作用。</span>
+          <div class="gmeta"><span class="m ro">只读</span><span class="m">syspkg/ 骨架</span><span class="m">0 MB · shim</span></div>
+        </div>
+        <div class="gtrack"><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div>
+          <div class="gbar gb1" style="left:0;width:30%">doctor / status 骨架</div></div>
+      </div>
+
+      <div class="grow">
+        <div class="gname"><span class="ph">02</span><span class="tt">镜像探测与配置建议</span>
+          <span class="ds">接入 <code>source/</code> 的探测与打分链路，产出候选排序与建议配置。只建议、不写入，并明确提示 winget 镜像不加速安装包。</span>
+          <div class="gmeta"><span class="m ro">只读</span><span class="m">复用 source/</span><span class="m">含期望管理文案</span></div>
+        </div>
+        <div class="gtrack"><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div>
+          <div class="gbar gb2" style="left:15%;width:28%">探测 · 打分 · 建议</div></div>
+      </div>
+
+      <div class="grow">
+        <div class="gname"><span class="ph">03</span><span class="tt">声明式配置 schema 与 status</span>
+          <span class="ds">定义系统包的声明式配置结构（独立于 <code>[tools]</code>），并让 status 能对比「声明」与「实际」。仍不执行任何变更。</span>
+          <div class="gmeta"><span class="m ro">只读</span><span class="m">不进 lockfile</span><span class="m">不产生 shim</span></div>
+        </div>
+        <div class="gtrack"><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div>
+          <div class="gbar gb3" style="left:32%;width:25%">schema + 差异对比</div></div>
+      </div>
+
+      <div class="grow">
+        <div class="gname"><span class="ph">04</span><span class="tt">显式 apply（winget 优先）</span>
+          <span class="ds">首个会改动宿主系统的阶段。以 <code>--id --exact</code> 精确调用，幂等依赖 HRESULT 退出码白名单。winget 先行是因为其代理路径最直接。</span>
+          <div class="gmeta"><span class="m wr">写入</span><span class="m">退出码白名单</span><span class="m">永不隐式</span></div>
+        </div>
+        <div class="gtrack"><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div>
+          <div class="gbar gb4" style="left:46%;width:30%">winget apply</div></div>
+      </div>
+
+      <div class="grow">
+        <div class="gname"><span class="ph">05</span><span class="tt">Homebrew 侧接入</span>
+          <span class="ds">以 JSON API 为主获取元数据。明确不接管 prefix、不尝试非默认安装目录，避免 bottle 失效与 Support Tier 降级。</span>
+          <div class="gmeta"><span class="m wr">写入</span><span class="m">JSON API 优先</span><span class="m">不碰 prefix</span></div>
+        </div>
+        <div class="gtrack"><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div>
+          <div class="gbar gb5" style="left:62%;width:26%">brew 接入</div></div>
+      </div>
+
+      <div class="grow">
+        <div class="gname"><span class="ph">06</span><span class="tt">文档与 CI 收口</span>
+          <span class="ds">中英双语文档成对更新、导航同步，并把两个二进制的分别构建与体积校验固化进 CI。</span>
+          <div class="gmeta"><span class="m">中英成对</span><span class="m">体积校验</span><span class="m">分别构建</span></div>
+        </div>
+        <div class="gtrack"><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div><div class="slot"></div>
+          <div class="gbar gb6" style="left:78%;width:22%">docs + CI</div></div>
+      </div>
+
+    </div>
+    </div>
+
+    <div class="phasegrid">
+      <div class="pcard"><div class="n">分界线</div><h6>① ~ ③ 全程只读</h6>
+        <p>前三个阶段无论如何组合，都不会修改用户系统或宿主配置。这意味着它们可以先行合入并长期观察，风险几乎为零。</p>
+        <div class="ck"><b>验收：</b>在未安装任何包管理器的机器上执行，须给出清晰诊断而非报错退出。</div></div>
+      <div class="pcard"><div class="n">分界线</div><h6>④ 起首次写入</h6>
+        <p>apply 是唯一会改动系统的入口，且过程非事务性——中途失败不回滚。因此它必须显式触发，并在失败时如实报出已完成与未完成的部分。</p>
+        <div class="ck"><b>验收：</b>重复执行同一 apply 须幂等；「已安装」不得被判为失败。</div></div>
+      <div class="pcard"><div class="n">贯穿全程</div><h6>每阶段都校验体积</h6>
+        <p>不把体积校验留到第 ⑥ 阶段。每个阶段提交前分别构建两个二进制，确认 shim 仍在 ≈ 3.5 MB 基线。</p>
+        <div class="ck"><b>验收：</b>shim 增量为 0；任一二进制增长超 10% 须说明原因。</div></div>
+      <div class="pcard"><div class="n">贯穿全程</div><h6>文档随行，不欠账</h6>
+        <p>面向用户的能力变更在同一提交内更新两份 README 与两种语言的站点页面及导航，使中英文档始终成对存在。</p>
+        <div class="ck"><b>验收：</b>站点生产构建通过，失效链接在校验阶段暴露。</div></div>
+    </div>
+  </div>
+
+  <p class="endnote"><b>一句话总结：</b>osdk 对系统包管理器的定位是「<b>宿主设施</b>」——做发现、状态查询、镜像探测与配置建议、以及显式 apply，不接管安装目录、不纳入 shim 体系、不进 lockfile 的可复现性承诺。安装目录控制的诚实结论是：<b>Homebrew 做不到且不应尝试，winget 仅 portable 类型可控</b>。需要真正的目录控制与可复现性时，走 osdk 自有的下载安装通道，而不是系统包管理器。<br><br>本页为设计文档的可视化附件，不含实现代码，未改动 <code>crates/</code> 下任何生产代码。图中所有数值均引自项目内既有实测记录与上游官方文档。</p>
+</section>
+
+</main>
+</body>
+</html>
