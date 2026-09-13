@@ -711,7 +711,7 @@ fn render_path_reset(shell: Shell, paths: &[PathBuf], out: &mut String) {
             } else {
                 let joined = paths
                     .iter()
-                    .map(|path| path.display().to_string())
+                    .map(|path| posix_path(&path.display().to_string()))
                     .collect::<Vec<_>>()
                     .join(":");
                 out.push_str(&format!(
@@ -721,6 +721,45 @@ fn render_path_reset(shell: Shell, paths: &[PathBuf], out: &mut String) {
             }
         }
     }
+}
+
+/// Render a filesystem path for a POSIX shell.
+///
+/// A no-op off Windows. On Windows the POSIX shells that exist are the msys /
+/// Cygwin family (Git-Bash, MSYS2), whose `$PATH` is colon-separated and whose
+/// path syntax is `/c/dir`. Emitting the native `C:\dir` form would make the
+/// drive letter's own colon read as a `$PATH` separator, so `C:\a:C:\b` splits
+/// into the four meaningless entries `C`, `\a`, `C`, `\b` — the shell reports no
+/// error and every managed tool silently disappears from `$PATH`. See
+/// docs/bugs/005.
+fn posix_path(path: &str) -> String {
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+    #[cfg(windows)]
+    {
+        windows_path_to_posix(path)
+    }
+}
+
+/// Convert `C:\dir\sub` into the msys form `/c/dir/sub`.
+///
+/// Leaves anything that is not a drive-letter path alone: a UNC share has no
+/// portable msys spelling, and an already-POSIX path must not be rewritten.
+#[cfg(windows)]
+fn windows_path_to_posix(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let is_drive_path = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    if !is_drive_path {
+        return path.replace('\\', "/");
+    }
+    let drive = path[..1].to_ascii_lowercase();
+    let rest = path[2..].replace('\\', "/");
+    format!("/{drive}{rest}")
 }
 
 fn render_capture_var(shell: Shell, key: &str, out: &mut String) {
@@ -968,6 +1007,65 @@ mod tests {
         let fish = render_hook_env(Shell::Fish, &delta);
         assert!(fish.contains("set -gx PATH"));
         assert!(fish.contains("set -gx GOROOT"));
+    }
+
+    /// The POSIX shells available on Windows are msys / Cygwin (Git-Bash,
+    /// MSYS2), where `$PATH` is colon-separated. A native `E:\dir` entry makes
+    /// the drive letter's colon read as a separator, so the shell silently
+    /// splits it into meaningless fragments and every managed tool vanishes
+    /// from `$PATH`.
+    ///
+    /// The pre-existing `hook_env_renders_path_and_vars` cannot catch this: it
+    /// feeds already-POSIX paths, which pass unchanged on every platform. Only
+    /// a native Windows path exercises the conversion. See docs/bugs/005.
+    #[cfg(windows)]
+    #[test]
+    fn windows_posix_shells_receive_msys_paths_not_drive_letters() {
+        let delta = EnvDelta {
+            path_prepend: vec![
+                PathBuf::from(r"E:\osdk-data\data\shims"),
+                PathBuf::from(r"C:\Program Files\osdk\bin"),
+            ],
+            set_vars: BTreeMap::new(),
+            unset_vars: Vec::new(),
+        };
+
+        for shell in [Shell::Bash, Shell::Zsh] {
+            let out = render_hook_env(shell, &delta);
+            let path_line = out
+                .lines()
+                .find(|line| line.starts_with("export PATH="))
+                .expect("a PATH line must be rendered");
+            assert!(
+                path_line.contains("/e/osdk-data/data/shims"),
+                "drive-letter paths must become msys paths: {path_line}"
+            );
+            assert!(
+                path_line.contains("/c/Program Files/osdk/bin"),
+                "spaces are fine inside the quoted value: {path_line}"
+            );
+            assert!(
+                !path_line.contains(r"E:\") && !path_line.contains("E:/"),
+                "a bare drive letter leaves a stray colon that splits $PATH: {path_line}"
+            );
+        }
+    }
+
+    /// Drive-letter conversion must not mangle paths that have no msys drive
+    /// spelling, and must not rewrite something already in POSIX form.
+    #[cfg(windows)]
+    #[test]
+    fn posix_path_conversion_only_rewrites_drive_letter_paths() {
+        assert_eq!(windows_path_to_posix(r"E:\a\b"), "/e/a/b");
+        assert_eq!(windows_path_to_posix("E:/a/b"), "/e/a/b");
+        assert_eq!(windows_path_to_posix("/already/posix"), "/already/posix");
+        // A UNC share has no portable msys drive form; only separators change.
+        assert_eq!(
+            windows_path_to_posix(r"\\server\share\dir"),
+            "//server/share/dir"
+        );
+        // Too short to be a drive path: must not lose characters.
+        assert_eq!(windows_path_to_posix("E:"), "E:");
     }
 
     #[test]
