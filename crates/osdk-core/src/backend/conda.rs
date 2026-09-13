@@ -709,6 +709,23 @@ impl CondaBackend {
             None => Ok(vec![ChannelRef::parse(DEFAULT_CHANNEL)?]),
         }
     }
+    /// Extra packages to solve into this tool's prefix, from the `with` option.
+    ///
+    /// The value arrives already canonicalized by `canonical_conda_with`
+    /// (lower-cased, de-duplicated, sorted, and free of version constraints), so
+    /// this only has to split it. Absent option means no extra packages, which
+    /// is the ordinary single-package case.
+    #[cfg(feature = "install")]
+    fn with_packages(&self, options: &BTreeMap<String, String>) -> Result<Vec<String>> {
+        let Some(value) = options.get("with") else {
+            return Ok(Vec::new());
+        };
+        Ok(value
+            .split(',')
+            .filter(|package| !package.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
 
     /// Choose the base URL to fetch repodata from.
     ///
@@ -911,9 +928,29 @@ impl CondaBackend {
         let spec = MatchSpec::from_str(&spec_text, ParseStrictness::Lenient)
             .map_err(|error| Error::config(format!("invalid conda spec `{spec_text}`: {error}")))?;
 
-        // Recursive: the whole closure is needed, not just the root match.
+        // `with` packages join the *same* solve rather than getting a prefix of
+        // their own. That is the whole point of the option: one solve is what
+        // guarantees the versions are mutually compatible and that a shared
+        // transitive dependency -- on Windows, crucially, `msys2-conda-epoch`
+        // and its single `msys-2.0.dll` -- is materialized exactly once.
+        // Installing them as separate tools cannot offer either property.
+        //
+        // They carry no version constraint by design; the solver picks whatever
+        // is compatible with the main package's pinned version.
+        let mut specs = vec![spec];
+        for package in self.with_packages(&tv.options)? {
+            let spec = MatchSpec::from_str(&package, ParseStrictness::Lenient).map_err(|error| {
+                Error::config(format!("invalid conda spec `{package}`: {error}"))
+            })?;
+            specs.push(spec);
+        }
+
+        // Recursive: the whole closure is needed, not just the root match. Every
+        // spec has to be queried, not just the main one -- repodata that lacks
+        // candidates for a `with` package would make the solve fail with a
+        // "no candidates" error that looks like the package does not exist.
         let available = gateway
-            .query(channels, platforms, [spec.clone()])
+            .query(channels, platforms, specs.clone())
             .recursive(true)
             .await
             .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))?;
@@ -929,7 +966,7 @@ impl CondaBackend {
 
         let task = SolverTask {
             virtual_packages,
-            specs: vec![spec],
+            specs,
             // Strict priority is what makes `channels = ["nvidia", ...]`
             // meaningful: nvidia's candidates are exhausted before falling
             // back, so an explicitly preferred channel actually wins.
@@ -1409,6 +1446,84 @@ mod tests {
         assert_ne!(
             with_nvidia, reversed,
             "channel order is solver priority and must not be normalized away"
+        );
+    }
+    /// `with` is part of install identity, and unlike `channels` it is a *set*.
+    ///
+    /// Both halves matter and they pull in opposite directions, which is why
+    /// they are asserted together. Changing the set must change the identity, or
+    /// adding `with` to an existing tool would either skip the reinstall or
+    /// collide with the old prefix -- and the user would meet
+    /// `conda_installed_locator`'s "ambiguous across multiple solved closures"
+    /// error, which blames channels for something channels did not do.
+    /// Reordering must *not* change it, or one request spelled two ways would
+    /// install twice. See docs/conda-with-option-spec.zh-CN.md §2.5.
+    #[test]
+    fn with_is_part_of_identity_but_its_order_is_not() {
+        let options =
+            |packages: &str| BTreeMap::from([("with".to_string(), packages.to_string())]);
+        let id = crate::tool::ToolId::parse("conda:m2-base").unwrap();
+        let identity = |packages: &str| {
+            crate::tool::dynamic_identity_options(&id, &options(packages))
+                .unwrap()
+                .into_map()
+        };
+
+        let bare = crate::tool::dynamic_identity_options(&id, &BTreeMap::new())
+            .unwrap()
+            .into_map();
+        let with_make = identity("m2-make");
+        assert_ne!(
+            bare, with_make,
+            "adding `with` must change the identity, or the new closure would reuse the old prefix"
+        );
+        assert_ne!(
+            with_make,
+            identity("m2-make,m2-diffutils"),
+            "a different package set must be a different install"
+        );
+
+        // A set, not a priority list: these two spell the same request.
+        assert_eq!(
+            identity("m2-make,m2-diffutils"),
+            identity("m2-diffutils,m2-make"),
+            "`with` order must be normalized away so one request maps to one prefix"
+        );
+        // Duplicates and case are normalized for the same reason.
+        assert_eq!(
+            with_make,
+            identity("m2-make,m2-make"),
+            "a repeated package is redundancy, not a different install"
+        );
+        assert_eq!(
+            with_make,
+            identity("M2-Make"),
+            "conda package names are lower-case by convention"
+        );
+    }
+
+    /// The `with` packages must reach the solver, not merely parse.
+    ///
+    /// This is the assertion a string-level test cannot make: the option could
+    /// canonicalize perfectly and still be dropped on the floor before
+    /// `SolverTask::specs`, and the only visible symptom would be a prefix
+    /// quietly missing the tools -- exactly the failure `with` exists to fix.
+    /// `solve` needs network, so this drives the same accessor `solve` builds
+    /// its spec list from.
+    #[test]
+    fn with_packages_are_handed_to_the_solver() {
+        let backend = CondaBackend::from_id("conda:m2-base").unwrap();
+
+        assert!(
+            backend.with_packages(&BTreeMap::new()).unwrap().is_empty(),
+            "no `with` option means the ordinary single-package solve"
+        );
+
+        let options = BTreeMap::from([("with".to_string(), "m2-diffutils,m2-make".to_string())]);
+        assert_eq!(
+            backend.with_packages(&options).unwrap(),
+            vec!["m2-diffutils".to_string(), "m2-make".to_string()],
+            "every `with` package must be handed to the solver as its own spec"
         );
     }
 
