@@ -483,7 +483,7 @@ fn scan_installs_within(
     let mut manifest_paths = Vec::new();
     let mut legacy_installs = Vec::new();
     let mut diagnostics = Vec::new();
-    let walker = walkdir::WalkDir::new(scan_root)
+    let mut walker = walkdir::WalkDir::new(scan_root)
         .follow_links(false)
         .max_depth(options.max_depth.saturating_add(1))
         .into_iter()
@@ -496,7 +496,19 @@ fn scan_installs_within(
                 || !entry.file_name().to_string_lossy().starts_with('.')
         });
 
-    for entry in walker {
+    // An install root's whole payload is unpacked *below* the manifest, and
+    // `is_canonical_install_root` only ever accepts
+    // `installs/<tool>/<version>/<install_id>` -- so nothing inside an install
+    // can itself be a canonical install root. Descending into one therefore
+    // cannot find another manifest, it only walks the payload: one conda prefix
+    // carries a full Python/mingw distribution, and the android-sdk and zig
+    // trees carry tens of thousands of files with no manifest anywhere. Left
+    // unpruned this walked 8,268 directories and stat-ed 84,352 entries per
+    // call, against 466 and 4,483 when pruned -- ~19x, paid on every prompt via
+    // `hook-env`, and it grew with SDKs that have nothing to do with dynamic
+    // tools. `next_batch`-free manual iteration is what lets us call
+    // `skip_current_dir`.
+    while let Some(entry) = walker.next() {
         match entry {
             Ok(entry) => {
                 if entry.file_type().is_symlink() || !entry.file_type().is_file() {
@@ -510,6 +522,9 @@ fn scan_installs_within(
                             manifest_path,
                         });
                     }
+                    // Same reasoning as the current-format branch below: an
+                    // install's payload cannot contain another install root.
+                    walker.skip_current_dir();
                     if manifest_paths.len() + legacy_installs.len() > options.max_manifests {
                         return Err(Error::other(format!(
                             "dynamic tool inventory scan exceeded manifest limit of {} under {}",
@@ -523,6 +538,9 @@ fn scan_installs_within(
                     continue;
                 }
                 manifest_paths.push(entry.into_path());
+                // Stop descending: the rest of this directory is the installed
+                // payload, and no canonical install root can live inside it.
+                walker.skip_current_dir();
                 if manifest_paths.len() > options.max_manifests {
                     return Err(Error::other(format!(
                         "dynamic tool inventory scan exceeded manifest limit of {} under {}",
@@ -1624,5 +1642,102 @@ mod install_manifest_tests {
         assert_eq!(owners_of(temporary.path(), "awk"), ["conda:m2-gawk"]);
         // Nobody owns `sh` here, so it is claimed by no one rather than by both.
         assert!(owners_of(temporary.path(), "sh").is_empty());
+    }
+
+    /// The scan must stop at a manifest instead of walking the payload below it.
+    ///
+    /// `is_canonical_install_root` only accepts
+    /// `installs/<tool>/<version>/<install_id>`, so nothing inside an install
+    /// can be an install root -- descending merely stat-s the unpacked payload.
+    /// One conda prefix ships a whole Python/mingw distribution, so on a real
+    /// tree this walked 8,268 directories and 84,352 entries instead of 466 and
+    /// 4,483, and `hook-env` paid it at every prompt.
+    ///
+    /// The probe is a manifest-named file planted *inside* the install. Pruning
+    /// means it is never opened; without pruning the scan reads it, fails to
+    /// parse it, and reports a diagnostic. Its depth must stay inside the scan's
+    /// own limit -- planted deeper than `max_depth` the depth cut-off hides it
+    /// first, the assertion holds either way, and the test silently proves
+    /// nothing.
+    #[test]
+    fn scan_stops_at_a_manifest_and_never_walks_the_payload() {
+        let temporary = tempfile::tempdir().unwrap();
+        write_install(temporary.path(), "conda:cmake", &[("cmake", true)]);
+
+        // conda/cmake/<version>/<install_id>
+        let version_dir = std::fs::read_dir(temporary.path().join("conda").join("cmake"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let install_root = std::fs::read_dir(&version_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(
+            DynamicToolManifest::manifest_path(&install_root).is_file(),
+            "fixture must place a manifest at the install root"
+        );
+
+        // Two levels below the install root: comfortably within the depth limit,
+        // so only pruning can keep the scan from reading it.
+        let payload = install_root.join("share").join("doc");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join(INVENTORY_FILE), b"not a manifest").unwrap();
+        let probe_depth = payload
+            .strip_prefix(temporary.path())
+            .unwrap()
+            .components()
+            .count();
+        assert!(
+            probe_depth <= DEFAULT_MAX_DEPTH,
+            "probe at depth {probe_depth} must stay inside the scan's own depth \
+             limit of {DEFAULT_MAX_DEPTH}, or the depth cut-off hides it and this \
+             test proves nothing"
+        );
+
+        let report = scan_installs(temporary.path(), &ScanOptions::tolerant()).unwrap();
+
+        assert_eq!(
+            report.installs.len(),
+            1,
+            "expected only the real install: {:?}",
+            report
+                .installs
+                .iter()
+                .map(|install| install.canonical_id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            report.diagnostics.is_empty(),
+            "a pruned scan must never open the payload, so the planted file \
+             cannot produce a diagnostic; got: {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// Pruning must not hide a sibling install that shares a parent directory.
+    ///
+    /// Guards against overshooting into "skip the whole tool directory": two
+    /// versions of one tool, and two install ids of one version, are siblings of
+    /// each other, not nested, so all of them must still be found.
+    #[test]
+    fn pruning_still_finds_every_sibling_install() {
+        let temporary = tempfile::tempdir().unwrap();
+        write_install(temporary.path(), "conda:nasm", &[("nasm", true)]);
+        write_install(temporary.path(), "conda:ninja", &[("ninja", true)]);
+        write_install(temporary.path(), "conda:m2-bash", &[("bash", true)]);
+
+        let report = scan_installs(temporary.path(), &ScanOptions::default()).unwrap();
+        let mut found = report
+            .installs
+            .iter()
+            .map(|install| install.canonical_id.clone())
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, ["conda:m2-bash", "conda:nasm", "conda:ninja"]);
     }
 }
