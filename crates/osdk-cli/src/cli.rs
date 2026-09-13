@@ -163,7 +163,7 @@ pub enum Command {
         /// Use global selection; npm packages use a controlled global prefix, while Go tools use the user config/lock.
         #[arg(short, long)]
         global: bool,
-        /// Backend option as key=value (repeatable); npm supports installer/allow_builds and Go tools support tags/env.
+        /// Backend option as key=value (repeatable); npm supports installer/allow_builds, Go tools support tags/env, and conda supports channels/with.
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         opts: Vec<String>,
     },

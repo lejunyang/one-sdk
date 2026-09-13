@@ -1,6 +1,6 @@
 # `with`：把一组平级 conda 包装进同一个 prefix
 
-**状态**：语义已定稿，待实现 · **动因**：[docs/bugs/005](./bugs/005-windows-posix-shim-recursion.zh-CN.md) 根因 B · **背景调研**：[docs/conda-backend-next-steps.zh-CN.md](./conda-backend-next-steps.zh-CN.md)
+**状态**：已实现（eat/conda-with-option） · **动因**：[docs/bugs/005](./bugs/005-windows-posix-shim-recursion.zh-CN.md) 根因 B · **背景调研**：[docs/conda-backend-next-steps.zh-CN.md](./conda-backend-next-steps.zh-CN.md)
 
 ## 1. 要解决的问题
 
@@ -39,49 +39,25 @@ conda:m2-base[with='m2-make,m2-diffutils']@2022.6.1
 | **solve 输入** | 主包 spec 与每个 `with` 包 spec 一起作为 `SolverTask::specs` 提交，**一次求解**。这是 `with` 与「装两个 tool」的根本差别：同一次求解保证版本相容，且共享传递依赖只出现一次 |
 | **`with` 项的版本** | 不接受版本约束，只写包名。求解器按主包版本与 channel 集自行选择相容版本 |
 | **prefix 归属** | 只有一个 prefix，属于主包这个 tool 条目。`with` 包不是独立的 tool，不出现在 `osdk list`、不能被单独 `use` / `uninstall` |
-| **命令暴露** | 规则不变：仍只发布主包自己的命令，`with` 包的命令与传递依赖同等对待、由 shim 层 withhold，可用 `[shims] include` 显式取回。**但现有实现对元包会退化成「发布整个 prefix」，必须先修，见 2.4** |
+| **命令暴露** | 规则不变：仍只发布主包自己的命令，`with` 包的命令与传递依赖同等对待、由 shim 层 withhold，可用 `[shims] include` 显式取回。现有实现曾对元包退化成「发布整个 prefix」，已在 006 修复，见 2.4 |
 | **PATH** | 整个 prefix 的 bin 目录仍然构成该 tool 的 `bin_paths`，因此 `with` 包在**主包命令的执行环境内**可见。这正是 `make` 能看见 `tr` 的机制 |
 | **identity** | `with` 的规范化值**进 identity**。理由见 2.5 |
 | **顺序无关** | `with = ["b", "a"]` 与 `with = ["a", "b"]` 是同一个安装 |
 | **不与自身重复** | `with` 不得包含主包自己；重复项去重 |
 
-### 2.4 命令暴露：现有机制对元包会退化，这是 `with` 的前置阻塞项
+### 2.4 命令暴露：元包退化已在 006 修复
 
-设计意图上，`conda.rs` 的 `bin_names()` 通过 `owned_bin_names()` 读取 conda 在 `info/paths.json` 里的记录，只发布**主包 owned 的**命令；闭包内其余命令留在 manifest 中由 shim 层 withhold。注释写得很清楚：
+设计意图上，`conda.rs` 的 `bin_names()` 通过 `owned_bin_names()` 只发布**主包 owned 的**命令；闭包内其余命令留在 manifest 中由 shim 层 withhold。注释写得很清楚：
 
 > A conda prefix holds the whole dependency closure, so its `bin` directories contain far more than the requested package: `conda:clang` unpacks 16 packages and its `bin` ends up with `xmllint`, `zstd` and the ICU tools alongside the compiler.
 
-**但对 `m2-base` 这类元包，这个机制实测失效了。** 本机实测 `osdk where --bins conda:m2-base`：
+**但对 `m2-base` 这类元包，这个机制曾经失效**：实测 `osdk where --bins conda:m2-base` 发布了 **251** 个命令、只 withhold 1 个，其中 `find`、`sort`、`ls`、`link`、`echo`、`test`、`tr` 全部会盖住 Windows 同名命令。
 
-```
-published (251): [, agetty, arch, ash, awk, ..., echo, ..., find, ..., link, ls, ..., sh, sort, ..., test, ..., tr, ..., which, who, ...
-withheld (1): .m2-ca-certificates-post-link
-```
+根因是**把「归属已知且为空」错当成「归属未知」**，从而落入为「未知」准备的退化分支「暴露整个 prefix」。元包自身只装 3 个不带可执行扩展名的文件，过滤后归属集合合法为空。写本规格时曾推断根因是「每个包解包覆盖 `info/paths.json`」，实测证伪：osdk 的归属捕获本身正确，错在对空记录的解读。
 
-**251 个命令被发布，只 withhold 了 1 个**。其中包含 `find`、`sort`、`ls`、`link`、`echo`、`test`、`which`、`tr` —— 全部会进 PATH 并盖住 Windows 同名命令。
+详细分析、修复方式与实测对照见 [docs/bugs/006](./bugs/006-conda-metapackage-bin-ownership.zh-CN.md)。修复后同一 prefix 的 published 由 251 降为 **0**，withheld 252，命令仍可用 `[shims] include` 取回。
 
-原因在 prefix 里看得很清楚：
-
-| 项 | 值 |
-| --- | --- |
-| `info/paths.json` 总条目 | **31** |
-| 其中 `Library/usr/bin/` 下的条目 | **3**（`cmd`、`shell`、`start`） |
-| `Library/usr/bin` 实际文件数 | **365** |
-| 实际发布命令数 | **251** |
-
-`info/paths.json` 记录的是**最后一个解包的包**（`m2-base` 元包自身，只带 3 个文件）留下的内容 —— 前面每个包的记录都被后一个覆盖了。注释里说这份记录是「captured during extraction before the next package overwrites it」，但对元包场景，被捕获的恰好是那个几乎不含文件的元包，于是 owned 集合小到无意义。而 3 条 owned 记录与 251 个已发布命令完全不匹配，说明实际走的是注释里描述的退化路径：
-
-> When that record is missing or empty the whole prefix is exposed instead: showing too much beats publishing nothing at all.
-
-「暴露过多胜过什么都不发布」这个取舍对单包 CLI 是合理的，**但对 `m2-*` 这类包是有害的**：它会用 msys 版 `find` / `sort` / `link` 覆盖 Windows 命令，正是当初为回避而放弃完整 MSYS2 的那个问题。
-
-**因此这是 `with` 的前置阻塞项，不是可选优化。** `with` 会让更多包进入同一 prefix，只会放大这个退化。必须先修好命令归属判定：
-
-- 正确做法是在**每个包解包时**分别捕获其 `info/paths.json` 并累积 owned 集合，而不是依赖 prefix 里最终残留的那一份；
-- 或者从 solved records 拿到每个包的文件清单（rattler 的 `RepoDataRecord` 链路上有这个信息），不依赖解包顺序；
-- 退化策略也应收紧：对 msys 系包，「暴露整个 prefix」的代价远高于「一个命令都不发布」，至少应改为发布空集并给出明确告警，而不是静默灌满 PATH。
-
-修好之后，`with` 包在 owned 判定上与传递依赖同等对待，`bin_names` 无需为 `with` 增加任何特殊逻辑。
+**这个前置阻塞项已解除**，`with` 包在 owned 判定上与传递依赖同等对待，`bin_names` 无需为 `with` 增加任何特殊逻辑。
 
 ### 2.5 `with` 为何必须进 identity
 
@@ -163,29 +139,42 @@ include = ["make"]
 
 `validate_conda_options` 目前是空实现，主包自包含检查放在这里（它同时能看到 `id` 与 canonical 值）。
 
-## 5. 实现要点
+## 5. 实现要点（已完成）
 
-**顺序很重要**：第 0 步是阻塞项，不修它就上 `with` 会让 PATH 污染变得更严重。
+| # | 位置 | 内容 |
+| --- | --- | --- |
+| 0 | `conda.rs` | **【前置】** 修正命令归属判定 —— 已作为 006 独立提交，见 §2.4 |
+| 1 | `tool.rs` | `CONDA_OPTIONS` 增加 `with`（`Artifact` / `identity: true` / `canonical_conda_with`）；实现 `canonical_conda_with`；`validate_conda_options` 拒绝 `with` 含主包 |
+| 2 | `conda.rs::solve` | `with` spec 与主包 spec 一并放入 `SolverTask::specs`，且同样进入 `gateway.query(...)` 的 spec 列表（`recursive(true)` 覆盖全部 spec）；新增 `with_packages()` 访问器 |
+| 3 | `conda.rs::list_remote` | 不受影响 —— 只列主包版本，与 `with` 无关 |
+| 4 | `bin_paths` / `bin_names` | 未改，第 0 步修好后无需特殊逻辑 |
+| 5 | `osdk use` CLI | 无需新参数：已有的通用 `--opt KEY=VALUE` 直接支持 `--opt with=m2-make`，仅更新帮助文本使其可被发现 |
 
-0. **【前置】修正命令归属判定**（见 2.4）：按包累积 owned 集合，不依赖 prefix 中残留的最后一份 `info/paths.json`；收紧退化策略，对 msys 系包不再静默暴露整个 prefix。**这一步独立于 `with`，本身就是缺陷修复，应单独提交。**
-1. **`tool.rs`**：`CONDA_OPTIONS` 增加 `with` 定义（`Artifact` / `identity: true` / `canonical_conda_with`）；实现 `canonical_conda_with`；在 `validate_conda_options` 中拒绝 `with` 含主包。
-2. **`conda.rs::solve`**：把 `with` 包 spec 与主包 spec 一起放入 `SolverTask::specs`，并同样加入 `gateway.query` 的 spec 列表（否则 repodata 里没有它们的候选）。注意 `query(...).recursive(true)` 需覆盖全部 spec。
-3. **`conda.rs::list_remote`**：**不受影响** —— 它只列主包版本，`with` 与「这个包有哪些版本」无关。
-4. **`bin_paths`**：不改。`bin_names` 在第 0 步修好后无需为 `with` 增加特殊逻辑。
-5. **`osdk use` CLI**：支持 `--with` 或直接透传 `[with=...]`，写入 `osdk.toml` 时保持规范化形态。
+## 6. 回归防线（已落地）
 
-## 6. 回归防线
+按本仓库的教训，区分「生成物长什么样」与「真的按预期工作」：
 
-按本仓库的教训，必须区分「生成物长什么样」与「真的按预期工作」：
+| 防线 | 用例 | 状态 |
+| --- | --- | --- |
+| 命令归属（第 0 步） | 见 006 的三个用例 | ✅ 已变异验证 |
+| 规范化 | `conda_with_accepts_only_bare_package_names` —— 排序去重、大小写归一，以及版本约束 / `conda:` 前缀 / 路径 / 空值 / 超长 / 超量各自报错 | ✅ |
+| identity | `with_is_part_of_identity_but_its_order_is_not` —— 集合不同则 identity 不同，顺序不同则相同 | ✅ 已变异验证（把 `identity` 置 `false` 后准确变红） |
+| backend 隔离 | `with_is_rejected_outside_the_conda_namespace` —— `npm:` / `cargo:` / `go:` / `github:` 带 `with` 一律失败 | ✅ 已反向验证（去掉 `with` 后变红，证明拒绝确实由 `with` 引起） |
+| solve 输入 | `with_packages_are_handed_to_the_solver` —— 断言 `with` 包确实进入交给求解器的 spec 集合，而非只被解析 | ✅ |
 
-- **命令归属（对应第 0 步）**：`conda:m2-base` 安装后断言 `find` / `sort` / `ls` / `link` **不在** published 列表中。这是当前实测失败的用例，修好前它就该是红的。
-- **规范化**：`with = ["b","a","b"]` → `a,b`；大小写归一；非法字符、超长、超量、空值、含主包各自报错。
-- **identity**：同一 `version` 下 `with` 不同 → identity 不同；`with` 顺序不同 → identity 相同。**这条最关键**，直接对应 2.5 的两种坏情况。
-- **backend 隔离**：`npm:` / `cargo:` / `go:` / `github:` / `http:` 带 `with` 一律解析失败。
-- **solve 输入**：断言 `with` 包确实进入了提交给求解器的 spec 集合（而不是只被解析、未被使用）。这是纯字符串断言抓不到的一类缺陷。
-- **端到端（必须在正常终端跑）**：`m2-base` + `with=["m2-make"]` 安装后，断言该 prefix 下 `msys-2.0.dll` **恰好一份**，且 `make` 能在 recipe 中调用到同 prefix 的 `tr` / `head`。
+### 6.1 端到端实测（win-64，真机）
 
-  当前执行环境无法回传 msys 子进程输出（退出码 0 但无副作用），此项**不能在该环境内验证**，需人工在真实终端确认并记录结果。
+`conda:m2-base[with='m2-make']@2022.6.1` 实装结果：
+
+| 断言 | 结果 |
+| --- | --- |
+| `msys-2.0.dll` 份数 | **1**（8 个单包并列时为 8） |
+| `make` / `sh` / `bash` / `tr` / `head` / `echo` / `awk` / `sed` / `grep` / `find` 同 prefix | 全部存在，`bin` 共 366 个文件 |
+| 带 `with` 与不带 `with` 的 prefix | 哈希不同（`dc99b040…` vs `03c5dba9…`），两者共存不覆盖 |
+| `with='m2-make,m2-diffutils'` 与 `with='m2-diffutils,m2-make'` | 指向同一 prefix（`e3e3c844…`），且仍只有 1 份 msys DLL |
+| `with='m2-base'` / `with='m2-make=4.4.1'` / `with='conda:m2-make'` / `with=''` | 全部被拒，错误信息指明原因 |
+
+**仍待人工确认**：`make` 在真实 recipe 中调用同 prefix 的 `tr` / `head` 是否成功。当前执行环境无法回传 msys 子进程输出（退出码 0 但无副作用），此项不能在该环境内验证，需在正常终端实跑。
 
 ## 7. 明确不做
 

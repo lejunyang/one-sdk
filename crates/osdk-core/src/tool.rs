@@ -837,17 +837,35 @@ const GO_OPTIONS: &[OptionDefinition] = &[
     ),
 ];
 
-const CONDA_OPTIONS: &[OptionDefinition] = &[option(
-    "channels",
-    "channels",
-    // The channel set decides which package is downloaded, not merely where it
-    // comes from, so it is part of the artifact identity: the same
-    // `conda:cuda-toolkit` at the same version resolves to different builds
-    // under `nvidia` than under `conda-forge`.
-    OptionEffect::Artifact,
-    true,
-    canonical_conda_channels,
-)];
+const CONDA_OPTIONS: &[OptionDefinition] = &[
+    option(
+        "channels",
+        "channels",
+        // The channel set decides which package is downloaded, not merely where
+        // it comes from, so it is part of the artifact identity: the same
+        // `conda:cuda-toolkit` at the same version resolves to different builds
+        // under `nvidia` than under `conda-forge`.
+        OptionEffect::Artifact,
+        true,
+        canonical_conda_channels,
+    ),
+    option(
+        "with",
+        "with",
+        // Extra packages solved into the same prefix change the artifact itself,
+        // so this belongs in the identity for the same reason `channels` does --
+        // and here it is load-bearing rather than merely tidy. The install root
+        // is fingerprinted from the solved closure, and `conda_installed_locator`
+        // refuses to guess when one `id@version` maps to several closures. Left
+        // out of the identity, adding `with` would either not trigger a
+        // reinstall or collide with the existing prefix, and the user would see
+        // an "ambiguous across multiple solved closures" error pointing them at
+        // channels, which has nothing to do with the real cause.
+        OptionEffect::Artifact,
+        true,
+        canonical_conda_with,
+    ),
+];
 
 const fn option(
     name: &'static str,
@@ -1607,6 +1625,67 @@ fn canonical_conda_channels(value: &str) -> Result<Option<String>> {
     }
     Ok(Some(channels.join(",")))
 }
+/// Canonicalize the `with` option: extra packages solved into the same prefix.
+///
+/// Unlike `channels` this **does** sort. Channel order is solver priority, but
+/// `with` is a set: `with = ["b", "a"]` and `with = ["a", "b"]` request the same
+/// install, so sorting keeps the identity -- and therefore the install root --
+/// stable across two spellings of one request. Duplicates collapse for the same
+/// reason. (`go:`'s `tags` is the existing precedent for a sorted set option.)
+///
+/// Only bare package names are accepted. Rejecting `:` `@` `[` `]` `/` `\` is
+/// what stops a version constraint, another backend id, or a path from being
+/// smuggled in through this option; version constraints are deliberately out of
+/// scope for the first version, because their conflict semantics against the
+/// main package's version are not defined yet.
+fn canonical_conda_with(value: &str) -> Result<Option<String>> {
+    let mut packages: Vec<String> = Vec::new();
+    for raw in value.split(',') {
+        let package = raw.trim();
+        if package.is_empty() {
+            continue;
+        }
+        if package.len() > 128 {
+            return Err(Error::config(format!(
+                "conda package name `{package}` is too long"
+            )));
+        }
+        // Lower-case is the conda package-name convention, so normalizing here
+        // keeps `M2-Make` and `m2-make` from producing two different identities
+        // for the same install.
+        let package = package.to_ascii_lowercase();
+        let valid = !package.is_empty()
+            && package
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+        if !valid || package == "." || package == ".." {
+            return Err(Error::config(format!(
+                "invalid conda package name `{package}` in option `with`; expected a plain \
+                 package name such as `m2-make`, without a version constraint"
+            )));
+        }
+        if !packages.contains(&package) {
+            packages.push(package);
+        }
+    }
+    if packages.is_empty() {
+        // An empty `with` is a typo, not a no-op. Silently ignoring it would
+        // hide the mistake until the prefix turned out to be missing a tool.
+        return Err(Error::config(
+            "conda option `with` must name at least one package",
+        ));
+    }
+    if packages.len() > 32 {
+        // More generous than `channels`' 8 -- a POSIX toolset runs to a dozen
+        // packages -- but still bounded, so `with` cannot quietly become an
+        // environment manifest.
+        return Err(Error::config(
+            "conda option `with` accepts at most 32 packages",
+        ));
+    }
+    packages.sort();
+    Ok(Some(packages.join(",")))
+}
 
 fn canonical_go_tags(value: &str) -> Result<Option<String>> {
     let mut tags = Vec::new();
@@ -2096,11 +2175,30 @@ fn validate_go_options(
     Ok(())
 }
 
+/// Cross-field checks for conda options.
+///
+/// Only reachable checks belong here -- the per-option canonicalizers already
+/// enforce shape. What they cannot see is the tool id, which is why the
+/// "`with` must not name the main package" rule lives at this level.
 fn validate_conda_options(
-    _id: &ToolId,
+    id: &ToolId,
     _raw: &BTreeMap<String, String>,
-    _canonical: &CanonicalOptions,
+    canonical: &CanonicalOptions,
 ) -> Result<()> {
+    if let Some(value) = canonical.get("with") {
+        // The canonicalizer lower-cases every entry, so compare against a
+        // lower-cased subject rather than assuming the id is already normalized.
+        let package = id.subject().to_ascii_lowercase();
+        if value.split(',').any(|entry| entry == package) {
+            // Distinct from the duplicate case the canonicalizer silently
+            // collapses: naming the main package here is a misunderstanding of
+            // what `with` means, so it earns its own message.
+            return Err(Error::config(format!(
+                "conda option `with` must not name the package itself (`{package}`); it lists \
+                 the *additional* packages to solve into the same prefix"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -2573,6 +2671,106 @@ fn invalid_request(input: &str) -> Error {
 mod tests {
     use super::*;
 
+    /// `with` rejects everything that is not a bare conda package name.
+    ///
+    /// The character set is the enforcement point for two separate promises: no
+    /// version constraints in the first version (their conflict semantics
+    /// against the main package's pinned version are undefined), and no
+    /// smuggling another backend id or a filesystem path in through an option.
+    #[test]
+    fn conda_with_accepts_only_bare_package_names() {
+        assert_eq!(
+            canonical_conda_with("m2-make").unwrap(),
+            Some("m2-make".to_string())
+        );
+
+        // Sorted, de-duplicated, lower-cased: `with` is a set, so the identity
+        // must not depend on how the user happened to spell it.
+        assert_eq!(
+            canonical_conda_with(" m2-make , m2-diffutils ,m2-make").unwrap(),
+            Some("m2-diffutils,m2-make".to_string())
+        );
+        assert_eq!(
+            canonical_conda_with("M2-Make").unwrap(),
+            Some("m2-make".to_string())
+        );
+
+        // A version constraint is the mistake most worth catching, because it
+        // looks reasonable and would otherwise reach the solver as a package
+        // name that cannot exist.
+        for rejected in [
+            "m2-make=4.4.1",
+            "m2-make>=4",
+            "conda:m2-make",
+            "m2-make@4.4.1",
+            "../escape",
+            "..",
+            ".",
+            "m2 make",
+            "m2/make",
+            "m2\\make",
+            "[m2-make]",
+        ] {
+            assert!(
+                canonical_conda_with(rejected).is_err(),
+                "`{rejected}` must be rejected rather than reach the solver"
+            );
+        }
+
+        // Empty is a typo, not a no-op; silently accepting it would defer the
+        // error to a prefix that mysteriously lacks the tool.
+        assert!(canonical_conda_with("").is_err());
+        assert!(canonical_conda_with("  ,  ").is_err());
+
+        // Bounded so `with` cannot quietly become an environment manifest.
+        let too_many = (0..33)
+            .map(|index| format!("pkg{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(canonical_conda_with(&too_many).is_err());
+        assert!(canonical_conda_with(&"a".repeat(129)).is_err());
+    }
+
+    /// `with` names the *additional* packages, so listing the main package is a
+    /// misunderstanding rather than mere redundancy, and gets its own error.
+    ///
+    /// This check has to live in the validator: the canonicalizer never sees the
+    /// tool id.
+    #[test]
+    fn conda_with_must_not_name_the_package_itself() {
+        let parsed = ToolSpec::parse("conda:m2-base[with='m2-base']@2022.6.1");
+        let error = parsed.expect_err("`with` naming the main package must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("must not name the package itself"),
+            "the error must explain the misunderstanding, got: {message}"
+        );
+
+        // Naming a *different* package is the normal case and must still work.
+        assert!(ToolSpec::parse("conda:m2-base[with='m2-make']@2022.6.1").is_ok());
+    }
+
+    /// `with` is a conda concept and must not leak into other namespaces.
+    ///
+    /// Its semantics rest on a shared prefix plus a solver that can take several
+    /// specs at once; no other backend has both. This is enforced structurally
+    /// -- `with` lives only in `CONDA_OPTIONS`, so every other schema rejects it
+    /// as unknown -- and asserted here so a future copy-paste into another
+    /// option table cannot pass unnoticed. See the spec's §3.
+    #[test]
+    fn with_is_rejected_outside_the_conda_namespace() {
+        for request in [
+            "npm:prettier[with='eslint']@3.0.0",
+            "cargo:ripgrep[with='fd-find']@14.0.0",
+            "go:github.com/foo/bar[with='baz']@1.0.0",
+            "github:cli/cli[with='gh']@2.0.0",
+        ] {
+            assert!(
+                ToolSpec::parse(request).is_err(),
+                "`{request}` must be rejected: `with` is conda-only"
+            );
+        }
+    }
     #[test]
     fn fixed_and_dynamic_ids_have_one_canonical_form() {
         assert_eq!(ToolId::parse(" node ").unwrap().to_string(), "node");
