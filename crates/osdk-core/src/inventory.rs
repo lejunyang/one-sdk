@@ -409,6 +409,25 @@ pub fn configured_and_installed_dynamic_ids<'a>(
 pub fn build_bin_ownership_candidates(
     installs: &[InstalledDynamicTool],
 ) -> BTreeMap<String, Vec<BinOwnerCandidate>> {
+    build_bin_ownership_candidates_with(installs, &|_, _, owned| owned)
+}
+
+/// As [`build_bin_ownership_candidates`], but asking `keep` which names count.
+///
+/// Routing and reconciliation have to agree with shim generation about who owns a
+/// name. While this function filtered on `owned` alone, the two disagreed the
+/// moment a user asked for an unowned command: generation created the shim,
+/// reconciliation did not see it in the expected set and deleted it again. The
+/// old comment here claimed `shims.include` made unowned bins reachable, but no
+/// configuration was ever consulted, so asking for one silently did nothing --
+/// the second half of docs/bugs/008.
+///
+/// `keep` receives `(canonical_id, bin_name, owned)` and is expected to be the
+/// same predicate generation uses, so both sides stay in step.
+pub fn build_bin_ownership_candidates_with(
+    installs: &[InstalledDynamicTool],
+    keep: &dyn Fn(&str, &str, bool) -> bool,
+) -> BTreeMap<String, Vec<BinOwnerCandidate>> {
     let mut owners: BTreeMap<String, Vec<BinOwnerCandidate>> = BTreeMap::new();
     for install in installs {
         // A report is a snapshot. Refuse entries whose root or manifest was
@@ -427,7 +446,12 @@ pub fn build_bin_ownership_candidates(
         // Unowned bins stay reachable: `shims.include` names one explicitly,
         // and once included it belongs to that package, so a genuine clash
         // between two real owners still surfaces as a conflict.
-        for bin in install.manifest.bins.iter().filter(|bin| bin.owned) {
+        for bin in install
+            .manifest
+            .bins
+            .iter()
+            .filter(|bin| keep(&install.canonical_id, &bin.name, bin.owned))
+        {
             owners
                 .entry(bin.name.clone())
                 .or_default()

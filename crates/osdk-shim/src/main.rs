@@ -682,7 +682,13 @@ fn dynamic_backend_for_bin(
     report: &ScanReport,
     tool_name: &str,
 ) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
-    let owners = osdk_core::shim::dynamic_bin_ownership(report);
+    // Honour the shim settings here too: a command the user exposed has a shim on
+    // disk, so this lookup must be able to route it, or the shim would exist and
+    // then fail to find its own backend (docs/bugs/008).
+    let owners = osdk_core::shim::dynamic_bin_ownership_with_settings(
+        report,
+        &ctx.config.settings.shims,
+    );
     let candidates = owners.get(tool_name)?;
     let owner_ids = candidates
         .iter()

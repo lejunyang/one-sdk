@@ -1,6 +1,6 @@
 # 008 — `shims.include` 是全局白名单，取回一个命令会禁掉其余所有工具
 
-**状态**：待修复 · **严重度**：严重 · **实测环境**：Windows x64、osdk 0.0.2
+**状态**：已修复 · **严重度**：严重 · **实测环境**：Windows x64、osdk 0.0.2
 
 ## 现象
 
@@ -73,7 +73,63 @@ if !settings.include.is_empty() && !included {
 - **恢复方式不直观**：得先想到是 `include` 的问题、`unset` 它、再在**项目外**跑一次
   reshim（项目内跑仍会读到项目配置）。
 
-## 修复方向
+## 修复
+
+保留 `include` 的既有语义（对「只要这几个」它是正确的），另外补上缺失的那一半。
+
+### 1. 新增 `shims.expose`：增量，不排他
+
+```
+osdk config set shims.expose "conda:m2-base:make"
+```
+
+它只做加法：把归属规则自行 withheld 的名字放行，从不因此收走别的东西。这正是
+006 场景需要的语义 —— 元包不拥有 prefix 里的任何命令，所以 `make` 必须点名索取，
+而「点名索取一个」不该意味着「其余都不要」。
+
+`exclude` 仍然最后生效，所以 `expose = ["conda:m2-base:*"]` 配
+`exclude = ["conda:m2-base:ls"]` 这种「放开一批、剔掉个别」照样能写。
+
+反过来，`expose` 会**盖过**别处的窄 `include`：两者都命中同一个名字时，一边说
+「要这个」，一边说「不在名单里」。让 `include` 赢就等于显式要求被静默丢弃，所以
+`expose` 优先。
+
+### 2. 三个列表都可按 tool 独立设置
+
+```
+osdk config set shims.conda:m2-base.expose  "make,sh"
+osdk config set shims.android-ndk.include   "clang,llvm-strip"
+osdk config set shims.conda:m2-base.exclude "ls,test"
+```
+
+TOML 落成 `[settings.shims.tools."conda:m2-base"]`。这是让 `include` 变安全的关键：
+限定到一个 tool 之后，它的白名单语义只在这个 tool 内成立，`conda:m2-base` 下的
+`include` 再也不可能收走 `cargo`。
+
+字段级覆盖：`Some(vec![])`（显式为空）与 `None`（未指定、继承全局）是两回事，所以
+只调一个维度不会顺手清掉另一个维度。`config get` 对未指定的字段显示 `inherit` 而不是
+空串 —— 两者含义不同，都显示为空会看不出哪个在生效。
+
+### 3. 让归属判定与生成判定用同一个谓词
+
+这是排查中才浮出来的第二层，也是「配置读到了、`published` 也对了，但 shim 就是不落
+盘」的真因：`build_bin_ownership_candidates` 里 `.filter(|bin| bin.owned)` 只看
+`owned`，**完全不读配置**。于是生成侧按配置写出 `make`，回收侧不认它、随即删掉。
+
+那里的注释当时写着「未拥有的 bin 仍可达：`shims.include` 点名即可」—— 但这个函数从
+未接触过任何配置，所以**取回从来就没真正生效过**。008 之所以看起来只是「include 太
+宽」，是因为另一半症状被这层掩盖了。
+
+改法是把谓词参数化，路由（`osdk-shim`）、回收（`reconcile_managed_shims`）和生成三
+处共用同一个 `shim_is_enabled_for`。三者必须一致：少接一处，就会退化成「shim 存在但
+路由不到」或者「生成完又被删」。
+
+### 4. 两条把人带进坑里的提示都改了
+
+`osdk where --bins` 的 "re-add one with ... shims.include" 与 conda 元包告警里的同一句，
+现在都指向 per-tool 的 `expose`。原提示是这次事故的直接起因。
+
+## 原修复方向
 
 1. **分开这两个语义**。`include` 保留"全局白名单"的既有含义，另加一个表达增量的设
    置（例如 `shims.expose`），语义是"在默认判定之上额外放行这些名字"，不影响任何
@@ -86,6 +142,28 @@ if !settings.include.is_empty() && !included {
    而目录空，会让人以为问题在别处。
 5. **加一道安全网**。一次 reshim 若要删掉的 shim 数量占现存的绝大多数，值得先提示再
    执行——这次是 646 → 0，属于典型的"配置写错了"而不是"用户真想这样"。
+
+## 实测
+
+`ai-auto-android` 收敛为 `m2-base` + `with` 后，用 per-tool `expose` 取回 13 个命令：
+
+| 观测 | 修复前 | 修复后 |
+| --- | --- | --- |
+| shims 总数 | 646 -> **0** | 574 -> **600** |
+| `cargo` / `go` / `node` | **全部消失** | 保留 |
+| `make` / `sh` / `tr` / `awk` | 无 | **全部生成** |
+| `ls`（未列入 expose） | — | 不生成（不劫持 Windows `ls`） |
+| `make` 端到端 | 只能走 `osdk exec` | **直接调用即可** |
+
+最后一行的实跑输出（recipe 里串联 `tr` / `awk` / `printf`，不经 `osdk exec`）：
+
+```
+make: Entering directory '/tmp/maketest2'
+HELLO-VIA-SHIM
+sum=6
+done
+make: Leaving directory '/tmp/maketest2'
+```
 
 ## 回归防线
 

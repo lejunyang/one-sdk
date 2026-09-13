@@ -404,6 +404,7 @@ pub struct SettingSpec {
     pub kind: SettingKind,
 }
 
+#[derive(Clone, Copy)]
 pub enum SettingKind {
     Bool,
     /// A positive integer; zero would stall the work it bounds.
@@ -511,6 +512,11 @@ pub const SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::List,
     },
     SettingSpec {
+        key: "shims.expose",
+        path: &["settings", "shims", "expose"],
+        kind: SettingKind::List,
+    },
+    SettingSpec {
         key: "shims.exclude",
         path: &["settings", "shims", "exclude"],
         kind: SettingKind::List,
@@ -521,12 +527,73 @@ pub fn find_setting(key: &str) -> Option<&'static SettingSpec> {
     SETTINGS.iter().find(|setting| setting.key == key)
 }
 
+/// A setting to write, either from the static table or built for a per-tool key.
+///
+/// Per-tool keys (`shims.<tool>.expose`) carry a segment taken from the user's
+/// argument, so they cannot be `&'static`. Keeping them in one owned type means
+/// `set_setting` / `unset_setting` have a single code path and cannot drift
+/// between the static and dynamic cases.
+pub struct ResolvedSetting {
+    pub key: String,
+    pub path: Vec<String>,
+    pub kind: SettingKind,
+}
+
+impl ResolvedSetting {
+    fn from_static(setting: &'static SettingSpec) -> Self {
+        Self {
+            key: setting.key.to_string(),
+            path: setting.path.iter().map(|part| part.to_string()).collect(),
+            kind: setting.kind,
+        }
+    }
+}
+
+/// The three shim lists that can be scoped to a single tool.
+const TOOL_SHIM_FIELDS: [&str; 3] = ["include", "exclude", "expose"];
+
+/// Resolve a key the user typed, accepting per-tool shim keys.
+///
+/// Shape: `shims.<tool>.<field>`, e.g. `shims.conda:m2-base.expose`. The tool id
+/// itself contains a colon, and TOML quotes it on write, so the only ambiguity is
+/// with the global `shims.include`; that one is in the static table and is tried
+/// first.
+pub fn resolve_setting(key: &str) -> Result<ResolvedSetting> {
+    if let Some(found) = find_setting(key) {
+        return Ok(ResolvedSetting::from_static(found));
+    }
+    if let Some(rest) = key.strip_prefix("shims.") {
+        // Split at the *last* dot: everything before it is the tool id, which may
+        // itself contain dots (`conda:python.pkg`), and the field never does.
+        if let Some((tool, field)) = rest.rsplit_once('.') {
+            if TOOL_SHIM_FIELDS.contains(&field) && !tool.is_empty() {
+                return Ok(ResolvedSetting {
+                    key: key.to_string(),
+                    path: vec![
+                        "settings".to_string(),
+                        "shims".to_string(),
+                        "tools".to_string(),
+                        tool.to_string(),
+                        field.to_string(),
+                    ],
+                    kind: SettingKind::List,
+                });
+            }
+        }
+    }
+    let known: Vec<&str> = SETTINGS.iter().map(|setting| setting.key).collect();
+    anyhow::bail!(
+        "unknown setting `{key}`\n  known: {}\n  per-tool shim lists: shims.<tool>.{{include|exclude|expose}}",
+        known.join(", ")
+    )
+}
+
 /// Parse and validate `value` for `setting`.
 ///
 /// Validation happens before the file is touched, so a rejected value leaves
 /// the config exactly as it was rather than writing something the loader would
 /// later refuse to parse.
-fn setting_value(setting: &SettingSpec, value: &str) -> Result<toml_edit::Item> {
+fn setting_value(setting: &ResolvedSetting, value: &str) -> Result<toml_edit::Item> {
     let value = value.trim();
     Ok(match setting.kind {
         SettingKind::Bool => {
@@ -598,7 +665,7 @@ pub fn setting_scope_path(ctx: &Ctx, scope: SettingScope) -> Result<PathBuf> {
 /// Write one setting into the config for `scope`.
 pub fn set_setting(
     ctx: &Ctx,
-    setting: &SettingSpec,
+    setting: &ResolvedSetting,
     value: &str,
     scope: SettingScope,
 ) -> Result<PathBuf> {
@@ -641,7 +708,7 @@ pub fn set_setting(
 /// unset from a no-op instead of claiming to have changed something.
 pub fn unset_setting(
     ctx: &Ctx,
-    setting: &SettingSpec,
+    setting: &ResolvedSetting,
     scope: SettingScope,
 ) -> Result<Option<PathBuf>> {
     let path = setting_scope_path(ctx, scope)?;
@@ -683,16 +750,21 @@ pub fn unset_setting(
 /// Walks outward from the deepest parent, and stops at the first table that
 /// still holds something -- an emptied `shims` must not take a populated
 /// `settings` with it.
-fn prune_empty_tables(root: &mut toml_edit::Table, parents: &[&str]) {
+/// Generic over the segment type so both the static `&str` paths and the owned
+/// paths built for per-tool keys can be pruned by the same code.
+fn prune_empty_tables<S: AsRef<str>>(root: &mut toml_edit::Table, parents: &[S]) {
     for depth in (0..parents.len()).rev() {
         let mut table = &mut *root;
         for parent in &parents[..depth] {
-            match table.get_mut(parent).and_then(|item| item.as_table_mut()) {
+            match table
+                .get_mut(parent.as_ref())
+                .and_then(|item| item.as_table_mut())
+            {
                 Some(child) => table = child,
                 None => return,
             }
         }
-        let name = parents[depth];
+        let name = parents[depth].as_ref();
         let empty = table
             .get(name)
             .and_then(|item| item.as_table())
@@ -857,33 +929,33 @@ mod tests {
 
     #[test]
     fn rejected_values_are_caught_before_any_write() {
-        let jobs = find_setting("jobs").unwrap();
-        assert!(setting_value(jobs, "0").is_err(), "zero jobs stalls work");
-        assert!(setting_value(jobs, "abc").is_err());
-        assert!(setting_value(jobs, "4").is_ok());
+        let jobs = resolve_setting("jobs").unwrap();
+        assert!(setting_value(&jobs, "0").is_err(), "zero jobs stalls work");
+        assert!(setting_value(&jobs, "abc").is_err());
+        assert!(setting_value(&jobs, "4").is_ok());
 
-        let offline = find_setting("offline").unwrap();
-        assert!(setting_value(offline, "maybe").is_err());
+        let offline = resolve_setting("offline").unwrap();
+        assert!(setting_value(&offline, "maybe").is_err());
         for truthy in ["true", "1", "yes", "ON"] {
             assert_eq!(
-                setting_value(offline, truthy).unwrap().to_string().trim(),
+                setting_value(&offline, truthy).unwrap().to_string().trim(),
                 "true",
                 "{truthy} should parse as true"
             );
         }
 
-        let attestations = find_setting("attestations").unwrap();
-        assert!(setting_value(attestations, "sometimes").is_err());
+        let attestations = resolve_setting("attestations").unwrap();
+        assert!(setting_value(&attestations, "sometimes").is_err());
         assert!(
-            setting_value(attestations, "REQUIRED").is_ok(),
+            setting_value(&attestations, "REQUIRED").is_ok(),
             "case-insensitive"
         );
     }
 
     #[test]
     fn list_settings_split_on_commas_and_drop_blanks() {
-        let include = find_setting("shims.include").unwrap();
-        let item = setting_value(include, " conda:clang:xmllint , , conda:clang:* ").unwrap();
+        let include = resolve_setting("shims.include").unwrap();
+        let item = setting_value(&include, " conda:clang:xmllint , , conda:clang:* ").unwrap();
         let array = item.as_array().expect("list settings store an array");
         let entries: Vec<&str> = array.iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(entries, ["conda:clang:xmllint", "conda:clang:*"]);
@@ -957,8 +1029,8 @@ mod tests {
             ("shims.include", "conda:clang:xmllint"),
         ];
         for (key, value) in cases {
-            let setting = find_setting(key).unwrap();
-            let item = setting_value(setting, value)
+            let setting = resolve_setting(key).unwrap();
+            let item = setting_value(&setting, value)
                 .unwrap_or_else(|error| panic!("`{key} = {value}` was rejected: {error}"));
 
             // Build the document the writer would produce, then load it the way
@@ -991,9 +1063,9 @@ mod tests {
             ("link_mode", "hardlinkk"),
             ("jobs", "0"),
         ] {
-            let setting = find_setting(key).unwrap();
+            let setting = resolve_setting(key).unwrap();
             assert!(
-                setting_value(setting, bad).is_err(),
+                setting_value(&setting, bad).is_err(),
                 "`{key} = {bad}` must be rejected before it reaches the file"
             );
         }
