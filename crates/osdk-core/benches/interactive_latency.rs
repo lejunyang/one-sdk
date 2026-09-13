@@ -136,6 +136,7 @@ fn main() {
 
     // 复刻本机形态：动态安装集中在一个 backend 下，
     // 而绝大多数遍历量来自不含 manifest 的静态 backend。
+    let mut a_real_install = None;
     for tool in [
         "conda:nasm",
         "conda:cmake",
@@ -143,8 +144,10 @@ fn main() {
         "conda:m2-bash",
         "conda:m2-sed",
     ] {
-        write_install(installs, tool, "1.0.0", 12);
+        let root = write_install(installs, tool, "1.0.0", 12);
+        a_real_install.get_or_insert(root);
     }
+    let a_real_install = a_real_install.expect("至少写入一个安装");
     // 多段 id：确认它们没有因为深度裁剪而被漏扫
     write_install(installs, "github:owner/repo", "2.0.0", 4);
     write_install(installs, "npm:@scope/pkg", "3.0.0", 4);
@@ -195,6 +198,28 @@ fn main() {
         100.0 * payload_dirs as f64 / cost.dirs as f64
     );
 
+    // 静态 backend 的子树是遍历量的主体（本机 android-sdk 单独 4,309 个
+    // 目录、zig 2,242 个，两者都没有一个 manifest），扫描只需浅探一层。
+    //
+    // 这条护栏靠诱饵生效，而不是靠数目录：埋在静态子树深处的 manifest，
+    // 其 identity 与所在路径不符，fail-closed 扫描一旦走到就会报错。所以
+    // 「扫描仍然成功」等价于「那棵树没有被走穿」，且判断必然经过
+    // `inventory.rs` 的裁剪判据本身。
+    //
+    // 曾经在这里数「扫描走过多少目录」，办法是在基准里复刻一份判据——那
+    // 与产品代码脱钩，改判据它照样输出同一个数字，等于没测。
+    write_decoy_manifest(installs, "zig", &a_real_install);
+    let guarded = scan_installs(installs, &ScanOptions::default());
+    assert!(
+        guarded.is_ok(),
+        "扫描走进了静态 backend 的子树并撞上诱饵 manifest：裁剪判据失效",
+    );
+    assert_eq!(
+        guarded.expect("scan").installs.len(),
+        8,
+        "诱饵不该改变扫描结果",
+    );
+
     println!("\n-- 激活片段渲染（纯字符串，作为对照基线）--");
     bench("activation_script(powershell)", 2000, || {
         let script = osdk_core::activate::activation_script(
@@ -232,4 +257,21 @@ fn count_payload_dirs(installs: &Path) -> usize {
         }
     }
     count
+}
+
+/// 在静态 backend 子树深处埋一个 identity 与路径不符的 manifest。
+///
+/// 裁剪生效时扫描进不到这里，它是不可见的；裁剪一旦失效，fail-closed
+/// 扫描走到就会因 identity 不匹配而报错。这样护栏的失败信号来自被测
+/// 代码自己的行为，而不是基准里另写一份判据。
+fn write_decoy_manifest(installs: &Path, static_tool: &str, borrow_from: &Path) {
+    // 深度刻意超过浅探的一层：放在 <static>/<version>/<id> 这个
+    // 「看起来像合法 install root」的位置上，裁剪失效才会走到。
+    let decoy = installs.join(static_tool).join("0.13.0").join("deadbeef");
+    std::fs::create_dir_all(&decoy).expect("decoy dir");
+    // 直接借用一个真实 manifest：它声明的 identity 与这个路径完全不符，
+    // 正是 fail-closed 扫描必须拒绝的东西。借用而不是另写一份，是为了
+    // 不让诱饵因为格式演进而悄悄失效（那会让护栏变成空操作）。
+    let source = borrow_from.join(".osdk-install.json");
+    std::fs::copy(&source, decoy.join(".osdk-install.json")).expect("decoy manifest");
 }

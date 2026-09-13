@@ -483,17 +483,54 @@ fn scan_installs_within(
     let mut manifest_paths = Vec::new();
     let mut legacy_installs = Vec::new();
     let mut diagnostics = Vec::new();
+    // Nearly all of the walking went into subtrees that cannot hold a manifest.
+    // On this machine android-sdk is 4,309 directories and zig 2,242, neither
+    // with a single manifest, against 1,602 under conda which holds all 14 --
+    // and `hook-env` pays for it on every shell prompt. A dynamic id always
+    // contains a `:`, and `sanitize_tool_id` splits on it, so
+    // `installs/<first segment>` is exactly the namespace; a fixed tool
+    // (`node`, `zig`, `android-sdk`) never writes an install manifest.
+    //
+    // Those subtrees are still entered, just not descended into: a manifest
+    // placed where it does not belong must keep being found and rejected, since
+    // that check is what stops a planted manifest from claiming a command. So
+    // the shallow limit below is deliberately 2 (the directory plus what sits
+    // directly inside it) rather than skipping the tree outright.
+    //
+    // Only a walk starting at the installs root can read a namespace off the
+    // first segment. `scan_installs_for_tool` starts inside one tool's subtree,
+    // where depth 1 is a *version* directory -- applying this there would prune
+    // the very tool being scanned.
+    let namespace_aware = identity_root == scan_root;
+    let full_depth = options.max_depth.saturating_add(1);
     let mut walker = walkdir::WalkDir::new(scan_root)
         .follow_links(false)
-        .max_depth(options.max_depth.saturating_add(1))
+        .max_depth(full_depth)
         .into_iter()
-        // Hidden directories below the install root are implementation state
-        // (`.locks`, atomic staging/backup trees, and similar). The inventory
-        // file itself is intentionally hidden, so filter directories only.
-        .filter_entry(|entry| {
-            entry.depth() == 0
-                || !entry.file_type().is_dir()
-                || !entry.file_name().to_string_lossy().starts_with('.')
+        .filter_entry(move |entry| {
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            // Hidden directories below the install root are implementation state
+            // (`.locks`, atomic staging/backup trees, and similar). The inventory
+            // file itself is intentionally hidden, so filter directories only.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                return false;
+            }
+            if !namespace_aware || entry.depth() < 2 {
+                return true;
+            }
+            // At depth >= 2 the first segment is known, so stop descending when
+            // it is not a namespace that could own a dynamic install.
+            entry
+                .path()
+                .strip_prefix(scan_root)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .map(|first| {
+                    crate::tool::is_dynamic_install_directory(&first.as_os_str().to_string_lossy())
+                })
+                .unwrap_or(true)
         });
 
     // An install root's whole payload is unpacked *below* the manifest, and
@@ -501,13 +538,12 @@ fn scan_installs_within(
     // `installs/<tool>/<version>/<install_id>` -- so nothing inside an install
     // can itself be a canonical install root. Descending into one therefore
     // cannot find another manifest, it only walks the payload: one conda prefix
-    // carries a full Python/mingw distribution, and the android-sdk and zig
-    // trees carry tens of thousands of files with no manifest anywhere. Left
-    // unpruned this walked 8,268 directories and stat-ed 84,352 entries per
-    // call, against 466 and 4,483 when pruned -- ~19x, paid on every prompt via
-    // `hook-env`, and it grew with SDKs that have nothing to do with dynamic
-    // tools. `next_batch`-free manual iteration is what lets us call
-    // `skip_current_dir`.
+    // carries a full Python/mingw distribution. Measured on this machine, this
+    // pruning takes the walk from 8,268 directories and 84,352 stat calls down
+    // to 7,268 and 65,736 -- real, but only 12% of the waste, because it can
+    // only fire inside an install. The namespace filter above is what removes
+    // the rest. Manual iteration (rather than a `for` loop) is what lets us
+    // call `skip_current_dir`.
     while let Some(entry) = walker.next() {
         match entry {
             Ok(entry) => {
@@ -1187,6 +1223,56 @@ mod install_manifest_tests {
         let report = scan_installs(temporary.path(), &ScanOptions::tolerant()).unwrap();
         assert!(report.installs.is_empty());
         assert_eq!(report.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn a_static_backend_subtree_is_probed_but_never_walked() {
+        // 静态工具（node/zig/android-sdk）永远不写 install manifest，而它们
+        // 恰恰是遍历量的主体：本机 android-sdk 4,309 个目录、zig 2,242 个，
+        // 两者加起来占全部遍历量的一多半，却一个 manifest 都没有。
+        //
+        // 这里用一个「放在深处、identity 与路径不符」的 manifest 当探针：
+        // 走到它，fail-closed 扫描必然报错；扫描成功就证明没走进去。
+        let temporary = tempfile::tempdir().unwrap();
+        let buried = temporary
+            .path()
+            .join("zig")
+            .join("0.13.0")
+            .join("deadbeef");
+        DynamicToolManifest::from_identity(identity())
+            .unwrap()
+            .write_atomic(&buried)
+            .unwrap();
+
+        // 同时放一个真实安装，确认扫描本身仍然在工作 —— 否则「没报错」也
+        // 可能是因为扫描什么都没做。
+        let real = identity();
+        let root = temporary
+            .path()
+            .join(crate::dirs::sanitize_tool_id(&real.tool))
+            .join(crate::dirs::sanitize_version_component(&real.version))
+            .join(crate::dirs::install_id_component(&real.install_id).unwrap());
+        DynamicToolManifest::from_identity(real).unwrap().write_atomic(&root).unwrap();
+
+        let report = scan_installs(temporary.path(), &ScanOptions::default())
+            .expect("静态 backend 的子树被走穿了，撞上了埋在深处的 manifest");
+        assert_eq!(report.installs.len(), 1);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_manifest_sitting_directly_in_a_static_directory_is_still_rejected() {
+        // 上一条测的是「不下探」，这条测的是「仍然浅探」。
+        //
+        // 两者是一对：只按 namespace 白名单硬跳过整棵树的话，放错位置的
+        // manifest 会变成静默通过 —— 那是防止伪造 manifest 劫持命令路由的
+        // 防线，不能为性能牺牲。所以非 namespace 目录仍要进去看一层。
+        let temporary = tempfile::tempdir().unwrap();
+        DynamicToolManifest::from_identity(identity())
+            .unwrap()
+            .write_atomic(&temporary.path().join("node"))
+            .unwrap();
+        assert!(scan_installs(temporary.path(), &ScanOptions::default()).is_err());
     }
 
     #[test]

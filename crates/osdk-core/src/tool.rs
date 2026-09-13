@@ -538,18 +538,57 @@ impl std::str::FromStr for ToolSpec {
     }
 }
 
+/// Every registered dynamic namespace.
+///
+/// This is the single source of truth: `namespace_schema` looks its answer up
+/// here instead of repeating the list in a `match`. The inventory scanner uses
+/// the same list to decide which `installs/` subtrees can possibly hold a
+/// dynamic install, so a namespace added in one place cannot go missing from
+/// the other -- and getting that wrong would make a whole backend's installs
+/// invisible to the scanner.
+pub static DYNAMIC_NAMESPACES: &[&NamespaceSchema] = &[
+    &NPM_SCHEMA,
+    &GITHUB_SCHEMA,
+    &HTTP_SCHEMA,
+    &CARGO_SCHEMA,
+    &GO_SCHEMA,
+    &CONDA_SCHEMA,
+];
+
 /// Return the schema for a registered namespace. Namespace names are already
 /// canonical and intentionally case-sensitive at this boundary.
 pub fn namespace_schema(namespace: &str) -> Option<&'static NamespaceSchema> {
-    match namespace {
-        "npm" => Some(&NPM_SCHEMA),
-        "github" => Some(&GITHUB_SCHEMA),
-        "http" => Some(&HTTP_SCHEMA),
-        "cargo" => Some(&CARGO_SCHEMA),
-        "go" => Some(&GO_SCHEMA),
-        "conda" => Some(&CONDA_SCHEMA),
-        _ => None,
-    }
+    DYNAMIC_NAMESPACES
+        .iter()
+        .copied()
+        .find(|schema| schema.namespace == namespace)
+}
+
+/// Install-tree directory names that a namespace can produce but that are not
+/// themselves namespaces.
+///
+/// `npm-global` is the one that exists today: a globally scoped npm install
+/// lands under `installs/npm-global/...` (see `GLOBAL_INSTALL_NAMESPACE` in the
+/// npm backend), even though `npm-global:` is not something a user can write.
+/// It has to be listed here, because a directory missing from this set is a
+/// directory the scanner will not look inside -- which would make those
+/// installs invisible.
+const DERIVED_INSTALL_DIRECTORIES: &[&str] = &["npm-global"];
+
+/// Whether a directory name sitting directly under `installs/` could contain a
+/// dynamic install manifest.
+///
+/// A dynamic id always carries a `:` (`conda:nasm`), and `sanitize_tool_id`
+/// splits on it, so the first path segment is the namespace. A fixed tool
+/// (`node`, `zig`, `android-sdk`) never writes an install manifest, so its
+/// subtree cannot hold one.
+///
+/// **When adding a dynamic backend, or any scope that renames its install
+/// directory, make sure the new name is reachable from here** -- either via
+/// `DYNAMIC_NAMESPACES` or `DERIVED_INSTALL_DIRECTORIES`. A name that is not
+/// will have its installs silently skipped by the inventory scan.
+pub fn is_dynamic_install_directory(name: &str) -> bool {
+    namespace_schema(name).is_some() || DERIVED_INSTALL_DIRECTORIES.contains(&name)
 }
 
 /// Canonicalize a dynamic id through the registered namespace subject rules.
