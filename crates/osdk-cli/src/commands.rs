@@ -3946,8 +3946,12 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         } else {
             let names: Vec<&str> = withheld.iter().map(|name| name.as_str()).collect();
             println!("withheld ({}): {}", names.len(), names.join(", "));
+            // Point at the per-tool `expose`, never the global `include`.
+            // `include` is an allowlist over every tool, so the old advice
+            // recovered one command by withholding all the others -- 646 shims
+            // down to zero (docs/bugs/008).
             println!(
-                "  re-add one with `osdk config set shims.include \"{}:{}\"`",
+                "  expose one with `osdk config set shims.{}.expose \"{}\"`",
                 backend.id(),
                 names[0]
             );
@@ -4451,7 +4455,32 @@ fn setting_display(s: &osdk_core::config::Settings, key: &str) -> Option<String>
         "lang" => s.lang.clone().unwrap_or_else(|| "auto".to_string()),
         "shims.include" => s.shims.include.join(", "),
         "shims.exclude" => s.shims.exclude.join(", "),
+        "shims.expose" => s.shims.expose.join(", "),
+        // Per-tool lists: `shims.<tool>.<field>`. Read back the same shape
+        // `config set` accepts, so a value that was just written is visible
+        // under the key the user typed rather than only inside the TOML.
+        other => return tool_shim_display(s, other),
+    })
+}
+
+/// Render `shims.<tool>.{include,exclude,expose}`, or `None` if not that shape.
+///
+/// An unset field prints as `inherit` rather than as an empty list: the two mean
+/// different things here -- inheriting the global list, versus overriding it with
+/// nothing -- and showing both as blank would hide which one is in effect.
+fn tool_shim_display(s: &osdk_core::config::Settings, key: &str) -> Option<String> {
+    let rest = key.strip_prefix("shims.")?;
+    let (tool, field) = rest.rsplit_once('.')?;
+    let overrides = s.shims.tools.get(tool);
+    let list = match field {
+        "include" => overrides.and_then(|tool| tool.include.as_ref()),
+        "exclude" => overrides.and_then(|tool| tool.exclude.as_ref()),
+        "expose" => overrides.and_then(|tool| tool.expose.as_ref()),
         _ => return None,
+    };
+    Some(match list {
+        Some(values) => values.join(", "),
+        None => "inherit".to_string(),
     })
 }
 
@@ -4565,10 +4594,11 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             }
         }
         ConfigCommand::Set { key, value, global } => {
-            let setting =
-                crate::config_edit::find_setting(&key).ok_or_else(|| unknown_setting(&key))?;
+            // `resolve_setting` also accepts the per-tool shim keys, which are
+            // not in the static table because they carry a tool id.
+            let setting = crate::config_edit::resolve_setting(&key)?;
             let scope = setting_scope(global);
-            let path = crate::config_edit::set_setting(&app.ctx, setting, &value, scope)?;
+            let path = crate::config_edit::set_setting(&app.ctx, &setting, &value, scope)?;
             // Re-read from disk: printing the argument back would claim success
             // even if the value landed somewhere the loader ignores.
             let written = osdk_core::config::Config::load_user(&path)?;
@@ -4578,10 +4608,9 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             offer_trust_after_set(app, &path, scope)?;
         }
         ConfigCommand::Unset { key, global } => {
-            let setting =
-                crate::config_edit::find_setting(&key).ok_or_else(|| unknown_setting(&key))?;
+            let setting = crate::config_edit::resolve_setting(&key)?;
             let scope = setting_scope(global);
-            match crate::config_edit::unset_setting(&app.ctx, setting, scope)? {
+            match crate::config_edit::unset_setting(&app.ctx, &setting, scope)? {
                 Some(path) => {
                     println!("unset {key} in {}", path.display());
                     // Removing a key rewrites the file, so a config that stays
@@ -6145,7 +6174,12 @@ fn installed_shim_owners(
     // resolve each pair once instead of once per name.
     let mut selection_memo =
         std::collections::HashMap::<(String, String), bool>::new();
-    for (name, candidates) in osdk_core::shim::dynamic_bin_ownership(&dynamic_report) {
+    // Same predicate as generation, so reconciliation cannot delete a shim that
+    // generation just created for an explicitly exposed command (docs/bugs/008).
+    for (name, candidates) in osdk_core::shim::dynamic_bin_ownership_with_settings(
+        &dynamic_report,
+        &app.ctx.config.settings.shims,
+    ) {
         let configured_owners = candidates
             .into_iter()
             .filter_map(|candidate| {

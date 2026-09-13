@@ -104,9 +104,12 @@ pub fn shim_is_enabled(settings: &ShimSettings, backend_id: &str, name: &str) ->
 /// a dependency closure.
 ///
 /// `owned` is only a *default*. A closure's command is withheld unless the user
-/// names it, while an explicit `include` still wins -- otherwise the withheld
-/// list would be unreachable and the setting a no-op. `exclude` is applied last
-/// either way, so it can still trim an owned command.
+/// names it -- via `expose` (additive, and the right tool for the job) or
+/// `include` (an allowlist, which also withholds everything it does not name).
+/// `exclude` is applied last either way, so it can still trim an owned command.
+///
+/// All three lists may be scoped to one tool through `shims.tools.<id>`, which is
+/// what makes a narrow `include` safe: globally it silences every tool it omits.
 pub fn shim_is_enabled_for(
     settings: &ShimSettings,
     backend_id: &str,
@@ -126,17 +129,41 @@ pub fn shim_is_enabled_for(
             glob_matches(pattern, subject)
         })
     };
-    let included = matches_any(&settings.include);
-    if !settings.include.is_empty() && !included {
+
+    // A tool's own lists replace the global ones for that tool, field by field.
+    // Scoping matters for `include`: globally it is an allowlist over every
+    // tool, so narrowing one SDK through it silences everything else. Per tool
+    // that blast radius is gone -- an `include` under `conda:m2-base` cannot
+    // withhold `cargo`.
+    let overrides = settings.tools.get(backend_id);
+    let include = overrides
+        .and_then(|tool| tool.include.as_deref())
+        .unwrap_or(&settings.include);
+    let exclude = overrides
+        .and_then(|tool| tool.exclude.as_deref())
+        .unwrap_or(&settings.exclude);
+    let expose = overrides
+        .and_then(|tool| tool.expose.as_deref())
+        .unwrap_or(&settings.expose);
+
+    let included = matches_any(include);
+    let exposed = matches_any(expose);
+
+    // `expose` is additive, so it survives the allowlist: naming a command is
+    // an instruction to shim it, and letting a narrow `include` elsewhere
+    // cancel that would make the two settings fight over the same name.
+    if !include.is_empty() && !included && !exposed {
         return false;
     }
     // A dependency's command needs to be asked for by name; being left in the
-    // manifest is what makes asking possible.
-    if !owned && !included {
+    // manifest is what makes asking possible. `expose` is the additive way to
+    // ask -- `include` also works, but only at the cost of withholding
+    // everything it does not list (docs/bugs/008).
+    if !owned && !included && !exposed {
         return false;
     }
-    // Exclude is applied last so a broad include can be trimmed.
-    !matches_any(&settings.exclude)
+    // Exclude is applied last so a broad include or expose can be trimmed.
+    !matches_any(exclude)
 }
 
 /// Case-insensitive glob over `*` and `?`.
@@ -440,6 +467,21 @@ pub fn validated_dynamic_install(
 /// `bin_names` yet.
 pub fn dynamic_bin_ownership(report: &ScanReport) -> BTreeMap<String, Vec<BinOwnerCandidate>> {
     inventory::build_bin_ownership_candidates(&report.installs)
+}
+
+/// Ownership as the shim layer sees it, honouring the shim settings.
+///
+/// Routing and reconciliation must apply the *same* predicate as generation.
+/// Filtering on `owned` alone made them disagree whenever a user asked for an
+/// unowned command: generation wrote the shim, reconciliation did not expect it
+/// and removed it, so `expose` looked like it did nothing (docs/bugs/008).
+pub fn dynamic_bin_ownership_with_settings(
+    report: &ScanReport,
+    settings: &ShimSettings,
+) -> BTreeMap<String, Vec<BinOwnerCandidate>> {
+    inventory::build_bin_ownership_candidates_with(&report.installs, &|id, name, owned| {
+        shim_is_enabled_for(settings, id, name, owned)
+    })
 }
 
 pub fn selected_dynamic_install_identity(
@@ -835,6 +877,7 @@ mod tests {
         let included = ShimSettings {
             include: vec!["conda:clang:xmllint".into()],
             exclude: Vec::new(),
+            ..Default::default()
         };
         assert!(
             super::shim_is_enabled_for(&included, "conda:clang", "xmllint", false),
@@ -853,6 +896,7 @@ mod tests {
         let both = ShimSettings {
             include: vec!["conda:clang:*".into()],
             exclude: vec!["conda:clang:xmllint".into()],
+            ..Default::default()
         };
         assert!(!super::shim_is_enabled_for(
             &both,
@@ -892,6 +936,7 @@ mod tests {
         let settings = ShimSettings {
             include: Vec::new(),
             exclude: vec!["android-build-tools:*".into()],
+            ..Default::default()
         };
         assert!(!super::shim_is_enabled(
             &settings,
@@ -923,6 +968,7 @@ mod tests {
         let exclude = ShimSettings {
             include: Vec::new(),
             exclude: vec!["*-clang".into(), "lint".into()],
+            ..Default::default()
         };
         assert!(!super::shim_is_enabled(
             &exclude,
@@ -940,6 +986,7 @@ mod tests {
         let include = ShimSettings {
             include: vec!["adb".into(), "sdk*".into()],
             exclude: Vec::new(),
+            ..Default::default()
         };
         assert!(super::shim_is_enabled(
             &include,
@@ -961,6 +1008,7 @@ mod tests {
         let both = ShimSettings {
             include: vec!["*".into()],
             exclude: vec!["fastboot".into()],
+            ..Default::default()
         };
         assert!(super::shim_is_enabled(
             &both,
@@ -982,6 +1030,7 @@ mod tests {
         let settings = ShimSettings {
             include: Vec::new(),
             exclude: vec!["android-ndk:*".into()],
+            ..Default::default()
         };
         assert!(!super::shim_is_enabled(&settings, "android-ndk", "clang"));
         assert!(!super::shim_is_enabled(
@@ -998,10 +1047,191 @@ mod tests {
     }
 
     #[test]
+    fn ownership_honours_expose_so_reconciliation_agrees_with_generation() {
+        // 008 的第二层，也是「配置读到了、published 也对了，但 shim 不落盘」的
+        // 真因：归属候选曾经只按 `owned` 硬过滤，完全不看配置。于是生成侧写出
+        // shim，回收侧不认它，随即删掉 —— expose 看起来毫无作用。
+        //
+        // 这条测试锁住的是「两侧用同一个判据」这个不变量，而不是某个具体名单。
+        let settings = ShimSettings {
+            expose: vec!["conda:m2-base:make".into()],
+            ..Default::default()
+        };
+        let keep = |id: &str, name: &str, owned: bool| {
+            super::shim_is_enabled_for(&settings, id, name, owned)
+        };
+
+        // owned=false 且被 expose 点名 —— 两侧都必须认。
+        assert!(
+            keep("conda:m2-base", "make", false),
+            "被 expose 的命令必须能进入归属候选，否则回收会删掉刚生成的 shim"
+        );
+        // owned=false 且没被点名 —— 两侧都不认。
+        assert!(!keep("conda:m2-base", "ls", false));
+        // owned=true 的正常命令不受影响。
+        assert!(keep("go", "go", true));
+    }
+
+    #[test]
+    fn a_global_include_is_an_allowlist_over_every_tool() {
+        // 008 的成因，作为既有行为固定下来：全局 include 是**全体**工具的
+        // 白名单，不是「额外加回一个」。实测按 006 的告警只列了 13 个 conda
+        // 命令，646 个 shim 直接归零，cargo / go 一并消失。
+        //
+        // 保留这个语义（它对「只要这几个」是正确的），但要有测试写明它的
+        // 作用域，否则下一个人还会把它当成增量设置来用。
+        let settings = ShimSettings {
+            include: vec!["conda:m2-base:make".into()],
+            ..Default::default()
+        };
+        assert!(super::shim_is_enabled_for(
+            &settings,
+            "conda:m2-base",
+            "make",
+            false
+        ));
+        assert!(
+            !super::shim_is_enabled(&settings, "go", "go"),
+            "全局 include 会牵连无关工具 —— 这正是 008，故这里断言现状而非期望"
+        );
+    }
+
+    #[test]
+    fn expose_adds_without_withholding_anything_else() {
+        // 008 的修复：expose 是增量的，取回一个被 withheld 的命令时，
+        // 不会顺手禁掉其他任何工具。
+        let settings = ShimSettings {
+            expose: vec!["conda:m2-base:make".into()],
+            ..Default::default()
+        };
+        assert!(
+            super::shim_is_enabled_for(&settings, "conda:m2-base", "make", false),
+            "expose 必须能把元包里 owned=false 的命令取回来"
+        );
+        assert!(
+            super::shim_is_enabled(&settings, "go", "go"),
+            "expose 绝不能牵连无关工具"
+        );
+        assert!(
+            super::shim_is_enabled(&settings, "cargo", "cargo"),
+            "expose 绝不能牵连无关工具"
+        );
+    }
+
+    #[test]
+    fn a_per_tool_include_cannot_withhold_another_tool() {
+        // per-tool 列表的核心价值：include 的白名单语义被限制在这个 tool 内，
+        // 于是「收窄一个吵闹的 SDK」不再等于「禁掉全世界」。
+        let mut tools = std::collections::BTreeMap::new();
+        tools.insert(
+            "conda:m2-base".to_string(),
+            crate::config::ToolShimSettings {
+                include: Some(vec!["make".into(), "sh".into()]),
+                ..Default::default()
+            },
+        );
+        let settings = ShimSettings {
+            tools,
+            ..Default::default()
+        };
+        // 该 tool 内：白名单生效。
+        assert!(super::shim_is_enabled_for(
+            &settings,
+            "conda:m2-base",
+            "make",
+            false
+        ));
+        assert!(
+            !super::shim_is_enabled_for(&settings, "conda:m2-base", "ls", true),
+            "tool 内的 include 应当挡住未列出的命令"
+        );
+        // 其他 tool：完全不受影响 —— 与上面的全局 include 形成对照。
+        assert!(
+            super::shim_is_enabled(&settings, "go", "go"),
+            "per-tool include 泄漏到了别的 tool"
+        );
+        assert!(
+            super::shim_is_enabled(&settings, "cargo", "cargo"),
+            "per-tool include 泄漏到了别的 tool"
+        );
+    }
+
+    #[test]
+    fn a_per_tool_list_overrides_the_global_one_field_by_field() {
+        // 未指定的字段继承全局，指定的字段整体替换。混淆这两者会让
+        // 「只调一个维度」意外清掉另一个维度。
+        let mut tools = std::collections::BTreeMap::new();
+        tools.insert(
+            "conda:m2-base".to_string(),
+            crate::config::ToolShimSettings {
+                expose: Some(vec!["make".into()]),
+                ..Default::default()
+            },
+        );
+        let settings = ShimSettings {
+            exclude: vec!["ls".into()],
+            tools,
+            ..Default::default()
+        };
+        // expose 被该 tool 覆盖。
+        assert!(super::shim_is_enabled_for(
+            &settings,
+            "conda:m2-base",
+            "make",
+            false
+        ));
+        // exclude 未被覆盖，继承全局 —— 对这个 tool 同样生效。
+        assert!(
+            !super::shim_is_enabled_for(&settings, "conda:m2-base", "ls", true),
+            "未指定的字段应当继承全局列表"
+        );
+    }
+
+    #[test]
+    fn exclude_still_wins_over_expose() {
+        // expose 是增量，但不是特权：仍要能用 exclude 修剪，否则
+        // 「放开一批再排除个别」这个常见组合就没法表达。
+        let settings = ShimSettings {
+            expose: vec!["conda:m2-base:*".into()],
+            exclude: vec!["conda:m2-base:ls".into()],
+            ..Default::default()
+        };
+        assert!(super::shim_is_enabled_for(
+            &settings,
+            "conda:m2-base",
+            "make",
+            false
+        ));
+        assert!(!super::shim_is_enabled_for(
+            &settings,
+            "conda:m2-base",
+            "ls",
+            false
+        ));
+    }
+
+    #[test]
+    fn expose_survives_a_narrow_global_include() {
+        // 两者都命中同一个名字时，expose 说「要」，include 说「不在名单里」。
+        // 让 include 赢就等于「显式要求的东西被静默丢弃」，所以 expose 优先。
+        let settings = ShimSettings {
+            include: vec!["go".into()],
+            expose: vec!["conda:m2-base:make".into()],
+            ..Default::default()
+        };
+        assert!(
+            super::shim_is_enabled_for(&settings, "conda:m2-base", "make", false),
+            "被 expose 点名的命令不应被别处的窄 include 取消"
+        );
+        assert!(super::shim_is_enabled(&settings, "go", "go"));
+    }
+
+    #[test]
     fn patterns_are_case_insensitive_and_match_whole_names() {
         let settings = ShimSettings {
             include: Vec::new(),
             exclude: vec!["ADB".into(), "d?".into()],
+            ..Default::default()
         };
         // Windows executables are case-insensitive, so the config must be too.
         assert!(!super::shim_is_enabled(

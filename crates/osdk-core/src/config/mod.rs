@@ -95,9 +95,53 @@ pub struct Settings {
 #[serde(default, deny_unknown_fields)]
 pub struct ShimSettings {
     /// When non-empty, only matching names are shimmed.
+    ///
+    /// This is an allowlist over **everything**, not a way to add one command
+    /// back: setting it to a single name withholds every other tool on the
+    /// machine. Reaching for it to recover one withheld command took a working
+    /// setup from 646 shims to zero (see docs/bugs/008); `expose` is the
+    /// additive setting for that job.
     pub include: Vec<String>,
-    /// Names to skip. Applied after `include`, so it always wins.
+    /// Names to skip. Applied after `include` and `expose`, so it always wins.
     pub exclude: Vec<String>,
+    /// Names to shim *in addition to* the default decision.
+    ///
+    /// Additive and therefore safe: it never withholds anything, it only lifts
+    /// a name that the ownership rules withheld on their own. A conda
+    /// metapackage owns none of the commands in its prefix, so `make` from
+    /// `conda:m2-base` needs asking for by name -- and asking must not imply
+    /// "and nothing else".
+    ///
+    /// `exclude` still wins, so a broad `expose` remains trimmable.
+    pub expose: Vec<String>,
+    /// Per-tool overrides, keyed by backend id (`conda:m2-base`, `go`, ...).
+    ///
+    /// A tool's own lists are evaluated instead of the global ones, so narrowing
+    /// one noisy SDK cannot silence unrelated tools -- the failure mode that
+    /// made the global `include` dangerous. Keys are matched exactly (no globs)
+    /// against the owning backend id; use the global lists for cross-tool
+    /// patterns.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, ToolShimSettings>,
+}
+
+/// One tool's shim policy, overriding the global lists for that tool only.
+///
+/// Every field is optional so a tool can adjust one dimension and inherit the
+/// rest: `Some(vec![])` ("explicitly empty") is meaningfully different from
+/// `None` ("not specified, use the global list").
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolShimSettings {
+    /// Allowlist for this tool alone. Scoped, so it cannot affect other tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    /// Names to skip for this tool alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+    /// Additional names to shim for this tool alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expose: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

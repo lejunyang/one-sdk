@@ -1235,8 +1235,10 @@ impl Backend for CondaBackend {
                     package = %self.package,
                     "this conda package installs no commands of its own, so nothing was \
                      published; it is a metapackage whose tools belong to the packages it \
-                     pulls in. Expose one explicitly with `osdk config set shims.include \
-                     \"<tool>:<command>\"`"
+                     pulls in. Expose one explicitly with `osdk config set \
+                     shims.<tool>.expose \"<command>\"` -- per-tool and additive, unlike \
+                     the global `shims.include`, which is an allowlist over every tool \
+                     and would withhold everything it does not name (docs/bugs/008)"
                 );
             }
             return Ok(owned);
