@@ -176,7 +176,7 @@ out.push_str(&format!(
 
 待处理：
 
-3. **根因 B（多 msys 根 / 多运行时混载）尚未处理。** 这不是 osdk 能在 PATH 层面消除的：`conda:m2-*` 每个包就是一个独立 prefix，各带一份 `msys-2.0.dll`。可考虑的方向是在 `osdk doctor` 中检测「PATH 上存在多个不同路径的 `msys-2.0.dll`」并告警，以及在文档层面引导用户用单一 MSYS2/Git-Bash 环境而非拼装 `m2-*` 包。
+3. **根因 B（多 msys 根 / 多运行时混载）尚未处理。** 这不是 osdk 能在 PATH 层面消除的：`conda:m2-*` 每个包就是一个独立 prefix，各带一份 `msys-2.0.dll`。已完成方案调研，见 [docs/conda-backend-next-steps.zh-CN.md](../conda-backend-next-steps.zh-CN.md) —— 结论是不引入 conda env 管理，而是给 `[tools]` 增加 `with` 选项让一组平级包共装同一 prefix，并补上 `osdk doctor` 对多份 `msys-2.0.dll` 的检测。
 
 4. **递归的真实触发条件仍未定位。** 需要在可安全崩溃的一次性环境（快照虚拟机）里复现并采集 minidump / bugcheck code。
 
