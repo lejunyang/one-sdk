@@ -30,7 +30,7 @@
 
 所以性能基准必须：`-NoProfile`、不经 shell 管道、断言退出码与输出规模、并在文档里写明测法。
 
-所以性能基准必须在 `-NoProfile` 下、用不经 shell 管道的方式测量，并在文档里写明测法。
+这些约定已写进 `AGENTS.md` 的「交互延迟」章节，回归防线是 `crates/osdk-core/benches/interactive_latency.rs`。
 
 ## 记录格式
 
