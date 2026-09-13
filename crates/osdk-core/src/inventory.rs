@@ -231,6 +231,15 @@ pub enum InventoryDiagnosticKind {
     Io,
     ManifestTooLarge,
     InvalidManifest,
+    /// The manifest parses and is internally consistent, but this build does not
+    /// recognize something in it -- a newer `osdk` wrote an option or schema this
+    /// binary predates.
+    ///
+    /// Kept apart from `InvalidManifest` because the operator response differs:
+    /// damage means "delete this install", version skew means "the binaries are
+    /// out of step, upgrade the older one". Conflating them told users their data
+    /// was corrupt when nothing was wrong with it. See docs/bugs/007.
+    UnrecognizedByThisBuild,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,13 +701,39 @@ fn scan_installs_within(
         let manifest = match DynamicToolManifest::from_slice(&bytes) {
             Ok(manifest) => manifest,
             Err(error) => {
-                handle_scan_problem(
-                    &mut diagnostics,
-                    options,
-                    manifest_path.clone(),
-                    InventoryDiagnosticKind::InvalidManifest,
-                    error.to_string(),
-                )?;
+                // A manifest this build cannot fully interpret is not the same
+                // thing as a damaged one. Version skew is skipped with a
+                // diagnostic even under the fail-closed policy: refusing the
+                // whole scan would let one install written by a newer `osdk`
+                // disable every unrelated tool, which is exactly how a single
+                // conda package once took `cargo` down with it (docs/bugs/007).
+                //
+                // Safe because the scan is not the security boundary. Anything
+                // about to be executed goes through `validated_dynamic_install`,
+                // which re-reads the manifest and re-checks the identity
+                // fingerprint -- and that fingerprint covers *all* material
+                // options, including ones this build cannot name. An install
+                // skipped here is simply invisible, never silently trusted.
+                let (kind, tolerate) = if is_version_skew(&error) {
+                    (InventoryDiagnosticKind::UnrecognizedByThisBuild, true)
+                } else {
+                    (InventoryDiagnosticKind::InvalidManifest, false)
+                };
+                if tolerate {
+                    diagnostics.push(InventoryDiagnostic {
+                        path: manifest_path.clone(),
+                        kind,
+                        message: error.to_string(),
+                    });
+                } else {
+                    handle_scan_problem(
+                        &mut diagnostics,
+                        options,
+                        manifest_path.clone(),
+                        kind,
+                        error.to_string(),
+                    )?;
+                }
                 continue;
             }
         };
@@ -1024,6 +1059,29 @@ fn extract_dynamic_id_from_value(value: &str) -> Option<String> {
         .and_then(|backend| canonical_dynamic_id(&backend).ok())
 }
 
+/// Does this manifest error mean "written by a newer osdk" rather than "damaged"?
+///
+/// Deliberately narrow, and matched on the two errors that a forward-compatible
+/// write actually produces:
+///
+/// * an option name the option schema of this build does not define, and
+/// * an inventory schema number this build predates.
+///
+/// Everything else -- malformed JSON, a fingerprint mismatch, a non-canonical
+/// identity, an unknown field, a bad dependency -- stays fail-closed. Those
+/// indicate real damage or tampering, where refusing is the correct answer and
+/// where being permissive would be dangerous.
+///
+/// Matching on the message text is unpleasant, but the alternative is threading a
+/// dedicated error variant through every option-schema call site, and the two
+/// strings matched here are produced in exactly one place each (`tool.rs`), both
+/// covered by tests that fail if the wording drifts.
+fn is_version_skew(error: &Error) -> bool {
+    let message = error.to_string();
+    message.contains("unsupported option `")
+        || message.contains("unsupported dynamic install inventory schema `")
+}
+
 fn handle_scan_problem(
     diagnostics: &mut Vec<InventoryDiagnostic>,
     options: &ScanOptions,
@@ -1258,6 +1316,132 @@ mod install_manifest_tests {
             .expect("静态 backend 的子树被走穿了，撞上了埋在深处的 manifest");
         assert_eq!(report.installs.len(), 1);
         assert!(report.diagnostics.is_empty());
+    }
+
+    /// 造一份「新版 osdk 写的」清单：结构完好，只是带一个本 build 不认识的
+    /// 选项。手工拼 JSON 而不是走 `from_identity`，因为本 build 的 schema
+    /// 根本无法构造出这样的选项 —— 这正是要模拟的版本偏斜。
+    fn manifest_json_with_unknown_option(id: &crate::tool::InstallIdentity) -> String {
+        let value = serde_json::json!({
+            "schema": INVENTORY_SCHEMA,
+            "identity": {
+                "tool": id.tool,
+                "version": id.version,
+                "platform": id.platform,
+                "scope": id.scope,
+                "material_options": { "an-option-from-the-future": "1" },
+                "dependencies": id.dependencies,
+                "materials": id.materials,
+                "install_id": id.install_id,
+            },
+            "bins": [],
+        });
+        serde_json::to_string_pretty(&value).unwrap()
+    }
+
+    #[test]
+    fn an_install_written_by_a_newer_osdk_does_not_disable_the_healthy_ones() {
+        // 007 的回归防线。一个清单带着本 build 不认识的选项时，其余无关工具
+        // 必须照常可见 —— 曾经这会让整次扫描失败，连 cargo 都被拦下。
+        //
+        // 注意这里刻意用 `ScanOptions::default()`（fail-closed），因为 shim
+        // 执行路径用的就是它。只在 tolerant 下通过是不够的。
+        let temporary = tempfile::tempdir().unwrap();
+
+        let healthy = identity();
+        let healthy_root = temporary
+            .path()
+            .join(crate::dirs::sanitize_tool_id(&healthy.tool))
+            .join(crate::dirs::sanitize_version_component(&healthy.version))
+            .join(crate::dirs::install_id_component(&healthy.install_id).unwrap());
+        DynamicToolManifest::from_identity(healthy.clone())
+            .unwrap()
+            .write_atomic(&healthy_root)
+            .unwrap();
+
+        let future_root = temporary
+            .path()
+            .join("conda")
+            .join("m2-base")
+            .join("2022.6.1")
+            .join("b3-v2-feedface");
+        std::fs::create_dir_all(&future_root).unwrap();
+        std::fs::write(
+            DynamicToolManifest::manifest_path(&future_root),
+            manifest_json_with_unknown_option(&identity()),
+        )
+        .unwrap();
+
+        let report = scan_installs(temporary.path(), &ScanOptions::default())
+            .expect("一个本 build 读不懂的安装让整次扫描失败了，007 回归");
+
+        // 健康的那个仍然在。
+        assert_eq!(report.installs.len(), 1);
+        assert_eq!(report.installs[0].manifest.identity.tool, healthy.tool);
+
+        // 读不懂的那个被跳过，但必须留下痕迹，且要与「损坏」区分开 ——
+        // 静默忽略会掩盖真正的损坏，归类成损坏会误导用户去删数据。
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0].kind,
+            InventoryDiagnosticKind::UnrecognizedByThisBuild
+        );
+        assert!(report.diagnostics[0]
+            .message
+            .contains("an-option-from-the-future"));
+    }
+
+    #[test]
+    fn real_damage_still_fails_closed() {
+        // 与上一条成对。放宽只针对版本偏斜，不能顺手把真正的损坏也放过去 ——
+        // 后者可能是篡改，fail-closed 是对的。
+        let temporary = tempfile::tempdir().unwrap();
+        let damaged = temporary
+            .path()
+            .join("conda")
+            .join("nasm")
+            .join("2.16.3")
+            .join("b3-v2-deadbeef");
+        std::fs::create_dir_all(&damaged).unwrap();
+        std::fs::write(
+            DynamicToolManifest::manifest_path(&damaged),
+            br#"{"schema":"#,
+        )
+        .unwrap();
+
+        assert!(
+            scan_installs(temporary.path(), &ScanOptions::default()).is_err(),
+            "截断的 manifest 被当成版本偏斜放过去了"
+        );
+    }
+
+    #[test]
+    fn a_tampered_identity_is_not_mistaken_for_version_skew() {
+        // 最危险的误判方向：把「指纹不对」当成版本偏斜跳过，等于放过一个
+        // 被改过的安装。指纹覆盖全部 material_options，所以它必须仍然是
+        // 硬错误，不能进 UnrecognizedByThisBuild 那条路。
+        let temporary = tempfile::tempdir().unwrap();
+        let mut manifest = DynamicToolManifest::from_identity(identity()).unwrap();
+        let root = temporary
+            .path()
+            .join(crate::dirs::sanitize_tool_id(&manifest.identity.tool))
+            .join(crate::dirs::sanitize_version_component(
+                &manifest.identity.version,
+            ))
+            .join(crate::dirs::install_id_component(&manifest.identity.install_id).unwrap());
+        // 只动版本号，install_id 保持原样 —— 指纹随即对不上。
+        manifest.identity.version = "9.9.9".to_string();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            DynamicToolManifest::manifest_path(&root),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            scan_installs(temporary.path(), &ScanOptions::default()).is_err(),
+            "指纹不匹配被当成版本偏斜放过去了"
+        );
     }
 
     #[test]

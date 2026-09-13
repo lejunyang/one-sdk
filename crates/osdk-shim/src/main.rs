@@ -51,6 +51,17 @@ fn real_main() -> i32 {
     osdk_core::i18n::set_lang(lang);
     // The tool name is argv[0]'s basename (e.g. the shim named "node"), unless
     // invoked directly as "osdk-shim <tool> <args...>" (windows .cmd wrapper).
+    // Answer self-identification before touching any state. These need no
+    // config, no registry and no inventory, and must keep working when the tree
+    // is in a state this build cannot read -- otherwise the one command that
+    // reveals which shim build is installed is unavailable exactly when a
+    // version mismatch is the thing being diagnosed (docs/bugs/007).
+    if is_direct_invocation(&args)
+        && matches!(args.get(1).map(String::as_str), Some("--version") | Some("-V"))
+    {
+        println!("osdk-shim {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
     let (tool_name, forward_args) = parse_invocation(&args);
     let tool_name = match tool_name {
         Some(t) => t,
@@ -112,7 +123,20 @@ fn real_main() -> i32 {
     let tools = config.tools.clone();
     let idiomatic_probe_cwd = cwd.clone();
     let ctx = make_ctx(dirs.clone(), platform, config);
-    let dynamic_report = match osdk_core::shim::scan_dynamic_installs(&ctx) {
+    // Tolerant, not fail-closed: this scan only answers "which backend owns
+    // this tool name", so one unreadable manifest elsewhere in the tree must
+    // not deny service to every tool. Under the fail-closed default a single
+    // conda install carrying an option this build does not know about made the
+    // shim refuse *everything* -- `cargo`, `node`, even `osdk-shim --version`
+    // -- and since rebuilding the shim needs `cargo`, the failure locked the
+    // user out of its own fix. See docs/bugs/007.
+    //
+    // This weakens no guarantee. The scan was never what made an install
+    // trustworthy: whatever is actually about to run still goes through
+    // `validated_dynamic_install`, which re-reads that manifest and re-checks
+    // identity, completion marker and provider evidence by itself. A damaged or
+    // unrecognized neighbour is skipped, never silently executed.
+    let dynamic_report = match osdk_core::shim::scan_dynamic_installs_tolerant(&ctx) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("osdk-shim: {error}");
@@ -521,6 +545,16 @@ fn remove_env_path(env: &mut std::collections::BTreeMap<String, String>, remove:
 }
 
 /// Determine the tool name and args to forward.
+/// Was the binary run as `osdk-shim ...` rather than through a shim name?
+///
+/// Shares `parse_invocation`'s rule so the two cannot drift: only the direct
+/// form may carry shim flags, because under a tool name `--version` belongs to
+/// that tool and must be forwarded untouched.
+fn is_direct_invocation(args: &[String]) -> bool {
+    let argv0 = args.first().map(|s| s.as_str()).unwrap_or("");
+    basename_no_ext(argv0) == "osdk-shim"
+}
+
 fn parse_invocation(args: &[String]) -> (Option<String>, &[String]) {
     let argv0 = args.first().map(|s| s.as_str()).unwrap_or("");
     let base = basename_no_ext(argv0);
