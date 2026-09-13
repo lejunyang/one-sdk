@@ -245,6 +245,66 @@ impl AndroidBackend {
         Acceptance::from_flags(accept_all, &ids)
     }
 
+    /// The packages whose licences a request must clear: the package itself plus
+    /// its dependencies.
+    ///
+    /// Dependencies are included because they may carry a *different* agreement
+    /// -- system images use vendor-specific licences -- and consenting to one must
+    /// not silently consent to another.
+    ///
+    /// Shared by the gate inside `install` and by `pending_licenses`; a preflight
+    /// that disagreed with the real gate would be worse than none, either refusing
+    /// an install that would have worked or waving one through that then fails
+    /// halfway. Any new gated relationship must be added here, once.
+    fn gated_packages<'m>(
+        manifest: &'m Manifest,
+        package: &'m RemotePackage,
+    ) -> Vec<&'m RemotePackage> {
+        let deps = manifest.resolve_dependencies(package);
+        let mut gated: Vec<&RemotePackage> = vec![package];
+        gated.extend(deps.iter().map(|(dep, _)| *dep));
+        gated
+    }
+
+    /// The licence agreements this request still needs, without installing
+    /// anything.
+    ///
+    /// `install` already gates on consent before fetching bytes, but by then the
+    /// caller has usually started other tools in parallel; when this one fails
+    /// they are cancelled mid-flight and their work is thrown away. The consent
+    /// state is knowable before any install starts, so the caller can ask first
+    /// and refuse the whole batch up front.
+    ///
+    /// This deliberately shares `pending` with the gate in `install` rather than
+    /// restating the rule: a preflight that disagreed with the real gate would be
+    /// worse than none, either blocking an install that would have succeeded or
+    /// waving through one that then fails halfway.
+    pub async fn pending_licenses(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Vec<license::PendingLicense>> {
+        let manifest = self.manifest(ctx).await?;
+        let sdk_root = Self::sdk_root(ctx);
+        let acceptance = Self::acceptance(tv);
+
+        // A pinned version whose manifest entry Google has already pruned cannot
+        // be checked here. Staying silent is right: `install` re-runs the gate and
+        // is the one that decides, and reporting a phantom block would refuse a
+        // locked install that works.
+        let Ok(package) = self.package(&manifest, &tv.version) else {
+            return Ok(Vec::new());
+        };
+
+        let gated = Self::gated_packages(&manifest, package);
+        Ok(license::pending(
+            &manifest,
+            &gated,
+            &acceptance,
+            &sdk_root,
+        ))
+    }
+
     /// Resolve the manifest package for a concrete version.
     pub fn package<'m>(&self, manifest: &'m Manifest, version: &str) -> Result<&'m RemotePackage> {
         // Families with a version tail address packages as `family;version`;
@@ -975,13 +1035,12 @@ impl Backend for AndroidBackend {
                     )));
                 }
 
-                // License gate, before any bytes are fetched. Dependencies are
-                // included because they may carry a *different* agreement --
-                // system images use vendor-specific licenses -- and consenting
-                // to one must not silently consent to another.
-                let deps = manifest.resolve_dependencies(package);
-                let mut gated: Vec<&RemotePackage> = vec![package];
-                gated.extend(deps.iter().map(|(dep, _)| *dep));
+                // License gate, before any bytes are fetched. The caller is
+                // expected to have run the same check across the whole batch
+                // first (so a refusal here does not cancel siblings mid-flight),
+                // but this stays authoritative: it is what actually stands
+                // between a missing agreement and the bytes.
+                let gated = Self::gated_packages(&manifest, package);
                 let pending = license::pending(&manifest, &gated, &acceptance, &sdk_root);
                 if !pending.is_empty() {
                     return Err(license::blocked_error(&pending));
@@ -1284,6 +1343,109 @@ fn root_env_names(family: &str) -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::android::repo::{Archive, Channel, Dependency, License, RemotePackage};
+
+    fn gated_package(path: &str, license_ref: Option<&str>) -> RemotePackage {
+        RemotePackage {
+            path: path.to_string(),
+            display_name: path.to_string(),
+            revision: "1.0.0".into(),
+            license_ref: license_ref.map(str::to_string),
+            channel: Channel::Stable,
+            dependencies: Vec::new(),
+            archives: vec![Archive {
+                url: "a.zip".into(),
+                size: 1,
+                checksum: "ab".into(),
+                host_os: None,
+                host_bits: None,
+            }],
+            obsolete: false,
+        }
+    }
+
+    /// The whole point of the preflight is that it asks the same question the
+    /// in-install gate asks. A dependency carrying its own agreement is exactly
+    /// the case that made a late refusal expensive, so if `gated_packages` ever
+    /// stopped following dependencies the preflight would pass and `install`
+    /// would then fail halfway -- the behaviour this change exists to remove.
+    #[test]
+    fn the_gated_set_covers_dependencies_not_just_the_requested_package() {
+        let mut manifest = Manifest {
+            packages: vec![
+                gated_package("system-images;android-34;google_apis;x86_64", Some("vendor")),
+                gated_package("emulator", Some("android-sdk-license")),
+            ],
+            ..Default::default()
+        };
+        manifest.licenses.insert(
+            "vendor".to_string(),
+            License {
+                id: "vendor".to_string(),
+                text: "vendor terms".to_string(),
+            },
+        );
+        manifest.licenses.insert(
+            "android-sdk-license".to_string(),
+            License {
+                id: "android-sdk-license".to_string(),
+                text: "sdk terms".to_string(),
+            },
+        );
+        // The system image depends on the emulator, which carries a *different*
+        // agreement than the image itself.
+        manifest.packages[0].dependencies = vec![Dependency {
+            path: "emulator".to_string(),
+            min_revision: None,
+        }];
+
+        let requested = manifest.package("system-images;android-34;google_apis;x86_64").unwrap();
+        let gated = AndroidBackend::gated_packages(&manifest, requested);
+        let paths: Vec<&str> = gated.iter().map(|p| p.path.as_str()).collect();
+        assert!(
+            paths.contains(&"system-images;android-34;google_apis;x86_64"),
+            "the requested package must be gated: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"emulator"),
+            "a dependency with its own licence must be gated too, or the \
+             preflight would miss it and install would fail halfway: {paths:?}"
+        );
+
+        // And the shared helper must actually surface both agreements, since that
+        // is what the caller reports and refuses on.
+        let temporary = tempfile::tempdir().unwrap();
+        let pending = crate::android::license::pending(
+            &manifest,
+            &gated,
+            &crate::android::license::Acceptance::None,
+            temporary.path(),
+        );
+        let ids: Vec<&str> = pending.iter().map(|p| p.license_id.as_str()).collect();
+        assert!(
+            ids.contains(&"vendor") && ids.contains(&"android-sdk-license"),
+            "both agreements must be pending: {ids:?}"
+        );
+    }
+
+    /// A pinned version whose manifest entry Google has already pruned cannot be
+    /// checked ahead of time. The preflight must stay quiet rather than invent a
+    /// block, otherwise a locked install that works today would start failing.
+    #[test]
+    fn an_unknown_version_reports_no_pending_licence_instead_of_guessing() {
+        let manifest = Manifest {
+            packages: vec![gated_package("ndk;29.0.1", Some("android-sdk-license"))],
+            ..Default::default()
+        };
+        let backend = AndroidBackend::new("ndk");
+        // `pending_licenses` returns an empty list on exactly this condition rather
+        // than reporting a block, so that a locked install of a version Google has
+        // since pruned is still decided by `install` and not refused up front.
+        assert!(
+            backend.package(&manifest, "1.2.3").is_err(),
+            "precondition: this version is not in the manifest"
+        );
+    }
 
     #[test]
     fn a_link_whose_target_is_gone_is_reported_and_then_pruned() {

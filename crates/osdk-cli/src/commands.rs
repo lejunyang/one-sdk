@@ -620,6 +620,12 @@ async fn install_requests(
     // npm package root, even when the merged config has a global selection for
     // the same package and version.
     mark_isolated_npm_scope(&mut requests);
+    // Refuse the whole batch before installing anything if consent is missing.
+    // Without this the requests run concurrently and a licence failure cancels
+    // whatever else was in flight, throwing away work that had already
+    // succeeded -- for a condition that was knowable before the first byte was
+    // fetched.
+    preflight_android_licenses(app, &requests).await?;
     // Package-backed JavaScript tools must never race their managed Node
     // dependency. Resolve and install Node before scheduling the remaining
     // independent requests concurrently.
@@ -672,6 +678,73 @@ async fn install_requests(
     }
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
     Ok(resolved)
+}
+
+/// Fail the batch up front when any Android request still needs consent.
+///
+/// The gate inside the Android backend already refuses to fetch bytes without
+/// consent, so this adds no permission of its own; it only moves the *timing* of
+/// an unavoidable failure to before the first install starts. That matters
+/// because installs run concurrently: a late refusal cancels its siblings
+/// mid-flight, so a user who forgot `-o accept-license` watched an unrelated
+/// tool get discarded and had to fetch it again.
+///
+/// Only manifest reads happen here, and only for Android requests, so a batch
+/// without Android tools pays nothing.
+async fn preflight_android_licenses(app: &App, requests: &[ToolRequest]) -> Result<()> {
+    use osdk_core::backend::android::{AndroidBackend, ID_PREFIX, SUPPORTED_FAMILIES};
+
+    let mut blocked = Vec::new();
+    for request in requests {
+        if !AndroidBackend::owns_id(&request.backend) {
+            continue;
+        }
+        let backend = app.registry.get(&request.backend)?;
+        // Construct the concrete backend instead of widening the `Backend`
+        // trait: a new trait method would enter the vtable and so be retained in
+        // the shim, whose binary size is a budget guarded on purpose. This is the
+        // approach the android doctor and licence commands already take.
+        let Some(family) = request.backend.strip_prefix(ID_PREFIX) else {
+            continue;
+        };
+        let Some(family) = SUPPORTED_FAMILIES
+            .iter()
+            .find(|candidate| **candidate == family)
+        else {
+            continue;
+        };
+        let android = AndroidBackend::new(family);
+        let effective = expand_request_alias(app, backend.as_ref(), request)?;
+        let mut tv = backend
+            .resolve_version(&app.ctx, &effective)
+            .await
+            .with_context(|| format!("resolving {}@{}", request.backend, request.spec))?;
+        bind_dynamic_request_options(&effective, &mut tv);
+        blocked.extend(android.pending_licenses(&app.ctx, &tv).await?);
+    }
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    // Merge per-request findings so one licence covering several packages is
+    // reported once, the way the in-install gate reports it.
+    let mut merged: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    for entry in blocked {
+        merged
+            .entry(entry.license_id)
+            .or_default()
+            .extend(entry.packages);
+    }
+    let pending: Vec<osdk_core::android::license::PendingLicense> = merged
+        .into_iter()
+        .map(
+            |(license_id, packages)| osdk_core::android::license::PendingLicense {
+                license_id,
+                packages: packages.into_iter().collect(),
+            },
+        )
+        .collect();
+    Err(osdk_core::android::license::blocked_error(&pending).into())
 }
 
 fn resolved_node_version(resolved: &[(ToolRequest, ToolVersion)]) -> Option<String> {
