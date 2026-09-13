@@ -4,7 +4,9 @@
 
 ## 激活不是安装，也不修改当前父进程
 
-`osdk activate <shell>` 只把一段 shell 代码打印到标准输出；调用方必须 `eval` 或 `source` 它。Bash 使用 `PROMPT_COMMAND`，Zsh 注册 `precmd_functions`，Fish 监听 `PWD` 与 `fish_prompt`，PowerShell 使用带重入保护的 `PostCommandLookupAction`。所有实现都会立即调用一次 hook，因此无需等待第一次目录切换。对应入口是 [`commands::activate`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs#L1847) 与 [`activation_script`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L48)。
+`osdk activate <shell>` 只把一段 shell 代码打印到标准输出；调用方必须 `eval` 或 `source` 它。Bash 使用 `PROMPT_COMMAND`，Zsh 注册 `precmd_functions`，Fish 监听 `PWD` 与 `fish_prompt`，PowerShell 包装 `prompt` 函数。四者都是**提示符级**粒度：每渲染一次提示符最多执行一次 hook，而不是每敲一条命令执行多次。所有实现都会立即调用一次 hook，因此无需等待第一次目录切换。对应入口是 [`commands::activate`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs#L1847) 与 [`activation_script`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L48)。
+
+PowerShell 的包装会保留你已有的 `prompt`：激活时捕获当前 `prompt`（没有则用内置默认），在自己的 hook 之后调用它；`osdk deactivate powershell` 再把它装回去。因此 Oh My Posh、Starship 或自定义 `prompt` 都不会被顶掉。早期版本改用 `PostCommandLookupAction`，它在**每次命令查找**时触发，一个十次迭代的循环会重跑整套激活 22 次，已改为现在的提示符级 hook。
 
 每次 hook 调用都会执行 `osdk hook-env`。[`compute_env_delta`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L217) 遍历 backend，按当前目录重新解析版本，只选已安装版本，并收集真实 bin 目录与 backend 环境变量。随后 CLI 叠加共享包管理器缓存变量和已启用的模型 provider 环境。输出脚本先从保存的原始 `PATH` 重建 PATH，再恢复已不再受管的变量，最后设置本次变量，因此反复刷新不会持续堆叠路径。原始值通过 `OSDK_ORIGINAL_PATH*`、`OSDK_ORIG_<KEY>*` 和 `OSDK_MANAGED_ENV` 保存；[`deactivation_script`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/activate/mod.rs#L107) 据此恢复。
 

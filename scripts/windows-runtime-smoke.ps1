@@ -309,8 +309,15 @@ exit /b 23
             Assert-True ($env:PATH.IndexOf($runtime, [StringComparison]::OrdinalIgnoreCase) -lt `
                 $env:PATH.IndexOf($originalPath, [StringComparison]::Ordinal)) `
                 "PowerShell activation did not place the runtime ahead of the inherited PATH"
-            Assert-True ($null -ne $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction) `
-                "PowerShell activation hook was not installed"
+            # The hook lives on `prompt`, not on PostCommandLookupAction: the
+            # latter fired once per command lookup, so a single loop re-ran the
+            # whole activation per iteration. Assert the prompt wrapper exists
+            # and still returns a prompt string -- a wrapper that forgets to
+            # call through would leave the user with a blank prompt.
+            Assert-True (Test-Path Function:prompt) `
+                "PowerShell activation hook was not installed on the prompt"
+            Assert-True (-not [string]::IsNullOrWhiteSpace((prompt))) `
+                "PowerShell activation prompt wrapper returned nothing"
             $deactivation = (& $osdk deactivate powershell | Out-String)
             Assert-True ($LASTEXITCODE -eq 0) "PowerShell deactivation rendering failed"
             Invoke-Expression $deactivation
@@ -319,6 +326,10 @@ exit /b 23
                 "PowerShell deactivation hook was not removed"
             Assert-True (-not (Test-Path Function:Invoke-OsdkHook)) `
                 "PowerShell deactivation function was not removed"
+            # Deactivation must hand back a working prompt rather than delete
+            # the function it wrapped.
+            Assert-True (-not [string]::IsNullOrWhiteSpace((prompt))) `
+                "PowerShell deactivation left the session without a usable prompt"
         }
     }
     finally {

@@ -91,10 +91,31 @@ function Invoke-OsdkHook {{
   if ($out) {{ Invoke-Expression ($out -join "`n") }}
 }}
 Invoke-OsdkHook
-$ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = {{
-  if ($script:OsdkHookRunning) {{ return }}
-  $script:OsdkHookRunning = $true
-  try {{ Invoke-OsdkHook }} finally {{ $script:OsdkHookRunning = $false }}
+# The hook belongs on the prompt, not on PostCommandLookupAction: the latter
+# fires once per *command lookup*, so a single pipeline or loop body re-ran the
+# whole activation (22 subprocesses for one ten-iteration loop, ~1.1s each).
+# bash/zsh/fish have always hooked their prompt; this matches them.
+if (-not $script:OsdkOriginalPrompt) {{
+  # Wrap whatever prompt is already installed (Oh My Posh, Starship, a dotfile
+  # override) instead of replacing it, and keep the builtin default when there
+  # is none -- overwriting a user's prompt to install a PATH hook is not a
+  # trade we get to make for them. Captured once so re-sourcing cannot nest
+  # the wrapper inside itself.
+  $existing = Get-Command prompt -CommandType Function -ErrorAction SilentlyContinue
+  if ($existing) {{
+    $script:OsdkOriginalPrompt = $existing.ScriptBlock
+  }} else {{
+    $script:OsdkOriginalPrompt = {{ "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }}
+  }}
+  function global:prompt {{
+    if (-not $script:OsdkHookRunning) {{
+      $script:OsdkHookRunning = $true
+      # A failed hook must not cost the user their shell prompt, so its errors
+      # stay contained here rather than propagating out of `prompt`.
+      try {{ Invoke-OsdkHook }} catch {{ }} finally {{ $script:OsdkHookRunning = $false }}
+    }}
+    & $script:OsdkOriginalPrompt
+  }}
 }}
 "#,
             bin = powershell_quote(osdk_bin)
@@ -192,6 +213,15 @@ if (Test-Path Env:OSDK_MANAGED_ENV) {
   }
 }
 if (Test-Path Env:OSDK_ORIGINAL_PATH_SET) { $env:PATH = $env:OSDK_ORIGINAL_PATH }
+# Put the user's own prompt back. Deleting our wrapper without restoring what it
+# wrapped would leave the session with no prompt function at all, silently
+# discarding an Oh My Posh / Starship / dotfile prompt that we only borrowed.
+if ($script:OsdkOriginalPrompt) {
+  Set-Item Function:global:prompt $script:OsdkOriginalPrompt
+  Remove-Variable OsdkOriginalPrompt -Scope Script -ErrorAction SilentlyContinue
+}
+# Older sessions activated before the prompt hook wired PostCommandLookupAction;
+# clear it too so deactivating an already-running shell fully unhooks.
 $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = $null
 Remove-Item Function:Invoke-OsdkHook -ErrorAction SilentlyContinue
 Remove-Variable OsdkHookRunning -Scope Script -ErrorAction SilentlyContinue
@@ -823,7 +853,62 @@ mod tests {
         assert!(powershell.contains("finally"));
         assert!(
             powershell.find("Invoke-OsdkHook\n").unwrap()
-                < powershell.find("PostCommandLookupAction").unwrap()
+                < powershell.find("function global:prompt").unwrap()
+        );
+    }
+
+    /// The hook must fire per prompt, not per command lookup.
+    ///
+    /// `PostCommandLookupAction` runs on every command *resolution*, so one
+    /// pipeline or loop body re-ran the entire activation: a ten-iteration loop
+    /// spawned 22 `hook-env` subprocesses at ~1.1s each, while the prompt hook
+    /// used by bash/zsh/fish spawned 1. Asserting the mechanism by name is the
+    /// only cheap way to catch a revert -- both versions are functionally
+    /// correct, so no behavioural test goes red when the frequency regresses.
+    #[test]
+    fn powershell_hook_runs_on_the_prompt_not_on_every_command_lookup() {
+        let script = activation_script(Shell::Powershell, "osdk");
+        // Match an assignment, not the bare name: the snippet explains in a
+        // comment why the per-lookup hook was abandoned, and a substring check
+        // would fail on that comment while a real revert slipped through a
+        // reworded one.
+        assert!(
+            !script.contains("PostCommandLookupAction ="),
+            "per-lookup hook reinstated; a single loop would re-run activation \
+             once per iteration:\n{script}"
+        );
+        assert!(
+            script.contains("function global:prompt"),
+            "hook must be installed on the prompt:\n{script}"
+        );
+    }
+
+    /// Installing the hook must not cost the user their own prompt.
+    ///
+    /// Oh My Posh, Starship and hand-written dotfile prompts are all just a
+    /// `prompt` function, so defining ours unconditionally would silently
+    /// discard theirs. The wrapper has to capture and call whatever was already
+    /// there, and fall back to PowerShell's builtin default when nothing was.
+    #[test]
+    fn powershell_hook_preserves_an_existing_user_prompt() {
+        let script = activation_script(Shell::Powershell, "osdk");
+        assert!(
+            script.contains("Get-Command prompt"),
+            "must look for an existing prompt before overwriting it:\n{script}"
+        );
+        assert!(
+            script.contains("$script:OsdkOriginalPrompt"),
+            "the existing prompt must be captured for later restore:\n{script}"
+        );
+        assert!(
+            script.contains("& $script:OsdkOriginalPrompt"),
+            "the captured prompt must still be invoked, or its output is lost:\n{script}"
+        );
+        // Re-sourcing the snippet must not wrap our own wrapper: that nests one
+        // hook per activation and multiplies the cost we just removed.
+        assert!(
+            script.contains("if (-not $script:OsdkOriginalPrompt)"),
+            "capture must be guarded so re-activation cannot nest wrappers:\n{script}"
         );
     }
 
@@ -843,6 +928,26 @@ mod tests {
         let powershell = deactivation_script(Shell::Powershell);
         assert!(powershell.contains("PostCommandLookupAction = $null"));
         assert!(powershell.contains("Remove-Variable OsdkHookRunning"));
+    }
+
+    /// Deactivation must hand the user's prompt back.
+    ///
+    /// Removing our wrapper without restoring what it wrapped would leave the
+    /// session with no `prompt` function, so a user who ran `osdk deactivate`
+    /// would lose the prompt they had before activating -- a worse outcome than
+    /// the slow hook we set out to fix.
+    #[test]
+    fn powershell_deactivation_restores_the_wrapped_prompt() {
+        let script = deactivation_script(Shell::Powershell);
+        assert!(
+            script.contains("Set-Item Function:global:prompt $script:OsdkOriginalPrompt"),
+            "the captured prompt must be reinstalled:\n{script}"
+        );
+        assert!(
+            script.contains("Remove-Variable OsdkOriginalPrompt"),
+            "the capture slot must be cleared so a later activation re-captures \
+             the real prompt rather than a stale one:\n{script}"
+        );
     }
 
     #[test]
