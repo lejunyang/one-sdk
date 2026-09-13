@@ -6,9 +6,12 @@
 //!
 //! - Unix: a symlink from `shims/<name>` to the `osdk-shim` binary. The launcher
 //!   inspects argv[0] to learn which tool to run.
-//! - Windows: no symlink (privilege). We emit `shims/<name>.cmd` and an
-//!   extension-less bash wrapper `shims/<name>` so cmd.exe/PowerShell and
-//!   Git-Bash both work, each invoking `osdk-shim.exe`.
+//! - Windows: no symlink (privilege). We emit `shims/<name>.cmd` for
+//!   cmd.exe/PowerShell and an extension-less **copy of the launcher binary**
+//!   at `shims/<name>` for Git-Bash/MSYS, which resolves argv[0] the same way
+//!   the Unix symlink does. That copy must never be a `#!/bin/sh` script: a
+//!   shim named `sh` or `bash` would then need itself as its own interpreter
+//!   and recurse until the machine dies (docs/bugs/005).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -565,14 +568,41 @@ fn generate_shim_in(shims: &Path, name: &str, osdk_shim_bin: &Path) -> Result<()
     let cmd = windows_cmd_wrapper_bytes(osdk_shim_bin);
     std::fs::write(&cmd_path, cmd).map_err(|e| Error::io(&cmd_path, e))?;
 
-    // extension-less bash wrapper for Git-Bash / MSYS
-    let sh_path = shims.join(name);
-    let sh = format!(
-        "#!/bin/sh\nexec \"{}\" \"$(basename \"$0\")\" \"$@\"\n",
-        osdk_shim_bin.display().to_string().replace('\\', "/")
-    );
-    std::fs::write(&sh_path, sh).map_err(|e| Error::io(&sh_path, e))?;
-    Ok(())
+    // Extension-less launcher for Git-Bash / MSYS.
+    //
+    // This MUST NOT be a `#!/bin/sh` script. A POSIX shell locates `/bin/sh`
+    // through PATH, so a shim *named* `sh` or `bash` — which `conda:m2-bash`
+    // and any other msys/cygwin package publishing a shell will produce —
+    // becomes an interpreter whose own interpreter is itself:
+    //
+    //     make (SHELL := /bin/sh) -> shims/sh -> needs /bin/sh -> shims/sh -> ...
+    //
+    // Every level is a real msys process (emulated fork, POSIX signal and pty
+    // layers), so this is exponential process growth, not bounded recursion:
+    // it exhausts CPU, handles and non-paged pool within seconds and has been
+    // observed to bugcheck the machine. See docs/bugs/005.
+    //
+    // A copy of the launcher binary avoids the whole class: msys executes a PE
+    // image directly, and `osdk-shim` already derives the tool name from
+    // argv[0] exactly as it does for the Unix symlink.
+    let launcher_path = shims.join(name);
+    write_windows_posix_launcher(&launcher_path, osdk_shim_bin)
+}
+
+/// Place an extension-less copy of the launcher binary at `launcher_path`.
+///
+/// Tries a hard link first so the shims dir does not carry one full copy of the
+/// binary per tool, then falls back to a byte copy when linking is unavailable
+/// (different volume, or a filesystem without hard-link support).
+#[cfg(windows)]
+fn write_windows_posix_launcher(launcher_path: &Path, osdk_shim_bin: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(launcher_path);
+    match std::fs::hard_link(osdk_shim_bin, launcher_path) {
+        Ok(()) => Ok(()),
+        Err(_) => std::fs::copy(osdk_shim_bin, launcher_path)
+            .map(|_| ())
+            .map_err(|e| Error::io(launcher_path, e)),
+    }
 }
 
 /// Serialize the Windows `.cmd` wrapper so cmd.exe can resolve the shim binary
@@ -737,13 +767,25 @@ fn remove_managed_shim_path(path: &Path) -> Result<bool> {
         .collect();
     let generated_cmd =
         lower.starts_with(b"@echo off\r\n") && contains_bytes(&lower, b"osdk-shim.exe\" %~n0 %*");
-    let generated_shell = lower.starts_with(b"#!/bin/sh\nexec \"")
+    // Extension-less launchers are copies (or hard links) of osdk-shim.exe.
+    let generated_launcher = is_pe_image(&contents);
+    // Recognize the pre-005 `#!/bin/sh` wrapper too, so `uninstall` / `reshim`
+    // clean up shims written by an older osdk instead of leaving the recursive
+    // `sh` / `bash` wrappers behind forever.
+    let legacy_shell = lower.starts_with(b"#!/bin/sh\nexec \"")
         && contains_bytes(&lower, b"osdk-shim.exe\" \"$(basename \"$0\")\" \"$@\"");
-    if !generated_cmd && !generated_shell {
+    if !generated_cmd && !generated_launcher && !legacy_shell {
         return Ok(false);
     }
     std::fs::remove_file(path).map_err(|error| Error::io(path, error))?;
     Ok(true)
+}
+
+/// Whether `contents` starts with an MZ/PE header, i.e. is a Windows binary
+/// rather than a user-authored text file that happens to sit in the shims dir.
+#[cfg(windows)]
+fn is_pe_image(contents: &[u8]) -> bool {
+    contents.starts_with(b"MZ")
 }
 
 #[cfg(windows)]
@@ -1774,6 +1816,70 @@ mod tests {
             b"@echo off\r\n\"C:\\tools\\osdk-shim.exe\" %~n0 %*\r\n"
         );
         assert!(!bytes.windows(4).any(|window| window == b"chcp"));
+    }
+
+    /// The extension-less launcher must never be a script whose interpreter is
+    /// resolved through PATH. A shim named `sh` or `bash` would otherwise need
+    /// itself to interpret itself and recurse until the machine dies; msys
+    /// process creation makes that growth exponential rather than bounded.
+    ///
+    /// Asserting on `sh` and `bash` specifically is the point: every other tool
+    /// name tolerated the old `#!/bin/sh` wrapper, which is exactly why the
+    /// defect survived. See docs/bugs/005.
+    #[cfg(windows)]
+    #[test]
+    fn windows_posix_launcher_is_never_a_shell_script() {
+        use super::*;
+
+        let td = tempfile::tempdir().unwrap();
+        let shims = td.path().join("shims");
+        let fake_bin = td.path().join("osdk-shim.exe");
+        // An MZ header stands in for the real launcher: generation must copy
+        // these bytes through rather than author a script around the path.
+        std::fs::write(&fake_bin, b"MZ\x90\x00fake-launcher").unwrap();
+
+        for name in ["sh", "bash", "node"] {
+            generate_shim_in(&shims, name, &fake_bin).unwrap();
+            let launcher = shims.join(name);
+            let contents = std::fs::read(&launcher).unwrap();
+            assert!(
+                !contents.starts_with(b"#!"),
+                "`{name}` launcher is a script with a shebang; a shell shim would recurse"
+            );
+            assert!(
+                contents.starts_with(b"MZ"),
+                "`{name}` launcher is not a PE image, so msys cannot exec it directly"
+            );
+            assert_eq!(
+                contents,
+                std::fs::read(&fake_bin).unwrap(),
+                "`{name}` launcher must be a faithful copy of osdk-shim.exe"
+            );
+        }
+    }
+
+    /// `uninstall` / `reshim` must still recognize the pre-005 `#!/bin/sh`
+    /// wrapper, otherwise machines upgraded from an older osdk keep the
+    /// recursive `sh` / `bash` shims forever. User-authored files stay put.
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_removes_legacy_shell_wrappers_but_preserves_user_files() {
+        use super::*;
+
+        let td = tempfile::tempdir().unwrap();
+        let legacy = td.path().join("sh");
+        std::fs::write(
+            &legacy,
+            b"#!/bin/sh\nexec \"E:/osdk-bin/osdk-shim.exe\" \"$(basename \"$0\")\" \"$@\"\n",
+        )
+        .unwrap();
+        assert!(remove_managed_shim_path(&legacy).unwrap());
+        assert!(!legacy.exists());
+
+        let user_owned = td.path().join("my-script");
+        std::fs::write(&user_owned, b"#!/bin/sh\necho mine\n").unwrap();
+        assert!(!remove_managed_shim_path(&user_owned).unwrap());
+        assert!(user_owned.exists());
     }
 
     #[cfg(windows)]
