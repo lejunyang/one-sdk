@@ -26,6 +26,8 @@ pub mod deno;
 pub mod dynamic;
 pub mod github;
 pub mod go;
+#[cfg(test)]
+mod go_module_proxy_tests;
 pub mod go_package;
 pub mod http;
 pub mod java;

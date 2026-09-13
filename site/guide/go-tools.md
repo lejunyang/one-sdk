@@ -91,6 +91,21 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 的逐请求凭据转发边界。选中的 proxy 会作为唯一 `GOPROXY` 条目传入，因此 provider 启动后
 不会暗中改试另一个来源。
 
+以上都属于 `go:<module>` 这类**包安装**路径。直接运行受管 `go`（`go build` /
+`go test`）拉取依赖是另一条通道：`[sources.go]` 只决定 Go 工具链归档的下载来源，
+模块下载由 go 命令自己按 `GOPROXY` 进行，因此镜像归档并不会让模块也走镜像。
+
+受管 go 的 `exec_env` 会注入一份排好序的 `GOPROXY`，候选集在配置里用 `go-modules`
+这个独立名字管理（默认为 `proxy.golang.org`、`goproxy.cn`、`mirrors.aliyun.com/goproxy`，
+末尾追加 `direct`）。这里只做配置层排序、不做网络探测：这段代码在 shim 里每次命令
+调用都会执行，一次探测往返会直接计入交互延迟；实时测速仍留在安装路径。
+
+条目之间用 `|` 而非 `,` 连接。分隔符本身就是回退策略：逗号只在 404/410 时继续尝试
+下一个，连接超时被视为终止错误，于是首个不可达的 proxy 就会让整条链失效 —— 而这
+恰好是需要镜像的场景。逗号带来的 gatekeeper 语义（私有 proxy 返回 403 时停止查找，
+避免把 module path 泄漏给下一个来源）在这里不适用，因为这组候选全是同一批公开模块
+的公开镜像。用户自己设过 `GOPROXY`（含 `off`、`direct`）时不会被覆盖。
+
 ## 隔离与激活
 
 osdk 在清空的环境中无 shell 执行一次 `go install <command>@v<version>`。它强制使用选中的

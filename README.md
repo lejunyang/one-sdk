@@ -544,6 +544,31 @@ when it is missing, ask for it explicitly:
 osdk --source-mode env install rust@1.98.0
 ```
 
+The Go module proxy is a separate channel: `[sources.go]` only decides where the
+Go toolchain archive is downloaded from, while `go build` / `go test` fetch
+dependencies through `GOPROXY`. When running a managed go, osdk injects a ranked
+`GOPROXY` joined with `|` (upstream first, then mirrors, `direct` last), so an
+unreachable `proxy.golang.org` falls through to a mirror instead of failing the
+build. The `|` separator is required: a comma only advances on 404/410 and
+treats a connection timeout as terminal.
+
+This mirror set is configured under its own `go-modules` name, independent of
+the toolchain archive sources:
+
+```toml
+[sources.go-modules]
+disable = ["proxy.golang.org"]
+
+[[sources.go-modules.custom]]
+id = "corp"
+kind = "custom"
+download_url = "https://goproxy.corp/"
+priority = 1
+```
+
+A `GOPROXY` you set yourself is never overridden -- including the policy values
+`off` and `direct`.
+
 After a successful online download, require cache-only operation with
 `--offline`. Tighten artifact policy when your environment requires it:
 

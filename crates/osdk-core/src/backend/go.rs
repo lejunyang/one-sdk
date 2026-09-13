@@ -184,9 +184,24 @@ impl Backend for GoBackend {
         let mut env = BTreeMap::new();
         let root = ctx.dirs.install_path(self.id(), &tv.version);
         env.insert("GOROOT".to_string(), root.display().to_string());
+        // `default_sources` above only governs where the Go *toolchain archive*
+        // comes from. Module downloads are a separate channel the go command
+        // drives itself through GOPROXY, so mirroring the archive did nothing
+        // for `go build` / `go test`: those still went to proxy.golang.org and
+        // failed wherever it is unreachable, which reads as osdk's mirror
+        // selection "not working" even though it was never in that path.
+        //
+        // Publish the module proxy as its own ranked source set and hand the
+        // best candidate to the go command. `module_proxy_sources` is the
+        // configuration-level view (defaults minus disabled, plus custom, sorted
+        // by priority) and involves no network: this runs in the shim on every
+        // command invocation, where a probe round-trip would be charged to
+        // interactive latency. Live probing stays in the install path.
+        if let Some(proxy) = self.preferred_module_proxy(ctx) {
+            env.insert("GOPROXY".to_string(), proxy);
+        }
         Ok(env)
     }
-
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths);
@@ -202,7 +217,74 @@ impl Backend for GoBackend {
     }
 }
 
+/// The tool id under which the Go *module proxy* sources are configured.
+///
+/// Deliberately distinct from the `go` backend id: `[sources.go]` selects where
+/// the toolchain archive is downloaded from, while this one selects the GOPROXY
+/// the go command uses for modules. They are different services with different
+/// hosts, and a user disabling a mirror for one must not silently repoint the
+/// other. `osdk config` / `[sources."go-modules"]` addresses this set.
+pub const GO_MODULE_PROXY_TOOL: &str = "go-modules";
+
 impl GoBackend {
+    /// Module-proxy candidates, best-first, without touching the network.
+    ///
+    /// The upstream default comes first so nothing changes for users who can
+    /// reach it; mirrors follow by priority and are what make `go build` work on
+    /// a network where proxy.golang.org is blocked. `direct` is appended as the
+    /// final fallback so a module absent from a mirror is still fetched from its
+    /// origin rather than failing the build.
+    fn module_proxy_sources(ctx: &Ctx) -> Vec<Source> {
+        crate::source::select::effective_sources_for(
+            ctx,
+            GO_MODULE_PROXY_TOOL,
+            vec![
+                Source::official("proxy.golang.org", "https://proxy.golang.org"),
+                // Same mirror set the `go:` package backend already ships, kept
+                // in sync with it so a module resolves identically whether it is
+                // fetched by `osdk use go:<tool>` or by a plain `go build`.
+                Source::mirror("goproxy.cn", "https://goproxy.cn", 10),
+                Source::mirror("aliyun", "https://mirrors.aliyun.com/goproxy", 20),
+            ],
+        )
+    }
+
+    /// The GOPROXY value to hand the go command, or `None` to leave it alone.
+    ///
+    /// Returns `None` when the user has already set GOPROXY, so an explicit
+    /// choice -- including the policy values `off` and `direct`, which are not
+    /// mirrors at all -- always wins over osdk's default. Also returns `None`
+    /// when configuration disabled every candidate, because emitting an empty or
+    /// `direct`-only value there would silently override that intent.
+    fn preferred_module_proxy(&self, ctx: &Ctx) -> Option<String> {
+        if std::env::var_os("GOPROXY").is_some() {
+            return None;
+        }
+        let mut endpoints = Self::module_proxy_sources(ctx)
+            .into_iter()
+            .map(|source| source.download_url.trim_end_matches('/').to_string())
+            .filter(|url| crate::backend::go_package::validate_go_proxy(url).is_ok())
+            .collect::<Vec<_>>();
+        if endpoints.is_empty() {
+            return None;
+        }
+        endpoints.push("direct".to_string());
+        // Join with `|`, not `,`. The separator *is* the fallback policy: after a
+        // comma the go command only moves on for 404/410 and treats every other
+        // error -- crucially a connection timeout -- as terminal, so a
+        // comma-joined list still dies on the first unreachable proxy and the
+        // mirrors behind it are never tried. That is exactly the case mirrors
+        // exist for. A pipe falls back after any error, including non-HTTP ones.
+        //
+        // The gatekeeper semantics a comma buys (a private proxy answering 403
+        // stops the lookup instead of leaking the module path onward) do not
+        // apply here: every entry in this list is a public mirror of the same
+        // public module set, so there is no private path to leak. A user who
+        // needs the gatekeeper behaviour sets GOPROXY themselves, which the
+        // check above leaves untouched.
+        Some(endpoints.join("|"))
+    }
+
     /// Find the platform archive file for `go_ver` (e.g. "go1.22.5") by trying
     /// each source's index in order.
     async fn find_file(

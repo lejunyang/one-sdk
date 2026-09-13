@@ -492,6 +492,27 @@ osdk --source official install go@1.22
 osdk --source-mode env install rust@1.98.0
 ```
 
+Go 的模块代理是一条独立通道：`[sources.go]` 只决定从哪里下载 Go 工具链本身，
+而 `go build` / `go test` 拉取依赖走的是 `GOPROXY`。运行受管 go 时 osdk 会
+自动写入一份按优先级排好、以 `|` 连接的 `GOPROXY`（官方源在前、镜像随后、
+`direct` 兜底），因此 `proxy.golang.org` 不可达时会自动改用镜像而不是直接
+失败。用 `|` 而不是 `,` 是必须的：逗号只在 404/410 时继续尝试下一个，连接
+超时会被当成终止错误。
+
+这组镜像在配置里用 `go-modules` 这个名字单独管理，与工具链归档源互不影响：
+
+```toml
+[sources.go-modules]
+disable = ["proxy.golang.org"]
+
+[[sources.go-modules.custom]]
+id = "corp"
+download_url = "https://goproxy.corp/"
+priority = 1
+```
+
+自己设过 `GOPROXY`（包括 `off`、`direct` 这类策略值）时，osdk 不会覆盖它。
+
 成功联网下载后，可以用 `--offline` 强制只使用缓存。安全要求更严格时，可收紧
 产物校验策略：
 

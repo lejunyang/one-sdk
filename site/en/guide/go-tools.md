@@ -103,6 +103,29 @@ because the later native `go install` process cannot preserve osdk's per-request
 credential-forwarding boundary. The selected proxy is passed as the only
 `GOPROXY` entry, so a started provider does not silently retry another source.
 
+All of the above concerns the `go:<module>` **package install** path. Running a
+managed `go` directly (`go build` / `go test`) fetches dependencies over a
+different channel: `[sources.go]` only selects where the Go toolchain archive is
+downloaded from, while module downloads are driven by the go command through
+`GOPROXY`, so mirroring the archive does not mirror the modules.
+
+A managed go's xec_env injects a ranked GOPROXY. The candidate set is
+configured under its own `go-modules` name (`proxy.golang.org`, `goproxy.cn` and
+`mirrors.aliyun.com/goproxy` by default, with `direct` appended). Ranking here is
+configuration-level only, with no network probe: this code runs in the shim on
+every command invocation, where a probe round-trip would be charged to interactive
+latency. Live probing stays in the install path.
+
+Entries are joined with `|` rather than `,`. The separator *is* the fallback
+policy: after a comma the go command only advances on 404/410 and treats a
+connection timeout as terminal, so a comma-joined list dies on the first
+unreachable proxy and never reaches the mirrors behind it -- exactly the case
+mirrors exist for. The gatekeeper semantics a comma buys (a private proxy
+answering 403 stops the lookup instead of leaking the module path onward) do not
+apply, because every candidate here is a public mirror of the same public module
+set. A `GOPROXY` the user set themselves -- including `off` and `direct` -- is
+never overridden.
+
 ## Isolation and activation
 
 osdk runs one shell-free `go install <command>@v<version>` in a cleared
