@@ -732,6 +732,13 @@ fn render_path_reset(shell: Shell, paths: &[PathBuf], out: &mut String) {
 /// into the four meaningless entries `C`, `\a`, `C`, `\b` — the shell reports no
 /// error and every managed tool silently disappears from `$PATH`. See
 /// docs/bugs/005.
+///
+/// This applies to `` only, and deliberately not to the managed variables
+/// (`CARGO_HOME`, `GOCACHE`, `JAVA_HOME`, ...). `` is parsed by the shell
+/// itself, so it must speak the shell's dialect; those variables are read by
+/// native Windows executables (`cargo.exe`, `go.exe`, the JVM launcher), which
+/// understand `C:\dir` and not `/c/dir`. Converting them would break the very
+/// tools this function exists to make reachable.
 fn posix_path(path: &str) -> String {
     #[cfg(not(windows))]
     {
