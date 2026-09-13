@@ -49,7 +49,7 @@
 
 | 编号 | 缺陷 | 严重度 | 状态 |
 | --- | --- | --- | --- |
-| [006](./006-conda-metapackage-bin-ownership.zh-CN.md) | conda 元包命令归属判定退化，`m2-base` 把 251 个 msys 命令灌进 PATH | 高 | 待修复 |
+| [006](./006-conda-metapackage-bin-ownership.zh-CN.md) | conda 元包命令归属判定退化，`m2-base` 把 251 个 msys 命令灌进 PATH | 高 | 已修复 |
 | [005](./005-windows-posix-shim-recursion.zh-CN.md) | Windows 无扩展名 shim 用 `#!/bin/sh` 自举；`conda:m2-*` 每包一个 msys 根 | 严重 | 部分修复 |
 | [001](./001-dynamic-bin-routing-ignores-owned.zh-CN.md) | 命令路由表未按 `owned` 过滤，依赖闭包制造假冲突 | 高 | 已修复 |
 | [004](./004-powershell-hook-granularity.zh-CN.md) | PowerShell 钩子挂在命令查找上，一条命令触发 22 次激活 | 高 | 已修复 |
