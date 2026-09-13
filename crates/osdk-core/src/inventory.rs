@@ -1570,6 +1570,109 @@ mod install_manifest_tests {
         manifest.write_atomic(&root).unwrap();
     }
 
+    /// A dynamic install lives one level below `Dirs::install_path`, so the
+    /// completion-marker check used for fixed tools can never find it.
+    ///
+    /// `exec` used to reinstall an already-present dynamic tool on every call
+    /// (~10 s each time, rewriting the completion marker) because the fast
+    /// path was switched off for any id containing a `:`. The offline check
+    /// that replaced it depends on this layout, so pin the layout down.
+    #[test]
+    fn a_dynamic_install_root_sits_below_the_fixed_tool_install_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let identity = InstallIdentity::new(
+            "conda:ninja",
+            "1.13.2",
+            "linux-x64",
+            InstallScope::Isolated,
+            &BTreeMap::new(),
+            Vec::new(),
+            BTreeMap::from([("root-sri".into(), "sha512-example".into())]),
+        )
+        .unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_INSTALL_DIR" => Some(temporary.path().display().to_string()),
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        // Go through the real locator, not a hand-rolled path join: the layout
+        // rule under test lives in `InstallLocator`, so a test that rebuilds
+        // the path itself would pass no matter what the locator does.
+        let install_root = crate::dirs::InstallLocator::new(&dirs, identity.clone())
+            .unwrap()
+            .install_root()
+            .to_path_buf();
+
+        // What `is_installed` would look at for a fixed tool.
+        let fixed_style_path = dirs.install_path(&identity.tool, &identity.version);
+        assert_ne!(
+            install_root, fixed_style_path,
+            "a dynamic install root must not equal <tool>/<version>: that is the \
+             path `is_installed` probes, and if they coincided the marker check \
+             would silently start deciding dynamic installs"
+        );
+        assert_eq!(
+            install_root.parent().unwrap(),
+            fixed_style_path,
+            "the dynamic root is exactly one level below <tool>/<version>"
+        );
+        assert_eq!(
+            install_root.file_name().unwrap().to_string_lossy(),
+            crate::dirs::install_id_component(&identity.install_id).unwrap(),
+            "and that extra level is the install id"
+        );
+    }
+
+    /// The install id is a fingerprint over resolved `materials` (archive
+    /// digests), which are only known after a network round-trip. So an
+    /// offline "is it already installed?" check must compare version and
+    /// identity options instead of recomputing the id.
+    ///
+    /// Without this test, someone could "simplify" that check into
+    /// recomputing the id locally; it would compile, and every functional
+    /// test would stay green, but the fast path would silently never hit --
+    /// `exec` would quietly go back to reinstalling on every call.
+    #[test]
+    fn the_install_id_depends_on_materials_that_only_a_download_can_supply() {
+        let options = BTreeMap::new();
+        let with_materials = InstallIdentity::new(
+            "conda:ninja",
+            "1.13.2",
+            "linux-x64",
+            InstallScope::Isolated,
+            &options,
+            Vec::new(),
+            BTreeMap::from([("root-sri".into(), "sha512-example".into())]),
+        )
+        .unwrap();
+        let without_materials = InstallIdentity::new(
+            "conda:ninja",
+            "1.13.2",
+            "linux-x64",
+            InstallScope::Isolated,
+            &options,
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_ne!(
+            with_materials.install_id, without_materials.install_id,
+            "materials feed the fingerprint, so the id cannot be derived \
+             offline from tool+version+options alone"
+        );
+        // The parts that *are* knowable offline must agree, since those are
+        // what the fast path matches on.
+        assert_eq!(with_materials.version, without_materials.version);
+        assert_eq!(
+            with_materials.material_options,
+            without_materials.material_options
+        );
+    }
+
     fn owners_of(base: &Path, name: &str) -> Vec<String> {
         let report = scan_installs(base, &ScanOptions::default()).unwrap();
         build_bin_ownership_candidates(&report.installs)

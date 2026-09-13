@@ -1032,6 +1032,91 @@ fn reject_public_internal_options(
     Ok(())
 }
 
+/// A dynamic install that already satisfies the request, found without going
+/// to the network.
+///
+/// `is_installed` cannot answer this for a dynamic tool: it looks for the
+/// completion marker under `<tool>/<version>`, while a dynamic install lives
+/// one level deeper, under `<tool>/<version>/<install_id>`. That mismatch is
+/// why the fast path used to be switched off for every id containing a `:`,
+/// which made `exec` reinstall an already-present tool on every single call.
+///
+/// Matching on the install id itself is not an option either: it is a
+/// fingerprint over the resolved `materials` (archive digests and the like),
+/// so computing it needs the very network round-trip we are trying to skip.
+/// What can be compared locally is the pair that decides *which* install a
+/// request wants -- the version, and the canonical identity options projected
+/// from the request. Both are available offline.
+fn installed_dynamic_match(
+    app: &App,
+    backend: &dyn Backend,
+    request: &ToolRequest,
+) -> Option<ToolVersion> {
+    let tool_id = osdk_core::tool::ToolId::parse(backend.id()).ok()?;
+    if !tool_id.is_dynamic() {
+        return None;
+    }
+    // Tolerant: one damaged manifest elsewhere in the tree must not force a
+    // reinstall of a tool that is sitting there intact.
+    let report = osdk_core::inventory::scan_installs_for_tool(
+        &app.ctx.dirs.installs,
+        backend.id(),
+        &osdk_core::inventory::ScanOptions::tolerant(),
+    )
+    .ok()?;
+    if report.installs.is_empty() {
+        return None;
+    }
+
+    let wanted_options = osdk_core::tool::dynamic_identity_options(&tool_id, &request.options)
+        .ok()?
+        .into_map();
+    let platform = app.ctx.platform.to_string();
+
+    let candidates: Vec<&osdk_core::inventory::InstalledDynamicTool> = report
+        .installs
+        .iter()
+        .filter(|install| {
+            let identity = &install.manifest.identity;
+            identity.tool == backend.id()
+                && identity.platform == platform
+                && identity.material_options == wanted_options
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let versions: Vec<String> = candidates
+        .iter()
+        .map(|install| install.manifest.identity.version.clone())
+        .collect();
+    // Compare against the *expanded* spec: an alias such as `@lts` never
+    // matches a directory name, so using the raw spec here would silently
+    // fall through to the network path and leave the bug half-fixed.
+    let selected = match &request.spec {
+        VersionSpec::Exact(exact) => versions.iter().find(|value| *value == exact).cloned(),
+        parsed => {
+            let infos: Vec<_> = versions
+                .iter()
+                .map(osdk_core::version::VersionInfo::stable)
+                .collect();
+            osdk_core::version::select_version(parsed, &infos).map(|info| info.version.clone())
+        }
+    }?;
+
+    let install = candidates
+        .iter()
+        .find(|install| install.manifest.identity.version == selected)?;
+    // The scan happened a moment ago; confirm the directory and manifest are
+    // still the same objects before letting them decide no install is needed.
+    install.revalidate().ok()?;
+
+    let mut version = ToolVersion::new(backend.id(), selected);
+    bind_dynamic_request_options(request, &mut version);
+    Some(version)
+}
+
 async fn install_one_without_shims(
     app: &App,
     req: &ToolRequest,
@@ -1043,12 +1128,27 @@ async fn install_one_without_shims(
     }
     let backend = app.registry.get(&req.backend)?;
     let effective = expand_request_alias(app, backend.as_ref(), req)?;
+    // Answer from disk before resolving. `resolve_version` goes to the network,
+    // so checking after it would still pay the round-trip -- and would still
+    // fail with no network, for a tool that is already installed.
+    if !force && !app.refresh_sources {
+        if let Some(installed) = installed_dynamic_match(app, backend.as_ref(), &effective) {
+            backend.ensure_post_install(&app.ctx, &installed)?;
+            println!("{}", t!("msg.already_installed", tool = installed));
+            return Ok((backend, installed));
+        }
+    }
     let mut tv = backend
         .resolve_version(&app.ctx, &effective)
         .await
         .with_context(|| format!("resolving {}@{}", req.backend, req.spec))?;
     bind_dynamic_request_options(&effective, &mut tv);
 
+    // The `:` exclusion stays: `is_installed` looks under `<tool>/<version>`,
+    // which is the parent of a dynamic install root, so for a dynamic tool it
+    // would report "installed" from a directory that holds no completion
+    // marker at all. Dynamic tools take the disk fast path above instead; what
+    // reaches here is `--force` or `--refresh`, which must reinstall anyway.
     if !force
         && osdk_core::pipeline::is_installed(&app.ctx.dirs, backend.id(), &tv.version)
         && !backend.id().contains(':')

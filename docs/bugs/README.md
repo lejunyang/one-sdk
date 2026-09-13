@@ -50,6 +50,6 @@
 | [001](./001-dynamic-bin-routing-ignores-owned.zh-CN.md) | 命令路由表未按 `owned` 过滤，依赖闭包制造假冲突 | 高 | 已修复 |
 | [004](./004-powershell-hook-granularity.zh-CN.md) | PowerShell 钩子挂在命令查找上，一条命令触发 22 次激活 | 高 | 已修复 |
 | [002](./002-scan-descends-into-install-payload.zh-CN.md) | 扫描下探到安装包内部，`hook-env` 每次多花几百毫秒 | 中 | 部分修复 |
-| [003](./003-exec-reinstalls-every-time.zh-CN.md) | `exec` 无条件重装已安装工具 | 中 | 待修复 |
+| [003](./003-exec-reinstalls-every-time.zh-CN.md) | `exec` 无条件重跑安装路径，已装的动态工具每次重装 | 中 | 已修复 |
 
 001 与 004 是各自独立的缺陷。**004 是当前最痛的一个**：它把 002 的单次代价乘上 22 倍，因此排在 002 之前修。002 单独存在时只是「每次提示符多 400 ms」，可以接受；被 004 放大后才变成「敲一条命令等 12 秒」。
