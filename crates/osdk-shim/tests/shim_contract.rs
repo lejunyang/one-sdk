@@ -489,6 +489,82 @@ fn recursive_invocation_fails_before_resolution() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("recursive shim invocation"));
 }
 
+/// The shim directory must survive into the launched tool's PATH.
+///
+/// It used to be stripped unconditionally, which is invisible for a leaf tool but
+/// breaks any tool that orchestrates others: `make` is a shim, so once the entry
+/// was gone its recipes could not resolve `go`, `node` or `gofmt`, and no PATH the
+/// user set could restore them because the removal happened afterwards.
+///
+/// Assert on the environment the shim hands to the child rather than on a real
+/// build: `osdk-shim` execs its target with the PATH under test, so a fixture that
+/// simply prints its own PATH observes exactly what a recipe would see. Sibling
+/// reachability is the contract; that this tool's own name still resolves to its
+/// real binary is covered by `lifecycle_path_uses_real_manager_instead_of_reentering_shims`.
+#[cfg(unix)]
+#[test]
+fn launched_tool_keeps_sibling_shims_reachable_on_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let log = temporary.path().join("path.log");
+    install_npm_fixture(
+        temporary.path(),
+        &project,
+        &format!(
+            "#!/bin/sh\nprintf '%s\n' \"$PATH\" > {}\nexit 0\n",
+            log.display()
+        ),
+        "#!/bin/sh\nexit 0\n",
+    );
+    let shims = temporary.path().join("data/shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    std::os::unix::fs::symlink(shim(), shims.join("npm")).unwrap();
+    // A sibling tool the launched process must still be able to find.
+    std::os::unix::fs::symlink(shim(), shims.join("go")).unwrap();
+
+    let output = isolated_command(temporary.path(), &project)
+        .args(["npm", "--version"])
+        .env("PATH", &shims)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let observed = std::fs::read_to_string(log).unwrap();
+    let entries = observed.trim().split(':').collect::<Vec<_>>();
+    assert!(
+        entries.contains(&shims.display().to_string().as_str()),
+        "shim directory was stripped from the launched tool's PATH: {observed}"
+    );
+}
+
+/// A *different* tool inside an active shim is not recursion.
+///
+/// The guard was a bare presence check on `OSDK_SHIM_ACTIVE`, so any nested
+/// shim call inherited it and was refused with 126 regardless of tool name. The
+/// practical damage was that `make` (a shim itself) could not reach `go` or
+/// `gofmt` from a recipe: it looked like a PATH problem but no PATH change could
+/// fix it. Assert the sibling case is *not* refused, and pick a tool that is not
+/// installed here so the run stops at resolution -- the point is only that it
+/// gets past the guard.
+#[test]
+fn sibling_tool_inside_active_shim_is_not_treated_as_recursion() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = isolated_command(temporary.path(), temporary.path())
+        .args(["go"])
+        .env("OSDK_SHIM_ACTIVE", "make")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("recursive shim invocation"),
+        "sibling tool refused as recursion: {stderr}"
+    );
+    assert_ne!(output.status.code(), Some(126), "{stderr}");
+}
 #[cfg(unix)]
 #[test]
 fn dependency_fetch_selects_registry_and_executes_manager_once() {

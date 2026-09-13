@@ -70,7 +70,23 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    if std::env::var_os("OSDK_SHIM_ACTIVE").is_some() {
+    // Recursion means *this same tool* re-entering its own shim, which is the
+    // runaway `sh -> shims/sh -> sh` structure docs/bugs/005 is about. A
+    // different tool name is not recursion: it is the ordinary case of one
+    // managed tool invoking another, and `make` (itself a shim) running a
+    // recipe that calls `go` is exactly that.
+    //
+    // The guard used to be a bare presence check on the variable, so every
+    // nested shim call inherited it and was refused with exit 126 whichever
+    // tool it was. Under `make` that made `go` / `gofmt` unreachable from
+    // any recipe, surfacing as `command not found` style breakage whose real
+    // cause was this guard rather than PATH.
+    //
+    // Compare against the recorded name instead: a genuine self-re-entry is
+    // still refused, while sibling tools pass through. Nested calls carry the
+    // innermost tool name, which suffices because every level rewrites the
+    // variable before exec, so any true cycle must revisit its own name.
+    if std::env::var("OSDK_SHIM_ACTIVE").is_ok_and(|active| active == tool_name) {
         eprintln!("osdk-shim: recursive shim invocation for `{tool_name}`");
         return 126;
     }
@@ -275,12 +291,17 @@ fn real_main() -> i32 {
             return 1;
         }
     };
-    // Activated shells put the shim directory on PATH. Never let lifecycle
-    // subprocesses re-enter the shim: expose the owning backend's real bins
-    // (plus Node for JavaScript launchers) ahead of the inherited PATH.
-    // Remove both lexical and canonical matches so symlinked activation paths
-    // cannot retain the shim directory under a different spelling.
-    remove_env_path(&mut exec_env, &ctx.dirs.shims());
+    // The shim directory is deliberately left on PATH.
+    //
+    // It used to be stripped here so a lifecycle subprocess could not re-enter
+    // the shim. That is unnecessary -- this tool's real bin directories are
+    // prepended below, so its own name already resolves to the real binary, and
+    // the `OSDK_SHIM_ACTIVE` name check above is the backstop for a backend that
+    // does not publish it. And it was actively harmful: a build orchestrator is
+    // itself a shim, so removing the directory took away every *other* managed
+    // tool with it. Under `make` no recipe could see `go`, `node` or `gofmt`, and
+    // no PATH the user set could bring them back, because the entry was dropped
+    // after their PATH had already been assembled.
     // JVM tools that bundle no runtime abort unless a JDK is visible. An
     // activated shell already exports JAVA_HOME, and a JAVA_HOME the user set
     // themselves is a deliberate choice, so only fill the gap when nothing
@@ -518,28 +539,6 @@ fn prepend_env_path(env: &mut std::collections::BTreeMap<String, String>, paths:
     let mut combined = paths;
     combined.extend(std::env::split_paths(&existing));
     if let Ok(value) = std::env::join_paths(combined) {
-        env.insert("PATH".into(), value.to_string_lossy().into_owned());
-    }
-}
-
-fn remove_env_path(env: &mut std::collections::BTreeMap<String, String>, remove: &std::path::Path) {
-    let existing = env
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("PATH"))
-        .unwrap_or_default();
-    let remove_canonical = std::fs::canonicalize(remove).ok();
-    let retained = std::env::split_paths(&existing)
-        .filter(|path| {
-            path != remove
-                && remove_canonical.as_ref().is_none_or(|canonical| {
-                    std::fs::canonicalize(path)
-                        .map(|path| path != *canonical)
-                        .unwrap_or(true)
-                })
-        })
-        .collect::<Vec<_>>();
-    if let Ok(value) = std::env::join_paths(retained) {
         env.insert("PATH".into(), value.to_string_lossy().into_owned());
     }
 }
