@@ -215,13 +215,30 @@ include = ["*"]
 exclude = ["d8"]
 ```
 
-模式支持 `*` 与 `?`，忽略大小写。加上 backend 前缀可以只收窄某一个工具，
-而不必逐个列出它的可执行文件：
+::: warning 全局 `include` 影响所有工具
+`include` 是**对全体工具生效的白名单**。只想收窄 NDK 却写了
+`include = ["clang"]`，`cargo`、`go`、`node` 会一并失去 shim。要收窄单个工具，用下面
+的按工具形式。
+:::
+
+模式支持 `*` 与 `?`，忽略大小写。**推荐把设置限定到单个工具**，这样白名单语义不会外
+溢到别的工具：
+
+```toml
+[settings.shims.tools."android-ndk"]
+include = ["clang", "clang++", "llvm-strip"]   # 只影响 NDK 自己的命令
+```
+
+也可以在全局列表里加 backend 前缀来收窄某一个工具（对 `exclude` 是等价写法，因为
+排除本身只作用于匹配项）：
 
 ```toml
 [settings.shims]
 exclude = ["android-ndk:*"]
 ```
+
+三个列表——`include`、`exclude`、`expose`——都可以按工具设置，未写的字段继承全局。
+完整语义见[控制哪些命令进 PATH](./projects#控制哪些命令进-path)。
 
 排除只是不生成 shim，工具本身仍然装着，激活 shell 后依旧在 PATH 上，
 `osdk exec` 也照常可用。改完执行 `osdk reshim` 生效，用

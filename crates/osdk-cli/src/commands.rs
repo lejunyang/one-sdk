@@ -4490,8 +4490,12 @@ fn unknown_setting(key: &str) -> anyhow::Error {
         .iter()
         .map(|setting| setting.key)
         .collect();
+    // Mention the per-tool shim keys too: they are not in the static table
+    // because they carry a tool id, and a user who mistyped one would otherwise
+    // see a list that does not contain the shape they were reaching for.
     anyhow!(
-        "unknown setting `{key}`; known settings: {}",
+        "unknown setting `{key}`; known settings: {}; per-tool shim lists: \
+         shims.<tool>.{{include|exclude|expose}}",
         known.join(", ")
     )
 }

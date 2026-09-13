@@ -168,9 +168,20 @@ Every executable gets a shim by default. `[settings.shims]` narrows that:
 
 ```toml
 [settings.shims]
-include = []                      # non-empty shims only matching names
+include = []                      # non-empty shims only matching names -- across **every** tool
 exclude = ["android-ndk:*"]       # applied last, so it always wins
+expose = []                       # additively shims withheld commands, affecting no other tool
+
+[settings.shims.tools."conda:m2-base"]
+expose = ["make", "sh"]           # per-tool override; fields left out inherit the global list
 ```
+
+`include` is an allowlist over **every** tool; `expose` only ever adds. Use
+`expose` to recover a withheld command, and the `include` under
+`[settings.shims.tools."<id>"]` to narrow one tool, where the scope is confined to
+that tool. See
+[Choosing which commands reach PATH](./projects#choosing-which-commands-reach-path)
+for the full semantics and pattern syntax.
 
 Patterns accept `*` and `?` and ignore case; a `backend:name` pattern applies to
 that backend only. Excluding a name only withholds the shim -- the tool stays

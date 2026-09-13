@@ -247,13 +247,32 @@ include = ["*"]
 exclude = ["d8"]
 ```
 
-Patterns accept `*` and `?` and ignore case. Qualifying a pattern with a
-backend narrows just that tool without listing each executable:
+::: warning A global `include` affects every tool
+`include` is an **allowlist over every tool**. Writing `include = ["clang"]` to
+narrow the NDK also takes the shims for `cargo`, `go` and `node` away. To narrow a
+single tool, use the per-tool form below.
+:::
+
+Patterns accept `*` and `?` and ignore case. **Prefer scoping the setting to one
+tool**, so the allowlist semantics cannot leak:
+
+```toml
+[settings.shims.tools."android-ndk"]
+include = ["clang", "clang++", "llvm-strip"]   # affects only the NDK's commands
+```
+
+Qualifying a pattern with a backend in the global lists also narrows one tool
+(equivalent for `exclude`, which only ever affects what it matches):
 
 ```toml
 [settings.shims]
 exclude = ["android-ndk:*"]
 ```
+
+All three lists -- `include`, `exclude`, `expose` -- can be set per tool, and a
+field left out inherits the global one. See
+[Choosing which commands reach PATH](./projects#choosing-which-commands-reach-path)
+for the full semantics.
 
 Excluding a name only withholds the shim. The tool stays installed, remains on
 PATH under an activated shell, and `osdk exec` still reaches it. Run

@@ -142,24 +142,47 @@ osdk where --bins conda:clang
 ```
 
 Withheld commands are still installed in the prefix; they simply get no shim and
-stay off PATH. To bring one back, use `osdk config set`:
+stay off PATH. To bring one back, use `expose`:
 
 ```bash
-osdk config set shims.include "conda:clang:xmllint"
+osdk config set shims.conda:clang.expose "xmllint"
 osdk reshim
 ```
 
-Both `include` and `exclude` accept `*` and `?` globs, and `exclude` is applied
-after `include` so a broad include can be trimmed. These rules are shared by
-every backend, not specific to conda.
+::: danger Do not use `shims.include` to recover a single command
+`include` is an **allowlist over every tool**: once non-empty, any name not listed
+gets no shim. Using it to recover one command also declares "and no other tool" —
+in practice that took 646 shims down to zero, with `cargo`, `go` and `node` all
+gone.
+
+Use `expose` to recover (additive, only ever adds), and the per-tool
+`shims.<tool>.include` to narrow one tool (scoped to that tool alone). See
+[Choosing which commands reach PATH](./projects#choosing-which-commands-reach-path).
+:::
+
+Metapackages need `expose` in particular. A package like `conda:m2-base` installs
+only a few files of its own and owns none of the commands in the prefix, so nothing
+is shimmed by default:
+
+```bash
+osdk config set shims.conda:m2-base.expose "make,sh,bash,tr,awk"
+osdk reshim
+```
+
+`make` is then callable directly, while the `ls` and `test` you did not list stay
+out of the way of their Windows namesakes.
+
+All three lists accept `*` and `?` globs, and `exclude` is applied last so a broad
+list can be trimmed. These rules are shared by every backend, not specific to
+conda.
 
 `config set` writes to the project config by default; `-g` targets the user
 config:
 
 ```bash
-osdk config set -g shims.include "conda:clang:xmllint"   # every project
-osdk config get shims.include                            # effective value
-osdk config unset shims.include                          # back to default
+osdk config set -g shims.conda:clang.expose "xmllint"   # every project
+osdk config get shims.conda:clang.expose                # effective value
+osdk config unset shims.conda:clang.expose              # back to default
 ```
 
 A setting in a project config makes that `osdk.toml` trust-required, so

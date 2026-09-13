@@ -152,9 +152,18 @@ hook 在 prompt/目录变化时重新计算环境。PATH 顺序为：
 
 ```toml
 [settings.shims]
-include = []                      # 非空时只生成匹配项
+include = []                      # 非空时只生成匹配项——对**所有**工具生效
 exclude = ["android-ndk:*"]       # 最后生效，因此总是胜出
+expose = []                       # 增量放行默认被挡下的命令，不影响其他工具
+
+[settings.shims.tools."conda:m2-base"]
+expose = ["make", "sh"]           # 按工具覆盖，未写的字段继承全局
 ```
+
+`include` 是**全体工具**的白名单，`expose` 只做加法。要取回某个被挡下的命令用
+`expose`；要收窄某个工具，优先用 `[settings.shims.tools."<id>"]` 下的 `include`，它
+的作用域限定在该工具内。完整语义与模式语法见
+[控制哪些命令进 PATH](./projects#控制哪些命令进-path)。
 
 模式支持 `*` 与 `?`，忽略大小写；带 `backend:name` 前缀时只作用于该 backend。
 排除只是不生成 shim——工具仍然装着，激活后仍在 PATH 上，`osdk exec` 也可用。

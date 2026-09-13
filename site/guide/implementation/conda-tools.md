@@ -152,11 +152,23 @@ reconciliation 必须套用完全相同的过滤。它原先比对的是未过�
 shim 转头就被删掉，而用户 exclude 掉的 shim 反而留着。`where --bins` 现在也报告
 路由后的决策而非 backend 原始列表，否则预览会和下一次 reshim 的产物自相矛盾。
 
+**这条约束后来被违反过一次，代价不小。** 归属候选的构造（`build_bin_ownership_
+candidates`）当时只按 `bin.owned` 硬过滤，完全不读配置。于是生成侧按配置写出了
+shim，回收侧不认它、随即删掉——用户点名要回的命令看起来毫无反应，而配置读取、
+`published` 统计全都是对的，症状极难定位。现在归属判定接受一个谓词参数，生成、
+回收（`reconcile_managed_shims`）和 shim 侧的命令路由三处共用同一个
+`shim_is_enabled_for`。少接一处，就会退化成「shim 存在但路由不到」或者「生成完
+又被删」。详见 `docs/bugs/008`。
+
 没有 `paths.json` 或清单为空时回退到导出整个 prefix。方向是刻意的：多导出几个命令
 用户可以再收窄，一个都不导出会让安装彻底失效。
 
-用户要找回某个依赖的命令时，复用已有的 `shims.include`——它本来就支持
-`backend:name` 形式的 glob，不需要为 conda 新造一套配置。
+用户要找回某个依赖的命令时用 `shims.expose`，而不是 `shims.include`。两者的差别是
+作用域而非写法：`include` 非空即成为**全体工具**的白名单，用它取回一个命令等于声明
+「其余工具都不要」（实测 646 个 shim 归零，`cargo`、`go` 一并消失）；`expose` 只做
+加法。三个列表都支持 `backend:name` 形式的 glob，也都可以通过
+`[settings.shims.tools."<id>"]` 限定到单个工具——这正是让 `include` 的白名单语义不
+再外溢的办法。不需要为 conda 新造一套配置。
 
 ## 二进制体积
 

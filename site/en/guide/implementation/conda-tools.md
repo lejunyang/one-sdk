@@ -193,13 +193,29 @@ keeping ones the user had excluded. `where --bins` likewise reports the routed
 decision rather than the raw backend list, or the preview would contradict the
 shims produced by the next reshim.
 
+**That constraint was later violated once, at some cost.** The ownership
+candidates (`build_bin_ownership_candidates`) filtered on `bin.owned` alone and
+consulted no configuration. Generation wrote a shim as configured, reconciliation
+did not recognize it and deleted it again -- so a command the user had explicitly
+asked for appeared to do nothing, while the config read and the `published` count
+were both correct, which made the symptom very hard to place. Ownership now takes
+a predicate, and generation, reconciliation (`reconcile_managed_shims`) and the
+shim's own command routing all share one `shim_is_enabled_for`. Miss any one of
+the three and it degrades into "the shim exists but cannot route" or "generated,
+then deleted". See `docs/bugs/008`.
+
 When `paths.json` is missing or empty, the fallback is to export the whole
 prefix. The asymmetry is deliberate: extra commands can be narrowed later,
 whereas exporting none makes the install useless.
 
-To recover a dependency's command, the existing `shims.include` setting is
-reused -- it already matches `backend:name` globs, so conda needs no
-configuration surface of its own.
+To recover a dependency's command, use `shims.expose` rather than
+`shims.include`. The difference is scope, not spelling: a non-empty `include` is
+an allowlist over **every** tool, so recovering one command with it declares "and
+no other tool" (measured: 646 shims down to zero, `cargo` and `go` gone), whereas
+`expose` only ever adds. All three lists match `backend:name` globs and can be
+scoped to a single tool through `[settings.shims.tools."<id>"]` -- which is what
+keeps `include`'s allowlist semantics from leaking. Conda needs no configuration
+surface of its own.
 
 ## Binary size
 

@@ -129,22 +129,42 @@ osdk where --bins conda:clang
 ```
 
 被挡下的命令仍然装在 prefix 里，只是不生成 shim、不进 PATH。需要某一个时，用
-`osdk config set` 把它加回来：
+`expose` 把它加回来：
 
 ```bash
-osdk config set shims.include "conda:clang:xmllint"
+osdk config set shims.conda:clang.expose "xmllint"
 osdk reshim
 ```
 
-`include` 和 `exclude` 都支持 `*` 和 `?` 通配，`exclude` 在 `include` 之后生效，
-所以可以先放宽再收窄。这套规则对所有 backend 通用，不是 conda 专有的。
+::: danger 不要用 `shims.include` 取回单个命令
+`include` 是**对全体工具生效的白名单**：一旦非空，任何没被列出的名字都不生成
+shim。用它取回一个命令，等于同时声明「其余工具都不要」——实测把 646 个 shim 变成
+了 0，`cargo`、`go`、`node` 全部消失。
+
+取回请用 `expose`（增量，只加不减），收窄某个工具请用 per-tool 的
+`shims.<tool>.include`（作用域限定在该工具内）。详见
+[控制哪些命令进 PATH](./projects#控制哪些命令进-path)。
+:::
+
+元包尤其需要 `expose`。`conda:m2-base` 这类包自身只装几个文件、不拥有 prefix 里的
+任何命令，所以默认一个 shim 都不生成：
+
+```bash
+osdk config set shims.conda:m2-base.expose "make,sh,bash,tr,awk"
+osdk reshim
+```
+
+这样 `make` 可以直接调用，而没列出的 `ls`、`test` 不会盖住 Windows 同名命令。
+
+三个列表都支持 `*` 和 `?` 通配，`exclude` 最后生效，所以可以先放宽再收窄。这套规则
+对所有 backend 通用，不是 conda 专有的。
 
 `config set` 默认写入项目配置，加 `-g` 写入用户配置：
 
 ```bash
-osdk config set -g shims.include "conda:clang:xmllint"   # 对所有项目生效
-osdk config get shims.include                            # 当前生效值
-osdk config unset shims.include                          # 恢复默认
+osdk config set -g shims.conda:clang.expose "xmllint"   # 对所有项目生效
+osdk config get shims.conda:clang.expose                # 当前生效值
+osdk config unset shims.conda:clang.expose              # 恢复默认
 ```
 
 写进项目配置的设置会让该 `osdk.toml` 需要信任，`config set` 会就地询问是否信任；
