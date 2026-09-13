@@ -13,6 +13,7 @@
 - `exec` 重复安装：结果正确，只是每次多花 10 秒并重写磁盘。
 - PowerShell 钩子粒度：行为正确，只是触发次数是其他 shell 的 20 倍。
 - Windows POSIX shim 递归：生成的文件内容完全符合预期，**故障形态是「不返回」** —— 任何检查生成物的断言都会全绿，只有在真实 msys 下带超时实跑才抓得到。
+- conda 元包命令归属：`bin_names` 的单包行为完全正确，测试全绿；只有在**元包**场景才静默退化成「暴露整个 prefix」，而这需要拿真实安装跑 `where --bins` 才看得见。
 
 功能测试证明「做对了」，却不证明「代价可接受」。所以每条记录都要写清**用什么手段才能抓到它**，并在修复时补上对应的测试或基准。
 
@@ -48,6 +49,7 @@
 
 | 编号 | 缺陷 | 严重度 | 状态 |
 | --- | --- | --- | --- |
+| [006](./006-conda-metapackage-bin-ownership.zh-CN.md) | conda 元包命令归属判定退化，`m2-base` 把 251 个 msys 命令灌进 PATH | 高 | 待修复 |
 | [005](./005-windows-posix-shim-recursion.zh-CN.md) | Windows 无扩展名 shim 用 `#!/bin/sh` 自举；`conda:m2-*` 每包一个 msys 根 | 严重 | 部分修复 |
 | [001](./001-dynamic-bin-routing-ignores-owned.zh-CN.md) | 命令路由表未按 `owned` 过滤，依赖闭包制造假冲突 | 高 | 已修复 |
 | [004](./004-powershell-hook-granularity.zh-CN.md) | PowerShell 钩子挂在命令查找上，一条命令触发 22 次激活 | 高 | 已修复 |
