@@ -407,7 +407,18 @@ pub fn build_bin_ownership_candidates(
         if install.revalidate().is_err() {
             continue;
         }
-        for bin in &install.manifest.bins {
+        // Only what the requested package installed itself can claim a name.
+        // A conda prefix also holds its dependency closure, so six packages
+        // that merely depend on the msys2 runtime each list `bash`; counting
+        // those made 34 ordinary commands (`bash`, `sh`, `kill`, `iconv` ...)
+        // look contested and refused to route any of them. Generation and
+        // reconciliation already filter on `owned` -- ownership has to agree
+        // with them, or the shim on disk and the shim we route to disagree.
+        //
+        // Unowned bins stay reachable: `shims.include` names one explicitly,
+        // and once included it belongs to that package, so a genuine clash
+        // between two real owners still surfaces as a conflict.
+        for bin in install.manifest.bins.iter().filter(|bin| bin.owned) {
             owners
                 .entry(bin.name.clone())
                 .or_default()
@@ -1503,5 +1514,115 @@ mod install_manifest_tests {
         symlink(&moved, &root).unwrap();
 
         assert!(report.installs[0].revalidate().is_err());
+    }
+
+    /// Write an install whose manifest exports `bins` as `(name, owned)`, so a
+    /// test can describe ownership without repeating the directory layout.
+    fn write_install(base: &Path, tool: &str, bins: &[(&str, bool)]) {
+        let install_identity = InstallIdentity::new(
+            tool,
+            "1.0.0",
+            "linux-x64",
+            InstallScope::Isolated,
+            &BTreeMap::new(),
+            Vec::new(),
+            BTreeMap::from([("root-sri".into(), "sha512-example".into())]),
+        )
+        .unwrap();
+        let root = base
+            .join(crate::dirs::sanitize_tool_id(&install_identity.tool))
+            .join(crate::dirs::sanitize_version_component(
+                &install_identity.version,
+            ))
+            .join(crate::dirs::install_id_component(&install_identity.install_id).unwrap());
+        let mut manifest = DynamicToolManifest::from_identity(install_identity).unwrap();
+        for (name, owned) in bins {
+            // The scanner confines bins to real files under the root, so the
+            // executable has to exist before the manifest names it.
+            let relative = format!("bin/{name}");
+            let absolute = root.join(&relative);
+            std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+            std::fs::write(&absolute, b"#!/bin/sh\n").unwrap();
+            manifest.bins.push(DynamicToolBin {
+                name: (*name).into(),
+                path: relative,
+                owned: *owned,
+            });
+        }
+        manifest.write_atomic(&root).unwrap();
+    }
+
+    fn owners_of(base: &Path, name: &str) -> Vec<String> {
+        let report = scan_installs(base, &ScanOptions::default()).unwrap();
+        build_bin_ownership_candidates(&report.installs)
+            .get(name)
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.canonical_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn unowned_closure_bins_do_not_claim_ownership() {
+        // Six conda packages share one msys2 runtime closure, so all six list
+        // `bash` while only `m2-bash` installed it. Counting the closure made
+        // 34 commands look contested and the shim refused to route any of them.
+        let temporary = tempfile::tempdir().unwrap();
+        write_install(temporary.path(), "conda:m2-bash", &[("bash", true)]);
+        write_install(
+            temporary.path(),
+            "conda:m2-sed",
+            &[("sed", true), ("bash", false)],
+        );
+        write_install(
+            temporary.path(),
+            "conda:m2-grep",
+            &[("grep", true), ("bash", false)],
+        );
+
+        assert_eq!(owners_of(temporary.path(), "bash"), ["conda:m2-bash"]);
+        // The packages keep their own commands.
+        assert_eq!(owners_of(temporary.path(), "sed"), ["conda:m2-sed"]);
+        assert_eq!(owners_of(temporary.path(), "grep"), ["conda:m2-grep"]);
+    }
+
+    #[test]
+    fn two_real_owners_still_conflict() {
+        // Guards the fix against overshooting into "just take the first owner":
+        // silently picking a winner between two genuine owners would run the
+        // wrong compiler, which is worse than refusing to route.
+        let temporary = tempfile::tempdir().unwrap();
+        write_install(temporary.path(), "conda:gcc_win-64", &[("gcc", true)]);
+        write_install(temporary.path(), "conda:m2w64-gcc", &[("gcc", true)]);
+
+        assert_eq!(
+            owners_of(temporary.path(), "gcc"),
+            ["conda:gcc_win-64", "conda:m2w64-gcc"]
+        );
+    }
+
+    #[test]
+    fn ownership_ignores_manifest_bin_order() {
+        // Ownership must not depend on where the owned entry sits in the list,
+        // otherwise the answer changes with an unrelated packaging change.
+        let temporary = tempfile::tempdir().unwrap();
+        write_install(
+            temporary.path(),
+            "conda:m2-gawk",
+            &[("bash", false), ("awk", true), ("sh", false)],
+        );
+        write_install(
+            temporary.path(),
+            "conda:m2-bash",
+            &[("bash", true), ("sh", false)],
+        );
+
+        assert_eq!(owners_of(temporary.path(), "bash"), ["conda:m2-bash"]);
+        assert_eq!(owners_of(temporary.path(), "awk"), ["conda:m2-gawk"]);
+        // Nobody owns `sh` here, so it is claimed by no one rather than by both.
+        assert!(owners_of(temporary.path(), "sh").is_empty());
     }
 }
