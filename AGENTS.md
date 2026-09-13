@@ -47,13 +47,17 @@
 
 `osdk hook-env` 由 shell 钩子在**每个提示符**执行，`osdk-shim` 在**每次命令调用**时执行。这两条路径上的耗时会被用户逐次感知，所以它们和二进制体积一样是产品指标。以下几条都是踩过的坑。
 
-- **改动 `hook-env`、`activate` 片段、shim 启动或 `inventory` 扫描后，必须跑 `cargo bench -p osdk-core` 并对照基准。** 基准在 `crates/osdk-core/benches/`，它测的是遍历量（目录数、stat 次数）而不只是墙钟时间——遍历量是确定性的，能在噪声环境里稳定暴露退化。`scan_visits_only_dynamic_backend_subtrees` 曾抓到「扫描下探进 conda prefix，一次多走 1,000 个目录」。
+- **改动 `hook-env`、`activate` 片段、shim 启动或 `inventory` 扫描后，必须跑 `cargo bench -p osdk-core` 并对照基准。** 基准在 `crates/osdk-core/benches/`，它测的是遍历量（目录数、stat 次数）而不只是墙钟时间——遍历量是确定性的，能在噪声环境里稳定暴露退化。它曾抓到「扫描下探进 conda prefix，一次多走 1,000 个目录」，以及「扫描走穿静态 backend 子树」。
 
 - **不要在装了 osdk 钩子的 shell 里测 osdk。** 钩子挂在提示符上，而某些 shell（PowerShell 的 `PostCommandLookupAction` 是历史实现）会在**每次命令查找**时触发，于是每一次 `& osdk ...` 计时都额外包含一次完整激活。这条曾让 `hook-env` 被测成 1000 ms（真实值约 400 ms），并据此把根因误判成「单次太慢」，实际问题是触发频率。**基准和手工计时都必须 `pwsh -NoProfile`，并用 `Diagnostics.Process` 直接起进程，不经 shell 管道。**
 
 - **基准必须断言退出码为 0 且输出非空。** 参数写错、环境变量被破坏时，osdk 会打印 usage 后以退出码 2 退出，耗时约 12 ms。这看起来像「快得惊人」，实际测的是报错路径。曾因辅助函数用 `$env` 作参数名（与 PowerShell 内建 `$env:` 驱动器同名）破坏了子进程环境，量出「12 ms、输出 0 字符」的假结果。
 
-- **性能探针必须自证落在被测机制之内。** 验证扫描剪枝时，探针文件放在超出 `max_depth` 的深度，被深度上限先拦住，于是有没有剪枝断言都成立——三个变异全部存活，测试等于空的。探针要么自带范围断言（`assert!(probe_depth <= DEFAULT_MAX_DEPTH)`），要么先做一次反向验证确认它真的能被发现。
+- **性能探针必须自证落在被测机制之内。** 两种形态都踩过。一是探针放在超出 `max_depth` 的深度，被深度上限先拦住，于是有没有剪枝断言都成立——三个变异全部存活，测试等于空的。二是**在基准里复刻一份被测判据**去数「走了多少目录」：它与产品代码脱钩，把 `inventory.rs` 的判据改成恒真，它照样输出同一个数字（37 → 37），变异一动不动地存活。后者更隐蔽，因为数字看起来很精确。
+
+  正确做法是让失败信号来自被测代码自己的行为。例如埋一个 identity 与所在路径不符的 manifest 当诱饵：裁剪失效才会走到它，fail-closed 扫描随即报错。**判断标准是「这个断言的结果会不会随产品代码改变」，而不是「它看起来测得准不准」。**
 
 - **深度上限不是可自由收窄的旋钮。** `ScanOptions::max_depth = 8` 是 `MAX_TOOL_ID_SEGMENTS(5) + version + install_id` 算出来的上界。收窄它在只装了 `conda:xxx`（2 段 id）的机器上能带来 8.9x 加速且测试全绿，但会让 `go:github.com/user/cmd/tool`（展开成 7 段，manifest 在深度 8）、`github:owner/repo`、`npm:@scope/pkg` 的安装**被漏扫**——扫不到的动态工具等于不存在。要减少遍历量，按 backend 裁剪子树，不要动深度。
+
+- **新增动态 backend 或改 install 目录名时，新名字必须能从 `is_dynamic_install_directory`（`tool.rs`）到达。** 扫描据它决定进不进一棵子树，漏掉的名字会让那个 backend 的安装**对扫描完全隐形**——不报错，只表现为「装了却用不了」。所以 `namespace_schema` 是从 `DYNAMIC_NAMESPACES` 查的，不是另写一份 `match`；派生出来的目录名（如 npm 全局安装的 `npm-global`）走 `DERIVED_INSTALL_DIRECTORIES`。这个坑本来就已经踩了一个：`npm-global` 在第一版实现里被漏掉，是 `scoped_queries_filter_versions_before_selection` 抓出来的。
 
