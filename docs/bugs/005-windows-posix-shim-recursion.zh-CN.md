@@ -18,6 +18,82 @@
 
   **因此根因 A 的修复应理解为「消除了一条已证存在的危险自举结构」，而不是「已证明修好了那次蓝屏」。** 真正的触发条件仍需在能安全崩溃的一次性环境（快照虚拟机）里，配合 minidump / bugcheck code 定位。
 
+## 补充（2026-09-14）：真正让 `make` 里所有受管工具消失的两个根因
+
+此前把「recipe 里 `go` 找不到」归因于根因 B1（多 msys 根导致 `/usr/bin` 只映射到
+单一 prefix）。B1 确实存在，但在它被 `conda:m2-base` + `with` 合并成单一 prefix
+之后，同一现象依然复现，因此 B1 不是全部原因。本次定位到另外两个**与 msys 无关、
+纯属 osdk 自身逻辑**的根因，二者叠加的表现与「PATH 没配好」完全一致，所以长期被
+误读。
+
+### 根因 D：递归守卫只看变量是否存在，不比对工具名
+
+`crates/osdk-shim/src/main.rs` 的守卫原为：
+
+```rust
+if std::env::var_os("OSDK_SHIM_ACTIVE").is_some() {
+    eprintln!("osdk-shim: recursive shim invocation for `{tool_name}`");
+    return 126;
+}
+```
+
+而 exec 前写入的是**当前**工具名（`exec_env.insert("OSDK_SHIM_ACTIVE", tool_name)`）。
+于是任何嵌套调用都会继承该变量：`make` 自身是 shim，它启动 recipe 后变量已置为
+`make`，recipe 里再调 `go` 就被判成「递归」并以 126 退出。这不是递归 —— 一个受管
+工具调用另一个受管工具是最普通的场景。
+
+实测证据（同一台机器）：
+
+| 动作 | 结果 |
+| --- | --- |
+| `OSDK_SHIM_ACTIVE=make` 下调 `go.cmd version` | `osdk-shim: recursive shim invocation for ``go``` |
+| 不设该变量直接调 `go.cmd version` | 正常输出 `go version go1.26.5` |
+
+修复：改为比对名字，只有**同名**再入才拒绝。
+
+```rust
+if std::env::var("OSDK_SHIM_ACTIVE").is_ok_and(|active| active == tool_name) {
+```
+
+### 根因 E：无条件从 PATH 里摘掉整个 shims 目录
+
+同一文件中 exec 前还有一步 `remove_env_path(&mut exec_env, &ctx.dirs.shims())`，
+本意是防止 lifecycle 子进程重新进入 shim。对叶子工具无害，但对**编排型**工具是
+致命的：`make` 是 shim，一旦目录被摘掉，recipe 里 `go`、`node`、`gofmt` 全部不可
+达，而且用户无法通过配置 PATH 修复 —— 移除发生在用户 PATH 组装完成之后。
+
+实测证据：recipe 内 `echo $PATH | tr : \n | grep -c data/shims` 得到 `0`，而同一
+recipe 内用绝对路径调 `/e/osdk-data/data/shims/go version` 可正常输出版本号 ——
+证明 shim 本身可用，缺的只是 PATH 条目。
+
+修复：不再剥离。工具自身的真实 bin 目录已在下方前置，所以它自己的名字本就解析到
+真实二进制；根因 D 修好后的同名守卫是兜底。`remove_env_path` 随之失去调用点，已
+一并删除以免留下死代码。
+
+### 端到端验证（未注入 GOPROXY、未改 PATH，完全依赖修复后的 osdk）
+
+| 动作 | 结果 |
+| --- | --- |
+| `make verify`（ai-auto-android，Windows） | EXIT=0，协议 52 项 / 3 个 Skills / 481 文件注释检查全过 |
+| recipe 内 `command -v go gofmt` | 两者都解析到 `/e/osdk-data/data/shims/` |
+| 清空模块缓存后 `make go-test` | EXIT=0，`go: downloading ...` 真实完成 |
+
+### 回归防线
+
+- `sibling_tool_inside_active_shim_is_not_treated_as_recursion`（`osdk-shim` 契约
+  测试）— 断言 `OSDK_SHIM_ACTIVE=make` 下调 `go` **不**被判为递归。变异：把守卫退回
+  `var_os(...).is_some()` → 变红（实测）。既有的
+  `recursive_invocation_fails_before_resolution` 保留，锁住同名再入仍被拒。
+- `launched_tool_keeps_sibling_shims_reachable_on_path`（同文件，`cfg(unix)`）—
+  断言 shims 目录仍在被启动工具的 PATH 中。
+
+### 与根因 A 的关系
+
+根因 A（无扩展名 shim 曾是 `#!/bin/sh` 脚本）已在 `882198a` 改成 PE 副本，本次实测
+确认 shims 下的 `go` 与 `osdk-shim.exe` 逐字节一致（SHA-256 相同），即该结构确已消除。
+D 和 E 与 A 无关，是独立的逻辑缺陷；此前之所以被 A 的叙述掩盖，是因为三者的用户可见
+症状都是「recipe 里找不到工具」。
+
 ## 现象
 
 在一个从 macOS 迁来的项目里（`Makefile` 首行为 `SHELL := /bin/sh`），用 osdk 管理的 `conda:m2-make` + `conda:m2-bash` 执行 `make <target>`：
