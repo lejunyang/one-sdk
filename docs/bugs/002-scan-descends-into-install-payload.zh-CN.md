@@ -55,12 +55,35 @@
 
 发现 manifest 后 `walker.skip_current_dir()`，不再下探安装负载。两处（当前格式与 legacy 格式）都要做。
 
-**这只解决了 12% 的浪费，是小头**。剩下 88% 需要另一种手段：不对静态 backend 的子树下探 8 层。之所以没有顺手把 `max_depth` 改小——它不是随便设的：
+**这只解决了 12% 的浪费，是小头**。剩下 88% 需要另一种手段：不对静态 backend 的子树下探 8 层。
 
-- `MAX_TOOL_ID_SEGMENTS = 5`（`dirs.rs:360`）允许 `github:owner/repo`、`npm:@scope/pkg`、`go:` 导入路径这类多段 id 展开成最多 5 级目录；
-- 加 `version` 与 `install_id` 两级，install root 最深 7 级，manifest 文件在第 8 级。
+### 为什么不收窄 `max_depth`（已实测否决）
 
-所以 8 正是正确的上界。真正该做的是**按 backend 区分**：静态 backend 的子树根本不必进入。这需要把"哪些 backend 可能有动态安装"传进扫描函数，属于接口变更，留作独立提交。
+看起来最省事的做法是把深度上限从 8 收窄——本机实测收益极大：
+
+| 深度上限 | 目录 | stat 条目 | 秒 | 找到 manifest |
+| --- | --- | --- | --- | --- |
+| 5 | 815 | 7,575 | 0.08 | 14 |
+| 6 | 4,505 | 37,072 | 0.37 | 14 |
+| 9（当前） | 7,268 | 65,736 | 0.62 | 14 |
+
+**但这是错的**，因为本机只装了 `conda:xxx` 这类两段 id。枚举各类动态 id 展开后的实际深度：
+
+| tool id | sanitize 后 | manifest 深度 |
+| --- | --- | --- |
+| `conda:nasm` / `npm:prettier` / `pypi:black` | `conda/nasm` | 5 |
+| `npm:@scope/pkg` / `github:owner/repo` | `github/owner/repo` | 6 |
+| **`go:github.com/user/cmd/tool`** | `go/github.com/user/cmd/tool` | **8** |
+
+收窄到 5 会让 `go:`、`github:`、`npm:@scope` 的安装**被漏扫**——扫不到的动态工具等于不存在，路由和激活都会失效。这是正确性缺陷，不能用来换 8.9x 的速度。`max_depth = 8` 正是 `MAX_TOOL_ID_SEGMENTS(5) + version + install_id` 的上界，是算出来的，不是随手设的。
+
+### 正确的方向
+
+按 backend 区分：只进入「可能存在动态安装」的顶层目录。动态工具 id 必含 `:`，`sanitize_tool_id` 按 `:` 分段，所以顶层目录名就是 backend 名（`conda`、`npm`、`github`…）。静态 backend（`node`、`java`、`zig`、`android-*`）从不写 manifest，其子树可以完全不进——与深度无关，因此不会漏扫任何动态工具。
+
+本机效果：只需进入 `conda` 一个目录（1,602 个），而非全树 10,305 个。
+
+尚未实施的原因：`scan_installs` 有 40+ 处调用（含体积敏感的 `osdk-shim`），传入 backend 集合是接口变更，应作为独立提交并单独量体积。
 
 ## 回归防线
 
