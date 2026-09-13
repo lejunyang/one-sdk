@@ -176,13 +176,33 @@ at E:\...\installs\conda\nasm\2.16.3\b3-v2-35b8...\.osdk-install.json
 
 据此手工删除该 `b3-v2-...` 指纹目录后，`list` 立即恢复正常，无辜工具重新可用，被删的工具下次 `exec` 时自动重装。
 
-### 3.3 附带发现：install 失败会回滚已成功的工具
+### 3.3 附带发现：install 失败会丢弃同批并发安装的成果
 
-配置里同时含 conda 工具与需要接受许可证的 android 包时，`install` 因 android 许可证报错退出，**已经装好的 conda 工具目录也被一并清空**（只剩 `.locks`，0 个 manifest）。这一项本次未深究，记录备查。
+初次记录时把这一项写成「已经装好的 conda 工具目录被一并清空」，**这个描述是错的**，事后用隔离环境三步对照实验推翻：
+
+| 场景 | 结果 | conda:nasm 状态 |
+| --- | --- | --- |
+| A 只装 conda | rc=0 | 完成标记=1，manifest=1 |
+| B 在 A 的基础上加入 android 再 `install` | rc=1（许可证） | **完成标记=1，manifest=1，完好无损** |
+| C 全新目录，一次性装 conda + android | rc=1（许可证） | 无 conda 目录 |
+
+B 证明**已存在的安装不会被后来的失败牵连**。真实现象只有 C：同一条 `install` 命令里，与失败项**并发进行**的那个安装被取消了。
+
+机制在 `crates/osdk-cli/src/commands.rs` 的 `install_requests`：请求经 `buffer_unordered(jobs)` 并发执行后由 `try_collect().await?` 收集，第一个 `Err` 立即返回，其余仍在执行的 future 被直接丢弃。被取消的安装不会留下半成品——`finalize_artifact_install` 的约定是任何失败都 `remove_dir_all` 整个目录——所以留下的是干净的「没装」，而不是损坏状态。
+
+代价本身不大，因为已下载的字节留在 CAS 里：
+
+| 观测 | 数值 |
+| --- | --- |
+| 失败后 store/cache 残留 | 1.45 MB（下载没有白费） |
+| 修好配置后重装 conda | 5.3 s |
+| 全新目录首次装 conda（对照） | 5.7 s |
+
+但时机是错的。`crates/osdk-core/src/backend/android.rs` 的门禁注释写明它跑在 "before any bytes are fetched"，也就是说**这个失败在任何字节下载之前就能判定**，本不该等到别的工具已经开工。因此修法不是改并发语义（那会让用户等完所有下载才看到一个开头就能报的错），而是把这次必然发生的失败提前到所有安装开工之前，见 §4.4。
 
 ---
 
-## 4. 三项修改
+## 4. 四项修改
 
 按风险从低到高排列，各自独立提交。
 
@@ -198,6 +218,22 @@ at E:\...\installs\conda\nasm\2.16.3\b3-v2-35b8...\.osdk-install.json
 
 不再遍历整个 installs 根目录，从根上消除「zig 和 android 的文件拖慢 conda」这一类无谓开销。
 
+### 4.4 许可证在开工前统一预检
+
+`install_requests` 在任何工具开始安装之前，先对批次里所有 android 请求跑一遍许可证检查，缺少同意就整批拒绝。这不新增任何权限判断——backend 内部那道门禁仍然是最终裁决者——只把一次必然发生的失败提前到不会牵连他人的时刻。
+
+判定逻辑抽成 `AndroidBackend::gated_packages`，由 `install` 的门禁与预检共用：一个与真实门禁不一致的预检比没有更糟，要么拦下本可成功的安装，要么放过之后仍会失败的安装。实现上不给 `Backend` trait 加方法（新方法会进 vtable 从而无法从 shim 裁剪掉，体积是刻意守住的指标），而是沿用 android doctor / licenses 命令已有的做法，直接构造具体 backend。
+
+新旧二进制在同一场景下的对照：
+
+| 观测 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 输出中的 `installing ...` 行 | 2 条（含 `installing conda:nasm@2.16.3`） | **0 条** |
+| store/cache 中被浪费的字节 | 3.07 MB | 1.45 MB（仅 manifest） |
+| 报错内容 | 许可证清单 + 接受方式 | 不变 |
+
+同时验证预检没有变成永久拦路：带 `-o accept-license=android-sdk-license` 时 `install` 仍 rc=0 正常安装；不含 android 的批次一次 manifest 都不会读。
+
 ---
 
 ## 附：证据来源
@@ -210,5 +246,7 @@ at E:\...\installs\conda\nasm\2.16.3\b3-v2-35b8...\.osdk-install.json
 - `crates/osdk-core/src/backend/dynamic.rs`：`finalize_artifact_install`(217)
 - `crates/osdk-core/src/lock.rs`：`FileLock`
 - `crates/osdk-core/src/shim/mod.rs`：`validated_dynamic_install`(351)、`dynamic_bin_ownership`(427)
+- `crates/osdk-cli/src/commands.rs`：`install_requests` 的 `buffer_unordered` + `try_collect`（并发取消的来源）、`preflight_android_licenses`（本次新增）
+- `crates/osdk-core/src/backend/android.rs`：`install` 内的许可证门禁、`gated_packages` 与 `pending_licenses`（本次新增）
 
 测试期间创建的临时 data 目录与项目目录均已删除，用户真实的 `E:\osdk-data` 未受影响（12 个 conda 工具完好）。
