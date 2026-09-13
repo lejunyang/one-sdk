@@ -214,6 +214,20 @@ B 证明**已存在的安装不会被后来的失败牵连**。真实现象只�
 
 单个 manifest 损坏时跳过并记录诊断，而不是让整棵树的扫描失败。至少要保证 `uninstall` 与 `list` 在这种状态下仍可执行，否则用户没有恢复出口。
 
+> **后续状态（2026-09-13 晚）**：枚举类路径已通过 `ScanOptions::tolerant()` 解决，
+> `list` / `reshim` / `uninstall` 不再被一个坏 manifest 挡住。
+>
+> 但本节当时只看到「损坏」这一种触发方式，漏掉了另一种更容易发生的：清单**完好无损**，
+> 只是被更新版本的 `osdk` 写入了本 build 不认识的字段。它同样会落进 `FailClosed`，
+> 而且因为 shim 的执行路径用的是 `ScanOptions::default()`，后果比损坏更重 ——
+> 所有工具（含与 conda 无关的 `cargo`、`go`）全部不可用，且自锁。
+>
+> 这一半由 [007](../bugs/007-shim-refuses-all-tools-on-unknown-option.zh-CN.md) 修完：
+> 版本偏斜与数据损坏分成两类诊断，前者跳过并告警，后者仍然 fail-closed。
+>
+> 教训：当时把这个问题定义为「损坏怎么处理」，于是只在「损坏」这条线上找解法。
+> 真正的问题是「读不懂的清单怎么处理」，而读不懂有两个来源，其中一个不是故障。
+
 ### 4.3 让 `conda::list_installed` 只扫自己那一支
 
 不再遍历整个 installs 根目录，从根上消除「zig 和 android 的文件拖慢 conda」这一类无谓开销。
