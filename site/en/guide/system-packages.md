@@ -122,10 +122,31 @@ Endpoints their operator does not document (today: nju and huaweicloud) rank
 below documented ones when no measurement separates them. They work, but
 nobody has promised they will keep working.
 
+## How mirror acceleration will apply itself
+
+Measuring is read-only, but it is not the end goal. Acceleration comes in three
+layers, with side effects escalating as you go down:
+
+| Layer | Scope | Needs admin? | Status |
+| --- | --- | --- | --- |
+| Which source osdk downloads SDKs from | osdk's own store only | No | **Already automatic**, see [Sources and security](sources-security.md) |
+| Which source osdk passes to winget | that one osdk-issued call only | No | Planned, will be automatic |
+| winget's global source configuration | every winget user on the machine | **Yes** | Planned, confirmed once by you |
+
+The middle layer is where "acceleration when installing dependencies" belongs:
+osdk picks the fastest **already-registered** source for its own winget calls.
+Your own `winget install` behaves exactly as before, and no admin rights are
+needed.
+
+Only the last layer changes this machine's global configuration. It asks you
+once, because it affects more than osdk — every winget caller afterwards sees
+that source, and a mirror cannot carry the official source's `StoreOrigin`
+trust marker. Once confirmed, osdk maintains it without asking again.
+
 ## Current boundaries
 
-- Read-only. Inspection and measurement work; writing a chosen mirror into
-  winget's configuration is not available yet.
+- Read-only. Inspection and measurement work; the last two layers above are not
+  implemented yet.
 - Only winget is covered today. Homebrew is planned.
 - osdk does not elevate on your behalf. When a later operation needs
   administrator rights, osdk will print the command for you to run rather than

@@ -353,13 +353,27 @@ pub async fn ranked_source_candidates_for(...)
 
 **osdk 不直接改写用户的 shell profile 或 winget settings.json。** 这与 `container/mirror.rs` 已确立的姿态一致——该模块的文档注释写着：「The planners consume already validated osdk policy plus typed discovery. They return versioned fingerprints and in-memory candidate bytes, but **never write, restart, recreate, or elevate a native runtime**.」写入走独立的 `container/apply.rs`，且需要用户确认一个精确的、带指纹的预览（`--execute --accept-preview <SHA256_ID>`）。
 
-系统包管理器侧应当完全同构：
+**但这条边界只适用于「写入宿主全局配置」，不适用于「osdk 自己这一次调用用哪个源」。** 两者必须分开，否则会得出「镜像加速必须每次手动操作」这一错误结论。实际上有三层，提权与副作用逐层升级：
 
-1. **`osdk pkg mirrors test`**：只探测、只排序、只报告。
-2. **`osdk pkg mirrors plan`**：生成一个带指纹的、可读的变更计划（对 Homebrew 是「要设哪些环境变量、写到哪个文件」，对 winget 是「要跑哪两条 `winget source` 命令、需要管理员」）。
-3. **`osdk pkg mirrors apply --accept-plan <ID>`**：在用户确认确切计划后才执行。
+| 层 | 作用范围 | 是否改宿主状态 | 是否需要提权 | 姿态 |
+| --- | --- | --- | --- | --- |
+| **L1 osdk 自有下载源** | 只影响 osdk 的 store | 否 | 否 | **已是现状**，`source::select` 的 `Selection::Auto` 自动探测并按实测速度排序 |
+| **L2 osdk 调用包管理器时的一次性源选择** | 只影响 osdk 发起的那一次调用 | 否 | 否 | **应当自动**，见下 |
+| **L3 包管理器的全局源配置** | 影响这台机器上所有 winget/brew 使用者 | 是 | **是** | 首次需用户确认，之后可自动维护 |
 
-**这同时满足了用户的既有偏好**——「源与配置一律通过 osdk 自身命令管理，不手写配置或代理源」。用户不需要自己去 `~/.zshrc` 里加 `export HOMEBREW_API_DOMAIN=...`，但 osdk 也不会背着用户改文件。
+**L2 是用户预期中「安装依赖时自动检测并设置镜像」的正确落点。** winget 的 `install` / `search` / `show` 均支持 `--source <name>`，指定某个已注册的源用于本次调用。osdk 因此可以在自己调用 winget 时，自动选用实测最快的已注册源，而**完全不触碰全局配置**：用户手敲 `winget install` 时行为不变，不需要管理员权限，也不会影响机器上其他 winget 使用者。探测结果本就有缓存与 TTL（§5.4 复用的 `source::select` 提供），因此这不会给每次安装都加上一轮测速。
+
+**L3 才是需要确认的那一层，原因具体而非教条**：
+
+- `winget source add` 写的是**机器级配置**，需要管理员权限。
+- 它影响的不只是 osdk：此后所有人、所有工具调用 winget 都会看到这个源。
+- **换源会削弱信任链**：镜像源无法获得默认源的 `StoreOrigin` 信任标记，只能是 `Trusted`（§9）。让这件事静默发生是不可接受的。
+
+因此 L3 采用**「首次确认一次，之后自动维护」**：第一次需要注册镜像源时，osdk 打印将要执行的确切命令与上述信任链影响，由用户确认一次；此后 osdk 可自动在已确认的源之间按实测速度选择，不再打扰。这既给到了自动化，又保证那一次真正有副作用的操作是用户知情的。
+
+**这同时满足了用户的既有偏好**——「源与配置一律通过 osdk 自身命令管理，不手写配置或代理源」。用户不需要自己去 `~/.zshrc` 里加 `export HOMEBREW_API_DOMAIN=...`，也不需要自己记 `winget source add` 的参数，但 osdk 也不会背着用户改机器级配置。
+
+**关于 `plan` 是否单独成命令**：`container/` 把 planner 与 apply 分成两个模块是实现层的分层，不必然要求命令面也分成两条命令。预览的价值是「让用户在确认前看到要改什么」，而这可以是 `apply --dry-run` 的职责。命令面因此收敛为 `test` 与 `apply`（后者带 `--dry-run`），少一个用户需要记住的命令，且预览与执行共用同一套计划生成代码，不会出现「预览过的计划和实际执行的不一致」这类分叉。
 
 对 Homebrew 有一个额外的落点选择：除了 shell profile，Homebrew 支持 `brew.env` 配置文件（`${HOMEBREW_PREFIX}/etc/homebrew/brew.env` 或 `$XDG_CONFIG_HOME/homebrew/brew.env`），**这比改 shell profile 干净得多**（不污染交互式 shell、对所有 brew 调用一致生效）。注意约束：这些文件**不支持 shell 变量展开或命令执行**，且「环境变量必须有值才会被检测到」。**建议优先写 `brew.env`。**
 
@@ -809,11 +823,10 @@ osdk pkg apply [PKG...] [--dry-run] [--yes] [--manager X]
 osdk pkg mirrors test [--manager X] [--json]
     探测镜像候选并打印排序（吞吐 / TTFB / 可达性），不做任何修改
 
-osdk pkg mirrors plan [--manager X]
-    生成带指纹的镜像配置变更计划（只读）
-
-osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
-    执行一个此前展示过的确切计划
+osdk pkg mirrors apply [--manager X] [--dry-run] [--accept-plan <SHA256_ID>]
+    把实测最快的镜像注册进包管理器的全局配置（L3，需管理员）。
+    --dry-run：只打印带指纹的变更计划与信任链影响，不执行
+    首次执行需要 --accept-plan 确认指纹；此后同一目标可自动维护
 ```
 
 **几处关键约定**：
@@ -832,6 +845,7 @@ osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
 - 一律附加 `--disable-interactivity`、`--nowarn`。**`--no-progress` 不作为必需项**（V-8 实测：重定向后无 ANSI 污染，且该标志已从帮助中移除，详见 §8.4.1）。
 - 安装时附加 `--silent`、`--accept-package-agreements`、`--accept-source-agreements`；查询时只需 `--accept-source-agreements`。
 - 一律使用 `--id <ID> --exact` 精确匹配，**绝不接受模糊匹配**（借鉴 mise：「bootstrap never accepts an ambiguous fuzzy match」）。
+- **osdk 自己发起的调用自动附加 `--source <name>`，选用实测最快的已注册源**（§5.5 的 L2）。这一步不改全局配置、不需提权、不影响用户手敲 winget 的行为。若无可用的镜像源，或探测数据过期且当前离线，则省略该参数、退回 winget 自身的默认源选择——**降级必须是省略参数，而不是猜一个源名**：传入未注册的源名会让 winget 直接报错（`0x8A150012`，V-8 实测），把一次本可成功的安装变成失败。
 - **退出码按 HRESULT 白名单分类**，而非「非零即失败」：
 
 | 分类 | 退出码 | osdk 的处理 |
@@ -916,7 +930,7 @@ osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
 - **winget** 会校验 manifest 中声明的安装器哈希（不符则 `INSTALLER_HASH_MISMATCH`）。
 - **Homebrew** 对 bottle 有 sha256 校验，且有 attestation 机制（`HOMEBREW_NO_VERIFY_ATTESTATIONS` 可关闭）；cask 侧依赖 Developer ID 签名 + Apple 公证 + Gatekeeper。
 - **osdk 能做也应该做的是**：在 doctor 中**报告**这些机制的状态（例如检测到用户设了 `HOMEBREW_NO_VERIFY_ATTESTATIONS` 时给出警告），而不是自己再做一遍校验。
-- **换镜像会削弱信任链**，必须如实告知：winget 镜像源无法获得默认 source 的 `StoreOrigin` 信任标记（只能是 `Trusted`）。这一点应当在 `osdk pkg mirrors plan` 的输出中显式列出，让用户在确认前就看到。
+- **换镜像会削弱信任链**，必须如实告知：winget 镜像源无法获得默认 source 的 `StoreOrigin` 信任标记（只能是 `Trusted`）。这一点应当在 `osdk pkg mirrors apply --dry-run` 的输出中显式列出，让用户在确认前就看到。
 
 文档中必须明确写出这条界线：**「osdk 对系统包提供的是发现与协调，不提供 osdk 级别的产物验证保证。」** 否则用户会合理地假设 `osdk pkg apply` 装的东西享有与 `osdk install` 同等的校验强度。
 
@@ -977,15 +991,23 @@ osdk pkg mirrors apply --manager X --accept-plan <SHA256_ID>
 验收：在装有/未装 winget 的 Windows 与装有/未装 brew 的 macOS 上，doctor 都给出可操作的结论；`--json` 输出确定性且 schema 版本化。
 
 **Phase 2：镜像探测与只读计划**
-`syspkg/mirror.rs` + `osdk pkg mirrors test` + `osdk pkg mirrors plan`。
-复用 `source::select::{effective_sources_for, ranked_source_candidates_for}`，不新建探测机制。内置镜像候选集（USTC/NJU/华为云 for winget；TUNA/USTC/阿里云 for brew），plan 产出带指纹的只读变更计划。**明确区分索引加速与产物加速**（§5.1）。
+`syspkg/mirror.rs` + `osdk pkg mirrors test`。
+复用 `source::select::{effective_sources_for, ranked_source_candidates_for}`，不新建探测机制。内置镜像候选集（USTC/NJU/华为云 for winget；TUNA/USTC/阿里云 for brew）。**明确区分索引加速与产物加速**（§5.1）。官方端点一并参与测速，使「没有镜像值得切换」成为一个可以得出的结论。
+**已完成**（提交 `dbdc74b`）：`osdk pkg mirrors test` 含 `--json`；四个候选实机全部可达，华为云 11.5 MiB/s 对官方源 1.1 MiB/s；`--offline` 拒绝而非返回未测排名；osdk +0.12%，osdk-shim 字节不变。
 
-**Phase 3：镜像配置的确认式写入**
-`syspkg/apply.rs` + `osdk pkg mirrors apply --accept-plan <ID>`。
-Homebrew 侧优先写 `brew.env` 而非 shell profile；winget 侧需管理员，无权限时打印命令。保证 `HOMEBREW_BOTTLE_DOMAIN` 与 `HOMEBREW_ARTIFACT_DOMAIN` 互斥。
+**Phase 3：osdk 自身调用时自动选用最快源（L2，不提权）**
+这是「安装依赖时自动检测并设置镜像」的落点，且不改宿主任何状态，因此排在需要提权的 L3 之前。
+osdk 发起的 winget 调用自动附加 `--source <name>`，选实测最快的**已注册**源；探测走 Phase 2 的缓存与 TTL，不给每次安装都加一轮测速。
+关键约束：无可用镜像源、或探测数据过期且当前离线时，**省略该参数**退回 winget 默认行为，绝不猜一个源名——传未注册的源名会让 winget 直接报 `0x8A150012`，把本可成功的安装变成失败。
+验收：用户手敲 winget 的行为完全不变；无管理员权限也能工作；离线时不报错、只是不加速。
+
+**Phase 3.5：镜像配置的确认式写入（L3，需管理员）**
+`syspkg/apply.rs` + `osdk pkg mirrors apply [--dry-run] [--accept-plan <ID>]`。**不设独立的 `plan` 子命令**：预览是 `--dry-run` 的职责，与执行共用同一套计划生成代码，避免「预览过的计划与实际执行不一致」这类分叉。
+首次注册需用户确认指纹，并在确认前显式列出**镜像源拿不到 `StoreOrigin` 信任标记**这一影响（§9）；此后同一目标可自动维护，不再打扰。
+Homebrew 侧优先写 `brew.env` 而非 shell profile；winget 侧需管理员，无权限时打印命令而不尝试提权。保证 `HOMEBREW_BOTTLE_DOMAIN` 与 `HOMEBREW_ARTIFACT_DOMAIN` 互斥。
 
 **Phase 4：声明式配置与状态查询**
-`[syspkg]` / `[syspkg.packages]` schema + `trust.rs` 集成 + `osdk pkg status [--json] [--missing]` + `osdk pkg plan [--detailed-exitcode]`。
+`[syspkg]` / `[syspkg.packages]` schema + `trust.rs` 集成 + `osdk pkg status [--json] [--missing]` + `osdk pkg plan [--detailed-exitcode]`（这条 `plan` 管的是**包安装**计划，与镜像配置无关——镜像侧的预览已合并进 `mirrors apply --dry-run`）。
 仍然**不安装任何东西**，只对照配置报告状态。
 
 **Phase 5：winget 侧 apply**
