@@ -100,3 +100,11 @@ tempfile.workspace = true
 # The shipped dependency is decode-only. Tests need to *build* a .7z fixture, so
 # the encoder is a dev-dependency and never reaches either binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
+
+# `hook-env` runs on every shell prompt and the shim on every command, so their
+# cost is a product metric. No criterion: the metric worth guarding here is the
+# deterministic walk volume (directories and stat calls), which stays stable
+# under noise, and dependency count is itself a size metric in this repo.
+[[bench]]
+name = "interactive_latency"
+harness = false

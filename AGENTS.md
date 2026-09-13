@@ -42,3 +42,18 @@
 - **升级依赖时要跟着 sigstore 走，别自己钉版本。** `reqwest` 曾长期双版本（0.12 + 0.13）编译，原因不是某个 feature 多拉了一份，而是我们钉 0.12 而 sigstore 全家钉 0.13，且 `sigstore-rekor` / `sigstore-tsa` 对它是**非 optional** 依赖，任何 feature 组合都躲不掉。跟随上游升到 0.13 后单版本，顺带把 `ring` 也消掉了（此前 `ring` 与 `aws-lc-rs` 两个加密后端同时在编）。遇到重复依赖先用 `cargo tree -i` 看是谁引入，若是上游已整体前进，正确做法是跟随而不是钉住。
 
 - **TLS 根证书来自操作系统信任库，不是内置副本。** reqwest 0.13 的 `rustls` feature 取代了 0.12 的 `rustls-tls`，同时把内置 webpki 根证书的 feature 全部删除。这是用户可见行为：企业 CA 自动生效，但精简容器缺 `ca-certificates` 时所有 HTTPS 下载都会失败。**测试套件基本离线，即使证书校验完全失效也会全绿**，所以改动 TLS 相关依赖后必须实测：既要确认正常 HTTPS 能通，也要确认 badssl.com 的 untrusted-root / expired / wrong-host / self-signed 四种坏证书都被拒绝且原因正确。
+
+# 交互延迟
+
+`osdk hook-env` 由 shell 钩子在**每个提示符**执行，`osdk-shim` 在**每次命令调用**时执行。这两条路径上的耗时会被用户逐次感知，所以它们和二进制体积一样是产品指标。以下几条都是踩过的坑。
+
+- **改动 `hook-env`、`activate` 片段、shim 启动或 `inventory` 扫描后，必须跑 `cargo bench -p osdk-core` 并对照基准。** 基准在 `crates/osdk-core/benches/`，它测的是遍历量（目录数、stat 次数）而不只是墙钟时间——遍历量是确定性的，能在噪声环境里稳定暴露退化。`scan_visits_only_dynamic_backend_subtrees` 曾抓到「扫描下探进 conda prefix，一次多走 1,000 个目录」。
+
+- **不要在装了 osdk 钩子的 shell 里测 osdk。** 钩子挂在提示符上，而某些 shell（PowerShell 的 `PostCommandLookupAction` 是历史实现）会在**每次命令查找**时触发，于是每一次 `& osdk ...` 计时都额外包含一次完整激活。这条曾让 `hook-env` 被测成 1000 ms（真实值约 400 ms），并据此把根因误判成「单次太慢」，实际问题是触发频率。**基准和手工计时都必须 `pwsh -NoProfile`，并用 `Diagnostics.Process` 直接起进程，不经 shell 管道。**
+
+- **基准必须断言退出码为 0 且输出非空。** 参数写错、环境变量被破坏时，osdk 会打印 usage 后以退出码 2 退出，耗时约 12 ms。这看起来像「快得惊人」，实际测的是报错路径。曾因辅助函数用 `$env` 作参数名（与 PowerShell 内建 `$env:` 驱动器同名）破坏了子进程环境，量出「12 ms、输出 0 字符」的假结果。
+
+- **性能探针必须自证落在被测机制之内。** 验证扫描剪枝时，探针文件放在超出 `max_depth` 的深度，被深度上限先拦住，于是有没有剪枝断言都成立——三个变异全部存活，测试等于空的。探针要么自带范围断言（`assert!(probe_depth <= DEFAULT_MAX_DEPTH)`），要么先做一次反向验证确认它真的能被发现。
+
+- **深度上限不是可自由收窄的旋钮。** `ScanOptions::max_depth = 8` 是 `MAX_TOOL_ID_SEGMENTS(5) + version + install_id` 算出来的上界。收窄它在只装了 `conda:xxx`（2 段 id）的机器上能带来 8.9x 加速且测试全绿，但会让 `go:github.com/user/cmd/tool`（展开成 7 段，manifest 在深度 8）、`github:owner/repo`、`npm:@scope/pkg` 的安装**被漏扫**——扫不到的动态工具等于不存在。要减少遍历量，按 backend 裁剪子树，不要动深度。
+
