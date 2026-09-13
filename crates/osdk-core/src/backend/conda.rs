@@ -328,8 +328,12 @@ fn finalize_conda_install(locator: &InstallLocator) -> Result<()> {
                 let owned_by_request = owned
                     .as_ref()
                     .map(|owned| owned.contains(&name))
-                    // No ownership record: treat everything as the package's
-                    // own, which exports too much rather than nothing at all.
+                    // No ownership record at all: treat everything as the
+                    // package's own, which exports too much rather than nothing.
+                    //
+                    // An empty record is not this case -- it reports that the
+                    // package owns nothing, so every command here belongs to the
+                    // closure and is withheld by default. See docs/bugs/006.
                     .unwrap_or(true);
                 let Some(path) = executable_in_dir(&directory, &name) else {
                     continue;
@@ -454,13 +458,30 @@ fn conda_bin_dirs(root: &std::path::Path) -> Vec<PathBuf> {
 /// own commands from the ones its dependencies contributed.
 const OWNED_PATHS_FILE: &str = ".osdk-conda-paths.json";
 
+/// Ownership of a prefix's commands, as established during install.
+///
+/// Keeping these two cases apart is the whole point. An empty owned list is a
+/// *fact* about a metapackage -- `m2-base` ships three non-executable helper
+/// files and nothing else -- not a failure to determine ownership. Conflating
+/// them made `conda:m2-base` fall back to publishing its entire prefix: 251
+/// commands including `find`, `sort`, `ls` and `link`, each shadowing the
+/// Windows command of the same name. See docs/bugs/006.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ownership {
+    /// The requested package was matched during extraction; these are the files
+    /// it installed. Legitimately empty for a metapackage.
+    Known(Vec<String>),
+    /// The requested package was never matched, so nothing can be said about
+    /// which files belong to it.
+    Unknown,
+}
+
 /// Read `info/paths.json` for the package that was just unpacked.
 ///
 /// Conda records every file a package installs there, which is what makes
 /// ownership answerable at all. A package that omits it (or writes something
-/// unparseable) yields an empty list, and the caller falls back to exposing the
-/// whole prefix rather than silently publishing nothing.
-#[cfg(feature = "install")]
+/// unparseable) yields an empty list; having *seen* the package is what makes
+/// ownership known, so that still counts as `Known`.#[cfg(feature = "install")]
 fn read_package_paths(prefix: &std::path::Path) -> Vec<String> {
     let manifest = prefix.join("info").join("paths.json");
     let Ok(text) = std::fs::read_to_string(&manifest) else {
@@ -482,12 +503,26 @@ fn read_package_paths(prefix: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Persist the owned-path list into the prefix.
+/// Persist the ownership record into the prefix.
+///
+/// `Unknown` deliberately writes no file: absence is how a reader tells it from
+/// `Known(vec![])`, which writes an empty array.
 #[cfg(feature = "install")]
-fn write_owned_paths(prefix: &std::path::Path, owned: &[String]) -> Result<()> {
+fn write_owned_paths(prefix: &std::path::Path, owned: &Ownership) -> Result<()> {
     let target = prefix.join(OWNED_PATHS_FILE);
-    let text = serde_json::to_string(&owned)?;
-    std::fs::write(&target, text).map_err(|error| Error::io(&target, error))
+    match owned {
+        Ownership::Known(paths) => {
+            let text = serde_json::to_string(paths)?;
+            std::fs::write(&target, text).map_err(|error| Error::io(&target, error))
+        }
+        // Clear any record an earlier install of this prefix left behind, so a
+        // stale file cannot be mistaken for this install's answer.
+        Ownership::Unknown => match std::fs::remove_file(&target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::io(&target, error)),
+        },
+    }
 }
 
 /// Load the owned-path list, if this prefix recorded one.
@@ -498,14 +533,15 @@ fn owned_paths(prefix: &std::path::Path) -> Option<Vec<String>> {
 
 /// Commands the requested package itself installs, as bare names.
 ///
-/// Returns `None` when ownership cannot be established, which the caller must
-/// treat as "expose everything" -- withholding every command would be a worse
-/// failure than exposing a few extra ones.
+/// Returns `None` only when ownership was never established (no record on
+/// disk), which the caller treats as "expose everything".
+///
+/// An empty record returns `Some(vec![])`, not `None`: a metapackage that ships
+/// no commands of its own is a determinate answer, and answering it with the
+/// whole prefix is how `conda:m2-base` came to publish 251 msys commands over
+/// the Windows ones. See docs/bugs/006.
 fn owned_bin_names(prefix: &std::path::Path) -> Option<Vec<String>> {
     let owned = owned_paths(prefix)?;
-    if owned.is_empty() {
-        return None;
-    }
     // Which directories count as command directories is platform-dependent, so
     // reuse the same list PATH is built from instead of a second opinion.
     let bin_dirs: Vec<String> = conda_bin_dirs(prefix)
@@ -559,7 +595,11 @@ fn owned_bin_names(prefix: &std::path::Path) -> Option<Vec<String>> {
         .collect();
     names.sort();
     names.dedup();
-    if names.is_empty() { None } else { Some(names) }
+    // Deliberately Some even when empty. The record was read, so ownership is
+    // established; that it yields no commands is the answer, not the absence of
+    // one. Collapsing this to None sent metapackages down the
+    // `expose everything'' path -- see docs/bugs/006.
+    Some(names)
 }
 
 /// The archive file name for a package URL.
@@ -764,8 +804,11 @@ impl CondaBackend {
     ) -> Result<()> {
         let scratch = prefix.join(".osdk-download");
         std::fs::create_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
-        // Paths belonging to the requested package itself, captured mid-loop.
-        let mut owned: Vec<String> = Vec::new();
+        // Ownership of the requested package's own files, captured mid-loop.
+        // Starts Unknown: if the loop never matches the requested package,
+        // ownership genuinely was not established and must not be reported as
+        // `this package owns nothing''.
+        let mut owned = Ownership::Unknown;
 
         for record in records {
             let file_name = archive_file_name(&record.url).ok_or_else(|| {
@@ -821,8 +864,11 @@ impl CondaBackend {
             // while the answer is still knowable: it is the only way to tell
             // the requested package's commands from those its dependencies
             // happened to drop into the same `bin` directory.
+            //
+            // Seeing the package is what makes ownership known, even when it
+            // installs nothing itself -- that is exactly the metapackage case.
             if record.package_record.name.as_normalized() == self.package {
-                owned = read_package_paths(prefix);
+                owned = Ownership::Known(read_package_paths(prefix));
             }
 
             // The archives are large (a single win-64 clang is 132 MB) and the
@@ -1127,8 +1173,15 @@ impl Backend for CondaBackend {
     /// Conda records what each package installs in `info/paths.json`, captured
     /// during extraction before the next package overwrites it, so the default
     /// is to publish only the requested package's own commands. When that
-    /// record is missing or empty the whole prefix is exposed instead: showing
-    /// too much beats publishing nothing at all.
+    /// record is missing the whole prefix is exposed instead: showing too much
+    /// beats publishing nothing at all.
+    ///
+    /// A record that exists but is *empty* is not that case. It says the
+    /// requested package ships no commands of its own, which is the normal
+    /// shape of a metapackage, and the honest answer is to publish nothing and
+    /// say so. Treating it as "unknown" is what made `conda:m2-base` publish
+    /// 251 msys commands -- `find`, `sort`, `ls`, `link` -- over the Windows
+    /// commands of the same name. See docs/bugs/006.
     ///
     /// The closure's commands stay in the install manifest and are withheld at
     /// the shim layer rather than dropped here, so `[shims] include` can still
@@ -1136,6 +1189,19 @@ impl Backend for CondaBackend {
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
         let prefix = conda_prefix_root(ctx, self.id(), tv);
         if let Some(owned) = owned_bin_names(&prefix) {
+            if owned.is_empty() {
+                // Not an error: the install is fine and its commands are in the
+                // manifest. But a tool that publishes nothing looks broken, so
+                // name the reason and the way out instead of failing silently.
+                tracing::warn!(
+                    tool = %self.id(),
+                    package = %self.package,
+                    "this conda package installs no commands of its own, so nothing was \
+                     published; it is a metapackage whose tools belong to the packages it \
+                     pulls in. Expose one explicitly with `osdk config set shims.include \
+                     \"<tool>:<command>\"`"
+                );
+            }
             return Ok(owned);
         }
         Ok(crate::backend::bin_names_in_dirs(
@@ -1379,7 +1445,11 @@ mod tests {
             let directory = if cfg!(windows) { "Library/bin" } else { "bin" };
             format!("{directory}/{file}")
         };
-        write_owned_paths(prefix, &[relative(&clang), relative(&clang_cl)]).unwrap();
+        write_owned_paths(
+            prefix,
+            &Ownership::Known(vec![relative(&clang), relative(&clang_cl)]),
+        )
+        .unwrap();
 
         let published = owned_bin_names(prefix).expect("ownership was recorded");
         assert_eq!(published, vec!["clang".to_string(), "clang-cl".to_string()]);
@@ -1393,9 +1463,129 @@ mod tests {
         let prefix = temporary.path();
         assert_eq!(owned_bin_names(prefix), None);
 
-        // An empty record means the same thing: it establishes nothing.
-        write_owned_paths(prefix, &[]).unwrap();
+        // `Unknown` must leave no file behind, so the fallback still applies.
+        write_owned_paths(prefix, &Ownership::Unknown).unwrap();
         assert_eq!(owned_bin_names(prefix), None);
+    }
+
+    /// A recorded-but-empty ownership list is a determinate answer -- the
+    /// requested package ships no commands of its own -- and must publish
+    /// nothing rather than fall back to the whole prefix.
+    ///
+    /// This is the metapackage case. `conda:m2-base` installs three
+    /// non-executable helper files and pulls its actual tools in as
+    /// dependencies; conflating "owns nothing" with "ownership unknown" made it
+    /// publish 251 msys commands, shadowing the Windows `find`, `sort`, `ls`
+    /// and `link`. See docs/bugs/006.
+    #[test]
+    fn an_empty_ownership_record_publishes_nothing_instead_of_the_whole_prefix() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+
+        // Populate the prefix so the fallback would have plenty to expose,
+        // which is what makes this assertion meaningful.
+        let bin = if cfg!(windows) {
+            prefix.join("Library").join("usr").join("bin")
+        } else {
+            prefix.join("bin")
+        };
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["find", "sort", "ls", "link"] {
+            let file = if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_string()
+            };
+            std::fs::write(bin.join(file), b"").unwrap();
+        }
+
+        write_owned_paths(prefix, &Ownership::Known(Vec::new())).unwrap();
+        assert_eq!(
+            owned_bin_names(prefix),
+            Some(Vec::new()),
+            "an empty record must stay empty, not become the whole prefix"
+        );
+    }
+
+    /// `Unknown` must actively clear a record an earlier install left behind;
+    /// otherwise a stale list would be mistaken for this install's answer.
+    #[test]
+    fn unknown_ownership_clears_a_stale_record() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        write_owned_paths(prefix, &Ownership::Known(vec!["bin/tool".to_string()])).unwrap();
+        assert!(prefix.join(OWNED_PATHS_FILE).exists());
+
+        write_owned_paths(prefix, &Ownership::Unknown).unwrap();
+        assert!(
+            !prefix.join(OWNED_PATHS_FILE).exists(),
+            "a stale record must not survive an install that established nothing"
+        );
+        assert_eq!(owned_bin_names(prefix), None);
+    }
+
+    /// The ownership flag `finalize_conda_install` writes into the manifest is
+    /// derived exactly as that function derives it, across all three states.
+    ///
+    /// This is the assertion that maps to the real failure: with `m2-base` the
+    /// record exists and is empty, so every command in the prefix must be
+    /// marked unowned. The manifest still lists them -- withholding is a shim
+    /// default, not deletion -- which is what keeps `[shims] include` working.
+    /// See docs/bugs/006.
+    #[test]
+    fn manifest_ownership_marks_a_metapackages_commands_as_unowned() {
+        // `finalize_conda_install` decides ownership as
+        // `owned.map(|o| o.contains(name)).unwrap_or(true)`, where `owned` is
+        // whatever `owned_bin_names` returns. Drive the real function so this
+        // stays coupled to the product code rather than to a copy of it.
+        let owned_by_request = |prefix: &std::path::Path, name: &str| {
+            owned_bin_names(prefix)
+                .map(|owned| owned.contains(&name.to_string()))
+                .unwrap_or(true)
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path();
+        let bin = if cfg!(windows) {
+            prefix.join("Library").join("usr").join("bin")
+        } else {
+            prefix.join("bin")
+        };
+        std::fs::create_dir_all(&bin).unwrap();
+        let executable = |name: &str| {
+            if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_string()
+            }
+        };
+        for name in ["find", "sort", "ls", "link", "sh", "bash", "make"] {
+            std::fs::write(bin.join(executable(name)), b"").unwrap();
+        }
+
+        // No record at all: ownership is unknown, so everything is kept.
+        write_owned_paths(prefix, &Ownership::Unknown).unwrap();
+        assert!(owned_by_request(prefix, "find"));
+
+        // Empty record: the metapackage owns nothing, so no command is its own
+        // and every one is withheld from shims by default.
+        write_owned_paths(prefix, &Ownership::Known(Vec::new())).unwrap();
+        for name in ["find", "sort", "ls", "link", "sh", "bash"] {
+            assert!(
+                !owned_by_request(prefix, name),
+                "`{name}` must not be marked owned for a package that installs no commands"
+            );
+        }
+
+        // Populated record: only the listed command is the package's own.
+        let relative = if cfg!(windows) {
+            "Library/usr/bin/make.exe"
+        } else {
+            "bin/make"
+        };
+        write_owned_paths(prefix, &Ownership::Known(vec![relative.to_string()])).unwrap();
+        assert!(owned_by_request(prefix, "make"));
+        assert!(!owned_by_request(prefix, "find"));
     }
 
     /// `paths.json` lists every file a package installs, most of which are
@@ -1418,12 +1608,12 @@ mod tests {
         let directory = if cfg!(windows) { "Library/bin" } else { "bin" };
         write_owned_paths(
             prefix,
-            &[
+            &Ownership::Known(vec![
                 format!("{directory}/{file}"),
                 format!("{directory}/nested/{file}"),
                 "include/clang/Basic/Version.h".to_string(),
                 "lib/libclang.so".to_string(),
-            ],
+            ]),
         )
         .unwrap();
 
@@ -1552,10 +1742,10 @@ mod tests {
 
         write_owned_paths(
             prefix,
-            &[
+            &Ownership::Known(vec![
                 "Library/usr/bin/make.exe".to_string(),
                 "Library/usr/bin/bash.exe".to_string(),
-            ],
+            ]),
         )
         .unwrap();
 
@@ -1586,11 +1776,11 @@ mod tests {
 
         write_owned_paths(
             prefix,
-            &[
+            &Ownership::Known(vec![
                 "Library/bin/zstd.exe".to_string(),
                 "Library/bin/zstd.dll".to_string(),
                 "Library/bin/libzstd.dll".to_string(),
-            ],
+            ]),
         )
         .unwrap();
 
@@ -1619,12 +1809,12 @@ mod tests {
 
         write_owned_paths(
             prefix,
-            &[
+            &Ownership::Known(vec![
                 "Library/usr/bin/bash.exe".to_string(),
                 "Library/usr/bin/bashbug".to_string(),
                 "Library/usr/bin/msys-2.0.dll".to_string(),
                 "Library/usr/bin/profile.ps1".to_string(),
-            ],
+            ]),
         )
         .unwrap();
 
@@ -1655,11 +1845,11 @@ mod tests {
 
         write_owned_paths(
             prefix,
-            &[
+            &Ownership::Known(vec![
                 "Scripts/pip.exe".to_string(),
                 "Scripts/activate.bat".to_string(),
                 "Scripts/wheel.cmd".to_string(),
-            ],
+            ]),
         )
         .unwrap();
 
@@ -1684,7 +1874,7 @@ mod tests {
         std::fs::create_dir_all(prefix.join("bin")).unwrap();
         std::fs::write(prefix.join("bin").join("make"), b"").unwrap();
 
-        write_owned_paths(prefix, &["bin/make".to_string()]).unwrap();
+        write_owned_paths(prefix, &Ownership::Known(vec!["bin/make".to_string()])).unwrap();
 
         assert_eq!(owned_bin_names(prefix), Some(vec!["make".to_string()]));
     }
