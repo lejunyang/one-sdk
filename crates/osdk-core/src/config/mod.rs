@@ -342,6 +342,7 @@ impl SourcesConfig {
 #[serde(default)]
 pub struct RegistriesConfig {
     pub npm: NpmRegistryConfig,
+    pub python: PythonIndexConfig,
 }
 
 /// Candidate registries for npm-compatible package managers. An empty list
@@ -354,6 +355,33 @@ pub struct NpmRegistryConfig {
 }
 
 impl Default for NpmRegistryConfig {
+    fn default() -> Self {
+        Self {
+            urls: Vec::new(),
+            probe_timeout_ms: 1500,
+        }
+    }
+}
+
+/// Candidate PyPI-compatible indexes, ranked by probe like SDK sources are.
+///
+/// These are mirrors of the *default* index only. A mirror is a full copy of
+/// PyPI, so it necessarily carries the same package names as upstream --
+/// including malicious ones. Ranking it above the default index (uv's
+/// `--index` / `--extra-index-url`, pip's `--extra-index-url`) would turn a
+/// convenience into a dependency-confusion vector, so osdk only ever maps a
+/// mirror onto the default index. Private indexes that genuinely need higher
+/// precedence are out of scope here and stay with the package manager's own
+/// configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PythonIndexConfig {
+    /// Ranked candidates. Empty means "use the built-in public default".
+    pub urls: Vec<String>,
+    pub probe_timeout_ms: u64,
+}
+
+impl Default for PythonIndexConfig {
     fn default() -> Self {
         Self {
             urls: Vec::new(),
@@ -926,6 +954,7 @@ fn read_config_file(path: &Path) -> Result<ConfigFile> {
     let mut file: ConfigFile = toml::from_str(&text).map_err(sanitize_config_parse_error)?;
     if let Some(registries) = &mut file.registries {
         normalize_registry_urls(&mut registries.npm.urls)?;
+        normalize_python_index_urls(&mut registries.python.urls)?;
     }
     if let Some(containers) = &mut file.containers {
         validate_containers_config(containers)?;
@@ -1132,6 +1161,49 @@ pub fn normalize_registry_url(value: &str) -> Result<String> {
     if url.query().is_some() || url.fragment().is_some() {
         return Err(Error::config(
             "registry URL must not contain a query string or fragment",
+        ));
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{path}/"));
+    Ok(url.to_string())
+}
+
+fn normalize_python_index_urls(urls: &mut Vec<String>) -> Result<()> {
+    let mut normalized = Vec::with_capacity(urls.len());
+    for value in urls.iter() {
+        let value = normalize_python_index_url(value)?;
+        if !normalized.contains(&value) {
+            normalized.push(value);
+        }
+    }
+    *urls = normalized;
+    Ok(())
+}
+
+/// Validate and canonicalize a PEP 503 simple-index base URL.
+///
+/// Stricter than [`normalize_registry_url`] in one deliberate way: plaintext
+/// `http` is refused. An index is where package hashes come from, so a
+/// downgradeable transport would let an attacker rewrite both the artifact and
+/// the hash that is supposed to detect the rewrite. Credentials are refused
+/// too -- they would otherwise reach logs and config files.
+pub fn normalize_python_index_url(value: &str) -> Result<String> {
+    let original = value.trim();
+    let mut url =
+        reqwest::Url::parse(original).map_err(|_| Error::config("invalid Python index URL"))?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        return Err(Error::config(
+            "Python index URL must use https and include a host",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Error::config(
+            "Python index URL must not contain credentials",
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(Error::config(
+            "Python index URL must not contain a query string or fragment",
         ));
     }
     let path = url.path().trim_end_matches('/').to_string();
@@ -1847,6 +1919,48 @@ probe_timeout_ms = 125
         assert!(normalize_registry_url("file:///tmp/registry").is_err());
         assert!(normalize_registry_url("https://token@example.test/").is_err());
         assert!(normalize_registry_url("relative/path").is_err());
+    }
+
+    #[test]
+    fn python_index_urls_require_https_and_reject_credentials() {
+        assert_eq!(
+            normalize_python_index_url("https://pypi.org/simple").unwrap(),
+            "https://pypi.org/simple/"
+        );
+        // Trailing slash is idempotent.
+        assert_eq!(
+            normalize_python_index_url("https://pypi.org/simple/").unwrap(),
+            "https://pypi.org/simple/"
+        );
+
+        // An index supplies the hashes used to verify artifacts, so plaintext
+        // transport is refused outright -- unlike npm registries, which still
+        // accept http.
+        let http = normalize_python_index_url("http://pypi.org/simple").unwrap_err();
+        assert_eq!(
+            http.to_string(),
+            "config error: Python index URL must use https and include a host"
+        );
+        assert!(normalize_registry_url("http://registry.test/").is_ok());
+
+        let credentials =
+            normalize_python_index_url("https://user:pass@mirror.test/simple").unwrap_err();
+        assert_eq!(
+            credentials.to_string(),
+            "config error: Python index URL must not contain credentials"
+        );
+
+        for rejected in [
+            "https://mirror.test/simple?token=1",
+            "https://mirror.test/simple#frag",
+            "file:///tmp/simple",
+            "relative/simple",
+        ] {
+            assert!(
+                normalize_python_index_url(rejected).is_err(),
+                "expected `{rejected}` to be refused"
+            );
+        }
     }
 
     #[test]

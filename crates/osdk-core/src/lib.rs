@@ -44,6 +44,11 @@ pub mod package_registry;
 pub mod pipeline;
 pub mod platform;
 pub mod process;
+// Picking a Python index only ever happens while installing packages; the shim
+// just launches an already-installed interpreter. Gating it keeps the probe
+// client, and the reqwest/serde_json machinery it needs, out of the shim build.
+#[cfg(feature = "install")]
+pub mod python_index;
 // Updating osdk itself downloads and unpacks a release, which is exactly the
 // machinery the shim drops. Keeping it behind `install` means the shim's build
 // never links it; `osdk self upgrade` is a CLI-only command anyway.
