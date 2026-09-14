@@ -257,6 +257,78 @@ impl PypiBackend {
         &self.project
     }
 
+    /// Create the environment and install the requirement into it.
+    #[cfg(feature = "install")]
+    fn build_environment(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+        choice: &InstallerChoice,
+        interpreter: &Path,
+        venv: &Path,
+    ) -> Result<()> {
+        // A user-supplied pip.conf must not be able to redirect the index, so
+        // the pip path always runs against a config file osdk controls.
+        let pip_config = venv.parent().map(|parent| parent.join(".osdk-pip.conf"));
+        if let (EnvCreator::Stdlib, Some(path)) = (choice.creator, pip_config.as_deref()) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
+            }
+            std::fs::write(path, b"# managed by osdk\\n")
+                .map_err(|error| Error::io(path, error))?;
+        }
+
+        let index = ctx
+            .config
+            .registries()
+            .python
+            .urls
+            .first()
+            .map(String::as_str);
+        let env = installer_env(
+            choice.creator,
+            index,
+            ctx.config.settings.offline,
+            ctx.config.settings.require_checksums,
+            pip_config.as_deref(),
+        );
+
+        let (program, args) = venv_command(choice, interpreter, venv);
+        run_installer(&program, &args, &env)?;
+
+        let requirement = self.requirement(&tv.version, &tv.options);
+        let (program, args) = install_command(choice, venv, &requirement);
+        run_installer(&program, &args, &env)?;
+
+        // Record what was built. Kept beside the environment rather than inside
+        // it, so osdk never modifies a directory the user may manage.
+        let receipt = EnvReceipt {
+            schema: ENV_RECEIPT_SCHEMA,
+            creator: choice.creator,
+            interpreter: interpreter.display().to_string(),
+            seed: detect_seed(venv),
+        };
+        let receipt_path = venv.join(ENV_RECEIPT_FILE);
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&receipt).map_err(|error| {
+                Error::other(format!("could not serialize the pypi env receipt: {error}"))
+            })?,
+        )
+        .map_err(|error| Error::io(&receipt_path, error))?;
+        Ok(())
+    }
+
+    /// The directory holding this tool's environment.
+    ///
+    /// Derived from the install identity, so it matches what the shim resolves.
+    pub fn install_root(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<PathBuf> {
+        let identity = pypi_install_identity(ctx, self.id(), tv)?;
+        Ok(crate::dirs::InstallLocator::new(&ctx.dirs, identity)?
+            .install_root()
+            .to_path_buf())
+    }
+
     /// The PEP 508 requirement string for a concrete version, including extras.
     ///
     /// `==` is deliberate: the version is already resolved, and a looser
@@ -467,6 +539,215 @@ fn site_packages_dirs(venv: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Run one installer step, refusing arguments that would weaken a gate.
+#[cfg(feature = "install")]
+fn run_installer(program: &Path, args: &[String], env: &BTreeMap<String, String>) -> Result<()> {
+    // Belt and braces: the argument lists are built above rather than taken
+    // from the user, but this is the single choke point every install passes
+    // through, so the check lives here too.
+    reject_unsafe_installer_args(args.iter().map(String::as_str))?;
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::process::run(&program.display().to_string(), &borrowed, env, None)
+}
+
+/// The `python` option names which managed interpreter to build against.
+#[cfg(feature = "install")]
+pub const PYTHON_OPTION: &str = "python";
+
+/// Whether the caller demanded uv-only behaviour.
+#[cfg(feature = "install")]
+fn require_uv(options: &BTreeMap<String, String>) -> bool {
+    options
+        .get("require-uv")
+        .is_some_and(|value| value == "true" || value == "1")
+}
+
+/// Resolve the managed interpreter to build the environment against.
+///
+/// Requiring an osdk-managed interpreter is deliberate. Building against
+/// whatever `python` happens to be on PATH would make the environment depend on
+/// machine state osdk does not control -- on this machine that PATH entry is a
+/// system 3.11 while osdk manages 3.14.7.
+#[cfg(feature = "install")]
+fn managed_interpreter(ctx: &Ctx, options: &BTreeMap<String, String>) -> Result<PathBuf> {
+    let installed = crate::backend::python::PythonBackend.list_installed(ctx)?;
+    if installed.is_empty() {
+        return Err(Error::other(
+            "no osdk-managed Python is installed; run `osdk install python` first",
+        ));
+    }
+    let version = match options.get(PYTHON_OPTION) {
+        Some(requested) => crate::backend::python::select_installed(requested, &installed)
+            .ok_or_else(|| Error::NotInstalled {
+                tool: "python".into(),
+                version: requested.clone(),
+            })?,
+        // Newest installed wins when unspecified. `list_installed` sorts
+        // lexically, which is not version order, so pick by comparing properly.
+        None => installed
+            .iter()
+            .max_by(|left, right| compare_python_versions(left, right))
+            .cloned()
+            .expect("the list is not empty"),
+    };
+
+    let root = ctx.dirs.install_path("python", &version);
+    if !root.join(".osdk-complete").is_file() {
+        return Err(Error::NotInstalled {
+            tool: "python".into(),
+            version,
+        });
+    }
+    let interpreter = if cfg!(windows) {
+        root.join("python.exe")
+    } else {
+        root.join("bin").join("python3")
+    };
+    if !interpreter.is_file() {
+        return Err(Error::other(format!(
+            "managed Python {version} has no interpreter at {}",
+            interpreter.display()
+        )));
+    }
+    Ok(interpreter)
+}
+
+/// Order two version strings numerically, segment by segment.
+#[cfg(feature = "install")]
+fn compare_python_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let parse = |value: &str| -> Vec<u64> {
+        value
+            .split(['.', '+', '-'])
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    parse(left).cmp(&parse(right))
+}
+
+/// Find an osdk-managed uv, if one is installed.
+///
+/// Only osdk's own installs are consulted. A uv from PATH would be an
+/// unpinned version whose behaviour could change under the user without any
+/// record of it in the install.
+#[cfg(feature = "install")]
+fn locate_uv(ctx: &Ctx) -> Option<PathBuf> {
+    let backend = PypiBackend::from_id("pypi:uv")?;
+    let versions = backend.list_installed(ctx).ok()?;
+    let newest = versions
+        .iter()
+        .max_by(|left, right| compare_python_versions(left, right))?;
+    let candidate = venv_bin_dir(&ctx.dirs.install_path(backend.id(), newest))
+        .join(if cfg!(windows) { "uv.exe" } else { "uv" });
+    candidate.is_file().then_some(candidate)
+}
+
+/// The install identity for one `pypi:` environment.
+///
+/// Not install-gated: the shim resolves an installed environment through the
+/// same identity, and it reads only local state.
+pub fn pypi_install_identity(
+    ctx: &Ctx,
+    backend_id: &str,
+    tv: &ToolVersion,
+) -> Result<crate::tool::InstallIdentity> {
+    crate::tool::InstallIdentity::new(
+        backend_id,
+        &tv.version,
+        ctx.platform.to_string(),
+        crate::tool::InstallScope::Isolated,
+        &tv.options,
+        Vec::new(),
+        // An environment is built by an installer rather than fetched from one
+        // address, so there is no artifact file or checksum to record. The
+        // requirement and its options are already part of the identity.
+        std::collections::BTreeMap::new(),
+    )
+}
+
+/// Resolve a command stem to the real file inside `directory`.
+///
+/// Needed because executable discovery reports stems while the file on Windows
+/// carries an extension. Getting this wrong is quiet rather than loud: the
+/// manifest simply records nothing.
+#[cfg(feature = "install")]
+fn executable_in_dir(directory: &Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidates = [
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        format!("{name}.bat"),
+        name.to_string(),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [name.to_string()];
+    candidates
+        .into_iter()
+        .map(|candidate| directory.join(candidate))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Publish the inventory manifest that makes the environment usable.
+#[cfg(feature = "install")]
+fn finalize_pypi_install(
+    backend: &PypiBackend,
+    ctx: &Ctx,
+    tv: &ToolVersion,
+    root: &Path,
+) -> Result<()> {
+    use crate::inventory::{DynamicToolBin, DynamicToolManifest};
+
+    let result = (|| -> Result<()> {
+        let identity = pypi_install_identity(ctx, backend.id(), tv)?;
+        let mut manifest = DynamicToolManifest::from_identity(identity)?;
+        let bin_dir = venv_bin_dir(root);
+        let canonical_root = dunce::canonicalize(root).map_err(|error| Error::io(root, error))?;
+
+        // Record only the commands this tool actually owns, resolved against the
+        // real root rather than a re-derived path.
+        for name in tool_bin_names(root) {
+            // `tool_bin_names` yields executable *stems* (`cowsay`), while the file
+            // on Windows is `cowsay.exe`. Joining the stem directly finds nothing
+            // there, which is how the manifest ended up with an empty `bins` list
+            // even though the environment was correct and the command runnable.
+            let Some(path) = executable_in_dir(&bin_dir, &name) else {
+                continue;
+            };
+            let canonical = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+            // A console script must not point outside its own environment.
+            let Ok(relative) = canonical.strip_prefix(&canonical_root) else {
+                return Err(Error::other(format!(
+                    "pypi command `{name}` resolves outside {}",
+                    root.display()
+                )));
+            };
+            manifest.bins.push(DynamicToolBin {
+                name,
+                path: relative.to_string_lossy().replace('\\', "/"),
+                owned: true,
+            });
+        }
+        manifest
+            .bins
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        manifest
+            .bins
+            .dedup_by(|left, right| left.name == right.name);
+
+        manifest.write_atomic(root)?;
+        // Written last: it is what marks the install usable, so it must not
+        // appear before the inventory it depends on.
+        std::fs::write(root.join(".osdk-complete"), b"")
+            .map_err(|error| Error::io(root.join(".osdk-complete"), error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        // A published-but-unusable environment is worse than none: it would
+        // satisfy a completeness check while failing every command.
+        let _ = std::fs::remove_dir_all(root);
+    }
+    result
+}
+
 #[async_trait]
 impl Backend for PypiBackend {
     fn id(&self) -> &str {
@@ -499,10 +780,27 @@ impl Backend for PypiBackend {
 
     #[cfg(feature = "install")]
     async fn resolve_version(&self, _ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
-        // An exact request resolves without touching the network, which is what
+        // A literal version resolves without touching the network, which is what
         // `osdk install pypi:uv@0.12.13` needs.
-        if let crate::version::VersionSpec::Exact(version) = &req.spec {
-            let mut tv = ToolVersion::new(self.id(), version.clone());
+        //
+        // `Prefix` counts as literal here, which looks wrong until you notice
+        // that the shared parser only calls a version `Exact` when it is a full
+        // three-part semver. Python versions are not semver and have no fixed
+        // segment count -- `cowsay@6.1`, `certifi@2026.7.22` -- so treating
+        // `Prefix` as "not a real version" rejects the majority of genuine PyPI
+        // releases. Verified end to end: `pypi:cowsay@6.1` parses to
+        // `Prefix("6.1")` and was refused before this.
+        //
+        // The requirement built from this is `==`-pinned, so the installer still
+        // treats it as one exact release rather than a range.
+        let literal = match &req.spec {
+            crate::version::VersionSpec::Exact(version)
+            | crate::version::VersionSpec::Prefix(version)
+            | crate::version::VersionSpec::Pinned(version) => Some(version.clone()),
+            _ => None,
+        };
+        if let Some(version) = literal {
+            let mut tv = ToolVersion::new(self.id(), version);
             tv.options = req.options.clone();
             return Ok(tv);
         }
@@ -510,49 +808,183 @@ impl Backend for PypiBackend {
             tool: self.id.clone(),
             spec: req.spec.to_string(),
             hint: Some(
-                "pypi requests need an exact version for now, e.g. `pypi:ruff@0.6.9`".into(),
+                "pypi requests need a literal version for now, e.g. `pypi:ruff@0.6.9`; \
+                 `latest` and ranges need an index lookup, which is not wired up yet"
+                    .into(),
             ),
         })
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, _ctx: &InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
-        Err(Error::other(format!(
-            "installing `{}` is not implemented yet",
-            self.id
-        )))
+    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+        let ctx = ictx.ctx;
+        let interpreter = managed_interpreter(ctx, &tv.options)?;
+        let choice = choose_installer(locate_uv(ctx).as_deref(), require_uv(&tv.options))?;
+        if let Some(notice) = &choice.notice {
+            // Printed rather than logged: the capability difference has to reach
+            // the person running the command, not only a log file.
+            eprintln!("osdk: {notice}");
+        }
+
+        // A dynamic install lives at `install_path/<install_id>`, not at
+        // `install_path` itself. Writing to the latter produced an environment
+        // that was complete on disk yet invisible to the shim, which reported
+        // `has no complete selected install` right after a successful install.
+        let identity = pypi_install_identity(ctx, self.id(), tv)?;
+        let locator = crate::dirs::InstallLocator::new(&ctx.dirs, identity)?;
+        let _lock = crate::backend::dynamic::acquire_install_lock(&locator, "pypi").await?;
+        let root = locator.install_root().to_path_buf();
+
+        // Build directly at the final location. A virtual environment cannot be
+        // relocated after creation, so the usual "build in scratch, then rename"
+        // pattern does not apply here.
+        //
+        // This is not a style preference. Windows console scripts are launcher
+        // executables with the interpreter's absolute path embedded in them, and
+        // `pyvenv.cfg` records absolute paths as well. Building in
+        // `cache/tmp/...` and moving the tree produced exactly that failure:
+        // `cowsay.exe` shipped with a shebang pointing into the scratch
+        // directory, so after the move it exited 1 with no output at all -- the
+        // hardest kind of failure to attribute, because the install reported
+        // success and the file was present and executable.
+        //
+        // Atomicity is preserved a different way: the completion marker and the
+        // inventory manifest are written only after the install succeeds, and a
+        // failure removes the whole directory. An interrupted run therefore
+        // leaves a directory with no marker, which every reader treats as absent.
+        if root.exists() {
+            std::fs::remove_dir_all(&root).map_err(|error| Error::io(&root, error))?;
+        }
+        if let Some(parent) = root.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
+        }
+
+        let result = self.build_environment(ctx, tv, &choice, &interpreter, &root);
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+            return result;
+        }
+
+        // The completion marker alone is not enough for a dynamic namespace.
+        // `osdk exec` and the shim locate a dynamic install through the
+        // inventory manifest, so without it the tool installs "successfully"
+        // and is then unusable -- which is exactly what the first end-to-end
+        // run produced: `has no complete install matching its unlocked request`
+        // immediately after `installed pypi:cowsay@6.1`.
+        finalize_pypi_install(self, ctx, tv, &root)
+    }
+
+    fn list_installed(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        // A dynamic install cannot use the default implementation. That one
+        // looks for `.osdk-complete` directly under `install_path/<version>`,
+        // while a dynamic install keeps it one level deeper, under the
+        // identity-derived `<install_id>` directory. The result was an install
+        // that worked through `osdk exec` yet never appeared in `osdk list`, and
+        // whose commands `reshim` therefore never generated -- the tool was
+        // usable only if you already knew its full id.
+        //
+        // Scan only this backend's own subtree: `reshim` reaches this once per
+        // backend per version, so walking every unrelated tool's installs would
+        // be paid on every call.
+        //
+        // Tolerant: listing what is installed must not fail wholesale because
+        // one environment is damaged, or the user cannot see the rest well
+        // enough to remove the broken one.
+        let report = crate::inventory::scan_installs_for_tool(
+            &ctx.dirs.installs,
+            self.id(),
+            &crate::inventory::ScanOptions::tolerant(),
+        )?;
+        let mut versions: Vec<String> = report
+            .installs
+            .iter()
+            .filter(|install| {
+                let identity = &install.manifest.identity;
+                identity.tool == self.id()
+                    && identity.platform == ctx.platform.to_string()
+                    && identity.scope == crate::tool::InstallScope::Isolated
+                    && install.install_root.join(".osdk-complete").is_file()
+            })
+            .map(|install| install.manifest.identity.version.clone())
+            .collect();
+        versions.sort();
+        versions.dedup();
+        Ok(versions)
+    }
+
+    fn dynamic_install_identity(
+        &self,
+        ctx: &Ctx,
+        tv: &ToolVersion,
+    ) -> Result<Option<crate::tool::InstallIdentity>> {
+        // The identity is knowable without solving anything, unlike conda's,
+        // because the environment is keyed by the request rather than by a
+        // resolved closure.
+        Ok(Some(pypi_install_identity(ctx, self.id(), tv)?))
+    }
+
+    fn validate_dynamic_install(
+        &self,
+        _ctx: &Ctx,
+        _tv: &ToolVersion,
+        install_root: &Path,
+        identity: &crate::tool::InstallIdentity,
+    ) -> Result<bool> {
+        if identity.scope != crate::tool::InstallScope::Isolated
+            || !install_root.join(".osdk-complete").is_file()
+            || !crate::inventory::DynamicToolManifest::manifest_path(install_root).is_file()
+        {
+            return Ok(false);
+        }
+        // The environment has to still have an interpreter: a venv whose
+        // interpreter was removed (or whose managed Python was uninstalled)
+        // looks complete on disk yet cannot run anything.
+        Ok(venv_python(install_root).is_file())
     }
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
-        // One environment per tool: executables live in its own bin directory.
-        let root = ctx.dirs.install_path(self.id(), &tv.version);
-        Ok(vec![venv_bin_dir(&root)])
+        // One environment per tool: executables live in its own bin directory,
+        // under the identity-derived install root rather than beside it.
+        Ok(vec![venv_bin_dir(&self.install_root(ctx, tv)?)])
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        // Discover what is actually on disk rather than assuming the console
-        // scripts match the project name -- they frequently do not.
-        let paths = self.bin_paths(ctx, tv)?;
-        let mut names = crate::backend::bin_names_in_dirs(&paths);
-        // The interpreter and pip belong to the environment's plumbing, not to
-        // the tool the user asked for; exposing them would let `pypi:ruff` shadow
-        // the managed `python`.
-        names.retain(|name| {
-            let stem = name
-                .rsplit_once('.')
-                .map(|(stem, _)| stem)
-                .unwrap_or(name)
-                .to_ascii_lowercase();
-            !matches!(
-                stem.as_str(),
-                "python" | "pythonw" | "python3" | "pip" | "pip3" | "activate" | "deactivate"
-            ) && !stem.starts_with("pip3.")
-                && !stem.starts_with("python3.")
-                && !stem.starts_with("activate")
-                && !stem.starts_with("deactivate")
-        });
-        Ok(names)
+        Ok(tool_bin_names(&self.install_root(ctx, tv)?))
     }
+}
+
+/// The commands an environment exposes, given its root.
+///
+/// The root is a parameter rather than something derived inside, because the
+/// caller that matters most -- publishing the inventory just after the
+/// environment is moved into place -- already knows the real path. Deriving it
+/// independently is how the first attempt wrote an empty `bins` list while
+/// `cowsay.exe` sat in `Scripts/`: at that moment the derived path did not exist
+/// yet, so the scan found nothing and reported success.
+///
+/// Discovery reads the directory instead of assuming the console script matches
+/// the project name, which frequently it does not.
+pub fn tool_bin_names(root: &Path) -> Vec<String> {
+    let bin_dir = venv_bin_dir(root);
+    let mut names = crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir));
+    // The interpreter and pip belong to the environment's plumbing, not to the
+    // tool the user asked for; exposing them would let `pypi:ruff` shadow the
+    // managed `python`.
+    names.retain(|name| {
+        let stem = name
+            .rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(name)
+            .to_ascii_lowercase();
+        !matches!(
+            stem.as_str(),
+            "python" | "pythonw" | "python3" | "pip" | "pip3"
+        ) && !stem.starts_with("pip3.")
+            && !stem.starts_with("python3.")
+            && !stem.starts_with("activate")
+            && !stem.starts_with("deactivate")
+    });
+    names
 }
 
 #[cfg(test)]
@@ -868,7 +1300,10 @@ mod tests {
 
         let backend = PypiBackend::from_id("pypi:ruff").unwrap();
         let tv = ToolVersion::new(backend.id(), "0.6.9");
-        let bin_dir = venv_bin_dir(&ctx.dirs.install_path(backend.id(), &tv.version));
+        // The identity-derived root, not `install_path` itself: a dynamic install
+        // lives one level deeper, and writing to the shallower path is what made
+        // an earlier version of this look correct while discovering nothing.
+        let bin_dir = venv_bin_dir(&backend.install_root(&ctx, &tv).unwrap());
         std::fs::create_dir_all(&bin_dir).unwrap();
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         for name in [
