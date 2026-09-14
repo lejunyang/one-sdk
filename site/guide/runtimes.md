@@ -170,13 +170,26 @@ catalog_url = "https://mirror.example/disco/v3.0/packages"
 
 ```bash
 osdk install maven@3.9.16
-osdk install gradle@9.7.0
+osdk install "gradle@=9.3.1"
 osdk install kotlin@2.4.10
 ```
 
-当前 JVM 工具 catalog 是固定集合：Maven 仅 `3.9.16`（SHA-512），Gradle 仅
-`9.7.0`（SHA-256），Kotlin 仅 `2.4.10`（SHA-256）。请求其他版本会失败。它们拥有
-独立安装目录和 shim；Kotlin 的 GitHub 下载还提供代理候选。
+**Gradle 按上游版本索引解析**，因此任何历史版本都可安装：`osdk list-remote gradle`
+列出全部正式发布（2026-09-14 实测 179 个），每个版本的下载地址与 SHA-256 都取自索引，
+无需在 osdk 内逐版本硬编码。索引里的 nightly、`-rc-N` 与 `-milestone-N` 会被判为非
+稳定，所以 `latest` 只会落到正式版；需要预览版请按名字显式指定。若某条记录没有校验和，
+安装会被拒绝而不是降级为不校验。
+
+Maven 与 Kotlin 的上游没有同类的可机读索引，仍是固定集合：Maven 仅 `3.9.16`
+（SHA-512）、Kotlin 仅 `2.4.10`（SHA-256），请求其他版本会失败。三者都拥有独立安装
+目录和 shim；Kotlin 的 GitHub 下载还提供代理候选。
+
+::: tip 与 Gradle Wrapper 的关系
+项目里已有 `gradle/wrapper/gradle-wrapper.properties` 时，**wrapper 仍是权威来源** ——
+它的 `distributionSha256Sum` 是比版本 pin 更强的保障。osdk 的 gradle pin 适用于没有
+wrapper 的场景（例如新建项目或直接用 `gradle` 命令）。两者的摘要同源：实测索引中
+9.3.1 的 checksum 与 wrapper 声明的 `distributionSha256Sum` 逐字符一致。
+:::
 
 ## Go
 

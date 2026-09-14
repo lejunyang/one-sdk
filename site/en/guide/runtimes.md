@@ -181,14 +181,31 @@ catalog_url = "https://mirror.example/disco/v3.0/packages"
 
 ```bash
 osdk install maven@3.9.16
-osdk install gradle@9.7.0
+osdk install "gradle@=9.3.1"
 osdk install kotlin@2.4.10
 ```
 
-The current JVM-tool catalog is fixed: Maven `3.9.16` with SHA-512, Gradle
-`9.7.0` with SHA-256, and Kotlin `2.4.10` with SHA-256. Other versions fail.
-Each has its own installation directory and shims; Kotlin also has a GitHub
-proxy download candidate.
+**Gradle resolves from the upstream version index**, so any historical release is
+installable: `osdk list-remote gradle` lists every finished release (179 measured
+on 2026-09-14), and each version's download URL and SHA-256 come from the index
+rather than being hardcoded per version. Nightlies, `-rc-N` and `-milestone-N`
+entries are classified as unstable, so `latest` only ever lands on a finished
+release; ask for a preview by name. An entry that publishes no checksum is
+refused rather than installed unverified.
+
+Maven and Kotlin have no comparable machine-readable index upstream, so they stay
+a fixed catalog: Maven `3.9.16` with SHA-512 and Kotlin `2.4.10` with SHA-256;
+other versions fail. All three have their own installation directory and shims;
+Kotlin also has a GitHub proxy download candidate.
+
+::: tip Relationship to the Gradle wrapper
+When a project has `gradle/wrapper/gradle-wrapper.properties`, **the wrapper
+remains authoritative** -- its `distributionSha256Sum` is a stronger guarantee
+than a version pin. An osdk gradle pin is for the cases without a wrapper, such
+as a new project or invoking `gradle` directly. The two agree on the digest: the
+index's checksum for 9.3.1 is byte-identical to the `distributionSha256Sum` a
+wrapper pins for it.
+:::
 
 ## Go
 

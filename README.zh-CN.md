@@ -323,7 +323,7 @@ osdk python find pypy-3.11
 osdk install java@21
 osdk install java@21 -o package-type=jre
 osdk install java@21 -o distribution=zulu -o package-type=jdk
-osdk install maven@3.9.16 gradle@9.7.0 kotlin@2.4.10
+osdk install maven@3.9.16 "gradle@=9.3.1" kotlin@2.4.10
 ```
 
 ### Go
