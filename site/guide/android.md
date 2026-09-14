@@ -383,14 +383,68 @@ cargo build --release
 这两个族的寻址形式是 `platforms;android-37.2`，因此版本本身带 `android-` 前缀——它
 是命名空间，不是版本段。有两点值得知道，因为都是首次安装它们时暴露出来的 bug：
 
-- `latest` 解析到最新的**数字** API 级别。`android-CANARY`、`android-UpsideDownCake`
+- `latest` 解析到最新的**稳定** API 级别。`android-CANARY`、`android-UpsideDownCake`
   这类代号是尚未分配编号的未来版本，因此排在所有数字版本**之下**而不是之上。需要它
   就按名字显式指定。
+- **是不是预览版，`<channelRef>` 说明不了。** Google 把 `android-37.2-beta3`、
+  `android-CANARY` 发布在 `channel-0`（稳定通道）上，且 license 与成品平台相同。
+  osdk 因此改读 `<type-details>` 里的 `<codename>` 与 `<beta-api-level>` —— 这才是
+  真正标记它们的字段，于是默认的 `prerelease = if-explicit` 策略能把它们挡在
+  `latest` 之外。
+- `android-36` 与 `android-36.1` 是**两个不同的 API 级别**，而名字本身看不出来。
+  `osdk list-remote` 会标出每个候选声明的 API 级别；`=` 用于逐字符锁定、不做任何回退：
+
+  ```bash
+  osdk list-remote android-platforms
+  # android-36-ext19 (API 36x)   <- ExtensionLevel 19 的 side-by-side 扩展包
+  # android-36 (API 36)
+  # android-36.1 (API 36.1)
+
+  osdk install "android-platforms@=android-36"   # 恰好 API 36
+  ```
+
+  裸数字 selector（如 `36`、`36.0`）在这里匹配不到任何东西：该家族的标识符都带
+  `android-` 命名空间，而且 Google 根本没有发布过 `android-36.0`。
 - 扩展级别（`android-35-ext15`）排在自身级别与下一级之间；beta（`android-37.2-beta1`）
   排在对应正式版之下。
 
 布局原样保留该版本号：`platforms/android-37.2/android.jar`，这正是 Gradle 和 Google
 自带工具查找的位置。
+
+#### 名字不等于 API 级别，用 `=` 锁定
+
+包名里的数字并不总是它的 API 级别，这一点在固定 `compileSdk` 时会咬人：
+
+| 包名 | 实际 API 级别 |
+| --- | --- |
+| `android-36` | 36 |
+| `android-36.1` | 36.1 |
+| `android-36-ext19` | 36x（ExtensionLevel 19 的 side-by-side 扩展） |
+
+写 `android-platforms = "android-36"` 是**前缀**请求，语义上允许命中同前缀的更新包。
+现在精确标识符优先，因此它会命中真正叫 `android-36` 的那一个；但如果项目要表达的是
+「就要这一个，不接受任何回退」，请用 `=` 前缀逐字锁定：
+
+```toml
+[tools]
+android-platforms = "=android-36"
+```
+
+`=` 对所有工具族通用（见[版本解析机制](./implementation/resolution)），它要求候选列表
+里存在逐字相同的版本，否则直接解析失败而不降级匹配。`osdk list-remote
+android-platforms` 会在每一行标出解析出的 API 级别，可以先核对再落 pin。
+
+#### 预览版不靠渠道识别
+
+Google 把 platform 族的预览版**发布在稳定渠道上**：`platforms;android-37.2-beta3`、
+`platforms;android-CANARY` 及其 system image 的 `channelRef` 都是 `channel-0`，和已经
+定稿的 `platforms;android-36` 完全一样。因此 osdk 不用渠道判断预览，而是同时看
+`<type-details>` 里的 `codename` / `beta-api-level`、渠道，以及版本尾部的预发布标签
+（`-rcN`、`-betaN` 等）。
+
+这直接影响 `latest`：在默认的 `prerelease = if-explicit` 策略下，只按渠道判断会让
+`android-system-images` 的 `latest` 落到 `android-37.2-beta3` 这样 2.4 GB 的预览镜像上。
+需要预览版时按名字显式指定，或用 `=` 锁定。
 
 ### 模拟器的 SDK 根校验
 

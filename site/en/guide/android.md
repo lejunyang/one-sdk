@@ -442,15 +442,79 @@ an `android-` prefix that is a namespace rather than a version segment. Two
 consequences worth knowing, because both were bugs found by installing them for
 the first time:
 
-- `latest` resolves to the newest **numbered** API level. Codenames such as
+- `latest` resolves to the newest **stable** API level. Codenames such as
   `android-CANARY` and `android-UpsideDownCake` are future releases with no
   assigned number, so they sort below every numbered release rather than above it.
   Ask for one by name if you want it.
+- Being a preview is **not** something `<channelRef>` tells you. Google publishes
+  `android-37.2-beta3` and `android-CANARY` on `channel-0`, the stable channel,
+  with the same licence as a finished platform. osdk therefore reads
+  `<codename>` and `<beta-api-level>` from `<type-details>`, which is what
+  actually marks them, and the default `prerelease = if-explicit` policy keeps
+  them out of `latest`.
+- `android-36` and `android-36.1` are **different API levels**, and the names do
+  not say so. `osdk list-remote` annotates each candidate with the API level it
+  declares, and `=` pins one verbatim with no fallback:
+
+  ```bash
+  osdk list-remote android-platforms
+  # android-36-ext19 (API 36x)   <- side-by-side extension, ExtensionLevel 19
+  # android-36 (API 36)
+  # android-36.1 (API 36.1)
+
+  osdk install "android-platforms@=android-36"   # exactly API 36
+  ```
+
+  A bare numeric selector such as `36` or `36.0` matches nothing here: every
+  identifier in this family carries the `android-` namespace, and Google
+  publishes no `android-36.0` at all.
 - Extension levels (`android-35-ext15`) sort between their own level and the
   next, and a beta (`android-37.2-beta1`) sorts below the release it precedes.
 
 The layout keeps the revision as-is: `platforms/android-37.2/android.jar`, which
 is where Gradle and Google's tools look.
+
+#### The name is not the API level -- pin it with `=`
+
+The number in a package name is not always its API level, which bites when you
+are fixing `compileSdk`:
+
+| Package | Actual API level |
+| --- | --- |
+| `android-36` | 36 |
+| `android-36.1` | 36.1 |
+| `android-36-ext19` | 36x (a side-by-side extension at ExtensionLevel 19) |
+
+Writing `android-platforms = "android-36"` is a **prefix** request, which by
+definition may match a newer package sharing that prefix. An exact identifier now
+wins, so it does select the package literally called `android-36`; but when the
+project means "this one, with no fallback", pin it verbatim with a leading `=`:
+
+```toml
+[tools]
+android-platforms = "=android-36"
+```
+
+`=` works for every family (see [Version resolution](./implementation/resolution)):
+it requires a character-for-character match among the published versions and fails
+to resolve rather than falling back to a looser tier. `osdk list-remote
+android-platforms` prints the resolved API level on each line, so you can check
+before committing a pin.
+
+#### Previews are not identified by channel
+
+Google publishes the platform families' previews **on the stable channel**:
+`platforms;android-37.2-beta3`, `platforms;android-CANARY` and their system images
+all carry `channelRef channel-0`, exactly like the finished
+`platforms;android-36`. osdk therefore does not use the channel to detect a
+preview; it consults the `codename` / `beta-api-level` in `<type-details>`, the
+channel, and a pre-release tag in the version tail (`-rcN`, `-betaN`, ...)
+together.
+
+This matters for `latest`: under the default `prerelease = if-explicit` policy,
+judging by channel alone makes `android-system-images`'s `latest` resolve to a
+2.4 GB preview image such as `android-37.2-beta3`. Ask for a preview by name, or
+pin it with `=`.
 
 ### The emulator's SDK root check
 

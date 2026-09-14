@@ -183,10 +183,17 @@ osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
 `-t/--tool` 至少一个且可重复。osdk 先安装指定版本，再把 backend bin 和环境加入
 单个子进程；不修改项目 pin，也不读取 lock。
 
+**不带 `@` 时继承当前生效的 pin。** `-t java` 表示「这个项目选定的那个 Java」，按
+[工作目录解析优先级](./implementation/resolution#工作目录解析优先级)向上查找
+`osdk.toml`、`.tool-versions` 与惯用版本文件；只有写成 `-t java@<选择器>` 才覆盖它，
+包括显式写 `@latest`。这条规则对 `install`、`exec`、`lock`、`outdated`、`upgrade`
+一致。什么都没配置时才回退到 `latest`。
+
 ```bash
 osdk exec --tool node@20 -- node --version
 osdk exec --tool node@20 --tool pnpm@10 -- pnpm test
 osdk exec -t bun@latest -- bunx vite
+osdk exec -t java -- ./gradlew build   # 用项目 pin 的 JDK，无需重复写版本
 ```
 
 `pnpx` 路由到受管 `pnpm dlx`，`bunx` 路由到受管 `bun x`；未声明对应 backend

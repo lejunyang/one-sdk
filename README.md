@@ -426,9 +426,29 @@ the install stops before downloading anything. Available families are
 `android-emulator`, `android-sources` and `android-system-images`.
 
 `android-platforms` and `android-sources` spell their revisions `android-37.2`,
-and `latest` picks the newest numbered API level — codenames such as
-`android-CANARY` are future releases with no number assigned yet, so ask for one
-by name if you want it.
+and `latest` picks the newest stable API level. Previews have to be asked for by
+name: Google publishes builds such as `android-37.2-beta3` and `android-CANARY`
+**on the stable channel** (`channelRef` is `channel-0`), so osdk identifies them
+from the manifest's `<codename>` and `<beta-api-level>` instead, and the default
+`prerelease = if-explicit` policy still keeps them out of `latest`.
+
+Within one family `android-36` and `android-36.1` are two different API levels,
+which the names do not reveal, so `osdk list-remote` annotates each candidate
+with the API level it actually declares:
+
+```bash
+osdk list-remote android-platforms
+# android-36-ext19 (API 36x)   <- side-by-side extension, ExtensionLevel 19
+# android-36 (API 36)
+# android-36.1 (API 36.1)
+```
+
+When you mean "this one, with no fallback", pin it verbatim with `=`:
+
+```bash
+# exactly API 36; cannot drift to 36.1
+osdk install "android-platforms@=android-36"
+```
 
 Emulator system images work the same way, and whatever a package declares as a
 dependency is installed with it — asking for an image brings the matching

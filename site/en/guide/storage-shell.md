@@ -203,10 +203,19 @@ At least one `-t/--tool` is required, and the option is repeatable. osdk install
 the requested versions, then exposes their bins and environment to one child
 process. It neither changes project pins nor reads the lock.
 
+**Without `@`, the operand inherits the pin in effect.** `-t java` means "the Java
+this project selected": osdk walks up for `osdk.toml`, `.tool-versions` and the
+idiomatic version files following the
+[working-directory precedence](./implementation/resolution#working-directory-precedence).
+Only `-t java@<selector>` overrides it -- including an explicit `@latest`. The rule
+is the same for `install`, `exec`, `lock`, `outdated` and `upgrade`, and `latest`
+remains the fallback when nothing is configured.
+
 ```bash
 osdk exec --tool node@20 -- node --version
 osdk exec --tool node@20 --tool pnpm@10 -- pnpm test
 osdk exec -t bun@latest -- bunx vite
+osdk exec -t java -- ./gradlew build   # uses the project's pinned JDK
 ```
 
 `pnpx` routes to managed `pnpm dlx` and `bunx` to managed `bun x`; omitting the

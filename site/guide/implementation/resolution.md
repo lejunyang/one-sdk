@@ -26,11 +26,12 @@ metadata 发现最长 module root。详见 [Go 开发工具实现](./go-tools#�
 - 空值、`latest`、`stable`、`current` 表示最新稳定版；
 - `lts`、`lts/<name>` 表示最新或指定 LTS 线；
 - 完整 semver（可带前置或构建标识）是精确版本；
+- 前导 `=`（如 `=android-36`）是**逐字 pin**：要求候选列表中存在字符级完全相同的版本，绝不回退到更宽松的匹配层级，也不要求文本是合法 semver。它区别于「精确版本」——后者在字面不命中时仍会按下文三级规则降级。之所以需要它，是因为某些目录的标识符本身不是版本，且在前缀匹配下互不排斥：`android-36` 与 `android-36.1` 是两个不同的 API 级别，而点分隔组件前缀匹配会让前者匹配上后者。逐字 pin 同时被视为「显式请求」，因此可在不放宽全局策略的前提下取到预发布版本；
 - 不完整数字（如 `20`、`20.11`）是组件前缀；
 - Node 项目元数据可产生 npm 风格 semver range，并支持 `||`；
 - `system` 是保留的版本规格；当前通用 backend 不会把它解析为 PATH 中的工具，Rust backend 目前会将其映射为 `stable`。在实现真正的 unmanaged/PATH 模式前，不应把它描述为可用的安装选择。
 
-候选列表约定按版本升序排列。[`select_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 从尾部选择最高匹配项：`latest` 只取稳定版，range 也只取稳定版，前缀按点分隔组件匹配而不是字符串前缀匹配。精确版本分三级匹配：先字面相等，再按 semver 核心版本比较（忽略 build metadata，`21.0.12` 可命中 `21.0.12+8`，预发布标识必须一致，同核心多 build 取最高），最后回退到点分隔组件前缀——仅在同核心版本缺失时让 `21.0.12` 命中四段式 PSU `21.0.12.1+1`，主要服务于带 build 号与 PSU 四段版本的 Java；严格三段 semver 的 backend 不会走到第三级。`select_version_with_prerelease` 为选择使用它的 backend 提供预发布策略：默认 `if-explicit`，`never` 拒绝预发布，`allow` 可让 `latest`、range 或前缀选中预发布版。Python、GitHub 和基于 npm package 的自定义 resolver 会显式应用该策略；通用 resolver 和部分 backend 仍使用 `select_version`，所以当前行为依 backend 而异。
+候选列表约定按版本升序排列。[`select_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 从尾部选择最高匹配项：`latest` 只取稳定版，range 也只取稳定版，前缀按点分隔组件匹配而不是字符串前缀匹配。逐字 pin 只做字符级比较，命中不了就解析失败。精确版本分三级匹配：先字面相等，再按 semver 核心版本比较（忽略 build metadata，`21.0.12` 可命中 `21.0.12+8`，预发布标识必须一致，同核心多 build 取最高），最后回退到点分隔组件前缀——仅在同核心版本缺失时让 `21.0.12` 命中四段式 PSU `21.0.12.1+1`，主要服务于带 build 号与 PSU 四段版本的 Java；严格三段 semver 的 backend 不会走到第三级。组件前缀匹配前会先检查「请求文本本身是否就是某个已发布版本」，命中则直接返回该候选：否则 `android-36` 会在 `android-36` 与 `android-36.1` 并存时选到后者。`select_version_with_prerelease` 为选择使用它的 backend 提供预发布策略：默认 `if-explicit`，`never` 拒绝预发布，`allow` 可让 `latest`、range 或前缀选中预发布版；逐字 pin 与带预发布标识的精确版本一样算作显式。Python、GitHub 和基于 npm package 的自定义 resolver 会显式应用该策略；通用 resolver 和部分 backend 仍使用 `select_version`，所以当前行为依 backend 而异。
 
 ## 工作目录解析优先级
 

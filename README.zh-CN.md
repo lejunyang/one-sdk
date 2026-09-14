@@ -386,8 +386,27 @@ osdk 不会替你接受协议：未传接受选项时，安装会在下载任何
 `android-emulator`、`android-sources`、`android-system-images`。
 
 `android-platforms` 与 `android-sources` 的版本形如 `android-37.2`，`latest` 取最新的
-数字 API 级别——`android-CANARY` 这类代号是尚未分配编号的未来版本，需要它请按名字
-显式指定。
+稳定 API 级别。预览版需要按名字显式指定：Google 把 `android-37.2-beta3`、
+`android-CANARY` 这类构建**发布在稳定通道上**（`channelRef` 为 `channel-0`），osdk 依据
+清单里的 `<codename>` 与 `<beta-api-level>` 识别它们，因此默认的
+`prerelease = if-explicit` 策略仍能把它们挡在 `latest` 之外。
+
+同一家族里 `android-36` 与 `android-36.1` 是两个不同的 API 级别，名字本身看不出这一点，
+所以 `osdk list-remote` 会标出每个候选的真实 API 级别：
+
+```bash
+osdk list-remote android-platforms
+# android-36-ext19 (API 36x)   <- ExtensionLevel 19 的 side-by-side 扩展包
+# android-36 (API 36)
+# android-36.1 (API 36.1)
+```
+
+需要「就是这一个、不接受任何回退」时，用 `=` 精确锁定：
+
+```bash
+# 恰好 API 36，不会漂移到 36.1
+osdk install "android-platforms@=android-36"
+```
 
 模拟器系统镜像同样如此，并且包声明的依赖会随之一起安装——安装镜像时会带上它
 所需的 `android-emulator`：
