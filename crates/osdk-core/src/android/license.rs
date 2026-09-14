@@ -231,6 +231,7 @@ mod tests {
             revision: "1.0.0".into(),
             license_ref: license_ref.map(str::to_string),
             channel: Channel::Stable,
+            api: Default::default(),
             dependencies: Vec::new(),
             archives: vec![Archive {
                 url: "a.zip".into(),

@@ -197,6 +197,50 @@ impl Dependency {
     }
 }
 
+/// The API-level facts a package's `<type-details>` declares.
+///
+/// Only the platform-ish families publish these (`platforms`, `sources`,
+/// `system-images`); a `build-tools` or `platform-tools` entry has none, so every
+/// field is optional and an absent block is not an error.
+///
+/// This block exists because it carries the **only** trustworthy preview signal
+/// in the manifest. `<channelRef>` does not: Google publishes
+/// `platforms;android-37.2-beta3`, `platforms;android-CANARY` and their system
+/// images on `channel-0` (stable), byte-verified against
+/// `repository2-4.xml` and `sys-img/google_apis/sys-img2-3.xml` on 2026-09-14.
+/// A manager that reads only the channel therefore classifies a DEV preview as
+/// stable, and `latest` under the default `prerelease = if-explicit` policy
+/// resolves to it. `<codename>` and `<beta-api-level>` are what actually mark
+/// it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApiLevelDetails {
+    /// `<api-level>` verbatim, e.g. `36`, `36.1`, or `36x`.
+    ///
+    /// Kept as published rather than parsed into a number. The `x` suffix marks
+    /// a non-base extension (`android-36-ext19` reports `36x`), and dropping it
+    /// would make that package indistinguishable from the base `android-36`.
+    pub api_level: Option<String>,
+    /// `<beta-api-level>`: the API level this preview will become.
+    pub beta_api_level: Option<String>,
+    /// `<codename>`: present only on a preview (`DEV`, `CANARY`, `CinnamonBun`).
+    pub codename: Option<String>,
+    /// `<extension-level>`, when declared.
+    pub extension_level: Option<String>,
+    /// `<base-extension>`: false on the `-extNN` side-by-side packages.
+    pub base_extension: Option<bool>,
+}
+
+impl ApiLevelDetails {
+    /// Whether these details describe a pre-release build.
+    ///
+    /// Either marker is sufficient and both are checked because they do not
+    /// always appear together: `android-CANARY` declares a codename and no
+    /// `beta-api-level`, while the `android-37.2-betaN` entries declare both.
+    pub fn is_preview(&self) -> bool {
+        self.codename.is_some() || self.beta_api_level.is_some()
+    }
+}
+
 /// A package as published in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemotePackage {
@@ -210,6 +254,9 @@ pub struct RemotePackage {
     pub license_ref: Option<String>,
     /// Channel the package is published on.
     pub channel: Channel,
+    /// API-level facts from `<type-details>`; empty for families that publish
+    /// none. See [`ApiLevelDetails`] for why these are parsed at all.
+    pub api: ApiLevelDetails,
     /// Other packages this package requires.
     pub dependencies: Vec<Dependency>,
     /// All archives declared for the package, across host platforms.
@@ -238,6 +285,26 @@ impl RemotePackage {
         self.version_tail()
             .map(str::to_string)
             .unwrap_or_else(|| self.revision.clone())
+    }
+
+    /// Whether this package is a pre-release build.
+    ///
+    /// Three independent signals, because no single one covers the manifest:
+    ///
+    /// 1. `<codename>` / `<beta-api-level>` in `<type-details>` — the only marker
+    ///    on the platform families, whose previews ship on `channel-0`.
+    /// 2. A non-stable `<channelRef>` — how the `ndk` and `emulator` families
+    ///    mark theirs.
+    /// 3. A pre-release tag in the version itself (`37.0.0-rc2`) — how
+    ///    `build-tools` marks its release candidates, which declare neither a
+    ///    codename nor a preview channel.
+    ///
+    /// Verified against the live manifest on 2026-09-14: dropping any one of the
+    /// three lets a preview through as stable for at least one family.
+    pub fn is_preview(&self) -> bool {
+        self.api.is_preview()
+            || self.channel != Channel::Stable
+            || version_tail_is_prerelease(&self.version())
     }
 
     /// Pick the archive matching `platform`, preferring an exact host-OS match
@@ -429,6 +496,40 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Whether a version's trailing `-<tag>` names a pre-release.
+///
+/// Deliberately an allowlist, and deliberately *not* the same judgement as
+/// [`split_prerelease`]. That function answers an ordering question and treats
+/// every hyphen tail as "sorts below the plain release", which is correct for
+/// ordering: `android-36-ext19` really does come before the base `android-36`.
+/// But it is not a preview -- it is a shipped side-by-side extension, and
+/// classifying it as one would hide API 36 extension packages behind the
+/// pre-release policy.
+///
+/// The tags below are the ones the Android manifest actually publishes as
+/// tails, enumerated from the live `repository2-4.xml` on 2026-09-14:
+/// `build-tools` uses `-rcN`, `cmdline-tools` uses `-rcNN` and `-alphaNN`, and
+/// `platforms` / `sources` use `-betaN` (plus the non-preview `-extNN`).
+/// Anything unrecognised is treated as *not* a preview: a mislabelled preview is
+/// caught by the codename and channel signals, whereas guessing here would
+/// silently hide real releases.
+fn version_tail_is_prerelease(version: &str) -> bool {
+    const PRERELEASE_TAGS: &[&str] = &[
+        "alpha", "beta", "canary", "dev", "eap", "nightly", "preview", "rc", "snapshot",
+    ];
+    let Some(tag) = split_prerelease(version).1 else {
+        return false;
+    };
+    let tag = tag.trim().to_ascii_lowercase();
+    PRERELEASE_TAGS.iter().any(|marker| {
+        // Tags carry a trailing ordinal (`rc2`, `alpha01`, `beta3`) or none at
+        // all. Requiring the remainder to be numeric keeps `ext19` from matching
+        // some future tag that merely starts with the same letters.
+        tag.strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
 /// Split `1.0-rc1` into (`1.0`, Some(`rc1`)).
 ///
 /// `platforms` and `sources` revisions read `android-37.2`, where the leading
@@ -581,6 +682,7 @@ fn parse_remote_package(xml: &str, start: usize, body: &str) -> Option<RemotePac
         .unwrap_or_default();
     let dependencies = parse_dependencies(body);
     let archives = parse_archives(body);
+    let api = parse_api_level_details(body);
     let obsolete = first_text(body, "obsolete")
         .map(|value| value.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -590,10 +692,39 @@ fn parse_remote_package(xml: &str, start: usize, body: &str) -> Option<RemotePac
         revision,
         license_ref,
         channel,
+        api,
         dependencies,
         archives,
         obsolete,
     })
+}
+
+/// Read the `<type-details>` API-level block, if the package has one.
+///
+/// Scoped to that element rather than scanning the whole package body: a
+/// `system-images` entry nests `<tag>` and `<vendor>` children that also carry
+/// `<id>`/`<display>` text, and a body-wide search for a field name would be
+/// free to pick one up from the wrong subtree.
+fn parse_api_level_details(body: &str) -> ApiLevelDetails {
+    let Some(start) = find_element(body, "type-details", 0) else {
+        return ApiLevelDetails::default();
+    };
+    let Some((details, _)) = element_body(body, start, "type-details") else {
+        return ApiLevelDetails::default();
+    };
+    let text = |field: &str| {
+        first_text(details, field)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    ApiLevelDetails {
+        api_level: text("api-level"),
+        beta_api_level: text("beta-api-level"),
+        codename: text("codename"),
+        extension_level: text("extension-level"),
+        base_extension: text("base-extension")
+            .map(|value| value.eq_ignore_ascii_case("true")),
+    }
 }
 
 fn parse_revision(body: &str) -> String {
@@ -1268,6 +1399,181 @@ mod tests {
             compare_versions("29.0.14206865", "30.0.16138531"),
             Ordering::Less
         );
+    }
+
+    /// The platform families' previews are published on the **stable** channel,
+    /// so the channel alone cannot classify them.
+    ///
+    /// Byte-verified against the live `repository2-4.xml` and
+    /// `sys-img/google_apis/sys-img2-3.xml` on 2026-09-14:
+    /// `platforms;android-37.2-beta3`, `platforms;android-CANARY` and
+    /// `system-images;android-37.2-beta3;google_apis_ps16k;x86_64` all carry
+    /// `<channelRef ref="channel-0"/>` and `android-sdk-license`, exactly like
+    /// the finished `platforms;android-36`. What distinguishes them is
+    /// `<codename>` / `<beta-api-level>` inside `<type-details>`, which the
+    /// parser previously discarded -- so `stable` came back `true` for a DEV
+    /// preview and `latest` resolved to it under the default policy.
+    #[test]
+    fn type_details_identify_stable_channel_previews() {
+        let xml = r#"<?xml version="1.0"?>
+<sdk:sdk-repository xmlns:sdk="http://schemas.android.com/sdk/android/repo/repository2/03">
+  <remotePackage path="platforms;android-36">
+    <type-details xsi:type="sdk:platformDetailsType">
+      <api-level>36</api-level>
+      <extension-level>17</extension-level>
+      <base-extension>true</base-extension>
+    </type-details>
+    <revision><major>2</major></revision>
+    <display-name>Android SDK Platform 36</display-name>
+    <uses-license ref="android-sdk-license"/>
+    <channelRef ref="channel-0"/>
+    <archives><archive><complete>
+      <size>1</size><checksum type="sha1">aa</checksum><url>p36.zip</url>
+    </complete></archive></archives>
+  </remotePackage>
+  <remotePackage path="platforms;android-36-ext19">
+    <type-details xsi:type="sdk:platformDetailsType">
+      <api-level>36x</api-level>
+      <extension-level>19</extension-level>
+      <base-extension>false</base-extension>
+    </type-details>
+    <revision><major>1</major></revision>
+    <display-name>Android SDK Platform 36 ext19</display-name>
+    <uses-license ref="android-sdk-license"/>
+    <channelRef ref="channel-0"/>
+    <archives><archive><complete>
+      <size>1</size><checksum type="sha1">bb</checksum><url>p36e19.zip</url>
+    </complete></archive></archives>
+  </remotePackage>
+  <remotePackage path="platforms;android-37.2-beta3">
+    <type-details xsi:type="sdk:platformDetailsType">
+      <api-level>37.1</api-level>
+      <beta-api-level>37.2</beta-api-level>
+      <beta-number>3</beta-number>
+      <codename>DEV</codename>
+      <extension-level>23</extension-level>
+      <base-extension>true</base-extension>
+    </type-details>
+    <revision><major>3</major></revision>
+    <display-name>Android SDK Platform 37.2-beta3</display-name>
+    <uses-license ref="android-sdk-license"/>
+    <channelRef ref="channel-0"/>
+    <archives><archive><complete>
+      <size>1</size><checksum type="sha1">cc</checksum><url>p372b3.zip</url>
+    </complete></archive></archives>
+  </remotePackage>
+  <remotePackage path="platforms;android-CANARY">
+    <type-details xsi:type="sdk:platformDetailsType">
+      <api-level>37.1</api-level>
+      <codename>CANARY</codename>
+      <extension-level>23</extension-level>
+      <base-extension>true</base-extension>
+    </type-details>
+    <revision><major>1</major></revision>
+    <display-name>Android SDK Platform CANARY</display-name>
+    <uses-license ref="android-sdk-license"/>
+    <channelRef ref="channel-0"/>
+    <archives><archive><complete>
+      <size>1</size><checksum type="sha1">dd</checksum><url>pcanary.zip</url>
+    </complete></archive></archives>
+  </remotePackage>
+  <remotePackage path="build-tools;37.0.0-rc2">
+    <revision><major>37</major><minor>0</minor><micro>0</micro></revision>
+    <display-name>Android SDK Build-Tools 37-rc2</display-name>
+    <uses-license ref="android-sdk-preview-license"/>
+    <channelRef ref="channel-0"/>
+    <archives><archive><complete>
+      <size>1</size><checksum type="sha1">ee</checksum><url>bt37rc2.zip</url>
+    </complete></archive></archives>
+  </remotePackage>
+</sdk:sdk-repository>
+"#;
+        let manifest = parse_manifest(xml).expect("fixture parses");
+
+        let base = manifest.package("platforms;android-36").unwrap();
+        assert_eq!(base.api.api_level.as_deref(), Some("36"));
+        assert_eq!(base.api.extension_level.as_deref(), Some("17"));
+        assert_eq!(base.api.base_extension, Some(true));
+        assert!(!base.api.is_preview());
+        assert!(!base.is_preview());
+
+        // The `x` suffix is preserved: it is what distinguishes a side-by-side
+        // extension from the base platform of the same API level.
+        let extension = manifest.package("platforms;android-36-ext19").unwrap();
+        assert_eq!(extension.api.api_level.as_deref(), Some("36x"));
+        assert_eq!(extension.api.base_extension, Some(false));
+        assert!(!extension.is_preview());
+
+        // Both preview shapes are caught, and both sit on the stable channel.
+        for path in ["platforms;android-37.2-beta3", "platforms;android-CANARY"] {
+            let preview = manifest.package(path).unwrap();
+            assert_eq!(preview.channel, Channel::Stable, "{path}");
+            assert_eq!(
+                preview.license_ref.as_deref(),
+                Some("android-sdk-license"),
+                "{path}"
+            );
+            assert!(preview.api.is_preview(), "{path}");
+            assert!(preview.is_preview(), "{path}");
+        }
+        assert_eq!(
+            manifest
+                .package("platforms;android-37.2-beta3")
+                .unwrap()
+                .api
+                .beta_api_level
+                .as_deref(),
+            Some("37.2")
+        );
+        // `android-CANARY` declares no beta level, so the codename has to be
+        // sufficient on its own.
+        assert!(manifest
+            .package("platforms;android-CANARY")
+            .unwrap()
+            .api
+            .beta_api_level
+            .is_none());
+
+        // `build-tools` publishes no type-details at all; its release candidates
+        // are marked only by the version tail, so that signal is load-bearing too.
+        let rc = manifest.package("build-tools;37.0.0-rc2").unwrap();
+        assert_eq!(rc.api, ApiLevelDetails::default());
+        assert!(!rc.api.is_preview());
+        assert!(rc.is_preview());
+    }
+
+    /// The version-tail signal is an allowlist, not "any hyphen".
+    ///
+    /// `android-36-ext19` sorts below the base `android-36` and therefore looks
+    /// like a pre-release to the *ordering* helper, but it is a shipped
+    /// side-by-side extension. Treating it as a preview would hide every API 36
+    /// extension package behind the pre-release policy -- and `android-36-ext19`
+    /// is precisely the package a project needing API 36 has to install.
+    #[test]
+    fn only_known_prerelease_tags_count_as_a_preview_tail() {
+        // Real tails from the live manifest, previews first.
+        for version in [
+            "37.0.0-rc2",
+            "19.0-alpha01",
+            "13.0-rc01",
+            "android-37.2-beta1",
+        ] {
+            assert!(version_tail_is_prerelease(version), "{version}");
+        }
+        for version in [
+            "android-36-ext19",
+            "android-36",
+            "android-36.1",
+            "37.0.1",
+            "29.0.14206865",
+            "latest",
+        ] {
+            assert!(!version_tail_is_prerelease(version), "{version}");
+        }
+        // A tag that merely starts with a marker's letters is not one: the
+        // remainder has to be an ordinal or absent.
+        assert!(!version_tail_is_prerelease("1.0-rchive"));
+        assert!(!version_tail_is_prerelease("1.0-betamax"));
     }
 
     #[test]

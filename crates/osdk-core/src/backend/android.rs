@@ -991,7 +991,14 @@ impl Backend for AndroidBackend {
             .filter(|package| !package.obsolete)
             .map(|package| VersionInfo {
                 version: package.version(),
-                stable: package.channel == Channel::Stable,
+                // Not `channel == Stable`: Google publishes the platform
+                // families' previews on `channel-0`, so that test reported
+                // `android-37.2-beta3` and `android-CANARY` as stable and
+                // `latest` resolved to a preview under the default
+                // `prerelease = if-explicit` policy. `is_preview` consults the
+                // `<type-details>` codename and the version's own pre-release
+                // tag as well. See `RemotePackage::is_preview`.
+                stable: !package.is_preview(),
                 lts: None,
             })
             .collect())
@@ -1352,6 +1359,7 @@ mod tests {
             revision: "1.0.0".into(),
             license_ref: license_ref.map(str::to_string),
             channel: Channel::Stable,
+            api: Default::default(),
             dependencies: Vec::new(),
             archives: vec![Archive {
                 url: "a.zip".into(),

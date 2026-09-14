@@ -1718,6 +1718,11 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
     apply_source_override(app, &tool);
     let backend = app.registry.get(&tool)?;
     let versions = backend.list_remote_versions(&app.ctx).await?;
+    // Android platform-ish families publish an API level that the package name
+    // does not always reveal, and the mismatch is a real trap: `android-36.1`
+    // is API 36.1, not API 36, so a project needing exactly 36 that reads this
+    // list has no way to tell the two apart. Annotate them.
+    let api_levels = android_api_levels(app, backend.id()).await;
     let mut count = 0;
     for v in &versions {
         if !v.stable {
@@ -1733,13 +1738,62 @@ pub async fn list_remote(app: &mut App, tool: String, filter: Option<String>) ->
             .as_deref()
             .map(|l| format!(" (LTS: {l})"))
             .unwrap_or_default();
-        println!("{}{}", v.version, lts);
+        let api = api_levels
+            .get(&v.version)
+            .map(|level| format!(" (API {level})"))
+            .unwrap_or_default();
+        println!("{}{}{}", v.version, api, lts);
         count += 1;
     }
     if count == 0 {
         println!("{}", t!("msg.no_matching_versions"));
     }
     Ok(())
+}
+
+/// Map each Android package version to the API level its manifest declares.
+///
+/// Empty for every non-Android backend and for the Android families that publish
+/// no `<type-details>` (`build-tools`, `platform-tools`, ...), so callers can
+/// annotate unconditionally.
+///
+/// Constructs `AndroidBackend` directly rather than widening the `Backend`
+/// trait: a new trait method enters the vtable of all backends and is therefore
+/// retained in `osdk-shim`, whose binary size is a guarded budget. This is the
+/// same approach the android doctor, licence and preflight paths take.
+///
+/// Best-effort: a manifest that cannot be fetched yields no annotations rather
+/// than failing the listing, which still has the versions the user asked for.
+async fn android_api_levels(
+    app: &App,
+    backend_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    use osdk_core::backend::android::{AndroidBackend, ID_PREFIX, SUPPORTED_FAMILIES};
+
+    let Some(family) = backend_id.strip_prefix(ID_PREFIX) else {
+        return Default::default();
+    };
+    let Some(family) = SUPPORTED_FAMILIES
+        .iter()
+        .find(|candidate| **candidate == family)
+    else {
+        return Default::default();
+    };
+    let android = AndroidBackend::new(family);
+    let Ok(manifest) = android.manifest(&app.ctx).await else {
+        return Default::default();
+    };
+    manifest
+        .family(family)
+        .into_iter()
+        .filter_map(|package| {
+            package
+                .api
+                .api_level
+                .as_ref()
+                .map(|level| (package.version(), level.clone()))
+        })
+        .collect()
 }
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
