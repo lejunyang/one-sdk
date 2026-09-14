@@ -126,6 +126,24 @@ apply, because every candidate here is a public mirror of the same public module
 set. A `GOPROXY` the user set themselves -- including `off` and `direct` -- is
 never overridden.
 
+`go-modules` is not a backend and so cannot be reached through the registry, but
+like `self` (osdk's own release download) it carries per-tool source
+configuration, so `canonical_source_tool` admits it explicitly and
+`osdk source list/test/add/remove/pin/unpin` all work. `source test` probes
+`<proxy>/golang.org/x/text/@v/list`: a small, long-lived, universally mirrored
+module on a well-known public path -- probing whatever the user actually depends
+on would leak that dependency to every candidate. `direct` is not a mirror and
+has no endpoint to measure, so it stays unranked and only appears as the final
+GOPROXY fallback.
+
+Pins need explicit handling here. The generic path applies a pin after probing,
+but this list is consumed directly in the shim with no probe, so
+`module_proxy_sources` moves the pinned source to the front itself; otherwise the
+pin would be written, reported as set, and then silently ignored. It moves to the
+front rather than displacing the rest because GOPROXY is a fallback list: a pin
+says "try this first", and dropping the others would turn one unreachable host
+into a hard build failure.
+
 ## Isolation and activation
 
 osdk runs one shell-free `go install <command>@v<version>` in a cleared

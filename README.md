@@ -552,19 +552,22 @@ unreachable `proxy.golang.org` falls through to a mirror instead of failing the
 build. The `|` separator is required: a comma only advances on 404/410 and
 treats a connection timeout as terminal.
 
-This mirror set is configured under its own `go-modules` name, independent of
-the toolchain archive sources:
+This mirror set lives under its own `go-modules` name, independent of the
+toolchain archive sources in `[sources.go]`, and the usual `osdk source`
+subcommands apply to it:
 
-```toml
-[sources.go-modules]
-disable = ["proxy.golang.org"]
-
-[[sources.go-modules.custom]]
-id = "corp"
-kind = "custom"
-download_url = "https://goproxy.corp/"
-priority = 1
+```bash
+osdk source list go-modules
+osdk source test go-modules
+osdk source add go-modules --id corp --download-url https://goproxy.corp/
+osdk source pin go-modules goproxy.cn
+osdk source unpin go-modules
 ```
+
+A pin means "try this first", not "use only this": the pinned source moves to
+the front and the rest stay on as fallbacks, so one unreachable host does not
+fail the build. Use `[sources.go-modules].disable` when you want exactly one
+endpoint.
 
 A `GOPROXY` you set yourself is never overridden -- including the policy values
 `off` and `direct`.

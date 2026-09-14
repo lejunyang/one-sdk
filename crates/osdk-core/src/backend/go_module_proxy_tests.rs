@@ -145,3 +145,35 @@ fn module_proxy_honours_disabled_and_custom_sources() {
     );
     assert!(proxy.ends_with("|direct"), "missing direct fallback: {proxy}");
 }
+
+/// `osdk source pin go-modules <id>` 必须真正改变 GOPROXY 的尝试顺序。
+///
+/// pin 写在 `[sources."go-modules"].pin`，而 `effective_sources_for` 本身不处理
+/// pin（通用路径是在探测之后再应用）。这份列表在 shim 里被直接消费、不做探测，
+/// 所以若不显式处理，pin 会被写入、被报告为已设置，然后静默失效。
+#[test]
+fn module_proxy_pin_moves_that_source_to_the_front() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut ctx = test_ctx(temporary.path());
+    ctx.config.sources.per_tool.insert(
+        GO_MODULE_PROXY_TOOL.to_string(),
+        ToolSources {
+            pin: Some("goproxy.cn".into()),
+            ..Default::default()
+        },
+    );
+
+    let proxy = without_goproxy(|| goproxy_of(&ctx)).expect("GOPROXY must be injected");
+
+    assert!(
+        proxy.starts_with("https://goproxy.cn|"),
+        "pin did not move its source to the front: {proxy}"
+    );
+    // pin 表达的是「优先尝试」，不是「只用这一个」：GOPROXY 是回退列表，
+    // 丢掉其余候选会让单点不可达直接变成构建失败。
+    assert!(
+        proxy.contains("https://proxy.golang.org"),
+        "pin must not drop the remaining fallbacks: {proxy}"
+    );
+    assert!(proxy.ends_with("|direct"), "missing direct fallback: {proxy}");
+}

@@ -106,6 +106,18 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 避免把 module path 泄漏给下一个来源）在这里不适用，因为这组候选全是同一批公开模块
 的公开镜像。用户自己设过 `GOPROXY`（含 `off`、`direct`）时不会被覆盖。
 
+`go-modules` 不是 backend，因此进不了 registry；但它和 `self`（osdk 自身的发布下载）
+一样携带 per-tool source 配置，所以 `canonical_source_tool` 显式放行它，`osdk source`
+的 list / test / add / remove / pin / unpin 都可用。`source test` 探测的是
+`<proxy>/golang.org/x/text/@v/list`：这个 module 小、长期存在、各镜像都有，且是公开
+路径 —— 拿用户实际依赖去探测会把依赖信息泄漏给每个候选。`direct` 不是镜像、没有可测
+端点，因此不参与排序，只作为 GOPROXY 末尾的兜底。
+
+pin 在这里需要额外处理。通用路径是在探测之后再应用 pin，而这份列表在 shim 里被直接
+消费、不做探测，所以 `module_proxy_sources` 自己把被 pin 的源移到首位；否则 pin 会被
+写入配置、被报告为已设置，然后静默失效。移到首位而不是丢弃其余候选，是因为 GOPROXY
+本身是回退列表：pin 表达「优先尝试」，丢掉其余会让单点不可达直接变成构建失败。
+
 ## 隔离与激活
 
 osdk 在清空的环境中无 shell 执行一次 `go install <command>@v<version>`。它强制使用选中的

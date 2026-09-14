@@ -226,28 +226,86 @@ impl Backend for GoBackend {
 /// other. `osdk config` / `[sources."go-modules"]` addresses this set.
 pub const GO_MODULE_PROXY_TOOL: &str = "go-modules";
 
-impl GoBackend {
-    /// Module-proxy candidates, best-first, without touching the network.
-    ///
-    /// The upstream default comes first so nothing changes for users who can
-    /// reach it; mirrors follow by priority and are what make `go build` work on
-    /// a network where proxy.golang.org is blocked. `direct` is appended as the
-    /// final fallback so a module absent from a mirror is still fetched from its
-    /// origin rather than failing the build.
-    fn module_proxy_sources(ctx: &Ctx) -> Vec<Source> {
-        crate::source::select::effective_sources_for(
-            ctx,
-            GO_MODULE_PROXY_TOOL,
-            vec![
-                Source::official("proxy.golang.org", "https://proxy.golang.org"),
-                // Same mirror set the `go:` package backend already ships, kept
-                // in sync with it so a module resolves identically whether it is
-                // fetched by `osdk use go:<tool>` or by a plain `go build`.
-                Source::mirror("goproxy.cn", "https://goproxy.cn", 10),
-                Source::mirror("aliyun", "https://mirrors.aliyun.com/goproxy", 20),
-            ],
-        )
+/// The built-in module-proxy candidates, before per-tool configuration.
+fn default_module_proxy_sources() -> Vec<Source> {
+    vec![
+        Source::official("proxy.golang.org", "https://proxy.golang.org"),
+        // Same mirror set the `go:` package backend already ships, kept in sync
+        // with it so a module resolves identically whether it is fetched by
+        // `osdk use go:<tool>` or by a plain `go build`.
+        Source::mirror("goproxy.cn", "https://goproxy.cn", 10),
+        Source::mirror("aliyun", "https://mirrors.aliyun.com/goproxy", 20),
+    ]
+}
+
+/// Module-proxy candidates, best-first, without touching the network.
+///
+/// The upstream default comes first so nothing changes for users who can reach
+/// it; mirrors follow by priority and are what make `go build` work on a network
+/// where proxy.golang.org is blocked. A configured pin overrides that order.
+///
+/// Public because `go-modules` is not a backend and so cannot be reached through
+/// the registry, yet it carries per-tool source configuration that
+/// `osdk source list/add/remove/pin` has to be able to read -- the same shape
+/// `self_update` uses for osdk's own release download.
+pub fn module_proxy_sources(ctx: &Ctx) -> Vec<Source> {
+    let mut sources = crate::source::select::effective_sources_for(
+        ctx,
+        GO_MODULE_PROXY_TOOL,
+        default_module_proxy_sources(),
+    );
+    // Honour a pin by moving that source to the front rather than dropping the
+    // rest. `effective_sources_for` deliberately knows nothing about pins --
+    // the ranking path applies them later, after probing -- but this list is
+    // consumed directly (no probe runs in the shim), so without this the pin
+    // would be written, reported as set, and then silently ignored.
+    //
+    // The others stay on as fallbacks because GOPROXY is a fallback list, not a
+    // single choice: a pin expresses "try this first", and dropping the rest
+    // would turn one unreachable host into a hard build failure. A user who
+    // wants exactly one endpoint disables the others, which this respects.
+    if let Some(pin) = ctx
+        .config
+        .tool_sources(GO_MODULE_PROXY_TOOL)
+        .and_then(|configured| configured.pin.as_deref())
+    {
+        if let Some(position) = sources.iter().position(|source| source.id == pin) {
+            let pinned = sources.remove(position);
+            sources.insert(0, pinned);
+        }
     }
+    sources
+}
+
+/// The URL whose download speed stands in for a module-proxy source.
+///
+/// Probes the `@v/list` endpoint of a small, long-lived, universally mirrored
+/// module. A proxy that cannot serve this cannot serve modules at all, so a
+/// failure here is a true negative rather than an artefact of the probe. Keep it
+/// to a well-known public path: probing an arbitrary module would leak whatever
+/// the user happens to depend on to every candidate.
+///
+/// `direct` is not a mirror and has no endpoint to measure, so it is left
+/// unranked; it only ever appears as the final fallback in the emitted GOPROXY.
+pub fn module_proxy_probe_url(source: &Source) -> Option<String> {
+    let base = source.download_url.trim_end_matches('/');
+    crate::backend::go_package::validate_go_proxy(base)
+        .ok()
+        .map(|()| format!("{base}/golang.org/x/text/@v/list"))
+}
+
+/// Probe every module-proxy candidate now and cache the ranking.
+pub async fn refresh_module_proxy_sources(ctx: &Ctx) -> Result<Vec<crate::source::ProbeResult>> {
+    crate::source::select::refresh_for(
+        ctx,
+        GO_MODULE_PROXY_TOOL,
+        module_proxy_sources(ctx),
+        |_ctx, source| module_proxy_probe_url(source),
+    )
+    .await
+}
+
+impl GoBackend {
 
     /// The GOPROXY value to hand the go command, or `None` to leave it alone.
     ///
@@ -260,7 +318,7 @@ impl GoBackend {
         if std::env::var_os("GOPROXY").is_some() {
             return None;
         }
-        let mut endpoints = Self::module_proxy_sources(ctx)
+        let mut endpoints = module_proxy_sources(ctx)
             .into_iter()
             .map(|source| source.download_url.trim_end_matches('/').to_string())
             .filter(|url| crate::backend::go_package::validate_go_proxy(url).is_ok())

@@ -499,17 +499,20 @@ Go 的模块代理是一条独立通道：`[sources.go]` 只决定从哪里下�
 失败。用 `|` 而不是 `,` 是必须的：逗号只在 404/410 时继续尝试下一个，连接
 超时会被当成终止错误。
 
-这组镜像在配置里用 `go-modules` 这个名字单独管理，与工具链归档源互不影响：
+这组镜像用 `go-modules` 这个名字单独管理，与工具链归档源 `[sources.go]` 互不影响，
+常规的 `osdk source` 子命令都适用：
 
-```toml
-[sources.go-modules]
-disable = ["proxy.golang.org"]
-
-[[sources.go-modules.custom]]
-id = "corp"
-download_url = "https://goproxy.corp/"
-priority = 1
+```bash
+osdk source list go-modules
+osdk source test go-modules
+osdk source add go-modules --id corp --download-url https://goproxy.corp/
+osdk source pin go-modules goproxy.cn
+osdk source unpin go-modules
 ```
+
+pin 表示「优先尝试」而不是「只用这一个」：被 pin 的源移到首位，其余仍留作回退，
+因此单点不可达不会直接导致构建失败。只想保留一个端点时，在配置里用
+`[sources.go-modules].disable` 去掉其他源。
 
 自己设过 `GOPROXY`（包括 `off`、`direct` 这类策略值）时，osdk 不会覆盖它。
 

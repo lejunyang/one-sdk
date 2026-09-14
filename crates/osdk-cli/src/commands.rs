@@ -4213,6 +4213,8 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
             let tool = canonical_source_tool(app, &tool)?;
             let sources = if tool == osdk_core::self_update::SOURCE_ID {
                 osdk_core::self_update::effective_sources(&app.ctx)
+            } else if tool == osdk_core::backend::go::GO_MODULE_PROXY_TOOL {
+                osdk_core::backend::go::module_proxy_sources(&app.ctx)
             } else if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
                 osdk_core::model::source::effective_sources(&app.ctx, provider)
             } else {
@@ -4257,6 +4259,11 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                     return Err(anyhow!("--model is only valid for model providers"));
                 }
                 osdk_core::self_update::refresh_sources(&app.ctx).await?
+            } else if tool == osdk_core::backend::go::GO_MODULE_PROXY_TOOL {
+                if model.is_some() {
+                    return Err(anyhow!("--model is only valid for model providers"));
+                }
+                osdk_core::backend::go::refresh_module_proxy_sources(&app.ctx).await?
             } else if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
                 let model = model.ok_or_else(|| {
                     anyhow!("`osdk source test {tool}` requires --model owner/repo@revision")
@@ -4318,6 +4325,10 @@ pub async fn source(app: &mut App, command: SourceCommand) -> Result<()> {
                 osdk_core::self_update::effective_sources(&app.ctx)
                     .iter()
                     .any(|source| source.id == id)
+            } else if tool == osdk_core::backend::go::GO_MODULE_PROXY_TOOL {
+                osdk_core::backend::go::module_proxy_sources(&app.ctx)
+                    .iter()
+                    .any(|source| source.id == id)
             } else if let Ok(provider) = tool.parse::<osdk_core::model::ProviderId>() {
                 osdk_core::model::source::effective_sources(&app.ctx, provider)
                     .iter()
@@ -4355,6 +4366,13 @@ fn canonical_source_tool(app: &App, tool: &str) -> Result<String> {
     // registry cannot canonicalize it, but it does carry per-tool source
     // configuration and must stay reachable from `osdk source ...`.
     if tool == osdk_core::self_update::SOURCE_ID {
+        return Ok(tool.to_string());
+    }
+    // `go-modules` is the GOPROXY the go command uses for module downloads. It
+    // is not a backend either -- `[sources.go]` selects the toolchain archive
+    // host, which is a different service -- but it carries the same per-tool
+    // source configuration and must be reachable from `osdk source ...`.
+    if tool == osdk_core::backend::go::GO_MODULE_PROXY_TOOL {
         return Ok(tool.to_string());
     }
     match tool.parse::<osdk_core::model::ProviderId>() {
