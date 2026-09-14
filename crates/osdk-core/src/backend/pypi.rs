@@ -271,6 +271,202 @@ impl PypiBackend {
     }
 }
 
+/// Which installer to drive, and why that choice was made.
+///
+/// The reason travels with the decision because it has to be shown to the
+/// user: the two paths differ in dependency sharing and in supported options,
+/// so silently taking the slower, less capable one would turn a capability
+/// difference into an unexplained mystery.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallerChoice {
+    pub creator: EnvCreator,
+    /// Absolute path to the uv executable, when the uv path was chosen.
+    pub uv: Option<PathBuf>,
+    /// User-facing explanation, empty when uv was available as expected.
+    pub notice: Option<String>,
+}
+
+/// Decide between uv and the stdlib fallback.
+///
+/// # Why "can it spawn" rather than "does it exist"
+///
+/// A plain path lookup is not enough on Windows: a `uv.ps1` shim or a file
+/// carrying only a shebang resolves fine yet cannot be started as a process.
+/// mise hit this in both its venv and pipx paths and settled on a spawn check;
+/// this does the same by actually running `uv --version`.
+///
+/// `require_uv` makes the absence of uv fail closed instead of falling back --
+/// for callers that need uv-only behaviour such as `--relocatable`.
+#[cfg(feature = "install")]
+pub fn choose_installer(uv_candidate: Option<&Path>, require_uv: bool) -> Result<InstallerChoice> {
+    if let Some(candidate) = uv_candidate {
+        if uv_is_spawnable(candidate) {
+            return Ok(InstallerChoice {
+                creator: EnvCreator::Uv,
+                uv: Some(candidate.to_path_buf()),
+                notice: None,
+            });
+        }
+        if require_uv {
+            return Err(Error::other(format!(
+                "`{}` was found but could not be started, so uv-only behaviour is \\
+                 unavailable; reinstall uv or drop --require-uv",
+                candidate.display()
+            )));
+        }
+        // Found but unusable is worth saying out loud: the file exists, so
+        // "uv is not installed" would send the user looking in the wrong place.
+        return Ok(InstallerChoice {
+            creator: EnvCreator::Stdlib,
+            uv: None,
+            notice: Some(format!(
+                "`{}` exists but could not be started; using python -m venv with pip \\
+                 instead. Dependencies will not be shared between environments.",
+                candidate.display()
+            )),
+        });
+    }
+    if require_uv {
+        return Err(Error::other(
+            "uv is required for this operation but is not installed; run \\
+             `osdk install pypi:uv` first",
+        ));
+    }
+    Ok(InstallerChoice {
+        creator: EnvCreator::Stdlib,
+        uv: None,
+        notice: Some(
+            "uv is not installed; using python -m venv with pip. Installing uv \\
+             (`osdk install pypi:uv`) makes resolution faster and lets environments \\
+             share dependencies instead of each keeping its own copy."
+                .to_string(),
+        ),
+    })
+}
+
+/// Whether this uv can actually be started, not merely located.
+#[cfg(feature = "install")]
+fn uv_is_spawnable(uv: &Path) -> bool {
+    use crate::process::{
+        CaptureLimits, CommandOutcome, CommandRunner, CommandSpec, SystemCommandRunner,
+    };
+    let command = CommandSpec::new(uv).arg("--version");
+    matches!(
+        SystemCommandRunner.run_captured(&command, CaptureLimits::default()),
+        CommandOutcome::Exited { status, .. } if status.success()
+    )
+}
+
+/// Build the argument list that creates the environment.
+#[cfg(feature = "install")]
+pub fn venv_command(
+    choice: &InstallerChoice,
+    interpreter: &Path,
+    venv: &Path,
+) -> (PathBuf, Vec<String>) {
+    match (choice.creator, choice.uv.as_deref()) {
+        (EnvCreator::Uv, Some(uv)) => (
+            uv.to_path_buf(),
+            vec![
+                "venv".to_string(),
+                // The interpreter is named explicitly rather than left to uv:
+                // the whole point is that the environment is built against the
+                // version osdk resolved. mise passes `--python <abs path>` here
+                // for the same reason.
+                "--python".to_string(),
+                interpreter.display().to_string(),
+                venv.display().to_string(),
+            ],
+        ),
+        _ => (
+            interpreter.to_path_buf(),
+            vec![
+                "-m".to_string(),
+                "venv".to_string(),
+                venv.display().to_string(),
+            ],
+        ),
+    }
+}
+
+/// Build the argument list that installs `requirement` into `venv`.
+#[cfg(feature = "install")]
+pub fn install_command(
+    choice: &InstallerChoice,
+    venv: &Path,
+    requirement: &str,
+) -> (PathBuf, Vec<String>) {
+    match (choice.creator, choice.uv.as_deref()) {
+        (EnvCreator::Uv, Some(uv)) => (
+            uv.to_path_buf(),
+            vec![
+                "pip".to_string(),
+                "install".to_string(),
+                // Target the environment explicitly. Relying on an ambient
+                // VIRTUAL_ENV would make the destination depend on how the
+                // caller was invoked.
+                "--python".to_string(),
+                venv_python(venv).display().to_string(),
+                requirement.to_string(),
+            ],
+        ),
+        _ => (
+            // The environment's own pip, never a global one: a global pip would
+            // install into whichever interpreter owns it, which is how packages
+            // end up in a system Python nobody asked for.
+            venv_python(venv),
+            vec![
+                "-m".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                requirement.to_string(),
+            ],
+        ),
+    }
+}
+
+/// Inspect which seed packages an environment ended up with.
+#[cfg(feature = "install")]
+pub fn detect_seed(venv: &Path) -> SeedState {
+    let site = site_packages_dirs(venv);
+    let present = |name: &str| {
+        site.iter().any(|dir| {
+            dir.join(name).is_dir()
+                || std::fs::read_dir(dir).is_ok_and(|entries| {
+                    entries.filter_map(|entry| entry.ok()).any(|entry| {
+                        let file = entry.file_name();
+                        let file = file.to_string_lossy();
+                        file.starts_with(&format!("{name}-")) && file.ends_with(".dist-info")
+                    })
+                })
+        })
+    };
+    SeedState {
+        pip: present("pip"),
+        setuptools: present("setuptools"),
+        wheel: present("wheel"),
+    }
+}
+
+#[cfg(feature = "install")]
+fn site_packages_dirs(venv: &Path) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        return vec![venv.join("Lib").join("site-packages")];
+    }
+    // Unix nests site-packages under the minor version, which is not known
+    // here, so enumerate rather than guess.
+    let lib = venv.join("lib");
+    let Ok(entries) = std::fs::read_dir(&lib) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().join("site-packages"))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
 #[async_trait]
 impl Backend for PypiBackend {
     fn id(&self) -> &str {
@@ -550,6 +746,119 @@ mod tests {
             client: reqwest::Client::new(),
             show_progress: false,
         }
+    }
+
+    /// uv gets `--python <abs path>`; the fallback runs the interpreter itself.
+    /// Both must name the interpreter explicitly rather than inherit one.
+    #[cfg(feature = "install")]
+    #[test]
+    fn both_paths_build_against_the_interpreter_osdk_resolved() {
+        let interpreter = PathBuf::from("/managed/python/3.14.7/python.exe");
+        let venv = PathBuf::from("/installs/pypi/ruff/0.6.9");
+
+        let uv_choice = InstallerChoice {
+            creator: EnvCreator::Uv,
+            uv: Some(PathBuf::from("/tools/uv.exe")),
+            notice: None,
+        };
+        let (program, args) = venv_command(&uv_choice, &interpreter, &venv);
+        assert_eq!(program, PathBuf::from("/tools/uv.exe"));
+        assert_eq!(args[0], "venv");
+        let python_flag = args.iter().position(|arg| arg == "--python").unwrap();
+        assert_eq!(args[python_flag + 1], interpreter.display().to_string());
+
+        let stdlib_choice = InstallerChoice {
+            creator: EnvCreator::Stdlib,
+            uv: None,
+            notice: None,
+        };
+        let (program, args) = venv_command(&stdlib_choice, &interpreter, &venv);
+        // The interpreter *is* the program here, so the environment cannot be
+        // built against a different Python than the one osdk chose.
+        assert_eq!(program, interpreter);
+        assert_eq!(args[0], "-m");
+        assert_eq!(args[1], "venv");
+    }
+
+    /// Installs must target the environment explicitly on both paths.
+    #[cfg(feature = "install")]
+    #[test]
+    fn installs_target_the_environment_and_never_a_global_pip() {
+        let venv = PathBuf::from("/installs/pypi/ruff/0.6.9");
+
+        let uv_choice = InstallerChoice {
+            creator: EnvCreator::Uv,
+            uv: Some(PathBuf::from("/tools/uv.exe")),
+            notice: None,
+        };
+        let (program, args) = install_command(&uv_choice, &venv, "ruff==0.6.9");
+        assert_eq!(program, PathBuf::from("/tools/uv.exe"));
+        assert_eq!(&args[0..2], &["pip".to_string(), "install".to_string()]);
+        // Explicit target: relying on an ambient VIRTUAL_ENV would make the
+        // destination depend on how osdk itself was invoked.
+        let python_flag = args.iter().position(|arg| arg == "--python").unwrap();
+        assert_eq!(PathBuf::from(&args[python_flag + 1]), venv_python(&venv));
+        assert!(args.contains(&"ruff==0.6.9".to_string()));
+
+        let stdlib_choice = InstallerChoice {
+            creator: EnvCreator::Stdlib,
+            uv: None,
+            notice: None,
+        };
+        let (program, args) = install_command(&stdlib_choice, &venv, "ruff==0.6.9");
+        // The environment's own interpreter runs its own pip. A bare `pip` on
+        // PATH would install into whichever Python owns it -- which is exactly
+        // how packages end up in a system Python nobody asked for.
+        assert_eq!(program, venv_python(&venv));
+        assert_eq!(
+            &args[0..3],
+            &["-m".to_string(), "pip".to_string(), "install".to_string()]
+        );
+    }
+
+    /// Absent uv falls back with an explanation; `require_uv` fails closed.
+    #[cfg(feature = "install")]
+    #[test]
+    fn missing_uv_falls_back_loudly_unless_uv_was_required() {
+        let choice = choose_installer(None, false).unwrap();
+        assert_eq!(choice.creator, EnvCreator::Stdlib);
+        let notice = choice.notice.expect("a fallback must be explained");
+        // The user has to learn three things: which path ran, what it costs,
+        // and how to get the better one.
+        assert!(notice.contains("python -m venv"), "{notice}");
+        assert!(notice.contains("share dependencies"), "{notice}");
+        assert!(notice.contains("osdk install pypi:uv"), "{notice}");
+
+        let error = choose_installer(None, true).unwrap_err();
+        assert!(error.to_string().contains("uv is required"));
+    }
+
+    /// A path that resolves but cannot be started must not be treated as uv.
+    ///
+    /// This is the Windows trap mise handles in two places: a `uv.ps1` or a
+    /// shebang-only file passes a path lookup yet fails to spawn.
+    #[cfg(feature = "install")]
+    #[test]
+    fn a_present_but_unspawnable_uv_is_not_used() {
+        let temp = tempfile::tempdir().unwrap();
+        // A text file named like an executable: findable, not runnable.
+        let fake = temp
+            .path()
+            .join(if cfg!(windows) { "uv.exe" } else { "uv" });
+        std::fs::write(&fake, b"#!/bin/sh\\necho not really uv\\n").unwrap();
+
+        assert!(!uv_is_spawnable(&fake));
+
+        let choice = choose_installer(Some(&fake), false).unwrap();
+        assert_eq!(choice.creator, EnvCreator::Stdlib);
+        let notice = choice.notice.expect("an unusable uv must be explained");
+        // "not installed" would send the user looking in the wrong place, since
+        // the file is right there.
+        assert!(notice.contains("could not be started"), "{notice}");
+
+        // With uv required, this is an error rather than a silent downgrade.
+        let error = choose_installer(Some(&fake), true).unwrap_err();
+        assert!(error.to_string().contains("could not be started"));
     }
 
     #[test]
