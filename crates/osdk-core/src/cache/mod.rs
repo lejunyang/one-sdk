@@ -38,6 +38,9 @@ pub fn cache_env(
     set_if_unset("npm_config_cache", root.join("npm"));
     // pip: download/wheel cache
     set_if_unset("PIP_CACHE_DIR", root.join("pip"));
+    // uv keeps its own cache and deliberately ignores pip.conf / PIP_* settings,
+    // so the PIP_CACHE_DIR above does not cover it.
+    set_if_unset("UV_CACHE_DIR", root.join("uv"));
     // Go: module cache
     set_if_unset("GOMODCACHE", root.join("go-mod"));
     set_if_unset("GOCACHE", root.join("go-build"));
@@ -126,6 +129,18 @@ mod tests {
             cache.join("pkg/npm")
         );
 
+        // uv keeps its own cache and ignores pip.conf / PIP_*, so it needs a
+        // redirect of its own next to pip's.
+        assert_eq!(
+            PathBuf::from(env.get("UV_CACHE_DIR").unwrap()),
+            cache.join("pkg/uv")
+        );
+        assert_ne!(
+            env.get("UV_CACHE_DIR").unwrap(),
+            env.get("PIP_CACHE_DIR").unwrap(),
+            "uv and pip must not share one cache directory"
+        );
+
         let npm = manager_env(&cache, &[("npm_config_cache", "npm")], |_| None);
         assert_eq!(
             PathBuf::from(npm.get("npm_config_cache").unwrap()),
@@ -152,6 +167,40 @@ mod tests {
         assert_eq!(
             PathBuf::from(managed.get("PIP_CACHE_DIR").unwrap()),
             cache.join("pkg/pip")
+        );
+    }
+
+    #[test]
+    fn uv_cache_follows_the_same_ownership_rules_as_pip() {
+        let cache = PathBuf::from("/x/cache");
+
+        // A user-chosen UV_CACHE_DIR must win: it stays out of our delta.
+        let env = cache_env(&cache, |key| {
+            (key == "UV_CACHE_DIR").then(|| "/custom/uv".to_string())
+        });
+        assert!(!env.contains_key("UV_CACHE_DIR"));
+        // Redirecting uv must not disturb the neighbouring managers.
+        assert!(env.contains_key("PIP_CACHE_DIR"));
+
+        // A value a previous osdk hook set may be refreshed to the current root.
+        let managed = cache_env(&cache, |key| match key {
+            "UV_CACHE_DIR" => Some("/old/osdk/pkg/uv".into()),
+            "OSDK_ORIG_UV_CACHE_DIR_SET" => Some("1".into()),
+            _ => None,
+        });
+        assert_eq!(
+            PathBuf::from(managed.get("UV_CACHE_DIR").unwrap()),
+            cache.join("pkg/uv")
+        );
+    }
+
+    #[test]
+    fn describe_reports_the_uv_cache() {
+        let cache = PathBuf::from("/x/cache");
+        let described = describe(&cache).into_iter().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            PathBuf::from(described.get("UV_CACHE_DIR").unwrap()),
+            cache.join("pkg/uv")
         );
     }
 

@@ -78,8 +78,10 @@ GC 遇到损坏 manifest 会拒绝继续，防止误删仍在使用的对象。
 Engine 或 Buildx 构建器自有的存储。详见[容器运行时、Registry 与原生操作](./containers)。
 
 通用 shell hook 在用户未设置时还映射
-`npm_config_cache`、`PIP_CACHE_DIR`、`GOMODCACHE`、`GOCACHE`、`CARGO_HOME` 和
-`GRADLE_USER_HOME`。这里没有 Maven `M2_HOME`/`maven.repo.local` 重定向。Rust 的
+`npm_config_cache`、`PIP_CACHE_DIR`、`UV_CACHE_DIR`、`GOMODCACHE`、`GOCACHE`、
+`CARGO_HOME` 和 `GRADLE_USER_HOME`。uv 不读 `pip.conf`，也不认 `PIP_*` 设置，
+因此它需要自己的 `UV_CACHE_DIR`（`<cache>/pkg/uv`）；`PIP_CACHE_DIR` 覆盖不到它。
+这里没有 Maven `M2_HOME`/`maven.repo.local` 重定向。Rust 的
 直接 shim/`exec` 会以 `<data>/cargo` 覆盖通用 `<cache>/pkg/cargo` 映射。
 Cargo 开发工具 provider 不会把两者当作构建 cache：每次安装都有 stage 私有的 `HOME`、
 `CARGO_HOME`、target 与安装根。只有符合条件的受控 `cargo-binstall` 会从

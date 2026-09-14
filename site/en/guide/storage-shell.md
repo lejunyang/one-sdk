@@ -83,8 +83,10 @@ Engine or a Buildx builder through supported native aggregate interfaces. See
 [Container Runtimes, Registries, and Native Operations](./containers).
 
 When the user has not set them, the general shell hook also maps
-`npm_config_cache`, `PIP_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`, `CARGO_HOME`, and
-`GRADLE_USER_HOME`. There is no Maven `M2_HOME`/`maven.repo.local` redirection.
+`npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `GOMODCACHE`, `GOCACHE`,
+`CARGO_HOME`, and `GRADLE_USER_HOME`. uv reads neither `pip.conf` nor the `PIP_*`
+settings, so it needs its own `UV_CACHE_DIR` (`<cache>/pkg/uv`); `PIP_CACHE_DIR`
+does not cover it. There is no Maven `M2_HOME`/`maven.repo.local` redirection.
 Direct Rust shims and `exec` override the general `<cache>/pkg/cargo` mapping
 with `<data>/cargo`.
 Cargo developer-tool providers do not use either location as their build cache:
