@@ -166,6 +166,7 @@ pub fn installer_env(
     offline: bool,
     require_hashes: bool,
     config_file: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     match creator {
@@ -173,6 +174,14 @@ pub fn installer_env(
             if let Some(url) = index_url {
                 // `UV_DEFAULT_INDEX`, never `UV_INDEX`: see above.
                 env.insert("UV_DEFAULT_INDEX".to_string(), url.to_string());
+            }
+            // Point uv at the managed cache explicitly. `crate::cache` sets this
+            // for interactive shells, but a subprocess osdk spawns itself does not
+            // inherit that, so without it uv used its own default location -- and
+            // the hard-link sharing between environments, which is the whole
+            // reason to prefer uv, happens *through* that cache.
+            if let Some(dir) = cache_dir {
+                env.insert("UV_CACHE_DIR".to_string(), dir.display().to_string());
             }
             env.insert("UV_PYTHON_DOWNLOADS".to_string(), "never".to_string());
             if offline {
@@ -190,6 +199,13 @@ pub fn installer_env(
             }
             if let Some(path) = config_file {
                 env.insert("PIP_CONFIG_FILE".to_string(), path.display().to_string());
+            }
+            // Same reasoning as the uv branch: a spawned subprocess does not
+            // inherit the shell hook's cache redirect. pip gains no cross-env
+            // sharing from this, but the downloads still belong under the managed
+            // root rather than in pip's own default location.
+            if let Some(dir) = cache_dir {
+                env.insert("PIP_CACHE_DIR".to_string(), dir.display().to_string());
             }
             if offline {
                 env.insert("PIP_NO_INDEX".to_string(), "1".to_string());
@@ -285,12 +301,21 @@ impl PypiBackend {
             .urls
             .first()
             .map(String::as_str);
+        // Reuse the same directory the shell hook redirects to, so an install
+        // performed by osdk and one performed in an activated shell share a cache
+        // rather than filling two.
+        let cache_root = crate::cache::downstream_root(&ctx.dirs.cache);
+        let cache_dir = match choice.creator {
+            EnvCreator::Uv => cache_root.join("uv"),
+            EnvCreator::Stdlib => cache_root.join("pip"),
+        };
         let env = installer_env(
             choice.creator,
             index,
             ctx.config.settings.offline,
             ctx.config.settings.require_checksums,
             pip_config.as_deref(),
+            Some(&cache_dir),
         );
 
         let (program, args) = venv_command(choice, interpreter, venv);
@@ -636,8 +661,16 @@ fn locate_uv(ctx: &Ctx) -> Option<PathBuf> {
     let newest = versions
         .iter()
         .max_by(|left, right| compare_python_versions(left, right))?;
-    let candidate = venv_bin_dir(&ctx.dirs.install_path(backend.id(), newest))
-        .join(if cfg!(windows) { "uv.exe" } else { "uv" });
+    // Resolve through the install identity, not `install_path`: a dynamic install
+    // sits one level deeper. Using the shallower path here meant a freshly
+    // installed uv was never found, so every later install silently took the pip
+    // fallback and reported "uv is not installed" while uv sat right there.
+    let tv = ToolVersion::new(backend.id(), newest);
+    let candidate = venv_bin_dir(&backend.install_root(ctx, &tv).ok()?).join(if cfg!(windows) {
+        "uv.exe"
+    } else {
+        "uv"
+    });
     candidate.is_file().then_some(candidate)
 }
 
@@ -1026,6 +1059,7 @@ mod tests {
             false,
             false,
             None,
+            None,
         );
         assert_eq!(
             uv.get("UV_DEFAULT_INDEX").map(String::as_str),
@@ -1047,6 +1081,7 @@ mod tests {
             false,
             false,
             None,
+            None,
         );
         assert_eq!(
             pip.get("PIP_INDEX_URL").map(String::as_str),
@@ -1055,12 +1090,49 @@ mod tests {
         assert!(!pip.contains_key("PIP_EXTRA_INDEX_URL"));
     }
 
+    /// The managed cache must be named explicitly for a spawned installer.
+    ///
+    /// `crate::cache` redirects these for interactive shells, but a subprocess
+    /// osdk spawns does not inherit that. Without this, uv used its own default
+    /// location -- and since the hard-link sharing between environments happens
+    /// *through* that cache, the whole reason to prefer uv quietly stopped
+    /// applying. Verified end to end: two environments shared no inode until the
+    /// cache was passed here.
+    #[test]
+    fn the_managed_cache_is_passed_to_the_installer_explicitly() {
+        let cache = PathBuf::from("/osdk/cache/pkg/uv");
+        let uv = installer_env(EnvCreator::Uv, None, false, false, None, Some(&cache));
+        assert_eq!(
+            uv.get("UV_CACHE_DIR").map(String::as_str),
+            Some("/osdk/cache/pkg/uv")
+        );
+
+        let pip_cache = PathBuf::from("/osdk/cache/pkg/pip");
+        let pip = installer_env(
+            EnvCreator::Stdlib,
+            None,
+            false,
+            false,
+            None,
+            Some(&pip_cache),
+        );
+        assert_eq!(
+            pip.get("PIP_CACHE_DIR").map(String::as_str),
+            Some("/osdk/cache/pkg/pip")
+        );
+
+        // Each installer gets only its own variable, so a pip run cannot be
+        // pointed at uv's cache layout or the other way round.
+        assert!(!uv.contains_key("PIP_CACHE_DIR"));
+        assert!(!pip.contains_key("UV_CACHE_DIR"));
+    }
+
     /// pip reads `pip.conf`; uv does not. The pip path must therefore pin the
     /// config file, or a stale user-level config could redirect the index.
     #[test]
     fn the_pip_path_pins_its_config_file() {
         let config = PathBuf::from("/tmp/osdk/pip.conf");
-        let pip = installer_env(EnvCreator::Stdlib, None, false, false, Some(&config));
+        let pip = installer_env(EnvCreator::Stdlib, None, false, false, Some(&config), None);
         assert_eq!(
             pip.get("PIP_CONFIG_FILE").map(String::as_str),
             Some("/tmp/osdk/pip.conf")
@@ -1068,20 +1140,20 @@ mod tests {
 
         // uv ignores pip.conf by design, so pinning it there would be noise that
         // implies a protection that is not actually in play.
-        let uv = installer_env(EnvCreator::Uv, None, false, false, Some(&config));
+        let uv = installer_env(EnvCreator::Uv, None, false, false, Some(&config), None);
         assert!(!uv.contains_key("PIP_CONFIG_FILE"));
     }
 
     #[test]
     fn offline_and_hash_enforcement_reach_both_installers() {
-        let uv = installer_env(EnvCreator::Uv, None, true, true, None);
+        let uv = installer_env(EnvCreator::Uv, None, true, true, None, None);
         assert_eq!(uv.get("UV_OFFLINE").map(String::as_str), Some("1"));
         assert_eq!(
             uv.get("UV_REQUIRE_HASHES").map(String::as_str),
             Some("true")
         );
 
-        let pip = installer_env(EnvCreator::Stdlib, None, true, true, None);
+        let pip = installer_env(EnvCreator::Stdlib, None, true, true, None, None);
         assert_eq!(pip.get("PIP_NO_INDEX").map(String::as_str), Some("1"));
         assert_eq!(pip.get("PIP_REQUIRE_HASHES").map(String::as_str), Some("1"));
     }
