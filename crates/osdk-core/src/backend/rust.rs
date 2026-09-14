@@ -323,6 +323,10 @@ impl Backend for RustBackend {
         let version = match &req.spec {
             VersionSpec::Latest => "stable".to_string(),
             VersionSpec::Exact(v) => v.clone(),
+            // A pin is passed through verbatim like any other selector: rustup's
+            // own channel names are the vocabulary here, and osdk does not
+            // enumerate them, so there is nothing to match a pin against.
+            VersionSpec::Pinned(v) => v.clone(),
             VersionSpec::Prefix(p) => p.clone(),
             VersionSpec::Range(requirement) => requirement.clone(),
             VersionSpec::Lts(_) => "stable".to_string(),

@@ -18,6 +18,21 @@ pub enum VersionSpec {
     Prefix(String),
     /// An exact version, e.g. `20.11.1`.
     Exact(String),
+    /// A version pinned verbatim with a leading `=`, e.g. `=android-36`.
+    ///
+    /// Distinct from [`VersionSpec::Exact`], which is what a *fully-specified
+    /// semver* parses to and which still falls back to looser tiers when no
+    /// literal match exists (see [`select_exact`]). `Pinned` never falls back:
+    /// the request either names a published version character-for-character or
+    /// it does not resolve.
+    ///
+    /// This exists because some catalogues use identifiers that are not versions
+    /// and are not mutually exclusive under prefix matching. Android platform
+    /// packages are the case that forced it: `android-36` and `android-36.1` are
+    /// two different API levels, and dotted-component prefix matching makes the
+    /// former match the latter, so there was previously no way to ask for
+    /// exactly `android-36`.
+    Pinned(String),
     /// A semver requirement from structured project metadata.
     Range(String),
     /// Use whatever is already on PATH (no management).
@@ -39,6 +54,17 @@ impl VersionSpec {
         }
         if let Some(rest) = lower.strip_prefix("lts-") {
             return VersionSpec::Lts(Some(rest.to_string()));
+        }
+        // A leading `=` pins the remainder verbatim. Checked before the semver
+        // classification below so `=1.2.3` is a pin rather than an Exact that
+        // would still fall back to looser tiers. Case is preserved because the
+        // pinned text is compared to published version strings, some of which
+        // are mixed-case identifiers (`android-CANARY`).
+        if let Some(rest) = s.strip_prefix('=') {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                return VersionSpec::Pinned(rest.to_string());
+            }
         }
         // A fully-specified semver (x.y.z, possibly with pre/build) is exact;
         // anything shorter is treated as a prefix.
@@ -90,6 +116,9 @@ impl fmt::Display for VersionSpec {
             VersionSpec::Lts(Some(n)) => write!(f, "lts/{n}"),
             VersionSpec::Prefix(p) => write!(f, "{p}"),
             VersionSpec::Exact(v) => write!(f, "{v}"),
+            // Round-trips through `parse`, so a pin echoed into a lock file or
+            // an error message re-reads as the same pin.
+            VersionSpec::Pinned(v) => write!(f, "={v}"),
             VersionSpec::Range(requirement) => write!(f, "{requirement}"),
             VersionSpec::System => write!(f, "system"),
         }
@@ -174,9 +203,25 @@ pub fn select_version<'a>(
                         .unwrap_or(false)
             })
         }
+        VersionSpec::Pinned(want) => candidates.iter().rev().find(|v| v.version == *want),
         VersionSpec::Prefix(pfx) => {
-            // match versions whose dotted components start with the prefix
             let want = pfx.trim_end_matches('.');
+            // An identifier that names a candidate outright wins over the
+            // dotted-component prefix scan below.
+            //
+            // Prefix matching is component-wise, so `android-36` is a prefix of
+            // `android-36.1` and the newest-first scan returned the latter --
+            // even though a package literally called `android-36` exists and is
+            // a *different* API level. The same shape appears wherever a
+            // catalogue's identifiers are not mutually exclusive under prefix
+            // matching.
+            //
+            // Ordinary version prefixes are unaffected: `20` is not the literal
+            // version of any Node release, so no candidate matches here and
+            // resolution proceeds to the scan as before.
+            if let Some(found) = candidates.iter().rev().find(|v| v.version == want) {
+                return Some(found);
+            }
             candidates
                 .iter()
                 .rev()
@@ -191,19 +236,33 @@ pub fn select_version_with_prerelease<'a>(
     policy: crate::config::PrereleasePolicy,
 ) -> Option<&'a VersionInfo> {
     use crate::config::PrereleasePolicy;
-    let exact_prerelease = matches!(
-        spec,
-        VersionSpec::Exact(version)
-            if semver::Version::parse(version)
-                .map(|version| !version.pre.is_empty())
-                .unwrap_or(false)
-    );
+    // A pin names one published version character-for-character, which is the
+    // clearest form of "explicit" there is; it must be able to reach a
+    // pre-release without also widening the policy for anything else. Unlike
+    // `Exact`, this does not require the text to be parseable semver: the
+    // catalogues that need pinning use identifiers that are not (`android-36`,
+    // `android-37.2-beta3`).
+    let pinned = matches!(spec, VersionSpec::Pinned(_));
+    let exact_prerelease = pinned
+        || matches!(
+            spec,
+            VersionSpec::Exact(version)
+                if semver::Version::parse(version)
+                    .map(|version| !version.pre.is_empty())
+                    .unwrap_or(false)
+        );
     match policy {
         PrereleasePolicy::Never if exact_prerelease => None,
         PrereleasePolicy::Allow => match spec {
             VersionSpec::Latest => candidates.last(),
             VersionSpec::Prefix(prefix) => {
                 let want = prefix.trim_end_matches('.');
+                // Same exact-identifier precedence as `select_version`; kept in
+                // step so the two policies cannot disagree about which candidate
+                // `android-36` names.
+                if let Some(found) = candidates.iter().rev().find(|v| v.version == want) {
+                    return Some(found);
+                }
                 candidates
                     .iter()
                     .rev()
@@ -497,6 +556,147 @@ mod tests {
         let sel = select_version(&VersionSpec::Exact("1.0.0-beta.1".into()), &c).unwrap();
         assert_eq!(sel.version, "1.0.0-beta.1+sha.abc");
         assert!(select_version(&VersionSpec::Exact("3.0.0".into()), &c).is_none());
+    }
+
+    /// An identifier that names a candidate outright must beat a longer
+    /// prefix-compatible sibling.
+    ///
+    /// Component-wise prefix matching makes `android-36` a prefix of
+    /// `android-36.1`, and the newest-first scan therefore returned the latter
+    /// even though a package literally called `android-36` exists and is a
+    /// different API level. A project needing exactly API 36 silently compiled
+    /// against 36.1.
+    #[test]
+    fn exact_identifier_beats_a_longer_prefix_sibling() {
+        // Ordered as the Android manifest orders them: oldest first, so the
+        // newest-first scan would reach `android-36.1` before `android-36`.
+        let candidates = vec![
+            vi("android-35", true, None),
+            vi("android-36", true, None),
+            vi("android-36.1", true, None),
+        ];
+        assert_eq!(
+            select_version(&VersionSpec::parse("android-36"), &candidates)
+                .unwrap()
+                .version,
+            "android-36"
+        );
+        // When the same text is NOT a published identifier, the dotted-component
+        // scan still runs and still picks the newest match -- the pre-existing
+        // behaviour, which this change must not disturb. (Prefix matching is
+        // component-wise, so the probe has to be a whole component: `android-3`
+        // would match nothing here even before the change.)
+        let without_the_base = vec![
+            vi("android-36.1", true, None),
+            vi("android-36.2", true, None),
+        ];
+        assert_eq!(
+            select_version(&VersionSpec::parse("android-36"), &without_the_base)
+                .unwrap()
+                .version,
+            "android-36.2"
+        );
+        // And the more specific identifier is still reachable by name.
+        assert_eq!(
+            select_version(&VersionSpec::parse("android-36.1"), &candidates)
+                .unwrap()
+                .version,
+            "android-36.1"
+        );
+    }
+
+    /// `36.0` cannot reach API 36, and that is a catalogue fact, not a bug.
+    ///
+    /// Google publishes `android-36` and `android-36.1`; there is no
+    /// `android-36.0`. Under numeric dotted comparison `36.0` is equal to `36`,
+    /// but neither is a published identifier of this family (the identifiers all
+    /// carry the `android-` namespace), so the only thing that can match is the
+    /// prefix scan -- which finds nothing. Asserting this keeps a future "make
+    /// 36.0 work" special case from being added silently.
+    #[test]
+    fn a_bare_numeric_selector_does_not_reach_a_namespaced_identifier() {
+        let candidates = vec![vi("android-36", true, None), vi("android-36.1", true, None)];
+        assert!(select_version(&VersionSpec::parse("36.0"), &candidates).is_none());
+        assert!(select_version(&VersionSpec::parse("36"), &candidates).is_none());
+    }
+
+    /// A leading `=` pins verbatim and never falls back to a looser tier.
+    #[test]
+    fn pinned_specs_match_only_a_literal_published_version() {
+        assert_eq!(
+            VersionSpec::parse("=android-36"),
+            VersionSpec::Pinned("android-36".into())
+        );
+        // Round-trips, so a pin written into a lock file re-reads as a pin.
+        assert_eq!(VersionSpec::parse("=android-36").to_string(), "=android-36");
+        // A lone `=` is not a pin; it stays whatever the ordinary rules say.
+        assert_eq!(VersionSpec::parse("="), VersionSpec::Prefix("=".into()));
+
+        let candidates = vec![
+            vi("android-36", true, None),
+            vi("android-36.1", true, None),
+            vi("21.0.12.1+1", true, None),
+        ];
+        assert_eq!(
+            select_version(&VersionSpec::parse("=android-36"), &candidates)
+                .unwrap()
+                .version,
+            "android-36"
+        );
+        // Unlike `Exact`, a pin does not fall back to the dotted-prefix tier:
+        // `21.0.12` resolves as Exact but must not resolve as a pin.
+        assert_eq!(
+            select_version(&VersionSpec::Exact("21.0.12".into()), &candidates)
+                .unwrap()
+                .version,
+            "21.0.12.1+1"
+        );
+        assert!(select_version(&VersionSpec::parse("=21.0.12"), &candidates).is_none());
+        assert!(select_version(&VersionSpec::parse("=android-37"), &candidates).is_none());
+    }
+
+    /// A pin is an explicit request, so it may reach a pre-release under the
+    /// default policy -- without widening that policy for anything else.
+    #[test]
+    fn a_pin_counts_as_explicit_for_the_prerelease_policy() {
+        let candidates = vec![
+            vi("android-37.1", true, None),
+            vi("android-37.2-beta3", false, None),
+        ];
+        for policy in [
+            crate::config::PrereleasePolicy::IfExplicit,
+            crate::config::PrereleasePolicy::Allow,
+        ] {
+            assert_eq!(
+                select_version_with_prerelease(
+                    &VersionSpec::parse("=android-37.2-beta3"),
+                    &candidates,
+                    policy,
+                )
+                .unwrap()
+                .version,
+                "android-37.2-beta3",
+                "{policy:?}"
+            );
+        }
+        // A bare `latest` under the default policy still stops at the stable one.
+        assert_eq!(
+            select_version_with_prerelease(
+                &VersionSpec::Latest,
+                &candidates,
+                crate::config::PrereleasePolicy::IfExplicit,
+            )
+            .unwrap()
+            .version,
+            "android-37.1"
+        );
+        // `never` refuses the pin rather than silently downgrading it.
+        assert!(select_version_with_prerelease(
+            &VersionSpec::parse("=android-37.2-beta3"),
+            &candidates,
+            crate::config::PrereleasePolicy::Never,
+        )
+        .is_none());
     }
 
     #[test]
