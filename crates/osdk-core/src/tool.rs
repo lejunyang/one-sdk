@@ -553,6 +553,7 @@ pub static DYNAMIC_NAMESPACES: &[&NamespaceSchema] = &[
     &CARGO_SCHEMA,
     &GO_SCHEMA,
     &CONDA_SCHEMA,
+    &PYPI_SCHEMA,
 ];
 
 /// Return the schema for a registered namespace. Namespace names are already
@@ -837,6 +838,21 @@ const GO_OPTIONS: &[OptionDefinition] = &[
     ),
 ];
 
+/// Options for `pypi:` installs.
+///
+/// `extras` is part of the artifact identity, not a mere preference: PEP 508
+/// extras pull additional dependencies into the same environment, so
+/// `pypi:httpx[extras=socks]` and plain `pypi:httpx` at one version install
+/// different closures. Leaving it out of the identity would let the second
+/// request quietly reuse the first one's environment.
+const PYPI_OPTIONS: &[OptionDefinition] = &[option(
+    "extras",
+    "extras",
+    OptionEffect::Artifact,
+    true,
+    canonical_pypi_extras,
+)];
+
 const CONDA_OPTIONS: &[OptionDefinition] = &[
     option(
         "channels",
@@ -940,6 +956,16 @@ static CONDA_SCHEMA: NamespaceSchema = NamespaceSchema {
     options: OptionSchema {
         definitions: CONDA_OPTIONS,
         validator: validate_conda_options,
+    },
+};
+
+static PYPI_SCHEMA: NamespaceSchema = NamespaceSchema {
+    namespace: "pypi",
+    subject_canonicalizer: canonical_pypi_subject,
+    selector_validator: validate_any_selector,
+    options: OptionSchema {
+        definitions: PYPI_OPTIONS,
+        validator: validate_pypi_options,
     },
 };
 
@@ -1557,6 +1583,93 @@ fn canonical_cargo_crate(value: &str) -> Result<Option<String>> {
 /// Conda package names are lowercase and use a restricted character set. The
 /// name becomes a URL path segment during the download, so anything that could
 /// escape it is rejected here rather than at request time.
+/// Canonicalize a PyPI project name per PEP 503.
+///
+/// Normalization is not cosmetic here. PEP 503 defines runs of `-`, `_`, and
+/// `.` as equivalent and compares names case-insensitively, so `Foo.Bar`,
+/// `foo-bar`, and `foo__bar` are one project. Folding them to a single form
+/// keeps one project from occupying several install directories -- and keeps
+/// `installs/pypi/foo-bar` from being ambiguous about which request produced it.
+fn canonical_pypi_subject(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        return Err(Error::config(
+            "PyPI project name must be between 1 and 128 characters",
+        ));
+    }
+    // PEP 508 extras belong in the `extras` option, where they take part in
+    // the artifact identity. Accepting them inside the subject would put them
+    // in the install path instead, so reject them with a pointer to the option.
+    if value.contains('[') || value.contains(']') {
+        return Err(Error::config(format!(
+            "PyPI extras must be given as an option, not in the name: \\
+             use `pypi:{}[extras=...]`",
+            value.split('[').next().unwrap_or(value).trim()
+        )));
+    }
+    let lowered = value.to_ascii_lowercase();
+    let valid = lowered
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.'));
+    // PEP 503 additionally requires a name to start and end alphanumerically,
+    // which also rules out `.`, `..`, and any leading-dot hidden directory.
+    let ends_alnum = lowered
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && lowered
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    if !valid || !ends_alnum {
+        return Err(Error::config(format!(
+            "invalid PyPI project name `{value}`; expected letters, digits, \\
+             `-`, `_`, or `.`, starting and ending alphanumerically"
+        )));
+    }
+    // Collapse each run of separators to a single `-` (PEP 503 normalization).
+    let mut normalized = String::with_capacity(lowered.len());
+    let mut in_separator = false;
+    for character in lowered.chars() {
+        if matches!(character, '-' | '_' | '.') {
+            in_separator = true;
+            continue;
+        }
+        if in_separator && !normalized.is_empty() {
+            normalized.push('-');
+        }
+        in_separator = false;
+        normalized.push(character);
+    }
+    Ok(normalized)
+}
+
+/// Canonicalize the `extras` option: a sorted, de-duplicated set.
+///
+/// Unlike conda channels, extras carry no precedence -- they are a set that the
+/// resolver unions into one closure -- so sorting them makes
+/// `[extras=b,a]` and `[extras=a,b]` the same identity instead of two
+/// environments holding identical packages.
+fn canonical_pypi_extras(value: &str) -> Result<Option<String>> {
+    let mut extras: Vec<String> = Vec::new();
+    for entry in value.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // An extra is itself a PEP 503 name, so it gets the same treatment.
+        let normalized = canonical_pypi_subject(entry)?;
+        if !extras.contains(&normalized) {
+            extras.push(normalized);
+        }
+    }
+    if extras.is_empty() {
+        return Err(Error::config("pypi option `extras` must not be empty"));
+    }
+    extras.sort_unstable();
+    Ok(Some(extras.join(",")))
+}
+
 fn canonical_conda_subject(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.len() > 128 {
@@ -2180,6 +2293,19 @@ fn validate_go_options(
 /// Only reachable checks belong here -- the per-option canonicalizers already
 /// enforce shape. What they cannot see is the tool id, which is why the
 /// "`with` must not name the main package" rule lives at this level.
+fn validate_pypi_options(
+    _id: &ToolId,
+    _raw: &BTreeMap<String, String>,
+    _canonical: &CanonicalOptions,
+) -> Result<()> {
+    // `extras` is fully checked by its canonicalizer (each entry must be a
+    // valid PEP 503 name, and the set must be non-empty), and unlike conda's
+    // `with` there is no "must not name the package itself" rule: depending on
+    // your own extras is meaningless rather than harmful, and the resolver
+    // reports it far better than a syntactic check here could.
+    Ok(())
+}
+
 fn validate_conda_options(
     id: &ToolId,
     _raw: &BTreeMap<String, String>,
@@ -2670,6 +2796,158 @@ fn invalid_request(input: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scan-reachability guarantee for `pypi:`.
+    ///
+    /// This is the single most consequential assertion for a new namespace and
+    /// the least visible failure in the system: the scanner only descends into
+    /// an `installs/` subtree whose name answers true here, so a namespace that
+    /// is missing produces no error at all -- the installs simply become
+    /// invisible, and the tool "installs fine but cannot be used". `npm-global`
+    /// was missed exactly this way once.
+    #[test]
+    fn pypi_installs_are_reachable_by_the_scanner() {
+        assert!(
+            is_dynamic_install_directory("pypi"),
+            "installs/pypi would not be scanned, making every pypi install invisible"
+        );
+        // Reachability must come from the registered namespace list rather than
+        // a second hand-written match that could drift out of step with it.
+        assert!(namespace_schema("pypi").is_some());
+        assert!(DYNAMIC_NAMESPACES
+            .iter()
+            .any(|schema| schema.namespace == "pypi"));
+
+        // And the install path stays a plain two-segment path, well inside the
+        // segment cap, so no id gets hash-folded into an opaque directory.
+        assert_eq!(
+            crate::dirs::sanitize_tool_id("pypi:ruff"),
+            std::path::PathBuf::from("pypi/ruff")
+        );
+    }
+
+    /// PEP 503 name normalization.
+    ///
+    /// `.`, `-`, and `_` runs are equivalent and comparison is
+    /// case-insensitive, so all spellings of one project must collapse to a
+    /// single id -- otherwise one project could occupy several install
+    /// directories and `installs/pypi/<name>` would stop identifying it.
+    #[test]
+    fn pypi_names_normalize_per_pep_503() {
+        for (input, expected) in [
+            ("ruff", "ruff"),
+            ("Ruff", "ruff"),
+            ("zope.interface", "zope-interface"),
+            ("zope_interface", "zope-interface"),
+            ("zope--interface", "zope-interface"),
+            ("typing_extensions", "typing-extensions"),
+            ("Flask-SQLAlchemy", "flask-sqlalchemy"),
+            ("uv", "uv"),
+        ] {
+            assert_eq!(
+                canonical_pypi_subject(input).unwrap(),
+                expected,
+                "`{input}` must normalize to `{expected}`"
+            );
+        }
+
+        // Every equivalent spelling must land on one id, which is the whole
+        // point of normalizing rather than merely lower-casing.
+        let canonical = canonical_pypi_subject("zope.interface").unwrap();
+        for equivalent in ["Zope-Interface", "zope_interface", "ZOPE.INTERFACE"] {
+            assert_eq!(canonical_pypi_subject(equivalent).unwrap(), canonical);
+        }
+    }
+
+    #[test]
+    fn pypi_names_reject_paths_extras_and_non_pep503_shapes() {
+        // Extras in the subject would end up in the install path instead of the
+        // identity, so they are refused with a pointer to the option form.
+        let error = canonical_pypi_subject("httpx[socks]").unwrap_err();
+        assert!(
+            error.to_string().contains("pypi:httpx[extras=...]"),
+            "the error should show the option form, got: {error}"
+        );
+
+        for rejected in [
+            "",
+            " ",
+            ".",
+            "..",
+            "-leading",
+            "trailing-",
+            ".hidden",
+            "../escape",
+            "a/b",
+            "a\\\\b",
+            "pypi:ruff",
+            "ruff@1.0",
+            "two words",
+        ] {
+            assert!(
+                canonical_pypi_subject(rejected).is_err(),
+                "expected `{rejected}` to be refused"
+            );
+        }
+    }
+
+    /// `extras` is a set, so its canonical form must not depend on spelling.
+    #[test]
+    fn pypi_extras_are_a_sorted_normalized_set() {
+        assert_eq!(
+            canonical_pypi_extras("socks").unwrap(),
+            Some("socks".to_string())
+        );
+        // Sorted and de-duplicated: unlike conda channels, extras carry no
+        // precedence, so `b,a` and `a,b` are the same environment.
+        assert_eq!(
+            canonical_pypi_extras(" http2 , socks ,http2").unwrap(),
+            Some("http2,socks".to_string())
+        );
+        assert_eq!(
+            canonical_pypi_extras("socks,http2").unwrap(),
+            canonical_pypi_extras("http2,socks").unwrap()
+        );
+        // Each entry is itself a PEP 503 name.
+        assert_eq!(
+            canonical_pypi_extras("Some_Extra").unwrap(),
+            Some("some-extra".to_string())
+        );
+
+        assert!(canonical_pypi_extras("").is_err());
+        assert!(canonical_pypi_extras(" , ").is_err());
+        assert!(canonical_pypi_extras("bad extra").is_err());
+    }
+
+    /// End-to-end through the public parser, including identity semantics.
+    #[test]
+    fn pypi_specs_parse_and_carry_extras_in_the_identity() {
+        let spec = ToolSpec::parse("pypi:Zope.Interface@7.0").unwrap();
+        assert_eq!(spec.id.to_string(), "pypi:zope-interface");
+        assert_eq!(spec.selector(), Some("7.0"));
+
+        let plain = ToolSpec::parse("pypi:httpx").unwrap();
+        let with_extras = ToolSpec::parse("pypi:httpx[extras=socks]").unwrap();
+        // Extras change the installed closure, so they must not compare equal:
+        // if they did, the second request would silently reuse the first
+        // environment and the extra would never be installed.
+        assert_ne!(plain.options, with_extras.options);
+        assert_eq!(with_extras.to_string(), "pypi:httpx[extras=socks]");
+
+        // Spelling differences that PEP 503 calls equivalent collapse to one
+        // request even through the full parser.
+        assert_eq!(
+            ToolSpec::parse("pypi:typing_extensions").unwrap().id.to_string(),
+            ToolSpec::parse("pypi:Typing-Extensions").unwrap().id.to_string()
+        );
+
+        for rejected in ["pypi:", "pypi:a/b", "pypi:httpx[socks]", "PYPI:ruff"] {
+            assert!(
+                ToolSpec::parse(rejected).is_err(),
+                "expected `{rejected}` to be refused"
+            );
+        }
+    }
 
     /// `with` rejects everything that is not a bare conda package name.
     ///
