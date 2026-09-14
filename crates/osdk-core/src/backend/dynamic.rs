@@ -314,6 +314,7 @@ pub(super) fn builtin_factories() -> Vec<Arc<dyn DynamicBackendFactory>> {
         Arc::new(NpmBackendFactory),
         Arc::new(HttpBackendFactory),
         Arc::new(CondaBackendFactory),
+        Arc::new(PypiBackendFactory),
     ]
 }
 
@@ -334,6 +335,25 @@ impl DynamicBackendFactory for CondaBackendFactory {
 
     fn create(&self, id: &str) -> Option<Arc<dyn Backend>> {
         crate::backend::conda::CondaBackend::from_id(id)
+            .map(|backend| Arc::new(backend) as Arc<dyn Backend>)
+    }
+}
+
+/// Like the conda factory, this is registered unconditionally rather than
+/// behind `install`. Installing a Python CLI is install-only, but *routing* to
+/// one is not: the shim has to resolve `pypi:ruff` to a backend before it can
+/// dispatch `ruff`. Gating the factory would make every pypi shim fail with
+/// "no backend provides", because the shim build could not construct the
+/// backend at all -- the same mistake already recorded above for conda.
+struct PypiBackendFactory;
+
+impl DynamicBackendFactory for PypiBackendFactory {
+    fn prefix(&self) -> &'static str {
+        "pypi"
+    }
+
+    fn create(&self, id: &str) -> Option<Arc<dyn Backend>> {
+        crate::backend::pypi::PypiBackend::from_id(id)
             .map(|backend| Arc::new(backend) as Arc<dyn Backend>)
     }
 }
@@ -420,6 +440,7 @@ mod tests {
             ("github", "github:cli/cli"),
             ("npm", "npm:prettier"),
             ("conda", "conda:clang"),
+            ("pypi", "pypi:ruff"),
         ] {
             let factory = builtin_factories()
                 .into_iter()

@@ -38,6 +38,7 @@ pub mod node;
 pub mod npm_cli;
 pub mod npm_package;
 pub mod pnpm;
+pub mod pypi;
 pub mod python;
 mod python_catalog;
 mod python_releases;
