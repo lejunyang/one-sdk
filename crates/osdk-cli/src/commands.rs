@@ -1249,12 +1249,20 @@ fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
         let requests = tools
             .iter()
             .map(|s| {
-                resolve_explicit_request(
+                let mut request = resolve_explicit_request(
                     app,
                     s,
                     &app.ctx.config.tool_configs,
                     &app.ctx.config.tools,
-                )
+                )?;
+                // A bare `tool` operand asks for "the version this project
+                // selected", not "the newest one published". `ToolRequest::parse`
+                // cannot know that -- an absent selector parses to
+                // `VersionSpec::Latest`, which is indistinguishable from an
+                // explicit `tool@latest` -- so the configured spec is bound here,
+                // where the original operand text is still available.
+                bind_configured_spec_for_bare_operand(app, s, &mut request);
+                Ok(request)
             })
             .collect::<Result<Vec<_>>>()?;
         return Ok(requests);
@@ -1357,6 +1365,79 @@ fn inherit_configured_options_from(
     let explicit = std::mem::take(&mut request.options);
     request.options = configured;
     request.options.extend(explicit);
+}
+
+/// Bind a bare `tool` operand to the spec the active configuration selected.
+///
+/// `install` / `exec` / `lock` / `outdated` / `upgrade` all name their tools on
+/// the command line, and an operand without `@` used to reach the backend as
+/// `VersionSpec::Latest`. That silently ignored the project's own pin: in a
+/// project pinning `java = "21.0.12.1+1"`, `osdk exec -t java -- ...` resolved
+/// `latest` against the remote index and exported
+/// `JAVA_HOME=<installs>/java/26.x`, so a Gradle build asking for
+/// `languageVersion = 21` failed with "Cannot find a Java installation". The
+/// same path sent `-t android-platforms` to `android-37.2` and
+/// `-t android-system-images` to the newest preview image, in a project that
+/// pinned neither.
+///
+/// The rule this restores is the one the resolution order already documents:
+/// `tool` means "whatever is active here" and only `tool@<selector>` overrides
+/// it. Detection is by the **operand text**, not by the parsed spec, because
+/// `VersionSpec::Latest` cannot distinguish an absent selector from a literal
+/// `@latest` -- and a user who typed `@latest` is asking for the newest release
+/// on purpose.
+///
+/// Resolution reuses [`resolver::resolve_active`], so `.tool-versions`,
+/// idiomatic version files and the global config keep their usual precedence
+/// relative to `osdk.toml`; only the "nothing configured" case still falls
+/// through to `latest`. A failure to parse a configured range is not fatal
+/// either: the pre-existing behaviour is kept rather than turning a malformed
+/// config value into a refusal to run.
+fn bind_configured_spec_for_bare_operand(app: &App, operand: &str, request: &mut ToolRequest) {
+    // Ancestor discovery starts at the working directory, exactly as the shim
+    // and `osdk current` do, so all three agree on what is active.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    bind_configured_spec_for_bare_operand_at(app, operand, request, &cwd);
+}
+
+/// As [`bind_configured_spec_for_bare_operand`], with the start directory given.
+///
+/// Split out so the contract can be tested without `set_current_dir`, which is
+/// process-global and therefore races the rest of the test binary.
+fn bind_configured_spec_for_bare_operand_at(
+    app: &App,
+    operand: &str,
+    request: &mut ToolRequest,
+    cwd: &std::path::Path,
+) {
+    if requested_spec_literal(operand).is_some() {
+        return;
+    }
+    let Ok(backend) = app.registry.get(&request.backend) else {
+        return;
+    };
+    let Some(active) = osdk_core::version::resolver::resolve_active(
+        backend.id(),
+        cwd,
+        &app.ctx.config.tools,
+        backend.idiomatic_files(),
+    ) else {
+        return;
+    };
+    let expanded = app
+        .ctx
+        .config
+        .expand_alias(backend.id(), &active.spec)
+        .unwrap_or(active.spec);
+    let spec = if active.is_range {
+        match VersionSpec::parse_range(&expanded) {
+            Ok(spec) => spec,
+            Err(_) => return,
+        }
+    } else {
+        VersionSpec::parse(&expanded)
+    };
+    request.spec = spec;
 }
 
 fn resolve_explicit_request(
@@ -6467,6 +6548,92 @@ mod command_flow_tests {
             show_progress: false,
         };
         crate::app::App::from_parts(ctx, registry, Arc::new(TerminalPrompt::new(false)), None, false)
+    }
+
+    /// A named operand without `@` must inherit the project's pin.
+    ///
+    /// This is what `osdk exec -t java -- ...` does. Before the fix the absent
+    /// selector became `VersionSpec::Latest` and the backend resolved it against
+    /// the remote index, so a project pinning JDK 21 got whatever the newest
+    /// published JDK was and its Gradle build failed on the toolchain check.
+    /// `-t android-platforms` behaved the same way and landed on `android-37.2`.
+    ///
+    /// The assertions are on the *spec*, not on an installed version: resolution
+    /// is what the bug was, and specs need no network.
+    #[test]
+    fn bare_named_operand_inherits_the_project_pin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        // A global pin that differs from the project's, so "took the global one"
+        // and "took the project one" are distinguishable outcomes.
+        std::fs::write(&user_config, "[tools]\njava = \"26.0.2.1+1\"\n").unwrap();
+        std::fs::write(
+            project.join("osdk.toml"),
+            "[tools]\njava = \"21.0.12.1+1\"\nandroid-platforms = \"android-36-ext19\"\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let bind = |operand: &str| {
+            let mut request = resolve_explicit_request(
+                &app,
+                operand,
+                &app.ctx.config.tool_configs,
+                &app.ctx.config.tools,
+            )
+            .unwrap();
+            bind_configured_spec_for_bare_operand_at(&app, operand, &mut request, &project);
+            request.spec
+        };
+
+        // `21.0.12.1+1` is a four-part Java PSU, which is not valid semver, so
+        // `VersionSpec::parse` classifies it as a prefix. That is the same
+        // classification the shim and `osdk current` give the identical string,
+        // and `select_exact`'s dotted-prefix tier still resolves it to exactly
+        // that release. What matters here is that the pin's text arrived at all.
+        assert_eq!(bind("java"), VersionSpec::Prefix("21.0.12.1+1".into()));
+        assert_eq!(
+            bind("android-platforms"),
+            VersionSpec::Prefix("android-36-ext19".into())
+        );
+        // An explicit `@latest` is a deliberate request for the newest release
+        // and must NOT be rewritten into the pin.
+        assert_eq!(bind("java@latest"), VersionSpec::Latest);
+        // An explicit different version stays untouched too.
+        assert_eq!(
+            bind("java@17.0.13+11"),
+            VersionSpec::Exact("17.0.13+11".into())
+        );
+    }
+
+    /// With nothing configured anywhere, a bare operand still means `latest`.
+    ///
+    /// The fix must not turn "no pin" into a failure or into some arbitrary
+    /// installed version; `osdk install <tool>` on a fresh machine has to keep
+    /// working.
+    #[test]
+    fn bare_named_operand_without_any_pin_still_means_latest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(&user_config, "[tools]\nnode = \"20.11.1\"\n").unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let mut request = resolve_explicit_request(
+            &app,
+            "go",
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+        )
+        .unwrap();
+        bind_configured_spec_for_bare_operand_at(&app, "go", &mut request, &project);
+
+        assert_eq!(request.spec, VersionSpec::Latest);
     }
 
     #[test]
