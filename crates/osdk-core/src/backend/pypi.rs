@@ -443,7 +443,7 @@ pub fn choose_installer(uv_candidate: Option<&Path>, require_uv: bool) -> Result
         }
         if require_uv {
             return Err(Error::other(format!(
-                "`{}` was found but could not be started, so uv-only behaviour is  unavailable; reinstall uv or drop --require-uv",
+                "`{}` was found but could not be started, so uv-only behaviour is unavailable; reinstall uv or drop --require-uv",
                 candidate.display()
             )));
         }
@@ -453,21 +453,21 @@ pub fn choose_installer(uv_candidate: Option<&Path>, require_uv: bool) -> Result
             creator: EnvCreator::Stdlib,
             uv: None,
             notice: Some(format!(
-                "`{}` exists but could not be started; using python -m venv with pip  instead. Dependencies will not be shared between environments.",
+                "`{}` exists but could not be started; using python -m venv with pip instead. Dependencies will not be shared between environments.",
                 candidate.display()
             )),
         });
     }
     if require_uv {
         return Err(Error::other(
-            "uv is required for this operation but is not installed; run  `osdk install pypi:uv` first",
+            "uv is required for this operation but is not installed; run `osdk install pypi:uv` first",
         ));
     }
     Ok(InstallerChoice {
         creator: EnvCreator::Stdlib,
         uv: None,
         notice: Some(
-            "uv is not installed; using python -m venv with pip. Installing uv  (`osdk install pypi:uv`) makes resolution faster and lets environments  share dependencies instead of each keeping its own copy."
+            "uv is not installed; using python -m venv with pip. Installing uv (`osdk install pypi:uv`) makes resolution faster and lets environments share dependencies instead of each keeping its own copy."
                 .to_string(),
         ),
     })
@@ -1241,6 +1241,46 @@ mod tests {
         assert_eq!(version_from_filename("index.html"), None);
         assert_eq!(version_from_filename("uv.whl"), None);
         assert_eq!(version_from_filename(""), None);
+    }
+
+    /// User-facing notices must not carry stray whitespace or backslashes.
+    ///
+    /// Both spellings that produce this are valid Rust and look right in review:
+    /// `\` before a newline is a continuation, `\\` is a literal backslash
+    /// followed by a real newline and every space of the source indentation. The
+    /// second shipped twice here -- once as `Installing uv \` plus a block of
+    /// spaces, then again as a double space after collapsing it -- because
+    /// nothing fails at compile time and the strings read correctly in the file.
+    /// This asserts on the value rather than the source, which is the only place
+    /// the difference is visible.
+    #[cfg(feature = "install")]
+    #[test]
+    fn installer_notices_contain_no_stray_whitespace_or_backslashes() {
+        // `None` means "no uv candidate", which is the fallback path.
+        let messages = [
+            choose_installer(None, false)
+                .expect("stdlib fallback is available")
+                .notice
+                .expect("fallback carries a notice"),
+            match choose_installer(None, true) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("--require-uv must fail when uv is absent"),
+            },
+        ];
+
+        for message in messages {
+            for (needle, description) in [
+                ("\\", "a backslash"),
+                ("  ", "a double space"),
+                ("\n", "a newline"),
+                ("\t", "a tab"),
+            ] {
+                assert!(
+                    !message.contains(needle),
+                    "message must not contain {description}: {message}"
+                );
+            }
+        }
     }
 
     #[test]
