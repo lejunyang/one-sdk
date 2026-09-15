@@ -49,6 +49,11 @@ pub mod process;
 // client, and the reqwest/serde_json machinery it needs, out of the shim build.
 #[cfg(feature = "install")]
 pub mod python_index;
+// Bare-name discovery exists only to explain an install request, and every probe
+// it runs is an HTTP call. Gating it keeps those probes out of the shim, which
+// never resolves a bare name -- it dispatches an already-installed tool.
+#[cfg(feature = "install")]
+pub mod backend_discovery;
 // Updating osdk itself downloads and unpacks a release, which is exactly the
 // machinery the shim drops. Keeping it behind `install` means the shim's build
 // never links it; `osdk self upgrade` is a CLI-only command anyway.

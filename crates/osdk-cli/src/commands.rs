@@ -1540,101 +1540,24 @@ async fn report_bare_tool_name(app: &App, operand: &str) -> Result<()> {
     if app.ctx.config.tool_configs.contains_key(name) || app.ctx.config.tools.contains_key(name) {
         return Ok(());
     }
-    let candidates = discover_backend_candidates(app, name).await;
+    let candidates = osdk_core::backend_discovery::discover(&app.ctx, name).await;
     if candidates.is_empty() {
         return Ok(());
     }
     Err(unknown_backend_error(name, &candidates))
 }
 
-/// One namespace that could provide a bare tool name, with what is known about it.
-struct BackendCandidate {
-    /// The command to run, e.g. `pypi:uv`.
-    id: String,
-    /// Newest version the source publishes, when it could be read.
-    version: Option<String>,
-    /// Who packages it, which is what decides between two working candidates.
-    packaging: &'static str,
-}
-
-/// Find the namespaces that could provide `name`.
+/// Fail with the namespaces that provide a bare tool name.
 ///
-/// A bare `uv` is genuinely ambiguous -- PyPI, conda-forge and GitHub releases
-/// all publish something by that name -- so osdk refuses to guess. Refusing
-/// without saying what the options are just moves the guessing to the user,
-/// though, and the two candidates are not equivalent: they differ in who does the
-/// packaging and, in practice, in how current they are. So the answer carries the
-/// evidence needed to choose rather than only the names.
-async fn discover_backend_candidates(app: &App, name: &str) -> Vec<BackendCandidate> {
-    let mut candidates = Vec::new();
-
-    // PyPI: read the index osdk would actually install from, so the reported
-    // version is the one this machine would get rather than upstream's.
-    if let Some(backend) = osdk_core::backend::pypi::PypiBackend::from_id(&format!("pypi:{name}")) {
-        let configured = &app.ctx.config.registries().python;
-        // Deliberately more generous than the install-path probe budget. This
-        // runs while a human waits for an explanation, and a mirror that needs
-        // 2 s is perfectly usable -- treating it as unreachable dropped the PyPI
-        // candidate entirely and left the answer listing only conda-forge.
-        let discovery_timeout = configured.probe_timeout_ms.max(8_000);
-        let index = match osdk_core::python_index::plan(&configured.urls, discovery_timeout).await {
-            osdk_core::python_index::IndexPlan::Selected { url, .. } => Some(url),
-            osdk_core::python_index::IndexPlan::PassThrough { .. } => {
-                Some(osdk_core::python_index::PYPI.to_string())
-            }
-            osdk_core::python_index::IndexPlan::Unavailable { .. } => None,
-        };
-        if let Some(index) = index {
-            let versions = osdk_core::python_index::list_versions(
-                &app.ctx.client,
-                &index,
-                backend.project(),
-                app.ctx.config.settings.offline,
-            )
-            .await;
-            if let Ok(versions) = versions {
-                let newest = versions
-                    .iter()
-                    .filter(|version| !osdk_core::backend::pypi::is_pep440_prerelease(version))
-                    .max_by(|left, right| osdk_core::backend::pypi::compare_pep440(left, right))
-                    .cloned();
-                candidates.push(BackendCandidate {
-                    id: format!("pypi:{}", backend.project()),
-                    version: newest,
-                    packaging: "published by the project itself",
-                });
-            }
-        }
-    }
-
-    // conda-forge: the package may exist there too, but it is repackaged by
-    // community volunteers rather than published upstream, and that distinction
-    // is exactly what the user needs in order to choose.
-    if conda_forge_has_package(app, name).await {
-        candidates.push(BackendCandidate {
-            id: format!("conda:{name}"),
-            // Deliberately not reported: reading it means a second network round
-            // trip for a candidate that is already the second choice, and a
-            // missing number reads better than a slow command.
-            version: None,
-            packaging: "repackaged by conda-forge, so it can lag upstream",
-        });
-    }
-
-    candidates
-}
-
-/// Whether conda-forge lists `name`, judged by a bounded anonymous request.
-async fn conda_forge_has_package(app: &App, name: &str) -> bool {
-    let url = format!("https://api.anaconda.org/package/conda-forge/{name}");
-    let Ok(response) = app.ctx.client.get(&url).send().await else {
-        return false;
-    };
-    response.status().is_success()
-}
-
-/// Turn discovered candidates into an error that can be acted on directly.
-fn unknown_backend_error(name: &str, candidates: &[BackendCandidate]) -> anyhow::Error {
+/// Discovery itself lives in `osdk_core::backend_discovery`, which walks the
+/// registered dynamic namespaces rather than a list written out here. The first
+/// version of this hard-coded PyPI and conda-forge, so a new backend simply did
+/// not appear -- the list has to be derived from the backends or it goes stale
+/// without anyone noticing.
+fn unknown_backend_error(
+    name: &str,
+    candidates: &[osdk_core::backend_discovery::Candidate],
+) -> anyhow::Error {
     use std::fmt::Write as _;
 
     if candidates.is_empty() {
@@ -1642,24 +1565,34 @@ fn unknown_backend_error(name: &str, candidates: &[BackendCandidate]) -> anyhow:
             "`{name}` is not a known backend, and no namespace was found that provides it"
         );
     }
-    let mut message =
-        format!("`{name}` is not a backend on its own, but these namespaces provide it:");
+    let mut message = format!(
+        "`{name}` is not a backend on its own. These namespaces publish something by that name:"
+    );
     for candidate in candidates {
-        // Written line by line rather than with embedded escapes: the first
-        // attempt used a `\\n` inside a string built by a generator and shipped
-        // the two characters literally, so the error arrived as one unreadable
-        // line.
+        // Built line by line rather than with escapes inside one literal: a
+        // `\n` written into a generated string once shipped as two literal
+        // characters, and a `\` continuation leaked its indentation into the
+        // output. Neither fails to compile.
         let _ = write!(message, "\n  osdk install {}", candidate.id);
         if let Some(version) = &candidate.version {
-            let _ = write!(message, "  (latest {version}, {})", candidate.packaging);
-        } else {
-            let _ = write!(message, "  ({})", candidate.packaging);
+            let _ = write!(message, "    {version}");
         }
+        // The description matters more than it looks. Probing `uv` finds npm's
+        // unrelated `uv` at 1.4.0 next to the real one at 0.12.14, and
+        // `pypi:ripgrep` is not BurntSushi's ripgrep. Printing ids and versions
+        // alone would present unrelated programs as interchangeable sources,
+        // which is a worse failure than not listing them at all.
+        if let Some(summary) = &candidate.summary {
+            let _ = write!(message, "\n      {summary}");
+        }
+        let _ = write!(message, "\n      {}", candidate.provenance.describe());
     }
+    // Ordering is by provenance, so the first entry is the one osdk would lean
+    // toward -- but it does not choose, and the caveat is the point: a shared
+    // name is not evidence of a shared project.
     let _ = write!(
         message,
-        "\n\nosdk does not pick a source for you: these are different packaging \n\
-         chains and can differ in version and maintainer."
+        "\n\nSame name does not mean same program -- compare the descriptions before choosing. Listed best-provenance first; osdk does not choose for you."
     );
     anyhow!(message)
 }
