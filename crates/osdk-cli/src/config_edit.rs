@@ -521,6 +521,25 @@ pub const SETTINGS: &[SettingSpec] = &[
         path: &["settings", "shims", "exclude"],
         kind: SettingKind::List,
     },
+    // Registry candidates live in the top-level `[registries]` table rather
+    // than under `[settings]`, because they configure delegated package
+    // managers instead of osdk's own downloads.
+    //
+    // Exposing them as settings is what makes "sources and configuration are
+    // managed through osdk's own commands" actually true for Python. Until
+    // now the only way to point osdk at a mirror was to hand-edit
+    // `config.toml` -- which the guide already told readers they would not
+    // have to do.
+    SettingSpec {
+        key: "registries.python.urls",
+        path: &["registries", "python", "urls"],
+        kind: SettingKind::List,
+    },
+    SettingSpec {
+        key: "registries.npm.urls",
+        path: &["registries", "npm", "urls"],
+        kind: SettingKind::List,
+    },
 ];
 
 pub fn find_setting(key: &str) -> Option<&'static SettingSpec> {
@@ -1027,6 +1046,12 @@ mod tests {
             ("offline", "true"),
             ("lang", "en"),
             ("shims.include", "conda:clang:xmllint"),
+            // Registry lists live outside `[settings]`, and the in-memory
+            // field is `#[serde(skip)]` with its own load path, so "the writer
+            // and the loader agree" is a real question here rather than a
+            // formality.
+            ("registries.python.urls", "https://pypi.org/simple/"),
+            ("registries.npm.urls", "https://registry.npmjs.org/"),
         ];
         for (key, value) in cases {
             let setting = resolve_setting(key).unwrap();

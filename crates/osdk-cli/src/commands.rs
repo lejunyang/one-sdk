@@ -475,7 +475,16 @@ pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
     match command {
         RegistryCommand::Test { manager } => {
             let cwd = std::env::current_dir().context("getting current dir for registry test")?;
-            let managers = registry_test_managers(manager.as_deref(), &cwd)?;
+            // `python` is not an npm-family manager, so it has to be recognized
+            // before the argument reaches that parser -- otherwise asking for it
+            // fails with `unknown package manager` and the Python probe, which is
+            // the whole point of the request, never runs.
+            let python_requested = manager.is_none() || manager.as_deref() == Some("python");
+            let managers = if manager.as_deref() == Some("python") {
+                Vec::new()
+            } else {
+                registry_test_managers(manager.as_deref(), &cwd)?
+            };
             let mut unavailable = Vec::new();
             for manager in managers {
                 let (executable, args) = registry_test_invocation(manager);
@@ -487,6 +496,19 @@ pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
                 print_registry_plan(manager, &plan);
                 if matches!(plan, RegistryPlan::Unavailable { .. }) {
                     unavailable.push(manager.to_string());
+                }
+            }
+            // Python indexes are probed alongside the npm-family registries.
+            // The probing logic already existed but was never reachable from
+            // any command, so a configured mirror could not be verified -- the
+            // user found out whether it worked by attempting an install.
+            if python_requested {
+                let config = app.ctx.config.registries().python.clone();
+                let plan =
+                    osdk_core::python_index::plan(&config.urls, config.probe_timeout_ms).await;
+                print_python_index_plan(&plan);
+                if matches!(plan, osdk_core::python_index::IndexPlan::Unavailable { .. }) {
+                    unavailable.push("python".to_string());
                 }
             }
             if unavailable.is_empty() {
@@ -539,6 +561,51 @@ fn registry_test_invocation(manager: PackageManager) -> (&'static str, Vec<Strin
         PackageManager::YarnClassic | PackageManager::YarnBerry => ("yarn", vec!["install".into()]),
         PackageManager::Bun => ("bun", vec!["install".into()]),
         PackageManager::Deno => ("deno", vec!["add".into(), "npm:probe".into()]),
+    }
+}
+
+/// Report the Python index plan in the same shape as the npm-family output.
+///
+/// A pass-through here means "no mirror configured", which is materially
+/// different from a mirror that failed: the first is the default state and the
+/// second is a problem the user needs to see.
+fn print_python_index_plan(plan: &osdk_core::python_index::IndexPlan) {
+    use osdk_core::python_index::IndexPlan;
+
+    println!("{}", t!("msg.registry_manager_header", manager = "python"));
+    let probes = match plan {
+        IndexPlan::PassThrough { reason } => {
+            println!("  {}: {reason}", t!("label.registry_pass_through"));
+            return;
+        }
+        IndexPlan::Selected { probes, .. } | IndexPlan::Unavailable { probes } => probes,
+    };
+    for probe in probes {
+        if probe.ok {
+            let latency = probe
+                .latency_ms
+                .map(|latency| format!("{latency} ms"))
+                .unwrap_or_else(|| t!("label.registry_ok"));
+            println!(
+                "  {:<12} {latency:>8}  {}",
+                t!("label.registry_healthy"),
+                probe.url
+            );
+        } else {
+            println!(
+                "  {:<12}          {}{}",
+                t!("label.registry_unavailable"),
+                probe.url,
+                probe
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    if let Some(url) = plan.selected_url() {
+        println!("  {}: {url}", t!("label.registry_selected"));
     }
 }
 
@@ -4579,6 +4646,22 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
                     .with_context(|| format!("removing {}", downloads.display()))?;
                 std::fs::create_dir_all(&downloads).ok();
             }
+            // The Python installer caches are osdk-managed now, so leaving them
+            // out would make `cache clean` quietly incomplete: osdk would be
+            // the reason they exist while offering no way to reclaim them.
+            //
+            // Only these two directories are touched, never `<cache>/pkg`
+            // wholesale -- that root also holds cargo, gradle and the Go caches,
+            // and cargo's in particular is a shared home containing installed
+            // binaries rather than just downloads.
+            let downstream = osdk_core::cache::downstream_root(&app.ctx.dirs.cache);
+            for name in ["uv", "pip"] {
+                let directory = downstream.join(name);
+                if directory.exists() {
+                    std::fs::remove_dir_all(&directory)
+                        .with_context(|| format!("removing {}", directory.display()))?;
+                }
+            }
             println!("{}", t!("msg.cache_cleared"));
         }
     }
@@ -4591,7 +4674,36 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
 /// answers "what will osdk do" instead of "what does the file happen to say" --
 /// the two differ whenever a default applies or an env var overrides.
 fn resolved_setting(app: &App, key: &str) -> Option<String> {
+    // Registry lists live in their own top-level table, so they are not
+    // reachable from `Settings`. They still have to be readable under the key
+    // `config set` accepts: a key that writes but then reports "unknown
+    // setting" on read is the drift `every_writable_setting_can_also_be_read_back`
+    // exists to catch, and it caught exactly this.
+    if let Some(rendered) = registry_setting_display(app.ctx.config.registries(), key) {
+        return Some(rendered);
+    }
     setting_display(&app.ctx.config.settings, key)
+}
+
+/// Render a `registries.*` key, or `None` if the key is not one.
+///
+/// An empty list prints as `default` rather than as nothing, because the two
+/// mean different things: no configured candidates means osdk uses its built-in
+/// public default, which is not the same as having configured an empty set.
+fn registry_setting_display(
+    registries: &osdk_core::config::RegistriesConfig,
+    key: &str,
+) -> Option<String> {
+    let urls = match key {
+        "registries.python.urls" => &registries.python.urls,
+        "registries.npm.urls" => &registries.npm.urls,
+        _ => return None,
+    };
+    Some(if urls.is_empty() {
+        "default".to_string()
+    } else {
+        urls.join(", ")
+    })
 }
 
 /// Render one setting from a resolved [`Settings`].
@@ -6329,8 +6441,7 @@ fn installed_shim_owners(
     // prefix publishes hundreds of them (m2-gawk alone accounts for over 800
     // scans here). The selection answer only depends on the tool and version, so
     // resolve each pair once instead of once per name.
-    let mut selection_memo =
-        std::collections::HashMap::<(String, String), bool>::new();
+    let mut selection_memo = std::collections::HashMap::<(String, String), bool>::new();
     // Same predicate as generation, so reconciliation cannot delete a shim that
     // generation just created for an explicitly exposed command (docs/bugs/008).
     for (name, candidates) in osdk_core::shim::dynamic_bin_ownership_with_settings(
@@ -6536,13 +6647,25 @@ mod command_flow_tests {
         // `set` and `get` are driven by two separate lists. If they drift, a
         // key accepts a value and then reports `unknown setting` on read.
         let defaults = osdk_core::config::Settings::default();
+        let registries = osdk_core::config::RegistriesConfig::default();
         for setting in crate::config_edit::SETTINGS {
+            // Two independent read paths now exist, because registry lists are
+            // not part of `Settings`. A key is readable if either renders it.
+            let rendered = registry_setting_display(&registries, setting.key)
+                .or_else(|| setting_display(&defaults, setting.key));
             assert!(
-                setting_display(&defaults, setting.key).is_some(),
+                rendered.is_some(),
                 "`{}` is settable but `config get` cannot render it",
                 setting.key
             );
         }
+
+        // And an unconfigured registry list must say "default" rather than look
+        // like a configured-but-empty set.
+        assert_eq!(
+            registry_setting_display(&registries, "registries.python.urls").as_deref(),
+            Some("default")
+        );
     }
 
     fn layered_npm_tool_config() -> (tempfile::TempDir, osdk_core::config::Config) {
@@ -6601,7 +6724,13 @@ mod command_flow_tests {
             cas,
             show_progress: false,
         };
-        crate::app::App::from_parts(ctx, registry, Arc::new(TerminalPrompt::new(false)), None, false)
+        crate::app::App::from_parts(
+            ctx,
+            registry,
+            Arc::new(TerminalPrompt::new(false)),
+            None,
+            false,
+        )
     }
 
     /// A named operand without `@` must inherit the project's pin.

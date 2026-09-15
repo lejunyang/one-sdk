@@ -30,8 +30,14 @@ const MAX_PROBE_REDIRECTS: usize = 3;
 /// PEP 691 first, with the PEP 503 HTML listing as an acceptable fallback.
 const INDEX_PROBE_ACCEPT: &str =
     "application/vnd.pypi.simple.v1+json;q=1.0, text/html;q=0.5, application/vnd.pypi.simple.v1+html;q=0.5";
-/// A tiny, universally present project, used only to confirm the index answers
-/// in a PEP 503 shape. Chosen because it is small and never yanked wholesale.
+/// A universally present project, used only to confirm the index answers in a
+/// PEP 503 shape.
+///
+/// Note this page is **not** small: `pip` has thousands of releases and its
+/// listing runs to megabytes. The probe therefore stops reading once it has seen
+/// enough to recognize the shape rather than downloading the whole document --
+/// the first attempt read to completion against `MAX_PROBE_BODY` and reported
+/// every healthy mirror as `response exceeds 65536 bytes`.
 const PROBE_PROJECT: &str = "pip";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,17 +186,26 @@ async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) ->
             .is_some_and(|value| value.contains("application/vnd.pypi.simple"));
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
+        let mut truncated = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(probe_error)?;
-            if body.len().saturating_add(chunk.len()) > MAX_PROBE_BODY {
-                return Err(format!("response exceeds {MAX_PROBE_BODY} bytes"));
-            }
             body.extend_from_slice(&chunk);
+            // Stop once there is enough to recognize the shape. A real project
+            // listing can run to megabytes -- `pip`'s does -- so reading to the
+            // end would both waste the transfer and, worse, make every healthy
+            // mirror look broken once the body passed the cap. The prefix is all
+            // the validation below needs, and dropping the connection here also
+            // keeps the probe fast, which is the point of measuring latency.
+            if body.len() >= MAX_PROBE_BODY {
+                body.truncate(MAX_PROBE_BODY);
+                truncated = true;
+                break;
+            }
         }
         if body.is_empty() {
             return Err("empty response".into());
         }
-        validate_probe_body(&body, json)
+        validate_probe_body(&body, json, truncated)
     })
     .await;
     match result {
@@ -217,8 +232,32 @@ async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) ->
 
 /// Confirm the body really is a project listing. A mirror that serves a captive
 /// portal or a generic error page with HTTP 200 must not rank as healthy.
-fn validate_probe_body(body: &[u8], json: bool) -> std::result::Result<(), String> {
+///
+/// `truncated` says the body is a prefix of a larger document, which is the
+/// normal case for a project with many releases. A prefix cannot be parsed as
+/// JSON, so the check falls back to looking for the structure a listing must
+/// begin with -- still enough to reject a portal page, which contains neither a
+/// `files` array nor PEP 503 anchors.
+fn validate_probe_body(
+    body: &[u8],
+    json: bool,
+    truncated: bool,
+) -> std::result::Result<(), String> {
     if json {
+        if truncated {
+            let text = std::str::from_utf8(body)
+                .map_err(|_| "PEP 691 index response is not UTF-8".to_string())?;
+            // The key must be present *and* introduce an array; a portal page
+            // that merely mentions the word would not satisfy both.
+            let has_files = text
+                .split_once("\"files\"")
+                .map(|(_, rest)| rest.trim_start().starts_with(':'))
+                .unwrap_or(false);
+            if !has_files {
+                return Err("PEP 691 index response has no `files` array".into());
+            }
+            return Ok(());
+        }
         let parsed: serde_json::Value =
             serde_json::from_slice(body).map_err(|_| "invalid PEP 691 index JSON".to_string())?;
         if !parsed.is_object() {
@@ -321,17 +360,44 @@ mod tests {
     #[test]
     fn probe_body_validation_rejects_portals_and_accepts_real_listings() {
         // PEP 503 HTML
-        assert!(validate_probe_body(b"<a href=\"pip-1.0.tar.gz\">pip</a>", false).is_ok());
+        assert!(validate_probe_body(b"<a href=\"pip-1.0.tar.gz\">pip</a>", false, false).is_ok());
         // A captive portal answering 200 with a welcome page.
-        assert!(validate_probe_body(b"<html><body>Welcome</body></html>", false).is_err());
-        assert!(validate_probe_body(b"", false).is_err());
+        assert!(validate_probe_body(b"<html><body>Welcome</body></html>", false, false).is_err());
+        assert!(validate_probe_body(b"", false, false).is_err());
 
         // PEP 691 JSON
-        assert!(validate_probe_body(br#"{"files":[],"name":"pip"}"#, true).is_ok());
+        assert!(validate_probe_body(br#"{"files":[],"name":"pip"}"#, true, false).is_ok());
         // Valid JSON, but not an index document.
-        assert!(validate_probe_body(br#"{"message":"forbidden"}"#, true).is_err());
-        assert!(validate_probe_body(br#"["not","an","object"]"#, true).is_err());
-        assert!(validate_probe_body(b"<html>", true).is_err());
+        assert!(validate_probe_body(br#"{"message":"forbidden"}"#, true, false).is_err());
+        assert!(validate_probe_body(br#"["not","an","object"]"#, true, false).is_err());
+        assert!(validate_probe_body(b"<html>", true, false).is_err());
+    }
+
+    /// A large listing arrives truncated, and that must still validate.
+    ///
+    /// `pip`'s own project page runs to megabytes, so the probe reads only a
+    /// prefix. Treating a prefix as malformed reported every healthy mirror as
+    /// `response exceeds 65536 bytes` -- which is how this was found.
+    #[test]
+    fn a_truncated_listing_is_still_recognized_but_a_portal_is_not() {
+        // A prefix of real PEP 691 JSON: unparseable, yet clearly a listing.
+        let prefix = br#"{"meta":{"api-version":"1.1"},"name":"pip","files":[{"filename":"pip-1.0.tar.gz","#;
+        assert!(validate_probe_body(prefix, true, true).is_ok());
+        // The same bytes would fail a strict parse, so the truncated path is
+        // doing real work rather than shadowing the parse.
+        assert!(validate_probe_body(prefix, true, false).is_err());
+
+        // A portal page is still refused: it has no `files` array anywhere.
+        let portal = br#"{"message":"login required","detail":"see files for help"}"#;
+        assert!(validate_probe_body(portal, true, true).is_err());
+
+        // And a body that merely mentions the word without introducing an
+        // array does not pass either.
+        let mentions = br#"{"note":"the \"files\" are elsewhere"}"#;
+        assert!(validate_probe_body(mentions, true, true).is_err());
+
+        // Truncated HTML validates on its anchors, as before.
+        assert!(validate_probe_body(b"<a href=\"pip-1.0.tar.gz\">pip", false, true).is_ok());
     }
 
     #[test]

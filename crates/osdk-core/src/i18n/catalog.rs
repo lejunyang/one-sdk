@@ -366,8 +366,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "prompt.cache_clean",
         (
-            "Remove all downloaded archives from the shared cache?",
-            "要从共享缓存中删除所有下载归档吗？",
+            "Remove downloaded archives and the Python installer caches from the shared cache?",
+            "要从共享缓存中删除下载归档与 Python 安装器缓存吗？",
         ),
     );
     m.insert(
@@ -3212,8 +3212,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.cache.clean.about",
         (
-            "Remove downloaded archives (keep store + installs)",
-            "删除下载的归档（保留存储区与已安装内容）",
+            "Remove downloaded archives and the uv/pip caches (keep store + installs)",
+            "删除下载归档与 uv/pip 缓存（保留存储区与已安装内容）",
         ),
     );
 

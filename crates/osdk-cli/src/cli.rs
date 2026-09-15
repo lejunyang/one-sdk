@@ -700,7 +700,7 @@ pub enum CacheCommand {
     Dir,
     /// Print the downstream package-manager cache redirections.
     Env,
-    /// Remove downloaded archives (keeps the CAS store + installs).
+    /// Remove downloaded archives and the uv/pip caches (keeps the CAS store + installs).
     Clean,
 }
 
