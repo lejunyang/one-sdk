@@ -54,6 +54,12 @@ pub async fn install(
     force: bool,
 ) -> Result<()> {
     let explicit = !tools.is_empty();
+    // A bare tool name that no backend owns is worth explaining before anything
+    // else happens: the operand is almost always a real package that simply needs
+    // its namespace, and the alternatives are not interchangeable.
+    for tool in &tools {
+        report_bare_tool_name(app, tool).await?;
+    }
     // Options normally mean the caller wants something the lock file does not
     // describe, so replay is skipped. Consent is the exception: it records a
     // decision rather than selecting an artifact, and is deliberately absent
@@ -1507,6 +1513,157 @@ fn bind_configured_spec_for_bare_operand_at(
     request.spec = spec;
 }
 
+/// Fail with a list of namespaces when a bare tool name owns no backend.
+///
+/// Only reached for an operand that names no backend and carries no namespace,
+/// so an ordinary request pays nothing. A namespaced or known operand returns
+/// immediately, and a name nothing provides falls through to the usual error
+/// from the resolver rather than being reported twice.
+async fn report_bare_tool_name(app: &App, operand: &str) -> Result<()> {
+    // Strip any selector first: `uv@0.12.13` is the same ambiguity as `uv`.
+    let name = operand
+        .split('@')
+        .next()
+        .unwrap_or(operand)
+        .split('[')
+        .next()
+        .unwrap_or(operand)
+        .trim();
+    if name.is_empty() || name.contains(':') {
+        return Ok(());
+    }
+    if app.registry.get(name).is_ok() {
+        return Ok(());
+    }
+    // Already configured under this key: the user has a spec for it, so the
+    // request is not ambiguous even though the bare name is not a backend.
+    if app.ctx.config.tool_configs.contains_key(name) || app.ctx.config.tools.contains_key(name) {
+        return Ok(());
+    }
+    let candidates = discover_backend_candidates(app, name).await;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    Err(unknown_backend_error(name, &candidates))
+}
+
+/// One namespace that could provide a bare tool name, with what is known about it.
+struct BackendCandidate {
+    /// The command to run, e.g. `pypi:uv`.
+    id: String,
+    /// Newest version the source publishes, when it could be read.
+    version: Option<String>,
+    /// Who packages it, which is what decides between two working candidates.
+    packaging: &'static str,
+}
+
+/// Find the namespaces that could provide `name`.
+///
+/// A bare `uv` is genuinely ambiguous -- PyPI, conda-forge and GitHub releases
+/// all publish something by that name -- so osdk refuses to guess. Refusing
+/// without saying what the options are just moves the guessing to the user,
+/// though, and the two candidates are not equivalent: they differ in who does the
+/// packaging and, in practice, in how current they are. So the answer carries the
+/// evidence needed to choose rather than only the names.
+async fn discover_backend_candidates(app: &App, name: &str) -> Vec<BackendCandidate> {
+    let mut candidates = Vec::new();
+
+    // PyPI: read the index osdk would actually install from, so the reported
+    // version is the one this machine would get rather than upstream's.
+    if let Some(backend) = osdk_core::backend::pypi::PypiBackend::from_id(&format!("pypi:{name}")) {
+        let configured = &app.ctx.config.registries().python;
+        // Deliberately more generous than the install-path probe budget. This
+        // runs while a human waits for an explanation, and a mirror that needs
+        // 2 s is perfectly usable -- treating it as unreachable dropped the PyPI
+        // candidate entirely and left the answer listing only conda-forge.
+        let discovery_timeout = configured.probe_timeout_ms.max(8_000);
+        let index = match osdk_core::python_index::plan(&configured.urls, discovery_timeout).await {
+            osdk_core::python_index::IndexPlan::Selected { url, .. } => Some(url),
+            osdk_core::python_index::IndexPlan::PassThrough { .. } => {
+                Some(osdk_core::python_index::PYPI.to_string())
+            }
+            osdk_core::python_index::IndexPlan::Unavailable { .. } => None,
+        };
+        if let Some(index) = index {
+            let versions = osdk_core::python_index::list_versions(
+                &app.ctx.client,
+                &index,
+                backend.project(),
+                app.ctx.config.settings.offline,
+            )
+            .await;
+            if let Ok(versions) = versions {
+                let newest = versions
+                    .iter()
+                    .filter(|version| !osdk_core::backend::pypi::is_pep440_prerelease(version))
+                    .max_by(|left, right| osdk_core::backend::pypi::compare_pep440(left, right))
+                    .cloned();
+                candidates.push(BackendCandidate {
+                    id: format!("pypi:{}", backend.project()),
+                    version: newest,
+                    packaging: "published by the project itself",
+                });
+            }
+        }
+    }
+
+    // conda-forge: the package may exist there too, but it is repackaged by
+    // community volunteers rather than published upstream, and that distinction
+    // is exactly what the user needs in order to choose.
+    if conda_forge_has_package(app, name).await {
+        candidates.push(BackendCandidate {
+            id: format!("conda:{name}"),
+            // Deliberately not reported: reading it means a second network round
+            // trip for a candidate that is already the second choice, and a
+            // missing number reads better than a slow command.
+            version: None,
+            packaging: "repackaged by conda-forge, so it can lag upstream",
+        });
+    }
+
+    candidates
+}
+
+/// Whether conda-forge lists `name`, judged by a bounded anonymous request.
+async fn conda_forge_has_package(app: &App, name: &str) -> bool {
+    let url = format!("https://api.anaconda.org/package/conda-forge/{name}");
+    let Ok(response) = app.ctx.client.get(&url).send().await else {
+        return false;
+    };
+    response.status().is_success()
+}
+
+/// Turn discovered candidates into an error that can be acted on directly.
+fn unknown_backend_error(name: &str, candidates: &[BackendCandidate]) -> anyhow::Error {
+    use std::fmt::Write as _;
+
+    if candidates.is_empty() {
+        return anyhow!(
+            "`{name}` is not a known backend, and no namespace was found that provides it"
+        );
+    }
+    let mut message =
+        format!("`{name}` is not a backend on its own, but these namespaces provide it:");
+    for candidate in candidates {
+        // Written line by line rather than with embedded escapes: the first
+        // attempt used a `\\n` inside a string built by a generator and shipped
+        // the two characters literally, so the error arrived as one unreadable
+        // line.
+        let _ = write!(message, "\n  osdk install {}", candidate.id);
+        if let Some(version) = &candidate.version {
+            let _ = write!(message, "  (latest {version}, {})", candidate.packaging);
+        } else {
+            let _ = write!(message, "  ({})", candidate.packaging);
+        }
+    }
+    let _ = write!(
+        message,
+        "\n\nosdk does not pick a source for you: these are different packaging \n\
+         chains and can differ in version and maintainer."
+    );
+    anyhow!(message)
+}
+
 fn resolve_explicit_request(
     app: &App,
     operand: &str,
@@ -1864,6 +2021,9 @@ async fn android_api_levels(
 }
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
+    // Same ambiguity as `install`: pinning a bare name that no backend owns would
+    // write a spec nothing can resolve.
+    report_bare_tool_name(app, &tool).await?;
     let requested_spec = requested_spec_literal(&tool);
     let (mut req, configured_key) = if global {
         resolve_explicit_request_target(
