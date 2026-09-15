@@ -731,6 +731,20 @@ async fn install_requests(
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
+    // uv has to be installed before the pypi tools that were locked to it, for
+    // the same reason node precedes npm packages: the tools below run
+    // concurrently, so leaving uv in that batch means a tool can start while uv
+    // is still being installed and fall back to pip. Measured before this split:
+    // uv was injected correctly and the option reached the backend, yet every
+    // tool still reported `creator: "stdlib"` -- the injection was right and the
+    // ordering was wrong, which looks identical from the outside.
+    let (uv_requests, mut remaining_requests) =
+        partition_runtime_dependency(remaining_requests, "pypi:uv", "pypi:");
+    for request in uv_requests {
+        let (backend, version) = install_one_without_shims(app, &request, force).await?;
+        generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
+        resolved.push((request, version));
+    }
     bind_request_node_version(&mut remaining_requests, &resolved);
     bind_request_rust_version(&mut remaining_requests, &resolved)?;
     bind_request_go_version(&mut remaining_requests, &resolved)?;
@@ -1704,7 +1718,87 @@ fn inject_node_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<V
 fn inject_managed_dependencies(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
     let requests = inject_node_dependency(app, requests)?;
     let requests = inject_rust_dependency(app, requests)?;
-    inject_go_dependency(app, requests)
+    let requests = inject_go_dependency(app, requests)?;
+    inject_uv_dependency(app, requests)
+}
+
+/// Add uv to the batch when a locked entry says uv installed it.
+///
+/// Without this, replaying a lockfile on a machine that has no uv silently used
+/// pip instead: the entry recorded `installer = "uv"`, the install succeeded, and
+/// the only sign was a notice suggesting uv might be nice to have. Verified
+/// before the change on a fresh data directory -- `pypi:requests` locked with uv
+/// replayed through pip and no uv was installed at all.
+///
+/// That is the failure a lockfile exists to prevent. uv and pip do not resolve
+/// identically (uv publishes a list of deliberate deviations), so the same locked
+/// version can pull different transitive dependencies depending on which one ran.
+///
+/// uv is installed as an ordinary `pypi:uv` request rather than fetched inline,
+/// so it goes through the same index, checksum and receipt path as anything else,
+/// and shows up in `osdk list` where the user can see it.
+fn inject_uv_dependency(app: &App, mut requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {
+    // Only act on entries that actually recorded uv. A plain `pypi:` request
+    // with no locked installer keeps the existing behaviour: use uv when it is
+    // there, fall back when it is not.
+    let needs_uv = requests.iter().any(|request| {
+        request.backend.starts_with("pypi:")
+            && request
+                .options
+                .get(crate::lockfile::LOCKED_PYPI_INSTALLER_OPTION)
+                .is_some_and(|installer| installer == "uv")
+    });
+    if !needs_uv {
+        return Ok(requests);
+    }
+    // uv installing itself would be circular, and a batch that already asks for
+    // uv needs no help.
+    if requests.iter().any(|request| request.backend == "pypi:uv") {
+        return Ok(requests);
+    }
+    // Already installed: nothing to add, and the backend will find it.
+    if uv_is_installed(app) {
+        return Ok(requests);
+    }
+
+    // Pinned to the recorded version when the lockfile carries one, because a
+    // resolver's behaviour changes between releases -- replaying with "whatever
+    // uv is newest" would reintroduce the drift on a smaller scale.
+    let pinned = requests.iter().find_map(|request| {
+        request
+            .options
+            .get(crate::lockfile::LOCKED_PYPI_UV_VERSION_OPTION)
+            .cloned()
+    });
+    let spec = match pinned {
+        Some(version) => format!("pypi:uv@{version}"),
+        None => "pypi:uv".to_string(),
+    };
+    let uv_request = ToolRequest::parse(&spec).map_err(|error| anyhow!("{error}"))?;
+    // Prepended so it is resolved before the tools that need it; the installer
+    // ordering below keeps dependencies ahead of their dependents.
+    requests.insert(0, uv_request);
+    Ok(requests)
+}
+
+/// Whether osdk manages a usable uv already.
+fn uv_is_installed(app: &App) -> bool {
+    let root = app.ctx.dirs.data.join("installs").join("pypi").join("uv");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return false;
+    };
+    // A version directory alone is not proof: the install may have been
+    // interrupted. Require a complete install below it.
+    entries.flatten().any(|entry| {
+        std::fs::read_dir(entry.path()).is_ok_and(|inner| {
+            inner.flatten().any(|install| {
+                install
+                    .path()
+                    .join(osdk_core::backend::pypi::ENV_RECEIPT_FILE)
+                    .is_file()
+            })
+        })
+    })
 }
 
 fn inject_go_dependency(app: &App, requests: Vec<ToolRequest>) -> Result<Vec<ToolRequest>> {

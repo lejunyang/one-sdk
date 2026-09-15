@@ -610,13 +610,36 @@ fn run_installer(program: &Path, args: &[String], env: &BTreeMap<String, String>
 #[cfg(feature = "install")]
 pub const PYTHON_OPTION: &str = "python";
 
+/// Option a lockfile replay carries to name the installer it recorded.
+///
+/// Set by the CLI when replaying an `osdk.lock` entry; never written by a user.
+///
+/// Deliberately outside the `install` gate: `osdk.lock` is read by the CLI, which
+/// builds without that feature in the shim's dependency graph, and gating the
+/// constant while leaving its reader ungated broke the shim build outright.
+pub const LOCKED_INSTALLER_OPTION: &str = "__osdk_pypi_installer";
 
 /// Whether the caller demanded uv-only behaviour.
 #[cfg(feature = "install")]
 fn require_uv(options: &BTreeMap<String, String>) -> bool {
-    options
+    if options
         .get("require-uv")
         .is_some_and(|value| value == "true" || value == "1")
+    {
+        return true;
+    }
+    // A lockfile entry recorded as installed by uv must not replay through pip.
+    // Measured before this existed: an entry with `installer = "uv"` replayed on a
+    // machine without uv installed fine through pip, printing only a notice -- so
+    // the lockfile promised one resolver and delivered another. Since uv and pip
+    // resolve differently, that can change the transitive dependencies while the
+    // recorded version still matches.
+    //
+    // The CLI installs uv first when it sees this, so reaching here with uv
+    // missing means the bootstrap itself failed; failing closed is then correct.
+    options
+        .get(LOCKED_INSTALLER_OPTION)
+        .is_some_and(|installer| installer == "uv")
 }
 
 /// Resolve the managed interpreter to build the environment against.

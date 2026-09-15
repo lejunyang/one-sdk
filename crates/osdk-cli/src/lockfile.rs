@@ -21,6 +21,17 @@ const NPM_LOCK_FORMAT: &str = "package-lock-v3";
 const NPM_LOCKFILE_PATH: &str = "project/package-lock.json";
 const NPM_GRAPH_DIRECTORY: &str = "osdk.lock.d/npm";
 const LOCKED_NPM_INSTALLER_OPTION: &str = "__osdk_npm_installer";
+/// Installer a `pypi:` entry was locked with, passed to the backend so a replay
+/// uses the same resolver rather than whichever one happens to be present.
+///
+/// Re-exported from the backend rather than spelled out again here. Two separate
+/// definitions of the same option name would let the writer and the reader drift
+/// apart, and nothing would fail to compile -- the replay would just quietly
+/// stop honouring the lockfile.
+pub use osdk_core::backend::pypi::LOCKED_INSTALLER_OPTION as LOCKED_PYPI_INSTALLER_OPTION;
+/// uv version a `pypi:` entry was locked with, so a replay pins the same
+/// resolver release rather than the newest one available.
+pub const LOCKED_PYPI_UV_VERSION_OPTION: &str = "__osdk_pypi_uv_version";
 const LOCKED_NPM_SCOPE_OPTION: &str = "__osdk_npm_scope";
 const LOCKED_NPM_NATIVE_LOCK_KIND_OPTION: &str = "__osdk_npm_native_lock_kind";
 const LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION: &str = "__osdk_npm_native_lock_format";
@@ -56,6 +67,63 @@ pub struct LockedTool {
     pub npm: Option<LockedNpmGraph>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native: Option<LockedNativeTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pypi: Option<LockedPypiTool>,
+}
+
+/// What a `pypi:` install needs recorded to be reproducible elsewhere.
+///
+/// The version alone is not enough. `pypi:cowsay = "6.1"` can be satisfied by
+/// two different resolvers -- uv when it is present, pip when it is not -- and
+/// they do not agree: uv publishes a list of deliberate deviations from pip's
+/// resolution behaviour. So the same lockfile could produce different transitive
+/// dependencies on two machines while both honestly reported "6.1".
+///
+/// This mirrors what `LockedNpmMetadata` records for npm (`installer` plus
+/// `node_version`): not just what was installed, but what installed it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LockedPypiTool {
+    /// Which tool built the environment and resolved the dependencies.
+    pub installer: PypiInstaller,
+    /// uv's own version, when uv did the work.
+    ///
+    /// Recorded because uv is a resolver whose behaviour changes between
+    /// releases, so "installed with uv" is only half an answer. Absent for the
+    /// pip path, where the resolver ships with the interpreter instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uv_version: Option<String>,
+    /// Interpreter version the environment was built against (`3.14.7`).
+    ///
+    /// A venv is bound to its interpreter's minor version; replaying against a
+    /// different one silently produces a different environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub python_version: Option<String>,
+}
+
+/// The tool that resolved and installed a `pypi:` environment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PypiInstaller {
+    Uv,
+    Pip,
+}
+
+impl PypiInstaller {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Uv => "uv",
+            Self::Pip => "pip",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "uv" => Ok(Self::Uv),
+            "pip" => Ok(Self::Pip),
+            other => anyhow::bail!("unsupported pypi installer `{other}`"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +322,9 @@ impl Default for LockedTool {
             artifact: None,
             npm: None,
             native: None,
+            // Reconstructed from a request rather than from an install, so there
+            // is no environment to read an installer from.
+            pypi: None,
         }
     }
 }
@@ -392,6 +463,19 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
             }
             if let Some(native) = &locked.native {
                 inject_native_metadata(backend, &mut options, native);
+            }
+            if let Some(pypi) = &locked.pypi {
+                // Carried into the request so the backend can honour the
+                // recorded resolver. Without this the entry replays with
+                // whatever installer the new machine happens to have, which is
+                // exactly the divergence the field was added to prevent.
+                options.insert(
+                    LOCKED_PYPI_INSTALLER_OPTION.into(),
+                    pypi.installer.as_str().into(),
+                );
+                if let Some(uv_version) = &pypi.uv_version {
+                    options.insert(LOCKED_PYPI_UV_VERSION_OPTION.into(), uv_version.clone());
+                }
             }
             Ok(ToolRequest {
                 backend: backend.clone(),
@@ -1313,6 +1397,7 @@ pub fn merge_resolved_with_scope(
                 artifact,
                 npm: npm_metadata.map(LockedNpmGraph::Metadata),
                 native: locked_native_metadata(version)?,
+                pypi: locked_pypi_metadata(dirs, platform, version),
             },
         );
     }
@@ -1422,6 +1507,7 @@ pub fn upsert_resolved_many_with_scope(
                 artifact,
                 npm: npm_metadata.map(LockedNpmGraph::Metadata),
                 native: locked_native_metadata(version)?,
+                pypi: locked_pypi_metadata(dirs, platform, version),
             },
         );
     }
@@ -1562,6 +1648,121 @@ fn reject_unmigratable_schema_one_npm_entries(lockfile: &Lockfile) -> Result<()>
         }
     }
     Ok(())
+}
+
+/// Read the installer identity of an installed `pypi:` environment.
+///
+/// Returns `None` for every other backend, and for a pypi install whose
+/// environment receipt cannot be read -- a lockfile entry without this is the
+/// current behaviour and stays valid, so a missing receipt must not fail the
+/// whole lock.
+///
+/// The facts come from the receipt osdk already writes next to the environment
+/// (`.osdk-pypi-env.json`), not from a fresh probe: the question is what built
+/// *this* environment, which a probe run later cannot answer.
+fn locked_pypi_metadata(
+    dirs: &osdk_core::dirs::Dirs,
+    platform: osdk_core::platform::Platform,
+    version: &ToolVersion,
+) -> Option<LockedPypiTool> {
+    if !version.backend.starts_with("pypi:") {
+        return None;
+    }
+    // Only the host platform's installs are on disk to inspect. Locking for
+    // another platform must not silently borrow this machine's installer.
+    if platform != osdk_core::platform::Platform::current() {
+        return None;
+    }
+
+    let receipt = read_pypi_env_receipt(dirs, version)?;
+    let installer = match receipt.creator {
+        osdk_core::backend::pypi::EnvCreator::Uv => PypiInstaller::Uv,
+        osdk_core::backend::pypi::EnvCreator::Stdlib => PypiInstaller::Pip,
+    };
+    // The interpreter path ends in the version directory osdk installed it
+    // under, which is where the minor version comes from.
+    let python_version = python_version_from_interpreter(&receipt.interpreter);
+    let uv_version = match installer {
+        PypiInstaller::Uv => installed_uv_version(dirs),
+        PypiInstaller::Pip => None,
+    };
+    Some(LockedPypiTool {
+        installer,
+        uv_version,
+        python_version,
+    })
+}
+
+/// Load the environment receipt for an installed pypi tool.
+fn read_pypi_env_receipt(
+    dirs: &osdk_core::dirs::Dirs,
+    version: &ToolVersion,
+) -> Option<osdk_core::backend::pypi::EnvReceipt> {
+    // A dynamic install lives one level below the version directory, under its
+    // install-id fingerprint. Reading the version directory directly finds
+    // nothing -- the same off-by-one-level mistake that has bitten the install
+    // root, `list_installed`, and uv discovery in turn.
+    let root = dirs.install_path(&version.backend, &version.version);
+    let entries = std::fs::read_dir(&root).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry
+            .path()
+            .join(osdk_core::backend::pypi::ENV_RECEIPT_FILE);
+        let Ok(text) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if let Ok(receipt) = serde_json::from_str::<osdk_core::backend::pypi::EnvReceipt>(&text) {
+            return Some(receipt);
+        }
+    }
+    None
+}
+
+/// Pull the interpreter version out of an osdk-managed interpreter path.
+///
+/// osdk installs interpreters at `installs/python/<version>/...`, so the segment
+/// after `python` is the version. A path outside that layout (a user-supplied
+/// interpreter) yields `None` rather than a guess.
+fn python_version_from_interpreter(interpreter: &str) -> Option<String> {
+    let path = std::path::Path::new(interpreter);
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        if component.as_os_str() != "python" {
+            continue;
+        }
+        let next = components.peek()?.as_os_str().to_str()?;
+        // Guard against matching a directory that merely sits next to a file
+        // called `python`: the following segment has to look like a version.
+        if next.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return Some(next.to_string());
+        }
+    }
+    None
+}
+
+/// The version of the uv that osdk manages, if one is installed.
+fn installed_uv_version(dirs: &osdk_core::dirs::Dirs) -> Option<String> {
+    let root = dirs.data.join("installs").join("pypi").join("uv");
+    let mut newest: Option<String> = None;
+    for entry in std::fs::read_dir(&root).ok()?.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_str()?.to_string();
+        newest = match newest {
+            None => Some(name),
+            Some(current) => {
+                if osdk_core::backend::pypi::compare_pep440(&name, &current)
+                    == std::cmp::Ordering::Greater
+                {
+                    Some(name)
+                } else {
+                    Some(current)
+                }
+            }
+        };
+    }
+    newest
 }
 
 fn locked_npm_metadata(
@@ -1905,6 +2106,120 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The interpreter version is parsed out of an osdk-managed path.
+    ///
+    /// This is what makes a lock entry replayable: a venv is bound to its
+    /// interpreter's minor version, so replaying against a different one
+    /// produces a different environment while still reporting the same tool
+    /// version.
+    #[test]
+    fn python_version_is_read_from_the_managed_interpreter_path() {
+        assert_eq!(
+            python_version_from_interpreter(r"E:\osdk-data\data\installs\python\3.14.7\python.exe")
+                .as_deref(),
+            Some("3.14.7")
+        );
+        assert_eq!(
+            python_version_from_interpreter("/home/u/.osdk/installs/python/3.11.16/bin/python3")
+                .as_deref(),
+            Some("3.11.16")
+        );
+
+        // An interpreter outside osdk's layout yields nothing rather than a
+        // guess: recording a wrong version is worse than recording none, since
+        // a wrong one would be replayed as though it had been verified.
+        assert_eq!(python_version_from_interpreter("/usr/bin/python3"), None);
+        assert_eq!(
+            python_version_from_interpreter(r"C:\Python311\python.exe"),
+            None
+        );
+
+        // A directory merely named `python` must not be mistaken for the
+        // version segment.
+        assert_eq!(
+            python_version_from_interpreter("/opt/python/bin/python"),
+            None
+        );
+    }
+
+    /// The installer enum round-trips through its serialized spelling.
+    #[test]
+    fn pypi_installer_round_trips() {
+        for installer in [PypiInstaller::Uv, PypiInstaller::Pip] {
+            let text = installer.as_str();
+            assert_eq!(PypiInstaller::parse(text).unwrap(), installer);
+        }
+        assert!(PypiInstaller::parse("poetry").is_err());
+    }
+
+    /// A pypi lock entry serializes with its installer, and survives a reload.
+    ///
+    /// The version alone cannot distinguish the two resolvers, and uv documents
+    /// deliberate deviations from pip's resolution, so an entry that omits this
+    /// can be satisfied differently on another machine while both honestly
+    /// report the same version.
+    #[test]
+    fn pypi_installer_identity_survives_a_save_and_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.lock");
+
+        let mut lockfile = Lockfile::default();
+        let mut platform_lock = PlatformLock::default();
+        platform_lock.tools.insert(
+            "pypi:requests".to_string(),
+            LockedTool {
+                request: "latest".into(),
+                version: "2.34.2".into(),
+                options: Default::default(),
+                artifact: None,
+                npm: None,
+                native: None,
+                pypi: Some(LockedPypiTool {
+                    installer: PypiInstaller::Uv,
+                    uv_version: Some("0.12.14".into()),
+                    python_version: Some("3.14.7".into()),
+                }),
+            },
+        );
+        lockfile
+            .platforms
+            .insert("windows-x64".to_string(), platform_lock);
+        save(&path, &lockfile).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("installer = \"uv\""), "{text}");
+        assert!(text.contains("uv_version = \"0.12.14\""), "{text}");
+        assert!(text.contains("python_version = \"3.14.7\""), "{text}");
+
+        let reloaded = load(&path).unwrap();
+        let entry = reloaded.platforms["windows-x64"].tools["pypi:requests"]
+            .pypi
+            .clone()
+            .expect("installer identity must survive a reload");
+        assert_eq!(entry.installer, PypiInstaller::Uv);
+        assert_eq!(entry.uv_version.as_deref(), Some("0.12.14"));
+    }
+
+    /// An entry without the pypi section still loads.
+    ///
+    /// Every lockfile written before this existed lacks the section, and a
+    /// lockfile that stops loading after an upgrade would be a breaking change
+    /// dressed up as a new feature.
+    #[test]
+    fn a_lockfile_without_installer_identity_still_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.lock");
+        std::fs::write(
+            &path,
+            "schema = 4\n\n[platforms.windows-x64.tools.\"pypi:cowsay\"]\nrequest = \"6.1\"\nversion = \"6.1\"\n",
+        )
+        .unwrap();
+
+        let loaded = load(&path).unwrap();
+        let entry = &loaded.platforms["windows-x64"].tools["pypi:cowsay"];
+        assert_eq!(entry.version, "6.1");
+        assert!(entry.pypi.is_none());
+    }
     use super::*;
 
     fn linux() -> Platform {
@@ -1936,6 +2251,7 @@ mod tests {
                         artifact: None,
                         npm: None,
                         native: None,
+                        pypi: None,
                     },
                 )]),
             },
@@ -2078,6 +2394,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                             artifact: None,
                             npm: None,
                             native: None,
+                            pypi: None,
                         },
                     )]),
                 },

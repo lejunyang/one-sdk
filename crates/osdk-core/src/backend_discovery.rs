@@ -250,9 +250,7 @@ async fn probe_python_index(ctx: &Ctx, project: &str) -> Option<ProbeResult> {
     let timeout = configured.probe_timeout_ms.max(8_000);
     let index = match crate::python_index::plan(&configured.urls, timeout).await {
         crate::python_index::IndexPlan::Selected { url, .. } => url,
-        crate::python_index::IndexPlan::PassThrough { .. } => {
-            crate::python_index::PYPI.to_string()
-        }
+        crate::python_index::IndexPlan::PassThrough { .. } => crate::python_index::PYPI.to_string(),
         crate::python_index::IndexPlan::Unavailable { .. } => return None,
     };
     let versions = crate::python_index::list_versions(&ctx.client, &index, project, false)
@@ -402,7 +400,10 @@ mod tests {
             truncate_summary("An extremely fast Python package installer"),
             "An extremely fast Python package installer"
         );
-        assert_eq!(truncate_summary("line one\n  line two"), "line one line two");
+        assert_eq!(
+            truncate_summary("line one\n  line two"),
+            "line one line two"
+        );
 
         // Long ASCII input is cut and marked.
         let long = "a".repeat(200);
