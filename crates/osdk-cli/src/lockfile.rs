@@ -32,6 +32,9 @@ pub use osdk_core::backend::pypi::LOCKED_INSTALLER_OPTION as LOCKED_PYPI_INSTALL
 /// uv version a `pypi:` entry was locked with, so a replay pins the same
 /// resolver release rather than the newest one available.
 pub const LOCKED_PYPI_UV_VERSION_OPTION: &str = "__osdk_pypi_uv_version";
+/// Interpreter version a `pypi:` entry was locked against, carried through a
+/// replay so re-locking preserves it rather than re-deriving it from this machine.
+pub const LOCKED_PYPI_PYTHON_VERSION_OPTION: &str = "__osdk_pypi_python_version";
 const LOCKED_NPM_SCOPE_OPTION: &str = "__osdk_npm_scope";
 const LOCKED_NPM_NATIVE_LOCK_KIND_OPTION: &str = "__osdk_npm_native_lock_kind";
 const LOCKED_NPM_NATIVE_LOCK_FORMAT_OPTION: &str = "__osdk_npm_native_lock_format";
@@ -475,6 +478,12 @@ pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<Too
                 );
                 if let Some(uv_version) = &pypi.uv_version {
                     options.insert(LOCKED_PYPI_UV_VERSION_OPTION.into(), uv_version.clone());
+                }
+                if let Some(python_version) = &pypi.python_version {
+                    options.insert(
+                        LOCKED_PYPI_PYTHON_VERSION_OPTION.into(),
+                        python_version.clone(),
+                    );
                 }
             }
             Ok(ToolRequest {
@@ -1650,16 +1659,21 @@ fn reject_unmigratable_schema_one_npm_entries(lockfile: &Lockfile) -> Result<()>
     Ok(())
 }
 
-/// Read the installer identity of an installed `pypi:` environment.
+/// Read the installer identity of a `pypi:` entry being locked.
 ///
 /// Returns `None` for every other backend, and for a pypi install whose
-/// environment receipt cannot be read -- a lockfile entry without this is the
-/// current behaviour and stays valid, so a missing receipt must not fail the
-/// whole lock.
+/// environment receipt cannot be read -- a lockfile entry without this section is
+/// the pre-existing behaviour and stays valid, so a missing receipt must not fail
+/// the whole lock.
 ///
-/// The facts come from the receipt osdk already writes next to the environment
-/// (`.osdk-pypi-env.json`), not from a fresh probe: the question is what built
-/// *this* environment, which a probe run later cannot answer.
+/// A replayed request already carries the recorded installer, and that outranks
+/// anything this machine can observe. Otherwise re-running `lock` on a machine
+/// without uv would rewrite `installer = "uv"` to `"pip"` and commit the weaker
+/// fact -- the recorded promise quietly replaced by the local situation.
+///
+/// Failing that, the facts come from the receipt osdk writes next to the
+/// environment (`.osdk-pypi-env.json`) rather than from a fresh probe: the
+/// question is what built *this* environment, which a later probe cannot answer.
 fn locked_pypi_metadata(
     dirs: &osdk_core::dirs::Dirs,
     platform: osdk_core::platform::Platform,
@@ -1668,6 +1682,23 @@ fn locked_pypi_metadata(
     if !version.backend.starts_with("pypi:") {
         return None;
     }
+
+    // Preserve what a replay carried in. This is also where `PypiInstaller::parse`
+    // earns its place: clippy reported it as never used, and the honest reading of
+    // that warning was not "delete it" but "the read-back path is missing". npm has
+    // had this from the start -- see `locked_npm_metadata`.
+    if let Some(recorded) = version.options.get(LOCKED_PYPI_INSTALLER_OPTION) {
+        let installer = PypiInstaller::parse(recorded).ok()?;
+        return Some(LockedPypiTool {
+            installer,
+            uv_version: version.options.get(LOCKED_PYPI_UV_VERSION_OPTION).cloned(),
+            python_version: version
+                .options
+                .get(LOCKED_PYPI_PYTHON_VERSION_OPTION)
+                .cloned(),
+        });
+    }
+
     // Only the host platform's installs are on disk to inspect. Locking for
     // another platform must not silently borrow this machine's installer.
     if platform != osdk_core::platform::Platform::current() {
@@ -2140,6 +2171,47 @@ mod tests {
             python_version_from_interpreter("/opt/python/bin/python"),
             None
         );
+    }
+
+    /// A replay's recorded installer outranks whatever this machine has.
+    ///
+    /// Re-running `lock` after replaying on a machine without uv used to re-derive
+    /// the installer from disk, rewriting `installer = "uv"` to `"pip"` and
+    /// committing the weaker fact -- the recorded promise silently replaced by the
+    /// local situation.
+    ///
+    /// clippy pointed straight at this: `PypiInstaller::parse` was reported as
+    /// never used. Deleting it would have silenced the warning and kept the bug;
+    /// the read-back path was what was actually missing.
+    #[test]
+    fn a_replayed_entry_keeps_its_recorded_installer() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(temp.path());
+
+        // A request as it arrives from a replay: no environment on disk at all,
+        // so anything derived locally would come back empty or wrong.
+        let mut version = ToolVersion::new("pypi:requests", "2.34.2".to_string());
+        version
+            .options
+            .insert(LOCKED_PYPI_INSTALLER_OPTION.into(), "uv".into());
+        version
+            .options
+            .insert(LOCKED_PYPI_UV_VERSION_OPTION.into(), "0.12.14".into());
+        version
+            .options
+            .insert(LOCKED_PYPI_PYTHON_VERSION_OPTION.into(), "3.14.7".into());
+
+        let metadata = locked_pypi_metadata(&dirs, Platform::current(), &version)
+            .expect("a replayed entry must keep its recorded installer");
+        assert_eq!(metadata.installer, PypiInstaller::Uv);
+        assert_eq!(metadata.uv_version.as_deref(), Some("0.12.14"));
+        assert_eq!(metadata.python_version.as_deref(), Some("3.14.7"));
+
+        // Without a recorded installer there is nothing to preserve, and with no
+        // environment on disk either, the honest answer is nothing rather than a
+        // default that would be written into the lockfile as though observed.
+        let bare = ToolVersion::new("pypi:requests", "2.34.2".to_string());
+        assert!(locked_pypi_metadata(&dirs, Platform::current(), &bare).is_none());
     }
 
     /// The installer enum round-trips through its serialized spelling.

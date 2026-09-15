@@ -724,7 +724,7 @@ async fn install_requests(
         generate_shims_including_dependencies(app, backend.as_ref(), &version)?;
         resolved.push((request, version));
     }
-    let (go_requests, mut remaining_requests) =
+    let (go_requests, remaining_requests) =
         partition_runtime_dependency(remaining_requests, "go", "go:");
     for request in go_requests {
         let (backend, version) = install_one_without_shims(app, &request, force).await?;
