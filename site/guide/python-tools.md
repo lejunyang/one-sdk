@@ -32,13 +32,42 @@ cowsay -t hello
 "pypi:cowsay" = "6.1"
 ```
 
-::: warning 版本目前必须写字面量
-`latest` 和版本范围需要读取索引，尚未接通，请求它们会得到明确报错而不是静默行为。
-`pypi:ruff@0.6.9`、`pypi:cowsay@6.1` 这类字面版本可用。
+`latest` 和版本范围会读取索引来解析，与其他 backend 一致：
 
-注意 Python 版本号不是 semver、段数不固定：`6.1` 和 `2026.7.22` 都是完整版本号，
-而不是前缀。
+```bash
+osdk install pypi:cowsay@latest
+osdk list-remote pypi:cowsay
+```
+
+::: tip 版本号不是 semver
+Python 版本号段数不固定：`6.1` 和 `2026.7.22` 都是完整版本号，而不是前缀。
+
+排序按 PEP 440 而非字典序，所以 `0.10.0` 高于 `0.9.0`。预发布版（`1.0rc1`、`2.0b3`、
+`3.0.dev1`）不会被 `latest` 选中——它们不带 `-`，因此需要单独识别——但显式请求仍可安装。
 :::
+
+## 不写前缀时会怎样
+
+`pypi:` 前缀是必需的，因为同一个名字在不同渠道往往都存在。osdk 不替你猜，但会把
+可用的渠道列出来，并说明它们的差别：
+
+```
+$ osdk install uv
+error: `uv` is not a backend on its own, but these namespaces provide it:
+  osdk install pypi:uv  (latest 0.12.14, published by the project itself)
+  osdk install conda:uv  (repackaged by conda-forge, so it can lag upstream)
+```
+
+两者不等价。conda-forge 的 uv 由 feedstock 从 `astral-sh/uv` 构建，代码是官方的，
+但打包由社区志愿者完成，实测落后 PyPI 一个版本（0.12.13 对 0.12.14）。两边都能用时
+优先 `pypi:`，理由就在这里。
+
+装好之后裸命令即可使用，不需要带前缀——shim 会接管：
+
+```bash
+osdk use --global pypi:uv
+uv --version
+```
 
 ## 名字与 extras
 

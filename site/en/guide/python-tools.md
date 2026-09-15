@@ -36,14 +36,48 @@ You can pin it in a project instead:
 "pypi:cowsay" = "6.1"
 ```
 
-::: warning Versions must currently be literal
-`latest` and version ranges require reading the index, which is not wired up yet;
-requesting them produces an explicit error rather than surprising behaviour.
-Literal versions such as `pypi:ruff@0.6.9` and `pypi:cowsay@6.1` work.
+`latest` and version ranges resolve by reading the index, the same as every
+other backend:
 
-Note that Python versions are not semver and have no fixed segment count: `6.1`
-and `2026.7.22` are both complete versions, not prefixes.
+```bash
+osdk install pypi:cowsay@latest
+osdk list-remote pypi:cowsay
+```
+
+::: tip Versions are not semver
+Python versions have no fixed segment count: `6.1` and `2026.7.22` are both
+complete versions, not prefixes.
+
+Ordering follows PEP 440 rather than string order, so `0.10.0` ranks above
+`0.9.0`. Pre-releases (`1.0rc1`, `2.0b3`, `3.0.dev1`) are never chosen by
+`latest` — they carry no `-`, so they need recognising separately — but an
+explicit request for one still installs.
 :::
+
+## Leaving off the prefix
+
+The `pypi:` prefix is required, because the same name usually exists in more than
+one channel. osdk will not guess for you, but it does list the channels that
+provide it, along with what separates them:
+
+```
+$ osdk install uv
+error: `uv` is not a backend on its own, but these namespaces provide it:
+  osdk install pypi:uv  (latest 0.12.14, published by the project itself)
+  osdk install conda:uv  (repackaged by conda-forge, so it can lag upstream)
+```
+
+These are not equivalent. The conda-forge uv is built from `astral-sh/uv` by the
+feedstock, so the code is genuine, but packaging is done by community volunteers
+and it measured one release behind PyPI (0.12.13 vs 0.12.14). That is why `pypi:`
+is the better choice when both work.
+
+Once installed, the bare command works without any prefix — the shim takes over:
+
+```bash
+osdk use --global pypi:uv
+uv --version
+```
 
 ## Names and extras
 
