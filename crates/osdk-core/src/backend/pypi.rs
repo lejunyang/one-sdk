@@ -407,8 +407,7 @@ pub fn choose_installer(uv_candidate: Option<&Path>, require_uv: bool) -> Result
         }
         if require_uv {
             return Err(Error::other(format!(
-                "`{}` was found but could not be started, so uv-only behaviour is \\
-                 unavailable; reinstall uv or drop --require-uv",
+                "`{}` was found but could not be started, so uv-only behaviour is  unavailable; reinstall uv or drop --require-uv",
                 candidate.display()
             )));
         }
@@ -418,25 +417,21 @@ pub fn choose_installer(uv_candidate: Option<&Path>, require_uv: bool) -> Result
             creator: EnvCreator::Stdlib,
             uv: None,
             notice: Some(format!(
-                "`{}` exists but could not be started; using python -m venv with pip \\
-                 instead. Dependencies will not be shared between environments.",
+                "`{}` exists but could not be started; using python -m venv with pip  instead. Dependencies will not be shared between environments.",
                 candidate.display()
             )),
         });
     }
     if require_uv {
         return Err(Error::other(
-            "uv is required for this operation but is not installed; run \\
-             `osdk install pypi:uv` first",
+            "uv is required for this operation but is not installed; run  `osdk install pypi:uv` first",
         ));
     }
     Ok(InstallerChoice {
         creator: EnvCreator::Stdlib,
         uv: None,
         notice: Some(
-            "uv is not installed; using python -m venv with pip. Installing uv \\
-             (`osdk install pypi:uv`) makes resolution faster and lets environments \\
-             share dependencies instead of each keeping its own copy."
+            "uv is not installed; using python -m venv with pip. Installing uv  (`osdk install pypi:uv`) makes resolution faster and lets environments  share dependencies instead of each keeping its own copy."
                 .to_string(),
         ),
     })
