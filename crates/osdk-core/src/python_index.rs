@@ -204,13 +204,16 @@ fn versions_from_pep691(body: &[u8]) -> crate::error::Result<Vec<String>> {
 fn versions_from_pep503(body: &[u8], _project: &str) -> crate::error::Result<Vec<String>> {
     use crate::error::Error;
 
-    let text = std::str::from_utf8(body)
-        .map_err(|_| Error::other("index response is not UTF-8"))?;
+    let text =
+        std::str::from_utf8(body).map_err(|_| Error::other("index response is not UTF-8"))?;
     let mut versions = Vec::new();
     // Anchor text is the filename in a PEP 503 listing. Reading the text rather
     // than the href keeps a mirror's rewritten download URLs from mattering.
     for segment in text.split('<') {
-        let Some(rest) = segment.strip_prefix("a ").or_else(|| segment.strip_prefix("A ")) else {
+        let Some(rest) = segment
+            .strip_prefix("a ")
+            .or_else(|| segment.strip_prefix("A "))
+        else {
             continue;
         };
         let Some((_, after)) = rest.split_once('>') else {
@@ -560,7 +563,8 @@ mod tests {
     #[test]
     fn a_truncated_listing_is_still_recognized_but_a_portal_is_not() {
         // A prefix of real PEP 691 JSON: unparseable, yet clearly a listing.
-        let prefix = br#"{"meta":{"api-version":"1.1"},"name":"pip","files":[{"filename":"pip-1.0.tar.gz","#;
+        let prefix =
+            br#"{"meta":{"api-version":"1.1"},"name":"pip","files":[{"filename":"pip-1.0.tar.gz","#;
         assert!(validate_probe_body(prefix, true, true).is_ok());
         // The same bytes would fail a strict parse, so the truncated path is
         // doing real work rather than shadowing the parse.
