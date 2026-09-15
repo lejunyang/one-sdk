@@ -344,6 +344,42 @@ impl PypiBackend {
         Ok(())
     }
 
+    /// The index to read for version discovery.
+    ///
+    /// Uses the same ranking as installs, so `latest` and the install that
+    /// follows it read the same index -- resolving against upstream and then
+    /// installing from a lagging mirror is how a version that "exists" turns out
+    /// to be unavailable moments later.
+    #[cfg(feature = "install")]
+    async fn resolved_index(&self, ctx: &Ctx) -> Result<String> {
+        let configured = &ctx.config.registries().python;
+        match crate::python_index::plan(&configured.urls, configured.probe_timeout_ms).await {
+            crate::python_index::IndexPlan::Selected { url, .. } => Ok(url),
+            // No mirror configured: upstream is the default index.
+            crate::python_index::IndexPlan::PassThrough { .. } => {
+                Ok(crate::python_index::PYPI.to_string())
+            }
+            // Configured mirrors all failed. Falling back to upstream here would
+            // silently ignore the configuration, so this fails closed.
+            crate::python_index::IndexPlan::Unavailable { probes } => {
+                let detail = probes
+                    .iter()
+                    .map(|probe| {
+                        format!(
+                            "{} ({})",
+                            probe.url,
+                            probe.error.as_deref().unwrap_or("unavailable")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(Error::other(format!(
+                    "no configured Python index is reachable: {detail}"
+                )))
+            }
+        }
+    }
+
     /// The directory holding this tool's environment.
     ///
     /// Derived from the install identity, so it matches what the shim resolves.
@@ -776,6 +812,80 @@ fn finalize_pypi_install(
     result
 }
 
+/// Whether a PEP 440 version string is a pre-release.
+///
+/// PEP 440 spells these with a letter marker after the release segment (`1.0rc1`,
+/// `2.0b3`, `3.0.dev1`, `1.0a2`), unlike semver's `-` suffix, so the shared
+/// semver-based check does not recognize them. Marking them unstable is what
+/// keeps `latest` from resolving to a release candidate while still allowing an
+/// exact request for one.
+#[cfg(feature = "install")]
+pub fn is_pep440_prerelease(version: &str) -> bool {
+    let lowered = version.to_ascii_lowercase();
+    // `.devN` and `.postN` may follow a separator; the pre-release markers may
+    // not, which is why simple substring checks are not enough on their own.
+    if lowered.contains(".dev") || lowered.starts_with("dev") {
+        return true;
+    }
+    // Walk the string and look for a marker that directly follows a digit, so
+    // `1.0rc1` matches while a project named like `beta-tool` does not.
+    let bytes = lowered.as_bytes();
+    for marker in ["a", "b", "c", "rc", "alpha", "beta", "pre", "preview"] {
+        let mut from = 0usize;
+        while let Some(found) = lowered[from..].find(marker) {
+            let at = from + found;
+            let after = at + marker.len();
+            let preceded_by_digit = at
+                .checked_sub(1)
+                .is_some_and(|index| bytes[index].is_ascii_digit());
+            let followed_by_digit_or_end = after >= bytes.len() || bytes[after].is_ascii_digit();
+            if preceded_by_digit && followed_by_digit_or_end {
+                return true;
+            }
+            from = at + 1;
+            if from >= lowered.len() {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Order two PEP 440 versions.
+///
+/// Compares the numeric release segments field by field, so `0.10.0` sorts above
+/// `0.9.0` -- a lexical sort puts them the other way round and would make
+/// `latest` resolve to an older release. A pre-release sorts below the
+/// corresponding final release, and anything unparseable falls back to a string
+/// comparison rather than being dropped.
+#[cfg(feature = "install")]
+pub fn compare_pep440(left: &str, right: &str) -> std::cmp::Ordering {
+    let release = |value: &str| -> Vec<u64> {
+        value
+            .split(['.', '+', '!'])
+            .map(|part| {
+                // Stop at the first non-digit so `0rc1` contributes 0 rather than
+                // being discarded entirely.
+                let digits: String = part
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect();
+                digits.parse::<u64>().unwrap_or(0)
+            })
+            .collect()
+    };
+    let ordering = release(left).cmp(&release(right));
+    if ordering != std::cmp::Ordering::Equal {
+        return ordering;
+    }
+    // Same release numbers: a pre-release is older than the final release.
+    match (is_pep440_prerelease(left), is_pep440_prerelease(right)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => left.cmp(right),
+    }
+}
+
 #[async_trait]
 impl Backend for PypiBackend {
     fn id(&self) -> &str {
@@ -795,15 +905,35 @@ impl Backend for PypiBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        // Deliberately unimplemented for now: listing versions means reading the
-        // index, and the index client belongs to the same change that performs
-        // installs. Returning an explicit error beats an empty list, which would
-        // read as "this project has no releases".
-        Err(Error::other(format!(
-            "listing versions for `{}` is not implemented yet",
-            self.id
-        )))
+    async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
+        let index = self.resolved_index(ctx).await?;
+        let versions = crate::python_index::list_versions(
+            &ctx.client,
+            &index,
+            &self.project,
+            ctx.config.settings.offline,
+        )
+        .await?;
+
+        // Sort by PEP 440 order rather than lexically, or `0.10.0` would sort
+        // below `0.9.0` and `latest` would resolve to an older release.
+        let mut sorted = versions;
+        sorted.sort_by(|left, right| compare_pep440(left, right));
+        sorted.dedup();
+        Ok(sorted
+            .into_iter()
+            .map(|version| {
+                // Pre-releases are marked unstable so `latest` skips them, while an
+                // exact request for one still resolves. PEP 440 spells them with a
+                // letter in the release segment (`1.0rc1`, `2.0b3`, `3.0.dev1`).
+                let stable = !is_pep440_prerelease(&version);
+                VersionInfo {
+                    version,
+                    stable,
+                    lts: None,
+                }
+            })
+            .collect())
     }
 
     #[cfg(feature = "install")]
@@ -832,15 +962,24 @@ impl Backend for PypiBackend {
             tv.options = req.options.clone();
             return Ok(tv);
         }
-        Err(Error::VersionResolve {
-            tool: self.id.clone(),
-            spec: req.spec.to_string(),
-            hint: Some(
-                "pypi requests need a literal version for now, e.g. `pypi:ruff@0.6.9`; \
-                 `latest` and ranges need an index lookup, which is not wired up yet"
-                    .into(),
-            ),
-        })
+        // Anything else -- `latest`, a range -- needs the index. Resolution goes
+        // through the shared selector so prerelease policy and range semantics
+        // behave the same here as for every other backend.
+        let versions = self.list_remote_versions(_ctx).await?;
+        let chosen = crate::version::select_version(&req.spec, &versions).ok_or_else(|| {
+            Error::VersionResolve {
+                tool: self.id.clone(),
+                spec: req.spec.to_string(),
+                hint: Some(format!(
+                    "the index lists {} release(s) for `{}`, none matching",
+                    versions.len(),
+                    self.project
+                )),
+            }
+        })?;
+        let mut tv = ToolVersion::new(self.id(), chosen.version.clone());
+        tv.options = req.options.clone();
+        Ok(tv)
     }
 
     #[cfg(feature = "install")]
@@ -1018,6 +1157,91 @@ pub fn tool_bin_names(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Version ordering must be numeric, not lexical.
+    ///
+    /// A lexical sort puts `0.9.0` above `0.10.0`, which would make `latest`
+    /// resolve to an older release -- a silent wrong answer rather than an error.
+    #[cfg(feature = "install")]
+    #[test]
+    fn versions_order_numerically_so_latest_is_actually_latest() {
+        let mut versions = vec![
+            "0.9.0".to_string(),
+            "0.10.0".to_string(),
+            "0.12.13".to_string(),
+            "0.2.0".to_string(),
+            "1.0.0".to_string(),
+        ];
+        versions.sort_by(|left, right| compare_pep440(left, right));
+        assert_eq!(versions, ["0.2.0", "0.9.0", "0.10.0", "0.12.13", "1.0.0"]);
+        // The specific pair a lexical sort gets wrong.
+        assert_eq!(
+            compare_pep440("0.10.0", "0.9.0"),
+            std::cmp::Ordering::Greater
+        );
+
+        // Non-semver shapes PyPI actually uses must order sensibly too.
+        assert_eq!(
+            compare_pep440("2026.7.22", "2026.1.4"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(compare_pep440("6.1", "6.0"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_pep440("6.1", "6.1"), std::cmp::Ordering::Equal);
+    }
+
+    /// PEP 440 pre-releases carry no `-`, so the semver check does not see them.
+    #[cfg(feature = "install")]
+    #[test]
+    fn pep440_prereleases_are_recognized_without_a_dash() {
+        for prerelease in ["1.0rc1", "2.0b3", "1.0a2", "3.0.dev1", "1.0c1", "1.0.0rc2"] {
+            assert!(
+                is_pep440_prerelease(prerelease),
+                "`{prerelease}` is a pre-release"
+            );
+        }
+        for final_release in ["1.0", "2.0.0", "0.12.13", "2026.7.22", "1.0.post1"] {
+            assert!(
+                !is_pep440_prerelease(final_release),
+                "`{final_release}` is a final release"
+            );
+        }
+
+        // A pre-release sorts below the final release with the same numbers, so
+        // `latest` prefers the final one.
+        assert_eq!(compare_pep440("1.0rc1", "1.0"), std::cmp::Ordering::Less);
+    }
+
+    /// Filenames are where versions come from when an index omits PEP 700's
+    /// `versions` key, which several mirrors do.
+    #[test]
+    fn versions_are_extracted_from_distribution_filenames() {
+        use crate::python_index::version_from_filename;
+
+        assert_eq!(
+            version_from_filename("uv-0.12.13-py3-none-win_amd64.whl").as_deref(),
+            Some("0.12.13")
+        );
+        assert_eq!(
+            version_from_filename("cowsay-6.1.tar.gz").as_deref(),
+            Some("6.1")
+        );
+        // A project name containing a dash: splitting from the left would yield
+        // the wrong field.
+        assert_eq!(
+            version_from_filename("typing-extensions-4.12.2.tar.gz").as_deref(),
+            Some("4.12.2")
+        );
+        assert_eq!(
+            version_from_filename("typing_extensions-4.12.2-py3-none-any.whl").as_deref(),
+            Some("4.12.2")
+        );
+
+        // Anything unrecognized is skipped rather than guessed at: a wrong
+        // version here would be installed as though it had been requested.
+        assert_eq!(version_from_filename("index.html"), None);
+        assert_eq!(version_from_filename("uv.whl"), None);
+        assert_eq!(version_from_filename(""), None);
+    }
 
     #[test]
     fn ids_normalize_through_the_namespace_schema() {

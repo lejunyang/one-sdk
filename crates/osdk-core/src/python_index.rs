@@ -74,6 +74,185 @@ impl IndexPlan {
     }
 }
 
+/// Cap on a project listing read for version discovery.
+///
+/// Far larger than the probe cap because this one has to be complete: a
+/// truncated listing would silently hide the newest release, which is the exact
+/// question `latest` is asking. `pip`'s listing -- among the largest on PyPI --
+/// measured about 2.3 MB, so this leaves generous headroom while still bounding
+/// what a hostile index can make osdk allocate.
+const MAX_LISTING_BODY: usize = 32 * 1024 * 1024;
+
+/// List the versions a project publishes, newest last.
+///
+/// `base` is the index to read, normally the one [`plan`] selected. Versions are
+/// returned as published strings without interpretation: PEP 440 versions are
+/// not semver and osdk's own ordering is applied by the caller.
+pub async fn list_versions(
+    client: &reqwest::Client,
+    base: &str,
+    project: &str,
+    offline: bool,
+) -> crate::error::Result<Vec<String>> {
+    use crate::error::Error;
+
+    if offline {
+        // Fail closed rather than reporting "no versions", which reads as "this
+        // project has no releases" and sends the user looking in the wrong place.
+        return Err(Error::other(format!(
+            "cannot list versions for `{project}` while offline; request an exact \\
+             version instead"
+        )));
+    }
+
+    let endpoint = format!("{}/{project}/", base.trim_end_matches('/'));
+    let response = client
+        .get(&endpoint)
+        .header(reqwest::header::ACCEPT, INDEX_PROBE_ACCEPT)
+        .send()
+        .await
+        .map_err(|error| Error::other(format!("index request failed: {}", probe_error(error))))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // A 404 is a definite answer, unlike a transport failure, so it earns a
+        // message that names the likely cause.
+        return Err(Error::other(format!(
+            "`{project}` was not found on the index; check the project name"
+        )));
+    }
+    if !response.status().is_success() {
+        return Err(Error::other(format!(
+            "index returned HTTP {} for `{project}`",
+            response.status().as_u16()
+        )));
+    }
+    let json = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("application/vnd.pypi.simple"));
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| Error::other(format!("index read failed: {}", probe_error(error))))?;
+        if body.len().saturating_add(chunk.len()) > MAX_LISTING_BODY {
+            // Refuse rather than truncate: a partial listing would answer
+            // `latest` with a stale version and look like a success.
+            return Err(Error::other(format!(
+                "index listing for `{project}` exceeds {MAX_LISTING_BODY} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let versions = if json {
+        versions_from_pep691(&body)?
+    } else {
+        versions_from_pep503(&body, project)?
+    };
+    if versions.is_empty() {
+        return Err(Error::other(format!(
+            "index listed no usable releases for `{project}`"
+        )));
+    }
+    Ok(versions)
+}
+
+/// Read versions from a PEP 691 JSON listing.
+///
+/// Prefers the `versions` key (PEP 700) and falls back to deriving them from
+/// filenames, because that key is optional and several mirrors omit it.
+fn versions_from_pep691(body: &[u8]) -> crate::error::Result<Vec<String>> {
+    use crate::error::Error;
+
+    let parsed: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| Error::other("index returned invalid PEP 691 JSON"))?;
+    if let Some(listed) = parsed.get("versions").and_then(|value| value.as_array()) {
+        let versions: Vec<String> = listed
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        if !versions.is_empty() {
+            return Ok(versions);
+        }
+    }
+    let files = parsed
+        .get("files")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| Error::other("PEP 691 index response has no `files` array"))?;
+    let mut versions = Vec::new();
+    for file in files {
+        // A yanked release is still installable by exact request but must not be
+        // what `latest` resolves to.
+        if file.get("yanked").is_some_and(|value| value != false) {
+            continue;
+        }
+        let Some(filename) = file.get("filename").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if let Some(version) = version_from_filename(filename) {
+            if !versions.contains(&version) {
+                versions.push(version);
+            }
+        }
+    }
+    Ok(versions)
+}
+
+/// Read versions from a PEP 503 HTML listing by parsing anchor filenames.
+fn versions_from_pep503(body: &[u8], _project: &str) -> crate::error::Result<Vec<String>> {
+    use crate::error::Error;
+
+    let text = std::str::from_utf8(body)
+        .map_err(|_| Error::other("index response is not UTF-8"))?;
+    let mut versions = Vec::new();
+    // Anchor text is the filename in a PEP 503 listing. Reading the text rather
+    // than the href keeps a mirror's rewritten download URLs from mattering.
+    for segment in text.split('<') {
+        let Some(rest) = segment.strip_prefix("a ").or_else(|| segment.strip_prefix("A ")) else {
+            continue;
+        };
+        let Some((_, after)) = rest.split_once('>') else {
+            continue;
+        };
+        let filename = after.trim();
+        if filename.is_empty() {
+            continue;
+        }
+        if let Some(version) = version_from_filename(filename) {
+            if !versions.contains(&version) {
+                versions.push(version);
+            }
+        }
+    }
+    Ok(versions)
+}
+
+/// Extract the version from a distribution filename.
+///
+/// Wheels are `name-version-...whl` and source distributions are
+/// `name-version.tar.gz`, so the version is the second dash-separated field of a
+/// wheel and the tail of an sdist. Anything else is skipped rather than guessed
+/// at -- a wrong version here would be installed as if it had been requested.
+pub fn version_from_filename(filename: &str) -> Option<String> {
+    if let Some(stem) = filename.strip_suffix(".whl") {
+        // name-version[-build]-python-abi-platform
+        let mut parts = stem.split('-');
+        let _name = parts.next()?;
+        let version = parts.next()?;
+        return (!version.is_empty()).then(|| version.to_string());
+    }
+    for suffix in [".tar.gz", ".zip", ".tar.bz2", ".tar.xz"] {
+        if let Some(stem) = filename.strip_suffix(suffix) {
+            // The project name may itself contain dashes, so split from the right.
+            let (_, version) = stem.rsplit_once('-')?;
+            return (!version.is_empty()).then(|| version.to_string());
+        }
+    }
+    None
+}
+
 /// Rank `candidates` by a fresh anonymous probe and pick the fastest healthy
 /// one. An empty candidate list means "no mirror configured", which is a
 /// pass-through rather than an implicit switch to upstream.

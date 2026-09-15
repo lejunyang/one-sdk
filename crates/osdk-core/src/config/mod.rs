@@ -385,7 +385,13 @@ impl Default for PythonIndexConfig {
     fn default() -> Self {
         Self {
             urls: Vec::new(),
-            probe_timeout_ms: 1500,
+            // Higher than the npm default of 1500 ms, which was copied here at
+            // first and proved too tight: a project listing is a far larger
+            // response than an npm ping. Measured from Beijing, the TUNA mirror
+            // needed about 1.2 s for `/simple/numpy/` and pypi.org about 1.8 s,
+            // so at 1500 ms a perfectly usable mirror was reported unreachable --
+            // which then failed `latest` outright instead of merely being slow.
+            probe_timeout_ms: 8000,
         }
     }
 }
