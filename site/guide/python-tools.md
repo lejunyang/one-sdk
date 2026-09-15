@@ -166,6 +166,28 @@ pip 路径还会额外固定 `PIP_CONFIG_FILE`。uv 设计上不读 `pip.conf`�
 你系统里遗留的 `pip.conf`（比如指向一个不受信任的索引）本来能悄悄覆盖上面所有
 设置。
 
+### 私有索引与凭据
+
+如果你已经为私有索引配置了凭据，osdk 会**退出索引规划**，把配置权完整交回给
+uv / pip：
+
+```
+$ osdk registry test
+python:
+  pass-through: index credentials are configured by environment variable UV_INDEX_INTERNAL_USERNAME
+```
+
+识别依据包括 `UV_INDEX_<名字>_USERNAME` / `_PASSWORD`、`UV_KEYRING_PROVIDER`、
+`PIP_INDEX_URL`、`PIP_KEYRING_PROVIDER`，以及 `~/.netrc`（Windows 上 `_netrc`）、
+`pip.conf` / `pip.ini`、`uv.toml` 等凭据文件。
+
+这样做不是「支持私有索引」，而是**不去干扰它**。osdk 把镜像映射为默认索引，而它
+无从知道哪些包本该来自你的私有索引——一旦映射，那些查询就会被送到公共镜像，正是
+上面那条 danger 要避免的依赖混淆形状。让开，凭据才能继续正常工作。
+
+注意 `UV_INDEX_URL`、`UV_INDEX`、`UV_DEFAULT_INDEX` **不算**凭据——它们配置的是
+索引地址而非身份，所以你照常可以用镜像。
+
 ## 解释器
 
 环境总是构建在 **osdk 管理的解释器**之上，而不是 PATH 上碰巧存在的那个 `python`。
@@ -178,6 +200,28 @@ osdk install "pypi:ruff[python=3.12]@0.6.9"
 这条约束是刻意的。用 PATH 上的 python 会让环境依赖 osdk 无法控制的机器状态——
 很多机器上那个 `python` 是系统自带的旧版本，而 osdk 管的是另一个。同理，uv 路径
 会设 `UV_PYTHON_DOWNLOADS=never`，禁止 uv 绕过 osdk 自行下载解释器。
+
+## 缓存
+
+uv 的缓存归 osdk 管（`<cache>/pkg/uv`），所以有两种回收方式，区别是要不要保留
+正在被环境使用的内容：
+
+```bash
+osdk cache prune   # 只丢弃 uv 认为已无引用的条目
+osdk cache clean   # 连 uv 与 pip 缓存整个删掉
+```
+
+uv 会把解包后的 wheel 硬链接进每个 venv，因此那些对象虽然位于缓存目录、却仍是
+活的。实测在一个已填充的缓存上，`prune` 报告「no unused entries」且 `archive-v0`
+一字节未减；`clean` 则会删掉它，于是每个环境下次都要重新下载。
+
+`prune` 没有预览模式：`uv cache prune` 本身没有，osdk 也不会靠猜来伪造一个。
+未安装 uv 时它会直接说明无事可做，而不是报告一次成功的空操作。
+
+::: warning uv 缓存目录归 uv 独占
+实测 `uv cache prune` 会删掉它自己缓存根目录下任何它不认识的东西。不要往
+`<cache>/pkg/uv` 里放别的文件并期待它们留存。
+:::
 
 ## 暴露哪些命令
 

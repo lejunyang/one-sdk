@@ -191,6 +191,32 @@ The pip path additionally pins `PIP_CONFIG_FILE`. uv ignores `pip.conf` by desig
 while pip reads it, so a leftover `pip.conf` on your system -- one pointing at an
 untrusted index, say -- could otherwise override everything above unnoticed.
 
+### Private indexes and credentials
+
+When credentials for a private index are already configured, osdk **stops
+planning indexes** and hands the decision back to uv / pip:
+
+```
+$ osdk registry test
+python:
+  pass-through: index credentials are configured by environment variable UV_INDEX_INTERNAL_USERNAME
+```
+
+Recognised evidence includes `UV_INDEX_<NAME>_USERNAME` / `_PASSWORD`,
+`UV_KEYRING_PROVIDER`, `PIP_INDEX_URL`, `PIP_KEYRING_PROVIDER`, and credential
+files such as `~/.netrc` (`_netrc` on Windows), `pip.conf` / `pip.ini` and
+`uv.toml`.
+
+This is not "private index support" -- it is a refusal to interfere with one.
+osdk maps a mirror onto the default index, and it cannot know which packages are
+supposed to come from your private index; mapping anyway would send those lookups
+to the public mirror, exactly the dependency-confusion shape the warning above
+exists to prevent. Staying out of the way is what keeps the credentials working.
+
+Note that `UV_INDEX_URL`, `UV_INDEX` and `UV_DEFAULT_INDEX` are **not** treated as
+credentials -- they configure an address rather than an identity, so mirrors keep
+working as usual.
+
 ## Interpreters
 
 Environments are always built against an **osdk-managed interpreter**, never
@@ -206,6 +232,30 @@ environment depend on machine state osdk does not control, and on many machines
 that `python` is an older system copy while osdk manages a different one. For the
 same reason the uv path sets `UV_PYTHON_DOWNLOADS=never`, so uv cannot fetch an
 interpreter behind osdk's back.
+
+## Cache
+
+uv's cache is osdk-managed (`<cache>/pkg/uv`), so there are two ways to reclaim
+it, differing in whether what the environments still use is kept:
+
+```bash
+osdk cache prune   # drop only entries uv considers unreferenced
+osdk cache clean   # delete the uv and pip caches outright
+```
+
+uv hardlinks each unpacked wheel into every venv, so those objects are live even
+though they sit in the cache. Measured on a populated cache, `prune` reported "no
+unused entries" and left `archive-v0` byte-for-byte intact, while `clean` deletes
+it and forces every environment to download again.
+
+`prune` has no preview mode: `uv cache prune` has none, and osdk will not fake
+one by guessing. With uv absent it says there is nothing to do rather than
+reporting a successful no-op.
+
+::: warning The uv cache directory belongs to uv alone
+Measured: `uv cache prune` removes anything it does not recognise under its own
+cache root. Do not put other files in `<cache>/pkg/uv` and expect them to survive.
+:::
 
 ## Which commands are exposed
 

@@ -729,6 +729,68 @@ fn locate_uv(ctx: &Ctx) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// What a prune did, so the caller can report it without re-deriving anything.
+#[cfg(feature = "install")]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PruneOutcome {
+    /// uv's own report, when uv ran.
+    pub uv_output: Option<String>,
+    /// Whether uv was available at all.
+    pub uv_available: bool,
+}
+
+/// Drop cache entries nothing references, keeping what environments still use.
+///
+/// This is deliberately not `cache clean`. uv hardlinks each unpacked wheel into
+/// every venv that needs it, so those objects are live even though they sit in
+/// the cache: measured on a populated cache, `uv cache prune` reported "No unused
+/// entries found" and left `archive-v0` byte-for-byte intact, while `clean`
+/// deletes it and forces every environment to download again.
+///
+/// **The decision is uv's alone, deliberately.** An earlier version of this also
+/// swept "orphaned" cache generations -- uv suffixes each bucket with a schema
+/// version (`simple-v25`, `archive-v0`), so upgrading uv leaves the previous one
+/// behind. Two measurements killed that idea. osdk cannot tell which generation
+/// is live: `uv cache` exposes no way to ask, and the heuristic that filled the
+/// gap (newest mtime per prefix) was measured picking the *wrong* one, proposing
+/// deletion of the bucket actually in use. And it was unnecessary anyway -- `uv
+/// cache prune` already removes a stale `simple-v24`, and indeed anything else it
+/// does not recognise under its own cache root, verified by running uv directly
+/// with osdk out of the picture.
+///
+/// That second finding is worth remembering for another reason: **uv treats its
+/// cache directory as exclusively its own**. Nothing else may store anything
+/// under `<cache>/pkg/uv` and expect it to survive.
+#[cfg(feature = "install")]
+pub fn prune_cache(ctx: &Ctx) -> Result<PruneOutcome> {
+    let cache_root = crate::cache::downstream_root(&ctx.dirs.cache).join("uv");
+    let mut outcome = PruneOutcome::default();
+
+    let Some(uv) = locate_uv(ctx).filter(|candidate| uv_is_spawnable(candidate)) else {
+        return Ok(outcome);
+    };
+    outcome.uv_available = true;
+
+    let mut command = std::process::Command::new(&uv);
+    command.arg("cache").arg("prune");
+    // Point uv at the osdk-managed cache explicitly rather than relying on the
+    // ambient environment: `crate::cache` only sets `UV_CACHE_DIR` for interactive
+    // shells, so a process osdk spawns would otherwise prune uv's default cache.
+    command.arg("--cache-dir").arg(&cache_root);
+    let output = command.output().map_err(|error| Error::io(&uv, error))?;
+    if !output.status.success() {
+        return Err(Error::other(format!(
+            "`uv cache prune` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let reported = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !reported.is_empty() {
+        outcome.uv_output = Some(reported);
+    }
+    Ok(outcome)
+}
+
 /// The install identity for one `pypi:` environment.
 ///
 /// Not install-gated: the shim resolves an installed environment through the

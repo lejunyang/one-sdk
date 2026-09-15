@@ -18,6 +18,7 @@
 //!    come from, so plaintext or a redirect off the original origin would let an
 //!    attacker rewrite the artifact and the hash meant to detect the rewrite.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -72,6 +73,128 @@ impl IndexPlan {
             _ => None,
         }
     }
+}
+
+/// The user's home directory, without adding a dependency for it.
+///
+/// Order follows `native_home_directories` in `package_registry.rs`: on Windows
+/// `USERPROFILE` first, elsewhere `HOME` first. Both are checked either way
+/// because Git Bash and MSYS set `HOME` on Windows too.
+fn home_directory() -> Option<PathBuf> {
+    let names = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+    for name in names {
+        if let Some(value) = std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
+}
+
+/// Environment variables through which a user configures index credentials.
+///
+/// uv and pip both read these, and osdk must not race them. Two of these are
+/// wildcards in uv's scheme (`UV_INDEX_<NAME>_USERNAME`), so the check is by
+/// prefix rather than exact name.
+const INDEX_CREDENTIAL_ENV: &[&str] = &[
+    // uv, per-index credentials.
+    "UV_INDEX_",
+    // uv, keyring integration.
+    "UV_KEYRING_PROVIDER",
+    // pip, both spellings.
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "PIP_KEYRING_PROVIDER",
+];
+
+/// Files through which a user configures index credentials.
+///
+/// `.netrc` is the one that matters most: both uv and pip consult it, and it is
+/// the conventional place to keep private-index credentials out of a repository.
+fn credential_config_files(home: &Path) -> Vec<PathBuf> {
+    let mut files = vec![
+        home.join(if cfg!(windows) { "_netrc" } else { ".netrc" }),
+        home.join(".netrc"),
+    ];
+    if cfg!(windows) {
+        files.push(home.join("pip").join("pip.ini"));
+        files.push(
+            home.join("AppData")
+                .join("Roaming")
+                .join("pip")
+                .join("pip.ini"),
+        );
+    } else {
+        files.push(home.join(".pip").join("pip.conf"));
+        files.push(home.join(".config").join("pip").join("pip.conf"));
+    }
+    files.push(home.join(".config").join("uv").join("uv.toml"));
+    files
+}
+
+/// Whether this machine already configures index credentials, and how.
+///
+/// osdk maps a configured mirror onto the *default index*. That is safe for a
+/// public mirror, but a private index reached with credentials is a different
+/// situation: osdk cannot know which projects are supposed to come from there,
+/// and pointing the default index at a public mirror would send those lookups to
+/// the wrong place -- the dependency-confusion shape this module exists to avoid.
+///
+/// So when credentials are configured, osdk stops planning and leaves the
+/// installer's own configuration alone. This follows the npm side, which returns
+/// `PassThrough` on the same evidence (`package_registry.rs`) rather than trying
+/// to merge osdk's mirror list with the user's authenticated registry.
+///
+/// Note this is not a *capability* for private indexes: it is a refusal to
+/// interfere with one. The credentials keep working because osdk stays out of the
+/// way, which is what makes an authenticated private index usable at all.
+pub fn credential_configuration(
+    getenv: impl Fn(&str) -> Option<String>,
+    env_names: &[String],
+    home: Option<&Path>,
+) -> Option<String> {
+    for name in env_names {
+        let upper = name.to_ascii_uppercase();
+        let matched = INDEX_CREDENTIAL_ENV.iter().any(|candidate| {
+            if candidate.ends_with('_') {
+                // Wildcard family: `UV_INDEX_INTERNAL_USERNAME` and friends. The
+                // suffix has to look like a credential field, or `UV_INDEX_URL`
+                // itself would match and every mirror configuration would be
+                // mistaken for an authenticated one.
+                upper.starts_with(candidate)
+                    && (upper.ends_with("_USERNAME") || upper.ends_with("_PASSWORD"))
+            } else {
+                upper == *candidate
+            }
+        });
+        if !matched {
+            continue;
+        }
+        // An empty value configures nothing; treating it as credentials would
+        // disable mirror selection for anyone who exported the name and cleared it.
+        if getenv(name).is_some_and(|value| !value.trim().is_empty()) {
+            return Some(format!(
+                "index credentials are configured by environment variable {name}"
+            ));
+        }
+    }
+
+    let home = home?;
+    for file in credential_config_files(home) {
+        if file.is_file() {
+            return Some(format!(
+                "index credentials may be configured in {}",
+                file.display()
+            ));
+        }
+    }
+    None
 }
 
 /// Cap on a project listing read for version discovery.
@@ -264,6 +387,20 @@ pub async fn plan(candidates: &[String], timeout_ms: u64) -> IndexPlan {
         return IndexPlan::PassThrough {
             reason: "no Python index mirrors configured".to_string(),
         };
+    }
+    // Credentials outrank mirror selection. Mapping a public mirror onto the
+    // default index while the user has a private authenticated index configured
+    // would send that index's lookups to the mirror instead -- the
+    // dependency-confusion shape this module is built to avoid. See
+    // `credential_configuration` for why this is a refusal to interfere rather
+    // than a missing capability.
+    let home = home_directory();
+    if let Some(reason) = credential_configuration(
+        |name| std::env::var(name).ok(),
+        &std::env::vars().map(|(name, _)| name).collect::<Vec<_>>(),
+        home.as_deref(),
+    ) {
+        return IndexPlan::PassThrough { reason };
     }
     let probes = probe_all(candidates, timeout_ms).await;
     // Preserve configured order among equally fast candidates by using the
@@ -477,6 +614,86 @@ fn probe_error(error: reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Configured credentials must stop mirror selection.
+    ///
+    /// osdk maps a mirror onto the *default* index. If the user has an
+    /// authenticated private index configured, that mapping would redirect its
+    /// lookups to the public mirror -- the dependency-confusion shape this module
+    /// exists to prevent. So the presence of credentials has to be detected, not
+    /// merged with.
+    #[test]
+    fn configured_credentials_stop_osdk_from_planning() {
+        // uv per-index credentials.
+        let names = vec!["UV_INDEX_INTERNAL_USERNAME".to_string()];
+        let reason = credential_configuration(
+            |name| (name == "UV_INDEX_INTERNAL_USERNAME").then(|| "svc".to_string()),
+            &names,
+            None,
+        );
+        assert!(
+            reason.is_some_and(|text| text.contains("UV_INDEX_INTERNAL_USERNAME")),
+            "per-index credentials must be detected and named"
+        );
+
+        // pip keyring integration.
+        let names = vec!["PIP_KEYRING_PROVIDER".to_string()];
+        assert!(
+            credential_configuration(|_| Some("subprocess".to_string()), &names, None,).is_some()
+        );
+    }
+
+    /// A plain mirror configuration must NOT be mistaken for credentials.
+    ///
+    /// `UV_INDEX_URL` starts with the same prefix as the credential family, so a
+    /// prefix-only check would classify every mirror setup as authenticated and
+    /// silently disable mirror selection for everyone.
+    #[test]
+    fn a_mirror_configuration_is_not_treated_as_credentials() {
+        for name in ["UV_INDEX_URL", "UV_INDEX", "UV_DEFAULT_INDEX"] {
+            let names = vec![name.to_string()];
+            assert_eq!(
+                credential_configuration(
+                    |_| Some("https://mirrors.example/simple/".to_string()),
+                    &names,
+                    None,
+                ),
+                None,
+                "`{name}` configures an index, not credentials"
+            );
+        }
+
+        // An exported-but-empty variable configures nothing.
+        let names = vec!["PIP_INDEX_URL".to_string()];
+        assert_eq!(
+            credential_configuration(|_| Some("   ".to_string()), &names, None),
+            None
+        );
+
+        // An unrelated variable must not match.
+        let names = vec!["PYTHONPATH".to_string()];
+        assert_eq!(
+            credential_configuration(|_| Some("/x".to_string()), &names, None),
+            None
+        );
+    }
+
+    /// A credential file is evidence even when no variable is set.
+    #[test]
+    fn a_netrc_file_counts_as_configured_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+
+        // Nothing there yet.
+        assert_eq!(credential_configuration(|_| None, &[], Some(home)), None);
+
+        let netrc = home.join(if cfg!(windows) { "_netrc" } else { ".netrc" });
+        std::fs::write(&netrc, "machine pypi.internal login svc password x\\n").unwrap();
+        let reason = credential_configuration(|_| None, &[], Some(home));
+        assert!(
+            reason.is_some(),
+            "a netrc file is where private-index credentials conventionally live"
+        );
+    }
     use super::*;
 
     #[test]

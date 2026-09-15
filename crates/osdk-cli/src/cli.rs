@@ -702,6 +702,18 @@ pub enum CacheCommand {
     Env,
     /// Remove downloaded archives and the uv/pip caches (keeps the CAS store + installs).
     Clean,
+    /// Drop only the cache entries nothing references any more.
+    ///
+    /// Unlike `clean`, this keeps whatever the installed environments still
+    /// point at: uv hardlinks its unpacked wheels into every venv, so those
+    /// objects are live even though they sit in the cache. Measured on a
+    /// populated cache, `prune` reported "no unused entries" and left
+    /// `archive-v0` byte-for-byte intact, while `clean` deletes it and forces
+    /// every environment to download again.
+    ///
+    /// No preview mode: `uv cache prune` has none, and osdk will not approximate
+    /// one by guessing at what uv would consider dangling.
+    Prune,
 }
 
 #[derive(Debug, Subcommand)]

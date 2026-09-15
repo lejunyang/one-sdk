@@ -4851,6 +4851,20 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             }
             println!("{}", t!("msg.cache_cleared"));
         }
+        CacheCommand::Prune => {
+            let outcome = osdk_core::backend::pypi::prune_cache(&app.ctx)?;
+            if !outcome.uv_available {
+                // Said plainly rather than reported as a successful no-op: uv is
+                // what decides which entries are dangling, so without it this
+                // command has nothing to do at all.
+                println!("uv is not installed, so there is nothing to prune; run `osdk install pypi:uv` first");
+            } else {
+                match &outcome.uv_output {
+                    Some(reported) => println!("{reported}"),
+                    None => println!("nothing to prune"),
+                }
+            }
+        }
     }
     Ok(())
 }
