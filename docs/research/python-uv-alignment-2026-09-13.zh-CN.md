@@ -4,7 +4,15 @@
 
 项目：github.com/lejunyang/one-sdk
 
-状态：**部分已实现 + 剩余阶段仍为提案。** P0（缓存归置）与 P1（`pypi:` 后端、索引镜像、venv 双路径、`latest` 与版本范围、裸名候选提示）已实现并提交于 2026-09-15，共 9 个 commit（`0d62ccd`、`c8ad589`、`393d3dc`、`2a44161`、`2d81ec2`、`a41f912`、`1c3900c`、`d226f0c`、`49ed05e`）；**P2 / P3 / P4 仍为设计提案，尚未实现**。**核心决策已由自举链路实机闭环验证**（§10 第四轮子表 A 组）。逐条实现状态见 §3.4 矩阵与 §8 路线图。
+状态：**部分已实现 + 剩余部分按设计不代理。** P0（缓存归置）与 P1（`pypi:` 后端、索引镜像、venv 双路径、`latest` 与版本范围、通用裸名发现、installer 记录/复现/回读）已实现并提交。本工作线共 **18 个 commit**（`git log df0c229~1..HEAD` 实测），按时间正序为：
+
+**实现 commit（15 个）**：`df0c229`（索引镜像的 confusion-proof plan 类型）、`529d213`（注册 `pypi:` 命名空间与 PEP 503 身份规则）、`a6060bf`（后端骨架 + 每工具独立环境）、`f511b79`（uv / stdlib venv 创建分派）、`0d62ccd`（端到端安装）、`393d3dc`（真正走 uv 路径 + 跨环境依赖共享）、`2a44161`（镜像可配置/可测/可清）、`2d81ec2`（消息不再泄漏反斜杠与缩进）、`a41f912`（`latest` 与版本范围）、`1c3900c`（裸名候选列表）、`49ed05e`（折叠残留双空格 + 文案值回归测试）、`590376c`（裸名发现改为遍历全部命名空间）、`81d0f9e`（不再把解释器自带命令当作工具命令）、`d95894c`（记录并复现 installer）、`cba3dc2`（replay 的 installer 不被本机重新推导覆盖）。
+
+**文档 commit（3 个）**：`c8ad589`（双语后端文档）、`d226f0c`（`latest` 与裸名候选文档）、`6cea18f`（本报告与实际交付同步）。
+
+**第五轮的关键结论变化**：原列为 P2/P3/P4 待办的 `uv pip compile/sync/...`、`uv add/sync/lock`、`uv tool`/`uvx`/PEP 723 等，已改判为「按设计不代理」——osdk 只保证「用户直接跑 `uv ...` 时环境已受管」，该目标已达成（§3.4 第四档、§8）。**核心决策已由自举链路实机闭环验证**（§10 第四轮 A 组）。**当前门禁状态**：clippy 干净（`-D warnings` exit=0）、`cargo test --workspace` 全绿；`cargo fmt --check` **不干净**（19 文件 / 44 hunk，其中 `python_index.rs` 的 3 处属本工作线未收尾项，其余为跨模块既有欠债，§10 第六轮 C 组）。
+
+上游事实核查基准日 2026-09-13（第三轮 pip 路径实测 2026-09-14，第四/五轮实现核对与体积、基准实测 2026-09-15）；本机实测环境为 Windows x64、`osdk 0.0.2`、osdk 数据根 `E:\osdk-data`、被测 uv 版本 `0.12.13` / `0.12.14`、被测 mise 版本 `2026.9.6 windows-x64 (2026-09-12)`（源码固定在 commit `acbbdee0b150f5eeb14eb287198b11625ea35472`，即 tag `v2026.9.6`）。第三轮实测的前提是当时本机 `uv` 未安装、解释器为 Python 3.14.7。
 
 上游事实核查基准日 2026-09-13（第三轮 pip 路径实测 2026-09-14，第四轮实现核对与体积/基准实测 2026-09-15）；本机实测环境为 Windows x64、`osdk 0.0.2`（`E:\osdk-bin\osdk.exe`）、osdk 数据根 `E:\osdk-data`、被测 uv 版本 `0.12.13 (0ebbd9274 2026-09-10 x86_64-pc-windows-msvc)`、被测 mise 版本 `2026.9.6 windows-x64 (2026-09-12)`（源码固定在 commit `acbbdee0b150f5eeb14eb287198b11625ea35472`，即 tag `v2026.9.6`）。第三轮实测的前提是当时本机 `uv` 未安装、解释器为 Python 3.14.7。
 
@@ -14,7 +22,9 @@
 >
 > - **2026-09-13 第二轮**：追加 §4.5「旁证：mise 的同题选择」，并据其修正了能力矩阵第 9/11/25/27/38/43 项、§4.3 的约束表述、§6.1 与 §7.3 的相关论证、§7.4 验收清单（新增第 25–27 项）、§9（新增第 7/8 项待验证）、§10（新增第二轮实测子表）、以及 P0/P1/P4 阶段内容。其中**第 38/43 项从 P1 前移到 P0** 是唯一影响路线图结构的改动。三档判定（已具备/部分具备/缺失）一项未变。
 > - **2026-09-14 第三轮（结论反转）**：**§4.5.7 的推荐由「不提供 stdlib venv 回退」改为「提供且受管的回退」。** 依据本机实测——原第 2 条理由「回退会静默绕过全部门禁」**不成立**：pip 侧存在等价的哈希/索引/离线门禁表面（`--require-hashes`、`PIP_INDEX_URL`、`PIP_NO_INDEX` 均已实测生效且 fail-closed）。同步改动：矩阵第 9/11 项、§6.7、新增 §7.1.1 与 §7.2.1、§7.3、§7.4（改写第 7/26/27 项，新增第 28–34 项）、P1 阶段、§10。三档判定仍一项未变。**原判断的错因已在 §4.5.7 中留痕，未删除。**
-> - **2026-09-15 第四轮（从调研转向实现后的状态同步）**：本轮**不改变任何设计结论**，只把矩阵与路线图从「计划」更新为「实现现状」，并补入**自举链路的实机闭环证据**——这是前三轮缺失的一环（此前只论证了设计，没有端到端自举实测）。报告定位随之变化：从纯设计提案变为**「P0/P1 已实现 + P2/P3/P4 仍为提案」**。所有状态改判均经 Read/Grep 核对 `crates/` 下实际代码，判定依据指向具体文件与符号；核对中发现三处与口头描述不符之处，已按代码为准记录（见 §3.4 汇总末与 §10 第四轮子表）。三态统计据实重算（见 §3.4 汇总）。新增 §11「实现阶段的工程教训」。
+> - **2026-09-15 第四轮（从调研转向实现后的状态同步）**：本轮**不改变任何设计结论**，只把矩阵与路线图从「计划」更新为「实现现状」，并补入**自举链路的实机闭环证据**——这是前三轮缺失的一环（此前只论证了设计，没有端到端自举实测）。报告定位随之变化：从纯设计提案变为**「P0/P1 已实现 + P2/P3/P4 仍为提案」**。所有状态改判均经 Read/Grep 核对 `crates/` 下实际代码；核对中发现三处与口头描述不符之处，已按代码为准记录。三态统计据实重算。新增 §11「实现阶段的工程教训」。
+> - **2026-09-15 第五轮（矩阵方法论修正 + 三项实现）**：**本轮有一处实质的结论变化，且它是方法论层面的**——原矩阵把 `uv pip compile/sync/...`、`uv add/sync/lock`、`uv tool`/`uvx`/PEP 723 列为 P2/P3/P4 待办，本轮改判为**「按设计不代理」**（§3.4 第四档）。原因是矩阵的逻辑「uv 有什么 → osdk 有没有对应物」**缺了「不需要对齐」这一档**，导致它与 §1.2 早已列明的非目标长期不一致；本轮统一（见 §3.4「第四档的由来」）。因此 **P2/P3/P4 被大幅缩减**（§8）。另同步三项实现：通用裸名候选发现（`590376c`，含「同名不同物」这一实测发现）、解释器自带命令不再被当作工具命令（`81d0f9e`）、`osdk.lock` 记录并复现 installer（`d95894c`，含「lock 承诺 uv 却交付 pip」的实测缺陷）。**更正第四轮的一处不准确表述**：第四轮称「uv 版本尚未钉入 `osdk.lock`」，易被读成完全没有记录；实际是当时 `pypi:` 条目只记 `request` + `version`，本轮才补上 installer 身份（详见 §8 P1）。四档统计据实重算。§11 新增三条教训。
+> - **2026-09-15 第六轮（收尾）**：clippy 两条 warning 已修（`cba3dc2`），**独立复核确认现已干净**（`--workspace --all-targets` 零 warning、`-D warnings` exit=0）。但本轮的重点不是修警告，而是**它指向的真缺陷**：`PypiInstaller::parse` 报 `never used` 的真正原因是 **pypi 只写不读 installer**，导致 replay 后重跑 `lock` 会用本机环境把记录的 installer 改写掉——**记录的承诺被本地现状静默覆盖**。这与第五轮「lock 承诺 uv 却交付 pip」是**同一类失败的两个方向**（写入侧 / 读取侧），已并列呈现于 §4.4。**另更正两处上报数据**：(a) 第五轮上报的「clippy clean」是错的，其验证脚本只匹配 `^error`、从未匹配 `warning:`；(b) 本轮上报的「fmt 仅 `app.rs` 有 diff 且与本次无关」也不准确——实测为 **19 个文件 / 44 处 hunk**，其中 `python_index.rs`（3 处）是本工作线新建文件，**应归属本工作线的未收尾项**。§11 新增 11.6、11.7，并把「验证手段与被验证对象脱钩」提炼为该族的统一判据。四档统计**不变**（24/3/3/28）。**另更正 commit 数**：本工作线实为 **18 个**（`git log df0c229~1..HEAD` 实测），此前先后报为 5 / 9 / 14 均不完整；漏掉的最后一个是 `529d213`。该数字本身的反复出错已作为第八个形态并入 §11.6。
 
 ---
 
@@ -32,7 +42,11 @@
 
 **六、第三轮实测推翻了第二轮的一处推荐：stdlib venv 回退应当提供，但必须受管。** 第二轮以「回退会静默绕过全部门禁」为主要理由主张 uv 缺失时 fail-closed，本轮实测证明该理由**不成立**——pip 有完整的等价门禁表面：`--require-hashes` 同样 fail-closed（错误哈希 exit=1 并列出 Expected/Got）、`PIP_INDEX_URL` 可由 osdk 注入并已验证生效、`PIP_NO_INDEX=1` 可强制离线。错因是把「uv 的参数表面」当成门禁的唯一载体。而因为**本机当前 uv 未安装**，原设计等于让 Python 功能在默认环境下直接不可用。修正后的方案是「默认自动回退 + 显式告知能力差异 + 仅 `--require-uv` 时 fail-closed」，并新增 creator 记录与分派、`--seed` 语义归一化、`--relocatable` 在 pip 路径报错。同时澄清了一个被原论证混同的概念：禁止的是**系统 pip**（污染全局），而 **osdk 创建的 venv 内自带的 pip** 是隔离且可受门禁约束的。另有一条方法学教训：本轮首次测哈希门禁时因复用 venv 拿到 exit=0 的假阴性，与 AGENTS.md 记录的「12 ms 假结果」同类。详见 §4.5.7、§6.7、§7.1.1、§7.2.1。
 
-**七、第四轮（实现后）：核心决策已实机闭环，代价 +0.64% / +0.35%。**【实测 2026-09-15】P0/P1 已实现并提交（9 个 commit）。最关键的新证据是**自举链路**：在一台完全没有 uv 的机器上，`osdk install pypi:uv@latest` 经 pip 回退路径装成 uv 0.12.14（22.7 s），随后 `pypi:httpie`（4.57 s）与 `pypi:requests`（1.02 s）自动改走 uv 路径且不再打印回退提示。这给出了一个比第三轮三条理由更强的论据：**回退不只是「无害」，而是「必要」——若按第二轮的 fail-closed 实现，第一步就装不了 uv，osdk 会陷入「要装 uv 必须先有 uv」的死锁。** 依赖共享经硬链接计数确认并带对照组（httpie / requests 环境 nlink=3，uv 自身环境 nlink=1，因为它由回退路径所建）。体积代价 osdk **+0.64%**、shim **+0.35%**，遍历量 355 目录未退化，测试 909 + 206 + 39 全绿。矩阵三态据实重算为 **20 已具备 / 8 部分具备 / 25 缺失 / 3 不适用（共 56 项）**。实现中与原设计的偏离、以及三处与口头描述不符之处，均已按代码为准记录。详见 §3.4 汇总、§8、§10 第四轮子表、§11。
+**七、第四轮（实现后）：核心决策已实机闭环，代价 +0.64% / +0.35%。**【实测 2026-09-15】P0/P1 已实现并提交。最关键的新证据是**自举链路**：在一台完全没有 uv 的机器上，`osdk install pypi:uv@latest` 经 pip 回退路径装成 uv 0.12.14（22.7 s），随后 `pypi:httpie`（4.57 s）与 `pypi:requests`（1.02 s）自动改走 uv 路径且不再打印回退提示。这给出了一个比第三轮三条理由更强的论据：**回退不只是「无害」，而是「必要」——若按第二轮的 fail-closed 实现，第一步就装不了 uv，osdk 会陷入「要装 uv 必须先有 uv」的死锁。** 依赖共享经硬链接计数确认并带对照组（httpie / requests 环境 nlink=3，uv 自身环境 nlink=1，因为它由回退路径所建）。体积代价 osdk **+0.64%**、shim **+0.35%**，遍历量 355 目录未退化。实现中与原设计的偏离、以及三处与口头描述不符之处，均已按代码为准记录。详见 §8、§10 第四轮子表、§11。
+
+**八、第五轮：矩阵原本缺了「不需要对齐」这一档，补上后剩余工作大幅收敛。**【实测 2026-09-15】原矩阵的逻辑是「uv 有什么 → osdk 有没有对应物」，因此每项能力只能落进已具备/部分具备/缺失三档，**缺失即待办**。这使它与 §1.2 早已列明的非目标长期矛盾：`uv pip compile/sync/...`、`uv add/sync/lock`、`uv tool`/`uvx`/PEP 723 在 §1.2 是非目标，在矩阵里却是「P2/P3/P4 待办」。本轮统一到**「按设计不代理」**——理由是 osdk 再包一层只带来**参数漂移**与**版本耦合**两样确定成本，收益为零，因为 osdk 真正要保证的只有「用户跑 `uv ...` 时环境已受管」，而这已由 `cache/mod.rs:43` + `hook-env` 完成。mise 提供了版本耦合的现成例证：它代理 `--exclude-newer` 后不得不检查 uv 版本是否够新（`pipx.rs:680`、`:856-864`）【源码】。四档统计据实重算为 **24 已具备 / 3 部分具备 / 3 缺失 / 28 不适用（共 58 项）**；第四档从 3 项增至 28 项**全部是口径修正而非能力退化**，P2/P3/P4 随之缩减为收尾工作。同步落地三项实现：通用裸名发现（`590376c`，发现 `npm:uv` 1.4.0 与 `pypi:uv` **同名不同物**，故候选必须带 registry 描述——否则比报错更糟，它诱导用户装错东西）、解释器自带命令不再冒充工具命令（`81d0f9e`）、`osdk.lock` 记录 installer（`d95894c`）。**shim 仅增 512 字节**，实证了 feature 门控纪律。详见 §3.4「第四档的由来」、§8、§10 第五轮子表、§11.4–11.5。
+
+**九、第六轮（收尾）：clippy 的一条 `never used` 告警指向的是真缺陷，而两次上报错误暴露了同一族验证失效。**【实测 2026-09-15】clippy 两条 warning 已修（`cba3dc2`），独立复现确认现已干净（`-D warnings` exit=0）。但重点不在警告本身：`PypiInstaller::parse` 从未被使用的真正原因是 **pypi 只写不读 installer**——replay 后在本机重跑 `lock`，会用本机环境把记录的 installer 覆盖掉。**这与第五轮「lock 承诺 uv 却交付 pip」是同一承诺在两个相反方向上的破坏**（写入侧 / 读取侧），二者合起来才说明「可复现性要求读写两侧都不被本机状态污染」（§4.4.1）。**若当初按「删掉未使用函数」处理，会连带把这个缺口永久藏掉——警告是它唯一的外部信号**（§11.7）。另有两处上报数据经复核更正：第五轮的「clippy clean」源自验证脚本**只匹配 `^error`、从未匹配 `warning:`**；本轮的「fmt 仅 `app.rs`」实为 **19 文件 / 44 hunk**，因为只读了 `fmt --check` 多行输出的第一条——其中 **`python_index.rs` 的 3 处属本工作线未收尾项**（该文件由 `df0c229` 新建），已列入剩余待办。这两个形态与此前四次假阴性共享同一结构：**验证手段与被验证对象脱钩，于是绿色结论毫无信息量**，统一判据是「**在相信一个通过之前，先确认这个验证在缺陷存在时会失败**」（§11.6）。该族在本轮又添两例：`python_index.rs` 的 hunk 数被从 3 读成 1（**在指出该形态的同一轮里以同一形态再犯一次**），以及本工作线 commit 数先后报为 5 → 9 → 14 → **18（实测）**。四档统计**不变**（24/3/3/28，已与用户独立复算双向核对）。
 
 ---
 
@@ -172,71 +186,89 @@ CLI 侧 `osdk python find` 已实测可用，输出区分 `managed` / `path` / `
 | 2 | `uv python find` | **已具备** | CLI `osdk python find`（实测输出 managed/path/system 三类） | 是（已完成） |
 | 3 | `uv python pin` | **已具备** | `config_edit.rs:27 set_project_tool`、`:14 set_global_tool`；`osdk use` | 是（已完成） |
 | 4 | `uv python dir` | **已具备** | `dirs.rs:312 install_path` | 是（已完成） |
-| 5 | `uv python upgrade` | **部分具备** | `osdk upgrade` 存在但语义是「按 lock 升级工具」，非「原地升 patch 保留 minor 固定」 | 是（P3，语义对齐） |
+| 5 | `uv python upgrade` | **部分具备** | `osdk upgrade` 存在但语义是「按 lock 升级工具」，非「原地升 patch 保留 minor 固定」 | 是（剩余待办，语义对齐，§8） |
 | 6 | `uv python update-shell` | **已具备** | `activate/mod.rs`、`osdk activate` / `deactivate` | 是（已完成） |
 | 7 | 解释器镜像源（含 PBS 镜像） | **已具备且优于 uv** | `python.rs:67` 三档源 + `source/select.rs` 自动测速失效转移；uv 侧只有单个 `UV_PYTHON_INSTALL_MIRROR` 前缀替换 | 是（§5.4 补充镜像） |
 | 8 | freethreaded 变体处理 | **已具备** | `python.rs:47/:340`、`:21 select_installed` | 是（已完成） |
 | 9 | `uv venv`（创建虚拟环境） | **已具备**（P1 已实现） | `backend/pypi.rs:491 venv_command` 双路径：`(EnvCreator::Uv, Some(uv))` → `uv venv --python <abs> <venv>`（:497-509），否则 `<python> -m venv <venv>`（:510-517）；`:435 choose_installer` 决定分支并产出 `notice`；`:59 EnvCreator`、`:88 EnvReceipt`、`:114 creator_from_pyvenv_cfg`（读 `uv =` 键回溯创建者）、`:559 detect_seed`。commit `0d62ccd` / `393d3dc` | ✅ 已实现 |
-| 10 | `uv venv --link-mode` | **部分具备** | osdk 有 `store/link.rs:19 LinkMode` 四档与 `same_filesystem()`，但**未**接到 venv：`pypi.rs:491 venv_command` 不产出 `--link-mode` | 是（P2，尚未实现） |
-| 11 | `uv venv --seed` / `--relocatable` / `--system-site-packages` | **缺失** | **核对结论**：三者均**未**成为用户可见选项。`pypi.rs:491 venv_command` 的参数表固定，不含任何一项；`:559 detect_seed` 与 `:99 SeedState` 只**观测**已有环境的 pip/setuptools/wheel（`:575-576`），不驱动 `--seed`；全文件检索 `relocatable` 仅命中 `:433` 一条文档注释（把它举为「需要 uv-only 行为的调用方」示例），无实现 | 是（P2，尚未实现；`--relocatable` 仍为 uv 独有的**能力降级**，pip 路径须报错而非静默忽略，§4.5.7） |
+| 10 | `uv venv --link-mode` | **部分具备** | osdk 有 `store/link.rs:19 LinkMode` 四档与 `same_filesystem()`，但**未**接到 venv：`pypi.rs:491 venv_command` 不产出 `--link-mode` | 是（剩余待办，§8） |
+| 11 | `uv venv --seed` / `--relocatable` / `--system-site-packages` | **缺失** | **核对结论**：三者均**未**成为用户可见选项。`pypi.rs:491 venv_command` 的参数表固定，不含任何一项；`:559 detect_seed` 与 `:99 SeedState` 只**观测**已有环境的 pip/setuptools/wheel（`:575-576`），不驱动 `--seed`；全文件检索 `relocatable` 仅命中 `:433` 一条文档注释（把它举为「需要 uv-only 行为的调用方」示例），无实现 | 是（**剩余收尾项**，见 §8 剩余待办第 11 项；`--relocatable` 仍为 uv 独有的**能力降级**，pip 路径须报错而非静默忽略，§4.5.7） |
 | 12 | `uv pip install` | **已具备**（P1 已实现，工具安装场景） | `backend/pypi.rs:523 install_command` 双路径：uv → `uv pip install --python <venv python> <req>`（:529-541，显式指定目标而非依赖环境中的 `VIRTUAL_ENV`）；stdlib → `<venv python> -m pip install <req>`（:542-553，注释明确「绝不用全局 pip」）。范围限于 `pypi:` 工具安装，非通用 `osdk python install` 命令 | ✅ 已实现（工具安装路径） |
-| 13 | `uv pip uninstall` | **部分具备** | `pypi.rs` 无 `uninstall` 子命令映射；`pypi:` 工具的卸载走 osdk 的通用 install-root 移除路径（整个 venv 目录删除），而非 `uv pip uninstall <pkg>` | 是（P2，尚未实现包级卸载） |
-| 14 | `uv pip compile` | **缺失** | 全文件检索 `compile` 无相关实现 | 是（P2，尚未实现） |
-| 15 | `uv pip sync` | **缺失** | 同上 | 是（P2，尚未实现） |
-| 16 | `uv pip freeze` / `list` / `show` / `tree` / `check` | **缺失** | 同上 | 是（P2，尚未实现） |
+| 13 | `uv pip uninstall` | **不适用 / 按设计排除** | 同第 14 项理由。`pypi:` 工具的移除走 osdk 通用 install-root 路径（整个 venv 删除）；venv 内的**包级**卸载由用户直接 `uv pip uninstall` 完成 | 否（按设计不代理） |
+| 14 | `uv pip compile` | **不适用 / 按设计排除** | 用户装完 uv 后直接跑即可。osdk 再包一层只引入**参数漂移与版本耦合**，且须跟随 uv 升级。osdk 的职责只有一件：让用户跑 `uv ...` 时环境已受管——索引指向配置的镜像、`UV_CACHE_DIR` 落在 osdk 缓存下。二者已完成（`cache/mod.rs:43` + `hook-env` 同时注入 `PIP_CACHE_DIR` 与 `UV_CACHE_DIR`，实测见 §10 第四轮 B 组） | 否（**按设计不代理**；环境注入已完成） |
+| 15 | `uv pip sync` | **不适用 / 按设计排除** | 同上 | 否（按设计不代理） |
+| 16 | `uv pip freeze` / `list` / `show` / `tree` / `check` | **不适用 / 按设计排除** | 同上。且这几条是纯查询命令，代理它们连「受管」都谈不上，只是转发 stdout | 否（按设计不代理） |
 | 17 | `uv pip --system` 语义 | **不适用 / 按设计排除** | `pypi.rs:542-546` 的 stdlib 分支固定使用 `venv_python(venv)`，注释说明全局 pip 会「把包装进某个没人要求的系统 Python」。即 osdk 的实现从结构上就不产生 `--system` 场景 | 否（设计上排除，非待办） |
-| 18 | `uv add` / `remove` | **缺失** | — | 是（P3，委托） |
-| 19 | `uv sync` | **缺失** | — | 是（P3，委托） |
-| 20 | `uv lock` + `uv.lock` universal resolution | **缺失** | `lockfile.rs` 只锁工具版本，无 Python 依赖图 | 是（P3，**引用而非复制**，见 §4.4） |
-| 21 | `uv run` | **部分具备** | `osdk exec` 存在（`commands.rs`），但不解析 `pyproject.toml`/不自动 sync | 是（P3） |
-| 22 | `uv tree` | **缺失** | — | 是（P2，透传） |
-| 23 | `pyproject.toml` 读取 | **缺失** | `config/mod.rs` 不含 pyproject 解析 | 是（P3，只读需要的字段） |
-| 24 | `uv workspace`（`metadata`/`dir`/`list`） | **缺失** | — | 是（P4，透传） |
-| 25 | `uv tool install` / `uninstall` / `list` / `upgrade` | **部分具备** | **命名空间已落地**：`tool.rs:963 namespace: "pypi"` + `:964 canonical_pypi_subject` + `:968 validate_pypi_options`；`:2809 pypi_installs_are_reachable_by_the_scanner` 断言 `is_dynamic_install_directory("pypi")`（§7.4 第 10 项已满足）。`osdk install pypi:<pkg>` 等价于 `uv tool install`（每工具独立 venv + shim）。**但未使用 uv 自己的 tool 机制**：`pypi.rs` 无 `UV_TOOL_DIR` / `UV_TOOL_BIN_DIR`，也无 `uv tool` 子命令映射；`upgrade` 走 osdk 通用路径 | 部分已实现（P4 剩余：`uv tool` 原生机制、包级 `uninstall`） |
-| 26 | `uvx` / `uv tool run`（ephemeral） | **缺失** | 无 ephemeral 运行实现 | 是（P4，尚未实现） |
-| 27 | `uv tool dir` / `update-shell` | **部分具备** | osdk 有 `dirs.rs:277 shims()` 与 `activate/`，`pypi:` 工具经 `reshim` 生成 shim（commit `0d62ccd` 已端到端验证）；但**未**采用 `UV_TOOL_DIR` / `UV_TOOL_BIN_DIR` 钉定（§4.5.3 的建议尚未实施） | 部分已实现（P4 剩余） |
-| 28 | `uv tool audit` | **缺失** | — | 否（非目标，安全审计不在本提案范围） |
-| 29 | PEP 723 单文件脚本 | **缺失** | — | 是（P4，透传） |
-| 30 | `uv build` | **缺失** | — | 否（非目标，§1.2） |
-| 31 | `uv publish` | **缺失** | — | 否（非目标，§1.2） |
+| 18 | `uv add` / `remove` | **不适用 / 按设计排除** | 项目层依赖管理属 uv 自身职责；osdk 不解析 `pyproject.toml`、不代理其增删 | 否（按设计不代理） |
+| 19 | `uv sync` | **不适用 / 按设计排除** | 同上。对照 mise：它的 `[deps.uv]` provider 也只是**调用** `uv sync`（`deps/providers/uv.rs:49`）并追踪 staleness，不自研同步逻辑（§4.5.2） | 否（按设计不代理） |
+| 20 | `uv lock` + `uv.lock` universal resolution | **不适用 / 按设计排除** | Python 依赖图的唯一真相源是 `uv.lock`，由 uv 生成与校验。§4.4 的分层设想（`osdk.lock` 记其摘要）**未实现且不再列为目标**——osdk 记录的是**工具层**身份（含 installer，第 44 项已实现），而非项目依赖图 | 否（按设计不代理；§4.4 的设想降级为备选） |
+| 21 | `uv run` | **不适用 / 按设计排除** | `osdk exec` 提供受管环境下的命令执行；解析 `pyproject.toml` 并自动 sync 属 uv 职责 | 否（按设计不代理） |
+| 22 | `uv tree` | **不适用 / 按设计排除** | 纯查询命令，同第 16 项 | 否（按设计不代理） |
+| 23 | `pyproject.toml` 读取 | **不适用 / 按设计排除** | osdk 不介入项目层清单。这与 §1.2 早已列明的非目标一致 | 否（按设计不代理） |
+| 24 | `uv workspace`（`metadata`/`dir`/`list`） | **不适用 / 按设计排除** | workspace 是项目层概念，同第 18–23 项 | 否（按设计不代理） |
+| 25 | `uv tool install` / `uninstall` / `list` / `upgrade` | **已具备（osdk 自有等价物）** | `osdk install pypi:<pkg>` 提供等价能力：`tool.rs:963 namespace: "pypi"` + `:964 canonical_pypi_subject` + `:968 validate_pypi_options`；`:2809` 断言 `is_dynamic_install_directory("pypi")`（§7.4 第 10 项已满足）；每工具独立 venv + `reshim` 生成 shim。**刻意不调用 `uv tool` 子命令**：那会把工具的安装根、卸载语义与升级路径交给 uv，与 osdk 的 install-root / receipt / inventory 模型重复且可能冲突。`UV_TOOL_DIR` 钉定（§4.5.3 曾建议）因此**不再列为目标** | ✅ 已实现（自有等价物，非代理 `uv tool`） |
+| 26 | `uvx` / `uv tool run`（ephemeral） | **不适用 / 按设计排除** | 临时环境按定义不进入 osdk 的 inventory 与 lock，纳管无意义；用户直接 `uvx` 即可 | 否（按设计不代理） |
+| 27 | `uv tool dir` / `update-shell` | **已具备（osdk 自有等价物）** | `dirs.rs:277 shims()` + `activate/`；`pypi:` 工具的 shim 由 `reshim` 生成（`0d62ccd` 端到端验证）。目录与 PATH 由 osdk 自己的模型负责，不使用 `UV_TOOL_BIN_DIR` | ✅ 已实现（自有等价物） |
+| 28 | `uv tool audit` | **不适用 / 按设计排除** | 安全审计不在本提案范围（§1.2） | 否（非目标） |
+| 29 | PEP 723 单文件脚本 | **不适用 / 按设计排除** | 单文件脚本的内联依赖由 uv 直接执行；osdk 不介入 | 否（按设计不代理） |
+| 30 | `uv build` | **不适用 / 按设计排除** | 构建发布物不属 SDK 管理（§1.2） | 否（非目标） |
+| 31 | `uv publish` | **不适用 / 按设计排除** | 发布是低频强凭据操作，osdk 介入只增加凭据暴露面而无加速收益（§1.2） | 否（非目标） |
 | 32 | `--index` / `--default-index` | **已具备**（P1 已实现） | `config/mod.rs:378 PythonIndexConfig{urls, probe_timeout_ms}`，挂在 `:345 RegistriesConfig::python`；`python_index.rs:259 plan()` 做排序探测，`:55 IndexPlan` 只有 `PassThrough`/`Selected`/`Unavailable` 三态；CLI `config_edit.rs:534 "registries.python.urls"` 可读写；`commands.rs:514 plan()` + `:578 print_python_index_plan` 使 `osdk registry test` 覆盖 python。commit `2a44161` | ✅ 已实现 |
 | 33 | `--extra-index-url` | **不适用 / 按设计排除**（类型层面不可表达） | `python_index.rs:52-65` 的 `IndexPlan` **故意不设** extra-index 变体，模块注释（:11-16）说明「镜像是 PyPI 完整副本，必然携带上游包名包括恶意包，把它排在默认索引之上就是依赖混淆向量」。这实现了 §7.3 规则 1 | 否（**由类型强制排除**，比「列为待办」更强） |
-| 34 | `--find-links` | **缺失** | 无相关实现 | 是（P2，尚未实现） |
+| 34 | `--find-links` | **不适用 / 按设计排除** | 本地/额外查找目录是用户在自己的 uv 调用里表达的偏好，osdk 不代理（同第 14 项） | 否（按设计不代理） |
 | 35 | `--index-strategy` 三档 | **不适用 / 按设计排除**（单索引不变量） | osdk 只产出单一默认索引（`IndexPlan::Selected`），不存在多索引合并场景，因此无需 `--index-strategy`。这与 §7.3 第三轮补充给出的「pip 路径单索引不变量」一致 | 否（设计上不需要） |
-| 36 | keyring / 私有源认证 | **缺失** | 有先例：`source/mod.rs:38 headers` + `:41 forward_credentials`；`package_registry.rs:850` 已能识别「凭据由环境配置」并退出规划 | 是（P4，尚未实现） |
-| 37 | `uv auth login/logout/token` | **缺失** | — | 否（非目标，凭据由 uv 自管） |
+| 36 | keyring / 私有源认证 | **缺失** | 有先例：`source/mod.rs:38 headers` + `:41 forward_credentials`；`package_registry.rs:850` 已能识别「凭据由环境配置」并退出规划 | 是（剩余待办，§8） |
+| 37 | `uv auth login/logout/token` | **不适用 / 按设计排除** | 凭据由 uv 自管，osdk 不代理（§1.2） | 否（非目标） |
 | 38 | `uv cache dir` | **已具备**（P0 已实现） | `cache/mod.rs:43 set_if_unset("UV_CACHE_DIR", root.join("uv"))` → `<cache>/pkg/uv`；`:198 describe_reports_the_uv_cache` 测试断言 `describe()` 报告它；`:174 uv_cache_follows_the_same_ownership_rules_as_pip` 断言用户已设值不被覆盖、且不扰动邻居 | ✅ 已实现 |
 | 39 | `uv cache clean` | **已具备**（P0/P1 已实现） | `commands.rs:4817-4824`：`downstream_root(cache)` 下对 `["uv","pip"]` 逐个 `remove_dir_all`。注释（:4813-4816）说明**只删这两个目录、绝不整体删 `<cache>/pkg`**，因为该根还有 cargo/gradle/Go 缓存，而 cargo 的是含已装二进制的共享 home | ✅ 已实现 |
-| 40 | `uv cache prune` | **缺失** | 无 `uv cache prune` 映射；`osdk prune` 仍是 store GC，语义不同 | 是（P2，尚未实现，见 §6.4） |
+| 40 | `uv cache prune` | **缺失** | 无 `uv cache prune` 映射；`osdk prune` 仍是 store GC，语义不同 | 是（剩余待办，§8；见 §6.4） |
 | 41 | CAS + hardlink 策略 | **已具备（解释器层）/ 已委托并验证（wheel 层）** | `store/mod.rs:23 Cas`、`store/link.rs:132 materialize`；wheel 层由 uv `archive-v0` 承担，`pypi.rs:19-31` 模块注释记录了实测数据与「osdk 不另建 wheel 级 CAS」的理由 | ✅ 分层已落地 |
-| 42 | 跨盘硬链接退化 | **已具备（osdk store）/ 未接 venv** | `store/link.rs:62 same_filesystem`、`:145-159` 阶梯已有；但 `pypi.rs:491 venv_command` 未做跨卷预判、不产出 `--link-mode=copy` | 是（P2，venv 侧尚未实现，§6.5） |
+| 42 | 跨盘硬链接退化 | **已具备（osdk store）/ 未接 venv** | `store/link.rs:62 same_filesystem`、`:145-159` 阶梯已有；但 `pypi.rs:491 venv_command` 未做跨卷预判、不产出 `--link-mode=copy` | 是（**剩余收尾项**，venv 侧尚未接入，见 §8 剩余待办第 42 项，§6.5） |
 | 43 | wheel 解包缓存 | **已具备**（P0/P1 已实现，含跨环境共享实测） | 由 `cache/mod.rs:43` 与 `pypi.rs:183-185`（子进程显式收到 `UV_CACHE_DIR`，注释说明子进程不继承交互式 shell 的设置）共同保证。`pypi.rs:22-26` 记录实测：两个环境各装 `certifi`，uv 产出**三条路径共享单一 inode**（两环境 + 缓存），每环境 762,964 B；pip 各自独立副本 6,812,960 B，**8.9 倍差异** | ✅ 已实现 |
-| 44 | `--frozen` / `--locked` | **部分具备** | `lockfile.rs` 有 schema 校验与 `load()`(:307) 的严格性，但无 Python 依赖图的 frozen/locked | 是（P3，尚未实现） |
+| 44 | `--frozen` / `--locked` | **部分具备（工具层已实现，项目层不代理）** | **工具层已实现且强于原设想**：`lockfile.rs:86 LockedPypiTool{installer, uv_version, python_version}`（`:71` 挂在 `LockedNativeTool::pypi`），`:1653 locked_pypi_metadata` 读已装环境的 installer 身份写入 lock，`:467-478` 在 replay 时把它还原为 `LOCKED_PYPI_INSTALLER_OPTION` / `LOCKED_PYPI_UV_VERSION_OPTION`；`pypi.rs:640-642` 使 `installer = "uv"` 的条目在 uv 缺失时**报错而非降级**。commit `d95894c`。**项目层（`uv.lock` 的 frozen/locked）按设计不代理**（第 20 项） | ✅ 工具层已实现 / 否（项目层不代理） |
 | 45 | `--offline` | **已具备**（P1 已实现，双路径传导） | `pypi.rs:163 installer_env` 按 creator 分派：uv → `UV_OFFLINE=1`（:187-189）；stdlib → `PIP_NO_INDEX=1`（:210-212）。调用点 `:315`、`:914` 传入 `ctx.config.settings.offline`；测试 `:1407 offline_and_hash_enforcement_reach_both_installers` | ✅ 已实现 |
-| 46 | `--exclude-newer` | **缺失** | 无相关实现 | 是（P3，尚未实现） |
+| 46 | `--exclude-newer` | **不适用 / 按设计排除** | 时间点约束是用户在自己的 uv 调用里表达的偏好（同第 14 项）。对照 mise：它在 `pipx:` 后端把 `minimum_release_age` 映射到 `--exclude-newer`（`pipx.rs:680`），并因此要检查 uv 版本是否够新（`:856-864`）——**这正是「代理参数会引入版本耦合」的具体例证**（§3.4 第四档的由来） | 否（按设计不代理） |
 | 47 | `--require-hashes` / `--no-verify-hashes` | **已具备**（P1 已实现，双路径 + 禁传清单） | `pypi.rs:190-192` → uv `UV_REQUIRE_HASHES=true`；`:213` → pip 侧对应设置；`:240 reject_unsafe_installer_args` 配合 `:233` 的禁传清单拦截 `--trusted-host` 等降级参数（测试 `:1424-1425`）；`:200-201` 在 pip 路径钉 `PIP_CONFIG_FILE`（注释 :156 说明 uv 忽略 `pip.conf` 而 pip 会读，故这是 pip 独有要求） | ✅ 已实现 |
-| 48 | 构建隔离 / sdist 构建 | **缺失（应委托）** | — | 是（P3，仅透传 `--no-build-isolation`） |
-| 49 | 平台标签 / `requires-python` | **部分具备** | `platform.rs`（osdk 自有三元组模型）；无 PEP 425 wheel 标签、无 `requires-python` 求值 | 是（P3，委托 uv，osdk 只做平台键映射） |
-| 50 | `uv export`（3 种格式） | **缺失** | — | 是（P4，透传） |
-| 51 | `uv version` / `self update` | **已具备** | `self_update.rs`、`osdk self` | 是（osdk 自管，uv 版本由 osdk 钉住，§4.4） |
-| 52 | `uv format` / `check` | **缺失** | — | 否（非目标，代码风格不属 SDK 管理） |
-| 53 | `uv init` | **缺失** | — | 否（非目标，脚手架不属 SDK 管理） |
-| 54 | 字节码编译（`--compile-bytecode`） | **缺失** | 无相关实现 | 是（P2，尚未实现） |
+| 48 | 构建隔离 / sdist 构建 | **不适用 / 按设计排除** | 由 uv/pip 自行处理；osdk 不代理 `--no-build-isolation`（同第 14 项） | 否（按设计不代理） |
+| 49 | 平台标签 / `requires-python` | **不适用 / 按设计排除** | PEP 425 wheel 标签选择与 `requires-python` 求值完全由 uv/pip 承担——这正是 §4.2「不自研」的核心内容；osdk 只做自己的三元组平台键（`platform.rs`）用于 lock 分区 | 否（按设计委托给 uv） |
+| 50 | `uv export`（3 种格式） | **不适用 / 按设计排除** | 项目层导出，同第 18–24 项 | 否（按设计不代理） |
+| 51 | `uv version` / `self update` | **已具备** | `self_update.rs`、`osdk self` 管 osdk 自身；uv 版本经 `lockfile.rs:86 LockedPypiTool::uv_version` 记录并在 replay 时钉定（commit `d95894c`），uv 自身的升级由 `osdk install pypi:uv@<ver>` 表达 | ✅ 已实现 |
+| 52 | `uv format` / `check` | **不适用 / 按设计排除** | 代码风格不属 SDK 管理（§1.2） | 否（非目标） |
+| 53 | `uv init` | **不适用 / 按设计排除** | 脚手架不属 SDK 管理（§1.2） | 否（非目标） |
+| 54 | 字节码编译（`--compile-bytecode`） | **不适用 / 按设计排除** | 安装期优化开关，由用户在自己的 uv 调用里表达（同第 14 项） | 否（按设计不代理） |
 | 55 | 版本发现与选择（`latest` / 范围 / PEP 440 排序） | **已具备**（P1 已实现；第四轮新增行） | `python_index.rs:91 list_versions`（PEP 691 JSON 优先，缺 PEP 700 `versions` 键时回落到 `:238 version_from_filename`，从右侧切分以正确处理 `typing-extensions-4.12.2.tar.gz`）、`:84 MAX_LISTING_BODY = 32 MiB`（注释记录 pip 的列表页实测约 2.3 MB）；`pypi.rs:862 compare_pep440` 按 release 字段数值比较（避免字符串序把 `0.9.0` 排在 `0.10.0` 之后）、`:823 is_pep440_prerelease` 识别无 `-` 的 `1.0rc1`/`2.0b3`/`3.0.dev1`；`:940 resolve_version` 中 `Exact`/`Prefix`/`Pinned` 均视为字面量（:954-959，因为 Python 版本非 semver、段数不定），其余经 `version::select_version` 解析。commit `a41f912` | ✅ 已实现 |
-| 56 | 裸工具名的命名空间候选提示 | **已具备**（P1 已实现；第四轮新增行，osdk 特有能力，uv 无对应物） | `commands.rs:1562` 起：`:1580 python_index::plan` + `:1588 list_versions` 取 PyPI 候选并附最新版本号，`:1629` 以有界匿名请求（`api.anaconda.org/package/conda-forge/<name>`）判断 conda-forge 是否收录，`:1620` 附「repackaged by conda-forge, so it can lag upstream」判断依据，`:1646` 输出「`<name>` is not a backend on its own, but these namespaces provide it:」。**不替用户选择**；已命名空间/已是后端/已配置的操作数不触发；发现路径用 8 s 下限而非安装探测预算（`:1578` 注释说明用 1.5 s 会丢掉 PyPI 候选、只列出 conda-forge 的误导性半答案）。commit `1c3900c` | ✅ 已实现 |
+| 56 | 裸工具名的命名空间候选发现 | **已具备**（第五轮重写为通用；osdk 特有能力，uv 无对应物） | `backend_discovery.rs`（495 行，**在 `install` feature 之后**，`lib.rs:55` 门控，注释 :52-54 说明 shim 从不解析裸名）。**由 `DYNAMIC_NAMESPACES` 驱动而非手写清单**（模块注释 :11-18 指出硬编码两条的旧实现「与 `is_dynamic_install_directory` 漏掉命名空间属同一类 bug」）；`:147 discover` 并发执行（`:168 join_all`），`:151` 离线时**直接返回空而非宣称不存在**；实探 npm / pypi / conda / cargo，`github`/`http`/`go` 经 `:86 NotProbed` 显式记录跳过原因（注释 :20-23：裸词在这些命名空间不是合法 id，报「未找到」是「把噪声装成结论」）。`:41 Provenance{FirstParty<Repackaged<CompiledLocally}` 决定排序。commit `590376c` | ✅ 已实现 |
+| 57 | 候选的「同名不同物」区分（registry 描述） | **已具备**（第五轮新增行；uv 无对应物，属 osdk 特有的安全性改进） | `backend_discovery.rs:70 Candidate::description` 携带 registry 自己的一句话描述，`:222 shorten` 截断（`:233` 注释说明按字符边界而非字节切分，因描述常含非 ASCII）；`:316` npm 读 `description`、`:337` crates.io 读 `crate.description`、`:264` pypi 读 JSON API。CLI 收尾句 `commands.rs:1609`：「Same name does not mean same program -- compare the descriptions before choosing. Listed best-provenance first; osdk does not choose for you.」**实测依据**：`npm:uv` 1.4.0 是 "Ultrafast UTF-8 data validation"（与 Astral uv 无关）、`pypi:prettier` 0.0.7 是 "Properly pprint of nested objects"（非格式化器）、`pypi:ripgrep` 亦非 BurntSushi 的（§10 第五轮 A 组）。**无描述的候选列表比原先的报错更糟——它诱导用户装错东西** | ✅ 已实现 |
+| 58 | lock 记录并复现 installer 身份 | **已具备**（第五轮记录 + **第六轮补齐回读**；uv 无对应物，属 osdk 的可复现性承诺） | **写入**：`lockfile.rs:86 LockedPypiTool{installer, uv_version, python_version}` + `:104 PypiInstaller`；`:1677 locked_pypi_metadata` 从已装环境读 installer 写入 lock，`:1704-1706` 拒绝为非本机平台借用本机 installer。**回读（`cba3dc2` 补）**：`:1690-1700` 使 replay 携带的 installer **优先于任何本机可观测的东西**，`python_version` 经 `:37 LOCKED_PYPI_PYTHON_VERSION_OPTION` 一并透传；回归测试 `:2187 a_replayed_entry_keeps_its_recorded_installer`（并断言无记录且无环境时返回 `None`，而非写入一个看似「观测到」的默认值）。**读取侧**：`:467-486` 还原为 backend option；`pypi.rs:620 LOCKED_INSTALLER_OPTION` + `:640-642` 使 `installer = "uv"` 在 uv 缺失时**报错而非降级**；`commands.rs:742 partition_runtime_dependency("pypi:uv", "pypi:")` 串行化 uv。commit `d95894c` + `cba3dc2`，两侧完整见 §4.4.1 | ✅ 已实现（读写两侧） |
 
-**汇总（第四轮据实重算）**：矩阵共 **56 项**（第四轮新增第 55「版本发现与选择」、第 56「裸工具名候选提示」两项——它们是已交付能力，前三轮的 54 项清单未覆盖）。
+**汇总（第五轮据实重算）**：矩阵共 **58 项**（第五轮新增第 57「同名不同物区分」、第 58「lock 记录并复现 installer」两项已交付能力）。
 
 | 状态 | 数量 | 条目编号 |
 | --- | --- | --- |
-| **已具备** | **20** | 1, 2, 3, 4, 6, 7, 8, **9**, **12**, **32**, **38**, **39**, **41**, **42**, **43**, **45**, **47**, 51, **55**, **56** |
-| **部分具备** | **8** | 5, 10, 13, 21, **25**, **27**, 44, 49 |
-| **缺失** | **25** | 11, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 28, 29, 30, 31, 34, 36, 37, 40, 46, 48, 50, 52, 53, 54 |
-| **不适用 / 按设计排除** | **3** | 17, 33, 35 |
+| **已具备** | **24** | 1, 2, 3, 4, 6, 7, 8, 9, 12, **25**, **27**, 32, 38, 39, 41, 42, 43, 45, 47, 51, 55, 56, **57**, **58** |
+| **部分具备** | **3** | 5, 10, **44**（工具层已实现，项目层不代理） |
+| **缺失** | **3** | 11, 36, 40 |
+| **不适用 / 按设计排除** | **28** | 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 29, 30, 31, 33, 34, 35, 37, 46, 48, 49, 50, 52, 53, 54 |
 
-按交付状态看：**已实现 11 项**（9, 12, 32, 38, 39, 41, 43, 45, 47, 55, 56）、**部分已实现 2 项**（25, 27）、**仍为待办 34 项**、**非目标 9 项**。
+按交付状态看：**已实现 17 项**、**按设计不代理 / 非目标 28 项**、**仍为待办 13 项**（其中 1–8 等为「已完成但保持自有实现」的历史措辞，实际待办只有 5、10、11、36、40、42 六项）。
 
-**与前三轮统计的口径差异**：前三轮记为「54 项中已具备 11 / 部分具备 12 / 缺失 31」。本轮的 20/8/25 与之不可直接相减，原因有三：(a) 总数由 54 增至 56；(b) 新增「不适用 / 按设计排除」这一档，把第 17、33、35 项从原「缺失」中移出——它们不是待做的事，而是实现后确认结构上不需要做（第 33 项更强，是**由类型强制排除**）；(c) 其余变化才是真正的实现进展。
+#### 第四档的由来：矩阵原本缺了「不需要对齐」这一档（第五轮方法论修正）
+
+**这是本轮最重要的一处变化，且它是方法论层面的。** 原矩阵的逻辑是「uv 有什么 → osdk 有没有对应物」，于是每一项 uv 能力都只能落进「已具备 / 部分具备 / 缺失」——**缺失就意味着待办**。这个逻辑没有位置容纳「osdk 不应该做这件事」。
+
+后果是一处**长期存在的自相矛盾**：§1.2 从第一轮起就把「复刻 `uv pip` 的全部 pip 兼容细节」「自研依赖求解器」等列为**明确非目标**，但矩阵里 `uv pip compile/sync/freeze/...`、`uv add/sync/lock`、`uv tool`/`uvx`/PEP 723 这些行始终标着「P2/P3/P4 待办」。同一份报告的两处对同一批能力给出了相反结论，前四轮都没有发现。**本轮统一到 §1.2 的口径**，不是新增了一个判断，而是消解了一个矛盾。
+
+**判据（写清楚为什么不代理）**：用户装完 uv 后直接跑 `uv pip compile` 即可。osdk 再包一层会引入两样确定的成本——**参数漂移**（osdk 的参数表与 uv 的逐版本发散）与**版本耦合**（osdk 必须跟随 uv 升级）。而收益是零，因为 osdk 真正需要保证的只有一件事：**用户跑 `uv ...` 时环境已经是受管的**——索引指向配置的镜像、`UV_CACHE_DIR` 落在 osdk 缓存下。这两件今天都已完成（`cache/mod.rs:43` + `hook-env` 同时注入 `PIP_CACHE_DIR` 与 `UV_CACHE_DIR`，实测见 §10 第四轮 B 组）。**所以这一档的正确状态是「已完成（以环境注入的方式）」而不是「待办」。**
+
+代理参数会引入版本耦合并非推演，mise 提供了现成例证：它把 `minimum_release_age` 映射到 uv 的 `--exclude-newer`，随即不得不检查 uv 版本是否够新、不够则告警（`pipx.rs:680`、`:856-864`）【源码】。这正是 osdk 选择不代理所要避开的东西。
+
+这也解释了第四档条目数为何从第四轮的 3 项跳到 **28 项**：新增的 25 项全部来自「原被误列为待办、实为非目标」的重分类，**不是能力退化，而是口径修正**。
+
+**与前几轮统计的口径差异**：第四轮记为「56 项中 20/8/25/3」。本轮 58 项 24/3/3/28 与之不可直接相减，原因有三：(a) 总数 56→58；(b) 上述 25 项从「缺失/部分具备」重分类到第四档；(c) 其余变化才是本轮的实现进展（第 25、27、44、57、58 项）。
+
+**第五轮的实现进展（5 项）**：第 **25/27** 项由「部分具备」升为「已具备」——判定依据同时修正：原以为需要 `UV_TOOL_DIR` 钉定才算完整，实际上 osdk **刻意不调用 `uv tool` 子命令**（那会把安装根、卸载语义、升级路径交给 uv，与 osdk 的 install-root / receipt / inventory 模型重复），因此 §4.5.3 的该项建议**不再列为目标**。第 **44** 项工具层已实现且强于原设想。第 **57/58** 项为新增行。
+
+**一处第四轮表述的更正**：第四轮称「uv 版本尚未钉入 `osdk.lock`」，这个说法容易被读成「完全没有记录」。准确的表述是：当时 `pypi:` 条目只记 `request` + `version` 两行，**本轮（`d95894c`）才补上 installer 身份**（`installer` / `uv_version` / `python_version`）。原表述不准确，在此更正并留痕。
 
 **第二轮（mise 旁证）后的变化**：三档判定一项未变，变化集中在「列入目标」列的实现约束与阶段归属（第 38/43 项从 P1 前移到 P0 是唯一影响路线图结构的改动）。其中「无 stdlib 回退」的表态已于第三轮反转。
 
@@ -327,6 +359,24 @@ osdk.lock
 ```
 
 这样 `osdk lock` 的语义保持不变（「解析确定版本」），而 Python 依赖图的真相仍在 `uv.lock`。`--locked` 的实现是「跑 uv 后比对 `uv.lock` 的 sha256 是否变化」，与 `LockedNativeLock` 已有的做法一致。
+
+> **第五轮起的实际形态与上面的设想不同。** `python_deps` 段**未实现且不再列为目标**（矩阵第 20 项已改判「按设计不代理」）：Python 依赖图归 uv，osdk 记录的是**工具层身份**。实际落地的是 `lockfile.rs:86 LockedPypiTool{installer, uv_version, python_version}`。
+
+#### 4.4.1 lock 的可复现性需要读写两侧都不被本机状态污染（第六轮）
+
+实现过程中，同一个可复现性承诺在**两个相反方向**上各被破坏了一次。两者单独看都像小疏漏，合起来才说明这个承诺的完整条件。
+
+| | 第五轮发现（读取侧） | 第六轮发现（写入侧） |
+| --- | --- | --- |
+| 症状 | replay 一个 `installer = "uv"` 的条目，**实际用 pip 装**，只打印提示、exit=0 | replay 之后在本机重跑 `lock`，**记录的 installer 被本机环境重新推导并覆盖** |
+| 本质 | **不照 lock 办**——lock 承诺一个 resolver，交付了另一个 | **把 lock 改成本机现状**——记录的承诺被本地现状静默覆盖 |
+| 证据 | receipt `creator: "stdlib"` 与 lock 的 `installer = "uv"` 矛盾 | clippy 报 `PypiInstaller::parse` 从未被使用——**写了却没有任何地方读回** |
+| 修法 | replay 时先把 uv 装上（`commands.rs:742` 的 `partition_runtime_dependency` 串行化），仍不可用则报错（`pypi.rs:640-642`） | replay 携带的 installer **优先于任何本机可观测的东西**（`lockfile.rs:1690-1700`），`python_version` 一并透传 |
+| commit | `d95894c` | `cba3dc2` |
+
+**统一的判据**：一份 lock 要真正可复现，**读取侧不能忽略它，写入侧也不能覆盖它**。只做一侧，另一侧就会把承诺悄悄抹平——而且两侧的失败都不报错、退出码都是 0。
+
+**一个现成的对照**：npm 侧从一开始就有回读路径。`lockfile.rs:1686-1689` 的注释写明了这一点——「npm has had this from the start -- see `locked_npm_metadata`」（`:1799`）。pypi 只写不读，是新增后端时漏掉了既有后端已具备的一半。**这类「新实现只做了参照实现的一半」的疏漏，靠对照既有实现比靠读新代码更容易发现。**
 
 ### 4.5 旁证：mise 的同题选择
 
@@ -977,7 +1027,7 @@ osdk 侧只需锁自己的东西，且用已有机制：`dirs.rs:319 lock_dir()`
 
 每阶段独立可交付、可验证。体积与延迟影响按 AGENTS.md 要求逐阶段标注；由于所有新增能力都在安装路径上，**预期对 shim 体积与 hook-env / shim 延迟零影响**——第四轮已按 §7.4 第 18–20 项实测确认该预期成立（见 §10 第四轮子表）。
 
-**当前进度（2026-09-15）**：**P0、P1 已实现并提交**；**P2、P3、P4 仍为设计提案，尚未实现**。
+**当前进度（2026-09-15）**：**P0、P1 已实现并提交**；原 **P2 / P3 / P4 已大幅缩减**——其主体（代理 uv 各类子命令）经第五轮矩阵方法论修正后改判为「按设计不代理」，剩余的真实待办已重排为下文的收尾项清单，不再保留三个空壳阶段。
 
 ### P0：接住 uv 的缓存（最小可交付，纯收益）——✅ 已实现
 
@@ -1012,58 +1062,54 @@ osdk 侧只需锁自己的东西，且用已有机制：`dirs.rs:319 lock_dir()`
 
 **与原计划的三处差异（按代码为准）**：
 
-1. **uv 未按 `native_tool.rs` 的 `NativeToolLifecycle` 建成独立后端**。实际做法是 uv 通过 `pypi:uv` 自举安装、由 `pypi.rs:989 locate_uv` 定位。因此「uv 版本钉入 `osdk.lock`」（§4.4 与 §7.4 第 11 项）**尚未实现**，仍为待办。
+1. **uv 未按 `native_tool.rs` 的 `NativeToolLifecycle` 建成独立后端**。实际做法是 uv 通过 `pypi:uv` 自举安装、由 `pypi.rs:989 locate_uv` 定位。**第五轮更正**：第四轮由此推论「uv 版本尚未钉入 `osdk.lock`」，该表述不准确——`d95894c` 已把 installer 身份（`installer` / `uv_version` / `python_version`）写入 lock 并在 replay 时钉定，见下文「第五轮追加」。
 2. **PyPI 索引没有建模为 `source/mod.rs` 的 `Source`**，而是新建了独立的 `python_index.rs`。模块注释（:3-6）给出理由：npm registry 应答 JSON ping 且按包名寻址，而 Python 索引是 PEP 503/691 规定形状的 HTML/JSON 列表页，两者「刻意分开为不同类型」。这是实现期做出的、有论证的偏离。
-3. **`--seed` 归一化、`--relocatable` 报错、跨卷预判 `--link-mode=copy` 三项未实现**（矩阵第 11、42 项），顺延至 P2。
+3. **`--seed` 归一化、`--relocatable` 报错、跨卷预判 `--link-mode=copy` 三项未实现**（矩阵第 11、42 项），列入剩余待办。
 
-**验收（已通过）**：`cargo test --workspace` 全绿——osdk-core lib **909**、osdk-cli **206** + isolated_cli **39**、android_real_manifest 7、conda_live 2（3 ignored）、osdk-shim 2（1 ignored）、shim_contract 2；clippy clean；shim 体积编译期断言通过（§7.4 第 19 项）。
+**第五轮追加的三项（commit `590376c` / `81d0f9e` / `d95894c`）**：
 
-**体积影响（实测）**：osdk 12,663,296 B（12.077 MB）、shim 3,709,440 B（3.538 MB），相对改动前基线 **+0.64% / +0.35%**。双路径确实未新增依赖。
+- **裸名候选发现重写为通用**（`590376c`，新增 `backend_discovery.rs` 495 行）。原实现硬编码 pypi + conda 两条；现由 `DYNAMIC_NAMESPACES`（**即 inventory 扫描信任的同一份清单**）驱动，实探 npm / pypi / conda / cargo，`github`/`http`/`go` 显式记录跳过原因，`Provenance` 按打包来源排序（FirstParty > Repackaged > CompiledLocally，cargo 最后因还需工具链）。**这一排序思路与 mise 从另一方向殊途同归**：mise 的 registry 给每个短名维护一份有序 backend 列表（§4.5），二者都得出「同一个名字有多个来源、需要一个稳定的优先级」这一结论。
+- **解释器自带命令不再被当作工具命令**（`81d0f9e`）。`pypi.rs:1203-1212` 把 `pydoc`/`pydoc3`/`pydoc3.X`/`idle`/`idle3`/`idle3.X`/`2to3`/`2to3-X`/`wheel`/`easy_install`/`easy_install-X` 一并排除。
+- **`osdk.lock` 记录并复现 installer**（`d95894c`）。见矩阵第 44、58 项。**replay 侧的修复比记录侧更关键**：修复前，`installer = "uv"` 的条目在无 uv 的机器上会被 pip 装掉并只打印一句提示、exit=0——**lock 承诺了一个 resolver、交付了另一个**。现在 uv 先作为普通 `pypi:uv` 请求装上（走同样的索引/校验/receipt 路径，在 `osdk list` 中可见），仍不可用则报错。
 
-**延迟影响（实测）**：见 P0 的延迟段——遍历量未退化。
+**验收（已通过，第五轮实测）**：`cargo test --workspace` 全绿——osdk-core lib **915**、osdk-cli **210** + isolated_cli **39**，其余目标同前；shim 体积编译期断言通过。**但 clippy 并非完全干净**，见下。
 
----
+**体积影响（第五轮实测）**：osdk **12,703,232 B（12.115 MB）**、shim **3,709,952 B（3.538 MB）**。**shim 仅增 512 字节**（相对第四轮的 3,709,440 B），因为 `backend_discovery.rs` 在 `install` feature 之后（`lib.rs:55` 门控，注释 :52-54 说明 shim 从不解析裸名）——**这实证了 AGENTS.md 那条 feature 门控纪律：495 行新代码 + 4 个 HTTP 探测器，对 shim 的净影响是一个字符串常量的量级。**
 
-### P2：pip 兼容层其余部分 + 缓存生命周期
-
-**内容**：`uv pip compile` / `sync` / `freeze` / `list` / `show` / `tree` / `check` 的映射与透传；`--find-links` 透传；`--compile-bytecode` 透传；`osdk cache clean` 扩展为同时清 uv 缓存；新增 `osdk cache prune`；`Settings::link_mode` → `--link-mode` 映射。
-
-**验收**：§7.4 第 16、17 项；孤立版本化缓存目录的清理走前缀白名单。
-
-**体积影响**：主要是参数映射代码，预期 osdk 增长 < 2%，shim 零增长。仍需实测。
-
-**延迟影响**：无。
+**延迟影响（第五轮实测）**：遍历量 **355 目录 / 8 个动态安装**，与第四轮完全一致，未因新增模块退化。
 
 ---
 
-### P3：项目与依赖解析
+### 第五轮：P2 / P3 / P4 大幅缩减，剩余工作重排
 
-**内容**：`uv add` / `remove` / `sync` / `lock` / `run` / `tree` 映射；`pyproject.toml` 只读所需字段；`uv.lock` 按 §4.4 以摘要方式记入 `osdk.lock`；`--frozen` / `--locked` / `--exclude-newer` / `--no-build-isolation` 透传；`uv python upgrade` 语义对齐。
+**第五轮的矩阵方法论修正（§3.4 第四档的由来）直接清空了这三个阶段的大部分内容。** 原 P2/P3/P4 的主体是「代理 uv 的各类子命令」，而这批能力已改判为「按设计不代理」——osdk 只保证环境受管，该目标在 P0/P1 即已达成。因此这里不再保留三个空壳阶段，改为如实列出**剩余的真实工作**。
 
-**验收**：§7.4 第 12 项；`osdk.lock` schema 递增并保持向后兼容（`lockfile.rs:307 load()` 已有 schema 范围校验与逐版本拒绝逻辑，如 `reject_native_backends_before_schema_four`）。
+**原三个阶段中被移除的内容**（全部因「按设计不代理」而不再是待办）：
 
-**体积影响**：新增 TOML 解析（若 `toml_edit` 已在 CLI 侧存在，则复用；`config_edit.rs:1` 的模块注释表明它已用 `toml_edit`）。预期增长 < 3%。
+| 原阶段 | 被移除的内容 | 现判定 |
+| --- | --- | --- |
+| P2 | `uv pip compile` / `sync` / `freeze` / `list` / `show` / `tree` / `check` 的映射与透传；`--find-links`；`--compile-bytecode` | 矩阵第 14–16、22、34、54 项 → 按设计不代理 |
+| P3 | `uv add` / `remove` / `sync` / `lock` / `run` 映射；`pyproject.toml` 解析；`uv.lock` 摘要记入 `osdk.lock`（§4.4 的设想）；`--exclude-newer` / `--no-build-isolation` 透传 | 矩阵第 18–21、23、46、48 项 → 按设计不代理 |
+| P4 | `uv tool` 子命令映射；`uvx` 透传；`uv workspace`；PEP 723；`uv export`；`UV_TOOL_DIR` 钉定（§4.5.3 建议） | 矩阵第 24、26、29、50 项 → 按设计不代理；第 25、27 项 → 已由 osdk 自有等价物满足 |
 
-**延迟影响**：无。
+**注意 P4 的两条第二轮实现约束的现状**：`UV_TOOL_DIR` / `UV_TOOL_BIN_DIR` 钉定**不再是目标**（osdk 刻意不走 `uv tool`，理由见矩阵第 25 项）；而「解释器 patch 升级后环境失效，用 receipt 而非符号链接解决」这条**仍然有效且部分已落地**——`d95894c` 记录的 `python_version` 正是这条思路的一部分（lock 记下环境是针对哪个解释器建的），完整的 receipt 校验仍待实现。
 
----
+**剩余的真实待办（按矩阵编号）**：
 
-### P4：工具安装、ephemeral 运行、workspace、PEP 723
+| # | 内容 | 说明 |
+| --- | --- | --- |
+| 5 | `uv python upgrade` 语义对齐 | `osdk upgrade` 现为「按 lock 升级工具」，非「原地升 patch 保留 minor 固定」 |
+| 10 | venv 的 `--link-mode` 映射 | `store/link.rs:19 LinkMode` 已有，未接到 `pypi.rs:491 venv_command` |
+| 11 | `--seed` / `--relocatable` / `--system-site-packages` | 三者均未成为用户可见选项；`--relocatable` 在 pip 路径须报错而非静默忽略 |
+| 36 | keyring / 私有源认证 | 有先例可循（`source/mod.rs:38/:41`、`package_registry.rs:850`） |
+| 40 | `osdk cache prune` | 调 `uv cache prune`；注意 uv 缓存目录带版本后缀，清理孤立目录须走前缀白名单（§6.4） |
+| 42 | venv 侧跨卷预判 `--link-mode=copy` | `same_filesystem()` 已有，未接到 venv（§6.5） |
+| — | 解释器升级后环境失效的完整 receipt 校验 | 见上文 P4 约束第二条 |
+| — | **`python_index.rs` 的 fmt 收敛**（第六轮新增） | 实测 3 处 diff（`:204` 的 `let` 换行、`:212` 的 `strip_prefix` 链换行、`:560` 测试内长字节串换行）。**该文件由 `df0c229` 新建，属本工作线自己的产物，故这 3 处应归本工作线收尾**，不同于其余 18 个文件的跨模块既有欠债（§10 第六轮 C 组）。改动极小、无行为影响 |
 
-**内容**：`pypi` 动态命名空间（含 `tool.rs:549 DYNAMIC_NAMESPACES` 注册）；`uv tool install` / `uninstall` / `list` / `upgrade` / `dir`；`uvx` 透传；`uv workspace` 三子命令透传；PEP 723 脚本透传；`uv export` 透传；`--keyring-provider subprocess` 透传。
+**关于 lock installer 回读**：第六轮发现并已闭环（`cba3dc2`，矩阵第 58 项）。**这一项此前不在任何阶段清单里**——它是 clippy 的 `never used` 告警在第六轮才暴露出来的写入侧缺陷（§4.4.1、§11.7），不是早已列入的待办。此处如实记为「新发现且已解决」。
 
-**第二轮补充的两条实现约束**（均来自 §4.5.3）：
-
-- **把 uv 的工具目录钉进 osdk 安装根**：设 `UV_TOOL_DIR` = 该 tool version 的 install path、`UV_TOOL_BIN_DIR` = 其下 `bin`。这正是 mise `pipx.rs:808-809` 的做法【源码】，已被验证可行，无需另行设计。
-- **解释器 patch 升级后工具环境失效，用 receipt 解决而非符号链接**。mise 的 `fix_venv_python_symlink()` 在 Windows 上是空实现（`pipx.rs:1133-1136`），即同类产品在此平台无解。osdk 应把 runtime 身份绑进 `NativeToolReceipt`（`native_tool.rs:47`），升级后 receipt 校验失败即要求显式重建——跨平台行为一致。
-
-**验收**：§7.4 第 10 项（**本阶段最关键**）、第 22 项；`cargo bench -p osdk-core` 的遍历量增长必须有解释。
-
-**体积影响**：预期增长 < 3%。
-
-**延迟影响**：**这是唯一有实质延迟风险的阶段。** 新增 `pypi` 命名空间意味着 inventory 扫描多一棵子树。AGENTS.md 记录过两个相关的坑：一是「扫描下探进 conda prefix，一次多走 1,000 个目录」，二是「性能探针必须自证落在被测机制之内」——不能在基准里复刻一份被测判据去数目录，那样把 `inventory.rs` 的判据改成恒真它也输出同一个数字。正确做法是埋 identity 与路径不符的诱饵 manifest（`benches/interactive_latency.rs:267 write_decoy_manifest` 已有此手法），裁剪失效时 fail-closed 扫描会报错。
-
-**若遍历量增长不可接受**：按 backend 裁剪子树，**不要收窄 `ScanOptions::max_depth`**。AGENTS.md 明确记录收窄它在只装了 2 段 id 工具的机器上能带来 8.9x 加速且测试全绿，但会让 `go:github.com/user/cmd/tool`（7 段，manifest 在深度 8）等安装被漏扫——扫不到的动态工具等于不存在。
+**这些都是收尾项，没有一项需要新阶段的规模。** 体积与延迟影响预期均可忽略（无新依赖、不触碰 hook-env / shim 路径），但按 AGENTS.md 仍须逐次实测确认。
 
 ---
 
@@ -1223,7 +1269,7 @@ osdk 侧只需锁自己的东西，且用已有机制：`dirs.rs:319 lock_dir()`
 | `osdk-core` lib 测试 | **909 passed**（第四轮修正：口头曾记为 908；`cargo test -p osdk-core installer_notices` 显示 `1 passed / 908 filtered out`，合计 909） |
 | `osdk-cli` 测试 | **206 passed**（unittests）+ **39 passed**（`tests/isolated_cli.rs`） |
 | 其余测试目标 | `android_real_manifest` 7、`conda_live` 2（3 ignored）、`zig_live_index` 0（1 ignored）、`osdk-shim` 2（1 ignored）、`shim_contract` 2 |
-| clippy | clean |
+| clippy | clean（**仅第四轮 HEAD `49ed05e` 成立**；第五轮 `d95894c` 引入了 2 条 warning，见第五轮子表 D 组） |
 
 **E 组：`49ed05e` 回归测试的变异验证（本轮独立复现，非采信）**
 
@@ -1233,6 +1279,103 @@ osdk 侧只需锁自己的东西，且用已有机制：`dirs.rs:319 lock_dir()`
 | 变异：向 notice 重新注入一个双空格 | **测试失败**，cargo 退出码 **101**，panic 消息打印出违规文案：`message must not contain a double space: uv is not installed; … Installing uv  (…)` |
 | 恢复 | `git diff` 为空，即恢复为逐字节相同 |
 | 结论 | 该断言的结果**会随产品代码改变**，因此不是空测试（与 §7.4 第 29/30 项要求同源） |
+
+### 第五轮新增实测项（2026-09-15 CST，三项实现之后）
+
+**A 组：「同名不同物」——通用裸名发现的核心发现**
+
+| 测量项 | 结果 |
+| --- | --- |
+| `osdk install uv` 的候选 | `pypi:uv` 0.12.14（Astral 的 uv）**与** `npm:uv` 1.4.0 —— 后者描述为 "Ultrafast UTF-8 data validation"，**与 Astral uv 毫无关系** |
+| `pypi:prettier` | 0.0.7，"Properly pprint of nested objects" —— **不是** JS 生态的 prettier 格式化器 |
+| `pypi:ripgrep` | 存在，但**不是** BurntSushi 的 ripgrep |
+| 结论 | 候选**必须**携带 registry 自己的一句话描述。否则会把无关程序呈现为可互换的源——**这比原来的报错更糟，因为它诱导用户装错东西** |
+| CLI 收尾句（`commands.rs:1609`） | `Same name does not mean same program -- compare the descriptions before choosing. Listed best-provenance first; osdk does not choose for you.` |
+| 探测范围 | 实探 npm（registry `dist-tags.latest`）/ pypi（配置的索引）/ conda（anaconda.org）/ cargo（crates.io `max_stable_version`）；`github`/`http`/`go` 显式跳过 |
+| 离线行为 | `backend_discovery.rs:151` 直接返回空，**不宣称「不存在」** |
+
+**B 组：lock 记录并复现 installer**
+
+| 测量项 | 结果 |
+| --- | --- |
+| 修复前的缺陷（**本轮最有价值的实测**） | 全新机器上 replay 一个 `installer = "uv"` 的条目：**osdk 用 pip 装了它**，只打印「uv 没装，建议装」的提示，**exit=0**。receipt 铁证 `creator: "stdlib"`。即 **lock 承诺一个 resolver、交付另一个** |
+| lock 记录的新字段 | `[platforms.windows-x64.tools."pypi:requests".pypi]` → `installer = "uv"` / `uv_version = "0.12.14"` / `python_version = "3.14.7"` |
+| 同一 lock 的对照 | cowsay 条目为 `installer = "pip"` —— 两条路径的差异被如实记下 |
+| 修复后行为 | replay 时先把 uv 作为普通 `pypi:uv` 请求装上（钉到记录的版本，走同样的索引/校验/receipt 路径，`osdk list` 可见）；之后 uv 仍不可用则**报错而非降级**（`pypi.rs:640-642`） |
+
+**C 组：体积（两次独立构建）**
+
+| 测量项 | 结果 |
+| --- | --- |
+| `osdk.exe` | **12,703,232 B = 12.115 MB** |
+| `osdk-shim.exe` | **3,709,952 B = 3.538 MB** |
+| shim 相对第四轮（3,709,440 B） | **仅 +512 字节** |
+| 意义 | `backend_discovery.rs` 495 行 + 4 个 HTTP 探测器，因在 `install` feature 之后（`lib.rs:55`），对 shim 的净影响约等于一个字符串常量——**实证了 AGENTS.md 的 feature 门控纪律** |
+
+**D 组：测试、基准与 clippy**
+
+| 测量项 | 结果 |
+| --- | --- |
+| `osdk-core` lib | **915 passed** |
+| `osdk-cli` | **210 passed**（unittests）+ **39 passed**（`isolated_cli`） |
+| 其余目标 | `android_real_manifest` 7、`conda_live` 2（3 ignored）、`zig_live_index` 0（1 ignored）、`osdk-shim` 2（1 ignored）、`shim_contract` 2；`cargo test --workspace` exit=0 |
+| 遍历量 | **355 目录 / 522 条目**，扫描发现 **8 个动态安装**——与第四轮完全一致，未退化 |
+| `scan_installs` 耗时（本次两轮采样） | fail-closed 13.47 / 16.89 ms，tolerant 16.93 / 15.31 ms。**明显高于第四轮的 5.88–6.26 ms** |
+| 耗时差异的判读 | 本次测量与其他构建任务并发执行。**遍历量（355 / 8）是确定性指标且完全一致**，据 AGENTS.md「只看 ms 会被机器噪声误导，退化时先对比遍历量」判定为无退化。口头给出的 5.90 / 5.95 ms 未能在本机复现，**故此处如实记录本次实测区间而非采信**。**第六轮补充认定**：5.90 / 5.95 应为低噪声窗口的单次测量，**不应作为基准**；基准应以遍历量为准 |
+| ⚠️ **clippy 并非完全干净** | `cargo clippy --workspace --all-targets` 产生 **2 条 warning**，且 `-D warnings` 下 **exit=101**（会阻断以此为门禁的 CI）：① `commands.rs:727` `mut remaining_requests` 不需要 `mut`；② `lockfile.rs:120 PypiInstaller::parse` 从未被使用。`git log -S` 确认**两者均由 `d95894c` 引入**。口头描述的「clippy clean」**与实测不符，此处按实测记录**。**第六轮已修（`cba3dc2`）**——且第 ② 条经查是真缺陷的信号而非死代码（§4.4.1、§11.7） |
+
+**E 组：`590376c` 的两个测试守卫**
+
+| 测量项 | 结果 |
+| --- | --- |
+| 守卫 ① | `backend_discovery.rs:371 every_dynamic_namespace_is_probed_or_explicitly_skipped` —— 新增命名空间若既无探测也无跳过原因则失败。**与 `is_dynamic_install_directory` 属同一类失效模式**（漏掉不报错，只表现为「能力对该命名空间隐形」） |
+| 守卫 ② | `:486-489 provenance_of` 逐命名空间断言 provenance（pypi/npm=FirstParty、conda=Repackaged、cargo=CompiledLocally） |
+| 守卫 ② 的由来（变异发现） | 原先只有 `:437-451` 钉枚举自身的序（`FirstParty < Repackaged < CompiledLocally`）。**变异测试发现：把 conda-forge 标成 `FirstParty` 能通过那个排序测试**——因为它只验证枚举序，不验证每个命名空间被赋了哪个值。注释 `:470` 记录了这一点。这是「断言必须会随产品代码改变」的又一实例（§11.4） |
+
+### 第六轮新增实测项（2026-09-15 CST，clippy 修复之后）
+
+**A 组：clippy 状态（独立复现，并暴露一次上报错误）**
+
+| 测量项 | 结果 |
+| --- | --- |
+| `cargo clippy --workspace --all-targets` | **零 warning、零 error**，exit=0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **exit=0**（门禁可通过） |
+| 修复内容（`cba3dc2`） | ① `commands.rs:727` 多余的 `mut`（加 uv 分区步骤后变冗余）已删；② `lockfile.rs:120 PypiInstaller::parse` 的 `never used` **按「补上调用点」而非「删函数」处理** |
+| ⚠️ 第五轮上报错误的成因（用户已承认） | 其验证脚本**只匹配 `^error`，从未匹配 `warning:`**，因此两条 warning 长期不可见、`-D warnings` 一直是 exit=101。**这是本轮最重要的教训，见 §11.6** |
+| 本报告第五轮的记录 | 第五轮已独立实测出这 2 条 warning 并如实写入（未采信「clippy clean」），本轮确认其已修复 |
+
+**B 组：`cba3dc2` 修复的真缺陷与其变异验证（本轮独立复现）**
+
+| 测量项 | 结果 |
+| --- | --- |
+| 缺陷本质 | pypi **只写不读** installer：replay 后在本机重跑 `lock`，会用本机环境重新推导 installer 并**覆盖记录的承诺**。与第五轮的读取侧缺陷构成一对（§4.4.1） |
+| 对照实现 | npm 从一开始就有回读路径（`lockfile.rs:1686-1689` 注释指向 `:1799 locked_npm_metadata`） |
+| 基线 | `a_replayed_entry_keeps_its_recorded_installer` **通过**（`1 passed / 210 filtered out`） |
+| 变异：删除 `:1690-1700` 的回读分支（即「直接删 `parse`」那条错误路径的等效后果） | **测试失败**，cargo exit=101，panic 消息 `a replayed entry must keep its recorded installer` |
+| 恢复 | `git diff` 为空（逐字节相同） |
+| 结论 | 该断言的结果会随产品代码改变；若当初按「删掉未使用函数」处理，**会连带把 lock 的可复现性缺口一起藏掉**（§11.7） |
+
+**C 组：`cargo fmt --check` 的真实范围（更正一处上报）**
+
+| 测量项 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | **exit=1**，**19 个文件 / 44 处 diff hunk** |
+| 涉及文件 | `osdk-cli/src/{app,pkg}.rs`；`osdk-core/benches/interactive_latency.rs`；`osdk-core/src/{inventory,package_registry,python_index,tool}.rs`；`osdk-core/src/android/repo.rs`；`osdk-core/src/backend/{android,conda,go,go_module_proxy_tests,go_package,jvm_tools}.rs`；`osdk-core/src/source/env.rs`；`osdk-core/src/syspkg/{mod,winget}.rs`；`osdk-core/tests/conda_live.rs`；`osdk-shim/src/main.rs` |
+| ⚠️ 上报为「仅 `app.rs`」 | **不准确**。`cargo fmt --check` 的输出是逐处 `Diff in <文件>:<行>`，**只看首条会把 19 个文件低估成 1 个**（与 §11.6 同源） |
+| 归属判定：既有欠债 | 18 个文件确认为跨模块既有欠债——以 `app.rs` 为例，在本工作线之前的 `49ed05e` 上检出同样有 fmt diff |
+| 归属判定：**本工作线未收尾项** | **`python_index.rs` 是例外**——它由 `df0c229`（`feat(python): model PyPI index mirrors with a confusion-proof plan type`）**新建**，是本工作线自己的产物，其 fmt diff 应归本工作线。实测为 **3 处**（不是 1 处）：`:204 versions_from_pep503` 的 `let` 换行、`:212` 的 `strip_prefix` 链换行、`:560` 测试内的长字节串字面量换行 |
+| `cba3dc2` 触及的两个文件 | `lockfile.rs` 与 `commands.rs` **均不在** fmt debt 列表内 |
+| 结论 | fmt 门禁当前不干净属既有欠债，**但不能一概说「与本次改动无关」**；`python_index.rs` 的 3 处应列入剩余待办（§8） |
+
+**D 组：测试与遍历量**
+
+| 测量项 | 结果 |
+| --- | --- |
+| `osdk-core` lib | **915 passed** |
+| `osdk-cli` | **211 passed**（较第五轮 +1，即新增的回读回归测试）+ **39 passed**（`isolated_cli`） |
+| 其余目标 | `android_real_manifest` 7、`conda_live` 2（3 ignored）、`zig_live_index` 0（1 ignored）、`osdk-shim` 2（1 ignored）、`shim_contract` 2；`cargo test --workspace` exit=0 |
+| 矩阵统计双向核对 | 用户独立复算得 **58 项 = 24/3/3/28、编号 1–58 无重复无缺号**，与本报告的脚本统计一致 |
+| bench 耗时的基准认定（**取代第五轮的噪声推测**） | 第五轮记为「口头 5.90/5.95 ms 未能复现，判为噪声」。现认定：**5.90/5.95 应是低噪声窗口的单次测量，不应作为基准**。判据是遍历量——**355 目录 / 8 个动态安装，第四、五两轮完全一致**，符合 AGENTS.md「遍历量是确定性指标，退化时先看它」 |
 
 ---
 
@@ -1276,3 +1419,72 @@ osdk: uv is not installed; using python -m venv with pip. Installing uv \
 `cache/mod.rs:43` 为交互式 shell 注入 `UV_CACHE_DIR`，但 **osdk 自己 spawn 的子进程不继承 shell hook 的设置**，因此 `pypi.rs:183-185` 必须再显式注入一次。`393d3dc` 的提交说明记录了它作为 bug 被发现的过程。
 
 值得注意的是**后果不止于「目录放错」**：uv 的跨环境硬链接共享正是**通过该缓存**发生的，缓存指错则共享静默失效——安装照样成功，只是每个环境各留一份副本。这类「功能看起来正常、只有量化指标才能发现退化」的缺陷，靠的是 §10 A 组那样的硬链接计数（带对照组）才能捕获，而不是「装完能跑」。
+
+### 11.4 一个测试可以「钉住形状」却不「钉住取值」（第五轮）
+
+`590376c` 的 provenance 排序原先只由一个测试守着：断言 `FirstParty < Repackaged < CompiledLocally`，以及一组乱序数据排序后的顺序（`backend_discovery.rs:437-451`）。看起来足够——它确实在验证「排序按 provenance 生效」。
+
+**变异测试暴露了漏洞：把 conda-forge 标成 `FirstParty`，那个测试照样通过。** 因为它验证的是**枚举自身的序**（形状），而不是**每个命名空间被赋了哪个 provenance**（取值）。而后者才是这个特性的实质——把第三方重打包标成一方发布，正是它要防止的误导。
+
+修法是补一个逐命名空间断言取值的测试（`:486-489`，pypi/npm=FirstParty、conda=Repackaged、cargo=CompiledLocally），注释 `:470` 记录了漏洞的形态。
+
+**可复用形式**：当一个特性由「一组规则 + 每个对象到规则的映射」构成时，**两者都要断言**。只测规则不测映射，是本报告反复出现的同一类空测试——与 §7.2.1 的哈希假阴性、§11.1 的字符串值断言、AGENTS.md 记载的「在基准里复刻一份被测判据」都是同一个坑的不同形态。判据始终是那一句：**这个断言的结果会不会随产品代码改变。**
+
+### 11.5 N=1 测不出、N=2 才暴露的缺陷（第五轮）
+
+`81d0f9e` 修的是一个真 bug：两个 `pypi:` 工具装在同一项目会失败——
+
+```
+refusing to generate managed shim 'pydoc' because it is provided by
+multiple installed tools: pypi:cowsay, pypi:requests
+```
+
+`pydoc` 是**每个 venv 都自带**的 stdlib 控制台脚本，两个环境都诚实地声称自己提供它。原有的过滤只排除了 `python` / `pip`，漏了 `pydoc` / `idle` / `2to3` / `wheel` / `easy_install` 及其版本后缀变体（现于 `pypi.rs:1203-1212` 一并排除）。
+
+**这个缺陷有两个让它躲过测试的特征**：
+
+1. **N=1 无害。** 一个环境声称提供 `pydoc` 完全没问题，冲突只在**第二个**环境也声称时才存在。任何单工具测试都是绿的。
+2. **报错点远离原因。** 失败发生在两个安装都成功之后的 reshim 阶段，报错信息里没有任何一个工具是「错的」——它们都诚实。
+
+**可复用形式**：凡涉及「多个安装物向同一命名空间贡献条目」的机制（shim 生成、PATH 拼装、命令注册），**测试装置至少要有两个同类安装物**。N=1 的装置在结构上无法暴露这类冲突。这与 §11.4 的判据一致：N=1 测试的结果不会随「冲突处理逻辑」的改变而改变。
+
+### 11.6 验证手段与被验证对象脱钩：一族缺陷的统一判据（第六轮）
+
+**本轮出现了这一族里最纯粹的形态**：第五轮上报「clippy clean」，而实际有 2 条 warning、`-D warnings` 一直 exit=101。原因是那个验证脚本**只匹配 `^error`，从未匹配 `warning:`**。脚本正常运行、正常输出、给出绿色结论——而它对真实问题完全视而不见。
+
+同一轮还出现了第二个形态：`cargo fmt --check` 报告了 **19 个文件 / 44 处** diff，被概括成「只有 `app.rs`」。因为该命令的输出是逐处 `Diff in <文件>:<行>`，**只读首条就会把 19 低估成 1**。
+
+**这个形态在本报告的协作过程中被现场复现了一次，值得记下来**：第六轮更正该数字后，转述方在核对 `python_index.rs` 的 diff 时读了 `Select-String` 输出的首条，把 **3 处** hunk（`:204` 的 `let` 换行、`:212` 的 `strip_prefix` 链换行、`:560` 的长字节串换行）转述成「一处 `let` 换行」——**即在指出该形态的同一轮里，又以同一形态犯了一次**。这说明它不是粗心，而是「多行输出的第一条读起来像结论」这一结构性诱因所致。
+
+**第三个形态出现在统计口径上**：本工作线的 commit 数被先后报为 5 → 9 → 14 → **18（实测 `git log df0c229~1..HEAD`）**。每次都不是数错，而是**只数了手上那批**——没有取工作线的全集。判据同样是「先确认这个统计口径覆盖了被统计对象的全貌」。
+
+把这些形态与此前记录的放在一起，共同结构就清楚了：
+
+| 形态 | 验证手段 | 为何绿色结论无信息量 |
+| --- | --- | --- |
+| 过滤条件写窄（第六轮） | 只 grep `^error` | warning 类问题永远不在匹配范围内 |
+| 只读多行输出的第一条（第六轮，且**被现场复现两次**） | 概括 `fmt --check` 首行 | 后 18 个文件 / 后 2 处 hunk 从未进入视野 |
+| 统计口径未覆盖全集（第六轮） | 只数手上那批 commit | 5 → 9 → 14 → 18，每次都自认完整 |
+| 复用 venv 测哈希门禁（§7.2.1） | 同一 venv 连测两次 | pip 短路跳过下载，校验路径未被触达 |
+| 复用已装环境测注入（§10 第四轮） | 未清空 data 目录 | 走 "already installed" 分支，注入逻辑未被触达 |
+| 探针放在超出 `max_depth` 的深度（AGENTS.md） | 深度上限先拦住探针 | 有没有剪枝断言都成立，三个变异全部存活 |
+| 在基准里复刻一份被测判据（AGENTS.md） | 基准自带一份判据副本 | 产品判据改成恒真，基准仍输出同一数字 |
+| 只钉枚举序不钉取值（§11.4） | 断言 `FirstParty < Repackaged` | conda-forge 被标成 FirstParty 也能通过 |
+
+**统一判据（可复用）**：**在相信一个「通过」之前，先确认这个验证在缺陷存在时会失败。**
+
+这句话就是变异验证为何是必需的——它不是额外的严谨性，而是**唯一能区分「真的没问题」与「验证没在看」的手段**。本报告此后每条防回归测试都做了变异验证（§10 第四轮 E 组、第五轮 E 组、第六轮 B 组），每次都先确认注入缺陷后测试确实失败、恢复后确实通过。
+
+对 shell 校验脚本，这条判据的具体落法是：**故意注入一个该脚本应当捕获的问题，确认它变红**。一个从未见过红色的检查脚本，其绿色不构成证据。
+
+对「读取工具输出」和「统计」这两类非脚本场景，落法是对应的两句：**先确认自己读的是全部输出而不是第一条**（`Measure-Object` 数一下条数，或 `Sort-Object -Unique` 看清涉及多少对象）；**先确认统计口径取的是全集**（例如用 `git log <base>..HEAD` 界定范围，而不是凭记忆罗列）。这两句之所以要写下来，是因为本报告的协作过程中它们各被违反了两次以上——**这一族缺陷的顽固性不在于难以理解，而在于每一次犯它的时候都不觉得自己在犯它**。
+
+### 11.7 `never used` 告警的第一反应应是「调用点漏了」而非「删掉它」（第六轮）
+
+clippy 报 `lockfile.rs:120 PypiInstaller::parse` 从未被使用。**最省事的处理是删掉这个函数——警告消失、测试全绿、diff 更小。**
+
+但那样会连带把一个真缺陷永久藏起来：这个函数没有调用点，恰恰**因为 pypi 侧漏掉了 installer 的回读路径**（§4.4.1）。删掉它，lock 的写入侧就会永远保持「被本机现状覆盖」的行为，而外部再也没有任何信号提示这件事——**警告本身是这个缺陷唯一的外部可见迹象**。
+
+正确的处理是反过来问：**这个函数被写出来是为了满足什么需求？那个需求现在由谁满足？** 本例的答案是「没人满足」，于是补上调用点（`lockfile.rs:1690-1700`），警告随之消失，缺陷同时被修掉。`:1686-1689` 的注释把这个推理留在了代码里。
+
+**可复用形式**：`dead_code` / `never used` 一类告警有两种成因——**真的多余**，或者**该用它的地方忘了用**。前者删除是对的，后者删除是掩盖。区分方法是先找参照实现（本例是 npm 的 `locked_npm_metadata`，`:1799`），确认这个能力在别处是否有对应的调用路径。**新增后端时只实现了参照实现一半的疏漏，靠对照比靠读新代码更容易发现。**
