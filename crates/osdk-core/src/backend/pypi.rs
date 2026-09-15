@@ -610,6 +610,7 @@ fn run_installer(program: &Path, args: &[String], env: &BTreeMap<String, String>
 #[cfg(feature = "install")]
 pub const PYTHON_OPTION: &str = "python";
 
+
 /// Whether the caller demanded uv-only behaviour.
 #[cfg(feature = "install")]
 fn require_uv(options: &BTreeMap<String, String>) -> bool {
@@ -1134,24 +1135,58 @@ impl Backend for PypiBackend {
 pub fn tool_bin_names(root: &Path) -> Vec<String> {
     let bin_dir = venv_bin_dir(root);
     let mut names = crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir));
-    // The interpreter and pip belong to the environment's plumbing, not to the
-    // tool the user asked for; exposing them would let `pypi:ruff` shadow the
-    // managed `python`.
-    names.retain(|name| {
-        let stem = name
-            .rsplit_once('.')
-            .map(|(stem, _)| stem)
-            .unwrap_or(name)
-            .to_ascii_lowercase();
-        !matches!(
-            stem.as_str(),
-            "python" | "pythonw" | "python3" | "pip" | "pip3"
-        ) && !stem.starts_with("pip3.")
-            && !stem.starts_with("python3.")
-            && !stem.starts_with("activate")
-            && !stem.starts_with("deactivate")
-    });
+    // Only what the requested tool itself provides. Everything the environment
+    // comes with belongs to the interpreter, and claiming it has two costs: it
+    // would let `pypi:ruff` shadow the managed `python`, and any two pypi tools
+    // would collide over the same name.
+    //
+    // That collision is not hypothetical. Installing `pypi:cowsay` and
+    // `pypi:requests` together failed with "refusing to generate managed shim
+    // `pydoc` because it is provided by multiple installed tools" -- `pydoc` is a
+    // stdlib script that every venv carries, so both environments honestly
+    // claimed it and shim generation had to refuse. The install itself had
+    // already succeeded, which made the failure look unrelated to either tool.
+    names.retain(|name| !is_interpreter_plumbing(name));
     names
+}
+
+/// Whether a command in a venv's bin directory comes from the interpreter
+/// rather than from the installed tool.
+///
+/// The list is what a bare `python -m venv` / `uv venv` produces before anything
+/// is installed into it, so none of it identifies the tool the user asked for.
+fn is_interpreter_plumbing(name: &str) -> bool {
+    let stem = name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+
+    // The interpreter and its installer.
+    if matches!(
+        stem.as_str(),
+        "python" | "pythonw" | "python3" | "pip" | "pip3" | "pipx"
+    ) {
+        return true;
+    }
+    // Version-suffixed variants: `pip3.14`, `python3.14`.
+    if stem.starts_with("pip3.") || stem.starts_with("python3.") {
+        return true;
+    }
+    // Activation scripts, which are shell fragments rather than commands.
+    if stem.starts_with("activate") || stem.starts_with("deactivate") {
+        return true;
+    }
+    // stdlib console scripts a venv inherits. `pydoc` is the one that actually
+    // broke a two-tool install; the rest are here because they arrive by the
+    // same route and would break the same way.
+    matches!(
+        stem.as_str(),
+        "pydoc" | "pydoc3" | "idle" | "idle3" | "2to3" | "wheel" | "easy_install" | "easy-install"
+    ) || stem.starts_with("pydoc3.")
+        || stem.starts_with("idle3.")
+        || stem.starts_with("2to3-")
+        || stem.starts_with("easy_install-")
 }
 
 #[cfg(test)]
@@ -1280,6 +1315,71 @@ mod tests {
                     "message must not contain {description}: {message}"
                 );
             }
+        }
+    }
+
+    /// A venv's inherited stdlib scripts must not be claimed as tool commands.
+    ///
+    /// Every venv carries `pydoc`, so two pypi tools both claiming it made shim
+    /// generation refuse the whole batch: "refusing to generate managed shim
+    /// `pydoc` because it is provided by multiple installed tools". Reproduced by
+    /// installing `pypi:cowsay` and `pypi:requests` together -- the installs
+    /// succeeded and then the command failed, so the error pointed at neither
+    /// tool. A single-tool test cannot see this, which is why it survived until a
+    /// two-tool lockfile replay.
+    #[test]
+    fn inherited_interpreter_commands_are_not_claimed_by_the_tool() {
+        // What a bare venv provides, on either platform.
+        for inherited in [
+            "python",
+            "python.exe",
+            "pythonw.exe",
+            "python3",
+            "python3.14",
+            "pip",
+            "pip.exe",
+            "pip3",
+            "pip3.14",
+            "pydoc",
+            "pydoc.exe",
+            "pydoc3",
+            "pydoc3.14",
+            "idle",
+            "idle3",
+            "2to3",
+            "2to3-3.14",
+            "activate",
+            "activate.bat",
+            "deactivate.bat",
+            "wheel",
+            "easy_install",
+            "easy_install-3.14",
+        ] {
+            assert!(
+                is_interpreter_plumbing(inherited),
+                "`{inherited}` comes from the interpreter, not the tool"
+            );
+        }
+
+        // Real tool commands must still come through, including ones whose names
+        // start like a filtered entry.
+        for owned in [
+            "cowsay",
+            "cowsay.exe",
+            "ruff",
+            "http",
+            "httpie",
+            "uv",
+            "uvx",
+            "pytest",
+            "python-dotenv",
+            "pipdeptree",
+            "idlemer",
+        ] {
+            assert!(
+                !is_interpreter_plumbing(owned),
+                "`{owned}` belongs to the tool and must be exposed"
+            );
         }
     }
 
