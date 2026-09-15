@@ -30,9 +30,9 @@ pub mod report;
 pub mod winget;
 
 pub use mirror::{
-    acceleration_of, effective_winget_sources, probe_winget_sources, winget_probe_url,
-    winget_sources, Acceleration, MirrorCandidate,
-    MirrorMeasurement, WINGET_MIRRORS, WINGET_OFFICIAL_ENDPOINT, WINGET_PROBE_FILE,
+    acceleration_of, effective_winget_sources, preferred_winget_source, probe_winget_sources,
+    winget_probe_url, winget_sources, Acceleration, MirrorCandidate, MirrorMeasurement,
+    NoPreferredSource, WINGET_MIRRORS, WINGET_OFFICIAL_ENDPOINT, WINGET_PROBE_FILE,
     WINGET_SOURCE_TOOL,
 };
 pub use report::{
@@ -60,6 +60,20 @@ pub const DISCOVERY_LIMITS: CaptureLimits =
 /// consumers can rely on a fixed set of entries.
 pub fn diagnose_all(runner: &dyn CommandRunner) -> SystemPackageReport {
     SystemPackageReport::new(vec![winget::diagnose(runner, DISCOVERY_LIMITS)])
+}
+
+/// The sources a manager currently has registered.
+///
+/// Wraps the per-manager query so callers need not carry [`DISCOVERY_LIMITS`]
+/// around. Returns an empty list for a manager osdk cannot query, which is the
+/// answer that makes selection omit `--source` instead of naming a source the
+/// host may not have.
+pub fn registered_sources(runner: &dyn CommandRunner, manager: ManagerKind) -> Vec<SourceRecord> {
+    match manager {
+        ManagerKind::Winget => winget::registered_sources(runner, DISCOVERY_LIMITS),
+        // Homebrew is not wired up yet; an empty list keeps selection honest.
+        ManagerKind::Homebrew => Vec::new(),
+    }
 }
 
 #[cfg(test)]

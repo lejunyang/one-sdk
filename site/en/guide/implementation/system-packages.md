@@ -162,6 +162,55 @@ documented ones when no measurement separates them. They work today, but nobody
 has promised they will keep working, and saying so is more honest than quietly
 ranking them first.
 
+## Source selection: two namespaces and one exclusivity rule
+
+osdk picks the fastest source for its own winget calls
+(`preferred_winget_source`). Two traps live here, and both fail in ways that
+look fine.
+
+### osdk's mirror ids and the host's registered names are different namespaces
+
+Internally the mirror ids are `ustc` / `nju` / `huaweicloud`, while
+`winget --source` accepts only a `Name` the host has **registered**. They may
+look alike, but they must never be assumed equal: measured on a real host,
+passing an unregistered name fails outright with `0x8A150012`, turning an
+installable package into an error.
+
+Matching therefore compares **endpoints**, not ids: take the measured
+candidate's URL, look for the same endpoint in `winget source export`'s
+registration list, and use that entry's `Name` only on a hit. Both sides are
+compared with any trailing slash trimmed, because `winget source add` preserves
+whatever form the user typed.
+
+The opposite direction is covered too: the same path on a different host
+(`evil.invalid/winget-source`) is **not** a match, since treating it as one
+would repoint osdk at an unrelated server.
+
+### `--source` is exclusive, so the official source is omitted, not named
+
+Naming one source hides all the others. Measured on winget 1.29.290:
+`winget search --query WhatsApp` returns msstore's WhatsApp, and adding
+`--source winget` makes it disappear — **with exit code 0**.
+
+So "the official source is fastest" cannot return `Ok("winget")`. That would
+pass an argument with no benefit — it is already the default — while turning
+msstore-only packages into "not found", a functional break that reports no
+error. This case is modelled as `NoPreferredSource::OfficialIsFastest`, meaning
+"no argument needed", kept distinct in the type system from a selection failure.
+
+Every `NoPreferredSource` variant maps to its own sentence, because the remedy
+differs: an unregistered mirror needs registering, while an honoured user pin
+needs nothing at all. A generic "unavailable" would leave the two
+indistinguishable.
+
+### Mutation-tested
+
+This logic was mutation-tested: four injected defects were all caught, including
+the most dangerous one — returning the internal id instead of the registered
+name, the `0x8A150012` bug above — which three tests caught at once. Per this
+repository's own standard, a check that has never been seen red does not make
+its green count as evidence.
+
 ## Missing from a platform is not missing from a host
 
 `ManagerStatus` separates `NotApplicable` from `NotInstalled` because they call

@@ -118,11 +118,29 @@ winget 的源是一份 manifest 索引，而 manifest 里的 `InstallerUrl` 指�
 | 层 | 作用范围 | 需要管理员？ | 状态 |
 | --- | --- | --- | --- |
 | osdk 下载 SDK 用哪个源 | 只影响 osdk 自己的 store | 否 | **已自动**，见 [下载源与安全](sources-security.md) |
-| osdk 调用 winget 时用哪个源 | 只影响 osdk 发起的那一次调用 | 否 | 计划中，将自动 |
+| osdk 调用 winget 时用哪个源 | 只影响 osdk 发起的那一次调用 | 否 | **已实现** |
 | winget 的全局源配置 | 影响机器上所有 winget 使用者 | **是** | 计划中，首次需你确认一次 |
 
 中间那层是"装依赖时自动加速"的落点：osdk 调 winget 时会自动选实测最快的**已注册**源，
 你手敲 `winget install` 的行为完全不变，也不需要管理员权限。
+`mirrors test` 的末尾会明确告诉你它选了哪个源、或者为什么不选：
+
+```text
+osdk will pass --source ustc-winget on winget calls it issues itself.
+Your own winget commands are unaffected.
+```
+
+::: warning osdk 只会指定镜像源，不会指定官方源
+`--source` 是排他的：指定一个源就屏蔽其余全部源。实测在本机加上 `--source winget`
+后，msstore 独有的包（如 WhatsApp）会直接搜不到，而且**退出码仍是 0、没有任何报错**。
+
+所以当实测最快的恰好是官方源时，osdk 会**省略** `--source` 而不是显式指定它——
+显式指定不会更快（它本就是默认），却会让 msstore 的包变成"找不到"。
+:::
+
+镜像必须已经在 winget 里注册过，osdk 才会使用它。osdk 不会把内置的镜像名直接传给
+winget：传一个未注册的源名会让整条命令以 `0x8A150012` 失败，把本可成功的安装变成错误。
+没有可用镜像时省略参数，是唯一安全的降级方式。
 
 只有最后一层会改这台机器的全局配置。它需要你确认一次，因为它影响的不只是 osdk——
 此后所有人调 winget 都会看到这个源，而且镜像源拿不到官方源的 `StoreOrigin` 信任标记。

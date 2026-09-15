@@ -29,7 +29,7 @@
 
 use serde::Serialize;
 
-use super::report::ManagerKind;
+use super::report::{ManagerKind, SourceRecord};
 use crate::error::Result;
 use crate::source::{select, Source, SourceKind};
 use crate::Ctx;
@@ -191,6 +191,108 @@ fn probe_timeout(ctx: &Ctx) -> std::time::Duration {
     std::time::Duration::from_millis(ctx.config.sources.probe_timeout_ms).max(PROBE_TIMEOUT)
 }
 
+/// Why osdk is not passing `--source` on a winget call it issues itself.
+///
+/// Each variant is a distinct, reportable situation rather than a generic
+/// failure, because the remedy differs: an unregistered mirror is fixed by
+/// registering it, while a user pin is not a problem at all.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "reason", content = "detail")]
+pub enum NoPreferredSource {
+    /// The user pinned a source, so osdk defers to that choice.
+    UserPinned(String),
+    /// No mirror osdk knows about is registered on this host.
+    NoMirrorRegistered,
+    /// The fastest registered candidate is the official source, which is
+    /// winget's own default and therefore needs no `--source` at all.
+    OfficialIsFastest,
+    /// Mirrors are registered, but nothing has been measured yet and osdk is
+    /// offline, so there is no basis for preferring one.
+    NoMeasurement,
+}
+
+/// Which registered winget source osdk should pass to its own calls.
+///
+/// Returns the source's **registered `Name`**, because that is the only token
+/// `winget --source` accepts. osdk's own mirror ids (`ustc`, `nju`, ...) are a
+/// separate namespace and are matched to the host's registrations by endpoint,
+/// never assumed to coincide: passing a name winget does not know fails the
+/// whole call with `0x8A150012` (verified on a real host), turning an
+/// installable package into an error. Preferring nothing is always safe;
+/// preferring a guess is not.
+///
+/// `registered` comes from `winget source export`, whose `Name` field is an
+/// identifier rather than a label and so does not vary with display language.
+pub fn preferred_winget_source(
+    registered: &[SourceRecord],
+    measured: &[MirrorMeasurement],
+    user_pin: Option<&str>,
+) -> std::result::Result<String, NoPreferredSource> {
+    // An explicit choice always wins, exactly as the Go backend leaves a
+    // user-set GOPROXY alone. Honour it even if it names something osdk has
+    // never measured: the user knows their host better than osdk's defaults do.
+    if let Some(pin) = user_pin {
+        return if registered.iter().any(|source| source.name == pin) {
+            Ok(pin.to_owned())
+        } else {
+            // A pin naming an unregistered source would fail the call. Report
+            // it rather than silently substituting a different source.
+            Err(NoPreferredSource::UserPinned(pin.to_owned()))
+        };
+    }
+
+    let reachable: Vec<&MirrorMeasurement> = measured
+        .iter()
+        .filter(|m| m.reachable == Some(true) && m.throughput.is_some())
+        .collect();
+    if reachable.is_empty() {
+        return Err(NoPreferredSource::NoMeasurement);
+    }
+
+    // Fastest first, and take the first one this host actually has registered.
+    let mut ranked = reachable;
+    ranked.sort_by(|a, b| {
+        b.throughput
+            .unwrap_or(0.0)
+            .total_cmp(&a.throughput.unwrap_or(0.0))
+    });
+
+    // The fastest candidate this host has registered, mirror or not.
+    let best = ranked.iter().find_map(|measurement| {
+        registered
+            .iter()
+            .find(|source| endpoints_match(source.endpoint.as_deref(), &measurement.endpoint))
+            .map(|source| (source, *measurement))
+    });
+
+    let Some((source, measurement)) = best else {
+        return Err(NoPreferredSource::NoMirrorRegistered);
+    };
+
+    // Naming the official source explicitly is worse than passing nothing. It
+    // is winget's own default, so the argument buys no speed -- and `--source`
+    // restricts the call to that one source, hiding every other registered
+    // source. On a stock host that silently excludes `msstore`, so a package
+    // available only from the Store would report as not found. Omitting the
+    // argument keeps winget's normal multi-source behaviour intact.
+    if measurement.kind == SourceKind::Official {
+        return Err(NoPreferredSource::OfficialIsFastest);
+    }
+
+    Ok(source.name.clone())
+}
+
+/// Whether a registered source and a measured candidate are the same endpoint.
+///
+/// Compared after trimming a trailing slash, since `winget source add` preserves
+/// whatever form the user typed and a mismatch here would silently demote a
+/// mirror that is in fact registered.
+fn endpoints_match(registered: Option<&str>, measured: &str) -> bool {
+    registered.is_some_and(|registered| {
+        registered.trim_end_matches('/') == measured.trim_end_matches('/')
+    })
+}
+
 /// The winget source candidates after user configuration.
 ///
 /// Goes through `effective_sources_for` so `osdk source disable` and custom
@@ -252,6 +354,7 @@ pub async fn probe_winget_sources(ctx: &Ctx) -> Result<Vec<MirrorMeasurement>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syspkg::report::SourceTrust;
 
     #[test]
     fn the_official_source_is_among_the_candidates() {
@@ -345,5 +448,251 @@ mod tests {
             Some(Acceleration::IndexOnly)
         );
         assert_eq!(acceleration_of(ManagerKind::Winget, "nonexistent"), None);
+    }
+
+    fn registered(name: &str, endpoint: &str) -> SourceRecord {
+        SourceRecord {
+            identifier: format!("{name}.Identifier"),
+            name: name.to_owned(),
+            endpoint: Some(endpoint.to_owned()),
+            kind: Some("Microsoft.PreIndexed.Package".to_owned()),
+            trust: SourceTrust::Trusted,
+        }
+    }
+
+    fn measured(id: &str, endpoint: &str, throughput: Option<f64>) -> MirrorMeasurement {
+        MirrorMeasurement {
+            source_id: id.to_owned(),
+            endpoint: endpoint.to_owned(),
+            kind: SourceKind::Mirror,
+            acceleration: Acceleration::IndexOnly,
+            reachable: Some(throughput.is_some()),
+            ttfb_ms: throughput.map(|_| 100),
+            throughput,
+        }
+    }
+
+    fn measured_official(throughput: Option<f64>) -> MirrorMeasurement {
+        MirrorMeasurement {
+            kind: SourceKind::Official,
+            ..measured("official", WINGET_OFFICIAL_ENDPOINT, throughput)
+        }
+    }
+
+    #[test]
+    fn the_official_source_is_never_named_explicitly() {
+        let hosts = [registered("winget", WINGET_OFFICIAL_ENDPOINT)];
+        let speeds = [measured_official(Some(700_000.0))];
+
+        // `--source winget` restricts the call to that one source, hiding
+        // msstore and buying nothing: it is already winget's default.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Err(NoPreferredSource::OfficialIsFastest)
+        );
+    }
+
+    #[test]
+    fn a_registered_mirror_beating_the_official_source_is_named() {
+        let hosts = [
+            registered("winget", WINGET_OFFICIAL_ENDPOINT),
+            registered("ustc-winget", "https://mirrors.ustc.edu.cn/winget-source"),
+        ];
+        let speeds = [
+            measured(
+                "ustc",
+                "https://mirrors.ustc.edu.cn/winget-source",
+                Some(5_000_000.0),
+            ),
+            measured_official(Some(700_000.0)),
+        ];
+
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Ok("ustc-winget".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_registered_mirror_slower_than_the_official_source_is_not_named() {
+        let hosts = [
+            registered("winget", WINGET_OFFICIAL_ENDPOINT),
+            registered("slow-mirror", "https://slow.invalid/winget-source"),
+        ];
+        let speeds = [
+            measured_official(Some(9_000_000.0)),
+            measured(
+                "slow",
+                "https://slow.invalid/winget-source",
+                Some(300_000.0),
+            ),
+        ];
+
+        // Redirecting to a slower mirror would be a pessimisation.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Err(NoPreferredSource::OfficialIsFastest)
+        );
+    }
+
+    #[test]
+    fn the_fastest_registered_mirror_is_preferred_by_its_registered_name() {
+        let hosts = [registered(
+            "ustc-winget",
+            "https://mirrors.ustc.edu.cn/winget-source",
+        )];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(5_000_000.0),
+        )];
+
+        // The registered Name, not osdk's internal mirror id: only the former is
+        // a token `winget --source` accepts.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Ok("ustc-winget".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_faster_but_unregistered_mirror_never_displaces_a_registered_one() {
+        let hosts = [registered(
+            "ustc-winget",
+            "https://mirrors.ustc.edu.cn/winget-source",
+        )];
+        let speeds = [
+            // Fastest, but this host has not registered it.
+            measured(
+                "huaweicloud",
+                "https://mirrors.huaweicloud.com/winget-source",
+                Some(11_000_000.0),
+            ),
+            measured(
+                "ustc",
+                "https://mirrors.ustc.edu.cn/winget-source",
+                Some(5_000_000.0),
+            ),
+        ];
+
+        // Naming the faster one would fail the call with 0x8A150012.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Ok("ustc-winget".to_owned())
+        );
+    }
+
+    #[test]
+    fn nothing_is_preferred_when_no_measured_mirror_is_registered() {
+        let hosts = [registered("winget", WINGET_OFFICIAL_ENDPOINT)];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(5_000_000.0),
+        )];
+
+        // Omitting --source is the safe degradation; guessing is not.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Err(NoPreferredSource::NoMirrorRegistered)
+        );
+    }
+
+    #[test]
+    fn an_unreachable_mirror_is_not_preferred_even_when_registered() {
+        let hosts = [registered(
+            "ustc-winget",
+            "https://mirrors.ustc.edu.cn/winget-source",
+        )];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            None,
+        )];
+
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Err(NoPreferredSource::NoMeasurement)
+        );
+    }
+
+    #[test]
+    fn a_user_pin_wins_over_the_fastest_measurement() {
+        let hosts = [
+            registered("winget", WINGET_OFFICIAL_ENDPOINT),
+            registered("ustc-winget", "https://mirrors.ustc.edu.cn/winget-source"),
+        ];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(9_000_000.0),
+        )];
+
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, Some("winget")),
+            Ok("winget".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_pin_naming_an_unregistered_source_is_reported_not_substituted() {
+        let hosts = [registered("winget", WINGET_OFFICIAL_ENDPOINT)];
+        let speeds = [measured_official(Some(1_000_000.0))];
+
+        // Substituting the working source would hide a broken configuration.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, Some("typo-mirror")),
+            Err(NoPreferredSource::UserPinned("typo-mirror".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_difference_does_not_hide_a_registered_mirror() {
+        let hosts = [registered(
+            "ustc-winget",
+            "https://mirrors.ustc.edu.cn/winget-source/",
+        )];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(5_000_000.0),
+        )];
+
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Ok("ustc-winget".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_different_host_on_the_same_path_is_not_treated_as_a_match() {
+        let hosts = [registered("impostor", "https://evil.invalid/winget-source")];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(5_000_000.0),
+        )];
+
+        // Matching on the path alone would repoint osdk at an unrelated host.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Err(NoPreferredSource::NoMirrorRegistered)
+        );
+    }
+
+    #[test]
+    fn a_source_without_an_endpoint_never_matches() {
+        let mut without = registered("odd", "https://mirrors.ustc.edu.cn/winget-source");
+        without.endpoint = None;
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(5_000_000.0),
+        )];
+
+        assert_eq!(
+            preferred_winget_source(&[without], &speeds, None),
+            Err(NoPreferredSource::NoMirrorRegistered)
+        );
     }
 }

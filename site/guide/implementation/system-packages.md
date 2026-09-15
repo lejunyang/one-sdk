@@ -125,6 +125,43 @@ winget v1.29.290）推翻了这个假设：
 但没有承诺，如实说明比默默排前更诚实。
 
 
+## 选源：两个命名空间与一个排他性
+
+osdk 调用 winget 时自动选用最快的源（`preferred_winget_source`），这里有两个坑，
+都会以「看起来正常」的方式出错。
+
+### 内置镜像 id 与宿主注册名是两套命名空间
+
+osdk 内部的镜像 id 是 `ustc` / `nju` / `huaweicloud`，而 `winget --source` 只接受
+宿主**已注册**的 `Name`。两者可能长得像，但绝不能假设相同——实测传一个未注册的源名，
+winget 以 `0x8A150012` 直接失败，一次本可成功的安装就变成了错误。
+
+因此匹配走 **endpoint 比对**而不是 id 比对：拿实测结果的 URL 去 `winget source export`
+的注册列表里找同一个 endpoint，命中了才用它的 `Name`。比对时两侧都去掉尾部斜杠，
+因为 `winget source add` 会原样保留用户输入的形式。
+
+反方向同样有测试覆盖：路径相同但主机不同（`evil.invalid/winget-source`）**不算命中**，
+否则会把 osdk 指向一个无关主机。
+
+### `--source` 是排他的，所以官方源必须省略而不是指定
+
+指定一个源就屏蔽其余全部源。实测（winget 1.29.290）：`winget search --query WhatsApp`
+能返回 msstore 的 WhatsApp，加上 `--source winget` 后该结果消失，**退出码仍是 0**。
+
+于是「实测最快的是官方源」不能返回 `Ok("winget")`：那样会传一个毫无收益的参数
+（它本就是默认），却让 msstore 独有的包变成「找不到」——一个不报错的功能损坏。
+这种情况建模为 `NoPreferredSource::OfficialIsFastest`，语义是「无需指定」，
+与「选择失败」在类型上区分开。
+
+`NoPreferredSource` 的每个变体都对应一句不同的解释，因为补救方式不同：镜像未注册要去
+注册，而用户 pin 生效根本不需要补救。笼统说一句「不可用」会让用户无法分辨。
+
+### 变异验证
+
+这套判定的测试做过变异验证，四个注入缺陷全部被捕获，其中包括最危险的那个——
+把返回值从注册名换成内置 id（即上面 `0x8A150012` 那个 bug），被三条测试同时抓住。
+按仓库既有的判据：没见过红色的测试，其绿色不构成证据。
+
 ## 平台缺失与安装缺失是两回事
 
 `ManagerStatus` 把 `NotApplicable` 和 `NotInstalled` 分开，因为两者的处置完全不同：

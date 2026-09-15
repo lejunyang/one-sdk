@@ -162,6 +162,24 @@ fn source_export_command() -> CommandSpec {
         .args(common_flags())
 }
 
+/// The sources winget currently has registered, or an empty list.
+///
+/// Separate from `diagnose` because selecting a source needs only this one
+/// fact, and because an empty list is the correct answer for every failure
+/// mode here: without a readable registration list osdk must omit `--source`
+/// rather than name a source winget may not have.
+pub fn registered_sources(runner: &dyn CommandRunner, limits: CaptureLimits) -> Vec<SourceRecord> {
+    let outcome = runner.run_captured(&source_export_command(), limits);
+    let (probe, _) = outcome_of(&outcome);
+    if probe != ProbeOutcome::Succeeded {
+        return Vec::new();
+    }
+    stdout_text(&outcome)
+        .as_deref()
+        .map(parse_exported_sources)
+        .unwrap_or_default()
+}
+
 /// Classify a completed probe without looking at its text.
 fn outcome_of(command: &CommandOutcome) -> (ProbeOutcome, Option<i32>) {
     match command {
@@ -238,7 +256,9 @@ pub fn diagnose(runner: &dyn CommandRunner, limits: CaptureLimits) -> ManagerRep
     report.set_capability(Capability::VersionQuery, CapabilityStatus::Supported);
 
     let mut details = WingetDetails {
-        version: stdout_text(&version_outcome).as_deref().and_then(parse_version),
+        version: stdout_text(&version_outcome)
+            .as_deref()
+            .and_then(parse_version),
         ..WingetDetails::default()
     };
 
@@ -415,7 +435,8 @@ mod tests {
 
     #[test]
     fn a_source_without_a_trust_level_is_unknown_rather_than_trusted() {
-        let line = r#"{"Arg":"https://example.invalid/src","Identifier":"Example","Name":"example"}"#;
+        let line =
+            r#"{"Arg":"https://example.invalid/src","Identifier":"Example","Name":"example"}"#;
 
         let sources = parse_exported_sources(line);
         assert_eq!(

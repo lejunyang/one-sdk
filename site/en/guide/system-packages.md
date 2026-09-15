@@ -130,13 +130,35 @@ layers, with side effects escalating as you go down:
 | Layer | Scope | Needs admin? | Status |
 | --- | --- | --- | --- |
 | Which source osdk downloads SDKs from | osdk's own store only | No | **Already automatic**, see [Sources and security](sources-security.md) |
-| Which source osdk passes to winget | that one osdk-issued call only | No | Planned, will be automatic |
+| Which source osdk passes to winget | that one osdk-issued call only | No | **Implemented** |
 | winget's global source configuration | every winget user on the machine | **Yes** | Planned, confirmed once by you |
 
 The middle layer is where "acceleration when installing dependencies" belongs:
 osdk picks the fastest **already-registered** source for its own winget calls.
 Your own `winget install` behaves exactly as before, and no admin rights are
-needed.
+needed. `mirrors test` ends by stating which source it chose, or why it chose
+none:
+
+```text
+osdk will pass --source ustc-winget on winget calls it issues itself.
+Your own winget commands are unaffected.
+```
+
+::: warning osdk names a mirror, never the official source
+`--source` is exclusive: naming one source hides all the others. Measured on a
+real host, adding `--source winget` makes packages that only msstore carries
+(WhatsApp, for one) impossible to find — and **the exit code is still 0, with no
+error at all**.
+
+So when the fastest registered candidate is the official source, osdk **omits**
+`--source` rather than naming it. Naming it buys no speed, since it is already
+the default, and would turn msstore packages into "not found".
+:::
+
+A mirror must already be registered with winget before osdk will use it. osdk
+never passes its own built-in mirror names through: naming a source winget does
+not know fails the whole command with `0x8A150012`, turning an installable
+package into an error. Omitting the argument is the only safe degradation.
 
 Only the last layer changes this machine's global configuration. It asks you
 once, because it affects more than osdk — every winget caller afterwards sees

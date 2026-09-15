@@ -35,17 +35,74 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
                     PkgManagerArg::Winget => ManagerKind::Winget,
                 };
                 let measurements = syspkg::probe_winget_sources(&app.ctx).await?;
+
+                // Which source osdk would actually pass to its own calls. Shown
+                // next to the ranking because the two can legitimately differ:
+                // the fastest endpoint is useless unless this host has it
+                // registered, and that gap is exactly what confuses people.
+                let runner = SystemCommandRunner;
+                let registered = syspkg::registered_sources(&runner, manager);
+                let selection = syspkg::preferred_winget_source(&registered, &measurements, None);
+
                 if json {
-                    serde_json::to_writer(&mut stdout, &measurements)
+                    let payload = serde_json::json!({
+                        "measurements": measurements,
+                        "selected": selection.as_ref().ok(),
+                        "not_selected_because": selection.as_ref().err(),
+                    });
+                    serde_json::to_writer(&mut stdout, &payload)
                         .context("serializing mirror measurements")?;
                     writeln!(stdout)?;
                 } else {
                     write_mirrors_human(&mut stdout, manager, &measurements)?;
+                    write_selection(&mut stdout, &selection)?;
                 }
                 Ok(())
             }
         },
     }
+}
+
+/// Report which source osdk will hand its own calls, and why.
+///
+/// Every "no source" case gets a distinct explanation. A generic "unavailable"
+/// would leave the user unable to tell "register the mirror" from "your pin is
+/// fine and being honoured".
+fn write_selection(
+    output: &mut dyn Write,
+    selection: &std::result::Result<String, syspkg::NoPreferredSource>,
+) -> Result<()> {
+    use syspkg::NoPreferredSource;
+
+    match selection {
+        Ok(name) => writeln!(
+            output,
+            "\nosdk will pass --source {name} on winget calls it issues itself.\n\
+             Your own winget commands are unaffected."
+        )?,
+        Err(NoPreferredSource::UserPinned(pin)) => writeln!(
+            output,
+            "\nSource '{pin}' is pinned but not registered on this host, so osdk\n\
+             will omit --source rather than fail the call. Register it, or clear the pin."
+        )?,
+        Err(NoPreferredSource::NoMirrorRegistered) => writeln!(
+            output,
+            "\nNone of the measured mirrors is registered with winget, so osdk will\n\
+             omit --source and let winget choose. Run `osdk pkg mirrors apply` to\n\
+             register the fastest one (needs administrator)."
+        )?,
+        Err(NoPreferredSource::OfficialIsFastest) => writeln!(
+            output,
+            "\nThe official source is the fastest one registered here, so osdk will\n\
+             omit --source. Naming it would restrict the call to that source alone\n\
+             and hide the others, including msstore."
+        )?,
+        Err(NoPreferredSource::NoMeasurement) => writeln!(
+            output,
+            "\nNo mirror was reachable, so osdk will omit --source and let winget choose."
+        )?,
+    }
+    Ok(())
 }
 
 fn human_throughput(bytes_per_second: f64) -> String {
@@ -87,11 +144,7 @@ fn write_mirrors_human(
                 human_throughput(throughput),
                 measurement.ttfb_ms.unwrap_or_default()
             )?,
-            (Some(false), _) => writeln!(
-                output,
-                "  -. {:<14} unreachable",
-                measurement.source_id
-            )?,
+            (Some(false), _) => writeln!(output, "  -. {:<14} unreachable", measurement.source_id)?,
             _ => writeln!(output, "  -. {:<14} not probed", measurement.source_id)?,
         }
     }
@@ -166,7 +219,12 @@ fn remedy(report: &ManagerReport) -> Option<&'static str> {
 }
 
 fn write_source(output: &mut dyn Write, source: &SourceRecord) -> Result<()> {
-    write!(output, "      {} ({})", source.name, trust_label(source.trust))?;
+    write!(
+        output,
+        "      {} ({})",
+        source.name,
+        trust_label(source.trust)
+    )?;
     if let Some(endpoint) = &source.endpoint {
         write!(output, " {endpoint}")?;
     }
