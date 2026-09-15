@@ -22,7 +22,6 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::mirror::{Acceleration, MirrorMeasurement};
 use super::report::SourceRecord;
 
 /// How a mirror gets into winget's configuration.
@@ -148,6 +147,7 @@ pub fn fingerprint_sources(registered: &[SourceRecord]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syspkg::mirror::{Acceleration, MirrorMeasurement};
     use crate::syspkg::report::SourceTrust;
 
     fn source(name: &str, endpoint: &str, trust: SourceTrust) -> SourceRecord {

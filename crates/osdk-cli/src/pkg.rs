@@ -91,11 +91,11 @@ fn write_selection(
              omit --source and let winget choose. Run `osdk pkg mirrors apply` to\n\
              register the fastest one (needs administrator)."
         )?,
-        Err(NoPreferredSource::OfficialIsFastest) => writeln!(
+        Err(NoPreferredSource::AlreadyTheDefaultSource) => writeln!(
             output,
-            "\nThe official source is the fastest one registered here, so osdk will\n\
-             omit --source. Naming it would restrict the call to that source alone\n\
-             and hide the others, including msstore."
+            "\nThe fastest source registered here is already the one winget uses by\n\
+             default, so osdk will omit --source. Naming it would restrict the call\n\
+             to that source alone and hide the others, including msstore."
         )?,
         Err(NoPreferredSource::NoMeasurement) => writeln!(
             output,

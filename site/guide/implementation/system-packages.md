@@ -143,14 +143,53 @@ winget 以 `0x8A150012` 直接失败，一次本可成功的安装就变成了�
 反方向同样有测试覆盖：路径相同但主机不同（`evil.invalid/winget-source`）**不算命中**，
 否则会把 osdk 指向一个无关主机。
 
-### `--source` 是排他的，所以官方源必须省略而不是指定
+### 镜像无法并存，所以判据是「源名」而不是「endpoint」
+
+这一条推翻了本模块的初版实现，值得记下推翻的过程。
+
+初版按 `SourceKind::Official` 判断「要不要省略 `--source`」，隐含假设是：镜像会以
+自己的名字注册，与官方源并存，因此「官方」和「镜像」是两个可区分的源。
+
+以管理员身份实测否证了这个假设。新增一个指向 USTC 的
+`Microsoft.PreIndexed.Package` 源，失败于 `0x80073D06`：
+
+```
+Operation failed: Windows 无法安装程序包
+Microsoft.Winget.Source_2026.915.1105.46_neutral__8wekyb3d8bbwe，
+因为它的版本为 2026.915.1105.46。已安装此程序包的更高版本 2026.915.1714.48。
+```
+
+对照 `winget source export` 可见官方源的 `Data` / `Identifier` 都是
+`Microsoft.Winget.Source_8wekyb3d8bbwe`——**与失败信息里的包是同一个 MSIX 身份**。
+这类源以固定身份安装，镜像分发的是同一个包的副本，所以第二个装不进去；又因镜像
+同步滞后（`2026.915.1105.46` < 本机 `2026.915.1714.48`），Windows 以「已装更高版本」
+直接拒绝。
+
+这解释了镜像站官方教程为何是 `source remove winget` + `source add winget <镜像>`：
+**顶替是唯一可行的形状**。
+
+于是判据必须换掉。真正要问的不是「这个 endpoint 是不是官方的」，而是
+**「这个源是不是已经是 winget 的默认源」**——而这由**名字**决定：名为 `winget` 的源
+永远默认参与调用，无论它指向 Microsoft 的 CDN 还是某个镜像。按 endpoint 判断会在
+顶替后失效：那时最快的源是镜像，代码会显式指定 `--source winget`，从而屏蔽 msstore。
+
+`NoPreferredSource::AlreadyTheDefaultSource` 因此同时覆盖两种宿主：未顶替的（默认源
+是官方 CDN）和已顶替的（默认源是镜像）。变异验证确认了这个判据被测住：把它换回按
+endpoint 判断，测试立即变红。
+
+**对 L2 层的结论**：`--source` 在 winget 上根本不是镜像加速的手段。顶替之前镜像不以
+任何独立名字存在，无从选择；顶替之后镜像就是默认源，不需要指定。加速完全由顶替动作
+达成。该层仍然保留，因为它正确处理用户 pin、拒绝把内置 id 当源名传出，且这正是
+Homebrew 需要的形状——那侧通过环境变量按次选择镜像，不依赖共享的注册表。
+
+### `--source` 是排他的，所以默认源必须省略而不是指定
 
 指定一个源就屏蔽其余全部源。实测（winget 1.29.290）：`winget search --query WhatsApp`
 能返回 msstore 的 WhatsApp，加上 `--source winget` 后该结果消失，**退出码仍是 0**。
 
 于是「实测最快的是官方源」不能返回 `Ok("winget")`：那样会传一个毫无收益的参数
 （它本就是默认），却让 msstore 独有的包变成「找不到」——一个不报错的功能损坏。
-这种情况建模为 `NoPreferredSource::OfficialIsFastest`，语义是「无需指定」，
+这种情况建模为 `NoPreferredSource::AlreadyTheDefaultSource`，语义是「无需指定」，
 与「选择失败」在类型上区分开。
 
 `NoPreferredSource` 的每个变体都对应一句不同的解释，因为补救方式不同：镜像未注册要去

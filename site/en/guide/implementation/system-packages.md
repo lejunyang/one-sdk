@@ -186,7 +186,51 @@ The opposite direction is covered too: the same path on a different host
 (`evil.invalid/winget-source`) is **not** a match, since treating it as one
 would repoint osdk at an unrelated server.
 
-### `--source` is exclusive, so the official source is omitted, not named
+### A mirror cannot coexist, so the test is the source *name*, not the endpoint
+
+This overturned the first implementation of this module, and how it was
+overturned is worth recording.
+
+The first version decided whether to omit `--source` from
+`SourceKind::Official`, on the implicit assumption that a mirror registers under
+its own name alongside the official source, making "official" and "mirror" two
+distinguishable entries.
+
+Tested as administrator, that assumption is false. Adding a
+`Microsoft.PreIndexed.Package` source pointing at USTC fails with
+`0x80073D06`: the package could not be installed because a higher version is
+already installed. Cross-checking `winget source export` shows the official
+source's `Data` and `Identifier` are both
+`Microsoft.Winget.Source_8wekyb3d8bbwe` — **the same MSIX identity named in the
+failure**. Sources of this type install under one fixed identity, a mirror
+distributes a copy of that same package, so a second one cannot be installed;
+and because mirrors lag upstream, the mirror's version was older than the
+installed one, which is what Windows rejected.
+
+That is why mirror operators document `source remove winget` followed by
+`source add winget <mirror>`: **replacing is the only available shape**.
+
+So the test had to change. The real question is not "is this endpoint the
+official one" but **"is this source already what winget uses by default"** — and
+that is decided by the *name*: a source named `winget` always participates in a
+call, whether it points at Microsoft's CDN or at a mirror. Judging by endpoint
+breaks precisely after replacement: the fastest source is then a mirror, so the
+code would name `--source winget` explicitly and hide msstore.
+
+`NoPreferredSource::AlreadyTheDefaultSource` therefore covers both hosts: the
+unmirrored one, where the default source is Microsoft's CDN, and the mirrored
+one, where the default source is a mirror. Mutation testing confirms the test is
+pinned: switching the guard back to an endpoint comparison turns it red.
+
+**Consequence for the L2 layer**: `--source` is not a mirror-acceleration
+mechanism on winget at all. Before replacement no mirror exists under any name
+to select; after replacement the mirror is the default and needs no argument.
+Acceleration comes entirely from the replacement. The layer is kept because it
+still honours a user pin and refuses to pass osdk's internal ids as source
+names, and because it is the shape Homebrew needs, where a mirror is chosen per
+invocation through environment variables rather than a shared registration.
+
+### `--source` is exclusive, so the default source is omitted, not named
 
 Naming one source hides all the others. Measured on winget 1.29.290:
 `winget search --query WhatsApp` returns msstore's WhatsApp, and adding
@@ -195,7 +239,7 @@ Naming one source hides all the others. Measured on winget 1.29.290:
 So "the official source is fastest" cannot return `Ok("winget")`. That would
 pass an argument with no benefit — it is already the default — while turning
 msstore-only packages into "not found", a functional break that reports no
-error. This case is modelled as `NoPreferredSource::OfficialIsFastest`, meaning
+error. This case is modelled as `NoPreferredSource::AlreadyTheDefaultSource`, meaning
 "no argument needed", kept distinct in the type system from a selection failure.
 
 Every `NoPreferredSource` variant maps to its own sentence, because the remedy

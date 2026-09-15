@@ -118,7 +118,7 @@ winget 的源是一份 manifest 索引，而 manifest 里的 `InstallerUrl` 指�
 | 层 | 作用范围 | 需要管理员？ | 状态 |
 | --- | --- | --- | --- |
 | osdk 下载 SDK 用哪个源 | 只影响 osdk 自己的 store | 否 | **已自动**，见 [下载源与安全](sources-security.md) |
-| osdk 调用 winget 时用哪个源 | 只影响 osdk 发起的那一次调用 | 否 | **已实现** |
+| osdk 调用 winget 时用哪个源 | 只影响 osdk 发起的那一次调用 | 否 | 已实现，但对 winget 不产生加速（见下） |
 | winget 的全局源配置 | 影响机器上所有 winget 使用者 | **是** | 计划中，首次需你确认一次 |
 
 中间那层是"装依赖时自动加速"的落点：osdk 调 winget 时会自动选实测最快的**已注册**源，
@@ -130,17 +130,26 @@ osdk will pass --source ustc-winget on winget calls it issues itself.
 Your own winget commands are unaffected.
 ```
 
-::: warning osdk 只会指定镜像源，不会指定官方源
-`--source` 是排他的：指定一个源就屏蔽其余全部源。实测在本机加上 `--source winget`
-后，msstore 独有的包（如 WhatsApp）会直接搜不到，而且**退出码仍是 0、没有任何报错**。
+::: warning winget 的镜像加速不靠 `--source`，而是靠顶替默认源
+这一点与直觉相反，是实机验证的结果。
 
-所以当实测最快的恰好是官方源时，osdk 会**省略** `--source` 而不是显式指定它——
-显式指定不会更快（它本就是默认），却会让 msstore 的包变成"找不到"。
+winget 的软件源是一个固定身份的 MSIX 包（`Microsoft.Winget.Source_8wekyb3d8bbwe`），
+所以**镜像无法作为一个独立的源与官方源并存**——以管理员身份新增会以
+`0x80073D06`（"已安装此程序包的更高版本"）失败。镜像站官方教程之所以让你先
+`winget source remove winget` 再 `winget source add winget <镜像地址>`，正是因为
+顶替是唯一可行的形状。
+
+顶替之后，镜像**就是**那个名为 `winget` 的默认源，对所有 winget 调用自动生效，
+**不需要任何 `--source` 参数**。所以 winget 侧的加速完全由上表第三层达成。
+
+而 `--source` 是排他的：指定一个源就屏蔽其余全部。实测加上 `--source winget` 后，
+msstore 独有的包（如 WhatsApp）直接搜不到，且**退出码仍是 0、没有任何报错**。
+因此无论那个源指向官方还是镜像，osdk 都会**省略** `--source`，以免让 msstore
+的包变成"找不到"。
 :::
 
-镜像必须已经在 winget 里注册过，osdk 才会使用它。osdk 不会把内置的镜像名直接传给
-winget：传一个未注册的源名会让整条命令以 `0x8A150012` 失败，把本可成功的安装变成错误。
-没有可用镜像时省略参数，是唯一安全的降级方式。
+osdk 也不会把内置的镜像名直接传给 winget：传一个未注册的源名会让整条命令以
+`0x8A150012` 失败，把本可成功的安装变成错误。省略参数是唯一安全的降级方式。
 
 只有最后一层会改这台机器的全局配置。它需要你确认一次，因为它影响的不只是 osdk——
 此后所有人调 winget 都会看到这个源，而且镜像源拿不到官方源的 `StoreOrigin` 信任标记。

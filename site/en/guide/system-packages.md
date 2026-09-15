@@ -130,7 +130,7 @@ layers, with side effects escalating as you go down:
 | Layer | Scope | Needs admin? | Status |
 | --- | --- | --- | --- |
 | Which source osdk downloads SDKs from | osdk's own store only | No | **Already automatic**, see [Sources and security](sources-security.md) |
-| Which source osdk passes to winget | that one osdk-issued call only | No | **Implemented** |
+| Which source osdk passes to winget | that one osdk-issued call only | No | Implemented, but no gain on winget (below) |
 | winget's global source configuration | every winget user on the machine | **Yes** | Planned, confirmed once by you |
 
 The middle layer is where "acceleration when installing dependencies" belongs:
@@ -144,21 +144,32 @@ osdk will pass --source ustc-winget on winget calls it issues itself.
 Your own winget commands are unaffected.
 ```
 
-::: warning osdk names a mirror, never the official source
-`--source` is exclusive: naming one source hides all the others. Measured on a
-real host, adding `--source winget` makes packages that only msstore carries
-(WhatsApp, for one) impossible to find — and **the exit code is still 0, with no
-error at all**.
+::: warning winget mirroring works by replacing the default source, not via `--source`
+This is counter-intuitive and was verified on a real host.
 
-So when the fastest registered candidate is the official source, osdk **omits**
-`--source` rather than naming it. Naming it buys no speed, since it is already
-the default, and would turn msstore packages into "not found".
+A winget package source is an MSIX package with a fixed identity
+(`Microsoft.Winget.Source_8wekyb3d8bbwe`), so **a mirror cannot be registered as
+a separate source alongside the official one** — adding it as administrator
+fails with `0x80073D06` ("a higher version of this package is already
+installed"). That is exactly why mirror operators instruct you to run
+`winget source remove winget` and then
+`winget source add winget <mirror-url>`: replacing is the only shape available.
+
+After replacing, the mirror **is** the default source named `winget`, in effect
+for every winget call automatically, with **no `--source` argument needed**. So
+acceleration on winget comes entirely from the third layer above.
+
+And `--source` is exclusive: naming one source hides all the others. Measured
+here, adding `--source winget` makes packages only msstore carries (WhatsApp,
+for one) impossible to find — and **the exit code is still 0, with no error at
+all**. So whether that source points at Microsoft's CDN or at a mirror, osdk
+**omits** `--source`, rather than turning msstore packages into "not found".
 :::
 
-A mirror must already be registered with winget before osdk will use it. osdk
-never passes its own built-in mirror names through: naming a source winget does
-not know fails the whole command with `0x8A150012`, turning an installable
-package into an error. Omitting the argument is the only safe degradation.
+osdk also never passes its own built-in mirror names through: naming a source
+winget does not know fails the whole command with `0x8A150012`, turning an
+installable package into an error. Omitting the argument is the only safe
+degradation.
 
 Only the last layer changes this machine's global configuration. It asks you
 once, because it affects more than osdk — every winget caller afterwards sees

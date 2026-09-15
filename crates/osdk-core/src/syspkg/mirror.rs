@@ -111,6 +111,15 @@ pub const WINGET_MIRRORS: &[MirrorCandidate] = &[
 /// The official winget source, as the baseline every mirror is ranked against.
 pub const WINGET_OFFICIAL_ENDPOINT: &str = "https://cdn.winget.microsoft.com/cache";
 
+/// The name winget's built-in package source carries.
+///
+/// Load-bearing rather than cosmetic: this source always participates in a call
+/// without being named, and applying a mirror *replaces it under this same
+/// name* -- the only shape available, since two `Microsoft.PreIndexed.Package`
+/// sources cannot coexist under one fixed MSIX identity. So a candidate
+/// carrying this name never needs `--source`, whatever endpoint it points at.
+pub const DEFAULT_WINGET_SOURCE_NAME: &str = "winget";
+
 /// The file whose transfer speed stands in for a winget source.
 ///
 /// A winget source is an MSIX package wrapping a SQLite index, and this is the
@@ -202,10 +211,22 @@ pub enum NoPreferredSource {
     /// The user pinned a source, so osdk defers to that choice.
     UserPinned(String),
     /// No mirror osdk knows about is registered on this host.
+    ///
+    /// On winget this is the normal state, and not a gap to be closed by
+    /// registering a mirror under its own name: a
+    /// `Microsoft.PreIndexed.Package` source installs under one fixed MSIX
+    /// identity (`Microsoft.Winget.Source_8wekyb3d8bbwe`), so a second such
+    /// source cannot coexist -- verified on an elevated host, where adding one
+    /// fails with `0x80073D06`. A winget mirror is applied by replacing the
+    /// source named `winget`, after which the mirror *is* the default and no
+    /// `--source` is wanted at all.
     NoMirrorRegistered,
-    /// The fastest registered candidate is the official source, which is
-    /// winget's own default and therefore needs no `--source` at all.
-    OfficialIsFastest,
+    /// The fastest registered candidate is already the source winget uses by
+    /// default, so no `--source` is wanted.
+    ///
+    /// Covers both a stock host, where that source is Microsoft's CDN, and a
+    /// mirrored host, where a mirror has replaced it under the same name.
+    AlreadyTheDefaultSource,
     /// Mirrors are registered, but nothing has been measured yet and osdk is
     /// offline, so there is no basis for preferring one.
     NoMeasurement,
@@ -223,6 +244,18 @@ pub enum NoPreferredSource {
 ///
 /// `registered` comes from `winget source export`, whose `Name` field is an
 /// identifier rather than a label and so does not vary with display language.
+///
+/// # Why this yields no acceleration on winget
+///
+/// Measured on an elevated host: a winget mirror cannot be registered
+/// alongside the official source, because both install under the same fixed
+/// MSIX identity. A mirror is applied by replacing the source named `winget`,
+/// so afterwards it already is what every winget call uses by default, and
+/// naming it would only restrict the call and hide `msstore`. In practice this
+/// function therefore returns `Err` on winget. It is kept because it still
+/// honours a user pin, refuses to pass osdk's internal ids as source names, and
+/// is the shape Homebrew needs, where a mirror is chosen per invocation through
+/// environment variables rather than a shared registration.
 pub fn preferred_winget_source(
     registered: &[SourceRecord],
     measured: &[MirrorMeasurement],
@@ -265,18 +298,25 @@ pub fn preferred_winget_source(
             .map(|source| (source, *measurement))
     });
 
-    let Some((source, measurement)) = best else {
+    let Some((source, _measurement)) = best else {
         return Err(NoPreferredSource::NoMirrorRegistered);
     };
 
-    // Naming the official source explicitly is worse than passing nothing. It
-    // is winget's own default, so the argument buys no speed -- and `--source`
-    // restricts the call to that one source, hiding every other registered
-    // source. On a stock host that silently excludes `msstore`, so a package
-    // available only from the Store would report as not found. Omitting the
-    // argument keeps winget's normal multi-source behaviour intact.
-    if measurement.kind == SourceKind::Official {
-        return Err(NoPreferredSource::OfficialIsFastest);
+    // The real question is not "is this the official endpoint" but "is this
+    // source already what winget uses by default", and for winget that is
+    // decided by the *name*, not the endpoint. `winget` is the built-in source
+    // name and always participates in a call, whether it still points at
+    // Microsoft's CDN or has been replaced by a mirror -- and replacing it is
+    // the only way a winget mirror can be applied at all, since two
+    // `Microsoft.PreIndexed.Package` sources cannot coexist under the same
+    // fixed MSIX identity (verified: adding a second fails with 0x80073D06).
+    //
+    // Either way, naming it buys nothing and costs something: `--source`
+    // restricts the call to that one source, which silently excludes `msstore`,
+    // so a Store-only package would report as not found. Omitting the argument
+    // keeps winget's normal multi-source behaviour.
+    if source.name == DEFAULT_WINGET_SOURCE_NAME {
+        return Err(NoPreferredSource::AlreadyTheDefaultSource);
     }
 
     Ok(source.name.clone())
@@ -480,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn the_official_source_is_never_named_explicitly() {
+    fn the_default_source_is_never_named_explicitly() {
         let hosts = [registered("winget", WINGET_OFFICIAL_ENDPOINT)];
         let speeds = [measured_official(Some(700_000.0))];
 
@@ -488,7 +528,7 @@ mod tests {
         // msstore and buying nothing: it is already winget's default.
         assert_eq!(
             preferred_winget_source(&hosts, &speeds, None),
-            Err(NoPreferredSource::OfficialIsFastest)
+            Err(NoPreferredSource::AlreadyTheDefaultSource)
         );
     }
 
@@ -514,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_mirror_slower_than_the_official_source_is_not_named() {
+    fn a_mirror_slower_than_the_default_source_is_not_named() {
         let hosts = [
             registered("winget", WINGET_OFFICIAL_ENDPOINT),
             registered("slow-mirror", "https://slow.invalid/winget-source"),
@@ -531,7 +571,7 @@ mod tests {
         // Redirecting to a slower mirror would be a pessimisation.
         assert_eq!(
             preferred_winget_source(&hosts, &speeds, None),
-            Err(NoPreferredSource::OfficialIsFastest)
+            Err(NoPreferredSource::AlreadyTheDefaultSource)
         );
     }
 
@@ -677,6 +717,32 @@ mod tests {
         assert_eq!(
             preferred_winget_source(&hosts, &speeds, None),
             Err(NoPreferredSource::NoMirrorRegistered)
+        );
+    }
+
+    #[test]
+    fn a_mirror_that_replaced_the_official_source_is_still_not_named() {
+        // The shape a real winget mirror takes, verified on an elevated host: it
+        // cannot coexist with the official source, so applying it *replaces* the
+        // source named `winget`. The name stays, the endpoint becomes the
+        // mirror's.
+        let hosts = [
+            registered("winget", "https://mirrors.ustc.edu.cn/winget-source"),
+            registered("msstore", "https://storeedgefd.dsx.mp.microsoft.com/v9.0"),
+        ];
+        let speeds = [measured(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            Some(5_000_000.0),
+        )];
+
+        // The mirror is already what winget uses by default here, so naming it
+        // buys nothing and would hide msstore -- the same trap as naming the
+        // official source, reached from the opposite direction.
+        assert_eq!(
+            preferred_winget_source(&hosts, &speeds, None),
+            Err(NoPreferredSource::AlreadyTheDefaultSource),
+            "a mirror occupying the default source name is already in effect"
         );
     }
 

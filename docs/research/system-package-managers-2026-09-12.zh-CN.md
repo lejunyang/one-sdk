@@ -846,6 +846,13 @@ osdk pkg mirrors apply [--manager X] [--dry-run] [--accept-plan <SHA256_ID>]
 - 安装时附加 `--silent`、`--accept-package-agreements`、`--accept-source-agreements`；查询时只需 `--accept-source-agreements`。
 - 一律使用 `--id <ID> --exact` 精确匹配，**绝不接受模糊匹配**（借鉴 mise：「bootstrap never accepts an ambiguous fuzzy match」）。
 - **osdk 自己发起的调用自动附加 `--source <name>`，选用实测最快的已注册源**（§5.5 的 L2）。这一步不改全局配置、不需提权、不影响用户手敲 winget 的行为。若无可用的镜像源，或探测数据过期且当前离线，则省略该参数、退回 winget 自身的默认源选择——**降级必须是省略参数，而不是猜一个源名**：传入未注册的源名会让 winget 直接报错（`0x8A150012`，V-8 实测），把一次本可成功的安装变成失败。
+- **winget 镜像无法与官方源并存，只能顶替它。这一条推翻了 L2 的适用前提**（实机验证，管理员会话）：
+  - `winget source add --name osdk-probe-ustc --arg <USTC> --type Microsoft.PreIndexed.Package --trust-level trusted` 失败，退出码 `0x80073D06`（`-2147009274`），报「已安装此程序包的更高版本」。
+  - 根因是包身份固定：官方源的 `Data`/`Identifier` 均为 `Microsoft.Winget.Source_8wekyb3d8bbwe`，而失败信息里的包正是 `Microsoft.Winget.Source_..._8wekyb3d8bbwe`——**同一个 MSIX 身份**。`Microsoft.PreIndexed.Package` 类型的源以固定身份安装，镜像分发的是同一个包的副本，因此第二个源装不进去；又因镜像同步滞后（镜像 `2026.915.1105.46` < 本机 `2026.915.1714.48`），Windows 直接以「已装更高版本」拒绝。
+  - 这解释了为什么 USTC 官方帮助页教的是 `source remove winget` + `source add winget <镜像>`：**并存在机制上不可能，顶替是唯一形状**，回滚靠 `source reset winget`。
+  - `Microsoft.Rest`（msstore 用的类型）不是替代出路：它指向 REST API，而国内镜像站提供的是 `source.msix` 静态文件镜像，不是 REST 服务。
+  - **对 L2 的直接后果**：顶替之后，镜像**就是**名为 `winget` 的那个源，对所有 winget 调用（含 osdk 自己的）默认生效，**根本不需要 `--source`**；而顶替之前，镜像不以任何独立名字存在，`--source` 也无从选择。因此 **`--source` 在 winget 上不是镜像加速的手段**——加速完全由 L3 的顶替动作达成，L2 对 winget 退化为「保持沉默」。这不影响 Homebrew：那侧靠环境变量，与此机制无关。
+
 - **`--source` 是排他的：指定一个源就屏蔽其余全部源。** 实机验证（winget 1.29.290）：`winget search --query WhatsApp` 能返回 msstore 的 WhatsApp（ID `9NKSQGP7F2NH`），而 `--source winget` 后该结果消失，只剩 winget 源的条目，退出码均为 0——**没有任何报错，只是结果变少**。两条推论：
   1. **实测最快者为官方源时必须省略 `--source`，而不是显式指定它。** 显式指定不带来任何加速（它本就是默认），却会让 msstore 独有的包变成「找不到」。这是一个静默的功能损坏，正是「验证失效模式」里「看起来正常的降级」那一类。
   2. 因此 L2 的返回值只在**选中镜像**时才是源名；选中官方源属于「无需指定」而非「选择失败」，两者在类型上必须可区分（实现为 `NoPreferredSource::OfficialIsFastest`）。
@@ -998,7 +1005,7 @@ osdk pkg mirrors apply [--manager X] [--dry-run] [--accept-plan <SHA256_ID>]
 复用 `source::select::{effective_sources_for, ranked_source_candidates_for}`，不新建探测机制。内置镜像候选集（USTC/NJU/华为云 for winget；TUNA/USTC/阿里云 for brew）。**明确区分索引加速与产物加速**（§5.1）。官方端点一并参与测速，使「没有镜像值得切换」成为一个可以得出的结论。
 **已完成**（提交 `dbdc74b`）：`osdk pkg mirrors test` 含 `--json`；四个候选实机全部可达，华为云 11.5 MiB/s 对官方源 1.1 MiB/s；`--offline` 拒绝而非返回未测排名；osdk +0.12%，osdk-shim 字节不变。
 
-**Phase 3：osdk 自身调用时自动选用最快源（L2，不提权）** — 选源判定已完成
+**Phase 3：osdk 自身调用时自动选用最快源（L2，不提权）** — 已实现，但实测后确认对 winget **不产生加速作用**（见 §8.4 的并存不可能一条）。保留该层的价值在于：它正确处理了用户 pin、拒绝把内置 id 当源名传出去、并在选中官方源时省略参数；对 Homebrew 仍然适用。winget 的加速改由 Phase 3.5 的顶替动作达成。
 这是「安装依赖时自动检测并设置镜像」的落点，且不改宿主任何状态，因此排在需要提权的 L3 之前。
 osdk 发起的 winget 调用自动附加 `--source <name>`，选实测最快的**已注册**源；探测走 Phase 2 的缓存与 TTL，不给每次安装都加一轮测速。
 关键约束：无可用镜像源、或探测数据过期且当前离线时，**省略该参数**退回 winget 默认行为，绝不猜一个源名——传未注册的源名会让 winget 直接报 `0x8A150012`，把本可成功的安装变成失败。
