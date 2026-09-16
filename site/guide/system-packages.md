@@ -158,6 +158,38 @@ osdk 对自己下载的 SDK 做哈希与签名校验，但系统包的字节 osd
 `osdk pkg apply` 装的东西和 `osdk install` 有同等强度的校验。
 :::
 
+## Linux 的包管理器：检测，但不代管
+
+在 Linux 上，`osdk pkg doctor` 会额外报告 apt / apk / pacman / dnf：
+
+```text
+Linux package managers (detected, not managed)
+  pacman: present, rollback manual downgrade from cache only
+    this distribution supports only full-system upgrades; run `pacman -Syu` yourself
+  osdk reports these and prints commands for you to run. It never installs,
+  upgrades, or elevates through them.
+```
+
+**osdk 不会通过它们安装、升级或提权**，这是有意的取舍而非未完成的功能。三条理由：
+
+1. **变更是全局的且需要 root。** apt 官方手册写明 `full-upgrade`「**会删除已安装的包**，如果这是整体升级系统所必需的」——一条安装命令可能连带升级共享库、删除其他包。
+2. **Arch 官方声明部分升级不受支持。** Wiki 原文：「**never** run `pacman -Sy`；**always** use `pacman -Syu`」。而"只装我需要的那个包"恰恰就是部分升级。Arch 还要求升级前先读发行版新闻公告，这一步无法自动化。
+3. **失败恢复能力差异极大。** dnf 有原子的 `history undo`；pacman 只能从 cache 手工降级（官方定位为「最后手段」，而清理 cache 又是常规维护）；apt 只有日志、没有 undo。**跨发行版的统一抽象无法承诺一致的恢复语义**——这比"难实现"更根本。
+
+所以 doctor 会把每家的回滚能力如实列出。这个信息才是决定"要不要让任何工具驱动你的包管理器"的依据，而它在这四家之间并不一致。
+
+::: tip 检测全程只读，不需要 sudo
+版本查询用的是各家文档化的只读接口：`dpkg-query -W -f=`、`apk info -e -v`、
+`pacman -Q`、`rpm -q --qf`。都指定了显式的输出格式，因此不依赖可能变化的默认格式，
+也不解析本地化表格。
+:::
+
+::: warning zypper 暂不在列
+不是因为它不重要，而是**尚未取证**。现有线索反而指向它可能与 apt **不**同构
+（openSUSE 通过 snapper 集成 btrfs 快照，可提供文件系统级回滚；zypper 有成文的退出码表）。
+把它标为"与 apt 相同"会是一个未经验证的断言，所以先留空。
+:::
+
 ## 三条源链路不要混淆
 
 osdk 里有三处都叫"源"，管的是不同的东西：

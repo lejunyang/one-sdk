@@ -27,6 +27,7 @@
 
 pub mod apply;
 pub mod config;
+pub mod distro;
 pub mod install;
 pub mod mirror;
 pub mod report;
@@ -38,6 +39,7 @@ pub use apply::{
     Infeasible, MirrorPlan, PlannedCommand, RegistrationShape,
 };
 pub use config::{KeyError, PackageKey, PackageRequest, SyspkgConfig};
+pub use distro::{DistroManager, DistroReport, RollbackAbility};
 pub use install::{
     explain_install_code, install_succeeded, plan_installs, run_installs, InstallPlan,
     InstallResult, PlannedInstall, SkipReason, SkippedPackage,
@@ -77,6 +79,7 @@ pub const DISCOVERY_LIMITS: CaptureLimits =
 /// consumers can rely on a fixed set of entries.
 pub fn diagnose_all(runner: &dyn CommandRunner) -> SystemPackageReport {
     SystemPackageReport::new(vec![winget::diagnose(runner, DISCOVERY_LIMITS)])
+        .with_distro_managers(distro::detect(runner, DISCOVERY_LIMITS))
 }
 
 /// The sources a manager currently has registered.

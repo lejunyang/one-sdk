@@ -176,6 +176,53 @@ plainly, so you do not assume `osdk pkg apply` gives the same guarantees as
 `osdk install`.
 :::
 
+## Linux package managers: detected, not managed
+
+On Linux, `osdk pkg doctor` additionally reports apt, apk, pacman and dnf:
+
+```text
+Linux package managers (detected, not managed)
+  pacman: present, rollback manual downgrade from cache only
+    this distribution supports only full-system upgrades; run `pacman -Syu` yourself
+  osdk reports these and prints commands for you to run. It never installs,
+  upgrades, or elevates through them.
+```
+
+**osdk will not install, upgrade, or elevate through them.** That is a deliberate
+boundary, not an unfinished feature, for three reasons:
+
+1. **Every change is global and needs root.** apt's own manual states that
+   `full-upgrade` "**will remove currently installed packages** if this is needed
+   to upgrade the system as a whole" — one install can cascade into upgrading
+   shared libraries and removing other packages.
+2. **Arch declares partial upgrades unsupported.** From the Wiki: "**never** run
+   `pacman -Sy`; instead, **always** use `pacman -Syu`". Installing just the one
+   package a project needs *is* a partial upgrade. Arch also asks you to read
+   release announcements first, which cannot be automated.
+3. **Failure recovery differs fundamentally.** dnf has atomic `history undo`;
+   pacman can only downgrade by hand from a cache that routine maintenance
+   clears, which it calls a last resort; apt has logs and no undo at all. **No
+   single abstraction can promise consistent recovery semantics** — a deeper
+   problem than being hard to implement.
+
+So doctor states each manager's rollback ability plainly. That is the fact which
+decides whether you should let any tool drive your package manager, and it is
+not the same answer across these four.
+
+::: tip Detection is read-only and never needs sudo
+Version queries use each project's documented read-only interface:
+`dpkg-query -W -f=`, `apk info -e -v`, `pacman -Q`, `rpm -q --qf`. Each specifies
+an explicit output format, so nothing depends on a default that could change, and
+no localized table is ever parsed.
+:::
+
+::: warning zypper is not listed yet
+Not because it does not matter, but because it has **not been verified**. The
+available clues point the other way: openSUSE integrates btrfs snapshots through
+snapper, which would give filesystem-level rollback, and zypper documents an
+exit-code table. Listing it as "same as apt" would assert something unchecked.
+:::
+
 ## Three source paths, not one
 
 Three things in osdk are called a "source", and they govern different things:

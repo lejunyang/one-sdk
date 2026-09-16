@@ -811,11 +811,61 @@ fn write_human(output: &mut dyn Write, report: &SystemPackageReport) -> Result<(
         }
     }
 
+    write_distro_managers(output, &report.distro_managers)?;
+
     if report.managers.iter().all(|m| !m.is_actionable()) {
         writeln!(output, "\nNothing to fix.")?;
     }
 
     Ok(())
+}
+
+/// Report the Linux package managers this host has, and osdk's stance on them.
+///
+/// Stating the stance is the point of the section. These are detected, never
+/// driven: every change they make needs root and lands in `/usr`, `/etc` and
+/// `/var`, Arch declares partial upgrades unsupported, and recovery after a
+/// failure differs so much between them that no single promise would be true.
+/// A user who sees them listed would reasonably assume `osdk pkg apply` covers
+/// them, so the line saying otherwise is not boilerplate.
+fn write_distro_managers(output: &mut dyn Write, reports: &[syspkg::DistroReport]) -> Result<()> {
+    let present: Vec<&syspkg::DistroReport> = reports.iter().filter(|r| r.present).collect();
+    if present.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(output, "\nLinux package managers (detected, not managed)")?;
+    for report in present {
+        writeln!(
+            output,
+            "  {}: present, rollback {}",
+            report.manager.id(),
+            rollback_label(report.rollback)
+        )?;
+        if report.full_system_upgrade_only {
+            // Arch's own guidance, passed through rather than paraphrased away.
+            writeln!(
+                output,
+                "    this distribution supports only full-system upgrades; run `pacman -Syu` yourself"
+            )?;
+        }
+    }
+    writeln!(
+        output,
+        "  osdk reports these and prints commands for you to run. It never installs,\n  \
+         upgrades, or elevates through them."
+    )?;
+    Ok(())
+}
+
+/// How much a manager can undo, in plain words.
+fn rollback_label(ability: syspkg::RollbackAbility) -> &'static str {
+    match ability {
+        // This is the one that makes dnf structurally different from the others.
+        syspkg::RollbackAbility::Transactional => "transactional (`dnf history undo`)",
+        syspkg::RollbackAbility::ManualFromCache => "manual downgrade from cache only",
+        syspkg::RollbackAbility::None => "none (logs only)",
+    }
 }
 
 #[cfg(test)]
@@ -1144,5 +1194,91 @@ mod tests {
         for text in [&changed, &mistyped] {
             assert!(text.contains("Nothing was changed"));
         }
+    }
+
+    fn distro(manager: osdk_core::syspkg::DistroManager, present: bool) -> syspkg::DistroReport {
+        syspkg::DistroReport {
+            manager,
+            present,
+            rollback: manager.rollback(),
+            full_system_upgrade_only: manager.requires_full_system_upgrade(),
+        }
+    }
+
+    fn render_distro(reports: &[syspkg::DistroReport]) -> String {
+        let mut buffer = Vec::new();
+        write_distro_managers(&mut buffer, reports).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn a_detected_linux_manager_comes_with_the_stance_stated() {
+        use osdk_core::syspkg::DistroManager;
+        let text = render_distro(&[distro(DistroManager::Apt, true)]);
+
+        assert!(text.contains("apt: present"), "got: {text}");
+        // Without this line a user reasonably assumes `pkg apply` covers apt.
+        assert!(
+            text.contains("never installs"),
+            "the boundary must be stated, got: {text}"
+        );
+    }
+
+    #[test]
+    fn arch_carries_its_own_projects_guidance() {
+        use osdk_core::syspkg::DistroManager;
+        let text = render_distro(&[distro(DistroManager::Pacman, true)]);
+
+        assert!(
+            text.contains("pacman -Syu"),
+            "Arch supports only full-system upgrades; that must be passed through"
+        );
+    }
+
+    #[test]
+    fn only_dnf_is_described_as_transactional() {
+        use osdk_core::syspkg::DistroManager;
+        let dnf = render_distro(&[distro(DistroManager::Dnf, true)]);
+        let apt = render_distro(&[distro(DistroManager::Apt, true)]);
+
+        assert!(dnf.contains("transactional"), "got: {dnf}");
+        assert!(
+            apt.contains("none (logs only)"),
+            "apt has no undo, and saying otherwise would misinform, got: {apt}"
+        );
+    }
+
+    #[test]
+    fn absent_managers_produce_no_section_at_all() {
+        use osdk_core::syspkg::DistroManager;
+        let text = render_distro(&[
+            distro(DistroManager::Apt, false),
+            distro(DistroManager::Pacman, false),
+        ]);
+
+        assert!(
+            text.is_empty(),
+            "a Windows host should not read about absent Linux managers, got: {text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_is_silent() {
+        assert!(render_distro(&[]).is_empty());
+    }
+
+    #[test]
+    fn only_the_present_managers_are_listed() {
+        use osdk_core::syspkg::DistroManager;
+        let text = render_distro(&[
+            distro(DistroManager::Apt, true),
+            distro(DistroManager::Pacman, false),
+        ]);
+
+        assert!(text.contains("apt: present"));
+        assert!(
+            !text.contains("pacman:"),
+            "a host with apt does not thereby have pacman, got: {text}"
+        );
     }
 }

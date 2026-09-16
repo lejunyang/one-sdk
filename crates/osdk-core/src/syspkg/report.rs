@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 /// Version of the `osdk pkg doctor --json` contract.
-pub const SYSPKG_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+pub const SYSPKG_DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 
 /// A system package manager osdk knows how to inspect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -240,6 +240,14 @@ impl ManagerReport {
 pub struct SystemPackageReport {
     pub schema_version: u32,
     pub managers: Vec<ManagerReport>,
+    /// Linux distribution package managers found on this host.
+    ///
+    /// A separate field rather than more entries in `managers`, because these are
+    /// detected and never driven: osdk reports them and prints commands the user
+    /// runs themselves. Merging them would let a consumer treat an apt entry as
+    /// something osdk can install through, which it deliberately is not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distro_managers: Vec<super::distro::DistroReport>,
 }
 
 impl SystemPackageReport {
@@ -247,7 +255,17 @@ impl SystemPackageReport {
         Self {
             schema_version: SYSPKG_DIAGNOSTIC_SCHEMA_VERSION,
             managers,
+            distro_managers: Vec::new(),
         }
+    }
+
+    /// Attach the Linux managers detected on this host.
+    pub fn with_distro_managers(
+        mut self,
+        distro_managers: Vec<super::distro::DistroReport>,
+    ) -> Self {
+        self.distro_managers = distro_managers;
+        self
     }
 
     /// Managers that are present and usable.
