@@ -302,13 +302,15 @@ fn real_main() -> i32 {
     // tool with it. Under `make` no recipe could see `go`, `node` or `gofmt`, and
     // no PATH the user set could bring them back, because the entry was dropped
     // after their PATH had already been assembled.
-    // JVM tools that bundle no runtime abort unless a JDK is visible. An
-    // activated shell already exports JAVA_HOME, and a JAVA_HOME the user set
-    // themselves is a deliberate choice, so only fill the gap when nothing
-    // else has. Injected before the tool's own bins so those stay in front.
+    // JVM tools that bundle no runtime abort unless a JDK is visible. A
+    // JAVA_HOME the user set themselves is a deliberate choice and is left
+    // alone; one this tool's own activation exported describes whichever
+    // directory the last prompt saw, so it is recomputed here rather than
+    // allowed to outlive that directory. Injected before the tool's own bins so
+    // those stay in front.
     if osdk_core::shim::requires_external_jdk(backend.id())
         && !exec_env.contains_key("JAVA_HOME")
-        && std::env::var_os("JAVA_HOME").is_none()
+        && !osdk_core::shim::process_java_home_is_user_owned()
     {
         if let Some((jdk_env, jdk_paths)) =
             osdk_core::shim::managed_jdk_env(&ctx, &registry, &idiomatic_probe_cwd)

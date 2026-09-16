@@ -262,9 +262,13 @@ osdk install android-cmdline-tools -o accept-licenses=true
 sdkmanager --version   # 无需先激活，也无需手动设 JAVA_HOME
 ```
 
-已有的 `JAVA_HOME` 一律不动，无论它来自 shell 激活还是你自己设置，
-因此可以用系统 JDK 覆盖。未安装任何托管 JDK 时，工具仍会报它自己的缺少
-JDK 错误，此时装一个 `java` 即可。
+**你自己设置**的 `JAVA_HOME` 一律不动，因此可以用系统 JDK 覆盖。但由 osdk 的
+shell 激活导出的那个不算你的选择：它是上一次提示符刷新时、按当时所在目录算出来
+的快照，因此会针对当前目录重新计算，不会让一个项目的 JDK 悄悄驱动另一个项目的
+构建。两者靠激活自己维护的 `OSDK_MANAGED_ENV` 区分——列在其中的变量是 osdk 的
+输出，其余是你的。
+
+未安装任何托管 JDK 时，工具仍会报它自己的缺少 JDK 错误，此时装一个 `java` 即可。
 
 `maven`、`gradle`、`kotlin` 同理。
 

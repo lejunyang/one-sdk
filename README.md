@@ -510,7 +510,9 @@ reports dangling links and `repair` removes them.
 
 The Android packages contain no JDK, so `sdkmanager`, `avdmanager`, `d8` and
 the other jar-backed tools run against an osdk-managed `java` when the
-environment has no `JAVA_HOME` of its own. Install one with `osdk install java`.
+environment has no `JAVA_HOME` of your own (a stale value osdk's activation
+exported is recomputed for the current directory, so one project's JDK cannot
+drive another's build). Install one with `osdk install java`.
 
 Guide: [Android SDK tools](site/en/guide/android.md)
 

@@ -3127,6 +3127,175 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
     }
 }
 
+/// A JVM tool receives the JDK its directory selects, and osdk's own stale
+/// export never stands in for the user's choice.
+///
+/// `kotlin` ships a compiler that runs on a JVM but bundles no `java`, so `exec`
+/// fills in a JDK. It used to stand aside whenever `JAVA_HOME` was set at all,
+/// which conflated two opposite cases: a value the user chose, and a value osdk
+/// itself exported for whichever directory the last shell prompt saw. The second
+/// let a JDK from one project silently drive a build in another.
+#[test]
+fn exec_recomputes_a_stale_managed_java_home_but_keeps_the_users_own() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // The project pins the older JDK; the newer one is merely installed, and is
+    // what a previous activation elsewhere would have exported.
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tools]\njava = \"21.0.2+13\"\nkotlin = \"2.4.10\"\n",
+    )
+    .unwrap();
+    for version in ["21.0.2+13", "26.0.1+9"] {
+        let home = temp.path().join(format!("installs/java/{version}/bin"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            temp.path()
+                .join(format!("installs/java/{version}/.osdk-complete")),
+            b"",
+        )
+        .unwrap();
+    }
+    let java_install = |version: &str| {
+        temp.path()
+            .join("installs")
+            .join("java")
+            .join(version)
+            .display()
+            .to_string()
+    };
+    let selected = java_install("21.0.2+13");
+    let user_choice = java_install("26.0.1+9");
+
+    let tools = temp.path().join("installs/kotlin/2.4.10/bin");
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::write(
+        temp.path().join("installs/kotlin/2.4.10/.osdk-complete"),
+        b"",
+    )
+    .unwrap();
+    let reporter = write_java_home_reporter(&tools);
+
+    let run = |env: &[(&str, &str)]| {
+        let output = run_isolated_in_with_env(
+            temp.path(),
+            &project,
+            &[
+                "--offline",
+                "exec",
+                "--tool",
+                "kotlin@2.4.10",
+                "--",
+                &reporter,
+            ],
+            env,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            stdout.contains("JAVA_HOME="),
+            "the stand-in JVM tool did not run, so this proves nothing: {stdout}"
+        );
+        stdout
+    };
+
+    // Nothing set: the directory's own pin is used.
+    let unset = run(&[]);
+    assert!(
+        unset.contains(&selected),
+        "an unset JAVA_HOME did not get the pinned JDK; got: {unset}"
+    );
+
+    // Set, and claimed by OSDK_MANAGED_ENV: osdk's own leftover output. It
+    // describes some other directory, so it must be recomputed. This is the
+    // assertion the defect trips.
+    let stale = run(&[
+        ("JAVA_HOME", user_choice.as_str()),
+        ("OSDK_MANAGED_ENV", "GOROOT,JAVA_HOME,CARGO_HOME"),
+    ]);
+    assert!(
+        stale.contains(&selected),
+        "a stale osdk-exported JAVA_HOME overrode the project pin: {stale}"
+    );
+
+    // Set with no managed marker: the user's own choice, which survives.
+    let owned = run(&[("JAVA_HOME", user_choice.as_str())]);
+    assert!(
+        owned.contains(&user_choice),
+        "a user-set JAVA_HOME was overwritten: {owned}"
+    );
+
+    // Managed, but managing other variables: still the user's JAVA_HOME.
+    let other = run(&[
+        ("JAVA_HOME", user_choice.as_str()),
+        ("OSDK_MANAGED_ENV", "GOROOT,CARGO_HOME"),
+    ]);
+    assert!(
+        other.contains(&user_choice),
+        "a user-set JAVA_HOME was overwritten inside an activated shell: {other}"
+    );
+}
+
+/// A stand-in JVM tool that prints the `JAVA_HOME` it was launched with.
+///
+/// Returns the command name `exec` should be given.
+///
+/// Windows needs a real executable: the isolated harness clears `PATH` and sets
+/// no `ComSpec`, so a `.cmd` cannot be started at all -- and it fails *quietly*,
+/// with `exec` reporting success and producing no output, which would read as
+/// "the JDK was wrong" rather than "the fixture never ran". Compiled with the
+/// rustc already running the tests, as the fake rustup fixture does.
+#[cfg(windows)]
+fn write_java_home_reporter(dir: &Path) -> String {
+    let source = dir.join("java-home-reporter.rs");
+    std::fs::write(
+        &source,
+        r#"
+fn main() {
+    println!(
+        "JAVA_HOME={}",
+        std::env::var("JAVA_HOME").unwrap_or_else(|_| "unset".to_string())
+    );
+}
+"#,
+    )
+    .unwrap();
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let compile = Command::new(rustc)
+        .args(["--crate-name", "java_home_reporter", "--edition", "2021"])
+        .arg(&source)
+        .arg("-o")
+        .arg(dir.join("kotlinc.exe"))
+        .output()
+        .expect("failed to spawn rustc to build the JAVA_HOME reporter");
+    assert!(
+        compile.status.success(),
+        "building the JAVA_HOME reporter failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    std::fs::remove_file(&source).unwrap();
+    "kotlinc".to_string()
+}
+
+#[cfg(not(windows))]
+fn write_java_home_reporter(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = dir.join("kotlinc");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf 'JAVA_HOME=%s\\n' \"${JAVA_HOME-unset}\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    "kotlinc".to_string()
+}
+
 #[cfg(unix)]
 #[test]
 fn node_only_exec_provides_cache_for_bundled_npm() {

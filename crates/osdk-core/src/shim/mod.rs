@@ -207,6 +207,51 @@ pub fn requires_external_jdk(backend_id: &str) -> bool {
     )
 }
 
+/// Whether an ambient `JAVA_HOME` is a deliberate user choice, and so must be
+/// left alone, rather than osdk's own leftover output.
+///
+/// Both `osdk exec` and the shim fill in a JDK for backends that bundle none,
+/// and both used to stand aside whenever `JAVA_HOME` was set at all. The comment
+/// justifying that named the two sources it meant to respect -- "an activated
+/// shell already exports JAVA_HOME, and a JAVA_HOME the user set themselves is a
+/// deliberate choice" -- but the check could not tell them apart, and the two
+/// want opposite handling. A value osdk exported is not an instruction; it is a
+/// snapshot of whichever directory was current when the last prompt fired, so
+/// honouring it lets a stale JDK outlive the project it was computed for.
+///
+/// Observed: with a shell activated where java resolves to 26, running
+/// `osdk exec -t android-build-tools` inside a project pinning 21 launched the
+/// tool against 26, silently ignoring that project's pin. Naming java in the
+/// same command masked the bug, because the JDK then arrived through the
+/// backend's own `exec_env` instead of this fallback.
+///
+/// `OSDK_MANAGED_ENV` is the discriminator, and it already exists: activation
+/// writes into it the exact list of variables it manages, so `deactivate` knows
+/// what to restore. A key listed there is osdk's own output and may be
+/// recomputed; anything else is the user's and is preserved. When the variable
+/// is absent -- a plain shell, CI, a hand-built `Command` -- there is no managed
+/// environment to distrust, so an ambient value is the user's.
+pub fn ambient_java_home_is_user_owned<F>(lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(java_home) = lookup("JAVA_HOME") else {
+        return false;
+    };
+    if java_home.trim().is_empty() {
+        return false;
+    }
+    !lookup("OSDK_MANAGED_ENV")
+        .unwrap_or_default()
+        .split(',')
+        .any(|key| key.trim() == "JAVA_HOME")
+}
+
+/// [`ambient_java_home_is_user_owned`] against the real process environment.
+pub fn process_java_home_is_user_owned() -> bool {
+    ambient_java_home_is_user_owned(|key| std::env::var(key).ok())
+}
+
 /// The JDK environment osdk would activate, for launching a tool whose own
 /// backend cannot describe one.
 ///
@@ -1297,6 +1342,51 @@ mod tests {
         ] {
             assert!(!super::requires_external_jdk(id), "{id}");
         }
+    }
+
+    #[test]
+    fn only_a_java_home_osdk_did_not_export_counts_as_the_users_own() {
+        // Nothing set: there is no choice to respect, so the caller fills it in.
+        assert!(!super::ambient_java_home_is_user_owned(|_| None));
+
+        // Set, with no managed-environment marker at all: a plain shell, CI, or
+        // a hand-built Command. Nothing here says osdk produced it, so it is
+        // the user's and must survive.
+        assert!(super::ambient_java_home_is_user_owned(|key| (key
+            == "JAVA_HOME")
+            .then(|| "/opt/user-jdk".to_string())));
+
+        // Set, and named in OSDK_MANAGED_ENV: this is osdk's own output from a
+        // previous prompt, describing whichever directory was current then. It
+        // is a stale snapshot rather than an instruction, so the caller must
+        // recompute it -- this is the case the defect got wrong, and honouring
+        // it let a JDK from one project leak into another.
+        assert!(!super::ambient_java_home_is_user_owned(|key| match key {
+            "JAVA_HOME" => Some("/managed/jdk-26".to_string()),
+            "OSDK_MANAGED_ENV" => Some("GOROOT,JAVA_HOME,CARGO_HOME".to_string()),
+            _ => None,
+        }));
+
+        // Managed, but managing something else: a user-set JAVA_HOME inside an
+        // activated shell is still the user's. Matching on substring rather
+        // than on a whole entry would get this wrong.
+        assert!(super::ambient_java_home_is_user_owned(|key| match key {
+            "JAVA_HOME" => Some("/opt/user-jdk".to_string()),
+            "OSDK_MANAGED_ENV" => Some("GOROOT,CARGO_HOME".to_string()),
+            _ => None,
+        }));
+
+        // A key that merely contains the name is not the name.
+        assert!(super::ambient_java_home_is_user_owned(|key| match key {
+            "JAVA_HOME" => Some("/opt/user-jdk".to_string()),
+            "OSDK_MANAGED_ENV" => Some("JAVA_HOME_OVERRIDE,MY_JAVA_HOME".to_string()),
+            _ => None,
+        }));
+
+        // An empty value cannot launch anything, so it is not a usable choice.
+        assert!(!super::ambient_java_home_is_user_owned(|key| (key
+            == "JAVA_HOME")
+            .then(String::new)));
     }
 
     #[test]

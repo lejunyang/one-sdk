@@ -459,7 +459,8 @@ junction），载荷只存一份。卸载时会先删链接再删载荷——顺
 `repair` 负责清除。
 
 Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基于 jar 的工具
-会在环境未设 `JAVA_HOME` 时使用 osdk 管理的 `java`。用 `osdk install java` 装一个即可。
+会在你未自行设置 `JAVA_HOME` 时使用 osdk 管理的 `java`（由 osdk 激活导出的旧值会按当前
+目录重算，不会让一个项目的 JDK 驱动另一个项目）。用 `osdk install java` 装一个即可。
 
 指南：[Android SDK 工具](site/guide/android.md)
 

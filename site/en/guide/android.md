@@ -300,9 +300,16 @@ osdk install android-cmdline-tools -o accept-licenses=true
 sdkmanager --version   # no activation, no manual JAVA_HOME
 ```
 
-An existing `JAVA_HOME` is never replaced, whether it came from shell
-activation or from you, so a system JDK still wins. With no managed JDK
-installed the tool reports its own missing-JDK error; install `java` to fix it.
+A `JAVA_HOME` **you** set is never replaced, so a system JDK still wins. One that
+osdk's own shell activation exported does not count as your choice: it is a
+snapshot taken for whichever directory the last prompt saw, so it is recomputed
+for the current directory rather than allowed to let one project's JDK silently
+drive another project's build. The two are told apart through
+`OSDK_MANAGED_ENV`, which activation maintains itself -- a variable listed there
+is osdk's output, anything else is yours.
+
+With no managed JDK installed the tool reports its own missing-JDK error; install
+`java` to fix it.
 
 The same applies to `maven`, `gradle` and `kotlin`.
 
