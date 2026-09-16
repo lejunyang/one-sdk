@@ -312,6 +312,13 @@ pub struct SourcesConfig {
     #[doc(hidden)]
     #[serde(skip)]
     pub containers: ContainersConfig,
+    /// System-package configuration, persisted under the separate top-level
+    /// `[syspkg]` table. It lives here internally so adding it does not break
+    /// callers that construct [`Config`] directly.
+    #[doc(hidden)]
+    #[serde(skip)]
+    #[cfg(feature = "install")]
+    pub syspkg: crate::syspkg::SyspkgConfig,
 }
 
 impl Default for SourcesConfig {
@@ -324,6 +331,8 @@ impl Default for SourcesConfig {
             per_tool: BTreeMap::new(),
             registries: RegistriesConfig::default(),
             containers: ContainersConfig::default(),
+            #[cfg(feature = "install")]
+            syspkg: crate::syspkg::SyspkgConfig::default(),
         }
     }
 }
@@ -710,6 +719,8 @@ struct ConfigFile {
     sources: Option<SourcesConfig>,
     registries: Option<RegistriesConfig>,
     containers: Option<ContainersConfig>,
+    #[cfg(feature = "install")]
+    syspkg: Option<crate::syspkg::SyspkgConfig>,
     tools: BTreeMap<String, ToolConfigEntry>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -751,6 +762,8 @@ impl Config {
                 per_tool: merged,
                 registries: self.sources.registries.clone(),
                 containers: self.sources.containers.clone(),
+                #[cfg(feature = "install")]
+                syspkg: self.sources.syspkg.clone(),
             };
         }
         if let Some(registries) = file.registries {
@@ -760,6 +773,13 @@ impl Config {
         if let Some(containers) = file.containers {
             // Container sections replace the lower-precedence layer as a unit.
             self.sources.containers = containers;
+        }
+        #[cfg(feature = "install")]
+        if let Some(syspkg) = file.syspkg {
+            // Replaced as a unit for the same reason: a project that lists its
+            // managers means exactly that list, not that list added to whatever
+            // a broader layer happened to allow.
+            self.sources.syspkg = syspkg;
         }
         self.apply_tool_configs(&file.tools);
         for (tool, aliases) in file.aliases {

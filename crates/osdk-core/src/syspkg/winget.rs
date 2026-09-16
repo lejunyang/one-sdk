@@ -180,6 +180,48 @@ pub fn registered_sources(runner: &dyn CommandRunner, limits: CaptureLimits) -> 
         .unwrap_or_default()
 }
 
+/// Every package winget reports as installed, with versions where it has them.
+///
+/// Uses `winget export --include-versions`, whose schema 2.0 JSON carries
+/// English keys regardless of display language. The `list` table would be
+/// simpler to call and impossible to parse safely: its headers are localized, so
+/// an English-header parser silently finds no column and concludes nothing is
+/// installed.
+///
+/// `None` means winget could not be queried, which callers must report as
+/// unknown rather than as an empty host. Export writes to a file rather than
+/// stdout, so a caller-supplied directory is used and the file removed.
+///
+/// Export also prints a warning to stderr for installed programs it cannot
+/// trace back to any source, while still exiting 0. That is expected and does
+/// not invalidate the packages it did resolve.
+pub fn installed_packages(
+    runner: &dyn CommandRunner,
+    limits: CaptureLimits,
+    directory: &std::path::Path,
+) -> Option<Vec<super::status::ExportedPackage>> {
+    let target = directory.join("osdk-winget-export.json");
+    let outcome = runner.run_captured(&export_command(&target), limits);
+    let (probe, _) = outcome_of(&outcome);
+    if probe != ProbeOutcome::Succeeded {
+        let _ = std::fs::remove_file(&target);
+        return None;
+    }
+    let json = std::fs::read_to_string(&target).ok();
+    let _ = std::fs::remove_file(&target);
+    json.map(|json| super::status::parse_exported_packages(&json))
+}
+
+fn export_command(target: &std::path::Path) -> CommandSpec {
+    CommandSpec::new(ManagerKind::Winget.program())
+        .args(["export", "-o"])
+        .arg(target)
+        // Without this the export omits versions, and a pinned request could
+        // never be evaluated.
+        .arg("--include-versions")
+        .args(common_flags())
+}
+
 /// Classify a completed probe without looking at its text.
 fn outcome_of(command: &CommandOutcome) -> (ProbeOutcome, Option<i32>) {
     match command {
