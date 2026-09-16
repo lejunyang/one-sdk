@@ -718,12 +718,86 @@ reqwest v0.13.5
 | --- | --- | --- |
 | **检测是否安装、版本查询** | ✅ 提供 | 只读，绝不提权。用各家稳定接口：`dpkg-query -W -f=`、`apk info -e -v` 或 `apk query --format json`、`pacman -Q`/`-T` |
 | **诊断与 doctor 集成** | ✅ 提供 | 报告缺失包、镜像可达性 |
-| **镜像探测与配置建议** | ✅ 提供计划 | 与 §5 同构，但**只生成建议不写入**——这几家的源配置文件属系统文件 |
+| **镜像加速（不改系统文件）** | ✅ 提供，且优先 | **实测修正见 §7.3.1**：apt 支持用 `Dir::Etc::SourceList` 等选项指向临时源，只影响 osdk 单次调用，不写 `/etc`、不需确认。这是 winget 做不到而 Linux 能做到的 |
+| **镜像写入系统源文件** | ⚠️ 降级为可选 | 有了上一行的 L2，改 `/etc/apt/sources.list` 的优先级下调；若要做，须计划-确认-回滚，且比 winget 更危险（写坏则整机无法装包） |
 | **生成可复制的建议命令** | ✅ 提供 | 打印完整命令让用户自己执行，含 Arch 上应改用 `-Syu` 的提示 |
-| **代为执行安装/升级/删除** | ❌ **不提供** | 需 root、影响全局、不可回滚、在 Arch 上属官方不支持的 partial upgrade |
+| **代为执行安装** | ⚠️ **结论已收窄，见 §7.3.1** | 原判「不提供」的依据之一（「mise 也不做」）**经核查不成立**——mise 确实用 `apt-get install -y` 代为安装。剩下成立的两条（Arch 部分升级、回滚分裂）指向「谨慎地做」而非「不做」。可采用 mise 的四档 sudo 策略；**Arch 例外，仍只打印 `-Syu` 建议**，因为那条限制来自发行版官方立场，与提权能力无关 |
+| **代为执行升级/删除** | ❌ 不提供 | 升级会牵连未请求的包；删除影响面更大。这两项与「装上项目缺的依赖」这一诉求无关 |
 | **纳入 lockfile** | ❌ 不提供 | 与 §10 对 winget/brew 的结论一致，理由更强 |
 
-这个姿态与 `container/` 先例一致：`container/mirror.rs` 的 planners「never write, restart, recreate, or elevate a native runtime」。**系统包管理器比容器运行时更需要这条约束。**
+这个姿态与 `container/` 先例一致：`container/mirror.rs` 的 planners「never write, restart, recreate, or elevate a native runtime」。**这条约束对「改系统源文件」依然适用**；但 §7.3.1 实测表明「加速 osdk 自己的调用」根本不需要写入系统状态，因此它不受这条约束限制——两者是不同的动作，不应共用一个结论。
+
+### 7.3.1 实测修正：mise 确实代为安装，且 apt 支持「不碰系统文件」的临时源
+
+本节原先的两条依据需要修正，一条被推翻，一条被大幅加强。
+
+**推翻：「mise 只做只读检测」这个前提是错的。** 官方 apt 文档明确写着缺失包用
+`apt-get install -y` 安装、必要时用 sudo 提权，并设 `DEBIAN_FRONTEND=noninteractive`
+避免 debconf 阻塞。因此「mise 也不做，所以 osdk 不做」这条论据不成立。
+
+mise 的实际能力（用于对照）：
+
+| 能力 | mise | 说明 |
+| --- | --- | --- |
+| 代为安装 | ✅ | `apt-get install -y`，sudo 四档策略 |
+| 版本 pin | ✅ apt/apk/dnf | pacman/AUR/brew 不能装 pin，跳过并警告 |
+| `state = "absent"` 声明式删包 | ✅ 仅 pacman | 其余只支持 `present` |
+| 容器内自动 `apt-get update` | ✅ | 仅当 `/var/lib/apt/lists` 为空 |
+| **发行版镜像加速** | ❌ **不提供** | 全文无任何 apt/apk/pacman/dnf 镜像配置能力 |
+
+sudo 四档：已 root 直接执行；交互终端正常 sudo 提示；**非交互且无免密 sudo 时报错并
+打印完整命令，绝不挂起等密码**；`system_packages.sudo = false` 彻底禁止提权、改为打印命令。
+每次执行前完整命令行都会记录。
+
+**因此仍然成立的只有两条**：Arch 声明部分升级不受支持，以及回滚能力三档分裂。这两条
+指向的是「谨慎地做」，而不是「不做」——**原结论应当收窄，而非维持**。
+
+**加强：apt 支持完全不碰系统文件的临时源，这是 winget 没有的 L2 能力。** 实测
+（WSL Ubuntu 22.04 jammy，root 与非 root 各一轮）：
+
+```
+apt-get \
+  -o Dir::Etc::SourceList=<临时源文件> \
+  -o Dir::Etc::SourceParts=<空目录> \
+  -o Dir::State::Lists=<临时目录> \
+  -o Dir::Cache=<临时目录> \
+  -o Acquire::Languages=none \
+  update
+```
+
+- 只读取指定的那一个源文件，官方源完全不参与（输出里只有镜像的 Get 行）。
+- **系统状态逐项核对未变**：`/var/cache/apt/pkgcache.bin` 的 md5 前后一致、
+  `/var/lib/apt/lists` 条目数 53 未变、`/etc/apt` 无任何文件被写。
+- 能正确解析完整依赖链（`install -s jq` 给出 libonig5/libjq1/jq 三级）。
+
+**`Dir::Cache` 不能漏。** 第一轮只设了 `Dir::Cache::Archives`，apt 仍去动
+`/var/cache/apt/pkgcache.bin`——非 root 下因权限被拒（两条 warning）而侥幸无害，
+**以 root 运行时就会真的写系统缓存**。「不碰系统」当时只是因为权限不足而恰好成立。
+
+**root 下必须让 `_apt` 能访问临时目录，否则静默失去沙箱。** apt 以 root 运行时会降权到
+`_apt` 用户下载；临时目录默认权限使 `_apt` 无法访问，apt 于是打印
+「Download is performed unsandboxed as root」并继续。这是**真实放弃了一项安全属性**
+而非噪音：沙箱的存在正是为了让恶意归档无法以 root 身份攻击下载器。实测
+`chown -R _apt:root <lists> <cache>` + `chmod 755 <临时目录>` 后该警告消失、沙箱保留。
+
+**镜像必须实测排名，不能硬编码。** 同一时刻同一网络实测同一文件：
+
+| 镜像 | 速度 |
+| --- | --- |
+| 阿里云 | 5878 KB/s |
+| USTC | 2040 KB/s |
+| TUNA | 411 KB/s |
+
+相差 14 倍，且与「哪个更有名」无关。这与 §5 对 winget 的结论一致：候选集内置、排名实测。
+
+**对 Linux 侧设计的结论**：
+
+1. **L2（osdk 自己调用时加速）在 Linux 上是可行的**，且比 winget 干净——winget 只能顶替
+   全局默认源，apt 能做到只影响单次调用、不需确认、不改系统状态。
+2. L3（改 `/etc/apt/sources.list`）仍需计划-确认-回滚，且比 winget 更危险：写坏了整台机器
+   都装不了东西。**但有了可用的 L2，L3 的优先级应当下调。**
+3. 代为安装可以做，采用 mise 的四档 sudo 策略；Arch 上仍只打印 `-Syu` 建议而不代为执行，
+   因为那条限制来自发行版官方立场，与提权能力无关。
 
 ### 7.4 mise 的做法：一个需要修正的前提，与一组更有价值的论据
 
