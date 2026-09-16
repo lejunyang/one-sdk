@@ -180,25 +180,29 @@ osdk 对自己下载的 SDK 做哈希与签名校验，但系统包的字节 osd
 `osdk pkg apply` 装的东西和 `osdk install` 有同等强度的校验。
 :::
 
-## Linux 的包管理器：检测，但不代管
+## Linux 的包管理器：代为安装，但只装缺的
 
-在 Linux 上，`osdk pkg doctor` 会额外报告 apt / apk / pacman / dnf：
+在 Linux 上，`osdk pkg doctor` 会额外报告 apt / apk / pacman / dnf，`pkg apply` 也会
+代为安装 `[syspkg.packages]` 里缺失的包。
 
 ```text
-Linux package managers (detected, not managed)
+Linux package managers
+  apt: present, rollback log only
   pacman: present, rollback manual downgrade from cache only
     this distribution supports only full-system upgrades; run `pacman -Syu` yourself
-  osdk reports these and prints commands for you to run. It never installs,
-  upgrades, or elevates through them.
 ```
 
-**osdk 不会通过它们安装、升级或提权**，这是有意的取舍而非未完成的功能。三条理由：
+**代为安装的范围是刻意收窄的**：只安装声明了而宿主没有的包，不升级、不删除。
+三条约束决定了这个边界：
 
-1. **变更是全局的且需要 root。** apt 官方手册写明 `full-upgrade`「**会删除已安装的包**，如果这是整体升级系统所必需的」——一条安装命令可能连带升级共享库、删除其他包。
-2. **Arch 官方声明部分升级不受支持。** Wiki 原文：「**never** run `pacman -Sy`；**always** use `pacman -Syu`」。而"只装我需要的那个包"恰恰就是部分升级。Arch 还要求升级前先读发行版新闻公告，这一步无法自动化。
-3. **失败恢复能力差异极大。** dnf 有原子的 `history undo`；pacman 只能从 cache 手工降级（官方定位为「最后手段」，而清理 cache 又是常规维护）；apt 只有日志、没有 undo。**跨发行版的统一抽象无法承诺一致的恢复语义**——这比"难实现"更根本。
+1. **变更是全局的且需要 root。** apt 官方手册写明 `full-upgrade`「**会删除已安装的包**，如果这是整体升级系统所必需的」。所以 osdk 只调 `install`，从不调 `upgrade` 或 `full-upgrade`。
+2. **Arch 官方声明部分升级不受支持。** Wiki 原文：「**never** run `pacman -Sy`；**always** use `pacman -Syu`」。而"只装我需要的那个包"恰恰就是部分升级。**所以 pacman 是唯一的例外：osdk 只打印命令，不代为执行**，因为这条限制来自发行版的官方立场，与 osdk 能不能提权无关。
+3. **失败恢复能力差异极大。** dnf 有原子的 `history undo`；pacman 只能从 cache 手工降级；apt 只有日志、没有 undo。**跨发行版的统一抽象无法承诺一致的恢复语义**，所以 doctor 会把每家的回滚能力如实列出——装之前值得看一眼。
 
-所以 doctor 会把每家的回滚能力如实列出。这个信息才是决定"要不要让任何工具驱动你的包管理器"的依据，而它在这四家之间并不一致。
+::: warning 已装但版本不同的包不会被重装
+`[syspkg.packages]` 里的版本是**安装时的期望，不是锁**。宿主上已有其他版本时
+osdk 会如实报告 `version differs` 并跳过，而不是为了对齐而改动一台你没要求改的机器。
+:::
 
 ::: tip 检测全程只读，不需要 sudo
 版本查询用的是各家文档化的只读接口：`dpkg-query -W -f=`、`apk info -e -v`、
@@ -321,6 +325,41 @@ osdk 也不会把内置的镜像名直接传给 winget：传一个未注册的�
 只有最后一层会改这台机器的全局配置。它需要你确认一次，因为它影响的不只是 osdk——
 此后所有人调 winget 都会看到这个源，而且镜像源拿不到官方源的 `StoreOrigin` 信任标记。
 确认过之后 osdk 会自动维护，不再打扰你。
+
+### Linux 上的镜像：自动生效，且不碰系统文件
+
+在 Debian 或 Ubuntu 上安装 apt 包时，osdk 会自动走镜像——**不需要配置，也不需要先跑
+别的命令**：
+
+```text
+$ osdk pkg apply --yes
+Using the aliyun mirror for this run; no system file is modified.
+Fetching the package index from it...
+...
+```
+
+这和 winget 侧是两种机制，差别值得说清楚：
+
+| | winget | apt |
+| --- | --- | --- |
+| 作用范围 | 机器全局的默认源 | **仅这一次调用** |
+| 是否改系统状态 | 是，需确认与回滚 | **否** |
+| 加速什么 | 只加速找包 | **找包和下包都加速** |
+
+apt 允许把源、索引和缓存全部指向一个临时目录，因此加速不需要你点头，也不留痕迹。
+实测确认：`/var/lib/apt/lists` 条目数不变、`/var/cache/apt/pkgcache.bin` 的 md5 不变、
+`/etc/apt` 没有任何文件被写，运行结束后临时目录自动删除。
+
+::: tip 拿不到镜像时会照常安装，而不是失败
+识别不了的发行版、连不上的镜像，都会退回宿主自己的源并继续。镜像是优化，
+不是前置条件——为了一个加速失败而拒绝安装是本末倒置。
+:::
+
+::: warning pacman 与 dnf 不做镜像
+不是遗漏。这两家的镜像配置是一个 mirrorlist 文件，并有各自的排序工具
+（`reflector`、`dnf-plugin-fastestmirror`），**没有 apt 那种"只影响单次调用"的覆盖方式**。
+做一个半吊子的版本比明说不做更糟。
+:::
 
 ## 应用镜像
 

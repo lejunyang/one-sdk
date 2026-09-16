@@ -201,34 +201,43 @@ plainly, so you do not assume `osdk pkg apply` gives the same guarantees as
 `osdk install`.
 :::
 
-## Linux package managers: detected, not managed
+## Linux package managers: installed for you, but only what is missing
 
-On Linux, `osdk pkg doctor` additionally reports apt, apk, pacman and dnf:
+On Linux, `osdk pkg doctor` additionally reports apt, apk, pacman and dnf, and
+`pkg apply` installs the packages from `[syspkg.packages]` that the host lacks.
 
 ```text
-Linux package managers (detected, not managed)
+Linux package managers
+  apt: present, rollback log only
   pacman: present, rollback manual downgrade from cache only
     this distribution supports only full-system upgrades; run `pacman -Syu` yourself
-  osdk reports these and prints commands for you to run. It never installs,
-  upgrades, or elevates through them.
 ```
 
-**osdk will not install, upgrade, or elevate through them.** That is a deliberate
-boundary, not an unfinished feature, for three reasons:
+**The scope is deliberately narrow**: osdk installs what is declared and absent.
+It never upgrades and never removes. Three constraints set that boundary:
 
 1. **Every change is global and needs root.** apt's own manual states that
    `full-upgrade` "**will remove currently installed packages** if this is needed
-   to upgrade the system as a whole" — one install can cascade into upgrading
-   shared libraries and removing other packages.
+   to upgrade the system as a whole". So osdk calls `install` and never `upgrade`
+   or `full-upgrade`.
 2. **Arch declares partial upgrades unsupported.** From the Wiki: "**never** run
    `pacman -Sy`; instead, **always** use `pacman -Syu`". Installing just the one
-   package a project needs *is* a partial upgrade. Arch also asks you to read
-   release announcements first, which cannot be automated.
+   package a project needs *is* a partial upgrade. **pacman is therefore the one
+   exception: osdk prints the command and does not run it**, because the limit
+   comes from the distribution's own position rather than from anything about
+   privilege.
 3. **Failure recovery differs fundamentally.** dnf has atomic `history undo`;
    pacman can only downgrade by hand from a cache that routine maintenance
-   clears, which it calls a last resort; apt has logs and no undo at all. **No
-   single abstraction can promise consistent recovery semantics** — a deeper
-   problem than being hard to implement.
+   clears; apt has logs and no undo at all. **No single abstraction can promise
+   consistent recovery semantics**, so doctor states each manager's rollback
+   ability — worth a glance before installing.
+
+::: warning A package present at another version is left alone
+The version in `[syspkg.packages]` is a wish for install time, **not a lock**.
+When the host has a different one, osdk reports `version differs` and skips it
+rather than reinstalling to force convergence on a machine you did not ask it to
+change.
+:::
 
 So doctor states each manager's rollback ability plainly. That is the fact which
 decides whether you should let any tool drive your package manager, and it is
@@ -375,6 +384,46 @@ Only the last layer changes this machine's global configuration. It asks you
 once, because it affects more than osdk — every winget caller afterwards sees
 that source, and a mirror cannot carry the official source's `StoreOrigin`
 trust marker. Once confirmed, osdk maintains it without asking again.
+
+### Mirrors on Linux: automatic, and no system file is touched
+
+Installing an apt package on Debian or Ubuntu goes through a mirror
+automatically — **nothing to configure, and no command to run first**:
+
+```text
+$ osdk pkg apply --yes
+Using the aliyun mirror for this run; no system file is modified.
+Fetching the package index from it...
+...
+```
+
+This is a different mechanism from winget's, and the difference matters:
+
+| | winget | apt |
+| --- | --- | --- |
+| Scope | the machine's default source | **this invocation only** |
+| Changes system state | yes; needs confirmation and rollback | **no** |
+| What it speeds up | finding packages only | **finding and downloading** |
+
+apt lets the source, index and cache all point into a temporary directory, so
+acceleration needs no confirmation and leaves nothing behind. Measured:
+`/var/lib/apt/lists` unchanged in count, `/var/cache/apt/pkgcache.bin` unchanged
+by md5, nothing written under `/etc/apt`, and the scratch directory removed when
+the run ends.
+
+::: tip When no mirror is available the install still happens
+An unrecognised distribution or an unreachable mirror falls back to the host's
+own sources and carries on. A mirror is an optimisation, not a precondition —
+refusing to install because acceleration failed would have the priorities
+backwards.
+:::
+
+::: warning pacman and dnf get no mirrors
+Not an oversight. Both configure mirrors through a mirrorlist file with their own
+ranking tools (`reflector`, `dnf-plugin-fastestmirror`), and **neither has an
+equivalent per-invocation override**. A half-working version would be worse than
+saying osdk does not do it.
+:::
 
 ## Applying a mirror
 

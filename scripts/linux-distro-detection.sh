@@ -52,19 +52,20 @@ fi
 
 # image | manager it ships | managers it does not | a package it always has
 #
-# The last column must be present in the base image itself, with no install
+# Column 4 ships in the base image; column 5 must NOT, so installing it proves
+# something actually happened rather than that it was already there.
 # step: it is the ground truth the status query is checked against.
 cases=(
-    "debian:stable-slim|apt|pacman dnf|coreutils"
-    "alpine:latest|apk|apt pacman dnf|busybox"
-    "archlinux:latest|pacman|apt dnf|coreutils"
-    "fedora:latest|dnf|apt pacman|coreutils"
+    "debian:stable-slim|apt|pacman dnf|coreutils|jq"
+    "alpine:latest|apk|apt pacman dnf|busybox|jq"
+    "archlinux:latest|pacman|apt dnf|coreutils|jq"
+    "fedora:latest|dnf|apt pacman|coreutils|jq"
 )
 
 failures=0
 
 for case_line in "${cases[@]}"; do
-    IFS='|' read -r image expect_present expect_absent known_present <<<"$case_line"
+    IFS='|' read -r image expect_present expect_absent known_present installable <<<"$case_line"
     echo
     echo "=== $image: expecting $expect_present ==="
 
@@ -156,6 +157,83 @@ osdk pkg status --json" 2>&1
     if grep -q '"state":"manager-unavailable"' <<<"$status_output"; then
         echo "  FAIL: the query did not run; the manager was reported unavailable" >&2
         failures=$((failures + 1))
+    fi
+
+    # The install path, in a container where running it is harmless. Unit tests
+    # prove the argv is built per manager; only a real distribution proves the
+    # manager accepts that argv and that the package actually arrives.
+    #
+    # pacman is excluded on purpose: osdk declines to install there, and the
+    # assertion below is that it declines rather than that it succeeds.
+    if [[ "$expect_present" != "pacman" ]]; then
+        install_output="$(
+            "$runtime" run --rm \
+                -v "$binary:/usr/local/bin/osdk:ro" \
+                -e OSDK_DATA_DIR=/tmp/osdk-data \
+                -e OSDK_CONFIG_DIR=/tmp/osdk-config \
+                -e OSDK_CACHE_DIR=/tmp/osdk-cache \
+                -e OSDK_YES=true \
+                "$image" \
+                sh -c "$prelude
+mkdir -p /tmp/proj && cd /tmp/proj
+cat > osdk.toml <<'TOML'
+[syspkg]
+managers = [\"$expect_present\"]
+
+[syspkg.packages]
+\"$expect_present:$installable\" = \"latest\"
+TOML
+osdk --yes trust >/dev/null 2>&1
+osdk pkg apply --yes 2>&1
+echo \"---exit:\$?\"
+command -v $installable >/dev/null 2>&1 && echo 'BINARY-PRESENT' || echo 'BINARY-ABSENT'" 2>&1
+        )" || true
+
+        # Containers run as root, so elevation resolves to AlreadyRoot and the
+        # command runs directly. A refusal here would mean the root case is
+        # broken, which no amount of unit testing would show.
+        if grep -q 'BINARY-PRESENT' <<<"$install_output"; then
+            echo "  ok: $installable was installed and is on PATH"
+        else
+            echo "  FAIL: $installable did not end up installed" >&2
+            echo "$install_output" | tail -20 >&2
+            failures=$((failures + 1))
+        fi
+        if grep -qi 'not run:' <<<"$install_output"; then
+            echo "  FAIL: elevation was refused while running as root" >&2
+            failures=$((failures + 1))
+        fi
+    else
+        pacman_output="$(
+            "$runtime" run --rm \
+                -v "$binary:/usr/local/bin/osdk:ro" \
+                -e OSDK_DATA_DIR=/tmp/osdk-data \
+                -e OSDK_CONFIG_DIR=/tmp/osdk-config \
+                -e OSDK_CACHE_DIR=/tmp/osdk-cache \
+                -e OSDK_YES=true \
+                "$image" \
+                sh -c "$prelude
+mkdir -p /tmp/proj && cd /tmp/proj
+cat > osdk.toml <<'TOML'
+[syspkg]
+managers = [\"pacman\"]
+
+[syspkg.packages]
+\"pacman:$installable\" = \"latest\"
+TOML
+osdk --yes trust >/dev/null 2>&1
+osdk pkg apply --dry-run 2>&1" 2>&1
+        )" || true
+
+        # Arch documents that installing one package is a partial upgrade and
+        # unsupported, so osdk must decline and say so -- not quietly omit it.
+        if grep -qi 'partial upgrade' <<<"$pacman_output"; then
+            echo "  ok: pacman is declined with the reason stated"
+        else
+            echo "  FAIL: pacman was not declined with a stated reason" >&2
+            echo "$pacman_output" | tail -20 >&2
+            failures=$((failures + 1))
+        fi
     fi
 
     # Detection must never elevate. Running as root in a container would hide a

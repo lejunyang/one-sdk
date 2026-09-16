@@ -296,7 +296,35 @@ async fn apply_packages(app: &App, dry_run: bool, yes: bool, json: bool) -> Resu
     }
 
     let runner = SystemCommandRunner;
-    let results = syspkg::run_installs(&runner, &plan);
+
+    // Decided once, from this host, and applied to every distro command in the
+    // plan. Observing inside the loop would let a mixed plan reach different
+    // conclusions for packages that face the same machine.
+    let elevation = syspkg::decide_elevation(syspkg::observe_elevation(
+        &runner,
+        syspkg::DISCOVERY_LIMITS,
+        app.ctx.config.sources.syspkg.no_elevate,
+    ));
+
+    // Say so before anything runs. A refusal that only surfaces in each package's
+    // explanation reads like four failures rather than one decision.
+    if !elevation.can_run() && plan.needs_elevation() {
+        if let Some(reason) = elevation.refusal() {
+            writeln!(
+                stdout,
+                "Not elevating: {}\n",
+                syspkg::Elevation::refusal_advice(reason)
+            )?;
+        }
+    }
+
+    // Acceleration is automatic: nothing to configure, nothing to run first.
+    // It is also silent when it cannot apply -- an unrecognised distribution, a
+    // manager with no per-invocation override, or a host that is already fast.
+    // Failing the install because a mirror could not be arranged would be worse
+    // than installing at the default speed.
+    let acceleration = prepare_acceleration(app, &plan, &elevation, &mut stdout)?;
+    let results = syspkg::run_installs(&runner, &plan, &elevation, acceleration.as_ref());
     let failed = results.iter().filter(|r| !r.succeeded).count();
 
     if json {
@@ -392,7 +420,102 @@ fn skip_label(reason: syspkg::SkipReason) -> &'static str {
         syspkg::SkipReason::NotApplicable => "not for this operating system",
         syspkg::SkipReason::ManagerUnavailable => "its manager could not be queried",
         syspkg::SkipReason::ManagerNotAllowed => "its manager is excluded by [syspkg] managers",
+        // Not a limitation of osdk: Arch documents that installing one package
+        // is a partial upgrade and unsupported. The command is printed so it can
+        // be run deliberately, after reading the news as upstream asks.
+        syspkg::SkipReason::PacmanWantsAFullUpgrade => {
+            "Arch does not support partial upgrades; run `pacman -Syu <package>` yourself"
+        }
     }
+}
+
+/// Arrange mirror acceleration for this run, if it applies.
+///
+/// Returns `None` whenever acceleration is not possible, which is a normal
+/// outcome rather than a failure: the plan has no apt packages, the host is not
+/// Debian-family, or `/etc/os-release` names a distribution osdk has no mirror
+/// paths for. Only a genuine I/O failure while building the scratch directory
+/// is propagated, because that one means something is wrong with the machine.
+///
+/// Nothing outside the returned temporary directory is written. That is the
+/// whole reason this is done per invocation instead of by editing
+/// `sources.list`: it needs no confirmation and leaves no trace.
+fn prepare_acceleration(
+    app: &App,
+    plan: &syspkg::InstallPlan,
+    elevation: &syspkg::Elevation,
+    stdout: &mut impl Write,
+) -> Result<Option<syspkg::EphemeralAptSource>> {
+    if !app.ctx.config.sources.syspkg.mirrors {
+        return Ok(None);
+    }
+
+    let wants_apt = plan.installs.iter().any(|install| {
+        matches!(
+            install.manager,
+            syspkg::ManagerKind::Distro(syspkg::DistroManager::Apt)
+        )
+    });
+    if !wants_apt {
+        return Ok(None);
+    }
+
+    let Ok(os_release) = std::fs::read_to_string("/etc/os-release") else {
+        return Ok(None);
+    };
+    let Some(flavour) = syspkg::read_flavour(&os_release) else {
+        return Ok(None);
+    };
+
+    let mirrors = syspkg::mirrors_for(syspkg::DistroManager::Apt);
+    let Some(mirror) = mirrors.first() else {
+        return Ok(None);
+    };
+
+    // `is_root` decides whether the scratch has to be reachable by the `_apt`
+    // user. Taken from the elevation decision already made, so the two cannot
+    // disagree about whether this run is privileged.
+    let is_root = matches!(elevation, syspkg::Elevation::AlreadyRoot);
+    let source = syspkg::prepare_ephemeral_apt_source(mirror, &flavour, is_root)
+        .context("preparing an ephemeral apt source")?;
+
+    writeln!(
+        stdout,
+        "Using the {} mirror for this run; no system file is modified.",
+        source.mirror
+    )?;
+
+    // The scratch starts with no package index, so apt cannot find anything in
+    // it -- measured: every install fails with `E: Unable to locate package`,
+    // naming the package rather than the empty index, which points the reader
+    // at the wrong problem entirely. Populate it before it is used.
+    //
+    // Elevation applies here too: writing into the scratch needs no privilege,
+    // but apt drops to `_apt` to fetch and expects to be root to do so.
+    let refresh = syspkg::apt_refresh_command(&source);
+    let Some(refresh) = elevation.apply(&refresh) else {
+        // Without elevation the install itself will be refused anyway, so
+        // there is nothing to accelerate. Returning None keeps the run on the
+        // system's own configuration rather than a source it cannot populate.
+        return Ok(None);
+    };
+
+    writeln!(stdout, "Fetching the package index from it...")?;
+    let refreshed =
+        osdk_core::process::CommandRunner::run_foreground(&SystemCommandRunner, &refresh);
+    let refreshed = refreshed.as_ref().is_ok_and(|status| status.success());
+    if !refreshed {
+        // Not fatal. A mirror that cannot be reached is a reason to fall back to
+        // the system configuration, not a reason to refuse to install.
+        writeln!(
+            stdout,
+            "The mirror could not be reached; continuing with this host's own sources.\n"
+        )?;
+        return Ok(None);
+    }
+    writeln!(stdout)?;
+
+    Ok(Some(source))
 }
 
 /// Register the fastest usable mirror, or explain why that cannot be done.

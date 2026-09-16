@@ -152,7 +152,11 @@ impl std::fmt::Display for KeyError {
 }
 
 /// The `[syspkg]` table.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` is written out rather than derived because `mirrors` defaults to
+/// `true`: a derived `bool` would be `false`, which would disable acceleration
+/// for every project that does not mention it, while still reporting success.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyspkgConfig {
     /// Managers allowed to participate. Empty means every manager osdk knows.
@@ -163,8 +167,25 @@ pub struct SyspkgConfig {
     pub managers: Vec<String>,
     /// Never attempt to elevate. Print the command to run instead.
     pub no_elevate: bool,
+    /// Use a mirror when installing, where the manager supports doing so
+    /// without modifying system configuration.
+    ///
+    /// On by default. Acceleration here is per invocation and leaves no trace,
+    /// so there is nothing to undo and no reason to make it opt-in.
+    pub mirrors: bool,
     /// Requested packages, keyed by `manager:package-id`.
     pub packages: BTreeMap<String, PackageRequest>,
+}
+
+impl Default for SyspkgConfig {
+    fn default() -> Self {
+        Self {
+            managers: Vec::new(),
+            no_elevate: false,
+            mirrors: true,
+            packages: BTreeMap::new(),
+        }
+    }
 }
 
 impl SyspkgConfig {

@@ -68,6 +68,75 @@ pub struct ElevationContext {
     pub elevation_forbidden: bool,
 }
 
+/// Observe this host's ability to elevate.
+///
+/// Separate from [`decide`] on purpose. The policy is a pure function of these
+/// five facts, so it can be exercised for a CI host from a developer's laptop;
+/// this function is the only part that has to run somewhere real, and it holds
+/// no policy of its own.
+///
+/// `sudo -n true` is the probe for passwordless sudo because it is what sudo
+/// itself offers: `-n` makes it fail rather than prompt. Running it costs one
+/// process and removes the need to parse sudoers, which is neither stable nor
+/// readable without privilege.
+#[cfg(unix)]
+pub fn observe(
+    runner: &dyn crate::process::CommandRunner,
+    limits: crate::process::CaptureLimits,
+    elevation_forbidden: bool,
+) -> ElevationContext {
+    // SAFETY: geteuid cannot fail and touches no memory the caller owns.
+    let is_root = unsafe { libc::geteuid() } == 0;
+
+    let sudo_present = matches!(
+        runner.run_captured(&CommandSpec::new("sudo").arg("--version"), limits),
+        crate::process::CommandOutcome::Exited { .. }
+    );
+
+    // Skip the probe when it cannot matter: as root there is nothing to elevate,
+    // and without sudo there is nothing to ask.
+    let passwordless_sudo = if is_root || !sudo_present {
+        false
+    } else {
+        matches!(
+            runner.run_captured(
+                &CommandSpec::new("sudo").args(["--non-interactive", "true"]),
+                limits,
+            ),
+            crate::process::CommandOutcome::Exited { status, .. } if status.success()
+        )
+    };
+
+    ElevationContext {
+        is_root,
+        has_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        sudo_present,
+        passwordless_sudo,
+        elevation_forbidden,
+    }
+}
+
+/// Observe this host's ability to elevate.
+///
+/// On Windows nothing here applies: the distro managers do not exist, and
+/// winget handles UAC itself rather than through a command prefix. Reporting
+/// "not root, no sudo" is accurate, and any distro package will already have
+/// been skipped as not applicable before elevation is consulted.
+#[cfg(not(unix))]
+pub fn observe(
+    _runner: &dyn crate::process::CommandRunner,
+    _limits: crate::process::CaptureLimits,
+    elevation_forbidden: bool,
+) -> ElevationContext {
+    ElevationContext {
+        is_root: false,
+        has_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        sudo_present: false,
+        passwordless_sudo: false,
+        elevation_forbidden,
+    }
+}
+
 /// Decide how to run a command that needs root.
 pub fn decide(context: ElevationContext) -> Elevation {
     // Root first: it makes every other question moot, and sudo may be absent in
@@ -96,6 +165,18 @@ impl Elevation {
     /// Whether osdk may run the command itself.
     pub const fn can_run(&self) -> bool {
         !matches!(self, Self::Refuse(_))
+    }
+
+    /// Why this decision refuses, if it does.
+    ///
+    /// Lets a caller that got `None` from [`apply`](Self::apply) report the
+    /// reason without re-deriving it, so the refusal and its explanation cannot
+    /// disagree.
+    pub const fn refusal(&self) -> Option<RefusalReason> {
+        match self {
+            Self::Refuse(reason) => Some(*reason),
+            _ => None,
+        }
     }
 
     /// Apply this decision to a command.

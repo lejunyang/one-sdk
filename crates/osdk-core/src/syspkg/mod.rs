@@ -28,6 +28,7 @@
 pub mod apply;
 pub mod config;
 pub mod distro;
+mod distro_mirror;
 pub mod elevate;
 pub mod install;
 pub mod mirror;
@@ -41,7 +42,15 @@ pub use apply::{
 };
 pub use config::{KeyError, PackageKey, PackageRequest, SyspkgConfig};
 pub use distro::{query_installed, DistroManager, DistroReport, RollbackAbility};
-pub use elevate::{Elevation, ElevationContext, RefusalReason};
+pub use distro_mirror::{
+    apt_confinement_options, apt_refresh_command, apt_sources_list, mirrors_for,
+    prepare_ephemeral_apt_source, read_flavour, DebianFlavour, DistroMirror, EphemeralAptSource,
+    ALPINE_MIRRORS, DEBIAN_MIRRORS,
+};
+pub use elevate::{
+    decide as decide_elevation, observe as observe_elevation, Elevation, ElevationContext,
+    RefusalReason,
+};
 pub use install::{
     explain_install_code, install_succeeded, plan_installs, run_installs, InstallPlan,
     InstallResult, PlannedInstall, SkipReason, SkippedPackage,
