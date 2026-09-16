@@ -85,6 +85,8 @@
 
 - **`never used` 警告往往指向缺失的调用点，不是死代码。** clippy 报 `PypiInstaller::parse` 从未被使用，真实原因是 lock 的**回读路径没接**：npm 一直在 `locked_npm_metadata` 里回读 installer，pypi 只写不读，于是重锁会用本机环境重新推导、把 lock 里记录的承诺静默覆盖。按「删掉函数」处理会让警告消失、测试全绿、diff 更小，而缺口被永久藏起来。**先问「调用点是不是漏了」，再考虑删。**
 
+- **在 WSL 里跑 `cargo` 编译出的是 Windows 的 `.exe`。** WSL 的 PATH interop 会把 `/mnt/.../osdk-data/data/shims` 下的 shim 当成可执行文件，于是 `cargo --version` 正常、构建报 `Finished`，产物却是 `target\debug\osdk.exe` 落在 Windows 目录——想做 Linux 侧验证时会得到一个「成功了但东西不对」的假象。`--version` 不碰文件系统，能跑几乎不证明任何事。另外两个相关限制：从 `/tmp`、`/home` 这类无 Windows 路径的目录启动时，Windows 侧的 cwd 会变成 `C:\Windows`；传 Linux 路径给它会报「路径不存在」。要在 WSL 内做 Linux 原生验证，先装原生 rustup（`~/.cargo/bin` 会自然排在 shim 之前）。
+
 ## 批量改文档的脚本没有测试会失败
 
 - **去重脚本把它要保留的那份也改了。** 把一条内容从 A 节移到 B 节、并在 A 节留下交叉引用时，脚本对两处都套用了同一次替换，于是 B 节里那条也变成了「详见 B 节」——自我指向的空引用，正文被删干净。代码有编译器和测试兜底，Markdown 没有：标题在、条目在、内容没了，diff 看起来像一次整洁的去重。
