@@ -255,6 +255,67 @@ name, the `0x8A150012` bug above — which three tests caught at once. Per this
 repository's own standard, a check that has never been seen red does not make
 its green count as evidence.
 
+## Applying a mirror: why three stages rather than one step
+
+`mirrors apply` is the only entry point in this subsystem that changes machine
+state, so its structure follows from the risk.
+
+### Replacing necessarily passes through a window with no source
+
+winget cannot atomically repoint a source, so the sequence is `remove` then
+`add`. Between them the host has **no package source at all** -- and the likeliest
+failure is the second command: when a mirror lags upstream, Windows refuses the
+older package with `0x80073D06`.
+
+That makes two things jointly necessary:
+
+1. **Refuse what can be predicted** -- `assess_feasibility` compares publish
+   times before anything runs.
+2. **Roll back what cannot** -- any failing command triggers
+   `winget source reset`.
+
+The rollback uses `reset` rather than re-adding the official URL, because winget
+knows its own built-in definition while an endpoint hardcoded here would go
+stale. Whether the rollback worked is reported, never assumed: a silently failed
+rollback is the one outcome a user must not be told is fine.
+
+### The feasibility test is publish time, not a version number
+
+Mirrors publish no version metadata. USTC answers `/version` with an honest 404;
+Huawei's mirror returns `200` with the same 11,963-byte HTML page for *any* path,
+so a successful request is not evidence a file exists, and trusting the status
+code would feed an HTML document into a destructive decision.
+
+`Last-Modified` on `source.msix` is used instead -- one `HEAD`, no 20 MB
+download. It cannot be converted into a version (`2026.915.1714.48` was published
+at 17:45 GMT, so `1714` is a build time), but it moves monotonically with the
+version, which is all a staleness test needs. A `text/html` content type is
+treated as unknown, which is what defends against the "200 plus HTML" case
+above.
+
+Dates are parsed into ordered fields rather than compared as text: "Dec" sorts
+before "Sep" alphabetically while December is later, so a string comparison
+would call a newer mirror stale and refuse a valid apply. Mutation testing found
+the gap here first -- the initial dates happened to sort correctly either way, so
+swapping in a string comparison left the tests green.
+
+### A fingerprint confirms a host state, not merely a plan
+
+Before running, the registered sources are re-read and compared against the
+plan's fingerprint; a mismatch refuses. This is the same `StaleInput` guard
+`container/apply.rs` applies to a config file. A wrong fingerprint and a changed
+host are distinct refusals -- one is a stale copy-paste, the other is the machine
+moving after you confirmed -- and they call for different remedies, so they read
+differently. Neither runs a single command.
+
+### Exit codes: not done is not success
+
+`--dry-run` exits 0 once the plan is printed, because the report is the
+requested output. But **asking to apply and ending with nothing applied** -- no
+usable mirror, no confirmation, a wrong fingerprint, a changed host, a failed
+command -- always exits non-zero. Otherwise a script reads "nothing happened" as
+success, which is the hardest class of defect to notice.
+
 ## Missing from a platform is not missing from a host
 
 `ManagerStatus` separates `NotApplicable` from `NotInstalled` because they call

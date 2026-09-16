@@ -751,6 +751,32 @@ pub enum PkgMirrorsCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Register the fastest mirror into the package manager's configuration.
+    ///
+    /// Unlike the rest of `osdk pkg`, this changes machine-wide state and needs
+    /// administrator rights. A winget mirror cannot be added alongside the
+    /// built-in source, so applying replaces the source named `winget` and the
+    /// official endpoint is no longer registered; `--dry-run` shows the exact
+    /// commands, the costs, and the rollback before anything runs.
+    Apply {
+        /// Which manager to configure.
+        #[arg(long, value_enum, value_name = "MANAGER", default_value = "winget")]
+        manager: PkgManagerArg,
+        /// Print the plan and exit without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm the plan whose fingerprint this is.
+        ///
+        /// Required for a first apply. The fingerprint covers the sources
+        /// registered when the plan was built, so a plan is refused once that
+        /// state has changed underneath it.
+        #[arg(long, value_name = "FINGERPRINT")]
+        accept_plan: Option<String>,
+        /// Emit the plan or the outcome as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

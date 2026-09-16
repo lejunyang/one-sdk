@@ -634,6 +634,7 @@ context TLS 材料、可通过本地 Unix socket 或 Windows named pipe 直接�
 osdk pkg doctor
 osdk pkg doctor --json
 osdk pkg mirrors test
+osdk pkg mirrors apply --dry-run
 ```
 
 报告宿主上有哪些系统包管理器（目前是 winget）、版本、已配置的源及其信任级别。
@@ -642,6 +643,9 @@ osdk pkg mirrors test
 
 注意 winget 的镜像只加速搜索和列表，不加速安装包下载——manifest 里的下载地址指向
 各软件厂商自己的服务器。osdk 会在输出里说明这一点。
+
+`mirrors apply` 是其中唯一会改机器状态的命令：需要管理员，且必须带上
+`--accept-plan` 指纹确认。装不上的镜像（比本机旧）会被提前拒绝，执行中失败会自动回滚。
 
 指南：[系统包管理器](site/guide/system-packages.md)
 

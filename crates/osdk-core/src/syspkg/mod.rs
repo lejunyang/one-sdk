@@ -30,12 +30,15 @@ pub mod mirror;
 pub mod report;
 pub mod winget;
 
-pub use apply::{fingerprint_sources, Consequence, MirrorPlan, PlannedCommand, RegistrationShape};
+pub use apply::{
+    apply_plan, assess_feasibility, fingerprint_sources, ApplyOutcome, ApplyRefused, Consequence,
+    Infeasible, MirrorPlan, PlannedCommand, RegistrationShape,
+};
 pub use mirror::{
     acceleration_of, effective_winget_sources, preferred_winget_source, probe_winget_sources,
-    winget_probe_url, winget_sources, Acceleration, MirrorCandidate, MirrorMeasurement,
-    NoPreferredSource, WINGET_MIRRORS, WINGET_OFFICIAL_ENDPOINT, WINGET_PROBE_FILE,
-    WINGET_SOURCE_TOOL,
+    source_published_at, winget_probe_url, winget_sources, Acceleration, MirrorCandidate,
+    MirrorMeasurement, NoPreferredSource, DEFAULT_WINGET_SOURCE_NAME, WINGET_MIRRORS,
+    WINGET_OFFICIAL_ENDPOINT, WINGET_PROBE_FILE, WINGET_SOURCE_TOOL,
 };
 pub use report::{
     Capability, CapabilityStatus, ManagerDetails, ManagerKind, ManagerReport, ManagerStatus,

@@ -709,6 +709,7 @@ Guide: [Container runtimes, registries, and native operations](site/en/guide/con
 osdk pkg doctor
 osdk pkg doctor --json
 osdk pkg mirrors test
+osdk pkg mirrors apply --dry-run
 ```
 
 Reports which system package managers the host has (winget today), their
@@ -721,6 +722,11 @@ not vary with the display language.
 Note that a winget mirror speeds up search and list, not installer downloads:
 the URLs inside a manifest point at each vendor's own servers. osdk says so in
 its output.
+
+`mirrors apply` is the only one of these that changes machine state: it needs
+administrator rights and an explicit `--accept-plan` fingerprint. A mirror that
+cannot be installed (older than what is present) is refused up front, and a
+failure part-way through rolls itself back.
 
 Guide: [System Package Managers](site/en/guide/system-packages.md)
 

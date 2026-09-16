@@ -391,6 +391,50 @@ pub async fn probe_winget_sources(ctx: &Ctx) -> Result<Vec<MirrorMeasurement>> {
     Ok(measurements)
 }
 
+/// When a winget source last published, from the `Last-Modified` of its package.
+///
+/// A `HEAD` rather than a download: the index package is around 20 MB, far too
+/// much to transfer just to decide whether an apply is worth attempting.
+///
+/// `None` means the question could not be answered -- an unreachable endpoint, a
+/// server that omits the header, or a response that is not the package at all.
+/// Callers must treat that as "unknown" rather than "fresh": Huawei's mirror
+/// answers `200` with an HTML page for any path, so a successful request is not
+/// by itself evidence that a package is there.
+pub async fn source_published_at(endpoint: &str) -> Option<String> {
+    let url = {
+        let base = endpoint.trim_end_matches('/');
+        format!("{base}/{WINGET_PROBE_FILE}")
+    };
+    let client = crate::http::client().ok()?;
+    let response = client
+        .head(&url)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    // A mirror serving an HTML error page will not be an MSIX; the content type
+    // is the cheapest signal that the response is the package rather than a
+    // friendly "not found" page rendered with status 200.
+    if let Some(kind) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        if kind.starts_with("text/html") {
+            return None;
+        }
+    }
+    response
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

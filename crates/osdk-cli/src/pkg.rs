@@ -59,8 +59,298 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
                 }
                 Ok(())
             }
+            PkgMirrorsCommand::Apply {
+                manager,
+                dry_run,
+                accept_plan,
+                json,
+            } => {
+                let manager = match manager {
+                    PkgManagerArg::Winget => ManagerKind::Winget,
+                };
+                apply_mirror(app, manager, dry_run, accept_plan.as_deref(), json).await
+            }
         },
     }
+}
+
+/// Register the fastest usable mirror, or explain why that cannot be done.
+///
+/// The sequence is deliberate: measure, then rule out what cannot work, then
+/// show the exact commands, and only then -- with an explicit confirmation --
+/// change anything. Every stage before the last is read-only, so running this
+/// without `--accept-plan` can never alter the host.
+async fn apply_mirror(
+    app: &App,
+    manager: ManagerKind,
+    dry_run: bool,
+    accept_plan: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    let runner = SystemCommandRunner;
+
+    let measurements = syspkg::probe_winget_sources(&app.ctx).await?;
+    let registered = syspkg::registered_sources(&runner, manager);
+
+    // The endpoint currently serving the default source is the baseline every
+    // candidate must beat: replacing it with something older is what Windows
+    // rejects outright.
+    let installed_endpoint = registered
+        .iter()
+        .find(|source| source.name == syspkg::DEFAULT_WINGET_SOURCE_NAME)
+        .and_then(|source| source.endpoint.clone());
+    let installed_published = match installed_endpoint.as_deref() {
+        Some(endpoint) => syspkg::source_published_at(endpoint).await,
+        None => None,
+    };
+
+    // Fastest first, and only mirrors: the default source is already in effect,
+    // so "applying" it would be a no-op that still costs a remove/add cycle.
+    let mut candidates: Vec<&syspkg::MirrorMeasurement> = measurements
+        .iter()
+        .filter(|m| m.kind != osdk_core::source::SourceKind::Official)
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.throughput
+            .unwrap_or(0.0)
+            .total_cmp(&a.throughput.unwrap_or(0.0))
+    });
+
+    let mut rejected: Vec<(String, syspkg::Infeasible)> = Vec::new();
+    let mut chosen = None;
+    for candidate in candidates {
+        let published = syspkg::source_published_at(&candidate.endpoint).await;
+        match syspkg::assess_feasibility(
+            published.as_deref(),
+            installed_published.as_deref(),
+            &candidate.endpoint,
+            candidate.reachable == Some(true),
+        ) {
+            Ok(()) => {
+                chosen = Some(candidate);
+                break;
+            }
+            Err(reason) => rejected.push((candidate.source_id.clone(), reason)),
+        }
+    }
+
+    let Some(candidate) = chosen else {
+        if json {
+            let payload = serde_json::json!({
+                "applied": false,
+                "plan": serde_json::Value::Null,
+                "rejected": rejected
+                    .iter()
+                    .map(|(id, reason)| serde_json::json!({ "mirror": id, "infeasible": reason }))
+                    .collect::<Vec<_>>(),
+            });
+            serde_json::to_writer(&mut stdout, &payload)
+                .context("serializing mirror apply result")?;
+            writeln!(stdout)?;
+        } else {
+            write_no_usable_mirror(&mut stdout, &rejected, installed_published.as_deref())?;
+        }
+        // Nothing was applied, so a script must not read this as success. The
+        // explanation above has already been printed; the error only sets the
+        // exit code.
+        if dry_run {
+            return Ok(());
+        }
+        anyhow::bail!("no mirror could be applied");
+    };
+
+    let plan =
+        syspkg::MirrorPlan::replace_default(&candidate.source_id, &candidate.endpoint, &registered);
+
+    if dry_run {
+        if json {
+            serde_json::to_writer(&mut stdout, &plan).context("serializing mirror plan")?;
+            writeln!(stdout)?;
+        } else {
+            write_plan(&mut stdout, &plan)?;
+        }
+        return Ok(());
+    }
+
+    match syspkg::apply_plan(&runner, &plan, &registered, accept_plan) {
+        Ok(outcome) => {
+            if json {
+                let payload = serde_json::json!({
+                    "applied": outcome.failed.is_none(),
+                    "outcome": outcome,
+                });
+                serde_json::to_writer(&mut stdout, &payload)
+                    .context("serializing mirror apply result")?;
+                writeln!(stdout)?;
+            } else {
+                write_outcome(&mut stdout, &outcome)?;
+            }
+            // A failed apply must not report success to a script.
+            if outcome.failed.is_some() {
+                anyhow::bail!("applying the mirror failed; see the output above");
+            }
+            Ok(())
+        }
+        Err(refusal) => {
+            if json {
+                let payload = serde_json::json!({
+                    "applied": false,
+                    "refused": refusal,
+                    "plan": plan,
+                });
+                serde_json::to_writer(&mut stdout, &payload)
+                    .context("serializing mirror apply refusal")?;
+                writeln!(stdout)?;
+            } else {
+                write_plan(&mut stdout, &plan)?;
+                write_refusal(&mut stdout, &refusal)?;
+            }
+            // Same reasoning as above: an unapplied plan is not a success.
+            anyhow::bail!("the mirror was not applied");
+        }
+    }
+}
+
+/// Explain why no mirror can be applied, naming each candidate's obstacle.
+fn write_no_usable_mirror(
+    output: &mut dyn Write,
+    rejected: &[(String, syspkg::Infeasible)],
+    installed_published: Option<&str>,
+) -> Result<()> {
+    writeln!(output, "No mirror can be applied right now.")?;
+    if let Some(installed) = installed_published {
+        writeln!(
+            output,
+            "  currently registered source published: {installed}"
+        )?;
+    }
+    for (mirror, reason) in rejected {
+        let explanation = match reason {
+            syspkg::Infeasible::MirrorIsStale {
+                mirror_last_modified,
+                ..
+            } => format!(
+                "published {mirror_last_modified}, older than what is installed -- \
+                 winget would reject it with 0x80073D06"
+            ),
+            syspkg::Infeasible::PublishTimeUnknown { .. } => {
+                "publish time could not be established, so staleness cannot be ruled out".to_owned()
+            }
+            syspkg::Infeasible::MirrorUnreachable { .. } => "unreachable".to_owned(),
+        };
+        writeln!(output, "  {mirror}: {explanation}")?;
+    }
+    writeln!(
+        output,
+        "\nA mirror lagging behind upstream is common and resolves itself once it\n\
+         syncs. Nothing was changed."
+    )?;
+    Ok(())
+}
+
+/// Show a plan in full, with its costs and its rollback, before anything runs.
+fn write_plan(output: &mut dyn Write, plan: &syspkg::MirrorPlan) -> Result<()> {
+    writeln!(
+        output,
+        "Plan: point winget's `{}` source at the {} mirror",
+        plan.source_name, plan.mirror_id
+    )?;
+    writeln!(output, "  endpoint: {}", plan.endpoint)?;
+
+    writeln!(output, "\nCommands, in order:")?;
+    for command in &plan.commands {
+        writeln!(output, "  {}", command.display())?;
+    }
+
+    writeln!(output, "\nWhat this costs:")?;
+    for consequence in &plan.consequences {
+        writeln!(output, "  - {}", consequence_label(consequence))?;
+    }
+
+    if let Some(rollback) = &plan.rollback {
+        writeln!(output, "\nTo undo:\n  {}", rollback.display())?;
+    }
+
+    writeln!(
+        output,
+        "\nNothing has been changed. To apply, re-run with:\n  \
+         --accept-plan {}",
+        plan.fingerprint
+    )?;
+    Ok(())
+}
+
+/// Plain-language wording for each disclosed cost.
+fn consequence_label(consequence: &syspkg::Consequence) -> &'static str {
+    match consequence {
+        syspkg::Consequence::NeedsAdministrator => "needs administrator rights",
+        syspkg::Consequence::MachineWide => {
+            "affects every winget user on this machine, not just osdk"
+        }
+        syspkg::Consequence::OfficialSourceRemoved => {
+            "Microsoft's own endpoint will no longer be registered"
+        }
+        syspkg::Consequence::BrieflyWithoutAnySource => {
+            "between the two commands, winget has no package source at all"
+        }
+        syspkg::Consequence::LosesStoreOriginTrust => {
+            "a mirror cannot carry the built-in source's StoreOrigin trust marker"
+        }
+        syspkg::Consequence::IndexOnlyAcceleration => {
+            "only package search gets faster; installer downloads do not"
+        }
+    }
+}
+
+/// Report what a run actually did, including a rollback if one happened.
+fn write_outcome(output: &mut dyn Write, outcome: &syspkg::ApplyOutcome) -> Result<()> {
+    for command in &outcome.completed {
+        writeln!(output, "  ok: {command}")?;
+    }
+    match (&outcome.failed, outcome.rolled_back) {
+        (None, _) => writeln!(output, "\nMirror applied.")?,
+        (Some(failed), rolled_back) => {
+            writeln!(output, "\nfailed: {failed}")?;
+            if let Some(code) = outcome.exit_code {
+                writeln!(output, "  exit code: {code}")?;
+            }
+            match rolled_back {
+                Some(true) => writeln!(
+                    output,
+                    "  rolled back: winget's built-in source was restored"
+                )?,
+                Some(false) => writeln!(
+                    output,
+                    "  ROLLBACK FAILED: winget may have no package source right now.\n  \
+                     Run `winget source reset --name winget --force` as administrator."
+                )?,
+                None => writeln!(output, "  no rollback was available")?,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Explain a refusal, distinguishing a stale confirmation from a changed host.
+fn write_refusal(output: &mut dyn Write, refusal: &syspkg::ApplyRefused) -> Result<()> {
+    match refusal {
+        syspkg::ApplyRefused::NotConfirmed { .. } => writeln!(
+            output,
+            "\nNothing was changed: this plan has not been confirmed."
+        )?,
+        syspkg::ApplyRefused::WrongFingerprint { expected, supplied } => writeln!(
+            output,
+            "\nNothing was changed: --accept-plan {supplied} does not match this plan.\n\
+             The plan above is {expected}."
+        )?,
+        syspkg::ApplyRefused::StateChanged { .. } => writeln!(
+            output,
+            "\nNothing was changed: winget's sources changed after this plan was built,\n\
+             so the confirmation no longer describes this host. Re-run to plan again."
+        )?,
+    }
+    Ok(())
 }
 
 /// Report which source osdk will hand its own calls, and why.
@@ -441,5 +731,170 @@ mod tests {
             !text.contains("not downloading it"),
             "with nothing measured there is no acceleration claim to qualify"
         );
+    }
+
+    fn sample_plan() -> osdk_core::syspkg::MirrorPlan {
+        osdk_core::syspkg::MirrorPlan::replace_default(
+            "ustc",
+            "https://mirrors.ustc.edu.cn/winget-source",
+            &[],
+        )
+    }
+
+    fn render_plan(plan: &osdk_core::syspkg::MirrorPlan) -> String {
+        let mut buffer = Vec::new();
+        write_plan(&mut buffer, plan).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn a_plan_states_that_nothing_has_changed_yet() {
+        let text = render_plan(&sample_plan());
+
+        // The single most important line: a user reading a wall of commands must
+        // not be left wondering whether they already ran.
+        assert!(text.contains("Nothing has been changed"), "got: {text}");
+    }
+
+    #[test]
+    fn a_plan_shows_every_command_the_rollback_and_the_fingerprint() {
+        let plan = sample_plan();
+        let text = render_plan(&plan);
+
+        for command in &plan.commands {
+            assert!(
+                text.contains(&command.display()),
+                "a command that will run must be shown verbatim: {}",
+                command.display()
+            );
+        }
+        assert!(text.contains("To undo"));
+        assert!(
+            text.contains(&plan.fingerprint),
+            "the confirmation token must be printed, or the plan cannot be accepted"
+        );
+    }
+
+    #[test]
+    fn a_plan_discloses_the_window_with_no_package_source() {
+        let text = render_plan(&sample_plan());
+
+        assert!(
+            text.contains("no package source at all"),
+            "the riskiest moment must be stated, got: {text}"
+        );
+        assert!(text.contains("only package search gets faster"));
+    }
+
+    #[test]
+    fn a_stale_mirror_is_explained_with_the_error_winget_would_give() {
+        let rejected = vec![(
+            "ustc".to_owned(),
+            osdk_core::syspkg::Infeasible::MirrorIsStale {
+                mirror_last_modified: "Tue, 15 Sep 2026 10:21:23 GMT".to_owned(),
+                installed_last_modified: "Tue, 15 Sep 2026 17:45:23 GMT".to_owned(),
+            },
+        )];
+
+        let mut buffer = Vec::new();
+        write_no_usable_mirror(
+            &mut buffer,
+            &rejected,
+            Some("Tue, 15 Sep 2026 17:45:23 GMT"),
+        )
+        .unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+
+        assert!(text.contains("0x80073D06"), "got: {text}");
+        assert!(text.contains("Nothing was changed"));
+    }
+
+    #[test]
+    fn an_unknown_publish_time_is_reported_as_unknown_not_as_stale() {
+        let rejected = vec![(
+            "huaweicloud".to_owned(),
+            osdk_core::syspkg::Infeasible::PublishTimeUnknown {
+                endpoint: "https://mirrors.huaweicloud.com/winget-source".to_owned(),
+            },
+        )];
+
+        let mut buffer = Vec::new();
+        write_no_usable_mirror(&mut buffer, &rejected, None).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+
+        assert!(text.contains("could not be established"));
+        assert!(
+            !text.contains("0x80073D06"),
+            "an unknown time is not the same finding as a stale mirror"
+        );
+    }
+
+    #[test]
+    fn a_failed_rollback_is_shouted_about_rather_than_mentioned() {
+        let outcome = osdk_core::syspkg::ApplyOutcome {
+            completed: vec!["winget source remove --name winget".to_owned()],
+            failed: Some("winget source add --name winget".to_owned()),
+            exit_code: Some(-2147009274),
+            rolled_back: Some(false),
+        };
+
+        let mut buffer = Vec::new();
+        write_outcome(&mut buffer, &outcome).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+
+        // The host may be left without a source; the recovery command must be
+        // right there rather than something the user has to look up.
+        assert!(text.contains("ROLLBACK FAILED"), "got: {text}");
+        assert!(text.contains("winget source reset --name winget --force"));
+    }
+
+    #[test]
+    fn a_successful_rollback_says_the_source_was_restored() {
+        let outcome = osdk_core::syspkg::ApplyOutcome {
+            completed: vec!["winget source remove --name winget".to_owned()],
+            failed: Some("winget source add --name winget".to_owned()),
+            exit_code: Some(1),
+            rolled_back: Some(true),
+        };
+
+        let mut buffer = Vec::new();
+        write_outcome(&mut buffer, &outcome).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+
+        assert!(text.contains("rolled back"));
+        assert!(!text.contains("ROLLBACK FAILED"));
+    }
+
+    #[test]
+    fn a_changed_host_is_distinguished_from_a_mistyped_confirmation() {
+        let mut changed = Vec::new();
+        write_refusal(
+            &mut changed,
+            &osdk_core::syspkg::ApplyRefused::StateChanged {
+                planned: "aaa".to_owned(),
+                current: "bbb".to_owned(),
+            },
+        )
+        .unwrap();
+        let changed = String::from_utf8(changed).unwrap();
+
+        let mut mistyped = Vec::new();
+        write_refusal(
+            &mut mistyped,
+            &osdk_core::syspkg::ApplyRefused::WrongFingerprint {
+                expected: "aaa".to_owned(),
+                supplied: "typo".to_owned(),
+            },
+        )
+        .unwrap();
+        let mistyped = String::from_utf8(mistyped).unwrap();
+
+        // Different causes need different remedies, so the wording must differ.
+        assert!(changed.contains("sources changed"));
+        assert!(mistyped.contains("does not match"));
+        assert_ne!(changed, mistyped);
+        for text in [&changed, &mistyped] {
+            assert!(text.contains("Nothing was changed"));
+        }
     }
 }

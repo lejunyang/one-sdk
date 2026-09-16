@@ -119,7 +119,7 @@ winget 的源是一份 manifest 索引，而 manifest 里的 `InstallerUrl` 指�
 | --- | --- | --- | --- |
 | osdk 下载 SDK 用哪个源 | 只影响 osdk 自己的 store | 否 | **已自动**，见 [下载源与安全](sources-security.md) |
 | osdk 调用 winget 时用哪个源 | 只影响 osdk 发起的那一次调用 | 否 | 已实现，但对 winget 不产生加速（见下） |
-| winget 的全局源配置 | 影响机器上所有 winget 使用者 | **是** | 计划中，首次需你确认一次 |
+| winget 的全局源配置 | 影响机器上所有 winget 使用者 | **是** | **已实现**，需你确认一次 |
 
 中间那层是"装依赖时自动加速"的落点：osdk 调 winget 时会自动选实测最快的**已注册**源，
 你手敲 `winget install` 的行为完全不变，也不需要管理员权限。
@@ -155,9 +155,62 @@ osdk 也不会把内置的镜像名直接传给 winget：传一个未注册的�
 此后所有人调 winget 都会看到这个源，而且镜像源拿不到官方源的 `StoreOrigin` 信任标记。
 确认过之后 osdk 会自动维护，不再打扰你。
 
+## 应用镜像
+
+```bash
+osdk pkg mirrors apply --dry-run          # 只看计划，不改任何东西
+osdk pkg mirrors apply --accept-plan <指纹>  # 确认后执行（需管理员）
+```
+
+这是 `osdk pkg` 里唯一会改机器状态的命令。它按顺序做四件事：测速 → 排除装不上的
+镜像 → 打印完整计划 → 只有带上正确指纹才执行。前三步都是只读的，所以不带
+`--accept-plan` 运行永远不会改动宿主。
+
+### 装不上的镜像会被提前拒绝
+
+镜像落后于上游是常态，而 winget 会拒绝安装比本机更旧的包。osdk 在动手之前就检查这件事：
+
+```text
+No mirror can be applied right now.
+  currently registered source published: Wed, 16 Sep 2026 01:08:41 GMT
+  huaweicloud: publish time could not be established, so staleness cannot be ruled out
+  ustc: published Tue, 15 Sep 2026 18:52:34 GMT, older than what is installed --
+        winget would reject it with 0x80073D06
+
+A mirror lagging behind upstream is common and resolves itself once it
+syncs. Nothing was changed.
+```
+
+判据是各镜像 `source.msix` 的 `Last-Modified`，用一次 `HEAD` 取得，不下载那 20 MB 的包。
+拿不到可信的发布时间就判为不可用——乐观放行恰好会撞上它要防的那次失败。
+
+### 失败会自动回滚
+
+顶替必须先 `remove` 再 `add`，两条命令之间宿主**没有任何软件源**。若 `add` 失败，
+osdk 立即执行 `winget source reset` 恢复 winget 自带的源定义，并**如实报告回滚是否成功**：
+
+```text
+failed: winget source add --name winget ...
+  exit code: -2147009274
+  ROLLBACK FAILED: winget may have no package source right now.
+  Run `winget source reset --name winget --force` as administrator.
+```
+
+回滚也失败时，恢复命令直接给在眼前，不需要你去查。
+
+### 指纹是对「某个宿主状态」的确认
+
+计划里的指纹覆盖执行时机器上注册的那批源。若在你确认之后源发生了变化（另一个管理员、
+另一个工具、另一个终端），osdk 会拒绝执行而不是照着一份已经不符的计划动手。
+
+::: tip 退出码可用于脚本判断
+`--dry-run` 成功打印计划就是 0。但**请求了 apply 而最终没有应用**（无可用镜像、未确认、
+指纹不符、宿主已变）一律返回非 0，所以脚本不会把"什么都没做"读成成功。
+:::
+
 ## 当前边界
 
-- 只读。检测与测速可用；上表后两层尚未实现。
+- 三层都已实现。Homebrew 尚未接入。
 - 目前只覆盖 winget。Homebrew 在计划内。
 - osdk 不代为提权。后续涉及需要管理员权限的操作时，osdk 会打印你需要自己执行的命令，
   而不是尝试提升权限。
