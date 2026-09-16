@@ -144,3 +144,17 @@ jobs:
         env:
           OSDK_WINE_CACHE_DIR: ${{ runner.temp }}/one-sdk-wine-cache
         run: ./scripts/windows-wine-tests.sh
+
+  # The unit tests prove the detection branching with a scripted runner, but only
+  # a real distribution can confirm that the query interfaces osdk calls exist
+  # and print what it expects. A dpkg-query flag that changed, or an apk output
+  # shape that differs from the documented one, would leave every test green and
+  # every report wrong.
+  linux-distro-detection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - name: detect apt/apk/pacman/dnf inside their own distributions
+        run: ./scripts/linux-distro-detection.sh

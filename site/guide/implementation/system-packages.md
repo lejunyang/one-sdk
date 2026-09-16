@@ -248,6 +248,55 @@ winget 不支持把一个源原子地重新指向别处，只能 `remove` 再 `a
 没有应用**——无可用镜像、未确认、指纹不符、宿主已变、执行失败——一律非 0。否则脚本会
 把「什么都没做」读成成功，而这正是最难发现的一类缺陷。
 
+## Linux 检测为什么是只读的，以及怎么验证它
+
+### 姿态由三个事实决定，不是保守
+
+apt/apk/pacman/dnf 与 winget/brew 结构不同，因此在类型上就分开：它们放在报告的
+独立字段 `distro_managers` 而非并入 `managers`。如果合在一起，消费者就可能把一条 apt
+记录当成 osdk 能安装的目标，而它刻意不是。
+
+三个事实各自独立地否决了「代为执行」：
+
+1. **变更全局且需 root。** apt 手册写明 `full-upgrade`「会删除已安装的包，如果这是
+   整体升级系统所必需的」。
+2. **Arch 声明部分升级不受支持。** 而「只装项目需要的那个包」就是部分升级。因此
+   `install_command` 对 pacman 打印的是 `-Syu --needed` 而非 `-S`——给用户一条其发行版
+   官方不支持的命令，比不给更糟。有测试专门锁定这一点。
+3. **回滚能力三档分裂。** `RollbackAbility` 因此是 per-manager 的枚举而不是一个布尔：
+   dnf 事务性、pacman 只能从 cache 手工降级、apt 只有日志。一个统一的答案会是假话。
+
+### 查询接口选择的是「格式由 osdk 指定」的那些
+
+`dpkg-query -W -f=${Version}` 与 `rpm -q --qf` 都显式给出格式串，因此解析目标是 osdk
+自己定的，不随发行版默认格式变化；`pacman -Q` 与 `apk info -e -v` 的输出形状是文档化
+且不本地化的。有一条测试断言**任何查询命令都不可能安装东西**——即不含 `install`/`add`/`-S`，
+也不以 `sudo` 开头。
+
+apk 的输出 `name-version` 解析有个坑：包名自身可能含连字符（`py3-foo-1.2-r0`）。
+按第一个连字符切会把 `foo-1.2-r0` 当成版本号，所以切点是**第一个后面紧跟数字的连字符**，
+并有专门用例覆盖。
+
+### 平台判断作为参数，否则关键分支在开发机上永不执行
+
+`detect` 里若直接写 `cfg!(target_os = "linux")`，那么在 Windows 上开发时**唯一有意义的
+分支永远不会被测到**。因此实际逻辑在 `detect_for(runner, limits, is_linux)`，`cfg!` 只留
+在 `detect` 这一层。Debian、Arch、Fedora 三种宿主形态因此都能在 Windows 上验证。
+
+### 单元测试证明不了的那一件事，用真容器补
+
+单元测试用脚本化 runner 覆盖分支，但它证明不了**这些查询接口真的存在且输出符合预期**。
+`dpkg-query` 某个 flag 变了，或 `apk info` 输出形状与文档不同，会让所有测试全绿而所有
+报告出错。
+
+所以 `scripts/linux-distro-detection.sh` 在真实的 Debian / Alpine / Arch / Fedora 容器里
+跑 `osdk pkg doctor --json`，逐个断言：该发行版自带的管理器被报为存在、不自带的不被误报、
+输出中不出现 `sudo`。它 grep 的是 JSON 而非人类可读输出（后者会本地化），且**有一条单元
+测试锁定那个 JSON 字面形状**——否则字段改名会让这个脚本静默地什么都匹配不到、却依然通过。
+
+没有 docker 或 podman 时脚本输出跳过原因并以 0 退出，不会让本机没有容器运行时的开发者
+构建失败。
+
 ## 平台缺失与安装缺失是两回事
 
 `ManagerStatus` 把 `NotApplicable` 和 `NotInstalled` 分开，因为两者的处置完全不同：

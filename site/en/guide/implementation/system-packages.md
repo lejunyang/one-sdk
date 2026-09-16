@@ -316,6 +316,68 @@ usable mirror, no confirmation, a wrong fingerprint, a changed host, a failed
 command -- always exits non-zero. Otherwise a script reads "nothing happened" as
 success, which is the hardest class of defect to notice.
 
+## Why Linux detection is read-only, and how that is verified
+
+### The stance follows from three facts, not from caution
+
+apt, apk, pacman and dnf are structurally unlike winget and brew, so they are
+kept apart in the type system: they live in the report's own `distro_managers`
+field rather than among `managers`. Merged, a consumer could treat an apt entry
+as something osdk installs through, which it deliberately is not.
+
+Three facts each independently rule out driving them:
+
+1. **Changes are global and need root.** apt's manual states that `full-upgrade`
+   "will remove currently installed packages if this is needed to upgrade the
+   system as a whole".
+2. **Arch declares partial upgrades unsupported**, and installing just the
+   package a project needs is a partial upgrade. So `install_command` prints
+   `-Syu --needed` for pacman rather than `-S`: handing a user a command their
+   distribution does not support is worse than handing them none. A test pins
+   this.
+3. **Rollback splits three ways.** `RollbackAbility` is therefore a per-manager
+   enum rather than a boolean: transactional for dnf, manual-from-cache for
+   pacman, none for apt. One shared answer would be false.
+
+### The query interfaces chosen are the ones whose format osdk dictates
+
+`dpkg-query -W -f=${Version}` and `rpm -q --qf` both pass an explicit format
+string, so the parse target is osdk's own rather than a distribution default that
+could change; `pacman -Q` and `apk info -e -v` have documented, unlocalized
+shapes. A test asserts that **no query command could install anything** -- none
+contains `install`, `add` or `-S`, and none starts with `sudo`.
+
+Parsing apk's `name-version` output has a trap: a package name may itself contain
+hyphens (`py3-foo-1.2-r0`). Splitting on the first hyphen would report
+`foo-1.2-r0` as the version, so the split point is the first hyphen **followed by
+a digit**, with a test for exactly that case.
+
+### The platform decision is a parameter, or the interesting branch never runs
+
+Had `detect` tested `cfg!(target_os = "linux")` inline, the only branch that
+matters would be unreachable on the machine most of this is developed on. The
+logic therefore lives in `detect_for(runner, limits, is_linux)`, with the `cfg!`
+confined to `detect`. Debian, Arch and Fedora host shapes are all exercised from
+Windows as a result.
+
+### The one thing unit tests cannot establish, containers do
+
+The unit tests cover the branching with a scripted runner, but they cannot prove
+that these query interfaces exist and print what osdk expects. A changed
+`dpkg-query` flag, or an `apk info` shape differing from the documented one,
+would leave every test green and every report wrong.
+
+So `scripts/linux-distro-detection.sh` runs `osdk pkg doctor --json` inside real
+Debian, Alpine, Arch and Fedora containers and asserts, per distribution, that
+the manager it ships is reported present, that the ones it does not ship are not,
+and that `sudo` never appears in the diagnostic. It greps the JSON rather than
+the human output, which is localized -- and **a unit test pins that exact JSON
+literal**, since otherwise renaming a field would leave the script matching
+nothing and passing vacuously.
+
+With neither docker nor podman present the script prints why it is skipping and
+exits 0, rather than failing a developer machine that has no container runtime.
+
 ## Missing from a platform is not missing from a host
 
 `ManagerStatus` separates `NotApplicable` from `NotInstalled` because they call

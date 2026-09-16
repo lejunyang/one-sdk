@@ -554,4 +554,54 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), 4, "no manager probed twice: {probes:?}");
     }
+
+    #[test]
+    fn the_json_shape_is_the_one_external_checks_grep_for() {
+        // `scripts/linux-distro-detection.sh` greps this exact shape to verify
+        // detection inside real Debian/Alpine/Arch/Fedora containers. If the
+        // field names or the kebab-case rename change, that script starts
+        // passing vacuously -- it would find no match and report nothing wrong.
+        let report = DistroReport {
+            manager: DistroManager::Apt,
+            present: true,
+            rollback: RollbackAbility::None,
+            full_system_upgrade_only: false,
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+
+        assert!(
+            json.contains(r#""manager":"apt","present":true"#),
+            "the external check greps for this literal, got: {json}"
+        );
+        assert!(json.contains(r#""rollback":"none""#), "got: {json}");
+        assert!(
+            json.contains(r#""full_system_upgrade_only":false"#),
+            "got: {json}"
+        );
+    }
+
+    #[test]
+    fn every_manager_id_serializes_to_the_name_used_in_configuration() {
+        for manager in DistroManager::ALL {
+            let json = serde_json::to_string(&manager).unwrap();
+            assert_eq!(
+                json,
+                format!("\"{}\"", manager.id()),
+                "the serialized name and the configuration name must not diverge"
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_values_serialize_in_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&RollbackAbility::ManualFromCache).unwrap(),
+            "\"manual-from-cache\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RollbackAbility::Transactional).unwrap(),
+            "\"transactional\""
+        );
+    }
 }
