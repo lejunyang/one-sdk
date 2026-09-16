@@ -94,6 +94,28 @@ no_elevate = false
 osdk 会如实报告、**但不会重装**——那会改动你没要求改的东西。
 :::
 
+### Linux 包也能写进 `[syspkg.packages]`
+
+```toml
+[syspkg]
+managers = ["apt"]
+
+[syspkg.packages]
+"apt:libssl-dev" = "latest"
+"apk:build-base" = "latest"
+"pacman:base-devel" = "latest"
+"dnf:openssl-devel" = "latest"
+```
+
+`osdk pkg status` 会逐个查询它们，用的是各家文档化的只读接口，不需要 sudo。
+
+::: warning 「查不到」和「没装」是两回事
+如果宿主上根本没有 apt（比如在 Fedora 上写了 `apt:` 条目），osdk 报的是
+**manager unavailable** 而不是 **missing**。
+
+这个区分不是措辞讲究：把「问不到」当成「没装」，会让 `--missing` 在 CI 里误报，
+也会让你去装一个可能早就装好的包。只有管理器确实回答了「没有这个包」才算 missing。
+:::
 ## 查看状态
 
 ```bash

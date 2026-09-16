@@ -236,6 +236,47 @@ fn version_command(manager: DistroManager) -> CommandSpec {
     CommandSpec::new(manager.program()).arg("--version")
 }
 
+/// Ask one manager whether a package is installed, and at what version.
+///
+/// Returns `None` when the question could not be answered at all -- the manager
+/// is absent, or the probe failed for a reason other than "not installed".
+/// Callers must keep that distinct from `Some(None)`, which means the manager
+/// answered and the package is not there. Collapsing the two would turn "apt
+/// could not be reached" into "the package is missing", sending someone to
+/// install what they may already have.
+///
+/// Read-only and never elevated: a query that could change the system would
+/// make `pkg status` a state-changing command.
+pub fn query_installed(
+    runner: &dyn CommandRunner,
+    limits: CaptureLimits,
+    manager: DistroManager,
+    package: &str,
+) -> Option<Option<String>> {
+    let outcome = runner.run_captured(&manager.query_command(package), limits);
+    match outcome {
+        CommandOutcome::Exited { ref status, .. } if status.success() => {
+            // Exit 0 with no parsable version still means installed; the version
+            // is simply unavailable, which `None` inside `Some` records.
+            let text = stdout_of(&outcome);
+            Some(parse_installed_version(manager, &text))
+        }
+        // A non-zero exit from these query commands is how each reports "not
+        // installed": dpkg-query exits 1, pacman -Q exits 1, rpm -q exits 1.
+        CommandOutcome::Exited { .. } => Some(None),
+        // Anything else -- the binary is missing, the probe timed out, execution
+        // failed -- is an unanswered question, not a negative answer.
+        _ => None,
+    }
+}
+
+fn stdout_of(outcome: &CommandOutcome) -> String {
+    outcome
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 /// Parse an installed version from a query command's stdout.
 ///
 /// Each manager prints a different shape, and each is handled explicitly rather
@@ -667,6 +708,122 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), 4, "no manager probed twice: {probes:?}");
+    }
+
+    /// A runner that answers one query with a chosen exit code and stdout.
+    struct QueryRunner {
+        code: i32,
+        stdout: &'static str,
+        installed_binary: bool,
+    }
+
+    impl CommandRunner for QueryRunner {
+        fn run_captured(&self, _command: &CommandSpec, _limits: CaptureLimits) -> CommandOutcome {
+            if !self.installed_binary {
+                return CommandOutcome::NotInstalled;
+            }
+            CommandOutcome::Exited {
+                status: probe_status(self.code),
+                output: crate::process::CapturedOutput {
+                    stdout: self.stdout.as_bytes().to_vec(),
+                    ..crate::process::CapturedOutput::default()
+                },
+            }
+        }
+
+        fn run_foreground(
+            &self,
+            _command: &CommandSpec,
+        ) -> std::io::Result<std::process::ExitStatus> {
+            panic!("a query must never run in the foreground");
+        }
+    }
+
+    #[test]
+    fn an_installed_package_reports_its_version() {
+        let runner = QueryRunner {
+            code: 0,
+            stdout: "2.46.0-1",
+            installed_binary: true,
+        };
+
+        let answer = query_installed(&runner, limits(), DistroManager::Apt, "git");
+
+        assert_eq!(answer, Some(Some("2.46.0-1".to_owned())));
+    }
+
+    #[test]
+    fn a_package_the_manager_does_not_have_is_a_negative_answer() {
+        // dpkg-query, pacman -Q and rpm -q all exit non-zero for "not installed".
+        let runner = QueryRunner {
+            code: 1,
+            stdout: "",
+            installed_binary: true,
+        };
+
+        let answer = query_installed(&runner, limits(), DistroManager::Apt, "nope");
+
+        assert_eq!(
+            answer,
+            Some(None),
+            "the manager answered; the package is absent"
+        );
+    }
+
+    #[test]
+    fn an_absent_manager_is_an_unanswered_question_not_a_missing_package() {
+        // The distinction that matters: collapsing this into Some(None) would
+        // report every package as missing on a host without that manager, and
+        // send someone installing what they may already have.
+        let runner = QueryRunner {
+            code: 0,
+            stdout: "",
+            installed_binary: false,
+        };
+
+        let answer = query_installed(&runner, limits(), DistroManager::Apt, "git");
+
+        assert_eq!(answer, None);
+        assert_ne!(answer, Some(None), "these two must never be conflated");
+    }
+
+    #[test]
+    fn success_without_a_parsable_version_still_counts_as_installed() {
+        // Exit 0 means the manager has it; an unreadable version is a gap in
+        // what we know, not evidence of absence.
+        let runner = QueryRunner {
+            code: 0,
+            stdout: "   \n",
+            installed_binary: true,
+        };
+
+        let answer = query_installed(&runner, limits(), DistroManager::Pacman, "git");
+
+        assert_eq!(answer, Some(None));
+    }
+
+    #[test]
+    fn each_manager_parses_its_own_output_shape_through_the_query() {
+        let cases = [
+            (DistroManager::Apt, "2.46.0-1", "2.46.0-1"),
+            (DistroManager::Pacman, "git 2.46.0-1", "2.46.0-1"),
+            (DistroManager::Apk, "git-2.46.0-r0", "2.46.0-r0"),
+            (DistroManager::Dnf, "2.46.0-1.fc41", "2.46.0-1.fc41"),
+        ];
+
+        for (manager, stdout, expected) in cases {
+            let runner = QueryRunner {
+                code: 0,
+                stdout,
+                installed_binary: true,
+            };
+            assert_eq!(
+                query_installed(&runner, limits(), manager, "git"),
+                Some(Some(expected.to_owned())),
+                "{} mis-parsed {stdout:?}",
+                manager.id()
+            );
+        }
     }
 
     #[test]

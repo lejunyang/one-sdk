@@ -102,6 +102,10 @@ impl PackageKey {
         let manager = match manager {
             "winget" => ManagerKind::Winget,
             "brew" => ManagerKind::Homebrew,
+            "apt" => ManagerKind::Distro(super::distro::DistroManager::Apt),
+            "apk" => ManagerKind::Distro(super::distro::DistroManager::Apk),
+            "pacman" => ManagerKind::Distro(super::distro::DistroManager::Pacman),
+            "dnf" => ManagerKind::Distro(super::distro::DistroManager::Dnf),
             other => {
                 return Err(KeyError::UnknownManager {
                     manager: other.to_owned(),
@@ -137,7 +141,8 @@ impl std::fmt::Display for KeyError {
             ),
             Self::UnknownManager { manager, key } => write!(
                 formatter,
-                "`{key}` names an unknown manager `{manager}`; use `winget` or `brew`"
+                "`{key}` names an unknown manager `{manager}`; use one of \
+                 winget, brew, apt, apk, pacman, dnf"
             ),
             Self::EmptyPackageId { key } => {
                 write!(formatter, "`{key}` has a manager prefix but no package id")
@@ -168,11 +173,9 @@ impl SyspkgConfig {
         if self.managers.is_empty() {
             return true;
         }
-        let name = match manager {
-            ManagerKind::Winget => "winget",
-            ManagerKind::Homebrew => "brew",
-        };
-        self.managers.iter().any(|allowed| allowed == name)
+        // `id()` is the same spelling used in configuration keys, so the two
+        // cannot drift apart into a list that silently matches nothing.
+        self.managers.iter().any(|allowed| allowed == manager.id())
     }
 
     /// Parse every package key, keeping malformed ones as reportable errors.

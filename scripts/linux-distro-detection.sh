@@ -50,18 +50,21 @@ if [[ ! -x "$binary" ]]; then
     exit 1
 fi
 
-# distro image                     expected present   expected absent
+# image | manager it ships | managers it does not | a package it always has
+#
+# The last column must be present in the base image itself, with no install
+# step: it is the ground truth the status query is checked against.
 cases=(
-    "debian:stable-slim|apt|pacman dnf"
-    "alpine:latest|apk|apt pacman dnf"
-    "archlinux:latest|pacman|apt dnf"
-    "fedora:latest|dnf|apt pacman"
+    "debian:stable-slim|apt|pacman dnf|coreutils"
+    "alpine:latest|apk|apt pacman dnf|busybox"
+    "archlinux:latest|pacman|apt dnf|coreutils"
+    "fedora:latest|dnf|apt pacman|coreutils"
 )
 
 failures=0
 
 for case_line in "${cases[@]}"; do
-    IFS='|' read -r image expect_present expect_absent <<<"$case_line"
+    IFS='|' read -r image expect_present expect_absent known_present <<<"$case_line"
     echo
     echo "=== $image: expecting $expect_present ==="
 
@@ -104,6 +107,56 @@ for case_line in "${cases[@]}"; do
             echo "  ok: $absent correctly absent"
         fi
     done
+
+    # Detection proves the manager was found. This proves the *query* interface
+    # works: that `dpkg-query -W -f=` and friends exist, exit as expected, and
+    # print what the parser assumes. A changed flag would leave every unit test
+    # green and every status report wrong, which is the failure only a real
+    # distribution can reveal.
+    status_output="$(
+        "$runtime" run --rm \
+            -v "$binary:/usr/local/bin/osdk:ro" \
+            -e OSDK_DATA_DIR=/tmp/osdk-data \
+            -e OSDK_CONFIG_DIR=/tmp/osdk-config \
+            -e OSDK_CACHE_DIR=/tmp/osdk-cache \
+            -e OSDK_YES=true \
+            "$image" \
+            sh -c "$prelude
+mkdir -p /tmp/proj && cd /tmp/proj
+cat > osdk.toml <<'TOML'
+[syspkg]
+managers = [\"$expect_present\"]
+
+[syspkg.packages]
+\"$expect_present:$known_present\" = \"latest\"
+\"$expect_present:definitely-not-a-real-package-osdk\" = \"latest\"
+TOML
+osdk --yes trust >/dev/null 2>&1
+osdk pkg status --json" 2>&1
+    )" || true
+
+    # A package the base image is guaranteed to have must read as satisfied.
+    if grep -q "\"id\":\"$known_present\",\"requested\":\"latest\",\"installed\":\"[^\"]" <<<"$status_output"; then
+        echo "  ok: $known_present reported installed with a version"
+    else
+        echo "  FAIL: $known_present was not reported as installed with a version" >&2
+        echo "$status_output" >&2
+        failures=$((failures + 1))
+    fi
+
+    # And one that cannot exist must read as missing -- not as "manager
+    # unavailable", which would mean the query never ran.
+    if grep -q '"state":"missing"' <<<"$status_output"; then
+        echo "  ok: an absent package is reported missing"
+    else
+        echo "  FAIL: the absent package was not reported missing" >&2
+        echo "$status_output" >&2
+        failures=$((failures + 1))
+    fi
+    if grep -q '"state":"manager-unavailable"' <<<"$status_output"; then
+        echo "  FAIL: the query did not run; the manager was reported unavailable" >&2
+        failures=$((failures + 1))
+    fi
 
     # Detection must never elevate. Running as root in a container would hide a
     # sudo call, so assert the output never mentions one.

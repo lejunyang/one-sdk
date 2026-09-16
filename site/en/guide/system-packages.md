@@ -104,6 +104,31 @@ package present at a different version is reported honestly and **left alone** â
 reinstalling it would change something you did not ask to change.
 :::
 
+### Linux packages belong in `[syspkg.packages]` too
+
+```toml
+[syspkg]
+managers = ["apt"]
+
+[syspkg.packages]
+"apt:libssl-dev" = "latest"
+"apk:build-base" = "latest"
+"pacman:base-devel" = "latest"
+"dnf:openssl-devel" = "latest"
+```
+
+`osdk pkg status` queries each one through its project's documented read-only
+interface. No sudo is involved.
+
+::: warning "Could not ask" is not "not installed"
+When the host has no apt at all -- an `apt:` entry evaluated on Fedora, say --
+osdk reports **manager unavailable**, not **missing**.
+
+The distinction is not pedantry: treating an unanswered question as a negative
+answer would make `--missing` fail spuriously in CI, and would send you
+installing a package you may already have. Only a manager that actually answered
+"no such package" produces `missing`.
+:::
 ## Checking status
 
 ```bash

@@ -21,6 +21,14 @@ pub const SYSPKG_DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 pub enum ManagerKind {
     Winget,
     Homebrew,
+    /// A Linux distribution's own package manager.
+    ///
+    /// Carried in the same enum so `[syspkg.packages]` can name one, but these
+    /// are not interchangeable with the two above: they own `/usr`, they need
+    /// root, and their failure-recovery guarantees differ from each other. Use
+    /// [`Self::is_distro`] wherever a code path assumes it can drive a manager
+    /// the way it drives winget.
+    Distro(super::distro::DistroManager),
 }
 
 impl ManagerKind {
@@ -30,7 +38,27 @@ impl ManagerKind {
         match self {
             Self::Winget => "winget",
             Self::Homebrew => "brew",
+            Self::Distro(manager) => manager.program(),
         }
+    }
+
+    /// The name used in configuration keys and in reports.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Winget => "winget",
+            Self::Homebrew => "brew",
+            Self::Distro(manager) => manager.id(),
+        }
+    }
+
+    /// Whether this is a Linux distribution manager.
+    ///
+    /// Exists so a path written for winget cannot quietly accept one: mirror
+    /// registration, `--source` selection and the MSIX-shaped reasoning behind
+    /// them have no meaning for apt, and treating a distro manager as "just
+    /// another manager" is how that becomes a silent misbehaviour.
+    pub const fn is_distro(self) -> bool {
+        matches!(self, Self::Distro(_))
     }
 }
 

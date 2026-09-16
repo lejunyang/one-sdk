@@ -167,6 +167,10 @@ pub fn acceleration_of(manager: ManagerKind, source_id: &str) -> Option<Accelera
         }
         // Homebrew is not wired up yet; claiming knowledge here would be a lie.
         ManagerKind::Homebrew => None,
+        // A distro mirror is a different mechanism: a source list apt reads
+        // per invocation, not a registered source carrying an id. Answering
+        // from WINGET_MIRRORS here would be nonsense dressed as a fact.
+        ManagerKind::Distro(_) => None,
     }
 }
 

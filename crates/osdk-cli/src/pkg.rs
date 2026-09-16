@@ -133,14 +133,18 @@ fn build_status(app: &App) -> Result<syspkg::StatusReport> {
     let platform_os = platform_os_name();
     let statuses = parsed
         .iter()
-        .map(|(key, request)| {
-            let available = match key.manager {
-                ManagerKind::Winget if config.allows(ManagerKind::Winget) => installed.as_deref(),
-                // Homebrew is not implemented, and a manager excluded by config
-                // must not be reported on as though it had been queried.
-                _ => None,
-            };
-            syspkg::evaluate(key, request, available, platform_os)
+        .map(|(key, request)| match key.manager {
+            // A distro manager answers one package at a time -- there is no
+            // cheap bulk export like winget's -- so it is queried per entry.
+            ManagerKind::Distro(manager) if config.allows(key.manager) => {
+                distro_status(&runner, manager, key, request, platform_os)
+            }
+            ManagerKind::Winget if config.allows(ManagerKind::Winget) => {
+                syspkg::evaluate(key, request, installed.as_deref(), platform_os)
+            }
+            // Homebrew is not implemented, and a manager excluded by config must
+            // not be reported on as though it had been queried.
+            _ => syspkg::evaluate(key, request, None, platform_os),
         })
         .collect();
 
@@ -148,6 +152,75 @@ fn build_status(app: &App) -> Result<syspkg::StatusReport> {
         statuses,
         key_errors.iter().map(ToString::to_string).collect(),
     ))
+}
+
+/// Evaluate one distro package against the host.
+///
+/// Written out rather than routed through `syspkg::evaluate` because the two
+/// have different shapes of evidence: winget hands over a whole installed set,
+/// while a distro manager answers a single question and can decline to answer at
+/// all. The declined case has to stay distinct from "not installed", or a host
+/// without apt would report every apt package as missing.
+fn distro_status(
+    runner: &SystemCommandRunner,
+    manager: osdk_core::syspkg::DistroManager,
+    key: &osdk_core::syspkg::PackageKey,
+    request: &osdk_core::syspkg::PackageRequest,
+    platform_os: &str,
+) -> syspkg::PackageStatus {
+    let requested = if request.wants_latest() {
+        "latest".to_owned()
+    } else {
+        request.version.clone()
+    };
+
+    let not_for_here = request
+        .os
+        .as_ref()
+        .is_some_and(|wanted| !wanted.eq_ignore_ascii_case(platform_os));
+    if not_for_here {
+        return syspkg::PackageStatus {
+            manager: key.manager,
+            id: key.id.clone(),
+            requested,
+            installed: None,
+            state: syspkg::PackageState::NotApplicable,
+        };
+    }
+
+    match syspkg::installed_distro_package(runner, manager, &key.id) {
+        // The manager answered and has it.
+        Some(Some(version)) => {
+            let state = if request.wants_latest() || version == request.version {
+                syspkg::PackageState::Satisfied
+            } else {
+                syspkg::PackageState::VersionDiffers
+            };
+            syspkg::PackageStatus {
+                manager: key.manager,
+                id: key.id.clone(),
+                requested,
+                installed: Some(version),
+                state,
+            }
+        }
+        // The manager answered and does not have it.
+        Some(None) => syspkg::PackageStatus {
+            manager: key.manager,
+            id: key.id.clone(),
+            requested,
+            installed: None,
+            state: syspkg::PackageState::Missing,
+        },
+        // The manager could not be asked. Not evidence of absence.
+        None => syspkg::PackageStatus {
+            manager: key.manager,
+            id: key.id.clone(),
+            requested,
+            installed: None,
+            state: syspkg::PackageState::ManagerUnavailable,
+        },
+    }
 }
 
 /// The platform name `[syspkg.packages]` `os` values are matched against.
@@ -714,11 +787,17 @@ fn status_label(status: ManagerStatus) -> &'static str {
     }
 }
 
+/// The name shown for a manager, identical to the one used in config keys.
+///
+/// Delegated rather than re-spelled here: two lists of the same names drift,
+/// and a report that calls a manager something the config will not accept is
+/// worse than no label.
 fn manager_label(manager: ManagerKind) -> &'static str {
-    match manager {
-        ManagerKind::Winget => "winget",
-        ManagerKind::Homebrew => "homebrew",
+    if manager == ManagerKind::Homebrew {
+        // The only place the display name differs from the config key.
+        return "homebrew";
     }
+    manager.id()
 }
 
 fn trust_label(trust: SourceTrust) -> &'static str {
@@ -743,6 +822,10 @@ fn remedy(report: &ManagerReport) -> Option<&'static str> {
         (ManagerKind::Homebrew, ManagerStatus::NotInstalled) => {
             Some("install Homebrew from https://brew.sh")
         }
+        // A distro manager is whatever the distribution ships. "apt is
+        // missing on Fedora" is not a defect, and telling someone to install
+        // apt there would be actively bad advice.
+        (ManagerKind::Distro(_), _) => None,
         (_, ManagerStatus::PermissionDenied) => {
             Some("the executable exists but this account may not run it")
         }

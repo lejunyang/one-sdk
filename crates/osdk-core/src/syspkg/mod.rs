@@ -40,7 +40,7 @@ pub use apply::{
     Infeasible, MirrorPlan, PlannedCommand, RegistrationShape,
 };
 pub use config::{KeyError, PackageKey, PackageRequest, SyspkgConfig};
-pub use distro::{DistroManager, DistroReport, RollbackAbility};
+pub use distro::{query_installed, DistroManager, DistroReport, RollbackAbility};
 pub use elevate::{Elevation, ElevationContext, RefusalReason};
 pub use install::{
     explain_install_code, install_succeeded, plan_installs, run_installs, InstallPlan,
@@ -84,12 +84,6 @@ pub fn diagnose_all(runner: &dyn CommandRunner) -> SystemPackageReport {
         .with_distro_managers(distro::detect(runner, DISCOVERY_LIMITS))
 }
 
-/// The sources a manager currently has registered.
-///
-/// Wraps the per-manager query so callers need not carry [`DISCOVERY_LIMITS`]
-/// around. Returns an empty list for a manager osdk cannot query, which is the
-/// answer that makes selection omit `--source` instead of naming a source the
-/// host may not have.
 /// Every winget package the host reports as installed, or `None` when winget
 /// could not be queried.
 ///
@@ -102,12 +96,28 @@ pub fn installed_winget_packages(
     winget::installed_packages(runner, DISCOVERY_LIMITS, scratch_directory)
 }
 
+/// Whether a distro manager has a package, and at what version.
+///
+/// `None` means the question went unanswered -- the manager is absent or the
+/// probe failed -- which callers must not report as "the package is missing".
+pub fn installed_distro_package(
+    runner: &dyn CommandRunner,
+    manager: distro::DistroManager,
+    package: &str,
+) -> Option<Option<String>> {
+    distro::query_installed(runner, DISCOVERY_LIMITS, manager, package)
+}
+
 /// The sources a manager currently has registered.
 pub fn registered_sources(runner: &dyn CommandRunner, manager: ManagerKind) -> Vec<SourceRecord> {
     match manager {
         ManagerKind::Winget => winget::registered_sources(runner, DISCOVERY_LIMITS),
         // Homebrew is not wired up yet; an empty list keeps selection honest.
         ManagerKind::Homebrew => Vec::new(),
+        // Distro managers have no registered-source concept to enumerate:
+        // apt reads a source list, it does not keep a named registry the way
+        // winget does. An empty list is the honest answer, not a gap.
+        ManagerKind::Distro(_) => Vec::new(),
     }
 }
 
