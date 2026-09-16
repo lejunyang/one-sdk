@@ -26,13 +26,21 @@
 //!   read-only probes.
 
 pub mod apply;
+pub mod config;
+pub mod install;
 pub mod mirror;
 pub mod report;
+pub mod status;
 pub mod winget;
 
 pub use apply::{
     apply_plan, assess_feasibility, fingerprint_sources, ApplyOutcome, ApplyRefused, Consequence,
     Infeasible, MirrorPlan, PlannedCommand, RegistrationShape,
+};
+pub use config::{KeyError, PackageKey, PackageRequest, SyspkgConfig};
+pub use install::{
+    explain_install_code, install_succeeded, plan_installs, run_installs, InstallPlan,
+    InstallResult, PlannedInstall, SkipReason, SkippedPackage,
 };
 pub use mirror::{
     acceleration_of, effective_winget_sources, preferred_winget_source, probe_winget_sources,
@@ -44,6 +52,10 @@ pub use report::{
     Capability, CapabilityStatus, ManagerDetails, ManagerKind, ManagerReport, ManagerStatus,
     ProbeOutcome, ProbePurpose, ProbeRecord, SourceRecord, SourceTrust, SystemPackageReport,
     WingetDetails, SYSPKG_DIAGNOSTIC_SCHEMA_VERSION,
+};
+pub use status::{
+    evaluate, parse_exported_packages, ExportedPackage, PackageState, PackageStatus, StatusReport,
+    SYSPKG_STATUS_SCHEMA_VERSION,
 };
 
 use std::time::Duration;
@@ -73,6 +85,19 @@ pub fn diagnose_all(runner: &dyn CommandRunner) -> SystemPackageReport {
 /// around. Returns an empty list for a manager osdk cannot query, which is the
 /// answer that makes selection omit `--source` instead of naming a source the
 /// host may not have.
+/// Every winget package the host reports as installed, or `None` when winget
+/// could not be queried.
+///
+/// `None` must be reported as unknown rather than as an empty host: "winget is
+/// unavailable" is not evidence that a package is absent.
+pub fn installed_winget_packages(
+    runner: &dyn CommandRunner,
+    scratch_directory: &std::path::Path,
+) -> Option<Vec<status::ExportedPackage>> {
+    winget::installed_packages(runner, DISCOVERY_LIMITS, scratch_directory)
+}
+
+/// The sources a manager currently has registered.
 pub fn registered_sources(runner: &dyn CommandRunner, manager: ManagerKind) -> Vec<SourceRecord> {
     match manager {
         ManagerKind::Winget => winget::registered_sources(runner, DISCOVERY_LIMITS),

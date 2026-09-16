@@ -29,6 +29,42 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
             }
             Ok(())
         }
+        PkgCommand::Status { missing, json } => {
+            let report = build_status(app)?;
+            if json {
+                serde_json::to_writer(&mut stdout, &report)
+                    .context("serializing package status")?;
+                writeln!(stdout)?;
+            } else {
+                write_status(&mut stdout, &report)?;
+            }
+            // `--missing` is the CI contract: a requested package that is absent
+            // must fail the check. A version difference does not, because the
+            // config never promised to hold a version.
+            if missing && report.has_missing() {
+                anyhow::bail!("some requested packages are not installed");
+            }
+            Ok(())
+        }
+        PkgCommand::Plan {
+            json,
+            detailed_exitcode,
+        } => {
+            let (plan, _) = build_plan(app)?;
+            if json {
+                serde_json::to_writer(&mut stdout, &plan).context("serializing package plan")?;
+                writeln!(stdout)?;
+            } else {
+                write_install_plan(&mut stdout, &plan)?;
+            }
+            if detailed_exitcode && !plan.is_empty() {
+                // 2 means "changes pending", distinct from 1 for a real error,
+                // so a pipeline can branch without parsing output.
+                std::process::exit(2);
+            }
+            Ok(())
+        }
+        PkgCommand::Apply { dry_run, yes, json } => apply_packages(app, dry_run, yes, json).await,
         PkgCommand::Mirrors { command } => match command {
             PkgMirrorsCommand::Test { manager, json } => {
                 let manager = match manager {
@@ -71,6 +107,218 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
                 apply_mirror(app, manager, dry_run, accept_plan.as_deref(), json).await
             }
         },
+    }
+}
+
+/// Compare `[syspkg.packages]` against the host.
+///
+/// The installed set is read once and reused for every request, so a report is
+/// one query rather than one per package.
+fn build_status(app: &App) -> Result<syspkg::StatusReport> {
+    let config = &app.ctx.config.sources.syspkg;
+    let (parsed, key_errors) = config.parsed_packages();
+    let runner = SystemCommandRunner;
+
+    // Query only when something actually asks for that manager, so a project
+    // with no winget packages never shells out to winget.
+    let wants_winget = parsed
+        .iter()
+        .any(|(key, _)| key.manager == ManagerKind::Winget);
+    let installed = if wants_winget && config.allows(ManagerKind::Winget) {
+        syspkg::installed_winget_packages(&runner, &app.ctx.dirs.cache)
+    } else {
+        None
+    };
+
+    let platform_os = platform_os_name();
+    let statuses = parsed
+        .iter()
+        .map(|(key, request)| {
+            let available = match key.manager {
+                ManagerKind::Winget if config.allows(ManagerKind::Winget) => installed.as_deref(),
+                // Homebrew is not implemented, and a manager excluded by config
+                // must not be reported on as though it had been queried.
+                _ => None,
+            };
+            syspkg::evaluate(key, request, available, platform_os)
+        })
+        .collect();
+
+    Ok(syspkg::StatusReport::new(
+        statuses,
+        key_errors.iter().map(ToString::to_string).collect(),
+    ))
+}
+
+/// The platform name `[syspkg.packages]` `os` values are matched against.
+fn platform_os_name() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// Build an install plan from the current status.
+fn build_plan(app: &App) -> Result<(syspkg::InstallPlan, syspkg::StatusReport)> {
+    let config = &app.ctx.config.sources.syspkg;
+    let report = build_status(app)?;
+    let (parsed, _) = config.parsed_packages();
+
+    let triples: Vec<_> = parsed
+        .into_iter()
+        .filter_map(|(key, request)| {
+            report
+                .packages
+                .iter()
+                .find(|status| status.id == key.id && status.manager == key.manager)
+                .cloned()
+                .map(|status| (key, request, status))
+        })
+        .collect();
+
+    let plan = syspkg::plan_installs(&triples, |manager| config.allows(manager));
+    Ok((plan, report))
+}
+
+/// Install what is missing, after showing exactly what that is.
+async fn apply_packages(app: &App, dry_run: bool, yes: bool, json: bool) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    let (plan, _) = build_plan(app)?;
+
+    if plan.is_empty() {
+        if json {
+            serde_json::to_writer(&mut stdout, &serde_json::json!({ "installed": [] }))
+                .context("serializing package apply result")?;
+            writeln!(stdout)?;
+        } else {
+            writeln!(
+                stdout,
+                "Nothing to install: every requested package is present."
+            )?;
+        }
+        return Ok(());
+    }
+
+    if dry_run {
+        if json {
+            serde_json::to_writer(&mut stdout, &plan).context("serializing package plan")?;
+            writeln!(stdout)?;
+        } else {
+            write_install_plan(&mut stdout, &plan)?;
+        }
+        return Ok(());
+    }
+
+    if !yes {
+        // Installing software is not something to do on an implied yes.
+        write_install_plan(&mut stdout, &plan)?;
+        writeln!(
+            stdout,
+            "\nNothing has been installed. Re-run with --yes to proceed."
+        )?;
+        anyhow::bail!("confirmation required");
+    }
+
+    let runner = SystemCommandRunner;
+    let results = syspkg::run_installs(&runner, &plan);
+    let failed = results.iter().filter(|r| !r.succeeded).count();
+
+    if json {
+        serde_json::to_writer(&mut stdout, &serde_json::json!({ "installed": results }))
+            .context("serializing package apply result")?;
+        writeln!(stdout)?;
+    } else {
+        for result in &results {
+            let mark = if result.succeeded { "ok" } else { "failed" };
+            writeln!(stdout, "  {mark}: {} -- {}", result.id, result.explanation)?;
+        }
+    }
+
+    if failed > 0 {
+        anyhow::bail!("{failed} package(s) could not be installed");
+    }
+    Ok(())
+}
+
+/// Render a status report.
+fn write_status(output: &mut dyn Write, report: &syspkg::StatusReport) -> Result<()> {
+    if report.packages.is_empty() && report.invalid_keys.is_empty() {
+        writeln!(
+            output,
+            "No system packages are configured. Add them under [syspkg.packages]."
+        )?;
+        return Ok(());
+    }
+
+    writeln!(output, "System packages")?;
+    for package in &report.packages {
+        let installed = package.installed.as_deref().unwrap_or("-");
+        writeln!(
+            output,
+            "  {:<40} {:<16} requested {} (installed {})",
+            package.id,
+            state_label(package.state),
+            package.requested,
+            installed
+        )?;
+    }
+
+    // Surfaced rather than logged: a key osdk cannot read is a package the user
+    // believes is managed, so "nothing missing" would be untrue while it exists.
+    for invalid in &report.invalid_keys {
+        writeln!(output, "  invalid entry: {invalid}")?;
+    }
+    Ok(())
+}
+
+fn state_label(state: syspkg::PackageState) -> &'static str {
+    match state {
+        syspkg::PackageState::Satisfied => "ok",
+        syspkg::PackageState::VersionDiffers => "other version",
+        syspkg::PackageState::Missing => "missing",
+        syspkg::PackageState::NotApplicable => "not for this os",
+        syspkg::PackageState::ManagerUnavailable => "manager unavailable",
+    }
+}
+
+/// Render an install plan, including what it deliberately leaves alone.
+fn write_install_plan(output: &mut dyn Write, plan: &syspkg::InstallPlan) -> Result<()> {
+    if plan.installs.is_empty() {
+        writeln!(output, "Nothing to install.")?;
+    } else {
+        writeln!(output, "Would install:")?;
+        for install in &plan.installs {
+            writeln!(output, "  {} ({})", install.id, install.version)?;
+            writeln!(output, "    {}", install.command.display())?;
+        }
+    }
+
+    if !plan.skipped.is_empty() {
+        writeln!(output, "\nLeft alone:")?;
+        for skipped in &plan.skipped {
+            writeln!(
+                output,
+                "  {:<40} {}",
+                skipped.id,
+                skip_label(skipped.reason)
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn skip_label(reason: syspkg::SkipReason) -> &'static str {
+    match reason {
+        syspkg::SkipReason::AlreadySatisfied => "already installed",
+        syspkg::SkipReason::VersionDiffersButPresent => {
+            "present at another version; the configured version is a wish, not a lock"
+        }
+        syspkg::SkipReason::NotApplicable => "not for this operating system",
+        syspkg::SkipReason::ManagerUnavailable => "its manager could not be queried",
+        syspkg::SkipReason::ManagerNotAllowed => "its manager is excluded by [syspkg] managers",
     }
 }
 

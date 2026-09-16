@@ -69,6 +69,113 @@ list` prints its columns as 名称 / ID / 版本. osdk's JSON is not: the keys a
 values are the same in every display language, and two runs are byte-identical.
 :::
 
+## Declaring which system packages you need
+
+Declare them in the project's `osdk.toml`, keyed by `manager:package-id`:
+
+```toml
+[syspkg]
+managers = ["winget"]     # only winget may participate; empty means no restriction
+no_elevate = false
+
+[syspkg.packages]
+"winget:BurntSushi.ripgrep.MSVC" = "latest"
+"winget:Microsoft.PowerToys" = "0.101.0"
+"winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
+```
+
+The manager prefix is required. Package ids are not portable across managers —
+winget's `PackageIdentifier` is case-sensitive and mirrors a repository path,
+and brew additionally separates a formula from a cask — so osdk does not map
+names between managers and asks you to say which one you mean.
+
+::: warning `[syspkg]` must be trusted first
+This table can cause software to be installed on your machine, which makes it
+execution-affecting project configuration, so it goes through osdk's existing
+trust flow. Until the project is trusted, every `pkg` subcommand refuses and
+tells you to run `osdk trust`.
+:::
+
+::: tip A version is a wish, not a lock
+The version in `[syspkg.packages]` means "ask for this when installing", not
+"hold the host at this version". A system package manager updates on its own
+schedule, and `osdk.lock` deliberately does **not** cover system packages. A
+package present at a different version is reported honestly and **left alone** —
+reinstalling it would change something you did not ask to change.
+:::
+
+## Checking status
+
+```bash
+osdk pkg status
+osdk pkg status --json
+osdk pkg status --missing     # exit non-zero when something is absent, for CI
+```
+
+```text
+System packages
+  7zip.7zip            other version    requested 1.0.0-wrong (installed 22.01)
+  Git.Git              ok               requested latest (installed 2.46.0)
+  Some.MacTool         not for this os  requested latest (installed -)
+  This.Is.Absent       missing          requested latest (installed -)
+  invalid entry: `broken-no-prefix` needs a manager prefix, for example `winget:broken-no-prefix`
+```
+
+Two of the five states are easy to conflate:
+
+- **other version** — installed, at a version other than requested. This is
+  **not** missing, and `--missing` does not fail on it.
+- **manager unavailable** — the manager itself could not be queried, so nothing
+  can be said about the package. That is not the same as "absent": treating it
+  as missing would send you installing something you may already have.
+
+A malformed key is listed as an `invalid entry` rather than ignored: it stands
+for a package you believe is managed, so skipping it silently would make
+"nothing missing" untrue.
+
+## Installing what is missing
+
+```bash
+osdk pkg plan                      # just show what would be installed
+osdk pkg plan --detailed-exitcode  # 2 when work is pending, 0 when it is not
+osdk pkg apply --dry-run
+osdk pkg apply --yes               # the only command that installs anything
+```
+
+A plan accounts for every request — what it will install, and **why it leaves
+the rest alone** — so nothing has to be inferred from an omission:
+
+```text
+Would install:
+  This.Is.Absent (latest)
+    winget install --id This.Is.Absent --exact --no-upgrade ...
+
+Left alone:
+  7zip.7zip     present at another version; the configured version is a wish, not a lock
+  Git.Git       already installed
+  Some.MacTool  not for this operating system
+```
+
+::: warning osdk will not upgrade your packages as a side effect
+This one was found by measurement: running `winget install` on a package that is
+**already present** makes winget upgrade it. On a host holding Git 2.46.0 it
+immediately began downloading 2.55.0.3 — an operation nobody requested.
+
+So osdk always passes `--no-upgrade`. "Make sure this package exists" does only
+that, and never moves you off a version you stayed on deliberately.
+:::
+
+One package failing does not abandon the others: they are independent requests.
+Every outcome is listed, and the command exits non-zero if any failed.
+
+::: tip System packages do not carry osdk-level artifact verification
+osdk hashes and verifies signatures for the SDKs it downloads itself, but it
+never touches the bytes of a system package — downloading and verification are
+winget's (it checks the installer hash declared in the manifest). Worth stating
+plainly, so you do not assume `osdk pkg apply` gives the same guarantees as
+`osdk install`.
+:::
+
 ## Three source paths, not one
 
 Three things in osdk are called a "source", and they govern different things:

@@ -64,6 +64,100 @@ Nothing to fix.
 两次运行的输出逐字节一致。
 :::
 
+## 声明需要哪些系统包
+
+在项目的 `osdk.toml` 里声明，键名格式是 `管理器:包 ID`：
+
+```toml
+[syspkg]
+managers = ["winget"]     # 只允许 winget 参与；留空表示不限制
+no_elevate = false
+
+[syspkg.packages]
+"winget:BurntSushi.ripgrep.MSVC" = "latest"
+"winget:Microsoft.PowerToys" = "0.101.0"
+"winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
+```
+
+管理器前缀是必需的。包 ID 不跨平台通用——winget 的 `PackageIdentifier` 区分大小写且
+对应仓库路径，brew 还要再分 formula 和 cask——所以 osdk 不做跨管理器的名称映射，
+要求你写明是哪一个。
+
+::: warning `[syspkg]` 需要先信任
+这个表能导致在你机器上安装软件，属于会影响执行的项目配置，因此纳入 osdk 既有的信任
+流程。未信任时任何 `pkg` 子命令都会拒绝执行并提示你先 `osdk trust`。
+:::
+
+::: tip 版本是「期望」，不是「锁定」
+`[syspkg.packages]` 里的版本含义是「安装时按这个要求」，不是「把宿主固定在这个版本」。
+系统包管理器按自己的节奏更新，`osdk.lock` 也**不覆盖系统包**。已装但版本不同的包，
+osdk 会如实报告、**但不会重装**——那会改动你没要求改的东西。
+:::
+
+## 查看状态
+
+```bash
+osdk pkg status
+osdk pkg status --json
+osdk pkg status --missing     # 有缺失就退出非 0，供 CI 用
+```
+
+```text
+System packages
+  7zip.7zip            other version    requested 1.0.0-wrong (installed 22.01)
+  Git.Git              ok               requested latest (installed 2.46.0)
+  Some.MacTool         not for this os  requested latest (installed -)
+  This.Is.Absent       missing          requested latest (installed -)
+  invalid entry: `broken-no-prefix` needs a manager prefix, for example `winget:broken-no-prefix`
+```
+
+五种状态各有不同含义，其中两种容易混淆：
+
+- **other version**：装了，但版本与请求不同。**不算缺失**，`--missing` 不会因它失败。
+- **manager unavailable**：管理器本身查不到，因此**无法判断**这个包在不在。这不等于
+  「包不存在」——把它当缺失会让你去装一个可能已经装了的东西。
+
+写错的键会作为 `invalid entry` 列出而**不是被忽略**：它代表一个你以为被管理的包，
+静默跳过就会让「没有缺失」变成假话。
+
+## 安装缺失的包
+
+```bash
+osdk pkg plan                      # 只看要装什么
+osdk pkg plan --detailed-exitcode  # 有待办返回 2，无待办返回 0
+osdk pkg apply --dry-run
+osdk pkg apply --yes               # 唯一会装东西的命令
+```
+
+计划会把每个请求都交代清楚——要装的、以及**为什么其余的不装**，不需要你从省略里推断：
+
+```text
+Would install:
+  This.Is.Absent (latest)
+    winget install --id This.Is.Absent --exact --no-upgrade ...
+
+Left alone:
+  7zip.7zip     present at another version; the configured version is a wish, not a lock
+  Git.Git       already installed
+  Some.MacTool  not for this operating system
+```
+
+::: warning osdk 不会顺手升级你的包
+这一点是实测出来的坑：对**已安装**的包执行 `winget install`，winget 会自动开始升级它。
+在装有 Git 2.46.0 的机器上实测，它立刻开始下载 2.55.0.3——而这不是你请求的操作。
+
+所以 osdk 一律附加 `--no-upgrade`。「确保包存在」就只做这件事，不会改动你刻意停留的版本。
+:::
+
+一个包安装失败不会中断其余的：它们是彼此独立的请求。所有结果都会列出，只要有失败就
+返回非 0。
+
+::: tip 系统包不享有 osdk 级别的产物校验
+osdk 对自己下载的 SDK 做哈希与签名校验，但系统包的字节 osdk 完全不接触——下载与校验
+由 winget 完成（它会校验 manifest 里声明的安装器哈希）。这条界线值得写明，以免你以为
+`osdk pkg apply` 装的东西和 `osdk install` 有同等强度的校验。
+:::
+
 ## 三条源链路不要混淆
 
 osdk 里有三处都叫"源"，管的是不同的东西：

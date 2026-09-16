@@ -730,6 +730,47 @@ pub enum PkgCommand {
         json: bool,
     },
 
+    /// Report the host against `[syspkg.packages]`.
+    ///
+    /// Read-only: it queries what is installed and compares, installing nothing.
+    Status {
+        /// Exit non-zero when a requested package is absent. For CI.
+        #[arg(long)]
+        missing: bool,
+        /// Emit the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show which packages would be installed, without installing them.
+    Plan {
+        /// Emit the plan as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Exit 2 when the plan would change something, 0 when it would not.
+        ///
+        /// For pipelines that branch on whether work is pending.
+        #[arg(long)]
+        detailed_exitcode: bool,
+    },
+
+    /// Install the packages `[syspkg.packages]` asks for and the host lacks.
+    ///
+    /// The only package command that changes the system. Packages already
+    /// present are left exactly as they are -- including at another version,
+    /// since the configured version is a wish for install time, not a lock.
+    Apply {
+        /// Print what would be installed and exit.
+        #[arg(long)]
+        dry_run: bool,
+        /// Proceed without the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Emit the outcome as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Inspect mirrors for a system package manager's sources.
     Mirrors {
         #[command(subcommand)]
