@@ -28,6 +28,7 @@
 pub mod apply;
 pub mod config;
 pub mod distro;
+pub mod elevate;
 pub mod install;
 pub mod mirror;
 pub mod report;
@@ -40,6 +41,7 @@ pub use apply::{
 };
 pub use config::{KeyError, PackageKey, PackageRequest, SyspkgConfig};
 pub use distro::{DistroManager, DistroReport, RollbackAbility};
+pub use elevate::{Elevation, ElevationContext, RefusalReason};
 pub use install::{
     explain_install_code, install_succeeded, plan_installs, run_installs, InstallPlan,
     InstallResult, PlannedInstall, SkipReason, SkippedPackage,

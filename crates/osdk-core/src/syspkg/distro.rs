@@ -124,23 +124,45 @@ impl DistroManager {
         }
     }
 
-    /// The command a user would run to install a package themselves.
+    /// The command that installs a package, before any elevation is applied.
     ///
-    /// On Arch this is `-Syu` with the package appended rather than `-S`, because
-    /// Arch supports only full-system upgrades; printing `-S` would hand the user
-    /// a partial upgrade their distribution says is unsupported.
+    /// Returned unelevated on purpose: whether it runs as root, under `sudo`,
+    /// under `sudo --non-interactive`, or not at all is decided by
+    /// [`super::elevate`]. Baking `sudo` in here would pre-empt that decision
+    /// and print the wrong command to a user who is already root.
+    ///
+    /// On Arch this is `-Syu` with the package appended rather than `-S`,
+    /// because Arch supports only full-system upgrades; printing `-S` would hand
+    /// the user a partial upgrade their distribution says is unsupported.
     pub fn install_command(self, package: &str) -> CommandSpec {
         match self {
-            Self::Apt => CommandSpec::new("sudo")
-                .args(["apt-get", "install", "--only-upgrade=false", "-y"])
+            // `--only-upgrade=false` used to be here, and it was wrong. Measured
+            // on Ubuntu 22.04: `--only-upgrade` restricts the operation to
+            // packages already present, dropping an absent package from the plan
+            // entirely (3 `Inst` lines became 0). apt accepted the `=false`
+            // spelling and ignored it, so the command worked by luck rather than
+            // by meaning what it said.
+            Self::Apt => CommandSpec::new("apt-get")
+                .args(["install", "-y"])
                 .arg(package),
-            Self::Apk => CommandSpec::new("sudo").args(["apk", "add"]).arg(package),
-            Self::Pacman => CommandSpec::new("sudo")
-                .args(["pacman", "-Syu", "--needed"])
+            Self::Apk => CommandSpec::new("apk").arg("add").arg(package),
+            Self::Pacman => CommandSpec::new("pacman")
+                .args(["-Syu", "--needed", "--noconfirm"])
                 .arg(package),
-            Self::Dnf => CommandSpec::new("sudo")
-                .args(["dnf", "install", "-y"])
-                .arg(package),
+            Self::Dnf => CommandSpec::new("dnf").args(["install", "-y"]).arg(package),
+        }
+    }
+
+    /// Environment this manager needs in order to stay non-interactive.
+    ///
+    /// apt is the one that matters: without `DEBIAN_FRONTEND=noninteractive` a
+    /// maintainer script can stop at a debconf prompt, which in an automated run
+    /// means hanging rather than failing. It is not a guarantee that every
+    /// maintainer script is non-interactive, and it supplies no credentials.
+    pub fn noninteractive_env(self) -> Vec<(String, String)> {
+        match self {
+            Self::Apt => vec![("DEBIAN_FRONTEND".to_owned(), "noninteractive".to_owned())],
+            Self::Apk | Self::Pacman | Self::Dnf => Vec::new(),
         }
     }
 }
@@ -310,6 +332,98 @@ mod tests {
             args.contains(&"--needed".to_owned()),
             "--needed keeps a rerun idempotent"
         );
+    }
+
+    #[test]
+    fn an_install_command_never_carries_its_own_sudo() {
+        // Elevation is decided by `elevate`, which may conclude "already root"
+        // or "refuse". A hardcoded sudo here would pre-empt that and print the
+        // wrong command to a root user.
+        for manager in DistroManager::ALL {
+            let command = manager.install_command("git");
+            assert_ne!(
+                command.program().to_string_lossy(),
+                "sudo",
+                "{} must leave elevation to the caller",
+                manager.id()
+            );
+            let args: Vec<String> = command
+                .arguments()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !args.iter().any(|a| a == "sudo"),
+                "{} smuggled sudo into its arguments: {args:?}",
+                manager.id()
+            );
+        }
+    }
+
+    #[test]
+    fn apt_install_never_restricts_itself_to_already_present_packages() {
+        // Measured on Ubuntu 22.04: `--only-upgrade` drops an absent package
+        // from the plan entirely (3 `Inst` lines became 0), so an install that
+        // passed it would report success having installed nothing.
+        let args: Vec<String> = DistroManager::Apt
+            .install_command("jq")
+            .arguments()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            !args.iter().any(|a| a.starts_with("--only-upgrade")),
+            "this silently turns an install into a no-op: {args:?}"
+        );
+        assert!(args.contains(&"install".to_owned()));
+        assert!(
+            args.contains(&"-y".to_owned()),
+            "must not wait for a prompt"
+        );
+    }
+
+    #[test]
+    fn apt_is_the_one_manager_needing_a_noninteractive_frontend() {
+        // Without it a maintainer script can stop at a debconf prompt, which in
+        // an automated run means hanging rather than failing.
+        let apt: Vec<(String, String)> = DistroManager::Apt.noninteractive_env();
+        assert_eq!(
+            apt,
+            vec![("DEBIAN_FRONTEND".to_owned(), "noninteractive".to_owned())]
+        );
+
+        for manager in [
+            DistroManager::Apk,
+            DistroManager::Pacman,
+            DistroManager::Dnf,
+        ] {
+            assert!(
+                manager.noninteractive_env().is_empty(),
+                "{} needs no frontend override; inventing one would be cargo cult",
+                manager.id()
+            );
+        }
+    }
+
+    #[test]
+    fn every_install_command_avoids_an_interactive_prompt() {
+        for manager in DistroManager::ALL {
+            let args: Vec<String> = manager
+                .install_command("git")
+                .arguments()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let assumes_yes = args.iter().any(|a| a == "-y" || a == "--noconfirm");
+            // apk needs no confirmation flag: `apk add` does not prompt.
+            let exempt = manager == DistroManager::Apk;
+            assert!(
+                assumes_yes || exempt,
+                "{} would stop for a prompt nobody can answer: {args:?}",
+                manager.id()
+            );
+        }
     }
 
     #[test]

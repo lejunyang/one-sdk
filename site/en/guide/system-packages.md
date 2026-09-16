@@ -223,6 +223,27 @@ snapper, which would give filesystem-level rollback, and zypper documents an
 exit-code table. Listing it as "same as apt" would assert something unchecked.
 :::
 
+### Elevation: four cases, and never a hang
+
+Linux package managers need root. osdk decides what to do from the four cases
+below, checked in this order:
+
+| Case | What osdk does |
+| --- | --- |
+| **Already root** (containers, CI) | Runs directly, without invoking sudo — it may not even be installed there, and is not needed |
+| **Elevation forbidden** (`no_elevate = true`) | Does not run; prints the command for you |
+| **Passwordless sudo available** | Uses `sudo --non-interactive`, which cannot prompt |
+| **Interactive terminal** | Ordinary `sudo`, prompting as usual |
+| **No terminal and no passwordless sudo** | **Refuses and prints the full command**, rather than waiting for a password nobody will type |
+
+That last row is why the policy exists: hanging on a password prompt in a CI job
+with no TTY burns the entire job timeout before saying anything — **a hang is
+worse than a failure**.
+
+Note that `no_elevate` forbids *elevating*, not doing work that requires root.
+It has no effect when you are already root, because no elevation happens there.
+
+In every case the full command line is recorded before it runs.
 ## Three source paths, not one
 
 Three things in osdk are called a "source", and they govern different things:
