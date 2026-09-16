@@ -148,6 +148,11 @@ osdk upgrade
 osdk exec --tool node@20 -- node --version
 ```
 
+`osdk lock` writes only the tools the project itself declares into `osdk.lock`;
+pins that live in your user-global configuration stay out, so the lock is safe to
+commit and reproduces on someone else's machine. To lock a global tool too,
+declare it in the project configuration or name it with `osdk lock <tool>`.
+
 For immutable Rust reproduction, pin an explicit or dated toolchain. Floating
 rustup channels such as `stable`, `beta`, and `nightly` remain floating when
 written to the lock.

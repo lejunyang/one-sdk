@@ -79,7 +79,16 @@ pub async fn install(
 }
 
 pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let explicit = !tools.is_empty();
     let requests = gather_requests(app, tools)?;
+    // Without operands the lock describes the project, so global pins are
+    // dropped here rather than in `gather_requests`, which `install` / `exec` /
+    // `outdated` share and where the global layer must keep applying.
+    let requests = if explicit {
+        requests
+    } else {
+        project_scoped_requests(app, requests)
+    };
     let mut resolved = resolve_requests(app, requests, opts).await?;
     // A reproducible npm tool lock includes npm's exact transitive graph.
     // Ensure managed Node is present first, then ask each npm package backend
@@ -161,11 +170,23 @@ pub async fn outdated(app: &mut App, tools: Vec<String>) -> Result<()> {
 }
 
 pub async fn upgrade(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let explicit = !tools.is_empty();
     let requests = gather_requests(app, tools)?;
     let resolved = install_requests(app, requests, opts, false, false).await?;
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
-    crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &resolved)?;
+    // Upgrading installs every configured tool, global pins included -- that is
+    // what the user asked for. Recording them is a separate question: the lock
+    // belongs to the project, so only its own tools are written.
+    let recorded = if explicit {
+        resolved
+    } else {
+        resolved
+            .into_iter()
+            .filter(|(request, _)| project_owns_request(app, request))
+            .collect()
+    };
+    crate::lockfile::merge_resolved(&path, app.ctx.platform, &app.ctx.dirs, &recorded)?;
     println!("updated {}", path.display());
     Ok(())
 }
@@ -1329,6 +1350,61 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Tool requests to write into a project lock when the command named none.
+///
+/// `osdk.lock` sits next to a project's own config and is committed with it, so
+/// it must describe that project -- not whatever the machine that ran `lock`
+/// happened to have pinned globally. `gather_requests` deliberately reads the
+/// *merged* configuration, because `install` / `exec` / `outdated` all want the
+/// global layer to apply; feeding that same merged set to the lock writer put
+/// every global pin into the project file. A project pinning one tool produced
+/// a lock naming fourteen, and a global `java = "26"` was written into a project
+/// that pins `21`.
+///
+/// The provenance needed to tell the layers apart is already recorded in
+/// `tool_origins`, which shell activation has been consulting all along. Only
+/// entries the project itself contributed are kept: its config file and its
+/// `.tool-versions`. Explicit operands are never filtered -- naming a tool is an
+/// instruction, and `osdk lock java` still locks java.
+///
+/// Backends injected from project evidence rather than from a config layer
+/// (`packageManager` in `package.json`, a discovered Node range) carry no origin
+/// entry. They are project facts by construction, so an absent origin is kept.
+fn project_scoped_requests(app: &App, requests: Vec<ToolRequest>) -> Vec<ToolRequest> {
+    requests
+        .into_iter()
+        .filter(|request| project_owns_request(app, request))
+        .collect()
+}
+
+/// Whether the project -- rather than the user-global config -- asked for this
+/// tool. Keyed by the config key that produced the entry, which for a dynamic
+/// backend may be an indirection alias (`tool.ni = "npm:@antfu/ni"`) rather than
+/// the backend id itself.
+fn project_owns_request(app: &App, request: &ToolRequest) -> bool {
+    let origins = &app.ctx.config.tool_origins;
+    let direct = origins.get(&request.backend);
+    let via_alias = || {
+        app.ctx.config.tools.iter().find_map(|(key, value)| {
+            let canonical = osdk_core::inventory::canonical_dynamic_id(key).ok();
+            let matches = ToolRequest::parse(value)
+                .ok()
+                .is_some_and(|parsed| parsed.backend == request.backend)
+                || canonical.as_deref() == Some(request.backend.as_str());
+            matches.then(|| origins.get(key)).flatten()
+        })
+    };
+    match direct.or_else(via_alias) {
+        Some(osdk_core::config::ToolConfigOrigin::GlobalConfig(_)) => false,
+        Some(
+            osdk_core::config::ToolConfigOrigin::ProjectConfig(_)
+            | osdk_core::config::ToolConfigOrigin::ToolVersions(_),
+        ) => true,
+        // Discovered from project evidence, not from any config layer.
+        None => true,
+    }
 }
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {

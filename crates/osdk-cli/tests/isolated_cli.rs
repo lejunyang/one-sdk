@@ -1046,6 +1046,73 @@ fn doctor_creates_state_only_under_isolated_root() {
 }
 
 #[test]
+fn lock_records_project_tools_and_leaves_global_pins_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    // The global layer pins a different tool, and a *different version* of the
+    // one the project pins. Both must stay out of the project's lock: it is
+    // committed alongside `osdk.toml`, so a global pin leaking in would make one
+    // machine's configuration everybody else's locked truth.
+    std::fs::write(
+        temp.path().join("config/config.toml"),
+        "[tools]\ngo = \"1.26.5\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\npython = \"3.14\"\n").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "lock"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lockfile = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(
+        lockfile.contains(&format!("[platforms.{}.tools.python]", platform_key())),
+        "project pin is missing from the lock: {lockfile}"
+    );
+    assert!(
+        lockfile.contains("request = \"3.14\""),
+        "lock did not record the project's requested spec: {lockfile}"
+    );
+    // A tool only the global config names must not appear at all. This is the
+    // assertion the defect trips: before the fix the lock named every global
+    // pin, so a project pinning one tool produced a lock naming all of them.
+    assert!(
+        !lockfile.contains("tools.go"),
+        "global-only pin leaked into the project lock: {lockfile}"
+    );
+}
+
+#[test]
+fn lock_still_records_a_global_tool_when_it_is_named_explicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    std::fs::write(
+        temp.path().join("config/config.toml"),
+        "[tools]\npython = \"3.14\"\n",
+    )
+    .unwrap();
+    // No project config at all: the only pin is global. Naming it on the command
+    // line is an instruction, so filtering must not swallow it -- otherwise
+    // `osdk lock python` would silently write an empty lock.
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "lock", "python"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lockfile = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(
+        lockfile.contains(&format!("[platforms.{}.tools.python]", platform_key())),
+        "explicit operand was filtered out of the lock: {lockfile}"
+    );
+}
+#[test]
 fn lock_resolves_static_python_versions_offline() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

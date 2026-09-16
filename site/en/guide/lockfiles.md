@@ -24,9 +24,9 @@ osdk model pull NAME REFERENCE [OPTIONS]
 | `install` with no tools and no `-o` | Yes; if a current-host platform section exists, use all tools in it | No |
 | `install TOOL...` | No | No |
 | `install -o KEY=VALUE`, even without a tool | No | No |
-| `lock` | Loads the old file only to preserve other platforms and models | Yes; rebuilds the target platform's complete tool map |
+| `lock` | Loads the old file only to preserve other platforms and models | Yes; rebuilds the target platform's tool map (only tools the project itself declares -- see below) |
 | `outdated` | No; re-resolves configuration or explicit requests | No |
-| `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map |
+| `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map (project tools only, likewise) |
 | `exec` | No | No |
 | `model pull` | Does not use a model lock as input | Merges `[models]` by default; `--no-lock` disables this |
 | `list`, `current`, `where` | No | No |
@@ -35,6 +35,33 @@ For `outdated`, the “current” column is the greatest installed version for t
 backend. It checks whether the newly resolved exact target is installed; it does
 not mean the directory's active version. `upgrade` installs the new resolution
 and then refreshes the lock.
+
+## A project lock records the project's own tools only
+
+`osdk.lock` sits beside the project configuration and is committed with it, so it
+describes **that project** -- not whatever the machine that ran `lock` happened to
+pin globally. Without tool operands, `lock` and `upgrade` write only the tools the
+project itself declares:
+
+| Where the tool comes from | Enters the project lock? |
+| --- | --- |
+| Project `osdk.toml` / `.osdk.toml` | Yes |
+| Project `.tool-versions` | Yes |
+| Derived from project evidence (`packageManager` in `package.json`, a discovered Node range) | Yes |
+| User-global `config.toml` | **No** |
+| Named explicitly on the command line (`osdk lock java`) | Yes; an explicit instruction overrides the filter above |
+
+The provenance comes from the configuration layer's own origin records -- the same
+data shell activation consults. Global pins still apply to `install`, `exec` and
+`outdated`; the only thing excluded is *being written into a project lock*, and
+`upgrade` still installs every configured tool, it just stops recording the global
+ones.
+
+This rule corrects a silent behavior: a project pinning one tool used to produce a
+lock naming more than a dozen, and a global `java = "26"` was written into a
+project that explicitly pins `21`, with no warning either time. To lock global
+tools too, declare them in the project configuration or name them on the command
+line.
 
 ## Recommended workflow
 

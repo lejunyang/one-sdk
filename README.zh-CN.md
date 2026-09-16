@@ -139,6 +139,10 @@ osdk upgrade
 osdk exec --tool node@20 -- node --version
 ```
 
+`osdk lock` 只把项目自己声明的工具写进 `osdk.lock`，用户全局配置里的固定版本不会进去，
+因此这份 lock 可以放心提交、在别人机器上复现。要连全局工具一起锁，就把它写进项目配置，
+或者用 `osdk lock <tool>` 点名。
+
 需要不可变的 Rust 环境时，请固定明确版本或带日期的 toolchain；`stable`、`beta`、
 `nightly` 等 rustup 浮动 channel 写入 lock 后仍会随上游更新。
 
