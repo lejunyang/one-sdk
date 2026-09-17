@@ -481,7 +481,6 @@ installed and where it is fetched from.
 | `[syspkg]` | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
 | `[sources]`, `[registries]` | Change where subprocesses download from |
 | `settings.verify_signatures`, `settings.require_checksums`, `settings.attestations` | Disable or downgrade artifact verification |
-| `settings.node`, `settings.npm` | `corepack enable` executes code; the installer decides which program drives installs |
 | `settings.python`, `settings.java` | Both carry `catalog_url`, which decides which runtime bytes get installed |
 | `allow_builds`, when explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
 
@@ -492,6 +491,14 @@ That covers `[tools]` and `[aliases]`, including their `npm:`, `github:`, `http:
 outright, and `go:` builds run with `CGO_ENABLED=0`. This is the same act as
 adding a line to `package.json` -- adding a package or changing a version never
 asks for re-approval.
+
+`settings.node` (a single `corepack` bool) and `settings.npm` (a single
+`default_installer` choice between npm and pnpm, and only as the lowest-priority
+fallback) do not require trust either. `corepack enable` runs the corepack shipped
+inside that Node install and only writes shims into the install directory -- the
+bytes arrived with Node itself. Corepack does download a package manager later, but
+that happens at run time, triggered by `packageManager` in `package.json`, which
+trust has never governed; gating the bool would not prevent it.
 
 Two things fail closed: an **unknown top-level section** and an **unregistered
 `settings` key** both require trust. A key this build cannot interpret is not

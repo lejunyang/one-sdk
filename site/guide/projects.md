@@ -441,7 +441,6 @@ osdk untrust [PATH]
 | `[syspkg]` | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
 | `[sources]`、`[registries]` | 改变子进程的下载目的地 |
 | `settings` 的 `verify_signatures`、`require_checksums`、`attestations` | 关掉或降级对产物的校验 |
-| `settings` 的 `node`、`npm` | `corepack enable` 会执行代码；installer 决定由哪个程序驱动安装 |
 | `settings` 的 `python`、`java` | 二者的 `catalog_url` 决定安装哪份运行时字节 |
 | `[tools]` 中显式打开的 `allow_builds` | 唯一让 npm 生命周期脚本得以运行的开关 |
 
@@ -449,6 +448,12 @@ osdk untrust [PATH]
 `npm:`、`github:`、`http:`、`go:`、`cargo:`、`pypi:`、`conda:` 条目也不需要：npm 安装默认
 传 `--ignore-scripts`，`http:` 制品缺 `sha256` 直接拒绝，`go:` 以 `CGO_ENABLED=0` 构建。
 这和在 `package.json` 里加一行依赖是同一件事——新增包、升降版本都不会要求重新信任。
+
+`settings.node`（只有 `corepack` 一个 bool）和 `settings.npm`（只有 `default_installer`，
+在 npm 与 pnpm 间二选一，且是最低优先级兜底）同样不需要信任。`corepack enable` 跑的是
+该 Node 安装包自带的 corepack，只往安装目录写 shim，字节在装 Node 时就已落盘；corepack
+真正下载包管理器发生在日后运行时，由 `package.json` 的 `packageManager` 触发，而那个
+字段从不在信任管辖内——拦这个 bool 拦不住它。
 
 两处 fail-closed：**未知的顶层 section** 和**未登记的 `settings` 键**都判为需要信任。
 本 build 无法解释的键，不会因为不认识而放行。

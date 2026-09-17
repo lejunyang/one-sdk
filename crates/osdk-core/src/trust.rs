@@ -112,10 +112,19 @@ impl TrustReason {
 ///
 /// `offline` is safe in the only direction it can move: it forbids network
 /// access, never grants it.
+///
+/// `node` and `npm` are here after checking what they can actually express.
+/// `node` holds a single bool, `corepack`, and `npm` a single two-way choice
+/// between the npm and pnpm that osdk itself manages -- and that choice is only
+/// the lowest-priority fallback, so it cannot override a project that declares
+/// its own installer. See `corepack_and_installer_choice_are_safe` for why the
+/// obvious reading of "runs corepack" does not make this a gate.
 const SAFE_SETTINGS_KEYS: &[&str] = &[
-    "link_mode",
     "jobs",
     "lang",
+    "link_mode",
+    "node",
+    "npm",
     "offline",
     "prerelease",
     "shims",
@@ -131,13 +140,9 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
     ("verify_signatures", TrustReason::WeakensVerification),
     ("require_checksums", TrustReason::WeakensVerification),
     ("attestations", TrustReason::WeakensVerification),
-    // `node.corepack` runs the installed Node's own `corepack enable`, which
-    // downloads and activates a package manager.
-    ("node", TrustReason::ExecutesCode),
-    // Selects which installer binary drives npm installs.
-    ("npm", TrustReason::ExecutesCode),
-    // Both carry `catalog_url`: a redirected catalog decides which interpreter
-    // or runtime bytes get installed in the first place.
+    // Both carry `catalog_url`, a free-form URL that decides which interpreter
+    // or runtime bytes get installed, and `python` also carries the
+    // `catalog_sha256` that would otherwise pin them.
     ("python", TrustReason::WeakensVerification),
     ("java", TrustReason::WeakensVerification),
 ];
@@ -795,6 +800,55 @@ mod tests {
             std::fs::write(&path, body).unwrap();
             assert!(!requires_trust(&path).unwrap(), "{body}");
         }
+    }
+
+    /// `settings.node` and `settings.npm` do not require trust.
+    ///
+    /// Both look alarming and are not. `node` holds one bool, `corepack`, which
+    /// runs the corepack shipped inside that very Node install -- refusing when
+    /// absent rather than fetching it -- and `enable` only writes shims into the
+    /// install directory. Turning it off changes which shims exist, not which
+    /// bytes are on the machine. Corepack does download a package manager later,
+    /// but that is triggered at run time by `packageManager` in `package.json`,
+    /// which trust has never governed; gating the bool would not prevent it.
+    ///
+    /// `npm` holds one choice between the npm and pnpm osdk already manages, and
+    /// only as the lowest-priority fallback.
+    ///
+    /// A gate that cannot stop the thing it names is worse than no gate: it
+    /// teaches people to accept trust prompts without reading them, so the one
+    /// that really matters gets waved through too.
+    #[test]
+    fn corepack_and_installer_choice_are_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for body in [
+            "[settings.node]\ncorepack = true\n",
+            "[settings.npm]\ndefault_installer = \"pnpm\"\n",
+            "[settings]\njobs = 4\n[settings.node]\ncorepack = true\n[settings.npm]\ndefault_installer = \"npm\"\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(
+                !requires_trust(&path).unwrap(),
+                "should need no trust: {body}"
+            );
+        }
+
+        // Editing them must not invalidate an existing record either.
+        let config_dir = temp.path().join("state");
+        std::fs::write(
+            &path,
+            "[settings]\nverify_signatures = false\n[settings.node]\ncorepack = false\n",
+        )
+        .unwrap();
+        trust(&config_dir, &path).unwrap();
+        std::fs::write(
+            &path,
+            "[settings]\nverify_signatures = false\n[settings.node]\ncorepack = true\n[settings.npm]\ndefault_installer = \"pnpm\"\n",
+        )
+        .unwrap();
+        assert!(is_trusted(&config_dir, &path, None).unwrap());
     }
 
     /// Each reported key must carry the reason a person needs to judge it, and
