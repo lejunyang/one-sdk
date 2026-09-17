@@ -37,6 +37,13 @@ pub struct Config {
     pub aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Path of the nearest discovered project config, if any.
     pub project_config_path: Option<PathBuf>,
+    /// Tools present in configuration but excluded by their platform filter,
+    /// mapped to the restriction that excluded them.
+    ///
+    /// Kept so a command that names such a tool can explain the absence. Without
+    /// it the tool would look simply unknown, sending the user to check their
+    /// spelling rather than the os/rch line that is doing its job.
+    pub excluded_tools: BTreeMap<String, String>,
 }
 
 /// Source layer that contributed an effective tool entry.
@@ -692,6 +699,74 @@ impl StructuredToolConfig {
     }
 }
 
+/// The option keys that are platform filters rather than backend options.
+///
+/// They are removed from `options` before anything reaches a backend: dynamic
+/// backends reject unknown options outright, so leaving `os` in place would turn
+/// every filtered entry into `unsupported option \`os\`` instead of a filter.
+pub const PLATFORM_FILTER_KEYS: &[&str] = &["os", "arch"];
+
+impl StructuredToolConfig {
+    /// Split this entry's platform filter out from its backend options.
+    ///
+    /// Returns the filter plus the options with `os`/`arch` removed. An
+    /// unrecognized token is an error rather than a filter that matches nothing,
+    /// for the same reason as in `[syspkg.packages]`: silently never matching
+    /// would remove the tool on every machine, and the symptom ("the tool is
+    /// missing") points nowhere near the misspelled line.
+    pub fn split_platform_filter(
+        &self,
+    ) -> Result<(
+        crate::platform::PlatformFilter,
+        BTreeMap<String, ToolConfigValue>,
+    )> {
+        let tokens = |key: &str| -> Vec<String> {
+            match self.options.get(key) {
+                Some(ToolConfigValue::String(value)) => vec![value.clone()],
+                Some(ToolConfigValue::Array(values)) => values.clone(),
+                // A bool here is a mistake worth reporting rather than ignoring;
+                // it will fail to parse as a platform token below.
+                Some(ToolConfigValue::Bool(value)) => vec![value.to_string()],
+                None => Vec::new(),
+            }
+        };
+        let filter = crate::platform::PlatformFilter::parse(&tokens("os"), &tokens("arch"))
+            // Deliberately `Error::other`: the caller adds the tool name and
+            // wraps the result in `Error::config`, so using `config` here too
+            // rendered "config error" twice in one message.
+            .map_err(|error| Error::other(error.to_string()))?;
+        let options = self
+            .options
+            .iter()
+            .filter(|(key, _)| !PLATFORM_FILTER_KEYS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        Ok((filter, options))
+    }
+}
+
+impl ToolConfigEntry {
+    /// This entry's platform filter, and the entry with the filter keys removed.
+    ///
+    /// A legacy string entry carries no filter and is returned unchanged, so the
+    /// `fd = "npm:fd@10"` spelling keeps working exactly as before.
+    pub fn split_platform_filter(&self) -> Result<(crate::platform::PlatformFilter, Self)> {
+        match self {
+            Self::Legacy(_) => Ok((crate::platform::PlatformFilter::default(), self.clone())),
+            Self::Structured(config) => {
+                let (filter, options) = config.split_platform_filter()?;
+                Ok((
+                    filter,
+                    Self::Structured(StructuredToolConfig {
+                        version: config.version.clone(),
+                        options,
+                    }),
+                ))
+            }
+        }
+    }
+}
+
 /// Arbitrary structured tool option value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -739,7 +814,7 @@ impl Config {
         load_layers_internal(user_config_file, None)
     }
 
-    fn apply_file(&mut self, file: ConfigFile, allow_model_env: bool) {
+    fn apply_file(&mut self, file: ConfigFile, allow_model_env: bool) -> Result<()> {
         if let Some(s) = file.settings {
             self.settings = s;
         }
@@ -781,17 +856,45 @@ impl Config {
             // a broader layer happened to allow.
             self.sources.syspkg = syspkg;
         }
-        self.apply_tool_configs(&file.tools);
+        self.apply_tool_configs(&file.tools)?;
         for (tool, aliases) in file.aliases {
             self.aliases.entry(tool).or_default().extend(aliases);
         }
+        Ok(())
     }
 
-    fn apply_tool_configs(&mut self, tools: &BTreeMap<String, ToolConfigEntry>) {
+    /// Merge one layer's `[tools]`, dropping entries whose platform filter does
+    /// not match this host.
+    ///
+    /// Filtering here rather than at each use site is what makes the semantics
+    /// "the entry does not exist": every downstream consumer -- resolution, lock,
+    /// shims, activation -- reads `tools`/`tool_configs` and so cannot
+    /// accidentally act on an entry meant for another platform.
+    ///
+    /// A filtered-out name is remembered so a command that names it explicitly
+    /// can say why it is absent instead of reporting an unknown tool.
+    fn apply_tool_configs(&mut self, tools: &BTreeMap<String, ToolConfigEntry>) -> Result<()> {
+        let host = crate::platform::Platform::current();
         for (tool, entry) in tools {
+            // The inner error is already a config error, so its own message is
+            // reused rather than wrapped: `Error::config` adds the "config
+            // error" prefix, and nesting produced it twice.
+            let (filter, entry) = entry
+                .split_platform_filter()
+                .map_err(|error| Error::config(format!("tool `{tool}`: {error}")))?;
+            if !filter.matches(&host) {
+                // A lower layer may have declared the same tool without a
+                // filter; this layer excluding it must not resurrect that one.
+                self.tools.remove(tool);
+                self.tool_configs.remove(tool);
+                self.excluded_tools.insert(tool.clone(), filter.describe());
+                continue;
+            }
+            self.excluded_tools.remove(tool);
             self.tools.insert(tool.clone(), entry.version().to_string());
-            self.tool_configs.insert(tool.clone(), entry.clone());
+            self.tool_configs.insert(tool.clone(), entry);
         }
+        Ok(())
     }
 
     /// Apply `OSDK_*` env overrides. Exposed for testing.
@@ -1111,6 +1214,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
         tool_origins: BTreeMap::new(),
         aliases: BTreeMap::new(),
         project_config_path: None,
+        excluded_tools: BTreeMap::new(),
     };
 
     if user_config_file.exists() {
@@ -1127,7 +1231,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                 ToolConfigOrigin::GlobalConfig(user_config_file.to_path_buf()),
             )
         }));
-        cfg.apply_file(file, true);
+        cfg.apply_file(file, true)?;
     }
 
     if let Some(start_dir) = start_dir {
@@ -1137,7 +1241,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                     .keys()
                     .map(|tool| (tool.clone(), ToolConfigOrigin::ProjectConfig(path.clone()))),
             );
-            cfg.apply_file(file, false);
+            cfg.apply_file(file, false)?;
             cfg.project_config_path = Some(path);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {
@@ -1318,6 +1422,7 @@ mod tests {
             tool_origins: BTreeMap::new(),
             aliases: BTreeMap::new(),
             project_config_path: None,
+            excluded_tools: Default::default(),
         };
         cfg.settings.link_mode = LinkMode::Hardlink;
         cfg.apply_env(|k| match k {
@@ -1462,6 +1567,7 @@ mirrors = ["https://project.example"]
             tool_origins: BTreeMap::new(),
             aliases: BTreeMap::new(),
             project_config_path: None,
+            excluded_tools: Default::default(),
         };
         cfg.sources.containers.registries.insert(
             "docker.io".to_string(),
@@ -1507,6 +1613,7 @@ mirrors = ["https://project.example"]
             tool_origins: BTreeMap::new(),
             aliases: BTreeMap::new(),
             project_config_path: None,
+            excluded_tools: Default::default(),
         };
 
         cfg.apply_env(|key| match key {
@@ -2063,5 +2170,157 @@ probe_timeout_ms = 125
             AttestationPolicy::Required
         );
         assert!("sometimes".parse::<AttestationPolicy>().is_err());
+    }
+
+    /// `os`/`arch` on a `[tools]` entry filter it rather than reaching the
+    /// backend as options.
+    ///
+    /// The second half matters as much as the first: dynamic backends reject
+    /// unknown options, so an `os` key left in `options` would turn every
+    /// filtered entry into `unsupported option \`os\`` instead of a filter.
+    #[test]
+    fn tool_platform_filter_is_split_out_of_backend_options() {
+        let entry: ToolConfigEntry = toml::from_str(
+            "version = \"1.2.3\"\nos = \"windows\"\narch = [\"arm64\", \"x64\"]\ninstaller = \"pnpm\"\n",
+        )
+        .unwrap();
+        let (filter, stripped) = entry.split_platform_filter().unwrap();
+
+        assert_eq!(filter.os, vec![crate::platform::Os::Windows]);
+        assert_eq!(
+            filter.arch,
+            vec![crate::platform::Arch::Arm64, crate::platform::Arch::X64]
+        );
+
+        // The backend must still see its own option, and must not see ours.
+        let options = stripped.to_request_options();
+        assert_eq!(options.get("installer").map(String::as_str), Some("pnpm"));
+        assert!(!options.contains_key("os"), "{options:?}");
+        assert!(!options.contains_key("arch"), "{options:?}");
+        assert_eq!(stripped.version(), "1.2.3");
+    }
+
+    /// A legacy string entry has no filter and is passed through untouched, so
+    /// `fd = "npm:fd@10"` keeps behaving exactly as before.
+    #[test]
+    fn a_legacy_string_entry_is_never_filtered() {
+        let entry = ToolConfigEntry::legacy("npm:fd@10");
+        let (filter, stripped) = entry.split_platform_filter().unwrap();
+        assert!(filter.is_unrestricted());
+        assert_eq!(stripped, entry);
+    }
+
+    /// A misspelled token is an error, not a filter that matches nothing.
+    #[test]
+    fn a_misspelled_tool_platform_token_is_rejected() {
+        for body in [
+            "version = \"1\"\nos = \"windwos\"\n",
+            "version = \"1\"\narch = \"arm65\"\n",
+        ] {
+            let entry: ToolConfigEntry = toml::from_str(body).unwrap();
+            let error = entry
+                .split_platform_filter()
+                .expect_err(&format!("should be rejected: {body}"));
+            let message = error.localized();
+            assert!(
+                message.contains("expected one of"),
+                "must list accepted tokens: {message}"
+            );
+        }
+    }
+
+    /// The filter decides membership of the merged `tools` map, so every
+    /// downstream consumer sees a non-matching entry as simply absent.
+    ///
+    /// Two entries, not one: with a single entry a bug that keeps everything and
+    /// a bug that drops everything are equally consistent with the result.
+    #[test]
+    fn a_non_matching_entry_is_absent_from_the_merged_config() {
+        let host = crate::platform::Platform::current();
+        let other_os = match host.os {
+            crate::platform::Os::Windows => "linux",
+            _ => "windows",
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path();
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!(
+                "[tools.kept]\nversion = \"1\"\nos = \"{}\"\n\n[tools.dropped]\nversion = \"2\"\nos = \"{other_os}\"\n",
+                host.os.config_token()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(&temporary.path().join("missing.toml"), project).unwrap();
+        assert!(config.tools.contains_key("kept"), "{:?}", config.tools);
+        assert!(!config.tools.contains_key("dropped"), "{:?}", config.tools);
+        assert!(!config.tool_configs.contains_key("dropped"));
+
+        // And the exclusion is recorded with its reason, so a command naming it
+        // can explain the absence instead of reporting an unknown tool.
+        assert!(config.excluded_tools.contains_key("dropped"));
+        assert!(config.excluded_tools["dropped"].contains(other_os));
+        assert!(!config.excluded_tools.contains_key("kept"));
+    }
+
+    /// `os` and `arch` are AND, not OR: matching one is not enough.
+    #[test]
+    fn os_and_arch_must_both_match_for_a_tool_entry() {
+        let host = crate::platform::Platform::current();
+        let other_arch = match host.arch {
+            crate::platform::Arch::Arm64 => "x64",
+            _ => "arm64",
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path();
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!(
+                "[tools.matching_os_only]\nversion = \"1\"\nos = \"{}\"\narch = \"{other_arch}\"\n",
+                host.os.config_token()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(&temporary.path().join("missing.toml"), project).unwrap();
+        assert!(
+            !config.tools.contains_key("matching_os_only"),
+            "a matching os must not be enough when arch differs: {:?}",
+            config.tools
+        );
+    }
+
+    /// A project layer excluding a tool must not fall back to a global entry
+    /// that had no filter. The narrower layer said "not here", and resurrecting
+    /// the broader one would install exactly what was ruled out.
+    #[test]
+    fn an_excluded_project_entry_does_not_fall_back_to_the_global_layer() {
+        let host = crate::platform::Platform::current();
+        let other_os = match host.os {
+            crate::platform::Os::Windows => "linux",
+            _ => "windows",
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(&user_config, "[tools]\nsometool = \"1\"\n").unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!("[tools.sometool]\nversion = \"2\"\nos = \"{other_os}\"\n"),
+        )
+        .unwrap();
+
+        let config = Config::load(&user_config, &project).unwrap();
+        assert!(
+            !config.tools.contains_key("sometool"),
+            "project exclusion must win over the unfiltered global pin: {:?}",
+            config.tools
+        );
+        assert!(config.excluded_tools.contains_key("sometool"));
     }
 }

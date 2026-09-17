@@ -240,6 +240,7 @@ mod tests {
                 tool_origins: Default::default(),
                 aliases: Default::default(),
                 project_config_path: None,
+                excluded_tools: Default::default(),
             },
             client: reqwest::Client::new(),
             cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store)),

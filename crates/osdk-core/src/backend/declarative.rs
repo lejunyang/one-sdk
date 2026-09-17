@@ -2133,6 +2133,7 @@ file = "acme-old-{{version}}-x86_64-linux-gnu-ubuntu-18.04.tar.gz"
                 tool_origins: Default::default(),
                 aliases: Default::default(),
                 project_config_path: None,
+                excluded_tools: Default::default(),
             },
             client: reqwest::Client::new(),
             show_progress: false,

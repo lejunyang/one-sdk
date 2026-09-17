@@ -2613,6 +2613,7 @@ npmRegistries:
             tool_origins: Default::default(),
             aliases: Default::default(),
             project_config_path: None,
+            excluded_tools: Default::default(),
         };
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));

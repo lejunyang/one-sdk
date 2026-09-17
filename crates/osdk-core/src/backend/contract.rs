@@ -94,6 +94,7 @@ fn context(root: &std::path::Path) -> Ctx {
             tool_origins: Default::default(),
             aliases: Default::default(),
             project_config_path: None,
+            excluded_tools: Default::default(),
         },
         client: reqwest::Client::new(),
         show_progress: false,

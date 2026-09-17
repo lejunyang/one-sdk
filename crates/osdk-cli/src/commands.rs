@@ -1411,6 +1411,24 @@ fn project_owns_request(app: &App, request: &ToolRequest) -> bool {
 
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
+        // Naming a tool that configuration excluded on this platform must say
+        // so. Falling through would either resolve it as though the filter were
+        // absent -- installing what the config said not to -- or report an
+        // unknown tool, sending the user to check their spelling instead of the
+        // `os`/`arch` line that is working as intended.
+        for operand in &tools {
+            let name = operand
+                .split_once('@')
+                .map(|(name, _)| name)
+                .unwrap_or(operand);
+            if let Some(restriction) = app.ctx.config.excluded_tools.get(name) {
+                return Err(anyhow::anyhow!(osdk_core::t!(
+                    "err.tool_excluded_by_platform",
+                    tool = name,
+                    restriction = restriction
+                )));
+            }
+        }
         let requests = tools
             .iter()
             .map(|s| {
@@ -4250,6 +4268,17 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
                     .unwrap_or_else(|| "config value".to_string())
             );
         }
+    }
+    // Excluded entries are reported here rather than omitted. A tool that is
+    // in the config yet absent from `current` otherwise looks like a mistake in
+    // the config; naming the restriction shows the filter did its job.
+    for (tool, restriction) in &app.ctx.config.excluded_tools {
+        any = true;
+        println!(
+            "{} {}",
+            tool,
+            t!("msg.excluded_by_platform", restriction = restriction)
+        );
     }
     if !any {
         println!("{}", t!("msg.no_active"));

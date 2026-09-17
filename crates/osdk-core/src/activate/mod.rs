@@ -880,6 +880,7 @@ mod tests {
                 tool_origins: BTreeMap::new(),
                 aliases: BTreeMap::new(),
                 project_config_path: None,
+                excluded_tools: Default::default(),
             },
             client: reqwest::Client::new(),
             show_progress: false,

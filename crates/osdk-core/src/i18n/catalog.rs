@@ -1430,6 +1430,20 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "msg.excluded_by_platform",
+        (
+            "(not for this platform: configured for {restriction})",
+            "（不适用于当前平台：配置限定为 {restriction}）",
+        ),
+    );
+    m.insert(
+        "err.tool_excluded_by_platform",
+        (
+            "tool `{tool}` is configured only for {restriction}, which does not match this machine; remove or widen that restriction to use it here",
+            "工具 `{tool}` 在配置中仅限 {restriction}，与当前机器不匹配；如需在此使用，请移除或放宽该限制",
+        ),
+    );
+    m.insert(
         "trust.reason.executes_code",
         (
             "can run arbitrary code on this machine during install",
