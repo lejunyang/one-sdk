@@ -203,6 +203,36 @@ Node 的 `lock -o arch=...` 会写入目标架构区段；osdk 没有跨架构�
 随后在不匹配 host 上安装会拒绝。当前 `upgrade -o arch=...` 始终写 host 平台区段，
 不要用它生成跨架构 lock。
 
+## conda 条目记录求解出的闭包
+
+`conda:ninja = "1.13.2"` 指定的不是一个制品，而是一次**求解**：结果是一组包的闭包
+（ninja 五个，编译器十几个），每个包各有自己的 URL 与摘要。同一版本一周后重新求解，
+或换一组 channel 求解，都会合法地得到不同的 build。因此只写 `version = "1.13.2"`
+的 lock 承诺远少于它看上去的那样——它固定的是一个请求，不是一个环境。
+
+`[platforms.<key>.tools."conda:<pkg>".conda]` 记录：
+
+| 字段 | 含义 |
+| --- | --- |
+| `closure` | 对闭包内各包 URL 与 SHA-256 求出的 `blake3:<64 位十六进制>` 摘要 |
+| `packages` | 该次求解得到的包数量 |
+
+```toml
+[platforms.windows-x64.tools."conda:ninja".conda]
+closure = "blake3:ed5710780df41d797269921935040e454aff71805c05446a7e319b8ce48e62e5"
+packages = 5
+```
+
+`closure` 就是 backend 用来决定「一次求解应落在哪个 prefix」的那个摘要，包内顺序经过
+排序，因此求解器的迭代顺序不会改变它。这使它恰好能回答「是否同一个环境」：replay 求解
+出不同闭包时摘要不同，差异会显现而不是被静默吞掉。`packages` 不与摘要重复——摘要不同
+只能说明「不一样」，而 `5 -> 11` 说明闭包变大了，通常意味着 channel 集合或 `with`
+列表变了。
+
+`channels` 与 `with` 属于安装身份，出现在同条目的 `options` 中。
+
+未安装时不写这一节：`lock` 允许在安装前运行，而编造一个从未观测到的摘要比留空更糟。
+
 ## 陈旧的项目 lock
 
 osdk 当前不比较 `osdk.toml` 与 `osdk.lock` 的修改时间或内容。只要最近 lock 存在

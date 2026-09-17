@@ -225,6 +225,43 @@ cross-architecture download-only mode, and installation rejects an artifact that
 cannot run on the host. `upgrade -o arch=...` currently still writes the host
 platform section, so do not use it to generate a cross-architecture lock.
 
+## A conda entry records the solved closure
+
+`conda:ninja = "1.13.2"` does not name an artifact: it names a *solve*, whose
+result is a closure of packages -- five for ninja, a dozen for a compiler -- each
+with its own URL and digest. The same version resolved a week later, or against a
+different channel set, legitimately produces different builds. A lock carrying
+only `version = "1.13.2"` therefore promises far less than it appears to: it pins
+a request, not an environment.
+
+`[platforms.<key>.tools."conda:<pkg>".conda]` records:
+
+| Field | Meaning |
+| --- | --- |
+| `closure` | `blake3:<64 hex>` digest over each package's URL and SHA-256 |
+| `packages` | How many packages the solve produced |
+
+```toml
+[platforms.windows-x64.tools."conda:ninja".conda]
+closure = "blake3:ed5710780df41d797269921935040e454aff71805c05446a7e319b8ce48e62e5"
+packages = 5
+```
+
+`closure` is the digest the backend already computes to decide *which prefix a
+solve belongs in*, taken over a sorted package list so solver iteration order
+cannot change it. That makes it exactly the value that answers "is this the same
+environment": if a replay solves to a different closure, its digest differs and
+the divergence becomes visible instead of silent. `packages` is not redundant with
+the digest -- a differing digest alone says only "not the same", while `5 -> 11`
+says the closure grew, usually a changed channel set or `with` list.
+
+`channels` and `with` are part of the install identity and appear in the same
+entry's `options`.
+
+The section is omitted when nothing is installed: `lock` may legitimately run
+before install, and inventing a digest that was never observed would be worse than
+recording none.
+
 ## Stale project locks
 
 osdk currently does not compare `osdk.toml` and `osdk.lock` timestamps or

@@ -72,6 +72,8 @@ pub struct LockedTool {
     pub native: Option<LockedNativeTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pypi: Option<LockedPypiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conda: Option<LockedCondaTool>,
 }
 
 /// What a `pypi:` install needs recorded to be reproducible elsewhere.
@@ -102,6 +104,44 @@ pub struct LockedPypiTool {
     /// different one silently produces a different environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub python_version: Option<String>,
+}
+
+/// What a `conda:` install needs recorded to be reproducible elsewhere.
+///
+/// The version alone is not enough, and for conda it is further from enough than
+/// for any other backend. `conda:ninja = "1.13.2"` does not name an artifact: it
+/// names a *solve*, whose result is a closure of packages -- five for ninja, a
+/// dozen for a compiler -- each with its own URL and digest. The same version
+/// resolved a week later, or against a different channel set, legitimately
+/// produces different builds. So a lock carrying only `version = "1.13.2"`
+/// promises far less than it appears to: it pins a request, not an environment.
+///
+/// Every other backend records enough to detect that. `go` locks a URL plus a
+/// SHA-256; `pypi:` locks which resolver built the environment. A conda entry
+/// used to carry `request` and `version` and nothing else -- no artifact section
+/// at all -- because `installed_artifact_receipt` looked for the receipt at the
+/// flat `<installs>/<tool>/<version>` path, while a conda prefix lives one level
+/// deeper under its install id. The receipt was on disk the whole time; the lock
+/// writer was looking in the wrong place and, finding nothing, recorded nothing.
+///
+/// The digest recorded here is the one the backend already computes to decide
+/// *which prefix a solve belongs in*, over each package's URL and sha256, sorted
+/// so solver iteration order cannot change it. That makes it exactly the value
+/// that answers "is this the same environment": if a replay solves to a
+/// different closure, its digest differs and the divergence is visible instead
+/// of silent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LockedCondaTool {
+    /// Digest over the solved closure's package URLs and SHA-256s
+    /// (`blake3:<hex>`), as recorded in the install identity's materials.
+    pub closure: String,
+    /// Number of packages the solve produced.
+    ///
+    /// Not redundant with the digest: it is what makes a mismatch legible. A
+    /// differing digest alone says only "not the same"; `5 -> 11` says the
+    /// closure grew, which is usually a changed channel set or `with` list.
+    pub packages: usize,
 }
 
 /// The tool that resolved and installed a `pypi:` environment.
@@ -326,8 +366,10 @@ impl Default for LockedTool {
             npm: None,
             native: None,
             // Reconstructed from a request rather than from an install, so there
-            // is no environment to read an installer from.
+            // is no environment to read an installer from, and no solved prefix
+            // to read a closure digest from.
             pypi: None,
+            conda: None,
         }
     }
 }
@@ -394,6 +436,7 @@ pub fn load(path: &Path) -> Result<Lockfile> {
     }
     match lockfile.schema {
         1 => {
+            reject_conda_metadata_before_schema_four(&lockfile)?;
             reject_native_backends_before_schema_four(&lockfile)?;
             reject_native_metadata_before_schema_four(&lockfile)?;
         }
@@ -620,6 +663,52 @@ fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
                 ),
                 (None, None) => {}
             }
+            validate_locked_conda(backend, locked)?;
+        }
+    }
+    Ok(())
+}
+
+/// A conda section belongs only to a `conda:` entry, and only in a shape that can
+/// actually be compared against a future solve.
+fn validate_locked_conda(backend: &str, locked: &LockedTool) -> Result<()> {
+    let Some(conda) = locked.conda.as_ref() else {
+        return Ok(());
+    };
+    if !backend.starts_with("conda:") {
+        anyhow::bail!("non-conda entry `{backend}` cannot carry conda closure metadata");
+    }
+    // Only blake3 is accepted: this is the digest the backend computes to pick a
+    // prefix, so a lock naming another algorithm could never be compared against
+    // an install and would silently verify nothing.
+    let Some(hex) = conda.closure.strip_prefix("blake3:") else {
+        anyhow::bail!(
+            "conda entry `{backend}` closure digest must be `blake3:<hex>`, got `{}`",
+            conda.closure
+        );
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("conda entry `{backend}` closure digest is not a 64-character hex blake3");
+    }
+    if conda.packages == 0 {
+        anyhow::bail!("conda entry `{backend}` cannot record an empty closure");
+    }
+    Ok(())
+}
+
+/// Older schemas predate the conda closure section, so a file claiming one is
+/// either hand-edited or written by a newer osdk that lied about its schema.
+fn reject_conda_metadata_before_schema_four(lockfile: &Lockfile) -> Result<()> {
+    for (platform, platform_lock) in &lockfile.platforms {
+        if let Some((backend, _)) = platform_lock
+            .tools
+            .iter()
+            .find(|(_, locked)| locked.conda.is_some())
+        {
+            anyhow::bail!(
+                "lock schema {} entry `{backend}` for platform `{platform}` cannot carry conda closure metadata",
+                lockfile.schema
+            );
         }
     }
     Ok(())
@@ -627,6 +716,7 @@ fn validate_schema_four(lockfile: &Lockfile) -> Result<()> {
 
 fn validate_schema_three(lockfile: &Lockfile) -> Result<()> {
     validate_schema_three_npm(lockfile)?;
+    reject_conda_metadata_before_schema_four(lockfile)?;
     reject_native_backends_before_schema_four(lockfile)?;
     reject_native_metadata_before_schema_four(lockfile)
 }
@@ -758,6 +848,7 @@ fn validate_native_lock(backend: &str, native_lock: &LockedNativeLock) -> Result
 
 fn validate_schema_two(path: &Path, lockfile: &Lockfile, read_graphs: bool) -> Result<()> {
     validate_complete_npm_entries(path, lockfile, read_graphs)?;
+    reject_conda_metadata_before_schema_four(lockfile)?;
     reject_native_backends_before_schema_four(lockfile)?;
     reject_native_metadata_before_schema_four(lockfile)
 }
@@ -1407,6 +1498,7 @@ pub fn merge_resolved_with_scope(
                 npm: npm_metadata.map(LockedNpmGraph::Metadata),
                 native: locked_native_metadata(version)?,
                 pypi: locked_pypi_metadata(dirs, platform, version),
+                conda: locked_conda_metadata(dirs, platform, version)?,
             },
         );
     }
@@ -1517,6 +1609,7 @@ pub fn upsert_resolved_many_with_scope(
                 npm: npm_metadata.map(LockedNpmGraph::Metadata),
                 native: locked_native_metadata(version)?,
                 pypi: locked_pypi_metadata(dirs, platform, version),
+                conda: locked_conda_metadata(dirs, platform, version)?,
             },
         );
     }
@@ -1846,6 +1939,58 @@ fn locked_npm_metadata(
         scope,
         node_version,
         native_lock,
+    }))
+}
+
+/// Read the solved-closure identity of an installed `conda:` prefix.
+///
+/// Taken from the install inventory rather than recomputed: the digest is only
+/// knowable after a solve, and re-solving here would both hit the network during
+/// `lock` and risk recording a closure different from the one actually
+/// installed. `conda_locked_identity` is the same lookup `bin_paths` and the shim
+/// already perform, so the lock cannot disagree with what runs.
+///
+/// Returns `None` when nothing is installed -- `lock` may legitimately run
+/// before install, and an absent prefix is not a reason to fail. It does *not*
+/// invent a placeholder digest: a lock entry claiming a closure it never saw
+/// would be worse than one admitting it has none.
+fn locked_conda_metadata(
+    dirs: &osdk_core::dirs::Dirs,
+    platform: Platform,
+    version: &ToolVersion,
+) -> Result<Option<LockedCondaTool>> {
+    if !version.backend.starts_with("conda:") {
+        return Ok(None);
+    }
+    let Some(identity) =
+        osdk_core::backend::conda::installed_identity(dirs, platform, &version.backend, version)?
+    else {
+        return Ok(None);
+    };
+    let Some(closure) = identity.materials.get("artifact-checksum") else {
+        return Ok(None);
+    };
+    // The package count is carried in the material file name the backend
+    // synthesizes (`conda-closure-<n>.json`); parse it rather than storing a
+    // second source of truth that could drift from the digest.
+    let packages = identity
+        .materials
+        .get("artifact-file")
+        .and_then(|file| {
+            file.strip_prefix("conda-closure-")
+                .and_then(|rest| rest.strip_suffix(".json"))
+                .and_then(|count| count.parse::<usize>().ok())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "conda install `{}@{}` has no recognizable closure material; reinstall it before locking",
+                version.backend,
+                version.version
+            )
+        })?;
+    Ok(Some(LockedCondaTool {
+        closure: closure.clone(),
+        packages,
     }))
 }
 
@@ -2251,6 +2396,7 @@ mod tests {
                     uv_version: Some("0.12.14".into()),
                     python_version: Some("3.14.7".into()),
                 }),
+                conda: None,
             },
         );
         lockfile
@@ -2324,6 +2470,7 @@ mod tests {
                         npm: None,
                         native: None,
                         pypi: None,
+                        conda: None,
                     },
                 )]),
             },
@@ -2467,6 +2614,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                             npm: None,
                             native: None,
                             pypi: None,
+                            conda: None,
                         },
                     )]),
                 },
@@ -4460,6 +4608,183 @@ sha256 = "{sha256}"
                 sha256: "sha256".into(),
             }],
         }
+    }
+
+    /// Materialize a conda prefix the way an install leaves it: under the
+    /// install-id directory, with the manifest recording the solved closure.
+    ///
+    /// The flat `<installs>/<tool>/<version>` path is deliberately left empty --
+    /// that is exactly where the lock writer used to look, and finding nothing
+    /// there is what made it record a version and nothing else.
+    fn write_conda_install_fixture(
+        dirs: &osdk_core::dirs::Dirs,
+        platform: Platform,
+        version: &ToolVersion,
+        digest: &str,
+        packages: usize,
+    ) {
+        let identity = osdk_core::tool::InstallIdentity::new(
+            &version.backend,
+            version.version.clone(),
+            platform.to_string(),
+            osdk_core::tool::InstallScope::Isolated,
+            &version.options,
+            Vec::new(),
+            std::collections::BTreeMap::from([
+                (
+                    "artifact-file".to_string(),
+                    format!("conda-closure-{packages}.json"),
+                ),
+                ("artifact-checksum".to_string(), digest.to_string()),
+            ]),
+        )
+        .unwrap();
+        let locator = osdk_core::dirs::InstallLocator::new(dirs, identity.clone()).unwrap();
+        let root = locator.install_root().to_path_buf();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        let manifest = osdk_core::inventory::DynamicToolManifest {
+            schema: 1,
+            identity,
+            bins: Vec::new(),
+        };
+        std::fs::write(
+            osdk_core::inventory::DynamicToolManifest::manifest_path(&root),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn conda_lock_records_the_solved_closure_not_just_the_version() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.lock");
+        let dirs = test_dirs(temporary.path());
+        let platform = linux();
+        let digest = format!("blake3:{}", "ab".repeat(32));
+
+        let request = ToolRequest {
+            backend: "conda:ninja".into(),
+            spec: osdk_core::version::VersionSpec::Exact("1.13.2".into()),
+            options: Default::default(),
+        };
+        let version = ToolVersion::new("conda:ninja", "1.13.2");
+        write_conda_install_fixture(&dirs, platform, &version, &digest, 5);
+
+        merge_resolved(
+            &path,
+            platform,
+            &dirs,
+            std::slice::from_ref(&(request, version)),
+        )
+        .unwrap();
+
+        let locked =
+            load(&path).unwrap().platforms[&platform_key(platform)].tools["conda:ninja"].clone();
+        let conda = locked.conda.expect(
+            "a conda entry must carry its solved closure; version alone pins a request, not an environment",
+        );
+        assert_eq!(conda.closure, digest);
+        assert_eq!(conda.packages, 5);
+    }
+
+    #[test]
+    fn conda_lock_omits_the_closure_when_nothing_is_installed() {
+        // `lock` may legitimately run before install. Recording a placeholder
+        // digest would be worse than recording none: it would claim a closure
+        // that was never observed.
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.lock");
+        let dirs = test_dirs(temporary.path());
+        let platform = linux();
+        let request = ToolRequest {
+            backend: "conda:ninja".into(),
+            spec: osdk_core::version::VersionSpec::Exact("1.13.2".into()),
+            options: Default::default(),
+        };
+        merge_resolved(
+            &path,
+            platform,
+            &dirs,
+            &[(request, ToolVersion::new("conda:ninja", "1.13.2"))],
+        )
+        .unwrap();
+        assert!(
+            load(&path).unwrap().platforms[&platform_key(platform)].tools["conda:ninja"]
+                .conda
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn conda_closure_metadata_is_rejected_where_it_cannot_belong() {
+        let digest = format!("blake3:{}", "cd".repeat(32));
+        let valid = |backend: &str, closure: &str, packages: usize| {
+            let mut lockfile = Lockfile::default();
+            lockfile.platforms.insert(
+                platform_key(linux()),
+                PlatformLock {
+                    tools: BTreeMap::from([(
+                        backend.to_string(),
+                        LockedTool {
+                            version: "1.13.2".into(),
+                            conda: Some(LockedCondaTool {
+                                closure: closure.to_string(),
+                                packages,
+                            }),
+                            ..Default::default()
+                        },
+                    )]),
+                },
+            );
+            validate_schema_four(&lockfile)
+        };
+
+        assert!(valid("conda:ninja", &digest, 5).is_ok());
+        // A closure section on a tool that has no solve is meaningless.
+        assert!(valid("go", &digest, 5)
+            .unwrap_err()
+            .to_string()
+            .contains("non-conda entry"));
+        // Only the digest the backend actually computes can be compared later.
+        assert!(valid("conda:ninja", "sha256:abcd", 5)
+            .unwrap_err()
+            .to_string()
+            .contains("blake3:<hex>"));
+        assert!(valid("conda:ninja", "blake3:xyz", 5)
+            .unwrap_err()
+            .to_string()
+            .contains("64-character hex"));
+        assert!(valid("conda:ninja", &digest, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("empty closure"));
+
+        // Older schemas predate the section entirely.
+        let old = Lockfile {
+            schema: 3,
+            platforms: BTreeMap::from([(
+                platform_key(linux()),
+                PlatformLock {
+                    tools: BTreeMap::from([(
+                        "conda:ninja".to_string(),
+                        LockedTool {
+                            version: "1.13.2".into(),
+                            conda: Some(LockedCondaTool {
+                                closure: digest.clone(),
+                                packages: 5,
+                            }),
+                            ..Default::default()
+                        },
+                    )]),
+                },
+            )]),
+            models: BTreeMap::new(),
+        };
+        assert!(validate_schema_three(&old)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot carry conda closure metadata"));
     }
 
     fn test_dirs(root: &Path) -> osdk_core::dirs::Dirs {

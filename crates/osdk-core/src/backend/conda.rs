@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::backend::{Backend, Ctx, InstallCtx};
-use crate::dirs::InstallLocator;
+use crate::dirs::{Dirs, InstallLocator};
 use crate::error::{Error, Result};
 use crate::inventory::{DynamicToolBin, DynamicToolManifest};
 use crate::platform::{Arch, Os, Platform};
@@ -258,6 +258,39 @@ fn conda_installed_locator(
     backend_id: &str,
     tv: &ToolVersion,
 ) -> Result<Option<InstallLocator>> {
+    match select_installed_identity(&ctx.dirs, ctx.platform, backend_id, tv)? {
+        Some(identity) => InstallLocator::new(&ctx.dirs, identity).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The install identity of the prefix currently satisfying this request.
+///
+/// Same lookup as [`conda_installed_locator`], but reachable with only `dirs` and
+/// a platform. `osdk.lock` is written from a context that has no `Ctx`, and the
+/// closure digest it needs to record lives in this identity's materials. Sharing
+/// the selection with the locator matters more than the convenience: a lock
+/// entry describing a different prefix from the one `bin_paths` resolves would
+/// be a lock that does not describe what runs.
+///
+/// Not install-gated -- it only reads the inventory.
+pub fn installed_identity(
+    dirs: &Dirs,
+    platform: Platform,
+    backend_id: &str,
+    tv: &ToolVersion,
+) -> Result<Option<InstallIdentity>> {
+    select_installed_identity(dirs, platform, backend_id, tv)
+}
+
+/// Shared body behind [`installed_identity`] and [`conda_installed_locator`], so
+/// the two cannot drift into selecting different prefixes.
+fn select_installed_identity(
+    dirs: &Dirs,
+    platform: Platform,
+    backend_id: &str,
+    tv: &ToolVersion,
+) -> Result<Option<InstallIdentity>> {
     let expected_options = crate::backend::dynamic::identity_options(backend_id, &tv.options)?;
     // Scan only this tool's own subtree: the filter below already requires
     // `identity.tool == backend_id`, so walking every other tool's installs
@@ -265,7 +298,7 @@ fn conda_installed_locator(
     // through `bin_paths`, and again through `bin_names`, so on a machine with
     // large SDKs installed the full walk dominated the whole command.
     let report = crate::inventory::scan_installs_for_tool(
-        &ctx.dirs.installs,
+        &dirs.installs,
         backend_id,
         &crate::inventory::ScanOptions::tolerant(),
     )?;
@@ -273,7 +306,7 @@ fn conda_installed_locator(
         let identity = &install.manifest.identity;
         identity.tool == backend_id
             && identity.version == tv.version
-            && identity.platform == ctx.platform.to_string()
+            && identity.platform == platform.to_string()
             && identity.scope == InstallScope::Isolated
             && identity.material_options == expected_options
     });
@@ -286,7 +319,7 @@ fn conda_installed_locator(
             tv.version
         )));
     }
-    InstallLocator::new(&ctx.dirs, first.manifest.identity).map(Some)
+    Ok(Some(first.manifest.identity))
 }
 
 /// The prefix root for an installed version, or the legacy flat path.
