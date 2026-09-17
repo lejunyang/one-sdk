@@ -225,6 +225,42 @@ cross-architecture download-only mode, and installation rejects an artifact that
 cannot run on the host. `upgrade -o arch=...` currently still writes the host
 platform section, so do not use it to generate a cross-architecture lock.
 
+## Artifact URLs record the upstream; mirrors apply at run time
+
+A lock is committed and replayed on other machines, so a URL in it is a promise
+about *what* to fetch, not a record of which host this machine happened to be
+fastest to. Those were the same string: the pipeline records whichever candidate
+actually downloaded, and on a mirrored network that is a mirror. A lock produced
+here therefore named `https://golang.google.cn/dl/...` for go and
+`https://gh-proxy.com/https://github.com/...` for java, and anyone replaying it
+was pushed through this machine's mirrors -- including people who cannot reach
+them.
+
+URLs are now normalized back to the upstream on write:
+
+| URL as recorded | URL written to the lock |
+| --- | --- |
+| `https://golang.google.cn/dl/go1.26.5...` | `https://go.dev/dl/go1.26.5...` |
+| `https://mirrors.aliyun.com/golang/...` | `https://go.dev/dl/...` |
+| `https://gh-proxy.com/https://github.com/...` | `https://github.com/...` |
+| A custom source, e.g. `https://nexus.internal/...` | **left unchanged** |
+
+The mapping is not a hardcoded list: it is derived from the backends' own
+`default_sources`, so a mirror is only rewritten to the upstream that the same
+backend declares it mirrors. A custom source is therefore left exactly as
+recorded -- osdk has no upstream to claim it corresponds to, and inventing one
+would write a false origin into a committed file. The checksum is untouched:
+mirrors serve the same bytes, and if one does not, that is what the checksum is
+for.
+
+The same applies to a model's `endpoint`. A model is identified by provider,
+repository and immutable revision, and every file's SHA-256 is already locked, so
+the host is not part of the identity. `--endpoint`, `HF_ENDPOINT` and
+`MODELSCOPE_ENDPOINT` used to flow straight into `[models.<name>].endpoint`; now
+only a provider's built-in endpoints collapse to its official one (ModelScope's
+`modelscope.cn` and `www.modelscope.ai` converge), and a custom endpoint is left
+as-is.
+
 ## A conda entry records the solved closure
 
 `conda:ninja = "1.13.2"` does not name an artifact: it names a *solve*, whose

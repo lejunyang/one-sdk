@@ -203,6 +203,35 @@ Node 的 `lock -o arch=...` 会写入目标架构区段；osdk 没有跨架构�
 随后在不匹配 host 上安装会拒绝。当前 `upgrade -o arch=...` 始终写 host 平台区段，
 不要用它生成跨架构 lock。
 
+## 制品 URL 记录上游，镜像只在运行时替换
+
+lock 会被提交并在别人的机器上复现，因此其中的 URL 是「取什么」的承诺，而不是「本机
+当时哪个主机最快」的记录。这两者曾是同一个字符串：pipeline 记录实际下载成功的那个
+候选，而在国内网络下那通常是镜像。于是这里生成的 lock 会写成
+`https://golang.google.cn/dl/...`（go）和
+`https://gh-proxy.com/https://github.com/...`（java），任何复现它的人都被推着走本机的
+镜像——包括根本访问不到这些镜像的人。
+
+现在写入时把 URL 规范化回上游：
+
+| 记录到的 URL | 写进 lock 的 URL |
+| --- | --- |
+| `https://golang.google.cn/dl/go1.26.5...` | `https://go.dev/dl/go1.26.5...` |
+| `https://mirrors.aliyun.com/golang/...` | `https://go.dev/dl/...` |
+| `https://gh-proxy.com/https://github.com/...` | `https://github.com/...` |
+| 自定义源，如 `https://nexus.internal/...` | **原样保留** |
+
+映射不是硬编码清单，而是由各 backend 自己的 `default_sources` 推导：只有 backend
+声明它镜像了某个上游，那个镜像才会被改写。因此自定义源会原样保留——osdk 无法知道它
+对应哪个上游，硬猜等于在提交进版本库的文件里写下虚假来源。checksum 不改：镜像提供
+相同字节，若某个镜像不是，那正是 checksum 存在的意义。
+
+模型的 `endpoint` 同理。模型的身份是 provider + repository + 不可变 revision，且每个
+文件的 SHA-256 都已入锁，主机不属于身份的一部分。`--endpoint`、`HF_ENDPOINT`、
+`MODELSCOPE_ENDPOINT` 曾直接流进 `[models.<name>].endpoint`；现在只有 provider 内置的
+端点会被折叠成官方端点（ModelScope 的 `modelscope.cn` 与 `www.modelscope.ai` 收敛到
+同一个），自定义端点原样保留。
+
 ## conda 条目记录求解出的闭包
 
 `conda:ninja = "1.13.2"` 指定的不是一个制品，而是一次**求解**：结果是一组包的闭包

@@ -23,6 +23,58 @@ pub enum SourceKind {
     Custom,
 }
 
+/// Rewrite a recorded artifact URL back onto its upstream host.
+///
+/// `osdk.lock` is committed and replayed on other machines, so a URL in it is a
+/// promise about *what* to fetch, not a record of which host this machine
+/// happened to be fastest to. Those two were the same string: the pipeline
+/// records whichever candidate actually downloaded, and on a CN network that is
+/// a mirror. So a lock produced here named `https://golang.google.cn/dl/...` for
+/// go and `https://gh-proxy.com/https://github.com/...` for java, and anyone
+/// replaying it was pushed through this machine's mirrors -- including people who
+/// cannot reach them.
+///
+/// The mapping is not a hardcoded list: `pairs` is derived from the backends'
+/// own `default_sources`, so a mirror is only ever rewritten to the upstream that
+/// the same backend declares it mirrors. A URL matching no known mirror is
+/// returned unchanged, which is what makes a user's custom source survive -- osdk
+/// has no upstream to claim it corresponds to, and inventing one would be a lie
+/// about provenance.
+///
+/// Longest prefix wins, because mirror bases nest: `gh-proxy.com/https://github.com/`
+/// and `gh-proxy.com/https://api.github.com/` share a prefix, and matching the
+/// shorter one first would leave `api.` stranded in the path.
+pub fn canonical_upstream_url(url: &str, pairs: &[(String, String)]) -> String {
+    let mut best: Option<&(String, String)> = None;
+    for pair in pairs {
+        if pair.0.is_empty() || !url.starts_with(pair.0.as_str()) {
+            continue;
+        }
+        if best.is_none_or(|current| pair.0.len() > current.0.len()) {
+            best = Some(pair);
+        }
+    }
+    match best {
+        Some((mirror, official)) => {
+            format!(
+                "{}{}",
+                official.trim_end_matches('/'),
+                // Keep exactly one separator: bases may or may not carry a
+                // trailing slash, and doubling it changes the request path.
+                {
+                    let tail = &url[mirror.len()..];
+                    if tail.starts_with('/') {
+                        tail.to_string()
+                    } else {
+                        format!("/{tail}")
+                    }
+                }
+            )
+        }
+        None => url.to_string(),
+    }
+}
+
 /// A single download source for a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {

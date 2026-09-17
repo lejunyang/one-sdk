@@ -25,6 +25,36 @@ pub fn default_sources(provider: ProviderId) -> Vec<Source> {
     }
 }
 
+/// The provider's own endpoint, for an endpoint that may be a mirror of it.
+///
+/// A model is identified by provider, repository and immutable revision, and the
+/// lock already pins every file's SHA-256. The host is therefore not part of what
+/// the lock promises -- it is how one machine reached it. Recording a mirror made
+/// a local convenience into everyone's locked source: `--endpoint`, `HF_ENDPOINT`
+/// and `MODELSCOPE_ENDPOINT` all flowed straight into `[models.<name>].endpoint`.
+///
+/// Only a provider's built-in endpoints are treated as equivalent. A custom
+/// endpoint is returned unchanged: osdk cannot know which provider's content it
+/// serves, and claiming otherwise would put a false origin in a committed file.
+pub fn canonical_provider_endpoint(provider: ProviderId, endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    let known = default_sources(provider);
+    let is_builtin = known
+        .iter()
+        .any(|source| source.download_url.trim_end_matches('/') == trimmed);
+    if !is_builtin {
+        return endpoint.to_string();
+    }
+    // The official source is the canonical one; ModelScope declares two built-in
+    // hosts (`modelscope.cn` and `www.modelscope.ai`), and both should lock to
+    // the same identity rather than to whichever answered faster.
+    known
+        .iter()
+        .find(|source| matches!(source.kind, crate::source::SourceKind::Official))
+        .map(|source| source.download_url.clone())
+        .unwrap_or_else(|| endpoint.to_string())
+}
+
 pub fn effective_sources(ctx: &Ctx, provider: ProviderId) -> Vec<Source> {
     let mut sources = default_sources(provider);
     if let Some(config) = ctx.config.tool_sources(provider.as_str()) {
@@ -290,6 +320,32 @@ mod tests {
     use crate::dirs::Dirs;
     use crate::platform::Platform;
     use crate::store::Cas;
+
+    #[test]
+    fn a_mirror_endpoint_locks_as_the_providers_own() {
+        // `--endpoint` / `HF_ENDPOINT` used to flow straight into the lock, so a
+        // machine behind a mirror committed that mirror as everyone's source.
+        assert_eq!(
+            canonical_provider_endpoint(ProviderId::HuggingFace, "https://huggingface.co"),
+            "https://huggingface.co"
+        );
+        // Both of ModelScope's built-in hosts collapse to the official one, so
+        // the lock does not depend on which answered faster.
+        assert_eq!(
+            canonical_provider_endpoint(ProviderId::ModelScope, "https://www.modelscope.ai"),
+            "https://modelscope.cn"
+        );
+        assert_eq!(
+            canonical_provider_endpoint(ProviderId::ModelScope, "https://modelscope.cn/"),
+            "https://modelscope.cn"
+        );
+        // A custom endpoint is left untouched: osdk cannot know whose content it
+        // serves, and a committed file must not carry an invented origin.
+        assert_eq!(
+            canonical_provider_endpoint(ProviderId::HuggingFace, "https://hf-mirror.example"),
+            "https://hf-mirror.example"
+        );
+    }
 
     #[test]
     fn model_sources_keep_credentials_off_custom_endpoints_by_default() {

@@ -1467,27 +1467,7 @@ pub fn merge_resolved_with_scope(
         if npm_metadata.is_some() {
             options.remove("node_version");
         }
-        let artifact = if version.backend.starts_with("npm:") {
-            None
-        } else {
-            let resolved_artifact =
-                osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
-                    url: receipt.url,
-                    file_name: receipt.file_name,
-                    checksum: receipt.checksum,
-                    subdir: version.options.get("catalog-subdir").cloned(),
-                    evidence: receipt.evidence,
-                });
-            installed_artifact_receipt(dirs, platform, version)?
-                .map(|receipt| LockedArtifact {
-                    url: receipt.url,
-                    file_name: receipt.file_name,
-                    checksum: receipt.checksum,
-                    subdir: version.options.get("catalog-subdir").cloned(),
-                    evidence: receipt.evidence,
-                })
-                .or(resolved_artifact)
-        };
+        let artifact = locked_artifact_for(dirs, platform, version)?;
         platform_lock.tools.insert(
             request.backend.clone(),
             LockedTool {
@@ -1578,27 +1558,7 @@ pub fn upsert_resolved_many_with_scope(
         if npm_metadata.is_some() {
             options.remove("node_version");
         }
-        let artifact = if version.backend.starts_with("npm:") {
-            None
-        } else {
-            let resolved_artifact =
-                osdk_core::pipeline::locked_artifact(version)?.map(|receipt| LockedArtifact {
-                    url: receipt.url,
-                    file_name: receipt.file_name,
-                    checksum: receipt.checksum,
-                    subdir: version.options.get("catalog-subdir").cloned(),
-                    evidence: receipt.evidence,
-                });
-            installed_artifact_receipt(dirs, platform, version)?
-                .map(|receipt| LockedArtifact {
-                    url: receipt.url,
-                    file_name: receipt.file_name,
-                    checksum: receipt.checksum,
-                    subdir: version.options.get("catalog-subdir").cloned(),
-                    evidence: receipt.evidence,
-                })
-                .or(resolved_artifact)
-        };
+        let artifact = locked_artifact_for(dirs, platform, version)?;
         platform_lock.tools.insert(
             request.backend.clone(),
             LockedTool {
@@ -1674,7 +1634,18 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
             repository: manifest.repository.clone(),
             requested_revision: manifest.requested_revision.clone(),
             revision: manifest.revision.clone(),
-            endpoint: manifest.endpoint.clone(),
+            // Same reason the tool artifact URL is normalized: `--endpoint` and
+            // `HF_ENDPOINT` exist so *this* machine can reach a provider through
+            // a mirror, and recording that choice made it everybody's. A model
+            // reference is provider + repository + immutable revision; the host
+            // that served those bytes is not part of the identity, and the file
+            // digests already pin the content. So a mirror endpoint is recorded
+            // as the provider's own, and anything osdk cannot map to a provider
+            // is left as-is rather than reattributed.
+            endpoint: osdk_core::model::source::canonical_provider_endpoint(
+                manifest.provider,
+                &manifest.endpoint,
+            ),
             variant: manifest.variant.clone(),
             files: manifest
                 .files
@@ -1699,6 +1670,69 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
 /// let one person's agreement silently stand in for everybody else's. They are
 /// dropped on write and must be supplied again per machine.
 pub(crate) const CONSENT_OPTIONS: &[&str] = &["accept-licenses", "accept-license"];
+
+/// The artifact section for one resolved tool, with its URL pointing upstream.
+///
+/// The pipeline records whichever candidate URL actually downloaded, which on a
+/// mirrored network is a mirror. That is right for the on-disk receipt -- it
+/// documents what this machine did -- but wrong for `osdk.lock`, which is
+/// committed and replayed elsewhere: it turned one machine's fastest host into
+/// everybody's locked source. Observed in a lock generated here: go pinned to
+/// `golang.google.cn`, java to `gh-proxy.com/https://github.com/...`.
+///
+/// Rewriting happens only through mirror/upstream pairs the backends declare
+/// about themselves, so a custom source -- which osdk cannot map to any upstream
+/// -- is left exactly as recorded rather than reattributed to a host that never
+/// served it. The checksum is untouched: mirrors serve the same bytes, and if one
+/// does not, that is precisely what the checksum exists to catch.
+fn locked_artifact_for(
+    dirs: &osdk_core::dirs::Dirs,
+    platform: Platform,
+    version: &ToolVersion,
+) -> Result<Option<LockedArtifact>> {
+    if version.backend.starts_with("npm:") {
+        return Ok(None);
+    }
+    let subdir = version.options.get("catalog-subdir").cloned();
+    let build = |receipt: osdk_core::pipeline::ArtifactReceipt| LockedArtifact {
+        url: receipt.url,
+        file_name: receipt.file_name,
+        checksum: receipt.checksum,
+        subdir: subdir.clone(),
+        evidence: receipt.evidence,
+    };
+    let resolved = osdk_core::pipeline::locked_artifact(version)?.map(build);
+    let artifact = installed_artifact_receipt(dirs, platform, version)?
+        .map(build)
+        .or(resolved);
+    Ok(artifact.map(|mut artifact| {
+        artifact.url = osdk_core::source::canonical_upstream_url(
+            &artifact.url,
+            &mirror_upstream_pairs_for_lock(dirs),
+        );
+        artifact
+    }))
+}
+
+/// Mirror pairs for URL normalization, loaded once per process.
+///
+/// `Registry::load` reads the declarative backend directory, so calling it per
+/// tool would re-read it for every entry in the lock. The set is a property of
+/// the installed backends, not of any one entry.
+fn mirror_upstream_pairs_for_lock(dirs: &osdk_core::dirs::Dirs) -> Vec<(String, String)> {
+    static PAIRS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    PAIRS
+        .get_or_init(
+            || match osdk_core::backend::registry::Registry::load(dirs) {
+                Ok(registry) => osdk_core::source::select::all_mirror_upstream_pairs(&registry),
+                // A registry that cannot be read is not a reason to fail writing a
+                // lock; it only means no rewriting is available, so URLs stay as
+                // recorded rather than being silently mangled.
+                Err(_) => Vec::new(),
+            },
+        )
+        .clone()
+}
 
 fn public_options(options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     options
@@ -4653,6 +4687,88 @@ sha256 = "{sha256}"
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_mirror_url_is_locked_as_its_upstream() {
+        // The receipt on disk records the host that actually served the bytes,
+        // which on a mirrored network is a mirror. The lock is committed and
+        // replayed elsewhere, so it must name the upstream instead -- otherwise
+        // one machine's fastest host becomes everybody's locked source, including
+        // for people who cannot reach it.
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.lock");
+        let dirs = test_dirs(temporary.path());
+        let platform = linux();
+
+        let mut version = ToolVersion::new("go", "1.26.5");
+        version.options.insert(
+            osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.to_string(),
+            "https://golang.google.cn/dl/go1.26.5.linux-amd64.tar.gz".to_string(),
+        );
+        version.options.insert(
+            osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.to_string(),
+            "go1.26.5.linux-amd64.tar.gz".to_string(),
+        );
+        version.options.insert(
+            osdk_core::pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.to_string(),
+            "sha256:abc".to_string(),
+        );
+        let request = ToolRequest {
+            backend: "go".into(),
+            spec: osdk_core::version::VersionSpec::Exact("1.26.5".into()),
+            options: Default::default(),
+        };
+
+        merge_resolved(&path, platform, &dirs, &[(request, version)]).unwrap();
+
+        let artifact = load(&path).unwrap().platforms[&platform_key(platform)].tools["go"]
+            .artifact
+            .clone()
+            .expect("a go entry carries its artifact");
+        assert_eq!(
+            artifact.url, "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+            "the lock kept this machine's mirror instead of the upstream"
+        );
+        // The checksum is deliberately untouched: mirrors serve the same bytes,
+        // and if one does not, that is what the checksum is for.
+        assert_eq!(artifact.checksum.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn a_custom_source_url_is_locked_unchanged() {
+        // osdk cannot know which upstream a user's own host corresponds to, so
+        // rewriting it would put an invented origin into a committed file. This
+        // is the other direction of the same rule, and the one an over-eager
+        // prefix match would break.
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.lock");
+        let dirs = test_dirs(temporary.path());
+        let platform = linux();
+
+        let mut version = ToolVersion::new("go", "1.26.5");
+        version.options.insert(
+            osdk_core::pipeline::LOCKED_ARTIFACT_URL_OPTION.to_string(),
+            "https://nexus.internal/golang/go1.26.5.linux-amd64.tar.gz".to_string(),
+        );
+        version.options.insert(
+            osdk_core::pipeline::LOCKED_ARTIFACT_FILE_OPTION.to_string(),
+            "go1.26.5.linux-amd64.tar.gz".to_string(),
+        );
+        let request = ToolRequest {
+            backend: "go".into(),
+            spec: osdk_core::version::VersionSpec::Exact("1.26.5".into()),
+            options: Default::default(),
+        };
+        merge_resolved(&path, platform, &dirs, &[(request, version)]).unwrap();
+        assert_eq!(
+            load(&path).unwrap().platforms[&platform_key(platform)].tools["go"]
+                .artifact
+                .as_ref()
+                .unwrap()
+                .url,
+            "https://nexus.internal/golang/go1.26.5.linux-amd64.tar.gz"
+        );
     }
 
     #[test]

@@ -53,6 +53,101 @@ impl VersionedProbeCache {
 /// The ambient candidate is folded in *before* pin handling in
 /// [`ranked_source_candidates`], so an explicit pin or `--source` still wins; the
 /// environment only competes when no source was chosen deliberately.
+/// Mirror-base -> upstream-base pairs a backend declares for itself.
+///
+/// Built from `default_sources` alone, deliberately: the user's configured
+/// sources are not included, because osdk cannot know what upstream a custom
+/// source corresponds to, and a wrong guess would rewrite a lock's URL to a host
+/// that never served those bytes. Only the pairs the backend itself asserts.
+///
+/// Only *download* bases are paired, and only ones carrying a real path.
+///
+/// Index bases are excluded because a lock records archive URLs, never index
+/// URLs, so pairing them buys nothing -- and costs a great deal. Python declares
+/// its mirror's index base as the bare host `https://gh-proxy.com`, which as a
+/// rewriting key matches *every* gh-proxy URL, including the GitHub-hosted java
+/// archives that have nothing to do with python. The first version of this
+/// function paired index bases and duly turned a Temurin URL into
+/// `https://releases.astral.sh/https://github.com/adoptium/...`. That is the
+/// over-wide prefix match AGENTS.md warns about, and it fails in the worse
+/// direction: the URL still looks plausible, so a lock would carry a host that
+/// never served those bytes and only fail at download time on someone else's
+/// machine.
+///
+/// The path requirement is the same guard applied structurally: a base that is
+/// nothing but scheme and host cannot distinguish one backend's artifacts from
+/// another's, so it is refused as a key regardless of where it came from.
+pub fn mirror_upstream_pairs(backend: &dyn Backend) -> Vec<(String, String)> {
+    let sources = backend.default_sources();
+    let Some(official) = sources
+        .iter()
+        .find(|source| matches!(source.kind, SourceKind::Official))
+        .map(|source| source.download_url.clone())
+    else {
+        return Vec::new();
+    };
+    sources
+        .iter()
+        .filter(|source| matches!(source.kind, SourceKind::Mirror))
+        .filter(|source| source.download_url != official)
+        .filter(|source| has_distinguishing_path(&source.download_url))
+        .map(|source| (source.download_url.clone(), official.clone()))
+        .collect()
+}
+
+/// Whether a base URL carries enough path to identify what it serves.
+///
+/// `https://gh-proxy.com` does not: it fronts everything. `https://gh-proxy.com/https://github.com/`
+/// does. Checked by looking past the scheme separator for a `/` with something
+/// after it, so a bare host with or without a trailing slash is refused.
+fn has_distinguishing_path(base: &str) -> bool {
+    let after_scheme = base.split_once("://").map_or(base, |(_, rest)| rest);
+    after_scheme
+        .split_once('/')
+        .is_some_and(|(_, path)| !path.trim_matches('/').is_empty())
+}
+
+/// Every mirror pair osdk knows, across static and dynamic backends alike.
+///
+/// The lock writer holds a resolved `ToolVersion`, not the backend that produced
+/// it, and the artifact may not be hosted by that backend at all: a `java`
+/// archive lives on GitHub, so the pair that rewrites its URL is declared by the
+/// `github` backend. Restricting the lookup to the entry's own backend would miss
+/// exactly the case observed in practice.
+///
+/// `registry.all()` alone is not enough for the same reason. It enumerates the
+/// compiled-in and declarative backends, but `github:` is *dynamic* -- constructed
+/// per request rather than registered -- so it never appears there, and the java
+/// URL went unrewritten while every test on static backends passed. Dynamic
+/// namespaces that own a mirror are therefore included explicitly.
+pub fn all_mirror_upstream_pairs(
+    registry: &crate::backend::registry::Registry,
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for backend in registry.all() {
+        pairs.extend(mirror_upstream_pairs(backend.as_ref()));
+    }
+    pairs.extend(dynamic_mirror_upstream_pairs());
+    pairs.sort();
+    pairs.dedup();
+    pairs
+}
+
+/// Mirror pairs owned by dynamic backends, which the registry cannot enumerate.
+///
+/// Kept as a function over each backend's own `default_sources` rather than a
+/// literal table, so a change to how a namespace declares its mirrors is picked
+/// up here instead of drifting out of sync with the backend.
+fn dynamic_mirror_upstream_pairs() -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    // `github:` hosts release assets that other backends' artifacts also come
+    // from, which is what makes its pair load-bearing beyond its own tools.
+    if let Some(github) = crate::backend::github::GithubBackend::from_id("github:owner/repo") {
+        pairs.extend(mirror_upstream_pairs(&github));
+    }
+    pairs
+}
+
 pub fn effective_sources_with_env(ctx: &Ctx, backend: &dyn Backend) -> Result<Vec<Source>> {
     let sources = effective_sources(ctx, backend);
     let Some(mirror) = backend.env_mirror() else {
@@ -472,6 +567,100 @@ pub async fn refresh_with_timeout(
 }
 
 /// Human-readable kind label.
+#[cfg(test)]
+mod mirror_pair_tests {
+    use super::*;
+
+    #[test]
+    fn a_mirror_url_is_rewritten_to_the_upstream_its_backend_declares() {
+        let registry = crate::backend::registry::Registry::new();
+        let pairs = all_mirror_upstream_pairs(&registry);
+
+        // go's own mirrors, which is what a lock generated on a CN network
+        // recorded instead of go.dev.
+        assert_eq!(
+            crate::source::canonical_upstream_url(
+                "https://golang.google.cn/dl/go1.26.5.windows-amd64.zip",
+                &pairs
+            ),
+            "https://go.dev/dl/go1.26.5.windows-amd64.zip"
+        );
+        assert_eq!(
+            crate::source::canonical_upstream_url(
+                "https://mirrors.aliyun.com/golang/go1.26.5.linux-amd64.tar.gz",
+                &pairs
+            ),
+            "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz"
+        );
+
+        // A java artifact is hosted on GitHub, so the pair that rewrites it is
+        // declared by the `github` backend rather than by `java`. Scoping the
+        // lookup to the entry's own backend would miss this.
+        assert_eq!(
+            crate::source::canonical_upstream_url(
+                "https://gh-proxy.com/https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26/OpenJDK26U.zip",
+                &pairs
+            ),
+            "https://github.com/adoptium/temurin26-binaries/releases/download/jdk-26/OpenJDK26U.zip"
+        );
+
+        // An upstream URL is already canonical and must be left alone.
+        assert_eq!(
+            crate::source::canonical_upstream_url("https://go.dev/dl/go1.26.5.zip", &pairs),
+            "https://go.dev/dl/go1.26.5.zip"
+        );
+
+        // A host osdk has never heard of is a user's own source. There is no
+        // upstream to claim it mirrors, so reattributing it would be a lie about
+        // provenance in a committed file.
+        assert_eq!(
+            crate::source::canonical_upstream_url("https://nexus.internal/go/go1.26.5.zip", &pairs),
+            "https://nexus.internal/go/go1.26.5.zip"
+        );
+    }
+
+    #[test]
+    fn the_longest_matching_mirror_base_wins() {
+        // These two nest: matching the shorter first would leave `api.` stranded
+        // in the rewritten path.
+        let pairs = vec![
+            (
+                "https://gh-proxy.com/https://github.com/".to_string(),
+                "https://github.com/".to_string(),
+            ),
+            (
+                "https://gh-proxy.com/https://api.github.com/".to_string(),
+                "https://api.github.com/".to_string(),
+            ),
+        ];
+        assert_eq!(
+            crate::source::canonical_upstream_url(
+                "https://gh-proxy.com/https://api.github.com/repos/owner/repo/releases",
+                &pairs
+            ),
+            "https://api.github.com/repos/owner/repo/releases"
+        );
+    }
+
+    #[test]
+    fn a_custom_source_is_never_paired_with_an_upstream() {
+        // Only what a backend asserts about itself becomes a pair. A user's
+        // configured mirror is not in `default_sources`, so it cannot appear.
+        let registry = crate::backend::registry::Registry::new();
+        let pairs = all_mirror_upstream_pairs(&registry);
+        assert!(
+            !pairs
+                .iter()
+                .any(|(mirror, _)| mirror.contains("nexus.internal")),
+            "pairs must come from default_sources only"
+        );
+        assert!(
+            pairs.iter().all(|(mirror, official)| mirror != official),
+            "a source must never be paired with itself"
+        );
+    }
+}
+
 pub fn kind_label(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Official => "official",
