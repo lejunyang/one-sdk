@@ -130,21 +130,21 @@ fn build_status(app: &App) -> Result<syspkg::StatusReport> {
         None
     };
 
-    let platform_os = platform_os_name();
+    let platform = app.ctx.platform;
     let statuses = parsed
         .iter()
         .map(|(key, request)| match key.manager {
             // A distro manager answers one package at a time -- there is no
             // cheap bulk export like winget's -- so it is queried per entry.
             ManagerKind::Distro(manager) if config.allows(key.manager) => {
-                distro_status(&runner, manager, key, request, platform_os)
+                distro_status(&runner, manager, key, request, &platform)
             }
             ManagerKind::Winget if config.allows(ManagerKind::Winget) => {
-                syspkg::evaluate(key, request, installed.as_deref(), platform_os)
+                syspkg::evaluate(key, request, installed.as_deref(), &platform)
             }
             // Homebrew is not implemented, and a manager excluded by config must
             // not be reported on as though it had been queried.
-            _ => syspkg::evaluate(key, request, None, platform_os),
+            _ => syspkg::evaluate(key, request, None, &platform),
         })
         .collect();
 
@@ -166,7 +166,7 @@ fn distro_status(
     manager: osdk_core::syspkg::DistroManager,
     key: &osdk_core::syspkg::PackageKey,
     request: &osdk_core::syspkg::PackageRequest,
-    platform_os: &str,
+    platform: &osdk_core::platform::Platform,
 ) -> syspkg::PackageStatus {
     let requested = if request.wants_latest() {
         "latest".to_owned()
@@ -174,11 +174,7 @@ fn distro_status(
         request.version.clone()
     };
 
-    let not_for_here = request
-        .os
-        .as_ref()
-        .is_some_and(|wanted| !wanted.eq_ignore_ascii_case(platform_os));
-    if not_for_here {
+    if !request.applies_to(platform) {
         return syspkg::PackageStatus {
             manager: key.manager,
             id: key.id.clone(),
@@ -220,17 +216,6 @@ fn distro_status(
             installed: None,
             state: syspkg::PackageState::ManagerUnavailable,
         },
-    }
-}
-
-/// The platform name `[syspkg.packages]` `os` values are matched against.
-fn platform_os_name() -> &'static str {
-    if cfg!(windows) {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
     }
 }
 
@@ -380,7 +365,7 @@ fn state_label(state: syspkg::PackageState) -> &'static str {
         syspkg::PackageState::Satisfied => "ok",
         syspkg::PackageState::VersionDiffers => "other version",
         syspkg::PackageState::Missing => "missing",
-        syspkg::PackageState::NotApplicable => "not for this os",
+        syspkg::PackageState::NotApplicable => "not for this platform",
         syspkg::PackageState::ManagerUnavailable => "manager unavailable",
     }
 }
@@ -417,7 +402,7 @@ fn skip_label(reason: syspkg::SkipReason) -> &'static str {
         syspkg::SkipReason::VersionDiffersButPresent => {
             "present at another version; the configured version is a wish, not a lock"
         }
-        syspkg::SkipReason::NotApplicable => "not for this operating system",
+        syspkg::SkipReason::NotApplicable => "not for this platform",
         syspkg::SkipReason::ManagerUnavailable => "its manager could not be queried",
         syspkg::SkipReason::ManagerNotAllowed => "its manager is excluded by [syspkg] managers",
         // Not a limitation of osdk: Arch documents that installing one package
@@ -1078,6 +1063,20 @@ fn rollback_label(ability: syspkg::RollbackAbility) -> &'static str {
 mod tests {
     use super::*;
     use osdk_core::syspkg::{ProbeOutcome, ProbePurpose, ProbeRecord, WingetDetails};
+
+    /// The label must not name only the OS: an arch-only filter produces the
+    /// same state, and telling someone "not for this os" while their OS matches
+    /// sends them looking in the wrong place.
+    #[test]
+    fn the_inapplicable_label_covers_arch_as_well_as_os() {
+        let state = state_label(syspkg::PackageState::NotApplicable);
+        assert!(!state.contains(" os"), "{state}");
+        assert_eq!(state, "not for this platform");
+
+        let skip = skip_label(syspkg::SkipReason::NotApplicable);
+        assert!(!skip.contains("operating system"), "{skip}");
+        assert_eq!(skip, "not for this platform");
+    }
 
     fn healthy_winget() -> ManagerReport {
         let mut report = ManagerReport::new(ManagerKind::Winget, ManagerStatus::Healthy);

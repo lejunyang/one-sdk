@@ -468,7 +468,7 @@ mod tests {
     fn request(version: &str) -> PackageRequest {
         PackageRequest {
             version: version.to_owned(),
-            os: None,
+            platform: Default::default(),
         }
     }
 

@@ -150,7 +150,7 @@ pub fn evaluate(
     key: &PackageKey,
     request: &PackageRequest,
     installed: Option<&[ExportedPackage]>,
-    platform_os: &str,
+    platform: &crate::platform::Platform,
 ) -> PackageStatus {
     let requested = if request.wants_latest() {
         "latest".to_owned()
@@ -158,16 +158,16 @@ pub fn evaluate(
         request.version.clone()
     };
 
-    if let Some(wanted_os) = &request.os {
-        if !wanted_os.eq_ignore_ascii_case(platform_os) {
-            return PackageStatus {
-                manager: key.manager,
-                id: key.id.clone(),
-                requested,
-                installed: None,
-                state: PackageState::NotApplicable,
-            };
-        }
+    // A filter that does not match makes the entry inapplicable rather than
+    // missing, so a Windows-only package is not reported as a gap on Linux.
+    if !request.applies_to(platform) {
+        return PackageStatus {
+            manager: key.manager,
+            id: key.id.clone(),
+            requested,
+            installed: None,
+            state: PackageState::NotApplicable,
+        };
     }
 
     let Some(installed) = installed else {
@@ -223,6 +223,18 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{Arch, Libc, Os, Platform, PlatformFilter};
+
+    /// A concrete host to evaluate against. Tests name the platform explicitly
+    /// rather than using `Platform::current()`, so a filter test asserts the
+    /// same thing on every machine that runs it.
+    fn windows() -> Platform {
+        Platform {
+            os: Os::Windows,
+            arch: Arch::X64,
+            libc: Libc::None,
+        }
+    }
 
     /// The shape a real host emitted, trimmed to the fields that matter.
     const REAL_EXPORT: &str = r#"{
@@ -247,7 +259,7 @@ mod tests {
     fn request(version: &str) -> PackageRequest {
         PackageRequest {
             version: version.to_owned(),
-            os: None,
+            platform: Default::default(),
         }
     }
 
@@ -278,7 +290,7 @@ mod tests {
             &key("9NKSQGP7F2NH"),
             &request("latest"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert_eq!(status.state, PackageState::Satisfied);
@@ -299,7 +311,7 @@ mod tests {
             &key("Git.Git"),
             &request("latest"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert_eq!(status.state, PackageState::Satisfied);
@@ -315,7 +327,7 @@ mod tests {
             &key("Git.Git"),
             &request("2.46.0"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert_eq!(status.state, PackageState::Satisfied);
@@ -329,7 +341,7 @@ mod tests {
             &key("Git.Git"),
             &request("2.99.0"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert_eq!(status.state, PackageState::VersionDiffers);
@@ -348,7 +360,7 @@ mod tests {
             &key("Nope.Nope"),
             &request("latest"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert_eq!(status.state, PackageState::Missing);
@@ -357,7 +369,7 @@ mod tests {
 
     #[test]
     fn an_unqueryable_manager_is_unknown_rather_than_missing() {
-        let status = evaluate(&key("Git.Git"), &request("latest"), None, "windows");
+        let status = evaluate(&key("Git.Git"), &request("latest"), None, &windows());
 
         assert_eq!(status.state, PackageState::ManagerUnavailable);
         assert!(
@@ -371,10 +383,13 @@ mod tests {
         let installed = parse_exported_packages(REAL_EXPORT);
         let macos_only = PackageRequest {
             version: "latest".to_owned(),
-            os: Some("macos".to_owned()),
+            platform: PlatformFilter {
+                os: vec![crate::platform::Os::Macos],
+                arch: Vec::new(),
+            },
         };
 
-        let status = evaluate(&key("Some.Tool"), &macos_only, Some(&installed), "windows");
+        let status = evaluate(&key("Some.Tool"), &macos_only, Some(&installed), &windows());
 
         assert_eq!(status.state, PackageState::NotApplicable);
         assert!(!status.state.is_missing());
@@ -385,10 +400,13 @@ mod tests {
         let installed = parse_exported_packages(REAL_EXPORT);
         let windows_only = PackageRequest {
             version: "latest".to_owned(),
-            os: Some("Windows".to_owned()),
+            platform: PlatformFilter {
+                os: vec![crate::platform::Os::Windows],
+                arch: Vec::new(),
+            },
         };
 
-        let status = evaluate(&key("Git.Git"), &windows_only, Some(&installed), "windows");
+        let status = evaluate(&key("Git.Git"), &windows_only, Some(&installed), &windows());
 
         assert_eq!(
             status.state,
@@ -407,7 +425,7 @@ mod tests {
             &key("git.git"),
             &request("latest"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert_eq!(status.state, PackageState::Missing);
@@ -420,13 +438,13 @@ mod tests {
             &key("Git.Git"),
             &request("latest"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
         let absent = evaluate(
             &key("Nope"),
             &request("latest"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
 
         assert!(!StatusReport::new(vec![present.clone()], Vec::new()).has_missing());
@@ -440,7 +458,7 @@ mod tests {
             &key("Git.Git"),
             &request("2.99.0"),
             Some(&installed),
-            "windows",
+            &windows(),
         );
         let report = StatusReport::new(vec![status], vec!["oops".to_owned()]);
 

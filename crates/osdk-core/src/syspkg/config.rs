@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::report::ManagerKind;
+use crate::platform::{Platform, PlatformFilter};
 
 /// A package requested in `[syspkg.packages]`.
 ///
@@ -32,10 +33,31 @@ use super::report::ManagerKind;
 pub struct PackageRequest {
     /// Desired version, or `latest`.
     pub version: String,
-    /// Restrict this request to one operating system (`windows`, `macos`,
-    /// `linux`). Absent means every platform where the manager exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub os: Option<String>,
+    /// Restrict this request to some operating systems and/or architectures.
+    ///
+    /// An unrestricted filter means "every platform where the manager exists",
+    /// which is what an entry without `os`/`arch` gets.
+    #[serde(skip_serializing_if = "PlatformFilter::is_unrestricted")]
+    #[serde(serialize_with = "serialize_filter")]
+    pub platform: PlatformFilter,
+}
+
+/// Serialize the filter back as the `os`/`arch` token lists it was written as.
+fn serialize_filter<S: serde::Serializer>(
+    filter: &PlatformFilter,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(None)?;
+    if !filter.os.is_empty() {
+        let tokens: Vec<_> = filter.os.iter().map(|os| os.config_token()).collect();
+        map.serialize_entry("os", &tokens)?;
+    }
+    if !filter.arch.is_empty() {
+        let tokens: Vec<_> = filter.arch.iter().map(|arch| arch.config_token()).collect();
+        map.serialize_entry("arch", &tokens)?;
+    }
+    map.end()
 }
 
 impl PackageRequest {
@@ -43,14 +65,41 @@ impl PackageRequest {
     pub fn wants_latest(&self) -> bool {
         self.version.is_empty() || self.version.eq_ignore_ascii_case("latest")
     }
+
+    /// Whether this request applies to `platform`.
+    pub fn applies_to(&self, platform: &Platform) -> bool {
+        self.platform.matches(platform)
+    }
 }
 
 /// Accept both spellings a person would naturally write.
 ///
 /// `"winget:Foo" = "latest"` and `"winget:Foo" = { version = "1.2" }` mean the
 /// same thing, and rejecting either would be a papercut with no upside.
+///
+/// `os` and `arch` each accept a single token or a list. An unrecognized token
+/// is a hard error here rather than a filter that never matches: the previous
+/// behavior compared `os` as a bare string, so `os = "windwos"` silently made
+/// the package inapplicable on every host while the status report still said
+/// `not applicable`, which reads exactly like a correct restriction.
 impl<'de> Deserialize<'de> for PackageRequest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Tokens {
+            One(String),
+            Many(Vec<String>),
+        }
+
+        impl Tokens {
+            fn into_vec(self) -> Vec<String> {
+                match self {
+                    Tokens::One(value) => vec![value],
+                    Tokens::Many(values) => values,
+                }
+            }
+        }
+
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Raw {
@@ -59,13 +108,24 @@ impl<'de> Deserialize<'de> for PackageRequest {
                 #[serde(default)]
                 version: String,
                 #[serde(default)]
-                os: Option<String>,
+                os: Option<Tokens>,
+                #[serde(default)]
+                arch: Option<Tokens>,
             },
         }
 
         Ok(match Raw::deserialize(deserializer)? {
-            Raw::Version(version) => PackageRequest { version, os: None },
-            Raw::Table { version, os } => PackageRequest { version, os },
+            Raw::Version(version) => PackageRequest {
+                version,
+                platform: PlatformFilter::default(),
+            },
+            Raw::Table { version, os, arch } => {
+                let os = os.map(Tokens::into_vec).unwrap_or_default();
+                let arch = arch.map(Tokens::into_vec).unwrap_or_default();
+                let platform = PlatformFilter::parse(&os, &arch)
+                    .map_err(<D::Error as serde::de::Error>::custom)?;
+                PackageRequest { version, platform }
+            }
         })
     }
 }
@@ -220,6 +280,7 @@ impl SyspkgConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{Arch, Libc, Os};
 
     #[test]
     fn a_key_without_a_manager_prefix_is_rejected_with_a_usable_hint() {
@@ -299,7 +360,7 @@ mod tests {
         for spelling in ["latest", "LATEST", "Latest", ""] {
             let request = PackageRequest {
                 version: spelling.to_owned(),
-                os: None,
+                platform: Default::default(),
             };
             assert!(request.wants_latest(), "{spelling:?} means latest");
         }
@@ -309,7 +370,7 @@ mod tests {
     fn a_concrete_version_is_not_latest() {
         let request = PackageRequest {
             version: "0.101.0".to_owned(),
-            os: None,
+            platform: Default::default(),
         };
 
         assert!(!request.wants_latest());
@@ -322,7 +383,7 @@ mod tests {
             "winget:Git.Git".to_owned(),
             PackageRequest {
                 version: "latest".to_owned(),
-                os: None,
+                platform: Default::default(),
             },
         );
         packages.insert("oops-no-prefix".to_owned(), PackageRequest::default());
@@ -335,5 +396,103 @@ mod tests {
 
         assert_eq!(parsed.len(), 1, "the valid key must survive");
         assert_eq!(errors.len(), 1, "and the bad one must still be reported");
+    }
+
+    /// `os` and `arch` both filter, in either the single-token or list spelling,
+    /// and the two dimensions are AND rather than OR.
+    ///
+    /// N=2 matters here: with a single entry a bug that accepts everything and a
+    /// bug that accepts nothing both look plausible, so each case asserts one
+    /// entry that must match alongside one that must not.
+    #[test]
+    fn os_and_arch_filter_independently_and_together() {
+        let win_arm = Platform {
+            os: Os::Windows,
+            arch: Arch::Arm64,
+            libc: Libc::None,
+        };
+        let win_x64 = Platform {
+            os: Os::Windows,
+            arch: Arch::X64,
+            libc: Libc::None,
+        };
+        let linux_arm = Platform {
+            os: Os::Linux,
+            arch: Arch::Arm64,
+            libc: Libc::None,
+        };
+
+        let parse = |toml_body: &str| -> PackageRequest {
+            #[derive(Deserialize)]
+            struct Wrapper {
+                package: PackageRequest,
+            }
+            toml::from_str::<Wrapper>(toml_body).unwrap().package
+        };
+
+        // Both dimensions given: only the exact combination applies.
+        let both = parse("package = { version = \"1\", os = \"windows\", arch = \"arm64\" }");
+        assert!(both.applies_to(&win_arm));
+        assert!(!both.applies_to(&win_x64), "arch must also match");
+        assert!(!both.applies_to(&linux_arm), "os must also match");
+
+        // Only `arch`: every OS with that architecture applies.
+        let arch_only = parse("package = { version = \"1\", arch = \"arm64\" }");
+        assert!(arch_only.applies_to(&win_arm));
+        assert!(arch_only.applies_to(&linux_arm));
+        assert!(!arch_only.applies_to(&win_x64));
+
+        // Lists are OR within one dimension.
+        let list = parse("package = { version = \"1\", arch = [\"arm64\", \"x64\"] }");
+        assert!(list.applies_to(&win_arm));
+        assert!(list.applies_to(&win_x64));
+
+        // Aliases resolve through the same parser the backends already use.
+        let aliased = parse("package = { version = \"1\", os = \"win\", arch = \"aarch64\" }");
+        assert!(aliased.applies_to(&win_arm));
+        assert!(!aliased.applies_to(&linux_arm));
+
+        // No filter at all still means everywhere.
+        let bare = parse("package = \"latest\"");
+        assert!(bare.applies_to(&win_arm));
+        assert!(bare.applies_to(&linux_arm));
+        assert!(bare.platform.is_unrestricted());
+    }
+
+    /// A misspelled token must be an error, not a filter that never matches.
+    ///
+    /// This is the failure this feature most needed to prevent. `os` used to be
+    /// compared as a bare string, so `os = "windwos"` made the package
+    /// inapplicable on every host while `pkg status` still reported it as
+    /// `not applicable` -- indistinguishable from a correct restriction, and the
+    /// package simply never installed anywhere.
+    #[test]
+    fn a_misspelled_platform_token_is_rejected_rather_than_never_matching() {
+        for body in [
+            "package = { version = \"1\", os = \"windwos\" }",
+            "package = { version = \"1\", arch = \"arm65\" }",
+            "package = { version = \"1\", os = [\"linux\", \"solaris\"] }",
+        ] {
+            #[derive(Debug, Deserialize)]
+            struct Wrapper {
+                #[allow(dead_code)]
+                package: PackageRequest,
+            }
+            let error =
+                toml::from_str::<Wrapper>(body).expect_err(&format!("should be rejected: {body}"));
+            let message = error.to_string();
+            // The message has to name the offending token and the accepted set,
+            // or the author still has to guess which of the two fields is wrong.
+            assert!(
+                message.contains("windwos")
+                    || message.contains("arm65")
+                    || message.contains("solaris"),
+                "{message}"
+            );
+            assert!(
+                message.contains("expected one of"),
+                "message must list the accepted tokens: {message}"
+            );
+        }
     }
 }
