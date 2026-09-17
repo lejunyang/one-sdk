@@ -77,7 +77,15 @@ no_elevate = false
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
 "winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
+"winget:Only.OnWindowsArm" = { version = "latest", os = "windows", arch = "arm64" }
+"winget:Either.Arch" = { version = "latest", arch = ["x64", "arm64"] }
 ```
+
+`os` 与 `arch` 都可写单值或数组：维度内是「任一命中」，两个维度之间是「都要命中」。
+不匹配的条目视为不适用，`pkg status` 报告为 `not for this platform`，不会算作缺失。
+无法识别的取值（例如 `windwos`、`arm65`）**直接报错**，而不是默默永不匹配——后者会让
+包在所有机器上都不安装，而报告看起来与一条正确的限定毫无区别。
+`arch` 接受 `x64`/`arm64`/`x86`/`arm` 及 `amd64`、`x86_64`、`aarch64` 等常见别名。
 
 管理器前缀是必需的。包 ID 不跨平台通用——winget 的 `PackageIdentifier` 区分大小写且
 对应仓库路径，brew 还要再分 formula 和 cask——所以 osdk 不做跨管理器的名称映射，

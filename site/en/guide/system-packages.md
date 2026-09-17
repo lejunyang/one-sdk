@@ -82,7 +82,18 @@ no_elevate = false
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
 "winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
+"winget:Only.OnWindowsArm" = { version = "latest", os = "windows", arch = "arm64" }
+"winget:Either.Arch" = { version = "latest", arch = ["x64", "arm64"] }
 ```
+
+`os` and `arch` each take a single token or a list: values within one dimension are
+OR, and the two dimensions are AND. A non-matching entry is inapplicable rather
+than missing, and `pkg status` reports it as `not for this platform`.
+An unrecognized value such as `windwos` or `arm65` is **an error**, not a filter
+that never matches: the latter would stop the package installing on every machine
+while the report still looked exactly like a correct restriction.
+`arch` accepts `x64`/`arm64`/`x86`/`arm` plus the usual aliases (`amd64`,
+`x86_64`, `aarch64`).
 
 The manager prefix is required. Package ids are not portable across managers —
 winget's `PackageIdentifier` is case-sensitive and mirrors a repository path,

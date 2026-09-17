@@ -343,6 +343,11 @@ version = "1.2.3"
 installer = "npm"             # auto|npm|pnpm；隐式默认值为 auto
 allow_builds = ["@scope/native-tool", "esbuild"]
 
+[tools."npm:only-on-windows-arm"]
+version = "1.0.0"
+os = "windows"                # 单值或数组；与 arch 之间是「都要命中」
+arch = "arm64"
+
 [tools."http:https://downloads.example.com/acme-{version}.tar.gz"]
 version = "1.2.3"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -364,6 +369,14 @@ Registry 的选择语义见[JavaScript 包管理器](./package-managers)。
 [npm 开发工具](./npm-tools#构建脚本策略)。
 `http:` 条目要求精确语义化版本，并为严格 HTTPS `{version}` 模板提供 SHA-256；
 文件/归档布局与离线重放见[直接 HTTPS 制品](./http-artifacts)。
+
+`os` 与 `arch` 是**平台过滤**，不是 backend option：它们在进入 backend 之前就被摘除，
+不匹配的条目在合并后的配置里**根本不存在**，因此求解、lock、shim、激活都不会看到它。
+维度内是「任一命中」，两个维度之间是「都要命中」。无法识别的取值直接报错，而不是默默
+永不匹配。显式点名一个被过滤的工具会报错并说明限制，`osdk current` 也会把它连同原因
+一起列出——一个写在配置里却不出现的工具，否则看起来像配置写错了。
+
+字符串简写形式（`fd = "npm:fd@10"`）不支持过滤，需要时改写成上面的表形式。
 
 ## 精确的覆盖与合并语义
 

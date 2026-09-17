@@ -376,6 +376,11 @@ version = "1.2.3"
 installer = "npm"             # auto|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
+[tools."npm:only-on-windows-arm"]
+version = "1.0.0"
+os = "windows"                # single token or a list; AND-ed with arch
+arch = "arm64"
+
 [tools."http:https://downloads.example.com/acme-{version}.tar.gz"]
 version = "1.2.3"
 sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -401,6 +406,18 @@ complete security boundary.
 The `http:` entry requires an exact semantic version and a SHA-256 for its
 strict HTTPS `{version}` template; see [Direct HTTPS Artifacts](./http-artifacts)
 for file/archive layout and offline replay.
+
+`os` and `arch` are **platform filters**, not backend options: they are stripped
+before anything reaches a backend, and a non-matching entry is **absent** from the
+merged configuration, so resolution, lock, shims and activation never see it.
+Values within one dimension are OR, and the two dimensions are AND. An
+unrecognized value is an error rather than a filter that never matches. Naming a
+filtered tool explicitly fails with the restriction quoted, and `osdk current`
+lists it with the reason -- a tool that is in the config yet never appears would
+otherwise look like a mistake in the config.
+
+The shorthand string form (`fd = "npm:fd@10"`) carries no filter; use the table
+form above when you need one.
 
 ## Exact override and merge semantics
 
