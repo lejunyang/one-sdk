@@ -280,7 +280,10 @@ mod tests {
             second.installs.is_empty(),
             "second read must come from the memo, not a fresh walk"
         );
-        assert!(Arc::ptr_eq(&first, &second), "must hand back the same report");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "must hand back the same report"
+        );
     }
 
     /// The ownership map is what actually made `reshim` look like a hang: it cost
