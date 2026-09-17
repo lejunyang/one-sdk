@@ -60,47 +60,312 @@ pub fn resolve_config(path: Option<&Path>, cwd: &Path) -> Result<PathBuf> {
     canonical_file(&config)
 }
 
+/// One reason a project config needs review, naming the exact key.
+///
+/// Carrying the key rather than a bare `true` is what lets the refusal say
+/// *what* to look at. A person told only "this config is untrusted" has to
+/// diff it against nothing; a person told that `settings.verify_signatures`
+/// disables signature verification can decide in one glance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustRequirement {
+    /// Dotted path to the offending key, e.g. `settings.verify_signatures`.
+    pub key: String,
+    /// Why this key is execution-affecting.
+    pub reason: TrustReason,
+}
+
+/// The capability a key grants. These are the only two things trust gates.
+///
+/// Declaring *which package* to install is deliberately not here: npm installs
+/// pass `--ignore-scripts`, `http:` artifacts require a pinned sha256, and
+/// `go:` builds run with `CGO_ENABLED=0`, so a dependency declaration on its
+/// own executes nothing the tool's publisher did not already ship. Treating it
+/// as dangerous made every added package demand re-approval while teaching
+/// nothing -- the gate cried wolf, which is how a real warning gets ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustReason {
+    /// Runs arbitrary code on this machine during install.
+    ExecutesCode,
+    /// Weakens verification of what is installed, or redirects where it comes
+    /// from. Dangerous in combination: an unverified mirror is both at once.
+    WeakensVerification,
+}
+
+impl TrustReason {
+    /// The localized explanation shown next to the key.
+    pub fn describe(self) -> String {
+        match self {
+            Self::ExecutesCode => crate::t!("trust.reason.executes_code"),
+            Self::WeakensVerification => crate::t!("trust.reason.weakens_verification"),
+        }
+    }
+}
+
+/// `[settings]` keys that can neither execute code nor weaken verification.
+///
+/// This is an allowlist, and an unlisted key defaults to requiring trust. A
+/// newly added setting is therefore fail-closed: forgetting to classify it
+/// makes configs ask for review needlessly (visible, mildly annoying, safe)
+/// rather than letting a dangerous key through silently.
+/// `settings_allowlist_covers_every_field` fails when a field is added without
+/// a decision being recorded on either list.
+///
+/// `offline` is safe in the only direction it can move: it forbids network
+/// access, never grants it.
+const SAFE_SETTINGS_KEYS: &[&str] = &[
+    "link_mode",
+    "jobs",
+    "lang",
+    "offline",
+    "prerelease",
+    "shims",
+    "yes",
+];
+
+/// `[settings]` keys that require trust, each with the reason it does.
+///
+/// Kept explicit rather than derived from "absent from the allowlist" so the
+/// refusal can explain itself, and so the coverage test can tell a deliberate
+/// classification apart from an omission.
+const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
+    ("verify_signatures", TrustReason::WeakensVerification),
+    ("require_checksums", TrustReason::WeakensVerification),
+    ("attestations", TrustReason::WeakensVerification),
+    // `node.corepack` runs the installed Node's own `corepack enable`, which
+    // downloads and activates a package manager.
+    ("node", TrustReason::ExecutesCode),
+    // Selects which installer binary drives npm installs.
+    ("npm", TrustReason::ExecutesCode),
+    // Both carry `catalog_url`: a redirected catalog decides which interpreter
+    // or runtime bytes get installed in the first place.
+    ("python", TrustReason::WeakensVerification),
+    ("java", TrustReason::WeakensVerification),
+];
+
+/// Top-level tables that require trust as a whole, with the reason.
+///
+/// `syspkg` installs into the machine outside the managed root, may prompt for
+/// elevation, and is deliberately not covered by `osdk.lock`. `sources` and
+/// `registries` change where subprocesses fetch from.
+const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
+    ("syspkg", TrustReason::ExecutesCode),
+    ("sources", TrustReason::WeakensVerification),
+    ("registries", TrustReason::WeakensVerification),
+];
+
+/// Top-level tables inspected key by key instead of judged as a whole.
+///
+/// `tools` needs this because a single tool option (`allow_builds`) can still
+/// opt into script execution even though the surrounding table is safe.
+const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings"];
+
+/// The npm tool option that turns lifecycle scripts back on.
+const ALLOW_BUILDS_OPTION: &str = "allow_builds";
+
+/// Collect every key in this config that requires review, in reporting order.
+///
+/// An empty result means the config is safe to load with no trust record.
+pub fn trust_requirements(path: &Path) -> Result<Vec<TrustRequirement>> {
+    let text = std::fs::read_to_string(path).map_err(|error| Error::io(path, error))?;
+    let value: toml::Value = toml::from_str(&text)?;
+    Ok(collect_requirements(&value))
+}
+
+/// Render the requirements as indented `key -- reason` lines for a message.
+pub fn describe_requirements(requirements: &[TrustRequirement]) -> String {
+    requirements
+        .iter()
+        .map(|requirement| {
+            format!(
+                "\n  {} -- {}",
+                requirement.key,
+                requirement.reason.describe()
+            )
+        })
+        .collect()
+}
+
+fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
+    let Some(table) = value.as_table() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+
+    for (key, value) in table {
+        match key.as_str() {
+            "settings" => collect_settings_requirements(value, &mut found),
+            "tools" => collect_tools_requirements(value, &mut found),
+            "aliases" => {}
+            other => {
+                debug_assert!(!INSPECTED_TABLES.contains(&other));
+                let reason = TRUST_REQUIRING_TABLES
+                    .iter()
+                    .find(|(name, _)| *name == other)
+                    .map(|(_, reason)| *reason)
+                    // An unrecognized top-level table is fail-closed: a table
+                    // this build cannot interpret cannot be shown harmless.
+                    .unwrap_or(TrustReason::ExecutesCode);
+                found.push(TrustRequirement {
+                    key: other.to_string(),
+                    reason,
+                });
+            }
+        }
+    }
+    found
+}
+
+fn collect_settings_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let Some(settings) = value.as_table() else {
+        // A `settings` key that is not a table is malformed, not safe.
+        found.push(TrustRequirement {
+            key: "settings".into(),
+            reason: TrustReason::WeakensVerification,
+        });
+        return;
+    };
+    for key in settings.keys() {
+        if SAFE_SETTINGS_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let reason = TRUST_REQUIRING_SETTINGS
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, reason)| *reason)
+            // Unlisted means unclassified, which is treated as dangerous.
+            .unwrap_or(TrustReason::WeakensVerification);
+        found.push(TrustRequirement {
+            key: format!("settings.{key}"),
+            reason,
+        });
+    }
+}
+
+/// Inspect `[tools]` for the one option that grants code execution.
+///
+/// Declaring `npm:prettier` or `github:cli/cli` is not itself a reason: those
+/// installs execute no package-authored code. `allow_builds` is, and it can
+/// arrive either as a table field or inline in the request string.
+fn collect_tools_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let Some(tools) = value.as_table() else {
+        return;
+    };
+    let inline_allows_builds = |spec: &str| {
+        crate::version::ToolRequest::parse(spec).is_ok_and(|request| {
+            request
+                .options
+                .get(ALLOW_BUILDS_OPTION)
+                .is_some_and(|value| allow_builds_enabled(value))
+        })
+    };
+    for (name, entry) in tools {
+        let allows_builds = match entry {
+            toml::Value::String(spec) => inline_allows_builds(spec),
+            toml::Value::Table(fields) => {
+                let declared = fields.get(ALLOW_BUILDS_OPTION).is_some_and(|value| {
+                    value
+                        .as_str()
+                        .map(allow_builds_enabled)
+                        // `allow_builds = true` is the natural TOML spelling.
+                        .or_else(|| value.as_bool())
+                        .unwrap_or(false)
+                });
+                declared
+                    || fields
+                        .get("version")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(inline_allows_builds)
+            }
+            _ => false,
+        };
+        if allows_builds {
+            found.push(TrustRequirement {
+                key: format!("tools.{name}.{ALLOW_BUILDS_OPTION}"),
+                reason: TrustReason::ExecutesCode,
+            });
+        }
+    }
+}
+
+/// Whether an `allow_builds` value actually asks for scripts to run.
+///
+/// Mirrors the npm backend's own parsing. A package list still ends up denied
+/// there (npm has no per-package allowlist), but it states the intent to build,
+/// so it is reported rather than silently treated as harmless.
+fn allow_builds_enabled(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    !matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
+/// Hash only the keys that trust actually governs.
+///
+/// Hashing the whole file made trust much stricter than its own gate: once a
+/// config contained a single trust-requiring key, *every* later edit
+/// invalidated the record, so bumping a version in `[tools]` -- a change that
+/// needs no trust on its own -- demanded re-approval. Both gates now read the
+/// same subset, so a record survives exactly the edits that were never gated.
 pub fn normalized_hash(path: &Path) -> Result<String> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::io(path, error))?;
     let value: toml::Value = toml::from_str(&text)?;
-    let normalized = toml::to_string(&value)
+    let governed = governed_subset(&value);
+    let normalized = toml::to_string(&governed)
         .map_err(|error| Error::config(format!("normalizing {}: {error}", path.display())))?;
     Ok(blake3::hash(normalized.as_bytes()).to_hex().to_string())
 }
 
-pub fn requires_trust(path: &Path) -> Result<bool> {
-    let text = std::fs::read_to_string(path).map_err(|error| Error::io(path, error))?;
-    let value: toml::Value = toml::from_str(&text)?;
+/// Project the config down to the keys `trust_requirements` reports on.
+///
+/// Driven by the same requirement list as the gate, so the two cannot drift: a
+/// key that is not a reason to ask for trust is also not a reason to
+/// invalidate it.
+fn governed_subset(value: &toml::Value) -> toml::Value {
+    let mut subset = toml::value::Table::new();
     let Some(table) = value.as_table() else {
-        return Ok(false);
+        return toml::Value::Table(subset);
     };
-    let dynamic_tool_activation = table
-        .get("tools")
-        .and_then(toml::Value::as_table)
-        .is_some_and(|tools| {
-            tools.iter().any(|(key, value)| {
-                is_recognized_dynamic_tool(key)
-                    || value.as_str().is_some_and(is_recognized_dynamic_request)
-                    || value
-                        .as_table()
-                        .and_then(|entry| entry.get("version"))
-                        .and_then(toml::Value::as_str)
-                        .is_some_and(is_recognized_dynamic_request)
-            })
-        });
-    Ok(dynamic_tool_activation
-        || table
-            .keys()
-            .any(|key| !matches!(key.as_str(), "tools" | "aliases")))
+    for requirement in collect_requirements(value) {
+        let mut segments = requirement.key.split('.');
+        let Some(head) = segments.next() else {
+            continue;
+        };
+        let Some(head_value) = table.get(head) else {
+            continue;
+        };
+        match segments.next() {
+            // A whole-table reason (`syspkg`, `sources`, an unknown table)
+            // pins that table's entire content.
+            None => {
+                subset.insert(head.to_string(), head_value.clone());
+            }
+            // A key-level reason pins just that key, leaving unrelated
+            // siblings editable.
+            Some(field) => {
+                let Some(field_value) = head_value.as_table().and_then(|table| table.get(field))
+                else {
+                    continue;
+                };
+                let nested = subset
+                    .entry(head.to_string())
+                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+                if let Some(nested) = nested.as_table_mut() {
+                    // For `tools.<name>.allow_builds` this records the whole
+                    // entry: the package identity is what approval covered.
+                    nested.insert(field.to_string(), field_value.clone());
+                }
+            }
+        }
+    }
+    toml::Value::Table(subset)
 }
 
-fn is_recognized_dynamic_tool(value: &str) -> bool {
-    crate::tool::ToolId::parse(value).is_ok_and(|tool| tool.is_dynamic())
-}
-
-fn is_recognized_dynamic_request(value: &str) -> bool {
-    crate::version::ToolRequest::parse(value)
-        .is_ok_and(|request| is_recognized_dynamic_tool(&request.backend))
+pub fn requires_trust(path: &Path) -> Result<bool> {
+    Ok(!trust_requirements(path)?.is_empty())
 }
 
 pub fn is_trusted(
@@ -465,8 +730,11 @@ mod tests {
         assert!(!is_trusted(&config_dir, &moved.join("osdk.toml"), None).unwrap());
     }
 
+    /// The whole point of the revision: declaring a dependency is not a reason
+    /// to ask for approval. Every namespace here installs without running
+    /// package-authored code, so a project may add and bump tools freely.
     #[test]
-    fn safe_pins_and_aliases_do_not_require_trust() {
+    fn declaring_tools_and_aliases_never_requires_trust() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("osdk.toml");
         std::fs::write(
@@ -475,63 +743,226 @@ mod tests {
         )
         .unwrap();
         assert!(!requires_trust(&path).unwrap());
-        std::fs::write(&path, "[tools]\nnode = \"20\"\n[settings]\nyes = true\n").unwrap();
-        assert!(requires_trust(&path).unwrap());
-        std::fs::write(
-            &path,
-            "[tools]\nnode = \"20\"\n[registries.npm]\nurls = [\"https://registry.npmjs.org/\"]\n",
-        )
-        .unwrap();
-        assert!(requires_trust(&path).unwrap());
-    }
 
-    #[test]
-    fn npm_project_tool_activation_requires_trust() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("osdk.toml");
+        for tool in [
+            "npm:prettier",
+            "github:cli/cli",
+            "go:github.com/user/cmd/tool",
+            "cargo:ripgrep",
+            "pypi:ruff",
+            "conda:nasm",
+            "http:https://downloads.example.test/tool-{version}",
+        ] {
+            std::fs::write(&path, format!("[tools]\n{tool:?} = \"1.2.3\"\n")).unwrap();
+            assert!(!requires_trust(&path).unwrap(), "{tool}");
+        }
+
+        // The table form, including a chosen installer, is equally harmless.
         std::fs::write(
             &path,
             "[tools.\"npm:prettier\"]\nversion = \"3\"\ninstaller = \"pnpm\"\n",
         )
         .unwrap();
-        assert!(requires_trust(&path).unwrap());
-
-        std::fs::write(&path, "[tools]\nformatter = \"npm:prettier@3\"\n").unwrap();
-        assert!(requires_trust(&path).unwrap());
-    }
-
-    #[test]
-    fn http_project_tool_activation_requires_trust() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("osdk.toml");
-        std::fs::write(
-            &path,
-            "[tools.\"http:https://downloads.example.test/tool-{version}\"]\nversion = \"1.2.3\"\nsha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
-        )
-        .unwrap();
-        assert!(requires_trust(&path).unwrap());
-
-        std::fs::write(
-            &path,
-            "[tools]\nfixture = \"http:https://downloads.example.test/tool-{version}[sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]@1.2.3\"\n",
-        )
-        .unwrap();
-        assert!(requires_trust(&path).unwrap());
-    }
-
-    #[test]
-    fn every_recognized_dynamic_namespace_requires_trust() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("osdk.toml");
-        for tool in [
-            "npm:prettier",
-            "github:cli/cli",
-            "http:https://downloads.example.test/tool-{version}",
-        ] {
-            std::fs::write(&path, format!("[tools]\n{tool:?} = \"1.2.3\"\n")).unwrap();
-            assert!(requires_trust(&path).unwrap(), "{tool}");
-        }
-        std::fs::write(&path, "[tools]\nfixture = \"unknown:tool@1.2.3\"\n").unwrap();
         assert!(!requires_trust(&path).unwrap());
+    }
+
+    /// `allow_builds` is the one thing inside `[tools]` that grants execution,
+    /// in either spelling, and it must be reported against its own key.
+    #[test]
+    fn allow_builds_requires_trust_in_every_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for body in [
+            "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = true\n",
+            "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"yes\"\n",
+            "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"esbuild\"\n",
+            "[tools]\nbundler = \"npm:esbuild[allow_builds=true]@0.21\"\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let found = trust_requirements(&path).unwrap();
+            assert_eq!(found.len(), 1, "{body}");
+            assert!(found[0].key.ends_with(".allow_builds"), "{body}");
+            assert_eq!(found[0].reason, TrustReason::ExecutesCode, "{body}");
+        }
+
+        // A false-ish value leaves scripts denied, so it is not a reason.
+        for body in [
+            "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = false\n",
+            "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"off\"\n",
+            "[tools.\"npm:esbuild\"]\nversion = \"0.21\"\nallow_builds = \"\"\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(!requires_trust(&path).unwrap(), "{body}");
+        }
+    }
+
+    /// Each reported key must carry the reason a person needs to judge it, and
+    /// safe siblings in the same table must not be dragged in.
+    #[test]
+    fn dangerous_keys_are_reported_individually_with_a_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        std::fs::write(
+            &path,
+            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nlang = \"zh\"\nverify_signatures = false\nrequire_checksums = false\n",
+        )
+        .unwrap();
+        let found = trust_requirements(&path).unwrap();
+        let keys: Vec<_> = found.iter().map(|item| item.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["settings.require_checksums", "settings.verify_signatures"]
+        );
+        assert!(found
+            .iter()
+            .all(|item| item.reason == TrustReason::WeakensVerification));
+
+        // The rendered message names each key and explains it.
+        let described = describe_requirements(&found);
+        assert!(described.contains("settings.verify_signatures"));
+        assert!(described.contains(&TrustReason::WeakensVerification.describe()));
+        assert!(!described.contains("settings.jobs"));
+    }
+
+    #[test]
+    fn syspkg_sources_and_registries_require_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        std::fs::write(&path, "[syspkg.packages]\n\"winget:Foo\" = \"latest\"\n").unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "syspkg");
+        assert_eq!(found[0].reason, TrustReason::ExecutesCode);
+
+        for (body, key) in [
+            ("[sources]\nselection = \"ordered\"\n", "sources"),
+            (
+                "[registries.npm]\nurls = [\"https://registry.npmjs.org/\"]\n",
+                "registries",
+            ),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let found = trust_requirements(&path).unwrap();
+            assert_eq!(found.len(), 1, "{body}");
+            assert_eq!(found[0].key, key);
+            assert_eq!(found[0].reason, TrustReason::WeakensVerification, "{body}");
+        }
+    }
+
+    /// An unknown top-level table, and an unknown `[settings]` key, must both
+    /// fail closed. A build that cannot interpret a key cannot clear it.
+    #[test]
+    fn unrecognized_keys_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        std::fs::write(&path, "[future_capability]\nvalue = 1\n").unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "future_capability");
+        assert_eq!(found[0].reason, TrustReason::ExecutesCode);
+
+        std::fs::write(&path, "[settings]\nfuture_switch = true\n").unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "settings.future_switch");
+    }
+
+    /// Every `Settings` field must appear on exactly one of the two lists.
+    ///
+    /// Without this, adding a field is silently classified by the fallback.
+    /// That fallback is fail-closed so a new field cannot become a hole, but an
+    /// unclassified field also cannot explain itself in the refusal, and a
+    /// field that *is* safe would needlessly demand approval forever. The field
+    /// names come from serializing a default `Settings`, so this test tracks the
+    /// struct rather than a hand-copied list that would drift.
+    #[test]
+    fn settings_allowlist_covers_every_field() {
+        let settings = crate::config::Settings::default();
+        let serialized = toml::Value::try_from(&settings).unwrap();
+        let table = serialized
+            .as_table()
+            .expect("settings serialize to a table");
+
+        let mut unclassified = Vec::new();
+        for key in table.keys() {
+            let safe = SAFE_SETTINGS_KEYS.contains(&key.as_str());
+            let dangerous = TRUST_REQUIRING_SETTINGS.iter().any(|(name, _)| name == key);
+            if safe == dangerous {
+                // Either on neither list, or contradictorily on both.
+                unclassified.push(key.clone());
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "these `Settings` fields are not classified for trust: {unclassified:?}. \
+             Add each to SAFE_SETTINGS_KEYS or TRUST_REQUIRING_SETTINGS."
+        );
+    }
+
+    /// Trust identity must follow the gate: edits to keys that never needed
+    /// approval must not invalidate a record, and edits to keys that did must.
+    #[test]
+    fn only_governed_keys_invalidate_a_trust_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let config = repo.join("osdk.toml");
+
+        let write = |body: &str| std::fs::write(&config, body).unwrap();
+        write("[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n");
+        trust(&config_dir, &config).unwrap();
+        assert!(is_trusted(&config_dir, &config, None).unwrap());
+
+        // Bumping a version, adding a dependency, adding an alias and changing
+        // a safe setting are all ungated, so trust survives all of them.
+        for body in [
+            "[tools]\nnode = \"22\"\n\n[settings]\njobs = 4\nverify_signatures = false\n",
+            "[tools]\nnode = \"22\"\nformatter = \"npm:prettier@3\"\n\n[settings]\njobs = 4\nverify_signatures = false\n",
+            "[tools]\nnode = \"22\"\nformatter = \"npm:prettier@3\"\n[aliases.node]\ndefault = \"22\"\n\n[settings]\njobs = 12\nverify_signatures = false\n",
+            "# a comment\n[settings]\nverify_signatures = false\njobs = 12\n[tools]\nnode = '22'\nformatter = \"npm:prettier@3\"\n[aliases.node]\ndefault = \"22\"\n",
+        ] {
+            write(body);
+            assert!(
+                is_trusted(&config_dir, &config, None).unwrap(),
+                "trust should survive: {body}"
+            );
+        }
+
+        // Restoring signature verification changes a governed key, so the
+        // record no longer matches. Fail-closed applies in both directions:
+        // identity is "what was approved", not "is this safer now".
+        write("[tools]\nnode = \"22\"\n\n[settings]\njobs = 12\nverify_signatures = true\n");
+        assert!(!is_trusted(&config_dir, &config, None).unwrap());
+
+        // Introducing a governed key that was absent at approval time must
+        // also invalidate it.
+        write("[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n");
+        assert!(is_trusted(&config_dir, &config, None).unwrap());
+        write(
+            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[syspkg.packages]\n\"winget:Foo\" = \"latest\"\n",
+        );
+        assert!(!is_trusted(&config_dir, &config, None).unwrap());
+    }
+
+    /// A config with nothing governed has no trust record to invalidate, so it
+    /// must never be refused however much it changes.
+    #[test]
+    fn ungoverned_configs_are_never_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        std::fs::write(&path, "[tools]\nnode = \"20\"\n").unwrap();
+        let before = normalized_hash(&path).unwrap();
+        std::fs::write(
+            &path,
+            "[tools]\nnode = \"24\"\nformatter = \"npm:prettier@3\"\ncli = \"github:cli/cli@2\"\n[aliases.node]\ndefault = \"24\"\n",
+        )
+        .unwrap();
+        assert!(!requires_trust(&path).unwrap());
+        // Identical because neither version contains a governed key.
+        assert_eq!(before, normalized_hash(&path).unwrap());
     }
 }

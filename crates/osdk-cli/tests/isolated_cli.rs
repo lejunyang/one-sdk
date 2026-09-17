@@ -867,14 +867,34 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
     let accepted = run_isolated_in(temp.path(), &project, &["config", "list"]);
     assert!(accepted.status.success());
 
+    // Bumping a tool version is not a governed change: `[tools]` grants no
+    // execution on its own, so an existing approval must survive it. This is
+    // the papercut the key-level gate exists to remove -- under the old
+    // whole-file hash this demanded re-approval.
     std::fs::write(
         &config,
         "[tools]\nnode = \"22\"\n[sources]\nselection = \"ordered\"\n",
     )
     .unwrap();
+    let bumped = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(
+        bumped.status.success(),
+        "bumping a tool version must not invalidate trust: {}",
+        String::from_utf8_lossy(&bumped.stderr)
+    );
+
+    // Editing the governed `[sources]` table does invalidate it, and the
+    // refusal must name the key so the user knows what to review.
+    std::fs::write(
+        &config,
+        "[tools]\nnode = \"22\"\n[sources]\nselection = \"auto\"\n",
+    )
+    .unwrap();
     let changed = run_isolated_in(temp.path(), &project, &["config", "list"]);
     assert!(!changed.status.success());
-    assert!(String::from_utf8_lossy(&changed.stderr).contains("is not trusted"));
+    let message = String::from_utf8_lossy(&changed.stderr);
+    assert!(message.contains("is not trusted"), "{message}");
+    assert!(message.contains("sources"), "{message}");
 
     let config_value = config.to_string_lossy().into_owned();
     let retrusted = run_isolated_in(temp.path(), &project, &["--yes", "trust", &config_value]);

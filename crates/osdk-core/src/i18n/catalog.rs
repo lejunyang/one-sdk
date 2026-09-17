@@ -1425,8 +1425,22 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "err.untrusted_config",
         (
-            "project config contains trust-required fields and is not trusted: {path}; review it, then run `osdk --yes trust {path}` or configure OSDK_TRUSTED_CONFIG_PATHS",
-            "项目配置包含需信任字段但尚未受信任：{path}；请审阅后运行 `osdk --yes trust {path}`，或配置 OSDK_TRUSTED_CONFIG_PATHS",
+            "project config is not trusted: {path}\nthese keys need review because they affect what runs on this machine:{requirements}\nreview them, then run `osdk --yes trust {path}` (or set OSDK_TRUSTED_CONFIG_PATHS). Declaring which tools or packages to install never needs trust on its own.",
+            "项目配置尚未受信任：{path}\n以下键会影响本机实际执行的内容，需要你审阅：{requirements}\n请审阅后运行 `osdk --yes trust {path}`（或配置 OSDK_TRUSTED_CONFIG_PATHS）。仅声明安装哪些工具或包本身不需要信任。",
+        ),
+    );
+    m.insert(
+        "trust.reason.executes_code",
+        (
+            "can run arbitrary code on this machine during install",
+            "安装过程中可能在本机执行任意代码",
+        ),
+    );
+    m.insert(
+        "trust.reason.weakens_verification",
+        (
+            "weakens verification of installed artifacts, or redirects where they are downloaded from",
+            "会削弱对安装产物的校验，或改变下载来源",
         ),
     );
     m.insert(

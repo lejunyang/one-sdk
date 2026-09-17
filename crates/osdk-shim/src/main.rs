@@ -447,7 +447,9 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
     else {
         return Ok(());
     };
-    if !osdk_core::trust::requires_trust(&project_config).map_err(|e| e.to_string())? {
+    let requirements =
+        osdk_core::trust::trust_requirements(&project_config).map_err(|e| e.to_string())?;
+    if requirements.is_empty() {
         return Ok(());
     }
     let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
@@ -458,7 +460,8 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
     }
     Err(osdk_core::t!(
         "err.untrusted_config",
-        path = project_config.display()
+        path = project_config.display(),
+        requirements = osdk_core::trust::describe_requirements(&requirements)
     ))
 }
 

@@ -146,7 +146,8 @@ impl App {
         if check_trust {
             if let Some(project_config) = osdk_core::trust::project_config(&cwd)? {
                 let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
-                if osdk_core::trust::requires_trust(&project_config)?
+                let requirements = osdk_core::trust::trust_requirements(&project_config)?;
+                if !requirements.is_empty()
                     && !osdk_core::trust::is_trusted(
                         &dirs.config,
                         &project_config,
@@ -155,7 +156,8 @@ impl App {
                 {
                     return Err(anyhow::anyhow!(osdk_core::t!(
                         "err.untrusted_config",
-                        path = project_config.display()
+                        path = project_config.display(),
+                        requirements = osdk_core::trust::describe_requirements(&requirements)
                     )));
                 }
             }
