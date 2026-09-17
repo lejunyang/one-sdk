@@ -432,14 +432,21 @@ fn trusted_project_npm_bin(ctx: &Ctx, cwd: &std::path::Path) -> crate::Result<Op
     let Some(project_root) = nearest_package_root(&cwd) else {
         return Ok(None);
     };
-    if !same_existing_path(&config_root, &project_root)
-        || !crate::trust::is_trusted(
+    // The gate asks "was the config that declared these specs reviewed?", so a
+    // config with nothing to review passes it. Demanding a positive record
+    // regardless would fail closed in the wrong place: declaring an npm tool no
+    // longer requires trust, so a hand-written config has no record, and
+    // insisting on one would skip activation *silently* rather than refusing
+    // loudly -- the curated launchers would just not appear on PATH, with no
+    // error explaining why.
+    let reviewed = crate::trust::requires_trust(config_path).is_ok_and(|required| !required)
+        || crate::trust::is_trusted(
             &ctx.dirs.config,
             config_path,
             std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS").as_ref(),
         )
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    if !same_existing_path(&config_root, &project_root) || !reviewed {
         return Ok(None);
     }
     let configured_specs = project_npm_configured_specs(ctx, config_path)?;
@@ -1589,5 +1596,94 @@ mod tests {
         assert!(out.contains("export PATH=\"$OSDK_ORIGINAL_PATH\""));
         assert!(out.contains("unset GOROOT"));
         assert!(out.contains("unset OSDK_MANAGED_ENV"));
+    }
+
+    /// A hand-written npm config activates its curated bin without a trust
+    /// record, because declaring an npm tool no longer requires one.
+    ///
+    /// The regression this guards against is silent: gating activation on a
+    /// positive `is_trusted` record means a config that needs no review has no
+    /// record, so the curated launchers vanish from PATH with no error. A probe
+    /// that only checks "did any path appear" cannot see it -- an unpublished
+    /// generation looks identical -- so this test publishes a real generation
+    /// first, making the absence attributable to the gate alone.
+    #[cfg(unix)]
+    #[test]
+    fn ungoverned_npm_config_activates_without_a_trust_record() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        let config_path = project.join("osdk.toml");
+        std::fs::write(&config_path, "[tools]\nformatter = \"npm:prettier@^3.6\"\n").unwrap();
+
+        // Nothing in this config is governed, so there is no record to find.
+        assert!(!crate::trust::requires_trust(&config_path).unwrap());
+
+        // Mirror the npm module's own fixture: the `bin` field is what makes
+        // the executable validatable, and without it publication fails.
+        let target = project.join("node_modules/prettier/bin/tool.js");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            project.join("node_modules/prettier/package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "prettier",
+                "version": "3.6.2",
+                "bin": { "prettier": "bin/tool.js" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        symlink(&target, project.join("node_modules/.bin/prettier")).unwrap();
+
+        let selection = crate::backend::npm_package::ProjectNpmBinSelection {
+            backend: "npm:prettier".into(),
+            configured_spec: "^3.6".into(),
+            version: "3.6.2".into(),
+        };
+        let configured =
+            BTreeMap::from([(selection.backend.clone(), selection.configured_spec.clone())]);
+        let published = crate::backend::npm_package::publish_project_bin_generation(
+            &project,
+            &selection,
+            &configured,
+        )
+        .unwrap();
+
+        let mut ctx = test_ctx(temporary.path(), &[("formatter", "npm:prettier@^3.6")]);
+        ctx.config.tool_origins.insert(
+            "formatter".into(),
+            crate::config::ToolConfigOrigin::ProjectConfig(config_path.clone()),
+        );
+
+        let activated = trusted_project_npm_bin(&ctx, &project).unwrap();
+        assert_eq!(
+            activated,
+            Some(published),
+            "an ungoverned npm config must still activate its curated bin"
+        );
+
+        // The record-based path must still be what clears a governed config:
+        // adding a governed key withholds activation until it is approved.
+        std::fs::write(
+            &config_path,
+            "[tools]\nformatter = \"npm:prettier@^3.6\"\n\n[settings]\nverify_signatures = false\n",
+        )
+        .unwrap();
+        assert!(crate::trust::requires_trust(&config_path).unwrap());
+        assert_eq!(
+            trusted_project_npm_bin(&ctx, &project).unwrap(),
+            None,
+            "a governed config must not activate until it is trusted"
+        );
+
+        crate::trust::trust(&ctx.dirs.config, &config_path).unwrap();
+        assert!(
+            trusted_project_npm_bin(&ctx, &project).unwrap().is_some(),
+            "approving the governed config restores activation"
+        );
     }
 }
