@@ -185,9 +185,9 @@ osdk config get shims.conda:clang.expose                # effective value
 osdk config unset shims.conda:clang.expose              # back to default
 ```
 
-A setting in a project config makes that `osdk.toml` trust-required, so
-`config set` offers to trust it on the spot, and `--yes` accepts. See
-[Projects and configuration](./projects#project-configuration-trust).
+`shims` settings do not require trust: they only decide which commands get a shim,
+and execute nothing. See
+[Which keys require trust](./projects#which-keys-require-trust).
 
 ::: tip When paths.json is missing
 A few packages ship without that manifest. osdk then exports the whole prefix

@@ -51,9 +51,10 @@ osdk config unset jobs                        # 恢复默认
 取值会先解析校验再落盘，非法值不会留下改了一半的文件；`unset` 会顺带清掉被清空的表头，
 不会留下一个空的 `[settings]`。
 
-::: warning 写入项目配置会触发信任
-项目配置里出现 `[settings]` 会使该文件需要信任（见下节）。`config set` 会就地询问是否
-信任，`--yes` 时自动确认；非交互环境下写入照常成功，但不授予信任，并提示还需要做什么。
+::: warning 写入受管设置会触发信任
+`config set` 写入的键若属于[受管键](#哪些键需要信任)（例如 `verify_signatures`），会使该
+文件需要信任，命令会就地询问，`--yes` 时自动确认；非交互环境下写入照常成功，但不授予
+信任，并提示还需要做什么。写入 `jobs`、`lang` 这类安全键不会触发询问。
 :::
 
 ## 项目版本发现
@@ -255,9 +256,9 @@ osdk reshim
 `osdk where --bins <tool>` 可以核对结果，它分别列出 `published`（生成 shim）与
 `withheld`（挡下）两组。
 
-::: tip 项目配置需要信任
-把这些设置写进项目 `osdk.toml` 会让该文件需要信任，`config set` 会就地询问；改动后
-重新 `osdk trust`。详见[项目配置信任](#项目配置信任)。
+::: tip 这些设置不需要信任
+`settings.shims` 只决定哪些命令生成 shim，既不执行代码也不改变下载来源，因此写进项目
+`osdk.toml` 不会要求信任。需要信任的键见[哪些键需要信任](#哪些键需要信任)。
 :::
 
 ## 完整配置参考
@@ -428,12 +429,40 @@ osdk trust list
 osdk untrust [PATH]
 ```
 
-`PATH` 可为配置文件或目录；目录会从该处向上找最近项目配置。只有顶层 `[tools]` 和
-`[aliases]` 的项目文件通常无需信任，但 npm 工具项需要信任，因为 Shell 激活可能暴露
-最终执行项目依赖文件的筛选 launcher；原始 `node_modules/.bin` 永远不会被激活。其他
-顶层 section（包括 `settings`、`sources`、`registries` 或未知 section）也需要信任。
-项目感知的 `osdk use npm:...` 成功后会信任它刚生成的 `osdk.toml` 精确内容；之后编辑
-会使该记录失效，并阻止筛选 generation 激活。
+`PATH` 可为配置文件或目录；目录会从该处向上找最近项目配置。
+
+### 哪些键需要信任
+
+判据是按**键**判定的，只有两类命中：会在本机**执行任意代码**，或会**削弱对产物的
+校验、改变下载来源**。
+
+| 需要信任 | 原因 |
+| --- | --- |
+| `[syspkg]` | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
+| `[sources]`、`[registries]` | 改变子进程的下载目的地 |
+| `settings` 的 `verify_signatures`、`require_checksums`、`attestations` | 关掉或降级对产物的校验 |
+| `settings` 的 `node`、`npm` | `corepack enable` 会执行代码；installer 决定由哪个程序驱动安装 |
+| `settings` 的 `python`、`java` | 二者的 `catalog_url` 决定安装哪份运行时字节 |
+| `[tools]` 中显式打开的 `allow_builds` | 唯一让 npm 生命周期脚本得以运行的开关 |
+
+**声明安装哪些工具或包本身不需要信任**，`[tools]`、`[aliases]` 都不需要，其中的
+`npm:`、`github:`、`http:`、`go:`、`cargo:`、`pypi:`、`conda:` 条目也不需要：npm 安装默认
+传 `--ignore-scripts`，`http:` 制品缺 `sha256` 直接拒绝，`go:` 以 `CGO_ENABLED=0` 构建。
+这和在 `package.json` 里加一行依赖是同一件事——新增包、升降版本都不会要求重新信任。
+
+两处 fail-closed：**未知的顶层 section** 和**未登记的 `settings` 键**都判为需要信任。
+本 build 无法解释的键，不会因为不认识而放行。
+
+被拒绝时 osdk 会逐条列出命中的键及各自原因，而不是只说"未受信任"：
+
+```text
+error: project config is not trusted: /path/to/osdk.toml
+these keys need review because they affect what runs on this machine:
+  settings.verify_signatures -- weakens verification of installed artifacts, or redirects where they are downloaded from
+  syspkg -- can run arbitrary code on this machine during install
+```
+
+### 信任身份与失效
 
 ```bash
 osdk --yes trust                 # 最近项目配置
@@ -442,10 +471,11 @@ osdk trust list                  # active / stale 记录
 osdk untrust                     # 撤销最近项目配置
 ```
 
-持久信任身份由配置的规范路径和规范化 TOML 内容的 BLAKE3 共同决定。内容变化或
-仓库移动会使记录变为 stale；仅空白或格式变化通常不会。软链接解析到真实目标。
-trust store 位于 `$OSDK_CONFIG_DIR/trusted-configs.toml`；`trust list` 只报告 stale，
-不会自动删除记录。
+持久信任身份由配置的规范路径，与**上表所列受管键**的规范化 TOML 内容的 BLAKE3 共同
+决定。哈希只覆盖受管键，因此两道门用的是同一个判据：一处不需要信任的改动，也不会
+让已有记录失效。改工具版本、新增依赖、调 `jobs`、加注释、改空白或调整键顺序都不会
+使记录变为 stale；改动受管键或移动仓库会。软链接解析到真实目标。trust store 位于
+`$OSDK_CONFIG_DIR/trusted-configs.toml`；`trust list` 只报告 stale，不会自动删除记录。
 
 CI 可设置 `OSDK_TRUSTED_CONFIG_PATHS`，值是操作系统路径分隔符连接的已审阅文件或
 目录。匹配文件或位于匹配目录下的项目配置会在本次进程中视为 trusted，不写本地

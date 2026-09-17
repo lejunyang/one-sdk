@@ -55,11 +55,12 @@ Values are parsed before the file is touched, so a rejected value leaves nothing
 half-written, and `unset` prunes the table it empties rather than leaving a bare
 `[settings]` header behind.
 
-::: warning Writing a project config makes it trust-required
-A `[settings]` table in a project config puts that file past the trust whitelist
-(next section). `config set` offers to trust it on the spot, and `--yes` accepts.
-In a non-interactive session the write still succeeds but trust is withheld, and
-the output says what is still needed.
+::: warning Writing a governed setting makes it trust-required
+If `config set` writes a [governed key](#which-keys-require-trust) such as
+`verify_signatures`, that file starts requiring trust; the command offers to trust
+it on the spot, and `--yes` accepts. In a non-interactive session the write still
+succeeds but trust is withheld, and the output says what is still needed. Writing a
+safe key such as `jobs` or `lang` prompts for nothing.
 :::
 
 ## Project version discovery
@@ -284,10 +285,11 @@ osdk reshim
 `osdk where --bins <tool>` verifies the outcome, listing `published` (shimmed) and
 `withheld` separately.
 
-::: tip Project config needs trust
-Writing these into a project `osdk.toml` makes that file require trust;
-`config set` asks in place, and you re-run `osdk trust` after editing it. See
-[Project configuration trust](#project-configuration-trust).
+::: tip These settings do not need trust
+`settings.shims` only decides which commands get a shim. It neither executes code
+nor changes where downloads come from, so writing it into a project `osdk.toml`
+never asks for trust. See
+[Which keys require trust](#which-keys-require-trust) for the ones that do.
 :::
 
 ## Complete configuration reference
@@ -466,14 +468,46 @@ osdk untrust [PATH]
 ```
 
 `PATH` may name a config file or directory; a directory triggers upward project
-discovery. Project files containing exclusively top-level `[tools]` and
-`[aliases]` are normally trust-free, but an npm tool entry requires trust
-because shell activation may expose curated launchers that ultimately execute
-files from project dependencies. Raw `node_modules/.bin` is never activated.
-Any other top-level section—including `settings`, `sources`, `registries`, or an
-unknown section—also requires trust. A successful project-aware
-`osdk use npm:...` trusts the exact `osdk.toml` it generated; later edits
-invalidate that record and prevent the curated generation from activating.
+discovery.
+
+### Which keys require trust
+
+The gate is evaluated **per key**, and only two things qualify: running
+**arbitrary code** on this machine, or **weakening verification** of what gets
+installed and where it is fetched from.
+
+| Requires trust | Why |
+| --- | --- |
+| `[syspkg]` | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
+| `[sources]`, `[registries]` | Change where subprocesses download from |
+| `settings.verify_signatures`, `settings.require_checksums`, `settings.attestations` | Disable or downgrade artifact verification |
+| `settings.node`, `settings.npm` | `corepack enable` executes code; the installer decides which program drives installs |
+| `settings.python`, `settings.java` | Both carry `catalog_url`, which decides which runtime bytes get installed |
+| `allow_builds`, when explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
+
+**Declaring which tools or packages to install never requires trust on its own.**
+That covers `[tools]` and `[aliases]`, including their `npm:`, `github:`, `http:`,
+`go:`, `cargo:`, `pypi:` and `conda:` entries: npm installs pass
+`--ignore-scripts` by default, an `http:` artifact without a `sha256` is refused
+outright, and `go:` builds run with `CGO_ENABLED=0`. This is the same act as
+adding a line to `package.json` -- adding a package or changing a version never
+asks for re-approval.
+
+Two things fail closed: an **unknown top-level section** and an **unregistered
+`settings` key** both require trust. A key this build cannot interpret is not
+cleared just because it is unrecognized.
+
+A refusal lists each offending key and its reason, rather than only reporting
+that the file is untrusted:
+
+```text
+error: project config is not trusted: /path/to/osdk.toml
+these keys need review because they affect what runs on this machine:
+  settings.verify_signatures -- weakens verification of installed artifacts, or redirects where they are downloaded from
+  syspkg -- can run arbitrary code on this machine during install
+```
+
+### Trust identity and staleness
 
 ```bash
 osdk --yes trust                 # nearest project configuration
@@ -482,11 +516,15 @@ osdk trust list                  # active and stale records
 osdk untrust                     # revoke the nearest project configuration
 ```
 
-Persistent identity binds the canonical path and BLAKE3 of normalized TOML
-content. Editing or moving the file makes the record stale; whitespace-only
-formatting normally does not. Symlinks resolve to their real target. Records
-live in `$OSDK_CONFIG_DIR/trusted-configs.toml`; `trust list` reports stale
-entries but does not remove them.
+Persistent identity binds the canonical path and the BLAKE3 of the normalized
+TOML content **of the governed keys listed above**. Because the hash covers only
+those keys, both gates read the same judgement: a change that needed no trust
+also cannot invalidate an existing record. Bumping a tool version, adding a
+dependency, changing `jobs`, adding a comment and reordering keys all leave the
+record intact; editing a governed key or moving the repository does not.
+Symlinks resolve to their real target. Records live in
+`$OSDK_CONFIG_DIR/trusted-configs.toml`; `trust list` reports stale entries but
+does not remove them.
 
 CI may set `OSDK_TRUSTED_CONFIG_PATHS` to an OS path-list of reviewed files or
 directories. Matching project files are trusted for that process without being

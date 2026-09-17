@@ -167,8 +167,8 @@ osdk config get shims.conda:clang.expose                # 当前生效值
 osdk config unset shims.conda:clang.expose              # 恢复默认
 ```
 
-写进项目配置的设置会让该 `osdk.toml` 需要信任，`config set` 会就地询问是否信任；
-`--yes` 时自动确认。详见[项目与配置](./projects#项目配置信任)。
+`shims` 设置不需要信任：它只决定哪些命令生成 shim，不执行任何代码。需要信任的键见
+[哪些键需要信任](./projects#哪些键需要信任)。
 
 ::: tip 没有 paths.json 时会怎样
 少数包不提供这份清单。这时 osdk 会导出整个 prefix 的命令，而不是一个都不导出——

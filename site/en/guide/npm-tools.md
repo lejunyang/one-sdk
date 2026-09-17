@@ -69,10 +69,11 @@ node = "22.17.0"
 ```
 
 The exact managed Node version and concrete installer are recorded together. An
-existing Node tool entry keeps its other options. osdk automatically trusts the
-exact generated `osdk.toml` content because activation can expose project code;
-editing that file changes its trust identity and requires review and
-`osdk trust` again.
+existing Node tool entry keeps its other options. Declaring an npm tool does not
+itself require trust -- installs pass `--ignore-scripts` by default -- so later
+edits to `[tools]`, added packages and version changes never ask for
+`osdk trust` again; only writing a governed key does. See
+[Which keys require trust](./projects#which-keys-require-trust).
 
 ## Installer selection
 
