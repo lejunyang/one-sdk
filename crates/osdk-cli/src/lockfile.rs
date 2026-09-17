@@ -448,6 +448,43 @@ pub fn load(path: &Path) -> Result<Lockfile> {
     Ok(lockfile)
 }
 
+/// The models a project's lock declares, as replayable references.
+///
+/// The `[models]` section had exactly one writer and no readers outside tests:
+/// `model pull` recorded a snapshot and nothing ever consulted it again. A lock
+/// that cannot be read back is not a lock -- it is a log. This is the reader, and
+/// `model sync` is what acts on it.
+///
+/// Returns the logical name alongside the reference so a caller can report which
+/// entry it is working on, and the file digests so a restore can be verified
+/// against what was committed rather than against whatever the provider serves
+/// today.
+pub fn locked_models(path: &Path) -> Result<Vec<(String, LockedModel)>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    Ok(load(path)?.models.into_iter().collect())
+}
+
+/// Drop a model entry from a project's lock, preserving everything else.
+///
+/// Needed because `model remove` deletes local snapshots but left the lock
+/// claiming them, so the next `model sync` would faithfully pull back exactly
+/// what the user had just removed. Pruning is per entry rather than a rewrite of
+/// the section: a lock also holds other platforms' tools and other models, and a
+/// stale entry is not a reason to touch them.
+pub fn remove_model(path: &Path, name: &str) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let mut lockfile = load(path)?;
+    if lockfile.models.remove(name).is_none() {
+        return Ok(false);
+    }
+    save(path, &lockfile)?;
+    Ok(true)
+}
+
 pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<ToolRequest>>> {
     let lockfile = load(path)?;
     if lockfile.schema == 1 {
@@ -4687,6 +4724,67 @@ sha256 = "{sha256}"
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn the_models_section_can_be_read_back_and_pruned() {
+        // The section had one writer and no readers outside tests: `model pull`
+        // recorded a snapshot and nothing ever consulted it, so a committed lock
+        // described a state no command could restore.
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.lock");
+
+        // Nothing on disk is an empty declaration, not an error: `sync` may run
+        // in a project that has never pulled a model.
+        assert!(locked_models(&path).unwrap().is_empty());
+        assert!(!remove_model(&path, "qwen").unwrap());
+
+        merge_model(&path, &test_model_manifest()).unwrap();
+        let models = locked_models(&path).unwrap();
+        assert_eq!(models.len(), 1);
+        let (name, entry) = &models[0];
+        assert_eq!(name, "qwen");
+        // The immutable revision is what a restore must replay -- replaying
+        // `requested_revision` would resolve a branch to whatever it points at
+        // now, which is the opposite of what a lock is for.
+        assert_eq!(entry.revision, "abc123");
+        assert_eq!(entry.requested_revision, "main");
+        assert_eq!(entry.files.len(), 1);
+        assert!(!entry.files[0].sha256.is_empty());
+
+        // Pruning one entry must not disturb the rest of the file.
+        let mut lockfile = load(&path).unwrap();
+        lockfile.platforms.insert(
+            platform_key(linux()),
+            PlatformLock {
+                tools: BTreeMap::from([(
+                    "go".to_string(),
+                    LockedTool {
+                        version: "1.26.5".into(),
+                        ..Default::default()
+                    },
+                )]),
+            },
+        );
+        lockfile.models.insert("other".into(), test_locked_model());
+        save(&path, &lockfile).unwrap();
+
+        assert!(remove_model(&path, "qwen").unwrap());
+        let after = load(&path).unwrap();
+        assert!(!after.models.contains_key("qwen"));
+        assert!(
+            after.models.contains_key("other"),
+            "pruning one model removed another"
+        );
+        assert!(
+            after.platforms[&platform_key(linux())]
+                .tools
+                .contains_key("go"),
+            "pruning a model removed a platform's tools"
+        );
+        // Removing an entry that is already gone is not an error, so `model
+        // remove` need not care whether the lock still mentioned it.
+        assert!(!remove_model(&path, "qwen").unwrap());
     }
 
     #[test]

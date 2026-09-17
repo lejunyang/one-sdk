@@ -5772,22 +5772,245 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
                 manifest.revision
             );
         }
-        ModelCommand::Remove { name } => {
-            if store.remove(&name)? {
+        ModelCommand::Sync { prune, dry_run } => model_sync(app, &store, prune, dry_run).await?,
+        ModelCommand::Remove { name, keep_lock } => {
+            let removed = store.remove(&name)?;
+            if removed {
                 let models = app.ctx.dirs.models();
-                let (removed, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+                let (pruned, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
                 println!(
                     "removed model {name}; pruned {} object(s), {} freed",
-                    removed,
+                    pruned,
                     human_bytes(bytes)
                 );
             } else {
                 println!("model {name} is not installed");
             }
+            // Deleting the snapshot while the lock still claims it left the two
+            // disagreeing, and the next `sync` would faithfully restore exactly
+            // what was just removed. Dropped unless the caller asks to keep it,
+            // which is the way to remove a snapshot locally without changing what
+            // the project declares.
+            if !keep_lock {
+                let cwd = std::env::current_dir()?;
+                let path = project_lock_path(app, &cwd);
+                if crate::lockfile::remove_model(&path, &name)? {
+                    println!("dropped {name} from {}", path.display());
+                }
+            }
         }
         ModelCommand::Env { command } => model_env(app, command)?,
     }
     Ok(())
+}
+
+/// Materialize what the project lock declares, and optionally drop what it does
+/// not.
+///
+/// This is the reader the `[models]` section never had. `pull` wrote entries that
+/// nothing consulted, so a committed lock described a state no command could
+/// restore; `install` deliberately does not reach for models (weights are far too
+/// large to fetch as a side effect of installing tools), which is why this is its
+/// own verb.
+///
+/// A snapshot already present is verified rather than re-fetched: the lock carries
+/// each file's SHA-256, so "is this the thing the lock describes" is answerable
+/// locally, and re-downloading gigabytes to answer it would be absurd. A snapshot
+/// that fails verification is re-pulled, because at that point the local copy is
+/// not what was committed.
+async fn model_sync(
+    app: &App,
+    store: &osdk_core::model::ModelStore,
+    prune: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let path = project_lock_path(app, &cwd);
+    let locked = crate::lockfile::locked_models(&path)?;
+    if locked.is_empty() && !prune {
+        println!("no models declared in {}", path.display());
+        return Ok(());
+    }
+
+    let mut restored = 0usize;
+    for (name, entry) in &locked {
+        // Verify before deciding, so an intact snapshot is left alone and a
+        // corrupted one is not mistaken for a present one.
+        let present = store
+            .verify(name)
+            .map(|manifest| manifest.revision == entry.revision)
+            .unwrap_or(false);
+        if present {
+            println!("{name} is up to date at revision {}", entry.revision);
+            continue;
+        }
+        if dry_run {
+            println!(
+                "would pull {name} ({}:{}@{})",
+                entry.provider, entry.repository, entry.revision
+            );
+            restored += 1;
+            continue;
+        }
+        // The lock pins the immutable revision, so the reference is rebuilt from
+        // it rather than from `requested_revision`: replaying a branch name would
+        // resolve to whatever it points at now.
+        let reference = osdk_core::model::ModelRef {
+            provider: entry.provider,
+            repository: entry.repository.clone(),
+            revision: entry.revision.clone(),
+        };
+        // Only the files the lock names, so a repository that gained files since
+        // the lock was written does not silently grow the snapshot.
+        let options = osdk_core::model::pull::PullOptions {
+            include: entry
+                .files
+                .iter()
+                .map(|file| glob_escape(&file.path))
+                .collect(),
+            exclude: Vec::new(),
+            variant: entry.variant.clone(),
+        };
+        let sources =
+            osdk_core::model::source::ranked_sources(&app.ctx, &reference, app.refresh_sources)
+                .await?;
+        let mut installed = None;
+        let mut last_error = None;
+        for source in sources {
+            let provider =
+                osdk_core::model::source::provider(reference.provider, source.forward_credentials);
+            match osdk_core::model::pull::pull(
+                &app.ctx,
+                provider.as_ref(),
+                name,
+                &reference,
+                &source.download_url,
+                &options,
+            )
+            .await
+            {
+                Ok(model) => {
+                    installed = Some(model);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let installed = installed.ok_or_else(|| {
+            anyhow!(
+                "cannot restore model {name}: {}",
+                last_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "no usable model source".into())
+            )
+        })?;
+        // A restore that produced different bytes is a failure, not a success:
+        // the point of the lock is that it pins content.
+        verify_restored_against_lock(name, entry, &installed.manifest)?;
+        println!(
+            "restored {name} at revision {} -> {}",
+            installed.manifest.revision,
+            installed.path.display()
+        );
+        restored += 1;
+    }
+
+    if prune {
+        let declared: std::collections::BTreeSet<_> =
+            locked.iter().map(|(name, _)| name.clone()).collect();
+        let mut pruned = 0usize;
+        for installed in store.list()? {
+            let name = installed.manifest.name.clone();
+            if declared.contains(&name) {
+                continue;
+            }
+            if dry_run {
+                println!("would remove {name} (not declared in the lock)");
+            } else if store.remove(&name)? {
+                println!("removed {name} (not declared in the lock)");
+            }
+            pruned += 1;
+        }
+        if pruned > 0 && !dry_run {
+            let models = app.ctx.dirs.models();
+            let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+            println!("pruned {} object(s), {} freed", objects, human_bytes(bytes));
+        }
+    }
+
+    if restored == 0 && !dry_run {
+        println!("all declared models are present");
+    }
+    Ok(())
+}
+
+/// Require a restored snapshot to match what the lock committed.
+///
+/// Checked per file rather than by count alone: an equal number of differing
+/// files would otherwise pass.
+fn verify_restored_against_lock(
+    name: &str,
+    entry: &crate::lockfile::LockedModel,
+    manifest: &osdk_core::model::SnapshotManifest,
+) -> Result<()> {
+    if manifest.revision != entry.revision {
+        anyhow::bail!(
+            "model {name} restored revision {} but the lock declares {}",
+            manifest.revision,
+            entry.revision
+        );
+    }
+    for locked in &entry.files {
+        let actual = manifest
+            .files
+            .iter()
+            .find(|file| file.path == locked.path)
+            .ok_or_else(|| {
+                anyhow!(
+                    "model {name} is missing locked file {} after restore",
+                    locked.path
+                )
+            })?;
+        if actual.size != locked.size {
+            anyhow::bail!(
+                "model {name} file {} has size {} but the lock declares {}",
+                locked.path,
+                actual.size,
+                locked.size
+            );
+        }
+        match actual.sha256.as_deref() {
+            Some(digest) if digest.eq_ignore_ascii_case(&locked.sha256) => {}
+            Some(digest) => anyhow::bail!(
+                "model {name} file {} restored digest {digest} but the lock declares {}",
+                locked.path,
+                locked.sha256
+            ),
+            None => anyhow::bail!(
+                "model {name} file {} was restored without a digest to compare",
+                locked.path
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Quote a literal path so it survives being used as an include glob.
+///
+/// The lock stores exact paths, and a file legitimately containing `[`, `{`, `*`
+/// or `?` would otherwise be read as a pattern and silently fail to match itself.
+fn glob_escape(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        if matches!(character, '*' | '?' | '[' | ']' | '{' | '}' | '\\') {
+            escaped.push('[');
+            escaped.push(character);
+            escaped.push(']');
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 fn model_env(app: &App, command: ModelEnvCommand) -> Result<()> {

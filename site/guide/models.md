@@ -14,10 +14,11 @@ osdk model pull NAME REFERENCE
   [--variant LABEL]
   [--no-lock]
 
+osdk model sync [--prune] [--dry-run]
 osdk model list
 osdk model path NAME
 osdk model verify NAME
-osdk model remove NAME
+osdk model remove NAME [--keep-lock]
 
 osdk model env enable [huggingface|modelscope] [--force]
 osdk model env disable [huggingface|modelscope]
@@ -97,8 +98,43 @@ manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 re
 - 每个文件的路径、大小与 SHA-256。
 
 token、cookie、临时签名下载 URL 和 ETag 不写入项目 lock。模型更新只合并同名
-模型项并保留平台工具区段。当前普通 `osdk install` 不从 `[models]` 自动拉取模型；
-模型重建仍使用 `model pull`。完整 schema 见[可复现锁文件](./lockfiles)。
+模型项并保留平台工具区段。完整 schema 见[可复现锁文件](./lockfiles)。
+
+`endpoint` 记录 provider 的官方端点：模型的身份是 provider + repository + 不可变
+revision，且每个文件的 SHA-256 都已入锁，主机不属于身份的一部分。因此镜像端点会被
+折叠成官方端点，自定义端点原样保留。
+
+### 从 lock 还原
+
+`osdk model sync` 是 `[models]` 段的读取方——`pull` 写、`sync` 复现，二者的关系与
+工具的 `lock` / `install` 相同。`osdk install` 刻意不代拉模型：权重太大，不该作为
+装工具的副作用被下载，所以这是一个独立动词。
+
+```bash
+osdk model sync                 # 还原 lock 声明的全部模型
+osdk model sync --dry-run       # 只报告会做什么
+osdk model sync --prune         # 同时删除 lock 不再声明的本地快照
+osdk model sync --prune --dry-run
+```
+
+还原时按 lock 里的**不可变 revision** 重建引用，而不是 `requested_revision`：复现
+一个分支名会解析到它当前所指，恰好与 lock 的目的相反。只拉 lock 列出的文件，因此
+仓库在锁定后新增的文件不会让快照静默变大；还原完成后逐文件比对大小与 SHA-256，
+不一致即失败——lock 的意义就是钉住内容。
+
+已存在且校验通过的快照不会重新下载：lock 带有每个文件的摘要，「这是不是 lock 描述
+的那份」可以本地回答，为此重下若干 GB 毫无意义。校验失败的快照会被重新拉取，因为
+那时本地副本已不是提交进版本库的那份。
+
+`--prune` 默认关闭：它删除的是已物化的权重，重新获取代价高，所以必须显式要求，而不
+能作为 sync 的副作用发生。
+
+### remove 与 lock 保持一致
+
+`osdk model remove <name>` 同时删除本地快照与 lock 条目。此前只删快照，lock 仍声称
+拥有它，于是下一次 `sync` 会忠实地把刚删掉的东西拉回来。
+
+只想在本机删除而不改变项目声明时用 `--keep-lock`，之后 `sync` 会重新还原它。
 
 ## Endpoint 与凭据
 

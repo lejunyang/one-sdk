@@ -592,6 +592,23 @@ pub enum ModelCommand {
         #[arg(long)]
         no_lock: bool,
     },
+    /// Materialize every model the project lock declares.
+    ///
+    /// The counterpart to `install` for tools: `pull` writes the lock, `sync`
+    /// replays it. Without this the `[models]` section could be written but never
+    /// read back, so a committed lock did not describe a reproducible state.
+    Sync {
+        /// Remove local snapshots the lock no longer declares.
+        ///
+        /// Off by default: pruning deletes materialized weights, which are large
+        /// and slow to re-fetch, so it is opt-in rather than a side effect of
+        /// syncing.
+        #[arg(long)]
+        prune: bool,
+        /// Report what would change without downloading or deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// List locally materialized model snapshots.
     List,
     /// Print the current local snapshot path.
@@ -599,7 +616,12 @@ pub enum ModelCommand {
     /// Verify all files in a local snapshot.
     Verify { name: String },
     /// Remove all local snapshots for a logical model name.
-    Remove { name: String },
+    Remove {
+        name: String,
+        /// Keep the lock entry, so a later `sync` restores the snapshot.
+        #[arg(long)]
+        keep_lock: bool,
+    },
     /// Manage provider environment exported by shell activation.
     Env {
         #[command(subcommand)]

@@ -532,6 +532,9 @@ osdk model pull qwen25-ms \
   --include '*.json' --include '*.safetensors'
 osdk model verify qwen25
 osdk model path qwen25
+
+# Restore the same snapshots elsewhere from osdk.lock (pull writes, sync replays)
+osdk model sync
 osdk model list
 ```
 

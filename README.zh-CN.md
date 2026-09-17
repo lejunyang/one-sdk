@@ -479,6 +479,9 @@ osdk model pull qwen25-ms \
   --include '*.json' --include '*.safetensors'
 osdk model verify qwen25
 osdk model path qwen25
+
+# 在另一台机器上按 osdk.lock 还原同一批快照（pull 写、sync 复现）
+osdk model sync
 osdk model list
 ```
 

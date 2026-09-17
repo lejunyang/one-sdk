@@ -15,10 +15,11 @@ osdk model pull NAME REFERENCE
   [--variant LABEL]
   [--no-lock]
 
+osdk model sync [--prune] [--dry-run]
 osdk model list
 osdk model path NAME
 osdk model verify NAME
-osdk model remove NAME
+osdk model remove NAME [--keep-lock]
 
 osdk model env enable [huggingface|modelscope] [--force]
 osdk model env disable [huggingface|modelscope]
@@ -106,8 +107,51 @@ By default, `pull` writes `[models.<name>]` at the top level of `osdk.lock` with
 
 Tokens, cookies, temporary signed download URLs, and ETags are not written. A
 model update merges only the same-name model record and preserves platform tool
-sections. Ordinary `osdk install` does not pull `[models]`; rebuild a model with
-`model pull`. See [Reproducible Lockfiles](./lockfiles) for the full schema.
+sections. See [Reproducible Lockfiles](./lockfiles) for the full schema.
+
+`endpoint` records the provider's official endpoint: a model is identified by
+provider, repository and immutable revision, and every file's SHA-256 is locked,
+so the host is not part of the identity. A mirror endpoint therefore collapses to
+the official one, while a custom endpoint is left unchanged.
+
+### Restoring from the lock
+
+`osdk model sync` is the reader the `[models]` section never had -- `pull` writes,
+`sync` replays, the same relationship tools have between `lock` and `install`.
+`osdk install` deliberately does not fetch models: weights are far too large to
+download as a side effect of installing tools, so this is its own verb.
+
+```bash
+osdk model sync                 # restore every model the lock declares
+osdk model sync --dry-run       # report what would happen
+osdk model sync --prune         # also delete snapshots the lock no longer declares
+osdk model sync --prune --dry-run
+```
+
+A restore rebuilds the reference from the lock's **immutable revision**, not from
+`requested_revision`: replaying a branch name would resolve to wherever it points
+now, which is the opposite of what a lock is for. Only the files the lock names
+are fetched, so a repository that gained files after locking cannot silently grow
+the snapshot, and every file's size and SHA-256 is compared afterwards -- a
+mismatch fails, because pinning content is the point.
+
+A snapshot that is already present and verifies is not re-downloaded: the lock
+carries each file's digest, so "is this the thing the lock describes" is
+answerable locally, and re-fetching gigabytes to answer it would be absurd. A
+snapshot that fails verification is re-pulled, since at that point the local copy
+is not what was committed.
+
+`--prune` is off by default: it deletes materialized weights, which are expensive
+to re-fetch, so it must be asked for rather than happening as a side effect.
+
+### `remove` keeps the lock in step
+
+`osdk model remove <name>` drops the lock entry along with the local snapshot.
+Previously only the snapshot went, leaving the lock still claiming it, so the next
+`sync` would faithfully pull back exactly what had just been removed.
+
+Use `--keep-lock` to remove locally without changing what the project declares; a
+later `sync` restores it.
 
 ## Endpoints and credentials
 
