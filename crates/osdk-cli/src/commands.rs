@@ -1409,8 +1409,55 @@ fn project_owns_request(app: &App, request: &ToolRequest) -> bool {
     }
 }
 
+/// Detect an operand that a shell split on an unquoted comma, and say so.
+///
+/// PowerShell treats `,` as an array separator even inside an argument, so
+/// `osdk install npm:x[a=1,b=2]@3` without quotes arrives as two operands:
+/// `npm:x[a=1` and `b=2]@3`. Each fragment is then a syntactically broken tool
+/// expression, and the first fails as "unterminated option block" -- accurate for
+/// the fragment, misleading for the user, whose brackets were balanced. bash and
+/// zsh pass the comma through, so the same command works there, which makes the
+/// failure look arbitrary.
+///
+/// The signal is specific: one operand opens a bracket it never closes, and a
+/// later operand closes one it never opened. A genuinely mistyped single operand
+/// produces no such pair and keeps the original message.
+fn report_shell_split_operands(tools: &[String]) -> Result<()> {
+    let brackets = |operand: &str| (operand.matches('[').count(), operand.matches(']').count());
+    for (start, operand) in tools.iter().enumerate() {
+        let (opens, closes) = brackets(operand);
+        if opens <= closes {
+            continue;
+        }
+        // Search for the closing half rather than assuming it is the very next
+        // operand: a value may itself contain commas, so one expression can be
+        // split into more than two fragments.
+        let end = tools[start + 1..].iter().position(|later| {
+            let (opens, closes) = brackets(later);
+            closes > opens
+        });
+        if let Some(offset) = end {
+            let end = start + 1 + offset;
+            // Rejoin with the comma the shell consumed, so the message can show
+            // the command that would have worked.
+            let rejoined = tools[start..=end].join(",");
+            return Err(anyhow::anyhow!(osdk_core::t!(
+                "err.operand_split_by_shell",
+                operand = rejoined
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
     if !tools.is_empty() {
+        // A shell that split one operand into several is worth naming before
+        // anything else: the resulting fragments fail as "unterminated option
+        // block", which sends the user to count brackets that were in fact
+        // written correctly.
+        report_shell_split_operands(&tools)?;
+
         // Naming a tool that configuration excluded on this platform must say
         // so. Falling through would either resolve it as though the filter were
         // absent -- installing what the config said not to -- or report an
@@ -8684,5 +8731,69 @@ mod command_flow_tests {
         assert!(!journal_path.exists());
         let config = osdk_core::config::Config::load_user(&config_path).unwrap();
         assert!(!config.global_tools.contains_key("npm:fixture-cli"));
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shell-split operand is reported as such, and nothing else is.
+    ///
+    /// The three cases must stay distinguishable. PowerShell splits an unquoted
+    /// comma inside one argument, so the fragments arrive as separate operands and
+    /// the first fails as "unterminated option block" -- true of the fragment, but
+    /// it sends the user to count brackets that were balanced as typed. A genuine
+    /// syntax mistake must keep the original message, or this hint would start
+    /// blaming the shell for the user's own typo.
+    #[test]
+    fn only_a_shell_split_operand_is_reported_as_one() {
+        let split = vec![
+            "npm:esbuild[installer=pnpm".to_string(),
+            "allow_builds=a]@0.21".to_string(),
+        ];
+        let error =
+            report_shell_split_operands(&split).expect_err("a split operand must be reported");
+        let message = error.to_string();
+        assert!(message.contains("quote"), "{message}");
+        // The message has to show the command that would have worked, comma and
+        // all, so it can be copied instead of reconstructed.
+        assert!(
+            message.contains("npm:esbuild[installer=pnpm,allow_builds=a]@0.21"),
+            "{message}"
+        );
+
+        // A value containing commas splits into more than two fragments; the
+        // closing half is not necessarily the next operand.
+        let three = vec![
+            "npm:esbuild[allow_builds=a".to_string(),
+            "b".to_string(),
+            "c]@0.21".to_string(),
+        ];
+        let error = report_shell_split_operands(&three).expect_err("three fragments");
+        assert!(
+            error
+                .to_string()
+                .contains("npm:esbuild[allow_builds=a,b,c]@0.21"),
+            "{error}"
+        );
+
+        // Everything else must pass through untouched.
+        for ok in [
+            // Balanced, quoted properly: the normal case.
+            vec!["npm:esbuild[allow_builds=\"a,b\"]@0.21".to_string()],
+            // A real typo: opens and never closes, with no closing fragment.
+            vec!["npm:esbuild[installer=pnpm@0.21".to_string()],
+            // A stray closing bracket only.
+            vec!["npm:esbuild]@0.21".to_string()],
+            // Two unrelated tools, both well formed.
+            vec!["node@20".to_string(), "npm:prettier@3".to_string()],
+            // Two separate broken operands that are not two halves of one.
+            vec!["npm:a]@1".to_string(), "npm:b]@2".to_string()],
+        ] {
+            assert!(
+                report_shell_split_operands(&ok).is_ok(),
+                "must not be reported as a split: {ok:?}"
+            );
+        }
     }
 }

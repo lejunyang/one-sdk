@@ -1437,6 +1437,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.operand_split_by_shell",
+        (
+            "this looks like one tool expression that the shell split on an unquoted comma; quote the whole operand: '{operand}'",
+            "这看起来是一个工具表达式被 shell 按未加引号的逗号拆开了；请给整个操作数加引号：'{operand}'",
+        ),
+    );
+    m.insert(
         "err.tool_excluded_by_platform",
         (
             "tool `{tool}` is configured only for {restriction}, which does not match this machine; remove or widen that restriction to use it here",
