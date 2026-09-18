@@ -22,6 +22,16 @@ osdk uninstall|rm TOOL@VERSION
 `-o/--opt` 可重复，必须写成 `KEY=VALUE`。它会应用到本次调用中的每个工具；
 一次命令混合不同 backend 时，不要传只适用于其中一个 backend 的选项。
 
+内联选项块写成 `tool[key=value,...]@selector`，选项块在 `@` 之前。**在 PowerShell 下要给
+整个操作数加引号**：它把参数内未加引号的逗号当数组分隔符，会把一个表达式拆成两个参数。
+
+```bash
+osdk install 'npm:esbuild[installer=pnpm,allow_builds=true]@0.21'
+```
+
+选项值本身含逗号时再套一层引号：`allow_builds="a,b"`。不加引号被拆开时，osdk 会识别出
+这种情况并给出加好引号的完整命令，而不是报括号没写完。
+
 ## 后端速览
 
 | backend | 工具名别名 | 生态版本文件 | 专用安装选项 |

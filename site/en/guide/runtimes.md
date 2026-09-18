@@ -24,6 +24,18 @@ osdk uninstall|rm TOOL@VERSION
 the invocation; do not pass an option specific to one backend in a mixed-backend
 command.
 
+An inline option block is written `tool[key=value,...]@selector`, with the block
+before the `@`. **Quote the whole operand on PowerShell**: it treats an unquoted
+comma inside an argument as an array separator and splits one expression into two.
+
+```bash
+osdk install 'npm:esbuild[installer=pnpm,allow_builds=true]@0.21'
+```
+
+Quote the value as well when it contains commas: `allow_builds="a,b"`. When an
+unquoted operand does get split, osdk recognizes it and prints the correctly quoted
+command instead of complaining about an unterminated bracket.
+
 ## Backend overview
 
 | Backend | Tool aliases | Native version files | Install options |
