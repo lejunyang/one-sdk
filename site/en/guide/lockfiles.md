@@ -370,5 +370,6 @@ rejects it explicitly.
 | `<installs>/<tool>/.locks/<version>.lock` file remains | This is an OS-level exclusion-lock path; process exit releases the lock, and an empty file does not mean it remains held |
 | Installation directory lacks `.osdk-complete` | Treat as a partial failed installation; delete and rebuild it after acquiring the object lock |
 
-Model snapshots use per-snapshot OS locks too. A `stale` entry from `trust list`
-instead means a configuration path or content hash no longer matches.
+Model snapshots use per-snapshot OS locks too. A `changed`, `missing` or
+`unreachable` entry from `trust list` instead means a configuration path or
+content hash no longer matches.

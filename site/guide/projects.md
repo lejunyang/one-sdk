@@ -499,15 +499,31 @@ these keys need review because they affect what runs on this machine:
 ```bash
 osdk --yes trust                 # 最近项目配置
 osdk --yes trust ./osdk.toml     # 指定文件
-osdk trust list                  # active / stale 记录
+osdk trust list                  # 列出记录及其状态
 osdk untrust                     # 撤销最近项目配置
+osdk trust prune --dry-run       # 预览将清理哪些死记录
+osdk trust prune                 # 清理配置文件已不存在的记录
 ```
+
+`trust list` 给出四种状态，它们的正确处置并不相同：
+
+| 状态 | 含义 | 该做什么 |
+| --- | --- | --- |
+| `active` | 文件在，受管键与批准一致 | 无需处理 |
+| `changed` | 文件在，受管键变了 | 审阅后重新 `osdk trust` |
+| `missing` | 文件没了，父目录还在 | `osdk trust prune` 可清理 |
+| `unreachable` | 父目录也读不到 | 先确认卷是否挂载，**不会**被 prune |
+
+`prune` 只删 `missing`。这一点是刻意的：`changed` 意味着项目还在、只是需要重新过目，
+把它删掉会变成日后一句无从解释的「未受信任」；而 `unreachable` 在 Windows 上正是 U 盘、
+网络共享或 WSL 挂载点掉线的样子，当垃圾清理会在卷恰好没挂载时删掉有效批准。
+`--dry-run` 与实际执行用同一份候选列表，所以预览就是即将发生的事。
 
 持久信任身份由配置的规范路径，与**上表所列受管键**的规范化 TOML 内容的 BLAKE3 共同
 决定。哈希只覆盖受管键，因此两道门用的是同一个判据：一处不需要信任的改动，也不会
 让已有记录失效。改工具版本、新增依赖、调 `jobs`、加注释、改空白或调整键顺序都不会
-使记录变为 stale；改动受管键或移动仓库会。软链接解析到真实目标。trust store 位于
-`$OSDK_CONFIG_DIR/trusted-configs.toml`；`trust list` 只报告 stale，不会自动删除记录。
+使记录变为 `changed`；改动受管键会，移动仓库则使其变为 `missing` 或 `unreachable`。
+软链接解析到真实目标。trust store 位于 `$OSDK_CONFIG_DIR/trusted-configs.toml`。
 
 CI 可设置 `OSDK_TRUSTED_CONFIG_PATHS`，值是操作系统路径分隔符连接的已审阅文件或
 目录。匹配文件或位于匹配目录下的项目配置会在本次进程中视为 trusted，不写本地

@@ -620,6 +620,7 @@ a config is refused, osdk lists exactly which keys need review and why:
 osdk --yes trust ./osdk.toml
 osdk trust list
 osdk untrust ./osdk.toml
+osdk trust prune                 # drop records whose config file is gone
 ```
 
 Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)

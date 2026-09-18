@@ -548,24 +548,42 @@ these keys need review because they affect what runs on this machine:
   syspkg -- can run arbitrary code on this machine during install
 ```
 
-### Trust identity and staleness
+### Trust identity and record states
 
 ```bash
 osdk --yes trust                 # nearest project configuration
 osdk --yes trust ./osdk.toml     # explicit file
-osdk trust list                  # active and stale records
+osdk trust list                  # records and their state
 osdk untrust                     # revoke the nearest project configuration
+osdk trust prune --dry-run       # preview which dead records would go
+osdk trust prune                 # drop records whose config file is gone
 ```
+
+`trust list` reports four states, and the right response differs for each:
+
+| State | Meaning | What to do |
+| --- | --- | --- |
+| `active` | File present, governed keys match the approval | nothing |
+| `changed` | File present, governed keys differ | review, then `osdk trust` again |
+| `missing` | File gone, its directory still readable | `osdk trust prune` can drop it |
+| `unreachable` | Its directory is unreadable too | check whether the volume is mounted; **never** pruned |
+
+`prune` removes only `missing`, deliberately. `changed` means the project is still
+there and merely needs another look, so dropping its record would resurface later
+as an unexplained "untrusted". And on Windows `unreachable` is exactly what a
+detached USB disk, network share or WSL mount looks like, so treating it as garbage
+would revoke valid approvals whenever a volume happened to be unplugged.
+`--dry-run` uses the same candidate list as the real run, so the preview is what
+will actually happen.
 
 Persistent identity binds the canonical path and the BLAKE3 of the normalized
 TOML content **of the governed keys listed above**. Because the hash covers only
 those keys, both gates read the same judgement: a change that needed no trust
 also cannot invalidate an existing record. Bumping a tool version, adding a
 dependency, changing `jobs`, adding a comment and reordering keys all leave the
-record intact; editing a governed key or moving the repository does not.
-Symlinks resolve to their real target. Records live in
-`$OSDK_CONFIG_DIR/trusted-configs.toml`; `trust list` reports stale entries but
-does not remove them.
+record intact; editing a governed key makes it `changed`, and moving the
+repository makes it `missing` or `unreachable`. Symlinks resolve to their real
+target. Records live in `$OSDK_CONFIG_DIR/trusted-configs.toml`.
 
 CI may set `OSDK_TRUSTED_CONFIG_PATHS` to an OS path-list of reviewed files or
 directories. Matching project files are trusted for that process without being

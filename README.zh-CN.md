@@ -559,6 +559,7 @@ osdk --attestations required install github:cli/cli@latest
 osdk --yes trust ./osdk.toml
 osdk trust list
 osdk untrust ./osdk.toml
+osdk trust prune                 # 清理配置文件已不存在的记录
 ```
 
 指南：[下载源、离线与安全](site/guide/sources-security.md)

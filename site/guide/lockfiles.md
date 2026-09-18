@@ -321,5 +321,5 @@ archive 子目录和 attestation evidence。无参数安装会恢复其 backend 
 | `<installs>/<tool>/.locks/<version>.lock` 文件残留 | 这是 OS 级排他锁的路径；进程结束会释放锁，空文件存在不表示仍被占用，不按时间删除 |
 | 安装目录没有 `.osdk-complete` | 视为上次失败的部分安装；拿到对象锁后删除并重新构建 |
 
-模型快照也使用按 snapshot 区分的 OS 排他锁。`trust list` 所显示的 `stale` 是
-配置路径或内容不再匹配，与以上 lock 状态无关。
+模型快照也使用按 snapshot 区分的 OS 排他锁。`trust list` 所显示的 `changed` /
+`missing` / `unreachable` 是配置路径或内容不再匹配，与以上 lock 状态无关。
