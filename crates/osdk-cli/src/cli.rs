@@ -459,6 +459,18 @@ pub enum ConfigCommand {
 pub enum TrustCommand {
     /// List content-bound trusted project configurations.
     List,
+
+    /// Drop records whose config file no longer exists.
+    ///
+    /// Only removes entries whose file is gone while its directory is still
+    /// readable. A config that merely changed keeps its record -- that project is
+    /// still there and only needs trusting again -- and an unreachable path is
+    /// left alone, since that is what a detached drive looks like.
+    Prune {
+        /// Report what would be removed without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

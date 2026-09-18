@@ -901,7 +901,9 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
     assert!(retrusted.status.success());
     let listed = run_isolated_in(temp.path(), &project, &["trust", "list"]);
     assert!(listed.status.success());
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("trusted"));
+    // The label is `active`, not `trusted`: `list` now distinguishes a record
+    // that still applies from one whose file changed or went missing.
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("active"));
 
     let removed = run_isolated_in(temp.path(), &project, &["untrust"]);
     assert!(removed.status.success());

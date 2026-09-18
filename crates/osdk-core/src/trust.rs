@@ -427,6 +427,107 @@ pub fn list(config_dir: &Path) -> Result<Vec<TrustRecord>> {
     Ok(read_store(config_dir)?.configs)
 }
 
+/// What a stored trust record is currently worth.
+///
+/// `list` and `prune` must agree on this, so it is derived once here rather than
+/// re-implemented per command: a `prune` that classified records differently from
+/// what `list` showed would delete something the user had just been told was
+/// still needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordState {
+    /// The file is present and its governed keys still hash to the record.
+    Active,
+    /// The file is present but its governed keys changed. The project is still
+    /// there; it needs reviewing and trusting again. **Never prunable** -- this is
+    /// a live project mid-edit, and dropping the record would silently turn into
+    /// "untrusted" with nothing explaining why.
+    Changed,
+    /// The path no longer resolves to a file, while its parent directory does
+    /// exist. The record cannot apply again unless the file comes back.
+    Missing,
+    /// Neither the file nor its parent directory resolves.
+    ///
+    /// Kept apart from `Missing` because on Windows this is what an unmounted
+    /// drive looks like -- a USB disk, a network share, a WSL mount. Treating it
+    /// as prunable garbage would delete valid approvals whenever a volume happened
+    /// to be detached, and the user would only discover it later as an
+    /// unexplained "untrusted".
+    Unreachable,
+}
+
+impl RecordState {
+    /// Whether dropping this record loses nothing.
+    ///
+    /// Only `Missing` qualifies. In particular `Changed` does not: the judgement
+    /// has to be "this record can never apply again", not "this record does not
+    /// apply right now".
+    pub fn is_prunable(self) -> bool {
+        matches!(self, RecordState::Missing)
+    }
+
+    /// Catalog key for the label shown to the user.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            RecordState::Active => "label.trust.active",
+            RecordState::Changed => "label.trust.changed",
+            RecordState::Missing => "label.trust.missing",
+            RecordState::Unreachable => "label.trust.unreachable",
+        }
+    }
+}
+
+/// Classify one stored record against the filesystem.
+pub fn record_state(config_dir: &Path, record: &TrustRecord) -> RecordState {
+    if record.path.is_file() {
+        return match is_trusted(config_dir, &record.path, None) {
+            Ok(true) => RecordState::Active,
+            // A hash that cannot be computed is reported as changed rather than
+            // as missing: the file is right there, so this is not a record to
+            // throw away.
+            Ok(false) | Err(_) => RecordState::Changed,
+        };
+    }
+    match record.path.parent() {
+        // The parent is readable and the file is genuinely gone.
+        Some(parent) if parent.is_dir() => RecordState::Missing,
+        _ => RecordState::Unreachable,
+    }
+}
+
+/// Every stored record with its current state.
+pub fn list_with_state(config_dir: &Path) -> Result<Vec<(TrustRecord, RecordState)>> {
+    Ok(list(config_dir)?
+        .into_iter()
+        .map(|record| {
+            let state = record_state(config_dir, &record);
+            (record, state)
+        })
+        .collect())
+}
+
+/// Drop every record whose file can never apply again, returning what was removed.
+///
+/// Deliberately keyed on [`RecordState::is_prunable`] rather than on
+/// `is_trusted`: the latter is also false for a config that is merely mid-edit,
+/// so pruning by it would revoke approvals for projects still in use.
+pub fn prune(config_dir: &Path) -> Result<Vec<TrustRecord>> {
+    let _lock = FileLock::acquire(store_lock_path(config_dir))?;
+    let mut store = read_store(config_dir)?;
+    let mut removed = Vec::new();
+    store.configs.retain(|record| {
+        if record_state(config_dir, record).is_prunable() {
+            removed.push(record.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if !removed.is_empty() {
+        write_store(config_dir, &store)?;
+    }
+    Ok(removed)
+}
+
 fn canonical_existing(path: &Path) -> Result<PathBuf> {
     dunce::canonicalize(path).map_err(|error| Error::io(path, error))
 }
@@ -1018,5 +1119,122 @@ mod tests {
         assert!(!requires_trust(&path).unwrap());
         // Identical because neither version contains a governed key.
         assert_eq!(before, normalized_hash(&path).unwrap());
+    }
+
+    /// The four states must be told apart, and only one of them prunable.
+    ///
+    /// `list` previously labelled both "the file changed" and "the file is gone"
+    /// as `stale`, which left no way to tell whether the right move was `trust`
+    /// or `untrust`.
+    #[test]
+    fn record_states_are_distinguished_and_only_missing_is_prunable() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("state");
+
+        let active = temp.path().join("active");
+        let changed = temp.path().join("changed");
+        let gone = temp.path().join("gone");
+        for directory in [&active, &changed, &gone] {
+            std::fs::create_dir_all(directory).unwrap();
+            std::fs::write(
+                directory.join("osdk.toml"),
+                "[sources]\nselection = \"ordered\"\n",
+            )
+            .unwrap();
+            trust(&config_dir, &directory.join("osdk.toml")).unwrap();
+        }
+
+        // Still exactly as approved.
+        // Same path, different governed content.
+        std::fs::write(
+            changed.join("osdk.toml"),
+            "[sources]\nselection = \"auto\"\n",
+        )
+        .unwrap();
+        // File removed, its directory still readable.
+        std::fs::remove_file(gone.join("osdk.toml")).unwrap();
+
+        let states: std::collections::BTreeMap<_, _> = list_with_state(&config_dir)
+            .unwrap()
+            .into_iter()
+            .map(|(record, state)| (record.path, state))
+            .collect();
+
+        assert_eq!(
+            states[&dunce::canonicalize(active.join("osdk.toml")).unwrap()],
+            RecordState::Active
+        );
+        // The canonical path of a deleted file cannot be recomputed, so these two
+        // are located by their directory name instead.
+        let by_dir = |needle: &str| {
+            *states
+                .iter()
+                .find(|(path, _)| path.to_string_lossy().contains(needle))
+                .map(|(_, state)| state)
+                .unwrap_or_else(|| panic!("no record under {needle}: {states:?}"))
+        };
+        assert_eq!(by_dir("changed"), RecordState::Changed);
+        assert_eq!(by_dir("gone"), RecordState::Missing);
+
+        // Only the removed file is prunable. `Changed` in particular is not: that
+        // project is still there and only needs approving again, so dropping its
+        // record would turn into an unexplained "untrusted" later.
+        assert!(!RecordState::Active.is_prunable());
+        assert!(!RecordState::Changed.is_prunable());
+        assert!(RecordState::Missing.is_prunable());
+        assert!(!RecordState::Unreachable.is_prunable());
+
+        let removed = prune(&config_dir).unwrap();
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        assert!(removed[0].path.to_string_lossy().contains("gone"));
+
+        // The other two survive, including the changed one.
+        let after: Vec<_> = list(&config_dir)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(
+            after.iter().any(|path| path.contains("active")),
+            "{after:?}"
+        );
+        assert!(
+            after.iter().any(|path| path.contains("changed")),
+            "a changed config must keep its record: {after:?}"
+        );
+
+        // Pruning again is a no-op rather than an error.
+        assert!(prune(&config_dir).unwrap().is_empty());
+    }
+
+    /// A path whose parent directory is also gone is left alone.
+    ///
+    /// On Windows that is indistinguishable from a detached volume -- a USB disk,
+    /// a network share, a WSL mount -- and pruning it would revoke valid
+    /// approvals whenever a drive happened to be unplugged, surfacing much later
+    /// as an unexplained "untrusted".
+    #[test]
+    fn an_unreachable_path_is_not_pruned() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("state");
+        let repo = temp.path().join("detachable/repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let config = repo.join("osdk.toml");
+        std::fs::write(&config, "[sources]\nselection = \"ordered\"\n").unwrap();
+        trust(&config_dir, &config).unwrap();
+
+        // Remove the whole tree, so neither the file nor its parent resolves.
+        std::fs::remove_dir_all(temp.path().join("detachable")).unwrap();
+
+        let states = list_with_state(&config_dir).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].1, RecordState::Unreachable);
+
+        assert!(
+            prune(&config_dir).unwrap().is_empty(),
+            "an unreachable path must not be pruned"
+        );
+        assert_eq!(list(&config_dir).unwrap().len(), 1);
     }
 }

@@ -5327,16 +5327,41 @@ pub fn trust(
     command: Option<TrustCommand>,
 ) -> Result<()> {
     if matches!(command, Some(TrustCommand::List)) {
-        for record in osdk_core::trust::list(&app.ctx.dirs.config)? {
-            let state = if record.path.is_file()
-                && osdk_core::trust::is_trusted(&app.ctx.dirs.config, &record.path, None)?
-            {
-                t!("label.trusted")
-            } else {
-                t!("label.stale")
-            };
-            println!("{}  {}  {}", state, record.hash, record.path.display());
+        for (record, state) in osdk_core::trust::list_with_state(&app.ctx.dirs.config)? {
+            println!(
+                "{}  {}  {}",
+                osdk_core::i18n::tr(state.label_key()),
+                record.hash,
+                record.path.display()
+            );
         }
+        return Ok(());
+    }
+
+    if let Some(TrustCommand::Prune { dry_run }) = command {
+        // Print before removing, and print the same list in both modes, so
+        // `--dry-run` is a genuine preview of what the real run does rather than
+        // a separately computed guess.
+        let candidates: Vec<_> = osdk_core::trust::list_with_state(&app.ctx.dirs.config)?
+            .into_iter()
+            .filter(|(_, state)| state.is_prunable())
+            .collect();
+        if candidates.is_empty() {
+            println!("{}", t!("msg.trust_prune_nothing"));
+            return Ok(());
+        }
+        for (record, _) in &candidates {
+            println!("  {}", record.path.display());
+        }
+        if dry_run {
+            println!(
+                "{}",
+                t!("msg.trust_prune_dry_run", count = candidates.len())
+            );
+            return Ok(());
+        }
+        let removed = osdk_core::trust::prune(&app.ctx.dirs.config)?;
+        println!("{}", t!("msg.trust_pruned", count = removed.len()));
         return Ok(());
     }
 

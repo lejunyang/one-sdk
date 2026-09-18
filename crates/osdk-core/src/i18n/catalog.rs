@@ -403,6 +403,31 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("label.error", ("error", "错误"));
     m.insert("label.trusted", ("trusted", "已信任"));
     m.insert("label.stale", ("stale", "已失效"));
+    m.insert("label.trust.active", ("active", "生效中"));
+    m.insert("label.trust.changed", ("changed", "内容已变"));
+    m.insert("label.trust.missing", ("missing", "文件已不存在"));
+    m.insert("label.trust.unreachable", ("unreachable", "路径不可达"));
+    m.insert(
+        "msg.trust_prune_nothing",
+        (
+            "nothing to prune: every record's config file is still in place",
+            "没有可清理的记录：每条记录的配置文件都还在",
+        ),
+    );
+    m.insert(
+        "msg.trust_prune_dry_run",
+        (
+            "would remove {count} record(s) whose config file no longer exists; rerun without --dry-run to apply",
+            "将移除 {count} 条配置文件已不存在的记录；去掉 --dry-run 重新运行即可执行",
+        ),
+    );
+    m.insert(
+        "msg.trust_pruned",
+        (
+            "removed {count} record(s) whose config file no longer exists",
+            "已移除 {count} 条配置文件已不存在的记录",
+        ),
+    );
     m.insert("label.container.healthy", ("healthy", "健康"));
     m.insert("label.container.degraded", ("degraded", "降级"));
     m.insert("label.container.not_installed", ("not installed", "未安装"));
