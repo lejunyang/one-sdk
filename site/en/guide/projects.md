@@ -377,9 +377,14 @@ installer = "npm"             # auto|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
 [tools."npm:only-on-windows-arm"]
+[tools."npm:only-on-windows-arm"]
 version = "1.0.0"
-os = "windows"                # single token or a list; AND-ed with arch
-arch = "arm64"
+when = { os = "windows", arch = "arm64" }   # single token or a list; both must match
+
+[tools.node]
+version = "20"
+arch = "arm64"                # backend option: which artifact to download
+when = { os = "windows" }     # filter: where this entry applies; both coexist
 
 [tools."http:https://downloads.example.com/acme-{version}.tar.gz"]
 version = "1.2.3"
@@ -407,14 +412,26 @@ The `http:` entry requires an exact semantic version and a SHA-256 for its
 strict HTTPS `{version}` template; see [Direct HTTPS Artifacts](./http-artifacts)
 for file/archive layout and offline replay.
 
-`os` and `arch` are **platform filters**, not backend options: they are stripped
-before anything reaches a backend, and a non-matching entry is **absent** from the
-merged configuration, so resolution, lock, shims and activation never see it.
-Values within one dimension are OR, and the two dimensions are AND. An
-unrecognized value is an error rather than a filter that never matches. Naming a
-filtered tool explicitly fails with the restriction quoted, and `osdk current`
-lists it with the reason -- a tool that is in the config yet never appears would
-otherwise look like a mistake in the config.
+`when` is a **platform filter**, not a backend option: it is stripped before
+anything reaches a backend, and a non-matching entry is **absent** from the merged
+configuration, so resolution, lock, shims and activation never see it. Values
+within one dimension are OR, and the dimensions are AND.
+
+::: warning Why it nests under `when` instead of plain `os` / `arch`
+`os`, `arch` and `libc` are **already** backend options on `github:` and `node`,
+where they select which artifact to download -- cross-architecture locking relies
+on exactly that. An earlier version read a flat `arch` as the filter, so
+`[tools.node] arch = "arm64"` made node vanish entirely on an x64 host, with
+nothing pointing at the cause. Nesting keeps the two vocabularies apart and leaves
+room for `libc` later.
+:::
+
+Only implemented dimensions are accepted inside `when`; an unsupported one such as
+`libc` is an error rather than being ignored, which would quietly widen the filter
+to "every libc". An unrecognized value is likewise an error, not a filter that
+never matches. Naming a filtered tool explicitly fails with the restriction quoted,
+and `osdk current` lists it with the reason -- a tool that is in the config yet
+never appears would otherwise look like a mistake in the config.
 
 The shorthand string form (`fd = "npm:fd@10"`) carries no filter; use the table
 form above when you need one.

@@ -345,8 +345,12 @@ allow_builds = ["@scope/native-tool", "esbuild"]
 
 [tools."npm:only-on-windows-arm"]
 version = "1.0.0"
-os = "windows"                # 单值或数组；与 arch 之间是「都要命中」
-arch = "arm64"
+when = { os = "windows", arch = "arm64" }   # 单值或数组；两个维度都要命中
+
+[tools.node]
+version = "20"
+arch = "arm64"                # backend 选项：下载哪个产物（语义不变）
+when = { os = "windows" }     # 过滤：这条在哪生效；两者可共存
 
 [tools."http:https://downloads.example.com/acme-{version}.tar.gz"]
 version = "1.2.3"
@@ -370,11 +374,21 @@ Registry 的选择语义见[JavaScript 包管理器](./package-managers)。
 `http:` 条目要求精确语义化版本，并为严格 HTTPS `{version}` 模板提供 SHA-256；
 文件/归档布局与离线重放见[直接 HTTPS 制品](./http-artifacts)。
 
-`os` 与 `arch` 是**平台过滤**，不是 backend option：它们在进入 backend 之前就被摘除，
-不匹配的条目在合并后的配置里**根本不存在**，因此求解、lock、shim、激活都不会看到它。
-维度内是「任一命中」，两个维度之间是「都要命中」。无法识别的取值直接报错，而不是默默
-永不匹配。显式点名一个被过滤的工具会报错并说明限制，`osdk current` 也会把它连同原因
-一起列出——一个写在配置里却不出现的工具，否则看起来像配置写错了。
+`when` 是**平台过滤**，不是 backend option：它在进入 backend 之前就被摘除，不匹配的
+条目在合并后的配置里**根本不存在**，因此求解、lock、shim、激活都不会看到它。维度内是
+「任一命中」，两个维度之间是「都要命中」。
+
+::: warning 为什么嵌套在 `when` 下，而不是直接写 `os` / `arch`
+`os`、`arch`、`libc` 在 `github:` 和 `node` 上**已经是 backend 选项**，语义是「下载哪个
+平台的产物」——跨架构锁定正依赖它。早先一版把平铺的 `arch` 读作过滤，结果
+`[tools.node] arch = "arm64"` 在 x64 主机上让 node 整条消失，且没有任何提示。嵌套把
+两套词汇分开，也给将来的 `libc` 留了位置。
+:::
+
+`when` 内只接受已实现的维度，写入未实现的（如 `libc`）会明确报错，而不是被忽略后把
+过滤悄悄放宽成「任意 libc」。无法识别的取值同样直接报错，而不是默默永不匹配。显式
+点名一个被过滤的工具会报错并说明限制，`osdk current` 也会把它连同原因一起列出——
+一个写在配置里却不出现的工具，否则看起来像配置写错了。
 
 字符串简写形式（`fd = "npm:fd@10"`）不支持过滤，需要时改写成上面的表形式。
 
