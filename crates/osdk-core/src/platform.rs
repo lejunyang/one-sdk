@@ -230,22 +230,89 @@ impl Libc {
     }
 }
 
-/// An `os` / `arch` restriction written on a config entry.
+/// A platform restriction written as a `when` table on a config entry.
 ///
-/// The semantics are **filter, not assertion**: an entry whose filter does not
+/// The semantics are **filter, not assertion**: an entry whose `when` does not
 /// match the host is treated as absent, exactly as `[syspkg.packages]`'s `os`
-/// already behaved. It can only ever narrow where something applies, never
-/// cause something to be installed that otherwise would not be, which is why it
-/// needs no trust.
+/// already behaved. It can only ever narrow where something applies, never cause
+/// something to be installed that otherwise would not be, which is why it needs
+/// no trust.
 ///
 /// Values within one dimension are OR (`os = ["linux", "macos"]` means either),
-/// and the two dimensions are AND (`os` **and** `arch` must both match).
+/// and the dimensions are AND (`os` **and** `arch` must both match).
+///
+/// # Why a nested `when` rather than flat `os`/`arch` keys
+///
+/// `os`, `arch` and `libc` are **already** backend options on `github:` and
+/// `node`, where they select *which artifact to download* -- that is what makes
+/// `osdk lock node@20 -o arch=arm64` produce a lock section for another
+/// architecture. Reusing those names for "where does this entry apply" gave them
+/// two opposite meanings on the same key: a first attempt at this feature made
+/// `[tools.node] arch = "arm64"` drop node entirely on an x64 host, silently
+/// breaking cross-architecture locking. Nesting the filter keeps the two
+/// vocabularies apart, and leaves room for `libc` without a third collision.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlatformFilter {
     /// Empty means "every OS".
     pub os: Vec<Os>,
     /// Empty means "every architecture".
     pub arch: Vec<Arch>,
+}
+
+/// One or several tokens, as either `os = "linux"` or `os = ["linux", "macos"]`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum Tokens {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Tokens {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Tokens::One(value) => vec![value],
+            Tokens::Many(values) => values,
+        }
+    }
+}
+
+/// The raw `when` table, before tokens are validated.
+///
+/// `deny_unknown_fields` is what makes a future dimension fail loudly instead of
+/// being ignored: `when = { libc = "musl" }` on a build that does not implement
+/// `libc` must not silently widen the filter to "every libc".
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWhen {
+    #[serde(default)]
+    os: Option<Tokens>,
+    #[serde(default)]
+    arch: Option<Tokens>,
+}
+
+impl<'de> serde::Deserialize<'de> for PlatformFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawWhen::deserialize(deserializer)?;
+        let os = raw.os.map(Tokens::into_vec).unwrap_or_default();
+        let arch = raw.arch.map(Tokens::into_vec).unwrap_or_default();
+        PlatformFilter::parse(&os, &arch).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for PlatformFilter {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        if !self.os.is_empty() {
+            let tokens: Vec<_> = self.os.iter().map(|os| os.config_token()).collect();
+            map.serialize_entry("os", &tokens)?;
+        }
+        if !self.arch.is_empty() {
+            let tokens: Vec<_> = self.arch.iter().map(|arch| arch.config_token()).collect();
+            map.serialize_entry("arch", &tokens)?;
+        }
+        map.end()
+    }
 }
 
 /// A token in a platform filter that no version of osdk understands.

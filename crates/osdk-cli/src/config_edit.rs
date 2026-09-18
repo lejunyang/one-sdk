@@ -939,6 +939,7 @@ mod tests {
     ) -> StructuredToolConfig {
         StructuredToolConfig {
             version: version.to_string(),
+            when: None,
             options: options
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value))

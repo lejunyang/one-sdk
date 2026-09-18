@@ -616,11 +616,32 @@ pub struct ToolSources {
 
 /// Persisted `[tools]` entry. Legacy strings remain supported, while structured
 /// objects can carry extra backend-specific options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum ToolConfigEntry {
     Legacy(String),
     Structured(StructuredToolConfig),
+}
+
+/// Deserialize by hand rather than with `#[serde(untagged)]`.
+///
+/// `untagged` discards the error from every variant it tried and reports only
+/// "data did not match any variant", so a mistake inside the table -- a
+/// misspelled `when.os`, an unsupported dimension -- surfaced as a parse error
+/// pointing at the `[tools.<name>]` header with no mention of the real cause.
+/// Deciding the variant from the value's own shape lets the inner error through.
+impl<'de> Deserialize<'de> for ToolConfigEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = toml::Value::deserialize(deserializer)?;
+        match value {
+            toml::Value::String(version) => Ok(Self::Legacy(version)),
+            other => StructuredToolConfig::deserialize(other)
+                .map(Self::Structured)
+                .map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 impl ToolConfigEntry {
@@ -634,6 +655,7 @@ impl ToolConfigEntry {
     ) -> Self {
         Self::Structured(StructuredToolConfig {
             version: version.into(),
+            when: None,
             options,
         })
     }
@@ -679,6 +701,14 @@ impl ToolConfigEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructuredToolConfig {
     pub version: String,
+    /// Platform restriction for this entry. `None` means "every platform".
+    ///
+    /// A typed field rather than one of the flattened `options`, so that it is
+    /// validated when the config is read and cannot be mistaken for a backend
+    /// option. `deny_unknown_fields` on the inner table makes a not-yet-supported
+    /// dimension fail loudly instead of widening the filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<crate::platform::PlatformFilter>,
     #[serde(flatten)]
     pub options: BTreeMap<String, ToolConfigValue>,
 }
@@ -699,46 +729,40 @@ impl StructuredToolConfig {
     }
 }
 
-/// The option keys that are platform filters rather than backend options.
+/// The option key holding a platform filter rather than backend options.
 ///
-/// They are removed from `options` before anything reaches a backend: dynamic
-/// backends reject unknown options outright, so leaving `os` in place would turn
-/// every filtered entry into `unsupported option \`os\`` instead of a filter.
-pub const PLATFORM_FILTER_KEYS: &[&str] = &["os", "arch"];
+/// It is removed from `options` before anything reaches a backend: dynamic
+/// backends reject unknown options outright, so leaving it in place would turn
+/// every filtered entry into `unsupported option `when`` instead of a filter.
+///
+/// Nested under one key rather than flat `os`/`arch` because both of those are
+/// already backend options meaning "which artifact to download"; see
+/// [`crate::platform::PlatformFilter`] for what went wrong when they were
+/// reused.
+pub const PLATFORM_FILTER_KEY: &str = "when";
 
 impl StructuredToolConfig {
-    /// Split this entry's platform filter out from its backend options.
+    /// Split this entry's `when` filter out from its backend options.
     ///
-    /// Returns the filter plus the options with `os`/`arch` removed. An
-    /// unrecognized token is an error rather than a filter that matches nothing,
-    /// for the same reason as in `[syspkg.packages]`: silently never matching
-    /// would remove the tool on every machine, and the symptom ("the tool is
-    /// missing") points nowhere near the misspelled line.
+    /// Returns the filter plus the options with `when` removed. An unrecognized
+    /// token is an error rather than a filter that matches nothing, for the same
+    /// reason as in `[syspkg.packages]`: silently never matching would remove the
+    /// tool on every machine, and the symptom ("the tool is missing") points
+    /// nowhere near the misspelled line.
     pub fn split_platform_filter(
         &self,
     ) -> Result<(
         crate::platform::PlatformFilter,
         BTreeMap<String, ToolConfigValue>,
     )> {
-        let tokens = |key: &str| -> Vec<String> {
-            match self.options.get(key) {
-                Some(ToolConfigValue::String(value)) => vec![value.clone()],
-                Some(ToolConfigValue::Array(values)) => values.clone(),
-                // A bool here is a mistake worth reporting rather than ignoring;
-                // it will fail to parse as a platform token below.
-                Some(ToolConfigValue::Bool(value)) => vec![value.to_string()],
-                None => Vec::new(),
-            }
+        let filter = match self.when.as_ref() {
+            Some(filter) => filter.clone(),
+            None => crate::platform::PlatformFilter::default(),
         };
-        let filter = crate::platform::PlatformFilter::parse(&tokens("os"), &tokens("arch"))
-            // Deliberately `Error::other`: the caller adds the tool name and
-            // wraps the result in `Error::config`, so using `config` here too
-            // rendered "config error" twice in one message.
-            .map_err(|error| Error::other(error.to_string()))?;
         let options = self
             .options
             .iter()
-            .filter(|(key, _)| !PLATFORM_FILTER_KEYS.contains(&key.as_str()))
+            .filter(|(key, _)| key.as_str() != PLATFORM_FILTER_KEY)
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         Ok((filter, options))
@@ -759,6 +783,10 @@ impl ToolConfigEntry {
                     filter,
                     Self::Structured(StructuredToolConfig {
                         version: config.version.clone(),
+                        // The filter has been extracted; the stripped entry
+                        // must not carry it again or a second split would
+                        // re-apply it.
+                        when: None,
                         options,
                     }),
                 ))
@@ -2181,7 +2209,7 @@ probe_timeout_ms = 125
     #[test]
     fn tool_platform_filter_is_split_out_of_backend_options() {
         let entry: ToolConfigEntry = toml::from_str(
-            "version = \"1.2.3\"\nos = \"windows\"\narch = [\"arm64\", \"x64\"]\ninstaller = \"pnpm\"\n",
+            "version = \"1.2.3\"\ninstaller = \"pnpm\"\n\n[when]\nos = \"windows\"\narch = [\"arm64\", \"x64\"]\n",
         )
         .unwrap();
         let (filter, stripped) = entry.split_platform_filter().unwrap();
@@ -2213,20 +2241,29 @@ probe_timeout_ms = 125
     /// A misspelled token is an error, not a filter that matches nothing.
     #[test]
     fn a_misspelled_tool_platform_token_is_rejected() {
-        for body in [
-            "version = \"1\"\nos = \"windwos\"\n",
-            "version = \"1\"\narch = \"arm65\"\n",
+        // Rejection happens while reading the config, not later: `when` is a
+        // typed field, so an unusable token never becomes a `PlatformFilter` at
+        // all. The message must name both the offending token and the accepted
+        // set, or the author is left guessing which of the two keys is wrong.
+        for (body, needle) in [
+            ("version = \"1\"\n[when]\nos = \"windwos\"\n", "windwos"),
+            ("version = \"1\"\n[when]\narch = \"arm65\"\n", "arm65"),
         ] {
-            let entry: ToolConfigEntry = toml::from_str(body).unwrap();
-            let error = entry
-                .split_platform_filter()
+            let error = toml::from_str::<ToolConfigEntry>(body)
                 .expect_err(&format!("should be rejected: {body}"));
-            let message = error.localized();
+            let message = error.to_string();
+            assert!(message.contains(needle), "{message}");
             assert!(
                 message.contains("expected one of"),
                 "must list accepted tokens: {message}"
             );
         }
+
+        // A dimension no build understands must not be quietly ignored, which
+        // would widen the filter to "every libc" -- the opposite of the intent.
+        let error = toml::from_str::<ToolConfigEntry>("version = \"1\"\n[when]\nlibc = \"musl\"\n")
+            .expect_err("an unknown `when` dimension must be rejected");
+        assert!(error.to_string().contains("libc"), "{error}");
     }
 
     /// The filter decides membership of the merged `tools` map, so every
@@ -2247,7 +2284,7 @@ probe_timeout_ms = 125
         std::fs::write(
             project.join("osdk.toml"),
             format!(
-                "[tools.kept]\nversion = \"1\"\nos = \"{}\"\n\n[tools.dropped]\nversion = \"2\"\nos = \"{other_os}\"\n",
+                "[tools.kept]\nversion = \"1\"\nwhen = {{ os = \"{}\" }}\n\n[tools.dropped]\nversion = \"2\"\nwhen = {{ os = \"{other_os}\" }}\n",
                 host.os.config_token()
             ),
         )
@@ -2279,7 +2316,7 @@ probe_timeout_ms = 125
         std::fs::write(
             project.join("osdk.toml"),
             format!(
-                "[tools.matching_os_only]\nversion = \"1\"\nos = \"{}\"\narch = \"{other_arch}\"\n",
+                "[tools.matching_os_only]\nversion = \"1\"\nwhen = {{ os = \"{}\", arch = \"{other_arch}\" }}\n",
                 host.os.config_token()
             ),
         )
@@ -2311,7 +2348,7 @@ probe_timeout_ms = 125
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
             project.join("osdk.toml"),
-            format!("[tools.sometool]\nversion = \"2\"\nos = \"{other_os}\"\n"),
+            format!("[tools.sometool]\nversion = \"2\"\nwhen = {{ os = \"{other_os}\" }}\n"),
         )
         .unwrap();
 
@@ -2322,5 +2359,98 @@ probe_timeout_ms = 125
             config.tools
         );
         assert!(config.excluded_tools.contains_key("sometool"));
+    }
+
+    /// A backend's own `os`/`arch`/`libc` options must keep meaning "which
+    /// artifact to download", not "where this entry applies".
+    ///
+    /// This is the regression that made `when` a nested table. `github:` and
+    /// `node` have had `arch` as a real option for as long as cross-architecture
+    /// locking has existed: `osdk lock node@20 -o arch=arm64` produces a lock
+    /// section for another machine. A first version of this feature read a flat
+    /// `arch` key as the platform filter, so `[tools.node] arch = "arm64"` made
+    /// node vanish from the merged config on an x64 host -- silently, with the
+    /// tool simply reported as absent.
+    #[test]
+    fn a_backends_own_arch_option_is_not_a_platform_filter() {
+        let host = crate::platform::Platform::current();
+        let other_arch = match host.arch {
+            crate::platform::Arch::Arm64 => "x64",
+            _ => "arm64",
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path();
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!("[tools.node]\nversion = \"20\"\narch = \"{other_arch}\"\n"),
+        )
+        .unwrap();
+
+        let config = Config::load(&temporary.path().join("missing.toml"), project).unwrap();
+        assert!(
+            config.tools.contains_key("node"),
+            "a backend `arch` option must not filter the entry out: {:?} / excluded {:?}",
+            config.tools,
+            config.excluded_tools
+        );
+        assert!(
+            config.excluded_tools.is_empty(),
+            "{:?}",
+            config.excluded_tools
+        );
+        // And it must still reach the backend as an option.
+        let options = config.tool_configs["node"].to_request_options();
+        assert_eq!(options.get("arch").map(String::as_str), Some(other_arch));
+    }
+
+    /// The two vocabularies must be usable together on one entry: download for
+    /// another architecture, yet only when this host matches.
+    #[test]
+    fn a_when_filter_and_an_arch_option_coexist_on_one_entry() {
+        let host = crate::platform::Platform::current();
+        let other_arch = match host.arch {
+            crate::platform::Arch::Arm64 => "x64",
+            _ => "arm64",
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path();
+        std::fs::write(
+            project.join("osdk.toml"),
+            format!(
+                "[tools.node]\nversion = \"20\"\narch = \"{other_arch}\"\nwhen = {{ os = \"{}\" }}\n",
+                host.os.config_token()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(&temporary.path().join("missing.toml"), project).unwrap();
+        assert!(config.tools.contains_key("node"), "{:?}", config.tools);
+        let options = config.tool_configs["node"].to_request_options();
+        // The filter is consumed; the backend option survives untouched.
+        assert_eq!(options.get("arch").map(String::as_str), Some(other_arch));
+        assert!(!options.contains_key("when"), "{options:?}");
+    }
+
+    /// A dimension this build does not implement must fail loudly.
+    ///
+    /// Accepting and ignoring `libc` would widen the filter to "every libc",
+    /// which is the opposite of what the author asked for, and the entry would
+    /// install somewhere it was explicitly excluded from.
+    #[test]
+    fn an_unimplemented_when_dimension_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path();
+        std::fs::write(
+            project.join("osdk.toml"),
+            "[tools.sometool]\nversion = \"1\"\nwhen = { libc = \"musl\" }\n",
+        )
+        .unwrap();
+
+        let error = Config::load(&temporary.path().join("missing.toml"), project)
+            .expect_err("an unknown `when` dimension must be rejected");
+        let message = error.localized();
+        assert!(message.contains("libc"), "{message}");
     }
 }

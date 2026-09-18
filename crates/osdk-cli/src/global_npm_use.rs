@@ -2554,6 +2554,7 @@ fn persist_global_config(
         &request.backend,
         &osdk_core::config::StructuredToolConfig {
             version: spec.into(),
+            when: None,
             options,
         },
     )

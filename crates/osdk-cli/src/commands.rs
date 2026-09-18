@@ -3070,6 +3070,9 @@ fn structured_tool_config(
 ) -> osdk_core::config::StructuredToolConfig {
     osdk_core::config::StructuredToolConfig {
         version: version.to_string(),
+        // Generated entries target the machine they are written on, so they
+        // carry no platform restriction.
+        when: None,
         options: options
             .iter()
             .map(|(key, value)| (key.clone(), structured_tool_option(key, value)))
