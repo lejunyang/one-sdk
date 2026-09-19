@@ -227,6 +227,24 @@ Prefer `osdk.run` when building a command from data: each argument becomes one
 argv entry, so a value with spaces or metacharacters cannot split or be
 reinterpreted. `osdk.sh` suits a fixed one-liner.
 
+### Standard library and environment variables
+
+The full Lua 5.4 standard library is loaded — `string`, `table`, `math`, `os`,
+`io`, `coroutine` and `utf8`, all except `debug`. The interpreter is statically
+linked, so **`require` can load plain Lua files but not C extension modules**
+(no `lfs`, no `socket`).
+
+`os.getenv` is redirected to the same source as `osdk.env`, so the two never
+disagree: the task's declared `env` first, then the process environment. This
+matters because a task's `env` applies to the children osdk spawns, not to osdk
+itself — stock `os.getenv` would return nil for precisely the variables the task
+declared, and a nil is indistinguishable from "unset", making the `env` table
+look broken.
+
+(Injecting into the real process environment would also make them agree, but it
+would leak one task's `env` into every later task, the freshness state and the
+trust checks — and `set_var` is a data race under threads.)
+
 ### This is not a sandbox
 
 The config file has already passed the trust gate, and `run` in the same file

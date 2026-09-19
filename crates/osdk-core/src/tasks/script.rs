@@ -202,6 +202,32 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     osdk.set("env", env_fn).map_err(to_lua)?;
 
     globals.set("osdk", osdk).map_err(to_lua)?;
+
+    // Replace `os.getenv` so it cannot quietly disagree with `osdk.env`.
+    //
+    // A task's `env` is applied to the *child processes* osdk spawns, not to
+    // osdk's own process, so stock `os.getenv` returns nil for every variable
+    // the task declared -- while `osdk.env`, and any command the script runs,
+    // see it fine. That disagreement is silent and the nil looks like an unset
+    // variable, so the natural conclusion is that the `env` table is broken.
+    //
+    // Injecting the values into the real process environment would make the two
+    // agree, but `set_var` is a data race by definition (unsafe as of edition
+    // 2024) and would leak one task's `env` into every later task, the
+    // freshness state and the trust checks. Redirecting the read is the smaller
+    // change and keeps the process environment honest.
+    let table: mlua::Table = globals.get("os").map_err(to_lua)?;
+    let env_lookup = context.env.clone();
+    let getenv = lua
+        .create_function(move |_, name: String| {
+            Ok(env_lookup
+                .get(&name)
+                .cloned()
+                .or_else(|| std::env::var(&name).ok()))
+        })
+        .map_err(to_lua)?;
+    table.set("getenv", getenv).map_err(to_lua)?;
+
     Ok(())
 }
 
@@ -215,7 +241,50 @@ fn shell_command(command: &str) -> std::process::Command {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// `os.getenv` and `osdk.env` must never disagree.
+    ///
+    /// The task's `env` reaches spawned children but not osdk's own process, so
+    /// an unpatched `os.getenv` returns nil for exactly the variables the task
+    /// declared -- and a nil is indistinguishable from "not set", which makes
+    /// the `env` table look broken. Both readers are asserted here because
+    /// fixing one and forgetting the other is the failure this guards.
+    #[test]
+    fn os_getenv_sees_the_task_env_just_like_osdk_env() {
+        let mut context = context();
+        context
+            .env
+            .insert("OSDK_TEST_TASK_VAR".into(), "declared-by-task".into());
+
+        let source = "local a = os.getenv('OSDK_TEST_TASK_VAR') \
+             local b = osdk.env('OSDK_TEST_TASK_VAR') \
+             if a ~= 'declared-by-task' then return 11 end \
+             if b ~= 'declared-by-task' then return 12 end \
+             if a ~= b then return 13 end \
+             return 0";
+        assert_eq!(
+            eval(source, &context).unwrap(),
+            0,
+            "11 = os.getenv wrong, 12 = osdk.env wrong, 13 = they disagree"
+        );
+    }
+
+    /// Overriding `os.getenv` must not blind it to the real environment.
+    #[test]
+    fn os_getenv_still_falls_back_to_the_process_environment() {
+        let source = "if os.getenv('PATH') ~= nil then return 0 end return 1";
+        assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
+
+    /// An unset variable must still read as nil, not as an empty string.
+    #[test]
+    fn an_unset_variable_is_still_nil() {
+        let source = "if os.getenv('OSDK_DEFINITELY_UNSET_XYZ') == nil then return 0 end \
+             return 1";
+        assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
 
     fn context() -> ScriptContext {
         ScriptContext {
