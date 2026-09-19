@@ -98,6 +98,54 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## Teardown that runs even on failure
+
+```toml
+[tasks.e2e]
+depends = ["start-db"]
+run = "pytest tests/e2e"
+run_post = "docker compose down"
+```
+
+`run_post` runs after `run`, **including when `run` failed** — which is the
+entire reason it exists. A final line inside `run` cannot do this: a failing
+task never reaches it, and the test database stays up.
+
+It belongs to the `run` family rather than the `depends` family, so it takes
+**commands**. The common one-line cleanup needs no separate task that nobody
+would ever invoke directly; when the teardown really is shared,
+`{ tasks = [...] }` still works:
+
+```toml
+run_post = [{ tasks = ["stop-db", "notify"] }]
+```
+
+> mise calls this `depends_post`. That name reads as a kind of dependency and it
+> is not one: prerequisites run before and decide whether the task runs at all,
+> while teardown runs after and decides nothing.
+
+### When it does not run
+
+| Situation | Teardown | Why |
+| --- | --- | --- |
+| `run` succeeded | runs | — |
+| `run` failed | **runs** | it started, so it has something to clean up |
+| a dependency failed, `run` never started | skipped | nothing was set up |
+| skipped as up to date by freshness | skipped | same |
+
+### Exit codes
+
+The **first** failure wins: if `run` exits 3 and teardown succeeds, the task is
+still 3 — cleaning up is not passing. If `run` succeeds and teardown fails, the
+task fails, because the machine is not in the state the task promised.
+
+When teardown has several steps, **the rest still run after one fails** —
+stopping halfway would strand exactly the resources this is meant to release.
+
+> `run_post_windows` is not supported yet. For a platform-specific teardown, use
+> `run_post = [{ tasks = ["cleanup"] }]` pointing at a task that has its own
+> `run_windows`.
+
 ## Passing arguments
 
 The simple case needs no declaration at all: a task with **exactly one command**

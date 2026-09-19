@@ -52,6 +52,8 @@ pub struct PlannedTask {
     pub name: String,
     pub dir: Option<String>,
     pub commands: Vec<PlannedStep>,
+    /// Teardown steps, run after `commands` even when they failed.
+    pub post: Vec<PlannedStep>,
     /// Input globs, for the freshness check.
     pub sources: Vec<String>,
     /// Output globs, for the freshness check.
@@ -161,7 +163,10 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         let Some(def) = set.tasks.get(&name) else {
             continue;
         };
-        for step in def.steps_for(windows) {
+        // `run_post` can reference tasks too, and a reference the plan does not
+        // contain gets silently skipped at execution time -- the same failure
+        // mode parallel steps had. Both lists feed the walk.
+        for step in def.steps_for(windows).into_iter().chain(def.post_steps()) {
             let RunStep::Parallel { tasks } = step else {
                 continue;
             };
@@ -210,7 +215,26 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
                 }
             }
         }
+        let mut post = Vec::new();
+        for step in def.post_steps() {
+            match step {
+                RunStep::Parallel { tasks } => post.push(PlannedStep::Parallel { tasks }),
+                RunStep::Argv { argv, ignore_error } => {
+                    post.push(PlannedStep::Argv { argv, ignore_error })
+                }
+                other => post.push(PlannedStep::Command {
+                    shell: shell.clone(),
+                    command: other
+                        .command()
+                        .expect("non-parallel step always carries a command")
+                        .to_string(),
+                    ignore_error: other.ignore_error(),
+                }),
+            }
+        }
+
         steps.push(PlannedTask {
+            post,
             standalone: standalone.contains(&name),
             sources: def.sources.clone(),
             outputs: def.outputs.clone(),
@@ -409,6 +433,94 @@ pub fn execute(
     execute_with_freshness(plan, config_root, spawner, &mut None)
 }
 
+/// Run a task's teardown steps, returning the first non-zero exit code.
+///
+/// Called on both the success and failure paths, which is the point: teardown
+/// that only ran on success would be useless for the case it exists to serve.
+/// It is *not* called when the task never started or was skipped as fresh --
+/// nothing was set up, so there is nothing to tear down.
+fn run_post_steps(
+    task: &PlannedTask,
+    plan: &Plan,
+    config_root: &Path,
+    spawner: &mut dyn Spawner,
+    outcome: &mut TaskOutcome,
+) -> Result<i32> {
+    if task.post.is_empty() {
+        return Ok(0);
+    }
+    let dir = resolve_dir(config_root, task.dir.as_deref());
+    let mut first_failure = 0;
+
+    for step in &task.post {
+        let code = match step {
+            PlannedStep::Command {
+                shell,
+                command,
+                ignore_error,
+            } => {
+                let code = spawner.run(&task.name, shell, command, &dir)?;
+                if code != 0 && *ignore_error {
+                    outcome.tolerated_failures.push(command.clone());
+                    continue;
+                }
+                code
+            }
+            PlannedStep::Argv { argv, ignore_error } => {
+                let code = spawner.run_argv(&task.name, argv, &dir)?;
+                if code != 0 && *ignore_error {
+                    outcome.tolerated_failures.push(argv.join(" "));
+                    continue;
+                }
+                code
+            }
+            PlannedStep::Parallel { tasks } => {
+                let mut worst = 0;
+                for name in tasks {
+                    let Some(sub) = plan.steps.iter().find(|candidate| &candidate.name == name)
+                    else {
+                        continue;
+                    };
+                    let sub_dir = resolve_dir(config_root, sub.dir.as_deref());
+                    for sub_step in &sub.commands {
+                        let code = match sub_step {
+                            PlannedStep::Command {
+                                shell,
+                                command,
+                                ignore_error,
+                            } => {
+                                let code = spawner.run(&sub.name, shell, command, &sub_dir)?;
+                                if code != 0 && *ignore_error {
+                                    continue;
+                                }
+                                code
+                            }
+                            PlannedStep::Argv { argv, ignore_error } => {
+                                let code = spawner.run_argv(&sub.name, argv, &sub_dir)?;
+                                if code != 0 && *ignore_error {
+                                    continue;
+                                }
+                                code
+                            }
+                            PlannedStep::Parallel { .. } => continue,
+                        };
+                        if code != 0 && worst == 0 {
+                            worst = code;
+                        }
+                    }
+                }
+                worst
+            }
+        };
+        // Every teardown step gets its turn even after one fails: stopping
+        // halfway would leave exactly the resources this is meant to release.
+        if code != 0 && first_failure == 0 {
+            first_failure = code;
+        }
+    }
+    Ok(first_failure)
+}
+
 /// Resolve one task's steps against parsed argument values.
 ///
 /// Done here rather than during planning so `--dry-run` and the real run share
@@ -592,6 +704,10 @@ pub fn execute_full(
                             outcome.tolerated_failures.push(argv.join(" "));
                             continue;
                         }
+                        // The task body failed, but it *did* start, so teardown
+                        // owes its work -- that is the whole reason `run_post`
+                        // exists rather than a last line of `run`.
+                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
                         outcome.code = code;
                         outcomes.push(outcome);
                         return Ok(outcomes);
@@ -608,6 +724,7 @@ pub fn execute_full(
                             outcome.tolerated_failures.push(command.clone());
                             continue;
                         }
+                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
                         outcome.code = code;
                         outcomes.push(outcome);
                         return Ok(outcomes);
@@ -644,6 +761,7 @@ pub fn execute_full(
                                 PlannedStep::Parallel { .. } => continue,
                             };
                             if code != 0 {
+                                run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
                                 outcome.code = code;
                                 outcomes.push(outcome);
                                 return Ok(outcomes);
@@ -653,6 +771,16 @@ pub fn execute_full(
                 }
             }
         }
+        // The body succeeded; teardown still runs, and its failure becomes the
+        // task's failure -- a clean test run whose cleanup broke has not left
+        // the machine in the state it promised.
+        let post_code = run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+        if post_code != 0 {
+            outcome.code = post_code;
+            outcomes.push(outcome);
+            return Ok(outcomes);
+        }
+
         // Only a clean run updates the record: storing state after a failure
         // would let the next invocation skip a task that never succeeded.
         if outcome.code == 0 {
@@ -952,6 +1080,195 @@ run = [{ argv = ["prog", "{{args}}", "--tail"] }]
         let parts: Vec<&str> = spawner.ran[0].split(SEP).collect();
         // `x` lands where the placeholder is, not tacked on the end.
         assert_eq!(parts, vec!["prog", "x", "--tail"]);
+    }
+
+    /// The reason `run_post` exists: cleanup that a final line of `run` could
+    /// never reach, because a failing task stops before it.
+    #[test]
+    fn teardown_runs_even_when_the_task_body_failed() {
+        let set = set_from(
+            r#"
+[e2e]
+run = "pytest"
+run_post = "stop-db"
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("pytest".into(), 5);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(
+            spawner.ran,
+            vec!["pytest", "stop-db"],
+            "teardown must still run"
+        );
+        // The failure is still the task's outcome: cleaning up is not passing.
+        assert_eq!(outcomes.last().unwrap().code, 5);
+    }
+
+    #[test]
+    fn teardown_also_runs_after_success() {
+        let set = set_from(
+            r#"
+[e2e]
+run = "pytest"
+run_post = "stop-db"
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["pytest", "stop-db"]);
+        assert_eq!(outcomes.last().unwrap().code, 0);
+    }
+
+    /// Nothing was set up, so nothing needs tearing down.
+    #[test]
+    fn teardown_is_skipped_when_a_dependency_failed_before_the_body_started() {
+        let set = set_from(
+            r#"
+start = "start-db"
+
+[e2e]
+run = "pytest"
+run_post = "stop-db"
+depends = ["start"]
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("start-db".into(), 1);
+
+        execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(
+            spawner.ran,
+            vec!["start-db"],
+            "neither the body nor its teardown may run: {:?}",
+            spawner.ran
+        );
+    }
+
+    /// osdk-specific: a task skipped as up to date never started, so its
+    /// teardown has nothing to undo. mise has no incrementality and so cannot
+    /// hit this case.
+    #[test]
+    fn teardown_is_skipped_when_freshness_skipped_the_task() {
+        use crate::tasks::freshness::FreshnessState;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_file(root, "src/a.rs", "fn a() {}");
+
+        let set = set_from(
+            r#"
+[build]
+run = "compile"
+run_post = "cleanup"
+sources = ["src/**/*.rs"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut state = FreshnessState::default();
+
+        let mut spawner = RecordingSpawner::default();
+        execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert_eq!(spawner.ran, vec!["compile", "cleanup"], "first run");
+
+        let mut spawner = RecordingSpawner::default();
+        let outcomes =
+            execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert!(outcomes[0].skipped);
+        assert!(
+            spawner.ran.is_empty(),
+            "a skipped task must not run its teardown: {:?}",
+            spawner.ran
+        );
+    }
+
+    /// A clean body with broken cleanup is not a success: the machine is not in
+    /// the state the task promised.
+    #[test]
+    fn a_failing_teardown_fails_the_task() {
+        let set = set_from(
+            r#"
+[e2e]
+run = "pytest"
+run_post = "stop-db"
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("stop-db".into(), 7);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(outcomes.last().unwrap().code, 7);
+    }
+
+    /// The body's exit code wins: cleanup succeeding does not rescue a failed
+    /// test run.
+    #[test]
+    fn the_bodys_failure_outranks_a_later_teardown_failure() {
+        let set = set_from(
+            r#"
+[e2e]
+run = "pytest"
+run_post = "stop-db"
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("pytest".into(), 3);
+        spawner.fail.insert("stop-db".into(), 9);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(
+            outcomes.last().unwrap().code,
+            3,
+            "the body's code identifies what actually went wrong"
+        );
+    }
+
+    /// Stopping at the first failed teardown step would strand exactly the
+    /// resources this feature exists to release.
+    #[test]
+    fn every_teardown_step_runs_even_after_one_fails() {
+        let set = set_from(
+            r#"
+[e2e]
+run = "pytest"
+run_post = ["stop-db", "remove-tmp", "notify"]
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("stop-db".into(), 2);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(
+            spawner.ran,
+            vec!["pytest", "stop-db", "remove-tmp", "notify"]
+        );
+        assert_eq!(outcomes.last().unwrap().code, 2);
+    }
+
+    /// The common case needs no separate task, but a shared teardown can still
+    /// reference one.
+    #[test]
+    fn teardown_can_reference_tasks_as_well_as_commands() {
+        let set = set_from(
+            r#"
+cleanup = "do-cleanup"
+
+[e2e]
+run = "pytest"
+run_post = [{ tasks = ["cleanup"] }]
+"#,
+        );
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["pytest", "do-cleanup"]);
     }
 
     #[test]

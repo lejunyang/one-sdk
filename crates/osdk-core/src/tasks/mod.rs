@@ -295,6 +295,30 @@ pub struct TaskDef {
     /// Windows needs *those* commands, not both sets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_windows: Option<RunSpec>,
+    /// Steps that run after `run`, **including when `run` failed**.
+    ///
+    /// Named after `run` rather than `depends` on purpose. mise calls the same
+    /// idea `depends_post`, which reads as a kind of dependency and is not one:
+    /// prerequisites run before and gate the task, these run after and cannot.
+    /// Sitting in the `run` family also means it takes commands, so the common
+    /// case -- one line of cleanup -- needs no separate task that nobody would
+    /// ever invoke directly:
+    ///
+    /// ```toml
+    /// run = "pytest tests/e2e"
+    /// run_post = "docker compose down"
+    /// ```
+    ///
+    /// Reusing [`RunSpec`] keeps `{ tasks = [...] }` available for the case
+    /// where the teardown really is shared.
+    ///
+    /// "After" has three boundaries, and the last one is specific to osdk:
+    /// it runs when `run` executed and failed; it is skipped when a dependency
+    /// failed so `run` never started (nothing was set up, so nothing needs
+    /// tearing down); and it is skipped when freshness deemed the task already
+    /// up to date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_post: Option<RunSpec>,
     /// Help text shown by `osdk task list`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -378,6 +402,14 @@ impl TaskDef {
         spec.map(RunSpec::steps).unwrap_or_default()
     }
 
+    /// The teardown steps, if any.
+    pub fn post_steps(&self) -> Vec<RunStep> {
+        self.run_post
+            .as_ref()
+            .map(RunSpec::steps)
+            .unwrap_or_default()
+    }
+
     /// Reject definitions that would fail confusingly at run time.
     fn validate(&self, name: &str) -> Result<()> {
         let has_run = self.run.as_ref().is_some_and(|r| !r.is_empty());
@@ -418,6 +450,29 @@ impl TaskDef {
                 if argv.is_empty() {
                     return Err(Error::config(format!(
                         "task `{name}`: `{{ argv = [] }}` names no program"
+                    )));
+                }
+            }
+        }
+        for step in self.post_steps() {
+            if let Some(cmd) = step.command() {
+                if cmd.trim().is_empty() {
+                    return Err(Error::config(format!(
+                        "task `{name}`: empty command in `run_post`"
+                    )));
+                }
+            }
+            if let RunStep::Parallel { tasks } = &step {
+                if tasks.is_empty() {
+                    return Err(Error::config(format!(
+                        "task `{name}`: `run_post` has a `{{ tasks = [] }}` step listing no tasks"
+                    )));
+                }
+            }
+            if let RunStep::Argv { argv, .. } = &step {
+                if argv.is_empty() {
+                    return Err(Error::config(format!(
+                        "task `{name}`: `run_post` has an `{{ argv = [] }}` naming no program"
                     )));
                 }
             }
@@ -556,7 +611,7 @@ impl TaskSet {
         let mut missing = Vec::new();
         for (name, def) in &self.tasks {
             let mut referenced: Vec<String> = def.depends.clone();
-            for step in def.steps_for(windows) {
+            for step in def.steps_for(windows).into_iter().chain(def.post_steps()) {
                 if let RunStep::Parallel { tasks } = step {
                     referenced.extend(tasks);
                 }
