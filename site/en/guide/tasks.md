@@ -198,18 +198,31 @@ directly into CI scripts.
 
 ## Trust
 
-`[tasks]` runs arbitrary commands on the machine, so a project config that
-contains it requires explicit trust:
+**Declaring a task does not require trust.** osdk never runs a task on its own:
+there is no postinstall, no lifecycle hook, no automatic invocation — `[tasks]`
+is read by `osdk run` and `osdk task` and nowhere else. Typing `osdk run build`
+*is* the authorization, so demanding a trust record first asks the same question
+twice, and a gate that fires on something you just asked for only teaches people
+to approve without reading.
+
+The contrast with `syspkg` makes the rule clear: it acts during `osdk install`,
+which you did not request per package, so review has to happen beforehand. A
+task only ever runs because someone named it.
+
+**`task_config` does still require trust**, because it is not a command you name
+but an ambient setting:
 
 ```
 $ osdk task list
 error: project config is not trusted: /path/to/osdk.toml
 these keys need review because they affect what runs on this machine:
-  tasks -- can run arbitrary code on this machine during install
+  task_config -- decides which interpreter runs your tasks, so a task may not run what it says
 ```
 
-Review it, then `osdk trust`. `task_config` requires trust for the same reason —
-its `shell` field decides which interpreter every task runs under.
+Its `shell` field decides which interpreter **every** task in scope runs under.
+A config that quietly sets `shell = "evil --run"` turns every later `osdk run`
+into something other than what the task text says, with nothing at the call site
+to reveal it. Review it, then `osdk trust`.
 
 ## What this is not
 

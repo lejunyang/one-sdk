@@ -86,6 +86,15 @@ pub struct TrustRequirement {
 pub enum TrustReason {
     /// Runs arbitrary code on this machine during install.
     ExecutesCode,
+    /// Silently changes *how* a command the user asked for gets executed.
+    ///
+    /// Distinct from [`Self::ExecutesCode`], which is about code running at a
+    /// moment the user did not choose. This one is about a command the user
+    /// *did* choose being routed somewhere else: `task_config.shell` picks the
+    /// interpreter for every task, so the text of a task stops determining what
+    /// actually runs. Reusing the install-time wording here would have stated
+    /// something plainly untrue -- tasks never run during install.
+    RedirectsExecution,
     /// Weakens verification of what is installed, or redirects where it comes
     /// from. Dangerous in combination: an unverified mirror is both at once.
     WeakensVerification,
@@ -96,6 +105,7 @@ impl TrustReason {
     pub fn describe(self) -> String {
         match self {
             Self::ExecutesCode => crate::t!("trust.reason.executes_code"),
+            Self::RedirectsExecution => crate::t!("trust.reason.redirects_execution"),
             Self::WeakensVerification => crate::t!("trust.reason.weakens_verification"),
         }
     }
@@ -152,27 +162,35 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
 /// `syspkg` installs into the machine outside the managed root, may prompt for
 /// elevation, and is deliberately not covered by `osdk.lock`. `sources` and
 /// `registries` change where subprocesses fetch from.
-/// `tasks` and `task_config` run whatever the config says, so both are
-/// `ExecutesCode`. Listing them changes no behavior -- an unknown table is
-/// already fail-closed to the same reason -- but it changes the *message*:
-/// "tasks -- runs commands on this machine" tells the reader what to review,
-/// where a bare unknown-table verdict leaves them diffing against nothing.
+/// `tasks` is deliberately **absent**. Nothing in osdk ever runs a task on its
+/// own: there is no postinstall, no lifecycle hook, no automatic invocation --
+/// `[tasks]` is read by `osdk run` and `osdk task` and nowhere else. Typing
+/// `osdk run build` *is* the authorization, so demanding a trust record first
+/// asks the same question twice. That is exactly the wolf-crying this module
+/// warns about above: a gate that fires on something the user just asked for
+/// teaches nothing and trains people to approve without reading.
 ///
-/// `task_config` is not merely cosmetic either: its `shell` field picks the
-/// interpreter for every task in scope, which is code execution by another name.
+/// The contrast with `syspkg` is the whole point. `syspkg` acts during
+/// `osdk install`, which the user did not request per-package, so review has to
+/// happen before the fact. A task only ever runs because someone named it.
+///
+/// `task_config` is different again, and does stay gated: it is not a command
+/// the user names but an ambient setting, and its `shell` field decides which
+/// interpreter *every* task in scope runs under. A config that quietly sets
+/// `shell = "evil --run"` turns every later `osdk run` into something other
+/// than what the task text says, with nothing at the call site to reveal it.
 const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
     ("syspkg", TrustReason::ExecutesCode),
     ("sources", TrustReason::WeakensVerification),
     ("registries", TrustReason::WeakensVerification),
-    ("tasks", TrustReason::ExecutesCode),
-    ("task_config", TrustReason::ExecutesCode),
+    ("task_config", TrustReason::RedirectsExecution),
 ];
 
 /// Top-level tables inspected key by key instead of judged as a whole.
 ///
 /// `tools` needs this because a single tool option (`allow_builds`) can still
 /// opt into script execution even though the surrounding table is safe.
-const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings"];
+const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks"];
 
 /// The npm tool option that turns lifecycle scripts back on.
 const ALLOW_BUILDS_OPTION: &str = "allow_builds";
@@ -211,6 +229,8 @@ fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
             "settings" => collect_settings_requirements(value, &mut found),
             "tools" => collect_tools_requirements(value, &mut found),
             "aliases" => {}
+            // Declaring a task is not running one; see TRUST_REQUIRING_TABLES.
+            "tasks" => {}
             other => {
                 debug_assert!(!INSPECTED_TABLES.contains(&other));
                 let reason = TRUST_REQUIRING_TABLES
@@ -1043,6 +1063,71 @@ mod tests {
     /// field that *is* safe would needlessly demand approval forever. The field
     /// names come from serializing a default `Settings`, so this test tracks the
     /// struct rather than a hand-copied list that would drift.
+    /// Declaring a task must not demand a trust record.
+    ///
+    /// Nothing runs a task implicitly -- no postinstall, no lifecycle hook --
+    /// so the user's `osdk run <name>` is itself the authorization. Gating it
+    /// would ask the same question twice, which is how a gate teaches people to
+    /// approve without reading. This test exists because re-adding `tasks` to
+    /// the trust list looks like a safety improvement and is not.
+    #[test]
+    fn declaring_a_task_does_not_require_trust() {
+        let value: toml::Value = toml::from_str(
+            r#"
+[tasks]
+build = "cargo build --release"
+
+[tasks.ci]
+run = ["cargo test", { cmd = "cargo clippy", ignore_error = true }]
+depends = ["build"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            collect_requirements(&value),
+            Vec::new(),
+            "a config that only declares tasks must load without a trust record"
+        );
+    }
+
+    /// `task_config` is an ambient setting, not a command the user names.
+    ///
+    /// Its `shell` decides the interpreter for every task in scope, so a config
+    /// can redirect what `osdk run` executes without changing any task's text.
+    #[test]
+    fn task_config_still_requires_trust_because_it_picks_the_interpreter() {
+        let value: toml::Value = toml::from_str("[task_config]\nshell = \"evil --run\"\n").unwrap();
+        let found = collect_requirements(&value);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].key, "task_config");
+        // Not ExecutesCode: nothing here runs during install, and saying so
+        // would be false.
+        assert_eq!(found[0].reason, TrustReason::RedirectsExecution);
+    }
+
+    /// Tasks alongside a genuinely dangerous table must not mask it.
+    #[test]
+    fn tasks_do_not_suppress_another_tables_requirement() {
+        let value: toml::Value = toml::from_str(
+            r#"
+[tasks]
+build = "cargo build"
+
+[sources]
+mode = "env"
+"#,
+        )
+        .unwrap();
+        let keys: Vec<String> = collect_requirements(&value)
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["sources".to_string()],
+            "tasks must neither add nor remove"
+        );
+    }
     #[test]
     fn settings_allowlist_covers_every_field() {
         let settings = crate::config::Settings::default();

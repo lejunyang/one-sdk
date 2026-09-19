@@ -64,7 +64,7 @@ fn test_ctx(root: &std::path::Path) -> Ctx {
             aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
-..Default::default()
+            ..Default::default()
         },
         client: reqwest::Client::new(),
         show_progress: false,
@@ -145,7 +145,10 @@ fn module_proxy_honours_disabled_and_custom_sources() {
         proxy.starts_with("https://goproxy.corp.example|"),
         "custom source did not win by priority: {proxy}"
     );
-    assert!(proxy.ends_with("|direct"), "missing direct fallback: {proxy}");
+    assert!(
+        proxy.ends_with("|direct"),
+        "missing direct fallback: {proxy}"
+    );
 }
 
 /// `osdk source pin go-modules <id>` 必须真正改变 GOPROXY 的尝试顺序。
@@ -177,5 +180,8 @@ fn module_proxy_pin_moves_that_source_to_the_front() {
         proxy.contains("https://proxy.golang.org"),
         "pin must not drop the remaining fallbacks: {proxy}"
     );
-    assert!(proxy.ends_with("|direct"), "missing direct fallback: {proxy}");
+    assert!(
+        proxy.ends_with("|direct"),
+        "missing direct fallback: {proxy}"
+    );
 }

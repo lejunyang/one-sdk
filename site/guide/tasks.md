@@ -188,17 +188,27 @@ error: task `linuxonly` is not available on this platform (os=linux)
 
 ## 信任
 
-`[tasks]` 会在本机执行任意命令，因此含有它的项目配置需要显式信任：
+**声明任务不需要信任。** osdk 不会自作主张地跑任何任务：没有 postinstall、
+没有生命周期钩子、没有任何自动调用，`[tasks]` 只被 `osdk run` 和 `osdk task`
+读取。你敲下 `osdk run build` 这个动作本身就是授权，再要求一次 trust 等于
+对同一件事问两遍——而一个总在你已经明确要求的事情上弹出的确认，只会训练人
+不读就点同意。
+
+对比 `syspkg` 就清楚了：它在 `osdk install` 期间动作，而用户并没有逐个包地
+要求过，所以必须事先审阅；任务则永远是因为有人点名才运行。
+
+**`task_config` 仍然需要信任**，因为它不是你点名的命令，而是一个环境设置：
 
 ```
 $ osdk task list
 error: project config is not trusted: /path/to/osdk.toml
 these keys need review because they affect what runs on this machine:
-  tasks -- can run arbitrary code on this machine during install
+  task_config -- 决定用什么解释器执行任务，任务的实际行为可能与写出来的不一致
 ```
 
-审阅之后 `osdk trust` 即可。`task_config` 同样需要信任——它的 `shell`
-字段决定了所有任务用什么解释器执行。
+它的 `shell` 字段决定作用域内**每个**任务用什么解释器。一份配置若悄悄写上
+`shell = "evil --run"`，之后每次 `osdk run` 执行的都不再是任务文本写的东西，
+而调用处看不出任何异样。审阅之后 `osdk trust` 即可。
 
 ## 不做什么
 

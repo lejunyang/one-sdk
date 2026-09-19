@@ -571,9 +571,7 @@ where
     if ctx.config.sources.mode == SourceMode::Env {
         return match ambient {
             Some(name) => Ok(RegistryPlan::PassThrough {
-                reason: format!(
-                    "registry is explicitly configured by environment variable {name}"
-                ),
+                reason: format!("registry is explicitly configured by environment variable {name}"),
             }),
             None => Err(Error::config(crate::i18n::trf(
                 "err.env_source_missing",
@@ -2614,7 +2612,7 @@ npmRegistries:
             aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
-..Default::default()
+            ..Default::default()
         };
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));

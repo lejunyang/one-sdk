@@ -1349,7 +1349,7 @@ mod tests {
                 aliases: Default::default(),
                 project_config_path: None,
                 excluded_tools: Default::default(),
-    ..Default::default()
+                ..Default::default()
             },
             client: reqwest::Client::new(),
             show_progress: false,
@@ -1890,7 +1890,11 @@ mod tests {
     /// GOPROXY cannot widen a narrowed set — verified here on the id contract
     /// that `ranked_proxy_sources` relies on.
     fn the_ambient_id_is_never_allowed_by_custom_narrowing() {
-        let custom = [Source::mirror("private", "https://proxy.private.example", 0)];
+        let custom = [Source::mirror(
+            "private",
+            "https://proxy.private.example",
+            0,
+        )];
         let allowed = custom
             .iter()
             .map(|source| source.id.as_str())

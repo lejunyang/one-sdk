@@ -142,7 +142,9 @@ impl JvmToolBackend {
             .ok_or_else(|| Error::VersionResolve {
                 tool: self.id().into(),
                 spec: tv.version.clone(),
-                hint: Some("Gradle 版本索引未给出该版本的 SHA-256，拒绝在无校验的情况下安装".into()),
+                hint: Some(
+                    "Gradle 版本索引未给出该版本的 SHA-256，拒绝在无校验的情况下安装".into(),
+                ),
             })?;
         let file_name = release
             .download_url

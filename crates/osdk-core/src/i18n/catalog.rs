@@ -1494,6 +1494,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "trust.reason.redirects_execution",
+        (
+            "decides which interpreter runs your tasks, so a task may not run what it says",
+            "决定用什么解释器执行任务，任务的实际行为可能与写出来的不一致",
+        ),
+    );
+    m.insert(
         "trust.reason.weakens_verification",
         (
             "weakens verification of installed artifacts, or redirects where they are downloaded from",
