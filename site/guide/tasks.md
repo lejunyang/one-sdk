@@ -150,6 +150,17 @@ NTFS 没有执行位，所以判据是**扩展名在 `exe/bat/cmd/com/ps1/vbs` �
 跨平台的写法是同名配对：`build`（带 shebang）与 `build.ps1` 放在一起，Windows
 取后者，其余平台取前者，任务名都是 `build`。
 
+### `.ps1` 用哪个 PowerShell
+
+`cmd` 无法直接启动 `.ps1`，所以这类脚本总是交给 PowerShell 执行。选择是在运行时
+探测的：**PATH 上有 `pwsh`（7+）就用它，没有则回退系统自带的 `powershell`（5.1）**。
+
+这不是可有可无的兼容：PowerShell 7 在 Windows 上是独立下载项，全新安装的系统里
+只有 5.1。写死 `pwsh` 会让每个 `.ps1` 任务在这类机器上以「找不到程序」失败。
+
+两者都支持 `-File`，所以命令行其余部分完全相同。如果脚本用到了 7 才有的语法，
+就在脚本里自己检查 `$PSVersionTable.PSVersion`。
+
 ### 与 shell 钩子的关系
 
 任务的环境由 osdk 直接注入，因此四种 shell 的激活片段都会在检测到 `OSDK_TASK`

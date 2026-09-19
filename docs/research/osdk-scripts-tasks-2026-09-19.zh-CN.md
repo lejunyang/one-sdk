@@ -384,7 +384,17 @@ should_run_exit=0    out=build-ran            （touch 了 source → 重跑）
 
 deno task 的做法是自带一个 sh/bash 子集解析器（`deno_task_shell`），使 `FOO=bar cmd`、`a && b`、`> /dev/null` 这类写法在 Windows 上也成立，还内置了 `rm`/`cp`/`mkdir` 等常用命令。这从根本上消灭了 `cross-env`/`rimraf` 那一类补丁。
 
-对 osdk 而言这是**第三阶段之后**才值得考虑的：它的实现与维护成本不低（要正确处理引号、管道、重定向、glob 展开），且与内嵌 Lua 在能力上部分重叠。**本次不推荐，但值得记录为未来方向。** 若要做，`deno_task_shell` crate 可直接评估复用（未实测体积，标注为待验证）。
+**落地后结论：这条路线已废弃，不再是待办。** 写下它时四档还没定形，当时判断它与内嵌 Lua「在能力上部分重叠」；四档全部实现后，重叠变成了**完全覆盖**：
+
+| 原本要靠内置 sh 子集解决的 | 四档里的对应做法 |
+| --- | --- |
+| `a && b` 的顺序与短路 | `run = ["a", "b"]`，数组本身即是语义（§6.6） |
+| 条件分支、循环生成命令 | 第四档 `lua` |
+| 跨平台路径拼接 | `osdk.path.join` |
+| `FOO=bar cmd` | 任务的 `env` 表 |
+| 平台差异 | `run_windows` + `build`/`build.ps1` 配对 |
+
+再引入一个 sh 解析器只会让两套语义并存，并为此付出体积和维护成本。**因此不再需要实测 `deno_task_shell` 的体积**——这个数字不会改变任何决定。
 
 ### 6.4 C 编译器依赖的诚实评估
 
@@ -844,9 +854,9 @@ git log --oneline -1    →  847b8f2
 ## 12. 本文未做的核查（诚实清单）
 
 1. **~~mlua vendored 的交叉编译验证~~ —— 已补测，见 §6.4.2。** zig cc 在 `x86_64-unknown-linux-gnu` 上完整走通，产物于 WSL Ubuntu 实际运行并输出 `lua says 21`；macOS 因缺 SDK、Android 因缺 NDK sysroot 未通过，两者均非 zig 能力问题，建议在对应平台原生构建。阶段四据此继续走 mlua，该项从阻塞性前置降级为 CI 配置工作。
-2. **`deno_task_shell` 的体积。** §6.3 提到它作为长期备选，但未建试验工程实测，标注为估算缺失。
+2. **~~`deno_task_shell` 的体积~~ —— 该项已取消。** 四档落地后其能力被完全覆盖（见 §6.3 的对照表），路线本身废弃，体积数字不再影响任何决定。
 3. **~~`globset` 在 osdk 现有依赖图中的实际增量~~ —— 已补测。** `cargo tree -e normal -p osdk-cli` 显示 `globset` 与 `walkdir` 均已在图内（450 个不同 crate），阶段二不引入新 crate。
 4. **mise 的部分行为未实机验证。** §2 的所有断言来自 2026-09-19 抓取的官方文档，未在本机安装 mise 复现。文档与实现不符的情况是可能的，实现前对关键语义（尤其 sources/outputs 的依赖失效传播）建议实测确认。
-5. **PowerShell 5.1 兼容性未实测。** §6.2 第 4 点的语法限制清单来自已知的 5.1/7 差异。**部分已补测**：5.1 下尾随 `&` 确为 parse error（§6.6 实测），印证了该清单的方向；但本设计将来会生成的 `.ps1` 脚本整体仍未做实机回归。
+5. **~~PowerShell 5.1 兼容性未实测~~ —— 已补测，且抓到一个真实缺陷。** 原表述里「本设计将来会生成的 `.ps1` 脚本」这一前提**并不成立**：四档落地后 osdk 不生成任何 `.ps1`，第三档只是启动用户自己写的脚本。但由此查出了真正的问题——`launch_argv` 曾硬编码 `pwsh`，而 **PowerShell 7 在 Windows 上是独立下载项，系统自带的只有 5.1 的 `powershell.exe`**，于是在未装 PS7 的普通 Windows 上每个 `.ps1` 任务都会以「找不到程序」失败，且错误指向任务而非真正的原因。现改为运行时探测：有 `pwsh` 用 `pwsh`，没有则回退 `powershell`（5.1 同样支持 `-File`，argv 其余部分不变）。实测两个方向：本机装有 PS7 时报告 `PSVersion=7 Edition=Core`；把 `pwsh` 移出 PATH 后报告 `PSVersion=5 Edition=Desktop` 且任务照常完成。此外 5.1 下尾随 `&` 为 parse error 一事已在 §6.6 实测。
 6. **`-NoProfile` 的三项能力差异未做端到端实测。** §6.5 的结论基于 `activate/mod.rs:3-9` 的机制阅读与 shims/activation 的职责划分，逻辑链完整，但**未构造真实场景跑一遍**（工具 A 有 shim、工具 B 被 `ShimSettings` 排除、且依赖 `JAVA_HOME`）。实现前必须补这个验证，判据见 §6.5 末段。
 7. **`{ tasks = [...] }` 的并行语义来自 mise 官方文档，未实机复现。** §6.6 中 `&` 的跨平台差异是本机实测的，但「mise 如何调度 `{tasks=[…]}`」一节仅有文档依据，与第 4 项同属一类。

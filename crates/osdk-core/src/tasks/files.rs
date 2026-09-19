@@ -218,6 +218,64 @@ fn collect_from(base: &Path, current: &Path, found: &mut BTreeMap<String, FileTa
     Ok(())
 }
 
+/// Which PowerShell to launch a `.ps1` with.
+///
+/// `pwsh` (7+) is preferred where it exists, but it is a separate download:
+/// Windows ships `powershell.exe` (5.1) and nothing else. Hardcoding `pwsh`
+/// would make every `.ps1` task fail on a stock Windows with a bare
+/// "program not found", which points at the task rather than at the real cause.
+///
+/// Off Windows there is no fallback to offer -- a `.ps1` there needs PowerShell
+/// installed -- so `pwsh` is returned and the spawn error speaks for itself.
+fn powershell_program() -> String {
+    if !cfg!(windows) {
+        return "pwsh".into();
+    }
+    if which_exists("pwsh") {
+        "pwsh".into()
+    } else {
+        // 5.1 understands `-File` too, so the rest of the argv is unchanged.
+        "powershell".into()
+    }
+}
+
+/// Whether a bare program name resolves on PATH.
+///
+/// Deliberately a PATH walk rather than spawning the program with `--version`:
+/// this runs while building a plan, including under `--dry-run`, and launching
+/// a shell just to ask whether it exists would be a visible cost on a path that
+/// is supposed to be inert.
+fn which_exists(program: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
+            .split(';')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| entry.to_ascii_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    std::env::split_paths(&paths).any(|dir| {
+        if dir.as_os_str().is_empty() {
+            return false;
+        }
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return true;
+        }
+        extensions.iter().any(|ext| {
+            let mut with_ext = program.to_string();
+            with_ext.push_str(ext);
+            dir.join(with_ext).is_file()
+        })
+    })
+}
+
 /// Rank a candidate among same-named files, higher winning.
 ///
 /// Only `.ps1` matters: it is the one extension whose desirability flips with
@@ -265,7 +323,7 @@ pub fn launch_argv(script: &Path) -> Vec<String> {
     if extension == "ps1" {
         // `-File` rather than `-Command` so arguments reach the script as
         // arguments instead of being re-parsed as PowerShell source.
-        return vec!["pwsh".into(), "-File".into(), path];
+        return vec![powershell_program(), "-File".into(), path];
     }
 
     if cfg!(windows) {
@@ -452,12 +510,53 @@ mod tests {
         );
     }
 
+    /// `cmd` cannot launch a `.ps1`, so one is always run through PowerShell.
     #[test]
-    fn a_ps1_is_launched_through_pwsh_because_cmd_cannot() {
+    fn a_ps1_is_launched_through_powershell_because_cmd_cannot() {
         let argv = launch_argv(Path::new("scripts/deploy.ps1"));
-        assert_eq!(argv[0], "pwsh");
+        // Which of the two it picks depends on what this machine has; both are
+        // PowerShell and both accept `-File`.
+        assert!(
+            argv[0] == "pwsh" || argv[0] == "powershell",
+            "unexpected interpreter: {argv:?}"
+        );
         assert_eq!(argv[1], "-File");
         assert!(argv[2].ends_with("deploy.ps1"));
+    }
+
+    /// Windows ships only 5.1, so `pwsh` must not be assumed.
+    ///
+    /// Hardcoding it made every `.ps1` task fail on a stock Windows with a bare
+    /// "program not found" -- an error pointing at the task rather than at the
+    /// missing optional download.
+    #[test]
+    fn a_stock_windows_without_pwsh_falls_back_to_the_bundled_powershell() {
+        if !cfg!(windows) {
+            return;
+        }
+        // An empty PATH is the strongest form of "pwsh is not installed".
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", "");
+        let chosen = powershell_program();
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(
+            chosen, "powershell",
+            "without pwsh on PATH the bundled 5.1 must be used"
+        );
+    }
+
+    #[test]
+    fn which_exists_agrees_with_reality_in_both_directions() {
+        // Present on every platform this builds for.
+        let shell = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(which_exists(shell), "{shell} should resolve on PATH");
+        assert!(
+            !which_exists("osdk-definitely-not-a-real-program-xyz"),
+            "a nonexistent program must not resolve"
+        );
     }
 
     #[test]

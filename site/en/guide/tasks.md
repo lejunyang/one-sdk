@@ -164,6 +164,19 @@ The cross-platform idiom is a same-name pair: `build` (with a shebang) beside
 `build.ps1`. Windows takes the latter, everything else the former, and the task
 is called `build` either way.
 
+### Which PowerShell runs a `.ps1`
+
+`cmd` cannot launch a `.ps1` directly, so such a script always goes through
+PowerShell. The choice is made at run time: **`pwsh` (7+) when it is on PATH,
+falling back to the bundled `powershell` (5.1) when it is not.**
+
+This is not optional politeness. PowerShell 7 is a separate download on Windows,
+and a fresh install has only 5.1 — hardcoding `pwsh` makes every `.ps1` task
+fail there with a bare "program not found".
+
+Both accept `-File`, so the rest of the command line is identical. If a script
+needs syntax only 7 has, check `$PSVersionTable.PSVersion` inside it.
+
 ### Interaction with the shell hook
 
 A task's environment is injected by osdk directly, so the activation snippet for
