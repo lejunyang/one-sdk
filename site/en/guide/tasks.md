@@ -98,6 +98,42 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## Timeouts
+
+```toml
+[tasks.e2e]
+run = "pytest tests/e2e"
+timeout = "5m"
+```
+
+Write `30s`, `5m`, `1h`, or a plain number of seconds. A malformed value is
+rejected **before anything runs** rather than silently meaning "no timeout" —
+asking for a limit and not getting one is the worst outcome available.
+
+### The whole process tree is killed
+
+When the limit expires, osdk terminates **every process the task started**, not
+just the one it launched directly. That distinction is the common case rather
+than an edge case: with `cmd /c npm test`, killing `cmd.exe` ends the task
+immediately while the `node` it started keeps running, holding the port and the
+files.
+
+The mechanisms differ by platform:
+
+- **Windows** uses a job object. The child is placed in the job at spawn time,
+  processes it creates inherit the job, and terminating the job terminates all
+  of them. `KILL_ON_JOB_CLOSE` is also set, so an osdk that dies unexpectedly
+  has the tree reclaimed by Windows instead of leaking it.
+- **Unix** uses `setsid` to make the child a process-group leader, then signals
+  the group with `kill(-pgid)`: `SIGTERM` first, with five seconds to clean up,
+  then `SIGKILL` for whatever ignored it.
+
+Both set the grouping up **before** the process starts — once a process has
+forked there is no reliable way to find all of its descendants.
+
+Timeouts compose with teardown: a task killed by its timeout did start, so its
+`run_post` still runs.
+
 ## Teardown that runs even on failure
 
 ```toml

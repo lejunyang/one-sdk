@@ -5114,6 +5114,8 @@ pub fn run_task(
         defs,
         base_path,
         arg_env: values.env_vars(),
+        // Set per task by the runner; this is just the initial value.
+        timeout: None,
     };
 
     let state_path = freshness_state_path(app);

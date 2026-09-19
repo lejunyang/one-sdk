@@ -113,6 +113,11 @@ windows-sys = { version = "0.59", features = [
     # WideCharToMultiByte, used to encode Windows .cmd shims in the system OEM
     # codepage so cmd.exe can reach an install path that is not ASCII.
     "Win32_Globalization",
+    # Job objects: a timed-out task must take its whole process tree with it.
+    # Killing only the direct child leaves cmd.exe's real program orphaned,
+    # which is precisely the case timeouts exist for.
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
 libc = "0.2"
 # versions

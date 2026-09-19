@@ -52,6 +52,8 @@ pub struct PlannedTask {
     pub name: String,
     pub dir: Option<String>,
     pub commands: Vec<PlannedStep>,
+    /// Wall-clock limit for each command in this task.
+    pub timeout: Option<std::time::Duration>,
     /// Teardown steps, run after `commands` even when they failed.
     pub post: Vec<PlannedStep>,
     /// Input globs, for the freshness check.
@@ -234,6 +236,10 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         }
 
         steps.push(PlannedTask {
+            timeout: def
+                .timeout
+                .as_deref()
+                .and_then(crate::tasks::tree::parse_duration),
             post,
             standalone: standalone.contains(&name),
             sources: def.sources.clone(),
@@ -318,6 +324,12 @@ pub trait Spawner {
 
     /// Exec a program directly, bypassing the shell.
     fn run_argv(&mut self, task: &str, argv: &[String], dir: &Path) -> Result<i32>;
+
+    /// Set the wall-clock limit applying to subsequent calls.
+    ///
+    /// Passed out of band rather than as a parameter on every call so the
+    /// trait stays small; the runner sets it once per task.
+    fn set_timeout(&mut self, _limit: Option<std::time::Duration>) {}
 }
 
 /// Runs commands as real child processes.
@@ -328,6 +340,8 @@ pub struct ProcessSpawner {
     pub defs: BTreeMap<String, TaskDef>,
     /// PATH as inherited by osdk itself.
     pub base_path: String,
+    /// Wall-clock limit for the task currently running.
+    pub timeout: Option<std::time::Duration>,
     /// Argument values exposed as `osdk_arg_*`.
     ///
     /// Safe on every shell: these enter the child's environment block verbatim,
@@ -337,6 +351,10 @@ pub struct ProcessSpawner {
 }
 
 impl Spawner for ProcessSpawner {
+    fn set_timeout(&mut self, limit: Option<std::time::Duration>) {
+        self.timeout = limit;
+    }
+
     fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32> {
         let (program, args) = shell
             .split_first()
@@ -349,12 +367,7 @@ impl Spawner for ProcessSpawner {
         for (key, value) in &self.arg_env {
             child.env(key, value);
         }
-        let status = child.status().map_err(|error| {
-            Error::other(format!("task `{task}`: cannot run `{program}`: {error}"))
-        })?;
-        // A signal-killed child reports no code; treat it as failure rather than
-        // silently succeeding.
-        Ok(status.code().unwrap_or(1))
+        self.run_to_completion(task, program, child)
     }
 
     fn run_argv(&mut self, task: &str, argv: &[String], dir: &Path) -> Result<i32> {
@@ -369,10 +382,37 @@ impl Spawner for ProcessSpawner {
         for (key, value) in &self.arg_env {
             child.env(key, value);
         }
-        let status = child.status().map_err(|error| {
+        self.run_to_completion(task, program, child)
+    }
+}
+
+impl ProcessSpawner {
+    /// Spawn inside a killable process group and wait, honouring the timeout.
+    ///
+    /// The grouping is established at spawn time even when no timeout is set:
+    /// after a process has forked there is no reliable way to find what it
+    /// started, so the decision cannot be deferred to the moment it is needed.
+    fn run_to_completion(&self, task: &str, program: &str, mut command: Command) -> Result<i32> {
+        use crate::tasks::tree;
+
+        let (mut child, mut handle) = tree::spawn_in_tree(&mut command).map_err(|error| {
             Error::other(format!("task `{task}`: cannot run `{program}`: {error}"))
         })?;
-        Ok(status.code().unwrap_or(1))
+
+        match tree::wait_with_timeout(&mut child, &mut handle, self.timeout) {
+            // A signal-killed child reports no code; treat it as failure rather
+            // than silently succeeding.
+            Ok(Some(code)) => Ok(code),
+            Ok(None) => Err(Error::other(format!(
+                "task `{task}`: timed out after {}; the process tree was terminated",
+                self.timeout
+                    .map(|limit| format!("{}s", limit.as_secs()))
+                    .unwrap_or_else(|| "the configured limit".into())
+            ))),
+            Err(error) => Err(Error::other(format!(
+                "task `{task}`: waiting for `{program}` failed: {error}"
+            ))),
+        }
     }
 }
 
@@ -683,6 +723,7 @@ pub fn execute_full(
             }
         }
 
+        spawner.set_timeout(task.timeout);
         let dir = resolve_dir(config_root, task.dir.as_deref());
         let steps = if root.as_deref() == Some(task.name.as_str()) {
             apply_arguments(task, values, has_spec)?
@@ -698,7 +739,14 @@ pub fn execute_full(
         for step in &steps {
             match step {
                 PlannedStep::Argv { argv, ignore_error } => {
-                    let code = spawner.run_argv(&task.name, argv, &dir)?;
+                    let code = match spawner.run_argv(&task.name, argv, &dir) {
+                        Ok(code) => code,
+                        Err(error) => {
+                            let _ =
+                                run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            return Err(error);
+                        }
+                    };
                     if code != 0 {
                         if *ignore_error {
                             outcome.tolerated_failures.push(argv.join(" "));
@@ -718,7 +766,19 @@ pub fn execute_full(
                     command,
                     ignore_error,
                 } => {
-                    let code = spawner.run(&task.name, shell, command, &dir)?;
+                    let code = match spawner.run(&task.name, shell, command, &dir) {
+                        Ok(code) => code,
+                        // A timeout arrives as an error, and the task did start
+                        // -- so teardown is owed exactly as much as after an
+                        // ordinary failure. Propagating straight out would skip
+                        // the cleanup precisely when the runaway left the most
+                        // behind.
+                        Err(error) => {
+                            let _ =
+                                run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            return Err(error);
+                        }
+                    };
                     if code != 0 {
                         if *ignore_error {
                             outcome.tolerated_failures.push(command.clone());
@@ -835,6 +895,8 @@ mod tests {
         ran: Vec<String>,
         /// Commands that should report failure, and with what code.
         fail: BTreeMap<String, i32>,
+        /// Commands that should fail as an `Err`, the way a timeout does.
+        error_on: BTreeMap<String, String>,
     }
 
     impl Spawner for RecordingSpawner {
@@ -846,6 +908,9 @@ mod tests {
             _dir: &Path,
         ) -> Result<i32> {
             self.ran.push(command.to_string());
+            if let Some(message) = self.error_on.get(command) {
+                return Err(Error::other(message.clone()));
+            }
             Ok(self.fail.get(command).copied().unwrap_or(0))
         }
 
@@ -1105,6 +1170,32 @@ run_post = "stop-db"
         );
         // The failure is still the task's outcome: cleaning up is not passing.
         assert_eq!(outcomes.last().unwrap().code, 5);
+    }
+
+    /// A timeout surfaces as an `Err`, and an early `?` would skip teardown --
+    /// precisely when the runaway process left the most behind.
+    #[test]
+    fn teardown_runs_when_the_body_times_out() {
+        let set = set_from(r#"
+[e2e]
+run = "pytest"
+run_post = "stop-db"
+timeout = "1s"
+"#);
+        let built = plan(&set, "e2e").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner
+            .error_on
+            .insert("pytest".into(), "timed out after 1s".into());
+
+        let error = execute(&built, Path::new("."), &mut spawner).unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(
+            spawner.ran,
+            vec!["pytest", "stop-db"],
+            "teardown must still run after a timeout: {:?}",
+            spawner.ran
+        );
     }
 
     #[test]

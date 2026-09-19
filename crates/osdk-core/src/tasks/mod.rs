@@ -31,6 +31,7 @@
 pub mod args;
 pub mod freshness;
 pub mod runner;
+pub mod tree;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -355,6 +356,14 @@ pub struct TaskDef {
     /// Declared arguments. Empty means the task takes none.
     #[serde(default, flatten)]
     pub spec: crate::tasks::args::Spec,
+    /// Wall-clock limit, e.g. `30s`, `5m`, `1h`; a bare number means seconds.
+    ///
+    /// On expiry osdk kills the task's **entire process tree**, not just the
+    /// command it launched. Killing the direct child alone would be the wrong
+    /// behaviour in the usual case: `cmd /c npm test` exits the moment cmd.exe
+    /// dies while the `node` it started keeps holding the port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
     /// Input globs. When they are unchanged, the task is skipped.
     ///
     /// A pattern matching nothing is an error rather than a vacuous "fresh":
@@ -478,6 +487,14 @@ impl TaskDef {
             }
         }
         self.spec.validate(name)?;
+        if let Some(text) = &self.timeout {
+            if crate::tasks::tree::parse_duration(text).is_none() {
+                return Err(Error::config(format!(
+                    "task `{name}`: `timeout = \"{text}\"` is not a duration; \
+                     write it as `30s`, `5m`, `1h`, or a plain number of seconds"
+                )));
+            }
+        }
 
         // Appending is decided by step count (see `runner::append_policy`), so a
         // task whose two platforms disagree would append on one and refuse on
