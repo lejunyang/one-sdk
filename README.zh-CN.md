@@ -164,6 +164,35 @@ osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 指南：[项目工具链](site/guide/projects.md) ·
 [锁文件与环境复现](site/guide/lockfiles.md)
 
+## 场景：用项目任务替代 Makefile
+
+在 `osdk.toml` 里声明命令，然后用 `osdk run` 执行。任务默认就是伪目标，
+依赖按拓扑顺序执行，工具版本由 osdk 注入——无需先激活 shell。
+
+```toml
+[tasks]
+build = "cargo build --release"
+
+[tasks.ci]
+run = [
+  "cargo fmt --check",
+  { cmd = "cargo clippy -- -D warnings", ignore_error = true },
+  { tasks = ["test", "doc"] },
+]
+depends = ["build"]
+```
+
+```bash
+osdk run ci
+osdk task list
+osdk run ci --dry-run
+```
+
+数组里的命令依次执行、失败即停；`ignore_error` 表示容忍失败并继续（但会
+打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。不要用 shell 的
+`&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
+[项目任务](site/guide/tasks.md)。
+
 ## 场景：从直接 HTTPS 制品安装工具
 
 对于没有专用 backend 的工具，可以把一个精确语义化版本绑定到 HTTPS `{version}` URL

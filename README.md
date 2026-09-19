@@ -179,6 +179,37 @@ legacy state and are never reused or executed.
 Guides: [Project toolchains](site/en/guide/projects.md) ·
 [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
 
+## Scenario: replace a Makefile with project tasks
+
+Declare commands in `osdk.toml` and run them with `osdk run`. Tasks are phony by
+default, prerequisites run in topological order, and osdk injects the tool
+versions the project declared -- no shell activation required first.
+
+```toml
+[tasks]
+build = "cargo build --release"
+
+[tasks.ci]
+run = [
+  "cargo fmt --check",
+  { cmd = "cargo clippy -- -D warnings", ignore_error = true },
+  { tasks = ["test", "doc"] },
+]
+depends = ["build"]
+```
+
+```bash
+osdk run ci
+osdk task list
+osdk run ci --dry-run
+```
+
+Array entries run in order and stop at the first failure; `ignore_error`
+tolerates one and continues (printing a warning); `{ tasks = [...] }` runs them
+together and waits for all. Do not reach for the shell's `&` -- it means
+something different in cmd, PowerShell 7, and PowerShell 5.1. See
+[Project tasks](site/en/guide/tasks.md).
+
 ## Scenario: install a tool from a direct HTTPS artifact
 
 For a tool without a dedicated backend, bind one exact semantic version to an

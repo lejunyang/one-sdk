@@ -11,6 +11,7 @@ current implementation boundaries.
 | --- | --- |
 | [Getting Started](./getting-started) | Global options, install/switch/query/remove workflows, and version aliases |
 | [Projects and Configuration](./projects) | Project discovery, native version files, the complete configuration schema, merge rules, and trust |
+| [Project tasks](./tasks) | Declare project commands under `[tasks]` and run them with `osdk run`, with dependencies, parallel steps, and platform variants |
 | [Reproducible Lockfiles](./lockfiles) | How `lock`, `install`, `outdated`, and `upgrade` interact, including stale states |
 | [Runtimes and Ecosystem Tools](./runtimes) | Node.js, Python, Java, Go, Rust, Maven, Gradle, and Kotlin |
 | [JavaScript Package Managers](./package-managers) | npm, pnpm, Yarn, Bun, Deno, Node dependency handling, and registry preflight |

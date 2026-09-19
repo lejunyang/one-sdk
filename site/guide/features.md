@@ -9,6 +9,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 | --- | --- |
 | [开始使用](./getting-started) | 全局参数，安装、切换、查询、卸载与版本别名 |
 | [项目与配置](./projects) | 项目发现、原生版本文件、完整配置字段、合并规则与信任 |
+| [项目任务](./tasks) | 用 `[tasks]` 声明项目命令，`osdk run` 执行，含依赖、并行与平台变体 |
 | [可复现锁文件](./lockfiles) | `lock`、`install`、`outdated`、`upgrade` 的交互与陈旧状态 |
 | [运行时与生态工具](./runtimes) | Node.js、Python、Java、Go、Rust、Maven、Gradle、Kotlin |
 | [JavaScript 包管理器](./package-managers) | npm、pnpm、Yarn、Bun、Deno、Node 依赖与 Registry 预检 |
@@ -26,6 +27,7 @@ osdk 用一套命令管理语言运行时、生态工具、大模型快照、下
 第一次使用时，先完成[安装](./installation)，再按下面的目标继续：
 
 - 为当前仓库建立工具版本：参阅[项目与配置](./projects)和[可复现锁文件](./lockfiles)。
+- 用项目命令替代 Makefile 或 npm scripts：参阅[项目任务](./tasks)。
 - 管理某种语言工具链：参阅[运行时与生态工具](./runtimes)。
 - 固定 npm、pnpm 或 Yarn：参阅[JavaScript 包管理器](./package-managers)。
 - 安装 Prettier、TypeScript 或 scoped npm CLI 包：参阅[npm 开发工具](./npm-tools)。
