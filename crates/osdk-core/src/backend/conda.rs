@@ -194,7 +194,11 @@ fn closure_digest(records: &[rattler_conda_types::RepoDataRecord]) -> String {
             format!(
                 "{}\u{1f}{}",
                 record.url,
-                record.package_record.sha256.map(hex::encode).unwrap_or_default()
+                record
+                    .package_record
+                    .sha256
+                    .map(hex::encode)
+                    .unwrap_or_default()
             )
         })
         .collect();
@@ -906,7 +910,9 @@ impl CondaBackend {
             .await
             .map_err(|error| Error::other(format!("conda extraction task failed: {error}")))?
             .map_err(|error| {
-                Error::other(format!("could not extract conda package `{file_name}`: {error}"))
+                Error::other(format!(
+                    "could not extract conda package `{file_name}`: {error}"
+                ))
             })?;
 
             // Every package unpacks into the same prefix, so each one's
@@ -949,7 +955,7 @@ impl CondaBackend {
         tv: &ToolVersion,
     ) -> Result<Vec<rattler_conda_types::RepoDataRecord>> {
         use rattler_conda_types::{MatchSpec, ParseStrictness};
-        use rattler_solve::{SolverImpl as _, SolverTask, resolvo::Solver};
+        use rattler_solve::{resolvo::Solver, SolverImpl as _, SolverTask};
 
         let (gateway, channel_config) = self.gateway(ctx).await?;
         let channels = self.resolved_channels(&tv.options, &channel_config)?;
@@ -972,9 +978,10 @@ impl CondaBackend {
         // is compatible with the main package's pinned version.
         let mut specs = vec![spec];
         for package in self.with_packages(&tv.options)? {
-            let spec = MatchSpec::from_str(&package, ParseStrictness::Lenient).map_err(|error| {
-                Error::config(format!("invalid conda spec `{package}`: {error}"))
-            })?;
+            let spec =
+                MatchSpec::from_str(&package, ParseStrictness::Lenient).map_err(|error| {
+                    Error::config(format!("invalid conda spec `{package}`: {error}"))
+                })?;
             specs.push(spec);
         }
 
@@ -1276,9 +1283,7 @@ impl Backend for CondaBackend {
             }
             return Ok(owned);
         }
-        Ok(crate::backend::bin_names_in_dirs(
-            &self.bin_paths(ctx, tv)?,
-        ))
+        Ok(crate::backend::bin_names_in_dirs(&self.bin_paths(ctx, tv)?))
     }
 
     /// Validate a prefix the shim is about to expose.
@@ -1456,9 +1461,8 @@ mod tests {
     /// under `conda-forge` alone, and both prefixes coexist.
     #[test]
     fn channels_are_part_of_identity_so_different_sets_do_not_share_a_prefix() {
-        let options = |channels: &str| {
-            BTreeMap::from([("channels".to_string(), channels.to_string())])
-        };
+        let options =
+            |channels: &str| BTreeMap::from([("channels".to_string(), channels.to_string())]);
         let id = crate::tool::ToolId::parse("conda:cuda-nvcc").unwrap();
 
         let with_nvidia =
@@ -1495,8 +1499,7 @@ mod tests {
     /// install twice. See docs/conda-with-option-spec.zh-CN.md §2.5.
     #[test]
     fn with_is_part_of_identity_but_its_order_is_not() {
-        let options =
-            |packages: &str| BTreeMap::from([("with".to_string(), packages.to_string())]);
+        let options = |packages: &str| BTreeMap::from([("with".to_string(), packages.to_string())]);
         let id = crate::tool::ToolId::parse("conda:m2-base").unwrap();
         let identity = |packages: &str| {
             crate::tool::dynamic_identity_options(&id, &options(packages))

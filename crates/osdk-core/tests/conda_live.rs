@@ -9,7 +9,7 @@
 
 #![cfg(feature = "install")]
 
-use osdk_core::backend::conda::{CondaBackend, DEFAULT_CHANNEL, parse_channels, subdir_for};
+use osdk_core::backend::conda::{parse_channels, subdir_for, CondaBackend, DEFAULT_CHANNEL};
 use osdk_core::platform::{Arch, Libc, Os, Platform};
 
 fn platform(os: Os, arch: Arch) -> Platform {
@@ -107,7 +107,10 @@ async fn clang_has_a_build_for_every_platform_osdk_maps() {
 async fn default_mirrors_serve_conda_repodata() {
     let bases = [
         ("upstream", "https://conda.anaconda.org"),
-        ("tuna", "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud"),
+        (
+            "tuna",
+            "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud",
+        ),
         ("bfsu", "https://mirrors.bfsu.edu.cn/anaconda/cloud"),
         ("nju", "https://mirror.nju.edu.cn/anaconda/cloud"),
     ];

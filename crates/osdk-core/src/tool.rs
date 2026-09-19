@@ -1608,9 +1608,9 @@ fn canonical_pypi_subject(value: &str) -> Result<String> {
         )));
     }
     let lowered = value.to_ascii_lowercase();
-    let valid = lowered
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.'));
+    let valid = lowered.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+    });
     // PEP 503 additionally requires a name to start and end alphanumerically,
     // which also rules out `.`, `..`, and any leading-dot hidden directory.
     let ends_alnum = lowered
@@ -1682,9 +1682,9 @@ fn canonical_conda_subject(value: &str) -> Result<String> {
             "conda package name must be lowercase: `{value}`"
         )));
     }
-    let valid = value
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.'));
+    let valid = value.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+    });
     if !valid || value.starts_with('.') || value == "." || value == ".." {
         return Err(Error::config(format!(
             "invalid conda package name `{value}`; expected lowercase letters, \
@@ -2937,8 +2937,14 @@ mod tests {
         // Spelling differences that PEP 503 calls equivalent collapse to one
         // request even through the full parser.
         assert_eq!(
-            ToolSpec::parse("pypi:typing_extensions").unwrap().id.to_string(),
-            ToolSpec::parse("pypi:Typing-Extensions").unwrap().id.to_string()
+            ToolSpec::parse("pypi:typing_extensions")
+                .unwrap()
+                .id
+                .to_string(),
+            ToolSpec::parse("pypi:Typing-Extensions")
+                .unwrap()
+                .id
+                .to_string()
         );
 
         for rejected in ["pypi:", "pypi:a/b", "pypi:httpx[socks]", "PYPI:ruff"] {

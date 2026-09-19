@@ -57,7 +57,10 @@ fn real_main() -> i32 {
     // reveals which shim build is installed is unavailable exactly when a
     // version mismatch is the thing being diagnosed (docs/bugs/007).
     if is_direct_invocation(&args)
-        && matches!(args.get(1).map(String::as_str), Some("--version") | Some("-V"))
+        && matches!(
+            args.get(1).map(String::as_str),
+            Some("--version") | Some("-V")
+        )
     {
         println!("osdk-shim {}", env!("CARGO_PKG_VERSION"));
         return 0;
@@ -689,10 +692,8 @@ fn dynamic_backend_for_bin(
     // Honour the shim settings here too: a command the user exposed has a shim on
     // disk, so this lookup must be able to route it, or the shim would exist and
     // then fail to find its own backend (docs/bugs/008).
-    let owners = osdk_core::shim::dynamic_bin_ownership_with_settings(
-        report,
-        &ctx.config.settings.shims,
-    );
+    let owners =
+        osdk_core::shim::dynamic_bin_ownership_with_settings(report, &ctx.config.settings.shims);
     let candidates = owners.get(tool_name)?;
     let owner_ids = candidates
         .iter()

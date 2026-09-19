@@ -297,12 +297,7 @@ impl AndroidBackend {
         };
 
         let gated = Self::gated_packages(&manifest, package);
-        Ok(license::pending(
-            &manifest,
-            &gated,
-            &acceptance,
-            &sdk_root,
-        ))
+        Ok(license::pending(&manifest, &gated, &acceptance, &sdk_root))
     }
 
     /// Resolve the manifest package for a concrete version.
@@ -1381,7 +1376,10 @@ mod tests {
     fn the_gated_set_covers_dependencies_not_just_the_requested_package() {
         let mut manifest = Manifest {
             packages: vec![
-                gated_package("system-images;android-34;google_apis;x86_64", Some("vendor")),
+                gated_package(
+                    "system-images;android-34;google_apis;x86_64",
+                    Some("vendor"),
+                ),
                 gated_package("emulator", Some("android-sdk-license")),
             ],
             ..Default::default()
@@ -1407,7 +1405,9 @@ mod tests {
             min_revision: None,
         }];
 
-        let requested = manifest.package("system-images;android-34;google_apis;x86_64").unwrap();
+        let requested = manifest
+            .package("system-images;android-34;google_apis;x86_64")
+            .unwrap();
         let gated = AndroidBackend::gated_packages(&manifest, requested);
         let paths: Vec<&str> = gated.iter().map(|p| p.path.as_str()).collect();
         assert!(

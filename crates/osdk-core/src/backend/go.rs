@@ -306,7 +306,6 @@ pub async fn refresh_module_proxy_sources(ctx: &Ctx) -> Result<Vec<crate::source
 }
 
 impl GoBackend {
-
     /// The GOPROXY value to hand the go command, or `None` to leave it alone.
     ///
     /// Returns `None` when the user has already set GOPROXY, so an explicit

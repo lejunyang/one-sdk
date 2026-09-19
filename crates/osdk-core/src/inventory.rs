@@ -816,7 +816,8 @@ fn scan_installs_within(
 
     let mut validated_legacy_installs = Vec::with_capacity(legacy_installs.len());
     for legacy in legacy_installs {
-        if let Err(error) = validate_regular_directory_path_from(identity_root, &legacy.install_root)
+        if let Err(error) =
+            validate_regular_directory_path_from(identity_root, &legacy.install_root)
         {
             handle_scan_problem(
                 &mut diagnostics,
@@ -1316,11 +1317,7 @@ mod install_manifest_tests {
         // 这里用一个「放在深处、identity 与路径不符」的 manifest 当探针：
         // 走到它，fail-closed 扫描必然报错；扫描成功就证明没走进去。
         let temporary = tempfile::tempdir().unwrap();
-        let buried = temporary
-            .path()
-            .join("zig")
-            .join("0.13.0")
-            .join("deadbeef");
+        let buried = temporary.path().join("zig").join("0.13.0").join("deadbeef");
         DynamicToolManifest::from_identity(identity())
             .unwrap()
             .write_atomic(&buried)
@@ -1334,7 +1331,10 @@ mod install_manifest_tests {
             .join(crate::dirs::sanitize_tool_id(&real.tool))
             .join(crate::dirs::sanitize_version_component(&real.version))
             .join(crate::dirs::install_id_component(&real.install_id).unwrap());
-        DynamicToolManifest::from_identity(real).unwrap().write_atomic(&root).unwrap();
+        DynamicToolManifest::from_identity(real)
+            .unwrap()
+            .write_atomic(&root)
+            .unwrap();
 
         let report = scan_installs(temporary.path(), &ScanOptions::default())
             .expect("静态 backend 的子树被走穿了，撞上了埋在深处的 manifest");
@@ -1547,7 +1547,8 @@ mod install_manifest_tests {
             .unwrap();
 
         let scoped =
-            scan_installs_for_tool(temporary.path(), &wanted.tool, &ScanOptions::default()).unwrap();
+            scan_installs_for_tool(temporary.path(), &wanted.tool, &ScanOptions::default())
+                .unwrap();
         assert_eq!(
             scoped.installs.len(),
             1,
@@ -1557,8 +1558,15 @@ mod install_manifest_tests {
 
         let full = scan_installs(temporary.path(), &ScanOptions::default()).unwrap();
         assert_eq!(
-            full.installs.iter().map(|i| &i.install_root).collect::<Vec<_>>(),
-            scoped.installs.iter().map(|i| &i.install_root).collect::<Vec<_>>(),
+            full.installs
+                .iter()
+                .map(|i| &i.install_root)
+                .collect::<Vec<_>>(),
+            scoped
+                .installs
+                .iter()
+                .map(|i| &i.install_root)
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1590,7 +1598,8 @@ mod install_manifest_tests {
         }
 
         let scoped =
-            scan_installs_for_tool(temporary.path(), "conda:nasm", &ScanOptions::default()).unwrap();
+            scan_installs_for_tool(temporary.path(), "conda:nasm", &ScanOptions::default())
+                .unwrap();
         assert_eq!(scoped.installs.len(), 1);
         assert_eq!(scoped.installs[0].manifest.identity.tool, "conda:nasm");
         assert_eq!(

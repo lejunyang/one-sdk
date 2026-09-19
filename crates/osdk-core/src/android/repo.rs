@@ -722,8 +722,7 @@ fn parse_api_level_details(body: &str) -> ApiLevelDetails {
         beta_api_level: text("beta-api-level"),
         codename: text("codename"),
         extension_level: text("extension-level"),
-        base_extension: text("base-extension")
-            .map(|value| value.eq_ignore_ascii_case("true")),
+        base_extension: text("base-extension").map(|value| value.eq_ignore_ascii_case("true")),
     }
 }
 

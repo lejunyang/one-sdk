@@ -191,7 +191,10 @@ fn main() {
     // 装置里每个 install 都埋了负载子树。扫描在 manifest 处剪枝，
     // 所以它走过的目录数应当远小于整棵树。
     let payload_dirs = count_payload_dirs(installs);
-    println!("  整棵树目录数                                  {:>8}", cost.dirs);
+    println!(
+        "  整棵树目录数                                  {:>8}",
+        cost.dirs
+    );
     println!("  其中属于安装负载（不该进入）                    {payload_dirs:>8}");
     println!(
         "  剪枝理应避开的比例                            {:>7.1}%",
@@ -222,10 +225,8 @@ fn main() {
 
     println!("\n-- 激活片段渲染（纯字符串，作为对照基线）--");
     bench("activation_script(powershell)", 2000, || {
-        let script = osdk_core::activate::activation_script(
-            osdk_core::activate::Shell::Powershell,
-            "osdk",
-        );
+        let script =
+            osdk_core::activate::activation_script(osdk_core::activate::Shell::Powershell, "osdk");
         assert!(script.contains("function global:prompt"));
     });
 

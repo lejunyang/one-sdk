@@ -30,9 +30,7 @@ use crate::error::{Error, Result};
 use crate::source::{Source, SourceKind};
 
 /// How an ambient mirror variable participates in source selection.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceMode {
     /// Validate the ambient value and rank it with the built-in sources.
@@ -249,10 +247,7 @@ where
         (SourceMode::Env, EnvSource::Rejected { variable, reason }) => {
             Err(Error::config(crate::i18n::trf(
                 "err.env_source_invalid",
-                &[
-                    ("variable", variable.as_str()),
-                    ("reason", reason.as_str()),
-                ],
+                &[("variable", variable.as_str()), ("reason", reason.as_str())],
             )))
         }
     }
@@ -275,7 +270,9 @@ mod tests {
         Ok(())
     }
 
-    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> + Copy {
+    fn env_of(
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<String> + Copy {
         move |key: &str| {
             pairs
                 .iter()
