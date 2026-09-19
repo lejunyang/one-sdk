@@ -205,6 +205,15 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             .ok_or_else(|| Error::other(format!("unknown task `{name}`")))?;
         let shell = shell_for(def, set)?;
         let mut commands = Vec::new();
+        // A file task becomes an argv step, never a shell string: the path may
+        // contain spaces (it very often does on Windows), and pasting it into a
+        // command line would need per-shell quoting to survive.
+        if let Some(file) = def.file.as_ref().filter(|path| !path.trim().is_empty()) {
+            commands.push(PlannedStep::Argv {
+                argv: crate::tasks::files::launch_argv(Path::new(file)),
+                ignore_error: false,
+            });
+        }
         #[cfg(feature = "scripts")]
         if let Some(source) = def.lua.as_ref().filter(|s| !s.trim().is_empty()) {
             commands.push(PlannedStep::Lua {
@@ -1963,6 +1972,7 @@ shell = "pwsh -Command"
         set.apply_config(crate::tasks::TaskConfig {
             shell: Some("bash -c".into()),
             dir: None,
+            ..Default::default()
         });
         let built = plan(&set, "plain").unwrap();
         let PlannedStep::Command { shell, .. } = &built.steps[0].commands[0] else {

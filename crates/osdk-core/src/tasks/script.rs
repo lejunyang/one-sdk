@@ -345,7 +345,6 @@ mod tests {
         let mut ctx = context();
         ctx.dir = temp.path().to_path_buf();
 
-
         // A tiny script that echoes each argument on its own line.
         let script_path = if cfg!(windows) {
             let path = temp.path().join("echo.bat");

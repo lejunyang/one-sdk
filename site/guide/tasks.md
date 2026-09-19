@@ -93,6 +93,69 @@ error: task dependency cycle: a -> b -> a
 
 `depends` 里的名字写错同样在执行前报错，不会跑到一半才发现。
 
+## 第三档：脚本文件
+
+一段脚本写到二十行上下，编辑器就不再高亮它、linter 也看不见它，TOML 的转义
+开始比省下的括号更费事。这时把它挪进 `osdk-tasks/`：
+
+```
+osdk-tasks/
+  build.ps1          -> osdk run build
+  test/units.ps1     -> osdk run test:units
+  test/_default.ps1  -> osdk run test
+```
+
+文件名去掉扩展名就是任务名，目录变成 `:` 分隔的命名空间，`_default` 指代目录
+本身。也可以在 TOML 里显式指向一个脚本：
+
+```toml
+[tasks.release]
+description = "Cut a release"
+file = "scripts/release.ps1"
+```
+
+`file` 相对**声明它的那个配置文件**解析，不是相对最终的合并根目录——否则全局
+配置里的相对路径会指向当前项目，而不是它自己所在的位置。
+
+### 脚本头里的元数据
+
+脚本用注释声明自己的描述和依赖，不必回到 TOML：
+
+```powershell
+#OSDK description="Build the release artifacts"
+#OSDK depends=fetch, lint
+```
+
+解析在第一个非注释行处停止，所以头必须在文件顶部——写在中间没人会去那里找。
+
+### 改用别的目录
+
+```toml
+[task_config]
+includes = ["tools/tasks"]
+```
+
+这是**替换**而不是追加：项目把脚本挪走，通常不希望默认目录还被搜索，悄悄保留
+会让搬迁想要退休的任务重新出现。
+
+### Windows 可见性
+
+NTFS 没有执行位，所以判据是**扩展名在 `exe/bat/cmd/com/ps1/vbs` 之内，或者
+文件以 shebang 开头**，二者有其一即可。两者都没有的文件在 Linux/macOS 上能用、
+在 Windows 上无法启动。
+
+这类任务仍然会出现在 `osdk task list` 里并标注原因，而不是消失——一个凭空
+不见的任务会让人回去检查拼写，而真正的修法（加扩展名或加 shebang）是猜不到的。
+
+跨平台的写法是同名配对：`build`（带 shebang）与 `build.ps1` 放在一起，Windows
+取后者，其余平台取前者，任务名都是 `build`。
+
+### 与 shell 钩子的关系
+
+任务的环境由 osdk 直接注入，因此四种 shell 的激活片段都会在检测到 `OSDK_TASK`
+时**主动避让**。否则 profile 钩子会在任务内重新按配置推导一遍环境，把任务自己
+的 `env`、以及任务刚装好的工具覆盖掉。
+
 ## 第四档：内嵌 Lua
 
 前三档覆盖绝大多数任务。当确实需要**条件分支、循环生成命令、跨平台路径运算**

@@ -98,6 +98,79 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## The third tier: script files
+
+Somewhere around twenty lines a script outgrows a TOML string: the editor stops
+highlighting it, the linter stops seeing it, and the escaping costs more than
+the braces save. Move it into `osdk-tasks/`:
+
+```
+osdk-tasks/
+  build.ps1          -> osdk run build
+  test/units.ps1     -> osdk run test:units
+  test/_default.ps1  -> osdk run test
+```
+
+The filename without its extension is the task name, directories become `:`
+namespaces, and `_default` names the directory itself. A script can also be
+pointed at explicitly:
+
+```toml
+[tasks.release]
+description = "Cut a release"
+file = "scripts/release.ps1"
+```
+
+`file` resolves against **the config file that declared it**, not the merged
+root -- otherwise a relative path in a global config would point into whichever
+project happens to be current rather than at its own directory.
+
+### Metadata in the script header
+
+A script declares its own description and dependencies in comments, without
+going back to the TOML:
+
+```powershell
+#OSDK description="Build the release artifacts"
+#OSDK depends=fetch, lint
+```
+
+Parsing stops at the first non-comment line, so the header has to be at the top
+-- buried in the middle is somewhere nobody would look for it.
+
+### Using a different directory
+
+```toml
+[task_config]
+includes = ["tools/tasks"]
+```
+
+This **replaces** the defaults rather than adding to them: a project that moves
+its scripts rarely wants the old directories still searched, and keeping them
+silently would resurrect the very tasks the move meant to retire.
+
+### Windows visibility
+
+NTFS has no execute bit, so the rule is: **the extension is one of
+`exe/bat/cmd/com/ps1/vbs`, or the file starts with a shebang**. Either will do.
+A file with neither works on Linux and macOS and cannot be launched on Windows.
+
+Such a task still appears in `osdk task list` with the reason attached rather
+than vanishing -- a task that simply disappears sends you back to check the
+spelling, and the actual fix (add an extension or a shebang) is not guessable
+from an absence.
+
+The cross-platform idiom is a same-name pair: `build` (with a shebang) beside
+`build.ps1`. Windows takes the latter, everything else the former, and the task
+is called `build` either way.
+
+### Interaction with the shell hook
+
+A task's environment is injected by osdk directly, so the activation snippet for
+all four shells **stands down** when it sees `OSDK_TASK`. Otherwise the profile
+hook would re-derive the environment from the config inside the task, discarding
+the task's own `env` and any tool it had just installed.
+
 ## The fourth tier: embedded Lua
 
 The first three tiers cover the vast majority of tasks. When you genuinely need

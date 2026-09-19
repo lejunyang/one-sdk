@@ -29,6 +29,7 @@
 //!   of reporting an unknown name.
 
 pub mod args;
+pub mod files;
 pub mod freshness;
 pub mod runner;
 // The embedded interpreter is the fourth tier and needs a C compiler to build,
@@ -39,6 +40,7 @@ pub mod script;
 pub mod tree;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -295,6 +297,19 @@ pub struct TaskDef {
     /// that step opted into `ignore_error`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
+    /// Set when discovery found a script Windows cannot launch.
+    ///
+    /// Not a config field: it is a fact about the file, and letting a user
+    /// write it would invite disagreement with what is actually on disk.
+    #[serde(skip)]
+    pub windows_invisible: bool,
+    /// A script file to execute, the third tier.
+    ///
+    /// Relative to the config file. Use it when a `run` string has outgrown
+    /// TOML -- past roughly twenty lines the editor stops highlighting it and
+    /// the escaping starts to cost more than it saves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     /// Embedded Lua, the fourth tier.
     ///
     /// A distinct field rather than a flavour of `run` so the tier is visible
@@ -455,12 +470,40 @@ impl TaskDef {
             .lua
             .as_ref()
             .is_some_and(|source| !source.trim().is_empty());
+        let has_file = self
+            .file
+            .as_ref()
+            .is_some_and(|path| !path.trim().is_empty());
 
-        if has_lua && (has_run || has_windows) {
+        // A task belongs to exactly one tier. Naming the offending pair beats a
+        // generic "conflicting fields": the writer usually pasted one in and
+        // forgot to delete the other, and wants to be told which two.
+        let declared: Vec<&str> = [
+            (has_run || has_windows, "run"),
+            (has_file, "file"),
+            (has_lua, "lua"),
+        ]
+        .into_iter()
+        .filter_map(|(present, label)| present.then_some(label))
+        .collect();
+        if declared.len() > 1 {
             return Err(Error::config(format!(
-                "task `{name}`: sets both `lua` and `run`; a task is written in one tier or \
-                 the other, and guessing which was meant would be worse than asking"
+                "task `{name}`: sets `{}`; a task is written in one tier, and guessing which \
+                 was meant would be worse than asking",
+                declared.join("` and `")
             )));
+        }
+
+        if has_file {
+            self.spec.validate(name)?;
+            if let Some(text) = &self.timeout {
+                if crate::tasks::tree::parse_duration(text).is_none() {
+                    return Err(Error::config(format!(
+                        "task `{name}`: `timeout = \"{text}\"` is not a duration"
+                    )));
+                }
+            }
+            return Ok(());
         }
         if has_lua {
             #[cfg(not(feature = "scripts"))]
@@ -483,7 +526,7 @@ impl TaskDef {
         }
         if !has_run && !has_windows {
             return Err(Error::config(format!(
-                "task `{name}`: needs `run` (or `run_windows`)"
+                "task `{name}`: needs `run`, `file`, or `lua`"
             )));
         }
         // A Windows-only task is legitimate, but pairing an empty `run` with a
@@ -588,6 +631,14 @@ pub struct TaskConfig {
     /// Default working directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// Directories searched for file tasks, replacing the defaults.
+    ///
+    /// Replacing rather than extending: a project that moves its scripts
+    /// somewhere else almost never wants the default directories still
+    /// searched, and silently keeping them would resurrect tasks the move was
+    /// meant to retire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<String>,
 }
 
 /// The merged, platform-filtered task set.
@@ -615,11 +666,31 @@ impl TaskSet {
     /// project overriding only `description` would inherit the global `run` --
     /// whereas whole replacement says "this name is mine now".
     pub fn apply(&mut self, entries: BTreeMap<String, TaskEntry>) -> Result<()> {
+        self.apply_from(entries, None)
+    }
+
+    /// Merge one layer, resolving `file` against the directory that declared it.
+    ///
+    /// The base is the declaring file's own directory, not the final merged
+    /// root: with several configs in play those differ, and resolving against
+    /// the root would make a global config's `file = "scripts/x.sh"` point into
+    /// whichever project happened to be current.
+    pub fn apply_from(
+        &mut self,
+        entries: BTreeMap<String, TaskEntry>,
+        base: Option<&Path>,
+    ) -> Result<()> {
         let host = Platform::current();
         for (name, entry) in entries {
             validate_name(&name)?;
-            let def = entry.into_def();
+            let mut def = entry.into_def();
             def.validate(&name)?;
+            if let (Some(base), Some(file)) = (base, def.file.as_ref()) {
+                let candidate = Path::new(file);
+                if candidate.is_relative() {
+                    def.file = Some(base.join(candidate).to_string_lossy().into_owned());
+                }
+            }
 
             let filter = def.when.clone().unwrap_or_default();
             if !filter.matches(&host) {
@@ -640,6 +711,36 @@ impl TaskSet {
         }
         self.check_alias_collisions()?;
         Ok(())
+    }
+
+    /// Merge discovered script files into the set.
+    ///
+    /// Applied before `[tasks]` so a TOML entry of the same name wins: the
+    /// explicit declaration is the more specific statement, and a file dropped
+    /// into the directory should not silently shadow it.
+    ///
+    /// A task Windows cannot execute is still inserted. Dropping it here would
+    /// make it read as a typo at the call site; keeping it lets the runner say
+    /// why it cannot start, which is the actionable message.
+    pub fn apply_files(&mut self, files: &BTreeMap<String, crate::tasks::files::FileTask>) {
+        for (name, found) in files {
+            if validate_name(name).is_err() {
+                // A filename that cannot be a task name is not an error worth
+                // failing the whole config over -- the directory may hold a
+                // README or an editor backup.
+                continue;
+            }
+            self.tasks.insert(
+                name.clone(),
+                TaskDef {
+                    description: found.description.clone(),
+                    depends: found.depends.clone(),
+                    file: Some(found.path.to_string_lossy().into_owned()),
+                    windows_invisible: !found.windows_visible,
+                    ..TaskDef::default()
+                },
+            );
+        }
     }
 
     /// Replace the runner defaults wholesale.
@@ -1105,10 +1206,12 @@ run = "y"
         set.apply_config(TaskConfig {
             shell: Some("sh -c".into()),
             dir: Some("/global".into()),
+            ..Default::default()
         });
         set.apply_config(TaskConfig {
             shell: Some("pwsh -Command".into()),
             dir: None,
+            ..Default::default()
         });
         assert_eq!(set.config.shell.as_deref(), Some("pwsh -Command"));
         // Unit replacement: the previous `dir` must not survive.

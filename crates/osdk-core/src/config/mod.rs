@@ -877,7 +877,12 @@ impl Config {
         load_layers_internal(user_config_file, None)
     }
 
-    fn apply_file(&mut self, file: ConfigFile, allow_model_env: bool) -> Result<()> {
+    fn apply_file(
+        &mut self,
+        file: ConfigFile,
+        allow_model_env: bool,
+        origin: Option<&Path>,
+    ) -> Result<()> {
         if let Some(s) = file.settings {
             self.settings = s;
         }
@@ -927,10 +932,23 @@ impl Config {
         {
             // Same-name tasks replace whole; `[task_config]` replaces as a unit,
             // matching `[registries]`. See `tasks::TaskSet::apply`.
+            let includes = file
+                .task_config
+                .as_ref()
+                .map(|config| config.includes.clone())
+                .unwrap_or_default();
             if let Some(config) = file.task_config {
                 self.tasks.apply_config(config);
             }
-            self.tasks.apply(file.tasks)?;
+            let base = origin.and_then(Path::parent);
+            // Scripts first, so a `[tasks]` entry of the same name wins: the
+            // TOML is the more specific statement, and a file appearing in the
+            // directory should not quietly shadow it.
+            if let Some(base) = base {
+                self.tasks
+                    .apply_files(&crate::tasks::files::discover(base, &includes)?);
+            }
+            self.tasks.apply_from(file.tasks, base)?;
         }
         Ok(())
     }
@@ -1292,7 +1310,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                 ToolConfigOrigin::GlobalConfig(user_config_file.to_path_buf()),
             )
         }));
-        cfg.apply_file(file, true)?;
+        cfg.apply_file(file, true, Some(user_config_file))?;
     }
 
     if let Some(start_dir) = start_dir {
@@ -1302,7 +1320,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                     .keys()
                     .map(|tool| (tool.clone(), ToolConfigOrigin::ProjectConfig(path.clone()))),
             );
-            cfg.apply_file(file, false)?;
+            cfg.apply_file(file, false, Some(&path))?;
             cfg.project_config_path = Some(path);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {

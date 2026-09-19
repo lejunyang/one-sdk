@@ -50,6 +50,10 @@ pub fn activation_script(shell: Shell, osdk_bin: &str) -> String {
         Shell::Bash => format!(
             r#"# osdk shell integration (bash)
 _osdk_hook() {{
+  # Inside `osdk run`, the task already got its environment directly from the
+  # runner. Re-running the hook here would re-derive PATH from the *config*,
+  # discarding the per-task `env` and any tool the task just installed.
+  [[ -n "${{OSDK_TASK:-}}" ]] && return 0
   local out
   out="$({bin} hook-env --shell bash 2>/dev/null)" && eval "$out"
 }}
@@ -63,6 +67,9 @@ _osdk_hook
         Shell::Zsh => format!(
             r#"# osdk shell integration (zsh)
 _osdk_hook() {{
+  # See the bash branch: a task's environment comes from the runner, not from
+  # re-deriving it here.
+  [[ -n "${{OSDK_TASK:-}}" ]] && return 0
   local out
   out="$({bin} hook-env --shell zsh 2>/dev/null)" && eval "$out"
 }}
@@ -77,6 +84,10 @@ _osdk_hook
         Shell::Fish => format!(
             r#"# osdk shell integration (fish)
 function _osdk_hook --on-variable PWD --on-event fish_prompt
+  # See the bash branch.
+  if set -q OSDK_TASK
+    return 0
+  end
   {bin} hook-env --shell fish 2>/dev/null | source
 end
 _osdk_hook
@@ -87,6 +98,11 @@ _osdk_hook
             r#"# osdk shell integration (powershell)
 $script:OsdkHookRunning = $false
 function Invoke-OsdkHook {{
+  # Inside `osdk run`, the task already received its environment from the
+  # runner. Re-deriving it here would discard the per-task `env` and any tool
+  # the task just installed -- and on a project whose config is untrusted it
+  # would print a trust error into the task's own output.
+  if ($env:OSDK_TASK) {{ return }}
   $out = & {bin} hook-env --shell powershell 2>$null
   if ($out) {{ Invoke-Expression ($out -join "`n") }}
 }}
@@ -910,6 +926,30 @@ mod tests {
             powershell.find("Invoke-OsdkHook\n").unwrap()
                 < powershell.find("function global:prompt").unwrap()
         );
+    }
+
+    /// Every shell's hook must stand down inside `osdk run`.
+    ///
+    /// This is the half of the `-NoProfile` decision that lives in the shell
+    /// snippet. osdk deliberately does *not* pass `-NoProfile` -- doing so
+    /// would drop the shell-activation half of its PATH injection, which is
+    /// where `JAVA_HOME` and friends come from. The profile therefore still
+    /// runs inside a task, and the hook inside it has to notice and do nothing;
+    /// otherwise it re-derives the environment from the config and discards the
+    /// per-task `env` the runner just set.
+    ///
+    /// Asserted for all four shells in one test because a new shell branch is
+    /// exactly the place this gets forgotten.
+    #[test]
+    fn every_shell_hook_stands_down_inside_a_task() {
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Powershell] {
+            let script = activation_script(shell, "/usr/bin/osdk");
+            assert!(
+                script.contains("OSDK_TASK"),
+                "{shell:?} hook must check OSDK_TASK before re-deriving the \
+                 environment:\n{script}"
+            );
+        }
     }
 
     /// The hook must fire per prompt, not per command lookup.

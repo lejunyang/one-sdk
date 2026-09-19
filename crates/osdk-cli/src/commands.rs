@@ -5206,7 +5206,16 @@ pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {
                         aliases.join(", ")
                     )
                 };
-                println!("{name:<24} {description}{alias_note}");
+                // A script Windows cannot launch is listed with the reason
+                // rather than omitted: silently dropping it reads as a typo at
+                // the call site, and the fix (add an extension or a shebang) is
+                // not guessable from an absence.
+                let blocked = if def.windows_invisible && cfg!(windows) {
+                    osdk_core::i18n::tr("task.windows_invisible")
+                } else {
+                    String::new()
+                };
+                println!("{name:<24} {description}{alias_note}{blocked}");
             }
             // A task hidden by its platform filter is not missing, and saying so
             // points at the `when` line instead of sending the reader to hunt

@@ -413,6 +413,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         "task.failure_ignored",
         ("   (failure ignored)", "   （忽略失败）"),
     );
+    m.insert(
+        "task.windows_invisible",
+        (
+            "   (not runnable on Windows: needs a known extension or a shebang)",
+            "   （Windows 无法执行：需要可识别的扩展名或 shebang）",
+        ),
+    );
     m.insert("label.trusted", ("trusted", "已信任"));
     m.insert("label.stale", ("stale", "已失效"));
     m.insert("label.trust.active", ("active", "生效中"));
