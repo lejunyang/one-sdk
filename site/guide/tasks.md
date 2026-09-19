@@ -93,6 +93,59 @@ error: task dependency cycle: a -> b -> a
 
 `depends` 里的名字写错同样在执行前报错，不会跑到一半才发现。
 
+## 第四档：内嵌 Lua
+
+前三档覆盖绝大多数任务。当确实需要**条件分支、循环生成命令、跨平台路径运算**
+时，用 `lua`：
+
+```toml
+[tasks.sync]
+lua = """
+for _, target in ipairs(osdk.argv) do
+  local dest = osdk.path.join(osdk.project_root, "dist", target)
+  local code = osdk.run("cp", "-r", target, dest)
+  if code ~= 0 then return code end
+end
+return 0
+"""
+```
+
+字段名是 `lua` 而不是 `run`，这样一眼能看出任务在哪一档；两者同时出现会被
+**拒绝**，而不是由运行器猜测你想要哪个。
+
+脚本返回 nil 或 true 表示成功，返回数字作为退出码，`return false` 记为失败。
+抛错则任务失败并带上错误信息。
+
+### 可用的 API
+
+| | |
+| --- | --- |
+| `osdk.sh(cmd)` | 走平台 shell 执行，**返回退出码**而非抛错 |
+| `osdk.run(prog, ...)` | 直接 exec，每个参数独立，不经 shell |
+| `osdk.path.join(...)` | 按当前平台的分隔符拼接 |
+| `osdk.path.exists(p)` | 路径是否存在 |
+| `osdk.env(name)` | 读环境变量，未设置返回 nil |
+| `osdk.platform.os` / `.windows` / `.arch` | 平台判断 |
+| `osdk.project_root` / `osdk.dir` / `osdk.task` | 位置与身份 |
+| `osdk.args.<名字>` / `osdk.argv` | 声明的参数与剩余参数 |
+
+构建命令时优先用 `osdk.run`：它的每个参数直接成为一个 argv 条目，含空格或
+特殊字符的值不会被拆开或重新解释。`osdk.sh` 适合写固定的一行命令。
+
+### 这不是沙箱
+
+配置文件已经过信任门禁，而同一个文件里的 `run` 本来就能执行任意 shell 命令，
+所以给 Lua 加沙箱保护不了任何东西。这里提供的是**语义正确的便利**，不是隔离。
+
+### 构建期需要 C 编译器
+
+Lua 由 `mlua` 从源码编译并静态链接，运行时零依赖，但**构建 osdk 时**需要一个
+C 编译器。它位于默认开启的 `scripts` feature 之后；关掉该 feature 的构建里，
+带 `lua` 的任务会报错提示改用 `run`。
+
+体积代价：osdk 约 +335 KB，而 `osdk-shim` **一字节未变**——shim 只负责分派
+已安装的工具，从不执行任务，整个引擎不在它的依赖图里。
+
 ## 超时
 
 ```toml

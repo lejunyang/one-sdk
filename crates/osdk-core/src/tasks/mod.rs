@@ -31,6 +31,11 @@
 pub mod args;
 pub mod freshness;
 pub mod runner;
+// The embedded interpreter is the fourth tier and needs a C compiler to build,
+// so it is opt-out via scripts. Gating it also keeps the engine out of the
+// shim, which never evaluates a task.
+#[cfg(feature = "scripts")]
+pub mod script;
 pub mod tree;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -290,6 +295,17 @@ pub struct TaskDef {
     /// that step opted into `ignore_error`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunSpec>,
+    /// Embedded Lua, the fourth tier.
+    ///
+    /// A distinct field rather than a flavour of `run` so the tier is visible
+    /// at a glance and a task that sets both can be rejected outright, instead
+    /// of the runner guessing from the content which one was meant.
+    ///
+    /// Only for what the declarative tiers cannot say: conditionals, loops that
+    /// generate work, cross-platform path arithmetic. Requires the `scripts`
+    /// feature, which is on by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lua: Option<String>,
     /// Windows-only replacement for `run`.
     ///
     /// Replaces rather than appends: a task that needs different commands on
@@ -435,6 +451,36 @@ impl TaskDef {
     fn validate(&self, name: &str) -> Result<()> {
         let has_run = self.run.as_ref().is_some_and(|r| !r.is_empty());
         let has_windows = self.run_windows.as_ref().is_some_and(|r| !r.is_empty());
+        let has_lua = self
+            .lua
+            .as_ref()
+            .is_some_and(|source| !source.trim().is_empty());
+
+        if has_lua && (has_run || has_windows) {
+            return Err(Error::config(format!(
+                "task `{name}`: sets both `lua` and `run`; a task is written in one tier or \
+                 the other, and guessing which was meant would be worse than asking"
+            )));
+        }
+        if has_lua {
+            #[cfg(not(feature = "scripts"))]
+            return Err(Error::config(format!(
+                "task `{name}`: `lua` needs the `scripts` feature, which this build does not \
+                 have; rewrite it with `run`, or use a build with scripting enabled"
+            )));
+            #[cfg(feature = "scripts")]
+            {
+                self.spec.validate(name)?;
+                if let Some(text) = &self.timeout {
+                    if crate::tasks::tree::parse_duration(text).is_none() {
+                        return Err(Error::config(format!(
+                            "task `{name}`: `timeout = \"{text}\"` is not a duration"
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
         if !has_run && !has_windows {
             return Err(Error::config(format!(
                 "task `{name}`: needs `run` (or `run_windows`)"

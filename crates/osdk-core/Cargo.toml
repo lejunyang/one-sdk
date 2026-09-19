@@ -21,7 +21,12 @@ categories = ["development-tools", "development-tools::build-utils"]
 # Cargo unifies features across a single `--workspace` build, which silently
 # re-enables this for the shim and undoes the saving. The two binaries must be
 # built in separate cargo invocations; see .github/workflows/publish.yml.
-default = ["install"]
+# Embedded Lua is the fourth scripting tier and is reachable only through
+# `osdk run`. The shim dispatches an already-installed tool and never evaluates
+# a task, so gating the engine keeps its ~300 KB out of the shim entirely --
+# measured at exactly 0 bytes of shim growth, the same shape as `install`.
+default = ["install", "scripts"]
+scripts = ["dep:mlua"]
 install = [
     "dep:sigstore",
     "dep:sigstore-verify",
@@ -86,6 +91,7 @@ tempfile.workspace = true
 walkdir.workspace = true
 windows-sys.workspace = true
 libc.workspace = true
+mlua = { workspace = true, optional = true }
 semver.workspace = true
 regex.workspace = true
 globset.workspace = true

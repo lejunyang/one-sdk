@@ -120,6 +120,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 libc = "0.2"
+# Embedded Lua for the fourth tier of task scripting. `vendored` builds the
+# interpreter from source, so there is no system Lua to find and no runtime
+# dependency to ship -- at the cost of needing a C compiler at build time.
+# Measured at +421.5 KiB standalone against a same-profile baseline, the
+# cheapest usable engine of the thirteen evaluated.
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
 # versions
 semver = "1"
 regex = "1"

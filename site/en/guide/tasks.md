@@ -98,6 +98,66 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## The fourth tier: embedded Lua
+
+The first three tiers cover the vast majority of tasks. When you genuinely need
+**conditionals, loops that generate work, or cross-platform path arithmetic**,
+use `lua`:
+
+```toml
+[tasks.sync]
+lua = """
+for _, target in ipairs(osdk.argv) do
+  local dest = osdk.path.join(osdk.project_root, "dist", target)
+  local code = osdk.run("cp", "-r", target, dest)
+  if code ~= 0 then return code end
+end
+return 0
+"""
+```
+
+The field is `lua` rather than `run` so the tier is visible at a glance, and a
+task setting both is **rejected** instead of leaving the runner to guess which
+one you meant.
+
+Returning nil or true succeeds, a number becomes the exit code, and
+`return false` counts as failure. Raising an error fails the task with that
+message.
+
+### Available API
+
+| | |
+| --- | --- |
+| `osdk.sh(cmd)` | Run through the platform shell, **returning an exit code** rather than throwing |
+| `osdk.run(prog, ...)` | Exec directly; each argument stays separate, no shell |
+| `osdk.path.join(...)` | Join with the host separator |
+| `osdk.path.exists(p)` | Whether a path exists |
+| `osdk.env(name)` | Read an environment variable, nil when unset |
+| `osdk.platform.os` / `.windows` / `.arch` | Platform facts |
+| `osdk.project_root` / `osdk.dir` / `osdk.task` | Location and identity |
+| `osdk.args.<name>` / `osdk.argv` | Declared arguments and the leftovers |
+
+Prefer `osdk.run` when building a command from data: each argument becomes one
+argv entry, so a value with spaces or metacharacters cannot split or be
+reinterpreted. `osdk.sh` suits a fixed one-liner.
+
+### This is not a sandbox
+
+The config file has already passed the trust gate, and `run` in the same file
+can execute arbitrary shell, so confining Lua would protect nothing. What the
+host API offers is **convenience with correct semantics**, not isolation.
+
+### A C compiler is needed at build time
+
+Lua is compiled from source and statically linked by `mlua`, so there is no
+runtime dependency — but building osdk needs a C compiler. It sits behind the
+`scripts` feature, which is on by default; in a build with it disabled, a task
+using `lua` reports an error telling you to use `run` instead.
+
+Size: about +335 KB on osdk, and **not a single byte** on `osdk-shim` — the shim
+only dispatches already-installed tools and never evaluates a task, so the
+engine is not in its dependency graph at all.
+
 ## Timeouts
 
 ```toml

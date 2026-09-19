@@ -15,6 +15,14 @@ categories = ["command-line-utilities", "development-tools"]
 name = "osdk"
 path = "src/main.rs"
 
+[features]
+# Mirrors osdk-core's feature of the same name. A `cfg(feature = "scripts")`
+# inside this crate tests *this* crate's feature list, not the dependency's, so
+# the flag has to exist on both sides or the Lua branches silently vanish and
+# the match stops being exhaustive.
+default = ["scripts"]
+scripts = ["osdk-core/scripts"]
+
 [dependencies]
 osdk-core.workspace = true
 clap.workspace = true

@@ -90,6 +90,9 @@ pub enum PlannedStep {
         argv: Vec<String>,
         ignore_error: bool,
     },
+    /// Evaluate embedded Lua.
+    #[cfg(feature = "scripts")]
+    Lua { source: String },
 }
 
 /// The interpreter used when neither the task nor `[task_config]` names one.
@@ -202,6 +205,12 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             .ok_or_else(|| Error::other(format!("unknown task `{name}`")))?;
         let shell = shell_for(def, set)?;
         let mut commands = Vec::new();
+        #[cfg(feature = "scripts")]
+        if let Some(source) = def.lua.as_ref().filter(|s| !s.trim().is_empty()) {
+            commands.push(PlannedStep::Lua {
+                source: source.clone(),
+            });
+        }
         for step in def.steps_for(windows) {
             match step {
                 RunStep::Parallel { tasks } => commands.push(PlannedStep::Parallel { tasks }),
@@ -329,6 +338,12 @@ pub trait Spawner {
     /// Exec a program directly, bypassing the shell.
     fn run_argv(&mut self, task: &str, argv: &[String], dir: &Path) -> Result<i32>;
 
+    /// Evaluate embedded Lua, returning the exit code it reports.
+    #[cfg(feature = "scripts")]
+    fn run_lua(&mut self, _task: &str, _source: &str, _dir: &Path) -> Result<i32> {
+        Err(Error::other("this spawner cannot evaluate Lua"))
+    }
+
     /// Set the wall-clock limit applying to subsequent calls.
     ///
     /// Passed out of band rather than as a parameter on every call so the
@@ -346,6 +361,8 @@ pub struct ProcessSpawner {
     pub base_path: String,
     /// Wall-clock limit for the task currently running.
     pub timeout: Option<std::time::Duration>,
+    /// Project root, exposed to scripts as `osdk.project_root`.
+    pub project_root: PathBuf,
     /// Argument values exposed as `osdk_arg_*`.
     ///
     /// Safe on every shell: these enter the child's environment block verbatim,
@@ -372,6 +389,54 @@ impl Spawner for ProcessSpawner {
             child.env(key, value);
         }
         self.run_to_completion(task, program, child)
+    }
+
+    #[cfg(feature = "scripts")]
+    fn run_lua(&mut self, task: &str, source: &str, dir: &Path) -> Result<i32> {
+        use crate::tasks::script::{self, ScriptContext};
+
+        // The script gets the same environment a spawned command would, so
+        // `osdk.sh` inside it sees the project's tools -- otherwise the tier
+        // would silently behave differently from the three below it.
+        let mut env: BTreeMap<String, String> = self.env.set_vars.clone();
+        if let Some(def) = self.defs.get(task) {
+            for (key, value) in &def.env {
+                env.insert(key.clone(), value.clone());
+            }
+        }
+        for (key, value) in &self.arg_env {
+            env.insert(key.clone(), value.clone());
+        }
+        if !self.env.path_prepend.is_empty() {
+            let mut entries = self.env.path_prepend.clone();
+            entries.extend(std::env::split_paths(&self.base_path));
+            if let Ok(joined) = std::env::join_paths(entries) {
+                env.insert("PATH".into(), joined.to_string_lossy().to_string());
+            }
+        }
+        env.insert(TASK_MARKER.into(), "1".into());
+        env.insert(TASK_NAME_VAR.into(), task.to_string());
+
+        let context = ScriptContext {
+            dir: dir.to_path_buf(),
+            project_root: self.project_root.clone(),
+            name: task.to_string(),
+            args: self
+                .arg_env
+                .iter()
+                .filter_map(|(key, value)| {
+                    key.strip_prefix("osdk_arg_")
+                        .map(|name| (name.to_string(), value.clone()))
+                })
+                .collect(),
+            argv: self
+                .arg_env
+                .get("osdk_args")
+                .map(|rest| rest.split(' ').map(str::to_string).collect())
+                .unwrap_or_default(),
+            env,
+        };
+        script::eval(source, &context)
     }
 
     fn run_argv(&mut self, task: &str, argv: &[String], dir: &Path) -> Result<i32> {
@@ -518,6 +583,14 @@ fn run_post_steps(
                 }
                 code
             }
+            #[cfg(feature = "scripts")]
+            PlannedStep::Lua { source } => {
+                let code = spawner.run_lua(&task.name, source, &dir)?;
+                if code != 0 {
+                    outcome.tolerated_failures.push("lua".into());
+                }
+                code
+            }
             PlannedStep::Parallel { tasks } => {
                 let mut worst = 0;
                 for name in tasks {
@@ -545,6 +618,10 @@ fn run_post_steps(
                                     continue;
                                 }
                                 code
+                            }
+                            #[cfg(feature = "scripts")]
+                            PlannedStep::Lua { source } => {
+                                spawner.run_lua(&sub.name, source, &sub_dir)?
                             }
                             PlannedStep::Parallel { .. } => continue,
                         };
@@ -604,6 +681,10 @@ fn apply_arguments(
         AppendPolicy::Append => {
             for step in resolved.iter_mut() {
                 match step {
+                    // A script reads arguments from `osdk.args` / `osdk.argv`
+                    // rather than having them appended to a command line.
+                    #[cfg(feature = "scripts")]
+                    PlannedStep::Lua { .. } => continue,
                     // An argv step keeps each leftover as its own entry, so
                     // spaces and metacharacters survive intact.
                     PlannedStep::Argv { argv, .. } => {
@@ -742,6 +823,22 @@ pub fn execute_full(
         };
         for step in &steps {
             match step {
+                #[cfg(feature = "scripts")]
+                PlannedStep::Lua { source } => {
+                    let code = match spawner.run_lua(&task.name, source, &dir) {
+                        Ok(code) => code,
+                        Err(error) => {
+                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            return Err(error);
+                        }
+                    };
+                    if code != 0 {
+                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+                        outcome.code = code;
+                        outcomes.push(outcome);
+                        return Ok(outcomes);
+                    }
+                }
                 PlannedStep::Argv { argv, ignore_error } => {
                     let code = match spawner.run_argv(&task.name, argv, &dir) {
                         Ok(code) => code,
@@ -820,6 +917,10 @@ pub fn execute_full(
                                     }
                                     code
                                 }
+                                #[cfg(feature = "scripts")]
+                                PlannedStep::Lua { source } => {
+                                    spawner.run_lua(&sub.name, source, &sub_dir)?
+                                }
                                 PlannedStep::Parallel { .. } => continue,
                             };
                             if code != 0 {
@@ -885,6 +986,8 @@ mod tests {
             .filter_map(|step| match step {
                 PlannedStep::Command { command, .. } => Some(command.clone()),
                 PlannedStep::Argv { argv, .. } => Some(argv.join(" ")),
+                #[cfg(feature = "scripts")]
+                PlannedStep::Lua { .. } => None,
                 PlannedStep::Parallel { .. } => None,
             })
             .collect()

@@ -408,9 +408,43 @@ mlua 的 `vendored` feature 通过 `cc` crate 从源码编译 Lua 5.4 并静态�
 
 支持这个判断的两点：Lua 是纯 C89、无平台特有依赖，属于 `zig cc` 最容易成功的一类；mingw-w64 与 musl 头文件 zig 已自带，正好覆盖本仓库的 Windows GNU 与 Linux 目标。
 
-**但这是推断，不是实测结论。** 已知风险点：zig 的 `cc` 驱动与 `cc` crate 传入的 MSVC 风格参数存在兼容性问题（`-target` 与 `/`-前缀参数混用时）；Apple 目标涉及 SDK 授权，zig 不附带 macOS SDK。落地前必须逐目标实测，**判据是「产物能在目标平台真实运行」，而不是「构建命令退出码为 0」**——后者正是 AGENTS.md「只看表象，不看产物」那一节反复警告的失效模式。
+### 6.4.2 zig 路线的实测结果（2026-09-19 补测）
 
-若 zig 路线在某目标失败，退路不变：该目标关闭 `scripts` feature，或整体改用纯 Rust 的 Rhai（+1,107 KiB，为 mlua 的 3.6 倍）。
+上面的推断已实测，结论是**部分成立**，且边界与预期不同。
+
+环境：Windows x64，zig 0.16.0（由 osdk 自己安装，`E:\osdk-data\data\shims\zig.cmd`），mlua 0.10.5 + lua-src 547.0.0，profile 与 osdk release 一致。
+
+| 目标 | 构建 | 真实运行 | 结论 |
+| --- | --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | ✅ 661,416 B | ✅ **`lua says 21`**（WSL Ubuntu） | **成立** |
+| `aarch64-apple-darwin` | ❌ 链接失败 | — | 缺 macOS SDK，与预期一致 |
+| `aarch64-linux-android` | ❌ `string.h` not found | — | 需 NDK sysroot，非 zig 能力问题 |
+
+**Linux 目标完整走通**：产物经 `file` 确认为 `ELF 64-bit LSB pie executable, x86-64 ... dynamically linked`，在 WSL Ubuntu 中执行输出 `lua says 21`——21 是 `1..6` 求和的唯一正确答案，因此这不只是「进程启动了」，而是嵌入的 Lua 解释器真正求值了。判据是产物运行结果而非构建退出码，符合 §6.4.1 自己定的标准。
+
+**两个失败目标的原因都不是 zig 不支持该平台：**
+
+- **macOS**：链接期需要 `libSystem`、`-liconv`，这些在 macOS SDK 里，而 zig 不附带（Apple 的 SDK 有授权限制）。rustc 的报错也指向同一处：`invoking xcrun ... failed: program not found`。解决路径是提供 SDK（`SDKROOT`）或换用 `cargo-zigbuild` 配合已有 SDK，属于独立的一步。
+- **Android**：bionic libc 的头文件由 NDK 提供，zig 自带的是 musl/glibc，所以 `string.h` 找不到。给出 NDK sysroot 即可，osdk 本身就有 android-ndk backend。
+
+### 6.4.3 实测过程中两个方法论教训
+
+**其一，前两轮「全部失败」是我的包装器写错，不是 zig 的问题。** 第一轮四个目标全挂，错误是 `unable to parse target query 'x86_64-unknown-linux-gnu': UnknownOperatingSystem`——看起来像 zig 不认识这个平台，实际是 `cc` crate 自己会传 `--target=<rust triple>`，与包装器硬编码的 zig 三元组冲突。**错误信息指向的位置与根因相距甚远**，若就此得出「zig 不支持」的结论，会直接把整条路线误判掉。
+
+**其二，第三轮失败暴露了一个「在被污染状态上验证」的典型。** 包装器用 Python 实现，构建报 `Compiler family detection failed`，而手工运行同一个包装器却成功。差别在于：`python` 在本机是 osdk 的 shim，交互 shell 里有激活所以能跑，而 cargo 的 build script 环境没有，于是 `osdk-shim: no version of python selected`。**手工验证通过恰恰掩盖了问题**——改用纯 `.cmd` 包装器后 Linux 立刻走通。这与 AGENTS.md「复用了被污染的状态」记的是同一类。
+
+### 6.4.4 对阶段四的结论
+
+**mlua 路线可行，但交叉编译不是「一个 zig 解决全部」。** 现实的落地方式是分目标处理：
+
+- Linux（gnu/musl）：`zig cc` 直接可用，已实测。
+- Windows：本机 MSVC 或 CI 的 mingw-w64，本就不需要交叉。
+- macOS：需 SDK，建议在 macOS runner 上原生构建，而不是硬凑交叉。
+- Android：给 NDK sysroot，osdk 已有该 backend。
+
+这与「退回 Rhai」相比仍然划算：Rhai 省掉的是全部 C 工具链问题，但体积代价是 **+1,107 KiB vs +421.5 KiB**（3.6 倍）。macOS 与 Android 在 CI 上原生构建是常规做法，不构成阻塞。
+
+**因此阶段四继续走 mlua**，但 §12 的「阻塞性前置条件」降级为「CI 矩阵的配置工作」——它不再是可行性未知，而是已知可行、需要逐目标配置。
 
 ### 6.5 `-NoProfile` 的修正：不要照抄 mise（2026-09-19 修订）
 
@@ -809,7 +843,7 @@ git log --oneline -1    →  847b8f2
 
 ## 12. 本文未做的核查（诚实清单）
 
-1. **mlua vendored 的交叉编译验证。** 本机只装了 MSVC toolchain 与若干 Rust target，未配置对应的 C 交叉编译器，因此**没有**验证 macOS / Linux / aarch64 目标能否构建 mlua vendored。这是阶段四的**阻塞性前置条件**，见 §6.4。**修订补充**：§6.4.1 指出 osdk 自带的 zig backend 很可能直接化解此项（`zig cc` 自带 musl / glibc / mingw-w64），但**该方案同样未实测**，仍属待验证；Apple 目标因 zig 不附带 macOS SDK 需单独处理。
+1. **~~mlua vendored 的交叉编译验证~~ —— 已补测，见 §6.4.2。** zig cc 在 `x86_64-unknown-linux-gnu` 上完整走通，产物于 WSL Ubuntu 实际运行并输出 `lua says 21`；macOS 因缺 SDK、Android 因缺 NDK sysroot 未通过，两者均非 zig 能力问题，建议在对应平台原生构建。阶段四据此继续走 mlua，该项从阻塞性前置降级为 CI 配置工作。
 2. **`deno_task_shell` 的体积。** §6.3 提到它作为长期备选，但未建试验工程实测，标注为估算缺失。
 3. **~~`globset` 在 osdk 现有依赖图中的实际增量~~ —— 已补测。** `cargo tree -e normal -p osdk-cli` 显示 `globset` 与 `walkdir` 均已在图内（450 个不同 crate），阶段二不引入新 crate。
 4. **mise 的部分行为未实机验证。** §2 的所有断言来自 2026-09-19 抓取的官方文档，未在本机安装 mise 复现。文档与实现不符的情况是可能的，实现前对关键语义（尤其 sources/outputs 的依赖失效传播）建议实测确认。

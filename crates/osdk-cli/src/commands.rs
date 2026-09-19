@@ -5095,6 +5095,15 @@ pub fn run_task(
                             .collect();
                         println!("  > {}{suffix}", rendered.join(" "));
                     }
+                    #[cfg(feature = "scripts")]
+                    runner::PlannedStep::Lua { source } => {
+                        // Show the first line plus a count: a preview that
+                        // hides the script entirely would not say what runs,
+                        // and dumping 40 lines would bury the rest of the plan.
+                        let lines = source.lines().count();
+                        let first = source.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                        println!("  lua ({lines} lines): {}", first.trim());
+                    }
                     runner::PlannedStep::Parallel { tasks } => {
                         println!("  || {}", tasks.join(", "));
                     }
@@ -5116,6 +5125,7 @@ pub fn run_task(
         arg_env: values.env_vars(),
         // Set per task by the runner; this is just the initial value.
         timeout: None,
+        project_root: config_root.clone(),
     };
 
     let state_path = freshness_state_path(app);
