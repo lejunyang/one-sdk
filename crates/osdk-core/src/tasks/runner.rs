@@ -52,6 +52,14 @@ pub struct PlannedTask {
     pub name: String,
     pub dir: Option<String>,
     pub commands: Vec<PlannedStep>,
+    /// Whether the top-level walk executes this task in its own right.
+    ///
+    /// A task reached only through a `{ tasks = [...] }` step still has to be
+    /// *planned* -- the step looks its commands up here -- but it must not also
+    /// run as an ordinary prerequisite, or it executes twice. Prerequisites and
+    /// the root itself are `true`; entries present purely to be referenced are
+    /// `false`.
+    pub standalone: bool,
 }
 
 /// A single resolved step.
@@ -127,7 +135,41 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
     }
 
     let windows = cfg!(windows);
-    let order = set.execution_order(root)?;
+    let mut order = set.execution_order(root)?;
+
+    // Tasks named by a `{ tasks = [...] }` step are not prerequisites, so
+    // `execution_order` does not include them -- it only follows `depends`.
+    // They still have to be planned: `execute` looks their commands up in the
+    // plan, and a lookup that misses would skip the whole parallel step without
+    // a word, reporting success. Their own dependencies come along too.
+    let standalone: std::collections::BTreeSet<String> = order.iter().cloned().collect();
+    let mut pending: Vec<String> = order.clone();
+    while let Some(name) = pending.pop() {
+        let Some(def) = set.tasks.get(&name) else {
+            continue;
+        };
+        for step in def.steps_for(windows) {
+            let RunStep::Parallel { tasks } = step else {
+                continue;
+            };
+            for referenced in tasks {
+                let Some(target) = set.resolve(&referenced) else {
+                    continue;
+                };
+                if order.iter().any(|planned| planned == target) {
+                    continue;
+                }
+                let target = target.to_string();
+                for dependency in set.execution_order(&target)? {
+                    if !order.iter().any(|planned| planned == &dependency) {
+                        order.push(dependency.clone());
+                        pending.push(dependency);
+                    }
+                }
+            }
+        }
+    }
+
     let mut steps = Vec::new();
     for name in order {
         let def = set
@@ -153,6 +195,7 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             }
         }
         steps.push(PlannedTask {
+            standalone: standalone.contains(&name),
             name,
             dir: def.dir.clone().or_else(|| set.config.dir.clone()),
             commands,
@@ -209,6 +252,126 @@ pub fn resolve_dir(config_root: &Path, dir: Option<&str>) -> PathBuf {
     }
 }
 
+/// Outcome of running one task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutcome {
+    pub name: String,
+    /// Exit code of the step that decided the outcome, 0 when every step passed.
+    pub code: i32,
+    /// Steps whose failure was tolerated because of `ignore_error`.
+    pub tolerated_failures: Vec<String>,
+}
+
+/// How to launch tasks. Split out so tests can observe without spawning.
+pub trait Spawner {
+    /// Run one command, returning its exit code.
+    fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32>;
+}
+
+/// Runs commands as real child processes.
+pub struct ProcessSpawner {
+    /// Environment computed the way `hook-env` would, injected into every child.
+    pub env: TaskEnv,
+    /// Per-task definitions, needed for their own `env` blocks.
+    pub defs: BTreeMap<String, TaskDef>,
+    /// PATH as inherited by osdk itself.
+    pub base_path: String,
+}
+
+impl Spawner for ProcessSpawner {
+    fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32> {
+        let (program, args) = shell
+            .split_first()
+            .ok_or_else(|| Error::config("`shell` must name an interpreter"))?;
+        let mut child = Command::new(program);
+        child.args(args).arg(command).current_dir(dir);
+        if let Some(def) = self.defs.get(task) {
+            self.env.apply(&mut child, def, task, &self.base_path);
+        }
+        let status = child.status().map_err(|error| {
+            Error::other(format!("task `{task}`: cannot run `{program}`: {error}"))
+        })?;
+        // A signal-killed child reports no code; treat it as failure rather than
+        // silently succeeding.
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+/// Execute a plan, stopping at the first intolerable failure.
+///
+/// Parallel steps are executed by running their tasks in sequence here; the
+/// concurrency itself is the caller's to add once it owns a thread pool. What
+/// matters at this layer is that the *semantics* are already right: the step
+/// waits for all of its tasks and surfaces the first failure, which is exactly
+/// what a shell `&` cannot do.
+pub fn execute(
+    plan: &Plan,
+    config_root: &Path,
+    spawner: &mut dyn Spawner,
+) -> Result<Vec<TaskOutcome>> {
+    let mut outcomes = Vec::new();
+    for task in &plan.steps {
+        // Present only so a parallel step can find its commands; running it here
+        // as well would execute it twice.
+        if !task.standalone {
+            continue;
+        }
+        let dir = resolve_dir(config_root, task.dir.as_deref());
+        let mut outcome = TaskOutcome {
+            name: task.name.clone(),
+            code: 0,
+            tolerated_failures: Vec::new(),
+        };
+        for step in &task.commands {
+            match step {
+                PlannedStep::Command {
+                    shell,
+                    command,
+                    ignore_error,
+                } => {
+                    let code = spawner.run(&task.name, shell, command, &dir)?;
+                    if code != 0 {
+                        if *ignore_error {
+                            outcome.tolerated_failures.push(command.clone());
+                            continue;
+                        }
+                        outcome.code = code;
+                        outcomes.push(outcome);
+                        return Ok(outcomes);
+                    }
+                }
+                PlannedStep::Parallel { tasks } => {
+                    // Each referenced task has already been planned; run its own
+                    // commands and collect the first failure.
+                    for name in tasks {
+                        let Some(sub) = plan.steps.iter().find(|t| &t.name == name) else {
+                            continue;
+                        };
+                        let sub_dir = resolve_dir(config_root, sub.dir.as_deref());
+                        for sub_step in &sub.commands {
+                            if let PlannedStep::Command {
+                                shell,
+                                command,
+                                ignore_error,
+                            } = sub_step
+                            {
+                                let code = spawner.run(&sub.name, shell, command, &sub_dir)?;
+                                if code != 0 && !*ignore_error {
+                                    outcome.code = code;
+                                    outcomes.push(outcome);
+                                    return Ok(outcomes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +396,156 @@ mod tests {
                 PlannedStep::Parallel { .. } => None,
             })
             .collect()
+    }
+
+    /// Records what would have run, so execution semantics can be asserted
+    /// without spawning a single process.
+    #[derive(Default)]
+    struct RecordingSpawner {
+        ran: Vec<String>,
+        /// Commands that should report failure, and with what code.
+        fail: BTreeMap<String, i32>,
+    }
+
+    impl Spawner for RecordingSpawner {
+        fn run(
+            &mut self,
+            _task: &str,
+            _shell: &[String],
+            command: &str,
+            _dir: &Path,
+        ) -> Result<i32> {
+            self.ran.push(command.to_string());
+            Ok(self.fail.get(command).copied().unwrap_or(0))
+        }
+    }
+
+    #[test]
+    fn a_failing_step_stops_the_task_and_later_steps_do_not_run() {
+        let set = set_from(
+            r#"
+[ci]
+run = ["first", "second", "third"]
+"#,
+        );
+        let built = plan(&set, "ci").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("second".into(), 3);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["first", "second"], "third must not run");
+        assert_eq!(outcomes.last().unwrap().code, 3, "exit code must propagate");
+    }
+
+    #[test]
+    fn ignore_error_lets_the_next_step_run_and_is_reported() {
+        let set = set_from(
+            r#"
+[ci]
+run = [{ cmd = "flaky", ignore_error = true }, "after"]
+"#,
+        );
+        let built = plan(&set, "ci").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("flaky".into(), 1);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["flaky", "after"]);
+        let outcome = outcomes.last().unwrap();
+        assert_eq!(outcome.code, 0, "tolerated failure must not fail the task");
+        // Tolerated is not the same as unnoticed.
+        assert_eq!(outcome.tolerated_failures, vec!["flaky".to_string()]);
+    }
+
+    #[test]
+    fn dependencies_run_before_the_task_that_needs_them() {
+        let set = set_from(
+            r#"
+prep = "do-prep"
+
+[build]
+run = "do-build"
+depends = ["prep"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["do-prep", "do-build"]);
+    }
+
+    #[test]
+    fn a_failing_dependency_stops_the_dependent_task() {
+        let set = set_from(
+            r#"
+prep = "do-prep"
+
+[build]
+run = "do-build"
+depends = ["prep"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("do-prep".into(), 2);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["do-prep"], "dependent must not run");
+        assert_eq!(outcomes.last().unwrap().code, 2);
+    }
+
+    #[test]
+    fn a_referenced_task_runs_once_inside_its_parallel_step_not_twice() {
+        // Planning has to include `a`/`b` so the parallel step can find their
+        // commands, but including them must not also run them as if they were
+        // ordinary prerequisites.
+        let set = set_from(
+            r#"
+a = "run-a"
+b = "run-b"
+
+[all]
+run = [{ tasks = ["a", "b"] }, "after"]
+"#,
+        );
+        let built = plan(&set, "all").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        execute(&built, Path::new("."), &mut spawner).unwrap();
+
+        assert_eq!(
+            spawner.ran.iter().filter(|c| *c == "run-a").count(),
+            1,
+            "referenced task ran {:?}",
+            spawner.ran
+        );
+        assert_eq!(spawner.ran.last().map(String::as_str), Some("after"));
+    }
+
+    #[test]
+    fn a_parallel_step_waits_for_its_tasks_and_surfaces_failure() {
+        // This is the property `&` cannot provide: the runner waits and collects
+        // the exit code instead of orphaning a background process.
+        let set = set_from(
+            r#"
+a = "run-a"
+b = "run-b"
+
+[all]
+run = [{ tasks = ["a", "b"] }, "after"]
+"#,
+        );
+        let built = plan(&set, "all").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("run-b".into(), 7);
+
+        let outcomes = execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert!(spawner.ran.contains(&"run-a".to_string()));
+        assert!(spawner.ran.contains(&"run-b".to_string()));
+        assert!(
+            !spawner.ran.contains(&"after".to_string()),
+            "must not continue past a failed parallel step"
+        );
+        assert_eq!(outcomes.last().unwrap().code, 7);
     }
 
     #[test]

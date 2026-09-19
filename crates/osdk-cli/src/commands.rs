@@ -4962,6 +4962,177 @@ pub fn hook_env(app: &App, shell: String) -> Result<()> {
     Ok(())
 }
 
+/// Compute the environment a task runs with.
+///
+/// This is deliberately the same three layers `hook-env` renders into the shell
+/// (activation delta, package caches, model providers) rather than a reduced
+/// set. osdk does **not** launch tasks with `-NoProfile` the way mise does: its
+/// shims sit on the persistent PATH, but `JAVA_HOME`/`GOROOT`-style exports come
+/// from the profile hook, so suppressing the profile would quietly drop them and
+/// hide any tool that `ShimSettings` excluded from shim generation. Injecting
+/// the environment here gets both halves: the task sees what it declared, and no
+/// stale outer activation can shadow it.
+fn task_environment(app: &App, cwd: &std::path::Path) -> Result<osdk_core::tasks::runner::TaskEnv> {
+    let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
+    let cache_vars = osdk_core::cache::cache_env(&app.ctx.dirs.cache, |k| std::env::var(k).ok());
+    delta.set_vars.extend(cache_vars);
+    let model_vars = osdk_core::model::env::configured_env(&app.ctx, |key| std::env::var(key).ok());
+    delta.set_vars.extend(model_vars);
+    Ok(osdk_core::tasks::runner::TaskEnv {
+        path_prepend: delta.path_prepend,
+        set_vars: delta.set_vars,
+    })
+}
+
+/// Directory that task-relative paths resolve against.
+///
+/// The config file's own directory, not the shell's cwd: a task means the same
+/// thing wherever it is invoked from.
+fn task_config_root(app: &App) -> std::path::PathBuf {
+    app.ctx
+        .config
+        .project_config_path
+        .as_ref()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
+}
+
+pub fn run_task(
+    app: &mut App,
+    task: String,
+    dry_run: bool,
+) -> Result<Option<std::process::ExitStatus>> {
+    use osdk_core::tasks::runner;
+
+    let set = &app.ctx.config.tasks;
+    let plan = runner::plan(set, &task)?;
+
+    if dry_run {
+        for planned in plan.steps.iter().filter(|step| step.standalone) {
+            println!("{}:", planned.name);
+            for step in &planned.commands {
+                match step {
+                    runner::PlannedStep::Command {
+                        command,
+                        ignore_error,
+                        ..
+                    } => {
+                        let suffix = if *ignore_error {
+                            osdk_core::i18n::tr("task.failure_ignored")
+                        } else {
+                            String::new()
+                        };
+                        println!("  $ {command}{suffix}");
+                    }
+                    runner::PlannedStep::Parallel { tasks } => {
+                        println!("  || {}", tasks.join(", "));
+                    }
+                }
+            }
+        }
+        return Ok(None);
+    }
+
+    let config_root = task_config_root(app);
+    let cwd = std::env::current_dir()?;
+    let env = task_environment(app, &cwd)?;
+    let base_path = std::env::var("PATH").unwrap_or_default();
+    let defs = app.ctx.config.tasks.tasks.clone();
+
+    let mut spawner = runner::ProcessSpawner {
+        env,
+        defs,
+        base_path,
+    };
+    let outcomes = runner::execute(&plan, &config_root, &mut spawner)?;
+
+    for outcome in &outcomes {
+        for tolerated in &outcome.tolerated_failures {
+            eprintln!(
+                "{}: task `{}` continued past a failing step: {tolerated}",
+                osdk_core::i18n::tr("label.warning"),
+                outcome.name
+            );
+        }
+    }
+
+    // Propagate the failing task's code so `osdk run` composes in a shell.
+    if let Some(failed) = outcomes.iter().find(|outcome| outcome.code != 0) {
+        eprintln!(
+            "{}: task `{}` failed with exit code {}",
+            osdk_core::i18n::tr("label.error"),
+            failed.name,
+            failed.code
+        );
+        std::process::exit(failed.code);
+    }
+    Ok(None)
+}
+
+pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {
+    use crate::cli::TaskCommand;
+    let set = &app.ctx.config.tasks;
+
+    match command {
+        TaskCommand::List { hidden } => {
+            if set.tasks.is_empty() && set.excluded.is_empty() {
+                println!("{}", osdk_core::i18n::tr("task.no_tasks"));
+                return Ok(());
+            }
+            for (name, def) in &set.tasks {
+                if def.hide && !hidden {
+                    continue;
+                }
+                let description = def.description.clone().unwrap_or_default();
+                let aliases: Vec<&str> = set
+                    .aliases
+                    .iter()
+                    .filter(|(_, target)| *target == name)
+                    .map(|(alias, _)| alias.as_str())
+                    .collect();
+                let alias_note = if aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "  ({}{})",
+                        osdk_core::i18n::tr("task.alias_prefix"),
+                        aliases.join(", ")
+                    )
+                };
+                println!("{name:<24} {description}{alias_note}");
+            }
+            // A task hidden by its platform filter is not missing, and saying so
+            // points at the `when` line instead of sending the reader to hunt
+            // for a typo.
+            for (name, reason) in &set.excluded {
+                println!(
+                    "{name:<24} ({}{reason})",
+                    osdk_core::i18n::tr("task.unavailable_here")
+                );
+            }
+        }
+        TaskCommand::Info { task } => {
+            let Some(name) = set.resolve(&task) else {
+                if let Some(reason) = set.exclusion_reason(&task) {
+                    return Err(anyhow!(
+                        "task `{task}` is not available on this platform ({reason})"
+                    ));
+                }
+                return Err(anyhow!("unknown task `{task}`"));
+            };
+            let def = &set.tasks[name];
+            println!("{}", toml::to_string_pretty(def).unwrap_or_default());
+        }
+        TaskCommand::Deps { task } => {
+            let order = set.execution_order(&task)?;
+            for (index, name) in order.iter().enumerate() {
+                println!("{}. {name}", index + 1);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
     use crate::cli::CacheCommand;
     match command {

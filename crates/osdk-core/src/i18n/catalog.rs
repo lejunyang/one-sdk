@@ -401,6 +401,17 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("prompt.yes_no", ("[y/N]:", "[是/否]："));
     m.insert("label.pinned", ("[pinned]", "[已固定]"));
     m.insert("label.error", ("error", "错误"));
+    m.insert("label.warning", ("warning", "警告"));
+    m.insert("task.no_tasks", ("no tasks defined", "未定义任何任务"));
+    m.insert("task.alias_prefix", ("alias: ", "别名："));
+    m.insert(
+        "task.unavailable_here",
+        ("unavailable here: ", "在此平台不可用："),
+    );
+    m.insert(
+        "task.failure_ignored",
+        ("   (failure ignored)", "   （忽略失败）"),
+    );
     m.insert("label.trusted", ("trusted", "已信任"));
     m.insert("label.stale", ("stale", "已失效"));
     m.insert("label.trust.active", ("active", "生效中"));

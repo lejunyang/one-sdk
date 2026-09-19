@@ -128,6 +128,25 @@ pub enum Command {
         command: Vec<String>,
     },
 
+    /// Run a project task defined in `[tasks]`.
+    ///
+    /// Only `osdk run <name>` is offered, never a bare `osdk <name>`: the bare
+    /// form gets shadowed by any subcommand added later, a problem mise hit and
+    /// now warns about for scripts.
+    Run {
+        /// Task name or alias.
+        task: String,
+        /// Print what would run instead of running it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Inspect project tasks.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+
     /// Generate shell completion code.
     Completions {
         /// Target shell.
@@ -407,6 +426,26 @@ pub enum RegistryCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// List available tasks.
+    #[command(alias = "ls")]
+    List {
+        /// Include tasks marked `hide = true`.
+        #[arg(long)]
+        hidden: bool,
+    },
+    /// Show one task's resolved definition.
+    Info {
+        /// Task name or alias.
+        task: String,
+    },
+    /// Print the execution order for a task.
+    Deps {
+        /// Task name or alias.
+        task: String,
+    },
+}
 #[derive(Debug, Subcommand)]
 pub enum AliasCommand {
     /// Set an alias for a tool, e.g. `node default 20`.
