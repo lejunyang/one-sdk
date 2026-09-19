@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osdk scripts / tasks 能力调研 · 可视化附件（2026-09-19）</title>
+<style>
+:root{
+  --ink:#16191c; --ink2:#394046; --muted:#6d747a; --faint:#8f959a;
+  --line:#dad6cd; --line2:#c6c1b6; --paper:#f4f2ed; --card:#fffefb; --card2:#faf8f3;
+  --rust:#a8442a; --rust-soft:#f5e4dd;
+  --teal:#1f6b63; --teal-soft:#dcebe9;
+  --steel:#44606e; --steel-soft:#dfe8ec;
+  --g1:#2f6d4a; --g1b:#dceae1;
+  --g2:#6b7a1e; --g2b:#ebeed3;
+  --g3:#a8601f; --g3b:#f6e6d2;
+  --g4:#8c2f2f; --g4b:#f0dada;
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono","Cascadia Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Source Han Sans SC","Noto Sans CJK SC",sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.75;-webkit-font-smoothing:antialiased}
+code,.mono{font-family:var(--mono);font-size:.9em}
+code{background:#eceae3;border:1px solid var(--line);border-radius:3px;padding:.05em .32em;color:#4a3f36}
+.wrap{max-width:1220px;margin:0 auto;padding:0 28px 96px}
+.masthead{border-bottom:2px solid var(--ink);background:var(--card)}
+.masthead .wrap{padding-top:34px;padding-bottom:26px}
+.kicker{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--rust);margin-bottom:12px}
+h1{font-size:30px;line-height:1.3;margin:0 0 10px;letter-spacing:-.01em;font-weight:700}
+.subtitle{font-size:16px;color:var(--ink2);margin:0 0 20px;max-width:74ch}
+.meta{display:flex;flex-wrap:wrap;gap:8px 26px;font-family:var(--mono);font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:14px}
+.meta b{color:var(--ink2);font-weight:600}
+nav.toc{position:sticky;top:0;z-index:50;background:rgba(244,242,237,.96);border-bottom:1px solid var(--line2);backdrop-filter:saturate(1.2) blur(6px)}
+nav.toc .wrap{display:flex;gap:0;overflow-x:auto;padding:0 28px;scrollbar-width:thin}
+nav.toc a{flex:0 0 auto;padding:11px 15px;font-size:13px;color:var(--ink2);text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
+nav.toc a:hover{color:var(--rust);border-bottom-color:var(--rust);background:#eeebe3}
+nav.toc a .n{font-family:var(--mono);font-size:11px;color:var(--faint);margin-right:6px}
+section{padding-top:52px}
+.sechead{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line2);padding-bottom:10px;margin-bottom:22px}
+.sechead .idx{font-family:var(--mono);font-size:12px;color:#fff;background:var(--ink);padding:3px 9px;border-radius:3px;letter-spacing:.06em;flex:0 0 auto}
+h2{font-size:21px;margin:0;font-weight:700;letter-spacing:-.005em}
+.sechead .tag{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line2);padding:2px 8px;border-radius:3px;white-space:nowrap}
+.lede{font-size:15px;color:var(--ink2);max-width:84ch;margin:0 0 22px}
+.lede strong{color:var(--ink);font-weight:600;background:linear-gradient(transparent 62%,#f0e2d0 62%)}
+.fig{background:var(--card);border:1px solid var(--line2);border-radius:5px;padding:22px;margin:0 0 16px;box-shadow:0 1px 0 rgba(0,0,0,.03)}
+.figcap{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:0 0 18px;padding-bottom:9px;border-bottom:1px dashed var(--line2);letter-spacing:.02em}
+.figcap b{color:var(--ink);font-weight:600}
+.note{font-size:13.5px;color:var(--muted);border-left:2px solid var(--line2);padding:2px 0 2px 14px;margin:16px 0 0;max-width:88ch}
+.note b{color:var(--ink2)}
+.stance{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:14px}
+.stance .c{background:var(--card);border:1px solid var(--line2);border-top:3px solid var(--teal);border-radius:4px;padding:15px 16px}
+.stance .c.warn{border-top-color:var(--rust)}
+.stance .c .h{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
+.stance .c .b{font-size:14px;font-weight:650;line-height:1.5;margin-bottom:6px}
+.stance .c .d{font-size:13px;color:var(--ink2);line-height:1.62}
+.stance .c .num{font-family:var(--mono);font-size:19px;font-weight:700;color:var(--teal);display:block;margin-bottom:2px}
+.stance .c.warn .num{color:var(--rust)}
+/* bars */
+.bars{display:grid;grid-template-columns:auto 1fr auto;gap:5px 14px;align-items:center;font-size:13.5px}
+.bars .nm{font-family:var(--mono);font-size:12.5px;white-space:nowrap;text-align:right;color:var(--ink2)}
+.bars .nm.pick{color:var(--g1);font-weight:700}
+.bars .nm.ctrl{color:var(--steel);font-weight:700}
+.bars .tr{background:#eeece5;border:1px solid var(--line);border-radius:2px;height:20px;position:relative;overflow:hidden}
+.bars .bar{height:100%;border-radius:1px 0 0 1px}
+.bars .v{font-family:var(--mono);font-size:12px;color:var(--ink2);white-space:nowrap;min-width:92px}
+.b-pick{background:linear-gradient(90deg,#2f6d4a,#4d8a66)}
+.b-ctrl{background:linear-gradient(90deg,#44606e,#64818f)}
+.b-ok{background:linear-gradient(90deg,#6b7a1e,#8b9a3c)}
+.b-mid{background:linear-gradient(90deg,#a8601f,#c07e3c)}
+.b-no{background:linear-gradient(90deg,#8c2f2f,#a85050)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{border:1px solid var(--line2);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--card2);font-weight:650;font-size:12.5px;color:var(--ink2)}
+td.num,th.num{text-align:right;font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+tr.pick td{background:var(--g1b)}
+tr.ctrl td{background:var(--steel-soft)}
+.y{color:var(--g1);font-weight:700}
+.n{color:var(--g4);font-weight:700}
+.p{color:var(--g3);font-weight:700}
+.pill{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:9px;border:1px solid;letter-spacing:.03em}
+.pill.a{color:var(--g1);border-color:var(--g1);background:var(--g1b)}
+.pill.b{color:var(--g3);border-color:var(--g3);background:var(--g3b)}
+.pill.c{color:var(--g4);border-color:var(--g4);background:var(--g4b)}
+/* tiers */
+.tiers{display:grid;grid-template-columns:repeat(4,1fr);gap:0}
+.tier{border:1px solid var(--line2);border-right:none;padding:16px;background:var(--card2);position:relative}
+.tier:last-child{border-right:1px solid var(--line2)}
+.tier .t{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#fff;background:var(--steel);display:inline-block;padding:2px 8px;border-radius:3px;margin-bottom:10px}
+.tier:nth-child(1) .t{background:var(--g1)}
+.tier:nth-child(2) .t{background:var(--g2)}
+.tier:nth-child(3) .t{background:var(--g3)}
+.tier:nth-child(4) .t{background:var(--rust)}
+.tier h4{margin:0 0 8px;font-size:14.5px}
+.tier pre{background:var(--card);border:1px solid var(--line);border-radius:3px;padding:9px;font-family:var(--mono);font-size:11px;line-height:1.55;overflow-x:auto;margin:0 0 9px;color:#4a3f36}
+.tier .u{font-size:12.5px;color:var(--muted);line-height:1.6}
+.arrowrow{display:grid;grid-template-columns:repeat(4,1fr);margin-top:-1px}
+.arrowrow div{text-align:center;font-family:var(--mono);font-size:11px;color:var(--rust);padding:7px 4px;border:1px solid var(--line2);border-top:none;border-right:none;background:var(--rust-soft)}
+.arrowrow div:last-child{border-right:1px solid var(--line2)}
+/* phases */
+.ph{display:grid;grid-template-columns:auto 1fr;gap:0 16px}
+.ph .mk{position:relative;width:26px}
+.ph .mk::before{content:"";position:absolute;left:12px;top:0;bottom:0;width:2px;background:var(--line2)}
+.ph .dot{position:absolute;left:5px;top:6px;width:16px;height:16px;border-radius:50%;background:var(--card);border:3px solid var(--teal);z-index:1}
+.ph .row:last-child .mk::before{bottom:50%}
+.ph .row{display:contents}
+.phase{padding:0 0 26px}
+.phase .hd{display:flex;align-items:baseline;gap:11px;margin-bottom:5px}
+.phase .hd b{font-size:15px}
+.phase .cost{font-family:var(--mono);font-size:11px;padding:1px 8px;border-radius:9px;border:1px solid var(--g1);color:var(--g1);background:var(--g1b)}
+.phase .cost.w{border-color:var(--g3);color:var(--g3);background:var(--g3b)}
+.phase ul{margin:6px 0 0;padding-left:19px;font-size:13.5px;color:var(--ink2)}
+.phase li{margin-bottom:3px}
+.no{background:var(--g4b);border:1px solid var(--g4);border-radius:4px;padding:14px 16px;margin-top:6px}
+.no b{color:var(--g4)}
+.no ul{margin:8px 0 0;padding-left:19px;font-size:13.5px;color:var(--ink2)}
+.trap{background:#fdf6e8;border:1px solid var(--g3);border-left-width:4px;border-radius:4px;padding:14px 16px;margin:16px 0 0}
+.trap .h{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--g3);margin-bottom:6px}
+.trap p{margin:0 0 8px;font-size:13.5px;color:var(--ink2)}
+.trap p:last-child{margin-bottom:0}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.cmp .box{border:1px solid var(--line2);border-radius:4px;padding:14px 16px;background:var(--card)}
+.cmp .box.g{border-top:3px solid var(--g1)}
+.cmp .box.r{border-top:3px solid var(--g4)}
+.cmp .box h4{margin:0 0 9px;font-size:14px}
+.cmp .box ul{margin:0;padding-left:19px;font-size:13.5px;color:var(--ink2)}
+.cmp .box li{margin-bottom:6px}
+@media(max-width:900px){.tiers,.arrowrow{grid-template-columns:1fr}.tier{border-right:1px solid var(--line2);border-bottom:none}.tier:last-child{border-bottom:1px solid var(--line2)}.arrowrow{display:none}.cmp{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="kicker">osdk · 设计调研可视化附件</div>
+    <h1>为 osdk.toml 增加 scripts / tasks 能力</h1>
+    <p class="subtitle">参考 mise tasks，目标是「既可简单使用，又可复杂编写、可代理 makefile」。本页呈现 13 个嵌入式脚本引擎的实测体积矩阵、与 7 个任务运行器的能力对照、四档分层设计与分阶段落地路线。</p>
+    <div class="meta">
+      <span><b>日期</b> 2026-09-19</span>
+      <span><b>状态</b> 纯调研提案 · 未改产品代码</span>
+      <span><b>修订</b> 2026-09-19 · 推翻 -NoProfile 结论，新增 &amp; 语义 / zig / Lua 版本 / 沙箱四节</span>
+      <span><b>实测环境</b> Windows x64 · rustc 1.98.0 · x86_64-pc-windows-msvc</span>
+      <span><b>正文</b> osdk-scripts-tasks-2026-09-19.zh-CN.md</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#s1"><span class="n">01</span>结论速览</a>
+  <a href="#s2"><span class="n">02</span>体积实测矩阵</a>
+  <a href="#s3"><span class="n">03</span>接入代价</a>
+  <a href="#s4"><span class="n">04</span>任务运行器对照</a>
+  <a href="#s5"><span class="n">05</span>可代理 makefile</a>
+  <a href="#s6"><span class="n">06</span>四档分层</a>
+  <a href="#s7"><span class="n">07</span>Windows</a>
+  <a href="#s8"><span class="n">08</span>实测陷阱</a>
+  <a href="#s9"><span class="n">09</span>落地阶段</a>
+  <a href="#s10"><span class="n">10</span>未做核查</a>
+</div></nav>
+
+<div class="wrap">
+
+<section id="s1">
+  <div class="sechead"><span class="idx">01</span><h2>结论速览</h2><span class="tag">六个决定形状的结论</span></div>
+  <p class="lede">内嵌脚本语言<strong>应该做，但不是第一步</strong>。真正的地基是「声明式 TOML + shell + 任务级增量」，内嵌语言是第四档的逃生舱。</p>
+  <div class="stance">
+    <div class="c">
+      <div class="h">推荐引擎</div>
+      <span class="num">mlua + Lua 5.4</span>
+      <div class="d">独立试验 +421.5 KiB，接入 osdk 实测 <b>+304,640 B（+2.37%）</b>。MIT，启动开销与基线无法区分。</div>
+    </div>
+    <div class="c">
+      <div class="h">shim 侧代价</div>
+      <span class="num">0 字节</span>
+      <div class="d">置于默认开启、shim 关闭的 <code>scripts</code> feature 后，<code>osdk-shim.exe</code> 字节数<b>一字不差</b>。两次独立构建实测。</div>
+    </div>
+    <div class="c warn">
+      <div class="h">坚决不做</div>
+      <div class="b">pattern rule 与自动变量</div>
+      <div class="d">引入它等于从任务运行器变成构建系统。mise / just / Task / cargo-make / npm / deno / turbo <b>无一提供</b>——这是一致判断而非遗漏。</div>
+    </div>
+    <div class="c warn">
+      <div class="h">Windows 否决项</div>
+      <div class="b">just 式「默认需要 sh」</div>
+      <div class="d">just 官方：安装后 <code>sh</code> 必须在 PATH 中，即需 Git for Windows / Cygwin。这与 osdk「装上就能用」的价值主张冲突。</div>
+    </div>
+    <div class="c">
+      <div class="h">热路径影响</div>
+      <span class="num">无</span>
+      <div class="d"><code>hook-env</code> 与 <code>osdk-shim</code> 不解析 <code>[tasks]</code>、不初始化引擎。但 freshness 的 glob 扫描是真实地雷（见 08）。</div>
+    </div>
+    <div class="c">
+      <div class="h">分层原则</div>
+      <div class="b">升档不推翻</div>
+      <div class="d">四档之间无一步需要先重写别的任务。20 个任务里 19 个停在第一档、1 个用第四档，是正常状态。</div>
+    </div>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sechead"><span class="idx">02</span><h2>嵌入式脚本引擎体积实测矩阵</h2><span class="tag">13 个候选 · 统一 profile</span></div>
+  <p class="lede">全部候选在<strong>同一台机器、同一次会话、与 osdk 逐字相同的 <code>[profile.release]</code></strong>（<code>opt-level="z"</code> + <code>lto="fat"</code> + <code>codegen-units=1</code> + <code>strip=true</code> + <code>panic="abort"</code>）下构建。每个 crate 共享同一 harness：解析带 <code>run</code>/<code>depends</code>/<code>sources</code>/<code>outputs</code> 的任务 TOML，并注册一个 <code>sh()</code> 宿主函数——<strong>否则链接器会裁掉引擎，量出的「省」是假的</strong>。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 2.1</b> 相对 <code>baseline</code>（serde + toml 地板，288,256 B）的净增量 · 单位 KiB · 条宽按最大值 5,069 KiB 归一</p>
+    <div class="bars">
+      <div class="nm pick">mlua + Lua 5.4</div><div class="tr"><div class="bar b-pick" style="width:8.3%"></div></div><div class="v">+421.5 KiB</div>
+      <div class="nm ctrl">不嵌语言（对照组）</div><div class="tr"><div class="bar b-ctrl" style="width:13.3%"></div></div><div class="v">+675.5 KiB</div>
+      <div class="nm">mlua + Luau</div><div class="tr"><div class="bar b-ok" style="width:14.7%"></div></div><div class="v">+745.0 KiB</div>
+      <div class="nm">Koto</div><div class="tr"><div class="bar b-ok" style="width:16.3%"></div></div><div class="v">+825.0 KiB</div>
+      <div class="nm">rquickjs (QuickJS-NG)</div><div class="tr"><div class="bar b-ok" style="width:16.8%"></div></div><div class="v">+851.0 KiB</div>
+      <div class="nm">Rhai</div><div class="tr"><div class="bar b-ok" style="width:21.8%"></div></div><div class="v">+1,107.0 KiB</div>
+      <div class="nm">Steel (Scheme)</div><div class="tr"><div class="bar b-mid" style="width:50.1%"></div></div><div class="v">+2,539.5 KiB</div>
+      <div class="nm">Starlark</div><div class="tr"><div class="bar b-mid" style="width:54.2%"></div></div><div class="v">+2,745.0 KiB</div>
+      <div class="nm">Gluon</div><div class="tr"><div class="bar b-mid" style="width:54.8%"></div></div><div class="v">+2,779.0 KiB</div>
+      <div class="nm">Duckscript + SDK</div><div class="tr"><div class="bar b-no" style="width:67.4%"></div></div><div class="v">+3,415.0 KiB</div>
+      <div class="nm">Boa (JS)</div><div class="tr"><div class="bar b-no" style="width:78.5%"></div></div><div class="v">+3,978.0 KiB</div>
+      <div class="nm">Nickel</div><div class="tr"><div class="bar b-no" style="width:100%"></div></div><div class="v">+5,069.0 KiB</div>
+    </div>
+    <p class="note"><b>为什么「不嵌语言」也有 +675.5 KiB：</b>对照组不是空壳——它包含 <code>globset</code> 做 sources/outputs 匹配、<code>walkdir</code> 做遍历、手写拓扑排序与进程 spawn，即一个真实可用的声明式任务运行器所需的全部。<b>Lua 比它还小 254 KiB</b>，因为 Lua 不需要 glob 引擎。两者是叠加关系而非替代关系。</p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 2.2</b> 完整矩阵 · 许可证取自 <code>cargo metadata</code> 解析出的 lockfile 实际版本，非 crates.io 页面印象</p>
+    <table>
+      <thead><tr><th>候选</th><th>版本</th><th>许可证</th><th class="num">字节</th><th class="num">净增量</th><th class="num">依赖数</th><th class="num">启动中位数</th><th>需 C 编译器</th><th>裁决</th></tr></thead>
+      <tbody>
+        <tr><td><code>baseline</code></td><td>—</td><td>—</td><td class="num">288,256</td><td class="num">—</td><td class="num">17</td><td class="num">12.85 ms</td><td>否</td><td>基准</td></tr>
+        <tr class="pick"><td><b>mlua + Lua 5.4</b></td><td>mlua 0.10.5<br>lua-src 547.0.0</td><td>MIT</td><td class="num">719,872</td><td class="num"><b>+421.5 KiB</b></td><td class="num">32</td><td class="num">12.59 ms</td><td class="p">是</td><td><span class="pill a">推荐</span></td></tr>
+        <tr class="ctrl"><td><b>不嵌语言</b></td><td>globset 0.4.20<br>walkdir 2.5.0</td><td>Unlicense OR MIT</td><td class="num">979,968</td><td class="num"><b>+675.5 KiB</b></td><td class="num">29</td><td class="num">61.26 ms<sup>†</sup></td><td>否</td><td><span class="pill a">地基</span></td></tr>
+        <tr><td>mlua + Luau</td><td>luau0-src 0.12.3</td><td>MIT</td><td class="num">1,051,136</td><td class="num">+745.0 KiB</td><td class="num">32</td><td class="num">11.64 ms</td><td class="p">是（C++）</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>Koto</td><td>koto 0.16.1</td><td>MIT</td><td class="num">1,133,056</td><td class="num">+825.0 KiB</td><td class="num">43</td><td class="num">12.69 ms</td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>rquickjs</td><td>rquickjs 0.13.0</td><td>MIT</td><td class="num">1,159,680</td><td class="num">+851.0 KiB</td><td class="num">22</td><td class="num">13.27 ms</td><td class="p">是</td><td><span class="pill b">备选</span></td></tr>
+        <tr><td>Rhai</td><td>rhai 1.26.1</td><td>MIT OR Apache-2.0</td><td class="num">1,421,824</td><td class="num">+1,107.0 KiB</td><td class="num">35</td><td class="num">12.57 ms</td><td>否</td><td><span class="pill b">备选</span></td></tr>
+        <tr><td>Steel</td><td>steel-core 0.8.3</td><td>MIT OR Apache-2.0</td><td class="num">2,888,704</td><td class="num">+2,539.5 KiB</td><td class="num">126</td><td class="num"><b class="n">180.00 ms</b></td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>Starlark</td><td>starlark 0.14.2</td><td>Apache-2.0</td><td class="num">3,099,136</td><td class="num">+2,745.0 KiB</td><td class="num">153</td><td class="num">12.87 ms</td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>Gluon</td><td>gluon 0.18.4</td><td>MIT</td><td class="num">3,133,952</td><td class="num">+2,779.0 KiB</td><td class="num">96</td><td class="num">17.45 ms</td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>Duckscript + SDK</td><td>duckscript 0.10.0<br>sdk 0.11.1</td><td>Apache-2.0</td><td class="num">3,785,216</td><td class="num">+3,415.0 KiB</td><td class="num">148</td><td class="num">12.43 ms</td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>Boa</td><td>boa_engine 0.22.0</td><td>Unlicense OR MIT</td><td class="num">4,361,728</td><td class="num">+3,978.0 KiB</td><td class="num">143</td><td class="num">12.72 ms</td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>Nickel</td><td>nickel-lang-core 0.19.0</td><td>MIT</td><td class="num">5,478,912</td><td class="num">+5,069.0 KiB</td><td class="num">226</td><td class="num">15.47 ms</td><td>否</td><td><span class="pill c">否</span></td></tr>
+        <tr><td>hematita</td><td>0.1.0</td><td><b class="n">GPL-3.0</b></td><td class="num">未测</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td>否</td><td><span class="pill c">硬性排除</span></td></tr>
+        <tr><td>quick-js</td><td>0.4.1</td><td>MIT</td><td class="num">未测</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="p">是</td><td><span class="pill c">仅 MSYS2 + gnu</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note"><sup>†</sup> 对照组的 61.26 ms 是 glob 遍历 201 个文件的真实成本，与其他候选测的「引擎初始化」不是同一件事，不可横向比较。它<b>第一次被测成 2,827.91 ms</b>，原因见第 08 节。<br>
+    <b>许可证结论：</b>全部为宽松许可，与 osdk 的 MIT 分发相容。Starlark 与 Duckscript 是纯 Apache-2.0（无 MIT 双授权），带专利条款与 NOTICE 要求，不构成阻碍但需在分发物中保留声明。<b>hematita 的 GPL-3.0 对分发型产品直接出局。</b></p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>2.3</b> 「能编译」不算证据 —— 每个二进制的冒烟验证输出</p>
+    <table>
+      <thead><tr><th>候选</th><th>输入（各自语法）</th><th>实际输出</th><th>反向验证</th></tr></thead>
+      <tbody>
+        <tr><td><code>eng-mlua-lua54</code></td><td><code>return 40 + 2</code></td><td><code>t =&gt; Integer(42)</code></td><td>—</td></tr>
+        <tr><td><code>eng-rhai</code></td><td><code>40 + 2</code></td><td><code>t =&gt; 42</code></td><td>—</td></tr>
+        <tr><td><code>eng-steel</code></td><td><code>(+ 40 2)</code></td><td><code>t =&gt; [42]</code></td><td>—</td></tr>
+        <tr><td><code>eng-starlark</code></td><td><code>x = 40 + 2</code></td><td><code>t =&gt; None</code>（模块级求值本就返回 None，<b>看起来可疑</b>）</td><td class="y">喂 <code>fail("boom")</code> → exit 1；喂正常脚本 → exit 0。两方向都对</td></tr>
+        <tr><td><code>shellonly</code></td><td>带 <code>depends</code> 的任务图</td><td><code>prep-ran | build-ran</code>（依赖链真的跑了）</td><td class="y">freshness 双向：output 新 → <code>up to date</code>；touch source → 重跑</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sechead"><span class="idx">03</span><h2>接入 osdk 的真实代价</h2><span class="tag">仓库副本实测 · 非推断</span></div>
+  <p class="lede">独立试验的 +421.5 KiB 只是参考值。osdk 已链接大量运行时支撑，<strong>真实增量只能在 osdk 里量</strong>。做法：<code>robocopy</code> 一份工作区到临时目录（排除 <code>target</code>/<code>.git</code>），加 <code>scripts</code> feature、加 <code>scripts</code> 模块、<strong>并在 CLI 里加一个活的调用点</strong>——没有活调用点，链接器可以裁掉 mlua，量出的省是假的。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>表 3.1</b> 两次独立 <code>cargo build</code>（<b>未用 <code>--workspace</code></b>，否则 Cargo 会统一 feature 并静默给 shim 打开 scripts）</p>
+    <table>
+      <thead><tr><th>二进制</th><th class="num">基线（实测）</th><th class="num">加 mlua 后</th><th class="num">增量</th><th class="num">占比</th><th class="num">10% 红线</th><th>判定</th></tr></thead>
+      <tbody>
+        <tr><td><code>osdk.exe</code></td><td class="num">12,870,144</td><td class="num">13,174,784</td><td class="num"><b>+304,640 B</b></td><td class="num"><b>+2.37%</b></td><td class="num">≈1.23 MB</td><td class="y">通过（红线的 1/4）</td></tr>
+        <tr class="pick"><td><code>osdk-shim.exe</code></td><td class="num">3,743,744</td><td class="num">3,743,744</td><td class="num"><b>0 B</b></td><td class="num"><b>0.00%</b></td><td class="num">≈0.36 MB</td><td class="y">一字节未变</td></tr>
+      </tbody>
+    </table>
+    <p class="note"><b>基准值是本次实测，未采用 AGENTS.md 中记载的 12,797,952 / 3,709,952</b> —— 该文件明确要求「基准线会随功能增长而变，引用前先实测当前值」。</p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>3.2</b> 体积通过不代表功能通过 —— Lua 路径活性验证</p>
+    <table>
+      <thead><tr><th>输入</th><th class="num">期望</th><th class="num">实际</th><th>验证了什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>return 7 * 6</code></td><td class="num">42</td><td class="num y">42</td><td>求值器真的在工作</td></tr>
+        <tr><td><code>return sh("exit 3")</code></td><td class="num">3</td><td class="num y">3</td><td>宿主函数双向可用（FFI 两个方向都链接了）</td></tr>
+        <tr><td><code>this is not lua (</code></td><td class="num">-1</td><td class="num y">-1</td><td>语法错误被捕获而非崩溃</td></tr>
+        <tr><td>不设环境变量</td><td class="num">0</td><td class="num y">0</td><td>常规路径不受影响</td></tr>
+      </tbody>
+    </table>
+    <div class="trap">
+      <div class="h">第一次验证是错的，记录在此</div>
+      <p>最初用 <code>osdk --version</code> 触发探针，三个用例<b>全部返回 0，看起来「全对」</b>。实际是 clap 在到达调用点之前就退出了 —— 什么都没测到。换成 <code>osdk config path</code>（会走到 <code>init_tracing</code> 之后）才得到上表结果。</p>
+      <p>这正是 AGENTS.md「探针必须自证落在被测机制之内」那一条的形态：<b>一个从未见过红色的检查，其绿色不构成证据</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sechead"><span class="idx">04</span><h2>任务运行器横向对照</h2><span class="tag">8 个工具 · 该抄什么 / 该避什么</span></div>
+  <div class="fig">
+    <p class="figcap"><b>表 4.1</b> 能力矩阵</p>
+    <table>
+      <thead><tr><th>维度</th><th>make</th><th>mise</th><th>just</th><th>Task</th><th>cargo-make</th><th>npm</th><th>deno</th><th>Turbo/moon</th></tr></thead>
+      <tbody>
+        <tr><td>文件级增量</td><td class="y">✅ 核心</td><td class="y">✅ mtime/hash</td><td class="n">❌ 明确不做</td><td class="y">✅ checksum</td><td class="p">部分</td><td class="n">❌</td><td class="n">❌</td><td class="y">✅ 内容哈希</td></tr>
+        <tr><td><b>pattern rule</b></td><td class="y">✅</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td></tr>
+        <tr><td>任务依赖</td><td class="y">✅</td><td class="y">✅ 三种</td><td class="y">✅</td><td class="y">✅</td><td class="y">✅</td><td class="p">pre/post</td><td class="y">✅</td><td class="y">✅ <code>^build</code></td></tr>
+        <tr><td>并行</td><td class="y">✅ jobserver</td><td class="y">✅ 默认 4</td><td class="p">⚠️ 有限</td><td class="y">✅</td><td class="y">✅</td><td class="p">需插件</td><td class="y">✅</td><td class="y">✅</td></tr>
+        <tr><td>参数化</td><td class="n">❌</td><td class="y">✅ usage spec</td><td class="y">✅ 原生</td><td class="y">✅ vars</td><td class="y">✅</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td></tr>
+        <tr><td><b>Windows 免额外依赖</b></td><td class="n">❌</td><td class="y">✅</td><td class="n">❌ 需 <code>sh</code></td><td class="y">✅</td><td class="y">✅</td><td class="p">⚠️ 语法差异</td><td class="y">✅ 内置 sh 子集</td><td class="y">✅</td></tr>
+        <tr><td>内嵌脚本语言</td><td class="n">❌</td><td class="n">❌ 靠 shebang</td><td class="n">❌</td><td class="n">❌</td><td class="y">✅ duckscript</td><td class="n">❌</td><td class="y">✅ JS</td><td class="n">❌</td></tr>
+        <tr><td>远程任务定义</td><td class="n">❌</td><td class="y">✅ HTTP+git</td><td class="n">❌</td><td class="p">实验</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td><td class="n">❌</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="cmp">
+    <div class="box g">
+      <h4>该抄</h4>
+      <ul>
+        <li><b>mise 的 <code>sources</code>/<code>outputs</code></b>，尤其是「任务定义自身自动算作 source」—— 改了定义就重跑。</li>
+        <li><b>mise 的 usage spec</b>，且一步到位做 spec 式（不走它已废弃的模板函数弯路）。</li>
+        <li><b>mise 的 <code>run_windows</code></b>。（<b>pwsh 自动 <code>-NoProfile</code> 不该抄</b> —— 初稿的错误结论，修正见第 07 节。）</li>
+        <li><b>Task 的 <code>method: checksum|timestamp|none</code></b> —— 判据做成可选项。mise 事后也补了 hash 选项，说明单一 mtime 不够。</li>
+        <li><b>mise 区分「<code>run</code> 内的执行步骤」与「<code>depends</code> 图的边」</b> —— 解决了 <code>depends</code> 表达不了的「先 A 后 B‖C」。</li>
+      </ul>
+    </div>
+    <div class="box r">
+      <h4>该避</h4>
+      <ul>
+        <li><b>just 的「Windows 默认需要 <code>sh</code>」</b> —— 对以「装上就能用」为卖点的 osdk 是致命的。</li>
+        <li><b>make 的 pattern rule 与自动变量</b> —— 见第 05 节。</li>
+        <li><b>npm 的「字符串直接丢给平台默认 shell」</b> —— 这正是 <code>cross-env</code> / <code>rimraf</code> 这类补丁包存在的根本原因。</li>
+        <li><b>mise 的 Tera 模板参数函数</b> —— 上游自己已废弃，并写明三条理由（两遍解析返回空串、转义不可预测、TOML 与 file task 行为不一致）。</li>
+        <li><b>mise 的 <code>confirm</code> 语义</b> —— 它只守 <code>run</code>，<code>depends</code> 已经跑完了（官方用 WARNING 标注）。osdk 若做确认应守住整个子树。</li>
+        <li><b>cargo-make 内嵌 duckscript 的选择</b> —— 实测 3,415 KiB，是 Lua 的 8 倍而表达力更弱。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sechead"><span class="idx">05</span><h2>「可代理 makefile」逐项裁决</h2><span class="tag">刚需 / 陷阱的分界</span></div>
+  <div class="fig">
+    <p class="figcap"><b>表 5.1</b> make 能力逐项</p>
+    <table>
+      <thead><tr><th>make 能力</th><th>刚需？</th><th>mise 覆盖</th><th>osdk 建议</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><td><code>.PHONY</code></td><td class="y">✅</td><td>隐含</td><td class="y">默认即如此</td><td>任务默认非文件目标，不需要这个概念</td></tr>
+        <tr><td>任务依赖与拓扑排序</td><td class="y">✅</td><td><code>depends</code></td><td class="y">做</td><td>并区分 <code>depends</code> / <code>wait_for</code></td></tr>
+        <tr><td>文件级时间戳增量</td><td class="y">✅</td><td><code>sources</code>/<code>outputs</code></td><td class="y">做</td><td><b>任务级</b>粒度，判据可选 mtime / hash</td></tr>
+        <tr><td>并行 <code>-j</code></td><td class="y">✅</td><td><code>--jobs</code></td><td class="y">做</td><td>复用现有 <code>settings.jobs</code></td></tr>
+        <tr><td>变量</td><td class="y">✅</td><td><code>[vars]</code>+<code>[env]</code></td><td class="y">做</td><td>与现有 <code>[settings]</code> 层次一致</td></tr>
+        <tr><td>自动变量 <code>$@</code>/<code>$&lt;</code>/<code>$^</code></td><td class="n">❌</td><td>不提供</td><td class="n">不做</td><td>只在 pattern rule 语境下有意义</td></tr>
+        <tr><td><b>pattern rule <code>%.o: %.c</code></b></td><td class="n">❌</td><td>不提供</td><td class="n">不做</td><td><b>见下方专栏</b></td></tr>
+        <tr><td>隐式规则库</td><td class="n">❌</td><td>不提供</td><td class="n">不做</td><td>同上</td></tr>
+        <tr><td>order-only 前置 <code>|</code></td><td class="n">❌</td><td>不提供</td><td class="n">不做</td><td><code>wait_for</code> 覆盖了实际需求</td></tr>
+        <tr><td>递归 make / jobserver</td><td class="n">❌</td><td>不提供</td><td class="n">不做</td><td>任务运行器不承担构建图职责</td></tr>
+      </tbody>
+    </table>
+    <div class="trap">
+      <div class="h">为什么 pattern rule 不该做</div>
+      <p>它的本质是「用一条规则声明 N 条文件级规则」。一旦提供，用户合理期待的下一步是：自动推导依赖链（<code>.c</code> → <code>.o</code> → 可执行文件的传递闭包）、VPATH 搜索、双冒号规则、<code>.SECONDARY</code>/<code>.INTERMEDIATE</code> 中间文件生命周期管理。<b>这不是「多做一个功能」，是变成构建系统。</b></p>
+      <p>而表 4.1 中该行<b>七个工具全是 ❌</b> —— 这是七个独立项目的一致判断。真实世界里需要 pattern rule 的场景（编译一棵源码树）已由各语言自己的构建器（cargo / tsc / go build）承担，任务运行器的职责是<b>以正确的工具版本和环境调用它们，并在输入没变时跳过</b>。</p>
+      <p>mise 官方在 monorepo 文档里说得很直白：<i>declare prerequisites in mise, or delegate the complete build graph to an existing build system. Avoid duplicating conflicting graphs.</i></p>
+    </div>
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sechead"><span class="idx">06</span><h2>四档分层设计</h2><span class="tag">核心约束：升档不推翻</span></div>
+  <p class="lede">每一档都是上一档的<strong>严格超集</strong>，低档写法在高档存在时语义不变。用户永远不会因为某个任务变复杂而被迫重写其他任务。</p>
+  <div class="tiers">
+    <div class="tier">
+      <span class="t">第一档</span>
+      <h4>单行字符串</h4>
+      <pre>[tasks]
+build = "cargo build"
+test  = "cargo test"</pre>
+      <div class="u">覆盖大多数场景。与 mise 的 trivial task 完全一致。<b>项目里 19/20 的任务应停在这里。</b></div>
+    </div>
+    <div class="tier">
+      <span class="t">第二档</span>
+      <h4>多行 shell + 声明式元数据</h4>
+      <pre>[tasks.build]
+run = ["cargo fmt --check",
+       "cargo build --release"]
+run_windows = "pwsh -File ..."
+depends = ["fetch-deps"]
+sources = ["crates/**/*.rs"]
+outputs = ["target/release/osdk.exe"]</pre>
+      <div class="u">增量、依赖、平台变体、环境变量。<b>Makefile 的绝大多数用途在此被覆盖。</b></div>
+    </div>
+    <div class="tier">
+      <span class="t">第三档</span>
+      <h4>独立脚本文件</h4>
+      <pre>[tasks.release]
+file = "scripts/release.ps1"
+
+# 或 osdk-tasks/ 目录
+# 用 #OSDK / #USAGE 注释头</pre>
+      <div class="u">脚本超过约 20 行时挪出 TOML。好处是编辑器能提供语法高亮与 lint。</div>
+    </div>
+    <div class="tier">
+      <span class="t">第四档</span>
+      <h4>内嵌 Lua（可选 feature）</h4>
+      <pre>[tasks.sync]
+lua = """
+for _, t in ipairs(targets) do
+  if osdk.platform.os == "windows"
+  then osdk.sh(...) end
+end
+"""</pre>
+      <div class="u">只用于<b>条件分支、循环生成、跨平台路径计算</b>三类。字段名用 <code>lua</code> 而非 <code>run</code>，一眼可辨档位且能给出互斥报错。</div>
+    </div>
+  </div>
+  <div class="arrowrow">
+    <div>↓ 加元数据，run 原样保留</div>
+    <div>↓ 脚本变长，挪进文件</div>
+    <div>↓ 确需程序化逻辑</div>
+    <div>← 逃生舱，不是地基</div>
+  </div>
+  <p class="note"><b>字段名 <code>lua</code> 是刻意的：</b>若复用 <code>run</code>，就需要靠猜测内容格式来分派解释器；独立字段让「这是哪一档」一目了然，且 <code>run</code> 与 <code>lua</code> 同时出现时可以给出明确报错而非静默取其一。</p>
+</section>
+
+<section id="s7">
+  <div class="sechead"><span class="idx">07</span><h2>Windows 一等公民</h2><span class="tag">否决了一批看起来自然的设计</span></div>
+  <div class="fig">
+    <p class="figcap"><b>表 7.1</b> 各方案的 Windows 代价</p>
+    <table>
+      <thead><tr><th>方案</th><th>开箱即用</th><th>需要什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>cmd /c</code>（默认 inline shell）</td><td class="y">✅</td><td>系统自带</td></tr>
+        <tr><td><code>pwsh</code>（可选 shell）</td><td class="p">⚠️</td><td>PowerShell 7 需单独安装；5.1 系统自带</td></tr>
+        <tr><td><code>sh</code>（just 的默认）</td><td class="n">❌</td><td><b>需 Git for Windows / Cygwin / MSYS2</b></td></tr>
+        <tr><td>内嵌 Lua</td><td class="y">✅ 运行时</td><td>运行时零依赖；<b>构建期</b>需 C 编译器</td></tr>
+        <tr><td>内嵌 Rhai / Koto / Starlark</td><td class="y">✅</td><td>构建期也无额外要求</td></tr>
+      </tbody>
+    </table>
+    <p class="note"><b>mise 的 Windows 细节值得逐条抄：</b>file task 可见性靠「扩展名在 <code>exe/bat/cmd/com/ps1/vbs</code> 白名单内 <b>或</b> 有 shebang」判定（两者都没有的文件在 Windows 上<b>完全隐形</b>）；Windows PowerShell 拒绝执行非 <code>.ps1</code> 脚本，所以 pwsh 任务被复制成临时 <code>.ps1</code> 再跑，并用 <code>MISE_TASK_DIR</code> 让脚本定位自身；<code>cmd /c</code> 不能直接启动 <code>.ps1</code>，所以要写 <code>pwsh -File ...</code> 而非直接写路径。</p>
+  </div>
+  <div class="trap">
+    <div class="h">修订：mise 的 <code>-NoProfile</code> 不能照抄</div>
+    <p>mise 在 shell 为 pwsh/powershell 时自动传 <code>-NoProfile</code>，理由是「防止会修改 PATH 的 profile 遮蔽任务自己的工具」。<b>初稿建议照抄，这条结论对 osdk 是错的，此处修正。</b></p>
+    <p>osdk 的 PATH 注入有<b>两套独立机制</b>（<code>activate/mod.rs:3-9</code>）：<b>shims</b> 写进持久 PATH，禁用 profile 也照常继承；<b>shell activation</b> 则完全挂在 profile 钩子上。因此 <code>-NoProfile</code> 的后果是<b>分层的</b>，既不是「全丢」也不是「无影响」：</p>
+    <table>
+      <thead><tr><th>能力</th><th><code>-NoProfile</code> 下</th><th>原因</th></tr></thead>
+      <tbody>
+        <tr><td>调用 <code>node</code> / <code>cargo</code> / <code>go</code></td><td class="y">正常且版本正确</td><td>shim 被调用时现场解析项目配置</td></tr>
+        <tr><td><code>JAVA_HOME</code> / <code>GOROOT</code> 等</td><td class="n">不会被设置</td><td>由 hook-env 导出</td></tr>
+        <tr><td>被 <code>ShimSettings</code> 排除的工具</td><td class="n">找不到</td><td>只有 activation 会前置真实 bin 目录</td></tr>
+      </tbody>
+    </table>
+    <p>本仓库 AGENTS.md「与 sdk 有关的命令不要使用 <code>-NoProfile</code>」因此是准确的，与 mise 的做法<b>真实冲突</b>。<b>正确做法：默认不加 <code>-NoProfile</code>，改由 osdk 在启动任务前自己计算并注入环境（复用 hook-env 逻辑），同时设 <code>OSDK_TASK=1</code> 让 profile 钩子自避让。</b>两个目标同时满足，而 <code>-NoProfile</code> 只能满足其一。</p>
+    <p>另：用户为本项目写的脚本需兼容 <b>PowerShell 5.1</b>，因此 osdk <b>生成</b>的任何 <code>.ps1</code> 片段必须限制在 5.1 语法内：不用 <code>&amp;&amp;</code>/<code>||</code>、不用三元 <code>?:</code>、不用 <code>??</code>、不用 <code>ConvertFrom-Json -AsHashtable</code>。</p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 7.2</b> <code>&amp;</code> 的三种互不兼容语义 —— 本机实测（pwsh 7.6.6）</p>
+    <table>
+      <thead><tr><th>shell</th><th><code>a &amp; b</code> 的含义</th><th>实测证据</th></tr></thead>
+      <tbody>
+        <tr><td>Unix <code>sh</code></td><td>a 放后台，b 立即开始（<b>并发</b>）</td><td>通识，本机未验证</td></tr>
+        <tr><td><b>Windows <code>cmd</code></b></td><td><b>a 跑完再跑 b，无条件</b></td><td class="n">输出 <code>RAN_ANYWAY</code>、<code>exit=0</code> —— <b>前一条的失败被吞掉</b></td></tr>
+        <tr><td><b>PowerShell 7</b></td><td>尾随 <code>&amp;</code> = 后台 Job</td><td>500 ms 的 sleep 在 <b>260 ms</b> 返回，确为异步</td></tr>
+        <tr><td><b>PowerShell 5.1</b></td><td class="n"><b>parse error</b></td><td class="n">「不允许使用与号(&amp;)。&amp; 运算符是为将来使用而保留的」</td></tr>
+      </tbody>
+    </table>
+    <p class="note">cmd 的 <code>&amp;</code> 与 Unix 的 <code>&amp;</code> <b>语义完全不同</b>：前者是「无条件顺序」，后者是「并发」。同一份 <code>run</code> 在两个平台上做两件不同的事，<b>而且都不报错</b>。<br><b>设计约束：<code>run</code> 内不依赖 <code>&amp;</code>，两个诉求各给专门字段</b> —— 失败也继续用 <code>{ cmd = "…", ignore_error = true }</code>（对齐 make 的 <code>-</code> 前缀、Task 的 <code>ignore_error</code>、cargo-make 的 <code>ignore_errors</code>）；真并行用 <code>{ tasks = ["a","b"] }</code>，osdk 能等待并收集退出码，而 <code>&amp;</code> 扔出的后台进程无人回收。<code>depends</code> 不能替代后者：官方明确其顺序不构成序列，表达不了「先 A，再 B‖C」。</p>
+  </div>
+
+  <div class="trap">
+    <div class="h">实测中发现：<code>sh</code> 可能是 osdk 自己的 shim</div>
+    <p>本机 <code>Get-Command sh</code> 解析到 <code>E:\osdk-data\data\shims\sh.cmd</code>。这意味着在装了 osdk 的开发机上 <code>sh</code> 确实可用 —— <b>但这恰恰让「默认 shell 选 sh」更危险</b>：开发机上因为这个 shim 悄悄能跑，裸机用户却会失败，问题被推迟到用户侧才暴露。<b>默认 <code>cmd /c</code> 的结论因此更稳固。</b></p>
+  </div>
+
+  <div class="cmp">
+    <div class="box g">
+      <h4>为什么 Lua 选 5.4</h4>
+      <ul>
+        <li><b>5.4 是当前维护版本</b>，也是 mlua 默认档与 vendored 构建最顺畅的一档。</li>
+        <li><b>5.3 起的整数子类型</b>让路径拼接与数值计算不会莫名产生 <code>1.0</code>。</li>
+        <li><b>LuaJIT / 5.1 的优势只有生态</b>（老库、OpenResty 系），而 osdk 不消费第三方 Lua 库，该优势为零；LuaJIT 的汇编后端在 aarch64-windows 一类目标上反而是负担。</li>
+        <li><b>体积差异不构成依据</b> —— 各版本都在数百 KiB 量级，远小于候选引擎之间的差距。</li>
+      </ul>
+      <p class="note">结论：选 5.4 是<b>「采用默认值」而非权衡结果</b>，但这个默认值没有需要推翻的理由。</p>
+    </div>
+    <div class="box r">
+      <h4>为什么不要 Luau 的沙箱</h4>
+      <ul>
+        <li>代价：<b>+323.5 KiB</b>，且构建期依赖从 C 抬升到 <b>C++</b>。</li>
+        <li>它提供只读全局表、屏蔽 <code>debug</code>/<code>io</code>/<code>os</code>、指令与内存配额 —— <b>目标场景是「执行不可信的第三方代码」</b>（来源 Roblox 要跑玩家脚本）。</li>
+        <li>而 osdk 的任务来自<b>已过 trust 门禁</b>的 <code>osdk.toml</code>，同一文件的 <code>run</code> 本就能执行任意 shell 命令。</li>
+        <li><b>在一个已能执行任意 shell 的文件里给 Lua 加沙箱，不构成任何实际保护</b> —— 攻击者直接写 <code>run</code> 即可。</li>
+      </ul>
+      <p class="note">若将来支持<b>远程任务定义</b>（当前明确不做），信任边界才会改变；但届时正确答案多半是<b>进程级隔离</b>而非语言级沙箱，因为 <code>run</code> 的问题依然存在。</p>
+    </div>
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sechead"><span class="idx">08</span><h2>实测中踩到的两个陷阱</h2><span class="tag">必须写进设计约束</span></div>
+  <p class="lede">这两个都是<strong>我在本次实测中亲自踩到的</strong>，不是从文档推断的风险。它们的共同点是：<strong>失效时不报错、看起来完全正常</strong>。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>8.1</b> glob 全量遍历 —— 46 倍的差距</p>
+    <div class="bars">
+      <div class="nm">在 <code>target/</code> 旁运行</div><div class="tr"><div class="bar b-no" style="width:100%"></div></div><div class="v">2,827.91 ms</div>
+      <div class="nm pick">干净目录（201 文件）</div><div class="tr"><div class="bar b-pick" style="width:2.17%"></div></div><div class="v">61.26 ms</div>
+    </div>
+    <p class="note"><b>这不是设计的成本，是我的 harness 的缺陷：</b><code>WalkDir::new(".")</code> 从 cwd 全量遍历，而 cwd 旁边就是几 GB 的 <code>target/</code>。<b>但它精确预演了产品会怎么出问题</b> —— AGENTS.md 里「扫描下探进 conda prefix，一次多走 1,000 个目录」记的是同一类坑。<br><b>→ 设计约束：freshness 扫描必须从 glob 的字面前缀起步</b>（<code>src/**/*.rs</code> 只进 <code>src/</code>），绝不能从 cwd 全量 walk。mise 官方文档也有对应警告，且它已把 monorepo 的自动文件系统遍历发现<b>废弃</b>，改为显式声明。</p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>8.2</b> glob 静默失配 —— 检查悄悄什么都没做</p>
+    <table>
+      <thead><tr><th>写法</th><th>匹配到的文件</th><th>表现</th><th>是否报错</th></tr></thead>
+      <tbody>
+        <tr><td><code>sources = ["**/*.marker"]</code></td><td class="n">0 个</td><td>freshness 检查静默跳过，任务<b>每次都跑</b></td><td class="n">否 —— 看起来完全正常</td></tr>
+        <tr class="pick"><td><code>sources = ["./src/f1.marker"]</code></td><td class="y">正确匹配</td><td>output 新 → <code>up to date</code>；touch source → 重跑</td><td>—</td></tr>
+      </tbody>
+    </table>
+    <p class="note">原因：<code>WalkDir</code> 产出的路径带 <code>./</code> 前缀而 pattern 不带。<b>→ 设计约束：glob 规范化（是否带 <code>./</code>、路径分隔符、大小写）必须有双向测试 —— 「该匹配的匹配到」<b>和</b>「不该匹配的没匹配」</b>，否则失效是静默的。这正是 AGENTS.md「前缀匹配过宽，与写窄同样危险，而且更隐蔽」那一条的形态。</p>
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sechead"><span class="idx">09</span><h2>分阶段落地</h2><span class="tag">先做什么能立刻可用</span></div>
+  <div class="fig">
+    <div class="ph">
+      <div class="row"><div class="mk"><div class="dot"></div></div><div class="phase">
+        <div class="hd"><b>阶段一 · 声明式基础</b><span class="cost">体积影响 ≈ 0</span></div>
+        <div style="font-size:13.5px;color:var(--ink2)">无新依赖 —— toml/serde 已在依赖图内。<b>这一阶段结束后就能替代大多数 Makefile 与 npm scripts。</b></div>
+        <ul>
+          <li><code>[tasks]</code> 解析与分层合并；<code>trust.rs</code> 显式分类</li>
+          <li><code>run</code> / <code>run_windows</code> / <code>description</code> / <code>alias</code> / <code>dir</code> / <code>env</code> / <code>depends</code> / <code>hide</code> / <code>quiet</code></li>
+          <li>拓扑排序 + 并行执行（复用 <code>settings.jobs</code>）；输出前缀化避免交错</li>
+          <li><code>osdk run</code> / <code>osdk task list</code> / <code>info</code> / <code>deps</code></li>
+        </ul>
+      </div></div>
+      <div class="row"><div class="mk"><div class="dot"></div></div><div class="phase">
+        <div class="hd"><b>阶段二 · 增量与参数</b><span class="cost">无新 crate（globset 已在图内）</span></div>
+        <ul>
+          <li><code>sources</code>/<code>outputs</code>/<code>freshness</code>；<b>任务定义自身自动算作 source</b></li>
+          <li><b>glob 扫描从字面前缀起步</b>（第 08 节教训），并补双向测试</li>
+          <li><code>usage</code> spec：解析、校验、<code>--help</code> 生成、shell 补全</li>
+          <li><code>timeout</code> / <code>depends_post</code> / <code>wait_for</code>；<code>osdk task add</code> / <code>rm</code> / <code>edit</code></li>
+        </ul>
+      </div></div>
+      <div class="row"><div class="mk"><div class="dot"></div></div><div class="phase">
+        <div class="hd"><b>阶段三 · 文件任务</b><span class="cost">体积影响 ≈ 0</span></div>
+        <ul>
+          <li><code>osdk-tasks/</code> 显式 includes 发现（<b>不做递归自动遍历</b> —— mise 已把它废弃）</li>
+          <li>注释头元数据（<code>#OSDK</code> / <code>#USAGE</code>）</li>
+          <li>Windows 可见性规则 + <code>.ps1</code> 配对 + <code>OSDK_TASK_DIR</code></li>
+        </ul>
+      </div></div>
+      <div class="row"><div class="mk"><div class="dot"></div></div><div class="phase">
+        <div class="hd"><b>阶段四 · 内嵌 Lua（可选）</b><span class="cost">osdk +2.37% · shim 0</span></div>
+        <ul>
+          <li><code>osdk-core</code> 的 <code>scripts</code> feature，<code>default</code> 开启、shim 关闭</li>
+          <li><code>lua</code> 字段 + <code>osdk.*</code> 宿主 API（<code>sh</code>、<code>platform</code>、<code>path.join</code>、<code>config</code>、<code>project_root</code>）</li>
+          <li><b class="p">阻塞性前置：先在 CI 的每个发布目标上验证 mlua vendored 能构建</b>。<b>优先尝试 <code>zig cc</code> 路线</b> —— osdk 已内置 zig backend，其注释明确说明 zig 自带 musl / glibc / mingw-w64，一台机器即可覆盖全部目标；判据是<b>产物在目标平台真实运行</b>，不是构建退出码为 0。任一目标失败则关闭该目标的 feature，或整体退回 Rhai</li>
+        </ul>
+      </div></div>
+    </div>
+    <div class="no">
+      <b>明确不做（是主动放弃，不是「暂未实现」）</b>
+      <ul>
+        <li><b>pattern rule 与自动变量</b> —— 见第 05 节</li>
+        <li><b>远程任务定义</b>（<code>file</code> 的 HTTP/<code>git::</code>、<code>includes</code> 的 <code>git::</code>）—— 把「信任本地文件的内容哈希」变成「信任一个会变的远程端点」，与 osdk 现有的内容绑定信任模型根本冲突</li>
+        <li><b>产物级远程缓存</b> —— mise 自己还标着 experimental，且需要先有可信的输入声明</li>
+        <li><b>沙箱（<code>deny_*</code>）</b> —— 平台差异巨大，Windows 侧支持有限</li>
+        <li><b>monorepo 任务命名空间</b> —— 等有真实需求；<code>config_roots</code> 这套是 mise 迭代很久才稳定的</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>9.2</b> 信任模型 —— 现状核查结果是个好起点</p>
+    <p style="margin:0 0 12px;font-size:14px">核查 <code>trust.rs</code> 发现：<code>collect_requirements</code> 对<b>未知顶层表 fail-closed</b>，归为 <code>ExecutesCode</code>。这意味着 <b>一旦 <code>osdk.toml</code> 出现 <code>[tasks]</code>，现有 osdk 会立即要求显式 trust —— 无需改动任何代码，默认就是安全的。</b></p>
+    <table>
+      <thead><tr><th>要做的事</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr><td>把 <code>tasks</code> 加进 <code>TRUST_REQUIRING_TABLES</code> 并标 <code>ExecutesCode</code></td><td>不是为改变行为（fail-closed 已如此），而是让拒绝信息能说清「<code>tasks</code> —— 会执行任意代码」，而非笼统的未知表</td></tr>
+        <tr><td><code>task_config</code> 与 <code>vars</code> <b>同样</b>显式分类为 <code>ExecutesCode</code></td><td><code>task_config.shell</code> 直接决定用什么解释器跑所有任务；<code>vars</code> 会被插值进命令。<b>不要因为「看起来只是变量」就放进安全列表</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sechead"><span class="idx">10</span><h2>本文未做的核查</h2><span class="tag">诚实清单</span></div>
+  <p class="lede">以下是<strong>已知但本次没有验证</strong>的事项。列出它们是因为：一个被提到却没做的检查，如果不写下来，就等于被悄悄放弃了。</p>
+  <div class="fig">
+    <table>
+      <thead><tr><th>未核查项</th><th>影响</th><th>建议的验证方式</th></tr></thead>
+      <tbody>
+        <tr><td><b>mlua vendored 的交叉编译</b></td><td class="n">阶段四的阻塞性前置</td><td>本机只有 MSVC toolchain，未配置 C 交叉编译器。<b>修订补充：osdk 自带的 zig backend 很可能直接化解此项</b>（<code>zig cc</code> 自带 musl / mingw-w64），<b>但该方案同样未实测</b>；Apple 目标因 zig 不附带 macOS SDK 需单独处理</td></tr>
+        <tr><td><code>deno_task_shell</code> 的体积</td><td class="p">仅影响长期备选评估</td><td>第 07 节提到它作为内置跨平台 shell 子集的备选，但未建试验工程实测</td></tr>
+        <tr><td><code>globset</code> 在 osdk 依赖图中的增量</td><td class="y">已补测，不再是缺口</td><td><code>cargo tree -e normal -p osdk-cli</code> 显示 450 个不同 crate，<code>globset</code> 与 <code>walkdir</code> 均已在图内 —— 阶段二不引入新 crate</td></tr>
+        <tr><td>mise 行为未实机验证</td><td class="p">第 02 节全部断言来自官方文档</td><td>实现前对关键语义（尤其 sources/outputs 的依赖失效传播）建议本机安装 mise 实测确认</td></tr>
+        <tr><td>PowerShell 5.1 兼容性</td><td class="p">影响 osdk 生成的脚本</td><td><b>部分已补测</b>：5.1 下尾随 <code>&amp;</code> 确为 parse error（表 7.2），印证清单方向；但生成的 <code>.ps1</code> 整体仍未做实机回归</td></tr>
+        <tr><td><b><code>-NoProfile</code> 的三项能力差异</b></td><td class="p">影响第 07 节的修订结论</td><td>结论基于 <code>activate/mod.rs:3-9</code> 的机制阅读，逻辑链完整但<b>未构造真实场景端到端跑一遍</b>（工具 A 有 shim、工具 B 被排除、且依赖 <code>JAVA_HOME</code>）。实现前必须补</td></tr>
+        <tr><td><code>{ tasks = [...] }</code> 的并行语义</td><td class="p">来自官方文档</td><td>表 7.2 中 <code>&amp;</code> 的跨平台差异是本机实测的，但「mise 如何调度 <code>{tasks=[…]}</code>」仅有文档依据</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="fig">
+    <p class="figcap"><b>10.2</b> 仓库清洁性 · 所有试验均在仓库外进行</p>
+    <table>
+      <thead><tr><th>核查</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><td><code>git status --porcelain</code></td><td class="y">空（工作区未被改动）</td></tr>
+        <tr><td>候选试验工程</td><td><code>E:\tmp\osdk-script-size\</code></td></tr>
+        <tr><td>接入代价试验（仓库副本）</td><td><code>E:\tmp\osdk-mlua-probe\</code></td></tr>
+        <tr><td>「当前树无 scripts/tasks 实现」</td><td class="y">grep <code>crates/</code> 下 <code>*.rs</code>，0 命中（搜索限定代码路径，避免命中文档对符号的描述）</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
