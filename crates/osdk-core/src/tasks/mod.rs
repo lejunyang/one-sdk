@@ -28,6 +28,7 @@
 //!   (see [`TaskSet::excluded`]) so `osdk run` can say why it is absent instead
 //!   of reporting an unknown name.
 
+pub mod freshness;
 pub mod runner;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -277,6 +278,27 @@ pub struct TaskDef {
     /// Platform filter, same vocabulary as `[tools]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when: Option<PlatformFilter>,
+    /// Input globs. When they are unchanged, the task is skipped.
+    ///
+    /// A pattern matching nothing is an error rather than a vacuous "fresh":
+    /// see `freshness::resolve` for why that failure would otherwise be silent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    /// Output globs. Absent ones simply mean "not built yet", not a config error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+    /// How to compare inputs: `mtime` (default), `hash`, or `always`.
+    ///
+    /// Offered as a choice because neither answer is right everywhere: mtime is
+    /// cheap but a `git checkout` or CI cache restore rewrites it without
+    /// changing content, while hashing reads every input. Task (go-task) ships
+    /// the same three, and mise added a hash option after starting with mtime.
+    #[serde(default, skip_serializing_if = "is_default_freshness")]
+    pub freshness: crate::tasks::freshness::Freshness,
+}
+
+fn is_default_freshness(value: &crate::tasks::freshness::Freshness) -> bool {
+    *value == crate::tasks::freshness::Freshness::default()
 }
 
 impl TaskEntry {

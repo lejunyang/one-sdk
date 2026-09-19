@@ -4984,6 +4984,19 @@ fn task_environment(app: &App, cwd: &std::path::Path) -> Result<osdk_core::tasks
     })
 }
 
+/// Where per-project freshness state lives.
+///
+/// Under the managed cache rather than beside `osdk.toml`: it is derived data,
+/// not something a user edits or commits, and writing into the project would
+/// mean every consumer needs a `.gitignore` entry. Keyed by the config path so
+/// two projects cannot collide.
+fn freshness_state_path(app: &App) -> std::path::PathBuf {
+    osdk_core::tasks::freshness::state_path(
+        &app.ctx.dirs.cache,
+        app.ctx.config.project_config_path.as_deref(),
+    )
+}
+
 /// Directory that task-relative paths resolve against.
 ///
 /// The config file's own directory, not the shell's cwd: a task means the same
@@ -5007,9 +5020,31 @@ pub fn run_task(
     let set = &app.ctx.config.tasks;
     let plan = runner::plan(set, &task)?;
 
+    let config_root = task_config_root(app);
+
     if dry_run {
+        // Showing the freshness verdict is the point of --dry-run for an
+        // incremental task: "what would run" and "why" are the same question.
+        let state = osdk_core::tasks::freshness::FreshnessState::load(&freshness_state_path(app))?;
         for planned in plan.steps.iter().filter(|step| step.standalone) {
-            println!("{}:", planned.name);
+            let verdict = osdk_core::tasks::freshness::decide(
+                &osdk_core::tasks::freshness::Inputs {
+                    root: &config_root,
+                    name: &planned.name,
+                    sources: &planned.sources,
+                    outputs: &planned.outputs,
+                    freshness: planned.freshness,
+                    definition: &planned.definition,
+                },
+                &state,
+            )?;
+            match verdict.reason() {
+                Some(reason) => println!("{}:  ({reason})", planned.name),
+                None => {
+                    println!("{}:  (up to date, would be skipped)", planned.name);
+                    continue;
+                }
+            }
             for step in &planned.commands {
                 match step {
                     runner::PlannedStep::Command {
@@ -5033,7 +5068,6 @@ pub fn run_task(
         return Ok(None);
     }
 
-    let config_root = task_config_root(app);
     let cwd = std::env::current_dir()?;
     let env = task_environment(app, &cwd)?;
     let base_path = std::env::var("PATH").unwrap_or_default();
@@ -5044,7 +5078,25 @@ pub fn run_task(
         defs,
         base_path,
     };
-    let outcomes = runner::execute(&plan, &config_root, &mut spawner)?;
+
+    let state_path = freshness_state_path(app);
+    let mut state = osdk_core::tasks::freshness::FreshnessState::load(&state_path)?;
+    let outcomes =
+        runner::execute_with_freshness(&plan, &config_root, &mut spawner, &mut Some(&mut state))?;
+    // Persist even on failure: the tasks that did succeed earlier in the plan
+    // recorded themselves, and discarding that would make the next run redo
+    // work that is genuinely up to date.
+    state.save(&state_path)?;
+
+    for outcome in &outcomes {
+        if outcome.skipped {
+            eprintln!(
+                "{}: {}",
+                outcome.name,
+                osdk_core::i18n::tr("task.up_to_date")
+            );
+        }
+    }
 
     for outcome in &outcomes {
         for tolerated in &outcome.tolerated_failures {

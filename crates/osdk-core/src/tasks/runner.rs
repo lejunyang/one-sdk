@@ -52,6 +52,14 @@ pub struct PlannedTask {
     pub name: String,
     pub dir: Option<String>,
     pub commands: Vec<PlannedStep>,
+    /// Input globs, for the freshness check.
+    pub sources: Vec<String>,
+    /// Output globs, for the freshness check.
+    pub outputs: Vec<String>,
+    /// How to compare inputs.
+    pub freshness: crate::tasks::freshness::Freshness,
+    /// Serialized definition, so editing a command invalidates a cached result.
+    pub definition: String,
     /// Whether the top-level walk executes this task in its own right.
     ///
     /// A task reached only through a `{ tasks = [...] }` step still has to be
@@ -196,6 +204,13 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         }
         steps.push(PlannedTask {
             standalone: standalone.contains(&name),
+            sources: def.sources.clone(),
+            outputs: def.outputs.clone(),
+            freshness: def.freshness,
+            // Serializing the whole definition is what makes "I edited the
+            // command" count as a change; comparing only input files would keep
+            // serving a stale result after the task itself was rewritten.
+            definition: toml::to_string(def).unwrap_or_default(),
             name,
             dir: def.dir.clone().or_else(|| set.config.dir.clone()),
             commands,
@@ -260,6 +275,8 @@ pub struct TaskOutcome {
     pub code: i32,
     /// Steps whose failure was tolerated because of `ignore_error`.
     pub tolerated_failures: Vec<String>,
+    /// Whether freshness let this task be skipped entirely.
+    pub skipped: bool,
 }
 
 /// How to launch tasks. Split out so tests can observe without spawning.
@@ -297,6 +314,12 @@ impl Spawner for ProcessSpawner {
     }
 }
 
+/// A task the runner chose not to execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    pub name: String,
+}
+
 /// Execute a plan, stopping at the first intolerable failure.
 ///
 /// Parallel steps are executed by running their tasks in sequence here; the
@@ -309,6 +332,22 @@ pub fn execute(
     config_root: &Path,
     spawner: &mut dyn Spawner,
 ) -> Result<Vec<TaskOutcome>> {
+    execute_with_freshness(plan, config_root, spawner, &mut None)
+}
+
+/// Execute a plan, consulting and updating freshness state when one is given.
+///
+/// Freshness is applied per task rather than to the plan as a whole: a fresh
+/// dependency is skipped while its dependent still runs, which is the behaviour
+/// make has and the reason `sources` is useful at all.
+pub fn execute_with_freshness(
+    plan: &Plan,
+    config_root: &Path,
+    spawner: &mut dyn Spawner,
+    state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
+) -> Result<Vec<TaskOutcome>> {
+    use crate::tasks::freshness;
+
     let mut outcomes = Vec::new();
     for task in &plan.steps {
         // Present only so a parallel step can find its commands; running it here
@@ -316,11 +355,33 @@ pub fn execute(
         if !task.standalone {
             continue;
         }
+
+        if let Some(state) = state.as_deref() {
+            let inputs = freshness::Inputs {
+                root: config_root,
+                name: &task.name,
+                sources: &task.sources,
+                outputs: &task.outputs,
+                freshness: task.freshness,
+                definition: &task.definition,
+            };
+            if !freshness::decide(&inputs, state)?.should_run() {
+                outcomes.push(TaskOutcome {
+                    name: task.name.clone(),
+                    code: 0,
+                    tolerated_failures: Vec::new(),
+                    skipped: true,
+                });
+                continue;
+            }
+        }
+
         let dir = resolve_dir(config_root, task.dir.as_deref());
         let mut outcome = TaskOutcome {
             name: task.name.clone(),
             code: 0,
             tolerated_failures: Vec::new(),
+            skipped: false,
         };
         for step in &task.commands {
             match step {
@@ -365,6 +426,21 @@ pub fn execute(
                         }
                     }
                 }
+            }
+        }
+        // Only a clean run updates the record: storing state after a failure
+        // would let the next invocation skip a task that never succeeded.
+        if outcome.code == 0 {
+            if let Some(state) = state.as_deref_mut() {
+                let inputs = freshness::Inputs {
+                    root: config_root,
+                    name: &task.name,
+                    sources: &task.sources,
+                    outputs: &task.outputs,
+                    freshness: task.freshness,
+                    definition: &task.definition,
+                };
+                freshness::record(&inputs, state)?;
             }
         }
         outcomes.push(outcome);
@@ -418,6 +494,175 @@ mod tests {
             self.ran.push(command.to_string());
             Ok(self.fail.get(command).copied().unwrap_or(0))
         }
+    }
+
+    fn write_file(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
+    }
+
+    #[test]
+    fn a_fresh_task_is_skipped_and_a_changed_source_reruns_it() {
+        use crate::tasks::freshness::FreshnessState;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_file(root, "src/a.rs", "fn a() {}");
+
+        let set = set_from(
+            r#"
+[build]
+run = "compile"
+sources = ["src/**/*.rs"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut state = FreshnessState::default();
+
+        // First run: nothing recorded yet, so it must execute.
+        let mut spawner = RecordingSpawner::default();
+        let outcomes =
+            execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert_eq!(spawner.ran, vec!["compile"]);
+        assert!(!outcomes[0].skipped);
+
+        // Second run with untouched inputs: skipped, and no process spawned.
+        let mut spawner = RecordingSpawner::default();
+        let outcomes =
+            execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert!(spawner.ran.is_empty(), "ran anyway: {:?}", spawner.ran);
+        assert!(outcomes[0].skipped);
+
+        // Touch a source: it runs again.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_file(root, "src/a.rs", "fn a() { changed }");
+        let mut spawner = RecordingSpawner::default();
+        execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert_eq!(spawner.ran, vec!["compile"]);
+    }
+
+    /// A failed run must not be recorded, or the next invocation skips a task
+    /// that never succeeded -- the worst possible direction for this feature.
+    #[test]
+    fn a_failing_task_is_not_recorded_as_up_to_date() {
+        use crate::tasks::freshness::FreshnessState;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_file(root, "src/a.rs", "fn a() {}");
+
+        let set = set_from(
+            r#"
+[build]
+run = "compile"
+sources = ["src/**/*.rs"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut state = FreshnessState::default();
+
+        let mut spawner = RecordingSpawner::default();
+        spawner.fail.insert("compile".into(), 1);
+        let outcomes =
+            execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert_eq!(outcomes[0].code, 1);
+
+        // Next invocation must try again rather than declare victory.
+        let mut spawner = RecordingSpawner::default();
+        execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert_eq!(
+            spawner.ran,
+            vec!["compile"],
+            "a failed task must not be skipped"
+        );
+    }
+
+    /// Freshness is per task: a fresh dependency is skipped while its dependent
+    /// still runs. Skipping the whole plan would make `sources` useless.
+    #[test]
+    fn a_fresh_dependency_is_skipped_but_its_dependent_still_runs() {
+        use crate::tasks::freshness::FreshnessState;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_file(root, "src/a.rs", "fn a() {}");
+
+        let set = set_from(
+            r#"
+[codegen]
+run = "generate"
+sources = ["src/**/*.rs"]
+
+[build]
+run = "compile"
+depends = ["codegen"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut state = FreshnessState::default();
+
+        let mut spawner = RecordingSpawner::default();
+        execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        assert_eq!(spawner.ran, vec!["generate", "compile"]);
+
+        let mut spawner = RecordingSpawner::default();
+        execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state)).unwrap();
+        // codegen is fresh; build has no sources so it always runs.
+        assert_eq!(spawner.ran, vec!["compile"]);
+    }
+
+    /// Without a state store the runner must not silently skip anything.
+    #[test]
+    fn execute_without_state_never_skips() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_file(root, "src/a.rs", "fn a() {}");
+
+        let set = set_from(
+            r#"
+[build]
+run = "compile"
+sources = ["src/**/*.rs"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+
+        for _ in 0..2 {
+            let mut spawner = RecordingSpawner::default();
+            let outcomes = execute(&built, root, &mut spawner).unwrap();
+            assert_eq!(spawner.ran, vec!["compile"]);
+            assert!(!outcomes[0].skipped);
+        }
+    }
+
+    /// A typo in `sources` must stop the task, not make it vacuously fresh.
+    #[test]
+    fn a_sources_pattern_matching_nothing_fails_the_run() {
+        use crate::tasks::freshness::FreshnessState;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_file(root, "src/a.rs", "fn a() {}");
+
+        let set = set_from(
+            r#"
+[build]
+run = "compile"
+sources = ["src/**/*.typo"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let mut state = FreshnessState::default();
+        let mut spawner = RecordingSpawner::default();
+
+        let error = execute_with_freshness(&built, root, &mut spawner, &mut Some(&mut state))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("matched no files"), "{error}");
+        assert!(spawner.ran.is_empty(), "must not run on a bad pattern");
     }
 
     #[test]

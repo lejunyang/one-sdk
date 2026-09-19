@@ -98,6 +98,63 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## Incremental: skip when inputs have not changed
+
+```toml
+[tasks.build]
+run = "cargo build --release"
+sources = ["Cargo.toml", "crates/**/*.rs"]
+outputs = ["target/release/osdk.exe"]
+```
+
+When every `source` is older than every `output`, the task is skipped:
+
+```
+$ osdk run build
+build: up to date, skipped
+```
+
+The default comparison is modification time. Three choices:
+
+| `freshness` | Behaviour | When |
+| --- | --- | --- |
+| `"mtime"` (default) | Compare modification times | Cheap, but `git checkout` and CI cache restores rewrite timestamps |
+| `"hash"` | Compare content hashes | Immune to touched-but-unchanged files, at the cost of reading every input |
+| `"always"` | Never skip | Opt out of incrementality |
+
+**The task definition counts as an input too**: editing `run` reruns the task
+even when no source file moved.
+
+With `outputs` omitted, osdk compares against the last successful run, stored in
+the cache directory rather than in your project, so nobody needs a `.gitignore`
+entry for it.
+
+### Two things worth knowing
+
+**A pattern that matches nothing is an error, not "no inputs".**
+
+```
+$ osdk run build
+error: task `build`: sources: ["src/**/*.typo"] matched no files; a pattern that
+matches nothing would make this task's freshness check silently meaningless
+```
+
+A `sources` entry matching zero files makes the freshness check vacuous — the
+task is then either skipped forever or rerun forever, while the config looks
+perfectly fine. Failing outright is the only version of this that is debuggable.
+
+**Globs are scanned from their literal prefix.** `crates/**/*.rs` descends into
+`crates/` only, never the whole project. This is not a micro-optimization: a
+measured scan rooted at the current directory next to a `target/` tree took
+2,827.91 ms against 61.26 ms from the correct starting point — 46x. Prefer
+patterns with a directory prefix; a bare `**/*.rs` walks everything.
+
+Prefix a pattern with `!` to exclude:
+
+```toml
+sources = ["src/**/*.rs", "!src/generated/**"]
+```
+
 ## Windows variants
 
 ```toml

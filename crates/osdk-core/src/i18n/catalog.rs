@@ -403,6 +403,7 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert("label.error", ("error", "错误"));
     m.insert("label.warning", ("warning", "警告"));
     m.insert("task.no_tasks", ("no tasks defined", "未定义任何任务"));
+    m.insert("task.up_to_date", ("up to date, skipped", "已是最新，跳过"));
     m.insert("task.alias_prefix", ("alias: ", "别名："));
     m.insert(
         "task.unavailable_here",

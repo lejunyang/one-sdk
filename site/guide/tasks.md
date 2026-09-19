@@ -93,6 +93,59 @@ error: task dependency cycle: a -> b -> a
 
 `depends` 里的名字写错同样在执行前报错，不会跑到一半才发现。
 
+## 增量：输入没变就跳过
+
+```toml
+[tasks.build]
+run = "cargo build --release"
+sources = ["Cargo.toml", "crates/**/*.rs"]
+outputs = ["target/release/osdk.exe"]
+```
+
+`sources` 全都比 `outputs` 旧时，任务被跳过：
+
+```
+$ osdk run build
+build: 已是最新，跳过
+```
+
+判据默认比较修改时间。三种可选：
+
+| `freshness` | 行为 | 适用 |
+| --- | --- | --- |
+| `"mtime"`（默认） | 比较修改时间 | 便宜，但 `git checkout` 与 CI 缓存恢复会刷新时间戳 |
+| `"hash"` | 比较内容哈希 | 不受"内容没变但时间戳变了"影响，代价是读取全部输入 |
+| `"always"` | 从不跳过 | 显式关掉增量 |
+
+**任务定义本身也算输入**：改了 `run` 的内容，即使源文件没动也会重跑。
+
+省略 `outputs` 时，osdk 用上次成功运行的时间作为基准，状态存在缓存目录里
+（不写进项目，避免每个使用者都要加 `.gitignore`）。
+
+### 两个容易踩的地方
+
+**写错的 pattern 会报错，不会被当成"没有输入"。**
+
+```
+$ osdk run build
+error: task `build`: sources: ["src/**/*.typo"] matched no files; a pattern that
+matches nothing would make this task's freshness check silently meaningless
+```
+
+一个匹配不到任何文件的 `sources` 会让新鲜度判断变得空洞——任务要么永远跳过、
+要么永远重跑，而配置看上去完全正常。所以这里选择直接失败。
+
+**glob 的扫描从字面前缀开始。** `crates/**/*.rs` 只会进入 `crates/`，不会遍历
+整个项目。这不是微优化：实测中一次从当前目录出发的全量遍历，在 `target/` 旁边
+要 2,827.91 ms，而正确起点只需 61.26 ms，相差 46 倍。写 pattern 时尽量带上目录
+前缀，`**/*.rs` 这种没有前缀的写法会走遍整棵树。
+
+`!` 前缀表示排除：
+
+```toml
+sources = ["src/**/*.rs", "!src/generated/**"]
+```
+
 ## Windows 变体
 
 ```toml
