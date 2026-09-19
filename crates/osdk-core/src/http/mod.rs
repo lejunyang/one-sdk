@@ -849,6 +849,7 @@ mod tests {
                 aliases: Default::default(),
                 project_config_path: None,
                 excluded_tools: Default::default(),
+                ..Default::default()
             },
             client: reqwest::Client::new(),
             cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),

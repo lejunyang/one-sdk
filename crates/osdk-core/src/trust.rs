@@ -152,10 +152,20 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
 /// `syspkg` installs into the machine outside the managed root, may prompt for
 /// elevation, and is deliberately not covered by `osdk.lock`. `sources` and
 /// `registries` change where subprocesses fetch from.
+/// `tasks` and `task_config` run whatever the config says, so both are
+/// `ExecutesCode`. Listing them changes no behavior -- an unknown table is
+/// already fail-closed to the same reason -- but it changes the *message*:
+/// "tasks -- runs commands on this machine" tells the reader what to review,
+/// where a bare unknown-table verdict leaves them diffing against nothing.
+///
+/// `task_config` is not merely cosmetic either: its `shell` field picks the
+/// interpreter for every task in scope, which is code execution by another name.
 const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
     ("syspkg", TrustReason::ExecutesCode),
     ("sources", TrustReason::WeakensVerification),
     ("registries", TrustReason::WeakensVerification),
+    ("tasks", TrustReason::ExecutesCode),
+    ("task_config", TrustReason::ExecutesCode),
 ];
 
 /// Top-level tables inspected key by key instead of judged as a whole.

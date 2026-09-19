@@ -881,6 +881,7 @@ mod tests {
                 aliases: BTreeMap::new(),
                 project_config_path: None,
                 excluded_tools: Default::default(),
+                ..Default::default()
             },
             client: reqwest::Client::new(),
             show_progress: false,

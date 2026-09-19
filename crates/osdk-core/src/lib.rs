@@ -67,6 +67,12 @@ pub mod store;
 // subsystem here keeps it, and its process probes, out of the shim's build.
 #[cfg(feature = "install")]
 pub mod syspkg;
+// Task definitions are read only by osdk run / osdk task. The shim never runs
+// a task -- it dispatches an already-installed tool -- so gating the module keeps
+// its parsing out of the shim's binary. A [tasks] table in a config the shim
+// reads stays harmless: serde ignores tables the build does not know.
+#[cfg(feature = "install")]
+pub mod tasks;
 pub mod tool;
 pub mod trust;
 #[cfg(feature = "install")]

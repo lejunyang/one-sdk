@@ -37,6 +37,12 @@ pub struct Config {
     pub aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Path of the nearest discovered project config, if any.
     pub project_config_path: Option<PathBuf>,
+    /// Project tasks, merged and platform-filtered.
+    ///
+    /// Behind `install` for the same reason as the module: the shim dispatches
+    /// tools and never runs a task, so its build should not carry the parsing.
+    #[cfg(feature = "install")]
+    pub tasks: crate::tasks::TaskSet,
     /// Tools present in configuration but excluded by their platform filter,
     /// mapped to the restriction that excluded them.
     ///
@@ -826,6 +832,35 @@ struct ConfigFile {
     syspkg: Option<crate::syspkg::SyspkgConfig>,
     tools: BTreeMap<String, ToolConfigEntry>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
+    #[cfg(feature = "install")]
+    tasks: BTreeMap<String, crate::tasks::TaskEntry>,
+    #[cfg(feature = "install")]
+    task_config: Option<crate::tasks::TaskConfig>,
+}
+
+/// An empty configuration: built-in defaults, nothing declared.
+///
+/// Hand-written rather than derived because `Config` is assembled field by
+/// field in `load_layers_internal`, and dozens of tests construct one to stand
+/// in for "no config". Without this they each spell out every field, so adding
+/// one field breaks all of them at once and the fix is 40 identical diffs.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            settings: Settings::default(),
+            sources: SourcesConfig::default(),
+            tools: BTreeMap::new(),
+            tool_configs: BTreeMap::new(),
+            global_tools: BTreeMap::new(),
+            global_tool_configs: BTreeMap::new(),
+            tool_origins: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            #[cfg(feature = "install")]
+            tasks: crate::tasks::TaskSet::default(),
+            project_config_path: None,
+            excluded_tools: BTreeMap::new(),
+        }
+    }
 }
 
 impl Config {
@@ -887,6 +922,15 @@ impl Config {
         self.apply_tool_configs(&file.tools)?;
         for (tool, aliases) in file.aliases {
             self.aliases.entry(tool).or_default().extend(aliases);
+        }
+        #[cfg(feature = "install")]
+        {
+            // Same-name tasks replace whole; `[task_config]` replaces as a unit,
+            // matching `[registries]`. See `tasks::TaskSet::apply`.
+            if let Some(config) = file.task_config {
+                self.tasks.apply_config(config);
+            }
+            self.tasks.apply(file.tasks)?;
         }
         Ok(())
     }
@@ -1232,18 +1276,7 @@ pub fn normalize_container_mirror_url(value: &str) -> Result<String> {
 }
 
 fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Result<Config> {
-    let mut cfg = Config {
-        settings: Settings::default(),
-        sources: SourcesConfig::default(),
-        tools: BTreeMap::new(),
-        tool_configs: BTreeMap::new(),
-        global_tools: BTreeMap::new(),
-        global_tool_configs: BTreeMap::new(),
-        tool_origins: BTreeMap::new(),
-        aliases: BTreeMap::new(),
-        project_config_path: None,
-        excluded_tools: BTreeMap::new(),
-    };
+    let mut cfg = Config::default();
 
     if user_config_file.exists() {
         let file = read_config_file(user_config_file)?;
@@ -1451,6 +1484,7 @@ mod tests {
             aliases: BTreeMap::new(),
             project_config_path: None,
             excluded_tools: Default::default(),
+            ..Default::default()
         };
         cfg.settings.link_mode = LinkMode::Hardlink;
         cfg.apply_env(|k| match k {
@@ -1596,6 +1630,7 @@ mirrors = ["https://project.example"]
             aliases: BTreeMap::new(),
             project_config_path: None,
             excluded_tools: Default::default(),
+            ..Default::default()
         };
         cfg.sources.containers.registries.insert(
             "docker.io".to_string(),
@@ -1642,6 +1677,7 @@ mirrors = ["https://project.example"]
             aliases: BTreeMap::new(),
             project_config_path: None,
             excluded_tools: Default::default(),
+            ..Default::default()
         };
 
         cfg.apply_env(|key| match key {

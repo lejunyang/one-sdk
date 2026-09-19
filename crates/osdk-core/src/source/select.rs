@@ -997,6 +997,7 @@ mod tests {
                 aliases: BTreeMap::new(),
                 project_config_path: None,
                 excluded_tools: Default::default(),
+                ..Default::default()
             },
             client: reqwest::Client::new(),
             cas: Arc::new(Cas::new(dirs.store.clone())),
