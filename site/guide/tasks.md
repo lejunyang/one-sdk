@@ -93,6 +93,97 @@ error: task dependency cycle: a -> b -> a
 
 `depends` 里的名字写错同样在执行前报错，不会跑到一半才发现。
 
+## 给任务传参
+
+最简单的情况不需要任何声明：**只有一条命令的任务**，多余参数直接追加。
+
+```toml
+[tasks]
+test = "cargo test"
+```
+
+```
+$ osdk run test -- --nocapture
+# 实际执行 cargo test --nocapture
+```
+
+判据是「命令步骤只有一条」，而不是「`run` 写成了字符串」。所以
+`run = "cargo test"` 和 `run = ["cargo test"]` 行为完全一致——把一种写法改成
+另一种，不会让参数悄悄不被接收。
+
+步骤多于一条时会**拒绝**，并说明怎么改：
+
+```
+$ osdk run ci -- --nocapture
+error: task `ci` does not accept arguments: it has several steps, so there is no
+single place to append them. Add `{{args}}` to an argv step, or declare them
+with [[tasks.ci.args]]
+```
+
+这里不猜「追加到最后一条」，是因为多步任务下这个答案并不成立：追加到最后一条？
+每一条？`{ tasks = [...] }` 并行步骤里的任务算不算？npm 能自动追加是因为一个
+script 永远只有一条命令。
+
+### 声明参数
+
+```toml
+[tasks.deploy]
+run = [{ argv = ["kubectl", "apply", "-f", "{{manifest}}", "--context", "{{env}}"] }]
+
+[[tasks.deploy.args]]
+name = "env"
+help = "目标环境"
+choices = ["staging", "prod"]
+
+[[tasks.deploy.args]]
+name = "manifest"
+default = "k8s/app.yaml"     # 有 default 即为可选
+
+[tasks.deploy.options.replicas]
+default = "3"
+
+[tasks.deploy.flags.wait]
+help = "等待 rollout 完成"
+```
+
+```
+osdk run deploy -- prod --replicas 5 --wait
+```
+
+位置参数用 `[[...]]` 数组，因为**顺序就是它的语义**；选项和开关无所谓顺序，
+所以用表。<code v-pre>{{args}}</code> 代表所有未被消费的参数，展开成**多个独立参数**而不是一个
+拼接字符串。
+
+校验在任何命令执行前完成：`choices` 不匹配、缺必需参数，都不会等到跑了一半
+才发现。
+
+### 为什么替换只在 `argv` 里生效
+
+<code v-pre>{{...}}</code> 只在 `{ argv = [...] }` 步骤中替换，**不在 `run` 字符串里替换**。
+原因是转义：
+
+| shell | 能否安全转义任意值 |
+| --- | --- |
+| `sh -c` | 可以（单引号 + `'\''`） |
+| `pwsh` | 可以（单引号 + `''`） |
+| **`cmd /c`** | **不能**——`%VAR%` 的展开发生在引号保护之前 |
+
+一个在两个平台安全、在第三个平台可注入的功能，比没有这个功能更糟，因为它会
+被当成安全的来用。而 `argv` 步骤里每个元素直接成为一个参数，中间没有任何解析
+器，所以不是「我们仔细转义了」，而是「没有可供注入的解析步骤」：
+
+```
+$ osdk run deploy -- prod 'x & echo pwned > bad.txt'
+# manifest 的值是完整的一整串，& 不会被解释，bad.txt 不会被创建
+```
+
+需要管道、重定向、通配符时继续用 `run = "..."`，只是那里不做替换；要传参就写
+成 `argv`，或者放进独立脚本。
+
+所有值同时以环境变量提供（`osdk_arg_env`、`osdk_args`），这条路没有转义问题——
+值进入子进程的环境块时不经过任何解析器。明知自己在什么 shell 下的人可以在
+`run` 字符串里用它们，风险自负。
+
 ## 增量：输入没变就跳过
 
 ```toml

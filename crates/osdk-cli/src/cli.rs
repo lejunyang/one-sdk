@@ -139,6 +139,9 @@ pub enum Command {
         /// Print what would run instead of running it.
         #[arg(long)]
         dry_run: bool,
+        /// Arguments for the task, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Inspect project tasks.

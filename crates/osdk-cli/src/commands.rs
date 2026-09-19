@@ -5014,11 +5014,23 @@ pub fn run_task(
     app: &mut App,
     task: String,
     dry_run: bool,
+    args: Vec<String>,
 ) -> Result<Option<std::process::ExitStatus>> {
     use osdk_core::tasks::runner;
 
     let set = &app.ctx.config.tasks;
     let plan = runner::plan(set, &task)?;
+
+    // Parse against the named task's declaration, before anything runs: a bad
+    // `choices` value or a missing required argument should not surface halfway
+    // through a pipeline that already had effects.
+    let resolved = set
+        .resolve(&task)
+        .ok_or_else(|| anyhow!("unknown task `{task}`"))?
+        .to_string();
+    let spec = set.tasks[&resolved].spec.clone();
+    let has_spec = !spec.is_empty();
+    let values = osdk_core::tasks::args::parse(&resolved, &spec, &args)?;
 
     let config_root = task_config_root(app);
 
@@ -5026,7 +5038,11 @@ pub fn run_task(
         // Showing the freshness verdict is the point of --dry-run for an
         // incremental task: "what would run" and "why" are the same question.
         let state = osdk_core::tasks::freshness::FreshnessState::load(&freshness_state_path(app))?;
-        for planned in plan.steps.iter().filter(|step| step.standalone) {
+        // Substitute arguments first. A preview that still shows `{{env}}`
+        // describes the template, not the command -- and the whole purpose of
+        // --dry-run is seeing what will actually happen.
+        let previewed = runner::resolve_for_preview(&plan, &resolved, &values, has_spec)?;
+        for planned in previewed.steps.iter().filter(|step| step.standalone) {
             let verdict = osdk_core::tasks::freshness::decide(
                 &osdk_core::tasks::freshness::Inputs {
                     root: &config_root,
@@ -5059,6 +5075,26 @@ pub fn run_task(
                         };
                         println!("  $ {command}{suffix}");
                     }
+                    runner::PlannedStep::Argv { argv, ignore_error } => {
+                        let suffix = if *ignore_error {
+                            osdk_core::i18n::tr("task.failure_ignored")
+                        } else {
+                            String::new()
+                        };
+                        // Quote entries containing spaces so the preview shows
+                        // argument boundaries, which is the point of argv.
+                        let rendered: Vec<String> = argv
+                            .iter()
+                            .map(|entry| {
+                                if entry.contains(char::is_whitespace) {
+                                    format!("{entry:?}")
+                                } else {
+                                    entry.clone()
+                                }
+                            })
+                            .collect();
+                        println!("  > {}{suffix}", rendered.join(" "));
+                    }
                     runner::PlannedStep::Parallel { tasks } => {
                         println!("  || {}", tasks.join(", "));
                     }
@@ -5077,12 +5113,19 @@ pub fn run_task(
         env,
         defs,
         base_path,
+        arg_env: values.env_vars(),
     };
 
     let state_path = freshness_state_path(app);
     let mut state = osdk_core::tasks::freshness::FreshnessState::load(&state_path)?;
-    let outcomes =
-        runner::execute_with_freshness(&plan, &config_root, &mut spawner, &mut Some(&mut state))?;
+    let outcomes = runner::execute_full(
+        &plan,
+        &config_root,
+        &mut spawner,
+        &mut Some(&mut state),
+        &values,
+        has_spec,
+    )?;
     // Persist even on failure: the tasks that did succeed earlier in the plan
     // recorded themselves, and discarding that would make the next run redo
     // work that is genuinely up to date.

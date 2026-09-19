@@ -81,6 +81,11 @@ pub enum PlannedStep {
     },
     /// Run these tasks concurrently, then continue.
     Parallel { tasks: Vec<String> },
+    /// Exec a program directly, no shell involved.
+    Argv {
+        argv: Vec<String>,
+        ignore_error: bool,
+    },
 }
 
 /// The interpreter used when neither the task nor `[task_config]` names one.
@@ -189,6 +194,9 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         for step in def.steps_for(windows) {
             match step {
                 RunStep::Parallel { tasks } => commands.push(PlannedStep::Parallel { tasks }),
+                RunStep::Argv { argv, ignore_error } => {
+                    commands.push(PlannedStep::Argv { argv, ignore_error })
+                }
                 other => {
                     let command = other
                         .command()
@@ -283,6 +291,9 @@ pub struct TaskOutcome {
 pub trait Spawner {
     /// Run one command, returning its exit code.
     fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32>;
+
+    /// Exec a program directly, bypassing the shell.
+    fn run_argv(&mut self, task: &str, argv: &[String], dir: &Path) -> Result<i32>;
 }
 
 /// Runs commands as real child processes.
@@ -293,6 +304,12 @@ pub struct ProcessSpawner {
     pub defs: BTreeMap<String, TaskDef>,
     /// PATH as inherited by osdk itself.
     pub base_path: String,
+    /// Argument values exposed as `osdk_arg_*`.
+    ///
+    /// Safe on every shell: these enter the child's environment block verbatim,
+    /// never through a parser -- exactly the guarantee interpolating into a
+    /// `cmd` string cannot make.
+    pub arg_env: BTreeMap<String, String>,
 }
 
 impl Spawner for ProcessSpawner {
@@ -305,12 +322,69 @@ impl Spawner for ProcessSpawner {
         if let Some(def) = self.defs.get(task) {
             self.env.apply(&mut child, def, task, &self.base_path);
         }
+        for (key, value) in &self.arg_env {
+            child.env(key, value);
+        }
         let status = child.status().map_err(|error| {
             Error::other(format!("task `{task}`: cannot run `{program}`: {error}"))
         })?;
         // A signal-killed child reports no code; treat it as failure rather than
         // silently succeeding.
         Ok(status.code().unwrap_or(1))
+    }
+
+    fn run_argv(&mut self, task: &str, argv: &[String], dir: &Path) -> Result<i32> {
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| Error::config(format!("task `{task}`: `argv` names no program")))?;
+        let mut child = Command::new(program);
+        child.args(rest).current_dir(dir);
+        if let Some(def) = self.defs.get(task) {
+            self.env.apply(&mut child, def, task, &self.base_path);
+        }
+        for (key, value) in &self.arg_env {
+            child.env(key, value);
+        }
+        let status = child.status().map_err(|error| {
+            Error::other(format!("task `{task}`: cannot run `{program}`: {error}"))
+        })?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+/// Whether leftover command-line arguments can be appended to a task.
+///
+/// Keyed on **how many command steps the task has**, not on whether `run` was
+/// written as a string or a list. `run = "x"` and `run = ["x"]` are the same
+/// task expressed two ways, so rewriting one into the other must not change
+/// whether arguments are accepted -- that is the "upgrading a tier never
+/// rewrites meaning" rule the whole layering rests on.
+///
+/// With several steps there is no defensible answer to "append where": the last
+/// command? every command? what about a `{ tasks = [...] }` step? npm can append
+/// because a script is always exactly one command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendPolicy {
+    /// Exactly one command step: leftover arguments go to it.
+    Append,
+    /// Anything else: leftover arguments are an error that says how to fix it.
+    Refuse,
+}
+
+/// Decide the append policy for a planned task.
+pub fn append_policy(task: &PlannedTask) -> AppendPolicy {
+    let mut commands = 0;
+    let mut parallel = false;
+    for step in &task.commands {
+        match step {
+            PlannedStep::Parallel { .. } => parallel = true,
+            _ => commands += 1,
+        }
+    }
+    if commands == 1 && !parallel {
+        AppendPolicy::Append
+    } else {
+        AppendPolicy::Refuse
     }
 }
 
@@ -335,6 +409,82 @@ pub fn execute(
     execute_with_freshness(plan, config_root, spawner, &mut None)
 }
 
+/// Resolve one task's steps against parsed argument values.
+///
+/// Done here rather than during planning so `--dry-run` and the real run share
+/// one implementation; a second copy would drift and the preview would stop
+/// matching what executes.
+fn apply_arguments(
+    task: &PlannedTask,
+    values: &crate::tasks::args::Values,
+    has_spec: bool,
+) -> Result<Vec<PlannedStep>> {
+    use crate::tasks::args;
+
+    // A template that names `{{args}}` has already said where leftovers go.
+    let consumes_rest = task.commands.iter().any(|step| match step {
+        PlannedStep::Argv { argv, .. } => argv
+            .iter()
+            .any(|element| element.trim() == args::REST_PLACEHOLDER),
+        _ => false,
+    });
+
+    let mut resolved = Vec::with_capacity(task.commands.len());
+    for step in &task.commands {
+        match step {
+            PlannedStep::Argv { argv, ignore_error } => resolved.push(PlannedStep::Argv {
+                argv: args::expand_argv(&task.name, argv, values)?,
+                ignore_error: *ignore_error,
+            }),
+            other => resolved.push(other.clone()),
+        }
+    }
+
+    if values.rest.is_empty() || consumes_rest {
+        return Ok(resolved);
+    }
+
+    match append_policy(task) {
+        AppendPolicy::Append => {
+            for step in resolved.iter_mut() {
+                match step {
+                    // An argv step keeps each leftover as its own entry, so
+                    // spaces and metacharacters survive intact.
+                    PlannedStep::Argv { argv, .. } => {
+                        argv.extend(values.rest.iter().cloned());
+                        return Ok(resolved);
+                    }
+                    // A shell string can only be appended textually. On `sh`
+                    // and `pwsh` that is quotable; on `cmd` it is not fully
+                    // solvable, which is documented and is why `argv` exists.
+                    PlannedStep::Command { command, .. } => {
+                        command.push(' ');
+                        command.push_str(&values.rest.join(" "));
+                        return Ok(resolved);
+                    }
+                    PlannedStep::Parallel { .. } => continue,
+                }
+            }
+            Ok(resolved)
+        }
+        AppendPolicy::Refuse => Err(Error::other(if has_spec {
+            format!(
+                "task `{name}` got {count} argument(s) its declaration does not cover; \
+                 add `{{{{args}}}}` to an argv step to receive them",
+                name = task.name,
+                count = values.rest.len()
+            )
+        } else {
+            format!(
+                "task `{name}` does not accept arguments: it has several steps, so there is no \
+                 single place to append them. Add `{{{{args}}}}` to an argv step, or declare \
+                 them with [[tasks.{name}.args]]",
+                name = task.name
+            )
+        })),
+    }
+}
+
 /// Execute a plan, consulting and updating freshness state when one is given.
 ///
 /// Freshness is applied per task rather than to the plan as a whole: a fresh
@@ -346,7 +496,52 @@ pub fn execute_with_freshness(
     spawner: &mut dyn Spawner,
     state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
 ) -> Result<Vec<TaskOutcome>> {
+    let values = crate::tasks::args::Values::default();
+    execute_full(plan, config_root, spawner, state, &values, false)
+}
+
+/// A copy of `plan` with argument substitution already applied.
+///
+/// Exists so `--dry-run` renders the same strings `execute_full` would run,
+/// using the same `apply_arguments`. Rendering the raw template instead would
+/// make the preview quietly disagree with reality, which defeats the point of
+/// previewing.
+pub fn resolve_for_preview(
+    plan: &Plan,
+    root: &str,
+    values: &crate::tasks::args::Values,
+    has_spec: bool,
+) -> Result<Plan> {
+    let mut steps = Vec::with_capacity(plan.steps.len());
+    for task in &plan.steps {
+        let mut task = task.clone();
+        if task.name == root {
+            task.commands = apply_arguments(&task, values, has_spec)?;
+        }
+        steps.push(task);
+    }
+    Ok(Plan { steps })
+}
+
+/// Execute a plan with argument values and freshness state.
+pub fn execute_full(
+    plan: &Plan,
+    config_root: &Path,
+    spawner: &mut dyn Spawner,
+    state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
+    values: &crate::tasks::args::Values,
+    has_spec: bool,
+) -> Result<Vec<TaskOutcome>> {
     use crate::tasks::freshness;
+
+    // Arguments belong to the task the user named, which is the last standalone
+    // entry in the plan. A value meant for `deploy` has no business reaching the
+    // `build` it depends on.
+    let root = plan
+        .steps
+        .iter()
+        .rfind(|step| step.standalone)
+        .map(|step| step.name.clone());
 
     let mut outcomes = Vec::new();
     for task in &plan.steps {
@@ -377,14 +572,31 @@ pub fn execute_with_freshness(
         }
 
         let dir = resolve_dir(config_root, task.dir.as_deref());
+        let steps = if root.as_deref() == Some(task.name.as_str()) {
+            apply_arguments(task, values, has_spec)?
+        } else {
+            task.commands.clone()
+        };
         let mut outcome = TaskOutcome {
             name: task.name.clone(),
             code: 0,
             tolerated_failures: Vec::new(),
             skipped: false,
         };
-        for step in &task.commands {
+        for step in &steps {
             match step {
+                PlannedStep::Argv { argv, ignore_error } => {
+                    let code = spawner.run_argv(&task.name, argv, &dir)?;
+                    if code != 0 {
+                        if *ignore_error {
+                            outcome.tolerated_failures.push(argv.join(" "));
+                            continue;
+                        }
+                        outcome.code = code;
+                        outcomes.push(outcome);
+                        return Ok(outcomes);
+                    }
+                }
                 PlannedStep::Command {
                     shell,
                     command,
@@ -410,18 +622,31 @@ pub fn execute_with_freshness(
                         };
                         let sub_dir = resolve_dir(config_root, sub.dir.as_deref());
                         for sub_step in &sub.commands {
-                            if let PlannedStep::Command {
-                                shell,
-                                command,
-                                ignore_error,
-                            } = sub_step
-                            {
-                                let code = spawner.run(&sub.name, shell, command, &sub_dir)?;
-                                if code != 0 && !*ignore_error {
-                                    outcome.code = code;
-                                    outcomes.push(outcome);
-                                    return Ok(outcomes);
+                            let code = match sub_step {
+                                PlannedStep::Command {
+                                    shell,
+                                    command,
+                                    ignore_error,
+                                } => {
+                                    let code = spawner.run(&sub.name, shell, command, &sub_dir)?;
+                                    if code != 0 && *ignore_error {
+                                        continue;
+                                    }
+                                    code
                                 }
+                                PlannedStep::Argv { argv, ignore_error } => {
+                                    let code = spawner.run_argv(&sub.name, argv, &sub_dir)?;
+                                    if code != 0 && *ignore_error {
+                                        continue;
+                                    }
+                                    code
+                                }
+                                PlannedStep::Parallel { .. } => continue,
+                            };
+                            if code != 0 {
+                                outcome.code = code;
+                                outcomes.push(outcome);
+                                return Ok(outcomes);
                             }
                         }
                     }
@@ -469,6 +694,7 @@ mod tests {
             .iter()
             .filter_map(|step| match step {
                 PlannedStep::Command { command, .. } => Some(command.clone()),
+                PlannedStep::Argv { argv, .. } => Some(argv.join(" ")),
                 PlannedStep::Parallel { .. } => None,
             })
             .collect()
@@ -494,6 +720,16 @@ mod tests {
             self.ran.push(command.to_string());
             Ok(self.fail.get(command).copied().unwrap_or(0))
         }
+
+        /// Records argv entries joined by a unit separator, so a test can tell
+        /// `["a b"]` (one argument containing a space) from `["a", "b"]` (two).
+        /// Joining with a space would erase exactly the distinction that makes
+        /// argv steps injection-proof.
+        fn run_argv(&mut self, _task: &str, argv: &[String], _dir: &Path) -> Result<i32> {
+            let recorded = argv.join("\u{1f}");
+            self.ran.push(recorded.clone());
+            Ok(self.fail.get(&recorded).copied().unwrap_or(0))
+        }
     }
 
     fn write_file(root: &Path, relative: &str, contents: &str) {
@@ -502,6 +738,220 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&path, contents).unwrap();
+    }
+
+    /// Separator the RecordingSpawner joins argv entries with, so tests can
+    /// assert on argument *boundaries* rather than on a flattened string.
+    const SEP: &str = "\u{1f}";
+
+    fn values_from(spec_toml: &str, input: &[&str]) -> crate::tasks::args::Values {
+        let spec: crate::tasks::args::Spec = toml::from_str(spec_toml).expect("spec");
+        let input: Vec<String> = input.iter().map(|value| value.to_string()).collect();
+        crate::tasks::args::parse("t", &spec, &input).expect("parse")
+    }
+
+    /// The central safety property: a value full of shell metacharacters stays
+    /// exactly one argument.
+    ///
+    /// This is why substitution is confined to argv steps. On `cmd` there is no
+    /// quoting that survives `%VAR%` expansion, so interpolating into a shell
+    /// string could not offer this guarantee -- and a guarantee that holds on
+    /// two platforms out of three is worse than none, because it gets trusted.
+    #[test]
+    fn a_substituted_value_cannot_break_out_into_extra_arguments() {
+        let set = set_from(
+            r#"
+[deploy]
+run = [{ argv = ["echo", "{{msg}}"] }]
+
+[[deploy.args]]
+name = "msg"
+"#,
+        );
+        let built = plan(&set, "deploy").unwrap();
+        let nasty = r#"prod & del /f /s /q C:\ | echo "pwned" %PATH% $(id) `id`"#;
+        let values = values_from("[[args]]\nname = \"msg\"\n", &[nasty]);
+
+        let mut spawner = RecordingSpawner::default();
+        execute_full(
+            &built,
+            Path::new("."),
+            &mut spawner,
+            &mut None,
+            &values,
+            true,
+        )
+        .unwrap();
+
+        let parts: Vec<&str> = spawner.ran[0].split(SEP).collect();
+        assert_eq!(
+            parts.len(),
+            2,
+            "value split into extra arguments: {parts:?}"
+        );
+        assert_eq!(parts[0], "echo");
+        assert_eq!(parts[1], nasty, "value must arrive verbatim");
+    }
+
+    /// `{{args}}` must produce one argv entry per argument.
+    #[test]
+    fn rest_arguments_stay_separate_entries() {
+        let set = set_from(
+            r#"
+[test]
+run = [{ argv = ["cargo", "test", "{{args}}"] }]
+"#,
+        );
+        let built = plan(&set, "test").unwrap();
+        let values = values_from("", &["--nocapture", "one two"]);
+
+        let mut spawner = RecordingSpawner::default();
+        execute_full(
+            &built,
+            Path::new("."),
+            &mut spawner,
+            &mut None,
+            &values,
+            false,
+        )
+        .unwrap();
+
+        let parts: Vec<&str> = spawner.ran[0].split(SEP).collect();
+        assert_eq!(parts, vec!["cargo", "test", "--nocapture", "one two"]);
+    }
+
+    /// Both spellings of a single command accept appended arguments, because
+    /// the policy keys on step count -- rewriting `"x"` as `["x"]` must not
+    /// silently change whether arguments are taken.
+    #[test]
+    fn a_single_command_accepts_appended_arguments_in_either_spelling() {
+        for source in [r#"t = "cargo test""#, r#"t = ["cargo test"]"#] {
+            let set = set_from(source);
+            let built = plan(&set, "t").unwrap();
+            assert_eq!(
+                append_policy(&built.steps[0]),
+                AppendPolicy::Append,
+                "spelling changed the policy: {source}"
+            );
+
+            let values = values_from("", &["--nocapture"]);
+            let mut spawner = RecordingSpawner::default();
+            execute_full(
+                &built,
+                Path::new("."),
+                &mut spawner,
+                &mut None,
+                &values,
+                false,
+            )
+            .unwrap();
+            assert_eq!(spawner.ran, vec!["cargo test --nocapture"], "{source}");
+        }
+    }
+
+    /// Several steps refuse, and the error says how to fix it.
+    #[test]
+    fn a_multi_step_task_refuses_arguments_with_an_actionable_message() {
+        let set = set_from(
+            r#"
+[ci]
+run = ["fmt", "test"]
+"#,
+        );
+        let built = plan(&set, "ci").unwrap();
+        assert_eq!(append_policy(&built.steps[0]), AppendPolicy::Refuse);
+
+        let values = values_from("", &["--nocapture"]);
+        let mut spawner = RecordingSpawner::default();
+        let error = execute_full(
+            &built,
+            Path::new("."),
+            &mut spawner,
+            &mut None,
+            &values,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not accept arguments"), "{error}");
+        assert!(
+            error.contains("{{args}}"),
+            "message must show the fix: {error}"
+        );
+        assert!(spawner.ran.is_empty(), "nothing may run before the refusal");
+    }
+
+    /// A parallel step also removes the single obvious place to append.
+    #[test]
+    fn a_task_with_a_parallel_step_refuses_arguments() {
+        let set = set_from(
+            r#"
+a = "run-a"
+
+[all]
+run = [{ tasks = ["a"] }]
+"#,
+        );
+        let built = plan(&set, "all").unwrap();
+        let all = built.steps.iter().find(|s| s.name == "all").unwrap();
+        assert_eq!(append_policy(all), AppendPolicy::Refuse);
+    }
+
+    /// Arguments belong to the named task, not to what it depends on.
+    #[test]
+    fn appended_arguments_do_not_leak_into_dependencies() {
+        let set = set_from(
+            r#"
+prep = "do-prep"
+
+[build]
+run = "do-build"
+depends = ["prep"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        let values = values_from("", &["--flag"]);
+
+        let mut spawner = RecordingSpawner::default();
+        execute_full(
+            &built,
+            Path::new("."),
+            &mut spawner,
+            &mut None,
+            &values,
+            false,
+        )
+        .unwrap();
+        assert_eq!(spawner.ran, vec!["do-prep", "do-build --flag"]);
+    }
+
+    /// A template naming `{{args}}` consumes the leftovers, so nothing is
+    /// appended a second time.
+    #[test]
+    fn an_explicit_rest_placeholder_suppresses_appending() {
+        let set = set_from(
+            r#"
+[t]
+run = [{ argv = ["prog", "{{args}}", "--tail"] }]
+"#,
+        );
+        let built = plan(&set, "t").unwrap();
+        let values = values_from("", &["x"]);
+
+        let mut spawner = RecordingSpawner::default();
+        execute_full(
+            &built,
+            Path::new("."),
+            &mut spawner,
+            &mut None,
+            &values,
+            false,
+        )
+        .unwrap();
+
+        let parts: Vec<&str> = spawner.ran[0].split(SEP).collect();
+        // `x` lands where the placeholder is, not tacked on the end.
+        assert_eq!(parts, vec!["prog", "x", "--tail"]);
     }
 
     #[test]

@@ -98,6 +98,102 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## Passing arguments
+
+The simple case needs no declaration at all: a task with **exactly one command**
+takes leftover arguments on the end.
+
+```toml
+[tasks]
+test = "cargo test"
+```
+
+```
+$ osdk run test -- --nocapture
+# runs: cargo test --nocapture
+```
+
+The rule keys on "one command step", not on "`run` was written as a string", so
+`run = "cargo test"` and `run = ["cargo test"]` behave identically. Rewriting one
+into the other never silently stops arguments from being accepted.
+
+With more than one step the task **refuses**, and says how to fix it:
+
+```
+$ osdk run ci -- --nocapture
+error: task `ci` does not accept arguments: it has several steps, so there is no
+single place to append them. Add `{{args}}` to an argv step, or declare them
+with [[tasks.ci.args]]
+```
+
+There is no guess at "append to the last one", because with several steps that
+answer does not hold up: the last command? every command? what about tasks inside
+a `{ tasks = [...] }` step? npm can append because a script is always exactly one
+command.
+
+### Declaring arguments
+
+```toml
+[tasks.deploy]
+run = [{ argv = ["kubectl", "apply", "-f", "{{manifest}}", "--context", "{{env}}"] }]
+
+[[tasks.deploy.args]]
+name = "env"
+help = "Target environment"
+choices = ["staging", "prod"]
+
+[[tasks.deploy.args]]
+name = "manifest"
+default = "k8s/app.yaml"     # having a default makes it optional
+
+[tasks.deploy.options.replicas]
+default = "3"
+
+[tasks.deploy.flags.wait]
+help = "Wait for rollout to finish"
+```
+
+```
+osdk run deploy -- prod --replicas 5 --wait
+```
+
+Positionals use `[[...]]` arrays because **order is their meaning**; options and
+flags are unordered, so they are tables. <code v-pre>{{args}}</code> stands for everything not
+otherwise consumed and expands to **separate arguments**, never one joined
+string.
+
+Validation runs before any command does: a value outside `choices`, or a missing
+required argument, is reported up front rather than halfway through.
+
+### Why substitution only happens inside `argv`
+
+<code v-pre>{{...}}</code> is substituted in `{ argv = [...] }` steps and **not** in `run`
+strings. The reason is escaping:
+
+| shell | can any value be escaped safely? |
+| --- | --- |
+| `sh -c` | yes (single quotes plus `'\''`) |
+| `pwsh` | yes (single quotes plus `''`) |
+| **`cmd /c`** | **no** — `%VAR%` expands before quoting is considered |
+
+A feature that is safe on two platforms and injectable on the third is worse
+than no feature, because it gets trusted. In an `argv` step each element becomes
+one argument with no parser in between, so this is not "we escape carefully" but
+"there is no parsing step left to inject into":
+
+```
+$ osdk run deploy -- prod 'x & echo pwned > bad.txt'
+# manifest receives the whole string; & is never interpreted, bad.txt is never created
+```
+
+Pipes, redirection and globbing still belong in `run = "..."`, which simply does
+not substitute. To pass arguments, use `argv` or a script file.
+
+Every value is also exported as an environment variable (`osdk_arg_env`,
+`osdk_args`). That path has no escaping problem at all — values enter the child's
+environment block without passing through a parser — so anyone who knows their
+own shell can use them inside a `run` string at their own risk.
+
 ## Incremental: skip when inputs have not changed
 
 ```toml

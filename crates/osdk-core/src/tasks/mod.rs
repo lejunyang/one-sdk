@@ -28,6 +28,7 @@
 //!   (see [`TaskSet::excluded`]) so `osdk run` can say why it is absent instead
 //!   of reporting an unknown name.
 
+pub mod args;
 pub mod freshness;
 pub mod runner;
 
@@ -65,6 +66,22 @@ pub enum RunStep {
     /// Distinct from `depends`: prerequisites carry no ordering among
     /// themselves, so they cannot express "first A, then B and C together".
     Parallel { tasks: Vec<String> },
+    /// `{ argv = ["kubectl", "apply", "-f", "{{manifest}}"] }` -- exec directly.
+    ///
+    /// The only step where `{{placeholders}}` are substituted, and the reason is
+    /// structural rather than careful: each element becomes one argv entry with
+    /// no shell in between, so there is no parser for a value to be
+    /// reinterpreted by. Interpolating into a shell string cannot be made safe
+    /// on `cmd`, where `%VAR%` expands before quoting is considered -- see
+    /// `tasks::args`.
+    ///
+    /// The cost is that pipes, redirection and globbing are unavailable here;
+    /// those still belong in a `cmd` string or a script file.
+    Argv {
+        argv: Vec<String>,
+        #[serde(default)]
+        ignore_error: bool,
+    },
 }
 
 /// Hand-written deserializers, because `#[serde(untagged)]` cannot report which
@@ -95,6 +112,14 @@ mod de {
     pub(super) struct ParallelStep {
         pub tasks: Vec<String>,
     }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct ArgvStep {
+        pub argv: Vec<String>,
+        #[serde(default)]
+        pub ignore_error: bool,
+    }
 }
 
 impl<'de> Deserialize<'de> for RunStep {
@@ -108,6 +133,19 @@ impl<'de> Deserialize<'de> for RunStep {
             toml::Value::Table(ref table) => {
                 let has_cmd = table.contains_key("cmd");
                 let has_tasks = table.contains_key("tasks");
+                if table.contains_key("argv") {
+                    if has_cmd || has_tasks {
+                        return Err(D::Error::custom(
+                            "a run step sets `argv`, `cmd`, or `tasks` -- not several",
+                        ));
+                    }
+                    return de::ArgvStep::deserialize(value)
+                        .map(|step| RunStep::Argv {
+                            argv: step.argv,
+                            ignore_error: step.ignore_error,
+                        })
+                        .map_err(D::Error::custom);
+                }
                 match (has_cmd, has_tasks) {
                     (true, true) => Err(D::Error::custom(
                         "a run step sets either `cmd` or `tasks`, not both",
@@ -122,7 +160,8 @@ impl<'de> Deserialize<'de> for RunStep {
                         .map(|step| RunStep::Parallel { tasks: step.tasks })
                         .map_err(D::Error::custom),
                     (false, false) => Err(D::Error::custom(
-                        "a run step table needs `cmd` (a command) or `tasks` (run in parallel)",
+                        "a run step table needs `cmd` (through a shell), `argv` (executed \
+                         directly, supports {{placeholders}}), or `tasks` (run in parallel)",
                     )),
                 }
             }
@@ -180,7 +219,15 @@ impl RunStep {
         match self {
             Self::Simple(cmd) => Some(cmd),
             Self::Command { cmd, .. } => Some(cmd),
-            Self::Parallel { .. } => None,
+            Self::Parallel { .. } | Self::Argv { .. } => None,
+        }
+    }
+
+    /// The argv template, for the one step kind that has one.
+    pub fn argv(&self) -> Option<&[String]> {
+        match self {
+            Self::Argv { argv, .. } => Some(argv),
+            _ => None,
         }
     }
 
@@ -189,6 +236,9 @@ impl RunStep {
         matches!(
             self,
             Self::Command {
+                ignore_error: true,
+                ..
+            } | Self::Argv {
                 ignore_error: true,
                 ..
             }
@@ -278,6 +328,9 @@ pub struct TaskDef {
     /// Platform filter, same vocabulary as `[tools]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when: Option<PlatformFilter>,
+    /// Declared arguments. Empty means the task takes none.
+    #[serde(default, flatten)]
+    pub spec: crate::tasks::args::Spec,
     /// Input globs. When they are unchanged, the task is skipped.
     ///
     /// A pattern matching nothing is an error rather than a vacuous "fresh":
@@ -360,6 +413,31 @@ impl TaskDef {
                         "task `{name}`: `{{ tasks = [] }}` step lists no tasks"
                     )));
                 }
+            }
+            if let RunStep::Argv { argv, .. } = &step {
+                if argv.is_empty() {
+                    return Err(Error::config(format!(
+                        "task `{name}`: `{{ argv = [] }}` names no program"
+                    )));
+                }
+            }
+        }
+        self.spec.validate(name)?;
+
+        // Appending is decided by step count (see `runner::append_policy`), so a
+        // task whose two platforms disagree would append on one and refuse on
+        // the other. Catching it at load time beats a "works on my machine"
+        // report from whichever platform the author did not test.
+        if self.run.is_some() && self.run_windows.is_some() {
+            let unix = self.steps_for(false).len();
+            let windows = self.steps_for(true).len();
+            let single = |count: usize| count == 1;
+            if single(unix) != single(windows) {
+                return Err(Error::config(format!(
+                    "task `{name}`: `run` has {unix} step(s) but `run_windows` has {windows}; \
+                     argument appending would differ by platform. Give both a single command, \
+                     or declare arguments explicitly"
+                )));
             }
         }
         Ok(())

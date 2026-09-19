@@ -138,7 +138,11 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Outdated { tools } => commands::outdated(app, tools).await,
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
         Command::Exec { tools, command } => commands::exec_cmd(app, tools, command).await,
-        Command::Run { task, dry_run } => return commands::run_task(app, task, dry_run),
+        Command::Run {
+            task,
+            dry_run,
+            args,
+        } => return commands::run_task(app, task, dry_run, args),
         Command::Task { command } => commands::task(app, command),
         Command::Completions { shell } => commands::completions(shell),
         Command::Alias { command } => commands::alias(app, command),
