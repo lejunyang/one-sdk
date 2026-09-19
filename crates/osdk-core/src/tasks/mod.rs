@@ -330,6 +330,18 @@ pub struct TaskDef {
     /// in no guaranteed order relative to one another.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends: Vec<String>,
+    /// Tasks to wait for **only if they are already in the plan**.
+    ///
+    /// The difference from `depends` is what happens when the named task is not
+    /// otherwise scheduled: `depends` pulls it in and runs it, `wait_for` does
+    /// nothing at all. It expresses "if we are both running, I go second"
+    /// without making the other task a prerequisite -- useful when two tasks
+    /// touch the same resource but neither actually needs the other's work.
+    ///
+    /// Naming a task that is not in the plan is therefore not an error; it is
+    /// the condition the field exists to handle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_for: Vec<String>,
     /// Task-level environment variables.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
@@ -623,6 +635,12 @@ impl TaskSet {
     ///
     /// Checked up front so a typo in `depends` fails before the first command
     /// runs, rather than halfway through a pipeline that already had effects.
+    ///
+    /// `wait_for` is deliberately excluded: naming a task that is not scheduled
+    /// is its normal case, so requiring the name to resolve would reject the
+    /// very usage it exists for. A misspelling there is silent, which is the
+    /// price of the semantics -- `osdk task info` prints the field so it can be
+    /// checked when something does not order the way it was meant to.
     pub fn unknown_references(&self) -> Vec<(String, String)> {
         let windows = cfg!(windows);
         let mut missing = Vec::new();
@@ -655,6 +673,56 @@ impl TaskSet {
         let mut path = Vec::new();
         self.visit(root, &mut order, &mut done, &mut path)?;
         Ok(order)
+    }
+
+    /// Reorder `order` so every `wait_for` target precedes the task naming it.
+    ///
+    /// Applied after the dependency sort rather than inside it, because the two
+    /// answer different questions: `depends` decides *what* runs, `wait_for`
+    /// only adjusts *when* among things already chosen. Folding it into the
+    /// graph would turn an ordering hint into a prerequisite -- exactly the
+    /// distinction the field exists to draw.
+    ///
+    /// A target that is not in `order` is skipped, which is the documented
+    /// case. A cycle formed purely by `wait_for` is also skipped rather than
+    /// reported: these are hints, and refusing to run because two hints
+    /// disagree would be a worse outcome than running in the original order.
+    pub fn apply_wait_for(&self, order: &mut Vec<String>) {
+        // Bounded by the number of tasks: each pass can only move one entry
+        // later, so `len` passes is enough to reach a fixed point or to
+        // conclude the constraints are unsatisfiable.
+        for _ in 0..order.len() {
+            let mut moved = false;
+            for index in 0..order.len() {
+                let name = order[index].clone();
+                let Some(def) = self.tasks.get(&name) else {
+                    continue;
+                };
+                for target in &def.wait_for {
+                    let Some(target) = self.resolve(target) else {
+                        continue;
+                    };
+                    let Some(target_index) = order.iter().position(|entry| entry == target) else {
+                        // Not scheduled: nothing to wait for.
+                        continue;
+                    };
+                    if target_index <= index {
+                        continue;
+                    }
+                    // The waiter currently runs first; move it after the target.
+                    let waiter = order.remove(index);
+                    order.insert(target_index, waiter);
+                    moved = true;
+                    break;
+                }
+                if moved {
+                    break;
+                }
+            }
+            if !moved {
+                return;
+            }
+        }
     }
 
     fn visit(

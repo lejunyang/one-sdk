@@ -5226,6 +5226,79 @@ pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {
                 println!("{}. {name}", index + 1);
             }
         }
+        TaskCommand::Add {
+            name,
+            run,
+            description,
+            depends,
+        } => {
+            // Validate before writing: a config that will not load is worse
+            // than a rejected command, because the next osdk invocation fails
+            // on something the user did not type.
+            let mut probe = osdk_core::tasks::TaskSet::default();
+            let mut entries = std::collections::BTreeMap::new();
+            let spec = if run.len() == 1 {
+                osdk_core::tasks::RunSpec::One(run[0].clone())
+            } else {
+                osdk_core::tasks::RunSpec::Many(
+                    run.iter()
+                        .map(|command| osdk_core::tasks::RunStep::Simple(command.clone()))
+                        .collect(),
+                )
+            };
+            entries.insert(
+                name.clone(),
+                osdk_core::tasks::TaskEntry::Full(Box::new(osdk_core::tasks::TaskDef {
+                    run: Some(spec),
+                    description: description.clone(),
+                    depends: depends.clone(),
+                    ..Default::default()
+                })),
+            );
+            probe.apply(entries)?;
+
+            let path = crate::config_edit::set_project_task(
+                &name,
+                &run,
+                description.as_deref(),
+                &depends,
+            )?;
+            println!("added task `{name}` to {}", path.display());
+        }
+        TaskCommand::Rm { name } => {
+            let (path, removed) = crate::config_edit::remove_project_task(&name)?;
+            if removed {
+                println!("removed task `{name}` from {}", path.display());
+            } else {
+                // Saying "removed" for something that was never there would
+                // hide a typo behind a success message.
+                return Err(anyhow!("no task `{name}` in {}", path.display()));
+            }
+        }
+        TaskCommand::Edit { name } => {
+            let Some(path) = app.ctx.config.project_config_path.clone() else {
+                return Err(anyhow!("no osdk project config found"));
+            };
+            if set.resolve(&name).is_none() {
+                return Err(anyhow!("unknown task `{name}`"));
+            }
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| {
+                    if cfg!(windows) {
+                        "notepad".to_string()
+                    } else {
+                        "vi".to_string()
+                    }
+                });
+            let status = std::process::Command::new(&editor)
+                .arg(&path)
+                .status()
+                .map_err(|error| anyhow!("cannot launch `{editor}`: {error}"))?;
+            if !status.success() {
+                return Err(anyhow!("`{editor}` exited with {status}"));
+            }
+        }
     }
     Ok(())
 }

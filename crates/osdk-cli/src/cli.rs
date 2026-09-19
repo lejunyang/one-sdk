@@ -448,6 +448,30 @@ pub enum TaskCommand {
         /// Task name or alias.
         task: String,
     },
+    /// Add a task to the project config.
+    Add {
+        /// Task name.
+        name: String,
+        /// Command to run; repeat for a sequence.
+        #[arg(short = 'r', long = "run", required = true)]
+        run: Vec<String>,
+        /// Help text shown by `osdk task list`.
+        #[arg(short = 'd', long = "desc")]
+        description: Option<String>,
+        /// Prerequisite task; repeatable.
+        #[arg(long = "depends")]
+        depends: Vec<String>,
+    },
+    /// Remove a task from the project config.
+    Rm {
+        /// Task name.
+        name: String,
+    },
+    /// Open the project config at this task in $EDITOR.
+    Edit {
+        /// Task name.
+        name: String,
+    },
 }
 #[derive(Debug, Subcommand)]
 pub enum AliasCommand {

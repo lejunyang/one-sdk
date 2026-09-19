@@ -10,6 +10,99 @@ use osdk_core::config::{StructuredToolConfig, ToolConfigValue};
 
 static NEXT_CONFIG_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(0);
 
+/// Write a task into the nearest project config, creating `osdk.toml` if there
+/// is none. Returns the file written.
+///
+/// Goes through `toml_edit` for the same reason every other edit here does: a
+/// config is something a person wrote, with their comments and their ordering,
+/// and a command that reformats the file as a side effect of adding one entry
+/// makes the diff unreviewable.
+pub fn set_project_task(
+    name: &str,
+    run: &[String],
+    description: Option<&str>,
+    depends: &[String],
+) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
+    let mut doc = load_doc(&path)?;
+
+    let tasks = doc
+        .entry("tasks")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("{}: `tasks` is not a table", path.display()))?;
+    // Implicit so `[tasks.build]` renders as its own section rather than
+    // forcing a bare `[tasks]` header above it.
+    tasks.set_implicit(true);
+
+    // A single command with no metadata stays on one line: the shorthand is
+    // what most tasks are, and expanding every one into a table would make the
+    // file harder to read than the user's own hand-written entries.
+    let simple = run.len() == 1 && description.is_none() && depends.is_empty();
+    if simple {
+        tasks.insert(name, toml_edit::value(run[0].clone()));
+        save_doc(&path, &doc)?;
+        return Ok(path);
+    }
+
+    let entry = tasks
+        .entry(name)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let table = entry
+        .as_table_mut()
+        .with_context(|| format!("{}: task `{name}` is not a table", path.display()))?;
+
+    if run.len() == 1 {
+        table.insert("run", toml_edit::value(run[0].clone()));
+    } else {
+        let mut array = toml_edit::Array::new();
+        for command in run {
+            array.push(command.as_str());
+        }
+        table.insert("run", toml_edit::value(array));
+    }
+    if let Some(description) = description {
+        table.insert("description", toml_edit::value(description));
+    }
+    if !depends.is_empty() {
+        let mut array = toml_edit::Array::new();
+        for dependency in depends {
+            array.push(dependency.as_str());
+        }
+        table.insert("depends", toml_edit::value(array));
+    }
+
+    save_doc(&path, &doc)?;
+    Ok(path)
+}
+
+/// Remove a task from the nearest project config.
+///
+/// Returns the path and whether anything was removed, so the caller can tell
+/// "deleted" from "was not there" instead of reporting success either way.
+pub fn remove_project_task(name: &str) -> Result<(PathBuf, bool)> {
+    let cwd = std::env::current_dir()?;
+    let Some(path) = find_project_config(&cwd) else {
+        return Err(anyhow::anyhow!("no osdk project config found"));
+    };
+    let mut doc = load_doc(&path)?;
+
+    let Some(tasks) = doc.get_mut("tasks").and_then(toml_edit::Item::as_table_mut) else {
+        return Ok((path, false));
+    };
+    let removed = tasks.remove(name).is_some();
+    // An empty `[tasks]` left behind is noise the user did not write.
+    let now_empty = tasks.is_empty();
+    if now_empty {
+        doc.remove("tasks");
+    }
+    if removed {
+        save_doc(&path, &doc)?;
+    }
+    Ok((path, removed))
+}
+
 /// Write a `[tools] <tool> = <spec>` pin to the user global config.
 pub fn set_global_tool(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
     with_global_config_lock(ctx, || set_global_tool_unlocked(ctx, tool, spec))

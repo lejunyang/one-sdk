@@ -190,6 +190,10 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         }
     }
 
+    // Ordering hints apply once membership is settled: `wait_for` can only
+    // reorder what `depends` already pulled in.
+    set.apply_wait_for(&mut order);
+
     let mut steps = Vec::new();
     for name in order {
         let def = set
@@ -742,8 +746,7 @@ pub fn execute_full(
                     let code = match spawner.run_argv(&task.name, argv, &dir) {
                         Ok(code) => code,
                         Err(error) => {
-                            let _ =
-                                run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
                             return Err(error);
                         }
                     };
@@ -774,8 +777,7 @@ pub fn execute_full(
                         // the cleanup precisely when the runaway left the most
                         // behind.
                         Err(error) => {
-                            let _ =
-                                run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
                             return Err(error);
                         }
                     };
@@ -1176,12 +1178,14 @@ run_post = "stop-db"
     /// precisely when the runaway process left the most behind.
     #[test]
     fn teardown_runs_when_the_body_times_out() {
-        let set = set_from(r#"
+        let set = set_from(
+            r#"
 [e2e]
 run = "pytest"
 run_post = "stop-db"
 timeout = "1s"
-"#);
+"#,
+        );
         let built = plan(&set, "e2e").unwrap();
         let mut spawner = RecordingSpawner::default();
         spawner
@@ -1649,6 +1653,99 @@ run = [{ tasks = ["a", "b"] }, "after"]
             "must not continue past a failed parallel step"
         );
         assert_eq!(outcomes.last().unwrap().code, 7);
+    }
+
+    /// The distinction from `depends`: naming a task that is not scheduled has
+    /// no effect at all, rather than pulling it in.
+    #[test]
+    fn wait_for_does_not_schedule_a_task_that_was_not_already_included() {
+        let set = set_from(
+            r#"
+migrate = "run-migrate"
+
+[serve]
+run = "run-serve"
+wait_for = ["migrate"]
+"#,
+        );
+        let built = plan(&set, "serve").unwrap();
+        let names: Vec<&str> = built.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["serve"], "wait_for must not pull migrate in");
+
+        let mut spawner = RecordingSpawner::default();
+        execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(spawner.ran, vec!["run-serve"]);
+    }
+
+    /// When both are scheduled, the waiter goes second.
+    #[test]
+    fn wait_for_orders_two_tasks_that_are_both_in_the_plan() {
+        let set = set_from(
+            r#"
+[migrate]
+run = "run-migrate"
+
+[serve]
+run = "run-serve"
+wait_for = ["migrate"]
+
+[up]
+run = "run-up"
+depends = ["serve", "migrate"]
+"#,
+        );
+        let built = plan(&set, "up").unwrap();
+        let order: Vec<&str> = built.steps.iter().map(|s| s.name.as_str()).collect();
+        let position = |name: &str| order.iter().position(|entry| *entry == name).unwrap();
+        assert!(
+            position("migrate") < position("serve"),
+            "wait_for ignored: {order:?}"
+        );
+    }
+
+    /// `depends` still wins on membership: it schedules, `wait_for` only sorts.
+    #[test]
+    fn depends_schedules_while_wait_for_only_reorders() {
+        let set = set_from(
+            r#"
+[a]
+run = "run-a"
+
+[b]
+run = "run-b"
+depends = ["a"]
+wait_for = ["ghost"]
+"#,
+        );
+        let built = plan(&set, "b").unwrap();
+        let names: Vec<&str> = built.steps.iter().map(|s| s.name.as_str()).collect();
+        // `a` is present because of depends; `ghost` does not exist at all and
+        // that is not an error.
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    /// Two hints that contradict each other must not hang or refuse to run.
+    #[test]
+    fn contradictory_wait_for_hints_still_produce_a_plan() {
+        let set = set_from(
+            r#"
+[a]
+run = "run-a"
+wait_for = ["b"]
+
+[b]
+run = "run-b"
+wait_for = ["a"]
+
+[both]
+run = "run-both"
+depends = ["a", "b"]
+"#,
+        );
+        let built = plan(&set, "both").unwrap();
+        let names: Vec<&str> = built.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"both"));
     }
 
     #[test]

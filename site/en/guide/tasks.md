@@ -335,6 +335,26 @@ Prefix a pattern with `!` to exclude:
 sources = ["src/**/*.rs", "!src/generated/**"]
 ```
 
+### wait_for: ordering without scheduling
+
+```toml
+[tasks.serve]
+run = "npm start"
+wait_for = ["migrate"]
+```
+
+`wait_for` differs from `depends` in exactly one way: **what happens when the
+named task is not scheduled**. `depends` pulls it in and runs it; `wait_for`
+does nothing.
+
+It says "if we are both running, I go second" without making the other task a
+prerequisite — useful when two tasks touch the same resource but neither needs
+the other's output.
+
+Naming a task that does not exist is therefore **not an error**; it is the case
+the field exists for. The cost is that a typo is silent, so `osdk task info`
+prints the field for when the ordering does not come out as intended.
+
 ## Windows variants
 
 ```toml
@@ -425,6 +445,18 @@ error: task `linuxonly` is not available on this platform (os=linux)
 | `osdk task list` | List tasks (`--hidden` includes hidden ones) |
 | `osdk task info <name>` | Show the merged definition |
 | `osdk task deps <name>` | Print the execution order |
+| `osdk task add <name> --run <cmd>` | Write it into the project config; repeat `--run` for a sequence |
+| `osdk task rm <name>` | Remove it from the project config |
+| `osdk task edit <name>` | Open the config in `$EDITOR` |
+
+`add` and `rm` preserve the file's existing comments, indentation and ordering —
+a config is something a person wrote, and adding one task should not reformat
+the rest of it. A single command is written as the one-line shorthand; the table
+form appears only when there are several commands or extra metadata.
+
+`add` validates before writing: a config that will not load is worse than a
+rejected command, because the next osdk run then fails on something the user
+never typed.
 
 Note there is only `osdk run <name>`, never a bare `osdk <name>`: the bare form
 gets shadowed by any subcommand added later, a trap mise hit and now advises

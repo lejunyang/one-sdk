@@ -311,6 +311,23 @@ matches nothing would make this task's freshness check silently meaningless
 sources = ["src/**/*.rs", "!src/generated/**"]
 ```
 
+### wait_for：只排序，不调度
+
+```toml
+[tasks.serve]
+run = "npm start"
+wait_for = ["migrate"]
+```
+
+`wait_for` 与 `depends` 的区别只在一件事上：**目标任务没被调度时会怎样**。
+`depends` 会把它拉进来执行；`wait_for` 什么也不做。
+
+它表达的是「如果我们俩都要跑，我排在后面」，而不把对方变成前置条件——适用于
+两个任务碰同一个资源、但谁也不真正需要对方的产物。
+
+因此这里写一个不存在的任务名**不是错误**，正是这个字段存在的场景。代价是拼错
+不会被发现；`osdk task info` 会打印这个字段，顺序不对时可以查。
+
 ## Windows 变体
 
 ```toml
@@ -398,6 +415,16 @@ error: task `linuxonly` is not available on this platform (os=linux)
 | `osdk task list` | 列出任务（`--hidden` 包含隐藏的） |
 | `osdk task info <名字>` | 查看合并后的完整定义 |
 | `osdk task deps <名字>` | 打印执行顺序 |
+| `osdk task add <名字> --run <命令>` | 写入项目配置，可重复 `--run` 表示多步 |
+| `osdk task rm <名字>` | 从项目配置删除 |
+| `osdk task edit <名字>` | 用 `$EDITOR` 打开配置 |
+
+`add` 与 `rm` 都保留文件原有的注释、缩进与条目顺序——配置是人写的，
+加一个任务不该顺带重排整份文件。单命令写成一行简写，多命令或带元数据时才
+展开成表。
+
+`add` 会先校验再落盘：一份写不进去的配置比一条被拒绝的命令更糟，因为下一次
+运行 osdk 会因为用户没输入过的东西而失败。
 
 注意只有 `osdk run <名字>`，没有裸的 `osdk <名字>`：后者会被将来新增的
 子命令遮蔽，是 mise 踩过并已建议脚本不要依赖的坑。
