@@ -2230,14 +2230,74 @@ fi
     assert!(calls.contains("install -g typescript@5.5.0"));
 }
 
+/// Compile a single-file Windows fixture executable with the ambient rustc.
+///
+/// Returns `false` when this environment cannot produce a runnable `.exe`, so the
+/// caller can skip rather than report a product failure.
+///
+/// # Why a skip and not an assert
+///
+/// `scripts/windows-wine-tests.sh` runs the `x86_64-pc-windows-gnu` test
+/// binaries under Wine, with `RUSTC` pointing at the host's *Linux* rustc. Wine
+/// cannot spawn an ELF image, so the compile fails with `Invalid handle.` --
+/// which says nothing about the behaviour under test, and indeed all three
+/// affected tests pass on a real Windows runner. Treating the missing fixture as
+/// "cannot be observed here" keeps the Wine job meaningful for the several dozen
+/// tests it *can* execute, instead of leaving three permanent red results that
+/// train everyone to ignore the job.
+///
+/// A failure is still distinguished from an impossibility: a rustc that starts
+/// and then rejects the source is a real problem and panics.
+#[cfg(windows)]
+fn compile_windows_fixture(source: &Path, output: &Path, crate_name: &str) -> bool {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let compile = Command::new(&rustc)
+        .args(["--crate-name", crate_name, "--edition", "2021", "-O"])
+        .arg(source)
+        .arg("-o")
+        .arg(output)
+        .output();
+    let compile = match compile {
+        Ok(compile) => compile,
+        Err(error) => {
+            // Could not even start the compiler: the only known cause is the
+            // cross-execution mismatch described above.
+            eprintln!(
+                "skipping: cannot spawn `{rustc}` to build the {crate_name} fixture \
+                 ({error}); a Windows test binary running under Wine cannot execute \
+                 the host's Linux rustc"
+            );
+            return false;
+        }
+    };
+    // rustc ran. A rejected source is a genuine fault in the fixture, not an
+    // environment limitation, so do not let it pass as a skip.
+    assert!(
+        compile.status.success(),
+        "building the {crate_name} fixture failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    // A cross-compiled ELF named `.exe` would load nowhere; make sure something
+    // was actually produced before promising the caller a usable fixture.
+    assert!(
+        output.is_file(),
+        "the {crate_name} fixture reported success but produced no file at {}",
+        output.display()
+    );
+    true
+}
+
 /// A stand-in rustup that appends the delegate environment it received, so a
 /// test can assert on the mirror osdk actually passed down.
 ///
 /// Windows needs a real executable here (osdk resolves `rustup.exe`, and the
 /// loader rejects a batch file under that name), so the recorder is compiled
 /// with the rustc that is already running the test.
+///
+/// `None` means this environment cannot build that executable at all (see
+/// [`compile_windows_fixture`]); the caller skips instead of failing.
 #[cfg(windows)]
-fn write_fake_rustup(root: &Path, project: &Path) -> PathBuf {
+fn write_fake_rustup(root: &Path, project: &Path) -> Option<PathBuf> {
     let rustup = root.join("data/cargo/bin/rustup.exe");
     std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
     let log = root.join("rustup-calls.log");
@@ -2286,24 +2346,16 @@ fn main() {{
         ),
     )
     .unwrap();
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let compile = Command::new(rustc)
-        .args(["--crate-name", "fake_rustup", "--edition", "2021", "-O"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&rustup)
-        .output()
-        .expect("failed to spawn rustc to build the fake rustup");
-    assert!(
-        compile.status.success(),
-        "building the fake rustup failed: {}",
-        String::from_utf8_lossy(&compile.stderr)
-    );
-    rustup
+    if !compile_windows_fixture(&source, &rustup, "fake_rustup") {
+        return None;
+    }
+    Some(rustup)
 }
 
+/// Always `Some` on Unix: a shell script needs no compiler. The `Option` exists
+/// only so both platforms present one signature to the call sites.
 #[cfg(unix)]
-fn write_fake_rustup(root: &Path, project: &Path) -> PathBuf {
+fn write_fake_rustup(root: &Path, project: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
     let rustup = root.join("data/cargo/bin/rustup");
@@ -2327,7 +2379,7 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
-    rustup
+    Some(rustup)
 }
 
 #[cfg(unix)]
@@ -2336,7 +2388,8 @@ fn rust_lifecycle_commands_use_isolated_rustup_and_repair_markers() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    write_fake_rustup(temp.path(), &project);
+    // Unix-only test: the fixture is a shell script and cannot fail to build.
+    write_fake_rustup(temp.path(), &project).expect("the unix fixture is always available");
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
     let stale = temp.path().join("installs/rust/stale");
     std::fs::create_dir_all(&stale).unwrap();
@@ -2408,7 +2461,8 @@ fn rust_override_import_export_and_toolchain_link_are_explicit() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    write_fake_rustup(temp.path(), &project);
+    // Unix-only test: the fixture is a shell script and cannot fail to build.
+    write_fake_rustup(temp.path(), &project).expect("the unix fixture is always available");
 
     let import = run_isolated_in(temp.path(), &project, &["rust", "override", "import"]);
     assert!(
@@ -2594,7 +2648,11 @@ fn rust_target_add_drives_the_selected_source_over_an_ambient_mirror() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    write_fake_rustup(temp.path(), &project);
+    // The recorder must be a runnable executable; where it cannot be built this
+    // contract is unobservable rather than broken.
+    if write_fake_rustup(temp.path(), &project).is_none() {
+        return;
+    }
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
 
     // An ambient mirror that must not win, mimicking a shell profile or CI.
@@ -2651,7 +2709,11 @@ fn local_rust_operations_do_not_inherit_an_ambient_mirror() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    write_fake_rustup(temp.path(), &project);
+    // The recorder must be a runnable executable; where it cannot be built this
+    // contract is unobservable rather than broken.
+    if write_fake_rustup(temp.path(), &project).is_none() {
+        return;
+    }
     std::fs::create_dir_all(temp.path().join("data/rustup/toolchains/stable/bin")).unwrap();
 
     let output = run_isolated_in_with_env(
@@ -3197,7 +3259,11 @@ fn exec_recomputes_a_stale_managed_java_home_but_keeps_the_users_own() {
         b"",
     )
     .unwrap();
-    let reporter = write_java_home_reporter(&tools);
+    // The reporter must be a runnable executable; where it cannot be built this
+    // contract is unobservable rather than broken.
+    let Some(reporter) = write_java_home_reporter(&tools) else {
+        return;
+    };
 
     let run = |env: &[(&str, &str)]| {
         let output = run_isolated_in_with_env(
@@ -3272,8 +3338,11 @@ fn exec_recomputes_a_stale_managed_java_home_but_keeps_the_users_own() {
 /// with `exec` reporting success and producing no output, which would read as
 /// "the JDK was wrong" rather than "the fixture never ran". Compiled with the
 /// rustc already running the tests, as the fake rustup fixture does.
+///
+/// `None` means this environment cannot build that executable at all (see
+/// [`compile_windows_fixture`]); the caller skips instead of failing.
 #[cfg(windows)]
-fn write_java_home_reporter(dir: &Path) -> String {
+fn write_java_home_reporter(dir: &Path) -> Option<String> {
     let source = dir.join("java-home-reporter.rs");
     std::fs::write(
         &source,
@@ -3287,25 +3356,17 @@ fn main() {
 "#,
     )
     .unwrap();
-    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
-    let compile = Command::new(rustc)
-        .args(["--crate-name", "java_home_reporter", "--edition", "2021"])
-        .arg(&source)
-        .arg("-o")
-        .arg(dir.join("kotlinc.exe"))
-        .output()
-        .expect("failed to spawn rustc to build the JAVA_HOME reporter");
-    assert!(
-        compile.status.success(),
-        "building the JAVA_HOME reporter failed: {}",
-        String::from_utf8_lossy(&compile.stderr)
-    );
+    if !compile_windows_fixture(&source, &dir.join("kotlinc.exe"), "java_home_reporter") {
+        return None;
+    }
     std::fs::remove_file(&source).unwrap();
-    "kotlinc".to_string()
+    Some("kotlinc".to_string())
 }
 
+/// Always `Some` off Windows: a shell script needs no compiler. The `Option`
+/// exists only so both platforms present one signature to the call sites.
 #[cfg(not(windows))]
-fn write_java_home_reporter(dir: &Path) -> String {
+fn write_java_home_reporter(dir: &Path) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
 
     let script = dir.join("kotlinc");
@@ -3315,7 +3376,7 @@ fn write_java_home_reporter(dir: &Path) -> String {
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    "kotlinc".to_string()
+    Some("kotlinc".to_string())
 }
 
 #[cfg(unix)]
