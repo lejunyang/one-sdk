@@ -445,13 +445,28 @@ fn routed_launcher<'a>(tool_name: &'a str, backend: &str) -> (&'a str, Option<&'
     }
 }
 
+/// Refuse to dispatch a tool when the project config carries an unreviewed key
+/// that would change *this* dispatch.
+///
+/// Only those keys. The shim runs on every command invocation, so anything it
+/// refuses becomes unusable in that directory -- and a refusal the shim cannot
+/// act on is pure cost. Adding a `[syspkg]` block used to make `cargo --version`
+/// fail here with "project config is not trusted", a message about installing
+/// system packages produced by a command that installs nothing; trust is bound
+/// to the file hash, so every later edit re-locked every tool again.
+///
+/// `osdk install`, `osdk pkg` and `osdk run` still evaluate the full set before
+/// they act, which is where those keys actually take effect.
 fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(), String> {
     let Some(project_config) = osdk_core::trust::project_config(cwd).map_err(|e| e.to_string())?
     else {
         return Ok(());
     };
-    let requirements =
-        osdk_core::trust::trust_requirements(&project_config).map_err(|e| e.to_string())?;
+    let requirements: Vec<_> = osdk_core::trust::trust_requirements(&project_config)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(osdk_core::trust::affects_tool_dispatch)
+        .collect();
     if requirements.is_empty() {
         return Ok(());
     }

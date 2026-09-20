@@ -170,9 +170,18 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
 /// warns about above: a gate that fires on something the user just asked for
 /// teaches nothing and trains people to approve without reading.
 ///
-/// The contrast with `syspkg` is the whole point. `syspkg` acts during
-/// `osdk install`, which the user did not request per-package, so review has to
-/// happen before the fact. A task only ever runs because someone named it.
+/// The contrast with `syspkg` is the whole point -- but state it accurately:
+/// `syspkg` is read only by the `osdk pkg` subcommands, and only
+/// `osdk pkg apply --yes` installs anything. What makes it different from
+/// `[tasks]` is not *when* it is read but *what one approval covers*: `osdk run
+/// build` names a single task whose text is right there, whereas `osdk pkg
+/// apply` accepts the whole package list at once, each entry able to run a
+/// distribution's install scripts as root. Review before the fact is what makes
+/// that list reviewable at all.
+///
+/// Note this table says nothing about which *commands* must enforce the gate --
+/// see [`affects_tool_dispatch`]. `syspkg` requires review before installing,
+/// not before every `cargo --version`.
 ///
 /// `task_config` is different again, and does stay gated: it is not a command
 /// the user names but an ambient setting, and its `shell` field decides which
@@ -194,6 +203,49 @@ const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks"];
 
 /// The npm tool option that turns lifecycle scripts back on.
 const ALLOW_BUILDS_OPTION: &str = "allow_builds";
+
+/// Does this requirement affect how `osdk-shim` dispatches an already-installed
+/// tool?
+///
+/// The shim runs on **every command invocation**, so whatever it refuses makes
+/// that command unusable in the directory. It must therefore gate only what it
+/// can itself act on, and nothing else.
+///
+/// It can act on `sources` and `registries`: the shim performs a registry
+/// preflight before running a package manager, so those genuinely decide where
+/// a subprocess it starts will fetch from. It cannot act on `syspkg` (read only
+/// by `osdk pkg`, and installing needs `osdk pkg apply --yes`) or on
+/// `task_config` (read only by `osdk run` / `osdk task`).
+///
+/// Gating those two here bought no safety and cost a great deal: adding a
+/// `[syspkg]` block to a project made `cargo --version` fail in that directory
+/// with "project config is not trusted" -- a refusal about installing system
+/// packages, raised by a command that installs nothing. And because trust is
+/// bound to the file's hash, every later edit of `osdk.toml` re-locked every
+/// tool again. That is the wolf-crying this module warns about, in the one place
+/// where it also breaks the build.
+///
+/// `osdk install`, `osdk pkg` and `osdk run` still evaluate the full set: the
+/// narrowing is the shim's alone, and each of those paths reaches keys the shim
+/// never does.
+pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
+    // Match on the top-level table: a requirement key is either a bare table
+    // name or `table.key`.
+    let table = requirement
+        .key
+        .split_once('.')
+        .map_or(requirement.key.as_str(), |(table, _)| table);
+    match table {
+        // Never reached by the shim.
+        "syspkg" | "task_config" => false,
+        // Everything else is treated as dispatch-affecting. Fail-closed on
+        // purpose: `settings`, `tools`, `sources`, `registries` and any table a
+        // future build does not recognize all stay gated, so adding a new
+        // execution-affecting key cannot silently escape the shim's check by
+        // being forgotten here.
+        _ => true,
+    }
+}
 
 /// Collect every key in this config that requires review, in reporting order.
 ///
@@ -1034,6 +1086,55 @@ mod tests {
             assert_eq!(found[0].key, key);
             assert_eq!(found[0].reason, TrustReason::WeakensVerification, "{body}");
         }
+    }
+
+    /// The shim gates only what it can itself act on.
+    ///
+    /// It runs on every command invocation, so a refusal it cannot act on simply
+    /// makes the directory unusable: a `[syspkg]` block used to make
+    /// `cargo --version` fail with "project config is not trusted" -- a message
+    /// about installing system packages, from a command that installs nothing --
+    /// and since trust is bound to the file hash, every later edit of
+    /// `osdk.toml` re-locked every tool again.
+    ///
+    /// Both directions are asserted. Narrowing this predicate too far is the
+    /// more dangerous mistake and would not show up as a failure anywhere else:
+    /// the shim would dispatch tools under a config whose `sources` or
+    /// `registries` nobody reviewed.
+    #[test]
+    fn the_shim_gates_dispatch_affecting_keys_only() {
+        let dispatch_affecting = |key: &str| {
+            affects_tool_dispatch(&TrustRequirement {
+                key: key.to_string(),
+                reason: TrustReason::ExecutesCode,
+            })
+        };
+
+        // Reached by the shim: it runs a registry preflight before starting a
+        // package manager, and settings/tools decide what it resolves and runs.
+        for key in [
+            "sources",
+            "registries",
+            "settings.verify_signatures",
+            "tools.npm.allow_builds",
+        ] {
+            assert!(dispatch_affecting(key), "{key} must still gate the shim");
+        }
+
+        // Never reached by the shim. `syspkg` is read only by `osdk pkg` (and
+        // only `apply --yes` installs); `task_config` only by `osdk run` /
+        // `osdk task`. Those commands evaluate the full requirement set
+        // themselves, which is where the review belongs.
+        for key in ["syspkg", "task_config"] {
+            assert!(
+                !dispatch_affecting(key),
+                "{key} must not block an unrelated tool invocation"
+            );
+        }
+
+        // An unrecognized table stays gated: a key this build cannot interpret
+        // must not escape the shim's check by having been forgotten here.
+        assert!(dispatch_affecting("something_new_from_the_future"));
     }
 
     /// An unknown top-level table, and an unknown `[settings]` key, must both

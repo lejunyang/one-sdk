@@ -105,6 +105,15 @@ This table can cause software to be installed on your machine, which makes it
 execution-affecting project configuration, so it goes through osdk's existing
 trust flow. Until the project is trusted, every `pkg` subcommand refuses and
 tells you to run `osdk trust`.
+
+**That scope is the `pkg` subcommands only.** Declaring `[syspkg]` does not
+affect other tools in the directory: `cargo`, `node` and anything else dispatched
+through the shim keep working. The shim gates only the configuration it can act
+on itself -- keys like `sources` and `registries`, which decide where a
+subprocess it starts will fetch from. Refusing a `[syspkg]` table the shim never
+reads would buy no safety while making the whole directory unusable, and since
+trust is bound to the file's hash, every later edit of `osdk.toml` would lock it
+again.
 :::
 
 ::: tip A version is a wish, not a lock
