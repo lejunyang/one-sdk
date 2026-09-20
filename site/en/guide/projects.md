@@ -548,6 +548,36 @@ these keys need review because they affect what runs on this machine:
   syspkg -- can run arbitrary code on this machine during install
 ```
 
+### What the gate covers: commands that act
+
+Trust exists to stop an unreviewed config from *doing* something, so a command
+that does nothing has nothing to gate. These keep working while a project is
+untrusted:
+
+- **Read-only inspection**: `list`, `current`, `where`, `doctor`, `completions`,
+  and `task list` / `task info` / `task deps`. They report state and reach no
+  install, download or subprocess. They are also exactly what you run *while
+  deciding* whether to trust a project -- refusing them hides both the evidence
+  and the way out.
+- **Trust management itself**: `trust`, `untrust`.
+- **`config set` / `config unset`**: the way an untrusted config is edited back
+  into shape. Gating them would block the only exit with the very config being
+  undone. Each addresses one named key in one named file and never acts on what
+  the untrusted config asks for. `config get` and `config list` stay gated
+  because they *do* report that config's merged values.
+
+**Tools dispatched through the shim are a separate line.** `cargo`, `node` and
+the rest are started by the shim, which gates only the keys it can act on itself
+-- `sources`, `registries` and the like, which decide where a subprocess it
+starts will fetch from. A table the shim never reads, such as `[syspkg]` or
+`[task_config]`, does not stop you from using tools in that directory. The cost
+of doing otherwise is the whole directory becoming unusable, and since trust is
+bound to the file's hash, every later edit of `osdk.toml` would lock it again.
+
+Everything else stays gated. That is the fail-closed direction: a new command is
+gated until someone deliberately exempts it, rather than slipping through
+because it was forgotten.
+
 ### Trust identity and record states
 
 ```bash

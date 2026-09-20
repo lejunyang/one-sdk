@@ -494,6 +494,30 @@ these keys need review because they affect what runs on this machine:
   syspkg -- can run arbitrary code on this machine during install
 ```
 
+### 拦截范围：只挡会动手的命令
+
+信任要挡的是「未经审阅的配置去做事」，所以不做事的命令没有什么可挡。下面这些
+在未信任时照常可用：
+
+- **只读查看**：`list`、`current`、`where`、`doctor`、`completions`，以及
+  `task list` / `task info` / `task deps`。它们只汇报状态，不安装、不下载、不起
+  子进程。这也正是你**决定要不要信任之前**会用的命令——把它们挡住，等于把判断
+  依据和出口一起藏起来。
+- **信任管理本身**：`trust`、`untrust`。
+- **`config set` / `config unset`**：这是把一份未信任配置改回正常的手段，挡住它
+  就等于用那份配置本身堵死了唯一出口。两者都只针对指定文件里的指定键，不会按未
+  信任配置的要求行事。`config get` / `config list` 仍受管，因为它们确实会输出那
+  份配置合并后的值。
+
+**经 shim 分派的工具是另一条线。** `cargo`、`node` 这类命令由 shim 启动，而
+shim 只对它自己会走到的键把关（`sources`、`registries` 之类决定子进程从哪拉取
+的）。像 `[syspkg]`、`[task_config]` 这种 shim 永远读不到的表，不会影响你在该目
+录下正常使用工具——否则代价是整个目录不可用，而信任绑定的是文件哈希，此后每次
+编辑 `osdk.toml` 都要重新解锁一次。
+
+其余命令一律受管。这是 fail-closed 的方向：新增一个命令默认受管，要豁免必须显式
+登记，而不是因为被遗漏而溜过去。
+
 ### 信任身份与失效
 
 ```bash

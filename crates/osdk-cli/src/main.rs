@@ -112,13 +112,32 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
 
 /// Whether a command runs before the project config is trusted.
 ///
-/// Trust management is exempt for the obvious reason. So are `config set` and
-/// `config unset`: they are how an untrusted project config is edited back into
-/// shape, and gating them would leave the only exit route blocked by the very
-/// config the user is undoing. Both address one named key in one named file and
-/// never act on what the untrusted config asks for. `config get` and
-/// `config list` stay behind the gate precisely because they do report the
-/// untrusted config's merged values.
+/// Trust exists to stop an unreviewed config from *doing* something. A command
+/// that acts on nothing has nothing to gate, and refusing it only makes the
+/// directory hostile: `osdk list` printing "project config is not trusted" tells
+/// the user a config they have not reviewed is preventing them from *looking at
+/// what is already installed*, which is both useless and alarming. Worse, it
+/// hides the exit route -- `osdk trust` wants to be read before it is run, and
+/// the commands that show you what you are about to approve were themselves
+/// refused.
+///
+/// Three groups are exempt.
+///
+/// Trust management itself, for the obvious reason.
+///
+/// `config set` / `config unset`: the way an untrusted config is edited back
+/// into shape. Gating them would block the only exit with the very config being
+/// undone. Each addresses one named key in one named file and never acts on what
+/// the untrusted config asks for. `config get` and `config list` stay gated
+/// precisely because they *do* report that config's merged values.
+///
+/// Read-only inspection: these resolve and print state, and reach no install,
+/// build, download, subprocess or host mutation. They are also what a person
+/// runs *while deciding* whether to trust a project.
+///
+/// Everything else stays gated, which is the fail-closed direction: a new
+/// command is gated until someone deliberately lists it here, rather than
+/// slipping through because it was forgotten.
 fn bypasses_trust_check(command: &Command) -> bool {
     matches!(
         command,
@@ -127,6 +146,19 @@ fn bypasses_trust_check(command: &Command) -> bool {
             | Command::Config {
                 command: crate::cli::ConfigCommand::Set { .. }
                     | crate::cli::ConfigCommand::Unset { .. }
+            }
+            // Read-only: report existing state, act on nothing.
+            | Command::List { .. }
+            | Command::Current { .. }
+            | Command::Where { .. }
+            | Command::Doctor { .. }
+            | Command::Completions { .. }
+            // `task list` / `info` / `deps` only print what the file declares;
+            // `osdk run` is what would execute it, and stays gated.
+            | Command::Task {
+                command: crate::cli::TaskCommand::List { .. }
+                    | crate::cli::TaskCommand::Info { .. }
+                    | crate::cli::TaskCommand::Deps { .. }
             }
     )
 }
@@ -201,7 +233,7 @@ mod tests {
     use super::bypasses_trust_check;
     #[cfg(unix)]
     use super::native_exit_code;
-    use crate::cli::{Command, ConfigCommand};
+    use crate::cli::{Command, ConfigCommand, TaskCommand};
 
     #[test]
     fn only_trust_management_and_config_writes_skip_the_trust_gate() {
@@ -239,6 +271,74 @@ mod tests {
         assert!(!bypasses_trust_check(&Command::Config {
             command: ConfigCommand::Path
         }));
+    }
+
+    /// Read-only commands must not be refused, and acting commands must be.
+    ///
+    /// Both directions matter, and they fail in opposite ways. Gating a
+    /// read-only command makes the directory hostile for no safety at all --
+    /// `osdk list` refusing to show what is already installed, and, worse,
+    /// hiding the very commands a person would use to decide whether to trust
+    /// the project. Exempting an acting command is the real hazard: it would run
+    /// under a config nobody reviewed.
+    #[test]
+    fn read_only_commands_are_not_gated_but_acting_ones_are() {
+        // Resolve and print state; reach no install, download, subprocess or
+        // host mutation.
+        for command in [
+            Command::List { tool: None },
+            Command::Current { tool: None },
+            Command::Where {
+                tool: "node".into(),
+                global: false,
+                bins: false,
+            },
+            Command::Doctor {
+                verify: false,
+                tool: None,
+            },
+            Command::Completions {
+                shell: clap_complete::Shell::Bash,
+            },
+            Command::Task {
+                command: TaskCommand::List { hidden: false },
+            },
+            Command::Task {
+                command: TaskCommand::Info {
+                    task: "build".into(),
+                },
+            },
+            Command::Task {
+                command: TaskCommand::Deps {
+                    task: "build".into(),
+                },
+            },
+        ] {
+            assert!(
+                bypasses_trust_check(&command),
+                "read-only command must not be refused: {command:?}"
+            );
+        }
+
+        // These install, build, download, mutate the host, or run something the
+        // untrusted config chose. They stay gated.
+        for command in [
+            Command::Run {
+                task: "build".into(),
+                dry_run: false,
+                args: Vec::new(),
+            },
+            Command::Reshim,
+            Command::Prune { dry_run: false },
+            Command::HookEnv {
+                shell: "bash".into(),
+            },
+        ] {
+            assert!(
+                !bypasses_trust_check(&command),
+                "command that acts must stay gated: {command:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
