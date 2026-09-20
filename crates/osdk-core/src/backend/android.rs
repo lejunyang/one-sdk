@@ -1625,10 +1625,22 @@ mod tests {
             .join(ndk_prebuilt_dir(crate::platform::Os::Windows))
             .join("bin");
         let rendered = joined.to_string_lossy().to_string();
+        // The contract is "no separator foreign to *this* platform", not "no
+        // `/`": on Unix `/` is the native one, so the literal check passed on
+        // Windows and could never pass on Linux -- it asserted the host, not the
+        // joining. Compare against MAIN_SEPARATOR so both platforms verify the
+        // same property.
+        let foreign = if std::path::MAIN_SEPARATOR == '/' {
+            '\\'
+        } else {
+            '/'
+        };
         assert!(
-            !rendered.contains('/'),
+            !rendered.contains(foreign),
             "path must not embed a foreign separator: {rendered}"
         );
+        // The component count is what actually proves the segments were joined
+        // one at a time rather than pushed in as one pre-joined string.
         assert_eq!(joined.components().count(), 6);
     }
 
