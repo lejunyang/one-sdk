@@ -43,11 +43,35 @@ python = "3.12"
 [syspkg.packages]
 # Package names verified against each distro's own index; osdk deliberately does
 # no cross-manager name mapping, so each has to be spelled its own way.
+
+# A C compiler, for every Linux contributor -- not just the ones cross-compiling.
+# rustc drives linking through `cc`, so without it the build dies on `proc-macro2`
+# and `quote`, crates with no C in them at all, behind a screen of linker
+# arguments whose actual cause ("cc: command not found") is one note among many.
+# Measured on a clean graph: `cc` is the only host compiler the build invokes;
+# cmake, make, perl and nasm are never called, and pkg-config is optional.
+#
+# macOS is deliberately absent: `cc` comes from the Xcode Command Line Tools
+# (`xcode-select --install`), not from any package manager osdk drives, so an
+# entry here could only ever be wrong. See the note below.
+"apt:build-essential" = { version = "latest", os = "linux" }
+"dnf:gcc" = { version = "latest", os = "linux" }
+"pacman:gcc" = { version = "latest", os = "linux" }
+"apk:build-base" = { version = "latest", os = "linux" }
+
+# The Windows cross-compilation linker, needed only by `wine-tests`.
 "apt:mingw-w64" = { version = "latest", os = "linux" }
 "dnf:mingw64-gcc" = { version = "latest", os = "linux" }
 "pacman:mingw-w64-gcc" = { version = "latest", os = "linux" }
 "apk:mingw-w64-gcc" = { version = "latest", os = "linux" }
 
+# Not declared here: a C compiler for macOS. `cc` is just as required there, but
+# it ships with the Xcode Command Line Tools and is installed by
+# `xcode-select --install` -- there is no Homebrew (or other) package that
+# provides it, so any entry would report a state that does not correspond to
+# whether the compiler exists. A fresh mac needs that one command before the
+# first build; everything else in this file applies unchanged.
+#
 # Not declared here: docker/podman for `distro-detection`. A container runtime is
 # a daemon, a user group and a storage driver, not just a package -- installing it
 # through a package manager leaves it unconfigured and not running, so the entry
