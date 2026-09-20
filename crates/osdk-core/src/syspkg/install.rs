@@ -635,6 +635,11 @@ mod tests {
         std::process::ExitStatus::from_raw(code as u32)
     }
 
+    /// A Unix wait status carries only an 8-bit exit code, so this round-trips
+    /// small codes and truncates large ones: winget's `ALREADY_INSTALLED`
+    /// (-1978335135) comes back from `.code()` as 97. That is a limit of the
+    /// platform's process API, not something to encode around -- tests whose
+    /// input is a full 32-bit winget code are gated to Windows instead.
     #[cfg(unix)]
     fn scripted_status(code: i32) -> std::process::ExitStatus {
         use std::os::unix::process::ExitStatusExt;
@@ -681,6 +686,14 @@ mod tests {
         );
     }
 
+    /// Windows-only because the input is winget's 32-bit `ALREADY_INSTALLED`
+    /// code, which a Unix wait status cannot represent (see `scripted_status`).
+    /// The judgement itself is covered on every platform by
+    /// `already_installed_counts_as_success_so_a_rerun_is_not_an_error` and
+    /// `a_distro_exit_code_is_not_judged_by_wingets_table`, which call
+    /// `install_succeeded*` directly; what this adds is the path through
+    /// `run_installs` and `ExitStatus`.
+    #[cfg(windows)]
     #[test]
     fn an_already_installed_package_is_reported_as_succeeding() {
         let runner = ScriptedRunner {

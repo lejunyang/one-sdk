@@ -3494,8 +3494,12 @@ fn unused_loopback_registry() -> String {
     format!("http://{address}/")
 }
 
+/// Write an npm registry config, optionally pinning `[sources] mode`.
+///
+/// `mode = "env"` is the setting under which an explicit registry environment
+/// variable is obeyed verbatim and no probing happens at all.
 #[cfg(not(windows))]
-fn write_registry_config(root: &Path, urls: &[&str]) {
+fn write_registry_config_with_sources(root: &Path, urls: &[&str], mode: Option<&str>) {
     let directory = root.join("config");
     std::fs::create_dir_all(&directory).unwrap();
     let urls = urls
@@ -3503,11 +3507,21 @@ fn write_registry_config(root: &Path, urls: &[&str]) {
         .map(|url| format!("\"{url}\""))
         .collect::<Vec<_>>()
         .join(", ");
+    let sources = match mode {
+        Some(mode) => format!("[sources]\nmode = \"{mode}\"\n\n"),
+        None => String::new(),
+    };
     std::fs::write(
         directory.join("config.toml"),
-        format!("[registries.npm]\nurls = [{urls}]\nprobe_timeout_ms = 500\n"),
+        format!("{sources}[registries.npm]\nurls = [{urls}]\nprobe_timeout_ms = 500\n"),
     )
     .unwrap();
+}
+
+/// The common case: registry urls with whatever source mode is the default.
+#[cfg(not(windows))]
+fn write_registry_config(root: &Path, urls: &[&str]) {
+    write_registry_config_with_sources(root, urls, None);
 }
 
 #[cfg(unix)]
@@ -4284,7 +4298,13 @@ fn exec_registry_all_unavailable_starts_no_manager_process() {
 fn exec_registry_respects_explicit_env_and_cli_registry_without_probing() {
     let temporary = tempfile::tempdir().unwrap();
     let dead = unused_loopback_registry();
-    write_registry_config(temporary.path(), &[&dead]);
+    // `mode = "env"` is what now means "obey the explicit registry and do not
+    // probe". A bare environment variable no longer ends planning: it became one
+    // more candidate to rank, so that an unreachable mirror in the environment
+    // loses to a working one instead of winning by default. Without this the
+    // dead candidate below is probed, every probe fails, and the command is
+    // refused -- which is correct behaviour, just not what this test is about.
+    write_registry_config_with_sources(temporary.path(), &[&dead], Some("env"));
     write_fake_registry_manager(
         temporary.path(),
         "npm",
