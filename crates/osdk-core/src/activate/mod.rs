@@ -111,7 +111,11 @@ Invoke-OsdkHook
 # fires once per *command lookup*, so a single pipeline or loop body re-ran the
 # whole activation (22 subprocesses for one ten-iteration loop, ~1.1s each).
 # bash/zsh/fish have always hooked their prompt; this matches them.
-if (-not $script:OsdkOriginalPrompt) {{
+# `Test-Path Variable:` rather than reading the variable: under
+# `Set-StrictMode -Version Latest` a bare read of a never-assigned variable is a
+# terminating error, so probing it directly made activation abort in exactly the
+# sessions careful enough to enable StrictMode.
+if (-not (Test-Path Variable:script:OsdkOriginalPrompt)) {{
   # Wrap whatever prompt is already installed (Oh My Posh, Starship, a dotfile
   # override) instead of replacing it, and keep the builtin default when there
   # is none -- overwriting a user's prompt to install a PATH hook is not a
@@ -124,7 +128,7 @@ if (-not $script:OsdkOriginalPrompt) {{
     $script:OsdkOriginalPrompt = {{ "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }}
   }}
   function global:prompt {{
-    if (-not $script:OsdkHookRunning) {{
+    if (-not (Test-Path Variable:script:OsdkHookRunning) -or -not $script:OsdkHookRunning) {{
       $script:OsdkHookRunning = $true
       # A failed hook must not cost the user their shell prompt, so its errors
       # stay contained here rather than propagating out of `prompt`.
@@ -232,7 +236,9 @@ if (Test-Path Env:OSDK_ORIGINAL_PATH_SET) { $env:PATH = $env:OSDK_ORIGINAL_PATH 
 # Put the user's own prompt back. Deleting our wrapper without restoring what it
 # wrapped would leave the session with no prompt function at all, silently
 # discarding an Oh My Posh / Starship / dotfile prompt that we only borrowed.
-if ($script:OsdkOriginalPrompt) {
+# Probed with `Test-Path Variable:` for the same StrictMode reason as activation:
+# deactivating a session that was never activated must be a no-op, not an error.
+if ((Test-Path Variable:script:OsdkOriginalPrompt) -and $script:OsdkOriginalPrompt) {
   Set-Item Function:global:prompt $script:OsdkOriginalPrompt
   Remove-Variable OsdkOriginalPrompt -Scope Script -ErrorAction SilentlyContinue
 }
@@ -1001,8 +1007,15 @@ mod tests {
         );
         // Re-sourcing the snippet must not wrap our own wrapper: that nests one
         // hook per activation and multiplies the cost we just removed.
+        //
+        // The probe is `Test-Path Variable:` rather than a bare read of the
+        // variable, because a bare read is a terminating error under
+        // `Set-StrictMode -Version Latest`. Asserting the guard *exists* is not
+        // enough on its own -- a guard spelled as a bare read still reads as a
+        // guard here -- so `powershell_snippets_survive_strict_mode` executes
+        // both snippets under StrictMode as the load-bearing check.
         assert!(
-            script.contains("if (-not $script:OsdkOriginalPrompt)"),
+            script.contains("if (-not (Test-Path Variable:script:OsdkOriginalPrompt))"),
             "capture must be guarded so re-activation cannot nest wrappers:\n{script}"
         );
     }
@@ -1043,6 +1056,77 @@ mod tests {
             "the capture slot must be cleared so a later activation re-captures \
              the real prompt rather than a stale one:\n{script}"
         );
+    }
+
+    /// Both PowerShell snippets must survive `Set-StrictMode -Version Latest`.
+    ///
+    /// The string assertions above can only see that a guard was written; they
+    /// cannot see whether it is a *legal* guard. Under StrictMode, reading a
+    /// variable that was never assigned is a terminating error, so the original
+    /// `if (-not $script:OsdkOriginalPrompt)` aborted activation outright -- and
+    /// `windows-runtime-smoke.ps1` runs under exactly that setting, which is
+    /// where it surfaced. Deactivation had the same exposure on its restore path,
+    /// reachable by deactivating a session that was never activated.
+    ///
+    /// This runs the rendered snippets through a real `pwsh -NoProfile` with
+    /// StrictMode on, so a guard that merely looks like a guard fails here.
+    /// Skipped, not silently passed, when no `pwsh` is on PATH: a check that
+    /// cannot run must not report success.
+    #[test]
+    #[cfg(windows)]
+    fn powershell_snippets_survive_strict_mode() {
+        let Some(pwsh) = locate_pwsh() else {
+            eprintln!("skipping: no pwsh on PATH to execute the rendered snippets");
+            return;
+        };
+
+        // A prompt function is deliberately absent here: that is the fresh-shell
+        // case, and it is the branch that reads the capture variable first.
+        let activation = activation_script(Shell::Powershell, "osdk");
+        let deactivation = deactivation_script(Shell::Powershell);
+        for (label, snippet) in [
+            ("activation", activation.clone()),
+            ("deactivation", deactivation.clone()),
+            // Deactivating a never-activated session, and activating twice, are
+            // both ordinary user sequences that hit the guarded reads.
+            ("activation twice", format!("{activation}\n{activation}")),
+            (
+                "activation then deactivation",
+                format!("{activation}\n{deactivation}"),
+            ),
+        ] {
+            let program = format!(
+                "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n\
+                 function global:prompt {{ 'probe> ' }}\n{snippet}\n\
+                 if (-not (prompt)) {{ throw 'prompt returned nothing' }}\n\
+                 Write-Output 'STRICT_MODE_OK'\n"
+            );
+            let output = std::process::Command::new(&pwsh)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &program])
+                .output()
+                .expect("failed to spawn pwsh");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("STRICT_MODE_OK"),
+                "the {label} snippet failed under StrictMode \
+                 (status={:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status.code()
+            );
+        }
+    }
+
+    /// Locate PowerShell 7 for [`powershell_snippets_survive_strict_mode`].
+    ///
+    /// Only `pwsh` counts. Windows PowerShell 5 differs in StrictMode details and
+    /// would make this check answer a question about a different interpreter than
+    /// the one the project's own scripts run under.
+    #[cfg(windows)]
+    fn locate_pwsh() -> Option<std::path::PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("pwsh.exe"))
+            .find(|candidate| candidate.is_file())
     }
 
     #[test]
