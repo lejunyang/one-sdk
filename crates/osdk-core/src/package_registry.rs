@@ -1972,7 +1972,8 @@ npmRegistries:
             r#""npmAuthToken": secret"#,
         ] {
             std::fs::write(project.join(".yarnrc.yml"), config).unwrap();
-            let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+            let (url, _guard) = unused_loopback();
+            let ctx = test_ctx(temp.path(), vec![url], false);
             let decision =
                 native_registry_candidates(&ctx, &project, PackageManager::YarnBerry, |_| None)
                     .unwrap();
@@ -2323,7 +2324,9 @@ npmRegistries:
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let candidates = vec![unused_loopback_url(), unused_loopback_url()];
+        let (first, _first_guard) = unused_loopback();
+        let (second, _second_guard) = unused_loopback();
+        let candidates = vec![first, second];
         let ctx = test_ctx(temp.path(), candidates, false);
         let args = vec!["install".into()];
         let home_value = home.display().to_string();
@@ -2511,7 +2514,8 @@ npmRegistries:
     /// leak the value, since a registry URL can carry a token.
     async fn explicit_manager_environment_passes_through() {
         let temp = tempfile::tempdir().unwrap();
-        let mut ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let (url, _guard) = unused_loopback();
+        let mut ctx = test_ctx(temp.path(), vec![url], false);
         ctx.config.sources.mode = SourceMode::Env;
         let args = vec!["install".into()];
         let cwd = isolated_cwd(temp.path());
@@ -2534,7 +2538,8 @@ npmRegistries:
     /// merely by existing. This is the npm-side equivalent of "pin beats env".
     async fn an_ambient_registry_does_not_outrank_a_configured_one() {
         let temp = tempfile::tempdir().unwrap();
-        let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let (url, _guard) = unused_loopback();
+        let ctx = test_ctx(temp.path(), vec![url], false);
         let args = vec!["install".into()];
         let cwd = isolated_cwd(temp.path());
         let plan = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |key| {
@@ -2555,7 +2560,8 @@ npmRegistries:
     /// must not silently disappear either; planning continues with the built-ins.
     async fn a_malformed_ambient_registry_is_dropped_rather_than_obeyed() {
         let temp = tempfile::tempdir().unwrap();
-        let ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let (url, _guard) = unused_loopback();
+        let ctx = test_ctx(temp.path(), vec![url], false);
         let args = vec!["install".into()];
         let cwd = isolated_cwd(temp.path());
         let plan = plan(&ctx, &cwd, PackageManager::Pnpm, "pnpm", &args, |key| {
@@ -2574,7 +2580,8 @@ npmRegistries:
     /// error rather than a quiet fallback to the built-in registries.
     async fn env_mode_without_a_variable_is_an_error() {
         let temp = tempfile::tempdir().unwrap();
-        let mut ctx = test_ctx(temp.path(), vec![unused_loopback_url()], false);
+        let (url, _guard) = unused_loopback();
+        let mut ctx = test_ctx(temp.path(), vec![url], false);
         ctx.config.sources.mode = SourceMode::Env;
         let args = vec!["install".into()];
         let cwd = isolated_cwd(temp.path());
@@ -2650,11 +2657,25 @@ npmRegistries:
         cwd
     }
 
-    fn unused_loopback_url() -> String {
+    /// A loopback URL nothing will ever answer on, and a guard that keeps it
+    /// that way for as long as the caller holds it.
+    ///
+    /// Binding port 0 and dropping the listener leaves the port free for
+    /// *anyone* -- including `registry_server`, which binds port 0 too. Under
+    /// `cargo test`'s parallelism the OS can hand that same port to a server in
+    /// another test between the drop and the probe, so a probe that must fail
+    /// connects and succeeds. That is how
+    /// `all_failed_candidates_are_unavailable` failed once in a full run while
+    /// passing every time on its own.
+    ///
+    /// Holding the listener instead keeps the port reserved; nothing ever
+    /// accepts on it, so a connection is refused rather than answered. The
+    /// backlog is never drained, which is exactly the "closed port" behaviour
+    /// these tests want, and it cannot be reassigned underneath them.
+    fn unused_loopback() -> (String, TcpListener) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{address}/")
+        (format!("http://{address}/"), listener)
     }
 
     fn registry_server(
