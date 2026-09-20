@@ -4196,21 +4196,37 @@ scope = "project"
             .validate_completed_install(&ctx, &version, ToolScope::Project, &isolated)
             .unwrap());
 
-        let global_version = with_scope(version.clone(), ToolScope::Global);
-        let global = write_scope_fixture(
+        // The native lockfile lives in a *project* install: `write_scope_fixture`
+        // writes one only in that branch, because a global npm install
+        // materializes into the prefix's node_modules and records no lock. This
+        // leg previously asked the global fixture for that file and died on
+        // `NotFound` before reaching its assertion -- invisibly, since the whole
+        // test is unix-only and Windows never ran it.
+        let locked_version = npm_test_version(&backend, "3.6.3");
+        let locked = write_scope_fixture(
             &backend,
             &ctx,
-            &global_version,
-            ToolScope::Global,
+            &locked_version,
+            ToolScope::Project,
             "prettier",
         );
-        let lock_path = global.join(PROJECT_DIR).join(NPM_LOCKFILE_NAME);
+        let lock_path = locked.join(PROJECT_DIR).join(NPM_LOCKFILE_NAME);
+        assert!(
+            lock_path.is_file(),
+            "the project fixture must carry a native lockfile to symlink: {}",
+            lock_path.display()
+        );
         let lock_copy = temporary.path().join("native-lock.yaml");
         std::fs::copy(&lock_path, &lock_copy).unwrap();
+        // A regular lockfile must still be accepted, or the rejection below
+        // would prove nothing about the symlink specifically.
+        assert!(backend
+            .validate_completed_install(&ctx, &locked_version, ToolScope::Project, &locked)
+            .unwrap());
         std::fs::remove_file(&lock_path).unwrap();
         symlink(&lock_copy, &lock_path).unwrap();
         assert!(!backend
-            .validate_completed_install(&ctx, &global_version, ToolScope::Global, &global)
+            .validate_completed_install(&ctx, &locked_version, ToolScope::Project, &locked)
             .unwrap());
     }
 
@@ -5486,7 +5502,12 @@ scope = "project"
                 schema: 1,
                 provider: PROVIDER.into(),
                 package: "prettier".into(),
-                installer: ISOLATED_INSTALLER.into(),
+                // The installer actually used, not ISOLATED_INSTALLER: that
+                // constant is the fixed value for project-scoped installs, which
+                // always go through the synthetic project. A global install runs
+                // under the manager it was given, and the receipt has to say so
+                // because reuse matches on it.
+                installer: "pnpm".into(),
                 node_version: TEST_NODE_VERSION.into(),
                 build_policy: "deny".into(),
                 graph_sha256: None,
