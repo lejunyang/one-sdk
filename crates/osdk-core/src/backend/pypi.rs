@@ -1828,7 +1828,17 @@ mod tests {
             "activate.bat".to_string(),
             "deactivate.bat".to_string(),
         ] {
-            std::fs::write(bin_dir.join(&name), b"x").unwrap();
+            let path = bin_dir.join(&name);
+            std::fs::write(&path, b"x").unwrap();
+            // Discovery keeps only executables. On Windows the extension decides,
+            // but on Unix it is the permission bit, so a fixture written 0644 is
+            // invisible there and the test would assert against an empty list
+            // rather than against the plumbing filter it is about.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
 
         let names = backend.bin_names(&ctx, &tv).unwrap();
