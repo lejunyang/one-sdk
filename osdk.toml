@@ -1,0 +1,116 @@
+# osdk project configuration for one-sdk itself.
+#
+# Two jobs: pin the toolchain this repo is built with, and make every check CI
+# runs available as one named task, so "what does CI do" has a single answer
+# that can also be run locally.
+
+[tools]
+# Matches rust-toolchain.toml. Both exist on purpose: rust-toolchain.toml is what
+# cargo and rust-analyzer read without osdk, this is what osdk installs.
+#
+# `targets` carries the Windows GNU triple because that is what
+# scripts/windows-wine-tests.sh cross-compiles for -- CI installs it as a
+# separate step, and a contributor who does not have it gets a link error rather
+# than an explanation.
+rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc-windows-gnu" }
+
+# scripts/test-installers.sh serves the fixture archives over `python3 -m
+# http.server`. Without it the installer smoke exits before printing anything.
+python = "3.12"
+
+[tasks]
+# --- the everyday loop -------------------------------------------------------
+fmt = "cargo fmt --all"
+build = "cargo build --workspace"
+
+[tasks.fmt-check]
+description = "Formatting, as CI checks it"
+run = "cargo fmt --all --check"
+
+[tasks.clippy]
+description = "Lints at the CI gate's own setting"
+# `-- -D warnings` rather than parsing output: the gate is the exit code, and a
+# checker that greps for `^error` misses `warning:` and reports clean while CI
+# fails (AGENTS.md, 验证失效模式).
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Workspace test suite"
+run = "cargo test --workspace"
+
+[tasks.msrv]
+description = "Minimum supported Rust version still compiles"
+# Pinned separately from [tools]: this must use the OLD compiler, so it asks
+# rustup for it explicitly instead of the project toolchain.
+run = "rustup run 1.91.1 cargo check --locked --workspace"
+
+# --- what CI runs, grouped so the name says which platform it covers ---------
+[tasks.ci]
+description = "Everything CI runs on this platform"
+run = [{ tasks = ["fmt-check", "clippy", "test"] }]
+
+[tasks.windows-smoke]
+description = "Windows runtime contract: shims, long paths, StrictMode activation"
+# Not covered by cargo test at all -- it drives the real cmd/PowerShell/Git Bash
+# shim chains, a >260 character state root, and renders activate/deactivate under
+# `Set-StrictMode -Version Latest`. A StrictMode defect reached CI green through
+# `cargo test --workspace` precisely because nothing here is a unit test.
+#
+# Depends on `build` so -BinDir points at binaries built from the current source
+# rather than whatever was left in target/ (a stale binary makes this pass while
+# testing the previous build).
+depends = ["build"]
+run = "pwsh -NoProfile -File scripts/windows-runtime-smoke.ps1 -BinDir target/debug"
+when = { os = "windows" }
+
+[tasks.wine-tests]
+description = "Windows GNU test suite under Wine, from Linux"
+# Requires mingw-w64 and the x86_64-pc-windows-gnu target; the script downloads
+# and checksums its own pinned Wine build.
+run = "./scripts/windows-wine-tests.sh"
+when = { os = "linux" }
+
+[tasks.installers]
+description = "Installer smoke test"
+run = "./scripts/test-installers.sh"
+when = { os = ["linux", "macos"] }
+
+[tasks.installers-windows]
+description = "Installer smoke test (PowerShell installer)"
+run = "pwsh -NoProfile -File scripts/test-installers.ps1"
+when = { os = "windows" }
+
+[tasks.live-smoke]
+description = "Live smoke harness used by the fmt job"
+run = "./scripts/test-live-smoke.sh"
+when = { os = ["linux", "macos"] }
+
+[tasks.distro-detection]
+description = "Package-manager detection inside real distro containers"
+# Skips cleanly when neither docker nor podman is present.
+run = "./scripts/linux-distro-detection.sh"
+when = { os = "linux" }
+
+[tasks.bench]
+description = "Interaction-latency benchmarks (hook-env, shim, inventory scan)"
+# Required after touching hook-env, activation, shim startup or the inventory
+# scan: these measure traversal counts, which stay deterministic under noise.
+run = "cargo bench -p osdk-core"
+
+[tasks.size]
+description = "Release binary sizes, measured the way that gives the real number"
+# Two separate invocations on purpose. A single `--workspace` release build makes
+# Cargo unify features, re-enabling `install` for the shim: the binary still
+# works, nothing warns, and the size silently doubles. osdk-shim has a
+# compile-time assertion against exactly this -- if it fires, fix the command,
+# not the assertion.
+run = [
+  "cargo build --release -p osdk-cli",
+  "cargo build --release -p osdk-shim",
+]
+env = { CARGO_TARGET_DIR = "target/size-check" }
+
+[tasks.site]
+description = "Build the documentation site (dead links fail the build)"
+dir = "site"
+run = "bun run build"

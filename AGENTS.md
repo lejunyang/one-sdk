@@ -7,6 +7,10 @@
 - `README.md` 和 `README.zh-CN.md` 应保持为面向使用场景的入口，只讲产品功能和用法。不要在任何一份 README 里写内部架构、实现算法或设计取舍，这些内容应放进 VitePress 中对应的实现说明章节。
 - VitePress 的用户指南页和实现说明页必须中英文成对存在。新增、删除或重命名页面时，同步更新两种语言的侧边栏，并运行 VitePress 生产构建，让失效链接在校验阶段暴露出来。
 
+- **每项检查都在 `osdk.toml` 的 `[tasks]` 里有名字，`osdk task list` 是唯一权威清单。** 不要去 `.github/workflows/ci.yml` 里翻命令再手抄一遍——抄出来的版本会和 CI 悄悄分叉。常用的几个：`osdk run ci`（fmt-check + clippy + test）、`osdk run windows-smoke`、`osdk run wine-tests`、`osdk run msrv`、`osdk run size`、`osdk run bench`。只在某个平台有意义的任务用 `when` 标好，在别的平台会被明确拒绝并说明原因，而不是悄悄跳过。
+- 新增一项 CI 检查时，同时加进 `osdk.toml`；反过来也一样。两边任意一侧独有的检查，就是下一次「本地全绿而 CI 失败」的来源。
+- 交叉编译所需的东西已写进配置：`rust` 条目带 `targets = "x86_64-pc-windows-gnu"`，`python` 供安装器冒烟的 fixture HTTP 服务使用。`mingw-w64` 和容器运行时仍需宿主自备——前者缺失会在链接期报错，后者缺失会让 `distro-detection` 干净跳过。
+
 - 每次提交前运行范围最小的相关测试。在宣布一个跨多个提交的工作项完成之前，运行完整的工作区验证。
 - 测试和冒烟检查必须在适用处使用临时的 `HOME`、`OSDK_*`、`CARGO_HOME`、`RUSTUP_HOME` 和构建目录。不要修改或依赖用户真实的 SDK 管理器状态。
 - 在 Windows 上执行脚本必须使用 PowerShell 7（`pwsh`），禁止使用 PowerShell 5（`powershell` / Windows PowerShell）。PowerShell 5 在字符编码、`Latin1` 等 .NET API 可用性和输出重定向行为上与 PowerShell 7 存在差异，会导致脚本结果不可靠。当默认 shell 为 PowerShell 5 时，通过 `pwsh -NoProfile -Command "..."` 或 `pwsh -File <script>` 显式转由 PowerShell 7 执行。
