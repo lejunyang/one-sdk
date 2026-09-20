@@ -4651,9 +4651,29 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
             ),
         )
         .unwrap();
-        let lockfile = format!(
-            "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      '@antfu/ni':\n        specifier: {version}\n        version: {version}\n\npackages:\n  '@antfu/ni@{version}':\n    resolution: {{integrity: sha512-fixture-integrity}}\n"
-        );
+        // A real npm lockfile: JSON, `lockfileVersion` 2 or 3, with the tool
+        // keyed by its install path. Feeding pnpm's YAML to a file named
+        // package-lock.json makes the graph unparseable, and the install is then
+        // dropped for "invalid provider evidence" without anything saying so.
+        let lockfile = serde_json::to_string_pretty(&serde_json::json!({
+            "name": "osdk-dynamic-npm-tool",
+            "lockfileVersion": 3,
+            "requires": true,
+            "packages": {
+                "": {
+                    "name": "osdk-dynamic-npm-tool",
+                    "dependencies": { "@antfu/ni": version },
+                },
+                "node_modules/@antfu/ni": {
+                    "version": version,
+                    "resolved": format!(
+                        "https://registry.example.test/@antfu/ni/-/ni-{version}.tgz"
+                    ),
+                    "integrity": "sha512-fixture-integrity",
+                },
+            },
+        }))
+        .unwrap();
         std::fs::write(project_root.join("package-lock.json"), &lockfile).unwrap();
         let launcher = project_root.join("node_modules/.bin/ni");
         std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
@@ -4680,7 +4700,12 @@ fn reshim_keeps_same_dynamic_backend_across_multiple_installed_versions() {
                     osdk_core::pipeline::HashAlgo::Sha256,
                 ),
                 "root_integrity": "sha512-fixture-integrity",
-                "root_source": format!("npm:@antfu/ni@{version}")
+                // The graph's root_source is the lockfile's `resolved` URL, not
+                // the request string -- it must match what npm_graph_identity
+                // reads back out of the lockfile written above.
+                "root_source": format!(
+                    "https://registry.example.test/@antfu/ni/-/ni-{version}.tgz"
+                )
             }))
             .unwrap(),
         )
