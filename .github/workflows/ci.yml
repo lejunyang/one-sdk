@@ -45,6 +45,29 @@ jobs:
         if: runner.os == 'Windows'
         with:
           python-version: "3.x"
+      # `./scripts/test-installers.sh` once exited 2 in 0.17s with no output on
+      # ubuntu while the same commit passed on macOS. A script that echoes from
+      # its first steps, and contains no `exit 2`, producing nothing at all means
+      # it never started -- so record the things that stop a script before line
+      # one. Never fails the job by itself.
+      - name: Installer preflight
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set +e
+          echo "bash: $(bash --version | head -1)"
+          echo "shell: $SHELL   uid: $(id -u)   pwd: $(pwd)"
+          echo "mktemp -d: $(mktemp -d 2>&1)"
+          echo "--- scripts/ ---"
+          ls -l scripts/ || echo "scripts/ is missing"
+          echo "--- the script itself ---"
+          ls -l scripts/test-installers.sh || echo "test-installers.sh is missing"
+          echo "executable: $([ -x scripts/test-installers.sh ] && echo yes || echo NO)"
+          echo "first line: $(head -1 scripts/test-installers.sh | cat -A)"
+          echo "interpreter: $(head -1 scripts/test-installers.sh | sed 's|^#!||' | awk '{print $1}')"
+          echo "syntax check: $(bash -n scripts/test-installers.sh 2>&1 && echo ok)"
+          echo "df -h /tmp:"; df -h /tmp
+          exit 0
       - name: Unix installer
         if: runner.os != 'Windows'
         shell: bash
@@ -156,5 +179,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
+      # Records the runtime and image digests. When a base image changes what it
+      # ships -- which is how `jq` quietly became preinstalled on archlinux and
+      # turned the pacman case into a no-op -- this is what makes the change
+      # visible instead of leaving a green-looking skip.
+      - name: Container preflight
+        run: |
+          set +e
+          docker version --format 'server {{.Server.Version}}' 2>&1 | head -2
+          for image in debian:stable-slim alpine:latest archlinux:latest fedora:latest; do
+            echo "--- $image ---"
+            docker pull -q "$image" 2>&1 | tail -1
+            docker image inspect "$image" --format '{{index .RepoDigests 0}}' 2>&1 | tail -1
+          done
+          exit 0
       - name: detect apt/apk/pacman/dnf inside their own distributions
         run: ./scripts/linux-distro-detection.sh

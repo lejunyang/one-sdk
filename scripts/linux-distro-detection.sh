@@ -16,6 +16,18 @@
 #
 # Requires docker or podman. Skips with a clear message when neither is present,
 # rather than failing a developer machine that simply has no container runtime.
+#
+# Two image-level details are load-bearing, and both once failed as though the
+# product were broken:
+#
+#   * TLS roots come from the OS trust store, so a slim image without
+#     `ca-certificates` fails every HTTPS request with "http error: builder
+#     error" -- a message about building the HTTP client, not about the network.
+#   * Alpine runs the glibc binary through gcompat, which needs `libgcc` as well
+#     for the unwinder; without it the binary cannot start and nothing is tested.
+#
+# Both are installed in the prelude below, per image, and deliberately not
+# treated as something the host provides.
 
 set -euo pipefail
 
@@ -50,30 +62,60 @@ if [[ ! -x "$binary" ]]; then
     exit 1
 fi
 
-# image | manager it ships | managers it does not | a package it always has
+# image | manager it ships | managers it does not | a package it always has |
+# a package it does NOT have
 #
 # Column 4 ships in the base image; column 5 must NOT, so installing it proves
 # something actually happened rather than that it was already there.
-# step: it is the ground truth the status query is checked against.
+#
+# Column 5 is checked at run time by `assert_absent_in_image`, because getting
+# it wrong does not look like a failure: archlinux:latest ships `jq`, so the
+# pacman case reported "Nothing to install: every requested package is present"
+# and never reached the branch it exists to test. The assertion turns that into
+# a loud failure instead of a silently skipped check.
 cases=(
     "debian:stable-slim|apt|pacman dnf|coreutils|jq"
     "alpine:latest|apk|apt pacman dnf|busybox|jq"
-    "archlinux:latest|pacman|apt dnf|coreutils|jq"
+    "archlinux:latest|pacman|apt dnf|coreutils|cowsay"
     "fedora:latest|dnf|apt pacman|coreutils|jq"
 )
 
 failures=0
+
+# Column 5 must be absent from the base image, or the check it feeds silently
+# proves nothing. Verified against the image rather than assumed, because the
+# symptom of getting it wrong is a cheerful "Nothing to install".
+assert_absent_in_image() {
+    local image="$1" package="$2"
+    if "$runtime" run --rm "$image" sh -c "command -v $package >/dev/null 2>&1"; then
+        echo "  FAIL: $package is already present in $image, so installing it proves nothing" >&2
+        echo "        pick a package the base image does not ship (column 5)" >&2
+        return 1
+    fi
+    return 0
+}
 
 for case_line in "${cases[@]}"; do
     IFS='|' read -r image expect_present expect_absent known_present installable <<<"$case_line"
     echo
     echo "=== $image: expecting $expect_present ==="
 
-    # Alpine needs gcompat to run a glibc binary; everything else runs as is.
+    # Alpine runs a glibc binary through gcompat, which needs libgcc too: the
+    # unwinder lives in libgcc_s.so.1 and every _Unwind_* symbol resolves
+    # against it. Installing only gcompat produced a binary that could not
+    # start at all -- "Error loading shared library libgcc_s.so.1", followed by
+    # a page of relocation errors -- which the script then reported as a
+    # detection failure, blaming the code for something that never ran.
+    #
+    # Debian slim carries no CA bundle, and osdk reads TLS roots from the OS
+    # trust store. Without it every HTTPS request fails as "http error: builder
+    # error" -- reqwest failing to construct a client with an empty root store,
+    # which reads like a product bug and is not one.
     prelude="true"
-    if [[ "$image" == alpine:* ]]; then
-        prelude="apk add --no-cache gcompat >/dev/null 2>&1"
-    fi
+    case "$image" in
+        alpine:*) prelude="apk add --no-cache gcompat libgcc >/dev/null 2>&1" ;;
+        debian:*) prelude="apt-get update >/dev/null 2>&1 && apt-get install -y --no-install-recommends ca-certificates >/dev/null 2>&1" ;;
+    esac
 
     output="$(
         "$runtime" run --rm \
@@ -165,6 +207,11 @@ osdk pkg status --json" 2>&1
     #
     # pacman is excluded on purpose: osdk declines to install there, and the
     # assertion below is that it declines rather than that it succeeds.
+    if ! assert_absent_in_image "$image" "$installable"; then
+        failures=$((failures + 1))
+        continue
+    fi
+
     if [[ "$expect_present" != "pacman" ]]; then
         install_output="$(
             "$runtime" run --rm \
