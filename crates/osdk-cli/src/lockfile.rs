@@ -1918,14 +1918,24 @@ fn read_pypi_env_receipt(
 /// osdk installs interpreters at `installs/python/<version>/...`, so the segment
 /// after `python` is the version. A path outside that layout (a user-supplied
 /// interpreter) yields `None` rather than a guess.
+///
+/// Both separators are split on rather than going through `Path::components`,
+/// which honours only the host's own. A receipt records the interpreter path of
+/// whichever machine built the environment, and a lockfile is meant to be read on
+/// another: on Unix a recorded Windows path is a single component, so the version
+/// segment was invisible and such an entry reported no version at all. osdk's
+/// install layout is identical on both platforms, so the segment rule below is
+/// what decides, not the host that happens to be reading.
 fn python_version_from_interpreter(interpreter: &str) -> Option<String> {
-    let path = std::path::Path::new(interpreter);
-    let mut components = path.components().peekable();
+    let mut components = interpreter
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty())
+        .peekable();
     while let Some(component) = components.next() {
-        if component.as_os_str() != "python" {
+        if component != "python" {
             continue;
         }
-        let next = components.peek()?.as_os_str().to_str()?;
+        let next = *components.peek()?;
         // Guard against matching a directory that merely sits next to a file
         // called `python`: the following segment has to look like a version.
         if next.chars().next().is_some_and(|c| c.is_ascii_digit()) {
@@ -2359,6 +2369,14 @@ mod tests {
     /// interpreter's minor version, so replaying against a different one
     /// produces a different environment while still reporting the same tool
     /// version.
+    ///
+    /// Every case here runs on every platform on purpose. The parse used to go
+    /// through `Path::components`, which splits on the host's separator only, so
+    /// the Windows-shaped path below was a single opaque component on Unix and its
+    /// version came back as `None` -- a receipt written on Windows and read on
+    /// Linux lost the very fact the entry exists to record. Asserting both shapes
+    /// on both platforms is what makes that regression fail where it happens,
+    /// instead of only on the machine that wrote the path.
     #[test]
     fn python_version_is_read_from_the_managed_interpreter_path() {
         assert_eq!(
@@ -2371,11 +2389,21 @@ mod tests {
                 .as_deref(),
             Some("3.11.16")
         );
+        // Mixed separators do occur: osdk joins its own layout onto a root that
+        // may already be spelled either way.
+        assert_eq!(
+            python_version_from_interpreter(r"E:\osdk-data/data/installs\python/3.13.2\python.exe")
+                .as_deref(),
+            Some("3.13.2")
+        );
 
         // An interpreter outside osdk's layout yields nothing rather than a
         // guess: recording a wrong version is worse than recording none, since
         // a wrong one would be replayed as though it had been verified.
         assert_eq!(python_version_from_interpreter("/usr/bin/python3"), None);
+        // Now that both separators are split everywhere, this path is segmented
+        // on Unix as well, so the "looks like a version" guard is what has to
+        // reject it -- which is why it is asserted on every platform.
         assert_eq!(
             python_version_from_interpreter(r"C:\Python311\python.exe"),
             None
@@ -2385,6 +2413,10 @@ mod tests {
         // version segment.
         assert_eq!(
             python_version_from_interpreter("/opt/python/bin/python"),
+            None
+        );
+        assert_eq!(
+            python_version_from_interpreter(r"C:\tools\python\bin\python.exe"),
             None
         );
     }

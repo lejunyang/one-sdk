@@ -89,6 +89,13 @@ pub struct EnvReceipt {
     pub schema: u32,
     pub creator: EnvCreator,
     /// Interpreter the environment was built against, as an absolute path.
+    ///
+    /// Written with the separators of whichever machine built the environment,
+    /// unlike the `/`-normalized paths in a store manifest -- it names a location
+    /// on that machine, so normalizing it would misrepresent it. Anything that
+    /// *parses* this value therefore has to accept both separators regardless of
+    /// the host it runs on; `Path::components` honours only the host's own, which
+    /// silently yielded nothing for a Windows-written receipt read on Linux.
     pub interpreter: String,
     /// Whether `pip`, `setuptools`, and `wheel` are present.
     pub seed: SeedState,
