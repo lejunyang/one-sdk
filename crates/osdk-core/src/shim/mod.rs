@@ -2305,6 +2305,10 @@ mod tests {
                 aliases: Default::default(),
                 project_config_path: None,
                 excluded_tools: Default::default(),
+                // Gated exactly like the field: `tasks` is behind the `install`
+                // feature so the shim's build never carries task parsing.
+                #[cfg(feature = "install")]
+                tasks: Default::default(),
             },
             client: reqwest::Client::new(),
             show_progress: false,
