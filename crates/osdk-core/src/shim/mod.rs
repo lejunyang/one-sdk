@@ -476,8 +476,11 @@ pub fn validated_dynamic_install(
     selected.options = request.options.clone();
     if !backend.validate_dynamic_install(ctx, &selected, &root, &manifest.identity)? {
         return Err(Error::other(format!(
-            "dynamic tool `{}@{version}` has invalid provider evidence; reinstall it before use",
-            request.backend
+            "dynamic tool `{}@{version}` has invalid provider evidence at {}; \
+             its receipt, manifest or lockfile disagrees with what is on disk. \
+             Run `osdk doctor` for the state osdk sees, or reinstall it",
+            request.backend,
+            root.display()
         )));
     }
     let canonical_root = dunce::canonicalize(&root).map_err(|error| Error::io(&root, error))?;

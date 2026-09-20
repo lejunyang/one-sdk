@@ -4522,6 +4522,17 @@ pub fn reshim(app: &App) -> Result<()> {
             }
             Err(error) => return Err(error.into()),
         };
+        // A configured dynamic backend with nothing installed is the one case
+        // worth saying out loud. It is not an error -- the install may simply be
+        // absent -- but it is also what a rejected install looks like from here,
+        // and those two are indistinguishable in silence. `osdk doctor` can then
+        // be pointed at the tool to get the actual reason.
+        if installed.is_empty() && dynamic_request.is_some() {
+            tracing::info!(
+                backend = backend.id(),
+                "configured dynamic backend has no usable install; no shim generated"
+            );
+        }
         for version in installed {
             let mut tv = ToolVersion::new(backend.id(), &version);
             if backend.id().contains(':') {
