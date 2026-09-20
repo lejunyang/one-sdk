@@ -9,7 +9,9 @@
 
 - **每项检查都在 `osdk.toml` 的 `[tasks]` 里有名字，`osdk task list` 是唯一权威清单。** 不要去 `.github/workflows/ci.yml` 里翻命令再手抄一遍——抄出来的版本会和 CI 悄悄分叉。常用的几个：`osdk run ci`（fmt-check + clippy + test）、`osdk run windows-smoke`、`osdk run wine-tests`、`osdk run msrv`、`osdk run size`、`osdk run bench`。只在某个平台有意义的任务用 `when` 标好，在别的平台会被明确拒绝并说明原因，而不是悄悄跳过。
 - 新增一项 CI 检查时，同时加进 `osdk.toml`；反过来也一样。两边任意一侧独有的检查，就是下一次「本地全绿而 CI 失败」的来源。
-- 交叉编译所需的东西已写进配置：`rust` 条目带 `targets = "x86_64-pc-windows-gnu"`，`python` 供安装器冒烟的 fixture HTTP 服务使用。`mingw-w64` 和容器运行时仍需宿主自备——前者缺失会在链接期报错，后者缺失会让 `distro-detection` 干净跳过。
+- 交叉编译所需的东西都在 `osdk.toml` 里：`rust` 条目带 `targets = "x86_64-pc-windows-gnu"`，`python` 供安装器冒烟的 fixture HTTP 服务使用，`[syspkg.packages]` 声明四个发行版各自的 mingw 包名。声明本身不装任何东西——`osdk pkg status` 只读，只有显式 `osdk pkg apply --yes` 才会安装。所以缺依赖时的流程是 `osdk pkg status` 看缺什么、`osdk pkg apply --yes` 装上，而不是读一条链接错误再去猜自己发行版的包名。
+- **mingw 不能换成 zig。** rustc 的 `x86_64-pc-windows-gnu` 目标通过 `x86_64-w64-mingw32-gcc` 链接，传给它的是一串 GNU ABI 导入库（`-lmsvcrt -lmingwex -lmingw32 -lgcc_eh -l:libpthread.a`）。实测：`zig cc` 能把 wine-ready.c 编成真正的 PE32+，但作为 rustc 的链接器会以 `unable to find dynamic system library 'msvcrt'` 失败——zig 按自己的策略解析 libc，不提供这组 `.a`，而 mingw 有 `libmsvcrt.a`。同一个 crate、同一工具链换成 mingw 即成功，所以差异在链接器而非环境。zig 在本项目的位置是 README 里已有的那个：给用户做 C 交叉编译，不经过 rustc 的链接器协议。
+- 容器运行时（docker/podman）**没有**写进 `[syspkg]`：它是守护进程 + 用户组 + 存储驱动，不只是一个包，装上而未配置会让条目报「已安装」而任务照样跳过。`distro-detection` 在两者都没有时会干净跳过并说明原因。
 
 - 每次提交前运行范围最小的相关测试。在宣布一个跨多个提交的工作项完成之前，运行完整的工作区验证。
 - 测试和冒烟检查必须在适用处使用临时的 `HOME`、`OSDK_*`、`CARGO_HOME`、`RUSTUP_HOME` 和构建目录。不要修改或依赖用户真实的 SDK 管理器状态。

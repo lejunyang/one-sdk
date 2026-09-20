@@ -18,6 +18,42 @@ rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc
 # http.server`. Without it the installer smoke exits before printing anything.
 python = "3.12"
 
+# System packages the Wine cross-test needs. Declaring them here does not install
+# anything: `[syspkg]` is a declaration, `osdk pkg status` is read-only, and only
+# an explicit `osdk pkg apply --yes` installs. So a contributor gets
+#
+#   osdk pkg status     # is mingw missing?
+#   osdk pkg apply --yes
+#
+# instead of reading a link error and guessing the package name for their distro.
+#
+# Why mingw and not zig: rustc's `x86_64-pc-windows-gnu` target links through
+# `x86_64-w64-mingw32-gcc`, and it passes GNU-ABI import libraries
+# (`-lmsvcrt -lmingwex -lmingw32 -lgcc_eh -l:libpthread.a`). Measured: `zig cc`
+# builds the wine-ready.c probe into a real PE32+ fine, but as rustc's linker it
+# fails with `unable to find dynamic system library 'msvcrt'` -- zig resolves libc
+# its own way and does not ship those `.a` files, while mingw has libmsvcrt.a.
+# Same crate and toolchain with mingw as the linker succeeds, so the difference is
+# the linker, not the setup. zig stays what the README already recommends it for:
+# users cross-compiling C, which does not go through rustc's linker protocol.
+[syspkg]
+# Left unrestricted on purpose: one entry per package manager below, filtered by
+# `os`, so whichever manager the host actually has is the one that applies.
+
+[syspkg.packages]
+# Package names verified against each distro's own index; osdk deliberately does
+# no cross-manager name mapping, so each has to be spelled its own way.
+"apt:mingw-w64" = { version = "latest", os = "linux" }
+"dnf:mingw64-gcc" = { version = "latest", os = "linux" }
+"pacman:mingw-w64-gcc" = { version = "latest", os = "linux" }
+"apk:mingw-w64-gcc" = { version = "latest", os = "linux" }
+
+# Not declared here: docker/podman for `distro-detection`. A container runtime is
+# a daemon, a user group and a storage driver, not just a package -- installing it
+# through a package manager leaves it unconfigured and not running, so the entry
+# would report "installed" while the task still skips. That script already skips
+# cleanly with a message when neither runtime is present.
+
 [tasks]
 # --- the everyday loop -------------------------------------------------------
 fmt = "cargo fmt --all"
