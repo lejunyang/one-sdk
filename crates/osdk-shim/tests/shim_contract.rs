@@ -327,11 +327,24 @@ fn http_shim_restarts_offline_and_rejects_tampered_receipt() {
 
 #[cfg(unix)]
 fn configure_registry(root: &Path, url: &str) {
+    configure_registry_with_mode(root, url, None);
+}
+
+/// As [`configure_registry`], but able to pin `[sources] mode`.
+///
+/// `mode = "env"` is the setting under which an explicit registry environment
+/// variable is obeyed as-is and nothing is probed.
+#[cfg(unix)]
+fn configure_registry_with_mode(root: &Path, url: &str, mode: Option<&str>) {
     let config = root.join("config/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let sources = match mode {
+        Some(mode) => format!("[sources]\nmode = \"{mode}\"\n\n"),
+        None => String::new(),
+    };
     std::fs::write(
         config,
-        format!("[registries.npm]\nurls = [{url:?}]\nprobe_timeout_ms = 2000\n"),
+        format!("{sources}[registries.npm]\nurls = [{url:?}]\nprobe_timeout_ms = 2000\n"),
     )
     .unwrap();
 }
@@ -714,9 +727,22 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
     );
 }
 
+/// A damaged install elsewhere in the tree must not take the whole shim down.
+///
+/// This used to assert the opposite -- that any unreadable manifest made the
+/// shim refuse everything. That fail-closed scan was removed on purpose
+/// (docs/bugs/007): one conda install carrying an unknown option bricked
+/// `cargo`, `node` and `osdk-shim --version` at once, and rebuilding the shim
+/// needs cargo, so the failure locked the user out of its own fix.
+///
+/// Nothing is weakened by the tolerant scan, because it only answers "which
+/// backend owns this name". Whatever is about to run still goes through
+/// `validated_dynamic_install`, which re-reads the manifest and re-checks
+/// identity, completion marker and provider evidence -- the neighbouring tests
+/// here cover exactly those refusals.
 #[cfg(unix)]
 #[test]
-fn dynamic_shim_fails_closed_on_corrupt_inventory_with_valid_configured_tool() {
+fn dynamic_shim_skips_a_corrupt_neighbour_and_still_runs_the_configured_tool() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     let log = temporary.path().join("dynamic.log");
@@ -744,18 +770,24 @@ fn dynamic_shim_fails_closed_on_corrupt_inventory_with_valid_configured_tool() {
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
-        stderr.contains("refusing dynamic tool inventory scan"),
-        "{stderr}"
+        log.exists(),
+        "a corrupt neighbour blocked an unrelated, correctly installed tool: {stderr}"
     );
-    assert!(stderr.contains("corrupt"), "{stderr}");
-    assert!(
-        stderr.contains(osdk_core::inventory::INVENTORY_FILE),
-        "{stderr}"
+    // The corrupt tree must not be silently adopted either: it provides no
+    // command, so asking for one from it still fails.
+    let missing = isolated_command(temporary.path(), &project)
+        .arg("tool")
+        .env("OSDK_TRUSTED_CONFIG_PATHS", &project)
+        .output()
+        .unwrap();
+    assert_ne!(
+        missing.status.code(),
+        Some(0),
+        "the corrupt install was treated as usable"
     );
-    assert!(!log.exists(), "configured dynamic tool unexpectedly ran");
 }
 
 #[cfg(unix)]
@@ -963,7 +995,11 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
         ..Default::default()
     }];
     manifest.write_atomic(&global_root).unwrap();
-    let global_project = global_root.join("project");
+    // A pnpm global install materializes under `pnpm-global/`, not in a
+    // synthetic `project/`: that is where both the package manifest and the
+    // native lock are looked up. Writing the npm-style layout here made the
+    // evidence check find neither and refuse the install.
+    let global_project = global_root.join("pnpm-global/global/5");
     let global_package = global_project.join("node_modules/fixture-cli");
     std::fs::create_dir_all(&global_package).unwrap();
     std::fs::write(
@@ -1102,13 +1138,23 @@ fn dynamic_npm_shim_rejects_identity_without_node_dependency() {
     manifest.bins = old_manifest.bins;
     manifest.write_atomic(&install_root).unwrap();
     std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+    // The healthy install from the fixture lives under its own identity
+    // directory and would still be a valid candidate, so the shim would select
+    // it and succeed -- proving nothing about the defective one. Drop it.
+    std::fs::remove_dir_all(&old_root).unwrap();
 
     let output = isolated_command(temporary.path(), &project)
         .arg("ni")
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "exit={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         !log.exists(),
         "manifest without a Node dependency unexpectedly launched the CLI"
@@ -1154,6 +1200,9 @@ fn dynamic_npm_shim_rejects_non_exact_manifest_node_identity() {
         manifest.bins = old_manifest.bins;
         manifest.write_atomic(&install_root).unwrap();
         std::fs::write(install_root.join(".osdk-complete"), b"").unwrap();
+        // Same reason as above: without this the healthy install is still a
+        // valid candidate and the shim rightly runs it.
+        std::fs::remove_dir_all(&old_root).unwrap();
 
         let output = isolated_command(temporary.path(), &project)
             .arg("ni")
@@ -1587,7 +1636,10 @@ fn explicit_registry_environment_is_preserved_without_probe() {
         "#!/bin/sh\nexit 0\n",
     );
     let server = ProbeServer::start("200 OK");
-    configure_registry(temporary.path(), server.url());
+    // Under the default mode the ambient variable is only a candidate and the
+    // configured registry is still probed; `env` mode is what promises the
+    // variable is honoured without any probe, which is what this test is about.
+    configure_registry_with_mode(temporary.path(), server.url(), Some("env"));
 
     let explicit = "https://environment.example.test/";
     let output = isolated_command(temporary.path(), &project)
