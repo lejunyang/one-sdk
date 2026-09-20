@@ -1085,9 +1085,17 @@ fn validate_env_value(name: &str, value: &str) -> Result<()> {
         Some(open) => &value[..open],
         None => value,
     };
+    // `Path::is_absolute` answers for the *host*, but a definition is data that
+    // travels: a TOML written on Windows is parsed on Linux too. On Unix
+    // `Path::new(r"C:\tools\gcc.exe").is_absolute()` is false and neither
+    // leading-separator test matches, so a drive-qualified absolute path slipped
+    // through this guard entirely -- and this guard is what keeps an `[env]`
+    // value from aiming a child process at arbitrary host state. Recognize the
+    // drive form explicitly so the same definition is rejected on every platform.
     if Path::new(leading_literal).is_absolute()
         || leading_literal.starts_with('/')
         || leading_literal.starts_with('\\')
+        || starts_with_windows_drive(leading_literal)
     {
         return Err(Error::config(format!(
             "`{label}` must not use an absolute path; anchor it at `{{install_path}}`"
@@ -1099,6 +1107,21 @@ fn validate_env_value(name: &str, value: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Does this text begin with a Windows drive qualifier (`C:\`, `C:/`, or bare
+/// `C:`)?
+///
+/// Needed because `Path::is_absolute` only answers for the host, while a
+/// declarative definition is data that may have been written on another
+/// platform. A bare `C:` counts: it is drive-relative on Windows and still
+/// leaves the install root.
+fn starts_with_windows_drive(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(drive) = characters.next() else {
+        return false;
+    };
+    drive.is_ascii_alphabetic() && characters.next() == Some(':')
 }
 
 fn validate_file_template(template: &str) -> Result<()> {
