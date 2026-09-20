@@ -11,6 +11,8 @@
 - 测试和冒烟检查必须在适用处使用临时的 `HOME`、`OSDK_*`、`CARGO_HOME`、`RUSTUP_HOME` 和构建目录。不要修改或依赖用户真实的 SDK 管理器状态。
 - 在 Windows 上执行脚本必须使用 PowerShell 7（`pwsh`），禁止使用 PowerShell 5（`powershell` / Windows PowerShell）。PowerShell 5 在字符编码、`Latin1` 等 .NET API 可用性和输出重定向行为上与 PowerShell 7 存在差异，会导致脚本结果不可靠。当默认 shell 为 PowerShell 5 时，通过 `pwsh -NoProfile -Command "..."` 或 `pwsh -File <script>` 显式转由 PowerShell 7 执行。
 - 从 Linux 验证 Rust 代码、测试、构建脚本、安装器或 CI 时，必须在宣布任务完成前用 `./scripts/windows-wine-tests.sh` 运行完整的 Windows GNU 工作区测试套件。缺少脚本前置依赖时先安装（包括 `x86_64-pc-windows-gnu` Rust 目标和 `mingw-w64`）；该脚本会自行下载并校验其固定版本的 Wine 构建。仅做 Windows 交叉编译或 Clippy 检查不满足这项运行时测试要求。纯文档改动可豁免。
+- **反方向同样要求：在 Windows 上改动激活片段、`hook-env`、shim 或 shell 集成后，`cargo test --workspace` 不足以宣布完成，必须实跑 `pwsh -NoProfile -File scripts\windows-runtime-smoke.ps1 -BinDir <构建输出>\debug`。** 这个脚本覆盖的东西一个单元测试都碰不到：cmd / PowerShell / Git Bash 三种 shell 各自的 shim 调用链、>260 字符的状态目录、含空格与中文的路径，以及**在 `Set-StrictMode -Version Latest` 下**渲染并执行 activate/deactivate。曾经漏掉的就是最后这一条——激活片段裸读一个尚未赋值的变量，在 StrictMode 下是终止性错误，于是整个激活中断，而 `cargo test --workspace` 在 Windows 上全绿。
+- 同理，跨平台分支（`#[cfg]`、路径分隔符、平台专属实现）**在单一平台上全绿不构成证据**：那一半代码在本平台根本不参与编译。判断改动是否跨平台，再决定要不要在另一侧实跑，而不是以本地绿色为准。
 
 # 二进制体积
 
@@ -96,6 +98,45 @@
 ## 测试规模不足以暴露冲突
 
 - **N=1 测不出、N=2 才暴露。** 每个 venv 都带 `pydoc` 这类 stdlib 脚本，单个工具声称提供它无害；装第二个 pypi 工具时两者都声称，shim 生成才拒绝整批。而且报错发生在两个安装都成功之后，看起来与任何单个工具都无关。**涉及命名空间冲突、shim 归属、全局资源的能力，测试至少要有两个实例。**
+
+# 跨平台路径：分隔符由数据的来源决定，不由宿主决定
+
+`Path` 的 API 只认**当前宿主**的分隔符：Windows 上 `/` 和 `\` 都算，Unix 上
+只有 `/`，`\` 是普通字符。所以 `Path::components()`、`file_name()`、
+`starts_with()` 只能用来处理**本机自己产生的**路径。
+
+一旦一个路径以字符串形式跨过机器边界（写进 receipt、lockfile、manifest，或
+来自归档内部、来自另一台机器的配置），就不能再用这些 API 去解析它——**读的
+机器和写的机器可能不是同一个平台**。
+
+判断只问一句：**这个字符串是谁写的？** 本机写的用 `Path`；别处写的（或要发给
+别处的）按下面的约定处理。
+
+## 三条约定
+
+1. **写进产物的相对路径，一律归一成 `/`**：`relative.to_string_lossy().replace('\\', "/")`。
+   store manifest、conda/github/npm/pypi 的文件清单都已这么做，因为产物要能
+   跨平台校验。
+2. **表示「某台机器上的位置」的绝对路径，保留原生分隔符**，归一反而会歪曲它
+   （`EnvReceipt::interpreter` 属于这类）。代价是**读它的一侧必须同时接受两种
+   分隔符**：用 `s.split(['/', '\\'])`，不要用 `Path::components()`。
+3. **校验用途（文件名、相对路径是否越界）先显式拒两种分隔符，再做其余检查**，
+   不要依赖宿主。`pipeline::validate_safe_filename` 是范例：先
+   `value.contains(['/', '\\', ':'])`，`components()` 只作兜底；
+   `inventory::normalize_relative_bin_path` 则是先 `replace('\\', "/")` 再按
+   `/` 逐段检查。
+
+## 为什么这类缺陷特别难发现
+
+`python_version_from_interpreter` 用 `Path::components()` 去找 `python` 后面
+那一段版本号。在 Windows 上一切正常；在 Linux 上，一个 Windows 写的
+interpreter 路径是**单个组件**，于是函数返回 `None`——不报错、不 panic，只是
+「这条 lock 条目没有 Python 版本」，而 lock 的用处正是记录它。
+
+**在 Windows 上跑 `cargo test --workspace` 永远发现不了**：断言里那条 Windows
+路径在 Windows 上本来就能过。所以这类函数的测试**两种分隔符的用例都要在所有
+平台上跑**，不要写成 `#[cfg(windows)]`——一旦加了 cfg，就等于声明「这半边不在
+另一个平台上验证」，而这正是缺陷的藏身处。
 
 # 交互延迟
 
