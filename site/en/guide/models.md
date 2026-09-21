@@ -249,7 +249,18 @@ HF_HUB_CACHE=<...>/hub
 HF_XET_CACHE=<...>/xet
 HF_ASSETS_CACHE=<...>/assets
 HF_HUB_OFFLINE=1                    # only when osdk is offline
+MODEL_ENDPOINT=<chosen HF-compatible endpoint>  # llama.cpp reads this, not HF_ENDPOINT
+LLAMA_CACHE=<...>/hub               # llama.cpp's own download-directory variable
 ```
+
+**Why llama.cpp needs two variables of its own**: its `-hf` downloader reads the
+Hugging Face-compatible endpoint from `MODEL_ENDPOINT` (not `HF_ENDPOINT`) and uses
+`LLAMA_CACHE` to override the download directory (per upstream `docs/models.md`).
+Exporting only the HF names left llama.cpp going straight to huggingface.co,
+unaffected by the mirror. Modern llama.cpp stores `-hf` files in the standard HF
+cache (`HF_HOME`/`HF_HUB_CACHE` take priority), so osdk points `LLAMA_CACHE` at the
+same managed `hub` directory -- old and new llama.cpp then share one copy of a GGUF
+instead of downloading it twice.
 
 The ModelScope adapter exports:
 

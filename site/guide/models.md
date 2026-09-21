@@ -225,7 +225,16 @@ HF_HUB_CACHE=<...>/hub
 HF_XET_CACHE=<...>/xet
 HF_ASSETS_CACHE=<...>/assets
 HF_HUB_OFFLINE=1                    # 仅 osdk offline 时
+MODEL_ENDPOINT=<选中的 HF 兼容端点>  # llama.cpp 读它，不读 HF_ENDPOINT
+LLAMA_CACHE=<...>/hub               # llama.cpp 自己的下载目录变量
 ```
+
+**为什么 llama.cpp 需要单独两个变量**：llama.cpp 的 `-hf` 下载器从
+`MODEL_ENDPOINT`（而不是 `HF_ENDPOINT`）读取 Hugging Face 兼容端点，并以
+`LLAMA_CACHE` 覆盖下载目录（依据上游 `docs/models.md`）。只导出 HF 的名字，llama.cpp
+仍然直连 huggingface.co、镜像对它不生效。新版 llama.cpp 已把 `-hf` 文件放进标准 HF
+缓存（`HF_HOME`/`HF_HUB_CACHE` 优先），所以 osdk 让 `LLAMA_CACHE` 与 `HF_HUB_CACHE`
+指向同一个受管 `hub` 目录——新旧两版 llama.cpp 因此共用一份 GGUF，而不是各下一遍。
 
 ModelScope adapter 导出：
 
