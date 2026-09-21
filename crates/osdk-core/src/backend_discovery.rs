@@ -248,7 +248,8 @@ async fn probe_python_index(ctx: &Ctx, project: &str) -> Option<ProbeResult> {
     // needing 2 s is perfectly usable, and treating it as unreachable dropped
     // the PyPI candidate entirely, leaving an answer that listed only conda.
     let timeout = configured.probe_timeout_ms.max(8_000);
-    let index = match crate::python_index::plan(&configured.urls, timeout).await {
+    let candidates = crate::python_index::effective_candidates(&configured.urls);
+    let index = match crate::python_index::plan(&candidates, timeout).await {
         crate::python_index::IndexPlan::Selected { url, .. } => url,
         crate::python_index::IndexPlan::PassThrough { .. } => crate::python_index::PYPI.to_string(),
         crate::python_index::IndexPlan::Unavailable { .. } => return None,

@@ -360,7 +360,8 @@ impl PypiBackend {
     #[cfg(feature = "install")]
     async fn resolved_index(&self, ctx: &Ctx) -> Result<String> {
         let configured = &ctx.config.registries().python;
-        match crate::python_index::plan(&configured.urls, configured.probe_timeout_ms).await {
+        let candidates = crate::python_index::effective_candidates(&configured.urls);
+        match crate::python_index::plan(&candidates, configured.probe_timeout_ms).await {
             crate::python_index::IndexPlan::Selected { url, .. } => Ok(url),
             // No mirror configured: upstream is the default index.
             crate::python_index::IndexPlan::PassThrough { .. } => {

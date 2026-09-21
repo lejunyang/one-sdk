@@ -116,6 +116,19 @@ token、cookie、临时签名下载 URL 和 ETag 不写入项目 lock。模型�
 revision，且每个文件的 SHA-256 都已入锁，主机不属于身份的一部分。因此镜像端点会被
 折叠成官方端点，自定义端点原样保留。
 
+Hugging Face 内置 `hf-mirror` 镜像（`https://hf-mirror.com`），ModelScope 内置两个
+官方域名，都参与探测排序。**内置镜像不会进 lock**——上面那条折叠规则只认内置端点。
+这也是它必须内置的原因：同一个域名用 `osdk source add` 加进来只是 `custom`，折叠规则
+不认，于是镜像域名会被写进 `[models.<name>].endpoint`，其他人复现这份 lock 时都会被
+推去走你的镜像，包括根本访问不到它的人。内置镜像不接收 provider token。
+
+```bash
+osdk source list hf              # 看当前候选与优先级
+osdk source test hf --model openai-community/gpt2@main   # 实测排名
+osdk source pin hf official      # 只走官方源，不必手改任何文件
+osdk source unpin hf             # 取消固定，恢复自动选择
+```
+
 ### 从 lock 还原
 
 `osdk model sync` 是 `[models]` 段的读取方——`pull` 写、`sync` 复现，二者的关系与

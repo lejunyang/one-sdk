@@ -13,7 +13,25 @@ use crate::source::{ProbeCache, ProbeResult, Selection, Source};
 
 pub fn default_sources(provider: ProviderId) -> Vec<Source> {
     match provider {
-        ProviderId::HuggingFace => vec![Source::official("official", "https://huggingface.co")],
+        ProviderId::HuggingFace => vec![
+            Source::official("official", "https://huggingface.co"),
+            // Built in rather than left to `source add`, because being built in is
+            // what earns a mirror the right not to appear in the lock.
+            // `canonical_provider_endpoint` and `source::canonical_upstream_url`
+            // both fold only *declared* mirrors back to upstream; a user-added
+            // source is `Custom`, so neither recognises it and the mirror's
+            // hostname lands in `[models.<name>].endpoint` for everyone replaying
+            // that lock -- including people who cannot reach it.
+            //
+            // Declaring this a mirror asserts the content is the same, and that was
+            // measured before adding it: for `openai-community/gpt2` the revision
+            // sha matched upstream exactly (607a30d7…) and `config.json` came back
+            // byte-identical (665 bytes, same SHA-256).
+            //
+            // `Source::mirror` sets `forward_credentials: false`, so a Hugging Face
+            // token is never sent here.
+            Source::mirror("hf-mirror", "https://hf-mirror.com", 10),
+        ],
         ProviderId::ModelScope => {
             let mut international = Source::official("modelscope-ai", "https://www.modelscope.ai");
             international.priority = 10;
@@ -320,6 +338,42 @@ mod tests {
     use crate::dirs::Dirs;
     use crate::platform::Platform;
     use crate::store::Cas;
+
+    /// The built-in mirror must be usable as a download source *and* be invisible
+    /// to the lock.
+    ///
+    /// Being built in is the entire mechanism: `canonical_provider_endpoint` folds
+    /// only declared mirrors, so before this the same host added via `source add`
+    /// was `Custom` and its hostname was committed into
+    /// `[models.<name>].endpoint`, pushing everyone who replayed that lock through
+    /// one machine's mirror.
+    #[test]
+    fn the_builtin_huggingface_mirror_is_a_mirror_and_never_reaches_the_lock() {
+        let sources = default_sources(ProviderId::HuggingFace);
+        let mirror = sources
+            .iter()
+            .find(|source| source.id == "hf-mirror")
+            .expect("huggingface must declare a built-in mirror");
+        assert!(matches!(mirror.kind, crate::source::SourceKind::Mirror));
+        // A mirror is anonymous: a Hugging Face token must not be sent to it.
+        assert!(
+            !mirror.forward_credentials,
+            "a mirror must not receive provider credentials"
+        );
+        // Ranked after the official source rather than ahead of it.
+        let official = sources
+            .iter()
+            .find(|source| matches!(source.kind, crate::source::SourceKind::Official))
+            .expect("official source");
+        assert!(mirror.priority > official.priority);
+
+        // The property that matters: pulling through the mirror locks upstream.
+        assert_eq!(
+            canonical_provider_endpoint(ProviderId::HuggingFace, &mirror.download_url),
+            "https://huggingface.co",
+            "the built-in mirror must fold to upstream in the lock"
+        );
+    }
 
     #[test]
     fn a_mirror_endpoint_locks_as_the_providers_own() {

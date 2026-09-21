@@ -135,7 +135,11 @@ Windows 上一个 `uv.ps1` 或只带 shebang 的文件能通过路径查找，�
 
 ## 索引与镜像
 
-Python 索引在 `[registries.python]` 里配置，通过 osdk 自己的配置管理，不需要你手改
+不配置时 osdk 自带一组候选：`mirrors.aliyun.com`、`mirrors.cloud.tencent.com`，
+最后是 `pypi.org`。上游始终作为最后一个候选而不是被去掉，所以访问不到镜像的机器
+仍然能解析，而不是得到「所有索引都不可用」。
+
+要用别的索引就在 `[registries.python]` 里写，通过 osdk 自己的配置管理，不需要手改
 `pip.conf` 或 `uv.toml`：
 
 ```toml
@@ -143,9 +147,13 @@ Python 索引在 `[registries.python]` 里配置，通过 osdk 自己的配置�
 urls = ["https://pypi.tuna.tsinghua.edu.cn/simple/"]
 ```
 
+**显式配置会被原样使用**，osdk 不会再往里追加自己的内置候选：只列一个索引的人是
+真的只要那一个，擅自补上镜像或上游会把请求发去你没选的地方，也会让纯内网环境失效。
+
 osdk 会用一次匿名探测给候选排序，选最快的可用者。探测不只看 HTTP 200，还会校验
 响应形态（PEP 503 的 anchor 或 PEP 691 的 `files` 数组），所以一个返回 200 的门户
-欢迎页不会被当成健康镜像。
+欢迎页不会被当成健康镜像。`osdk registry test python` 探测的就是实际会用的那一组
+候选。
 
 ::: danger 镜像只映射默认索引，永不映射更高优先级的索引
 镜像是 PyPI 的完整副本，因此必然包含上游的同名包——包括恶意包。把它排在默认

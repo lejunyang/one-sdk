@@ -23,8 +23,48 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
-/// Upstream. Used when no candidates are configured.
+/// Upstream. Always the last candidate, and the one a mirror maps onto.
 pub const PYPI: &str = "https://pypi.org/simple/";
+
+/// Built-in mirror candidates, tried ahead of [`PYPI`] when the user configured
+/// none.
+///
+/// `[registries.npm]` has had this shape from the start (`package_registry.rs`
+/// chains `NPMMIRROR` then `NPMJS` when the configured list is empty), while the
+/// Python side defaulted to an empty list and therefore never tried a mirror at
+/// all -- an asymmetry, not a decision.
+///
+/// These two are the same mirrors ComfyUI Desktop ships as its "Chinese mirrors"
+/// setting, which is a useful signal about which ones are actually maintained.
+/// What is **not** copied is how it applies them: ComfyUI keeps `pypi.org` as the
+/// primary `--index-url` and adds mirrors as *extra* indexes. Two indexes able to
+/// answer for the same project name is the dependency-confusion shape this module
+/// exists to refuse, which is why [`IndexPlan`] has no extra-index variant. Here a
+/// mirror only ever *replaces* the default index.
+///
+/// Measured reachable from this project's network before being added: aliyun 75 ms,
+/// tencent 376 ms, pypi.org 465 ms for `/simple/pip/`, all HTTP 200 in PEP 503
+/// shape.
+pub const PYPI_MIRRORS: &[&str] = &[
+    "https://mirrors.aliyun.com/pypi/simple/",
+    "https://mirrors.cloud.tencent.com/pypi/simple/",
+];
+
+/// The candidate list to probe: the user's if they configured any, otherwise the
+/// built-in mirrors followed by upstream.
+///
+/// Upstream is always last rather than absent, so a machine that cannot reach the
+/// mirrors still resolves instead of reporting every index unavailable.
+pub fn effective_candidates(configured: &[String]) -> Vec<String> {
+    if !configured.is_empty() {
+        return configured.to_vec();
+    }
+    PYPI_MIRRORS
+        .iter()
+        .map(|url| (*url).to_string())
+        .chain(std::iter::once(PYPI.to_string()))
+        .collect()
+}
 
 const MAX_PROBE_BODY: usize = 64 * 1024;
 const MAX_PROBE_REDIRECTS: usize = 3;
@@ -614,6 +654,44 @@ fn probe_error(error: reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// With nothing configured, the built-in mirrors must actually be candidates,
+    /// and upstream must remain reachable as the last one.
+    ///
+    /// Before this, `[registries.python].urls` defaulted to empty and every caller
+    /// passed it straight to `plan`, which answers `PassThrough` for an empty list
+    /// -- so the Python side never tried a mirror at all, while the npm side had
+    /// chained its built-ins from the start.
+    #[test]
+    fn builtin_python_mirrors_are_candidates_when_nothing_is_configured() {
+        let candidates = effective_candidates(&[]);
+        assert_eq!(candidates.len(), PYPI_MIRRORS.len() + 1);
+        for mirror in PYPI_MIRRORS {
+            assert!(
+                candidates.iter().any(|url| url == mirror),
+                "built-in mirror {mirror} must be a candidate"
+            );
+        }
+        // Upstream last, not absent: a host that cannot reach the mirrors must
+        // still resolve rather than see every index reported unavailable.
+        assert_eq!(
+            candidates.last().map(String::as_str),
+            Some(PYPI),
+            "upstream must remain the final candidate"
+        );
+    }
+
+    /// The other direction: an explicit configuration must not be diluted with
+    /// osdk's built-ins.
+    ///
+    /// Someone who lists exactly one index means it. Appending mirrors would send
+    /// their lookups somewhere they did not choose, and appending upstream would
+    /// quietly defeat an air-gapped or corporate-only setup.
+    #[test]
+    fn a_configured_python_index_list_is_used_verbatim() {
+        let configured = vec!["https://index.corp.example/simple/".to_string()];
+        assert_eq!(effective_candidates(&configured), configured);
+    }
+
     /// Configured credentials must stop mirror selection.
     ///
     /// osdk maps a mirror onto the *default* index. If the user has an

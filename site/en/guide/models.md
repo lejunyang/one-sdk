@@ -128,6 +128,22 @@ provider, repository and immutable revision, and every file's SHA-256 is locked,
 so the host is not part of the identity. A mirror endpoint therefore collapses to
 the official one, while a custom endpoint is left unchanged.
 
+Hugging Face ships a built-in `hf-mirror` mirror (`https://hf-mirror.com`) and
+ModelScope two official hosts; all of them take part in probe ranking.
+**A built-in mirror never reaches the lock** -- the collapsing rule above
+recognises built-in endpoints only. That is precisely why it has to be built in:
+the same host added with `osdk source add` is merely `custom`, the rule does not
+recognise it, and the mirror's hostname ends up in `[models.<name>].endpoint`,
+pushing everyone who replays that lock through your mirror -- including people who
+cannot reach it. A built-in mirror never receives the provider token.
+
+```bash
+osdk source list hf              # current candidates and their priority
+osdk source test hf --model openai-community/gpt2@main   # measure the ranking
+osdk source pin hf official      # stay on the official source, no file editing
+osdk source unpin hf             # drop the pin and return to auto-selection
+```
+
 ### Restoring from the lock
 
 `osdk model sync` is the reader the `[models]` section never had -- `pull` writes,

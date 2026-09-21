@@ -533,8 +533,15 @@ pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
             // user found out whether it worked by attempting an install.
             if python_requested {
                 let config = app.ctx.config.registries().python.clone();
+                // The same candidate list the install path resolves against,
+                // including the built-in mirrors when nothing is configured.
+                // Probing `config.urls` directly would report on an empty set and
+                // print "no Python index mirrors configured" while installs were in
+                // fact ranking mirrors -- a diagnostic disagreeing with the thing it
+                // diagnoses.
+                let candidates = osdk_core::python_index::effective_candidates(&config.urls);
                 let plan =
-                    osdk_core::python_index::plan(&config.urls, config.probe_timeout_ms).await;
+                    osdk_core::python_index::plan(&candidates, config.probe_timeout_ms).await;
                 print_python_index_plan(&plan);
                 if matches!(plan, osdk_core::python_index::IndexPlan::Unavailable { .. }) {
                     unavailable.push("python".to_string());

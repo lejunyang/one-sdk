@@ -156,18 +156,31 @@ looking in the wrong place.
 
 ## Indexes and mirrors
 
-Python indexes are configured under `[registries.python]`, managed through osdk's
-own configuration, so you do not have to hand-edit `pip.conf` or `uv.toml`:
+With nothing configured, osdk ships its own candidates:
+`mirrors.aliyun.com`, `mirrors.cloud.tencent.com`, and finally `pypi.org`.
+Upstream stays as the last candidate rather than being dropped, so a host that
+cannot reach the mirrors still resolves instead of being told every index is
+unavailable.
+
+To use a different index, set it under `[registries.python]`, managed through
+osdk's own configuration, so you do not have to hand-edit `pip.conf` or
+`uv.toml`:
 
 ```toml
 [registries.python]
 urls = ["https://pypi.tuna.tsinghua.edu.cn/simple/"]
 ```
 
+**An explicit list is used verbatim**; osdk does not append its built-ins to it.
+Someone who lists a single index means that one, and quietly adding mirrors or
+upstream would send lookups somewhere they did not choose and defeat an
+internal-only setup.
+
 osdk ranks the candidates with a fresh anonymous probe and picks the fastest
 healthy one. A probe checks more than HTTP 200: it validates the response *shape*
 (PEP 503 anchors or a PEP 691 `files` array), so a captive portal answering 200
 with a welcome page cannot rank as a healthy mirror.
+`osdk registry test python` probes exactly the candidate set that installs use.
 
 ::: danger A mirror only ever replaces the default index
 A mirror is a complete copy of PyPI and therefore carries upstream's package
