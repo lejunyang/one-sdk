@@ -173,6 +173,10 @@ are fetched, so a repository that gained files after locking cannot silently gro
 the snapshot, and every file's size and SHA-256 is compared afterwards -- a
 mismatch fails, because pinning content is the point.
 
+`sync` also rebuilds consumer views from the `views` declarations recorded in the
+lock (see below), so on another machine `osdk model sync` alone is enough; you do
+not re-run `model view add`.
+
 A snapshot that is already present and verifies is not re-downloaded: the lock
 carries each file's digest, so "is this the thing the lock describes" is
 answerable locally, and re-fetching gigabytes to answer it would be absurd. A
@@ -227,6 +231,48 @@ osdk source unpin huggingface|modelscope
 The probe resolves repository metadata and then samples up to 1 MiB from a real
 file. Anonymous and credential-bearing probes use different cache keys. See
 [Sources and Supply-chain Security](./sources-security) for source behavior.
+
+## Declaring models in `osdk.toml`
+
+Instead of pulling first and locking afterwards, you can declare models directly
+in the project `osdk.toml`. Declaring does not download anything; a later
+`osdk model pull <name>` matches the declaration, records the consumer views into
+the lock, and renders them immediately:
+
+```toml
+[models.flux]
+source   = "hf:black-forest-labs/FLUX.1-dev@main"
+include  = ["*.safetensors", "*.json"]
+exclude  = ["*.onnx"]
+variant  = "fp16"
+when     = { os = "windows" }          # optional; same shape as [tools] `when`
+
+[models.flux.views.comfyui]
+profile  = "desktop"                   # defaults to "default" when omitted
+[models.flux.views.comfyui.map]
+"unet/" = "diffusion_models"
+"vae/"  = "vae"
+
+[models.embedder.views.hf-cache]
+# consumer table without a map: that consumer's default layout
+```
+
+The fields mirror the `model pull` flags (`source`/`include`/`exclude`/
+`variant`/`when`) plus `views` (consumer name -> that consumer's `profile` and
+`map`). A `map` key is a **repo-relative path prefix** (normalized to `/`) and
+its value is a consumer category, using exactly the same rules as
+`model view add --map`. A misspelled field is an error
+(`deny_unknown_fields`), never silently ignored.
+
+**Trust.** Merely declaring *what* to fetch (`source`/`include`/`variant`/
+`when`/`views`) needs no trust, exactly like declaring an npm dependency; only
+keys that change the **byte source** do -- an `endpoint`, a custom URL, an
+`insecure` toggle. Model declarations **never block the shim**: ordinary tool
+commands such as `cargo --version` keep working in a project that only declares
+models, while the commands that actually fetch (`osdk model sync` / `pull`)
+enforce the full check. An entry that carries an `endpoint` is pinned as a whole
+(the same granularity as `tools.<name>.allow_builds`), so editing it re-prompts;
+editing a different, endpoint-free model does not.
 
 ## Consumer views (model view)
 

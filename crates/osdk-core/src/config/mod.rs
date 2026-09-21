@@ -43,6 +43,10 @@ pub struct Config {
     /// tools and never runs a task, so its build should not carry the parsing.
     #[cfg(feature = "install")]
     pub tasks: crate::tasks::TaskSet,
+    /// Declared project models (`[models.<name>]`). Like tasks, install-gated:
+    /// the shim never reads model declarations.
+    #[cfg(feature = "install")]
+    pub models: BTreeMap<String, ModelDeclaration>,
     /// Tools present in configuration but excluded by their platform filter,
     /// mapped to the restriction that excluded them.
     ///
@@ -820,6 +824,65 @@ impl ToolConfigValue {
     }
 }
 
+/// One declared project model (`[models.<name>]`, research §6.2).
+///
+/// `deny_unknown_fields` is deliberate: a typo in `source`/`endpoint` must fail
+/// loudly rather than being silently ignored while the model never materializes.
+/// View sub-tables are free-form category maps (repo prefix -> consumer
+/// category), validated by the view renderer rather than the config parser.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelDeclaration {
+    /// Provider reference, e.g. `hf:owner/repo@main`.
+    pub source: String,
+    /// Glob include patterns applied at pull time.
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// Glob exclude patterns.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Format/quantization label recorded into the snapshot identity.
+    pub variant: Option<String>,
+    /// Optional platform filter (same `when` shape as tools).
+    pub when: Option<crate::platform::PlatformFilter>,
+    /// Consumer views: consumer (e.g. "comfyui") -> its declaration.
+    #[serde(default)]
+    pub views: BTreeMap<String, ModelViewDeclaration>,
+    /// Explicit endpoint override. Its presence is what makes this entry
+    /// trust-requiring (see `trust::collect_models_requirements`).
+    pub endpoint: Option<String>,
+}
+
+/// One consumer view attached to a `[models.<name>]` entry (research §6.2).
+///
+/// ```toml
+/// [models.flux.views.comfyui]
+/// profile = "default"
+/// map = { "unet/" = "diffusion_models", "vae/" = "vae" }
+/// ```
+///
+/// `profile` defaults to "default"; `map` is a repo-relative path prefix ->
+/// consumer category table, normalized to `/` by the consumer layer.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelViewDeclaration {
+    pub profile: String,
+    #[serde(default)]
+    pub map: BTreeMap<String, String>,
+}
+
+#[cfg(feature = "install")]
+impl Default for ModelViewDeclaration {
+    fn default() -> Self {
+        Self {
+            profile: "default".to_string(),
+            map: BTreeMap::new(),
+        }
+    }
+}
+
 /// On-disk config file shape (a subset that users edit).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -834,6 +897,8 @@ struct ConfigFile {
     aliases: BTreeMap<String, BTreeMap<String, String>>,
     #[cfg(feature = "install")]
     tasks: BTreeMap<String, crate::tasks::TaskEntry>,
+    #[cfg(feature = "install")]
+    models: BTreeMap<String, ModelDeclaration>,
     #[cfg(feature = "install")]
     task_config: Option<crate::tasks::TaskConfig>,
 }
@@ -857,6 +922,8 @@ impl Default for Config {
             aliases: BTreeMap::new(),
             #[cfg(feature = "install")]
             tasks: crate::tasks::TaskSet::default(),
+            #[cfg(feature = "install")]
+            models: BTreeMap::new(),
             project_config_path: None,
             excluded_tools: BTreeMap::new(),
         }
@@ -923,6 +990,13 @@ impl Config {
             // managers means exactly that list, not that list added to whatever
             // a broader layer happened to allow.
             self.sources.syspkg = syspkg;
+        }
+        #[cfg(feature = "install")]
+        if !file.models.is_empty() {
+            // Project declarations replace the lower-precedence layer as a
+            // unit, like tools: the project is the more specific statement of
+            // which models it needs.
+            self.models.extend(file.models);
         }
         self.apply_tool_configs(&file.tools)?;
         for (tool, aliases) in file.aliases {
@@ -2506,5 +2580,80 @@ probe_timeout_ms = 125
             .expect_err("an unknown `when` dimension must be rejected");
         let message = error.localized();
         assert!(message.contains("libc"), "{message}");
+    }
+
+    #[test]
+    fn models_section_parses_with_views_and_defaults() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            r#"
+[models.flux]
+source = "hf:black-forest-labs/FLUX.1-dev@main"
+include = ["*.safetensors", "*.json"]
+exclude = ["*.onnx"]
+variant = "fp16"
+when = { os = "windows" }
+
+[models.flux.views.comfyui]
+profile = "desktop"
+[models.flux.views.comfyui.map]
+"unet/" = "diffusion_models"
+"vae/" = "vae"
+
+[models.plain]
+source = "hf:o/r@main"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_user(&config_file).unwrap();
+        let flux = config.models.get("flux").expect("flux parsed");
+        assert_eq!(flux.source, "hf:black-forest-labs/FLUX.1-dev@main");
+        assert_eq!(flux.include, vec!["*.safetensors", "*.json"]);
+        assert_eq!(flux.exclude, vec!["*.onnx"]);
+        assert_eq!(flux.variant.as_deref(), Some("fp16"));
+        assert!(flux.endpoint.is_none());
+        assert_eq!(flux.when.as_ref().unwrap().os.len(), 1);
+        let comfyui = flux.views.get("comfyui").expect("comfyui view parsed");
+        assert_eq!(comfyui.profile, "desktop");
+        assert_eq!(
+            comfyui.map.get("unet/").map(String::as_str),
+            Some("diffusion_models")
+        );
+        // A view block omitted entirely still deserializes as empty; a view with
+        // no explicit profile defaults to "default".
+        assert!(config.models.get("plain").unwrap().views.is_empty());
+    }
+
+    #[test]
+    fn models_view_profile_defaults_to_default_and_unknown_key_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+
+        // Default profile.
+        let with_profile = temporary.path().join("p.toml");
+        std::fs::write(
+            &with_profile,
+            "[models.m]\nsource = \"hf:o/r@main\"\n[models.m.views.comfyui]\n",
+        )
+        .unwrap();
+        let config = Config::load_user(&with_profile).unwrap();
+        assert_eq!(config.models["m"].views["comfyui"].profile, "default");
+
+        // Unknown model key is denied loudly (deny_unknown_fields), so a typo in
+        // e.g. `endpont` cannot silently make the endpoint override not apply.
+        let bad = temporary.path().join("bad.toml");
+        std::fs::write(
+            &bad,
+            "[models.m]\nsource = \"hf:o/r@main\"\nendpont = \"https://x.example\"\n",
+        )
+        .unwrap();
+        let error = Config::load_user(&bad).unwrap_err();
+        assert!(
+            error.localized().contains("endpont"),
+            "{}",
+            error.localized()
+        );
     }
 }

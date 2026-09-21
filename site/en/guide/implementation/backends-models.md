@@ -163,6 +163,41 @@ The CLI entry point for `osdk model pull <name> <reference>` is in [`commands.rs
 
 `model list/path/verify/remove` operate on the current logical name. Verification checks both the CAS BLAKE3 hash and SHA-256. Removal deletes all snapshots under that logical name, then runs CAS GC with SDK installs and models as roots. Offline pull still requires cached provider metadata and every selected download, after which it can rematerialize a removed snapshot.
 
+## Declarative `[models]`, views, and trust classification
+
+Besides a command-line `pull`, models can be declared in the project's
+`osdk.toml` under `[models.<name>]`, shaped by `ModelDeclaration` in
+[`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs)
+(`deny_unknown_fields`; like `tasks` it sits behind the `install` feature, so the
+shim's dependency graph does not carry it). An entry has
+`source/include/exclude/variant/when` plus
+`views: consumer -> ModelViewDeclaration{profile, map}`. On `pull <name>` the
+merged `Config.models` supplies it: after fetching, the views are written into
+the lock via `locked_views_from_declaration`, and
+`model_view::reconcile_declared_views` renders them immediately.
+
+On the lock side [`LockedModel.views`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs)
+is `consumer -> LockedModelView{profile, map}` with
+`#[serde(default, skip_serializing_if)]`, so it is omitted when empty; the
+schema stays 4 and an older binary ignores the unknown field (verified with a
+real older build). `set_model_views` gives the field a read/update path that
+mirrors its write path, avoiding the write-only gap AGENTS.md records for npm.
+After restoring a snapshot, `model sync` calls the same reconcile, so the view
+declarations are rebuilt on another machine by `sync` alone -- no second
+`model view add`.
+
+Trust lives in [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs):
+`models` is in `INSPECTED_TABLES` and `collect_models_requirements` inspects it
+key by key -- only keys that decide the byte source (`endpoint`/`insecure`/a
+custom URL) raise `WeakensVerification`; a plain declaration raises nothing.
+An entry carrying a governed key is folded into the normalized hash **as a whole
+entry** (the same granularity as `tools.<name>.allow_builds`), so editing that
+entry re-prompts while editing a different model does not.
+`affects_tool_dispatch` returns `false` for every `models..` key: the shim never
+reads model declarations, so they cannot break ordinary tool commands in a
+project. Both behaviours are pinned by tests that go red when the classification
+or the `false` arm is removed.
+
 ## Provider environment persistence
 
 `osdk model env enable [provider] [--force]` writes only `sources.<provider>.env` and optional `env_force` to the **user-level** config; project config cannot override those switches. Activation behavior lives in [`model/env.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/env.rs):

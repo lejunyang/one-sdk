@@ -161,7 +161,19 @@ variant = "safetensors-fp16" # 可省略
 path = "config.json"
 size = 123
 sha256 = "..."
+
+# 可选：该模型要渲染的消费者视图（来自 osdk.toml 的 [models.<name>.views]）
+[models.qwen.views.comfyui]
+profile = "default"
+[models.qwen.views.comfyui.map]
+"unet/" = "diffusion_models"
 ```
+
+
+`views` 段只在非空时写出，记录的是 consumer -> profile 与「仓库相对前缀 ->
+类别」映射；**不记录**视图的本机绝对路径和实际链接方式（那是机器相关的）。
+`osdk model sync` 会读它重建视图，所以这是个有读有写的字段。`views` 是 schema 4
+上的可选新字段，旧版 osdk 读到会忽略它而不报错，因此 schema 版本不提升。
 
 平台键为 `linux-*`、`macos-*`、`windows-*`，架构为 `x64|arm64|x86|arm`；
 musl Linux 追加 `-musl`。更新一个平台会保留其他平台和顶层模型记录。内部

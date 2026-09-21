@@ -2312,6 +2312,8 @@ mod tests {
                 // feature so the shim's build never carries task parsing.
                 #[cfg(feature = "install")]
                 tasks: Default::default(),
+                #[cfg(feature = "install")]
+                models: Default::default(),
             },
             client: reqwest::Client::new(),
             show_progress: false,

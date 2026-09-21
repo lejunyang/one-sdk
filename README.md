@@ -585,6 +585,21 @@ osdk model view list
 osdk model view doctor comfyui
 osdk model view remove comfyui --model qwen25
 ```
+You can also declare models in `osdk.toml`; `osdk model pull <name>` then picks up
+the declaration, records the views in the lock, and renders them. Declaring what to
+fetch needs no trust; only an `endpoint`/custom-source key does, and model
+declarations never block ordinary tool commands:
+
+```toml
+[models.flux]
+source = "hf:black-forest-labs/FLUX.1-dev@main"
+[models.flux.views.comfyui.map]
+"unet/" = "diffusion_models"
+"vae/"  = "vae"
+```
+
+`osdk model sync` restores every locked model **and** rebuilds its views.
+
 
 Enable provider endpoint and cache variables for activated shells when model
 tools should share the osdk environment:

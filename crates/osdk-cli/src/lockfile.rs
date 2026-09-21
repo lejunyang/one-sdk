@@ -333,6 +333,24 @@ pub struct LockedModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
     pub files: Vec<LockedModelFile>,
+    /// Consumer views declared for this model (research §6.3): consumer ->
+    /// profile -> (repo path prefix -> category). Skip when empty so existing
+    /// locks serialize byte-identically and an older build ignores the field
+    /// rather than failing (no deny_unknown_fields on LockedModel).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub views: BTreeMap<String, LockedModelView>,
+}
+
+/// One consumer view declaration carried in the lock. Only the identity
+/// (profile + category mapping) is recorded -- never the local view path or
+/// the link mode, which are machine-specific (research §6.3).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedModelView {
+    #[serde(default)]
+    pub profile: String,
+    /// Repo-relative path prefix (normalized to `/`) -> consumer category.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub map: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1697,9 +1715,59 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
                     })
                 })
                 .collect::<Result<_>>()?,
+            views: BTreeMap::new(),
         },
     );
     save(path, &lockfile)
+}
+
+/// Record the consumer views declared for one model into an existing lock
+/// entry. Kept separate from [`merge_model`] so a bare `model pull` (no
+/// declaration) leaves `views` empty and existing callers/tests stay simple,
+/// while a pull driven by `[models.<name>.views]` can persist the declaration.
+///
+/// This is the read/write symmetry AGENTS.md demands: the field is not
+/// write-only. `model sync` reads it back (`locked_models`) so a replay on
+/// another machine knows which views to rebuild.
+pub fn set_model_views(
+    path: &Path,
+    name: &str,
+    views: BTreeMap<String, LockedModelView>,
+) -> Result<bool> {
+    let mut lockfile = if path.is_file() {
+        load(path)?
+    } else {
+        return Ok(false);
+    };
+    let Some(entry) = lockfile.models.get_mut(name) else {
+        return Ok(false);
+    };
+    if entry.views == views {
+        return Ok(false);
+    }
+    entry.views = views;
+    save(path, &lockfile)?;
+    Ok(true)
+}
+
+/// Build the lock form of a model's view declarations from resolved config,
+/// keyed the same way the lock stores them (consumer -> view entry). Shared by
+/// the pull path so config and lock never encode the mapping differently.
+pub fn locked_views_from_declaration(
+    declaration_views: &BTreeMap<String, osdk_core::config::ModelViewDeclaration>,
+) -> BTreeMap<String, LockedModelView> {
+    declaration_views
+        .iter()
+        .map(|(consumer, view)| {
+            (
+                consumer.clone(),
+                LockedModelView {
+                    profile: view.profile.clone(),
+                    map: view.map.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Options that record a human decision rather than an artifact input. A lock
@@ -2829,6 +2897,7 @@ version = "3.6.2"
                     endpoint: "https://huggingface.co".into(),
                     variant: None,
                     files: Vec::new(),
+                    views: BTreeMap::new(),
                 },
             )]),
         };
@@ -3645,6 +3714,49 @@ lockfile = "lockfileVersion: '9.0'"
         assert!(lock.platforms["linux-x64"].tools.contains_key("node"));
         assert_eq!(lock.models["qwen"].revision, "abc123");
         assert_eq!(lock.models["qwen"].files[0].sha256, "sha256");
+    }
+
+    #[test]
+    fn model_views_round_trip_and_empty_views_are_omitted() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        merge_model(&path, &test_model_manifest()).unwrap();
+
+        // A model with no declared views serializes no `views` key at all.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[models.qwen.views"), "{text}");
+
+        // Write views from a declaration shape.
+        let declared = std::collections::BTreeMap::from([(
+            "comfyui".to_string(),
+            osdk_core::config::ModelViewDeclaration {
+                profile: "default".to_string(),
+                map: std::collections::BTreeMap::from([(
+                    "unet/".to_string(),
+                    "diffusion_models".to_string(),
+                )]),
+            },
+        )]);
+        let locked = locked_views_from_declaration(&declared);
+        assert!(set_model_views(&path, "qwen", locked).unwrap());
+
+        // Read it back: the read path AGENTS.md demands for a new field, so
+        // re-lock cannot silently drop the declaration.
+        let lock = load(&path).unwrap();
+        let view = &lock.models["qwen"].views["comfyui"];
+        assert_eq!(view.profile, "default");
+        assert_eq!(view.map["unet/"], "diffusion_models");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[models.qwen.views.comfyui.map]"), "{text}");
+
+        // Idempotent: setting the same views again changes nothing.
+        let again = locked_views_from_declaration(&declared);
+        assert!(!set_model_views(&path, "qwen", again).unwrap());
+
+        // Unknown model and missing file are clean misses, not errors.
+        assert!(!set_model_views(&path, "ghost", BTreeMap::new()).unwrap());
+        let missing = temp.path().join("nope.lock");
+        assert!(!set_model_views(&missing, "qwen", BTreeMap::new()).unwrap());
     }
 
     #[test]
@@ -4710,6 +4822,7 @@ sha256 = "{sha256}"
                 size: 10,
                 sha256: "sha256".into(),
             }],
+            views: BTreeMap::new(),
         }
     }
 

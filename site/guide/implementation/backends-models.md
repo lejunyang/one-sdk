@@ -137,6 +137,32 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 `model list/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 pull 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。
 
+## 声明式 `[models]`、视图与信任分类
+
+除了命令行 `pull`，模型也可在项目 `osdk.toml` 的 `[models.<name>]` 声明，结构在
+[`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs)
+的 `ModelDeclaration`（`deny_unknown_fields`，与 `tasks` 一样在 `install` feature 之后，
+shim 的依赖图不带它）。每个声明含 `source/include/exclude/variant/when` 与
+`views: consumer -> ModelViewDeclaration{profile, map}`。`pull <name>` 时从合并后的
+`Config.models` 取这份声明：拉取后把视图经 `locked_views_from_declaration` 写入 lock，
+并调用 `model_view::reconcile_declared_views` 立即渲染。
+
+lock 侧 [`LockedModel.views`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs)
+是 `consumer -> LockedModelView{profile, map}`，`#[serde(default, skip_serializing_if)]`，
+空时不落盘；schema 仍为 4，旧二进制读到未知字段会忽略（已用旧版二进制实测）。
+`set_model_views` 提供与写入对称的读取更新路径，避免「只写不读」（AGENTS.md 记过
+npm 的同一族坑）。`model sync` 复现快照后同样调用 reconcile，所以视图声明在另一台
+机器上靠 `sync` 就能重建，不必重跑 `model view add`。
+
+信任分类在 [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs)：
+`models` 加入 `INSPECTED_TABLES`，由 `collect_models_requirements` 逐 key 检查——
+只有决定字节来源的 key（`endpoint`/`insecure`/自定义 URL）报 `WeakensVerification`，
+单纯声明不报。含受管 key 的**整条 model 条目**被纳入 normalized hash（与
+`tools.<name>.allow_builds` 同级粒度），所以改那条目会重新提示，改别的模型不会。
+`affects_tool_dispatch` 对任何 `models..` key 返回 `false`：shim 不读模型声明，模型
+声明因此不会让一个项目里的普通工具命令失效。这两条都由「移除分类/移除 false 分支
+后必须变红」的测试守住。
+
 ## Provider 环境持久化
 
 `osdk model env enable [provider] [--force]` 只把 `sources.<provider>.env` 和可选 `env_force` 写入**用户级**配置，项目配置不能覆盖这两个开关。激活逻辑在 [`model/env.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/env.rs)：

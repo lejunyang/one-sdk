@@ -529,6 +529,20 @@ osdk model view list
 osdk model view doctor comfyui
 osdk model view remove comfyui --model qwen25
 ```
+也可以直接在 `osdk.toml` 里声明模型；`osdk model pull <name>` 会读取这份声明，把
+视图写进 lock 并立即渲染。只声明「要什么」不需要信任，只有 `endpoint`/自定义来源
+这类会改变字节来源的 key 才需要，而且模型声明不会阻断普通工具命令：
+
+```toml
+[models.flux]
+source = "hf:black-forest-labs/FLUX.1-dev@main"
+[models.flux.views.comfyui.map]
+"unet/" = "diffusion_models"
+"vae/"  = "vae"
+```
+
+`osdk model sync` 会还原 lock 声明的全部模型，**并**重建它们的视图。
+
 
 需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用
 Provider 环境：

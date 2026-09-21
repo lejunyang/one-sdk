@@ -562,6 +562,115 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
     assert!(lock.contains("sha256 ="));
 }
 
+// End-to-end declarative flow (Unix, needs the fixture server): a project with
+// a `[models.<name>.views]` declaration pulls, and the pull both records the
+// views in the lock and renders the consumer view without a separate
+// `model view add`. This is the config -> lock -> view chain, asserted by
+// reading the produced files (not exit codes).
+#[cfg(not(windows))]
+#[test]
+fn declared_model_pull_records_views_in_lock_and_renders_view() {
+    let payload = br#"{"model":"fixture"}"#.to_vec();
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_payload = payload.clone();
+    let server = std::thread::spawn(move || {
+        for request_number in 0..2 {
+            let mut stream = accept_fixture_connection(&listener, "HF declared-views fixture");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            if request_number == 0 {
+                let body = format!(
+                    r#"{{"sha":"abc123","siblings":[{{"rfilename":"config.json","lfs":{{"sha256":"{digest}","size":{}}}}}]}}"#,
+                    server_payload.len()
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .unwrap();
+                stream.write_all(&server_payload).unwrap();
+            }
+        }
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // A source-only declaration (no endpoint): needs no trust, and maps the
+    // repo-root config.json into ComfyUI's `configs` category.
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[models.fixture]\nsource = \"hf:owner/repo@main\"\n\
+         [models.fixture.views.comfyui]\n\
+         map = { \"config.json\" = \"configs\" }\n",
+    )
+    .unwrap();
+    let endpoint = format!("http://{address}");
+    let output = run_isolated_in(
+        temporary.path(),
+        &project,
+        &[
+            "model",
+            "pull",
+            "fixture",
+            "hf:owner/repo@main",
+            "--endpoint",
+            &endpoint,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+
+    // 1) The lock carries the declared view.
+    let lock = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(lock.contains("[models.fixture.views.comfyui]"), "{lock}");
+    assert!(lock.contains("profile = \"default\""), "{lock}");
+    assert!(lock.contains("\"config.json\" = \"configs\""), "{lock}");
+
+    // 2) The view was rendered: read the actual placed file through the view.
+    let view_list = run_isolated_in(
+        temporary.path(),
+        &project,
+        &["model", "view", "path", "comfyui"],
+    );
+    let view_root = PathBuf::from(String::from_utf8(view_list.stdout).unwrap().trim());
+    let placed = view_root.join("configs").join("config.json");
+    assert!(
+        placed.is_file(),
+        "view file missing at {}",
+        placed.display()
+    );
+    assert_eq!(std::fs::read(&placed).unwrap(), payload);
+
+    // 3) The state file records the membership (so `view list` shows it).
+    let state =
+        std::fs::read_to_string(temporary.path().join("data/views/.osdk-views.json")).unwrap();
+    assert!(state.contains("fixture"), "{state}");
+}
+
 // See `huggingface_model_pull_materializes_and_locks_snapshot`.
 #[cfg(not(windows))]
 #[test]
@@ -1093,6 +1202,49 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
     assert!(removed.status.success());
     let rejected_again = run_isolated_in(temp.path(), &project, &["config", "list"]);
     assert!(!rejected_again.status.success());
+}
+
+/// Declaring `[models]` (what to fetch + which views to render) runs nothing,
+/// so a source-only declaration must not demand trust -- the same way
+/// declaring an npm dependency does not. An `endpoint` override does, because it
+/// chooses where the bytes come from. This goes through the real CLI config
+/// gate, and `affects_tool_dispatch("models..") == false` is what keeps the
+/// shim from blocking an unrelated `cargo --version` in such a project (the
+/// shim-side predicate is unit-tested in trust.rs).
+#[test]
+fn source_only_models_declaration_needs_no_trust_but_endpoint_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = project.join("osdk.toml");
+
+    // Source + include + a view mapping: no byte-source override, no trust.
+    std::fs::write(
+        &config,
+        "[models.sd]\nsource = \"hf:runwayml/stable-diffusion-v1-5@main\"\n         include = [\"*.safetensors\"]\n         [models.sd.views.comfyui.map]\nunet = \"diffusion_models\"\n",
+    )
+    .unwrap();
+    let accepted = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(
+        accepted.status.success(),
+        "a source-only [models] declaration must need no trust: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    // Adding an endpoint to the same entry makes it trust-requiring.
+    std::fs::write(
+        &config,
+        "[models.sd]\nsource = \"hf:runwayml/stable-diffusion-v1-5@main\"\n         endpoint = \"https://mirror.example.com\"\n",
+    )
+    .unwrap();
+    let rejected = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    assert!(
+        !rejected.status.success(),
+        "an endpoint override must require trust"
+    );
+    let message = String::from_utf8_lossy(&rejected.stderr);
+    assert!(message.contains("is not trusted"), "{message}");
+    assert!(message.contains("models.sd.endpoint"), "{message}");
 }
 
 #[test]

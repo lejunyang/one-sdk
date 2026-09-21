@@ -1028,7 +1028,7 @@ pub struct LockedModelView {
 
 **不入 lock 的东西**：视图的绝对路径（那是本机位置）、link mode 实际取值（那是本机能力）、镜像端点（见 §6.6 后 endpoint 会折叠为官方）。理由与既有 `merge_model` 的注释完全一致——lock 记录的是身份，不是某台机器怎么够到它。
 
-`schema` 版本：`views` 是可选新增字段，旧 osdk 读新 lock 时 serde 会因未知字段……**需要核查**：`Lockfile` 及 `LockedModel` 未标 `deny_unknown_fields`（`lockfile.rs:46/326` 只有 derive，无该属性），所以旧版本读新 lock 会忽略 `views` 而非报错，`schema` 可以不升。**但这一点本轮只做了源码阅读，未做旧二进制读新 lock 的实测**，列入 §9 诚实清单。
+`schema` 版本：`views` 是可选新增字段，旧 osdk 读新 lock 时 serde 会因未知字段……**已实测（P1-4）**：`Lockfile` 及 `LockedModel` 未标 `deny_unknown_fields`（`lockfile.rs:46/326`），用本机 v0.0.2 旧二进制读一份带 `views.comfyui` 的 schema=4 lock，`osdk model sync --dry-run` 正常输出 `would pull flux (huggingface:o/r@abc123)`、exit=0，未知字段被忽略而不报错。**所以 `schema` 不升，保持 4。**
 
 ### 6.4 trust 分类
 
@@ -1045,6 +1045,12 @@ const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "mo
 - 出现 `endpoint`、任何自定义 URL、或 `insecure`-类字段 ⇒ `WeakensVerification`（与 `sources` 同级）。
 
 `affects_tool_dispatch` 增加 `"models" => false`：shim 从不读模型声明。**这一条必须配一个会失败的测试**——把 `models` 从该分支移除后，「带 `[models]` 的项目里 `cargo --version` 仍然可用」的测试要变红。
+
+**已实现（P1-4），实测细节两处与初稿略有出入，以此为准：**
+
+1. **整条 `[models.<name>]` 若含受管 key，则按「整条目录取证」，不是只钉单个 key。** 这与 `tools.<name>.allow_builds` 的粒度一致（批准的对象是这条 model 条目）。后果：给**带 endpoint 的同一条目**改一个无害的 sibling 字段（如加一个 `include`）也会重新要求信任——因为被钉住的是该条目；但改**另一条没有 endpoint 的 model** 不会失效。单测 `an_endpoint_pins_its_own_model_entry_but_not_sibling_models` 钉住这个语义。初稿设想的「同条目内 sibling 可编辑」不成立，已据此修正。
+2. **「会失败的测试」两条都落地并做了注入验证**：① 单测 `model_requirements_never_affect_tool_dispatch`——把 `models` 从 `affects_tool_dispatch` 的 false 分支移除后立即 FAILED（`!dispatch_affecting("models")` 断言变红），还原后绿；② 集成测试 `source_only_models_declaration_needs_no_trust_but_endpoint_does`（走真实 CLI 的 `config list` 门禁）——把 `collect_models_requirements` 临时换成「整表要求信任」后，单测 `declaring_a_model_is_safe_…` 在「a model declaration with no endpoint must need no trust」处变红，还原后绿。另加一条反向守住 fail-closed：同条目出现 `endpoint` 时真实 CLI 报 `is not trusted` 且消息含 `models.sd.endpoint`。
+3. **shim 侧无 cfg 门控**：该分类逻辑在所有平台编译运行，trust 23 条相关测试在 Windows 与 WSL（原生 Linux cargo）两侧都跑，未用 `#[cfg(windows)]`。
 
 ### 6.5 provider 可扩展化
 
@@ -1294,7 +1300,7 @@ P0 全部不涉及新目录布局，风险最低。
 
 1. ~~没有做真实 ComfyUI 的端到端。~~ **第二轮已完成**（§5.9）：真实 ComfyUI v0.34.0 + 自带 Python 3.13.12，三个类别全部在 `/object_info` 可见，含三路归因控制与反向控制。**仍未验证的部分**：① 浏览器前端的**视觉**渲染（本轮读的是 `/object_info` 的 combo 数据，它是下拉框的数据源，但没有真的去点开 UI 截图比对）；② custom node 对 `folder_paths` 的额外用法（本机未装任何 custom node）；③ **通过 Desktop UI 把视图加进 `modelsDirs` 的那一步没有实操**——本轮走的是与 Desktop 等价的 `--extra-model-paths-config` 机制，因为实操会改用户的 `settings.json`（§3.2.3 已论证不该写）。换言之「机制可行」已验证，「Desktop 的 Add Shared Directory 按钮接受这个目录」未验证。
 2. **没有验证 llama.cpp / sd-webui / ModelScope 客户端对硬链接的接受度**。三处均标为「推测」。
-3. **没有验证旧版 osdk 读取含 `views` 字段的新 lock**。§6.3 的兼容性结论来自源码阅读（未见 `deny_unknown_fields`），未做二进制实测。
+3. ~~没有验证旧版 osdk 读取含 `views` 字段的新 lock。~~ **P1-4 已实测**（见 §6.3）：v0.0.2 旧二进制读带 `views` 的 schema=4 lock，`model sync --dry-run` exit=0 且正确忽略未知字段。
 4. **没有验证 Ollama 的 `ollama create` 路径**。本机未安装 Ollama。磁盘多一份拷贝的结论来自其 blob store 设计，属合理推断而非实测。
 5. ~~没有实际安装 torch+CUDA。~~ **第二轮已实跑**（§5.8）：`torch 2.12.1+cu130`、`cuda_available True`、RTX 4080 Laptop / 驱动 610.47。**但这是 Desktop 自带的组合**；osdk 自己经 `pypi:` + extra-index 装出 cu126/cu128 的路径**仍未实测**。
 6. **没有测量重构对二进制体积与 `hook-env` 延迟的影响**。渲染器与 provider 注册表都会进 `osdk-cli`；`model env` 的新增变量会进 `hook-env` 热路径。AGENTS.md 要求两者都实测，本轮未做（尚无代码可测）。**实现时必须按 AGENTS.md 的命令分两次构建实测，并跑 `cargo bench -p osdk-core`。**

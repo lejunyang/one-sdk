@@ -5,6 +5,52 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Context};
 use osdk_core::model::view::{ViewEntry, ViewEntrySpec, ViewKind, ViewState, ViewStore};
 
+/// Reconcile one model's consumer views from a lock/config declaration into the
+/// persisted [`ViewState`] and (re)render them. Idempotent: declaring the same
+/// views again is a no-op render; changing a mapping replaces the entry.
+///
+/// Unknown consumer names are skipped with a warning rather than failing the
+/// whole sync: a newer osdk may declare a consumer this build cannot render, and
+/// ignoring it is forward-compatible with how the lock tolerates unknown fields.
+pub(crate) fn reconcile_declared_views(
+    app: &crate::App,
+    model: &str,
+    declared: &std::collections::BTreeMap<String, crate::lockfile::LockedModelView>,
+) -> anyhow::Result<()> {
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let views = view_store(app);
+    let mut state = ViewState::load(&app.ctx.dirs)?;
+    for (consumer, view) in declared {
+        let Ok(kind) = consumer.parse::<ViewKind>() else {
+            eprintln!(
+                "warning: model `{model}` declares unknown view consumer `{consumer}`; \
+                 this build supports only comfyui|hf-cache, skipping"
+            );
+            continue;
+        };
+        let profile = if view.profile.is_empty() {
+            "default"
+        } else {
+            view.profile.as_str()
+        };
+        state.add(
+            kind,
+            profile,
+            ViewEntrySpec {
+                model: model.to_string(),
+                map: view.map.clone(),
+            },
+        );
+        state.save(&app.ctx.dirs)?;
+        let entries = entries_for(&state, kind, profile);
+        let reports = views.render(kind, profile, &entries)?;
+        print_render_report(model, reports.get(model));
+    }
+    Ok(())
+}
+
 use crate::cli::ModelViewCommand;
 use crate::App;
 

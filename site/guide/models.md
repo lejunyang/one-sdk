@@ -155,6 +155,9 @@ osdk model sync --prune --dry-run
 仓库在锁定后新增的文件不会让快照静默变大；还原完成后逐文件比对大小与 SHA-256，
 不一致即失败——lock 的意义就是钉住内容。
 
+`sync` 还会按 lock 里记录的 `views` 声明重建消费者视图（见下节），所以在另一台
+机器上只需 `osdk model sync`，不必重新 `model view add`。
+
 已存在且校验通过的快照不会重新下载：lock 带有每个文件的摘要，「这是不是 lock 描述
 的那份」可以本地回答，为此重下若干 GB 毫无意义。校验失败的快照会被重新拉取，因为
 那时本地副本已不是提交进版本库的那份。
@@ -205,6 +208,44 @@ osdk source unpin huggingface|modelscope
 
 探测会先解析目标仓库 metadata，再对一个真实文件做最多 1 MiB 的 Range 下载；
 匿名与带凭据模式使用不同缓存键。更多 source 规则见[下载源与供应链安全](./sources-security)。
+
+## 在 `osdk.toml` 中声明模型
+
+除了先 `pull` 再入 lock，也可以直接在项目 `osdk.toml` 里声明模型。声明本身不下载
+权重；之后 `osdk model pull <name>` 会匹配这份声明，并把消费者视图一起写进 lock、
+立即渲染：
+
+```toml
+[models.flux]
+source   = "hf:black-forest-labs/FLUX.1-dev@main"
+include  = ["*.safetensors", "*.json"]
+exclude  = ["*.onnx"]
+variant  = "fp16"
+when     = { os = "windows" }          # 可选，与 [tools] 的 when 同构
+
+[models.flux.views.comfyui]
+profile  = "desktop"                   # 省略时为 "default"
+[models.flux.views.comfyui.map]
+"unet/" = "diffusion_models"
+"vae/"  = "vae"
+
+[models.embedder.views.hf-cache]
+# 只给 consumer 段、不写 map：用该 consumer 的默认布局
+```
+
+字段含义与 `model pull` 参数一致：`source` / `include` / `exclude` / `variant` /
+`when`，外加 `views`（consumer 名 -> 该 consumer 的 `profile` 与 `map`）。`map` 的
+key 是**仓库内相对路径前缀**（一律以 `/` 归一），value 是消费者类别，规则与
+`model view add --map` 完全相同。写错字段名会直接报错（`deny_unknown_fields`），
+不会被静默忽略。
+
+**信任（trust）语义**：只是声明「要什么」（`source`/`include`/`variant`/`when`/
+`views`）不需要信任项目配置，和声明一个 npm 依赖同级；只有能改变**字节来源**的
+字段才要求审核——`endpoint`、自定义 URL、`insecure` 一类。而且模型声明**从不阻断
+shim**：一个只声明了模型的项目里，`cargo --version` 这类普通工具命令照常运行；
+真正会拉取的 `osdk model sync` / `pull` 才执行完整的信任检查。带 `endpoint` 的那
+条 model 条目作为整体被钉住（与 `tools.<name>.allow_builds` 同级粒度），改它会要
+求重新信任；改另一条不带 `endpoint` 的模型不会。
 
 ## 消费者视图（model view）
 

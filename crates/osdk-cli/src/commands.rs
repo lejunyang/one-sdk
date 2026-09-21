@@ -6244,6 +6244,20 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
                 let cwd = std::env::current_dir()?;
                 let path = project_lock_path(app, &cwd);
                 crate::lockfile::merge_model(&path, &installed.manifest)?;
+                // If this pull corresponds to a `[models.<name>]` declaration,
+                // carry its view declarations into the lock so another machine's
+                // `model sync` rebuilds the same consumer views. Without a
+                // declaration, views stay empty (skip_serializing_if).
+                let declared_views = app
+                    .ctx
+                    .config
+                    .models
+                    .get(&name)
+                    .map(|m| crate::lockfile::locked_views_from_declaration(&m.views));
+                if let Some(views) = declared_views {
+                    crate::lockfile::set_model_views(&path, &name, views.clone())?;
+                    crate::model_view::reconcile_declared_views(app, &name, &views)?;
+                }
                 println!("updated {}", path.display());
             }
             println!(
@@ -6354,6 +6368,10 @@ async fn model_sync(
             .unwrap_or(false);
         if present {
             println!("{name} is up to date at revision {}", entry.revision);
+            // Views are part of what the lock declares; reconciling here makes
+            // `model sync` also (re)build them on a machine that never ran
+            // `model view add`.
+            crate::model_view::reconcile_declared_views(app, name, &entry.views)?;
             continue;
         }
         if dry_run {
@@ -6419,6 +6437,7 @@ async fn model_sync(
         // A restore that produced different bytes is a failure, not a success:
         // the point of the lock is that it pins content.
         verify_restored_against_lock(name, entry, &installed.manifest)?;
+        crate::model_view::reconcile_declared_views(app, name, &entry.views)?;
         println!(
             "restored {name} at revision {} -> {}",
             installed.manifest.revision,

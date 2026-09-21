@@ -172,7 +172,21 @@ variant = "safetensors-fp16" # optional
 path = "config.json"
 size = 123
 sha256 = "..."
+
+# Optional: consumer views to render for this model
+# (from [models.<name>.views] in osdk.toml)
+[models.qwen.views.comfyui]
+profile = "default"
+[models.qwen.views.comfyui.map]
+"unet/" = "diffusion_models"
 ```
+
+The `views` table is written only when non-empty and records consumer ->
+profile plus a repo-relative-prefix -> category map; it never records the
+machine-local view path or the link mode actually used. `osdk model sync` reads
+it back to rebuild views, so the field has both a write and a read path. It is
+an optional addition on schema 4: an older osdk ignores the unknown field
+instead of failing, so the schema version is not bumped.
 
 Platform keys use `linux-*`, `macos-*`, or `windows-*` plus
 `x64|arm64|x86|arm`; musl Linux adds `-musl`. Updating one platform preserves

@@ -199,7 +199,12 @@ const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
 ///
 /// `tools` needs this because a single tool option (`allow_builds`) can still
 /// opt into script execution even though the surrounding table is safe.
-const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks"];
+const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "models"];
+
+/// Keys under one `[models.<name>]` entry that decide where model bytes come
+/// from (or weaken how they are checked). Everything else is a harmless
+/// declaration, like declaring `npm:prettier` (research §6.4).
+const MODEL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "url", "mirror"];
 
 /// The npm tool option that turns lifecycle scripts back on.
 const ALLOW_BUILDS_OPTION: &str = "allow_builds";
@@ -237,7 +242,7 @@ pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
         .map_or(requirement.key.as_str(), |(table, _)| table);
     match table {
         // Never reached by the shim.
-        "syspkg" | "task_config" => false,
+        "syspkg" | "task_config" | "models" => false,
         // Everything else is treated as dispatch-affecting. Fail-closed on
         // purpose: `settings`, `tools`, `sources`, `registries` and any table a
         // future build does not recognize all stay gated, so adding a new
@@ -280,6 +285,7 @@ fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
         match key.as_str() {
             "settings" => collect_settings_requirements(value, &mut found),
             "tools" => collect_tools_requirements(value, &mut found),
+            "models" => collect_models_requirements(value, &mut found),
             "aliases" => {}
             // Declaring a task is not running one; see TRUST_REQUIRING_TABLES.
             "tasks" => {}
@@ -369,6 +375,38 @@ fn collect_tools_requirements(value: &toml::Value, found: &mut Vec<TrustRequirem
             found.push(TrustRequirement {
                 key: format!("tools.{name}.{ALLOW_BUILDS_OPTION}"),
                 reason: TrustReason::ExecutesCode,
+            });
+        }
+    }
+}
+
+/// Inspect `[models]` entries for keys that redirect or weaken the byte source.
+///
+/// Declaring what to fetch (`source`, `include`, `exclude`, `variant`, `when`)
+/// and which consumer views to render (`views`) is never a reason to ask for
+/// trust -- like declaring an npm dependency, it runs nothing. An explicit
+/// `endpoint`/custom URL/`insecure` flag is, and is reported per model so the
+/// message names the offending entry.
+fn collect_models_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let Some(models) = value.as_table() else {
+        // A malformed `models` table cannot be shown harmless.
+        found.push(TrustRequirement {
+            key: "models".into(),
+            reason: TrustReason::WeakensVerification,
+        });
+        return;
+    };
+    for (name, entry) in models {
+        let Some(fields) = entry.as_table() else {
+            continue;
+        };
+        for source_key in fields
+            .keys()
+            .filter(|k| MODEL_SOURCE_KEYS.contains(&k.as_str()) || k.as_str().contains("endpoint"))
+        {
+            found.push(TrustRequirement {
+                key: format!("models.{name}.{source_key}"),
+                reason: TrustReason::WeakensVerification,
             });
         }
     }
@@ -1135,6 +1173,124 @@ mod tests {
         // An unrecognized table stays gated: a key this build cannot interpret
         // must not escape the shim's check by having been forgotten here.
         assert!(dispatch_affecting("something_new_from_the_future"));
+    }
+
+    /// Declaring a model is like declaring a dependency: it runs nothing and
+    /// fetches nothing on its own, so `source`/`include`/`variant`/`when`/`views`
+    /// must not demand trust (research §6.4). Only keys that actually choose the
+    /// byte source (`endpoint`, a custom URL, an `insecure` toggle) do, and they
+    /// are reported per model rather than gating the whole table.
+    #[test]
+    fn declaring_a_model_is_safe_but_an_endpoint_override_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        // A full declaration with no source-redirecting key needs no trust.
+        let full = concat!(
+            "[models.sd]\n",
+            "source = \"hf:runwayml/stable-diffusion-v1-5@main\"\n",
+            "include = [\"*.safetensors\"]\n",
+            "variant = \"fp16\"\n",
+            "[models.sd.views.comfyui.map]\n",
+            "unet = \"diffusion_models\"\n",
+            "vae = \"vae\"\n",
+        );
+        std::fs::write(&path, full).unwrap();
+        assert!(
+            !requires_trust(&path).unwrap(),
+            "a model declaration with no endpoint must need no trust"
+        );
+
+        // An endpoint override is the one thing that does.
+        std::fs::write(
+            &path,
+            concat!(
+                "[models.sd]\n",
+                "source = \"hf:runwayml/stable-diffusion-v1-5@main\"\n",
+                "endpoint = \"https://mirror.example.com\"\n",
+            ),
+        )
+        .unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "models.sd.endpoint");
+        assert_eq!(found[0].reason, TrustReason::WeakensVerification);
+
+        // insecure is reported under its own key, not the whole table.
+        std::fs::write(
+            &path,
+            "[models.sd]
+source = \"hf:o/r@main\"
+insecure = true
+",
+        )
+        .unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "models.sd.insecure");
+    }
+
+    /// Even when a model *does* require trust (an endpoint override), that
+    /// requirement must never block the shim: the shim cannot reach model
+    /// sources, and gating it would make `cargo --version` fail in a project
+    /// that merely declares models. The `install`/`sync` paths still see it.
+    #[test]
+    fn model_requirements_never_affect_tool_dispatch() {
+        let dispatch_affecting = |key: &str| {
+            affects_tool_dispatch(&TrustRequirement {
+                key: key.to_string(),
+                reason: TrustReason::WeakensVerification,
+            })
+        };
+        assert!(!dispatch_affecting("models"));
+        assert!(!dispatch_affecting("models.sd.endpoint"));
+        assert!(!dispatch_affecting("models.sd.insecure"));
+    }
+
+    /// Editing a harmless declaration field must not invalidate a trust record
+    /// that was granted for a sibling endpoint key. The governed subset keeps
+    /// only the keys trust actually governs.
+    /// An entry that carries an endpoint pins that whole model entry (the same
+    /// whole-entry granularity `tools.<name>.allow_builds` uses: the reviewed
+    /// identity is the entry, not one leaf). So editing a sibling field *inside
+    /// that same entry* re-prompts, but editing a different, endpoint-free model
+    /// does not. The governed subset projects by entry, not by the whole
+    /// `[models]` table.
+    #[test]
+    fn an_endpoint_pins_its_own_model_entry_but_not_sibling_models() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        let config_dir = temp.path().join("state");
+
+        let body = |sd_include: &str, other_include: &str| {
+            format!(
+                "[models.sd]\nsource = \"hf:a/b@main\"\nendpoint = \"https://m.example.com\"\ninclude = [{sd_include}]\n\n                 [models.plain]\nsource = \"hf:c/d@main\"\ninclude = [{other_include}]\n"
+            )
+        };
+
+        std::fs::write(&path, body("\"a\"", "\"x\"")).unwrap();
+        trust(&config_dir, &path).unwrap();
+
+        // Editing a sibling model that has no endpoint keeps the record: the
+        // governed subset does not include `models.plain` at all.
+        std::fs::write(&path, body("\"a\"", "\"x\", \"y\"")).unwrap();
+        assert!(
+            is_trusted(&config_dir, &path, None).unwrap(),
+            "editing a different endpoint-free model must not invalidate trust"
+        );
+
+        // Editing the reviewed entry -- even a harmless field -- re-prompts,
+        // because that entry is the reviewed unit.
+        std::fs::write(&path, body("\"a\", \"b\"", "\"x\", \"y\"")).unwrap();
+        assert!(!is_trusted(&config_dir, &path, None).unwrap());
+
+        // Changing the endpoint re-prompts as well (the direct case).
+        std::fs::write(
+            &path,
+            "[models.sd]\nsource = \"hf:a/b@main\"\nendpoint = \"https://other.example.com\"\n             \n[models.plain]\nsource = \"hf:c/d@main\"\n",
+        )
+        .unwrap();
+        assert!(!is_trusted(&config_dir, &path, None).unwrap());
     }
 
     /// An unknown top-level table, and an unknown `[settings]` key, must both
