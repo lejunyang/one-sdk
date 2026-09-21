@@ -1361,6 +1361,249 @@ github.rs:1101        &ctx.dirs.installs
 
 ---
 
+## 12. P3 调研：应用依赖清单应不应该成为一等公民
+
+> 本节回答用户提出的关键判断：「专属依赖（应用级依赖清单）osdk 好像都没处理过。」
+> 结论先行：**应该，但不要新建第二套机制**——以 npm 已经走通的「发现 → 选
+> installer → 驱原生包管理器 → 回读原生 lock → 纳入 osdk lock」链路为样板，
+> 把「整份应用环境的一次性兑现」补成一个与「装单个工具」并列的一等概念，
+> Python 侧照 npm 的形状补齐，而不是塞进现有 `pypi:` 的「一工具一 venv」。
+> 外部参照是 mise 2026 年的 `mise deps`（实验特性，见 §12.4），它恰好把「工具
+> (`[tools]`)」和「项目依赖 (`[deps]`)」显式分成两层——与本节主张的分层一致。
+
+### 12.1 现状台账：osdk 对 npm 的依赖处理做到哪、缺口在哪
+
+先把两条极易混淆的路径分开，否则后面所有讨论都会把「装一个 npm 工具」误当成
+「管项目依赖」。
+
+**路径 A —— 把某个 npm 包当工具装：`npm:<pkg>` backend。**
+代码在 `crates/osdk-core/src/backend/npm_package.rs`。它处理的是**这个工具自身**
+的依赖闭包：读该包的 package.json、驱动真实 npm/pnpm、解析并回读
+package-lock.json、校验 `node_modules/.bin`，并通过 `InstallDependency` 传递运行
+时依赖（如 node）。这是「一个 CLI 工具 + 它自己的依赖树」，语义上和
+`pypi:<cli>` 的「一工具一独立 venv」是同级的，**不是**「应用环境」。
+
+**路径 B —— 管用户项目自己的 package.json。**
+代码在 `crates/osdk-core/src/npm_tools.rs`，项目级编排在
+`crates/osdk-cli/src/commands.rs` 约 2470–2540。这一段才带「应用依赖」语义，它
+已经实现了三块可复用的基础设施：
+
+1. **边界发现（无需配置）**：`find_nearest_package_json`（`npm_tools.rs:271`）从
+   当前目录**向上逐层**找最近的 package.json。边界处理是 fail-closed：向上遇到一个
+   **存在但解析失败**的 package.json 会**直接报错、不跳过**继续往上找
+   （`:633` 附近测试印证）。即「坏的上层清单会挡住下层项目」，而不是悄悄忽略。
+2. **installer 选择的严格优先级**：`select_automatic_installer`
+   （`npm_tools.rs:357`）按 ① package.json 的 `packageManager` 字段（最高、项目
+   自己声明、谁都盖不过）→ ② 现存原生 lock 文件的归属者（谁写的 lock 谁继续管）
+   → ③ `settings.npm.default_installer`（**仅兜底**）。代码注释明确：改 default
+   绝不会把一个已经声明 `packageManager` 或已有 lock 的项目抢走。
+3. **一致性校验，不猜着跑**：`packageManager` 声明 pnpm、目录里却是 npm 写的
+   package-lock.json 时，报 `err.npm_manager_lock_owner_conflict` 拒绝
+   （`npm_tools.rs:371`），而不是随便挑一个执行。
+
+commands.rs 的项目级编排（`:2494` 起）在真正安装前会**重新 inspect 一次**项目
+（防止 resolve 期间清单/lock 被别的进程改动），选定 installer、算出它应写的
+lock、驱动原生安装器，然后**回读**实际生成的 package-lock、校验其归属者与格式，
+再把原生 lock 的 kind/format/sha256 记进 osdk lock（`record_project_npm_metadata`）。
+
+**关键缺口（本节立论基础）：**
+
+- **`osdk install`（不带 operand）不会因为目录里有 package.json 就兑现整份依赖
+  清单。** 它的语义是 install from config（`cli.rs:78-81`）——按 osdk 配置/lock
+  装**工具**（node/python/uv 等运行时），不等于「在项目里跑一次 `npm install`
+  装全 dependencies」。
+- 真正触发「读 package.json 装依赖」的是**带 npm 包 operand** 的路径
+  （commands.rs 约 2494 起）：把**某一个**包加进项目 package.json 的对应 section
+  再驱动原生 installer。粒度是「**逐个依赖加进来并装好**」，不是「读整份 manifest
+  一次性把整个应用环境装好」。
+- **结论基线**：即便是处理得最深的 npm，osdk 也**没有「应用依赖清单」这一等公
+  民**——缺的是「读整份 manifest → 一次性兑现整个应用环境 → 纳入 osdk lock / CAS
+  / inventory」这一层。Python 侧 `grep -r "requirements.txt" crates/` **0 命中**，
+  是同一缺口的另一种表现：npm 至少有成熟的「逐依赖 + 原生 lock 回读」基础设施，
+  Python 连逐依赖的项目环境都没有，只有「一 CLI 一 venv」。
+
+### 12.2 该不该新增一等公民：该，但与「工具」严格分层
+
+该做。理由不是「Python 也想要 npm 有的东西」，而是 ComfyUI 这类产品的本质是
+「**一份应用源码 + 一份应用依赖清单 + 若干模型 + 一个运行时**」，osdk 已经能管其
+中的运行时（python/uv/conda/cuda）和模型（本重构），唯独「应用依赖清单」缺位，
+于是「install 后直接能跑」永远差临门一脚。
+
+但必须把两层在数据模型上分开，否则会重蹈把 `pypi:<cli>` 当应用环境的覆辙：
+
+| | 工具（tool，现有） | 应用环境（app env，新增） |
+| --- | --- | --- |
+| 单位 | 一个可执行工具（node、uv、`pypi:ruff`） | 一个项目目录的整份依赖闭包 |
+| 安装位置 | osdk 管控的隔离 install 目录 + shim | **项目内**（`.venv`、`node_modules`） |
+| 触发 | `osdk install [tool]`、shim 按需 | 检测到项目清单且 stale 时兑现 |
+| 清单 | osdk.toml `[tools]` / lock 的 `[platforms]` | 项目原生 manifest（requirements.txt / pyproject / package.json） |
+| 锁 | osdk.lock 钉版本 | 原生 lock（uv.lock/package-lock）为主，osdk.lock 只记其身份与摘要 |
+| 谁是真相 | osdk lock | 原生 lock；osdk 是「驱动 + 校验 + 记录」的那一层 |
+
+**核心原则：osdk 不自己当 Python 解析器/打包器，也不复制一份依赖图。** 解析、装
+包、生成 lock 全部交给原生工具（uv / npm），osdk 负责的是它真正更擅长、也是
+AGENTS.md 反复强调的那几件事：**准备好工具链本身（uv/python）、挑对镜像与索引、
+用隔离环境与凭据卫生驱动它、回读产物校验、把结果纳入 osdk lock/CAS/inventory、
+并保证跨人复现一致**。这与 npm_package backend「驱真实 npm、不自己实现 npm」的
+取舍完全一致。
+
+### 12.3 Python 应用环境模式设计（照 npm 形状补齐）
+
+建议新增一个**应用环境 backend / 子命令面**（命名待定，候选 `osdk deps` 或
+`osdk env sync`，与 mise 的 `deps` 对齐，避免和现有 `model env` 的 `env` 撞义），
+内部抽象成与 npm 同构的五步：
+
+1. **发现**：`find_nearest_python_manifest(start)`，与
+   `find_nearest_package_json` 同形——向上找 `pyproject.toml`（PEP 621 / uv
+   project）或 `requirements.txt`（+ 可选 `requirements.in`）。优先级与边界照搬
+   npm：最近者胜；存在但无法解析的清单**报错不跳过**。一个目录同时有 pyproject
+   与 requirements.txt 时显式报错或按明确规则二选一，**不静默合并**（两份真相会
+   漂移）。
+2. **installer 选择**：Python 侧对应 npm「packageManager → 现存 lock → 兜底」的
+   优先级应是：① 项目声明（pyproject 里的 uv 痕迹 / 显式配置）→ ② 现存 lock
+   （有 `uv.lock` 走 uv project 模式；只有 requirements.txt 走 `uv pip` 模式）→
+   ③ `settings.python.default_installer`（uv / pip，仅兜底）。声明与 lock 归属不
+   一致时同样报错，复刻 `npm_manager_lock_owner_conflict` 的 fail-closed。
+3. **驱动原生工具装进项目 venv**（不是隔离工具 venv）：
+   - pyproject + uv.lock：`uv sync`（官方语义即「按 lock 把项目环境装成一致状
+     态」，见 https://docs.astral.sh/uv/concepts/projects/sync/ ；`uv run` 前会自动
+     lock+sync）。
+   - requirements.txt：`uv venv` + `uv pip install -r requirements.txt`；要冻结可
+     复现则用 `uv pip compile` 产 lock 再 `uv pip sync`
+     （https://docs.astral.sh/uv/pip/compile/）。
+   - **解释器必须由 osdk 解析的 python 提供**，并延续 pypi backend 已验证的
+     `UV_PYTHON_DOWNLOADS=never`（不让 uv 在 osdk 背后偷偷下解释器）与
+     `UV_DEFAULT_INDEX`/`PIP_INDEX_URL`（镜像只映射为**默认**索引，绝不写
+     `--extra-index-url`/`UV_INDEX`，防依赖混淆）——这些环境与「危险参数拒绝」
+     (`reject_unsafe_installer_args`) 在 `pypi.rs` 已存在，**直接复用**，不要重写。
+4. **回读 lock / receipt**：校验 `.venv` 的 `pyvenv.cfg`（creator、解释器，
+   pypi.rs 已有 `creator_from_pyvenv_cfg` 等解析）、回读 uv.lock/requirements 的
+   存在与摘要；把「清单 hash + 原生 lock 的 kind/路径/sha256 + python 版本 + uv
+   版本 + 目标 extra-index（torch 场景）」记进 osdk.lock 的新应用环境段。这一步是
+   AGENTS.md「只写不读」警告的正面落实：npm 的教训是 pypi 曾经只写
+   installer、重锁时却不回读，导致静默被本机环境覆盖。
+5. **纳入 CAS / inventory / trust**：site-packages 里的 wheel 解包结果与
+   ComfyUI 模型一样是大文件，应纳入 CAS roots（类似 view 的处理），避免多项目
+   重复占盘。trust 上，**读清单装依赖本身就是执行第三方代码**，比模型声明更敏
+   感：应用环境段（尤其自定义 index/extra-index URL）应归入需要信任的表，理由
+   接近 sources 的 WeakensVerification；与 §6.4 的模型 trust 用同一套逐 key 机
+   制，但默认结论相反（装包=执行，故整段需要信任，除非仅声明官方默认索引）。
+
+CLI 面貌建议（与 mise 对齐、又贴合 osdk 既有动词）：
+
+```text
+osdk deps              # 发现本项目应用清单并按 lock 兑现（stale 才动）
+osdk deps --list       # 列出识别到的应用环境与 freshness
+osdk deps --dry-run    # 只报告会跑什么
+osdk deps --force      # 忽略 freshness 强制重装
+```
+
+复用 vs 新造清单：
+
+| npm 已有的（可直接抽象复用） | Python 侧要新造的 |
+| --- | --- |
+| 向上发现 + fail-closed 边界 | pyproject/requirements 的发现与解析 |
+| installer 严格优先级 + lock 归属冲突报错 | uv vs pip 的选择与冲突判定 |
+| 「安装前重新 inspect」防并发漂移 | `.venv`/uv.lock 的回读与 pyvenv.cfg 校验 |
+| 原生 lock kind/format/sha256 入 osdk lock | Python 版 lock 身份记录与 CAS roots |
+| 隔离 HOME / 凭据卫生 / 默认索引映射 | 大部分可直接用 `pypi.rs` 现成环境 |
+
+### 12.4 横向对照：mise 的 `deps`（用户点名，官方为准）
+
+查证来源：mise 官方文档 **Deps (experimental)**，
+https://mise.jdx.dev/dev-tools/deps.html （2026-09 抓取）。
+
+- **真实名称与成熟度**：命令是 **`mise deps`**，配置段是 **`[deps]`**；页面标题
+  与正文都标注 **experimental**，且必须 `[settings] experimental = true` 才启用。
+  即用户记忆中的「mise 有类似 dep 的 beta 功能」属实：它是**实验特性**，尚未稳
+  定。版本层面，mise 2026.8.x 仍在活跃迭代该功能（crates.io 2026.8.13）。
+- **它明确把两层分开**，原话：「Use `[tools]` to install the package manager
+  itself; use `[deps]` to install the project's packages.」这正是 §12.2 的分层：
+  `[tools]` 装 node/python/uv，`[deps.npm]`/`[deps.uv]` 装项目自己的包。
+- **支持的清单类型**（内置 provider，官方表）：npm/yarn/pnpm/bun/deno/aube、
+  **pip（requirements.txt，默认 `pip install -r requirements.txt`）**、
+  **poetry（pyproject+poetry.lock）**、**uv（pyproject+uv.lock，默认 `uv sync`）**、
+  go、bundler、composer、dart/flutter、git-submodule。输出多为 `node_modules` /
+  `.venv` / `vendor`。注意：**pip provider 不创建也不选择 venv**，官方明确要求另
+  行配置 virtualenv——这印证了「装包」与「备解释器/环境」必须是两件事。
+- **freshness 模型（最值得借鉴也最值得警惕的一点）**：mise 用 **blake3 对源清单
+  与生效命令做哈希**，存在 `$MISE_STATE_DIR/deps/<hash>.toml`（**不写进项目目
+  录**），源或命令变了、或声明的 outputs 缺失才算 stale 才重装；它**不逐个核验已
+  装包**，也不查上游更新。优点是快且无副作用；风险正是 AGENTS.md「验证失效模
+  式」警告的——**「命令成功 + 哈希没变」不代表环境真的对**（site-packages 被手
+  改、被别的工具动过它发现不了），要靠 `--force` 与 outputs 存在性兜底。osdk 若
+  借鉴，应在「哈希 freshness」之外保留一条**可选的深度校验**（读 receipt / 对
+  CAS 摘要），把 mise 明确承认的这块短板补上。
+- **auto / 并行 / 依赖序**：`[deps.x] auto=true` 会在 `mise run`/`mise x` 前自动
+  跑；无依赖的 provider 并行、有 `depends` 的按序；可自定义 provider（sources/
+  outputs/run/env/dir）。monorepo 要显式 `config_roots`，**不任意向下扫子目录**
+  （与 osdk 模型扫描「深度上限不能乱收窄、动态目录要显式登记」是同一类纪律）。
+- **对 osdk 的借鉴与反例**：
+  - 借鉴：`[tools]` vs `[deps]` 分层、provider 表（sources/outputs/默认命令）、
+    默认命令可被 `run` 覆盖（如 `npm install`→`npm ci` 冻结实装）、状态写在工具
+    自己的 state 目录而非项目里、auto 前置于 run/exec、`--no-deps` 逃生口。
+  - 反例/不要照搬：实验期的自动触发容易让「装应用依赖」变成每次命令的隐式副作
+    用（osdk 对模型都坚持「不做 install 副作用」，应用环境更应显式或可关）；
+    纯哈希 freshness 的弱保证；以及把 pip 默认成「无 venv 直接装」——osdk 应坚持
+    项目隔离 venv。
+
+其他范式（一句话对照，未逐源码深查，标为背景）：Nix devshell / devbox / pixi 走
+「声明式环境 + lock」路线，隔离更彻底但引入各自工具链与生态门槛；asdf 传统上只
+管工具、不管应用依赖（mise 的 `[deps]` 正是补这块）。对 osdk 而言，mise 的
+「工具/依赖分层 + 驱原生包管理器」范式比重 Nix 式自建环境更贴合现有架构。
+
+### 12.5 回到 ComfyUI：B 路径的可行性阶梯
+
+把 §7.3 的 B 路径（osdk 完整托管源码版 ComfyUI）按依赖关系拆成可落地的台阶，
+每一级都建立在前一级之上，可独立交付：
+
+1. **第 0 级（已具备）**：osdk 装 python/uv，模型经 `[models]` + view 就绪。
+2. **第 1 级（=§12.3 的最小实现）**：能 `github:` clone ComfyUI 源码树，并对其
+   `requirements.txt` 驱 `uv venv` + `uv pip install -r`，回读 venv 与装包结果入
+   lock。做到这一级，「install 后 `osdk run comfy` 能跑」成立（run 任务里
+   `.venv/Scripts/python main.py`）。**这是性价比最高的一级**，因为它只依赖
+   §12.3，不需要 osdk 懂 ComfyUI。
+3. **第 2 级（torch/CUDA 特化）**：ComfyUI 的 requirements 默认装 CPU torch 或从
+   PyPI 取通用版；要 GPU 必须叠加 PyTorch 官方/镜像 extra-index 与 `+cuXXX`
+   local version。复用 P0-3 已吸收的 PyPI 镜像与 pypi.rs 的默认/额外索引处理，
+   但要解决 §7.4 的组合约束（Python 版本 × cu 版本 × 平台的 wheel 可用性矩阵）
+   与下条的驱动门槛。
+4. **第 3 级（doctor 前置闸门 + 「直接能跑」）**：在装 GPU torch **之前**做
+   nvidia-smi 驱动比对（§12.6），不匹配即阻止并解释；再用 `[tasks]`/一次 install
+   把 clone、装环境、建模型视图、起服务串成单一入口，才达到用户要的「install
+   后直接能跑」。这一级代价最大（要做环境探测、要处理 ComfyUI commit 钉版与
+   custom node），应在第 1 级被真实使用验证后再做。
+
+**代价与是否值得**：第 1 级代价中等、收益独立（任何 Python 应用都受益，不只
+ComfyUI），值得作为 P3 的首个实现项；第 2/3 级与 CUDA 强耦合、验证成本高，应在
+应用环境抽象稳定后单独推进。对「普通消费者只想跑 ComfyUI」的主路径，结论仍与
+§7.2 一致：**Desktop 管运行时、osdk 管模型/视图更省事**；B 路径服务的是要钉
+commit、要非 N 卡后端、要 CI/无 GUI 的少数高确定性需求。
+
+### 12.6 NVIDIA 驱动硬边界：doctor 的检测 + 报告设计
+
+驱动是 osdk **只能检测报告、不能安装**的硬前提（内核态组件，且与 OS/显卡强耦
+合）。§7.4 已起头，这里给出可落地设计（本轮只设计，不实现）：
+
+- **读产物**：运行 `nvidia-smi --query-gpu=driver_version --format=csv,noheader`
+  （跨平台同命令，随驱动提供），解析「主版本号即支持的最高 CUDA major」
+  （NVIDIA 的 CUDA forward-compat 规则：R535 驱动最高支持 CUDA 12.x，具体 minor
+  支持矩阵随驱动版本走；本机实测驱动 610.47 可跑 cu130 wheel，见 §5.8）。
+  `nvidia-smi` 缺失/退出非零 = 无 NVIDIA 驱动，应明确报告「GPU 路线不可用」，
+  而不是默默装 CPU 版。
+- **比对对象**：将要安装的 torch wheel 的 cu 标签（cu126/cu128/cu130…，来自
+  §7.4 已实测的 wheel 矩阵）所需的**最低**驱动版本。低于门槛 → **安装前**失败，
+  错误信息同时给出：当前驱动、目标 wheel 需要的驱动、升级方向，而不是让用户在
+  import torch / 出图时撞上 `no kernel image`。
+- **fail-closed 与可验证性**：探测必须区分「真无驱动 / nvidia-smi 不在 PATH /
+  解析失败」三种空结果（与本项目一贯的「空下拉框/空输出不能一律当成功或失败」
+  同源）。实现时该解析函数的测试要像 trust 分类那样**两种方向都有**：给一份高
+  驱动+cu130 应放行、给一份低驱动+cu130 应拦截、给无 nvidia-smi 应明确报「无法
+  判定」而不是放行。
+- **落点**：并入既有 `osdk doctor`（P0-5 已在其中加了系统代理诊断，doctor 在
+  trust 豁免名单、读项目配置正常），并在应用环境安装 GPU 依赖的路径上作为前置
+  闸门复用同一判定，保证 doctor 报的和安装时拦的是同一个函数，不会两处口径漂移。
+
 ## 附录 A：实测环境与命令
 
 **环境**：Windows x64；PowerShell 7.6.6.0（`C:\Program Files\PowerShell\7\pwsh.exe`，全部以 `-NoProfile` 执行）；Python 3.11.0（`C:\Python311\python.exe`）用于离线复现探针；隔离 venv 内 `huggingface_hub 1.32.0`；**真实 ComfyUI 端到端用安装自带的 Python 3.13.12**；osdk 为仓库内 `target\release\osdk.exe`；系统代理 `127.0.0.1:7897`（WinINET，`ProxyEnable=1`）。GPU：RTX 4080 Laptop，驱动 610.47。卷：C/D/E 三个 NTFS。开发者模式已开启（`AllowDevelopmentWithoutDevLicense=1`）——这一点影响符号链接结论，见 §5.3。
@@ -1420,3 +1663,9 @@ github.rs:1101        &ctx.dirs.installs
 - HF-Mirror：`https://beta.hf-mirror.com/`
 - reqwest 重定向剥离敏感头：`https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html` 与 `redirect.rs` 的 `remove_sensitive_headers`
 - PyTorch wheel 索引：`https://download.pytorch.org/whl/cu126/torch/` 等
+
+- mise Deps（experimental，[deps] 应用依赖）：`https://mise.jdx.dev/dev-tools/deps.html`
+- mise Dev Tools（[tools] 与 depends 字段）：`https://mise.jdx.dev/dev-tools/index.html`
+- uv Locking and syncing（`uv sync` 语义）：`https://docs.astral.sh/uv/concepts/projects/sync/`
+- uv Locking environments（`uv pip compile` / requirements）：`https://docs.astral.sh/uv/pip/compile/`
+- uv Managing dependencies（PEP 621 project.dependencies）：`https://docs.astral.sh/uv/concepts/projects/dependencies/`
