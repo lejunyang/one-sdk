@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osdk 模型管理重构调研 · 可视化附件（2026-09-21）</title>
+<style>
+:root{
+  --ink:#16191c; --ink2:#394046; --muted:#6d747a; --faint:#8f959a;
+  --line:#dad6cd; --line2:#c6c1b6; --paper:#f4f2ed; --card:#fffefb; --card2:#faf8f3;
+  --rust:#a8442a; --rust-soft:#f5e4dd;
+  --teal:#1f6b63; --teal-soft:#dcebe9;
+  --steel:#44606e; --steel-soft:#dfe8ec;
+  --g1:#2f6d4a; --g1b:#dceae1;
+  --g2:#6b7a1e; --g2b:#ebeed3;
+  --g3:#a8601f; --g3b:#f6e6d2;
+  --g4:#8c2f2f; --g4b:#f0dada;
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono","Cascadia Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Source Han Sans SC","Noto Sans CJK SC",sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.75;-webkit-font-smoothing:antialiased}
+code,.mono{font-family:var(--mono);font-size:.9em}
+code{background:#eceae3;border:1px solid var(--line);border-radius:3px;padding:.05em .32em;color:#4a3f36;word-break:break-all}
+.wrap{max-width:1220px;margin:0 auto;padding:0 28px 96px}
+.masthead{border-bottom:2px solid var(--ink);background:var(--card)}
+.masthead .wrap{padding-top:34px;padding-bottom:26px}
+.kicker{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--rust);margin-bottom:12px}
+h1{font-size:30px;line-height:1.3;margin:0 0 10px;letter-spacing:-.01em;font-weight:700}
+.subtitle{font-size:16px;color:var(--ink2);margin:0 0 20px;max-width:78ch}
+.meta{display:flex;flex-wrap:wrap;gap:8px 26px;font-family:var(--mono);font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:14px}
+.meta b{color:var(--ink2);font-weight:600}
+nav.toc{position:sticky;top:0;z-index:50;background:rgba(244,242,237,.96);border-bottom:1px solid var(--line2);backdrop-filter:saturate(1.2) blur(6px)}
+nav.toc .wrap{display:flex;gap:0;overflow-x:auto;padding:0 28px;scrollbar-width:thin}
+nav.toc a{flex:0 0 auto;padding:11px 15px;font-size:13px;color:var(--ink2);text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
+nav.toc a:hover{color:var(--rust);border-bottom-color:var(--rust);background:#eeebe3}
+nav.toc a .n{font-family:var(--mono);font-size:11px;color:var(--faint);margin-right:6px}
+section{padding-top:52px}
+.sechead{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line2);padding-bottom:10px;margin-bottom:22px;flex-wrap:wrap}
+.sechead .idx{font-family:var(--mono);font-size:12px;color:#fff;background:var(--ink);padding:3px 9px;border-radius:3px;letter-spacing:.06em;flex:0 0 auto}
+h2{font-size:21px;margin:0;font-weight:700;letter-spacing:-.005em}
+.sechead .tag{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line2);padding:2px 8px;border-radius:3px;white-space:nowrap}
+.lede{font-size:15px;color:var(--ink2);max-width:86ch;margin:0 0 22px}
+.lede strong{color:var(--ink);font-weight:600;background:linear-gradient(transparent 62%,#f0e2d0 62%)}
+.fig{background:var(--card);border:1px solid var(--line2);border-radius:5px;padding:22px;margin:0 0 16px;box-shadow:0 1px 0 rgba(0,0,0,.03)}
+.figcap{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:0 0 18px;padding-bottom:9px;border-bottom:1px dashed var(--line2);letter-spacing:.02em}
+.figcap b{color:var(--ink);font-weight:600}
+.note{font-size:13.5px;color:var(--muted);border-left:2px solid var(--line2);padding:2px 0 2px 14px;margin:16px 0 0;max-width:92ch}
+.note b{color:var(--ink2)}
+.note.warn{border-left-color:var(--rust)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{border:1px solid var(--line2);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--card2);font-weight:650;font-size:12.5px;color:var(--ink2)}
+td.num,th.num{text-align:right;font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+.y{color:var(--g1);font-weight:700}
+.n{color:var(--g4);font-weight:700}
+.p{color:var(--g3);font-weight:700}
+.pill{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:9px;border:1px solid;letter-spacing:.03em;white-space:nowrap}
+.pill.a{color:var(--g1);border-color:var(--g1);background:var(--g1b)}
+.pill.b{color:var(--g3);border-color:var(--g3);background:var(--g3b)}
+.pill.c{color:var(--g4);border-color:var(--g4);background:var(--g4b)}
+.pill.s{color:var(--steel);border-color:var(--steel);background:var(--steel-soft)}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.stance{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+.stance .c{background:var(--card);border:1px solid var(--line2);border-top:3px solid var(--teal);border-radius:4px;padding:15px 16px}
+.stance .c.warn{border-top-color:var(--rust)}
+.stance .c.ok{border-top-color:var(--g1)}
+.stance .c .h{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
+.stance .c .b{font-size:14px;font-weight:650;line-height:1.5;margin-bottom:6px}
+.stance .c .d{font-size:13px;color:var(--ink2);line-height:1.62}
+.stance .c .num{font-family:var(--mono);font-size:19px;font-weight:700;color:var(--teal);display:block;margin-bottom:2px}
+.stance .c.warn .num{color:var(--rust)}
+.stance .c.ok .num{color:var(--g1)}
+.layers{display:grid;gap:10px}
+.layer{border:1px solid var(--line2);border-radius:4px;background:var(--card2);padding:14px 16px;position:relative}
+.layer .lh{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.layer .lt{font-weight:700;font-size:15px}
+.layer .ls{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#fff;padding:2px 8px;border-radius:3px}
+.layer.acq{border-left:4px solid var(--steel)} .layer.acq .ls{background:var(--steel)}
+.layer.sto{border-left:4px solid var(--teal)} .layer.sto .ls{background:var(--teal)}
+.layer.vie{border-left:4px solid var(--g3)} .layer.vie .ls{background:var(--g3)}
+.layer .lb{font-size:13.5px;color:var(--ink2)}
+.layer .keep{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+.arrowrow{text-align:center;font-family:var(--mono);color:var(--line2);font-size:16px;line-height:1;margin:-4px 0}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:820px){.split{grid-template-columns:1fr}}
+.panel{border:1px solid var(--line2);border-radius:4px;padding:14px 16px;background:var(--card2)}
+.panel.bad{border-top:3px solid var(--g4)}
+.panel.good{border-top:3px solid var(--g1)}
+.panel h4{margin:0 0 10px;font-size:14px;font-weight:700}
+.panel.bad h4{color:var(--g4)} .panel.good h4{color:var(--g1)}
+pre{font-family:var(--mono);font-size:12px;line-height:1.6;background:#f7f5ef;border:1px solid var(--line);border-radius:3px;padding:11px 13px;overflow-x:auto;margin:0 0 10px;color:#3d3a34}
+pre .hl{background:#f0dada;color:#7a2222;padding:0 2px}
+pre .ok{background:#dceae1;color:#245239;padding:0 2px}
+pre .dim{color:var(--faint)}
+.mut{display:grid;grid-template-columns:auto auto 1fr;gap:6px 12px;align-items:center;font-size:13px}
+.mut .lbl{font-family:var(--mono);font-size:12px;color:var(--ink2);white-space:nowrap}
+.mut .st{font-family:var(--mono);font-size:11px;padding:1px 8px;border-radius:9px;text-align:center;white-space:nowrap}
+.mut .st.caught{background:var(--g1b);color:var(--g1);border:1px solid var(--g1)}
+.mut .st.survived{background:var(--g4b);color:var(--g4);border:1px solid var(--g4)}
+.mut .st.expected{background:var(--steel-soft);color:var(--steel);border:1px solid var(--steel)}
+.mut .dsc{font-size:12.5px;color:var(--muted)}
+.budget{display:grid;grid-template-columns:auto 1fr auto;gap:5px 14px;align-items:center;font-size:13.5px}
+.budget .nm{font-family:var(--mono);font-size:12.5px;white-space:nowrap;text-align:right;color:var(--ink2)}
+.budget .tr{background:#eeece5;border:1px solid var(--line);border-radius:2px;height:22px;position:relative;overflow:hidden}
+.budget .seg{height:100%;float:left}
+.budget .s1{background:linear-gradient(90deg,#44606e,#64818f)}
+.budget .s2{background:linear-gradient(90deg,#a8601f,#c07e3c)}
+.budget .over{background:repeating-linear-gradient(45deg,#8c2f2f,#8c2f2f 5px,#a85050 5px,#a85050 10px)}
+.budget .limit{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--g4);z-index:3}
+.budget .v{font-family:var(--mono);font-size:12px;color:var(--ink2);white-space:nowrap;min-width:96px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:12px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.phases{display:grid;grid-template-columns:repeat(4,1fr);gap:0}
+@media(max-width:900px){.phases{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.phases{grid-template-columns:1fr}}
+.phase{border:1px solid var(--line2);border-right:none;padding:16px;background:var(--card2)}
+.phase:last-child{border-right:1px solid var(--line2)}
+@media(max-width:900px){.phase{border-right:1px solid var(--line2)}}
+.phase .t{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#fff;display:inline-block;padding:2px 8px;border-radius:3px;margin-bottom:10px}
+.phase:nth-child(1) .t{background:var(--g1)}
+.phase:nth-child(2) .t{background:var(--g2)}
+.phase:nth-child(3) .t{background:var(--g3)}
+.phase:nth-child(4) .t{background:var(--g4)}
+.phase .ph{font-size:14px;font-weight:700;margin-bottom:8px;line-height:1.45}
+.phase ul{margin:0;padding-left:17px;font-size:12.5px;color:var(--ink2);line-height:1.66}
+.phase li{margin-bottom:4px}
+.phase .cost{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:10px;padding-top:8px;border-top:1px dashed var(--line2)}
+.srcs{font-size:12.5px;color:var(--muted);line-height:1.8}
+.srcs code{font-size:11.5px}
+.foot{margin-top:56px;padding-top:18px;border-top:2px solid var(--ink);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+
+<div class="masthead">
+  <div class="wrap">
+    <div class="kicker">osdk · research visual · 2026-09-21 · 第二轮（真实安装实测）</div>
+    <h1>模型管理重构：从「不可变快照」到「消费者可直接使用的模型环境」</h1>
+    <p class="subtitle">现有 <code>osdk model</code> 把获取与完整性做得扎实，却没有交付：产物是一个带内容哈希的目录，没有任何消费者认识它。本图解给出六个结构性冲突、十组实测结论，以及「保留获取层 + 新增呈现层」的落地路径。<b>第二轮已在真实 ComfyUI Desktop 安装上完成端到端验证。</b></p>
+    <div class="meta">
+      <span><b>配套正文</b> model-management-refactor-2026-09-21.zh-CN.md</span>
+      <span><b>核查基准日</b> 2026-09-21</span>
+      <span><b>环境</b> Windows x64 · pwsh 7.6.6.0 · ComfyUI v0.34.0 / Python 3.13.12 · torch 2.12.1+cu130</span>
+      <span><b>状态</b> 调研 + 设计，未改产品代码</span>
+    </div>
+  </div>
+</div>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#s0"><span class="n">00</span>本轮修订</a>
+    <a href="#s1"><span class="n">01</span>断裂点</a>
+    <a href="#s2"><span class="n">02</span>冲突</a>
+    <a href="#s3"><span class="n">03</span>消费者矩阵</a>
+    <a href="#s35"><span class="n">04</span>Desktop 链路</a>
+    <a href="#s4"><span class="n">05</span>三层架构</a>
+    <a href="#s5"><span class="n">06</span>实测与变异</a>
+    <a href="#s6"><span class="n">07</span>镜像与测速</a>
+    <a href="#s7"><span class="n">08</span>源码版 vs Desktop</a>
+    <a href="#s8"><span class="n">09</span>路线</a>
+    <a href="#s9"><span class="n">10</span>未核查</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<section id="s0">
+  <div class="sechead"><span class="idx">00</span><h2>第二轮修订：真实安装推翻了什么</h2><span class="tag">初稿 → 实测</span></div>
+  <p class="lede">初稿写作时 ComfyUI Desktop 尚未完成首次启动向导，该族结论全部来自上游源码离线复现。用户完成安装后，<strong>三处被推翻或实质修正，三处从「源码推导」升级为「实跑验证」</strong>。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>表 0.1</b> 修订清单 · <span class="pill c">推翻</span> · <span class="pill b">修正</span> · <span class="pill a">升级为实跑</span></p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:8%">类型</th><th style="width:14%">位置</th><th style="width:39%">初稿的说法</th><th>实测之后</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="pill c">推翻</span></td><td>§3.2 对接接口</td>
+          <td>「用户在 Storage 面板点一下 Add Shared Directory」</td>
+          <td>那不是可程序化接口。真接口是 <code>settings.json</code> 的 <b><code>modelsDirs</code> 数组</b>，Desktop 每次启动据它生成 YAML 再以 <code>--extra-model-paths-config</code> 传入（链路由运行中进程命令行证实）</td>
+        </tr>
+        <tr>
+          <td><span class="pill b">修正</span></td><td>§3.2 磁盘布局</td>
+          <td>单一 ComfyUI 目录；<code>%LOCALAPPDATA%\Comfy-Desktop</code></td>
+          <td><b>三根分离</b>（Cache / Installs / Shared），实际在 <code>E:\Comfy-Desktop</code>（装到了其他盘）；Shared\models 下<b>已预建 25 个类别目录</b></td>
+        </tr>
+        <tr>
+          <td><span class="pill b">修正</span></td><td>§6.1 写入策略</td>
+          <td>（未讨论）</td>
+          <td><b>osdk 不应直接写 <code>settings.json</code></b>：上游维护脚本原文说 launcher 会在自己的保存周期覆盖它，本轮也实测到它重写 <code>installations.json</code> 并轮转 <code>.bak</code></td>
+        </tr>
+        <tr>
+          <td><span class="pill a">升级</span></td><td>§5.9 端到端</td>
+          <td>用上游 <code>folder_paths.py</code> 离线复现</td>
+          <td><b>真实 ComfyUI v0.34.0 进程</b>：三类权重全部出现在 <code>/object_info</code> 的下拉框数据里，含三路归因 + 反向控制</td>
+        </tr>
+        <tr>
+          <td><span class="pill a">升级</span></td><td>§5.8 CUDA</td>
+          <td>索引页存在该 wheel</td>
+          <td><b>本机实跑</b>：<code>torch 2.12.1+cu130</code>、<code>cuda_available True</code>（RTX 4080 Laptop / 驱动 610.47）</td>
+        </tr>
+        <tr>
+          <td><span class="pill a">升级</span></td><td>§7 推荐</td>
+          <td>并列三条路径，未下结论</td>
+          <td><b>明确推荐 Desktop 版</b>，osdk 不接管运行时、只接管模型（理由见第 08 节）</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note warn"><b>顺带记下一条方法论教训。</b>监控安装进度的探针用 <code>Get-ChildItem | Measure-Object Length</code> 读文件大小，<b>连续八分钟报告 0 MB</b>，几乎让我写下「下载卡住」——该文件当时已有 1.65 GB。目录枚举读的是不刷新的 NTFS 目录项。<b>缺陷在测量工具里，不在被测对象里</b>，详见第 06 节。</div>
+  </div>
+</section>
+
+<section id="s1">
+  <div class="sechead"><span class="idx">01</span><h2>断裂点：pull 与 env 是两条不相通的路</h2><span class="tag">全部实测</span></div>
+  <p class="lede">这不是配置疏漏。<strong><code>model pull</code> 写到 <code>&lt;data&gt;/models/</code>，<code>model env</code> 指向 <code>&lt;cache&gt;/pkg/models/</code></strong>，两者从未对接；启用 env 不会让任何工具看见 pull 的成果。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 1.1</b> 现状：一次 pull 与一次 env enable 在磁盘上落到两个互不相干的位置（临时 OSDK 根实测输出）</p>
+    <div class="split">
+      <div class="panel bad">
+        <h4>model pull 的产物</h4>
+<pre>&lt;data&gt;/models/probe/
+├── current.json   <span class="dim">{"snapshot":"4d44c30c20f5efa903ebe9b0"}</span>
+├── .locks/
+└── snapshots/
+    ├── <span class="hl">4d44c30c20f5efa903ebe9b0</span>/   <span class="dim">第一次 --include</span>
+    └── <span class="hl">5be8be92c71b9618dd17a615</span>/   <span class="dim">改了 --include</span>
+
+<span class="dim">REPARSE_POINTS_IN_MODEL_ROOT=<span class="hl">0</span>   ← 没有稳定入口</span></pre>
+        <div class="note" style="margin-top:0">改一次 <code>--include</code> 就多一个哈希目录，<code>current.json</code> 改指向。外部配置写死路径会<b>静默失效</b>。</div>
+      </div>
+      <div class="panel bad">
+        <h4>model env list 导出的变量</h4>
+<pre>HF_HOME       = &lt;cache&gt;\pkg\models\huggingface
+HF_HUB_CACHE  = &lt;cache&gt;\pkg\models\huggingface\hub
+HF_XET_CACHE  = &lt;cache&gt;\pkg\models\huggingface\xet
+HF_ASSETS_CACHE = ...\assets
+HF_ENDPOINT   = https://huggingface.co
+
+<span class="dim">全部在 &lt;cache&gt; 下 —— 与上面的 &lt;data&gt; <span class="hl">零交集</span></span></pre>
+        <div class="note" style="margin-top:0">env 只影响「客户端库自己下载时落到哪」，与 pull 的成果无关。</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 1.2</b> 三个数字：同一次 pull 的磁盘账本（<code>fsutil hardlink list</code> 实测）</p>
+    <div class="stance">
+      <div class="c ok">
+        <div class="h">快照 ↔ CAS</div>
+        <span class="num">3 links</span>
+        <div class="b">去重有效</div>
+        <div class="d">两个快照 + 一个 CAS 对象共享同一 inode，改 <code>--include</code> 不会让相同文件占两份。</div>
+      </div>
+      <div class="c warn">
+        <div class="h">下载缓存</div>
+        <span class="num">1 link</span>
+        <div class="b">独立的第二份</div>
+        <div class="d"><code>&lt;cache&gt;/downloads/models/</code> 那份不与 CAS 共享。<code>CAS_BYTES=1042966</code>，下载缓存同样 <code>1042966</code>。</div>
+      </div>
+      <div class="c warn">
+        <div class="h">回收责任</div>
+        <span class="num">GC 盲区</span>
+        <div class="b">只有 cache clean 能回收</div>
+        <div class="d">CAS 的 <code>gc_roots</code> 覆盖不到下载缓存。gpt2 尺度无所谓，FLUX / 72B 尺度是几十 GB。</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sechead"><span class="idx">02</span><h2>六个结构性冲突与各自的解</h2><span class="tag">正面回答，不回避</span></div>
+  <p class="lede">每一条都先承认冲突是真的，再说明为什么解法不是「让用户自己写配置」。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>表 2.1</b> 冲突 → 解法 → 该解法的代价</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:17%">冲突</th><th style="width:26%">为什么它是真的</th><th style="width:31%">解法</th><th>代价 / 边界</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>内容哈希</b> vs 稳定路径</td>
+          <td>哈希含文件选择；去掉这一点会让两次不同 <code>--include</code> 互相覆盖</td>
+          <td>不动快照，增加 <code>&lt;data&gt;/models/&lt;n&gt;/current</code> 目录级链接</td>
+          <td>Windows 用 junction（免提权）；符号链接在普通机器上会失败</td>
+        </tr>
+        <tr>
+          <td><b>一 repo 多类别</b> vs 一目录一类别</td>
+          <td>扩散仓库同一 repo 内含 unet/vae/text_encoder，分属三类；YAML 语义是一目录一类</td>
+          <td>渲染 ComfyUI 形状的 models 根，硬链接指回快照字节</td>
+          <td>需要「仓库路径 → 类别」映射；推不出的文件 <b>不进视图</b> 并报告</td>
+        </tr>
+        <tr>
+          <td><b>CAS 去重</b> vs 消费者要真实文件</td>
+          <td>—（这条比看上去小）</td>
+          <td>硬链接对消费者就是真实文件；HF 缓存实测用普通文件也能解析</td>
+          <td>跨卷不可硬链接（实测被拒），退化为 junction 或拷贝</td>
+        </tr>
+        <tr>
+          <td><b>不可变快照</b> vs 消费者就地写入</td>
+          <td>改硬链接 = 改同一批字节，会一起污染 CAS，<code>verify</code> 随后失败</td>
+          <td>① 视图文件设只读 ② <code>verify</code> 覆盖视图 ③ 写入区与只读区分离</td>
+          <td>不做 CoW 拦截：用户态无法拦 <code>open(O_WRONLY)</code></td>
+        </tr>
+        <tr>
+          <td><b>镜像便利</b> vs lock 可移植</td>
+          <td>自定义源会把镜像域名写进 lock（实测 <code>endpoint = "https://hf-mirror.com"</code>）</td>
+          <td>不放宽折叠规则，而是把常用镜像升格为 <b>内置候选</b>，天然落入折叠分支</td>
+          <td>私有端点继续原样入锁 —— 这是正确的</td>
+        </tr>
+        <tr>
+          <td><b>[models] 声明</b> vs trust 门禁</td>
+          <td>未识别顶层表 fail-closed 为 <code>ExecutesCode</code>，且 shim 也会拦（实测 exit=1）</td>
+          <td>加入 <code>INSPECTED_TABLES</code> 按 key 判定；<code>affects_tool_dispatch</code> 返回 false</td>
+          <td>忘了后半步 = 精确重演 <code>[syspkg]</code> 那次事故</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note warn"><b>trust 冲突已用对照实验确认，不是推断。</b>两个项目唯一差别是后者多一段 <code>[models.flux]</code>：<code>control-no-models</code> 的 <code>osdk current</code> exit=0；<code>with-models</code> exit=1，报「project config contains trust-required fields and is not trusted」。</div>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sechead"><span class="idx">03</span><h2>消费者矩阵：八个产品各自怎么找模型</h2><span class="tag">每条附来源</span></div>
+  <p class="lede">适配面不是「支持 ComfyUI」，而是四个正交问题：<strong>如何发现 · 什么形状 · 接不接受链接 · 有没有类别</strong>。证据强度分三档，推测项在正文里也标为推测。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>表 3.1</b> 消费者约定汇总 · <span class="pill a">源码/字节</span> 已读上游实现或本机产物 · <span class="pill b">官方文档</span> · <span class="pill c">推测</span> 未查证</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:13%">消费者</th><th style="width:20%">发现机制</th><th style="width:17%">目录形状</th><th style="width:9%">类别</th><th style="width:14%">链接</th><th style="width:16%">osdk 适配面</th><th style="width:11%">证据</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>ComfyUI core</b></td>
+          <td><code>extra_model_paths.yaml</code> → <code>add_model_folder_path</code>；<code>--base-directory</code></td>
+          <td>models 根 + 类型子目录</td>
+          <td>25+ 类</td>
+          <td><span class="y">junction / hardlink 实测可用</span></td>
+          <td>渲染视图 + 生成 YAML</td>
+          <td><span class="pill a">源码+实测</span></td>
+        </tr>
+        <tr>
+          <td><b>Comfy Desktop</b></td>
+          <td><code>settings.json</code> 的 <b><code>modelsDirs</code> 数组</b> → 启动时生成 YAML → <code>--extra-model-paths-config</code></td>
+          <td>每个数组元素 = 一个 <code>comfy.desktop_&lt;i&gt;</code> 段</td>
+          <td>同上 + <code>clip</code>/<code>unet</code> 别名</td>
+          <td><span class="y">hardlink 实测可用（真实 ComfyUI）</span></td>
+          <td>渲染视图 + <b>打印路径供一次性添加</b>，不代写 settings.json</td>
+          <td><span class="pill a">真实安装 + 端到端</span></td>
+        </tr>
+        <tr>
+          <td><b>transformers / diffusers</b></td>
+          <td><code>HF_HUB_CACHE</code> / <code>HF_HOME</code></td>
+          <td><code>models--org--repo/{refs,blobs,snapshots}</code></td>
+          <td><span class="dim">无</span></td>
+          <td><span class="y">普通文件即可（实测）</span></td>
+          <td>渲染 HF 缓存布局</td>
+          <td><span class="pill a">源码+实测</span></td>
+        </tr>
+        <tr>
+          <td><b>vLLM</b></td>
+          <td>同 HF；<code>--model</code> 可为本地路径；<code>--download-dir</code></td>
+          <td>同 HF 或任意目录</td>
+          <td><span class="dim">无</span></td>
+          <td><span class="y">同上</span></td>
+          <td>复用 HF 视图，零专门适配</td>
+          <td><span class="pill b">官方文档</span></td>
+        </tr>
+        <tr>
+          <td><b>llama.cpp</b></td>
+          <td><code>-m &lt;file&gt;</code> / <code>-hf</code>；<code>LLAMA_CACHE</code>；<code>MODEL_ENDPOINT</code></td>
+          <td>单个 <code>.gguf</code> 文件</td>
+          <td><span class="dim">无</span></td>
+          <td><span class="p">推测可用（未测）</span></td>
+          <td>稳定 <code>.gguf</code> 路径</td>
+          <td><span class="pill a">源码</span></td>
+        </tr>
+        <tr>
+          <td><b>Ollama</b></td>
+          <td>自有 blob store，<code>OLLAMA_MODELS</code></td>
+          <td><code>manifests/</code> + <code>blobs/sha256-*</code></td>
+          <td><span class="dim">无</span></td>
+          <td><span class="n">不适用</span></td>
+          <td><code>ollama create</code> + Modelfile，<b>不直接写盘</b></td>
+          <td><span class="pill b">官方文档</span></td>
+        </tr>
+        <tr>
+          <td><b>sd-webui / A1111</b></td>
+          <td>逐类别 CLI 参数（<code>--ckpt-dir</code> …）</td>
+          <td>类别目录（异名）</td>
+          <td>有</td>
+          <td><span class="p">推测可用（未测）</span></td>
+          <td>渲染视图 + 生成启动参数</td>
+          <td><span class="pill a">源码</span></td>
+        </tr>
+        <tr>
+          <td><b>ModelScope 客户端</b></td>
+          <td><code>MODELSCOPE_CACHE</code></td>
+          <td><code>hub/models/{owner}/{name}/</code> 扁平</td>
+          <td><span class="dim">无</span></td>
+          <td><span class="p">推测可用（未测）</span></td>
+          <td>渲染缓存视图（比 HF 更简单）</td>
+          <td><span class="pill b">文档</span></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note"><b>Comfy Desktop 这一行是本轮变化最大的。</b>它不让用户写 YAML，也不是靠界面点击对接——真正的接口是 <code>settings.json</code> 里的 <code>modelsDirs</code> <b>数组</b>，每个元素都会成为一个独立的模型根。详见下一节。</div>
+  </div>
+</section>
+
+<section id="s35">
+  <div class="sechead"><span class="idx">04</span><h2>Comfy Desktop 的真实链路与多根语义</h2><span class="tag">运行中进程证实</span></div>
+  <p class="lede">这一节全部来自<strong>真实安装</strong>：本机 asar 字节、运行中进程的命令行、Desktop 自己生成的文件，以及在真实 ComfyUI 上跑的多根实验。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4.1</b> 从 <code>modelsDirs</code> 到 ComfyUI 的完整链路 —— 每一环都有实测证据</p>
+<pre><span class="ok">settings.json</span>  "modelsDirs": ["E:\Comfy-Desktop\ComfyUI-Shared\models"]        <span class="dim">← osdk 要追加的就是这个数组</span>
+   │
+   ├─ resolveLauncherModelDirs(inst, sharedModelsDirs)                 <span class="dim">asar</span>
+   ├─ syncCustomModelFolders(installPath, dirs, …)                     <span class="dim">asar · 会往每个 dir 建全套类别目录</span>
+   ├─ ensureModelPathsConfig(dirs) → buildYaml(resolved, …)            <span class="dim">asar</span>
+   │     └─ 写 %APPDATA%\Comfy Desktop\<span class="ok">instance-model-paths\&lt;id&gt;.yaml</span>
+   │
+   └─ launchCmd.args.push('<span class="ok">--extra-model-paths-config</span>', yamlPath)
+
+<span class="dim"># 运行中进程的真实命令行（本机捕获，非推断）：</span>
+...\.venv\Scripts\python.exe -s ComfyUI\main.py --enable-manager
+  <span class="ok">--extra-model-paths-config</span> "C:\Users\...\Comfy Desktop\instance-model-paths\inst-1789929692790.yaml"
+  --input-directory  E:\Comfy-Desktop\ComfyUI-Shared\input
+  --output-directory E:\Comfy-Desktop\ComfyUI-Shared\output</pre>
+    <div class="note"><b>至今不存在任何 <code>extra_model_paths.yaml</code></b>（全目录递归确认）。Desktop 用每次启动重新生成的 <code>instance-model-paths\&lt;id&gt;.yaml</code> 完全取代了它。本轮用探针复刻了 <code>buildYaml()</code>，再与 Desktop 真实生成的文件逐项比对——段命名、27 个 key 的顺序、<code>controlnet</code> 次级目录、别名位置全部一致（含「杜撰 key」反向控制）。<b>这保证后续实测不是在测我自己写的东西。</b></div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 4.2</b> 多根语义：追加一个 osdk 根到底意味着什么（<code>probe_multiroot.py</code>，真实 <code>folder_paths.py</code>）</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:26%">问题</th><th style="width:16%">答案</th><th>实测细节</th></tr></thead>
+      <tbody>
+        <tr><td>追加根与内置根等价吗？</td><td><span class="y">等价</span></td><td>权重正常出现在对应类别，且<b>不顶掉</b>用户原有根的内容（两条断言分别验证「看得见新的」与「没弄丢旧的」）</td></tr>
+        <tr><td>两个根有同名文件？</td><td><span class="p">先注册者胜</span></td><td>按注册顺序取<b>第一个实际存在该文件</b>的根（不是「第一个根」——内置根通常没有该文件）。<code>get_filename_list</code> 只列一次，UI 上看不出有两份</td></tr>
+        <tr><td><code>is_default</code> 的作用？</td><td><span class="n">会反转胜者</span></td><td>把该根提到搜索顺序最前，同名冲突的赢家随之改变。<b>所以 osdk 视图不应加 <code>is_default</code></b>——那等于悄悄改变用户原有根的优先级</td></tr>
+        <tr><td>类别子目录必须齐全吗？</td><td><span class="y">不必须</span></td><td>缺失的类别只是空列表，不是错误（该变异被标记 EXPECTED-SURVIVE 并确实全绿）。但仍<b>建议全建 25 个</b>，避免 Desktop 往只读视图里创建目录</td></tr>
+        <tr><td>目录需要可写吗？</td><td><span class="y">不需要</span></td><td>只读权重文件仍被正常发现与列出 —— 这是「视图设只读」这条防线的必要前提</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note warn"><b>一个被捕获的自身错误。</b>该探针第一版断言「冲突取 <code>registered[0]</code>」，结果 FAIL——因为 <code>registered[0]</code> 是 ComfyUI 内置根，两个文件都不在那儿。<b>失败的是我的断言，不是被测机制</b>。改成「按顺序找第一个真正存在该文件的根」并额外加了一条把结论讲明白的断言，比硬编码一个胜者更好：后者会在 <code>is_default</code> 改变行为时静默继续通过。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4.3</b> 为什么 osdk 不该直接写 <code>settings.json</code> —— 三条独立证据</p>
+    <div class="stance">
+      <div class="c warn">
+        <div class="h">证据一 · 上游自己说</div>
+        <div class="b">launcher 会覆盖它</div>
+        <div class="d">Desktop 随包维护脚本原文：「Close the app before any mutating action — <b>the launcher will overwrite settings.json / installations.json on its own save cycle</b>.」</div>
+      </div>
+      <div class="c warn">
+        <div class="h">证据二 · 本轮实测到了</div>
+        <div class="b">它在测试期间自己写了一次</div>
+        <div class="d"><code>installations.json</code> 哈希变化，<code>.bak</code> 恰好轮转为变更前内容。diff 是纯增量 <code>lastLaunchedAt</code>，来自 Desktop 在 03:07:06 <b>自动启动的它自己的实例</b>。</div>
+      </div>
+      <div class="c warn">
+        <div class="h">证据三 · 回滚点会被消耗</div>
+        <div class="b"><code>.bak</code> 只写第一次</div>
+        <div class="d">脚本注释：legacy <code>.bak</code>「only written the first time, so the very first/original snapshot is preserved」。osdk 写坏了，用户唯一的原始快照可能已经没了。</div>
+      </div>
+    </div>
+    <div class="note"><b>采纳的替代方案</b>：<code>osdk model view path comfyui</code> 打印视图根 + 一行指引，由用户在 Desktop UI 里<b>一次性</b>添加。此后 osdk 重建视图、切换快照、改 <code>--include</code>，这个路径都不变——稳定入口的意义正在于此。若将来 Desktop 提供受支持的 CLI/IPC 注入途径再补 attach 子命令；<b>本轮在 asar 内未找到这样的途径</b>。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4.4</b> 三根分离的真实布局（修正初稿据文档所写的 <code>%LOCALAPPDATA%</code>）</p>
+<pre>E:\Comfy-Desktop\
+├── ComfyUI-Cache\download-cache\v0.34.0-env1_win-nvidia\   <span class="dim">环境包 .7z（2256.2 MB）· maxCachedDownloads:1 管的是这里</span>
+├── ComfyUI-Installs\ComfyUI\
+│   ├── ComfyUI\          <span class="dim">源码树 + .venv + models(26 子目录) + custom_nodes</span>
+│   ├── standalone-env\   <span class="dim">自带 Python 3.13.12 + uv.exe 0.12.9</span>
+│   └── manifest.json     <span class="dim">钉死 torch 2.12.1+cu130 / comfyui_commit 12d5279…</span>
+└── ComfyUI-Shared\{models,input,output}\
+    └── models\           <span class="ok">Desktop 预建 25 个类别子目录</span>
+
+%APPDATA%\Comfy Desktop\  <span class="dim">settings.json · installations.json · 各自 .bak · instance-model-paths\&lt;id&gt;.yaml</span></pre>
+    <div class="note"><b><code>useChineseMirrors: true</code> 与 osdk 镜像是互补，不是重复。</b>asar 内该设置的描述原文只提 <b>Git（gitcode.com）与 PyPI</b>——它影响 custom node 的 clone 与 pip 安装，<b>不影响模型权重下载</b>。所以 Desktop 管它自己的依赖获取，osdk 管模型权重获取，各管一段。附带实测：环境包本体 <code>desktop-assets.comfy.org</code> 在本机直连可达（206，1737 ms），并未走镜像。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4.5</b> 为什么必须渲染视图，而不是直接指向快照（上游 <code>folder_paths.py</code> 原样逻辑实测）</p>
+    <div class="split">
+      <div class="panel bad">
+        <h4>✗ 一条配置指向整个快照</h4>
+<pre>osdk:
+  checkpoints: &lt;snapshot&gt;      <span class="dim">← 一条</span>
+
+<span class="dim">get_filename_list("checkpoints") →</span>
+[ <span class="hl">"text_encoder\\clip_l.safetensors"</span>,
+  <span class="hl">"unet\\flux1-dev.safetensors"</span>,
+  <span class="hl">"vae\\ae.safetensors"</span> ]</pre>
+        <div class="note" style="margin-top:0">三个不同类别的权重挤进同一个下拉框；选中不会加载。</div>
+      </div>
+      <div class="panel good">
+        <h4>✓ 渲染 ComfyUI 形状的 models 根</h4>
+<pre>osdk_0:
+  base_path: '&lt;view&gt;/models'    <span class="dim">← 一条</span>
+  'diffusion_models': 'diffusion_models/'
+  'vae': 'vae/'
+  'text_encoders': 'text_encoders/'
+  ...
+
+<span class="dim">diffusion_models →</span> <span class="ok">["flux1-dev.safetensors"]</span>
+<span class="dim">vae            →</span> <span class="ok">["ae.safetensors"]</span>
+<span class="dim">text_encoders  →</span> <span class="ok">["clip_l.safetensors"]</span>
+<span class="dim">checkpoints    →</span> <span class="ok">[]</span>  <span class="dim">反向控制</span></pre>
+        <div class="note" style="margin-top:0"><code>fsutil hardlink list</code> 计数 = 2 ⇒ 视图不额外占字节。</div>
+      </div>
+    </div>
+    <div class="note"><b><code>checkpoints</code> 为空是反向控制。</b>没有它，前三条「各自只看见自己的权重」可能只是「什么都能匹配」的假象。<b>这套形状已在真实 ComfyUI v0.34.0 上验证</b>，见第 06 节。</div>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="sechead"><span class="idx">05</span><h2>目标架构：获取 / 存储 / 呈现三层分离</h2><span class="tag">获取层语义一条不丢</span></div>
+  <p class="lede">重构不是推翻现有获取语义，而是<strong>补上从未存在过的第三层</strong>。快照仍然不可变、内容寻址、可 <code>verify</code>；视图是派生数据，可随时重建、随时丢弃。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4.1</b> 三层架构 · 灰底为保留现状，橙色为新增</p>
+    <div class="layers">
+      <div class="layer acq">
+        <div class="lh"><span class="ls">Acquire</span><span class="lt">获取层</span><span class="keep">改动：provider 注册表化 + 内置镜像</span></div>
+        <div class="lb">provider registry（取代闭合 enum）：<code>hf</code> · <code>modelscope</code> · 新增 <code>http</code> / <code>local</code>。镜像作为 provider 的<b>内置等价端点</b>参与测速排名与失败切换。产出已校验 SHA-256 的文件集。</div>
+      </div>
+      <div class="arrowrow">▼</div>
+      <div class="layer sto">
+        <div class="lh"><span class="ls">Store</span><span class="lt">存储层</span><span class="keep">改动：稳定入口 + 消除双份拷贝</span></div>
+        <div class="lb">CAS（blake3）+ 不可变快照 <code>&lt;data&gt;/models/&lt;n&gt;/snapshots/&lt;hash&gt;/</code> —— <b>保留</b>。新增 <code>&lt;data&gt;/models/&lt;n&gt;/current</code> 稳定入口（junction / symlink）；下载完成即 ingest 进 CAS，不再留独立第二份。</div>
+      </div>
+      <div class="arrowrow">▼</div>
+      <div class="layer vie">
+        <div class="lh"><span class="ls">View · 新增</span><span class="lt">呈现层</span><span class="keep">本重构的核心</span></div>
+        <div class="lb">
+          <code>&lt;data&gt;/views/&lt;consumer&gt;/&lt;profile&gt;/</code> 渲染成消费者认识的形状：<br>
+          <span class="pill s">comfyui</span> models 根 + 类型子目录（硬链接、只读）&nbsp;
+          <span class="pill s">hf-cache</span> <code>models--org--repo/{refs,blobs,snapshots}</code>&nbsp;
+          <span class="pill s">gguf</span> 扁平 <code>*.gguf</code>&nbsp;
+          <span class="pill s">a1111</span> 异名类别目录<br>
+          交付方式二选一或并用：① 生成消费者配置文件　② 导出环境变量（<code>HF_HUB_CACHE</code> / <code>LLAMA_CACHE</code> / <code>MODELSCOPE_CACHE</code>）
+        </div>
+      </div>
+    </div>
+    <div class="note">三层分离带来的性质：换 <code>--include</code> 导致快照哈希变化时，<b>视图重建即可，消费者侧配置路径不变</b>；同一份字节可同时被多个消费者看到而不额外占空间。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 4.2</b> 新增 CLI 面 · <code>osdk model view</code></p>
+<pre>osdk model view add &lt;consumer&gt; --model &lt;name&gt; [--profile &lt;p&gt;]
+                               [--map &lt;repo-path&gt;=&lt;category&gt;]... [--link-mode hardlink|copy|auto]
+osdk model view list | path &lt;consumer&gt; | rebuild [&lt;consumer&gt;] [--prune] | remove &lt;consumer&gt;
+osdk model view export &lt;consumer&gt; [--to &lt;path&gt;]   <span class="dim"># 生成消费者配置文件</span>
+osdk model view <span class="ok">doctor</span> &lt;consumer&gt;               <span class="dim"># 未归类文件 / 悬空链接 / 跨卷退化</span>
+
+<span class="dim">既有命令保留语义：pull · sync · list · path · verify · remove</span>
+<span class="dim">变更：</span>model path --stable <span class="dim">打印稳定入口 ·</span> pull --as &lt;consumer&gt; <span class="dim">拉完即建视图</span>
+      verify <span class="dim">扩展到视图 ·</span> remove <span class="dim">先拆视图再删快照</span></pre>
+    <div class="note"><b><code>view doctor</code> 是设计的一部分，不是附属品。</b>既然类别推断必须 fail-closed（推不出就不进视图），就必须有一个命令能回答「哪些文件没进去、为什么」。</div>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="sechead"><span class="idx">06</span><h2>实测与变异：每个 PASS 都证明过自己能变红</h2><span class="tag">10 个变异，0 意外</span></div>
+  <p class="lede">按仓库 AGENTS.md 的判据：<strong>在相信一个「通过」之前，先注入它应当捕获的缺陷，确认它变红。</strong>探针不复刻被测判据 —— ComfyUI 侧直接 import 上游 <code>folder_paths.py</code>，HF 侧直接 import 真实 <code>huggingface_hub</code>，端到端侧直接跑真实 ComfyUI 进程。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 5.0</b> 真实 ComfyUI 端到端（本轮新增，解除初稿最大的局限）</p>
+<pre><span class="dim">被测：安装自带 .venv\python.exe (3.13.12) 启动 ComfyUI v0.34.0，参数用 Desktop 自己那一套</span>
+<span class="dim">读的是 /object_info 的 combo 选项 —— UI 下拉框渲染的同一份数据</span>
+
+<span class="ok">PASS</span> ComfyUI server started and answers /system_stats
+<span class="ok">PASS</span> CONTROL: the install's own models dir is readable  :: ["osdk-e2e-control.safetensors"]
+<span class="ok">PASS</span> osdk view weight visible in UNETLoader.unet_name    :: server=["osdk-e2e-unet.safetensors"]
+<span class="ok">PASS</span> osdk view weight visible in VAELoader.vae_name      :: server=["osdk-e2e-vae.safetensors"]
+<span class="ok">PASS</span> osdk view weight visible in CLIPLoader.clip_name    :: server=["osdk-e2e-clip.safetensors"]
+<span class="ok">PASS</span> a file added after startup appears without restart
+<span class="ok">PASS</span> a never-written name does not appear (negative control)
+FAILURES: []</pre>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:26%">「下拉框为空」的可能原因</th><th>探针如何把它<b>单独</b>分离出来（按任务要求构造进探针，非事后解释）</th></tr></thead>
+      <tbody>
+        <tr><td>(a) osdk 渲染错了</td><td>同一次运行往<b>安装自身的</b> <code>models\loras</code> 写一个 control 权重。它不经过 osdk 任何渲染逻辑；若它也看不见，问题在探针或服务器</td></tr>
+        <tr><td>(b) 类别映射不匹配</td><td>每个类别同时报告<b>服务器返回的选项</b>与<b>磁盘实际文件</b>。「磁盘有而服务器没有」⇒ 映射问题；「磁盘也没有」⇒ 渲染问题，分别打印不同 DIAGNOSIS 行</td></tr>
+        <tr><td>(c) 服务器还没重扫</td><td>启动<b>之后</b>再写新文件，不重启直接再查。它若出现，说明「没出现 = 真的不存在」。<b>这条不过，上面所有「空」的结论都不成立</b></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note"><b>环境影响已验证还原，不是声明。</b>全程<b>未写</b> <code>settings.json</code>（走与 Desktop 相同的 <code>--extra-model-paths-config</code>）。前后指纹：<code>settings.json</code> SHA-256 一致、<code>modelsDirs</code> 不变、shared models 0 文件不变、install models 36 文件不变、<code>osdk-e2e*</code> 残留为 0。唯一变化的 <code>installations.json</code> 已逐行 diff 归因为 Desktop 自身的保存周期。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 5.1</b> 四组探针的变异结果（baseline 均为 exit=0 且无 FAIL）</p>
+    <div class="mut">
+      <div class="lbl">probe_comfy · one_entry_for_whole_snapshot</div><div class="st caught">CAUGHT</div><div class="dsc">整体映射一个快照 → 三类挤进同一下拉框</div>
+      <div class="lbl">probe_comfy · no_retarget</div><div class="st caught">CAUGHT</div><div class="dsc">junction 不重定向 → 稳定路径仍服务旧快照</div>
+      <div class="lbl">probe_comfy · metadata_named_as_weights</div><div class="st caught">CAUGHT</div><div class="dsc">把 <code>.osdk-model.json</code> 改成 <code>.safetensors</code> → 污染下拉框</div>
+      <div class="lbl">probe_hf_cache · no_refs_file</div><div class="st caught">CAUGHT</div><div class="dsc">不写 <code>refs/&lt;branch&gt;</code> → 分支名解析失败</div>
+      <div class="lbl">probe_hf_cache · wrong_repo_dir_name</div><div class="st caught">CAUGHT</div><div class="dsc">目录名不用 <code>models--org--repo</code> → 客户端完全找不到</div>
+      <div class="lbl">probe_hf_cache · flat_layout_no_snapshots</div><div class="st caught">CAUGHT</div><div class="dsc">省掉 <code>snapshots/&lt;commit&gt;</code> 层 → 全部失败</div>
+      <div class="lbl">probe_view · copy_instead_of_hardlink</div><div class="st caught">CAUGHT</div><div class="dsc">视图用拷贝 → 链接计数断言变红</div>
+      <div class="lbl">probe_view · flat_view_no_type_subfolders</div><div class="st caught">CAUGHT</div><div class="dsc">视图不分类型子目录 → 类别隔离全部失败</div>
+      <div class="lbl">probe_multiroot · osdk_root_promoted_to_default</div><div class="st caught">CAUGHT</div><div class="dsc">给 osdk 根加 <code>is_default</code> → 同名冲突胜者反转</div>
+      <div class="lbl">probe_multiroot · only_the_filled_category_dirs</div><div class="st expected">EXPECTED-SURVIVE</div><div class="dsc">只建要填的目录 → 预期无影响，<b>显式标注</b>而非当成弱测试</div>
+    </div>
+    <div class="note warn"><b>三次自身的验证缺陷，按 AGENTS.md 要求记录。</b>① <b>空断言</b>：第一版探针重定向前后文件同名，「缓存不陈旧」这条即使不重定向也成立——改名后 <code>no_retarget</code> 变异才从存活变为被捕获。<b>探针的第一版是空的，而它是绿的。</b>② <b>错误的期望</b>：多根探针最初断言「冲突取 <code>registered[0]</code>」，而那是内置根、两文件都不在其中——失败的是断言不是机制。③ <b>错误的测量工具</b>：见下。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 5.2</b> 测量工具本身是错的 —— 差点写下「下载卡住」这一错误结论</p>
+<pre><span class="dim">watcher 用 Get-ChildItem | Measure-Object Length，连续八分钟报 0 MB。四种读法对照：</span>
+
+t=0  <span class="hl">Get-ChildItem=1747484099</span>  Get-Item=1801671300  FileInfo=1801671300  <span class="ok">OpenStream=1801671300</span>
+t=1  <span class="hl">Get-ChildItem=1801671300</span>  Get-Item=1811413643  FileInfo=1811413643  <span class="ok">OpenStream=1811479107</span>
+t=2  <span class="hl">Get-ChildItem=1811479107</span>  Get-Item=1818159757  FileInfo=1818159757  <span class="ok">OpenStream=1818159757</span>
+     ↑ 恒等于上一轮的 OpenStream 值</pre>
+    <div class="note warn"><b>目录枚举读的是 NTFS 目录项，另一进程持续写入时它不刷新</b>；打开文件才拿到活的大小。更说明问题的是：<code>Get-ChildItem</code> 在 t=N 恰好等于 <code>OpenStream</code> 在 t=N−1 —— <b>我自己探针的那次 open 触发了元数据刷新</b>，于是枚举永远滞后一轮。改用 <code>Stream.Length</code> 后立刻报出 1820.2 MB 并增长到 2256.2 MB 完成。任何监控 osdk 自己下载进度的代码都会踩到同一个坑。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 5.3</b> 链接原语在本机的可用性（pwsh 7，<b>非管理员</b>）</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:30%">原语</th><th style="width:14%">结果</th><th>实测细节</th></tr></thead>
+      <tbody>
+        <tr><td>同卷 hardlink（文件）</td><td><span class="y">可用</span></td><td><code>fsutil</code> 报 2 links ⇒ 确实是一个对象而非两份拷贝</td></tr>
+        <tr><td>junction（目录）</td><td><span class="y">可用</span></td><td>创建、读穿、原地重定向均成功；删除 junction 不影响目标内容</td></tr>
+        <tr><td>跨卷 hardlink</td><td><span class="n">被拒（符合预期）</span></td><td><code>系统无法将文件移到不同的磁盘驱动器。</code></td></tr>
+        <tr><td>跨卷 junction</td><td><span class="y">可用</span></td><td>E: 上的 junction 指向 C: 的目录，读穿成功</td></tr>
+        <tr><td>目录 symlink</td><td><span class="p">可用，但不可推广</span></td><td>本机 <code>AllowDevelopmentWithoutDevLicense=1</code>（开发者模式已开），<code>whoami /priv</code> 无 <code>SeCreateSymbolicLinkPrivilege</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note warn"><b>最后一行直接决定选型。</b>符号链接在本机能建，靠的是开发者模式而非权限，<b>普通用户机器上会失败</b>。所以稳定入口与跨卷视图一律用 <b>junction（目录）+ hardlink（文件）</b>，Unix 侧用 symlink + hardlink —— 与 <code>store/link.rs</code> 既有注释的判断一致。</div>
+  </div>
+</section>
+
+<section id="s6">
+  <div class="sechead"><span class="idx">07</span><h2>镜像加速：机制有一半，另一半坏得很安静</h2><span class="tag">三处实测</span></div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 6.1</b> 模型源测速为何 100% 失败 —— 原因是预算，不是网络</p>
+    <div class="budget">
+      <div class="nm">metadata 解析</div>
+      <div class="tr"><div class="seg s1" style="width:24.9%"></div><div class="limit" style="left:63.3%"></div></div>
+      <div class="v">589 ms</div>
+      <div class="nm">1 MiB Range 下载</div>
+      <div class="tr"><div class="seg s2" style="width:75.1%"></div><div class="limit" style="left:63.3%"></div></div>
+      <div class="v">1779 ms</div>
+      <div class="nm" style="font-weight:700">probe 总耗时</div>
+      <div class="tr"><div class="seg s1" style="width:24.9%"></div><div class="seg s2" style="width:38.4%"></div><div class="seg over" style="width:36.7%"></div><div class="limit" style="left:63.3%"></div></div>
+      <div class="v" style="color:var(--g4);font-weight:700">2368 ms</div>
+    </div>
+    <div class="legend">
+      <span><i class="s1" style="background:linear-gradient(90deg,#44606e,#64818f)"></i>metadata</span>
+      <span><i style="background:linear-gradient(90deg,#a8601f,#c07e3c)"></i>Range 下载</span>
+      <span><i style="background:repeating-linear-gradient(45deg,#8c2f2f,#8c2f2f 5px,#a85050 5px,#a85050 10px)"></i>超出预算部分</span>
+      <span><i style="background:var(--g4);width:3px"></i>probe_timeout_ms 默认 1500 ms</span>
+    </div>
+    <div class="note"><code>probe_one</code> 在<b>一个 timeout 内</b>做完 resolve + Range，且 <code>probe_file</code> 选的是<b>最大</b>文件（gpt2 的 <code>rust_model.ot</code> = 702 MB）。更糟的是 <code>osdk config set sources.probe_timeout_ms</code> 返回 <code>unknown setting</code> —— 用户没有 CLI 手段调高预算，排名于是永远退化为配置顺序。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 6.2</b> 用 <code>source add</code> 加镜像，会把本机的便利写进所有人的锁</p>
+<pre><span class="dim">$</span> osdk source add huggingface --id hf-mirror --download-url https://hf-mirror.com
+<span class="dim">$</span> osdk source pin huggingface hf-mirror
+<span class="dim">$</span> osdk model pull viamirror hf:openai-community/gpt2@main --include config.json   <span class="dim">→ 成功</span>
+
+<span class="dim"># osdk.lock</span>
+endpoint = <span class="hl">"https://hf-mirror.com"</span>
+<span class="dim"># .osdk-model.json</span>
+MANIFEST_ENDPOINT=<span class="hl">https://hf-mirror.com</span></pre>
+    <div class="note"><code>canonical_provider_endpoint</code> 只折叠 provider 的<b>内置</b>端点，自定义源原样保留 —— 源码注释写明这是刻意的（osdk 无法断言一个任意域名服务的是谁的内容）。理由成立，但后果是用户按文档最自然的操作恰好落进不折叠的那一支。<b>正确修法是缩小「自定义」的范围</b>：把公认镜像做成 <code>default_sources</code> 里的内置候选（<code>forward_credentials = false</code>），它就天然落入折叠分支，无需改逻辑。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 6.3</b> 端点可达性实测（2026-09-21，本机经代理）</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:26%">端点</th><th style="width:22%"><code>/api/models/&lt;id&gt;</code></th><th style="width:26%"><code>.../revision/&lt;rev&gt;?blobs=true</code></th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>huggingface.co</code></td><td class="num">200 · 521 ms</td><td class="num">200 · 653 ms</td><td>官方</td></tr>
+        <tr><td><code>hf-mirror.com</code></td><td class="num"><span class="n">308 → 官方</span></td><td class="num">200 · 1198 ms</td><td>部分路径回跳上游</td></tr>
+        <tr><td><code>beta.hf-mirror.com</code></td><td class="num">200 · 853 ms</td><td class="num">200 · 853 ms</td><td>未观察到回跳</td></tr>
+        <tr><td><code>modelscope.cn</code></td><td class="num">200 · 232 ms</td><td class="num">—</td><td>已内置</td></tr>
+        <tr><td><code>www.modelscope.ai</code></td><td class="num">200 · 473 ms</td><td class="num">—</td><td>已内置</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note"><b>308 回跳是一个必须处理的设计点，但不是安全漏洞。</b>reqwest 在跨 host 重定向时会移除 <code>AUTHORIZATION</code>/<code>COOKIE</code>，所以 token 不会泄露；代价是匿名镜像请求回跳后变成匿名官方请求 —— <b>镜像没起到加速作用，而用户看到的是「配了镜像还是慢」</b>。探测阶段应检测首跳是否跨 host 3xx，并在 <code>source list</code> 中标注。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 6.4</b> 附带发现：osdk 不读取 Windows 系统代理（三段式对照，同一 URL、同一时刻）</p>
+<pre>LEG1  .NET 无代理环境变量        <span class="ok">ok</span>    710 ms    <span class="dim">← 读 WinINET 注册表</span>
+LEG2  osdk 无代理环境变量        <span class="hl">exit=1</span>  16572 ms  <span class="dim">network timeout</span>
+LEG3  osdk 带 HTTPS_PROXY        <span class="ok">exit=0</span>   2321 ms</pre>
+    <div class="note">系统代理为 <code>ProxyEnable=1, ProxyServer=127.0.0.1:7897</code>。这不是模型子系统的 bug，是 osdk 整体的 HTTP 行为，但在模型场景下后果最重：浏览器能打开 huggingface.co，<code>osdk model pull</code> 却超时，而错误信息不指向代理。建议 <code>osdk doctor</code> 增加一项诊断。</div>
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sechead"><span class="idx">08</span><h2>源码版 vs Desktop 版：明确推荐</h2><span class="tag">本轮给出结论</span></div>
+  <p class="lede"><strong>推荐：对 ComfyUI 使用 Desktop 版（standalone 变体），osdk 不接管其运行时，只接管模型。</strong>初稿在这里只并列了三条路径没下结论。拿到真实安装后，理由不是偏好，而是 Desktop 装完那份<strong>钉死的清单</strong>。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>图 7.1</b> <code>manifest.json</code> 实测内容 —— 一个上游已验证、版本全钉死、GPU 可用的组合</p>
+<pre>{
+  "id": "win-nvidia",  "version": "v0.34.0-env1",
+  "comfyui_ref": "v0.34.0",
+  "comfyui_commit": "<span class="ok">12d5279438bfefc058a269eae805ceab6047777f</span>",
+  "python_version": "<span class="ok">3.13.12</span>",
+  "torch_version": "<span class="ok">2.12.1+cu130</span>",
+  "torchvision_version": "0.27.1+cu130",
+  "torchaudio_version": "2.11.0+cu130",
+  "uv_version": "0.12.9",
+  "vendor_requirements_content": "--extra-index-url https://download.pytorch.org/whl/cu130\ntorch==2.12.1+cu130\n…"
+}
+
+<span class="dim"># 本机实跑（安装自带解释器）：</span>
+python 3.13.12   torch 2.12.1+cu130   <span class="ok">cuda_available True</span>   cuda_ver 13.0
+<span class="dim"># GPU: NVIDIA GeForce RTX 4080 Laptop GPU, 驱动 610.47</span></pre>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 7.2</b> 两条路线逐维度对比</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:18%">维度</th><th style="width:41%">Desktop（standalone）· 推荐</th><th>osdk 托管源码版</th></tr></thead>
+      <tbody>
+        <tr><td>Python</td><td><span class="y">3.13.12，随包</span></td><td>osdk <code>python</code> backend 装</td></tr>
+        <tr><td>torch / CUDA</td><td><span class="y">2.12.1+cu130 钉死，已验证 GPU 可用</span></td><td>需自行选 cu126/cu128/cu130，组合正确性自负</td></tr>
+        <tr><td>ComfyUI 本体</td><td>钉到具体 commit</td><td><span class="n">需按 requirements.txt 装应用环境 —— 当前 <code>pypi:</code> backend 不支持</span></td></tr>
+        <tr><td>custom node 依赖</td><td><code>--enable-manager</code> + ComfyUI-Manager</td><td><span class="n">osdk 无对应能力</span></td></tr>
+        <tr><td>首次成本</td><td>下载 2.3 GB 环境包</td><td>分别装 Python / torch / 依赖，网络与失败面更大</td></tr>
+        <tr><td><b>osdk 的价值</b></td><td><b>模型权重的获取、去重、镜像、视图</b></td><td>同左，外加一份重复且更脆弱的运行时管理</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note"><b>为什么不推荐 osdk 接管运行时</b>：那等于用 osdk 解析出的 Python + torch 去替换一个上游已验证过的组合。收益是「统一管理」，代价是把 works-by-construction 的环境变成需要自己维持正确性的环境——而 torch/CUDA/Python ABI 的组合恰恰最容易出错。这与 osdk 对 Android SDK 的既有立场（不重新分发、不自己造一套）、以及 <code>pypi:</code> backend「把解析交给 uv」的判断同源。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 7.3</b> 三处张力，必须说清楚而非回避</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:24%">张力</th><th>说明与处置</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>autoUpdateComfyUI: true</code></td>
+          <td>Desktop 会自行更新 ComfyUI 本体，osdk 锁不住。<b>所以 osdk.lock 只保证模型可复现，不保证 ComfyUI 版本可复现。</b>需要后者就在 Desktop 里关掉自动更新——那是 Desktop 的开关，不是 osdk 的。文档必须写明，否则「osdk 让它可复现」是空话</td>
+        </tr>
+        <tr>
+          <td>两个 uv 并存</td>
+          <td>Desktop 自带 uv 0.12.9（<code>standalone-env\uv.exe</code>），osdk 也管 uv。两者独立、互不干扰。<b>不要</b>让它们共用缓存：Desktop 环境是钉死的，改它的缓存只会制造难查的问题</td>
+        </tr>
+        <tr>
+          <td>模型有两条下载路</td>
+          <td>ComfyUI-Manager / 前端也能下模型，落到 <code>is_default</code> 标记的那个根（当前是用户的 Shared\models）。osdk 视图是<b>另一个根且只读</b>。<span class="y">这是好事</span>——两者不互相污染，osdk 管的那部分保持可校验。这也是「不要给 osdk 视图加 <code>is_default</code>」的实际理由</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="note"><b>什么时候才该考虑 osdk 托管源码版</b>：需要钉死 ComfyUI commit 做可复现实验、需要非 NVIDIA 后端（Desktop 变体是 <code>win-nvidia</code>）、或需要在 CI / 无 GUI 环境跑。这三种情况前置是给 <code>pypi:</code> backend 增加「应用环境」模式（P3-3）。</div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 7.4</b> 推荐形态下的 <code>osdk.toml</code> —— 注意没有 <code>[tools]</code></p>
+<pre><span class="dim"># 运行时归 Desktop，osdk 只管模型</span>
+[models.flux-dev]
+source  = "hf:black-forest-labs/FLUX.1-dev@main"
+include = ["*.safetensors", "*.json"]
+
+[models.flux-dev.views.comfyui]
+profile = "default"
+
+[settings.models]
+auto_view = true
+
+<span class="dim">$</span> osdk install                      <span class="dim"># 拉模型 + 建视图</span>
+<span class="dim">$</span> osdk model view path comfyui
+<span class="dim">→ &lt;data&gt;/views/comfyui/default/models</span>
+<span class="dim">  一次性贴进 Desktop 设置 → Storage → Add Shared Directory</span></pre>
+    <div class="note"><b>仍然做不到的：NVIDIA 显卡驱动。</b>内核态组件，不能由用户态包管理器装。osdk 能做的上界是「驱动已满足最低版本的前提下其余一切就绪」，并在安装前检测报错（读 <code>nvidia-smi</code> 比对），而不是让用户在运行期撞上 <code>CUDA driver version is insufficient</code>。</div>
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sechead"><span class="idx">09</span><h2>落地路线：从「立即可做」到「单独立项」</h2><span class="tag">每步含注入验证</span></div>
+
+  <div class="fig">
+    <p class="figcap"><b>图 8.1</b> 四个阶段 · 越往右改动越大</p>
+    <div class="phases">
+      <div class="phase">
+        <span class="t">P0 · 立即</span>
+        <div class="ph">不改任何现有语义</div>
+        <ul>
+          <li><code>current</code> 稳定入口 + <code>path --stable</code></li>
+          <li><code>probe_timeout_ms</code> 可配置；两段各自计时</li>
+          <li>内置 <code>hf-mirror</code>（不转发凭据）</li>
+          <li><code>model env</code> 导出 <code>LLAMA_CACHE</code> / <code>MODEL_ENDPOINT</code></li>
+          <li><code>doctor</code> 报告系统代理未被使用</li>
+        </ul>
+        <div class="cost">风险最低；无新目录布局</div>
+      </div>
+      <div class="phase">
+        <span class="t">P1 · 核心</span>
+        <div class="ph">呈现层</div>
+        <ul>
+          <li><code>ModelView</code> + comfyui / hf-cache / gguf 渲染器</li>
+          <li><code>model view</code> 七个子命令</li>
+          <li>类别推断 + <b>fail-closed</b></li>
+          <li>视图只读 + <code>verify</code> 覆盖视图</li>
+          <li>跨卷退化策略与明确报告</li>
+          <li>GC roots 加入 views</li>
+          <li><b>预建 25 类目录，且不加 <code>is_default</code></b></li>
+        </ul>
+        <div class="cost">§5 的四组探针 + 端到端可直接复用为回归</div>
+      </div>
+      <div class="phase">
+        <span class="t">P2 · 声明式</span>
+        <div class="ph">[models] 与一次 install</div>
+        <ul>
+          <li><code>ConfigFile</code> 增加 <code>models</code></li>
+          <li>trust 分类（含 <code>affects_tool_dispatch</code>）</li>
+          <li><code>LockedModel.views</code> <b>双向</b>读写</li>
+          <li><code>install</code> 拉模型 + 建视图 + 大小阈值</li>
+          <li><code>sync</code> 与视图联动</li>
+        </ul>
+        <div class="cost">AGENTS.md 警告过「只写不读」：新字段必须同时有读取路径测试</div>
+      </div>
+      <div class="phase">
+        <span class="t">P3 · 立项</span>
+        <div class="ph">较大改动</div>
+        <ul>
+          <li>provider 注册表化 + <code>local:</code> / <code>http:</code></li>
+          <li>下载缓存与 CAS 合流</li>
+          <li><code>pypi:</code> 的「应用环境」模式</li>
+          <li>a1111 / modelscope 渲染器；Ollama 走 <code>ollama create</code></li>
+          <li><code>doctor</code> 的 CUDA 驱动兼容检查</li>
+        </ul>
+        <div class="cost">各自独立，不互相阻塞</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>表 8.2</b> 三个最容易「绿着通过」的步骤，及其注入验证</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:28%">步骤</th><th style="width:34%">正向断言</th><th>注入什么才算验证有效</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>内置镜像折叠为官方</td>
+          <td>经镜像 pull 后 lock 中 <code>endpoint</code> 是官方</td>
+          <td>删掉内置条目 → 该断言必须变红（否则它测的是别的东西）</td>
+        </tr>
+        <tr>
+          <td>trust 不阻断 shim</td>
+          <td>带 <code>[models]</code> 的项目里 <code>cargo --version</code> 可用</td>
+          <td>从 <code>affects_tool_dispatch</code> 移除 <code>models</code> → 必须重新 exit=1</td>
+        </tr>
+        <tr>
+          <td>类别推断 fail-closed</td>
+          <td><code>checkpoints</code> 保持为空</td>
+          <td>把推断改成「兜底归 checkpoints」→ 该断言必须变红</td>
+        </tr>
+        <tr>
+          <td>视图不被 inventory 扫描</td>
+          <td>视图里的诱饵 manifest 扫不到</td>
+          <td>把扫描根改成 <code>dirs.data</code> → 必须变红</td>
+        </tr>
+        <tr>
+          <td>消除下载缓存双份</td>
+          <td>完成文件链接计数 ≥ 2 或已删除，<code>CAS_BYTES</code> 不翻倍</td>
+          <td>去掉 ingest 后的替换步骤 → 必须变红</td>
+        </tr>
+        <tr>
+          <td>osdk 视图不改变优先级</td>
+          <td>用户原有根的同名文件仍然胜出</td>
+          <td>给 osdk 视图注入 <code>is_default</code> → 必须变红（§5.11 变异已证明该断言有牙）</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<section id="s9">
+  <div class="sechead"><span class="idx">10</span><h2>本文未做的核查</h2><span class="tag">诚实清单</span></div>
+  <p class="lede">按 AGENTS.md：<strong>一个你注意到的风险就是你欠下的一步</strong>。第二轮解除了三项，也<strong>新增了两项</strong>——真实安装让一些此前想不到的问题变得可见。</p>
+
+  <div class="fig">
+    <p class="figcap"><b>表 9.1</b> 欠账清单 · <span class="pill a">已解除</span> · <span class="pill c">仍欠</span></p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th style="width:8%">状态</th><th style="width:26%">项目</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill a">已解除</span></td><td>真实 ComfyUI 端到端</td><td>第二轮完成（§5.9）。<b>但仍未验证</b>：① 浏览器前端的<b>视觉</b>渲染（读的是 <code>/object_info</code> 数据源，没点开 UI 截图比对）；② custom node 的额外用法（本机未装）；③ <b>通过 Desktop UI 实际添加目录那一步没有实操</b>——因为实操会改用户的 settings.json。「机制可行」已验证，「按钮接受这个目录」未验证</td></tr>
+        <tr><td><span class="pill a">已解除</span></td><td>torch+CUDA 实跑</td><td>§5.8 已实跑。<b>但那是 Desktop 自带的组合</b>；osdk 自己经 <code>pypi:</code> + extra-index 装出 cu126/cu128 的路径仍未实测</td></tr>
+        <tr><td><span class="pill a">已解除</span></td><td>视图被 inventory 扫描</td><td>6 处调用点扫描根全部是 <code>dirs.installs</code>，<code>views</code> 与其平级 ⇒ 不会被扫到。但无任何东西守护这个事实，仍需加断言</td></tr>
+        <tr><td><span class="pill c">仍欠</span></td><td>llama.cpp / sd-webui / ModelScope 的硬链接接受度</td><td>三处均标为「推测」</td></tr>
+        <tr><td><span class="pill c">仍欠</span></td><td>旧版 osdk 读含 <code>views</code> 的新 lock</td><td>结论来自源码阅读（未见 <code>deny_unknown_fields</code>），未做二进制实测</td></tr>
+        <tr><td><span class="pill c">仍欠</span></td><td>Ollama 的 <code>ollama create</code></td><td>本机未安装</td></tr>
+        <tr><td><span class="pill c">仍欠</span></td><td>体积与 <code>hook-env</code> 延迟</td><td>尚无代码可测。实现时必须分两次构建实测 + <code>cargo bench -p osdk-core</code></td></tr>
+        <tr><td><span class="pill c">仍欠</span></td><td><code>hf-mirror</code> 308 回跳覆盖面</td><td>只测了两个 API 路径，未穷举 <code>resolve</code> 带 Range 的行为</td></tr>
+        <tr><td><span class="pill c">新增</span></td><td>Desktop 自动更新后视图是否仍有效</td><td>推测有效（视图是外部目录，与版本无关），但若新版增删 <code>MODEL_FOLDER_TYPES</code>，osdk 类别表需跟进。<b>这是会随时间失效的断言，实现时应加版本探测而非硬编码</b></td></tr>
+        <tr><td><span class="pill c">新增</span></td><td>多个 osdk 视图根并存</td><td>§5.11 只测了「用户根 + 一个 osdk 根」。两个 osdk 视图并存时的同名冲突未验证</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>附</b> 实测环境与用户环境还原</p>
+    <p class="srcs">
+      <b>环境</b>：Windows x64；PowerShell 7.6.6.0（全部 <code>-NoProfile</code>）；Python 3.11.0 用于离线复现探针；隔离 venv 内 <code>huggingface_hub 1.32.0</code>；<b>真实端到端用安装自带的 Python 3.13.12</b>；osdk 为仓库内 <code>target\release\osdk.exe</code>；系统代理 <code>127.0.0.1:7897</code>；GPU RTX 4080 Laptop / 驱动 610.47；C/D/E 三个 NTFS 卷；开发者模式已开启（影响符号链接结论）。<br>
+      <b>被观测的 Desktop</b>：程序在 <code>E:\comfyui\Comfy Desktop</code>，数据在 <code>E:\Comfy-Desktop</code>，配置在 <code>%APPDATA%\Comfy Desktop</code>；安装 standalone / win-nvidia / v0.34.0-env1，环境包 2,365,760,769 B，本轮从 <code>installing</code> 观测到 <code>installed</code>。<br>
+      <b>探针</b>：19 个脚本 + 4 个变异 harness，位于 <code>%TEMP%\osdk-model-probe-20260921\</code>。<br>
+      <b>用户环境还原（已验证）</b>：端到端<b>未写</b> <code>settings.json</code>。前后指纹比对：settings.json SHA-256 一致、<code>modelsDirs</code> 不变、shared models 0 文件不变、install models 36 文件不变、<code>osdk-e2e*</code> 残留为 0。唯一变化的 <code>installations.json</code> 已归因为 Desktop 自身保存周期。osdk 真实数据根 <code>E:\osdk-data</code> 全程未被写入。
+    </p>
+  </div>
+
+  <div class="fig">
+    <p class="figcap"><b>附</b> 外部来源</p>
+    <p class="srcs">
+      ComfyUI <code>folder_paths.py</code> / <code>utils/extra_config.py</code> / <code>extra_model_paths.yaml.example</code>（GitHub raw，master）· Comfy Desktop 数据位置 <code>docs.comfy.org/installation/desktop/usage/settings</code> · <b>Comfy Desktop 实现与运行时观测取自本机安装</b>（<code>app.asar</code>、<code>settings.json</code>、<code>installations.json</code>、<code>manifest.json</code>、<code>instance-model-paths\&lt;id&gt;.yaml</code>、运行中进程命令行）· <code>huggingface_hub/constants.py</code>（GitHub raw，main）· HF 缓存说明 <code>huggingface.co/docs/huggingface_hub/guides/manage-cache</code> · llama.cpp <code>common/common.cpp</code> 与 <code>tools/cli/README.md</code> · Ollama <code>docs.ollama.com/faq</code> · <code>/import</code> · <code>/modelfile</code> · vLLM <code>docs.vllm.ai</code> · sd-webui <code>modules/cmd_args.py</code> · ModelScope <code>modelscope.ai/docs/Models/Download-Model</code> · reqwest <code>redirect.rs</code> 的 <code>remove_sensitive_headers</code> · PyTorch wheel 索引 <code>download.pytorch.org/whl/cu1xx/torch/</code>
+    </p>
+  </div>
+</section>
+
+<div class="foot">
+  osdk 模型管理重构调研 · 可视化附件 · 2026-09-21 · 正文见 <code>docs/research/model-management-refactor-2026-09-21.zh-CN.md</code> · 本文所有数字均为当日本机实测，引用前请按附录命令复测
+</div>
+
+</div>
+</body>
+</html>
