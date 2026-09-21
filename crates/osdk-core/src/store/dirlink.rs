@@ -83,6 +83,47 @@ pub fn exists(link: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Unlink every directory-link that is a *direct child* of `root`, recursively.
+///
+/// Used before removing a rendered view tree. A view contains junctions/symlinks
+/// that point at snapshot components. `remove_dir_all` on modern Rust does not
+/// follow them (the same guarantee relied on for `current`), but Windows
+/// junctions sit on undocumented ground, and a view can hold many of them. This
+/// walks bottom-up and unlinks each reparse point first, so the subsequent
+/// `remove_dir_all` only ever deletes real directories and files inside the
+/// view -- never anything a link pointed at.
+///
+/// File hardlinks are intentionally left alone: removing a hardlink entry only
+/// drops one name, never the shared bytes, so ordinary file deletion is correct
+/// for them.
+pub fn remove_tree_links_first(root: &Path) -> std::io::Result<()> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                if let Ok(meta) = path.symlink_metadata() {
+                    if is_link(&meta) {
+                        // A link to a directory: unlink, do not descend into the
+                        // target.
+                        platform::remove(&path)?;
+                        continue;
+                    }
+                }
+                stack.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 mod platform {
     use std::path::Path;

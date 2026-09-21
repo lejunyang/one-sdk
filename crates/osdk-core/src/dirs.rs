@@ -284,6 +284,16 @@ impl Dirs {
     pub fn models(&self) -> PathBuf {
         self.data.join("models")
     }
+    /// Rendered consumer views over model snapshots
+    /// (`<data>/views/<consumer>/<profile>/...`).
+    ///
+    /// Kept separate from [`Self::models`]: a snapshot is immutable content, a
+    /// view is a consumer-shaped projection of it. Views hold links (or copies)
+    /// back into the CAS and can be rebuilt or removed at will without touching
+    /// any snapshot.
+    pub fn model_views(&self) -> PathBuf {
+        self.data.join("views")
+    }
     /// Self-contained rustup home for the delegate rust backend.
     pub fn rustup_home(&self) -> PathBuf {
         self.data.join("rustup")

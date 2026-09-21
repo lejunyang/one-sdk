@@ -17,6 +17,7 @@ pub mod env;
 pub mod provider;
 pub mod pull;
 pub mod source;
+pub mod view;
 
 const MODEL_MANIFEST_FILE: &str = ".osdk-model.json";
 const CURRENT_FILE: &str = "current.json";
@@ -165,9 +166,9 @@ pub struct InstalledModel {
 }
 
 pub struct ModelStore {
-    dirs: Dirs,
+    pub(crate) dirs: Dirs,
     cas: Arc<Cas>,
-    link_mode: LinkMode,
+    pub(crate) link_mode: LinkMode,
 }
 
 impl ModelStore {
