@@ -132,7 +132,7 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 2. 在 auto 模式下，[`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) 对真实仓库先取 manifest，再对最大的可探测文件执行最多 1 MiB 的 Range 请求；结果按 provider、repo、revision 和来源配置缓存。
 3. provider 解析远端 manifest；`--include`/`--exclude` glob 选择文件，`--variant` 只作为快照标签参与身份计算。
 4. 文件按 `settings.jobs` 并发、可续传下载到 provider/repository/revision 隔离的 cache；校验声明 size 和 SHA-256。
-5. [`ModelStore`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 再次校验文件，写入共享 CAS，在隐藏临时目录完成 snapshot 后 rename 到 `<models>/<logical-name>/snapshots/<snapshot-key>`，再以临时文件加 rename 更新 `current.json`；这些 rename 没有跨平台替换原子性或 durability 保证。
+5. [`ModelStore`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 再次校验文件，写入共享 CAS，在隐藏临时目录完成 snapshot 后 rename 到 `<models>/<logical-name>/snapshots/<snapshot-key>`，再以临时文件加 rename 更新 `current.json`；这些 rename 没有跨平台替换原子性或 durability 保证。随后把 `<models>/<logical-name>/current` 这个目录链接重指向新快照：快照目录名由内容哈希决定（包含文件选择），因此换 `--include` 就会换目录，外部配置里写死的路径会静默失效，而 ComfyUI、llama.cpp、vLLM 都只接受一个会被保存下来的路径。Windows 上用 junction 而非符号链接，因为符号链接需要 Developer Mode 或提权，junction 不需要；重指向时如果 `current` 位置是真实目录会显式报错，不会静默删除用户数据。链接创建失败只记 warning 不中断发布——此时快照与 `current.json` 已经落盘，为一个链接丢弃整次下载并不合理，`model path`（不带 `--stable`）仍可从 `current.json` 作答。
 6. 默认把 provider、repo、requested/resolved revision、endpoint、variant 以及每个文件的 size/SHA-256 写入 `osdk.lock` 的顶层 `[models]`；token 和短期下载 URL不落盘。
 
 `model list/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 pull 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。

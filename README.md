@@ -564,6 +564,10 @@ osdk model pull qwen25-ms \
 osdk model verify qwen25
 osdk model path qwen25
 
+# A path that survives the next pull -- snapshot directories are content-hashed,
+# so feed this one to ComfyUI, llama.cpp or a script instead
+osdk model path qwen25 --stable
+
 # Restore the same snapshots elsewhere from osdk.lock (pull writes, sync replays)
 osdk model sync
 osdk model list

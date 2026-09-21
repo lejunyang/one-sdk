@@ -509,6 +509,10 @@ osdk model pull qwen25-ms \
 osdk model verify qwen25
 osdk model path qwen25
 
+# 下次 pull 之后依然有效的路径：快照目录名含内容哈希，
+# 要写进 ComfyUI、llama.cpp 或脚本里的路径请用这个
+osdk model path qwen25 --stable
+
 # 在另一台机器上按 osdk.lock 还原同一批快照（pull 写、sync 复现）
 osdk model sync
 osdk model list

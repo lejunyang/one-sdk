@@ -17,7 +17,7 @@ osdk model pull NAME REFERENCE
 
 osdk model sync [--prune] [--dry-run]
 osdk model list
-osdk model path NAME
+osdk model path NAME [--stable]
 osdk model verify NAME
 osdk model remove NAME [--keep-lock]
 
@@ -37,10 +37,23 @@ osdk model env list
 | `--variant LABEL` | Record an identity/manifest/lock label; it **does not select files** |
 | `--no-lock` | Do not update `osdk.lock` at the nearest project location |
 
-The other model commands have no optional arguments. `list` shows each logical
-name's current snapshot; `path` prints its current directory; `verify` checks all
-files. `remove` deletes every snapshot for the logical name and immediately runs
-CAS GC; it currently does not ask for confirmation.
+`list` shows each logical name's current snapshot; `path` prints its current
+directory; `verify` checks all files. `remove` deletes every snapshot for the
+logical name and immediately runs CAS GC; it currently does not ask for
+confirmation.
+
+`path --stable` prints `<data>/models/<name>/current`, a directory link resolving
+to the current snapshot (a junction on Windows, a symlink elsewhere). Snapshot
+directory names embed a content hash, so they change whenever `--include`,
+`--exclude` or the revision changes. **Use `--stable` for any path that gets
+written down somewhere**: a ComfyUI `extra_model_paths.yaml`, a llama.cpp `-m`, a
+constant in a script. Without `--stable` you get the real hashed snapshot path,
+which is fine for one-off use.
+
+```bash
+osdk model path qwen25            # …/snapshots/9f1c2a…
+osdk model path qwen25 --stable   # …/qwen25/current  ← still valid after the next pull
+```
 
 ## Provider references
 
@@ -84,6 +97,7 @@ snapshot writers.
 ```text
 <data>/models/<name>/
 ├── current.json
+├── current -> snapshots/<snapshot>/   # directory link; printed by `model path --stable`
 ├── .locks/<snapshot>.lock
 └── snapshots/<snapshot>/
     ├── .osdk-model.json

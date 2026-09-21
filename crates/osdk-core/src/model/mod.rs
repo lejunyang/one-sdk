@@ -20,6 +20,14 @@ pub mod source;
 
 const MODEL_MANIFEST_FILE: &str = ".osdk-model.json";
 const CURRENT_FILE: &str = "current.json";
+/// Stable directory name resolving to the current snapshot.
+///
+/// The snapshot directory is named by a content hash that includes the file
+/// selection, so `--include` changing produces a new directory and any path
+/// written into an external config silently stops matching. Consumers need one
+/// path that does not move: ComfyUI's `extra_model_paths.yaml`, llama.cpp's
+/// `-m`, and `--model` for vLLM all take a path and keep it.
+const CURRENT_LINK: &str = "current";
 const COMPLETE_MARKER: &str = ".osdk-complete";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +358,24 @@ impl ModelStore {
         if !root.exists() {
             return Ok(false);
         }
+        // Take the link out explicitly, then delete the tree.
+        //
+        // This is belt-and-braces, and the measurement says so: dropping it
+        // changes no observable outcome. `remove_dir_all` does not follow
+        // symlinks -- a documented guarantee, hardened after CVE-2022-21658 -- and
+        // for a Windows junction, where std documents nothing, it was measured
+        // here to remove the root while leaving the junction's target fully
+        // intact, including when the junction dangles. (.NET's
+        // `Directory.Delete(recursive)` refuses outright instead, which is why the
+        // exact API had to be measured rather than reasoned about.)
+        //
+        // Kept anyway for one narrow reason: on Windows the safe outcome rests on
+        // undocumented behaviour, so the teardown order stays ours rather than
+        // depending on it. No test can distinguish this line's presence today --
+        // removing it leaves the suite green, which is a fact about the line
+        // being inert, not about the suite being weak.
+        crate::store::dirlink::remove(&root.join(CURRENT_LINK))
+            .map_err(|error| Error::io(root.join(CURRENT_LINK), error))?;
         std::fs::remove_dir_all(&root).map_err(|error| Error::io(&root, error))?;
         Ok(true)
     }
@@ -380,7 +406,61 @@ impl ModelStore {
             &CurrentSnapshot {
                 snapshot: snapshot.to_string(),
             },
-        )
+        )?;
+        self.point_current_link(model_root, snapshot)
+    }
+
+    /// Repoint `<model>/current` at the snapshot just published.
+    ///
+    /// A junction on Windows and a symlink on Unix: `current.json` is machine
+    /// readable but an external tool cannot parse it, and the whole purpose here
+    /// is to hand other programs a path.
+    ///
+    /// A failure is reported, not fatal. The snapshot and `current.json` are
+    /// already durable at this point, so refusing the whole publish over a link
+    /// would discard a completed download; and `model path` can still answer from
+    /// `current.json`. The one case that *is* an error is a real directory
+    /// sitting at `current` -- see `dirlink::retarget`.
+    fn point_current_link(&self, model_root: &Path, snapshot: &str) -> Result<()> {
+        let link = model_root.join(CURRENT_LINK);
+        let target = model_root.join("snapshots").join(snapshot);
+        if let Err(error) = crate::store::dirlink::retarget(&target, &link) {
+            tracing::warn!(
+                link = %link.display(),
+                target = %target.display(),
+                %error,
+                "could not update the stable `current` link; `model path` still \
+                 resolves through current.json"
+            );
+        }
+        Ok(())
+    }
+
+    /// The stable path for a model, if the link is present.
+    ///
+    /// Returns the link itself rather than the snapshot it resolves to: the
+    /// caller wants the name that keeps working after the next pull.
+    pub fn stable_path(&self, name: &str) -> Result<PathBuf> {
+        validate_model_name(name)?;
+        let link = self.model_root(name).join(CURRENT_LINK);
+        if crate::store::dirlink::exists(&link) {
+            return Ok(link);
+        }
+        // Absent because this model predates the link, or because creating it
+        // failed. Rebuild from the recorded snapshot rather than reporting a
+        // missing feature.
+        let installed = self.current(name)?;
+        let model_root = self.model_root(name);
+        if let Some(snapshot) = installed.path.file_name().and_then(|name| name.to_str()) {
+            self.point_current_link(&model_root, snapshot)?;
+        }
+        if crate::store::dirlink::exists(&link) {
+            Ok(link)
+        } else {
+            Err(Error::other(format!(
+                "no stable path for model `{name}`: the `current` link could not be created"
+            )))
+        }
     }
 }
 
@@ -582,6 +662,197 @@ mod tests {
             .gc_roots(&[&store.dirs.installs, &store.dirs.models()])
             .unwrap();
         assert_eq!(removed, 1);
+    }
+
+    /// The stable entry is the whole point of P0-1: an external config records a
+    /// path once and keeps working across pulls.
+    ///
+    /// Reads the produced artifact rather than an exit code -- a `current`
+    /// directory existing proves nothing, so this resolves a file *through* the
+    /// link and compares bytes.
+    #[test]
+    fn stable_entry_resolves_to_the_current_snapshot_and_follows_a_new_one() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = store(temporary.path());
+        let identity = |revision: &str| SnapshotIdentity {
+            name: "fixture".into(),
+            provider: ProviderId::HuggingFace,
+            repository: "owner/repo".into(),
+            requested_revision: "main".into(),
+            revision: revision.into(),
+            endpoint: "https://example.test".into(),
+            variant: None,
+        };
+
+        let first_source = temporary.path().join("first.bin");
+        std::fs::write(&first_source, b"first-bytes").unwrap();
+        let first = store
+            .publish(
+                identity("rev-one"),
+                vec![DownloadedModelFile {
+                    path: "weights.bin".into(),
+                    source: first_source,
+                    size: 11,
+                    sha256: None,
+                    etag: None,
+                }],
+            )
+            .unwrap();
+
+        let stable = store.stable_path("fixture").unwrap();
+        assert!(
+            crate::store::dirlink::exists(&stable),
+            "`current` must be a link, not a directory"
+        );
+        assert_eq!(
+            std::fs::read(stable.join("weights.bin")).unwrap(),
+            b"first-bytes"
+        );
+        // The stable name is not the hashed snapshot name.
+        assert_ne!(stable, first.path);
+
+        // A second publish moves the link while the path stays put.
+        let second_source = temporary.path().join("second.bin");
+        std::fs::write(&second_source, b"second-bytes").unwrap();
+        let second = store
+            .publish(
+                identity("rev-two"),
+                vec![DownloadedModelFile {
+                    path: "weights.bin".into(),
+                    source: second_source,
+                    size: 12,
+                    sha256: None,
+                    etag: None,
+                }],
+            )
+            .unwrap();
+        assert_ne!(first.path, second.path, "a new revision is a new snapshot");
+
+        let stable_again = store.stable_path("fixture").unwrap();
+        assert_eq!(stable_again, stable, "the stable path must not move");
+        assert_eq!(
+            std::fs::read(stable_again.join("weights.bin")).unwrap(),
+            b"second-bytes",
+            "the stable path must resolve to the newest snapshot"
+        );
+    }
+
+    /// The link must not make CAS GC think an object is referenced twice, nor
+    /// make it miss one. `gc_roots` walks with `follow_links(false)`, and this
+    /// pins that: the object stays live while the model exists and is collected
+    /// once it does not.
+    #[test]
+    fn the_stable_link_does_not_confuse_store_gc() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("weights.bin");
+        std::fs::write(&source, b"gc-bytes").unwrap();
+        let store = store(temporary.path());
+        let installed = store
+            .publish(
+                SnapshotIdentity {
+                    name: "fixture".into(),
+                    provider: ProviderId::HuggingFace,
+                    repository: "owner/repo".into(),
+                    requested_revision: "main".into(),
+                    revision: "rev".into(),
+                    endpoint: "https://example.test".into(),
+                    variant: None,
+                },
+                vec![DownloadedModelFile {
+                    path: "weights.bin".into(),
+                    source,
+                    size: 8,
+                    sha256: None,
+                    etag: None,
+                }],
+            )
+            .unwrap();
+        let hash = installed.manifest.files[0].cas_hash.clone();
+        assert!(crate::store::dirlink::exists(
+            &store.model_root("fixture").join(CURRENT_LINK)
+        ));
+
+        let models = store.dirs.models();
+        let (removed, _) = store
+            .cas
+            .gc_roots(&[&store.dirs.installs, &models])
+            .unwrap();
+        assert_eq!(removed, 0, "the live model's object must survive GC");
+        assert!(store.cas.object_path(&hash).is_file());
+
+        // Removing the model takes the link with it and frees the object.
+        assert!(store.remove("fixture").unwrap());
+        let (removed, _) = store
+            .cas
+            .gc_roots(&[&store.dirs.installs, &models])
+            .unwrap();
+        assert_eq!(removed, 1, "the object must be collected once unreferenced");
+    }
+
+    /// `remove` must leave nothing link-shaped behind, and must not reach through
+    /// the link to whatever it pointed at.
+    ///
+    /// The link points at a directory *outside* the model root on purpose: if
+    /// teardown ever reached through it, that payload would vanish, and GC
+    /// accounting would never reveal it.
+    ///
+    /// Honest scope: this pins the user-visible property, not one line of the
+    /// implementation. `remove_dir_all` already unlinks rather than traversing, so
+    /// this stays green if the explicit unlink in `remove` is deleted. It is a
+    /// regression guard against that platform behaviour changing, or against a
+    /// future teardown that walks the tree itself and does traverse.
+    #[test]
+    fn removing_a_model_unlinks_rather_than_reaching_through_the_link() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("weights.bin");
+        std::fs::write(&source, b"bytes").unwrap();
+        let store = store(temporary.path());
+        store
+            .publish(
+                SnapshotIdentity {
+                    name: "fixture".into(),
+                    provider: ProviderId::HuggingFace,
+                    repository: "owner/repo".into(),
+                    requested_revision: "main".into(),
+                    revision: "rev".into(),
+                    endpoint: "https://example.test".into(),
+                    variant: None,
+                },
+                vec![DownloadedModelFile {
+                    path: "weights.bin".into(),
+                    source,
+                    size: 5,
+                    sha256: None,
+                    etag: None,
+                }],
+            )
+            .unwrap();
+
+        // Re-point the stable link at a payload that lives outside the model
+        // root, so "deleted through the link" and "unlinked" have visibly
+        // different outcomes.
+        let outside = temporary.path().join("outside-payload");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precious.txt"), b"must survive").unwrap();
+        let model_root = store.model_root("fixture");
+        let link = model_root.join(CURRENT_LINK);
+        crate::store::dirlink::retarget(&outside, &link).unwrap();
+        assert!(
+            link.join("precious.txt").is_file(),
+            "link must read through"
+        );
+
+        assert!(store.remove("fixture").unwrap());
+
+        assert!(!model_root.exists(), "the model root must be gone");
+        assert!(
+            !crate::store::dirlink::exists(&link),
+            "no link may be left behind"
+        );
+        assert!(
+            outside.join("precious.txt").is_file(),
+            "teardown must not reach through the link to its target"
+        );
     }
 
     #[test]

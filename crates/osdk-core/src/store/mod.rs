@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 use crate::dirs::create_dir_all;
 use crate::error::{Error, Result};
 
+pub mod dirlink;
 pub mod link;
 pub mod manifest;
 

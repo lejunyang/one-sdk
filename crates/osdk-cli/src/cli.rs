@@ -690,7 +690,18 @@ pub enum ModelCommand {
     /// List locally materialized model snapshots.
     List,
     /// Print the current local snapshot path.
-    Path { name: String },
+    Path {
+        name: String,
+        /// Print the stable `current` path instead of the hashed snapshot path.
+        ///
+        /// The snapshot directory name embeds a content hash that covers the file
+        /// selection, so it changes whenever `--include`/`--exclude` or the
+        /// revision changes. Use this when the path is going into something that
+        /// keeps it: a ComfyUI `extra_model_paths.yaml`, a llama.cpp `-m`, a
+        /// script.
+        #[arg(long)]
+        stable: bool,
+    },
     /// Verify all files in a local snapshot.
     Verify { name: String },
     /// Remove all local snapshots for a logical model name.

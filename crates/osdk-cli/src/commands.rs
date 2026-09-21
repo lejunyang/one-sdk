@@ -6237,7 +6237,14 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
                 );
             }
         }
-        ModelCommand::Path { name } => println!("{}", store.current(&name)?.path.display()),
+        ModelCommand::Path { name, stable } => {
+            let path = if stable {
+                store.stable_path(&name)?
+            } else {
+                store.current(&name)?.path
+            };
+            println!("{}", path.display());
+        }
         ModelCommand::Verify { name } => {
             let manifest = store.verify(&name)?;
             println!(

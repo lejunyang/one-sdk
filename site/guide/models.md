@@ -16,7 +16,7 @@ osdk model pull NAME REFERENCE
 
 osdk model sync [--prune] [--dry-run]
 osdk model list
-osdk model path NAME
+osdk model path NAME [--stable]
 osdk model verify NAME
 osdk model remove NAME [--keep-lock]
 
@@ -36,9 +36,20 @@ osdk model env list
 | `--variant LABEL` | 记录到快照 identity、manifest 和 lock 的标签；**不会自动筛文件** |
 | `--no-lock` | 不更新最近项目位置的 `osdk.lock` |
 
-其他命令没有可选参数。`list` 显示每个逻辑名的当前快照；`path` 输出当前路径；
-`verify` 校验当前快照所有文件；`remove` 删除该逻辑名的全部快照并立即执行 CAS GC，
-当前不会请求确认。
+`list` 显示每个逻辑名的当前快照；`path` 输出当前路径；`verify` 校验当前快照所有
+文件；`remove` 删除该逻辑名的全部快照并立即执行 CAS GC，当前不会请求确认。
+
+`path --stable` 输出 `<data>/models/<name>/current`，这是一个指向当前快照的目录
+链接（Windows 上是 junction，其他平台是符号链接）。快照目录名里含内容哈希，改
+`--include`/`--exclude` 或换 revision 都会换目录，所以**要写进别处的路径请用
+`--stable`**：ComfyUI 的 `extra_model_paths.yaml`、llama.cpp 的 `-m`、脚本里的
+常量都属于这种情况。不带 `--stable` 时输出带哈希的真实快照路径，适合只用一次的
+场合。
+
+```bash
+osdk model path qwen25            # …/snapshots/9f1c2a…
+osdk model path qwen25 --stable   # …/qwen25/current  ← 下次 pull 后仍然有效
+```
 
 ## Provider 引用
 
@@ -77,6 +88,7 @@ manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 re
 ```text
 <data>/models/<name>/
 ├── current.json
+├── current -> snapshots/<snapshot>/   # 目录链接；`model path --stable` 输出它
 ├── .locks/<snapshot>.lock
 └── snapshots/<snapshot>/
     ├── .osdk-model.json
