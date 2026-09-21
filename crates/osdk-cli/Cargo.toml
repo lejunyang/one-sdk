@@ -41,6 +41,11 @@ indicatif.workspace = true
 dunce.workspace = true
 walkdir.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Read-only WinINET registry access for `osdk doctor`'s system-proxy
+# diagnostic. CLI-only: the shim never shows diagnostics and must not pay for it.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 flate2.workspace = true

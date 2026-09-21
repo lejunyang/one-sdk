@@ -7174,10 +7174,50 @@ pub fn doctor(app: &App, verify: bool, tool: Option<String>) -> Result<()> {
         on_path
     );
     println!("  backends     : {}", app.registry.ids().join(", "));
+    doctor_proxy_section();
     if verify {
         doctor_verify(app, tool.as_deref())?;
     }
     Ok(())
+}
+
+/// Report the proxy situation.
+///
+/// This is diagnosis, not adoption: osdk's reqwest client reads proxy settings
+/// only from `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`, never from the Windows
+/// desktop (WinINET) proxy. A user who enabled the latter has a working browser
+/// and a tool that times out, so when the two disagree we say so and point at the
+/// exact variable to set. Credentials embedded in a proxy URL are redacted.
+fn doctor_proxy_section() {
+    let env = crate::proxy_diag::env_proxy();
+    let windows = crate::proxy_diag::windows_proxy_settings();
+    match crate::proxy_diag::advise(&env, windows.as_ref()) {
+        crate::proxy_diag::ProxyAdvice::EnvConfigured { vars } => {
+            println!(
+                "  proxy        : {} ({})",
+                t!("doctor.proxy_env"),
+                vars.join(", ")
+            );
+        }
+        crate::proxy_diag::ProxyAdvice::WindowsSystemProxyIgnored { server, pac } => {
+            let mut detail = Vec::new();
+            if let Some(server) = server {
+                detail.push(crate::proxy_diag::redact_proxy(&server));
+            }
+            if pac {
+                detail.push("PAC".to_string());
+            }
+            println!(
+                "  proxy        : {} ({})",
+                t!("doctor.proxy_win_ignored"),
+                detail.join(", ")
+            );
+            println!("                {}", t!("doctor.proxy_hint"));
+        }
+        crate::proxy_diag::ProxyAdvice::NoneConfigured => {
+            println!("  proxy        : {}", t!("doctor.proxy_none"));
+        }
+    }
 }
 
 /// Re-hash every installed file and report drift.

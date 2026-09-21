@@ -8,6 +8,7 @@ mod localize;
 mod lockfile;
 mod pkg;
 mod prompt;
+mod proxy_diag;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};

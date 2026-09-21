@@ -740,6 +740,8 @@ osdk completions bash > osdk.bash
 osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lang` 覆盖单次命令的
 语言，`OSDK_LANG` 设置当前会话偏好。
 
+`osdk doctor` 还会报告代理状态。osdk 只从 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 读取代理，不读 Windows 的「系统代理」开关；两者不一致时它会明确指出并给出要设置的变量，而不是让「浏览器能上、osdk 超时」这种情况无从解释。
+
 指南：[存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
 
 ## 支持范围

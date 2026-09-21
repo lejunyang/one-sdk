@@ -1381,6 +1381,25 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     );
     m.insert("doctor.on_path", ("on PATH", "在 PATH 中"));
     m.insert(
+        "doctor.proxy_env",
+        ("environment proxy in use", "使用环境变量代理"),
+    );
+    m.insert(
+        "doctor.proxy_win_ignored",
+        (
+            "Windows system proxy is ON but osdk ignores it",
+            "Windows 系统代理已开启，但 osdk 不会使用它",
+        ),
+    );
+    m.insert(
+        "doctor.proxy_hint",
+        (
+            "osdk reads only HTTPS_PROXY/HTTP_PROXY/ALL_PROXY; set one to use this proxy, e.g. $env:HTTPS_PROXY='http://127.0.0.1:7897'",
+            "osdk 只读取 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY；要走该代理请设置其中一个，例如 $env:HTTPS_PROXY='http://127.0.0.1:7897'",
+        ),
+    );
+    m.insert("doctor.proxy_none", ("no proxy configured", "未配置代理"));
+    m.insert(
         "doctor.verify_title",
         ("  verifying installed files", "  正在校验已安装文件"),
     );

@@ -229,7 +229,7 @@ osdk registry test [MANAGER]
 
 | 命令 | 输出 |
 | --- | --- |
-| `doctor` | 平台、data/store/install 目录、store 与 install 是否同文件系统、shim 路径及是否在 PATH、backend ID |
+| `doctor` | 平台、data/store/install 目录、store 与 install 是否同文件系统、shim 路径及是否在 PATH、backend ID、代理状态 |
 | `doctor --verify` | 以上全部，并重新哈希每个已安装文件，指出不再匹配的部分 |
 | `doctor --verify --tool` | 同样的检查但只针对单个工具；完整校验会读取每个字节，耗时数分钟 |
 | `config path` | 配置目录、用户配置文件、当前项目配置 |
@@ -240,6 +240,14 @@ osdk registry test [MANAGER]
 
 顶层 `doctor` 当前不直接打印 `link_mode`；使用 `config list` 查看。它与诊断原生容器
 控制面的 `container doctor` 不同。
+
+`doctor` 的代理行需要解释一下。osdk 的 HTTP 客户端只从环境变量读取代理
+（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`，大小写均可），**不读** Windows 设置里
+的「系统代理」（那是浏览器等 WinINET 程序读的注册表项）。所以当你在 Windows 设置里
+开了代理、却没有设置上述环境变量时，浏览器能上网而 osdk 超时——`doctor` 会明确报
+「Windows 系统代理已开启，但 osdk 不会使用它」，并给出要设置的变量；设置了环境变量
+则显示正在使用。osdk 只做诊断、不会擅自改用系统代理，因为那会改变流量去向。代理值中
+若含账号密码会在输出前脱敏。
 
 ## 校验已安装文件
 

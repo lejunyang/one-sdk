@@ -253,7 +253,7 @@ osdk registry test [MANAGER]
 
 | Command | Output |
 | --- | --- |
-| `doctor` | Platform, data/store/install directories, whether store and installs share a filesystem, shim path and PATH presence, and backend IDs |
+| `doctor` | Platform, data/store/install directories, whether store and installs share a filesystem, shim path and PATH presence, backend IDs, and proxy state |
 | `doctor --verify` | Everything above, then re-hashes every installed file and names what no longer matches |
 | `doctor --verify --tool` | The same check limited to one tool; a full pass reads every byte and takes minutes |
 | `config path` | Config directory, user file, and current project configuration |
@@ -265,6 +265,17 @@ osdk registry test [MANAGER]
 Top-level `doctor` currently does not print `link_mode`; use `config list` to
 inspect it. It is distinct from `container doctor`, which diagnoses native
 container control planes.
+
+The `doctor` proxy line needs a word of explanation. osdk's HTTP client reads a
+proxy only from the environment (`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, in
+either case) and **never** from the Windows "system proxy" -- that is a WinINET
+registry setting read by browsers and other desktop apps. So with the Windows
+toggle on but no such variable set, your browser works while osdk times out;
+`doctor` reports "Windows system proxy is ON but osdk ignores it" together with
+the exact variable to set, and shows the environment proxy when one is present.
+It diagnoses only and never silently adopts the system proxy, because that would
+change where traffic goes. Any credentials embedded in a proxy value are
+redacted before printing.
 
 ## Verifying installed files
 

@@ -829,6 +829,11 @@ osdk localizes commands, help, prompts, errors, and diagnostics in English and
 Chinese. `--lang` overrides the locale for one command; `OSDK_LANG` sets the
 session preference.
 
+`osdk doctor` also reports proxy state. osdk reads a proxy only from
+`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`, never from the Windows system-proxy
+toggle; when those disagree it says so and names the variable to set, instead of
+letting a browser-working, osdk-timing-out setup go unexplained.
+
 Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
 
 ## Support matrix
