@@ -36,10 +36,26 @@ osdk config unset jobs                        # back to the default
 
 The writable settings are the scalar and list ones: `jobs`, `offline`, `yes`,
 `verify_signatures`, `require_checksums`, `attestations`, `prerelease`,
-`link_mode`, `lang`, `shims.include`, `shims.exclude`, `shims.expose`, and the
-per-tool `shims.<tool>.{include,exclude,expose}`. Lists take a comma-separated
-value. Tool pins, source pins and aliases are not included; `osdk use`,
-`osdk source pin` and `osdk alias` own those.
+`link_mode`, `lang`, `sources.probe_timeout_ms`, `shims.include`,
+`shims.exclude`, `shims.expose`, and the per-tool
+`shims.<tool>.{include,exclude,expose}`. Lists take a comma-separated value. Tool
+pins, source pins and aliases are not included; `osdk use`, `osdk source pin`
+and `osdk alias` own those.
+
+`sources.probe_timeout_ms` is written into the top-level `[sources]` table, in
+milliseconds, and must be >= 1 (default 1500). It is the budget for **one probe
+of one source**: a model-source probe spends it on both a metadata request and a
+bounded range fetch, so on a slow network 1500 ms can classify a perfectly usable
+local mirror as unreachable. Raise it rather than hand-editing the file:
+
+```bash
+osdk config set -g sources.probe_timeout_ms 4000   # relaxes probing only, not downloads
+osdk config get sources.probe_timeout_ms
+```
+
+The Python and npm probe timeouts are the separate `probe_timeout_ms` under
+`[registries.python]` / `[registries.npm]` and are not currently in the
+`config set` list (the two URL lists are).
 
 The enum vocabularies come from the settings' own types, and accepted aliases
 are normalized on write (`attestations=auto` is stored as `if-available`):

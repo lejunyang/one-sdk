@@ -623,6 +623,18 @@ pub const SETTINGS: &[SettingSpec] = &[
     // now the only way to point osdk at a mirror was to hand-edit
     // `config.toml` -- which the guide already told readers they would not
     // have to do.
+    // Source probing. Persisted under the top-level `[sources]` table rather
+    // than `[settings]`, alongside `selection` and `cache_ttl`.
+    //
+    // Exposing this is what frees a slow-network user from hand-editing
+    // config.toml. The model probe spends one budget on both a metadata request
+    // and a bounded range fetch, so a 1500 ms default tuned for a small version
+    // index can classify a perfectly usable local source as unreachable.
+    SettingSpec {
+        key: "sources.probe_timeout_ms",
+        path: &["sources", "probe_timeout_ms"],
+        kind: SettingKind::PositiveInt,
+    },
     SettingSpec {
         key: "registries.python.urls",
         path: &["registries", "python", "urls"],

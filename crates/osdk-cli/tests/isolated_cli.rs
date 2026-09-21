@@ -193,6 +193,91 @@ fn config_list_uses_only_isolated_directories() {
     );
 }
 
+/// `sources.probe_timeout_ms` is reachable through `osdk config` end to end.
+///
+/// It lives in the `[sources]` table, not `[settings]`, so three read paths had
+/// to learn it; a whitelist entry alone would have written it and then answered
+/// `unknown setting` on read. The global scope is used deliberately: a project
+/// `[sources]` table is gated by trust, while the user-global file never is, so
+/// this exercises the round trip without a trust decision entering the test.
+#[test]
+fn sources_probe_timeout_round_trips_through_config_commands() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let default = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.probe_timeout_ms"],
+    );
+    assert!(
+        default.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default.stderr)
+    );
+    assert_eq!(String::from_utf8(default.stdout).unwrap().trim(), "1500");
+
+    let set = run_isolated(
+        temp.path(),
+        &["config", "set", "-g", "sources.probe_timeout_ms", "4000"],
+    );
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    // Read the artifact, not the echoed value: a write that lands somewhere the
+    // loader ignores would still print success. The user-global file is
+    // `<config dir>/config.toml` (Dirs::user_config_file).
+    let user_config = temp.path().join("config").join("config.toml");
+    let body = std::fs::read_to_string(&user_config).unwrap_or_else(|error| {
+        panic!("missing user config at {}: {error}", user_config.display())
+    });
+    assert!(body.contains("[sources]"), "config body was: {body}");
+    assert!(
+        body.contains("probe_timeout_ms = 4000"),
+        "config body was: {body}"
+    );
+
+    let read = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.probe_timeout_ms"],
+    );
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert_eq!(String::from_utf8(read.stdout).unwrap().trim(), "4000");
+
+    // Validation: PositiveInt must reject zero.
+    let zero = run_isolated(
+        temp.path(),
+        &["config", "set", "-g", "sources.probe_timeout_ms", "0"],
+    );
+    assert!(!zero.status.success());
+    assert!(
+        String::from_utf8_lossy(&zero.stderr).contains("at least 1"),
+        "{}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
+
+    // And unset restores the default.
+    let unset = run_isolated(
+        temp.path(),
+        &["config", "unset", "-g", "sources.probe_timeout_ms"],
+    );
+    assert!(
+        unset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unset.stderr)
+    );
+    let back = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.probe_timeout_ms"],
+    );
+    assert_eq!(String::from_utf8(back.stdout).unwrap().trim(), "1500");
+}
+
 #[test]
 fn attestation_policy_cli_override_is_reported() {
     let temp = tempfile::tempdir().unwrap();

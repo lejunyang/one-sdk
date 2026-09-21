@@ -34,9 +34,22 @@ osdk config unset jobs                        # 恢复默认
 
 可写的是下列标量与列表设置：`jobs`、`offline`、`yes`、`verify_signatures`、
 `require_checksums`、`attestations`、`prerelease`、`link_mode`、`lang`、
-`shims.include`、`shims.exclude`、`shims.expose`，以及按工具限定的
-`shims.<tool>.{include,exclude,expose}`。列表用逗号分隔。工具固定、source 固定和别名
-不在其中，它们分别由 `osdk use`、`osdk source pin` 和 `osdk alias` 管理。
+`sources.probe_timeout_ms`、`shims.include`、`shims.exclude`、`shims.expose`，以及按
+工具限定的 `shims.<tool>.{include,exclude,expose}`。列表用逗号分隔。工具固定、source
+固定和别名不在其中，它们分别由 `osdk use`、`osdk source pin` 和 `osdk alias` 管理。
+
+`sources.probe_timeout_ms` 写进顶层 `[sources]` 表，单位毫秒、必须 ≥ 1，默认 1500。
+它是**每个源一次探测**的总预算：模型源探测要在这一份预算内同时发 metadata 请求和一个
+有界的 Range 拉取，所以慢网络下 1500 ms 可能把完全可用的本地镜像误判为不可达。此时调
+大它，而不是去手改配置文件：
+
+```bash
+osdk config set -g sources.probe_timeout_ms 4000   # 只放宽源探测，不影响下载本身
+osdk config get sources.probe_timeout_ms
+```
+
+Python 与 npm 各自的探测超时是 `[registries.python]` / `[registries.npm]` 下独立的
+`probe_timeout_ms`，当前不在 `config set` 清单里（那两组列表已在清单中）。
 
 枚举取值与各自类型一致，别名会被规范化后写入（`attestations=auto` 存为
 `if-available`）：

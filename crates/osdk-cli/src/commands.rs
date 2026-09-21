@@ -5418,7 +5418,24 @@ fn resolved_setting(app: &App, key: &str) -> Option<String> {
     if let Some(rendered) = registry_setting_display(app.ctx.config.registries(), key) {
         return Some(rendered);
     }
+    if let Some(rendered) = sources_setting_display(&app.ctx.config.sources, key) {
+        return Some(rendered);
+    }
     setting_display(&app.ctx.config.settings, key)
+}
+
+/// Render a `sources.*` key, or `None` if the key is not one.
+///
+/// Like the registry lists, sources live in their own top-level table and are not
+/// reachable from `Settings`.
+fn sources_setting_display(
+    sources: &osdk_core::config::SourcesConfig,
+    key: &str,
+) -> Option<String> {
+    match key {
+        "sources.probe_timeout_ms" => Some(sources.probe_timeout_ms.to_string()),
+        _ => None,
+    }
 }
 
 /// Render a `registries.*` key, or `None` if the key is not one.
@@ -5590,8 +5607,9 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 // The global value on its own, not the merged result: with `-g`
                 // the question is what the user config holds.
                 let user = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
-                let value =
-                    setting_display(&user.settings, &key).ok_or_else(|| unknown_setting(&key))?;
+                let value = sources_setting_display(&user.sources, &key)
+                    .or_else(|| setting_display(&user.settings, &key))
+                    .ok_or_else(|| unknown_setting(&key))?;
                 println!("{value}");
             } else {
                 let value = resolved_setting(app, &key).ok_or_else(|| unknown_setting(&key))?;
@@ -5607,8 +5625,12 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             // Re-read from disk: printing the argument back would claim success
             // even if the value landed somewhere the loader ignores.
             let written = osdk_core::config::Config::load_user(&path)?;
-            let effective =
-                setting_display(&written.settings, &key).unwrap_or_else(|| value.clone());
+            // Read back through the same resolvers `config get` uses, so a key
+            // written into `[sources]` or `[registries]` is confirmed where the
+            // loader actually reads it rather than echoing the argument.
+            let effective = sources_setting_display(&written.sources, &key)
+                .or_else(|| setting_display(&written.settings, &key))
+                .unwrap_or_else(|| value.clone());
             println!("set {key} = {effective} in {}", path.display());
             offer_trust_after_set(app, &path, scope)?;
         }
@@ -7639,10 +7661,13 @@ mod command_flow_tests {
         // key accepts a value and then reports `unknown setting` on read.
         let defaults = osdk_core::config::Settings::default();
         let registries = osdk_core::config::RegistriesConfig::default();
+        let sources = osdk_core::config::SourcesConfig::default();
         for setting in crate::config_edit::SETTINGS {
-            // Two independent read paths now exist, because registry lists are
-            // not part of `Settings`. A key is readable if either renders it.
+            // Three independent read paths now exist: `Settings`, the registry
+            // tables, and the `[sources]` table. A key is readable if any renders
+            // it.
             let rendered = registry_setting_display(&registries, setting.key)
+                .or_else(|| sources_setting_display(&sources, setting.key))
                 .or_else(|| setting_display(&defaults, setting.key));
             assert!(
                 rendered.is_some(),
