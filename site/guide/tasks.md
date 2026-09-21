@@ -587,11 +587,19 @@ error: task `linuxonly` is not available on this platform (os=linux)
 **`task_config` 仍然需要信任**，因为它不是你点名的命令，而是一个环境设置：
 
 ```
-$ osdk task list
+$ osdk task list          # 只是打印声明，不需要信任
+build
+test
+
+$ osdk run test           # 真正要用那个解释器，于是被拦住
 error: project config is not trusted: /path/to/osdk.toml
 these keys need review because they affect what runs on this machine:
   task_config -- 决定用什么解释器执行任务，任务的实际行为可能与写出来的不一致
 ```
+
+注意被拦住的是 `osdk run`，不是 `osdk task list`。后者只报告文件里写了什么、
+不执行任何东西，因此即使项目尚未信任也照常可用——否则「先看清再决定要不要
+信任」这条路本身就被堵死了。
 
 它的 `shell` 字段决定作用域内**每个**任务用什么解释器。一份配置若悄悄写上
 `shell = "evil --run"`，之后每次 `osdk run` 执行的都不再是任务文本写的东西，

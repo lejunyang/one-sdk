@@ -646,11 +646,20 @@ task only ever runs because someone named it.
 but an ambient setting:
 
 ```
-$ osdk task list
+$ osdk task list          # only prints what is declared; needs no trust
+build
+test
+
+$ osdk run test           # actually uses that interpreter, so it is refused
 error: project config is not trusted: /path/to/osdk.toml
 these keys need review because they affect what runs on this machine:
   task_config -- decides which interpreter runs your tasks, so a task may not run what it says
 ```
+
+Note which command is refused: `osdk run`, not `osdk task list`. Listing only
+reports what the file says and executes nothing, so it keeps working on an
+untrusted project -- otherwise the route to *reading a config before deciding
+whether to trust it* would itself be blocked.
 
 Its `shell` field decides which interpreter **every** task in scope runs under.
 A config that quietly sets `shell = "evil --run"` turns every later `osdk run`

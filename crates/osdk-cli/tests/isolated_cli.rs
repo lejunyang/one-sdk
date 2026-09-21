@@ -842,6 +842,105 @@ fn safe_project_pins_do_not_require_trust() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("node = 20"));
 }
 
+/// Read-only commands skip the trust *gate*, not the project *config*.
+///
+/// `bypasses_trust_check` routed `task list` through a loader that reads only
+/// user-global configuration, so the command whose entire job is to print what
+/// the project declares reported "no tasks defined" for every project -- this
+/// repository included, whose `[tasks]` table is the documented answer to "what
+/// does CI run". Nothing failed and nothing warned: exit code 0, and output
+/// that reads as a legitimate "there are none".
+///
+/// `osdk run <task>` stays gated and therefore used the full loader, which is
+/// how a task could be runnable while being unlistable -- two code paths
+/// disagreeing about whether the same table exists.
+#[test]
+fn read_only_commands_see_the_project_config_they_report_on() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // Deliberately free of trust-requiring keys: this must work with no trust
+    // record at all, which is the point of the read-only exemption.
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[tasks]\nlisted-task = \"echo hi\"\n",
+    )
+    .unwrap();
+
+    let listed = run_isolated_in(temp.path(), &project, &["task", "list"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        stdout.contains("listed-task"),
+        "`task list` must print the project's task; got: {stdout}"
+    );
+
+    // `task info` reads the same set and was empty for the same reason.
+    let info = run_isolated_in(temp.path(), &project, &["task", "info", "listed-task"]);
+    assert!(
+        info.status.success(),
+        "{}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&info.stdout).contains("echo hi"),
+        "`task info` must resolve the project's task"
+    );
+}
+
+/// The exemption must not become a silent widening of trust.
+///
+/// Loading the project config for read-only commands is only safe while the
+/// commands that *act* on it stay refused. Without this, the fix above would be
+/// indistinguishable from "untrusted configs are now honoured everywhere".
+#[test]
+fn loading_project_config_for_read_only_commands_does_not_unlock_the_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // `[sources]` requires trust (WeakensVerification); `[tasks]` gives the run
+    // path something to attempt.
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[sources]\nselection = \"ordered\"\n[tasks]\nlisted-task = \"echo hi\"\n",
+    )
+    .unwrap();
+
+    // Read-only still works despite the untrusted, trust-requiring table.
+    let listed = run_isolated_in(temp.path(), &project, &["task", "list"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("listed-task"));
+
+    // ...and the command that would execute it is still refused.
+    let refused = run_isolated_in(temp.path(), &project, &["run", "listed-task"]);
+    assert!(
+        !refused.status.success(),
+        "`run` must stay gated on an untrusted config; stdout: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("is not trusted"), "{message}");
+
+    // A command that installs is likewise still refused.
+    let install = run_isolated_in(temp.path(), &project, &["install"]);
+    assert!(
+        !install.status.success(),
+        "`install` must stay gated on an untrusted config"
+    );
+    assert!(
+        String::from_utf8_lossy(&install.stderr).contains("is not trusted"),
+        "`install` must be refused for the trust reason, not some other error"
+    );
+}
+
 #[test]
 fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
     let temp = tempfile::tempdir().unwrap();

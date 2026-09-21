@@ -100,14 +100,40 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        let bypass_trust_check = bypasses_trust_check(&cli.command);
-        let mut app = if bypass_trust_check {
-            App::init_without_trust_check(overrides)?
+        // Three cases, not two. `excludes_project_config` is about trust
+        // management, which must not read the project at all;
+        // `bypasses_trust_check` is about read-only commands, which must read it
+        // and only skip the refusal.
+        let mut app = if excludes_project_config(&cli.command) {
+            App::init_without_project_config(overrides)?
+        } else if bypasses_trust_check(&cli.command) {
+            App::init_read_only(overrides)?
         } else {
             App::init(overrides)?
         };
         dispatch(&mut app, cli.command).await
     })
+}
+
+/// Whether a command must not read the project configuration at all.
+///
+/// Trust management and the `config set`/`unset` escape hatch: letting an
+/// untrusted project take part in the decision to trust it, or in the edit that
+/// brings it back into shape, would defeat the point of the gate.
+///
+/// Distinct from [`bypasses_trust_check`], which is about commands that *do*
+/// read the project config and merely skip the refusal. Conflating the two is
+/// what made `osdk task list` report "no tasks defined" for every project.
+fn excludes_project_config(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Trust { .. }
+            | Command::Untrust { .. }
+            | Command::Config {
+                command: crate::cli::ConfigCommand::Set { .. }
+                    | crate::cli::ConfigCommand::Unset { .. }
+            }
+    )
 }
 
 /// Whether a command runs before the project config is trusted.
@@ -230,9 +256,9 @@ fn init_tracing(verbose: u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::bypasses_trust_check;
     #[cfg(unix)]
     use super::native_exit_code;
+    use super::{bypasses_trust_check, excludes_project_config};
     use crate::cli::{Command, ConfigCommand, TaskCommand};
 
     #[test]
@@ -271,6 +297,65 @@ mod tests {
         assert!(!bypasses_trust_check(&Command::Config {
             command: ConfigCommand::Path
         }));
+    }
+
+    /// The two exemptions are different things and must not drift back together.
+    ///
+    /// `excludes_project_config` means "do not read the project at all", and only
+    /// trust management may claim it. `bypasses_trust_check` means "read it, but
+    /// do not refuse" -- and a command in that group that also excluded the
+    /// config would be reporting on a file it never opened, which is exactly the
+    /// bug where `task list` printed "no tasks defined" for every project.
+    #[test]
+    fn read_only_commands_read_the_project_config_while_trust_management_does_not() {
+        for command in [
+            Command::Trust {
+                path: None,
+                command: None,
+            },
+            Command::Untrust { path: None },
+            Command::Config {
+                command: ConfigCommand::Set {
+                    key: "jobs".into(),
+                    value: "4".into(),
+                    global: false,
+                },
+            },
+        ] {
+            assert!(
+                excludes_project_config(&command),
+                "trust management must not read the project config: {command:?}"
+            );
+        }
+
+        // Every read-only command reports on the project config, so none of them
+        // may exclude it.
+        for command in [
+            Command::List { tool: None },
+            Command::Current { tool: None },
+            Command::Doctor {
+                verify: false,
+                tool: None,
+            },
+            Command::Task {
+                command: TaskCommand::List { hidden: false },
+            },
+            Command::Task {
+                command: TaskCommand::Info {
+                    task: "build".into(),
+                },
+            },
+            Command::Task {
+                command: TaskCommand::Deps {
+                    task: "build".into(),
+                },
+            },
+        ] {
+            assert!(
+                !excludes_project_config(&command),
+                "read-only command must still load the project config it reports on: {command:?}"
+            );
+        }
     }
 
     /// Read-only commands must not be refused, and acting commands must be.

@@ -128,22 +128,56 @@ impl App {
     }
 }
 
+/// How much of the project configuration a command may see, and whether the
+/// trust gate applies to it.
+///
+/// This was one boolean, which conflated two independent questions and so could
+/// not express the middle case. `task list` needs the project's `[tasks]` table
+/// -- printing it is the command's entire purpose -- but must not be refused on
+/// an unreviewed config. With a single flag it got both or neither, and "neither"
+/// meant it reported "no tasks defined" for every project on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectAccess {
+    /// Load the project config and refuse if it is untrusted. The default.
+    Gated,
+    /// Load the project config but do not enforce the gate: the command only
+    /// reports what the config says and acts on nothing.
+    ReadOnly,
+    /// Do not load the project config at all. Trust management uses this so an
+    /// untrusted project cannot influence the decision to trust it.
+    Excluded,
+}
+
 impl App {
     /// Build the app: resolve dirs, load config, overlay CLI flags, build ctx.
     pub fn init(overrides: GlobalOverrides) -> Result<App> {
-        Self::init_with_trust(overrides, true)
+        Self::init_with_project_access(overrides, ProjectAccess::Gated)
     }
 
-    pub fn init_without_trust_check(overrides: GlobalOverrides) -> Result<App> {
-        Self::init_with_trust(overrides, false)
+    /// Load the project config without enforcing the trust gate.
+    ///
+    /// For commands that only *report* what the project declares: they need the
+    /// project layer, because it is the thing they exist to print, while
+    /// refusing them on an unreviewed config would make the directory hostile
+    /// and hide the exit route (see `bypasses_trust_check`).
+    pub fn init_read_only(overrides: GlobalOverrides) -> Result<App> {
+        Self::init_with_project_access(overrides, ProjectAccess::ReadOnly)
     }
 
-    fn init_with_trust(overrides: GlobalOverrides, check_trust: bool) -> Result<App> {
+    /// Build with the project config excluded entirely.
+    ///
+    /// For trust management and `config set`/`unset`: an untrusted project must
+    /// not influence the decision to trust it, nor the edit that undoes it.
+    pub fn init_without_project_config(overrides: GlobalOverrides) -> Result<App> {
+        Self::init_with_project_access(overrides, ProjectAccess::Excluded)
+    }
+
+    fn init_with_project_access(overrides: GlobalOverrides, access: ProjectAccess) -> Result<App> {
         let dirs = Dirs::resolve().context("resolving osdk directories")?;
         dirs.ensure().context("creating osdk directories")?;
 
         let cwd = std::env::current_dir().context("getting current dir")?;
-        if check_trust {
+        if access == ProjectAccess::Gated {
             if let Some(project_config) = osdk_core::trust::project_config(&cwd)? {
                 let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
                 let requirements = osdk_core::trust::trust_requirements(&project_config)?;
@@ -162,10 +196,16 @@ impl App {
                 }
             }
         }
-        let mut config = if check_trust {
-            Config::load(&dirs.user_config_file(), &cwd)
-        } else {
-            Config::load_user(&dirs.user_config_file())
+        // Only `Excluded` drops the project layer. `ReadOnly` must keep it: it
+        // skips the *gate*, not the *file*. Loading user-global config alone made
+        // `task list` print "no tasks defined" for every project, while
+        // `osdk run` -- gated, and therefore using the full loader -- ran those
+        // very tasks. Two code paths disagreeing about whether a table exists.
+        let mut config = match access {
+            ProjectAccess::Gated | ProjectAccess::ReadOnly => {
+                Config::load(&dirs.user_config_file(), &cwd)
+            }
+            ProjectAccess::Excluded => Config::load_user(&dirs.user_config_file()),
         }
         .context("loading configuration")?;
 
