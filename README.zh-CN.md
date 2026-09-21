@@ -517,6 +517,18 @@ osdk model path qwen25 --stable
 osdk model sync
 osdk model list
 ```
+
+把快照渲染成 ComfyUI / Hugging Face 缓存形状的消费者视图（链接回快照、不复制
+权重、只读），并生成或打印接入配置：
+
+```bash
+osdk model view add comfyui qwen25 --map unet/=diffusion_models
+osdk model view path comfyui                 # 稳定路径，贴进消费者配置
+osdk model view export comfyui --to extra_model_paths.yaml   # 源码版 ComfyUI
+osdk model view list
+osdk model view doctor comfyui
+osdk model view remove comfyui --model qwen25
+```
 
 需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用
 Provider 环境：

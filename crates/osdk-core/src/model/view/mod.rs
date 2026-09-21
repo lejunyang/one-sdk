@@ -18,15 +18,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::dirs::Dirs;
 use crate::error::{Error, Result};
-use crate::model::{
-    safe_relative_path, validate_model_name, InstalledModel, ModelFile, ModelStore,
-};
-use crate::store::link::{self, LinkMode};
+use crate::model::{safe_relative_path, validate_model_name, InstalledModel, ModelStore};
+use crate::store::link::LinkMode;
 
 pub mod comfyui;
 pub mod hf_cache;
+pub mod state;
 
 pub use hf_cache::repo_dir_name;
+pub use state::{ViewConsumer, ViewEntrySpec, ViewState};
 
 /// A consumer view shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,12 @@ impl ViewKind {
     }
 }
 
+impl std::fmt::Display for ViewKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::str::FromStr for ViewKind {
     type Err = Error;
 
@@ -66,15 +72,6 @@ impl std::str::FromStr for ViewKind {
     }
 }
 
-/// How a single repository-relative file maps into a consumer view.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placement {
-    /// Category/folder within the consumer layout (e.g. `diffusion_models`).
-    pub category: String,
-    /// File name inside that category.
-    pub file_name: String,
-}
-
 /// One model's membership in one view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewEntry {
@@ -85,34 +82,78 @@ pub struct ViewEntry {
     pub map: BTreeMap<String, String>,
 }
 
-/// Result of rendering (or re-rendering) one model into a view.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RenderReport {
-    /// Files placed into the view, as consumer-relative `/` paths.
-    pub placed: Vec<String>,
-    /// Files the renderer could not assign to a category. fail-closed: these are
-    /// not placed anywhere and surfaced here for `view doctor`.
-    pub unclassified: Vec<String>,
-    /// Link modes that were actually used per placed file (for explicit
-    /// cross-volume reporting), deduplicated.
-    pub modes_used: Vec<LinkMode>,
-    /// Number of files that fell back to a byte copy because a link was not
-    /// possible (different volume). Reported, never silent.
-    pub copies: usize,
+/// How a planned entry is materialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceSource {
+    /// Link/copy the snapshot file at this absolute path.
+    Link(PathBuf),
+    /// Write these literal bytes (a tiny generated file such as a hub refs
+    /// pointer).
+    Write(Vec<u8>),
 }
 
-impl RenderReport {
-    fn note_mode(&mut self, mode: LinkMode) {
-        if !self.modes_used.contains(&mode) {
-            self.modes_used.push(mode);
-        }
-        if mode == LinkMode::Copy {
-            self.copies += 1;
-        }
+/// One planned entry: a root-relative consumer path and how to fill it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedFile {
+    /// Consumer-relative path with `/` separators.
+    pub relative: String,
+    pub source: PlaceSource,
+}
+
+/// Result of planning a render.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    pub files: Vec<PlannedFile>,
+    /// Snapshot files the renderer could not assign. fail-closed: not placed.
+    pub unclassified: Vec<String>,
+}
+
+/// How a single repository-relative file maps into a consumer view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub category: String,
+    pub file_name: String,
+}
+
+impl Plan {
+    pub fn link(&mut self, relative: impl Into<String>, source: PathBuf) {
+        self.files.push(PlannedFile {
+            relative: relative.into(),
+            source: PlaceSource::Link(source),
+        });
+    }
+
+    pub fn write(&mut self, relative: impl Into<String>, bytes: Vec<u8>) {
+        self.files.push(PlannedFile {
+            relative: relative.into(),
+            source: PlaceSource::Write(bytes),
+        });
     }
 }
 
-/// Manages rendered views under `<data>/views`.
+/// Outcome after materializing a plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderReport {
+    pub placed: Vec<String>,
+    pub unclassified: Vec<String>,
+    pub copies: usize,
+}
+
+/// Persisted ownership of every consumer-relative path in a view profile.
+///
+/// ComfyUI categories are shared across models, so a rebuild cannot delete a
+/// category directory -- that would remove another model's links. This records
+/// which model owns each placed path, so incremental rebuilds and per-model
+/// removal touch only that model's entries; it also makes same-filename
+/// collisions across models detectable instead of last-write-wins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ViewManifest {
+    #[serde(default)]
+    owners: BTreeMap<String, String>,
+}
+
+const VIEW_MANIFEST_FILE: &str = ".osdk-view.json";
+
 pub struct ViewStore {
     dirs: Dirs,
     models: ModelStore,
@@ -124,17 +165,12 @@ impl ViewStore {
         Self { dirs, models }
     }
 
-    /// `<data>/views/<kind>/<profile>` -- the stable root a consumer's config
-    /// points at. The default profile is `default`.
     pub fn view_root(&self, kind: ViewKind, profile: &str) -> Result<PathBuf> {
         validate_profile(profile)?;
         Ok(self.dirs.model_views().join(kind.as_str()).join(profile))
     }
 
-    /// Render every current model that belongs to this view into it.
-    ///
-    /// `entries` lists model membership (from config or the lock). Models not
-    /// currently pulled are skipped (the view is rebuilt again after sync).
+    /// Render (incrementally) the listed models. Models not pulled are skipped.
     pub fn render(
         &self,
         kind: ViewKind,
@@ -143,55 +179,159 @@ impl ViewStore {
     ) -> Result<BTreeMap<String, RenderReport>> {
         let root = self.view_root(kind, profile)?;
         crate::dirs::create_dir_all(&root)?;
+        if kind == ViewKind::Comfyui {
+            for category in comfyui::categories() {
+                crate::dirs::create_dir_all(&root.join(category))?;
+            }
+        }
+
+        let mut manifest = self.load_manifest(&root)?;
         let mut reports = BTreeMap::new();
+
         for entry in entries {
             validate_model_name(&entry.model)?;
             let Ok(installed) = self.models.current(&entry.model) else {
-                // Not pulled yet; nothing to render. Not an error.
                 continue;
             };
-            let model_dir = root.join(&entry.model);
-            // Rebuild this model's subtree from scratch so removed files do not
-            // linger as stale links.
-            if model_dir.exists() {
-                crate::store::dirlink::remove_tree_links_first(&model_dir)?;
-                std::fs::remove_dir_all(&model_dir).map_err(|e| Error::io(&model_dir, e))?;
-            }
-            crate::dirs::create_dir_all(&model_dir)?;
-            let report = match kind {
-                ViewKind::Comfyui => {
-                    comfyui::render(&installed, &entry.map, &model_dir, self.models.link_mode)?
-                }
-                ViewKind::HfCache => {
-                    hf_cache::render(&installed, &model_dir, self.models.link_mode)?
-                }
+
+            // Drop this model's previously-owned paths first.
+            self.remove_owned(&root, &mut manifest, &entry.model)?;
+
+            let plan = match kind {
+                ViewKind::Comfyui => comfyui::plan(&installed, &entry.map)?,
+                ViewKind::HfCache => hf_cache::plan(&installed)?,
             };
+
+            let mut report = RenderReport {
+                unclassified: plan.unclassified,
+                ..Default::default()
+            };
+            for file in plan.files {
+                let destination = join_consumer(&root, &file.relative)?;
+                if let Some(owner) = manifest.owners.get(&file.relative) {
+                    if owner != &entry.model {
+                        return Err(Error::other(format!(
+                            "view path `{}` is already provided by model `{owner}`; \
+                             rename a model or map it to a different category",
+                            file.relative
+                        )));
+                    }
+                }
+                match file.source {
+                    PlaceSource::Link(source) => {
+                        let used = place_file(&source, &destination, self.models.link_mode)?;
+                        if used == LinkMode::Copy {
+                            report.copies += 1;
+                        }
+                    }
+                    PlaceSource::Write(bytes) => {
+                        if let Some(parent) = destination.parent() {
+                            crate::dirs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&destination, &bytes)
+                            .map_err(|e| Error::io(&destination, e))?;
+                    }
+                }
+                manifest
+                    .owners
+                    .insert(file.relative.clone(), entry.model.clone());
+                report.placed.push(file.relative);
+            }
+
+            report.placed.sort();
+            report.unclassified.sort();
             reports.insert(entry.model.clone(), report);
         }
+
+        self.save_manifest(&root, &manifest)?;
         Ok(reports)
     }
 
-    /// Remove a whole profile's view tree, or one model's subtree within it.
+    /// Remove one model's entries, or the whole profile.
     pub fn remove(&self, kind: ViewKind, profile: &str, model: Option<&str>) -> Result<bool> {
         let root = self.view_root(kind, profile)?;
-        let target = match model {
-            Some(name) => {
-                validate_model_name(name)?;
-                root.join(name)
-            }
-            None => root,
-        };
-        if !target.exists() {
+        if !root.exists() {
             return Ok(false);
         }
-        crate::store::dirlink::remove_tree_links_first(&target)?;
-        std::fs::remove_dir_all(&target).map_err(|e| Error::io(&target, e))?;
-        Ok(true)
+        match model {
+            Some(model) => {
+                validate_model_name(model)?;
+                let mut manifest = self.load_manifest(&root)?;
+                let had = manifest.owners.values().any(|m| m == model);
+                self.remove_owned(&root, &mut manifest, model)?;
+                self.save_manifest(&root, &manifest)?;
+                Ok(had)
+            }
+            None => {
+                crate::store::dirlink::remove_tree_links_first(&root)?;
+                std::fs::remove_dir_all(&root).map_err(|e| Error::io(&root, e))?;
+                Ok(true)
+            }
+        }
     }
 
     pub fn link_mode(&self) -> LinkMode {
         self.models.link_mode
     }
+
+    /// Whether a model has a current snapshot pulled locally.
+    pub fn model_exists(&self, name: &str) -> Result<bool> {
+        match self.models.current(name) {
+            Ok(_) => Ok(true),
+            // current() wraps every missing-file path in the structured Io
+            // variant (current.json missing => NotFound).
+            Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(Error::PlainIo(io)) if io.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
+    fn load_manifest(&self, root: &Path) -> Result<ViewManifest> {
+        let path = root.join(VIEW_MANIFEST_FILE);
+        if !path.is_file() {
+            return Ok(ViewManifest::default());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| Error::io(&path, e))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| Error::other(format!("invalid {VIEW_MANIFEST_FILE}: {e}")))
+    }
+
+    fn save_manifest(&self, root: &Path, manifest: &ViewManifest) -> Result<()> {
+        let path = root.join(VIEW_MANIFEST_FILE);
+        let bytes = serde_json::to_vec_pretty(manifest)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes).map_err(|e| Error::io(&tmp, e))?;
+        std::fs::rename(&tmp, &path).map_err(|e| Error::io(&path, e))
+    }
+
+    /// Delete every consumer-relative path owned by `model`, dropping entries.
+    fn remove_owned(&self, root: &Path, manifest: &mut ViewManifest, model: &str) -> Result<()> {
+        let owned: Vec<String> = manifest
+            .owners
+            .iter()
+            .filter_map(|(path, owner)| (owner == model).then_some(path.clone()))
+            .collect();
+        for relative in owned {
+            let path = join_consumer(root, &relative)?;
+            match path.symlink_metadata() {
+                Ok(meta) if crate::store::dirlink::is_link(&meta) && meta.is_dir() => {
+                    crate::store::dirlink::remove(&path)?;
+                }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(_) => {}
+            }
+            manifest.owners.remove(&relative);
+        }
+        Ok(())
+    }
+}
+
+fn join_consumer(root: &Path, relative: &str) -> Result<PathBuf> {
+    Ok(root.join(safe_relative_path(relative)?))
 }
 
 fn validate_profile(profile: &str) -> Result<()> {
@@ -209,20 +349,12 @@ fn validate_profile(profile: &str) -> Result<()> {
     Ok(())
 }
 
-/// Place one snapshot file into the view using the chosen link mode, returning
-/// the mode actually used. Shared by every renderer so cross-volume fallback
-/// and read-only marking behave identically.
-///
-/// Read-only is set on the placed entry so a consumer that writes in place
-/// fails loudly instead of mutating the CAS bytes through a hardlink. A copy is
-/// also marked read-only; the user can still delete a view (directory removal
-/// does not require unsetting the file's read-only bit on either platform), but
-/// overwriting its contents is denied.
+/// Place one file with the chosen link mode and mark it read-only.
 pub(crate) fn place_file(source: &Path, destination: &Path, mode: LinkMode) -> Result<LinkMode> {
     if let Some(parent) = destination.parent() {
         crate::dirs::create_dir_all(parent)?;
     }
-    let used = link::materialize(source, destination, mode)?;
+    let used = crate::store::link::materialize(source, destination, mode)?;
     set_readonly(destination)?;
     Ok(used)
 }
@@ -232,7 +364,6 @@ fn set_readonly(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(path).map_err(|e| Error::io(path, e))?;
     let mut perms = meta.permissions();
-    // Drop write for owner/group/other, keep read (and execute if it had it).
     perms.set_mode(perms.mode() & 0o555);
     std::fs::set_permissions(path, perms).map_err(|e| Error::io(path, e))
 }
@@ -248,17 +379,9 @@ fn set_readonly(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Apply the read-only bit to a view working-tree entry that was linked
-/// separately from the blob-placement path (the HF cache links
-/// `snapshots/<rev>/<file>` to a blob, rather than directly to the snapshot).
-pub(crate) fn set_working_readonly(path: &Path) -> Result<()> {
-    set_readonly(path)
-}
-
 /// Resolve a snapshot file's absolute path within the materialized snapshot.
-pub(crate) fn snapshot_file_path(installed: &InstalledModel, file: &ModelFile) -> Result<PathBuf> {
-    let relative = safe_relative_path(&file.path)?;
-    Ok(installed.path.join(relative))
+pub(crate) fn snapshot_file_path(installed: &InstalledModel, relative: &str) -> Result<PathBuf> {
+    Ok(installed.path.join(safe_relative_path(relative)?))
 }
 
 #[cfg(test)]
@@ -267,7 +390,6 @@ mod tests {
     use crate::dirs::Dirs;
     use crate::model::{DownloadedModelFile, ModelStore, ProviderId, SnapshotIdentity};
     use crate::store::Cas;
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn stores(root: &Path) -> (ModelStore, ViewStore) {
@@ -280,50 +402,33 @@ mod tests {
         .unwrap();
         dirs.ensure().unwrap();
         let cas = Arc::new(Cas::new(dirs.store.clone()));
-        // Copy mode makes the view test deterministic on every platform and
-        // still exercises the read-only marking that matters for safety.
-        let models = ModelStore::new(dirs.clone(), cas, LinkMode::Copy);
-        let views = ViewStore::new(
-            dirs.clone(),
-            Arc::new(Cas::new(dirs.store.clone())),
-            LinkMode::Copy,
-        );
+        let models = ModelStore::new(dirs.clone(), cas.clone(), LinkMode::Copy);
+        let views = ViewStore::new(dirs.clone(), cas, LinkMode::Copy);
         (models, views)
     }
 
-    fn write_source(root: &Path, rel: &str, bytes: &[u8]) -> (std::path::PathBuf, u64) {
-        let path = root.join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, bytes).unwrap();
-        (path, bytes.len() as u64)
+    /// `src_rel` is where the downloaded bytes live in the scratch area;
+    /// `repo_rel` is the path inside the repository (what the classifier sees).
+    fn file_in(root: &Path, src_rel: &str, repo_rel: &str, bytes: &[u8]) -> DownloadedModelFile {
+        let source = root.join(src_rel);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, bytes).unwrap();
+        DownloadedModelFile {
+            path: repo_rel.into(),
+            source,
+            size: bytes.len() as u64,
+            sha256: None,
+            etag: None,
+        }
     }
 
-    /// Publish a multi-component diffusion snapshot plus a loose root file.
-    fn publish_mix(models: &ModelStore, root: &Path) {
-        let mut files = Vec::new();
-        for (rel, bytes) in [
-            ("unet/diffusion.safetensors", &b"unet-bytes"[..]),
-            ("vae/vae.safetensors", &b"vae-bytes"[..]),
-            ("text_encoder/te.safetensors", &b"te-bytes"[..]),
-            ("loras/style.safetensors", &b"lora-bytes"[..]),
-            ("loose.safetensors", &b"loose-bytes"[..]),
-            ("config.json", &b"{}"[..]),
-        ] {
-            let (source, size) = write_source(root, rel, bytes);
-            files.push(DownloadedModelFile {
-                path: rel.into(),
-                source,
-                size,
-                sha256: None,
-                etag: None,
-            });
-        }
+    fn publish(models: &ModelStore, _root: &Path, name: &str, files: Vec<DownloadedModelFile>) {
         models
             .publish(
                 SnapshotIdentity {
-                    name: "mix".into(),
+                    name: name.into(),
                     provider: ProviderId::HuggingFace,
-                    repository: "owner/repo".into(),
+                    repository: format!("owner/{name}"),
                     requested_revision: "main".into(),
                     revision: "abc123".into(),
                     endpoint: "https://huggingface.co".into(),
@@ -335,105 +440,138 @@ mod tests {
     }
 
     #[test]
-    fn comfyui_view_places_components_categories_and_is_readonly() {
+    fn comfyui_shared_categories_survive_rebuild_and_model_removal() {
         let temp = tempfile::tempdir().unwrap();
         let scratch = temp.path().join("scratch");
         std::fs::create_dir_all(&scratch).unwrap();
         let (models, views) = stores(temp.path());
-        publish_mix(&models, &scratch);
-
-        // Explicit mapping rescues the loose weight; config.json has no weight
-        // category and stays unclassified alongside the loose json.
-        let mut map = BTreeMap::new();
-        map.insert("loose.safetensors".to_string(), "checkpoints".to_string());
-        let entries = vec![ViewEntry {
-            model: "mix".into(),
-            map,
-        }];
-        let reports = views
+        publish(
+            &models,
+            &scratch,
+            "a",
+            vec![file_in(
+                &scratch,
+                "src-a/vae-a.safetensors",
+                "vae/vae-a.safetensors",
+                b"A",
+            )],
+        );
+        publish(
+            &models,
+            &scratch,
+            "b",
+            vec![file_in(
+                &scratch,
+                "src-b/vae-b.safetensors",
+                "vae/vae-b.safetensors",
+                b"B",
+            )],
+        );
+        let map = BTreeMap::new();
+        let entries = vec![
+            ViewEntry {
+                model: "a".into(),
+                map: map.clone(),
+            },
+            ViewEntry {
+                model: "b".into(),
+                map,
+            },
+        ];
+        let root = views.view_root(ViewKind::Comfyui, "default").unwrap();
+        views
             .render(ViewKind::Comfyui, "default", &entries)
             .unwrap();
-        let report = &reports["mix"];
-
-        let root = views.view_root(ViewKind::Comfyui, "default").unwrap();
-        let m = root.join("mix");
-
-        // Correct categories, read bytes THROUGH the view.
         assert_eq!(
-            std::fs::read(m.join("diffusion_models/diffusion.safetensors")).unwrap(),
-            b"unet-bytes"
+            std::fs::read(root.join("vae/vae-a.safetensors")).unwrap(),
+            b"A"
         );
         assert_eq!(
-            std::fs::read(m.join("vae/vae.safetensors")).unwrap(),
-            b"vae-bytes"
+            std::fs::read(root.join("vae/vae-b.safetensors")).unwrap(),
+            b"B"
         );
+
+        // Rebuild model a only; b's link must remain (the shared-dir bug).
+        views
+            .render(ViewKind::Comfyui, "default", &[entries[0].clone()])
+            .unwrap();
         assert_eq!(
-            std::fs::read(m.join("text_encoders/te.safetensors")).unwrap(),
-            b"te-bytes"
+            std::fs::read(root.join("vae/vae-b.safetensors")).unwrap(),
+            b"B"
         );
+
+        views
+            .remove(ViewKind::Comfyui, "default", Some("a"))
+            .unwrap();
+        assert!(!root.join("vae/vae-a.safetensors").exists());
         assert_eq!(
-            std::fs::read(m.join("checkpoints/loose.safetensors")).unwrap(),
-            b"loose-bytes"
+            std::fs::read(root.join("vae/vae-b.safetensors")).unwrap(),
+            b"B"
         );
-
-        // fail-closed: the loose json is unclassified, not dumped anywhere.
-        assert_eq!(report.unclassified, vec!["config.json"]);
-        assert!(!m.join("checkpoints/config.json").exists());
-
-        // all 25 category dirs exist
-        let mut dir_count = 0usize;
-        for entry in std::fs::read_dir(&m).unwrap() {
-            if entry.unwrap().file_type().unwrap().is_dir() {
-                dir_count += 1;
-            }
-        }
-        assert_eq!(dir_count, 25, "renderer must pre-create every category");
-
-        // read-only: opening the placed file for write must fail.
-        let placed = m.join("vae/vae.safetensors");
-        assert!(std::fs::OpenOptions::new()
-            .write(true)
-            .open(&placed)
-            .is_err());
-
-        // copy mode reported honestly: four components + the rescued loose
-        // weight = 5 placed files (the json stays unclassified). Removal must
-        // not harm the snapshot.
-        assert_eq!(report.copies, 5);
-        views.remove(ViewKind::Comfyui, "default", None).unwrap();
-        assert!(!root.exists());
-        assert_eq!(models.verify("mix").unwrap().revision, "abc123");
+        assert_eq!(models.verify("a").unwrap().revision, "abc123");
     }
 
     #[test]
-    fn hf_cache_view_has_hub_layout_and_refs() {
+    fn same_filename_across_models_is_a_reported_collision_not_an_overwrite() {
         let temp = tempfile::tempdir().unwrap();
         let scratch = temp.path().join("scratch");
         std::fs::create_dir_all(&scratch).unwrap();
         let (models, views) = stores(temp.path());
-        let (source, size) = write_source(&scratch, "model.bin", b"hub");
-        models
-            .publish(
-                SnapshotIdentity {
-                    name: "q".into(),
-                    provider: ProviderId::HuggingFace,
-                    repository: "owner/repo".into(),
-                    requested_revision: "main".into(),
-                    revision: "deadbeef".into(),
-                    endpoint: "https://huggingface.co".into(),
-                    variant: None,
-                },
-                vec![DownloadedModelFile {
-                    path: "model.bin".into(),
-                    source,
-                    size,
-                    sha256: None,
-                    etag: Some("\"etag-1\"".into()),
-                }],
+        publish(
+            &models,
+            &scratch,
+            "a",
+            vec![file_in(
+                &scratch,
+                "src-a/vae.safetensors",
+                "vae/vae.safetensors",
+                b"A",
+            )],
+        );
+        publish(
+            &models,
+            &scratch,
+            "b",
+            vec![file_in(
+                &scratch,
+                "src-b/vae.safetensors",
+                "vae/vae.safetensors",
+                b"B",
+            )],
+        );
+        let map = BTreeMap::new();
+        let err = views
+            .render(
+                ViewKind::Comfyui,
+                "default",
+                &[
+                    ViewEntry {
+                        model: "a".into(),
+                        map: map.clone(),
+                    },
+                    ViewEntry {
+                        model: "b".into(),
+                        map,
+                    },
+                ],
             )
-            .unwrap();
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already provided by model"),
+            "{err}"
+        );
+    }
 
-        let reports = views
+    #[test]
+    fn hf_cache_layout_sits_directly_under_the_view_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let (models, views) = stores(temp.path());
+        let mut f = file_in(&scratch, "q/model.bin", "model.bin", b"hub");
+        f.etag = Some("\"e1\"".into());
+        publish(&models, &scratch, "q", vec![f]);
+        views
             .render(
                 ViewKind::HfCache,
                 "default",
@@ -443,33 +581,13 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert!(reports["q"].unclassified.is_empty());
-
         let root = views.view_root(ViewKind::HfCache, "default").unwrap();
-        let repo = root.join("q/models--owner--repo");
-        assert_eq!(std::fs::read(repo.join("refs/main")).unwrap(), b"deadbeef");
-        // working tree resolves through the blob
+        let repo = root.join("models--owner--q");
+        assert_eq!(std::fs::read(repo.join("refs/main")).unwrap(), b"abc123");
         assert_eq!(
-            std::fs::read(repo.join("snapshots/deadbeef/model.bin")).unwrap(),
+            std::fs::read(repo.join("snapshots/abc123/model.bin")).unwrap(),
             b"hub"
         );
-        assert!(repo.join("blobs/etag-1").exists());
-    }
-
-    #[test]
-    fn an_unpulled_model_in_entries_is_skipped_not_an_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let (_models, views) = stores(temp.path());
-        let reports = views
-            .render(
-                ViewKind::Comfyui,
-                "default",
-                &[ViewEntry {
-                    model: "ghost".into(),
-                    map: BTreeMap::new(),
-                }],
-            )
-            .unwrap();
-        assert!(reports.is_empty());
+        assert!(repo.join("blobs/e1").exists());
     }
 }

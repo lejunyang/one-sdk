@@ -5110,3 +5110,90 @@ fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_cod
         "--host\nunix:///var/run/docker.sock\nimage\nprune\n--force\n"
     );
 }
+
+fn view_list_empty(output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no model views configured"),
+        "empty list output: {stdout}"
+    );
+}
+
+#[test]
+fn model_view_offline_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| run_isolated(temp.path(), args);
+
+    // 1. List with nothing configured.
+    view_list_empty(&run(&["model", "view", "list"]));
+
+    // 2. add refuses an unpulled model with an actionable message (not a raw
+    //    io error).
+    let output = run(&["model", "view", "add", "comfyui", "ghost"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not pulled") && stderr.contains("osdk model pull ghost"),
+        "expected actionable unpulled error, got: {stderr}"
+    );
+    // Nothing was persisted after the failed add.
+    view_list_empty(&run(&["model", "view", "list"]));
+
+    // 3. path prints the stable, profile-scoped view root.
+    let output = run(&["model", "view", "path", "comfyui"]);
+    assert!(output.status.success());
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(
+        path.replace('\\', "/").ends_with("views/comfyui/default"),
+        "unexpected stable view path: {path}"
+    );
+
+    // 4. remove of a nonexistent view is a benign "nothing to remove".
+    let output = run(&["model", "view", "remove", "comfyui"]);
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("nothing to remove"),
+        "got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // 5. export prints a fragment with a unique key and, critically, no
+    //    is_default (research 搂5.11: that flag silently reorders name
+    //    collisions against the user's own roots).
+    let output = run(&["model", "view", "export", "comfyui"]);
+    assert!(output.status.success());
+    let fragment = String::from_utf8_lossy(&output.stdout);
+    assert!(fragment.contains("osdk-comfyui-default:"), "{fragment}");
+    assert!(fragment.contains("base_path:"), "{fragment}");
+    assert!(
+        !fragment.to_ascii_lowercase().contains("is_default"),
+        "export must never emit is_default: {fragment}"
+    );
+}
+
+#[test]
+fn model_view_export_to_merge_is_idempotent_and_preserves_user_yaml() {
+    let temp = tempfile::tempdir().unwrap();
+    let yaml = temp.path().join("extra_model_paths.yaml");
+    // Pre-existing user content that must survive repeated osdk merges.
+    std::fs::write(
+        &yaml,
+        "# my user header\nmy_own:\n  base_path: /elsewhere\n  checkpoints: ckpt\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| run_isolated(temp.path(), args);
+    let y = yaml.to_str().unwrap();
+
+    run(&["model", "view", "export", "comfyui", "--to", y]);
+    run(&["model", "view", "export", "comfyui", "--to", y]);
+
+    let body = std::fs::read_to_string(&yaml).unwrap();
+    // User block untouched and still present once.
+    assert!(body.contains("my_own:"));
+    assert_eq!(body.matches("my_own:").count(), 1);
+    // Managed block present exactly once despite two exports.
+    assert_eq!(body.matches("osdk-comfyui-default:").count(), 1);
+    assert!(!body.to_ascii_lowercase().contains("is_default"));
+
+    let _ = Path::new("");
+}

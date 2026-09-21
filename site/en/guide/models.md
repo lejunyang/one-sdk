@@ -24,6 +24,14 @@ osdk model remove NAME [--keep-lock]
 osdk model env enable [huggingface|modelscope] [--force]
 osdk model env disable [huggingface|modelscope]
 osdk model env list
+
+osdk model view add <comfyui|hf-cache> <name> [--profile P] [--map PREFIX=CATEGORY]...
+osdk model view list
+osdk model view path <comfyui|hf-cache> [--profile P]
+osdk model view rebuild [<comfyui|hf-cache>]
+osdk model view remove <comfyui|hf-cache> [--profile P] [--model NAME]
+osdk model view export <comfyui|hf-cache> [--profile P] [--to extra_model_paths.yaml]
+osdk model view doctor <comfyui|hf-cache> [--profile P]
 ```
 
 | `pull` argument | Effect |
@@ -219,6 +227,42 @@ osdk source unpin huggingface|modelscope
 The probe resolves repository metadata and then samples up to 1 MiB from a real
 file. Anonymous and credential-bearing probes use different cache keys. See
 [Sources and Supply-chain Security](./sources-security) for source behavior.
+
+## Consumer views (model view)
+
+Snapshots are laid out like the upstream repository (`unet/`, `vae/`,
+`text_encoder/` side by side); consumers expect a different shape. `osdk model
+view` renders a pulled snapshot into the consumer's shape with links (hardlinks
+on the same volume, counted byte copies across volumes) back to the snapshot --
+no weights are copied -- and marks view files read-only so a consumer writing in
+place cannot corrupt the snapshot or CAS.
+
+- `add <comfyui|hf-cache> <name>` adds a model and renders it. `comfyui`
+  produces `<view>/<category>/<file>` (all 25 category dirs pre-created, files
+  classified by the `unet/vae/text_encoder/loras` directory conventions);
+  `hf-cache` produces `models--org--repo/{refs,blobs,snapshots}`. The model must
+  be pulled first.
+- `--map PREFIX=CATEGORY` (repeatable) maps a repo path prefix to a category,
+  longest prefix wins. Files that cannot be classified are **never dumped into
+  checkpoints**; they are skipped and listed by `view doctor`.
+- `path` prints the stable view root; it does not change across pulls, so it is
+  the path to write into the consumer's config.
+- `export` prints the consumer config fragment. For ComfyUI it is an
+  `extra_model_paths.yaml` section with a unique key and **no `is_default`**.
+  With `--to` it merges idempotently into a source-edition yaml; without it the
+  fragment is printed -- for Desktop, add the printed path once in its Storage
+  UI (osdk never writes Desktop's `settings.json`).
+- `remove` drops one model's view entries (shared category dirs and other models
+  are untouched) or a whole profile; snapshots are not deleted.
+- Two models rendering to the same consumer path make `add` fail loudly rather
+  than silently overwriting.
+
+```bash
+osdk model pull flux hf:org/flux-GGUF --include 'unet/*' --include 'vae/*'
+osdk model view add comfyui flux
+osdk model view export comfyui --to extra_model_paths.yaml   # source edition
+osdk model view path comfyui                                 # Desktop: paste this
+```
 
 ## Global model environment
 

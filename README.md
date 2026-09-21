@@ -572,6 +572,19 @@ osdk model path qwen25 --stable
 osdk model sync
 osdk model list
 ```
+
+Render a snapshot into a ComfyUI / Hugging Face cache-shaped consumer view
+(links back to the snapshot, no copied weights, read-only) and emit the wiring
+config:
+
+```bash
+osdk model view add comfyui qwen25 --map unet/=diffusion_models
+osdk model view path comfyui                 # stable path for consumer config
+osdk model view export comfyui --to extra_model_paths.yaml   # source ComfyUI
+osdk model view list
+osdk model view doctor comfyui
+osdk model view remove comfyui --model qwen25
+```
 
 Enable provider endpoint and cache variables for activated shells when model
 tools should share the osdk environment:

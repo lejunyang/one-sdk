@@ -716,6 +716,71 @@ pub enum ModelCommand {
         #[command(subcommand)]
         command: ModelEnvCommand,
     },
+    /// Render and manage consumer-shaped views over pulled models.
+    View {
+        #[command(subcommand)]
+        command: ModelViewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelViewCommand {
+    /// Add a pulled model to a consumer view and (re)render it.
+    Add {
+        /// Consumer shape: comfyui | hf-cache.
+        kind: osdk_core::model::view::ViewKind,
+        /// Logical model name (as used with `model pull`).
+        model: String,
+        /// View profile; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Explicit repo-prefix -> category mapping (repeatable), e.g.
+        /// `--map unet/=diffusion_models`.
+        #[arg(long)]
+        map: Vec<String>,
+    },
+    /// List views and the models rendered into them.
+    List,
+    /// Print a view root path (stable across pulls) for a consumer config.
+    Path {
+        kind: osdk_core::model::view::ViewKind,
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// Re-render views from current memberships and current snapshots.
+    Rebuild {
+        /// Limit to one consumer shape.
+        kind: Option<osdk_core::model::view::ViewKind>,
+    },
+    /// Remove a model from a view, or the whole view profile.
+    Remove {
+        kind: osdk_core::model::view::ViewKind,
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Remove only this model; omit to remove the whole profile.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Write or print the consumer config fragment for a rendered view.
+    ///
+    /// For ComfyUI this is an `extra_model_paths.yaml` section with a unique
+    /// key and no `is_default`. With `--to` it is merged into a source-edition
+    /// yaml; without it the fragment is printed (for Desktop, add the printed
+    /// root once in its Storage UI -- osdk never writes Desktop settings.json).
+    Export {
+        kind: osdk_core::model::view::ViewKind,
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Merge the fragment into this yaml file (source-edition ComfyUI).
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Report unclassified files and the link modes a view used.
+    Doctor {
+        kind: osdk_core::model::view::ViewKind,
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

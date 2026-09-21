@@ -6311,6 +6311,7 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
             }
         }
         ModelCommand::Env { command } => model_env(app, command)?,
+        ModelCommand::View { command } => crate::model_view::model_view(app, command)?,
     }
     Ok(())
 }

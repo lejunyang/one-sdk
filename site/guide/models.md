@@ -23,6 +23,14 @@ osdk model remove NAME [--keep-lock]
 osdk model env enable [huggingface|modelscope] [--force]
 osdk model env disable [huggingface|modelscope]
 osdk model env list
+
+osdk model view add <comfyui|hf-cache> <name> [--profile P] [--map PREFIX=CATEGORY]...
+osdk model view list
+osdk model view path <comfyui|hf-cache> [--profile P]
+osdk model view rebuild [<comfyui|hf-cache>]
+osdk model view remove <comfyui|hf-cache> [--profile P] [--model NAME]
+osdk model view export <comfyui|hf-cache> [--profile P] [--to extra_model_paths.yaml]
+osdk model view doctor <comfyui|hf-cache> [--profile P]
 ```
 
 | `pull` 参数 | 作用 |
@@ -197,6 +205,38 @@ osdk source unpin huggingface|modelscope
 
 探测会先解析目标仓库 metadata，再对一个真实文件做最多 1 MiB 的 Range 下载；
 匿名与带凭据模式使用不同缓存键。更多 source 规则见[下载源与供应链安全](./sources-security)。
+
+## 消费者视图（model view）
+
+快照按上游仓库布局存放（`unet/`、`vae/`、`text_encoder/` 平级），消费者要的是
+另一种形状。`osdk model view` 把已 pull 的快照**渲染成消费者形状的目录**，文件以
+链接（同卷硬链接，跨卷退化为拷贝并明确计数）指回快照，不复制权重；视图文件设为
+只读，避免消费者就地写入污染快照与 CAS。
+
+- `add <comfyui|hf-cache> <name>`：把模型加入视图并渲染。`comfyui` 渲染成
+  `<view>/<类别>/<文件>`（25 个类别目录预先建好，按 `unet/vae/text_encoder/loras`
+  等目录约定归类）；`hf-cache` 渲染成 `models--org--repo/{refs,blobs,snapshots}`。
+  模型必须先 `model pull`，否则报错并提示先 pull。
+- `--map PREFIX=CATEGORY`（可重复）：显式指定仓库路径前缀到类别的映射，最长前缀
+  优先。**无法归类的文件不会被兜底塞进 checkpoints**，而是跳过并由 `view doctor`
+  列出。
+- `path`：打印稳定的视图根，路径不随 pull/`--include` 变化——把它写进消费者配置。
+- `export`：生成消费者配置片段。`comfyui` 是一段 `extra_model_paths.yaml`（唯一键、
+  `base_path` 指向视图根，**不带 `is_default`**，避免悄悄改变消费者自己的模型根
+  优先级）。带 `--to` 会以带标记的托管块幂等合并进源码版 ComfyUI 的 yaml；不带则
+  只打印——Desktop 版请按打印的路径在 Storage 面板添加一次，osdk 不写 Desktop 的
+  `settings.json`。
+- `remove`：移除某模型在视图里的条目（只拆该模型的链接，共享类别目录里其它模型
+  不受影响）或整个 profile；不删快照。
+- 两个模型若渲染到同一消费者路径（同名文件且同类），`add` 会**报错拒绝**而不是
+  静默后者覆盖前者。
+
+```bash
+osdk model pull flux hf:org/flux-GGUF --include 'unet/*' --include 'vae/*'
+osdk model view add comfyui flux
+osdk model view export comfyui --to extra_model_paths.yaml   # 源码版
+osdk model view path comfyui                                 # Desktop：贴这个路径
+```
 
 ## 全局模型环境
 
