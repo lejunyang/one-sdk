@@ -135,7 +135,7 @@ pre .dim{color:var(--faint)}
 
 <div class="masthead">
   <div class="wrap">
-    <div class="kicker">osdk · research visual · 2026-09-21 · 第二轮（真实安装实测）</div>
+    <div class="kicker">osdk · research visual · 2026-09-21 · 第三轮（源码版配置链接实跑）</div>
     <h1>模型管理重构：从「不可变快照」到「消费者可直接使用的模型环境」</h1>
     <p class="subtitle">现有 <code>osdk model</code> 把获取与完整性做得扎实，却没有交付：产物是一个带内容哈希的目录，没有任何消费者认识它。本图解给出六个结构性冲突、十组实测结论，以及「保留获取层 + 新增呈现层」的落地路径。<b>第二轮已在真实 ComfyUI Desktop 安装上完成端到端验证。</b></p>
     <div class="meta">
@@ -208,6 +208,7 @@ pre .dim{color:var(--faint)}
       </tbody>
     </table>
     </div>
+    <div class="note"><b>第三轮（§5.12 / §7.2.1）：源码版 ComfyUI 纯配置接模型——能走通。</b> git clone 当前上游（<code>b0f4b7b</code>）、临时 venv 直接 import ComfyUI 自己的 <code>folder_paths</code>/<code>extra_config</code> 实跑（非复刻）：① <code>extra_model_paths.yaml</code> 两种形状都成立——多条 <code>base_path</code> 直连快照内部子目录（零渲染，配 P0-1 稳定入口即可用），或 osdk 渲染 ComfyUI 形状视图根 + 一条 base_path；② <b>junction / symlink / 逐文件 hardlink</b> 摆进默认 <code>models/&lt;类别&gt;/</code> 三者都被发现（类别目录本身要建成链接；junction 无需提权）；③ <code>.osdk-*</code> 元数据下拉框泄漏数 <b>0</b>；④ 用真实 mtime 缓存做出「渲染错 / 类别不匹配 / 未重扫」三路可区分对照。推荐配置发现（产品化=渲染视图+一条 base_path），osdk 需补 <code>model view render/export</code>。源码版 yaml 不被任何进程自动重写，比 Desktop settings.json 更适合 osdk 管理。全程临时实例，未碰 Desktop 与真实数据根。</div>
     <div class="note warn"><b>顺带记下一条方法论教训。</b>监控安装进度的探针用 <code>Get-ChildItem | Measure-Object Length</code> 读文件大小，<b>连续八分钟报告 0 MB</b>，几乎让我写下「下载卡住」——该文件当时已有 1.65 GB。目录枚举读的是不刷新的 NTFS 目录项。<b>缺陷在测量工具里，不在被测对象里</b>，详见第 06 节。</div>
   </div>
 </section>

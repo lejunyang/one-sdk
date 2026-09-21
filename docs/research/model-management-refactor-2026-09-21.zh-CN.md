@@ -17,6 +17,8 @@
 > - **§5.8 升级**：torch+CUDA 从「索引页存在该 wheel」升级为**本机实跑**：`torch 2.12.1+cu130`、`torch.cuda.is_available() == True`（RTX 4080 Laptop，驱动 610.47）。
 > - **§7 重写**：给出「源码版 vs Desktop 版」的**明确推荐**（初稿只并列三条路径，未下结论）。
 >
+> **2026-09-21 第三轮补查（§5.12 / §7.2.1，源码版实机）。** 针对「源码版 ComfyUI 能否纯配置接模型」，本轮 `git clone` 当前上游（commit `b0f4b7b`）、用独立临时 venv 直接 import ComfyUI 自己的 `folder_paths`/`extra_config` 实跑（非复刻）：① 配置发现 `extra_model_paths.yaml` 的两种形状都成立——多条 base_path 直连快照内部子目录（零渲染即可用，配 P0-1 稳定入口），或 osdk 渲染一个 ComfyUI 形状视图根、一条 base_path；② 文件系统层面 junction / symlink / 逐文件 hardlink 摆进默认 `models/<类别>/` 三者都被发现；③ `.osdk-*` 元数据在真实源码版下拉框中泄漏数为 0；④ 用 ComfyUI 自己的 mtime 缓存做出「渲染错 / 类别不匹配 / 未重扫」三路可区分对照。结论：能走通，推荐配置发现（产品化形态为渲染视图 + 一条 base_path），osdk 需补 `model view render/export`（§7.2.1，本轮不实现）。全程临时实例，未碰 Desktop 与真实数据根。
+
 > 另记一条**方法论教训**（§5.10）：监控安装进度的探针用 `Get-ChildItem | Measure-Object Length` 读大小，连续八分钟报 0 MB，几乎让我写下「下载卡住」这一错误结论——该文件当时已有 1.65 GB。**缺陷在测量工具里，不在被测对象里。**
 
 ---
@@ -792,6 +794,110 @@ PROBLEMS: []
 
 > **一个被捕获的自身错误**：该探针第一版断言「冲突取 `registered[0]`」，结果 FAIL——因为 `registered[0]` 是 ComfyUI 内置根，两个文件都不在那儿。**失败的是我的断言，不是被测机制**。改成「按顺序找第一个真正存在该文件的根」后通过，并额外加了一条把结论讲明白的断言（后追加的根不覆盖先前的）。这比直接改成硬编码的胜者要好：后者会在 `is_default` 改变行为时静默继续通过。
 
+### 5.12 源码版 ComfyUI 配置链接实跑（第三轮，回答「源码版能否配置接模型」）
+
+§5.9 / §5.11 跑的是 Desktop 自带的 ComfyUI（v0.34.0，经 Desktop 的
+`--extra-model-paths-config` 通道）。第三轮用户进一步问：**源码版 ComfyUI 能否只靠配置
+把 osdk 模型链接进去、两种「链接」各自是否成立**。这次不复刻 `folder_paths.py`，而是
+`git clone` 当前上游源码（commit `b0f4b7b`），用独立临时 venv（仅装 `pyyaml`，不装
+torch）直接 **import ComfyUI 自己的 `folder_paths` + `utils.extra_config`**，调用的
+`get_filename_list()` 正是 `nodes.py` 里填充 `/object_info` 各 combo 下拉框的同一个函数
+（`nodes.py:604/721/777/986` 等逐处核对）。因此类别白名单、扩展名过滤、`os.walk` 遍历、
+mtime 缓存全部是 ComfyUI 的真实代码，没有一行是我们重写的。临时实例在
+`%TEMP%\osdk-comfy-src-*`，与 Desktop、真实 `E:\osdk-data` 完全隔离。
+
+**被测快照**按真实「一 repo 多类别」形状手造：一个快照里同时有
+`unet/*.safetensors`、`vae/*.safetensors`、`text_encoder/*.safetensors`、`loras/*`、
+一个快照根的散文件，以及 `.osdk-complete/.osdk-model.json/.osdk-manifest.json`；另有一个
+单组件 lora 仓库快照。
+
+#### 5.12.1 配置发现（`extra_model_paths.yaml`）：两种形状都成立
+
+**形状 A——不渲染视图，YAML 多条 base_path 直接指快照内部子目录。**
+源码版 loader（`utils/extra_config.py`）对 YAML 顶层**每个键**各读一个 `base_path`，
+每个键可映射任意类别→相对子目录，多个键天然并存。于是为同一快照写四段（diffusion 指
+`unet`、vae 指 `vae`、text_encoders 指 `text_encoder`、loras 指 `loras`），再为第二个
+仓库写第五段，`get_filename_list` 结果：
+
+```text
+diffusion_models = ["diffusion_pytorch_model.safetensors"]
+vae               = ["vae.safetensors"]
+text_encoders     = ["encoder.safetensors"]
+loras             = ["add-detail.safetensors", "style.safetensors"]   # 两个 repo 合并
+```
+
+即「多个 base_path 段并存」「一 repo 多类别用多条类别映射直连快照子目录」**都可行，
+无需 osdk 先渲染视图**。代价：① 快照根的散文件 `weights-only.safetensors` 不属于任何
+子目录，无法被任何一条「一目录一类别」映射覆盖（结构性限制，不是 bug）；② YAML 里要写
+的是哈希快照内部路径，或用 P0-1 的稳定入口 `…/<name>/current/unet` 这类**不随哈希变**
+的路径，否则换快照即失效。
+
+**形状 B——osdk 渲染一个 ComfyUI 形状的视图根，一条 base_path 指过去。**
+视图根下 `diffusion_models/ vae/ text_encoders/ loras/` 各是指向快照组件子目录的
+**目录 junction**，YAML 只写一条 `base_path: <view>` 加类别映射。结果四类全部出现
+（`loras` 仅 `style`，因为视图只挂了该模型，符合预期）。
+
+| 维度 | A：多条映射直连快照子目录 | B：osdk 渲染视图根 |
+| --- | --- | --- |
+| 需 osdk 渲染 | 否，纯 YAML | 是（建类别目录+链接） |
+| 路径稳定性 | 必须用 `current/…` 稳定入口，否则哈希变即断 | 视图根本身稳定，内部由 osdk 重指向 |
+| 散文件/非标准布局 | 覆盖不到快照根散文件 | 可由渲染器按规则归类，fail-closed |
+| 消费者配置复杂度 | 每模型每类别一行，模型一多就冗长 | 永远一条 base_path |
+| 跨消费者复用 | 只对 ComfyUI 有用 | 同一渲染机制可产出 a1111/hf-cache 形状 |
+| 占用额外 inode | 零 | 仅目录链接，不复制字节 |
+
+结论：**A 是「现在零实现就能用」的最小路径（配合 P0-1 `model path --stable`），B 是
+osdk 真正要产品化的形态**（见 §7.2.1 与 §6）。二者底层都是 ComfyUI 同一套发现机制，
+不是两条不同的路。
+
+#### 5.12.2 文件系统链接摆进默认 `models/<类别>/`：junction / symlink / 硬链接三者都成立
+
+把链接直接放进 ComfyUI checkout 自带的 `models/`（不写 YAML，YAML 的 base_path 就指向
+它自己的 models 目录）：
+
+```text
+models/diffusion_models 作为 junction  -> 快照/unet   发现 diffusion_pytorch_model.safetensors
+models/diffusion_models 作为 symlink   -> 快照/unet   同样发现
+models/diffusion_models/*.safetensors 逐文件 hardlink -> 快照字节   同样发现
+vae 同理。删掉链接后两类恢复为空（negative control）。
+```
+
+三种都被源码版正常发现。两个实测到的细节：① **必须把「类别目录本身」建成链接**；若先
+建真实类别目录再往里面 mklink，会得到「文件已存在」且发现为空——这是摆链接时唯一容易踩
+的坑；② 目录 symlink 在本机成功是因为开了 Developer Mode，**junction 才是无需提权、对
+所有用户都成立的选择**——与 P0-1 稳定入口的选型一致，P0-1 的 `store::dirlink` 原语可
+直接复用来渲染这种链接视图。
+
+**元数据不污染下拉框（在真实源码版复核）**：快照里物理存在
+`.osdk-complete/.osdk-model.json/.osdk-manifest.json`，但遍历全部类别（含 configs）后
+这些名字出现在类别列表里的数量为 **0**。原因双重：点目录被过滤 + `.json` 不匹配各权重
+类别的扩展名白名单。
+
+#### 5.12.3 「下拉框为空」的三种成因在探针层面可区分
+
+| 成因 | 构造 | 真实代码给出的可观测差异 |
+| --- | --- | --- |
+| (i) 渲染错/路径不存在 | YAML 指向 `does_not_exist` 子目录 | 注册的 search path `isdir=False`，列表空 |
+| (ii) 类别不匹配 | 把 `unet` 映射给 `checkpoints` | 文件出现在 `checkpoints`，而 `diffusion_models` 为空——与 (i) 的「全空」可区分 |
+| (iii) 未重扫/缓存陈旧 | 首次列举后往目录加新文件并触碰目录 mtime | mtime 缓存自动失效，第二次列举出现新文件、`cache_auto_refreshed=True`，无需重启 |
+
+`folder_paths.get_filename_list` 的缓存按**目录 mtime + 路径集合**失效
+（`folder_paths.py:484`），所以「新增模型后不重启即可见」在源码版同样成立；(iii) 是用来
+证明「空 = 真没有」而非缓存陈旧的对照，不预先过这条，(i)/(ii) 的空结论都不可信。
+
+#### 5.12.4 回答原问题与取舍
+
+1. **源码版能否通过配置把模型链接进相应目录？能。** `extra_model_paths.yaml` 是源码版
+   标准配置文件，由 `main.py:142-147` 在启动时读取，可重复段、可 `--extra-model-paths-config`
+   追加，**不被任何进程自动重写**——这正是它比 Desktop `settings.json` 更适合 osdk 管理
+   的根本原因（Desktop 的文件归 launcher 所有并会被覆盖，见 §3.2.3）。
+2. **两种「链接」都实证可行**：配置发现（A/B 两形）与文件系统链接（junction/symlink/
+   hardlink）。
+3. **推荐配置发现，且产品形态推荐 B（渲染视图）+ 一条 base_path**：零字节占用、快照保持
+   不可变、CAS 去重不受影响、P0-1 稳定入口保证 YAML 里的路径不随内容哈希失效；文件系统
+   直链默认目录只适合「我就想手动塞一个模型」的零散场景，不适合多模型多消费者管理。
+4. **osdk 侧需要补的能力（设计结论，本轮未实现）**：见 §7.2.1。
+
 ---
 
 ## 6. 重构设计
@@ -1050,6 +1156,24 @@ pub static MODEL_PROVIDERS: &[&ProviderSchema] = &[&HUGGINGFACE, &MODELSCOPE, &H
 3. **模型下载有两条路**：ComfyUI-Manager / 前端也能下模型，会落到 `is_default` 标记的那个根（当前是用户的 `ComfyUI-Shared\models`）。osdk 的视图是**另一个根且只读**。这是好事——**两者不会互相污染**，osdk 管的那部分保持可校验，用户随手下的那部分留在它自己的地方。这也是 §6.1 里「不要给 osdk 视图加 `is_default`」的实际理由。
 
 **什么时候才该考虑 osdk 托管源码版**：需要钉死 ComfyUI commit 做可复现实验、需要非 NVIDIA 后端（Desktop 变体是 `win-nvidia`）、或需要在 CI/无 GUI 环境里跑。这三种情况下走 §7.3 的 B 路径，且前置是给 `pypi:` backend 增加「应用环境」模式。
+
+### 7.2.1 落地「源码版一条命令接模型」osdk 要补什么（基于 §5.12）
+
+源码版证明后，osdk 侧缺的是一个**渲染 + 配置片段**能力，而不是发现机制本身：
+
+- **`osdk model view render comfyui --model <name>…`**：在稳定的视图根下，用 P0-1 已落地
+  的 `store::dirlink`（Windows junction / Unix symlink，逐文件可退化为 hardlink/拷贝）按
+  类别建目录链接；类别映射规则内置 ComfyUI 的 25 类，推断不出的文件 fail-closed 并由
+  `view doctor` 报告（§6.1 已设计）。视图根路径稳定，快照切换时只重指向，不改 YAML。
+- **`osdk model view export comfyui`**：生成一段可直接并入
+  `extra_model_paths.yaml` 的片段（一个带唯一键的段，`base_path` 指向视图根，**不带
+  `is_default`**，理由 §5.11）。对源码版可以直接写进项目里的 yaml；对 Desktop 只**打印**
+  片段与「在 Storage 面板添加该目录」的指引，仍不写 `settings.json`。
+- **短路径（零新渲染也能先用）**：`model path --stable` 已在 P0-1 提供，用户现在就能手写
+  形如 `base_path: <…>/<name>/current` 的 A 形 YAML；B 是把这件规模化、自动化、跨消费者
+  复用的产品化版本。
+- 这些都属 §8 的 P1 呈现层，与已完成的 P0（稳定入口/镜像/超时/代理/llama 变量）正交。
+
 
 ### 7.3 ComfyUI 本体的三条路径（供 §7.2 之外的场景参考）
 
