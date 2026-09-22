@@ -296,9 +296,11 @@ pub fn plan(
         program_candidates,
         args,
         env,
-        cwd: project.root.clone(),
+        cwd: super::effective_cwd(&project.root, config.dir.as_deref()),
         frozen: has_lock,
         downgraded_reason,
+        // Node installers create whatever they need themselves.
+        prelude: Vec::new(),
     })
 }
 

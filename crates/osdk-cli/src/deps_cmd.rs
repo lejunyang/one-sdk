@@ -282,17 +282,42 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         }
     }
 
-    let cwd = item.project.root.join(&item.plan.cwd);
+    // Already absolute: the provider resolved \[deps.<p>].dir\ against the project
+    // root. Joining again would be a no-op for an absolute path but would quietly
+    // change meaning if a provider ever returned a relative one.
+    let cwd = &item.plan.cwd;
     let mut command = std::process::Command::new(&program);
     command
         .args(&item.plan.args)
-        .current_dir(&cwd)
+        .current_dir(cwd)
         .env("PATH", &path);
     for (key, value) in &item.plan.env {
         command.env(key, value);
     }
 
     println!("{}", command_line(&item.plan));
+
+    // Prelude steps run first, with the same program, cwd and environment. A
+    // failure here stops the run: continuing would hand the main command an
+    // environment the tool already said it could not build.
+    for step in &item.plan.prelude {
+        let mut prelude = std::process::Command::new(&program);
+        prelude.args(step).current_dir(cwd).env("PATH", &path);
+        for (key, value) in &item.plan.env {
+            prelude.env(key, value);
+        }
+        let status = prelude
+            .status()
+            .with_context(|| format!("running {} {}", program.display(), step.join(" ")))?;
+        if !status.success() {
+            return Err(anyhow!(
+                "`{} {}` failed with {status}",
+                program.display(),
+                step.join(" ")
+            ));
+        }
+    }
+
     let status = command
         .status()
         .with_context(|| format!("running {}", program.display()))?;
@@ -471,12 +496,19 @@ fn command_line(plan: &RunPlan) -> String {
     for (key, value) in &plan.env {
         parts.push(format!("{key}={value}"));
     }
-    parts.push(
-        plan.program_candidates
-            .first()
-            .cloned()
-            .unwrap_or_else(|| plan.tool.to_string()),
-    );
+    let program = plan
+        .program_candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| plan.tool.to_string());
+    // Prelude steps are part of *what runs*, so they belong in the string that
+    // gets hashed. Leaving them out would hash "create the environment, then
+    // sync" and "sync into whatever is already there" identically.
+    for step in &plan.prelude {
+        parts.push(format!("{program} {}", step.join(" ")));
+        parts.push("&&".to_string());
+    }
+    parts.push(program);
     parts.extend(plan.args.iter().cloned());
     parts.join(" ")
 }

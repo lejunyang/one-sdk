@@ -288,7 +288,9 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 在 `osdk.toml` 里声明一个 provider，然后运行：
 
 ```toml
-[deps.pnpm]
+[deps.pnpm]          # Node：npm / pnpm / yarn / bun
+# [deps.uv]          # Python：pyproject.toml + uv.lock
+# [deps.pip-requirements]   # Python：requirements.txt
 ```
 
 ```bash

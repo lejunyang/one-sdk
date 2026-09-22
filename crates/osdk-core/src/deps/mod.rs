@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 
 pub mod node;
+pub mod python;
 pub mod state;
 
 pub use state::{DepsState, ProviderState};
@@ -162,7 +163,14 @@ impl DepsProviderSchema {
 
 /// All compiled-in providers. D1 ships the Node ecosystem; further ecosystems
 /// are added here.
-pub static PROVIDERS: &[&DepsProviderSchema] = &[&node::NPM, &node::PNPM, &node::YARN, &node::BUN];
+pub static PROVIDERS: &[&DepsProviderSchema] = &[
+    &node::NPM,
+    &node::PNPM,
+    &node::YARN,
+    &node::BUN,
+    &python::UV,
+    &python::PIP_REQUIREMENTS,
+];
 
 pub fn provider_schema(id: &str) -> Option<&'static DepsProviderSchema> {
     PROVIDERS.iter().copied().find(|schema| schema.id == id)
@@ -241,6 +249,15 @@ pub struct RunPlan {
     pub cwd: PathBuf,
     /// Whether this plan is the frozen (lockfile-respecting) form.
     pub frozen: bool,
+    /// Commands to run, in order, before the main one -- same program, same
+    /// cwd, same env.
+    ///
+    /// This exists for one measured asymmetry: `uv sync` creates the project
+    /// environment itself, while `uv pip sync` refuses without one ("No
+    /// virtual environment found"). Expressing it as a prelude keeps the step
+    /// visible in `--dry-run` and inside the freshness hash, instead of hiding
+    /// an implicit `uv venv` in the runner where neither would show it.
+    pub prelude: Vec<Vec<String>>,
     /// Set when osdk deliberately fell back to a non-frozen command because no
     /// native lock existed. Callers must report it rather than proceed quietly.
     pub downgraded_reason: Option<String>,
@@ -344,7 +361,13 @@ fn detect_in(
         Err(error) => return Err(Error::io(manifest, error)),
     }
 
-    let declared_manager = node::declared_manager(schema, &manifest)?;
+    // Routed by ecosystem: Python manifests carry no \packageManager\ equivalent,
+    // but must still be parsed so an unreadable one is an error rather than a
+    // silent "no declaration" that falls through to a different installer.
+    let declared_manager = match schema.ecosystem {
+        Ecosystem::Python => python::declared_manager(schema, &manifest)?,
+        _ => node::declared_manager(schema, &manifest)?,
+    };
     let native_lock = schema
         .native_locks
         .iter()
@@ -468,6 +491,7 @@ fn lock_owner(ecosystem: Ecosystem, lock: &Path) -> Option<String> {
     let name = lock.file_name()?.to_str()?;
     match ecosystem {
         Ecosystem::Node => node::lock_owner(name).map(str::to_string),
+        Ecosystem::Python => python::lock_owner(name).map(str::to_string),
         _ => None,
     }
 }
@@ -481,6 +505,7 @@ pub fn plan(
 ) -> Result<RunPlan> {
     match project.ecosystem {
         Ecosystem::Node => node::plan(project, choice, config, tool_versions),
+        Ecosystem::Python => python::plan(project, choice, config, tool_versions),
         other => Err(Error::other(format!(
             "no deps provider implementation for ecosystem `{}` yet",
             other.as_str()
@@ -534,6 +559,31 @@ pub fn effective_outputs(
 pub struct OutputSpecOwned {
     pub path: String,
     pub required: bool,
+}
+
+/// Working directory for a provider's command: the project root, with
+/// `[deps.<p>].dir` applied when set.
+///
+/// This exists because `dir` is a *declared* setting -- documented, in the
+/// schema, and carried through config -- and a declared setting that silently
+/// does nothing is worse than an absent one: the project looks configured and
+/// the command runs somewhere else.
+///
+/// `dir` is read accepting both separators. It arrives from a committed
+/// `osdk.toml`, so the machine that wrote it is not necessarily the one reading
+/// it, and `Path::components()` only understands the host's own separator (see
+/// [`relative_segments`]).
+pub fn effective_cwd(root: &Path, dir: Option<&str>) -> PathBuf {
+    match dir {
+        Some(dir) => {
+            let mut path = root.to_path_buf();
+            for segment in relative_segments(dir) {
+                path.push(segment);
+            }
+            path
+        }
+        None => root.to_path_buf(),
+    }
 }
 
 /// Stable label for a native lockfile, derived from its file name.
@@ -599,6 +649,37 @@ pub fn relative_segments(path: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// `[deps.<p>].dir` is applied, and applied for both separator spellings on
+    /// every platform.
+    ///
+    /// Not `#[cfg(windows)]`-gated on purpose. AGENTS.md records that gating a
+    /// separator test is a declaration that the other half is never verified,
+    /// and that is exactly where the bug hides: `dir` arrives from a committed
+    /// `osdk.toml`, so a Windows author can write `apps\api` and a Linux
+    /// machine must still find it.
+    #[test]
+    fn a_configured_dir_is_applied_for_either_separator() {
+        let root = Path::new("/projects/app");
+
+        assert_eq!(effective_cwd(root, None), root.to_path_buf());
+
+        let forward = effective_cwd(root, Some("apps/api"));
+        let backward = effective_cwd(root, Some("apps\\api"));
+        assert_eq!(
+            forward, backward,
+            "the separator the value was written with must not change where the command runs"
+        );
+        assert!(forward.ends_with("api"), "{forward:?}");
+        assert_eq!(
+            forward.strip_prefix(root).unwrap(),
+            Path::new("apps").join("api")
+        );
+
+        // A value that normalizes to nothing must not move the command out of the
+        // project; `relative_segments` drops `.` and empty components.
+        assert_eq!(effective_cwd(root, Some("./")), root.to_path_buf());
+    }
+
     use super::*;
 
     fn write(path: &Path, contents: &str) {

@@ -321,7 +321,9 @@ a single dependency stays with `osdk install npm:<package>`.
 Declare a provider in `osdk.toml`, then run it:
 
 ```toml
-[deps.pnpm]
+[deps.pnpm]          # Node: npm / pnpm / yarn / bun
+# [deps.uv]          # Python: pyproject.toml + uv.lock
+# [deps.pip-requirements]   # Python: requirements.txt
 ```
 
 ```bash

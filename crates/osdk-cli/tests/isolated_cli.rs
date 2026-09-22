@@ -5692,3 +5692,106 @@ fn deps_freshness_reports_a_distinguishable_reason() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("stale"), "{stdout}");
 }
+
+/// The Python providers plan the commands their measured behaviour requires.
+///
+/// Two of those requirements are counter-intuitive enough to be worth pinning
+/// from the CLI, not just from unit tests:
+///
+/// * `uv sync --frozen` does **not** verify the lock is current -- measured, it
+///   exits 0 and installs a stale set. `--locked` is the flag that checks. A test
+///   asserting merely "a freeze flag is present" would accept the weaker command.
+/// * source builds must be denied with `--no-build`, never with `UV_NO_BUILD`:
+///   the variable is silently ignored by `uv pip install`, so a plan that relied
+///   on it would look safe while building every sdist locally.
+#[test]
+fn python_deps_plan_locked_and_deny_source_builds() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("pyproject.toml"),
+        "[project]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.uv]\n").unwrap();
+
+    // No lock: reported, and without a freeze flag it does not have the right to.
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no uv.lock"), "{stdout}");
+    // Assert flags against the command line itself. Reading them off the whole
+    // output would let a word in a warning decide a claim about the command --
+    // "no uv.lock in ..." and "--locked" are easy to confuse that way.
+    let command = stdout
+        .lines()
+        .find(|line| line.contains("would run in"))
+        .unwrap_or_else(|| panic!("no command line in output: {stdout}"));
+    assert!(!command.contains("--locked"), "{command}");
+    assert!(command.contains("--no-build"), "{command}");
+    assert!(
+        !stdout.contains("UV_NO_BUILD"),
+        "the env var is ignored by `uv pip install`; a flag is required: {stdout}"
+    );
+    // The interpreter must come from osdk, never from uv reaching out.
+    assert!(stdout.contains("UV_PYTHON_DOWNLOADS=never"), "{stdout}");
+
+    // With a lock, `--locked` appears -- not just `--frozen`.
+    std::fs::write(project.join("uv.lock"), "version = 1\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let command = stdout
+        .lines()
+        .find(|line| line.contains("would run in"))
+        .unwrap_or_else(|| panic!("no command line in output: {stdout}"));
+    assert!(
+        command.contains("--locked"),
+        "`--frozen` alone accepts a stale lock: {command}"
+    );
+    assert!(!stdout.contains("warning:"), "{stdout}");
+}
+
+/// `requirements.txt` counts as a lock only when every line pins a version, and
+/// the environment is created before syncing into it.
+///
+/// The pinning distinction matters because uv installs an unpinned file happily
+/// (measured, exit 0) -- so "it worked" says nothing about reproducibility, and
+/// the only honest response is to say so.
+///
+/// The prelude matters because `uv pip sync` refuses when no environment exists
+/// ("No virtual environment found") while `uv sync` creates one. Keeping it in
+/// the printed command rather than hidden in the runner is what makes it visible
+/// here and inside the freshness hash.
+#[test]
+fn pip_requirements_reports_unpinned_files_and_creates_the_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.pip-requirements]\n").unwrap();
+
+    std::fs::write(project.join("requirements.txt"), "idna==3.10\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("not fully pinned"),
+        "a fully pinned file is reproducible: {stdout}"
+    );
+    // `--allow-existing` keeps the prelude idempotent: plain `uv venv` exits 2
+    // once an environment is there, which would break every run after the first.
+    assert!(stdout.contains("venv --allow-existing"), "{stdout}");
+    assert!(stdout.contains("pip sync"), "{stdout}");
+
+    std::fs::write(project.join("requirements.txt"), "idna\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("not fully pinned"),
+        "an unpinned requirement is not reproducible and must be reported: {stdout}"
+    );
+}

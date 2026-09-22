@@ -44,7 +44,30 @@ enable one in osdk.toml, for example:
 
 ## 支持的 provider
 
-当前支持 Node 生态四款：`npm`、`pnpm`、`yarn`、`bun`。
+| provider | 生态 | 清单 | 原生 lock |
+| --- | --- | --- | --- |
+| `npm` / `pnpm` / `yarn` / `bun` | Node | `package.json` | 各自的 lockfile |
+| `uv` | Python | `pyproject.toml` | `uv.lock` |
+| `pip-requirements` | Python | `requirements.txt` | 无（全钉版本时它自己就是 lock） |
+
+### Python 的两点差异
+
+**`uv` 用 `--locked` 而不只是 `--frozen`。** uv 的 `--frozen` 只保证「不更新
+lock」，**不**校验 lock 与 `pyproject.toml` 是否一致——实测：lock 过期时它 exit=0
+并按旧 lock 装，新加的依赖根本没装上。要「lock 必须当令」得用 `--locked`，所以 osdk
+两个都传。这与 `npm ci` 不同（后者在不一致时会失败）。
+
+**`requirements.txt` 只有全钉版本才算可复现。** uv 会照常安装未钉版本的文件
+（exit=0），所以「装上了」不等于「可复现」。osdk 会检查并明确告知：
+
+```
+warning: requirements.txt is not fully pinned, so this install is not
+reproducible; pin every requirement (or use uv with a uv.lock) to make it so
+```
+
+依赖装进项目自己的 `.venv`，与「应用依赖在项目内、工具在隔离目录」的分层一致。
+osdk 还会传 `UV_PYTHON_DOWNLOADS=never`，确保用的是 osdk 选定的解释器，
+而不是 uv 自己悄悄下载的另一个。
 
 ## installer 如何选定
 

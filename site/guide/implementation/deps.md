@@ -92,6 +92,51 @@ lockfile 时会**明确失败**，而 classic 会静默继续，猜错的代价�
 （pnpm 12 因此会 `ERR_PNPM_IGNORED_BUILDS` 并提示 `pnpm approve-builds`），
 但 osdk 仍然显式传 `--ignore-scripts`，不依赖某个版本的默认值。
 
+## Python：两处与 Node 不对称的地方
+
+两条都来自 2026-09-22 的实测（uv 0.12.17 / CPython 3.12.14），判据同 Node 那轮——
+造一个只有 sdist 的包、其 `setup.py` 写标记文件，用**标记文件是否存在**判定源码构建
+是否真发生，不看退出码。
+
+**一、禁源码构建只能用 flag，不能用环境变量。** `UV_NO_BUILD=1` 在
+`uv pip install` 上被**静默忽略**（exit=0、标记文件存在、源码照样构建），只有
+`uv sync` 识别它。`uv pip install --help` 里 `--no-build` 没有 `[env:]` 标注，
+而同页的 `--no-build-isolation` 有——同一个变量名在两个子命令上行为不同。
+
+这与 yarn **恰好相反**：berry 拒绝 `--ignore-scripts`，只能靠
+`YARN_ENABLE_SCRIPTS=false`。所以 Node 侧「env 是等效手段」的经验**不能平移**到
+Python。若按对称性推导，写出来会是一个看起来生效、实际每次都在本机构建源码的开关。
+
+**二、`--frozen` 不等于「lock 当令」。** lock 与 `pyproject.toml` 不一致时
+`uv sync --frozen` 仍 exit=0 并按旧 lock 装（新加的依赖没装上），因为它的语义只是
+「不更新 lock」。要校验一致性得用 `--locked`。`npm ci` 在同样情形下会失败，所以两个
+生态不对称，osdk 对 uv 两个 flag 都传。
+
+## prelude：为什么需要一个「前置命令」概念
+
+`uv sync` 会自建项目环境，而 `uv pip sync` 在没有环境时直接拒绝
+（`No virtual environment found`）。这个不对称如果藏进 runner 里隐式补一句
+`uv venv`，那么 `--dry-run` 看不到它、freshness 哈希也不包含它。
+
+所以 `RunPlan` 有 `prelude: Vec<Vec<String>>`：同一个程序、同一个 cwd、同一份 env，
+按序先跑。它出现在打印出来的命令串里，因此也进入哈希——否则「先建环境再 sync」与
+「往已有环境里 sync」会被哈希成同一件事。
+
+prelude 必须**幂等**：`uv venv` 在环境已存在时 exit=2（`Failed to create virtual
+environment`），于是第一次之后每次都会在到达 sync 之前失败。用
+`--allow-existing` 复用，这也是正确行为——`uv pip sync` 本来就负责让环境内容与
+文件一致，重建只会丢掉缓存。
+
+## `[deps.<p>].dir` 曾经声明了却不生效
+
+`dir` 一直在 schema 与文档里，但 provider 直接用了 `project.root`，配置被完全忽略。
+一个**声明了却什么都不做的设置比没有这个设置更糟**：项目看起来配好了，命令却跑在别处。
+
+现在两个 provider 共用 `effective_cwd`，并且 `dir` **按两种分隔符读取**——它来自被
+提交的 `osdk.toml`，写它的机器不一定是读它的机器，而 `Path::components()` 只认宿主
+自己的分隔符。该函数的测试两种写法都在所有平台上跑，没有 `#[cfg(windows)]`：
+一旦加了 cfg，就等于声明另一半永不验证，而那正是缺陷的藏身处。
+
 ## 工具的获取是委派的
 
 缺包管理器时，`deps` 调 `install_one_without_shims`——就是 `osdk install` 用的那条。

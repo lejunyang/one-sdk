@@ -46,7 +46,34 @@ enable one in osdk.toml, for example:
 
 ## Supported providers
 
-The four Node installers: `npm`, `pnpm`, `yarn`, and `bun`.
+| provider | ecosystem | manifest | native lock |
+| --- | --- | --- | --- |
+| `npm` / `pnpm` / `yarn` / `bun` | Node | `package.json` | its own lockfile |
+| `uv` | Python | `pyproject.toml` | `uv.lock` |
+| `pip-requirements` | Python | `requirements.txt` | none (it *is* the lock when fully pinned) |
+
+### Two things that differ on Python
+
+**`uv` gets `--locked`, not just `--frozen`.** uv's `--frozen` only promises not
+to update the lock; it does **not** check the lock against `pyproject.toml` --
+measured, a stale lock exits 0 and installs the old set, with a newly added
+dependency simply missing. Asserting the lock is current is `--locked`, so osdk
+passes both. `npm ci` fails in that situation, so the ecosystems are not
+symmetric.
+
+**A `requirements.txt` is only reproducible when every line is pinned.** uv
+installs an unpinned file happily (exit 0), so "it installed" says nothing about
+reproducibility. osdk checks and says so:
+
+```
+warning: requirements.txt is not fully pinned, so this install is not
+reproducible; pin every requirement (or use uv with a uv.lock) to make it so
+```
+
+Dependencies land in the project's own `.venv`, matching the same split as
+everywhere else: application dependencies in the project, tools in isolated
+directories. osdk also passes `UV_PYTHON_DOWNLOADS=never`, so the interpreter is
+the one osdk resolved rather than one uv fetched on its own.
 
 ## How the installer is chosen
 
