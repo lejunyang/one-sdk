@@ -2658,6 +2658,16 @@ commit、要非 N 卡后端、要 CI / 无 GUI 的少数高确定性需求。
 
   闸门复用同一判定，保证 doctor 报的和安装时拦的是同一个函数，不会两处口径漂移。
 
+### 12.7 后续：实现级设计已另文承载
+
+§12 回答的是「该不该做应用依赖清单」；「怎么做、分几批做、每批怎么验」已另起一份实现级设计文档，范围也按用户要求扩大到多生态（npm 系 / Python / go / cargo / deno 等 + 自定义provider）、自动探测、以及「缺包管理器时复用既有工具安装链自动装上」：
+
+- **`docs/research/osdk-deps-design-2026-09-22.zh-CN.md`** —— `osdk deps` 的 CLI 面、`[deps]` schema、provider trait/静态表、公共层与 per-provider 边界、freshness + 深度校验、lock 新增段与旧二进制兼容、与 `install`/`run`/`hook-env` 的衔接、分批实现路线（D1–D6）、以及逐条诚实清单。
+
+本节（§12.1–§12.6）仍是那份文档的上游依据：npm 现状台账、该不该做的论证、mise 对照、ComfyUI B 路径阶梯与 nvidia doctor 设计都不在新文档里重复抄录。其中 §12.3 第 5 步的 trust 结论已按 wheel/sdist 分粒度修正（提交 dbc63f8），新文档的 trust 三档以修正后的版本为准。
+
+---
+
 ## 附录 A：实测环境与命令
 
 **环境**：Windows x64；PowerShell 7.6.6.0（`C:\Program Files\PowerShell\7\pwsh.exe`，全部以 `-NoProfile` 执行）；Python 3.11.0（`C:\Python311\python.exe`）用于离线复现探针；隔离 venv 内 `huggingface_hub 1.32.0`；**真实 ComfyUI 端到端用安装自带的 Python 3.13.12**；osdk 为仓库内 `target\release\osdk.exe`；系统代理 `127.0.0.1:7897`（WinINET，`ProxyEnable=1`）。GPU：RTX 4080 Laptop，驱动 610.47。卷：C/D/E 三个 NTFS。开发者模式已开启（`AllowDevelopmentWithoutDevLicense=1`）—— 这一点影响符号链接结论，见 §5.3。
