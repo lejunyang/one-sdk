@@ -349,6 +349,15 @@ requires approving the config:
 allow_build_from_source = true
 ```
 
+When the package manager is not installed, `deps` installs it through the same
+tool install path `osdk install` uses, into osdk's isolated directories rather
+than your project. In CI, where tools should come only from an explicit
+`osdk install`, turn the acquisition off:
+
+```bash
+osdk deps --no-install-tools
+```
+
 With no `[deps]` section, `osdk deps` only reports what it found and which
 providers could manage it. It installs nothing.
 

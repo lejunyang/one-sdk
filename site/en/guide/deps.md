@@ -90,6 +90,34 @@ osdk deps --frozen
 That turns the fallback above into an error instead of a warning it is easy to
 miss.
 
+## When the package manager is not installed
+
+`deps` installs it, through the same tool install path `osdk install` uses -- so
+source selection, verification and the CAS are identical, and there is no second
+installer to keep honest.
+
+The tool lands in osdk's isolated directories, **not** in your project. `deps`
+puts dependencies in the project; the package manager that installs them is a
+tool.
+
+```bash
+$ osdk deps
+installing node for deps provider `npm`
+installing node@26.10.0 ...installed node@26.10.0
+npm.cmd install --ignore-scripts
+added 2 packages in 827ms
+```
+
+In CI you usually want tools to come from an explicit `osdk install`, so that a
+run cannot quietly acquire a different version. `--no-install-tools` turns the
+acquisition off -- it forbids *acquiring*, not using one you installed yourself:
+
+```bash
+osdk deps --no-install-tools
+```
+
+It fails when a tool is missing, naming the command that would fix it.
+
 ## Build scripts are off by default
 
 A dependency's `preinstall` / `install` / `postinstall` hooks do not run.

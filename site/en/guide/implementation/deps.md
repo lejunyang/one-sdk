@@ -101,6 +101,49 @@ scripts by default (which is why pnpm 12 reports `ERR_PNPM_IGNORED_BUILDS` and
 suggests `pnpm approve-builds`). osdk still passes `--ignore-scripts` explicitly
 rather than relying on one version's default.
 
+## Acquiring tools is delegated
+
+When a package manager is missing, `deps` calls `install_one_without_shims` --
+the same path `osdk install` uses. The reason not to build a second one is
+concrete: that path already carries source selection, verification, attestation
+and the CAS, so an independent implementation would have to duplicate all of it
+to be equally trustworthy, and the duplicate is the copy that rots.
+
+Versions come from different places per role. An installer's version can be
+pinned by the manifest's `packageManager` field; a runtime's cannot, so it comes
+from `[tools]`, falling back to whatever is already installed.
+
+`--no-install-tools` draws its line at **acquiring**, not **using**: a tool the
+user installed works as normal, a missing one is an error naming the command that
+fixes it. CI needs that distinction -- tools should come from an explicit, reviewed
+`osdk install` rather than whatever a given run happened to fetch.
+
+## PATH is prepended, not appended
+
+`run_plan` puts the resolved bin directories at the *front* of PATH. This is not
+a style choice: npm and pnpm are themselves node scripts, and dependency
+lifecycle hooks invoke `node` directly, so an unrelated node earlier on PATH would
+win and the install would run under a runtime osdk did not select -- while looking
+entirely normal.
+
+Program lookup searches the installer's own directories first and then all of
+them. The second pass is required because npm ships with node and lives in
+node's bin directory rather than its own.
+
+## Recording happens only after success
+
+`record` runs only after the command returns successfully, and that ordering is
+load-bearing. Moving it ahead of the run would not break the current run -- that
+one still fails loudly -- but the *next* one would report "up to date" for a tree
+that was never populated, converting one visible failure into a silently broken
+working tree.
+
+The lock's `native_lock` section digests the file as it exists **after** the
+install, so it describes what was actually consumed rather than what was intended.
+On a first install no lockfile exists yet, so the section is absent; the next run
+adds it, which is also the run where the command changes from `npm install` to
+`npm ci`.
+
 ## Discovery is fail-closed
 
 `discover()` walks upward from the current directory, nearest wins, and **does

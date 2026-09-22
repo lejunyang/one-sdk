@@ -314,6 +314,13 @@ osdk deps --frozen
 allow_build_from_source = true
 ```
 
+包管理器没装时，`deps` 会走 osdk 平常那条工具安装链自动装上，并装进 osdk 的隔离
+目录而非你的项目。CI 里想让工具只来自显式的 `osdk install`，可以关掉自动获取：
+
+```bash
+osdk deps --no-install-tools
+```
+
 没有 `[deps]` 段时，`osdk deps` 只报告它找到了什么、可以用哪些 provider，不会动手
 安装。
 

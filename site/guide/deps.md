@@ -81,6 +81,31 @@ osdk deps --frozen
 
 这会把上面那个退回变成错误，而不是一条容易被忽略的警告。
 
+## 包管理器没装怎么办
+
+`deps` 会自己把它装上，走的是 osdk 平常那条工具安装链——所以来源选择、校验、
+CAS 都和 `osdk install` 完全一致，不存在第二套安装逻辑。
+
+工具装进 osdk 的隔离目录，**不会**进你的项目。`deps` 往项目里放的是依赖，
+而装依赖的那个包管理器属于工具。
+
+```bash
+$ osdk deps
+installing node for deps provider `npm`
+installing node@26.10.0 ...installed node@26.10.0
+npm.cmd install --ignore-scripts
+added 2 packages in 827ms
+```
+
+CI 里通常希望工具来自一次显式的 `osdk install`，以免某次运行悄悄取到别的版本。
+用 `--no-install-tools` 把「自动获取」关掉——它只禁止**获取**，你自己装好的照常可用：
+
+```bash
+osdk deps --no-install-tools
+```
+
+工具缺失时它会直接失败，并告诉你该跑哪条命令补上。
+
 ## 构建脚本默认关闭
 
 依赖的 `preinstall` / `install` / `postinstall` 默认不执行。仅声明装哪些包不会

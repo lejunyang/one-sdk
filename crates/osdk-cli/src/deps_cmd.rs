@@ -8,12 +8,15 @@
 //! the identity -- and leaves resolution and installation to the native tool.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use osdk_core::deps::{
     self, state, DepsProviderSchema, DetectedProject, InstallerChoice, ProviderConfig, RunPlan,
+    ToolRole,
 };
+use osdk_core::version::{ToolRequest, ToolVersion};
 
 use crate::App;
 
@@ -34,6 +37,7 @@ struct Resolved {
     schema: &'static DepsProviderSchema,
     project: DetectedProject,
     choice: InstallerChoice,
+    config: ProviderConfig,
     plan: RunPlan,
     decision: state::Decision,
 }
@@ -98,6 +102,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             schema,
             project: project.clone(),
             choice,
+            config,
             plan,
             decision,
         });
@@ -152,15 +157,234 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             );
             continue;
         }
-        let _ = &item.schema;
-        let _ = &options.no_install_tools;
+        let tools = ensure_tools(app, item, options.no_install_tools).await?;
+        run_plan(item, &tools)?;
+        record(app, item, &tools)?;
+    }
+    Ok(())
+}
+
+/// A tool `deps` resolved, and the bin directories it contributes.
+struct ReadyTool {
+    id: String,
+    version: String,
+    role: ToolRole,
+    bin_dirs: Vec<PathBuf>,
+}
+
+/// Resolve every tool a provider needs, installing the missing ones through
+/// osdk's existing install path.
+///
+/// Installing is delegated, not reimplemented. `install_one_without_shims`
+/// already carries source selection, verification, attestation and the CAS; a
+/// second installer here would have to duplicate all of it to be equally honest,
+/// and the copy would be the one that rots. The tools land where every other
+/// osdk install lands -- an isolated install root -- never in the project:
+/// `deps` puts *dependencies* in the project, while the package manager that
+/// installs them is a tool.
+async fn ensure_tools(
+    app: &mut App,
+    item: &Resolved,
+    no_install_tools: bool,
+) -> anyhow::Result<Vec<ReadyTool>> {
+    let mut ready = Vec::new();
+    for required in item.schema.required_tools {
+        // An installer's version can be pinned by the manifest's
+        // `packageManager` field. A runtime's cannot, so it comes from `[tools]`
+        // or, failing that, whatever is already installed.
+        let pinned = match required.role {
+            ToolRole::Installer => item.choice.version.clone(),
+            ToolRole::Runtime => None,
+        };
+        let spec = match &pinned {
+            Some(version) => format!("{}@{version}", required.id),
+            None => match app.ctx.config.tools.get(required.id) {
+                Some(configured) => format!("{}@{configured}", required.id),
+                None => required.id.to_string(),
+            },
+        };
+        let request = ToolRequest::parse(&spec)
+            .with_context(|| format!("parsing deps tool request `{spec}`"))?;
+        let backend = app.registry.get(&request.backend)?;
+
+        // Already installed means nothing is acquired, which is the distinction
+        // `--no-install-tools` draws: it forbids *acquiring* a tool, not using
+        // one the user installed themselves.
+        let installed = backend.list_installed(&app.ctx)?;
+        let resolved =
+            crate::commands::select_installed_version(&request.backend, &request.spec, installed)
+                .ok();
+
+        let version = match resolved {
+            Some(version) => ToolVersion::new(&request.backend, &version),
+            None => {
+                if no_install_tools {
+                    return Err(anyhow!(
+                        "deps provider `{}` needs `{}`, which is not installed, and \
+                         `--no-install-tools` forbids installing it; \
+                         run `osdk install {spec}` first",
+                        item.schema.id,
+                        required.id
+                    ));
+                }
+                println!("installing {spec} for deps provider `{}`", item.schema.id);
+                let (_, installed) =
+                    crate::commands::install_one_without_shims(app, &request, false).await?;
+                installed
+            }
+        };
+
+        let bin_dirs = backend
+            .bin_paths(&app.ctx, &version)
+            .with_context(|| format!("resolving bin directories for {}", version.backend))?;
+        ready.push(ReadyTool {
+            id: required.id.to_string(),
+            version: version.version.clone(),
+            role: required.role,
+            bin_dirs,
+        });
+    }
+    Ok(ready)
+}
+
+/// Run the provider's command with the resolved tools on PATH.
+///
+/// The program is resolved out of the install's own bin directory rather than
+/// through an osdk shim. A shim refuses when no version is selected for the
+/// current directory (`osdk-shim: no version of 'pnpm' selected`), and the
+/// situation `deps` exists for is exactly "just installed, never `use`d".
+///
+/// Runtime bin directories are *prepended* to PATH rather than appended: npm and
+/// pnpm are node scripts and dependency lifecycle hooks invoke `node` directly,
+/// so an unrelated node earlier on PATH would win and the install would run
+/// under a runtime osdk did not choose.
+fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+    let program = resolve_program(&item.plan, tools).ok_or_else(|| {
+        anyhow!(
+            "could not find `{}` in the install for `{}`",
+            item.plan.program_candidates.join("` or `"),
+            item.plan.tool
+        )
+    })?;
+
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let mut path = OsString::new();
+    for dir in tools.iter().flat_map(|tool| &tool.bin_dirs) {
+        if !path.is_empty() {
+            path.push(separator);
+        }
+        path.push(dir);
+    }
+    if let Some(inherited) = std::env::var_os("PATH") {
+        if !inherited.is_empty() {
+            path.push(separator);
+            path.push(inherited);
+        }
+    }
+
+    let cwd = item.project.root.join(&item.plan.cwd);
+    let mut command = std::process::Command::new(&program);
+    command
+        .args(&item.plan.args)
+        .current_dir(&cwd)
+        .env("PATH", &path);
+    for (key, value) in &item.plan.env {
+        command.env(key, value);
+    }
+
+    println!("{}", command_line(&item.plan));
+    let status = command
+        .status()
+        .with_context(|| format!("running {}", program.display()))?;
+    if !status.success() {
         return Err(anyhow!(
-            "running `{}` is not wired up yet: installing a missing package manager \
-             and executing the plan land in the next step (D2). \
-             Use `--dry-run` or `--list` for now.",
+            "`{}` failed with {status}",
             command_line(&item.plan)
         ));
     }
+    Ok(())
+}
+
+/// Locate the installer program among the resolved bin directories.
+///
+/// Candidates are tried in order because Windows needs `pnpm.cmd` where Unix
+/// needs `pnpm`; the provider supplies both and the first that exists wins. The
+/// installer's own directories are searched first, then all of them, because npm
+/// ships inside node's bin directory rather than its own.
+fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
+    let installer_first = tools
+        .iter()
+        .filter(|tool| tool.role == ToolRole::Installer || tool.id == plan.tool);
+    for tool in installer_first.chain(tools.iter()) {
+        for candidate in &plan.program_candidates {
+            for dir in &tool.bin_dirs {
+                let path = dir.join(candidate);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Persist what happened: freshness state, then the lock entry.
+///
+/// Both only after a successful run. Recording freshness for a failed install
+/// would make the next run report "up to date" for a tree that was never
+/// populated, turning one visible failure into a silently broken working tree.
+fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
+    let command = command_line(&item.plan);
+    let sources = deps::effective_sources(item.schema, &item.config);
+    let existing: Vec<PathBuf> = sources
+        .iter()
+        .map(|source| item.project.root.join(source))
+        .filter(|path| path.is_file())
+        .collect();
+    let outputs: Vec<(PathBuf, bool)> =
+        deps::effective_outputs(item.schema, &item.config, config_outputs_set(&item.config))
+            .into_iter()
+            .map(|spec| (item.project.root.join(&spec.path), spec.required))
+            .collect();
+
+    let state_path = state::state_path(&app.ctx.dirs.cache, &item.project.root);
+    let mut persisted = state::DepsState::load(&state_path)?;
+    persisted.record(
+        item.project.provider,
+        &state::Inputs {
+            sources: &existing,
+            declared_sources: !sources.is_empty(),
+            command: &command,
+            outputs: &outputs,
+        },
+    )?;
+    persisted.save(&state_path)?;
+
+    let installer_version = tools
+        .iter()
+        .find(|tool| tool.role == ToolRole::Installer)
+        .map(|tool| tool.version.clone());
+    let runtime = tools
+        .iter()
+        .find(|tool| tool.role == ToolRole::Runtime)
+        .map(|tool| format!("{}@{}", tool.id, tool.version));
+
+    let lock_path = crate::lockfile::default_path(&item.project.root);
+    crate::lockfile::merge_deps(
+        &lock_path,
+        item.project.provider,
+        crate::lockfile::DepsRecord {
+            installer: item.choice.provider.to_string(),
+            installer_version,
+            runtime,
+            project_root: &item.project.root,
+            manifest: &item.project.manifest,
+            native_lock: item.project.native_lock.as_deref(),
+            run: command,
+            index: item.config.index.clone(),
+            allow_build_from_source: item.config.allow_build_from_source,
+        },
+    )?;
     Ok(())
 }
 

@@ -5607,3 +5607,88 @@ fn deps_trust_gates_the_registry_but_not_the_declaration() {
         "a deps trust requirement must not reach tool dispatch: {output:?}"
     );
 }
+
+/// `--no-install-tools` refuses rather than acquiring a package manager, and
+/// refuses *without side effects*.
+///
+/// This is the CI switch: a run there should use the tools an explicit
+/// `osdk install` put in place, so that it cannot quietly acquire a different
+/// version than the one that was reviewed. The assertions therefore check the
+/// filesystem, not just the exit code -- "it failed" and "it failed after
+/// installing half of something" look identical from the status alone.
+#[test]
+fn deps_refuses_to_acquire_tools_when_told_not_to() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n").unwrap();
+
+    let output = run_isolated_in(root, &project, &["deps", "--no-install-tools"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--no-install-tools"), "{stderr}");
+    // The message has to name the command that would fix it; "not installed" on
+    // its own leaves the user to guess the spec.
+    assert!(stderr.contains("osdk install"), "{stderr}");
+
+    assert!(
+        !root.join("installs").join("node").exists(),
+        "nothing may be acquired"
+    );
+    assert!(
+        !project.join("node_modules").exists(),
+        "nothing may be installed"
+    );
+    // A failed run must not record freshness: doing so would make the *next*
+    // run report "up to date" for a tree that was never populated, turning one
+    // visible failure into a silently broken working tree.
+    assert!(
+        !root.join("cache").join("deps").exists(),
+        "a failed run must not record freshness"
+    );
+}
+
+/// Freshness distinguishes its reasons, and each reason is reachable.
+///
+/// Asserted together because "stale" on its own is not evidence of anything --
+/// a decision function that always returned `Stale` would satisfy any single
+/// case. The three paths here fail for three different, named reasons, and the
+/// no-recorded-run case is what a first run must hit.
+#[test]
+fn deps_freshness_reports_a_distinguishable_reason() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n").unwrap();
+
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stale"), "{stdout}");
+    assert!(stdout.contains("no recorded successful run"), "{stdout}");
+
+    // A provider whose declared sources match nothing must not be called fresh.
+    // A predicate that matches no files is vacuously true, which would dress up
+    // "nothing was checked" as "nothing changed".
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps.pnpm]\nsources = [\"does-not-exist.json\"]\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stale"), "{stdout}");
+}

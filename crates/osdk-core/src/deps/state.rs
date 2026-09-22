@@ -65,6 +65,34 @@ impl DepsState {
         std::fs::write(&tmp, text.as_bytes()).map_err(|error| Error::io(&tmp, error))?;
         std::fs::rename(&tmp, path).map_err(|error| Error::io(path, error))
     }
+
+    /// Record a successful run so the next one has something to compare against.
+    ///
+    /// Only to be called after the command exited successfully. Recording a hash
+    /// for a failed install would make the *next* run report "up to date" for a
+    /// tree that was never populated -- worse than recording nothing, because it
+    /// turns one visible failure into a silently broken working tree.
+    pub fn record(&mut self, provider: &str, inputs: &Inputs<'_>) -> Result<()> {
+        let hash = input_hash(inputs.sources, inputs.command)?;
+        let seen_outputs = inputs
+            .outputs
+            .iter()
+            .filter(|(path, _)| path.exists())
+            // The same normalization `decide` applies on the read side.
+            // Calling the shared helper rather than repeating the separator
+            // rule is deliberate: two copies drift, and the symptom would be
+            // a recorded output that silently never matches the one looked up.
+            .map(|(path, _)| super::normalize_relative(&path.to_string_lossy()))
+            .collect();
+        self.providers.insert(
+            provider.to_string(),
+            ProviderState {
+                hash: Some(hash),
+                seen_outputs,
+            },
+        );
+        Ok(())
+    }
 }
 
 /// Where a project's deps state belongs inside the managed cache.
@@ -186,6 +214,63 @@ pub fn decide(inputs: &Inputs<'_>, state: Option<&ProviderState>) -> Result<Deci
 
 #[cfg(test)]
 mod tests {
+    /// `record` is the only thing that makes a provider fresh, so the ordering in
+    /// the caller is load-bearing: it must run *after* a successful command.
+    ///
+    /// This test pins the property that makes that ordering observable -- a
+    /// state file whose hash was never updated still reports stale. Without it,
+    /// moving `record` ahead of the run would look harmless: the command still
+    /// fails loudly once, and only the *next* run silently claims a tree that was
+    /// never populated is up to date.
+    #[test]
+    fn a_hash_recorded_for_different_inputs_does_not_make_a_provider_fresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("package.json");
+        std::fs::write(&manifest, b"{}").unwrap();
+        let sources = vec![manifest.clone()];
+
+        let mut state = DepsState::default();
+        state
+            .record(
+                "npm",
+                &Inputs {
+                    sources: &sources,
+                    declared_sources: true,
+                    command: "npm install",
+                    outputs: &[],
+                },
+            )
+            .unwrap();
+
+        // Same sources, different command: the run that would have produced this
+        // state never happened, so it cannot be fresh.
+        let decision = decide(
+            &Inputs {
+                sources: &sources,
+                declared_sources: true,
+                command: "npm ci",
+                outputs: &[],
+            },
+            state.providers.get("npm"),
+        )
+        .unwrap();
+        assert!(!decision.is_fresh(), "{decision:?}");
+
+        // And the recorded command *is* fresh, which is what proves the check
+        // above is discriminating rather than always-stale.
+        let decision = decide(
+            &Inputs {
+                sources: &sources,
+                declared_sources: true,
+                command: "npm install",
+                outputs: &[],
+            },
+            state.providers.get("npm"),
+        )
+        .unwrap();
+        assert!(decision.is_fresh(), "{decision:?}");
+    }
+
     use super::*;
 
     fn write(path: &Path, body: &str) {

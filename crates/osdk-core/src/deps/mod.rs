@@ -536,6 +536,48 @@ pub struct OutputSpecOwned {
     pub required: bool,
 }
 
+/// Stable label for a native lockfile, derived from its file name.
+///
+/// Recognition is driven off the provider table rather than a second hand-written
+/// mapping: a separate list is one more place to forget when a provider is added,
+/// and the symptom -- a lock entry labelled with the wrong installer -- reads as
+/// plausible rather than as a bug.
+pub fn native_lock_kind(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    let known = PROVIDERS
+        .iter()
+        .any(|provider| provider.native_locks.contains(&name));
+    if !known {
+        return None;
+    }
+    // Exhaustive over the table checked above, so a provider added without a
+    // label here yields None rather than a borrowed name that cannot be
+    // 'static\. None means "no native lock recorded", which is visibly
+    // incomplete; a wrong label would not be.
+    match name {
+        "package-lock.json" => Some("package-lock"),
+        "npm-shrinkwrap.json" => Some("npm-shrinkwrap"),
+        "pnpm-lock.yaml" => Some("pnpm-lock"),
+        "yarn.lock" => Some("yarn-lock"),
+        "bun.lock" => Some("bun-lock"),
+        "bun.lockb" => Some("bun-lockb"),
+        _ => None,
+    }
+}
+
+/// SHA-256 of a file, lowercase hex.
+///
+/// Lives here rather than in the CLI so the lock writer needs no hashing
+/// dependency of its own, and so it shares the hashing crates that
+/// \[profile.release]\ pins to \opt-level = 3\.
+pub fn file_sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|error| Error::io(path, error))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Normalize a project-relative path for anything that gets written into a
 /// produced artifact (lock, receipt, state).
 ///

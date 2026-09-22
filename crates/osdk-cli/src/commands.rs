@@ -1234,7 +1234,7 @@ fn installed_dynamic_match(
     Some(version)
 }
 
-async fn install_one_without_shims(
+pub(crate) async fn install_one_without_shims(
     app: &App,
     req: &ToolRequest,
     force: bool,
@@ -3368,7 +3368,7 @@ fn global_npm_selection_spec(
     Ok(VersionSpec::parse(&expanded))
 }
 
-fn select_installed_version(
+pub(crate) fn select_installed_version(
     backend: &str,
     spec: &VersionSpec,
     installed: Vec<String>,

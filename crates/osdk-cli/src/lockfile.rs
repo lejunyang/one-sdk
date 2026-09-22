@@ -1732,6 +1732,76 @@ fn reject_linked_rust(dirs: &osdk_core::dirs::Dirs, version: &ToolVersion) -> Re
     Ok(())
 }
 
+/// What `merge_deps` needs to record one application environment.
+pub struct DepsRecord<'a> {
+    pub installer: String,
+    pub installer_version: Option<String>,
+    pub runtime: Option<String>,
+    pub project_root: &'a Path,
+    pub manifest: &'a Path,
+    pub native_lock: Option<&'a Path>,
+    pub run: String,
+    pub index: Option<String>,
+    pub allow_build_from_source: bool,
+}
+
+/// Record a materialized application environment in the lock.
+///
+/// Paths are stored relative to the lock and normalized to `/`: this value gets
+/// committed and read on other platforms, where `\` is not a separator at all.
+/// Digests come from the files as they are on disk right now, after the install,
+/// so the entry describes what was actually consumed rather than what was
+/// intended.
+pub fn merge_deps(path: &Path, provider: &str, record: DepsRecord<'_>) -> Result<()> {
+    let mut lockfile = if path.is_file() {
+        load(path)?
+    } else {
+        Lockfile::default()
+    };
+    let lock_dir = path.parent().unwrap_or(Path::new("."));
+
+    let manifest_sha256 = osdk_core::deps::file_sha256(record.manifest)?;
+    // The kind comes from the file name via the provider table, so a provider
+    // added later cannot end up mislabelled here.
+    let mut native_lock = None;
+    if let Some(lock) = record.native_lock {
+        if let Some(kind) = osdk_core::deps::native_lock_kind(lock) {
+            native_lock = Some(LockedDepsNativeLock {
+                kind: kind.to_string(),
+                path: relative_to_lock(lock_dir, lock),
+                sha256: osdk_core::deps::file_sha256(lock)?,
+            });
+        }
+    }
+
+    lockfile.deps.insert(
+        provider.to_string(),
+        LockedDeps {
+            installer: record.installer,
+            installer_version: record.installer_version,
+            runtime: record.runtime,
+            manifest: relative_to_lock(lock_dir, record.manifest),
+            manifest_sha256,
+            native_lock,
+            run: record.run,
+            index: record.index,
+            allow_build_from_source: record.allow_build_from_source,
+        },
+    );
+    let _ = record.project_root;
+    save(path, &lockfile)
+}
+
+/// A path relative to the lock's directory, with `/` separators.
+///
+/// Falls back to the normalized absolute path when the target is not under the
+/// lock -- recording something wrong would be worse than recording something
+/// verbose, and a path outside the project is a real (if unusual) configuration.
+fn relative_to_lock(lock_dir: &Path, target: &Path) -> String {
+    let relative = target.strip_prefix(lock_dir).unwrap_or(target);
+    relative.to_string_lossy().replace('\\', "/")
+}
+
 pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -> Result<()> {
     let mut lockfile = if path.is_file() {
         load(path)?

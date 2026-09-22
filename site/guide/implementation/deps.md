@@ -92,6 +92,39 @@ lockfile 时会**明确失败**，而 classic 会静默继续，猜错的代价�
 （pnpm 12 因此会 `ERR_PNPM_IGNORED_BUILDS` 并提示 `pnpm approve-builds`），
 但 osdk 仍然显式传 `--ignore-scripts`，不依赖某个版本的默认值。
 
+## 工具的获取是委派的
+
+缺包管理器时，`deps` 调 `install_one_without_shims`——就是 `osdk install` 用的那条。
+不另造一套的理由很直接：那条路径上已经有源选择、校验、attestation 与 CAS，
+第二份实现要同样可靠就得把这些全抄一遍，而抄出来的那份必然先腐烂。
+
+版本来源分两种角色：installer 的版本可以被清单的 `packageManager` 钉住，
+runtime 的不行，所以后者取自 `[tools]`，再退到「本机已装的哪个」。
+
+`--no-install-tools` 划的界是**获取**而不是**使用**：已经装好的照常用，
+缺的则报错并给出该跑的命令。CI 需要这个区分——工具应当来自一次被审阅过的显式
+`osdk install`，而不是某次运行顺手取到的另一个版本。
+
+## PATH 是前置而非追加
+
+`run_plan` 把解析出的 bin 目录**插到 PATH 最前面**。这不是风格问题：npm 与 pnpm
+本身是 node 脚本，依赖的生命周期钩子也会直接调 `node`，若 PATH 上先出现另一个
+node，安装就会在 osdk 没有选定的运行时下进行——而且一切看起来正常。
+
+程序查找先搜 installer 自己的目录，再搜全部。后一步是必需的：npm 随 node 发布，
+住在 node 的 bin 目录里而不是自己的。
+
+## 记录只发生在成功之后
+
+`record` 在命令成功返回后才调用，顺序是承重的。把它挪到执行前不会让当次运行变得
+正常——当次照样响亮地失败——但**下一次**会对着一个从未被填充的目录报告「已是最新」，
+于是一次可见的失败变成一棵静默损坏的工作树。
+
+`osdk.lock` 的 `native_lock` 段记的是**安装后**磁盘上的那个文件的摘要，
+所以它描述的是实际被消费的东西，而不是原本打算消费的东西。第一次安装时
+lockfile 还不存在，该段因此缺席；lockfile 生成后的下一次运行才补上，
+同时命令也从 `npm install` 转成 `npm ci`。
+
 ## 发现是 fail-closed 的
 
 `discover()` 从当前目录向上逐层找，最近者胜，**不向下递归**——
