@@ -562,6 +562,91 @@ mod tests {
         );
     }
 
+    /// Two models that each contribute a *different* filename coexist; when
+    /// they contribute the *same* consumer-relative path the second render is
+    /// rejected and, critically, the first model's link is left byte-intact.
+    /// This is the "two models, one shared view root" case the P1 aggregation
+    /// rewrite exists to protect. Asserted by reading the artifact (the file
+    /// bytes still belong to model a), not by the error alone.
+    #[test]
+    fn collision_leaves_the_first_models_link_intact_and_is_atomic_per_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let (models, views) = stores(temp.path());
+        publish(
+            &models,
+            &scratch,
+            "a",
+            vec![file_in(
+                &scratch,
+                "src-a/vae.safetensors",
+                "vae/vae.safetensors",
+                b"AAA",
+            )],
+        );
+        publish(
+            &models,
+            &scratch,
+            "b",
+            vec![file_in(
+                &scratch,
+                "src-b/vae.safetensors",
+                "vae/vae.safetensors",
+                b"BBB",
+            )],
+        );
+        let map = BTreeMap::new();
+        let entry_a = ViewEntry {
+            model: "a".into(),
+            map: map.clone(),
+        };
+        let entry_b = ViewEntry {
+            model: "b".into(),
+            map,
+        };
+        let root = views.view_root(ViewKind::Comfyui, "default").unwrap();
+        let collision = root.join("vae/vae.safetensors");
+
+        // a alone renders fine.
+        views
+            .render(ViewKind::Comfyui, "default", std::slice::from_ref(&entry_a))
+            .unwrap();
+        assert_eq!(std::fs::read(&collision).unwrap(), b"AAA");
+
+        // Trying to render both must fail rather than overwrite a's bytes.
+        let err = views
+            .render(
+                ViewKind::Comfyui,
+                "default",
+                &[entry_a.clone(), entry_b.clone()],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already provided by model"),
+            "{err}"
+        );
+        // Read the artifact: a's link must still point at a's bytes.
+        assert_eq!(
+            std::fs::read(&collision).unwrap(),
+            b"AAA",
+            "a rejected collision must not overwrite the incumbent link"
+        );
+
+        // Rebuilding b alone (which would place the colliding path into an
+        // empty-of-a profile is fine, but in THIS root a still owns it) must
+        // also be rejected: ownership is read from the on-disk manifest, not
+        // just the entry list passed to one render call.
+        let err = views
+            .render(ViewKind::Comfyui, "default", std::slice::from_ref(&entry_b))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already provided by model"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&collision).unwrap(), b"AAA");
+    }
+
     #[test]
     fn hf_cache_layout_sits_directly_under_the_view_root() {
         let temp = tempfile::tempdir().unwrap();

@@ -139,6 +139,15 @@ when = { os = ["linux", "macos"] }
 description = "Installer smoke test (PowerShell installer)"
 run = "pwsh -NoProfile -File scripts/test-installers.ps1"
 when = { os = "windows" }
+[tasks.comfyui-view-e2e]
+description = "ComfyUI model-view end-to-end (real CLI + headless source-tree ComfyUI)"
+# Drives pull -> declarative [models] render -> extra_model_paths.yaml export ->
+# real folder_paths discovery, plus the two-model same-root collision contract.
+# Needs a ComfyUI checkout and a Python with PyYAML; pass them explicitly. Not
+# part of `ci`/`test`: an environment-heavy integration guard run on demand.
+# All OSDK_* state is temp-isolated and the Desktop install is untouched.
+run = "pwsh -NoProfile -File scripts/test-comfyui-model-view.ps1 -BinDir target/debug -ComfyDir $OSDK_COMFYUI_DIR"
+when = { os = "windows" }
 
 [tasks.live-smoke]
 description = "Live smoke harness used by the fmt job"
