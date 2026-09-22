@@ -330,6 +330,7 @@ Declare a provider in `osdk.toml`, then run it:
 osdk deps --list            # detected providers and their freshness
 osdk deps --dry-run         # print what would run, without running it
 osdk deps                   # materialize the manifest
+osdk deps --verify          # check the installed tree against its own receipts
 ```
 
 osdk decides frozen-vs-not by looking for the native lockfile itself rather than

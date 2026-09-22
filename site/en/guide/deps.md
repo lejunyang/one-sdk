@@ -190,6 +190,43 @@ allow_build_from_source = false
 env = { CI = "1" }
 ```
 
+## Checking an installed environment: `osdk deps --verify`
+
+Freshness answers "did the inputs change" and **cannot see** that something else
+edited `node_modules` or `site-packages` -- the hash is over the inputs.
+`--verify` reads the receipts the package managers write **themselves** to answer
+a different question: is what is installed still what was installed?
+
+```bash
+osdk deps --verify
+```
+
+Two layers, cheapest first:
+
+- **L1**: is the native lockfile's sha256 still the one recorded in `osdk.lock`?
+  This catches a drift freshness structurally cannot -- the lock is untouched, so
+  the hash matches, but the environment was rebuilt by something else.
+- **L2**: does every entry in the receipt still exist, at the recorded size and
+  version? Python reads `dist-info/RECORD` (per-file size and sha256); Node reads
+  `node_modules/.package-lock.json` (per-package version and integrity).
+
+The exit code is non-zero when anything is wrong, so this works as a CI gate. The
+output also reports how much was examined: "0 problems" and "nothing was checked"
+must not read the same, so an environment with no receipt to read is **reported as
+an error rather than passed**.
+
+Four kinds of tampering were measured as detectable: deleting a file inside an
+installed package, changing a file's contents, deleting a whole installed package,
+and swapping a package's `version` in place. The last is the sneakiest -- the
+directory is there, the file count is right, only the version disagrees.
+
+::: warning Do not just re-run the installer after a failure
+`uv pip sync` was measured **not** to repair a modified file, and the tampered
+content may already be in the tool's global cache (one modified file made every
+newly created venv copy the bad version from cache). Clear the cache and
+reinstall.
+:::
+
 ## Freshness
 
 `deps` records a hash of the inputs of the last successful run and compares it

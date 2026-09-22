@@ -28,6 +28,7 @@ use crate::error::{Error, Result};
 pub mod node;
 pub mod python;
 pub mod state;
+pub mod verify;
 
 pub use state::{DepsState, ProviderState};
 

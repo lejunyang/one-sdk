@@ -30,6 +30,7 @@ pub struct DepsOptions {
     pub skip: Vec<String>,
     pub no_install_tools: bool,
     pub frozen: bool,
+    pub verify: bool,
 }
 
 /// One provider ready to be reported on or run.
@@ -108,6 +109,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         });
     }
 
+    if options.verify {
+        return verify(app, &resolved);
+    }
+
     if options.list {
         for item in &resolved {
             println!(
@@ -160,6 +165,85 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
         run_plan(item, &tools)?;
         record(app, item, &tools)?;
+    }
+    Ok(())
+}
+
+/// Check installed environments against the package managers' own receipts.
+///
+/// Two layers, cheapest first:
+///
+/// * **L1** -- is the native lockfile still the one osdk installed from? This
+///   catches a drift freshness structurally cannot: the lock is untouched, so the
+///   sources hash matches, but the environment was rebuilt by something else.
+/// * **L2** -- does every entry in the receipt still exist, at the recorded size
+///   and version?
+///
+/// The exit code is non-zero when anything is wrong, so this is usable as a CI
+/// gate. `checked` is reported alongside, because "0 problems" and "nothing was
+/// examined" must not read the same -- a verification that inspected nothing is
+/// not a pass.
+fn verify(app: &App, resolved: &[Resolved]) -> anyhow::Result<()> {
+    use osdk_core::deps::verify as deep;
+
+    let mut problems = 0usize;
+    for item in resolved {
+        println!("{}  {}", item.project.provider, item.project.root.display());
+
+        // L1 first: it is one file read, and it explains an L2 failure when both
+        // fire.
+        let lock_path = crate::lockfile::default_path(&item.project.root);
+        if lock_path.is_file() {
+            let locked = crate::lockfile::load(&lock_path)?;
+            if let Some(entry) = locked.deps.get(item.project.provider) {
+                if let Some(native) = &entry.native_lock {
+                    match deep::verify_native_lock(
+                        &item.project.root,
+                        &native.path,
+                        &native.sha256,
+                    )? {
+                        Some(finding) => {
+                            problems += 1;
+                            println!("    L1 {}", finding.describe());
+                        }
+                        None => println!("    L1 {} matches osdk.lock", native.path),
+                    }
+                }
+            }
+        }
+
+        let report = match item.project.ecosystem {
+            osdk_core::deps::Ecosystem::Node => deep::verify_node(&item.project.root)?,
+            osdk_core::deps::Ecosystem::Python => deep::verify_python(&item.project.root, None)?,
+            other => {
+                println!("    L2 not implemented for {} yet", other.as_str());
+                continue;
+            }
+        };
+        if report.is_clean() {
+            println!("    L2 {} entries verified", report.checked);
+        } else {
+            problems += report.findings.len();
+            println!(
+                "    L2 {} entries checked, {} problem(s):",
+                report.checked,
+                report.findings.len()
+            );
+            for finding in &report.findings {
+                println!("       {}", finding.describe());
+            }
+        }
+    }
+    let _ = app;
+
+    if problems > 0 {
+        return Err(anyhow!(
+            "{problems} problem(s) found; the installed environment does not match \
+             what was installed. Note that re-running the installer may not fix it: \
+             `uv pip sync` was measured not to repair a modified file, and a tampered \
+             file can already be in the tool's global cache. Clear the cache and \
+             reinstall."
+        ));
     }
     Ok(())
 }

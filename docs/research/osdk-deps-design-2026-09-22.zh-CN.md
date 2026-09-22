@@ -401,7 +401,45 @@ mise 官方明确：freshness 检查**不逐个核验已装包**、不查上游�
 | --- | --- | --- |
 | L0 哈希（默认） | sources + 生效命令哈希、outputs 存在性 | 毫秒级 |
 | L1 身份（默认，便宜） | 原生 lock 的 sha256 是否仍等于 osdk.lock 记录值；installer/工具版本是否仍匹配 | 一次文件读 |
-| L2 产物（`--verify`） | provider 各自的 receipt 判据：`node_modules/.bin` 齐全（照 `npm_package.rs` 的 `validate_project_package_bins`）、`pyvenv.cfg` 的 creator/解释器仍是记录的那个（照 `pypi.rs` 的 `creator_from_pyvenv_cfg`）、关键包元数据存在 | 秒级 |
+| L2 产物（`--verify`） | **每个包的原生 receipt**：Python 读 `dist-info/RECORD` 的逐文件 size/sha256，Node 读 `node_modules/.package-lock.json` 的逐包 version/integrity（判据已实测，见 §8.4） | 秒级 |
+
+### 8.4 L2 判据的有效性（已实测，2026-09-22）
+
+指令是明确的：**做不到「故意破坏后必须失败」就说明这层是装饰、不要保留**。所以每条
+候选判据都对着真实篡改测了一遍，通不过的直接淘汰。
+
+| 篡改 | pyvenv.cfg | dist-info 存在 | **RECORD 逐文件** | 结论 |
+| --- | --- | --- | --- | --- |
+| 删掉包内一个文件（`idna/idnadata.py`） | 未发现 | 未发现 | **发现（缺 1 个）** | 只有 RECORD 够用 |
+| 改一个文件的内容（`idna/core.py` 追加一行） | 未发现 | 未发现 | **发现（size 13239→13251）** | 同上 |
+
+| 篡改 | **.package-lock.json 逐包** | 结论 |
+| --- | --- | --- |
+| 删掉一个已装包目录（`is-number`） | **发现（1 条记录在磁盘上不存在）** | 有效 |
+| 就地把某包的 `version` 改成 9.9.9 | **发现（recorded 3.0.1 ≠ actual 9.9.9）** | 有效 |
+
+**被淘汰的两条**：设计原本写的 `pyvenv.cfg` 的 creator/解释器、以及「关键包元数据
+存在」，对上面两种 Python 篡改**都毫无反应**。它们是 AGENTS.md 说的那种「断言与被测
+机制脱离」——检查的是环境怎么建的，而篡改动的是环境里装了什么。保留它们会让
+`--verify` 通过一个实际已经坏掉的环境。
+
+**保留的判据**：Python 用 `dist-info/RECORD`（实测 idna 3.10 的 15 行里有 14 行带
+`sha256=` 与 size，是真正的逐文件收据）；Node 用 `node_modules/.package-lock.json`
+（npm 自己写的收据，含逐包 `version` 与 `integrity`）。两者都是包管理器自己留下的，
+osdk 不另造第二份依赖图。
+
+#### 反向控制暴露出的一件更严重的事
+
+反向控制（干净环境必须全部通过）第一次**没通过**：新建的 venv 仍报 1 处 size 不匹配。
+排查后确认不是判据误报，而是——**`uv` 把被篡改的文件写进了它的全局缓存**，此后每个
+新 venv 都从坏缓存复制过来。换一个全新的 `UV_CACHE_DIR` 后不匹配归零，证明污染在缓存
+而不在判据。
+
+这件事有两层含义。一是方法论上：它正是 AGENTS.md「复用了被污染的状态」那一族，
+如果当时把「干净环境也报错」当成判据不可靠而放弃 L2，结论会完全反过来。二是产品上：
+**`uv pip sync` 不校验已装文件的内容**——被改过的文件不会被修复（实测 `core.py` 的
+`# tampered` 在 sync 之后仍在），所以「跑一遍 sync 就好了」并不成立，这恰恰是 L2
+存在的理由，也说明 `deps doctor` 发现篡改后应当建议的是清缓存 + 重装，而不是重跑 sync。
 
 L1 是关键补强：它能抓到「原生 lock 被人改过但 sources 哈希也跟着变了所以看着一致」之外的另一种漂移——**lock 没变但环境被别的工具替换过**。
 
@@ -559,7 +597,7 @@ AGENTS.md 记过 pypi「只写 installer 不回读、重锁被本机环境静默
 4. **bundler / composer** 的冻结安装参数与「是否会编译 native extension / 跑脚本」，以及 osdk **目前没有 ruby/php backend**（`registry.rs:21-36` 无此二者）——D5 若要做，需先评估是否新增 backend 或要求 syspkg 提供。
 5. **go**：`go mod download` 是否在任何情况下会执行代码（如 `//go:generate` 不会，但 toolchain 自动下载 `GOTOOLCHAIN` 的行为需核准），以及 `vendor/` 存在时的判定细节。
 6. **cargo**：`cargo fetch --locked` 是否足以让后续离线构建成功、以及 `CARGO_HOME` 与 osdk 既有 cargo 管理（`data/cargo`）如何不打架。
-7. **各 provider 的 receipt 判据是否足以发现外部篡改**（L2 深度校验的有效性）——必须按「故意破坏后 `--verify` 必须失败」实测，否则这层是装饰。
+7. ~~**各 provider 的 receipt 判据是否足以发现外部篡改**~~ → **已实测（§8.4）**：`dist-info/RECORD` 与 `node_modules/.package-lock.json` 四种篡改全部检出；原设计的 `pyvenv.cfg` creator 判据对文件级篡改毫无反应，已淘汰。反向控制另外暴露出 `uv` 会把被篡改的文件写进全局缓存，且 `uv pip sync` 不修复内容。
 8. ~~`osdk deps add/remove` 是否应该存在~~ —— **已定（2026-09-22 用户拍板）**：不新增；`deps` 只做整份清单兑现，单包增删继续走 `osdk install <npm:pkg>`。见 §3。
 
 ---

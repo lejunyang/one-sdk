@@ -327,6 +327,16 @@ pub enum Command {
         /// non-frozen install.
         #[arg(long)]
         frozen: bool,
+        /// Check the installed environment against the package manager's own
+        /// receipt, instead of only checking whether the inputs changed.
+        ///
+        /// Freshness cannot see that something else edited `node_modules` or
+        /// `site-packages`: the hash is over the inputs. This reads the receipts
+        /// (`dist-info/RECORD`, `node_modules/.package-lock.json`) and reports
+        /// files that are missing, resized, or a different version than what was
+        /// installed.
+        #[arg(long)]
+        verify: bool,
     },
 
     /// Manage Rust components, targets, status, overrides, and linked toolchains.

@@ -235,6 +235,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
             skip,
             no_install_tools,
             frozen,
+            verify,
         } => {
             deps_cmd::deps(
                 app,
@@ -247,6 +248,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
                     skip,
                     no_install_tools,
                     frozen,
+                    verify,
                 },
             )
             .await

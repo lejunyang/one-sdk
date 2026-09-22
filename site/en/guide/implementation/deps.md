@@ -101,6 +101,60 @@ scripts by default (which is why pnpm 12 reports `ERR_PNPM_IGNORED_BUILDS` and
 suggests `pnpm approve-builds`). osdk still passes `--ignore-scripts` explicitly
 rather than relying on one version's default.
 
+## Deep verification: predicates chosen by measurement, not by plausibility
+
+The design originally proposed L2 as "`pyvenv.cfg` creator/interpreter still the
+recorded one" plus "key package metadata present". Each candidate was tested
+against real tampering before any of it was implemented, and both of those were
+**dropped**:
+
+| Tampering | pyvenv.cfg | dist-info present | **per-file RECORD** |
+| --- | --- | --- | --- |
+| delete a file inside a package | missed | missed | **found** |
+| change a file's contents | missed | missed | **found** |
+
+The reason is plain: they describe **how the environment was created**, while
+tampering changes **what is in it**. That is exactly AGENTS.md's "assertion
+detached from the mechanism under test" -- keeping them would let `--verify` pass
+an environment that is already broken, which is worse than having no layer at all.
+
+What survived is the receipt each package manager writes **itself**: Python's
+`dist-info/RECORD` (measured: 14 of idna 3.10's 15 lines carry size and sha256)
+and Node's `node_modules/.package-lock.json` (per-package version and integrity).
+osdk reads those instead of keeping a second dependency graph -- the same
+judgement as "the native lock is the source of truth".
+
+Size is compared rather than sha256 because it catches the same class of tampering
+(measured: appending one line took 13239 to 13251) at a fraction of the cost, and
+a verification too slow to be run protects nothing. The hash is still in RECORD if
+a `--verify --deep` ever needs it.
+
+### What the reverse control exposed
+
+"A clean environment must pass everything" **failed** the first time: a freshly
+created venv still reported one size mismatch. The cause was not a false positive
+in the predicate -- it was that **`uv` had written the tampered file into its
+global cache**, so every new venv copied the bad version from there. A fresh
+`UV_CACHE_DIR` brought it to zero.
+
+Two consequences. Methodologically this is AGENTS.md's "reused polluted state"
+family: had "even a clean environment reports an error" been read as an unreliable
+predicate, L2 would have been abandoned on exactly inverted evidence. And as
+product behaviour, it means **`uv pip sync` does not verify the contents of
+already-installed files** (measured: the modified `core.py` still carried its edit
+after a sync), so "just run it again" is not a fix. That is why a `--verify`
+failure recommends clearing the cache and reinstalling.
+
+### "Could not check" is not "checked and fine"
+
+With no receipt to read, L2 reports `ReceiptMissing` rather than returning an
+empty clean report. `checked == 0` with no findings would be a vacuous pass,
+dressing up "nothing was examined" as "nothing is wrong". The report therefore
+states how many entries were checked.
+
+`--verify` short-circuits before anything is installed: it is a check, not a
+command that changes the environment.
+
 ## Python: two asymmetries with Node
 
 Both measured on 2026-09-22 (uv 0.12.17 / CPython 3.12.14), by the same judgement

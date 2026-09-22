@@ -5795,3 +5795,118 @@ fn pip_requirements_reports_unpinned_files_and_creates_the_environment() {
         "an unpinned requirement is not reproducible and must be reported: {stdout}"
     );
 }
+
+/// The whole reason `--verify` exists: freshness reports fresh while the
+/// environment is broken.
+///
+/// This is the control that decides whether the layer is real or decoration.
+/// Nothing in `sources` changes here -- only the installed tree is tampered with
+/// -- so the hash still matches and L0 is satisfied. If `--verify` also passed,
+/// it would be checking nothing worth checking.
+///
+/// The tampering is done directly rather than through a package manager so the
+/// test needs no network: the receipt format is what is under test, and it is the
+/// same file npm would have written.
+#[test]
+fn verify_finds_tampering_that_freshness_cannot_see() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("package-lock.json"), "{}\n").unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.npm]\n").unwrap();
+
+    // A receipt exactly as npm writes it, with the tree it describes.
+    let nm = project.join("node_modules");
+    std::fs::create_dir_all(nm.join("is-odd")).unwrap();
+    std::fs::create_dir_all(nm.join("is-number")).unwrap();
+    std::fs::write(
+        nm.join(".package-lock.json"),
+        r#"{"packages":{"":{},"node_modules/is-odd":{"version":"3.0.1"},"node_modules/is-number":{"version":"6.0.0"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        nm.join("is-odd/package.json"),
+        r#"{"name":"is-odd","version":"3.0.1"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        nm.join("is-number/package.json"),
+        r#"{"name":"is-number","version":"6.0.0"}"#,
+    )
+    .unwrap();
+
+    // Clean: passes, and says how much it looked at. "0 problems" and "nothing
+    // examined" must not read the same.
+    let output = run_isolated_in(root, &project, &["deps", "--verify"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2 entries verified"), "{stdout}");
+
+    // Tamper with the installed tree only. Nothing in `sources` moves.
+    std::fs::write(
+        nm.join("is-odd/package.json"),
+        r#"{"name":"is-odd","version":"9.9.9"}"#,
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["deps", "--verify"]);
+    assert!(
+        !output.status.success(),
+        "a swapped version must fail verification: {output:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("is version 9.9.9 but was installed as 3.0.1"),
+        "{stdout}"
+    );
+
+    // Deleting a package is caught too, and named.
+    std::fs::remove_dir_all(nm.join("is-number")).unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--verify"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("node_modules/is-number is missing"),
+        "{stdout}"
+    );
+}
+
+/// An environment with no receipt is not silently a pass.
+///
+/// `checked == 0` with an empty finding list would be a vacuous pass -- the shape
+/// AGENTS.md warns about, where "nothing was checked" is dressed up as "nothing
+/// is wrong". So the absence of a receipt is itself reported.
+#[test]
+fn verify_refuses_to_pass_an_environment_it_cannot_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.npm]\n").unwrap();
+
+    // No node_modules at all: unverifiable, and therefore not clean.
+    let output = run_isolated_in(root, &project, &["deps", "--verify"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no install receipt"),
+        "an unverifiable environment must not read as verified: {stdout}"
+    );
+
+    // `--verify` must not install anything on its way to checking.
+    assert!(
+        !project.join("node_modules").exists(),
+        "verification is a check, not a command that changes the environment"
+    );
+}

@@ -297,6 +297,7 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 osdk deps --list            # 列出探测到的 provider 与新鲜度
 osdk deps --dry-run         # 打印将要执行的命令，不执行
 osdk deps                   # 兑现整份清单
+osdk deps --verify          # 按包管理器自己的收据校验已装环境
 ```
 
 osdk 不把「是否冻结」交给包管理器判断，而是自己先看原生 lockfile 在不在：有就用
