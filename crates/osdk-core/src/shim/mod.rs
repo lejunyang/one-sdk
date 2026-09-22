@@ -2314,6 +2314,8 @@ mod tests {
                 tasks: Default::default(),
                 #[cfg(feature = "install")]
                 models: Default::default(),
+                #[cfg(feature = "install")]
+                deps: Default::default(),
             },
             client: reqwest::Client::new(),
             show_progress: false,

@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod config_edit;
 mod container;
+mod deps_cmd;
 mod global_npm_use;
 mod localize;
 mod lockfile;
@@ -225,6 +226,31 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Python { command } => commands::python(app, command),
         Command::Android { command } => commands::android(app, command).await,
         Command::Model { command } => commands::model(app, command).await,
+        Command::Deps {
+            providers,
+            list,
+            dry_run,
+            force,
+            explain,
+            skip,
+            no_install_tools,
+            frozen,
+        } => {
+            deps_cmd::deps(
+                app,
+                deps_cmd::DepsOptions {
+                    providers,
+                    list,
+                    dry_run,
+                    force,
+                    explain,
+                    skip,
+                    no_install_tools,
+                    frozen,
+                },
+            )
+            .await
+        }
         Command::Rust { command } => commands::rust(app, command).await,
         Command::Cache { command } => commands::cache(app, command),
         Command::Container { command } => return container::run(app, command).await,

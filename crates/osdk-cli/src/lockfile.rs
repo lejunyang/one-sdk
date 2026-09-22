@@ -50,6 +50,11 @@ pub struct Lockfile {
     pub platforms: BTreeMap<String, PlatformLock>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, LockedModel>,
+    /// Application dependency environments, keyed by provider id. Skipped when
+    /// empty so existing locks serialize byte-identically and an older build
+    /// ignores the section instead of failing (no deny_unknown_fields here).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deps: BTreeMap<String, LockedDeps>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -360,6 +365,58 @@ pub struct LockedModelFile {
     pub sha256: String,
 }
 
+/// Identity of one materialized application dependency environment.
+///
+/// What is recorded is what another machine needs to reproduce *the same*
+/// install: which installer at which version, driven by which runtime, against
+/// which manifest and native lockfile, from which index. Deliberately **not**
+/// recorded: absolute paths (machine locations), the contents of
+/// `node_modules` (that is the native lockfile's job -- osdk does not keep a
+/// second dependency graph), and credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedDeps {
+    /// Installer id actually used (`npm`, `pnpm`, ...).
+    pub installer: String,
+    /// Exact installer version, when osdk resolved one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_version: Option<String>,
+    /// Runtime the installer ran under, as `id@version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Manifest path relative to the lock, normalized to `/` because this value
+    /// is committed and read on other platforms.
+    pub manifest: String,
+    pub manifest_sha256: String,
+    /// The native lockfile this install consumed, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_lock: Option<LockedDepsNativeLock>,
+    /// Effective command, kept so a reviewer can see what ran and so a changed
+    /// command invalidates freshness.
+    pub run: String,
+    /// Recorded as the provider's canonical registry; a mirror is folded to it
+    /// for the same reason model endpoints are -- one machine's fastest host is
+    /// not part of the identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+    /// Whether the entry opted into running build scripts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_build_from_source: bool,
+}
+
+/// The native lockfile an application environment was installed from.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedDepsNativeLock {
+    /// Stable kind label, e.g. `package-lock` or `pnpm-lock`.
+    pub kind: String,
+    /// Path relative to the lock, normalized to `/`.
+    pub path: String,
+    pub sha256: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn schema_version() -> u32 {
     4
 }
@@ -370,6 +427,7 @@ impl Default for Lockfile {
             schema: schema_version(),
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
+            deps: BTreeMap::new(),
         }
     }
 }
@@ -1501,6 +1559,7 @@ pub fn merge_resolved_with_scope(
             schema: schema_version(),
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
+            deps: BTreeMap::new(),
         }
     };
     if lockfile.schema == 1 {
@@ -2627,6 +2686,7 @@ mod tests {
             schema: 1,
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
+            deps: BTreeMap::new(),
         };
         initial.platforms.insert(
             "windows-x64".into(),
@@ -2760,6 +2820,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             schema: 1,
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
+            deps: BTreeMap::new(),
         };
         save(&path, &legacy).unwrap();
         assert_eq!(load(&path).unwrap().schema, schema_version());
@@ -2791,6 +2852,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                 },
             )]),
             models: BTreeMap::new(),
+            deps: BTreeMap::new(),
         };
         save(&path, &legacy).unwrap();
         let lock = load(&path).unwrap();
@@ -2900,6 +2962,7 @@ version = "3.6.2"
                     views: BTreeMap::new(),
                 },
             )]),
+            deps: BTreeMap::new(),
         };
 
         let error = save(&path, &lockfile).unwrap_err();
@@ -3714,6 +3777,93 @@ lockfile = "lockfileVersion: '9.0'"
         assert!(lock.platforms["linux-x64"].tools.contains_key("node"));
         assert_eq!(lock.models["qwen"].revision, "abc123");
         assert_eq!(lock.models["qwen"].files[0].sha256, "sha256");
+    }
+
+    /// A `[deps]` section round-trips, and an empty one is omitted so existing
+    /// locks keep serializing byte-identically.
+    ///
+    /// The read side is asserted on purpose: AGENTS.md records that `pypi` once
+    /// wrote an `installer` nothing read back, so re-locking silently discarded
+    /// it. A write-only `[deps]` section would repeat that exactly -- the lock
+    /// would promise an installer and index that no replay consults.
+    #[test]
+    fn deps_section_round_trips_and_is_omitted_when_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+
+        // Empty: not serialized at all.
+        let mut lockfile = Lockfile::default();
+        save(&path, &lockfile).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[deps"), "{text}");
+
+        lockfile.deps.insert(
+            "pnpm".into(),
+            LockedDeps {
+                installer: "pnpm".into(),
+                installer_version: Some("12.5.1".into()),
+                runtime: Some("node@22.23.2".into()),
+                manifest: "package.json".into(),
+                manifest_sha256: "aa".repeat(32),
+                native_lock: Some(LockedDepsNativeLock {
+                    kind: "pnpm-lock".into(),
+                    path: "pnpm-lock.yaml".into(),
+                    sha256: "bb".repeat(32),
+                }),
+                run: "pnpm install --frozen-lockfile --ignore-scripts".into(),
+                index: Some("https://registry.npmjs.org/".into()),
+                allow_build_from_source: false,
+            },
+        );
+        save(&path, &lockfile).unwrap();
+
+        // Read it back: this is the path that keeps the section from being
+        // write-only.
+        let reloaded = load(&path).unwrap();
+        let entry = &reloaded.deps["pnpm"];
+        assert_eq!(entry.installer, "pnpm");
+        assert_eq!(entry.installer_version.as_deref(), Some("12.5.1"));
+        assert_eq!(entry.runtime.as_deref(), Some("node@22.23.2"));
+        assert_eq!(entry.native_lock.as_ref().unwrap().kind, "pnpm-lock");
+        assert_eq!(entry.run, "pnpm install --frozen-lockfile --ignore-scripts");
+        assert!(!entry.allow_build_from_source);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[deps.pnpm]"), "{text}");
+        // A false flag stays out of the file, so the common case adds no noise.
+        assert!(!text.contains("allow_build_from_source"), "{text}");
+    }
+
+    /// A lock written by a newer osdk (one that knows `[deps]`) must remain
+    /// readable by a build that does not: no `deny_unknown_fields` anywhere on
+    /// the way in. This is the same property `[models.*.views]` relies on, and
+    /// it is asserted rather than assumed because the whole point of the section
+    /// being optional is that older binaries keep working.
+    #[test]
+    fn an_unknown_section_does_not_stop_the_lock_from_loading() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(
+            &path,
+            concat!(
+                "schema = 4\n",
+                "\n",
+                // A section this build does not know at all.
+                "[future_capability.thing]\n",
+                "value = 1\n",
+                "\n",
+                "[deps.pnpm]\n",
+                "installer = \"pnpm\"\n",
+                "manifest = \"package.json\"\n",
+                "manifest_sha256 = \"aa\"\n",
+                "run = \"pnpm install\"\n",
+                // A field inside a known section that this build does not know.
+                "unknown_future_field = true\n",
+            ),
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.deps["pnpm"].installer, "pnpm");
     }
 
     #[test]
@@ -5139,6 +5289,7 @@ sha256 = "{sha256}"
                 },
             )]),
             models: BTreeMap::new(),
+            deps: BTreeMap::new(),
         };
         assert!(validate_schema_three(&old)
             .unwrap_err()

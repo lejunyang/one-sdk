@@ -47,6 +47,10 @@ pub struct Config {
     /// the shim never reads model declarations.
     #[cfg(feature = "install")]
     pub models: BTreeMap<String, ModelDeclaration>,
+    /// Application dependency providers (`[deps.<provider>]`). Install-gated for
+    /// the same reason: the shim never materializes a dependency closure.
+    #[cfg(feature = "install")]
+    pub deps: DepsConfig,
     /// Tools present in configuration but excluded by their platform filter,
     /// mapped to the restriction that excluded them.
     ///
@@ -824,6 +828,82 @@ impl ToolConfigValue {
     }
 }
 
+/// `[deps]`: which application dependency providers this project uses.
+///
+/// Deliberately separate from `[tools]`: `[tools]` installs the *package
+/// manager*, `[deps]` installs the *project's packages*. Mixing them is how a
+/// design ends up treating "install pnpm" and "install this project's
+/// dependencies" as one action, which they are not -- they have different
+/// targets (isolated install dir vs the project), different sources of truth
+/// (osdk.lock vs the native lockfile) and different triggers.
+///
+/// Note the absence of `deny_unknown_fields` on *this* table: it is incompatible
+/// with `#[serde(flatten)]`, because the deny check runs before flatten can
+/// absorb the key, so every provider name would be rejected as unknown. The
+/// flattened map is the intended catch-all here; the protection against typos
+/// lives one level down, on [`DepsProviderEntry`], where a misspelled field is a
+/// real hazard.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DepsConfig {
+    /// Providers disabled here even if a broader layer enabled them. Disabling
+    /// stops the provider from running; it does not uninstall anything.
+    #[serde(default)]
+    pub disable: Vec<String>,
+    /// Provider entries, keyed by provider id (`npm`, `pnpm`, ...). An empty
+    /// table selects the built-in provider without making it automatic.
+    #[serde(flatten)]
+    pub providers: BTreeMap<String, DepsProviderEntry>,
+}
+
+/// One `[deps.<provider>]` entry.
+///
+/// `deny_unknown_fields` is the point: a misspelled `output` or `allow_builds`
+/// must fail loudly. Silently ignoring `allow_build_from_source` would be the
+/// worst case -- the user would believe build scripts are enabled (or disabled)
+/// while the opposite holds.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DepsProviderEntry {
+    /// Run before `osdk run` / `osdk exec`. Default false: materializing a
+    /// dependency closure is too large a side effect to be implicit.
+    pub auto: bool,
+    /// Freshness inputs. Replaces the provider's built-in list rather than
+    /// adding to it.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Tracked outputs. Replaces the built-in list; an explicit empty list
+    /// disables output tracking on purpose.
+    pub outputs: Option<Vec<String>>,
+    /// Override the command entirely.
+    pub run: Option<String>,
+    /// Extra environment for the install command.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Working directory relative to the config root (for a nested project).
+    pub dir: Option<String>,
+    /// Providers that must finish first. Orders configured providers; it does
+    /// not declare a provider that is not configured.
+    #[serde(default)]
+    pub depends: Vec<String>,
+    /// Timeout for the install command, e.g. "5m".
+    pub timeout: Option<String>,
+    /// Pin the installer explicitly, overriding automatic selection.
+    pub installer: Option<String>,
+    /// Registry/index override. Its presence is what makes this entry
+    /// trust-requiring as `WeakensVerification` -- it redirects where bytes come
+    /// from (see `trust::collect_deps_requirements`).
+    pub index: Option<String>,
+    /// Additional index. Same trust class as `index`, and never ranked above the
+    /// default one.
+    pub extra_index: Option<String>,
+    /// Allow building from source / running lifecycle scripts. `ExecutesCode`:
+    /// default denied, must be asked for.
+    pub allow_build_from_source: bool,
+}
+
 /// One declared project model (`[models.<name>]`, research §6.2).
 ///
 /// `deny_unknown_fields` is deliberate: a typo in `source`/`endpoint` must fail
@@ -900,6 +980,8 @@ struct ConfigFile {
     #[cfg(feature = "install")]
     models: BTreeMap<String, ModelDeclaration>,
     #[cfg(feature = "install")]
+    deps: Option<DepsConfig>,
+    #[cfg(feature = "install")]
     task_config: Option<crate::tasks::TaskConfig>,
 }
 
@@ -924,6 +1006,8 @@ impl Default for Config {
             tasks: crate::tasks::TaskSet::default(),
             #[cfg(feature = "install")]
             models: BTreeMap::new(),
+            #[cfg(feature = "install")]
+            deps: DepsConfig::default(),
             project_config_path: None,
             excluded_tools: BTreeMap::new(),
         }
@@ -990,6 +1074,13 @@ impl Config {
             // managers means exactly that list, not that list added to whatever
             // a broader layer happened to allow.
             self.sources.syspkg = syspkg;
+        }
+        #[cfg(feature = "install")]
+        if let Some(deps) = file.deps {
+            // Replaced as a unit, like `[registries]` and `[syspkg]`: a project
+            // that lists its providers means exactly that list, not that list
+            // added to whatever a broader layer happened to enable.
+            self.deps = deps;
         }
         #[cfg(feature = "install")]
         if !file.models.is_empty() {

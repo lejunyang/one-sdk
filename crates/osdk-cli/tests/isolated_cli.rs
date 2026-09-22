@@ -5349,3 +5349,261 @@ fn model_view_export_to_merge_is_idempotent_and_preserves_user_yaml() {
 
     let _ = Path::new("");
 }
+
+/// `osdk deps` with no `[deps]` section reports what it found and stops.
+///
+/// Running `npm ci` because a package.json exists would be precisely the kind of
+/// implicit large side effect osdk avoids: a bare `install` does not fetch models
+/// either. The grouping matters too -- four Node providers read the same
+/// `package.json`, so one line per provider would claim four findings where there
+/// is one project.
+#[test]
+fn deps_without_a_declaration_reports_candidates_without_installing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\n").unwrap();
+
+    let output = run_isolated_in(root, &project, &["deps"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no `[deps]` section"), "{stdout}");
+    assert!(stdout.contains("package.json"), "{stdout}");
+    // Assert the *shape*, not just that the words appear: one manifest line, and
+    // each provider named once. A per-provider loop would print the manifest four
+    // times and still contain the right words somewhere.
+    let manifest_lines = stdout
+        .lines()
+        .filter(|line| line.trim_end().ends_with("package.json"))
+        .count();
+    assert_eq!(
+        manifest_lines, 1,
+        "the one manifest must be listed once, not once per provider: {stdout}"
+    );
+    let candidate_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("candidates:"))
+        .collect();
+    assert_eq!(candidate_lines.len(), 1, "{stdout}");
+    assert!(
+        candidate_lines[0]
+            .trim()
+            .ends_with("candidates: bun, npm, pnpm, yarn"),
+        "each provider exactly once, in a stable order: {stdout}"
+    );
+    // Nothing was installed: the read-only report must not have created a
+    // dependency directory. Checking the filesystem rather than the exit code is
+    // the point -- a successful exit says nothing about side effects.
+    assert!(
+        !project.join("node_modules").exists(),
+        "reporting must not install"
+    );
+}
+
+/// The frozen/non-frozen decision is osdk's, made by looking for the native
+/// lockfile itself rather than by passing a flag and hoping.
+///
+/// This exists because two of the four Node installers do not fail without a
+/// lockfile: `yarn@1` and `bun` accept a freeze-ish invocation and install
+/// anyway. Delegating the check would therefore be silently wrong on half the
+/// matrix, so osdk checks, and says so when it has to fall back.
+#[test]
+fn deps_downgrades_from_frozen_only_when_it_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n").unwrap();
+
+    // No lockfile: non-frozen, and the downgrade is reported rather than silent.
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("warning:"), "{stdout}");
+    assert!(stdout.contains("no pnpm-lock.yaml"), "{stdout}");
+    assert!(
+        !stdout.contains("--frozen-lockfile"),
+        "must not claim to freeze without a lockfile: {stdout}"
+    );
+    assert!(stdout.contains("--ignore-scripts"), "{stdout}");
+
+    // `--frozen` turns that fallback into an error instead of a warning.
+    let output = run_isolated_in(root, &project, &["deps", "--frozen", "--dry-run"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requires a native lockfile"), "{stderr}");
+
+    // With a lockfile present, the frozen flag appears and the warning goes.
+    std::fs::write(project.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--frozen-lockfile"), "{stdout}");
+    assert!(
+        !stdout.contains("warning:"),
+        "nothing was downgraded: {stdout}"
+    );
+}
+
+/// yarn is dispatched on its major version, because classic and berry disagree
+/// on both flags that matter.
+///
+/// Berry 4.6.0 rejects `--ignore-scripts` outright (`Unknown Syntax Error`), so
+/// it has to be `YARN_ENABLE_SCRIPTS=false`; classic accepts berry's
+/// `--immutable` and then neither freezes nor blocks scripts, which is the worst
+/// of the two failure modes because it looks like it worked.
+#[test]
+fn deps_dispatches_yarn_on_its_major_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.yarn]\n").unwrap();
+    std::fs::write(project.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","packageManager":"yarn@4.6.0"}"#,
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("YARN_ENABLE_SCRIPTS=false"), "{stdout}");
+    assert!(stdout.contains("--immutable"), "{stdout}");
+    assert!(
+        !stdout.contains("--ignore-scripts"),
+        "berry rejects that flag: {stdout}"
+    );
+
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","packageManager":"yarn@1.22.19"}"#,
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--frozen-lockfile"), "{stdout}");
+    assert!(stdout.contains("--ignore-scripts"), "{stdout}");
+    assert!(
+        !stdout.contains("--immutable"),
+        "classic accepts it and ignores it, which is worse than refusing: {stdout}"
+    );
+    assert!(!stdout.contains("YARN_ENABLE_SCRIPTS"), "{stdout}");
+}
+
+/// Discovery is fail-closed in both directions it can go wrong.
+///
+/// A manifest that will not parse is an error, not a skip: silently walking past
+/// it would install the wrong project's dependencies (or none) and report
+/// success. And a declared package manager that disagrees with the lockfile on
+/// disk is refused rather than guessed, the same judgement `npm_tools` already
+/// makes.
+#[test]
+fn deps_discovery_is_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n").unwrap();
+
+    std::fs::write(project.join("package.json"), "{ this is not json").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("package.json"), "{stderr}");
+
+    // A declaration that contradicts the enabled provider: refused, because
+    // running pnpm over a project whose manifest says yarn would produce a
+    // second lockfile and a working tree nobody declared.
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","packageManager":"yarn@4.6.0"}"#,
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("declares package manager `yarn`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("provider `pnpm`"), "{stderr}");
+
+    // A declaration that contradicts the lockfile on disk: also refused, and
+    // this is the case that needs both providers enabled to be visible at all.
+    // osdk only looks for the lockfiles of providers the project turned on, so
+    // the check is reported against the provider that owns the file.
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n\n[deps.yarn]\n").unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","packageManager":"pnpm@12.5.1"}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("declares `pnpm`"), "{stderr}");
+    assert!(stderr.contains("owned by `yarn`"), "{stderr}");
+}
+
+/// Both directions of the trust boundary, in one test so neither can drift.
+///
+/// Declaring a provider must be free: gating it would mean re-approving a config
+/// for every ordinary line, which teaches nothing and trains the user to click
+/// through the prompts that do matter. Redirecting the registry must not be free.
+/// And neither may block tool dispatch -- the `[syspkg]` accident was exactly a
+/// trust requirement leaking into `cargo --version`.
+#[test]
+fn deps_trust_gates_the_registry_but_not_the_declaration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps.pnpm]\nauto = true\nsources = [\"package.json\"]\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(
+        output.status.success(),
+        "an ordinary declaration must not need approval: {output:?}"
+    );
+
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps.pnpm]\nindex = \"https://registry.example.com/\"\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("deps.pnpm.index"), "{stderr}");
+
+    // Same untrusted config: dispatching a tool must still work.
+    let output = run_isolated_in(root, &project, &["current"]);
+    assert!(
+        output.status.success(),
+        "a deps trust requirement must not reach tool dispatch: {output:?}"
+    );
+}

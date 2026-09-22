@@ -31,6 +31,12 @@ pub mod backend;
 pub mod cache;
 pub mod config;
 pub mod container;
+// Application dependency manifests are read only by `osdk deps` (and the
+// commands that opt into it). The shim dispatches an already-installed tool and
+// never materializes a project's dependency closure, so gating the module keeps
+// its provider tables and manifest parsing out of the shim's binary.
+#[cfg(feature = "install")]
+pub mod deps;
 pub mod dirs;
 pub mod error;
 pub mod http;

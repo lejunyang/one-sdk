@@ -311,6 +311,49 @@ and now-unowned shims. Project-managed npm dependencies and their curated
 
 Guide: [npm developer tools](site/en/guide/npm-tools.md)
 
+## Scenario: install a project's own application dependencies
+
+`install` brings tools; `deps` brings the project's own dependency manifest.
+`[tools]` provides the package manager, then `deps` drives it over
+`package.json` so the whole closure lands inside the project. Adding or removing
+a single dependency stays with `osdk install npm:<package>`.
+
+Declare a provider in `osdk.toml`, then run it:
+
+```toml
+[deps.pnpm]
+```
+
+```bash
+osdk deps --list            # detected providers and their freshness
+osdk deps --dry-run         # print what would run, without running it
+osdk deps                   # materialize the manifest
+```
+
+osdk decides frozen-vs-not by looking for the native lockfile itself rather than
+delegating it: with a lockfile it installs frozen, without one it falls back to
+a plain install **and says so**. That matters because `yarn@1` and `bun` install
+happily with no lockfile at all, so passing a flag and trusting it would be
+silently wrong on half the matrix. Use `--frozen` to turn that fallback into an
+error:
+
+```bash
+osdk deps --frozen
+```
+
+Build and lifecycle scripts are off by default. Turn them on per provider, which
+requires approving the config:
+
+```toml
+[deps.pnpm]
+allow_build_from_source = true
+```
+
+With no `[deps]` section, `osdk deps` only reports what it found and which
+providers could manage it. It installs nothing.
+
+Guide: [application dependencies](site/en/guide/deps.md)
+
 ## Scenario: install a Rust CLI from Cargo
 
 Choose one exact managed Rust version, then install a crate by exact version,
@@ -887,6 +930,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
 - [Package managers and registry selection](site/en/guide/package-managers.md)
 - [npm developer tools](site/en/guide/npm-tools.md)
+- [application dependencies](site/en/guide/deps.md)
 - [Cargo developer tools](site/en/guide/cargo-tools.md)
 - [Go developer tools](site/en/guide/go-tools.md)
 - [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)

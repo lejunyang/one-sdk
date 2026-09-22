@@ -293,6 +293,42 @@ pub enum Command {
         command: ModelCommand,
     },
 
+    /// Install a project's application dependencies from its own manifests.
+    ///
+    /// Distinct from `install`, which installs *tools*: `[tools]` brings the
+    /// package manager, `deps` runs it over `package.json` and friends so the
+    /// project's whole dependency closure lands inside the project. Adding or
+    /// removing a single dependency stays with `osdk install <npm:pkg>`.
+    Deps {
+        /// Limit to these providers (repeatable). Default: every enabled one.
+        providers: Vec<String>,
+        /// List detected providers and their freshness without installing.
+        #[arg(long)]
+        list: bool,
+        /// Report what would run, and why, without running it.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Run even when freshness says nothing changed.
+        #[arg(long)]
+        force: bool,
+        /// Explain each freshness decision.
+        #[arg(long)]
+        explain: bool,
+        /// Skip these providers (repeatable).
+        #[arg(long = "skip", value_name = "PROVIDER")]
+        skip: Vec<String>,
+        /// Fail instead of installing a missing package manager.
+        ///
+        /// For CI, where tools should come from an explicit `osdk install` so a
+        /// run cannot quietly acquire a different version.
+        #[arg(long = "no-install-tools")]
+        no_install_tools: bool,
+        /// Require a native lockfile; fail rather than falling back to a
+        /// non-frozen install.
+        #[arg(long)]
+        frozen: bool,
+    },
+
     /// Manage Rust components, targets, status, overrides, and linked toolchains.
     Rust {
         #[command(subcommand)]

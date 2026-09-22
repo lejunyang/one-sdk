@@ -279,6 +279,46 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 
 指南：[npm 开发工具](site/guide/npm-tools.md)
 
+## 场景：安装项目自己的应用依赖
+
+`install` 装的是工具，`deps` 装的是项目自己的依赖清单：`[tools]` 把包管理器准备好，
+`deps` 再驱动它读 `package.json`，把整份依赖闭包装进项目。要增删单个依赖，仍然用
+`osdk install npm:<包名>`。
+
+在 `osdk.toml` 里声明一个 provider，然后运行：
+
+```toml
+[deps.pnpm]
+```
+
+```bash
+osdk deps --list            # 列出探测到的 provider 与新鲜度
+osdk deps --dry-run         # 打印将要执行的命令，不执行
+osdk deps                   # 兑现整份清单
+```
+
+osdk 不把「是否冻结」交给包管理器判断，而是自己先看原生 lockfile 在不在：有就用
+冻结安装，没有就退回普通安装**并明确告知**。这一点是必要的——`yarn@1` 与 `bun` 在
+缺少 lockfile 时会照常安装而不报错，只靠传参会在半数组合上静默失效。需要严格时用
+`--frozen`，它把这种退回变成错误：
+
+```bash
+osdk deps --frozen
+```
+
+默认不运行任何依赖的构建或生命周期脚本。需要时按 provider 显式打开，这一项需要你
+批准配置：
+
+```toml
+[deps.pnpm]
+allow_build_from_source = true
+```
+
+没有 `[deps]` 段时，`osdk deps` 只报告它找到了什么、可以用哪些 provider，不会动手
+安装。
+
+指南：[应用依赖](site/guide/deps.md)
+
 ## 场景：从 Cargo 安装 Rust CLI
 
 先选择一个精确的受管 Rust 版本，再按精确版本、最新稳定版或数字前缀安装 crate：
@@ -793,6 +833,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [运行时与生态工作流](site/guide/runtimes.md)
 - [包管理器与 Registry 选择](site/guide/package-managers.md)
 - [npm 开发工具](site/guide/npm-tools.md)
+- [应用依赖](site/guide/deps.md)
 - [Cargo 开发工具](site/guide/cargo-tools.md)
 - [Go 开发工具](site/guide/go-tools.md)
 - [直接 HTTPS 制品](site/guide/http-artifacts.md)

@@ -199,12 +199,51 @@ const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
 ///
 /// `tools` needs this because a single tool option (`allow_builds`) can still
 /// opt into script execution even though the surrounding table is safe.
-const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "models"];
+const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "models", "deps"];
 
 /// Keys under one `[models.<name>]` entry that decide where model bytes come
 /// from (or weaken how they are checked). Everything else is a harmless
 /// declaration, like declaring `npm:prettier` (research §6.4).
 const MODEL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "url", "mirror"];
+
+/// Keys under one `[deps.<provider>]` entry that redirect where bytes come from.
+///
+/// Note the deliberate narrowness. `UV_INDEX_`-style prefix matching taught this
+/// project that matching too widely is as harmful as matching too narrowly, and
+/// harder to notice: a key like `index_strategy` is not a source override, and
+/// treating it as one would demand approval for a harmless setting. These are
+/// exact names.
+const DEPS_SOURCE_KEYS: &[&str] = &["index", "extra_index", "registry", "insecure"];
+
+/// Keys that opt into running build or lifecycle scripts, i.e. executing code
+/// the user did not otherwise ask to run. Same class as `tools.<name>.allow_builds`.
+const DEPS_BUILD_KEYS: &[&str] = &["allow_build_from_source"];
+
+/// Does this `[deps.<provider>.env]` variable *name* redirect where packages are
+/// fetched from?
+///
+/// This check exists because omitting it left a hole: `index` was gated while
+/// `env = { NPM_CONFIG_REGISTRY = "https://…" }` achieved exactly the same
+/// redirect with no approval at all. A gate that one spelling walks around is
+/// not a gate.
+///
+/// The matching is by suffix rather than prefix, and that direction is
+/// deliberate. `UV_INDEX_` taught this project that a prefix sweeps in unrelated
+/// settings (`index_strategy`, `NPM_CONFIG_FUND`) and the damage is invisible --
+/// a needless prompt, or a feature quietly switched off. A suffix like
+/// `_REGISTRY` names the thing itself. Both directions are asserted in the
+/// tests: names that redirect, and names that merely sound like they do.
+fn env_name_redirects_source(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    // Scoped registries: `NPM_CONFIG_@SCOPE:REGISTRY`.
+    if upper.contains(":REGISTRY") {
+        return true;
+    }
+    upper.ends_with("_REGISTRY")
+        || upper.ends_with("REGISTRY_SERVER")
+        || upper.ends_with("_INDEX_URL")
+        || upper.ends_with("_DEFAULT_INDEX")
+}
 
 /// The npm tool option that turns lifecycle scripts back on.
 const ALLOW_BUILDS_OPTION: &str = "allow_builds";
@@ -242,7 +281,7 @@ pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
         .map_or(requirement.key.as_str(), |(table, _)| table);
     match table {
         // Never reached by the shim.
-        "syspkg" | "task_config" | "models" => false,
+        "syspkg" | "task_config" | "models" | "deps" => false,
         // Everything else is treated as dispatch-affecting. Fail-closed on
         // purpose: `settings`, `tools`, `sources`, `registries` and any table a
         // future build does not recognize all stay gated, so adding a new
@@ -286,6 +325,7 @@ fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
             "settings" => collect_settings_requirements(value, &mut found),
             "tools" => collect_tools_requirements(value, &mut found),
             "models" => collect_models_requirements(value, &mut found),
+            "deps" => collect_deps_requirements(value, &mut found),
             "aliases" => {}
             // Declaring a task is not running one; see TRUST_REQUIRING_TABLES.
             "tasks" => {}
@@ -409,6 +449,93 @@ fn collect_models_requirements(value: &toml::Value, found: &mut Vec<TrustRequire
                 reason: TrustReason::WeakensVerification,
             });
         }
+    }
+}
+
+/// Inspect `[deps]` for keys that redirect the byte source or enable builds.
+///
+/// The default is that a provider entry needs **no** trust. That is not leniency
+/// but consistency: `TrustReason`'s own documentation says declaring which
+/// package to install is deliberately not a gate, because installs pass
+/// `--ignore-scripts` and artifacts are pinned. The deps layer keeps that
+/// promise -- it passes `--ignore-scripts` (or yarn berry's
+/// `YARN_ENABLE_SCRIPTS=false`) by default -- so enabling `[deps.pnpm]` executes
+/// nothing the package publisher did not already ship as plain files.
+///
+/// Two things do change it, and they are reported per entry so the message names
+/// the provider:
+/// - a custom `index`/`registry` redirects where bytes come from
+///   (`WeakensVerification`, same class as `sources`);
+/// - `allow_build_from_source` runs build and lifecycle scripts on this machine
+///   (`ExecutesCode`, same class as `tools.<name>.allow_builds`).
+///
+/// A custom provider is different again: its `run` *is* an arbitrary command,
+/// and unlike a task it can be triggered ahead of `osdk run` by `auto`, so the
+/// user does not point at it each time. Those always require trust.
+fn collect_deps_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let Some(table) = value.as_table() else {
+        // A malformed `deps` table cannot be shown harmless.
+        found.push(TrustRequirement {
+            key: "deps".into(),
+            reason: TrustReason::WeakensVerification,
+        });
+        return;
+    };
+    for (name, entry) in table {
+        // `disable` is a list of provider names; turning a provider off cannot
+        // add capability.
+        if name == "disable" {
+            continue;
+        }
+        let Some(fields) = entry.as_table() else {
+            continue;
+        };
+        // A provider that is not compiled in is a custom one: `run` is an
+        // arbitrary command.
+        if fields.contains_key("run") {
+            found.push(TrustRequirement {
+                key: format!("deps.{name}.run"),
+                reason: TrustReason::ExecutesCode,
+            });
+        }
+        // An env table can redirect the source just as effectively as `index`,
+        // so it is inspected by variable name rather than trusted wholesale.
+        if let Some(env) = fields.get("env").and_then(toml::Value::as_table) {
+            for variable in env.keys() {
+                if env_name_redirects_source(variable) {
+                    found.push(TrustRequirement {
+                        key: format!("deps.{name}.env.{variable}", variable = variable),
+                        reason: TrustReason::WeakensVerification,
+                    });
+                }
+            }
+        }
+        for key in fields.keys() {
+            if DEPS_SOURCE_KEYS.contains(&key.as_str()) {
+                found.push(TrustRequirement {
+                    key: format!("deps.{name}.{key}"),
+                    reason: TrustReason::WeakensVerification,
+                });
+            } else if DEPS_BUILD_KEYS.contains(&key.as_str())
+                && build_from_source_enabled(&fields[key])
+            {
+                found.push(TrustRequirement {
+                    key: format!("deps.{name}.{key}"),
+                    reason: TrustReason::ExecutesCode,
+                });
+            }
+        }
+    }
+}
+
+/// `allow_build_from_source = false` leaves scripts denied, so it is not a
+/// reason. Mirrors `allow_builds_enabled`: writing the key to turn the thing
+/// *off* must not demand approval.
+fn build_from_source_enabled(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Boolean(flag) => *flag,
+        toml::Value::String(raw) => allow_builds_enabled(raw),
+        _ => false,
     }
 }
 
@@ -1291,6 +1418,202 @@ insecure = true
         )
         .unwrap();
         assert!(!is_trusted(&config_dir, &path, None).unwrap());
+    }
+
+    /// Enabling a built-in deps provider must need no trust: osdk passes
+    /// `--ignore-scripts` (or yarn berry's env equivalent) by default, so nothing
+    /// the publisher did not ship as plain files runs. This is the same judgement
+    /// `TrustReason`'s own docs make about declaring a package.
+    #[test]
+    fn enabling_a_builtin_deps_provider_needs_no_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for body in [
+            "[deps.pnpm]\n",
+            "[deps.npm]\nauto = true\n",
+            "[deps.pnpm]\nsources = [\"package.json\"]\noutputs = [\"node_modules\"]\n",
+            "[deps.pnpm]\ndir = \"apps/api\"\ndepends = [\"npm\"]\n",
+            // Writing the build key to turn it *off* must not demand approval.
+            "[deps.pnpm]\nallow_build_from_source = false\n",
+            "[deps]\ndisable = [\"npm\"]\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(
+                !requires_trust(&path).unwrap(),
+                "should need no trust: {body}"
+            );
+        }
+    }
+
+    /// The two things that do change it, reported per provider and with the right
+    /// reason. A custom registry is `WeakensVerification` because it redirects
+    /// where bytes come from -- not because it executes anything.
+    #[test]
+    fn a_custom_registry_weakens_verification_and_builds_execute_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for (body, key) in [
+            (
+                "[deps.pnpm]\nindex = \"https://registry.example.com/\"\n",
+                "deps.pnpm.index",
+            ),
+            (
+                "[deps.npm]\nextra_index = \"https://other.example.com/\"\n",
+                "deps.npm.extra_index",
+            ),
+            (
+                "[deps.npm]\nregistry = \"https://r.example.com/\"\n",
+                "deps.npm.registry",
+            ),
+            ("[deps.npm]\ninsecure = true\n", "deps.npm.insecure"),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let found = trust_requirements(&path).unwrap();
+            assert_eq!(found.len(), 1, "{body}");
+            assert_eq!(found[0].key, key, "{body}");
+            assert_eq!(
+                found[0].reason,
+                TrustReason::WeakensVerification,
+                "a redirected source is not code execution: {body}"
+            );
+        }
+
+        std::fs::write(&path, "[deps.pnpm]\nallow_build_from_source = true\n").unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "deps.pnpm.allow_build_from_source");
+        assert_eq!(found[0].reason, TrustReason::ExecutesCode);
+    }
+
+    /// An env table can redirect the source as effectively as `index`, so it is
+    /// gated too -- otherwise `index` demands approval while
+    /// `env = { NPM_CONFIG_REGISTRY = ... }` achieves the same thing for free.
+    /// (That hole existed in the first draft of this classifier and is the reason
+    /// the check is here.)
+    #[test]
+    fn an_env_variable_that_redirects_the_registry_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for (variable, key) in [
+            ("NPM_CONFIG_REGISTRY", "deps.pnpm.env.NPM_CONFIG_REGISTRY"),
+            (
+                "YARN_NPM_REGISTRY_SERVER",
+                "deps.pnpm.env.YARN_NPM_REGISTRY_SERVER",
+            ),
+            ("PIP_INDEX_URL", "deps.pnpm.env.PIP_INDEX_URL"),
+            ("UV_DEFAULT_INDEX", "deps.pnpm.env.UV_DEFAULT_INDEX"),
+            (
+                "NPM_CONFIG_@ACME:REGISTRY",
+                "deps.pnpm.env.NPM_CONFIG_@ACME:REGISTRY",
+            ),
+        ] {
+            std::fs::write(
+                &path,
+                format!("[deps.pnpm.env]\n\"{variable}\" = \"https://r.example.com/\"\n"),
+            )
+            .unwrap();
+            let found = trust_requirements(&path).unwrap();
+            assert_eq!(found.len(), 1, "{variable}");
+            assert_eq!(found[0].key, key, "{variable}");
+            assert_eq!(
+                found[0].reason,
+                TrustReason::WeakensVerification,
+                "{variable}"
+            );
+        }
+    }
+
+    /// The other direction, which is the one that hides.
+    ///
+    /// AGENTS.md records the `UV_INDEX_` lesson: a *prefix* match sweeps in
+    /// settings that are not credentials or sources at all, and the damage is
+    /// invisible -- a needless approval prompt, or a feature quietly switched
+    /// off. So names that merely resemble a source override must be asserted to
+    /// stay trust-free. Every entry below shares a word or prefix with a real
+    /// redirect and is not one.
+    #[test]
+    fn env_names_that_merely_resemble_a_redirect_do_not_require_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        for variable in [
+            // Same `UV_INDEX_`/`*_INDEX*` neighbourhood, not a source.
+            "UV_INDEX_STRATEGY",
+            "NPM_CONFIG_INDEX_HINT",
+            // Contains "REGISTRY" but does not name one.
+            "NPM_CONFIG_REGISTRY_TIMEOUT_MS",
+            // Ordinary settings.
+            "NPM_CONFIG_FUND",
+            "NODE_ENV",
+            "CI",
+        ] {
+            std::fs::write(&path, format!("[deps.pnpm.env]\n\"{variable}\" = \"1\"\n")).unwrap();
+            assert!(
+                !requires_trust(&path).unwrap(),
+                "`{variable}` is not a source override and must not demand approval"
+            );
+        }
+
+        // Ordinary provider settings, likewise.
+        std::fs::write(
+            &path,
+            concat!(
+                "[deps.pnpm]\n",
+                "sources = [\"package.json\"]\n",
+                "outputs = [\"node_modules\"]\n",
+                "auto = true\n",
+                "installer = \"pnpm\"\n",
+                "timeout = \"5m\"\n",
+                "depends = [\"npm\"]\n",
+                "dir = \"apps/api\"\n",
+            ),
+        )
+        .unwrap();
+        assert!(!requires_trust(&path).unwrap());
+    }
+
+    /// A custom provider's `run` is an arbitrary command, and `auto` can trigger
+    /// it ahead of `osdk run`, so unlike a task the user does not point at it
+    /// each time. Always `ExecutesCode`.
+    #[test]
+    fn a_custom_deps_provider_always_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        std::fs::write(
+            &path,
+            concat!(
+                "[deps.codegen]\n",
+                "sources = [\"schema.graphql\"]\n",
+                "outputs = [\"src/generated\"]\n",
+                "run = \"pnpm run codegen\"\n",
+            ),
+        )
+        .unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "deps.codegen.run");
+        assert_eq!(found[0].reason, TrustReason::ExecutesCode);
+    }
+
+    /// Even when a deps entry *does* require trust, that must never block the
+    /// shim: the shim never materializes a dependency closure, and gating it
+    /// would make `cargo --version` fail in a project that merely declares
+    /// providers -- the `[syspkg]` accident all over again.
+    #[test]
+    fn deps_requirements_never_affect_tool_dispatch() {
+        let dispatch_affecting = |key: &str| {
+            affects_tool_dispatch(&TrustRequirement {
+                key: key.to_string(),
+                reason: TrustReason::ExecutesCode,
+            })
+        };
+        assert!(!dispatch_affecting("deps"));
+        assert!(!dispatch_affecting("deps.pnpm.index"));
+        assert!(!dispatch_affecting("deps.codegen.run"));
+        assert!(!dispatch_affecting("deps.pnpm.allow_build_from_source"));
     }
 
     /// An unknown top-level table, and an unknown `[settings]` key, must both
