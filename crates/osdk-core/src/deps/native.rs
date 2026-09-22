@@ -138,7 +138,7 @@ pub fn plan(
     let program_candidates;
     let tool;
 
-    match project.provider {
+    match project.provider.as_ref() {
         "go" => {
             tool = "go";
             program_candidates = vec!["go.exe".to_string(), "go".to_string()];
@@ -211,7 +211,7 @@ pub fn plan(
     }
 
     Ok(RunPlan {
-        tool,
+        tool: tool.into(),
         program_candidates,
         args,
         env,
@@ -234,7 +234,7 @@ mod tests {
         lock: Option<&Path>,
     ) -> DetectedProject {
         DetectedProject {
-            provider,
+            provider: provider.into(),
             ecosystem,
             root: manifest.parent().unwrap().to_path_buf(),
             manifest: manifest.to_path_buf(),
@@ -245,7 +245,7 @@ mod tests {
 
     fn choice(provider: &'static str) -> InstallerChoice {
         InstallerChoice {
-            provider,
+            provider: provider.into(),
             version: None,
             origin: super::super::InstallerOrigin::Default,
         }

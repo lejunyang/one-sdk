@@ -177,9 +177,9 @@ pub fn plan(
     let declared_version = choice
         .version
         .clone()
-        .or_else(|| tool_versions.get(project.provider).cloned());
+        .or_else(|| tool_versions.get(&*project.provider).cloned());
 
-    let (tool, program_candidates) = match project.provider {
+    let (tool, program_candidates) = match project.provider.as_ref() {
         "npm" => ("node", vec!["npm.cmd".to_string(), "npm".to_string()]),
         "pnpm" => ("pnpm", vec!["pnpm.cmd".to_string(), "pnpm".to_string()]),
         "yarn" => ("yarn", vec!["yarn.cmd".to_string(), "yarn".to_string()]),
@@ -191,7 +191,7 @@ pub fn plan(
         }
     };
 
-    match project.provider {
+    match project.provider.as_ref() {
         "npm" => {
             if has_lock {
                 args.push("ci".into());
@@ -292,7 +292,7 @@ pub fn plan(
     }
 
     Ok(RunPlan {
-        tool,
+        tool: tool.into(),
         program_candidates,
         args,
         env,
@@ -312,7 +312,7 @@ mod tests {
 
     fn project(provider: &'static str, lock: Option<&str>) -> DetectedProject {
         DetectedProject {
-            provider,
+            provider: provider.into(),
             ecosystem: Ecosystem::Node,
             root: PathBuf::from("/p"),
             manifest: PathBuf::from("/p/package.json"),
@@ -323,7 +323,7 @@ mod tests {
 
     fn choice(provider: &'static str, version: Option<&str>) -> InstallerChoice {
         InstallerChoice {
-            provider,
+            provider: provider.into(),
             origin: super::super::InstallerOrigin::Default,
             version: version.map(str::to_string),
         }

@@ -6051,3 +6051,176 @@ fn native_manifests_are_validated_rather_than_skipped() {
         assert!(output.status.success(), "{provider}: {output:?}");
     }
 }
+
+/// A custom provider is declared, not discovered, and it runs.
+///
+/// There is no manifest to find: the declaration *is* the detection. Its root is
+/// the directory of the config that declared it, so `sources` and `outputs` are
+/// relative to the same place a built-in provider's would be.
+///
+/// Freshness is asserted in both directions, because "stale" alone proves nothing
+/// -- a decision function that always said stale would satisfy half of this.
+#[test]
+fn a_custom_provider_runs_and_tracks_its_own_freshness() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("schema.graphql"), "type Q { a: String }\n").unwrap();
+
+    let marker = project.join("generated");
+    let run = if cfg!(windows) {
+        "cmd /c mkdir generated"
+    } else {
+        "mkdir generated"
+    };
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[deps.codegen]\nsources = [\"schema.graphql\"]\noutputs = [\"generated\"]\nrun = \"{run}\"\n"
+        ),
+    )
+    .unwrap();
+
+    // A custom provider's `run` is an arbitrary command, so it always needs
+    // approval -- unlike declaring a built-in provider.
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(
+        !output.status.success(),
+        "an arbitrary command must be approved first: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("deps.codegen.run"), "{stderr}");
+
+    let output = run_isolated_in(
+        root,
+        &project,
+        &[
+            "--yes",
+            "trust",
+            project.join("osdk.toml").to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    // Now it is visible, with no manifest anywhere.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("codegen"), "{stdout}");
+    assert!(stdout.contains("stale"), "{stdout}");
+
+    // And it actually runs.
+    let output = run_isolated_in(root, &project, &["deps"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        marker.is_dir(),
+        "the command must really have run: {output:?}"
+    );
+
+    // Same inputs: fresh.
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("fresh"), "{stdout}");
+
+    // Changed source: stale again, with a reason.
+    std::fs::write(
+        project.join("schema.graphql"),
+        "type Q { a: String, b: Int }\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stale"), "{stdout}");
+
+    // A missing declared output is staleness too: the step promised it.
+    std::fs::write(project.join("schema.graphql"), "type Q { a: String }\n").unwrap();
+    std::fs::remove_dir_all(&marker).unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stale"), "{stdout}");
+    assert!(stdout.contains("generated"), "{stdout}");
+}
+
+/// `depends` decides the order, and a cycle is refused rather than resolved
+/// arbitrarily.
+///
+/// The declaration order in the file is deliberately the opposite of the required
+/// order, so a test that merely checked "both ran" would pass without any
+/// ordering at all.
+#[test]
+fn depends_orders_providers_and_refuses_a_cycle() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let echo = |what: &str| {
+        if cfg!(windows) {
+            format!("cmd /c echo {what}")
+        } else {
+            format!("echo {what}")
+        }
+    };
+    // `b` is declared first but depends on `a`, so ordering has to reverse it.
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[deps.b]\nrun = \"{}\"\ndepends = [\"a\"]\n\n[deps.a]\nrun = \"{}\"\n",
+            echo("B"),
+            echo("A")
+        ),
+    )
+    .unwrap();
+    let output = run_isolated_in(
+        root,
+        &project,
+        &[
+            "--yes",
+            "trust",
+            project.join("osdk.toml").to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let a_at = stdout.find(" A").unwrap_or_else(|| panic!("{stdout}"));
+    let b_at = stdout.find(" B").unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        a_at < b_at,
+        "`a` must be planned before `b` despite being declared second: {stdout}"
+    );
+
+    // A cycle is an error. Choosing an order anyway would run a step before its
+    // input existed and blame the wrong provider.
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[deps.a]\nrun = \"{}\"\ndepends = [\"b\"]\n\n[deps.b]\nrun = \"{}\"\ndepends = [\"a\"]\n",
+            echo("A"),
+            echo("B")
+        ),
+    )
+    .unwrap();
+    let output = run_isolated_in(
+        root,
+        &project,
+        &[
+            "--yes",
+            "trust",
+            project.join("osdk.toml").to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cycle"), "{stderr}");
+    assert!(stderr.contains('a') && stderr.contains('b'), "{stderr}");
+}

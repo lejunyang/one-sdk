@@ -183,10 +183,76 @@ pub fn provider_schema(id: &str) -> Option<&'static DepsProviderSchema> {
     PROVIDERS.iter().copied().find(|schema| schema.id == id)
 }
 
+/// Build a `DetectedProject` for a provider that exists only in the project's
+/// config.
+///
+/// A custom provider has no manifest to find and no lockfile to own: it *is* a
+/// declaration. So discovery does not apply -- the project root is where the
+/// config that declared it lives, and that is the whole detection step.
+///
+/// Note what this deliberately does not do: it does not go looking for files to
+/// decide whether the provider applies. `sources` still drives freshness, but an
+/// empty `sources` means "cannot establish freshness" (so it always runs), not
+/// "not applicable". Guessing applicability from the filesystem is how a custom
+/// step would silently stop running after a refactor.
+pub fn detect_custom(id: &str, config_root: &Path, config_path: &Path) -> DetectedProject {
+    DetectedProject {
+        provider: std::borrow::Cow::Owned(id.to_string()),
+        ecosystem: Ecosystem::Custom,
+        root: config_root.to_path_buf(),
+        manifest: config_path.to_path_buf(),
+        native_lock: None,
+        declared_manager: None,
+    }
+}
+
+/// Plan a custom provider's command.
+///
+/// The command is split on whitespace rather than run through a shell. Handing it
+/// to `cmd.exe` or `sh` would make the same `run` string mean different things on
+/// different machines, and would turn quoting into a portability hazard for
+/// something that gets committed. Anything needing shell features belongs in a
+/// script the `run` line invokes.
+pub fn plan_custom(project: &DetectedProject, config: &ProviderConfig) -> Result<RunPlan> {
+    // One check, deliberately. An earlier version also tested `is_empty()` before
+    // this, and the redundancy made the guard untestable: removing either one left
+    // the other still rejecting, so injecting a fault produced no observable
+    // change. A guard whose removal is invisible cannot be trusted to be there.
+    let command = config.run.as_deref().unwrap_or_default();
+    let mut parts = command.split_whitespace();
+    let program = parts.next().ok_or_else(|| {
+        Error::config(format!(
+            "custom deps provider `{}` needs a `run` command",
+            project.provider
+        ))
+    })?;
+    let args: Vec<String> = parts.map(str::to_string).collect();
+
+    Ok(RunPlan {
+        tool: std::borrow::Cow::Owned(project.provider.to_string()),
+        // Resolved from PATH, which by then has the bin directories of whatever
+        // `depends` brought in. A custom step usually calls a tool another
+        // provider installed.
+        program_candidates: vec![program.to_string()],
+        args,
+        env: config.env.clone(),
+        cwd: effective_cwd(&project.root, config.dir.as_deref()),
+        // Nothing to freeze: there is no lockfile in this model. Reporting it as
+        // frozen would make `--frozen` pass on a provider it cannot check.
+        frozen: false,
+        downgraded_reason: None,
+        prelude: Vec::new(),
+    })
+}
+
 /// One provider matched against a real directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedProject {
-    pub provider: &'static str,
+    /// Provider id. `Borrowed` for the built-in table, `Owned` for a custom
+    /// provider whose name only exists in the project's config. Only this field,
+    /// `InstallerChoice::provider` and `RunPlan::tool` needed widening: the static
+    /// schemas keep `&'static str`, so the built-in path still allocates nothing.
+    pub provider: std::borrow::Cow<'static, str>,
     pub ecosystem: Ecosystem,
     /// Directory holding the primary manifest.
     pub root: PathBuf,
@@ -248,7 +314,7 @@ impl DeclaredManager {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPlan {
     /// Backend id whose bin directory provides the program.
-    pub tool: &'static str,
+    pub tool: std::borrow::Cow<'static, str>,
     /// Program file name to look for inside that bin directory, best first.
     pub program_candidates: Vec<String>,
     pub args: Vec<String>,
@@ -300,7 +366,7 @@ pub enum InstallerOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallerChoice {
-    pub provider: &'static str,
+    pub provider: std::borrow::Cow<'static, str>,
     pub origin: InstallerOrigin,
     /// Version the project asked for, when it named one.
     pub version: Option<String>,
@@ -343,7 +409,7 @@ pub fn discover(
             break;
         }
     }
-    found.sort_by(|left, right| left.provider.cmp(right.provider));
+    found.sort_by(|left, right| left.provider.cmp(&right.provider));
     Ok(found)
 }
 
@@ -391,7 +457,7 @@ fn detect_in(
         .find(|path| path.is_file());
 
     Ok(Some(DetectedProject {
-        provider: schema.id,
+        provider: schema.id.into(),
         ecosystem: schema.ecosystem,
         root: directory.to_path_buf(),
         manifest,
@@ -429,8 +495,8 @@ pub fn select_installer(
         })
         .collect();
     if project.native_lock.is_some() && !rivals.is_empty() {
-        let mut names: Vec<&str> = rivals.iter().map(|peer| peer.provider).collect();
-        names.push(project.provider);
+        let mut names: Vec<&str> = rivals.iter().map(|peer| &*peer.provider).collect();
+        names.push(&project.provider);
         names.sort_unstable();
         return Err(Error::config(format!(
             "{} has lockfiles for more than one installer ({}); \
@@ -466,7 +532,7 @@ pub fn select_installer(
             )));
         }
         return Ok(InstallerChoice {
-            provider: project.provider,
+            provider: project.provider.clone(),
             origin: InstallerOrigin::Manifest,
             version: declared.version.clone(),
         });
@@ -474,14 +540,14 @@ pub fn select_installer(
 
     if project.native_lock.is_some() {
         return Ok(InstallerChoice {
-            provider: project.provider,
+            provider: project.provider.clone(),
             origin: InstallerOrigin::NativeLock,
             version: None,
         });
     }
 
     if let Some(installer) = &config.installer {
-        if installer != project.provider {
+        if installer.as_str() != &*project.provider {
             return Err(Error::config(format!(
                 "`[deps.{}].installer = \"{}\"` does not match the provider; \
                  enable `[deps.{}]` instead",
@@ -489,14 +555,14 @@ pub fn select_installer(
             )));
         }
         return Ok(InstallerChoice {
-            provider: project.provider,
+            provider: project.provider.clone(),
             origin: InstallerOrigin::ProjectConfig,
             version: None,
         });
     }
 
     Ok(InstallerChoice {
-        provider: project.provider,
+        provider: project.provider.clone(),
         origin: InstallerOrigin::Default,
         version: None,
     })
@@ -528,10 +594,10 @@ pub fn plan(
         Ecosystem::Go | Ecosystem::Rust | Ecosystem::Deno => {
             native::plan(project, choice, config, tool_versions)
         }
-        other => Err(Error::other(format!(
-            "no deps provider implementation for ecosystem `{}` yet",
-            other.as_str()
-        ))),
+        Ecosystem::Custom => plan_custom(project, config),
+        // No catch-all: every ecosystem has an implementation, so adding one
+        // should fail to compile here rather than fail at runtime with a message
+        // announcing that it is not implemented.
     }
 }
 
@@ -671,6 +737,41 @@ pub fn relative_segments(path: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// A custom provider with no `run` is an error, not a silent no-op.
+    ///
+    /// Accepting it would make `osdk deps` report success for a step that never
+    /// executed -- the shape this subsystem keeps refusing elsewhere ("could not
+    /// check" must not read as "checked and fine").
+    #[test]
+    fn a_custom_provider_without_a_command_is_refused() {
+        let project = detect_custom("codegen", Path::new("/p"), Path::new("/p/osdk.toml"));
+
+        for run in [None, Some(String::new()), Some("   ".to_string())] {
+            let config = ProviderConfig {
+                run,
+                ..ProviderConfig::default()
+            };
+            assert!(
+                plan_custom(&project, &config).is_err(),
+                "an absent or blank `run` must not be accepted"
+            );
+        }
+
+        // And a real command plans, so the check above is discriminating rather
+        // than "always fails".
+        let config = ProviderConfig {
+            run: Some("pnpm run codegen".into()),
+            ..ProviderConfig::default()
+        };
+        let plan = plan_custom(&project, &config).unwrap();
+        assert_eq!(plan.program_candidates, vec!["pnpm".to_string()]);
+        assert_eq!(plan.args, vec!["run".to_string(), "codegen".to_string()]);
+        // Never reported as frozen: there is no lockfile in this model, so
+        // `--frozen` must not pass on the strength of a custom step.
+        assert!(!plan.frozen);
+        assert!(plan.prelude.is_empty());
+    }
+
     /// `[deps.<p>].dir` is applied, and applied for both separator spellings on
     /// every platform.
     ///

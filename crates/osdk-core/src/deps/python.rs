@@ -125,7 +125,7 @@ pub fn plan(
     // the venv explicitly rather than assume the project already has one.
     let mut prelude: Vec<Vec<String>> = Vec::new();
 
-    match project.provider {
+    match project.provider.as_ref() {
         "uv" => {
             args.push("sync".into());
             if project.native_lock.is_some() {
@@ -210,7 +210,7 @@ pub fn plan(
     }
 
     Ok(RunPlan {
-        tool: "pypi:uv",
+        tool: "pypi:uv".into(),
         program_candidates: vec!["uv.exe".to_string(), "uv".to_string()],
         args,
         env,
@@ -269,7 +269,7 @@ mod tests {
 
     fn project(provider: &'static str, manifest: &Path, lock: Option<&Path>) -> DetectedProject {
         DetectedProject {
-            provider,
+            provider: provider.into(),
             ecosystem: Ecosystem::Python,
             root: manifest.parent().unwrap().to_path_buf(),
             manifest: manifest.to_path_buf(),
@@ -280,7 +280,7 @@ mod tests {
 
     fn choice(provider: &'static str) -> InstallerChoice {
         InstallerChoice {
-            provider,
+            provider: provider.into(),
             version: None,
             origin: super::super::InstallerOrigin::Default,
         }

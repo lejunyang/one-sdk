@@ -131,6 +131,37 @@ osdk deps --frozen
 
 这会把上面那个退回变成错误，而不是一条容易被忽略的警告。
 
+## 自定义 provider
+
+除了内置的包管理器，`[deps]` 里任何别的名字都是一个自定义步骤：一条你自己的命令，
+带上它的输入与产物。形状与 `[tasks]` 同构。
+
+```toml
+[deps.codegen]
+sources = ["schema/schema.graphql"]   # 变了才重跑
+outputs = ["src/generated"]           # 缺了就算过期
+run = "pnpm run codegen"
+depends = ["pnpm"]                    # 等 pnpm 先把依赖装好
+dir = "apps/api"                      # 可选：在子目录里跑
+env = { NODE_ENV = "development" }
+```
+
+自定义 provider 不需要清单文件——**声明本身就是发现**。它的根是声明它的那份
+`osdk.toml` 所在目录，所以 `sources` 与 `outputs` 的相对起点和内置 provider 一致。
+
+`run` **不经过 shell**：命令按空白切分后直接执行。否则同一条 `run` 在不同机器上含义
+会不同，而这个字符串是要提交进仓库的。需要管道、重定向一类的写法，请放进一个脚本里
+再由 `run` 调用它。
+
+`depends` 决定顺序，`osdk` 会据此排序（声明顺序无关）。构成环时直接报错——随便挑一个
+顺序会让某一步在它的输入还不存在时就运行，而报错会指向错误的那个 provider。
+
+::: warning 自定义 provider 一律需要批准
+`run` 是一条任意命令，所以它**总是**需要你批准配置——这与内置 provider 不同（声明
+装什么不需要）。这也与 `[tasks]` 不同：task 是你显式 `osdk run <名字>` 触发的，
+那次调用本身就是授权；而 deps 可以由 `auto` 前置触发。
+:::
+
 ## 包管理器没装怎么办
 
 `deps` 会自己把它装上，走的是 osdk 平常那条工具安装链——所以来源选择、校验、

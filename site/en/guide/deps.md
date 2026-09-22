@@ -148,6 +148,43 @@ osdk deps --frozen
 That turns the fallback above into an error instead of a warning it is easy to
 miss.
 
+## Custom providers
+
+Beyond the built-in package managers, any other name under `[deps]` is a custom
+step: a command of your own, with its inputs and its outputs. The shape mirrors
+`[tasks]`.
+
+```toml
+[deps.codegen]
+sources = ["schema/schema.graphql"]   # re-runs when these change
+outputs = ["src/generated"]           # missing means stale
+run = "pnpm run codegen"
+depends = ["pnpm"]                    # wait for pnpm to install first
+dir = "apps/api"                      # optional: run in a subdirectory
+env = { NODE_ENV = "development" }
+```
+
+A custom provider needs no manifest -- **the declaration is the detection**. Its
+root is the directory of the `osdk.toml` that declared it, so `sources` and
+`outputs` are relative to the same place a built-in provider's would be.
+
+`run` does **not** go through a shell: the command is split on whitespace and
+executed directly. Otherwise the same `run` line would mean different things on
+different machines, and this string gets committed. Anything needing pipes or
+redirection belongs in a script that `run` invokes.
+
+`depends` decides the order and osdk sorts accordingly (declaration order is
+irrelevant). A cycle is an error: picking some order anyway would run a step before
+its input existed, and the failure would point at the wrong provider.
+
+::: warning Custom providers always need approval
+`run` is an arbitrary command, so it **always** requires approving the config --
+unlike a built-in provider, where declaring what to install does not. It also
+differs from `[tasks]`: a task is triggered by you explicitly running
+`osdk run <name>`, and that invocation is the authorization, whereas deps can be
+triggered ahead of time by `auto`.
+:::
+
 ## When the package manager is not installed
 
 `deps` installs it, through the same tool install path `osdk install` uses -- so

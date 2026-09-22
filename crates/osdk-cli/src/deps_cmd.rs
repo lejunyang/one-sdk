@@ -35,7 +35,9 @@ pub struct DepsOptions {
 
 /// One provider ready to be reported on or run.
 struct Resolved {
-    schema: &'static DepsProviderSchema,
+    /// `None` for a custom provider: not having a built-in schema is precisely
+    /// what makes one custom, so this is the distinction rather than an error.
+    schema: Option<&'static DepsProviderSchema>,
     project: DetectedProject,
     choice: InstallerChoice,
     config: ProviderConfig,
@@ -61,20 +63,47 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         .filter(|id| options.providers.is_empty() || options.providers.iter().any(|p| p == *id))
         .filter_map(|id| deps::provider_schema(id))
         .collect();
-    if enabled.is_empty() {
-        println!("no matching deps providers are configured");
-        return Ok(());
-    }
-
     let ceiling = app
         .ctx
         .config
         .project_config_path
         .as_deref()
         .and_then(Path::parent);
-    let detected = deps::discover(&cwd, ceiling, &enabled)?;
+    let mut detected = deps::discover(&cwd, ceiling, &enabled)?;
+
+    // Custom providers are not discovered, they are declared: there is no
+    // manifest to find. Their root is the directory of the config that declared
+    // them, which keeps `sources`/`outputs` relative to the same place a built-in
+    // provider's would be.
+    let config_path = app.ctx.config.project_config_path.clone();
+    for id in configured.keys() {
+        if deps::provider_schema(id).is_some() {
+            continue;
+        }
+        if options.skip.iter().any(|skip| skip == id) {
+            continue;
+        }
+        if !options.providers.is_empty() && !options.providers.iter().any(|p| p == id) {
+            continue;
+        }
+        let Some(path) = &config_path else {
+            return Err(anyhow!(
+                "custom deps provider `{id}` needs a project config file to anchor it"
+            ));
+        };
+        let root = path.parent().unwrap_or(&cwd);
+        detected.push(deps::detect_custom(id, root, path));
+    }
+
     if detected.is_empty() {
-        println!("no dependency manifests found for the configured providers");
+        // Split the two cases: "you selected nothing" and "nothing was found"
+        // have different fixes, and collapsing them sends the user looking in the
+        // wrong place.
+        if enabled.is_empty() {
+            println!("no matching deps providers are configured");
+        } else {
+            println!("no dependency manifests found for the configured providers");
+        }
         return Ok(());
     }
 
@@ -82,11 +111,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     let mut resolved = Vec::new();
     for project in &detected {
         let config = configured
-            .get(project.provider)
+            .get(&*project.provider)
             .cloned()
             .unwrap_or_default();
-        let schema = deps::provider_schema(project.provider)
-            .ok_or_else(|| anyhow!("unknown deps provider `{}`", project.provider))?;
+        let schema = deps::provider_schema(&project.provider);
         let choice = deps::select_installer(project, &config, &detected)?;
         let plan = deps::plan(project, &choice, &config, &tool_versions)?;
         if options.frozen && !plan.frozen {
@@ -108,6 +136,11 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             decision,
         });
     }
+
+    // `depends` is a promise about order, so it has to be honoured before
+    // anything runs. A codegen step that needs another provider's output would
+    // otherwise fail for a reason unrelated to what the user configured.
+    order_by_depends(&mut resolved, &configured)?;
 
     if options.verify {
         return verify(app, &resolved);
@@ -169,6 +202,62 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sort providers so that everything a provider `depends` on runs before it.
+///
+/// A cycle is an error rather than a silently broken order: picking some order
+/// anyway would make one of the steps run before its input existed, and the
+/// failure would point at the wrong provider. Dependencies naming a provider that
+/// is not configured are ignored -- that is a no-op, not a contradiction, since a
+/// disabled provider has nothing to wait for.
+fn order_by_depends(
+    resolved: &mut Vec<Resolved>,
+    configured: &BTreeMap<String, ProviderConfig>,
+) -> anyhow::Result<()> {
+    let present: Vec<String> = resolved
+        .iter()
+        .map(|item| item.project.provider.to_string())
+        .collect();
+
+    let mut ordered: Vec<Resolved> = Vec::with_capacity(resolved.len());
+    let mut done: Vec<String> = Vec::new();
+    let mut remaining: Vec<Resolved> = std::mem::take(resolved);
+
+    while !remaining.is_empty() {
+        let ready = remaining.iter().position(|item| {
+            let id: &str = &item.project.provider;
+            configured
+                .get(id)
+                .map(|config| {
+                    config.depends.iter().all(|need| {
+                        // Only wait for something that is actually going to run.
+                        !present.iter().any(|name| name == need)
+                            || done.iter().any(|name| name == need)
+                    })
+                })
+                .unwrap_or(true)
+        });
+        match ready {
+            Some(index) => {
+                let item = remaining.remove(index);
+                done.push(item.project.provider.to_string());
+                ordered.push(item);
+            }
+            None => {
+                let stuck: Vec<&str> = remaining
+                    .iter()
+                    .map(|item| &*item.project.provider)
+                    .collect();
+                return Err(anyhow!(
+                    "`depends` forms a cycle among: {}; break it in osdk.toml",
+                    stuck.join(", ")
+                ));
+            }
+        }
+    }
+    *resolved = ordered;
+    Ok(())
+}
+
 /// Check installed environments against the package managers' own receipts.
 ///
 /// Two layers, cheapest first:
@@ -195,7 +284,7 @@ fn verify(app: &App, resolved: &[Resolved]) -> anyhow::Result<()> {
         let lock_path = crate::lockfile::default_path(&item.project.root);
         if lock_path.is_file() {
             let locked = crate::lockfile::load(&lock_path)?;
-            if let Some(entry) = locked.deps.get(item.project.provider) {
+            if let Some(entry) = locked.deps.get(&*item.project.provider) {
                 if let Some(native) = &entry.native_lock {
                     match deep::verify_native_lock(
                         &item.project.root,
@@ -272,7 +361,13 @@ async fn ensure_tools(
     no_install_tools: bool,
 ) -> anyhow::Result<Vec<ReadyTool>> {
     let mut ready = Vec::new();
-    for required in item.schema.required_tools {
+    // A custom provider declares no tools of its own: its `run` line invokes
+    // whatever is already available, which in practice is what `depends` brought
+    // in. Inventing a tool requirement for it would be guessing at the command.
+    let Some(schema) = item.schema else {
+        return Ok(ready);
+    };
+    for required in schema.required_tools {
         // An installer's version can be pinned by the manifest's
         // `packageManager` field. A runtime's cannot, so it comes from `[tools]`
         // or, failing that, whatever is already installed.
@@ -307,11 +402,11 @@ async fn ensure_tools(
                         "deps provider `{}` needs `{}`, which is not installed, and \
                          `--no-install-tools` forbids installing it; \
                          run `osdk install {spec}` first",
-                        item.schema.id,
+                        schema.id,
                         required.id
                     ));
                 }
-                println!("installing {spec} for deps provider `{}`", item.schema.id);
+                println!("installing {spec} for deps provider `{}`", schema.id);
                 let (_, installed) =
                     crate::commands::install_one_without_shims(app, &request, false).await?;
                 installed
@@ -421,6 +516,14 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
 /// installer's own directories are searched first, then all of them, because npm
 /// ships inside node's bin directory rather than its own.
 fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
+    // A custom provider brings no tools of its own, so there are no install
+    // directories to search: its `run` line names whatever `depends` made
+    // available, or something already on PATH. Returning the name unresolved lets
+    // the OS do the lookup against the PATH the child is given -- which is the
+    // resolved tools first, then the inherited one.
+    if tools.is_empty() {
+        return plan.program_candidates.first().map(PathBuf::from);
+    }
     let installer_first = tools
         .iter()
         .filter(|tool| tool.role == ToolRole::Installer || tool.id == plan.tool);
@@ -444,22 +547,21 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
     let command = command_line(&item.plan);
-    let sources = deps::effective_sources(item.schema, &item.config);
+    let sources = effective_sources(item.schema, &item.config);
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| item.project.root.join(source))
         .filter(|path| path.is_file())
         .collect();
-    let outputs: Vec<(PathBuf, bool)> =
-        deps::effective_outputs(item.schema, &item.config, config_outputs_set(&item.config))
-            .into_iter()
-            .map(|spec| (item.project.root.join(&spec.path), spec.required))
-            .collect();
+    let outputs: Vec<(PathBuf, bool)> = effective_outputs(item.schema, &item.config)
+        .into_iter()
+        .map(|(path, required)| (item.project.root.join(path), required))
+        .collect();
 
     let state_path = state::state_path(&app.ctx.dirs.cache, &item.project.root);
     let mut persisted = state::DepsState::load(&state_path)?;
     persisted.record(
-        item.project.provider,
+        &item.project.provider,
         &state::Inputs {
             sources: &existing,
             declared_sources: !sources.is_empty(),
@@ -481,7 +583,7 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
     let lock_path = crate::lockfile::default_path(&item.project.root);
     crate::lockfile::merge_deps(
         &lock_path,
-        item.project.provider,
+        &item.project.provider,
         crate::lockfile::DepsRecord {
             installer: item.choice.provider.to_string(),
             installer_version,
@@ -537,22 +639,21 @@ fn resolved_tool_versions(app: &App) -> BTreeMap<String, String> {
 
 fn decide(
     app: &App,
-    schema: &'static DepsProviderSchema,
+    schema: Option<&'static DepsProviderSchema>,
     project: &DetectedProject,
     config: &ProviderConfig,
     plan: &RunPlan,
 ) -> anyhow::Result<state::Decision> {
-    let sources = deps::effective_sources(schema, config);
+    let sources = effective_sources(schema, config);
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| project.root.join(source))
         .filter(|path| path.is_file())
         .collect();
-    let outputs: Vec<(PathBuf, bool)> =
-        deps::effective_outputs(schema, config, config_outputs_set(config))
-            .into_iter()
-            .map(|spec| (project.root.join(&spec.path), spec.required))
-            .collect();
+    let outputs: Vec<(PathBuf, bool)> = effective_outputs(schema, config)
+        .into_iter()
+        .map(|(path, required)| (project.root.join(path), required))
+        .collect();
     let path = state::state_path(&app.ctx.dirs.cache, &project.root);
     let persisted = state::DepsState::load(&path)?;
     let command = command_line(plan);
@@ -564,12 +665,47 @@ fn decide(
     };
     Ok(state::decide(
         &inputs,
-        persisted.providers.get(project.provider),
+        persisted.providers.get(&*project.provider),
     )?)
 }
 
-fn config_outputs_set(config: &ProviderConfig) -> bool {
-    !config.outputs.is_empty()
+/// Freshness sources for a provider, whether or not it has a built-in schema.
+///
+/// A custom provider has no defaults to fall back to: what the project declared
+/// is all there is. Declaring nothing therefore means freshness cannot be
+/// established, so it runs every time -- deliberately, rather than being treated
+/// as "always fresh", which would be the vacuous-truth trap.
+fn effective_sources(
+    schema: Option<&'static DepsProviderSchema>,
+    config: &ProviderConfig,
+) -> Vec<String> {
+    match schema {
+        Some(schema) => deps::effective_sources(schema, config),
+        None => config.sources.clone(),
+    }
+}
+
+/// Outputs for a provider, as (path, required) pairs.
+///
+/// A custom provider's declared outputs are `Required`: the user named them as the
+/// result of the step, so their absence means the step has not produced what it
+/// promised. Built-in providers keep their own mix of required and
+/// optional-once-seen.
+fn effective_outputs(
+    schema: Option<&'static DepsProviderSchema>,
+    config: &ProviderConfig,
+) -> Vec<(String, bool)> {
+    match schema {
+        Some(schema) => deps::effective_outputs(schema, config, !config.outputs.is_empty())
+            .into_iter()
+            .map(|spec| (spec.path, spec.required))
+            .collect(),
+        None => config
+            .outputs
+            .iter()
+            .map(|path| (path.clone(), true))
+            .collect(),
+    }
 }
 
 /// The effective command, including env, because env is part of *what runs*:
@@ -616,11 +752,11 @@ fn report_undeclared(cwd: &Path) -> anyhow::Result<()> {
             .find(|(path, _)| path == &project.manifest)
         {
             Some((_, providers)) => {
-                if !providers.contains(&project.provider) {
-                    providers.push(project.provider);
+                if !providers.iter().any(|name| *name == &*project.provider) {
+                    providers.push(&*project.provider);
                 }
             }
-            None => by_manifest.push((project.manifest.clone(), vec![project.provider])),
+            None => by_manifest.push((project.manifest.clone(), vec![&*project.provider])),
         }
     }
 

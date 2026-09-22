@@ -101,6 +101,64 @@ scripts by default (which is why pnpm 12 reports `ERR_PNPM_IGNORED_BUILDS` and
 suggests `pnpm approve-builds`). osdk still passes `--ignore-scripts` explicitly
 rather than relying on one version's default.
 
+## Custom providers: three fields became Cow, not everything became String
+
+A custom provider's name comes from config, so it is a runtime `String`, while the
+built-in table is static `&'static str`. Widening everything to `String` would make
+every built-in entry allocate, across a 40-site diff.
+
+Only three fields actually carry a provider name: `DetectedProject::provider`,
+`InstallerChoice::provider` and `RunPlan::tool`. Those three became
+`Cow<'static, str>` -- `Borrowed` and allocation-free on the built-in path, `Owned`
+for a custom one. The static schema tables are untouched.
+
+`Resolved::schema` became an `Option` accordingly. Not to dodge the type system:
+**not having a built-in schema is precisely what makes a provider custom**, so
+`Option` states the fact more directly than a sentinel or an error would. A custom
+provider's `sources`/`outputs` therefore come straight from what was declared --
+there are no defaults to fall back to. Declaring none means freshness cannot be
+established, so it runs every time; not "always fresh", which would be the
+vacuous-truth trap.
+
+A custom provider's `outputs` are treated as **required**: writing them down is a
+claim that the step produces them, so their absence means the step did not deliver
+what it promised. Built-in providers keep their own mix of required and
+optional-once-seen.
+
+## `run` does not go through a shell
+
+The command is split on whitespace and executed directly. Handing it to `cmd.exe`
+or `sh` would make one `run` line mean different things on different machines --
+and this string is committed -- while quoting rules would become a portability
+hazard. Anything needing shell features belongs in a script that `run` invokes.
+
+Program resolution takes a different path for a custom provider: it brings no tools
+of its own, so there are no install directories to search. The name goes to the OS
+for a PATH lookup, and the PATH the child receives is "resolved tools first, then
+the inherited one", so whatever `depends` installed is found.
+
+## depends decides order, and a cycle is an error
+
+`order_by_depends` topologically sorts. A cycle is refused rather than resolved
+arbitrarily: choosing an order would run a step before its input existed, and the
+failure would name the wrong provider. Dependencies pointing at providers that are
+not configured are ignored -- that is a no-op rather than a contradiction, since a
+disabled provider has nothing to wait for.
+
+## One "injection that stayed green" exposed a code problem, not a test problem
+
+`plan_custom` originally had two guards: `command.is_empty()`, and then
+`parts.next()` returning `None`. Injecting a fault into either produced **no
+observable change**, because the other still rejected.
+
+That is not a weak test -- it means **a guard whose removal is invisible cannot be
+trusted to be there**. It was collapsed into a single check, and the injection was
+then confirmed to turn it red.
+
+In the same spirit, `plan`'s ecosystem dispatch lost its catch-all arm: every
+ecosystem now has an implementation, so adding one should fail **at compile time**
+rather than print "not implemented yet" at runtime.
+
 ## go / cargo / deno: why there is no script-suppressing flag
 
 Node and Python both need build scripts explicitly turned off. These three do not

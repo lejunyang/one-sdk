@@ -92,6 +92,53 @@ lockfile 时会**明确失败**，而 classic 会静默继续，猜错的代价�
 （pnpm 12 因此会 `ERR_PNPM_IGNORED_BUILDS` 并提示 `pnpm approve-builds`），
 但 osdk 仍然显式传 `--ignore-scripts`，不依赖某个版本的默认值。
 
+## 自定义 provider：三个字段改 Cow，而不是整体改 String
+
+自定义 provider 的名字来自配置，是运行时的 `String`；而内置 provider 表是静态的
+`&'static str`。全面改成 `String` 会让每个内置条目都要分配，且 diff 波及 40 余处。
+
+实际只有三个字段真的承载「provider 名字」：`DetectedProject::provider`、
+`InstallerChoice::provider`、`RunPlan::tool`。这三处改成
+`Cow<'static, str>`——内置路径仍是 `Borrowed`、不分配，自定义路径是 `Owned`。
+静态 schema 表完全不动。
+
+`Resolved::schema` 相应变成 `Option`。这不是为了绕开类型，而是**没有内置 schema
+恰恰就是「自定义」的定义**，用 `Option` 表达比用一个哨兵值或报错更贴近事实。
+自定义 provider 的 `sources`/`outputs` 因此直接取配置里声明的那些——它没有默认值可
+回落。声明为空则意味着「无法确立新鲜度」，于是每次都跑；而不是当成「永远新鲜」，
+那正是空洞成立的陷阱。
+
+自定义 provider 的 `outputs` 一律按 **required** 处理：用户把它们写下来就是宣称这一步
+会产出它们，缺了就说明这一步没有兑现承诺。内置 provider 保留自己那套
+required / optional-once-seen 的混合。
+
+## `run` 不经过 shell
+
+命令按空白切分后直接执行。交给 `cmd.exe` 或 `sh` 会让同一条 `run` 在不同机器上含义
+不同，而这个字符串是要提交的；引号规则也会变成一个可移植性陷阱。需要 shell 特性的，
+放进脚本再由 `run` 调用。
+
+程序解析上自定义 provider 走另一条路：它不带自己的工具，所以没有 install 目录可搜，
+直接把名字交给操作系统按 PATH 查找——而子进程拿到的 PATH 是「先解析出的工具，再继承
+的那份」，所以 `depends` 装好的东西能被找到。
+
+## depends 决定顺序，环是错误
+
+`order_by_depends` 做拓扑排序。环报错而不是随便挑一个顺序：挑了就会让某一步在它的
+输入还不存在时运行，而失败信息会指向错误的 provider。指向未配置的 provider 的依赖被
+忽略——那是空操作而非矛盾，一个被禁用的 provider 没有什么可等的。
+
+## 一处「注入不变红」反而揭示了代码问题
+
+`plan_custom` 最初有两道检查：先 `command.is_empty()`，再 `parts.next()` 返回 `None`
+时报错。给任一道注入缺陷都**看不出变化**，因为另一道仍会拒绝。
+
+这不是测试写得不好，而是**一道移除后不可见的防线不能被信任它还在**。已收敛为单一判据，
+并验证注入后确实变红。
+
+同类地，`plan` 的生态分派去掉了兜底分支：现在每个生态都有实现，新增一个应当在**编译期**
+失败，而不是在运行时打印一句「这个生态还没实现」。
+
 ## go / cargo / deno：为什么没有「禁脚本」开关
 
 Node 与 Python 都需要显式关掉构建脚本，这三个不需要——不是省略，而是**取依赖阶段
