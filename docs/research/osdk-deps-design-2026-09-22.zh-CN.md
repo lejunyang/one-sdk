@@ -237,6 +237,58 @@ pub trait DepsProvider: Send + Sync {
 3. **「禁脚本」在 yarn berry 上是环境变量而非 CLI 参数**，所以公共层的 `RunPlan` 必须同时承载 args 与 env 两种表达，不能只拼命令行。
 4. **pnpm 12 与 bun 默认已拦依赖构建脚本**（pnpm 12 甚至因此 exit=1）。这对 osdk 的 trust 第一档是**加强**而非削弱：即便用户没显式禁脚本，这两个较新的包管理器自己也默认不跑依赖脚本。但 osdk 仍显式传 `--ignore-scripts`，理由是不依赖某个版本的默认值（pnpm 9 就会跑）。
 
+### 5.4.2 Python 侧禁源码构建与冻结开关（已核准，2026-09-22 实测）
+
+判据与 Node 那轮一致：**不看退出码，看源码构建是否真的发生**。探针造一个只有 sdist
+的本地包，其 `setup.py` 向标记文件追加一行；「标记文件是否存在」才是证据。每个问题
+用全新的 `UV_CACHE_DIR`（AGENTS.md 记过反例：在已装好的 venv 里测哈希校验，pip 跳过
+下载因而根本没校验）。
+
+实测版本：uv 0.12.17 (x86_64-pc-windows-msvc)、CPython 3.12.14。
+
+| 问题 | 命令 | exit | 标记文件 | 结论 |
+| --- | --- | --- | --- | --- |
+| 默认会不会构建 sdist | `uv pip install <sdist-only>` | 0 | **存在** | 默认**会**从源码构建 |
+| `--no-build` | 同上 `+ --no-build` | 1 | 不存在 | 有效，`error: Building source distributions is disabled` |
+| `--only-binary=:all:` | 同上 `+ --only-binary=:all:` | 1 | 不存在 | 有效，报同一条错误 |
+| **`UV_NO_BUILD=1`（pip install）** | 同上，仅设环境变量 | **0** | **存在** | ⚠️ **无效**，被静默忽略 |
+| `UV_NO_BUILD=1`（`uv sync`） | `uv sync --frozen` | 2 | 不存在 | 有效，`can't be installed because it is marked as --no-build` |
+| 反向控制：纯 wheel 包 | `uv pip install idna==3.10 --no-build` | 0 | — | 正常装上，读 dist-info 的 `WHEEL` 确认（`Generator: flit 3.9.0`） |
+
+**`UV_NO_BUILD` 的子命令不一致是本轮最重要的发现，直接决定 RunPlan 形状。**
+`uv pip install --help` 里 `--no-build` **没有** `[env: …]` 标注（而同页的
+`--no-build-isolation` 有 `[env: UV_NO_BUILD_ISOLATION=]`）；`uv sync --help` 里
+`--no-build` 则标着 `[env: UV_NO_BUILD=]`。也就是说同一个变量名在两个子命令上行为
+不同。
+
+这与 yarn 那条恰好相反：yarn berry 必须靠 env（它拒绝 `--ignore-scripts`），而 uv 的
+`pip install` 必须靠 flag（它无视 env）。所以 Node 侧「env 也算一种等效手段」的经验
+不能平移到 Python——**Python provider 一律传 flag**，env 只用于索引与缓存一类确实被
+识别的设置。反向控制（纯 wheel 包在 `--no-build` 下仍能装上）是必需的，否则「全部被
+拦住」会与「开关生效」表现一致。
+
+### 5.4.3 uv 的冻结语义（已核准）
+
+| 场景 | exit | 观察到的产物 | 结论 |
+| --- | --- | --- | --- |
+| 无 `uv.lock` 时 `uv sync --frozen` | 1 | 未创建 lock、venv 未填充 | **明确失败**，与 npm/pnpm/yarn-berry 同类 |
+| 有 lock 时 `uv sync --frozen` | 0 | `uv.lock` 在、包装进**项目自己的 `.venv`** | 正常 |
+| lock 与 `pyproject.toml` 不一致时 `--frozen` | **0** | 新增的 `six` **未**被装上 | `--frozen` 的语义是「不更新 lock、按 lock 装」，**不报告不一致** |
+| `uv pip sync requirements.txt` | 0 | 装上 | 可用 |
+| `uv pip sync` 传未钉版本的需求 | 0 | — | 容忍未钉版本，不强制全钉 |
+
+第三行值得单独说明：uv 的 `--frozen` 不等于「校验 lock 是最新的」。要那个语义得用
+`--locked`（`Assert that the uv.lock will remain unchanged`，带
+`[env: UV_LOCKED=]`）。这与 npm 的 `ci` 不同——`npm ci` 在 lock 与清单不一致时会
+失败。**所以 osdk 对 uv 用 `--frozen` 只能保证「不改 lock」，要保证「lock 与清单一致」
+必须另加 `--locked`。** 这一条会影响 D4 的深度校验设计：Python 侧「lock 是否仍然当令」
+不能假定被 `--frozen` 覆盖。
+
+好消息是它印证了设计里坚持的一点：`uv sync` 会把依赖装进**项目自己的 `.venv`**，
+与 osdk「应用环境落在项目内、工具落在隔离目录」的分层天然一致，不需要额外手段去
+逼迫它。另外实测到 `uv sync` 会主动忽略与项目不符的 `VIRTUAL_ENV`（打印 warning 并
+使用 `.venv`），所以 osdk 不必、也不应通过设 `VIRTUAL_ENV` 来选环境。
+
 ### 5.5 缺 lock 时的降级路径（因上表第 1 条而必须显式化）
 
 ```text
@@ -423,7 +475,7 @@ AGENTS.md 记过 pypi「只写 installer 不回读、重锁被本机环境静默
 | provider | 为什么默认安全 |
 | --- | --- |
 | npm/pnpm/yarn/bun | osdk 默认传 `--ignore-scripts` 一类开关（npm 侧已是 `BuildPolicy::Deny` 默认），不跑生命周期脚本 |
-| uv / pip-requirements | 默认只装 wheel（`--only-binary` 一类约束，**确切开关待核**，§15） |
+| uv / pip-requirements | 默认只装 wheel，用 `--no-build`（已核准，§5.4.2）；**不能只依赖 `UV_NO_BUILD` 环境变量**，它在 `uv pip install` 上不被识别 |
 | go | `go mod download` 只取模块源码到缓存，不执行构建（`go build` 才编译；**deps 不负责 build**） |
 | cargo | `cargo fetch` 只下载，不编译（build script 在 `cargo build` 时才跑） |
 | composer / bundler | **待核**（各自有 script/extension 构建机制） |
@@ -501,7 +553,7 @@ AGENTS.md 记过 pypi「只写 installer 不回读、重锁被本机环境静默
 
 **待核（实现前必须用能失败的验证核准，现在不得当既定事实）**
 
-1. **uv/pip 只装预编译产物的确切开关**：`--only-binary=:all:`、`UV_NO_BUILD`/`--no-build`、`--no-build-isolation` 的语义与版本差异；uv 默认是否允许拉 sdist 并本地构建。
+1. ~~**uv/pip 只装预编译产物的确切开关**~~ → **已核准（§5.4.2，uv 0.12.17 实测）**：默认会拉 sdist 并本地构建；`--no-build` 与 `--only-binary=:all:` 均有效；**`UV_NO_BUILD` 环境变量在 `uv pip install` 上被静默忽略、仅 `uv sync` 识别**，故 Python provider 一律传 flag。冻结语义另见 §5.4.3：`--frozen` 只保证不改 lock，**不**校验 lock 与清单一致（那需要 `--locked`），与 `npm ci` 不同。
 2. ~~npm 系的 frozen 命令与脚本开关在各 installer 上的确切形态~~ —— **已核准（2026-09-22 实测，见 §5.4）**，含版本号与反向控制。**剩余未测的两格**：yarn classic 与 yarn berry 在「lock 与清单不一致」时的行为（npm/pnpm/bun 三家已测为 exit≠0）。这一格影响的只是错误信息质量，不影响 provider 表的命令选择（osdk 自己预检 lock 存在性已覆盖更危险的那种情况）；D1 实现时补测。
 3. **deno `deno install --frozen`** 是否存在及其语义（mise 表里写的是 `deno install`）。
 4. **bundler / composer** 的冻结安装参数与「是否会编译 native extension / 跑脚本」，以及 osdk **目前没有 ruby/php backend**（`registry.rs:21-36` 无此二者）——D5 若要做，需先评估是否新增 backend 或要求 syspkg 提供。
