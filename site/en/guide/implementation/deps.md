@@ -101,6 +101,61 @@ scripts by default (which is why pnpm 12 reports `ERR_PNPM_IGNORED_BUILDS` and
 suggests `pnpm approve-builds`). osdk still passes `--ignore-scripts` explicitly
 rather than relying on one version's default.
 
+## go / cargo / deno: why there is no script-suppressing flag
+
+Node and Python both need build scripts explicitly turned off. These three do not
+-- not as an omission, but because **the fetch step has no such hook**. Measured
+(go 1.27.1 / cargo 1.98.0 / deno 2.9.6):
+
+- After `cargo fetch`, `target/` **does not exist**, so `build.rs` never ran; build
+  scripts are a `cargo build` concern.
+- `go mod download` leaves no artifact in the project.
+- `deno install` creates no `node_modules`.
+
+So adding an `--ignore-scripts`-style argument "for symmetry with npm" would either
+be rejected by the tool or silently do nothing -- both worse than not passing it.
+The `no_script_suppressing_flag_is_invented` test guards exactly that.
+
+All three have a **real** frozen mode, in contrast with the Node round (yarn classic
+and bun exit 0 and install anyway with no lock). And **cargo's `--locked` is the
+strictest freeze in this subsystem**: it exits 101 even when the lock is merely
+stale, where `uv sync --frozen` quietly installs the old set. That makes
+"`--locked` means the same thing across ecosystems" a wrong assumption -- each one
+has to be measured separately.
+
+### GOTOOLCHAIN and UV_PYTHON_DOWNLOADS are the same problem
+
+`GOTOOLCHAIN` defaults to `auto`: when `go.mod` asks for a newer Go, go goes and
+fetches a different toolchain (measured: `go: downloading go1.99.0`; it failed here
+only because that version does not exist, but **the attempt itself happened**). The
+fetch would then run under a Go that osdk neither selected nor verified -- exactly
+isomorphic to uv downloading an interpreter. Both are pinned explicitly:
+`GOTOOLCHAIN=local` and `UV_PYTHON_DOWNLOADS=never`.
+
+`CARGO_HOME` needs no new convention: `backend/rust.rs:39-40` already points it at
+`<data>/cargo`, so deps inherits that and does not mix with the user's own
+`~/.cargo`.
+
+### One test that was discarded
+
+The first version asserted "a `go.mod` is not parsed as a Node manifest". It could
+**never fail** -- `node::declared_manager` returns early when the ecosystem is not
+Node, so a misrouted `go.mod` was harmless. That is a probe outside the mechanism it
+claimed to cover: injecting the catch-all dispatch left it green.
+
+It was replaced with "these manifests are validated, and a broken one is not
+skipped", and that one was confirmed to fail when validation is removed. The
+dispatch was still made **exhaustive, with no `_` arm**: having the compiler demand
+an arm is cheaper than learning about a missed wiring from a user.
+
+### bundler / composer being unsupported is a hard constraint, not a preference
+
+`backend/registry.rs:21-36` has no ruby and no php, so D2's "install the missing
+package manager" chain cannot work for those ecosystems. Listing a provider whose
+precondition osdk cannot meet would give the user "declared, detected, failed while
+installing the tool" -- worse than saying plainly that it is unsupported. Support
+requires adding the language backend first, which is a separate piece of work.
+
 ## Deep verification: predicates chosen by measurement, not by plausibility
 
 The design originally proposed L2 as "`pyvenv.cfg` creator/interpreter still the

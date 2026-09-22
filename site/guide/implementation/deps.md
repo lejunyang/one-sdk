@@ -92,6 +92,52 @@ lockfile 时会**明确失败**，而 classic 会静默继续，猜错的代价�
 （pnpm 12 因此会 `ERR_PNPM_IGNORED_BUILDS` 并提示 `pnpm approve-builds`），
 但 osdk 仍然显式传 `--ignore-scripts`，不依赖某个版本的默认值。
 
+## go / cargo / deno：为什么没有「禁脚本」开关
+
+Node 与 Python 都需要显式关掉构建脚本，这三个不需要——不是省略，而是**取依赖阶段
+没有这个口子**。实测（go 1.27.1 / cargo 1.98.0 / deno 2.9.6）：
+
+- `cargo fetch` 之后 `target/` **不存在**，说明 `build.rs` 根本没跑；构建脚本是
+  `cargo build` 的事。
+- `go mod download` 在项目里不留任何产物。
+- `deno install` 不创建 `node_modules`。
+
+所以为了「与 npm 对称」给它们加一个 `--ignore-scripts` 一类的参数，结果只会是被工具
+拒绝、或者静默什么都不做——两者都比不加更糟。`no_script_suppressing_flag_is_invented`
+这条测试专门守着这件事。
+
+三者的冻结模式都是**真的**，这与 Node 那轮形成对照（yarn classic 与 bun 在缺 lock 时
+exit=0 照常安装）。而且 **cargo 的 `--locked` 比本子系统里任何别的冻结都严**：lock
+仅仅过期它也 exit=101，而 uv 的 `--frozen` 会按旧 lock 静默装完。这说明「`--locked`
+在各生态语义一致」是个错误假设，每个生态都必须单独核准。
+
+### GOTOOLCHAIN 与 UV_PYTHON_DOWNLOADS 是同一类问题
+
+`GOTOOLCHAIN` 默认 `auto`：`go.mod` 要求更新的 Go 时，go 会主动
+`go: downloading go1.99.0` 去换工具链（实测行为，本例因该版本不存在而失败，但**尝试
+下载这件事已经发生**）。那就意味着实际跑的 Go 不是 osdk 选定、也不是 osdk 校验过的
+那个——与 uv 自行下载解释器完全同构。两处都显式钉住：`GOTOOLCHAIN=local`、
+`UV_PYTHON_DOWNLOADS=never`。
+
+`CARGO_HOME` 无需新增约定：`backend/rust.rs:39-40` 已经把它指向 `<data>/cargo`，
+deps 沿用即可，也因此不会与用户自己的 `~/.cargo` 混在一起。
+
+### 一条被淘汰的测试
+
+最初写了一条「`go.mod` 不会被当作 Node 清单解析」。它**永远不会失败**——
+`node::declared_manager` 开头就有 `ecosystem != Node` 的早退，所以即使分派错了也无害。
+这正是「探针落在被测机制之外」：注入 catch-all 分派后它仍然全绿。
+
+换成了「这些清单确实被校验、坏清单不会被跳过」，并验证了它在注入「不校验」时会红。
+不过分派本身还是改成了**穷尽 match、去掉 `_` 分支**：编译器强制补一条 arm，比将来从
+用户那里发现漏接要便宜。
+
+### 暂不支持 bundler / composer 是硬约束，不是取舍
+
+`backend/registry.rs:21-36` 里没有 ruby、没有 php，所以 D2 那条「缺包管理器就自动装」
+对这两个生态**走不通**。把无法兑现前置条件的 provider 列进表，用户会得到「声明了、
+探测到了、装工具那步失败」——比明确不支持更糟。要支持得先加语言后端，那是另一件事。
+
 ## 深度校验：判据由实测筛出，而不是由合理性筛出
 
 设计最初写的 L2 判据是「`pyvenv.cfg` 的 creator/解释器仍是记录的那个」加「关键包

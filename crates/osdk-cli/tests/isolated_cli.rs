@@ -5910,3 +5910,144 @@ fn verify_refuses_to_pass_an_environment_it_cannot_check() {
         "verification is a check, not a command that changes the environment"
     );
 }
+
+/// go, cargo and deno each plan their own real frozen mode, and go is never
+/// allowed to swap its toolchain.
+///
+/// These three share a property Node does not: their fetch step does not execute
+/// dependency code (measured -- `cargo fetch` leaves no `target/`, so `build.rs`
+/// never ran), so there is no `--ignore-scripts` equivalent to pass. The test
+/// asserts that too, because adding one "for symmetry" would either be rejected
+/// by the tool or quietly do nothing.
+///
+/// `GOTOOLCHAIN=local` is the load-bearing line: the default `auto` was measured
+/// to attempt `go: downloading go1.99.0` when `go.mod` asks for a newer Go, which
+/// would run the fetch under a toolchain osdk neither chose nor verified.
+#[test]
+fn native_providers_plan_real_freezes_and_pin_the_toolchain() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    for (provider, manifest, manifest_body, lock, expected_freeze) in [
+        ("go", "go.mod", "module p\n\ngo 1.21\n", "go.sum", None),
+        (
+            "cargo",
+            "Cargo.toml",
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+            "Cargo.lock",
+            Some("--locked"),
+        ),
+        ("deno", "deno.json", "{}\n", "deno.lock", Some("--frozen")),
+    ] {
+        let project = root.join(provider);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(manifest), manifest_body).unwrap();
+        std::fs::write(project.join("osdk.toml"), format!("[deps.{provider}]\n")).unwrap();
+
+        // No lock: the downgrade is reported, never silent.
+        let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+        assert!(output.status.success(), "{provider}: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("warning:"), "{provider}: {stdout}");
+        let command = stdout
+            .lines()
+            .find(|line| line.contains("would run in"))
+            .unwrap_or_else(|| panic!("{provider}: no command in {stdout}"));
+        if let Some(flag) = expected_freeze {
+            assert!(
+                !command.contains(flag),
+                "{provider} must not claim to freeze without a lock: {command}"
+            );
+        }
+        // No flag borrowed from another ecosystem.
+        for foreign in ["--ignore-scripts", "--no-build", "--frozen-lockfile"] {
+            assert!(
+                !command.contains(foreign),
+                "{provider} got `{foreign}` from elsewhere: {command}"
+            );
+        }
+        if provider == "go" {
+            assert!(
+                command.contains("GOTOOLCHAIN=local"),
+                "the default `auto` downloads a toolchain osdk did not choose: {command}"
+            );
+        }
+
+        // With a lock, the real freeze flag appears.
+        std::fs::write(project.join(lock), "").unwrap();
+        let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+        assert!(output.status.success(), "{provider}: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let command = stdout
+            .lines()
+            .find(|line| line.contains("would run in"))
+            .unwrap_or_else(|| panic!("{provider}: no command in {stdout}"));
+        if let Some(flag) = expected_freeze {
+            assert!(command.contains(flag), "{provider}: {command}");
+        }
+        assert!(
+            !stdout.contains("warning:"),
+            "{provider} had nothing to downgrade: {stdout}"
+        );
+        if provider == "go" {
+            // Pinned regardless of the lock: the hazard is unrelated to it.
+            assert!(command.contains("GOTOOLCHAIN=local"), "{command}");
+        }
+    }
+}
+
+/// Discovery stays fail-closed for the new ecosystems.
+///
+/// A manifest that cannot be parsed must be an error rather than a skip -- for the
+/// same reason as everywhere else: walking silently past a broken `Cargo.toml`
+/// would install the wrong project's dependencies, or none, and report success.
+///
+/// This replaced an earlier test asserting "a valid go.mod is not parsed as JSON",
+/// which turned out to be unfalsifiable: `node::declared_manager` returns early
+/// when the ecosystem is not Node, so a misrouted `go.mod` was harmless and the
+/// assertion passed either way. It was a probe outside the mechanism it claimed to
+/// cover. This one fails when validation is absent.
+#[test]
+fn native_manifests_are_validated_rather_than_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    // Cargo.toml is TOML and deno.json is JSON, so both can be checked.
+    for (provider, manifest, broken) in [
+        ("cargo", "Cargo.toml", "[package\nname = broken"),
+        ("deno", "deno.json", "{not json"),
+    ] {
+        let project = root.join(provider);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(manifest), broken).unwrap();
+        std::fs::write(project.join("osdk.toml"), format!("[deps.{provider}]\n")).unwrap();
+
+        let output = run_isolated_in(root, &project, &["deps", "--list"]);
+        assert!(
+            !output.status.success(),
+            "{provider}: a broken manifest must not be skipped: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(manifest), "{provider}: {stderr}");
+    }
+
+    // And the valid versions are accepted, so the check above is discriminating
+    // rather than "always fails".
+    for (provider, manifest, valid) in [
+        (
+            "cargo",
+            "Cargo.toml",
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        ),
+        ("deno", "deno.json", "{}\n"),
+        ("go", "go.mod", "module p\n\ngo 1.21\n"),
+    ] {
+        let project = root.join(format!("{provider}-ok"));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(manifest), valid).unwrap();
+        std::fs::write(project.join("osdk.toml"), format!("[deps.{provider}]\n")).unwrap();
+
+        let output = run_isolated_in(root, &project, &["deps", "--list"]);
+        assert!(output.status.success(), "{provider}: {output:?}");
+    }
+}

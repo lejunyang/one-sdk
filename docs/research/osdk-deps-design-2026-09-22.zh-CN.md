@@ -289,6 +289,59 @@ pub trait DepsProvider: Send + Sync {
 逼迫它。另外实测到 `uv sync` 会主动忽略与项目不符的 `VIRTUAL_ENV`（打印 warning 并
 使用 `.venv`），所以 osdk 不必、也不应通过设 `VIRTUAL_ENV` 来选环境。
 
+### 5.4.4 go / cargo / deno 的冻结与代码执行（已核准，2026-09-22 实测）
+
+实测版本：go 1.27.1、cargo 1.98.0、deno 2.9.6（均由 osdk 装在隔离根内）。
+
+| 生态 | 装依赖会执行代码吗 | 冻结模式 | 缺 lock 时 | lock 过期时 |
+| --- | --- | --- | --- | --- |
+| go | **不会**（`go mod download` 只取，不编译：项目里无任何产物、无 `target`/二进制） | 天然（`go.sum` + 模块校验） | 写出 `go.sum` | 依赖不在校验和里即 exit=1 |
+| cargo | **不会**（`cargo fetch` exit=0 但 **`target/` 未创建**，说明 `build.rs` 没跑） | `--locked` | **exit=101 且不创建 lock** | **exit=101** |
+| deno | 不会（`deno install` 只下载，未建 `node_modules`） | `--frozen` | **exit=1 且不创建 lock** | exit=1，提示 `--frozen=false` |
+
+三者都有**真实**的冻结模式——这与 Node 那轮不同（yarn classic 与 bun 在缺 lock 时
+exit=0 照常安装）。cargo 的 `--locked` 还比 uv 的 `--frozen` 更严：**lock 过期时它会
+失败**，而 uv 的 `--frozen` 会按旧 lock 静默装（§5.4.3）。所以「`--locked` 语义」并非
+跨生态一致，每个都得单独核准。
+
+关于「装依赖是否执行代码」这一列：`cargo fetch` 的判据是 `target/` 不存在。fetch 只
+下载源码，`build.rs` 要到 `cargo build` 才跑——所以**取依赖本身不执行代码**，这符合
+§10 的 trust 分档（默认不需要 trust）。但要注意这与 Node/Python 的差别：`npm install`
+默认**会**跑生命周期脚本（osdk 传 `--ignore-scripts` 拦掉），而 cargo/go 的 fetch 阶段
+根本没有这个口子。
+
+#### GOTOOLCHAIN=auto 会绕过 osdk 的版本管理
+
+实测：`go.mod` 写 `go 1.99.0` 时，go 1.27.1 会主动
+`go: downloading go1.99.0 (windows/amd64)`（本例因该版本不存在而失败，但**尝试下载
+这件事本身**已经发生）。设 `GOTOOLCHAIN=local` 则直接报
+`go.mod requires go >= 1.99.0 (running go 1.27.1; GOTOOLCHAIN=local)` 而不去下载。
+
+这与 Python 侧 `UV_PYTHON_DOWNLOADS=never` 是同一类问题：**工具自行获取运行时，
+会让实际跑的东西不是 osdk 选定的那个**，而且默认值（`auto`）就是会下载。go provider
+因此必须显式设 `GOTOOLCHAIN=local`，并把「go.mod 要求的版本高于已装版本」变成一条
+osdk 自己给出的、指明该跑哪条 `osdk install` 的错误，而不是让 go 静默换一个工具链。
+
+#### CARGO_HOME 不打架（已核实代码）
+
+`backend/rust.rs:39-40` 把 `CARGO_HOME` 指向 `ctx.dirs.cargo_home()`（即
+`<data>/cargo`），`:61` 与 `:437` 也从那里取 bin。所以 deps 驱动 cargo 时**沿用**这个
+已有约定即可，不需要另设，也不会与用户自己的 `~/.cargo` 混在一起。
+
+### 5.4.5 bundler / composer：如实降级，不假装能装
+
+`backend/registry.rs:21-36` 的内置 backend 表里**没有 ruby，也没有 php**。这意味着
+D2 那条「缺包管理器就自动装上」的链条对这两个生态**走不通**——osdk 装不了 ruby，
+也就装不了 bundler。
+
+所以本轮**不**把它们放进 provider 表。把一个自己无法兑现前置条件的 provider 列进去，
+用户会得到「声明了、探测到了、然后在装工具那一步失败」的体验，比明确说「不支持」更糟。
+要支持的前提是先给 osdk 加 ruby/php backend，那是独立的一件事，不在 deps 的范围内。
+
+已查证的一点是它们**有**冻结模式（bundler 的 `--deployment` / `--frozen`，composer 的
+`--no-dev` 配合 `composer.lock`），但既然前置条件不成立，这些参数留在诚实清单里作为
+将来加 backend 时的起点，不写进实现。
+
 ### 5.5 缺 lock 时的降级路径（因上表第 1 条而必须显式化）
 
 ```text
@@ -593,10 +646,10 @@ AGENTS.md 记过 pypi「只写 installer 不回读、重锁被本机环境静默
 
 1. ~~**uv/pip 只装预编译产物的确切开关**~~ → **已核准（§5.4.2，uv 0.12.17 实测）**：默认会拉 sdist 并本地构建；`--no-build` 与 `--only-binary=:all:` 均有效；**`UV_NO_BUILD` 环境变量在 `uv pip install` 上被静默忽略、仅 `uv sync` 识别**，故 Python provider 一律传 flag。冻结语义另见 §5.4.3：`--frozen` 只保证不改 lock，**不**校验 lock 与清单一致（那需要 `--locked`），与 `npm ci` 不同。
 2. ~~npm 系的 frozen 命令与脚本开关在各 installer 上的确切形态~~ —— **已核准（2026-09-22 实测，见 §5.4）**，含版本号与反向控制。**剩余未测的两格**：yarn classic 与 yarn berry 在「lock 与清单不一致」时的行为（npm/pnpm/bun 三家已测为 exit≠0）。这一格影响的只是错误信息质量，不影响 provider 表的命令选择（osdk 自己预检 lock 存在性已覆盖更危险的那种情况）；D1 实现时补测。
-3. **deno `deno install --frozen`** 是否存在及其语义（mise 表里写的是 `deno install`）。
-4. **bundler / composer** 的冻结安装参数与「是否会编译 native extension / 跑脚本」，以及 osdk **目前没有 ruby/php backend**（`registry.rs:21-36` 无此二者）——D5 若要做，需先评估是否新增 backend 或要求 syspkg 提供。
-5. **go**：`go mod download` 是否在任何情况下会执行代码（如 `//go:generate` 不会，但 toolchain 自动下载 `GOTOOLCHAIN` 的行为需核准），以及 `vendor/` 存在时的判定细节。
-6. **cargo**：`cargo fetch --locked` 是否足以让后续离线构建成功、以及 `CARGO_HOME` 与 osdk 既有 cargo 管理（`data/cargo`）如何不打架。
+3. ~~**deno `deno install --frozen`**~~ → **已核准（§5.4.4，deno 2.9.6 实测）**：`deno install --frozen` 存在且为真实冻结——缺 lock 时 exit=1 且**不创建** lock，lock 过期时 exit=1 并提示 `--frozen=false`。`deno install` 不建 `node_modules`。
+4. **bundler / composer** → **已判定不做（§5.4.5）**：osdk 内置 backend 表（`registry.rs:21-36`）**无 ruby、无 php**，D2 的「缺包管理器就自动装」链条对这两个生态走不通。把无法兑现前置条件的 provider 列进表里，用户会得到「声明了、探测到了、装工具那步失败」的体验，比明确不支持更糟。要支持须先给 osdk 加 ruby/php backend，属独立工作项。其冻结参数（bundler `--deployment`/`--frozen`、composer 配合 `composer.lock`）留作将来起点。
+5. ~~**go**~~ → **已核准（§5.4.4，go 1.27.1 实测）**：`go mod download` 只取不编译（项目内无任何产物），**不执行依赖代码**；`GOTOOLCHAIN` 默认 `auto` 会主动`go: downloading go1.99.0` 去换工具链，必须显式设 `GOTOOLCHAIN=local`，并由 osdk 自己报「该跑哪条 install」。`vendor/` 存在时的判定细节仍未测。
+6. ~~**cargo**~~ → **已核准（§5.4.4，cargo 1.98.0 实测）**：`cargo fetch` **不跑 `build.rs`**（`target/` 未创建），故取依赖不执行代码；`--locked` 在缺 lock 与 lock 过期时**均 exit=101 且不写 lock**，比 uv 的 `--frozen` 更严；`CARGO_HOME` 沿用 `backend/rust.rs:39-40` 已有的 `<data>/cargo`，不打架。「fetch 后能否完全离线构建」未单独实测（需要一次真实 build，留待实现该 provider 时验）。
 7. ~~**各 provider 的 receipt 判据是否足以发现外部篡改**~~ → **已实测（§8.4）**：`dist-info/RECORD` 与 `node_modules/.package-lock.json` 四种篡改全部检出；原设计的 `pyvenv.cfg` creator 判据对文件级篡改毫无反应，已淘汰。反向控制另外暴露出 `uv` 会把被篡改的文件写进全局缓存，且 `uv pip sync` 不修复内容。
 8. ~~`osdk deps add/remove` 是否应该存在~~ —— **已定（2026-09-22 用户拍板）**：不新增；`deps` 只做整份清单兑现，单包增删继续走 `osdk install <npm:pkg>`。见 §3。
 

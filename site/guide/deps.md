@@ -49,6 +49,33 @@ enable one in osdk.toml, for example:
 | `npm` / `pnpm` / `yarn` / `bun` | Node | `package.json` | 各自的 lockfile |
 | `uv` | Python | `pyproject.toml` | `uv.lock` |
 | `pip-requirements` | Python | `requirements.txt` | 无（全钉版本时它自己就是 lock） |
+| `go` | Go | `go.mod` | `go.sum` |
+| `cargo` | Rust | `Cargo.toml` | `Cargo.lock` |
+| `deno` | Deno | `deno.json` / `deno.jsonc` | `deno.lock` |
+
+### go / cargo / deno 的两点不同
+
+**它们取依赖时不执行依赖的代码。** 实测 `cargo fetch` 不创建 `target/`（说明
+`build.rs` 没跑）、`go mod download` 在项目里不留任何产物、`deno install` 不建
+`node_modules`。所以这三个 provider 不需要也没有 `--ignore-scripts` 之类的开关——
+构建脚本要到真正 `cargo build` 时才是问题。
+
+**冻结模式都是真的，而且 cargo 最严。** `cargo fetch --locked` 在缺 lock 与
+**lock 过期**时都会失败；相比之下 `uv sync --frozen` 只保证不改 lock，过期时会按旧
+lock 静默装。所以「`--locked` 一词在各生态含义相同」是不成立的假设。
+
+::: tip go 的工具链被钉住
+`GOTOOLCHAIN` 默认是 `auto`——`go.mod` 要求更新的 Go 时，go 会**自己下载**另一个
+工具链（实测会打印 `go: downloading go1.99.0`）。那样跑起来的就不是 osdk 选定并校验过
+的 Go 了，所以 osdk 显式传 `GOTOOLCHAIN=local`。要用更新的 Go，请用
+`osdk install go@<版本>`。
+:::
+
+### 暂不支持：bundler / composer
+
+osdk 目前没有 ruby / php 的工具后端，也就装不了 bundler / composer 本身。把这两个
+provider 列进来，结果会是「声明了、探测到了、然后在装工具那一步失败」——比明确说不支持
+更糟。要支持需要先给 osdk 加对应的语言后端。
 
 ### Python 的两点差异
 

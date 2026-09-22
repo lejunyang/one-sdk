@@ -322,6 +322,7 @@ Declare a provider in `osdk.toml`, then run it:
 
 ```toml
 [deps.pnpm]          # Node: npm / pnpm / yarn / bun
+# [deps.go]          # Go / Rust / Deno: go, cargo, deno
 # [deps.uv]          # Python: pyproject.toml + uv.lock
 # [deps.pip-requirements]   # Python: requirements.txt
 ```

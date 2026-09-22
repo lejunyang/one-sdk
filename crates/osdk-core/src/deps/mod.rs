@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+pub mod native;
 pub mod node;
 pub mod python;
 pub mod state;
@@ -45,6 +46,7 @@ pub enum Ecosystem {
     Python,
     Go,
     Rust,
+    Deno,
     Custom,
 }
 
@@ -55,6 +57,7 @@ impl Ecosystem {
             Self::Python => "python",
             Self::Go => "go",
             Self::Rust => "rust",
+            Self::Deno => "deno",
             Self::Custom => "custom",
         }
     }
@@ -171,6 +174,9 @@ pub static PROVIDERS: &[&DepsProviderSchema] = &[
     &node::BUN,
     &python::UV,
     &python::PIP_REQUIREMENTS,
+    &native::GO,
+    &native::CARGO,
+    &native::DENO,
 ];
 
 pub fn provider_schema(id: &str) -> Option<&'static DepsProviderSchema> {
@@ -365,9 +371,18 @@ fn detect_in(
     // Routed by ecosystem: Python manifests carry no \packageManager\ equivalent,
     // but must still be parsed so an unreadable one is an error rather than a
     // silent "no declaration" that falls through to a different installer.
+    // Exhaustive on purpose -- no `_` arm. A catch-all would route a newly added
+    // ecosystem to the Node parser, which reads `packageManager` out of JSON: on a
+    // `go.mod` that is an error about invalid JSON, and on a TOML manifest that
+    // happens to parse it would be a declaration the file never made. Making the
+    // compiler demand an arm is cheaper than finding that out from a user.
     let declared_manager = match schema.ecosystem {
+        Ecosystem::Node => node::declared_manager(schema, &manifest)?,
         Ecosystem::Python => python::declared_manager(schema, &manifest)?,
-        _ => node::declared_manager(schema, &manifest)?,
+        Ecosystem::Go | Ecosystem::Rust | Ecosystem::Deno => {
+            native::declared_manager(schema, &manifest)?
+        }
+        Ecosystem::Custom => None,
     };
     let native_lock = schema
         .native_locks
@@ -493,6 +508,9 @@ fn lock_owner(ecosystem: Ecosystem, lock: &Path) -> Option<String> {
     match ecosystem {
         Ecosystem::Node => node::lock_owner(name).map(str::to_string),
         Ecosystem::Python => python::lock_owner(name).map(str::to_string),
+        Ecosystem::Go | Ecosystem::Rust | Ecosystem::Deno => {
+            native::lock_owner(name).map(str::to_string)
+        }
         _ => None,
     }
 }
@@ -507,6 +525,9 @@ pub fn plan(
     match project.ecosystem {
         Ecosystem::Node => node::plan(project, choice, config, tool_versions),
         Ecosystem::Python => python::plan(project, choice, config, tool_versions),
+        Ecosystem::Go | Ecosystem::Rust | Ecosystem::Deno => {
+            native::plan(project, choice, config, tool_versions)
+        }
         other => Err(Error::other(format!(
             "no deps provider implementation for ecosystem `{}` yet",
             other.as_str()

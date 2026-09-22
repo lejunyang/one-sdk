@@ -51,6 +51,37 @@ enable one in osdk.toml, for example:
 | `npm` / `pnpm` / `yarn` / `bun` | Node | `package.json` | its own lockfile |
 | `uv` | Python | `pyproject.toml` | `uv.lock` |
 | `pip-requirements` | Python | `requirements.txt` | none (it *is* the lock when fully pinned) |
+| `go` | Go | `go.mod` | `go.sum` |
+| `cargo` | Rust | `Cargo.toml` | `Cargo.lock` |
+| `deno` | Deno | `deno.json` / `deno.jsonc` | `deno.lock` |
+
+### Two ways go / cargo / deno differ
+
+**Fetching dependencies does not execute their code.** Measured: `cargo fetch`
+creates no `target/` (so `build.rs` never ran), `go mod download` leaves no
+artifact in the project, and `deno install` creates no `node_modules`. These
+providers therefore have no `--ignore-scripts` equivalent to pass -- build scripts
+only become a concern at `cargo build`.
+
+**All three have a real frozen mode, and cargo's is the strictest.**
+`cargo fetch --locked` fails both with no lock and when the lock is merely *stale*,
+whereas `uv sync --frozen` only promises not to update the lock and will quietly
+install the old set. So "`--locked` means the same thing everywhere" is not a safe
+assumption.
+
+::: tip go's toolchain is pinned
+`GOTOOLCHAIN` defaults to `auto`: when `go.mod` asks for a newer Go, go **downloads
+another toolchain itself** (measured: it prints `go: downloading go1.99.0`). The
+fetch would then run under a Go that osdk neither selected nor verified, so osdk
+passes `GOTOOLCHAIN=local`. To use a newer Go, run `osdk install go@<version>`.
+:::
+
+### Not supported: bundler / composer
+
+osdk has no ruby or php tool backend, so it cannot install bundler or composer
+themselves. Listing these providers would produce "declared, detected, then failed
+while installing the tool" -- worse than saying plainly that they are unsupported.
+Supporting them requires adding the corresponding language backend first.
 
 ### Two things that differ on Python
 
