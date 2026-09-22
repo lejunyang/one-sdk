@@ -2439,17 +2439,21 @@ AGENTS.md 反复强调的那几件事：**准备好工具链本身（uv/python�
 
    installer、重锁时却不回读，导致静默被本机环境覆盖。
 
-2. **纳入 CAS /inventory/trust**：site-packages 里的 wheel 解包结果与
+2. **纳入 CAS / inventory / trust（trust 粒度按 wheel vs sdist 区分，不要整段默认要信任）**：
+   site-packages 里的 wheel 解包结果与 ComfyUI 模型一样是大文件，应纳入 CAS roots（类似 view 的处理），避免多项目重复占盘。trust 必须复用 osdk 自己既有的哲学，而不是另立一条「装包=执行」的更严默认：
 
-   ComfyUI 模型一样是大文件，应纳入 CAS roots（类似 view 的处理），避免多项目
+   - **既有哲学（代码事实）**：`trust.rs:79-84` 的 doc comment 明确——「声明装*哪个包*故意不进 trust 门禁」，因为 npm 装包传 `--ignore-scripts`、`http:` 制品钉死 sha256、`go:` 构建 `CGO_ENABLED=0`，「一条依赖声明本身不会执行工具发布者没随包发出的东西」；把它当危险会「每加一个包都要重新批准却什么都没教会用户——门禁喊狼来了，真警告反而被忽略」。
+   - **npm 侧的默认口子是堵死的（先例）**：`npm_package.rs:786-788` 的 `build_policy` 在没有 `allow_builds` 时直接返回 `BuildPolicy::Deny`；npm 只有全有/全无的 `--ignore-scripts`（`npm_package.rs:853` 附近注释）。即默认不跑生命周期/构建脚本，要显式 `allow_builds` 才放行——该选项也已在 `trust.rs` 的逐 key 检查里按 `ExecutesCode` 处理（`ALLOW_BUILDS_OPTION`）。
 
-   重复占盘。trust 上，**读清单装依赖本身就是执行第三方代码**，比模型声明更敏
+   **据此，Python 应用环境的默认结论应分粒度，而不是整段要信任：**
 
-   感：应用环境段（尤其自定义 index/extra-index URL）应归入需要信任的表，理由
+   1. **纯 wheel（.whl）+ 官方默认索引的应用依赖声明 → 默认不要 trust**。装 wheel 是纯解包，wheel 没有 install 期任意代码执行机制（不像 sdist），与 npm「声明包不执行东西」同级；索引是官方默认值时来源也没被改写。这与 `trust.rs:79-84` 和 npm `BuildPolicy::Deny` 默认完全一致。
+   2. **自定义 index / extra-index URL → `WeakensVerification`**（与 `sources` 同级）：理由是**改了字节来源**、可能引入依赖混淆/被劫持源，**不是**因为执行代码。沿用 pypi backend 已有的「镜像只映默认索引、绝不写 `--extra-index-url`/`UV_INDEX`」（`pypi.rs` 的 `installer_env` 与 `reject_unsafe_installer_args`）作为防线。
+   3. **显式允许从 sdist（源码 .tar.gz）构建 → `ExecutesCode`，默认 Deny、显式开**：从 sdist 安装要跑 `setup.py` / PEP 517 build backend，等于在本机执行任意代码，性质等同 npm 的 `allow_builds`。因此应像 npm 一样默认拒绝 sdist 构建（等价于默认加 `--only-binary` 一类约束），只有用户显式声明（如 `allow_build = true` 之类）才放行，并把该 key 按 `ExecutesCode` 纳入逐 key trust 检查。
 
-   接近 sources 的 WeakensVerification；与 §6.4 的模型 trust 用同一套逐 key 机
+   机制上复用 §6.4 那套逐 key 分类（`INSPECTED_TABLES` 风格 + `collect_*_requirements`），但**默认结论从「整段需要信任」纠正为上面的三档**。
 
-   制，但默认结论相反（装包 = 执行，故整段需要信任，除非仅声明官方默认索引）。
+   > 关于 uv/pip 具体行为的待核实项（实现阶段必须给能失败的验证，不能现在当既定事实）：uv/pip 默认是否允许拉 sdist 并本地构建、是否默认 build isolation、`--only-binary=:all:` 与 `UV_NO_BUILD`/`--no-build` 的确切语义与版本差异——本节只据「wheel 不解包执行代码、sdist 要跑 build backend」这一打包格式事实下 trust 结论；上述命令的精确行为**标注为待实现阶段核实**，设计落地时用真实 uv/pip 探针确认默认到底会不会执行构建脚本，再决定默认 Deny 用哪个开关实现。
 
 CLI 面貌建议（与 mise 对齐、又贴合 osdk 既有动词）：
 
