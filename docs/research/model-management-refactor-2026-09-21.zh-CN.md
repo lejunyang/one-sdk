@@ -2664,6 +2664,8 @@ commit、要非 N 卡后端、要 CI / 无 GUI 的少数高确定性需求。
 
 - **`docs/research/osdk-deps-design-2026-09-22.zh-CN.md`** —— `osdk deps` 的 CLI 面、`[deps]` schema、provider trait/静态表、公共层与 per-provider 边界、freshness + 深度校验、lock 新增段与旧二进制兼容、与 `install`/`run`/`hook-env` 的衔接、分批实现路线（D1–D6）、以及逐条诚实清单。
 
+另有一处产品决策已于 2026-09-22 由用户拍板并收敛进新文档：**不新增 osdk deps add/remove**——osdk deps 只做「读整份清单一次兑现」，单个依赖的增删继续走既有的 osdk install <npm:pkg>，两者职责不重叠。
+
 本节（§12.1–§12.6）仍是那份文档的上游依据：npm 现状台账、该不该做的论证、mise 对照、ComfyUI B 路径阶梯与 nvidia doctor 设计都不在新文档里重复抄录。其中 §12.3 第 5 步的 trust 结论已按 wheel/sdist 分粒度修正（提交 dbc63f8），新文档的 trust 三档以修正后的版本为准。
 
 ---

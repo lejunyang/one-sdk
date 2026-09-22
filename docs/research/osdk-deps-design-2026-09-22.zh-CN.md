@@ -75,7 +75,7 @@ osdk deps doctor                        # 解释性诊断：清单冲突、lock 
 
 设计取舍：
 
-- **不新增 `add`/`remove` 子命令**（mise 有 `deps add npm:react`）。osdk 已有「带 npm 包 operand 的 install」承担逐依赖增删（`commands.rs` 约 2494 起），再加一个入口会出现两个语义重叠的动作。**待评审确认**：若用户希望统一，应该是把既有 operand 路径改成 `osdk deps add`，而不是并列两套。
+- **不新增 `add`/`remove` 子命令（已定，2026-09-22 用户拍板）**。职责切分固定为：**`osdk deps` = 读整份清单一次兑现**；**`osdk install <npm:pkg>` = 单个依赖的增删**（既有路径，`commands.rs` 约 2494 起）。两者不重叠，也不再规划 `deps add`——mise 的 `deps add npm:react` 这条不吸收，因为 osdk 已有等价入口，并列两套会让「加一个包」出现两种写法。
 - `--frozen` 与 `--no-install-tools` 是 CI 组合：**CI 里不希望 osdk 顺手装工具或改 lock**。
 - 一级动词选 `deps` 而非 `env`：`model env` 已占用 `env` 语义（provider 环境变量导出），复用会歧义。
 
@@ -199,10 +199,10 @@ pub trait DepsProvider: Send + Sync {
 
 | id | ecosystem | 主清单 | 原生 lock | 默认命令（冻结优先） | outputs | 需要的 osdk 工具 | 批次 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `npm` | Node | `package.json` | `package-lock.json` | `npm ci`（无 lock 时 `npm install`，且**必须报告降级**） | `node_modules/`（Required） | `node`（+ npm 随 node） | P1 |
-| `pnpm` | Node | `package.json` | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | `node_modules/` | `node`, `pnpm` | P1 |
-| `yarn` | Node | `package.json` | `yarn.lock` | `yarn install --immutable`（**Berry 语义，待核 classic 差异**） | `node_modules/` | `node`, `yarn` | P1 |
-| `bun` | Node | `package.json` | `bun.lock`/`bun.lockb` | `bun install --frozen-lockfile` | `node_modules/` | `bun` | P1 |
+| `npm` | Node | `package.json` | `package-lock.json` | `npm ci --ignore-scripts`（无 lock 时降级 `npm install --ignore-scripts` 并**报告降级**） | `node_modules/`（Required） | `node`（npm 随 node） | D1 |
+| `pnpm` | Node | `package.json` | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile --ignore-scripts` | `node_modules/` | `node`, `pnpm` | D1 |
+| `yarn` | Node | `package.json` | `yarn.lock` | **按 major 分派**：berry `yarn install --immutable`（禁脚本用 `YARN_ENABLE_SCRIPTS=false`，**没有** `--ignore-scripts`）；classic `yarn install --frozen-lockfile --ignore-scripts` + **osdk 自己预检 lock 存在**（classic 缺 lock 时不报错） | `node_modules/` | `node`, `yarn` | D1 |
+| `bun` | Node | `package.json` | `bun.lock`（新格式；`bun.lockb` 为旧二进制格式） | `bun install --frozen-lockfile --ignore-scripts` + **osdk 自己预检 lock 存在**（bun 缺 lock 时不报错） | `node_modules/` | `bun` | D1 |
 | `uv` | Python | `pyproject.toml` | `uv.lock` | `uv sync --frozen` | `.venv/`（OptionalOnceSeen） | `python`, `uv` | P2 |
 | `pip-requirements` | Python | `requirements.txt` | 无（可选 `requirements.lock`） | `uv pip sync requirements.txt`（回退 `uv pip install -r`，降级要报告） | `.venv/` | `python`, `uv` | P2 |
 | `poetry` | Python | `pyproject.toml` | `poetry.lock` | `poetry install --sync` | `.venv/` | `python`, `poetry`(pypi:) | P3 |
@@ -215,7 +215,40 @@ pub trait DepsProvider: Send + Sync {
 
 **`cargo` 是一个刻意的例外提示**：它不把依赖装进项目目录，而是 `CARGO_HOME` 全局缓存。所以「outputs 必须在项目内」这条假设不能写进公共层——公共层只能要求「provider 自己说明产物在哪、以及如何判定存在」。这正是 mise 表里把 `go`/`pip` 的 outputs 标为 optional 的同一类问题。
 
-### 5.4 默认选冻结式命令（与 mise 的一处差异）
+### 5.4 Node 系参数核准结果（2026-09-22 实测，D1 的直接依据）
+
+写 provider 表之前先把「冻结」与「禁脚本」两组开关逐个实测，**不把待核当既定事实**。探针在临时目录 + 隔离 HOME/各包管理器 cache 下运行，用一个 `file:` 本地依赖，其 `preinstall`/`install`/`postinstall` 各往标记文件追加一行——「脚本有没有跑」由标记文件内容判定，而不是看命令有没有报错。
+
+版本：node v22.23.2 / npm 10.9.8 / pnpm 9.15.1 与 **12.5.1**（后者是 osdk 自己装出来的版本）/ yarn 1.22.19（classic）与 **4.6.0**（berry，经 corepack）/ bun 1.4.2。
+
+| 断言 | npm 10.9.8 | pnpm 9.15.1 / 12.5.1 | yarn classic 1.22.19 | yarn berry 4.6.0 | bun 1.4.2 |
+| --- | --- | --- | --- | --- | --- |
+| 缺 lock 时"冻结"命令**是否失败** | ✅ `npm ci` exit=1（`EUSAGE`，明确要求先 `npm install`） | ✅ exit=1（`ERR_PNPM_NO_LOCKFILE`） | ❌ **exit=0**，`--frozen-lockfile` 被接受但只打印 `info No lockfile found.`，照常安装且**不写 lock** | ✅ exit=1（`YN0028: The lockfile would have been created by this install, which is explicitly forbidden`） | ❌ **exit=0**，照常安装且**不写 lock** |
+| lock 与清单不一致时是否失败 | ✅ exit=1（`can only install packages when your package.json and package-lock.json ... are in sync`，并列出 `Missing: left-pad@1.3.0 from lock file`） | ✅ exit=1（`ERR_PNPM_OUTDATED_LOCKFILE`，并打印 specifiers 差异） | 未单独测（见诚实清单） | 未单独测（见诚实清单） | ✅ exit=1（`error: lockfile had changes, but lockfile is frozen`） |
+| `--ignore-scripts` 是否存在且真的禁掉脚本 | ✅ 标记文件 `<none>`（`npm install` 与 `npm ci` 两条都验过） | ✅ 标记文件 `<none>` | ✅ 标记文件 `<none>`，并打印 `warning Ignored scripts due to flag.` | ❌ **不存在该选项**：`Unknown Syntax Error: Unsupported option name ("--ignore-scripts")`，`yarn install` 只接受 `--immutable/--immutable-cache/--refresh-lockfile/--check-cache/--check-resolutions/--inline-builds/--mode` | ✅ 标记文件 `<none>` |
+| 禁脚本的替代途径 | — | — | — | ✅ `YARN_ENABLE_SCRIPTS=false`：标记 `<none>`，并打印 `YN0004: ... lists build scripts, but all build scripts have been disabled` | — |
+| 不加禁脚本开关时脚本确实会跑（反向控制） | ✅ 标记含 `dep-preinstall,dep-install,dep-postinstall,root-preinstall,root-postinstall` | ✅ 9.15.1 同上；**12.5.1 只跑 root 的 `root-postinstall`，依赖的脚本默认被拦**并以 `ERR_PNPM_IGNORED_BUILDS` exit=1（提示 `pnpm approve-builds`） | ✅ 标记含全部五条 | ✅ 标记含 `dep-preinstall,dep-postinstall,root-postinstall` | ✅ 只跑 root 的两条，依赖的 postinstall 被默认拦下（`Blocked 3 postinstalls. Run 'bun pm untrusted' for details.`） |
+| classic 是否接受 berry 的 `--immutable` | ❌（无关） | — | ⚠️ **exit=0 静默接受**，但不起冻结作用（脚本照跑、无 lock 也不报错） | — | — |
+
+**对 provider 表的四条直接后果**（已写进 §5.3）：
+
+1. **`--frozen-lockfile` 不能被当作「保证冻结」的统一手段。** yarn classic 与 bun 在**缺 lock** 时接受该标志却照常安装，属于「看起来成功其实没冻结」——正是 AGENTS.md 点名的静默降级形状。所以 **osdk 必须在调用前自己预检 `native_lock` 是否存在**，缺失时按 §5.5 的降级路径显式报告，而不是把冻结责任推给包管理器。
+2. **yarn 必须按 major 分派命令**：berry 用 `--immutable` + `YARN_ENABLE_SCRIPTS=false`；classic 用 `--frozen-lockfile --ignore-scripts`。把 berry 的写法套到 classic 会静默不生效（上表最后一行）。major 从 `packageManager` 字段或 `yarn --version` 判定。
+3. **「禁脚本」在 yarn berry 上是环境变量而非 CLI 参数**，所以公共层的 `RunPlan` 必须同时承载 args 与 env 两种表达，不能只拼命令行。
+4. **pnpm 12 与 bun 默认已拦依赖构建脚本**（pnpm 12 甚至因此 exit=1）。这对 osdk 的 trust 第一档是**加强**而非削弱：即便用户没显式禁脚本，这两个较新的包管理器自己也默认不跑依赖脚本。但 osdk 仍显式传 `--ignore-scripts`，理由是不依赖某个版本的默认值（pnpm 9 就会跑）。
+
+### 5.5 缺 lock 时的降级路径（因上表第 1 条而必须显式化）
+
+```text
+provider.native_lock 存在？
+├─ 是 → 用冻结命令；失败即失败（lock 过期/不一致是真问题，不降级）
+└─ 否 → ① 默认：降级为非冻结命令，并在输出里**明确报告**"本次为非冻结安装，将生成 <lock>"
+        ② --frozen：直接失败（CI 语义：缺 lock 就是错误）
+```
+
+这条对 npm/pnpm/berry 是"顺带正确"（它们自己就会失败），对 classic/bun 是**唯一**能让语义一致的办法。
+
+### 5.6 默认选冻结式命令（与 mise 的一处差异）
 
 mise 的内置默认是**普通安装命令**（`npm install`、`pip install -r`），官方明确「不一定是 frozen-lockfile 安装」，要冻结得自己覆盖 `run`。osdk 反过来：**默认冻结**，因为 osdk 的整体承诺是可复现（lock 是它的立身之本）。代价是「没有原生 lock 的新项目会失败」——处理办法是：无 lock 时自动降级为非冻结命令，**但在输出里明确报告这次是非冻结安装**，而不是静默换命令（「静默降级」正是 AGENTS.md 反复点名的失效模式）。
 
@@ -270,6 +303,12 @@ mise 的内置默认是**普通安装命令**（`npm install`、`pip install -r`
 注意 ③ 排在 ② 之后：项目**清单**的声明与**现有 lock** 都比 osdk 侧配置更权威，这与 `npm_tools.rs:313-316` 的注释（改 default 绝不会把已声明/已有 lock 的项目抢走）一致。
 
 ### 7.2 工具缺失时怎么装（复用现有链，不重造）
+
+**先给核准结论（2026-09-22 实测，D2 的地基）**：在一个空的临时 `OSDK_*` 根里执行 `osdk install node@22 pnpm --yes` → exit=0，`osdk list` 报 `node: 22.23.2` 与 `pnpm: 12.5.1`；产物落在 `<install>/node/22.23.2` 与 `<install>/pnpm/12.5.1`（各带 `.locks`），shim 目录生成了 `node/npm/npx/corepack/pnpm/pnpx`（`.cmd` 成对）；**项目目录没有出现 `node_modules`**——即既有安装链确实把包管理器装进**隔离 install 目录**，不碰项目。所以 D2 只需「决定要哪个工具与版本」并调用这条链，不新造安装逻辑。
+
+**⚠️ 一条改变实现方式的发现：deps 不能通过 shim 调用包管理器。** 用 `<data>/shims/pnpm.cmd` 调用时得到 `osdk-shim: no version of 'pnpm' selected (set one with 'osdk use pnpm@<version>')` 且 exit=1——shim 需要「当前目录已选定版本」，而 deps 的场景恰恰是「osdk 刚把工具装好、项目未必 `use` 过」。因此 **deps 必须用解析出的真实 bin 路径执行**：`Backend::bin_paths(&ctx, &tv)`（`backend/mod.rs:185`，已存在，**不需要给 trait 加方法**）取到 `<install>/pnpm/12.5.1/bin`，从中拿 `pnpm.mjs`/`pnpm.cmd`；同时把 node 的 bin 目录**前置**进子进程 PATH（实测必需：依赖的生命周期脚本里写 `node -e ...`，若 PATH 没有 node 就会失败）。这与 `npm_package.rs` 项目级编排已有的 `node_bin_dir` 做法一致。
+
+
 
 ```text
 provider.required_tools → 形如 [{ id: "pnpm", version_from: ToolsSection|Latest }]
@@ -457,17 +496,19 @@ AGENTS.md 记过 pypi「只写 installer 不回读、重锁被本机环境静默
 7. lock 无 `deny_unknown_fields`、旧二进制忽略未知字段（v0.0.2 实测）：`lockfile.rs:46/326` 与 model-management 文档 §6.3。
 8. mise `deps` 的分层、provider 表、freshness 模型与「不逐包核验」、monorepo 需显式 roots、pip provider 不建 venv：<https://mise.jdx.dev/dev-tools/deps.html>（experimental）。
 9. uv 的 `uv sync` 语义与 `uv pip compile/sync`：<https://docs.astral.sh/uv/concepts/projects/sync/>、<https://docs.astral.sh/uv/pip/compile/>。
+10. **Node 系四家的冻结与禁脚本开关矩阵**（含 yarn classic/berry 分派、classic 与 bun 缺 lock 时不失败、berry 无 `--ignore-scripts`、pnpm 12 与 bun 默认拦依赖脚本）：§5.4 实测表，2026-09-22。
+11. **既有安装链能把包管理器装进隔离 install 目录且不碰项目**，以及 **deps 不能走 shim、必须用 `Backend::bin_paths` 的真实 bin + 前置 node 到 PATH**：§7.2 实测，2026-09-22。
 
 **待核（实现前必须用能失败的验证核准，现在不得当既定事实）**
 
 1. **uv/pip 只装预编译产物的确切开关**：`--only-binary=:all:`、`UV_NO_BUILD`/`--no-build`、`--no-build-isolation` 的语义与版本差异；uv 默认是否允许拉 sdist 并本地构建。
-2. **npm 系的 frozen 命令与脚本开关在各 installer 上的确切形态**：`npm ci` 无 lock 时的行为、`yarn install --immutable`（Berry）vs classic `--frozen-lockfile`、`bun install --frozen-lockfile` 的确切标志名、pnpm 的 `--frozen-lockfile` 在 CI 下是否已是默认；以及各自「禁用生命周期脚本」的确切参数（npm `--ignore-scripts` 已知，pnpm/yarn/bun 待核）。
+2. ~~npm 系的 frozen 命令与脚本开关在各 installer 上的确切形态~~ —— **已核准（2026-09-22 实测，见 §5.4）**，含版本号与反向控制。**剩余未测的两格**：yarn classic 与 yarn berry 在「lock 与清单不一致」时的行为（npm/pnpm/bun 三家已测为 exit≠0）。这一格影响的只是错误信息质量，不影响 provider 表的命令选择（osdk 自己预检 lock 存在性已覆盖更危险的那种情况）；D1 实现时补测。
 3. **deno `deno install --frozen`** 是否存在及其语义（mise 表里写的是 `deno install`）。
 4. **bundler / composer** 的冻结安装参数与「是否会编译 native extension / 跑脚本」，以及 osdk **目前没有 ruby/php backend**（`registry.rs:21-36` 无此二者）——D5 若要做，需先评估是否新增 backend 或要求 syspkg 提供。
 5. **go**：`go mod download` 是否在任何情况下会执行代码（如 `//go:generate` 不会，但 toolchain 自动下载 `GOTOOLCHAIN` 的行为需核准），以及 `vendor/` 存在时的判定细节。
 6. **cargo**：`cargo fetch --locked` 是否足以让后续离线构建成功、以及 `CARGO_HOME` 与 osdk 既有 cargo 管理（`data/cargo`）如何不打架。
 7. **各 provider 的 receipt 判据是否足以发现外部篡改**（L2 深度校验的有效性）——必须按「故意破坏后 `--verify` 必须失败」实测，否则这层是装饰。
-8. **`osdk deps add/remove` 是否应该存在**（与既有 npm operand 路径的关系）——这是需要用户拍板的产品决策，不是技术待核。
+8. ~~`osdk deps add/remove` 是否应该存在~~ —— **已定（2026-09-22 用户拍板）**：不新增；`deps` 只做整份清单兑现，单包增删继续走 `osdk install <npm:pkg>`。见 §3。
 
 ---
 
