@@ -21,6 +21,29 @@ use cli::{Cli, Command};
 use osdk_core::i18n;
 
 fn main() {
+    // Everything below runs on an owned thread with an explicit stack rather than
+    // on the main thread, whose size is fixed at link time. See
+    // `DISPATCH_STACK_SIZE` for what overflowed and how it was found.
+    let worker = std::thread::Builder::new()
+        .name("osdk".into())
+        .stack_size(DISPATCH_STACK_SIZE)
+        .spawn(main_inner);
+    match worker {
+        Ok(handle) => {
+            if handle.join().is_err() {
+                // The panic has already printed itself; exiting non-zero without
+                // a second message keeps the output honest.
+                std::process::exit(101);
+            }
+        }
+        Err(error) => {
+            eprintln!("osdk: cannot start: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn main_inner() {
     // Phase 1: pick the language before building help, so `--help`/errors are
     // already localized. `--lang` is scanned from raw args; otherwise fall back
     // to OSDK_LANG / locale.
@@ -95,6 +118,27 @@ fn scan_lang_flag(args: &[String]) -> Option<String> {
     }
     None
 }
+
+/// Stack for the thread that runs everything after process start.
+///
+/// Two large frames live on this path, and both are reserved on entry regardless
+/// of which command was asked for: `localize(Cli::command())` builds the whole
+/// localized clap tree, and `dispatch` is one `async fn` whose future contains
+/// every command's future inlined.
+///
+/// In a debug build that total already sat just under the 1MB the linker gives the
+/// main thread. Adding three `bool` fields to `Command` crossed it, and the
+/// failure was `osdk --version` dying with
+/// `thread 'main' has overflowed its stack` -- a message pointing nowhere near the
+/// change, since even `--version` has to build the command tree first. Bisection
+/// was the only way to find it: one added field was fine, three were not.
+///
+/// Every tokio worker already gets its own configurable stack; the main thread was
+/// the one place running these frames on a fixed one. 16MB is far beyond the
+/// measured need and costs only address space -- the right trade for removing a
+/// cliff the next contributor would otherwise fall off while adding an unrelated
+/// flag.
+const DISPATCH_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
     // Commands that need async use a runtime; sync ones don't strictly need it
@@ -462,5 +506,51 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
 
         assert_eq!(native_exit_code(std::process::ExitStatus::from_raw(9)), 137);
+    }
+
+    /// Parsing and dispatch must not run on the process's initial stack.
+    ///
+    /// The bug this guards was expensive to attribute. `localize(Cli::command())`
+    /// is one large frame and `dispatch` is another; the main thread's stack is
+    /// fixed at link time, and once the two stopped fitting, the symptom was
+    /// `osdk --version` aborting with `thread 'main' has overflowed its stack` --
+    /// provoked by three added `bool` fields nowhere near either one.
+    ///
+    /// An earlier version of this test built the command tree on a probe thread
+    /// sized to `DISPATCH_STACK_SIZE`, and was useless: shrinking the constant to
+    /// 1MB kept it green, because clap's construction *alone* fits in 1MB. What did
+    /// not fit was the real path, where both frames coexist. The probe measured
+    /// something other than the thing that broke, so it could not fail.
+    ///
+    /// The property that actually prevents a relapse is structural -- the work must
+    /// be handed to a thread whose stack size we choose -- so it is checked
+    /// structurally, on the real source. Deleting the `stack_size` call or calling
+    /// `main_inner` directly from `main` makes this fail.
+    #[test]
+    fn parsing_runs_on_an_explicitly_sized_stack() {
+        let source = include_str!("main.rs");
+
+        let main_body = source
+            .split_once("\nfn main() {")
+            .expect("main must exist")
+            .1
+            .split_once("\nfn ")
+            .expect("main must be followed by another item")
+            .0;
+
+        assert!(
+            main_body.contains("stack_size(DISPATCH_STACK_SIZE)"),
+            "main must hand its work to a thread with an explicit stack; \
+             otherwise parsing runs on the linker's fixed stack and \
+             `osdk --version` can abort. main body was:\n{main_body}"
+        );
+        assert!(
+            main_body.contains("spawn(main_inner)"),
+            "the sized thread must be what runs main_inner, not something else"
+        );
+        assert!(
+            !main_body.contains("main_inner()"),
+            "main_inner must not also be called directly on the initial stack"
+        );
     }
 }
