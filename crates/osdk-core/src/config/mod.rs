@@ -1240,10 +1240,11 @@ impl Config {
                 )));
             }
 
+            let prefix = format!("//{}:", expanded.relative);
             let prefixed = file
                 .tasks
                 .into_iter()
-                .map(|(name, entry)| (format!("//{}:{name}", expanded.relative), entry))
+                .map(|(name, entry)| (format!("{prefix}{name}"), qualify_entry(entry, &prefix)))
                 .collect();
             // The base is the sub-project's own directory, so its `file = "x.sh"`
             // resolves against itself rather than against the monorepo root.
@@ -1717,6 +1718,36 @@ pub fn normalize_python_index_url(value: &str) -> Result<String> {
     let path = url.path().trim_end_matches('/').to_string();
     url.set_path(&format!("{path}/"));
     Ok(url.to_string())
+}
+
+/// Rewrite a sub-project task's references to its own siblings.
+///
+/// A sub-project's tasks are stored as `//<relative>:<name>`, so a bare
+/// `depends = ["prep"]` written inside that file would otherwise be looked up as a
+/// global name and fail as unknown -- a config that was correct on its own terms
+/// breaking purely because it became a sub-project, with an error pointing at the
+/// dependency rather than at the rewrite that lost it.
+///
+/// So a bare name resolves within the declaring sub-project, which is both what the
+/// file appears to say and the convention mise settles on. An entry already starting
+/// with `//` is absolute and left untouched, which is how one sub-project depends on
+/// another.
+#[cfg(feature = "install")]
+fn qualify_entry(entry: crate::tasks::TaskEntry, prefix: &str) -> crate::tasks::TaskEntry {
+    fn qualify(names: &mut [String], prefix: &str) {
+        for name in names.iter_mut() {
+            if !name.starts_with("//") {
+                *name = format!("{prefix}{name}");
+            }
+        }
+    }
+
+    let mut entry = entry;
+    if let crate::tasks::TaskEntry::Full(def) = &mut entry {
+        qualify(&mut def.depends, prefix);
+        qualify(&mut def.wait_for, prefix);
+    }
+    entry
 }
 
 /// Walk up from `start_dir` looking for a project config file.

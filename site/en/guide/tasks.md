@@ -707,6 +707,35 @@ Patterns match exactly as `[deps].roots` does -- segment by segment, single-leve
 only, `..` rejected -- because both share one implementation rather than each having
 its own.
 
+### Dependencies across sub-projects
+
+A `//` prefix in `depends` crosses sub-projects; without one, the name stays inside
+the sub-project that declared it:
+
+```toml
+# apps/web/osdk.toml
+[tasks.prep]
+run = "npm run codegen"
+
+[tasks.build]
+run = "npm run build"
+depends = ["//packages/ui:build", "prep"]
+```
+
+`//packages/ui:build` names the other sub-project; `prep` means the one **next to
+it**, even though `packages/ui` has a task by that name too. A sub-project's config
+therefore reads as what it literally says, and a `depends = ["prep"]` written before
+the move into a monorepo needs no change.
+
+Cycles are caught, across sub-projects as well:
+
+```
+$ osdk run //apps/web:build
+error: config error: task dependency cycle: //apps/web:build -> //packages/ui:build -> //apps/web:build
+```
+
+Both ends are named, so you can see which edge to remove.
+
 ### A sub-project cannot declare `[task_config]`
 
 A sub-project contributes task **definitions** only. `[task_config]` holds

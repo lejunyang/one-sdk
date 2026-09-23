@@ -6463,6 +6463,117 @@ fn tasks_are_never_discovered_outside_the_declared_roots() {
     );
 }
 
+/// `depends` crosses roots with `//`, and stays local without it.
+///
+/// Both halves were measured before being written down. The local half was a real
+/// gap: a sub-project's `depends = ["prep"]` was looked up as a global name and
+/// failed as `unknown task prep`, so a config that was correct on its own terms broke
+/// purely by becoming a sub-project -- and the error pointed at the dependency rather
+/// than at the rewrite that lost it.
+#[test]
+fn task_depends_crosses_roots_only_when_written_with_a_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/web")).unwrap();
+    std::fs::create_dir_all(project.join("packages/ui")).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\", \"packages/*\"]\n",
+    )
+    .unwrap();
+    // `prep` exists in both sub-projects, which is what makes the local-resolution
+    // assertion meaningful: with one copy, "resolved locally" and "resolved globally"
+    // would look the same.
+    std::fs::write(
+        project.join("apps/web/osdk.toml"),
+        "[tasks.prep]\nrun = \"echo web-prep\"\n\n[tasks.build]\nrun = \"echo web-built\"\ndepends = [\"//packages/ui:build\", \"prep\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("packages/ui/osdk.toml"),
+        "[tasks.prep]\nrun = \"echo ui-prep\"\n\n[tasks.build]\nrun = \"echo ui-built\"\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(
+        root,
+        &project,
+        &["--yes", "trust", project.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//apps/web:build"]);
+    assert!(output.status.success(), "{output:?}");
+    let planned = String::from_utf8_lossy(&output.stdout);
+
+    // The `//`-prefixed dependency pulled in the other root's task.
+    assert!(
+        planned.contains("ui-built"),
+        "a `//` dependency must cross roots: {planned}"
+    );
+    // The bare name resolved to this sub-project's own `prep`...
+    assert!(
+        planned.contains("web-prep"),
+        "a bare dependency must resolve within its own root: {planned}"
+    );
+    // ...and not to the identically named task in the other one.
+    assert!(
+        !planned.contains("ui-prep"),
+        "a bare dependency must not reach another root: {planned}"
+    );
+    // Dependencies before the task that declared them.
+    let ui = planned.find("ui-built").expect("ui-built");
+    let web = planned.find("web-built").expect("web-built");
+    assert!(ui < web, "dependencies must be planned first: {planned}");
+}
+
+/// A cycle that spans two roots is still a cycle.
+///
+/// The existing detector works on names, so crossing roots does not exempt anything --
+/// but that is worth pinning rather than assuming, because the rewrite that qualifies
+/// bare names runs before the graph is built and could have produced two distinct
+/// names for one task.
+#[test]
+fn a_cycle_across_roots_is_detected() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/web")).unwrap();
+    std::fs::create_dir_all(project.join("packages/ui")).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\", \"packages/*\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("apps/web/osdk.toml"),
+        "[tasks.build]\nrun = \"echo web\"\ndepends = [\"//packages/ui:build\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("packages/ui/osdk.toml"),
+        "[tasks.build]\nrun = \"echo ui\"\ndepends = [\"//apps/web:build\"]\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(
+        root,
+        &project,
+        &["--yes", "trust", project.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//apps/web:build"]);
+    assert!(
+        !output.status.success(),
+        "a cross-root cycle must be refused: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cycle"), "{stderr}");
+    // Both ends named, so the reader can see which edge to remove.
+    assert!(stderr.contains("//apps/web:build"), "{stderr}");
+    assert!(stderr.contains("//packages/ui:build"), "{stderr}");
+}
+
 /// A partial pattern matches only what it names.
 ///
 /// Separate from the test above because that one could not fail: its `apps/*` has a

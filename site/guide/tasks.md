@@ -643,6 +643,33 @@ pattern 覆盖就不会被发现。对任务来说这条比对依赖更要紧：
 `[deps].roots` 完全一致（逐段匹配、只支持单层 `*`、拒绝 `..`），因为它们共用同一
 份实现而不是各写一遍。
 
+### 跨子项目的依赖
+
+`depends` 里带 `//` 前缀就跨子项目，不带就留在本子项目内：
+
+```toml
+# apps/web/osdk.toml
+[tasks.prep]
+run = "npm run codegen"
+
+[tasks.build]
+run = "npm run build"
+depends = ["//packages/ui:build", "prep"]
+```
+
+`//packages/ui:build` 指向另一个子项目；`prep` 指的是**它旁边那个** `prep`，即使
+`packages/ui` 里也有一个同名任务。这样一份子项目配置单独读起来就是它字面的意思——
+搬进 monorepo 之前写的 `depends = ["prep"]` 不需要改。
+
+环会被检出，跨子项目也一样：
+
+```
+$ osdk run //apps/web:build
+error: config error: task dependency cycle: //apps/web:build -> //packages/ui:build -> //apps/web:build
+```
+
+两端都报出来，这样你知道该删哪条边。
+
 ### 子项目不能声明 `[task_config]`
 
 子项目只贡献**任务定义**。`[task_config]` 是作用域级的设置，其中 `shell` 决定每个
