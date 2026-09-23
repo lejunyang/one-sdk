@@ -148,6 +148,59 @@ osdk deps --frozen
 That turns the fallback above into an error instead of a warning it is easy to
 miss.
 
+## Monorepos: declare the sub-projects
+
+osdk does **not** scan downward for projects. To manage several packages in a
+monorepo, declare where they live under `[deps]`:
+
+```toml
+[deps]
+roots = ["apps/*", "packages/*"]
+
+[deps.npm]
+```
+
+Only matching directories are examined. **A package no pattern covers is not
+found** -- even with a perfectly good manifest sitting right beside the others.
+What can be acted on automatically has to be what was declared; otherwise
+`osdk deps` installs dependencies for a package you never mentioned.
+
+Each sub-project gets its own address, `//<path>:<provider>`:
+
+```
+$ osdk deps --list --explain
+//apps/api:npm      stale  /repo/apps/api
+    from root: apps/*
+//apps/web:npm      stale  /repo/apps/web
+    from root: apps/*
+//packages/ui:npm   stale  /repo/packages/ui
+    from root: packages/*
+```
+
+Which makes one addressable on its own:
+
+```bash
+osdk deps //apps/api:npm          # just this sub-project
+osdk deps npm                     # every npm sub-project
+osdk deps --skip //apps/web:npm   # all but one
+```
+
+### How patterns match
+
+- `*` (any characters) and `?` (one character), matched **segment by segment**.
+- **No `**`**: that would turn a declared root back into an arbitrary subtree
+  walk, which is the thing this feature exists to avoid. Write the depth out
+  instead, e.g. `apps/*/*`.
+- A `*` never crosses `/`, so `apps/*` does not reach `apps/group/nested`.
+- `..` is refused: a committed config should not be able to reach outside the
+  project.
+- Matching nothing is not an error -- `apps/*` in a repo with no `apps` yet is a
+  forward-looking declaration.
+
+Sub-projects found through a root follow the same rules as a top-level one: a
+broken manifest is an **error**, not a skip. Installing some of the packages and
+reporting success is the failure mode hardest to notice.
+
 ## Custom providers
 
 Beyond the built-in package managers, any other name under `[deps]` is a custom

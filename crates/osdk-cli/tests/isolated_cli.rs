@@ -6224,3 +6224,107 @@ fn depends_orders_providers_and_refuses_a_cycle() {
     assert!(stderr.contains("cycle"), "{stderr}");
     assert!(stderr.contains('a') && stderr.contains('b'), "{stderr}");
 }
+
+/// A monorepo's sub-projects come from `[deps].roots` and from nowhere else.
+///
+/// The undeclared `vendor/thirdparty` is the whole point of the test: it has a
+/// perfectly good `package.json` sitting one level down, exactly where a subtree
+/// walk would find it, and it must not appear. What can be acted on
+/// automatically has to be what was declared -- otherwise `osdk deps` in a
+/// monorepo installs dependencies for a package nobody asked about.
+///
+/// Each result is addressable as `//<path>:<provider>` and reports which pattern
+/// produced it, because a repo with four `npm` packages would otherwise print
+/// `npm` four times with no way to tell the lines apart.
+#[test]
+fn monorepo_roots_discover_only_what_was_declared() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    for relative in ["apps/api", "apps/web", "packages/ui", "vendor/thirdparty"] {
+        let directory = project.join(relative);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("package.json"),
+            r#"{"name":"p","private":true}"#,
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\", \"packages/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for expected in ["//apps/api:npm", "//apps/web:npm", "//packages/ui:npm"] {
+        assert!(stdout.contains(expected), "missing {expected}: {stdout}");
+    }
+    assert!(
+        !stdout.contains("vendor"),
+        "`vendor/thirdparty` was never declared and must not be discovered: {stdout}"
+    );
+    // The originating pattern is reported, not just the path.
+    assert!(stdout.contains("from root: apps/*"), "{stdout}");
+    assert!(stdout.contains("from root: packages/*"), "{stdout}");
+
+    // A rooted id addresses exactly one sub-project.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "//apps/api:npm"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("//apps/api:npm"), "{stdout}");
+    assert!(
+        !stdout.contains("//apps/web:npm") && !stdout.contains("//packages/ui:npm"),
+        "a rooted id must select one sub-project: {stdout}"
+    );
+
+    // Removing the declaration removes the sub-projects: nothing is remembered
+    // from a previous run, and nothing is found without a pattern.
+    std::fs::write(project.join("osdk.toml"), "[deps.npm]\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("//apps/"),
+        "with no roots declared, no sub-project may be discovered: {stdout}"
+    );
+}
+
+/// A broken manifest inside a declared root is an error, not a skipped package.
+///
+/// Being found through a root does not make the fail-closed rule weaker. Skipping
+/// it would mean a monorepo installs some of its packages and reports success,
+/// which is the failure mode that is hardest to notice.
+#[test]
+fn a_broken_manifest_inside_a_root_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    let good = project.join("apps/api");
+    std::fs::create_dir_all(&good).unwrap();
+    std::fs::write(good.join("package.json"), r#"{"name":"p"}"#).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    // Control: the good one alone is fine.
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(output.status.success(), "{output:?}");
+
+    // A sibling whose manifest will not parse takes the whole run down.
+    let bad = project.join("apps/web");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join("package.json"), "{ not json").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(
+        !output.status.success(),
+        "a broken sub-project must not be silently skipped: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("package.json"), "{stderr}");
+}

@@ -101,6 +101,46 @@ scripts by default (which is why pnpm 12 reports `ERR_PNPM_IGNORED_BUILDS` and
 suggests `pnpm approve-builds`). osdk still passes `--ignore-scripts` explicitly
 rather than relying on one version's default.
 
+## Monorepo roots: matched segment by segment, not scan-then-filter
+
+`discover_in_roots` descends one pattern segment at a time: a literal segment is a
+`join`, and only a wildcard segment causes a `read_dir` of **that one level**. The
+results may coincide with "walk the subtree, then filter by pattern", but the
+properties do not: the latter has to read every directory to decide, and one
+missing filter condition turns it silently into a whole-repository crawl.
+Descending by segment makes "only look where it was declared" structural, rather
+than dependent on a filter branch always being right.
+
+`**` is not supported. It would turn a declared root back into an arbitrary
+subtree walk, which is the thing this feature exists to prevent, so it is absent
+rather than present-and-restricted. Write the depth out (`apps/*/*`).
+
+`glob_matches` refuses any name containing a separator. Every current caller
+passes a single directory name, so this changes nothing today -- but a matcher that
+*can* span a separator means the next caller to pass a multi-segment string
+silently gets the subtree crawl. That guarantee belongs in the function, not in
+every caller remembering.
+
+### An "injection that stayed green", and what it improved
+
+The first injection against the core invariant **did not fail**. Two reasons, both
+worth recording:
+
+1. My initial injection routed literal segments through the wildcard branch. That
+   is **not a defect**: `glob_matches("apps", name)` still accepts only `apps`, so
+   the change merely reads a directory to confirm what `join` already knew.
+2. The load-bearing branch is the `glob_matches` call. But replacing *that* with
+   `true` stayed green too, because every fixture used `apps/*`, whose only
+   wildcard segment is a bare `*` -- which **should** match every directory. So
+   "accept any name" and "match the pattern" produced identical results, and the
+   filter was never actually under test.
+
+A test using `api-*` was added (`api-v1`/`api-v2` must match, the adjacent
+`web-v1` must not), and replacing `glob_matches` with `true` now turns it red.
+This is a concrete instance of AGENTS.md's "the probe must fall inside the
+mechanism under test": **a fixture that only ever uses a bare `*` cannot test a
+wildcard filter.**
+
 ## Custom providers: three fields became Cow, not everything became String
 
 A custom provider's name comes from config, so it is a runtime `String`, while the

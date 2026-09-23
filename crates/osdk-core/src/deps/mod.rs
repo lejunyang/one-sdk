@@ -413,6 +413,199 @@ pub fn discover(
     Ok(found)
 }
 
+/// A sub-project found by expanding a declared root pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootedProject {
+    /// The `[deps].roots` entry this came from, `/`-normalized. Reported so
+    /// `--list` can say which declaration produced a project rather than leaving
+    /// the user to guess.
+    pub root_pattern: String,
+    /// Path of the sub-project relative to the config root, `/`-normalized.
+    pub relative: String,
+    pub project: DetectedProject,
+}
+
+impl RootedProject {
+    /// Addressable id: `//apps/api:uv`.
+    ///
+    /// The `//` prefix is what keeps a rooted id from colliding with a plain
+    /// provider name, so `osdk deps //apps/api:uv` and `osdk deps uv` cannot be
+    /// confused for one another.
+    pub fn id(&self) -> String {
+        format!("//{}:{}", self.relative, self.project.provider)
+    }
+}
+
+/// Parse a rooted provider id back into its parts.
+///
+/// Returns `None` for a plain provider name, which is how the CLI tells the two
+/// forms apart without a second flag.
+pub fn parse_rooted_id(value: &str) -> Option<(&str, &str)> {
+    let rest = value.strip_prefix("//")?;
+    let (relative, provider) = rest.rsplit_once(':')?;
+    if relative.is_empty() || provider.is_empty() {
+        return None;
+    }
+    Some((relative, provider))
+}
+
+/// Discover sub-projects inside the directories named by `[deps].roots`.
+///
+/// The invariant this function exists to hold: **only directories matching a
+/// declared pattern are looked at.** There is no walk of arbitrary subtrees, and
+/// a pattern is matched segment by segment rather than by scanning and filtering
+/// afterwards -- the difference matters, because a scan-then-filter version would
+/// still have to read every directory to decide, and one forgotten filter would
+/// silently turn it into a full crawl.
+///
+/// The reasoning is the same one AGENTS.md records for the model inventory scan:
+/// the set of things that can be found automatically must be the set that was
+/// declared. A monorepo where `osdk deps` quietly picked up a package nobody
+/// listed would install dependencies for a project the user did not ask about.
+pub fn discover_in_roots(
+    config_root: &Path,
+    roots: &[String],
+    enabled: &[&'static DepsProviderSchema],
+) -> Result<Vec<RootedProject>> {
+    let mut found = Vec::new();
+    for pattern in roots {
+        let normalized = normalize_relative(pattern);
+        let segments: Vec<&str> = relative_segments(&normalized);
+        if segments.is_empty() {
+            return Err(Error::config(format!(
+                "`[deps].roots` entry `{pattern}` does not name a directory"
+            )));
+        }
+        // A root must stay inside the project: a pattern escaping upwards would
+        // let a committed config reach parts of the machine the project has no
+        // business touching.
+        if segments.contains(&"..") {
+            return Err(Error::config(format!(
+                "`[deps].roots` entry `{pattern}` must not contain `..`"
+            )));
+        }
+
+        let mut directories = vec![config_root.to_path_buf()];
+        for segment in &segments {
+            let mut next = Vec::new();
+            for directory in &directories {
+                if segment.contains('*') || segment.contains('?') {
+                    // Only this one level is enumerated, and only because a
+                    // wildcard was written for it.
+                    //
+                    // Worth knowing if you are auditing this: routing a *literal*
+                    // segment through this branch too would not actually widen
+                    // anything, because `glob_matches("apps", name)` still only
+                    // accepts `apps`. It would just read a directory to learn what
+                    // a `join` already knew. The branch that does the load-bearing
+                    // work is the `glob_matches` call below -- replacing it with
+                    // `true` is what turns this into a subtree crawl, and that is
+                    // the variant the tests are built to catch.
+                    let entries = match std::fs::read_dir(directory) {
+                        Ok(entries) => entries,
+                        // A pattern matching nothing is not an error: `apps/*` in
+                        // a repo with no `apps` yet is a forward-looking
+                        // declaration, not a mistake.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(Error::io(directory, error)),
+                    };
+                    let mut matched: Vec<PathBuf> = Vec::new();
+                    for entry in entries {
+                        let entry = entry.map_err(|error| Error::io(directory, error))?;
+                        if !entry
+                            .file_type()
+                            .map_err(|e| Error::io(directory, e))?
+                            .is_dir()
+                        {
+                            continue;
+                        }
+                        let name = entry.file_name();
+                        let Some(name) = name.to_str() else { continue };
+                        if glob_matches(segment, name) {
+                            matched.push(entry.path());
+                        }
+                    }
+                    // Sorted so the order does not depend on readdir, which would
+                    // make `--list` output and `depends` resolution vary by
+                    // machine.
+                    matched.sort();
+                    next.extend(matched);
+                } else {
+                    let candidate = directory.join(segment);
+                    if candidate.is_dir() {
+                        next.push(candidate);
+                    }
+                }
+            }
+            directories = next;
+        }
+
+        for directory in directories {
+            let relative = directory
+                .strip_prefix(config_root)
+                .unwrap_or(&directory)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for schema in enabled {
+                // `detect_in` is reused unchanged, so a root sub-project is
+                // fail-closed on a broken manifest exactly like a top-level one.
+                if let Some(project) = detect_in(&directory, schema)? {
+                    found.push(RootedProject {
+                        root_pattern: normalized.clone(),
+                        relative: relative.clone(),
+                        project,
+                    });
+                }
+            }
+        }
+    }
+    found.sort_by_key(RootedProject::id);
+    Ok(found)
+}
+
+/// Match one path segment against one pattern segment.
+///
+/// Supports `*` (any run of characters) and `?` (one character). Deliberately not
+/// a full glob library: `**` is the one thing that would turn a declared root
+/// into an arbitrary crawl, which is exactly what this feature exists to prevent,
+/// so it is not supported rather than supported-and-restricted.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    // A separator is never matchable here, by either side. Today every caller
+    // passes a single directory name, so this changes nothing -- but a matcher
+    // that *can* span a separator means the next caller to hand it a
+    // multi-segment string silently gets the subtree crawl this whole feature
+    // exists to prevent. The guarantee belongs in the function, not in every
+    // caller remembering.
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    // Classic two-pointer wildcard match with backtracking on `*`.
+    let (mut p, mut n) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            mark = n;
+            p += 1;
+        } else if let Some(position) = star {
+            p = position + 1;
+            mark += 1;
+            n = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
 fn detect_in(
     directory: &Path,
     schema: &'static DepsProviderSchema,
@@ -737,6 +930,245 @@ pub fn relative_segments(path: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// A partial wildcard rejects the directories it does not match.
+    ///
+    /// Every other fixture here uses `apps/*`, whose only wildcard segment is a
+    /// bare `*` -- which correctly matches every directory. That makes "accept any
+    /// name" and "match the pattern" produce identical results, so the filter
+    /// itself was never under test: injecting `if true` in place of the match left
+    /// the suite green.
+    ///
+    /// `api-*` is the shape that distinguishes them: `api-v1` must be found and
+    /// `web-v1`, sitting right beside it with its own manifest, must not.
+    #[test]
+    fn a_partial_wildcard_rejects_what_it_does_not_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for name in ["api-v1", "api-v2", "web-v1"] {
+            let directory = root.join("apps").join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("package.json"), "{}").unwrap();
+        }
+
+        let enabled = [&node::NPM];
+        let found = discover_in_roots(root, &["apps/api-*".to_string()], &enabled).unwrap();
+        let ids: Vec<String> = found.iter().map(RootedProject::id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "//apps/api-v1:npm".to_string(),
+                "//apps/api-v2:npm".to_string(),
+            ],
+            "`api-*` must not pick up `web-v1`"
+        );
+    }
+
+    /// A literal path segment is matched literally, never enumerated.
+    ///
+    /// This is the invariant that separates "look inside what was declared" from
+    /// "walk the repository", and it needs a fixture that can actually tell the
+    /// two apart. `other/pkg` sits at the same depth as `apps/api` and has its own
+    /// manifest: matching `apps` literally makes it unreachable, while enumerating
+    /// that level makes it appear at once.
+    ///
+    /// The earlier version of this test used an undeclared directory under
+    /// `vendor/`, which could not distinguish the two behaviours -- treating
+    /// segments as wildcards left it green. A test that stays green when the
+    /// invariant is broken is not protecting it.
+    #[test]
+    fn a_literal_root_segment_is_not_enumerated() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for relative in ["apps/api", "other/pkg"] {
+            let directory = root.join(relative);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("package.json"), "{}").unwrap();
+        }
+
+        let enabled = [&node::NPM];
+        let found = discover_in_roots(root, &["apps/*".to_string()], &enabled).unwrap();
+        let ids: Vec<String> = found.iter().map(RootedProject::id).collect();
+        assert_eq!(
+            ids,
+            vec!["//apps/api:npm".to_string()],
+            "`apps` is a literal segment: `other/pkg` must be unreachable"
+        );
+    }
+
+    /// Only directories matching a declared root are looked at.
+    ///
+    /// This is the invariant the whole feature exists for, so it is asserted from
+    /// both sides: the declared sub-projects are found, and an undeclared one
+    /// sitting right next to them is **not** -- even though it has a perfectly
+    /// good manifest and a subtree walk would have found it immediately.
+    ///
+    /// The same judgement AGENTS.md records for the model inventory scan: what can
+    /// be discovered automatically must be what was declared. A monorepo where
+    /// `osdk deps` quietly picked up an unlisted package would install
+    /// dependencies for a project nobody asked about.
+    #[test]
+    fn only_declared_roots_are_discovered() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for relative in ["apps/api", "apps/web", "packages/ui", "vendor/thirdparty"] {
+            let directory = root.join(relative);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("package.json"), "{}").unwrap();
+        }
+
+        let enabled = [&node::NPM];
+        let found = discover_in_roots(
+            root,
+            &["apps/*".to_string(), "packages/*".to_string()],
+            &enabled,
+        )
+        .unwrap();
+        let ids: Vec<String> = found.iter().map(RootedProject::id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "//apps/api:npm".to_string(),
+                "//apps/web:npm".to_string(),
+                "//packages/ui:npm".to_string(),
+            ]
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("vendor")),
+            "`vendor/thirdparty` was never declared and must not be found: {ids:?}"
+        );
+
+        // Each result says which declaration produced it, so `--list` does not
+        // leave the user guessing.
+        assert_eq!(found[0].root_pattern, "apps/*");
+        assert_eq!(found[2].root_pattern, "packages/*");
+
+        // No roots means no sub-projects at all, not "scan everything".
+        assert!(discover_in_roots(root, &[], &enabled).unwrap().is_empty());
+    }
+
+    /// A root pattern is matched one segment at a time, so a wildcard never
+    /// becomes a recursive crawl.
+    ///
+    /// `apps/*` must not reach `apps/group/nested`. Supporting `**` would hand
+    /// back exactly the arbitrary walk this feature refuses, so it is absent
+    /// rather than present-and-limited.
+    #[test]
+    fn a_wildcard_matches_one_level_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let nested = root.join("apps/group/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("package.json"), "{}").unwrap();
+        // A sibling at the level the pattern does name, as a control: without it,
+        // an empty result would not distinguish "did not recurse" from "matched
+        // nothing at all".
+        let shallow = root.join("apps/api");
+        std::fs::create_dir_all(&shallow).unwrap();
+        std::fs::write(shallow.join("package.json"), "{}").unwrap();
+
+        let enabled = [&node::NPM];
+        let found = discover_in_roots(root, &["apps/*".to_string()], &enabled).unwrap();
+        let ids: Vec<String> = found.iter().map(RootedProject::id).collect();
+        assert_eq!(ids, vec!["//apps/api:npm".to_string()]);
+
+        // The nested one is reachable only by naming its level explicitly.
+        let found = discover_in_roots(root, &["apps/*/*".to_string()], &enabled).unwrap();
+        let ids: Vec<String> = found.iter().map(RootedProject::id).collect();
+        assert_eq!(ids, vec!["//apps/group/nested:npm".to_string()]);
+    }
+
+    /// A broken manifest inside a root is an error, exactly as at the top level.
+    ///
+    /// Skipping it would mean a monorepo silently installs some of its packages
+    /// and reports success -- the fail-closed rule does not get weaker because the
+    /// project was found through a root.
+    #[test]
+    fn a_broken_manifest_in_a_root_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let good = root.join("apps/api");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("package.json"), "{}").unwrap();
+
+        let enabled = [&node::NPM];
+        assert!(discover_in_roots(root, &["apps/*".to_string()], &enabled).is_ok());
+
+        // A directory where a manifest belongs cannot be shown harmless.
+        let bad = root.join("apps/web");
+        std::fs::create_dir_all(bad.join("package.json")).unwrap();
+        assert!(
+            discover_in_roots(root, &["apps/*".to_string()], &enabled).is_err(),
+            "a root sub-project must be fail-closed like any other"
+        );
+    }
+
+    /// Root patterns accept either separator, on every platform, and cannot
+    /// escape the project.
+    ///
+    /// Not `#[cfg(windows)]`-gated: `roots` is written in a committed
+    /// `osdk.toml`, so a Windows author can write `apps\api` and a Linux machine
+    /// still has to find it. Gating the test would declare that half unverified,
+    /// which is where this class of bug lives.
+    #[test]
+    fn root_patterns_accept_either_separator_and_cannot_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let directory = root.join("apps/api");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("package.json"), "{}").unwrap();
+
+        let enabled = [&node::NPM];
+        let forward = discover_in_roots(root, &["apps/api".to_string()], &enabled).unwrap();
+        let backward = discover_in_roots(root, &["apps\\api".to_string()], &enabled).unwrap();
+        assert_eq!(forward, backward);
+        assert_eq!(forward.len(), 1);
+        // The recorded pattern and relative path are `/`-normalized regardless of
+        // how they were written, because both end up in reports and state files.
+        assert_eq!(forward[0].root_pattern, "apps/api");
+        assert_eq!(forward[0].relative, "apps/api");
+
+        for escaping in ["../outside", "apps/../../outside"] {
+            assert!(
+                discover_in_roots(root, &[escaping.to_string()], &enabled).is_err(),
+                "`{escaping}` escapes the project and must be refused"
+            );
+        }
+        assert!(discover_in_roots(root, &[".".to_string()], &enabled).is_err());
+    }
+
+    /// Rooted ids round-trip, and a plain provider name is not mistaken for one.
+    #[test]
+    fn rooted_ids_round_trip() {
+        assert_eq!(parse_rooted_id("//apps/api:uv"), Some(("apps/api", "uv")));
+        assert_eq!(
+            parse_rooted_id("//packages/ui:pnpm"),
+            Some(("packages/ui", "pnpm"))
+        );
+        // A plain name has no `//`, which is how the two forms stay distinct.
+        assert_eq!(parse_rooted_id("uv"), None);
+        assert_eq!(parse_rooted_id("//:uv"), None);
+        assert_eq!(parse_rooted_id("//apps/api:"), None);
+        assert_eq!(parse_rooted_id("//apps/api"), None);
+    }
+
+    /// The wildcard matcher itself, including the cases that decide whether a
+    /// pattern can widen unexpectedly.
+    #[test]
+    fn glob_matching_is_bounded() {
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("api", "api"));
+        assert!(glob_matches("api-*", "api-v2"));
+        assert!(glob_matches("*-service", "auth-service"));
+        assert!(glob_matches("a*c", "abbbc"));
+        assert!(glob_matches("a?c", "abc"));
+        assert!(!glob_matches("api", "api-v2"));
+        assert!(!glob_matches("a?c", "ac"));
+        assert!(!glob_matches("a*c", "abd"));
+        // A separator is never matched by a wildcard: segments are matched
+        // individually, so a pattern cannot reach into a deeper level.
+        assert!(!glob_matches("*", "apps/api"));
+    }
+
     /// A custom provider with no `run` is an error, not a silent no-op.
     ///
     /// Accepting it would make `osdk deps` report success for a step that never

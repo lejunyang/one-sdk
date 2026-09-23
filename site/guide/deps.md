@@ -131,6 +131,54 @@ osdk deps --frozen
 
 这会把上面那个退回变成错误，而不是一条容易被忽略的警告。
 
+## monorepo：显式声明子项目
+
+osdk **不会**向下扫描子目录找项目。要管理一个 monorepo 的多个包，在 `[deps]` 里
+显式声明它们所在的位置：
+
+```toml
+[deps]
+roots = ["apps/*", "packages/*"]
+
+[deps.npm]
+```
+
+只有匹配到的目录会被检查。**没被 `roots` 覆盖的包不会被发现**——即使它有一份完好的
+清单、就躺在旁边。可被自动处理的集合必须是你声明过的集合，否则 `osdk deps` 会给一个
+你根本没提到的包装依赖。
+
+每个子项目有自己的地址 `//<路径>:<provider>`：
+
+```
+$ osdk deps --list --explain
+//apps/api:npm      stale  /repo/apps/api
+    from root: apps/*
+//apps/web:npm      stale  /repo/apps/web
+    from root: apps/*
+//packages/ui:npm   stale  /repo/packages/ui
+    from root: packages/*
+```
+
+可以按地址只处理一个：
+
+```bash
+osdk deps //apps/api:npm          # 只这个子项目
+osdk deps npm                     # 所有 npm 子项目
+osdk deps --skip //apps/web:npm   # 排除一个
+```
+
+### 模式的匹配规则
+
+- 支持 `*`（任意字符）与 `?`（单个字符），**逐段匹配**。
+- **不支持 `**`**：那等于把声明的 root 变回任意子树遍历，正是这个功能要避免的事。
+  需要更深的层级就把它写出来，例如 `apps/*/*`。
+- 一个 `*` 永不跨越 `/`，所以 `apps/*` 不会匹配到 `apps/group/nested`。
+- `..` 会被拒绝：一份被提交的配置不该能伸到项目外面。
+- 匹配不到任何目录不算错误——`apps/*` 在还没有 `apps` 的仓库里是一句前瞻性的声明。
+
+root 里的子项目与顶层项目遵循同一套规则：清单坏了就**报错**，不会跳过。少装一个包却
+报告成功，是最难被发现的那种失败。
+
 ## 自定义 provider
 
 除了内置的包管理器，`[deps]` 里任何别的名字都是一个自定义步骤：一条你自己的命令，

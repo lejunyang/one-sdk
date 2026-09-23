@@ -38,6 +38,11 @@ struct Resolved {
     /// `None` for a custom provider: not having a built-in schema is precisely
     /// what makes one custom, so this is the distinction rather than an error.
     schema: Option<&'static DepsProviderSchema>,
+    /// Set when this came from a `[deps].roots` pattern: the addressable id
+    /// (`//apps/api:uv`) and the pattern that produced it. Reported so `--list`
+    /// says where a sub-project came from instead of printing the same bare
+    /// provider name once per package.
+    rooted: Option<(String, String)>,
     project: DetectedProject,
     choice: InstallerChoice,
     config: ProviderConfig,
@@ -57,10 +62,20 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // An operand may be a plain provider name or a rooted id (`//apps/api:npm`).
+    // Both have to select the underlying provider here, before roots are
+    // expanded: filtering `enabled` by the literal operand would leave it empty
+    // for a rooted id and there would be nothing left to expand.
+    let selects = |id: &str, operands: &[String]| {
+        operands.iter().any(|operand| {
+            operand == id
+                || deps::parse_rooted_id(operand).is_some_and(|(_, provider)| provider == id)
+        })
+    };
     let enabled: Vec<&'static DepsProviderSchema> = configured
         .keys()
-        .filter(|id| !options.skip.iter().any(|skip| skip == *id))
-        .filter(|id| options.providers.is_empty() || options.providers.iter().any(|p| p == *id))
+        .filter(|id| !selects(id, &options.skip))
+        .filter(|id| options.providers.is_empty() || selects(id, &options.providers))
         .filter_map(|id| deps::provider_schema(id))
         .collect();
     let ceiling = app
@@ -95,7 +110,43 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         detected.push(deps::detect_custom(id, root, path));
     }
 
-    if detected.is_empty() {
+    // Sub-projects named by `[deps].roots`. Discovery never descends below the
+    // config root on its own, so this is the only way a monorepo's packages come
+    // into scope -- and only the ones a declared pattern actually names.
+    let mut rooted: Vec<deps::RootedProject> = Vec::new();
+    if !app.ctx.config.deps.roots.is_empty() {
+        let Some(path) = &config_path else {
+            return Err(anyhow!(
+                "`[deps].roots` needs a project config file to resolve against"
+            ));
+        };
+        let config_root = path.parent().unwrap_or(&cwd);
+        for candidate in deps::discover_in_roots(config_root, &app.ctx.config.deps.roots, &enabled)?
+        {
+            let id = candidate.id();
+            // Selectable either by full id (`//apps/api:uv`) or by provider name,
+            // so `osdk deps uv` still means "every uv project" in a monorepo.
+            let provider = candidate.project.provider.to_string();
+            if options
+                .skip
+                .iter()
+                .any(|skip| *skip == id || *skip == provider)
+            {
+                continue;
+            }
+            if !options.providers.is_empty()
+                && !options
+                    .providers
+                    .iter()
+                    .any(|wanted| *wanted == id || *wanted == provider)
+            {
+                continue;
+            }
+            rooted.push(candidate);
+        }
+    }
+
+    if detected.is_empty() && rooted.is_empty() {
         // Split the two cases: "you selected nothing" and "nothing was found"
         // have different fixes, and collapsing them sends the user looking in the
         // wrong place.
@@ -129,7 +180,39 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         let decision = decide(app, schema, project, &config, &plan)?;
         resolved.push(Resolved {
             schema,
+            rooted: None,
             project: project.clone(),
+            choice,
+            config,
+            plan,
+            decision,
+        });
+    }
+
+    for candidate in &rooted {
+        let config = configured
+            .get(&*candidate.project.provider)
+            .cloned()
+            .unwrap_or_default();
+        let schema = deps::provider_schema(&candidate.project.provider);
+        // Peers are scoped to this sub-project: a lockfile in a sibling package
+        // says nothing about which installer owns this one.
+        let choice = deps::select_installer(&candidate.project, &config, &[])?;
+        let plan = deps::plan(&candidate.project, &choice, &config, &tool_versions)?;
+        if options.frozen && !plan.frozen {
+            return Err(anyhow!(
+                "`--frozen` requires a native lockfile for `{}`: {}",
+                candidate.id(),
+                plan.downgraded_reason
+                    .clone()
+                    .unwrap_or_else(|| "no lockfile found".into())
+            ));
+        }
+        let decision = decide(app, schema, &candidate.project, &config, &plan)?;
+        resolved.push(Resolved {
+            schema,
+            rooted: Some((candidate.id(), candidate.root_pattern.clone())),
+            project: candidate.project.clone(),
             choice,
             config,
             plan,
@@ -150,7 +233,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         for item in &resolved {
             println!(
                 "{}  {}  {}",
-                item.project.provider,
+                item.label(),
                 if item.decision.is_fresh() {
                     "fresh"
                 } else {
@@ -159,6 +242,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 item.project.root.display()
             );
             if options.explain {
+                if let Some((_, pattern)) = &item.rooted {
+                    println!("    from root: {pattern}");
+                }
                 if let Some(reason) = item.decision.reason() {
                     println!("    reason: {reason}");
                 }
@@ -200,6 +286,20 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         record(app, item, &tools)?;
     }
     Ok(())
+}
+
+impl Resolved {
+    /// How this provider is named in output: the rooted id when it came from a
+    /// `roots` pattern, otherwise the plain provider name.
+    ///
+    /// Without it a monorepo with four `uv` packages prints `uv` four times with
+    /// no way to tell the lines apart.
+    fn label(&self) -> String {
+        match &self.rooted {
+            Some((id, _)) => id.clone(),
+            None => self.project.provider.to_string(),
+        }
+    }
 }
 
 /// Sort providers so that everything a provider `depends` on runs before it.

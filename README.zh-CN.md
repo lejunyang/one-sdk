@@ -290,6 +290,7 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 ```toml
 [deps.pnpm]          # Node：npm / pnpm / yarn / bun
 # [deps.go]          # Go / Rust / Deno：go、cargo、deno
+# roots = ["apps/*"]  # monorepo：显式声明子项目，绝不盲扫
 # [deps.uv]          # Python：pyproject.toml + uv.lock
 # [deps.pip-requirements]   # Python：requirements.txt
 ```

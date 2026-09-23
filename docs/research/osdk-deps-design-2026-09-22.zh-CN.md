@@ -17,7 +17,7 @@
 - **「没装包管理器就自动装」不新造安装逻辑**，直接复用现有工具安装链：osdk 已内置 node/npm/pnpm/yarn/bun/deno/python/go/rust/java/zig 等 backend（`backend/registry.rs:21-36`），deps 只负责「决定要哪个工具、哪个版本」，装由 `install` 那条路做，落在**隔离的工具 install 目录**，绝不落在项目 venv。
 - **trust 按 dbc63f8 修正后的三档落到每个 provider**：默认不要 trust（纯预编译产物 + 官方索引）；自定义 / extra index → `WeakensVerification`；显式放开**从源码构建 / 生命周期脚本** → `ExecutesCode`，默认 Deny、显式开。
 - **freshness 借鉴 mise 的哈希模型但补上它承认的短板**：mise 明确「不逐个核验已装包」；osdk 在哈希 freshness 之外提供一层可选的**深度校验**（读 receipt / 比对原生 lock 摘要），并保留 `--force`。
-- **不做隐式副作用**：`osdk deps` 默认显式调用；`auto` 前置到 `run`/`exec` 必须由用户显式开启，且有 `--no-deps` 逃生口。这比 mise 的默认更克制，理由与「`osdk install` 刻意不代拉模型」同源。
+- **与 mise 的差异不在 `auto` 默认值**（2026-09-23 拍板后两者都默认开，见 §9.2），而在三点：命令默认取**冻结式**（`npm ci` / `--locked` / `--frozen`，缺 lock 时显式报告降级）、**auto 前置只做 freshness 快判绝不做深度校验**（`--verify` 只在显式调用时跑）、Python 坚持**项目隔离 `.venv`**。逃生口是 `--no-deps`（单次）与 `auto = false`（声明式）。
 
 ---
 
@@ -48,7 +48,7 @@
 | provider 表 | 内置 npm/yarn/pnpm/bun/deno/aube/pip/poetry/uv/go/bundler/composer/dart/flutter/git-submodule，各有默认 sources/outputs/命令 | **同构**，但表项带 trust 档位与「无工具时装什么」（§5） |
 | 默认命令可覆盖 | `run = "npm ci"` 覆盖默认 `npm install` | **同**，且**默认就选冻结式命令**（§5.4） |
 | freshness | blake3 哈希 sources + 生效命令，存 `$MISE_STATE_DIR/deps/<hash>.toml`（不写项目目录）；**不逐包核验**、不查上游 | 哈希模型**同**（复用 `tasks::freshness` 先例），**另加**可选深度校验补其短板（§8） |
-| auto | `auto = true` 默认前置于 `mise run` / `mise x` | **默认关**；开启后仍有 `--no-deps`（§9） |
+| auto | `auto = true` 默认前置于 `mise run` / `mise x` | **默认开**（2026-09-23 拍板，见 §9.2）；覆盖 install/run/exec，仍有 `--no-deps` 与 `auto = false` |
 | pip provider | 官方明确「不创建也不选择 venv」，要另配 virtualenv | **拒绝裸装**：osdk 的 pypi provider 永远在项目 `.venv` 内（§5.5） |
 | monorepo | 要显式 `[monorepo].config_roots`，不盲扫子目录 | **同**（§6.3） |
 
@@ -511,6 +511,62 @@ L1 是关键补强：它能抓到「原生 lock 被人改过但 sources 哈希�
 `hook-env` 那条是硬红线：它在**每个提示符**执行（AGENTS.md「交互延迟」），deps 的探测涉及文件系统 walk 与哈希，绝不能进这条热路径。提示 stale 只能读已有 state 文件的一个布尔，且要进 bench 对照。
 
 ---
+
+### 9.2 auto 的目标模型与当前实现的差距（**已拍板，待实现（下一批）**）
+
+2026-09-23 用户拍板。支撑数据：freshness 热路径的缓存命中成本用户无感——20KiB lock
+0.16ms、200KiB 0.39ms、2MiB 的巨型 monorepo lock 也只有 2.06ms（.NET SHA256 的保守
+上界，blake3 更快）；反向对照也通过（篡改清单必判 stale，判据非装饰）。既然命中成本
+可忽略，就没有理由按动词分档去省它。
+
+#### 定案
+
+- **`auto` 是 bool、默认 `true`**，并且同时覆盖 **install / run / exec** 三个触发点。
+- 语义：**裸** `osdk install`、`osdk run <task>`、`osdk exec` 之前，对声明了 `[deps]`
+  的 provider 做一次 freshness 判定，stale 才兑现依赖。
+
+#### 与当前实现的两处差距
+
+| | 当前实现 | 定案 |
+| --- | --- | --- |
+| 默认值 | `ProviderConfig.auto: bool` = **false** | **true** |
+| 覆盖范围 | 字段已存在，但**没有任何触发点消费它**（install 完全不接 deps，run/exec 也未接） | install / run / exec 三处都消费 |
+
+注意第二行：`auto` 今天是一个**已声明却无人读取**的字段。这正是 AGENTS.md 记过的
+`pypi installer` 那类坑的形状（只写不读），实现这一批时应当顺手让它变成真有消费者，
+而不是继续留着。
+
+#### 三个非可选安全阀
+
+1. **`--no-deps`**：install / run / exec 都支持，单次跳过自动兑现。
+2. **显式 operand 不触发**：`osdk install <具体工具>` 带 operand 时**不**自动兑现
+   deps，与既有「显式 operand 跳过 lock replay」一致（`commands.rs` 的
+   `let explicit = !tools.is_empty();`）。只有**裸** install / run / exec 触发。
+   **必须有测试守住**——否则「装一个工具」会顺带改动项目的依赖树。
+3. **auto 前置只做 freshness 快判，绝不默认跑 `--verify`**：命中直接放行（上面那条
+   0.16–2.06ms 的路径），stale 才兑现；深度校验（L1/L2，§8.3/§8.4）只在显式
+   `osdk deps --verify` 时发生。理由是成本量级差三个数量级，而且把秒级扫描塞进每次
+   `osdk run` 会让用户去关掉整个机制。
+
+#### trust 不调整（已核）
+
+沿用 dbc63f8 修正后的三档。核对结论：**自动触发不需要额外 trust**——触发时机变了，
+但装的东西没有变得更危险（默认仍禁构建脚本、仍走官方索引、仍是冻结式命令）。
+自定义 provider 的 `run` 仍**一律** `ExecutesCode`，而且在 auto 默认开之后这一条
+更重要：它是唯一会因「未被显式调用」而执行任意命令的路径，所以它的门禁不能松。
+
+#### 默认翻转是面向用户的行为变更
+
+`auto` 从 false 到 true 是可感知变更，实现该批时必须同步：两份 README、site 中英文
+guide、`[deps]` schema 所在的实现说明页，都要讲清「默认自动兑现」以及两种关法
+（`--no-deps` 单次 / `auto = false` 声明式）。本文件中凡把「auto 默认关」当作与 mise
+的关键差异之处已在本次一并更正（§1 一页结论、§2.3 对照表），避免文档自相矛盾。
+
+#### 该批的注入验收（写在这里以便实现时照做）
+
+- auto 前置改成默认跑 `--verify` → 「auto 前置不得触发深度扫描」测试必须红。
+- freshness 命中却仍执行安装命令 → 「命中应零安装动作」测试必须红。
+- 带 operand 的 install 也触发 deps → 「显式 operand 不触发」测试必须红。
 
 ## 10. lock 影响
 

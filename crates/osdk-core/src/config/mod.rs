@@ -851,6 +851,14 @@ pub struct DepsConfig {
     /// stops the provider from running; it does not uninstall anything.
     #[serde(default)]
     pub disable: Vec<String>,
+    /// Sub-project directories to look inside, as patterns relative to this
+    /// config: `roots = ["apps/*", "packages/*"]`.
+    ///
+    /// Nothing is discovered below the config root without an entry here. That is
+    /// the whole point of the field: the set of sub-projects osdk may act on has
+    /// to be the set the project declared, not whatever a subtree walk turns up.
+    #[serde(default)]
+    pub roots: Vec<String>,
     /// Provider entries, keyed by provider id (`npm`, `pnpm`, ...). An empty
     /// table selects the built-in provider without making it automatic.
     #[serde(flatten)]
