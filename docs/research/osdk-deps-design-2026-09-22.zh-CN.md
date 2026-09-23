@@ -389,6 +389,82 @@ mise 的内置默认是**普通安装命令**（`npm install`、`pip install -r`
 
 与 mise 一致：**不扫任意子目录**。两条途径——单个子项目用 `[deps.<p>] dir = "apps/api"`；多子项目用显式 roots 列表（形如 `[deps] roots = ["apps/*", "packages/*"]`），provider id 带 root 限定（`//apps/api:uv`）。理由与模型扫描「深度上限不能乱收窄、动态目录要显式登记」（AGENTS.md）同源：能被自动发现的集合必须是显式声明的。
 
+### 6.6 affected：转发还是自建图（2026-09-23 调研，分层结论）
+
+用户的洞察是「主流工具很多自带变更/受影响能力，osdk 也许该转发而非重造依赖图」。
+查证结论：**成立，但只对一半生态成立。**
+
+先区分两种图，混起来会得出错误结论：
+
+- **图 A｜任务编排图**：`depends` 的拓扑（`tasks/mod.rs`），「跑 test 前先跑 build」。**已存在。**
+- **图 B｜跨包依赖图**：从子项目清单推断「apps/web 依赖 packages/ui」。**不存在。** 只有 `--affected` 需要它。
+
+#### 各工具原生能力（官方文档，2026-09-23 查证）
+
+| 工具 | 原生 affected | 命令 | 自有图 B | 前提 |
+| --- | --- | --- | --- | --- |
+| pnpm 12.x | 有 | `--filter '...[origin/main]'` | 有 | `pnpm-workspace.yaml` + git |
+| turbo | 有 | `--affected` / `--filter=...[HEAD^1]` | 有 | workspace 声明 + git |
+| nx | 有，最完整 | `nx affected -t build` | 有 | project graph + git |
+| yarn berry | 有 | `workspaces foreach --since` | 有（`-R` 递归 deps 字段） | `workspaces` 字段 + git |
+| mise | 有，experimental | `run --affected` | 有，experimental | `config_roots` + git |
+| npm v11 | 无 | — | 无 | — |
+| cargo | **官方无** | — | 无 | — |
+| go / uv / poetry | 无 | — | 无 | — |
+
+出处：<https://pnpm.io/filtering>（12.x）、<https://turborepo.dev/docs/reference/run>（更新
+2026-08-30）、<https://nx.dev/docs/features/ci-features/affected>（更新 2026-09-23）、
+<https://yarnpkg.com/cli/workspaces/foreach>、<https://mise.jdx.dev/tasks/monorepo.html>。
+
+**决定性分野**：Node 系都自有图 B，转发即可；cargo/go/uv/poetry 官方一个都没有——搜到的
+cargo 方案（`cargo-delta`、`cargo-affect`、`cargo-workspaces changed`、`clippier`、
+`rust-affected`）全是第三方 crate。顺带一条：turbo 已有 experimental 的 uv workspace
+支持（<https://turborepo.dev/docs/guides/tools/python>，更新 2026-09-11），说明「Python 侧
+缺图 B」是生态共识，解法是外部工具补而不是等 uv 自己做。
+
+#### 自建图 B 的真实代价：两个坑
+
+这两个才是难点，**不是「读 deps 字段」**：
+
+**一、lockfile 变更如何归因。** nx 的 `projectsAffectedByDependencyUpdates` 三档：
+`"all"`（**默认**，lock 一变所有项目都算受影响，官方原话是 "failsafe in case Nx misses a
+project"）、`"auto"`（解析 base 与 head 两版 lock、diff 已解析的包元数据、映射回依赖它们的
+项目）、`string[]`（手工指定）。**默认是最保守那档**，与我们的 fail-closed 同源；而 `auto`
+档的代价是为每种 lock 写解析器——nx 支持 6 种，`bun.lockb` 是二进制还得**调 bun 渲染**才能
+diff。
+
+**二、CI 浅克隆会静默退化。** nx 的 GitHub Actions 示例里 `fetch-depth: 0` 带注释
+"**required**. Without the full Git history, there is no base commit to compare against."
+turbo 说得更狠：checkout 太浅时 "**all packages will be considered changed**"——即静默退化
+为全量、不报错。这正是 AGENTS.md 说的「看起来正常的降级行为」。
+
+#### 分层结论（已定）
+
+不是「有原生就转发、没有就自建」——那会同时继承语义不统一与实现成本。分层是：
+
+1. **第一层（本轮做）**：`osdk deps --filter <路径glob>`。零图 B 依赖、全生态一致、
+   fail-closed 完全可控。已覆盖「只处理 apps/ 下的包」这类最常见需求。
+2. **第二层（登记，暂不做）**：对 pnpm/turbo/nx/yarn 转发原生 affected。三条硬约束现在
+   写死，将来做时照办：
+   - **显式声明「这是 pnpm/nx 的判断」**，不假装是 osdk 自己算的；
+   - **主动检测 CI 浅克隆并报错**，不沿用 turbo 的静默退化；
+   - 至少打出「转发给谁 + 用了什么 base/head」。
+3. **第三层（登记，暂不做）**：为 cargo/go/uv 自建图 B。留到有真实需求——现在做是用最大
+   成本覆盖最小收益，且会与 Node 系已有的图 B **产生两份可能不一致的图**，那比没有图更糟。
+
+#### 诚实清单（本节）
+
+已查证：上表中 pnpm / turbo / nx / yarn / mise / npm 的能力与前提，nx 的 lockfile 三档与
+`fetch-depth: 0` 要求，turbo 的浅克隆退化为全量，cargo 官方无 affected（第三方 crate 存在）。
+
+**未核实**：bun 是否有 `--since` 等价能力（表中记「无」属推断，未找到官方出处）；nx 的
+project graph 具体从哪些字段推断依赖；各第三方 cargo affected crate 的成熟度（只用来证明
+「官方没有」这一点）；pnpm `--filter-prod` 与 `--filter` 在 affected 场景的确切差异（文档
+只说「omits devDependencies when selecting dependency projects」）。全部调研**未实跑核实**，
+均来自官方文档文本。
+
+---
+
 ### 6.5 一条被推翻的假设：tasks 的子项目 trust
 
 2026-09-23 把 monorepo 从 deps 扩到 tasks 时，我先提出「子项目 `osdk.toml` 里的
