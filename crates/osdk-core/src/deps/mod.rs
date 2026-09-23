@@ -468,12 +468,64 @@ pub fn discover_in_roots(
     enabled: &[&'static DepsProviderSchema],
 ) -> Result<Vec<RootedProject>> {
     let mut found = Vec::new();
+    for expanded in expand_roots(config_root, roots, "[deps].roots")? {
+        for schema in enabled {
+            // `detect_in` is reused unchanged, so a root sub-project is
+            // fail-closed on a broken manifest exactly like a top-level one.
+            if let Some(project) = detect_in(&expanded.directory, schema)? {
+                found.push(RootedProject {
+                    root_pattern: expanded.pattern.clone(),
+                    relative: expanded.relative.clone(),
+                    project,
+                });
+            }
+        }
+    }
+    found.sort_by_key(RootedProject::id);
+    Ok(found)
+}
+
+/// One directory a `roots` pattern named.
+#[derive(Debug, Clone)]
+pub struct ExpandedRoot {
+    /// The directory itself, with this machine's separators: it is a location on
+    /// this machine, not something written into a portable artifact.
+    pub directory: PathBuf,
+    /// Its path relative to the config root, `/`-normalized because it goes into
+    /// ids that are printed, compared, and written down.
+    pub relative: String,
+    /// The pattern that produced it, reported so a listing can say where a
+    /// sub-project came from rather than printing the same name repeatedly.
+    pub pattern: String,
+}
+
+/// Expand `roots` patterns into the directories they name.
+///
+/// Shared by `[deps].roots` and `[tasks].roots`, which differ only in what they
+/// then look for inside each directory -- a dependency manifest for one, an
+/// `osdk.toml` for the other. Keeping the expansion in one place is the point: two
+/// copies of this logic would drift, and the thing that would drift is precisely
+/// the guarantee that nothing outside the declared set is ever reached.
+///
+/// Patterns descend **segment by segment**: a literal segment is joined, and only a
+/// wildcard segment causes `read_dir` of that one level. A scan-then-filter version
+/// would have to read every directory to decide, and one forgotten filter would
+/// silently turn it into a full crawl.
+///
+/// `label` names the configuration key in error messages, so `[tasks].roots` does
+/// not get told about `[deps].roots`.
+pub fn expand_roots(
+    config_root: &Path,
+    roots: &[String],
+    label: &str,
+) -> Result<Vec<ExpandedRoot>> {
+    let mut found = Vec::new();
     for pattern in roots {
         let normalized = normalize_relative(pattern);
         let segments: Vec<&str> = relative_segments(&normalized);
         if segments.is_empty() {
             return Err(Error::config(format!(
-                "`[deps].roots` entry `{pattern}` does not name a directory"
+                "`{label}` entry `{pattern}` does not name a directory"
             )));
         }
         // A root must stay inside the project: a pattern escaping upwards would
@@ -481,7 +533,7 @@ pub fn discover_in_roots(
         // business touching.
         if segments.contains(&"..") {
             return Err(Error::config(format!(
-                "`[deps].roots` entry `{pattern}` must not contain `..`"
+                "`{label}` entry `{pattern}` must not contain `..`"
             )));
         }
 
@@ -526,8 +578,7 @@ pub fn discover_in_roots(
                         }
                     }
                     // Sorted so the order does not depend on readdir, which would
-                    // make `--list` output and `depends` resolution vary by
-                    // machine.
+                    // make listings and `depends` resolution vary by machine.
                     matched.sort();
                     next.extend(matched);
                 } else {
@@ -546,20 +597,13 @@ pub fn discover_in_roots(
                 .unwrap_or(&directory)
                 .to_string_lossy()
                 .replace('\\', "/");
-            for schema in enabled {
-                // `detect_in` is reused unchanged, so a root sub-project is
-                // fail-closed on a broken manifest exactly like a top-level one.
-                if let Some(project) = detect_in(&directory, schema)? {
-                    found.push(RootedProject {
-                        root_pattern: normalized.clone(),
-                        relative: relative.clone(),
-                        project,
-                    });
-                }
-            }
+            found.push(ExpandedRoot {
+                directory,
+                relative,
+                pattern: normalized.clone(),
+            });
         }
     }
-    found.sort_by_key(RootedProject::id);
     Ok(found)
 }
 

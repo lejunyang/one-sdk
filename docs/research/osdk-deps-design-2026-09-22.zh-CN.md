@@ -389,6 +389,41 @@ mise 的内置默认是**普通安装命令**（`npm install`、`pip install -r`
 
 与 mise 一致：**不扫任意子目录**。两条途径——单个子项目用 `[deps.<p>] dir = "apps/api"`；多子项目用显式 roots 列表（形如 `[deps] roots = ["apps/*", "packages/*"]`），provider id 带 root 限定（`//apps/api:uv`）。理由与模型扫描「深度上限不能乱收窄、动态目录要显式登记」（AGENTS.md）同源：能被自动发现的集合必须是显式声明的。
 
+### 6.5 一条被推翻的假设：tasks 的子项目 trust
+
+2026-09-23 把 monorepo 从 deps 扩到 tasks 时，我先提出「子项目 `osdk.toml` 里的
+`[tasks].run` 是任意命令，而当前 trust 只审主项目那一份，所以需要一套传递语义」，
+并据此列了三档方案（A 传递并展示清单 / B 逐个 trust / C 两档都给）。
+
+**这个前提是错的。** `trust.rs:165-171` 有一段成文论证，说的正好相反：
+
+> `tasks` is deliberately **absent**. Nothing in osdk ever runs a task on its own...
+> Typing `osdk run build` *is* the authorization, so demanding a trust record first
+> asks the same question twice.
+
+即**主项目的 `[tasks].run` 本来就不需要 trust**。那么要求子项目的 `run` 需要 trust，
+就是在说同一件事在不同位置危险程度不同——而 §12.3 那轮刚刚纠正过这类不一致（把
+「装包=执行代码」按 wheel / sdist 分开）。三档方案连同「选 C 防止将来被砍成纯 A」
+的理由一起作废。
+
+记下来的价值在于它是 AGENTS.md 那条教训的实例：**以为发现了缺陷，实际是自己的
+假设错了。** 我当时的推理链看起来严密（子配置含 run → run 会执行 → 执行需授权），
+但它绕过了一个已经写在代码里的、更早做过的判断。查证既有论证比补一道门禁便宜得多。
+
+真实风险在别处，而且既有设计已经覆盖它：子项目若能声明 `[task_config]`，其 `shell`
+字段会替作用域内**每个** task 换解释器（`trust.rs:186-196` 正是为此把 `task_config`
+放进 `TRUST_REQUIRING_TABLES`、归 `RedirectsExecution`）。最终实现选择**直接拒绝**
+子项目声明 `[task_config]`，而不是让它走那道门禁——门禁按「用户批准过的那个文件」
+计账，子配置要走就得一个包一个批准，正是 ① 决策刚否掉的东西。移除能力比给能力加门
+更严也更安静。
+
+附带一个意外收获：因为 `roots` 就放在 `[task_config]` 里，**声明子项目这件事自动
+继承了那道门禁**——`osdk run` 会要求先 trust，没有新增任何信任面。这一条是被一个
+「失败得像是错了」的测试揭示的：早期版本未 trust 就跑 rooted task 被拒绝，那个拒绝
+是对的。
+
+---
+
 ### 6.4 两条语法决策（已定，防劣化）
 
 这两条来自 2026-09-23 对 mise 与 pnpm `--filter` 的定向调研。写下来是因为**两者都容易在将来被"简化"掉，而简化的代价不在当时可见**。

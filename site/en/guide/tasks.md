@@ -666,6 +666,70 @@ A config that quietly sets `shell = "evil --run"` turns every later `osdk run`
 into something other than what the task text says, with nothing at the call site
 to reveal it. Review it, then `osdk trust`.
 
+## Monorepos: tasks in sub-projects
+
+`[task_config].roots` declares which directories are sub-projects. Their tasks join
+the same table under `//<path>:<name>`:
+
+```toml
+# osdk.toml at the repository root
+[task_config]
+roots = ["apps/*", "packages/*"]
+
+[tasks.hello]
+run = "echo root"
+```
+
+```toml
+# apps/api/osdk.toml
+[tasks.build]
+run = "cargo build"
+```
+
+```
+$ osdk task list
+//apps/api:build
+//packages/ui:build
+hello
+
+$ osdk run //apps/api:build
+```
+
+The prefix is not decoration: without it, `packages/ui`'s `build` would replace the
+identically named task in `apps/api`. This is the same addressing `[deps].roots` uses
+for `//apps/api:uv` -- one syntax, not a second one.
+
+**Only declared directories are read.** A directory with a perfectly good `osdk.toml`
+sitting beside the others is not found unless a pattern covers it. For tasks this
+matters more than it does for dependencies: a `run` line is an arbitrary command, so
+"discovering a project by accident" means "discovering code to execute by accident".
+Patterns match exactly as `[deps].roots` does -- segment by segment, single-level `*`
+only, `..` rejected -- because both share one implementation rather than each having
+its own.
+
+### A sub-project cannot declare `[task_config]`
+
+A sub-project contributes task **definitions** only. `[task_config]` holds
+scope-wide settings, and `shell` among them decides which interpreter every task runs
+under. That power stays with the config that declares `roots` -- the one you actually
+reviewed and ran `osdk trust` on.
+
+```
+$ osdk task list
+error: config error: apps/api/osdk.toml: a sub-project cannot declare `[task_config]`;
+runner defaults such as `shell` belong to the config that declares `[task_config].roots`
+```
+
+An **error**, not a silent omission: a setting that is written down, has no effect and
+draws no complaint is worse than an error, because its author believes it worked.
+
+### Declaring roots means `osdk run` needs trust
+
+`roots` lives in `[task_config]`, and that table is already behind the trust gate
+(previous section). So declaring sub-projects makes `osdk run` ask for `osdk trust`
+first -- not a new gate added for monorepos, but the existing one inherited
+automatically. `osdk task list` keeps working, because it reports without executing.
+
 ## What this is not
 
 osdk tasks are a **task runner**, not a build system. Make's pattern rules

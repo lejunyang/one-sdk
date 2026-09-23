@@ -605,6 +605,65 @@ these keys need review because they affect what runs on this machine:
 `shell = "evil --run"`，之后每次 `osdk run` 执行的都不再是任务文本写的东西，
 而调用处看不出任何异样。审阅之后 `osdk trust` 即可。
 
+## monorepo：子项目的任务
+
+`[task_config].roots` 显式声明哪些目录是子项目，它们的任务会以
+`//<路径>:<任务名>` 的形式进入同一个任务表：
+
+```toml
+# 仓库根的 osdk.toml
+[task_config]
+roots = ["apps/*", "packages/*"]
+
+[tasks.hello]
+run = "echo root"
+```
+
+```toml
+# apps/api/osdk.toml
+[tasks.build]
+run = "cargo build"
+```
+
+```
+$ osdk task list
+//apps/api:build
+//packages/ui:build
+hello
+
+$ osdk run //apps/api:build
+```
+
+前缀不是装饰：没有它，`packages/ui` 的 `build` 会把 `apps/api` 的同名任务顶掉。
+这套寻址与 `[deps].roots` 的 `//apps/api:uv` 是同一套，不是第二种语法。
+
+**只有声明过的目录会被读取。** 旁边有一份完好 `osdk.toml` 的目录，若没被任何
+pattern 覆盖就不会被发现。对任务来说这条比对依赖更要紧：`run` 是一条任意命令，
+所以「意外发现一个项目」等于「意外发现一段可执行的代码」。pattern 的匹配规则与
+`[deps].roots` 完全一致（逐段匹配、只支持单层 `*`、拒绝 `..`），因为它们共用同一
+份实现而不是各写一遍。
+
+### 子项目不能声明 `[task_config]`
+
+子项目只贡献**任务定义**。`[task_config]` 是作用域级的设置，其中 `shell` 决定每个
+任务用什么解释器——这个权力留给声明 `roots` 的那份配置，也就是你实际审阅并
+`osdk trust` 过的那份。
+
+```
+$ osdk task list
+error: config error: apps/api/osdk.toml: a sub-project cannot declare `[task_config]`;
+runner defaults such as `shell` belong to the config that declares `[task_config].roots`
+```
+
+是**报错**而不是忽略：一个写下去却没有任何效果、也不给任何提示的设置，比报错更糟
+——作者会以为它生效了。
+
+### 声明 roots 之后，`osdk run` 需要信任
+
+`roots` 就写在 `[task_config]` 里，而这张表本来就在信任门禁内（上一节）。所以一旦
+声明了子项目，`osdk run` 会要求先 `osdk trust`——这不是为 monorepo 新加的一道门，
+而是它自动继承了已有的那道。`osdk task list` 仍然照常可用，因为它只报告不执行。
+
 ## 不做什么
 
 osdk 的任务是**任务运行器**，不是构建系统。明确不提供 make 的模式规则

@@ -6306,6 +6306,284 @@ fn depends_orders_providers_and_refuses_a_cycle() {
 /// Each result is addressable as `//<path>:<provider>` and reports which pattern
 /// produced it, because a repo with four `npm` packages would otherwise print
 /// `npm` four times with no way to tell the lines apart.
+/// `[task_config].roots` brings sub-project tasks in under `//<path>:<name>`.
+///
+/// The addressing is the same one `[deps].roots` uses for providers, and
+/// deliberately so: one syntax for "a thing in a sub-project", not two.
+#[test]
+fn task_roots_expose_sub_project_tasks_under_a_rooted_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/api")).unwrap();
+    std::fs::create_dir_all(project.join("packages/ui")).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\", \"packages/*\"]\n\n[tasks.hello]\nrun = \"echo root\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("apps/api/osdk.toml"),
+        "[tasks.build]\nrun = \"echo api-built\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("packages/ui/osdk.toml"),
+        "[tasks.build]\nrun = \"echo ui-built\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["task", "list"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    for expected in ["//apps/api:build", "//packages/ui:build", "hello"] {
+        assert!(listed.contains(expected), "missing {expected}: {listed}");
+    }
+
+    // Same-named tasks in different sub-projects stay distinct, which is the point
+    // of the prefix: without it the second `build` would replace the first.
+    //
+    // Trusting first, because `roots` lives in `[task_config]` -- already gated as
+    // `RedirectsExecution` -- so `osdk run` refuses until the config is approved.
+    // That is the gate working, not an obstacle: declaring roots inherited the
+    // existing protection instead of needing a new one. `task list` is exempt as a
+    // read-only command, which is why the assertions above needed no trust.
+    let output = run_isolated_in(
+        root,
+        &project,
+        &["--yes", "trust", project.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+
+    // `--dry-run` rather than a real run: this harness clears PATH, so a task whose
+    // `run` names a program could not resolve it, and asserting on that would test
+    // the harness instead of the addressing. Resolution is the property in question,
+    // and dry-run shows it.
+    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//apps/api:build"]);
+    assert!(output.status.success(), "{output:?}");
+    let planned = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        planned.contains("api-built"),
+        "the rooted name must resolve to the api sub-project's command: {planned}"
+    );
+    assert!(
+        !planned.contains("ui-built"),
+        "a rooted name must select exactly one sub-project's task: {planned}"
+    );
+
+    // And the sibling with the same task name resolves to its own command.
+    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//packages/ui:build"]);
+    assert!(output.status.success(), "{output:?}");
+    let planned = String::from_utf8_lossy(&output.stdout);
+    assert!(planned.contains("ui-built"), "{planned}");
+}
+
+/// Declaring `roots` inherits the existing `[task_config]` trust gate.
+///
+/// Worth pinning because it is the reason this feature needed no new trust surface.
+/// `roots` lives in `[task_config]`, which is in `TRUST_REQUIRING_TABLES` as
+/// `RedirectsExecution`, so `osdk run` refuses an unapproved config that declares
+/// sub-projects -- for free, and for the same reason the table was gated to begin
+/// with.
+///
+/// Found by a test failing for what looked like the wrong reason: an earlier version
+/// of the test above ran a rooted task without trusting and was refused. The refusal
+/// was correct.
+#[test]
+fn declaring_task_roots_requires_the_same_approval_as_other_runner_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/api")).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("apps/api/osdk.toml"),
+        "[tasks.build]\nrun = \"echo built\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//apps/api:build"]);
+    assert!(
+        !output.status.success(),
+        "running from an untrusted config that declares roots must be refused: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("task_config"),
+        "the refusal must name the gated table: {stderr}"
+    );
+
+    // Approved, it runs.
+    let output = run_isolated_in(
+        root,
+        &project,
+        &["--yes", "trust", project.to_str().unwrap()],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//apps/api:build"]);
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// Only declared roots are read.
+///
+/// This guards the discovery boundary, not trust: a `run` line is an arbitrary
+/// command, so finding one that nobody declared means finding code to execute that
+/// nobody declared. Verified to fail by widening `expand_roots` to accept any
+/// directory name.
+#[test]
+fn tasks_are_never_discovered_outside_the_declared_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    for relative in ["apps/api", "vendor/thirdparty"] {
+        std::fs::create_dir_all(project.join(relative)).unwrap();
+        std::fs::write(
+            project.join(relative).join("osdk.toml"),
+            "[tasks.build]\nrun = \"echo built\"\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\"]\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["task", "list"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(listed.contains("//apps/api:build"), "{listed}");
+    assert!(
+        !listed.contains("vendor"),
+        "`vendor/thirdparty` was never declared and must not be discovered: {listed}"
+    );
+}
+
+/// A partial pattern matches only what it names.
+///
+/// Separate from the test above because that one could not fail: its `apps/*` has a
+/// bare `*` as its only wildcard segment, which is supposed to match every
+/// directory, so replacing the matcher with `true` produced the same result and the
+/// filter was never exercised. Mutation caught this -- the same way it caught the
+/// identical gap on the deps side.
+///
+/// `api-*` makes the matcher load-bearing: two siblings match, one does not.
+#[test]
+fn a_partial_root_pattern_matches_only_the_named_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    for relative in ["apps/api-v1", "apps/api-v2", "apps/web-v1"] {
+        std::fs::create_dir_all(project.join(relative)).unwrap();
+        std::fs::write(
+            project.join(relative).join("osdk.toml"),
+            "[tasks.build]\nrun = \"echo built\"\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/api-*\"]\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["task", "list"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    for expected in ["//apps/api-v1:build", "//apps/api-v2:build"] {
+        assert!(listed.contains(expected), "missing {expected}: {listed}");
+    }
+    assert!(
+        !listed.contains("web-v1"),
+        "`apps/web-v1` does not match `apps/api-*` and must not be discovered: {listed}"
+    );
+}
+
+/// A sub-project may not declare `[task_config]`.
+///
+/// This is the security-relevant assertion of this batch. `shell` decides which
+/// interpreter every task in scope runs under, so a sub-config setting it would make
+/// every later `osdk run` do something other than what the task text says, with
+/// nothing at the call site to reveal it. The root's `[task_config]` is gated by
+/// trust (`RedirectsExecution`) for exactly this reason; a sub-project's is refused
+/// outright instead, because gating it would mean one approval per package.
+///
+/// Refused rather than ignored: a setting that draws no complaint and has no effect
+/// leaves the author believing it worked.
+///
+/// Verified to fail by removing the check, which makes the sub-config load silently.
+#[test]
+fn a_sub_project_cannot_redirect_the_interpreter() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/api")).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\"]\n\n[tasks.hello]\nrun = \"echo root\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("apps/api/osdk.toml"),
+        "[task_config]\nshell = \"cmd /c echo HIJACKED &&\"\n\n[tasks.build]\nrun = \"echo built\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(root, &project, &["task", "list"]);
+    assert!(
+        !output.status.success(),
+        "a sub-project declaring [task_config] must be refused: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("task_config"),
+        "the error must name the offending table: {stderr}"
+    );
+    // The offending file, not the monorepo root: blaming the wrong file sends the
+    // reader to the wrong place.
+    assert!(
+        stderr.contains("api"),
+        "the error must name the sub-project's own config: {stderr}"
+    );
+}
+
+/// A rooted name that does not exist is an error, not an empty run.
+#[test]
+fn an_unknown_rooted_task_is_reported() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/api")).unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[task_config]\nroots = [\"apps/*\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("apps/api/osdk.toml"),
+        "[tasks.build]\nrun = \"echo built\"\n",
+    )
+    .unwrap();
+
+    // Right sub-project, wrong task name.
+    let output = run_isolated_in(root, &project, &["run", "//apps/api:nope"]);
+    assert!(
+        !output.status.success(),
+        "an unknown task must not succeed silently: {output:?}"
+    );
+
+    // Right task name, sub-project that was never declared.
+    let output = run_isolated_in(root, &project, &["run", "//vendor/x:build"]);
+    assert!(
+        !output.status.success(),
+        "an undeclared sub-project must not resolve: {output:?}"
+    );
+}
+
 /// Listing is tiered; materializing is not.
 ///
 /// Two halves, and the second is the one that matters. Defaulting `--list` to the

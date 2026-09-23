@@ -1167,6 +1167,87 @@ impl Config {
                     .apply_files(&crate::tasks::files::discover(base, &includes)?);
             }
             self.tasks.apply_from(file.tasks, base)?;
+
+            // Sub-projects named by `[task_config].roots`. After the layer's own
+            // `[task_config]`, because that is what states the roots.
+            if let Some(base) = base {
+                self.apply_rooted_tasks(base)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge the tasks of every sub-project `[task_config].roots` names.
+    ///
+    /// Each sub-project's tasks enter the shared set as `//<relative>:<name>`, the
+    /// same addressing `[deps].roots` uses for providers. Three properties are
+    /// deliberate:
+    ///
+    /// * **Only declared roots are read.** `deps::expand_roots` is shared rather than
+    ///   reimplemented, so "nothing outside the declared set is reached" stays one
+    ///   guarantee instead of two that can drift. The stake is higher here than for
+    ///   deps: a `run` line is an arbitrary command, so discovering one by accident
+    ///   is discovering code to execute by accident.
+    /// * **A sub-project without an `osdk.toml` is not an error.** A root pattern
+    ///   says where projects live, not that every one of them configures osdk.
+    /// * **A malformed one fails the whole load.** Same fail-closed rule as a broken
+    ///   dependency manifest inside a root: skipping it would mean running without
+    ///   tasks the project declared, and saying nothing about it.
+    #[cfg(feature = "install")]
+    fn apply_rooted_tasks(&mut self, config_root: &Path) -> Result<()> {
+        if self.tasks.config.roots.is_empty() {
+            return Ok(());
+        }
+        let roots = self.tasks.config.roots.clone();
+        for expanded in crate::deps::expand_roots(config_root, &roots, "[task_config].roots")? {
+            let Some(path) = PROJECT_CONFIG_NAMES
+                .iter()
+                .map(|name| expanded.directory.join(name))
+                .find(|candidate| candidate.is_file())
+            else {
+                continue;
+            };
+            // `read_config_file` rather than a second parser: it already attributes
+            // errors to the file that caused them, which matters most here -- a parse
+            // error blamed on the monorepo root would send the reader to the wrong
+            // file entirely.
+            let file = read_config_file(&path)?;
+
+            // A sub-project contributes task *definitions* and nothing else.
+            //
+            // `[task_config]` holds ambient defaults, and `shell` among them decides
+            // which interpreter every task in scope runs under -- a
+            // `shell = "evil --run"` makes every later `osdk run` do something other
+            // than what the task text says, with nothing at the call site to reveal
+            // it. That is why the root's `[task_config]` sits in
+            // `TRUST_REQUIRING_TABLES` as `RedirectsExecution`.
+            //
+            // The alternative was to route sub-configs through that same gate. It was
+            // rejected: trust is keyed on a file the user approved, so this would need
+            // one approval per sub-project -- a gate per package in a monorepo, for a
+            // field most projects never set. Removing the capability is both stricter
+            // and quieter than gating it.
+            //
+            // Rejected rather than ignored. A silently ineffective setting is worse
+            // than an error: the user wrote it, sees no complaint, and concludes it
+            // took effect.
+            if file.task_config.is_some() {
+                return Err(Error::config(format!(
+                    "{}: a sub-project cannot declare `[task_config]`; runner defaults \
+                     such as `shell` belong to the config that declares \
+                     `[task_config].roots`",
+                    path.display()
+                )));
+            }
+
+            let prefixed = file
+                .tasks
+                .into_iter()
+                .map(|(name, entry)| (format!("//{}:{name}", expanded.relative), entry))
+                .collect();
+            // The base is the sub-project's own directory, so its `file = "x.sh"`
+            // resolves against itself rather than against the monorepo root.
+            self.tasks.apply_from(prefixed, path.parent())?;
         }
         Ok(())
     }

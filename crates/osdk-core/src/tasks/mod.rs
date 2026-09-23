@@ -625,6 +625,20 @@ impl TaskDef {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TaskConfig {
+    /// Sub-project directories whose tasks join this set, e.g.
+    /// `roots = ["apps/*", "packages/*"]`.
+    ///
+    /// Nothing below the config root is discovered without an entry here. That is
+    /// the whole point: the set of sub-projects whose tasks osdk will run has to be
+    /// the set the project declared, not whatever a subtree walk turns up -- a
+    /// `run` line is an arbitrary command, so finding one by accident is finding
+    /// code to execute by accident.
+    ///
+    /// Shares `deps::expand_roots` with `[deps].roots`, so the guarantees are the
+    /// same ones and not a second implementation of them: segment-by-segment
+    /// descent, single-level `*` only, `..` rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
     /// Default interpreter for every task in scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
