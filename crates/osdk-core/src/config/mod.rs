@@ -860,9 +860,43 @@ pub struct DepsConfig {
     #[serde(default)]
     pub roots: Vec<String>,
     /// Provider entries, keyed by provider id (`npm`, `pnpm`, ...). An empty
-    /// table selects the built-in provider without making it automatic.
+    /// table is enough to select the built-in provider: `auto` defaults to true,
+    /// so declaring the provider is also opting into automatic materialization.
     #[serde(flatten)]
     pub providers: BTreeMap<String, DepsProviderEntry>,
+}
+
+// Gated with the type it implements: \DepsProviderEntry\ only exists behind
+// \install\, and an ungated impl makes the shim build fail to compile rather than
+// merely grow. Caught by building the shim separately for the size measurement.
+#[cfg(feature = "install")]
+impl Default for DepsProviderEntry {
+    /// Written out rather than derived, because `derive` would give
+    /// `auto: false` while the field's serde default is `true` -- and then a
+    /// programmatically built entry would not mean what a parsed one means. That
+    /// divergence is invisible until a test constructs an entry and concludes
+    /// something false about real config.
+    fn default() -> Self {
+        Self {
+            auto: default_true(),
+            sources: Vec::new(),
+            outputs: None,
+            run: None,
+            env: BTreeMap::new(),
+            dir: None,
+            depends: Vec::new(),
+            timeout: None,
+            installer: None,
+            index: None,
+            extra_index: None,
+            allow_build_from_source: false,
+        }
+    }
+}
+
+#[cfg(feature = "install")]
+fn default_true() -> bool {
+    true
 }
 
 /// One `[deps.<provider>]` entry.
@@ -872,11 +906,22 @@ pub struct DepsConfig {
 /// worst case -- the user would believe build scripts are enabled (or disabled)
 /// while the opposite holds.
 #[cfg(feature = "install")]
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DepsProviderEntry {
-    /// Run before `osdk run` / `osdk exec`. Default false: materializing a
-    /// dependency closure is too large a side effect to be implicit.
+    /// Materialize this provider's dependencies before a bare `install`, `run`
+    /// or `exec`.
+    ///
+    /// Defaults to **true**. The freshness check in front of it is a cache hit in
+    /// the common case and costs well under a millisecond for an ordinary lock
+    /// (measured: 0.16ms at 20KiB, 0.39ms at 200KiB, 2.06ms for a 2MiB monorepo
+    /// lock), so there is nothing meaningful to save by making the user opt in --
+    /// while a project whose dependencies are quietly out of date is exactly the
+    /// failure this prevents.
+    ///
+    /// Two ways out: `--no-deps` for a single command, `auto = false` to declare
+    /// it for a provider.
+    #[serde(default = "default_true")]
     pub auto: bool,
     /// Freshness inputs. Replaces the provider's built-in list rather than
     /// adding to it.

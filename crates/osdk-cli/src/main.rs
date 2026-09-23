@@ -162,6 +162,27 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
     })
 }
 
+/// Does this command imply bringing declared \[deps]\ up to date first?
+///
+/// Only a **bare** \install\, plus un\ and \exec\. Two exclusions are
+/// deliberate, and each has a test:
+///
+/// * \install\ **with operands** means "install this tool". Also rewriting the
+///   project's dependency tree would be a side effect nobody asked for -- the same
+///   reasoning that makes explicit operands skip lock replay.
+/// * un --dry-run\ exists in order to have no effects, so materializing for it
+///   would contradict the flag.
+fn wants_auto_deps(command: &Command) -> bool {
+    match command {
+        Command::Install { tools, no_deps, .. } => tools.is_empty() && !no_deps,
+        Command::Exec { no_deps, .. } => !no_deps,
+        Command::Run {
+            dry_run, no_deps, ..
+        } => !no_deps && !dry_run,
+        _ => false,
+    }
+}
+
 /// Whether a command must not read the project configuration at all.
 ///
 /// Trust management and the `config set`/`unset` escape hatch: letting an
@@ -237,16 +258,23 @@ fn bypasses_trust_check(command: &Command) -> bool {
 }
 
 async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>> {
+    if wants_auto_deps(&command) {
+        deps_cmd::materialize_auto(app).await?;
+    }
+
     let result = match command {
-        Command::Install { tools, opts, force } => commands::install(app, tools, opts, force).await,
+        Command::Install {
+            tools, opts, force, ..
+        } => commands::install(app, tools, opts, force).await,
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
-        Command::Exec { tools, command } => commands::exec_cmd(app, tools, command).await,
+        Command::Exec { tools, command, .. } => commands::exec_cmd(app, tools, command).await,
         Command::Run {
             task,
             dry_run,
             args,
+            ..
         } => return commands::run_task(app, task, dry_run, args),
         Command::Task { command } => commands::task(app, command),
         Command::Completions { shell } => commands::completions(shell),
@@ -293,6 +321,10 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
                     no_install_tools,
                     frozen,
                     verify,
+                    // Explicit \osdk deps\ covers every configured provider:
+                    // naming the command is itself the opt-in, so \uto\ does not
+                    // narrow it.
+                    auto_only: false,
                 },
             )
             .await
@@ -332,7 +364,7 @@ fn init_tracing(verbose: u8) {
 mod tests {
     #[cfg(unix)]
     use super::native_exit_code;
-    use super::{bypasses_trust_check, excludes_project_config};
+    use super::{bypasses_trust_check, excludes_project_config, wants_auto_deps};
     use crate::cli::{Command, ConfigCommand, TaskCommand};
 
     #[test]
@@ -486,6 +518,7 @@ mod tests {
                 task: "build".into(),
                 dry_run: false,
                 args: Vec::new(),
+                no_deps: false,
             },
             Command::Reshim,
             Command::Prune { dry_run: false },
@@ -506,6 +539,106 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
 
         assert_eq!(native_exit_code(std::process::ExitStatus::from_raw(9)), 137);
+    }
+
+    fn install(tools: Vec<String>, no_deps: bool) -> Command {
+        Command::Install {
+            tools,
+            opts: Vec::new(),
+            force: false,
+            no_deps,
+        }
+    }
+
+    /// A bare `install`, `run` and `exec` bring declared dependencies up to date.
+    ///
+    /// This is the default the user chose, so it is pinned rather than left to the
+    /// field: silently not materializing looks like a working command that simply
+    /// used a stale environment.
+    #[test]
+    fn bare_install_run_and_exec_materialize_declared_dependencies() {
+        assert!(wants_auto_deps(&install(Vec::new(), false)));
+        assert!(wants_auto_deps(&Command::Run {
+            task: "build".into(),
+            dry_run: false,
+            args: Vec::new(),
+            no_deps: false,
+        }));
+        assert!(wants_auto_deps(&Command::Exec {
+            tools: vec!["node@22".into()],
+            command: vec!["node".into()],
+            no_deps: false,
+        }));
+    }
+
+    /// Valve 1: `--no-deps` opts out for exactly one invocation.
+    #[test]
+    fn no_deps_suppresses_materialization_on_every_entry_point() {
+        assert!(!wants_auto_deps(&install(Vec::new(), true)));
+        assert!(!wants_auto_deps(&Command::Run {
+            task: "build".into(),
+            dry_run: false,
+            args: Vec::new(),
+            no_deps: true,
+        }));
+        assert!(!wants_auto_deps(&Command::Exec {
+            tools: vec!["node@22".into()],
+            command: vec!["node".into()],
+            no_deps: true,
+        }));
+    }
+
+    /// Valve 2: `osdk install <tool>` installs that tool and nothing else.
+    ///
+    /// Rewriting a project's dependency tree as a side effect of asking for one
+    /// tool would be the kind of surprise that makes people stop using the
+    /// feature. Same reasoning that makes explicit operands skip lock replay.
+    #[test]
+    fn an_explicit_operand_keeps_install_to_just_that_tool() {
+        assert!(!wants_auto_deps(&install(vec!["node@22".into()], false)));
+        assert!(!wants_auto_deps(&install(
+            vec!["node@22".into(), "python@3.12".into()],
+            false
+        )));
+    }
+
+    /// Valve 3 (the half of it that is structural): `--dry-run` has no effects.
+    ///
+    /// The other half -- that the auto path checks freshness and never runs the
+    /// deep `--verify` scan -- lives in `deps_cmd::materialize_auto`, which passes
+    /// `verify: false`.
+    #[test]
+    fn dry_run_makes_no_changes_including_dependencies() {
+        assert!(!wants_auto_deps(&Command::Run {
+            task: "build".into(),
+            dry_run: true,
+            args: Vec::new(),
+            no_deps: false,
+        }));
+    }
+
+    /// Commands unrelated to running code must not acquire dependencies.
+    ///
+    /// Stated as a property over a sample rather than one case, so adding a
+    /// command does not quietly join the auto path.
+    #[test]
+    fn unrelated_commands_never_materialize_dependencies() {
+        for command in [
+            Command::Trust {
+                path: None,
+                command: None,
+            },
+            Command::Untrust { path: None },
+            Command::Current { tool: None },
+            Command::Task {
+                command: TaskCommand::List { hidden: false },
+            },
+        ] {
+            assert!(
+                !wants_auto_deps(&command),
+                "{command:?} must not trigger dependency materialization"
+            );
+        }
     }
 
     /// Parsing and dispatch must not run on the process's initial stack.

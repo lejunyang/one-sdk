@@ -374,6 +374,45 @@ manifest 存在但不是常规文件、或解析失败，一律报错而不是�
 否则一个只是声明了 provider 的项目会连 `cargo --version` 都跑不了——
 `[syspkg]` 踩过的正是这个坑。
 
+## auto 前置：只判新鲜度，绝不深扫
+
+`auto` 默认 `true`，覆盖裸 `install` / `run` / `exec` 三个入口。这个默认值不是
+随手选的，它依赖一个实测前提：新鲜度判定本身足够便宜到可以放在每条命令前面。
+
+实测（.NET SHA256，blake3 更快，故为保守上界）：20KiB 的 lock 0.16ms，200KiB
+0.39ms，2MiB 的巨型 monorepo lock 2.06ms。命中时除这次哈希比对外不做任何事——
+不启动包管理器，不列目录，不读已装文件。
+
+由此划出一条硬线：**auto 前置永远不跑 `--verify`**。深度校验要逐条读包管理器的
+收据（Python 的 `dist-info/RECORD` 逐文件 size/sha256，Node 的
+`node_modules/.package-lock.json` 逐包 integrity），量级是秒。把秒级扫描放在每次
+`osdk run` 前面，结果不会是「更安全」，而是用户把整个机制关掉。所以
+`materialize_auto` 传 `verify: false`，`--verify` 保持显式。
+
+这条约束一开始没有测试守着。变异测试把 `verify: true` 注进 auto 路径，整个套件
+**全绿**——特性里最贵的那个承诺没有任何东西拦着它。为此把选项集从
+`materialize_auto` 里抽成 `auto_options()`：它从「藏在一次调用里的字面量」变成
+「一个测试能读的值」，四条断言（不 verify、不 force、只覆盖 auto、允许装工具）
+各自能被对应变异打红。
+
+三个安全阀集中在 `wants_auto_deps` 一处，而不是散在三个 match 臂里：
+
+| 情况 | 为什么不触发 |
+| --- | --- |
+| `osdk install node@22` | 带 operand 是「装这个工具」，顺手重写项目依赖树是没人要求的副作用；与「显式 operand 跳过 lock replay」同一条理由 |
+| `--no-deps` | 单次逃生口，三个入口都有 |
+| `run --dry-run` | 这个标志的全部意义就是没有副作用 |
+
+`auto = false` 只关自动触发，不影响显式 `osdk deps`——点名调用这个命令本身就是
+授权。反过来说，`auto` 也不是 trust 事项：触发时机变了，装的东西没变危险，所以
+分档仍按「默认不需要信任、自定义 index 归 `WeakensVerification`、放开源码构建归
+`ExecutesCode`」，自定义 provider 的 `run` 依旧一律 `ExecutesCode`。
+
+`DepsProviderEntry` 的 `Default` 是手写的而不是 derive 的，因为 derive 会给
+`auto: false`，而字段的 serde 默认是 `true`。两者不一致时，「程序构造出来的
+entry」与「从配置解析出来的 entry」含义不同，而这种分歧要等到某个测试构造了
+entry、并据此对真实配置得出错误结论时才会暴露。
+
 ## 新鲜度
 
 沿用 `tasks::freshness` 的形状：输入哈希写进

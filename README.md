@@ -335,6 +335,17 @@ osdk deps                   # materialize the manifest
 osdk deps --verify          # check the installed tree against its own receipts
 ```
 
+You don't have to call it every time. A bare `osdk install`, `osdk run <task>` or
+`osdk exec` compares manifest hashes first and materializes only when stale. On a
+hit that costs a fraction of a millisecond, starts no package manager, and does not
+run the deep `--verify` scan. Naming a tool (`osdk install node@22`) never triggers
+it; skip once with `--no-deps`, or turn it off per provider with `auto = false`:
+
+```bash
+osdk run dev                # materialize if stale, then run the task
+osdk run dev --no-deps      # not this time
+```
+
 osdk decides frozen-vs-not by looking for the native lockfile itself rather than
 delegating it: with a lockfile it installs frozen, without one it falls back to
 a plain install **and says so**. That matters because `yarn@1` and `bun` install

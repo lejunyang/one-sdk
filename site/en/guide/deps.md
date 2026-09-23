@@ -24,13 +24,39 @@ fetching models on its own. Declare a provider explicitly:
 [deps.pnpm]
 ```
 
-Then:
+One line is enough. From there, two ways to use it.
+
+**Explicitly:**
 
 ```bash
 osdk deps --list            # detected providers and their freshness
 osdk deps --dry-run         # print what would run, without running it
 osdk deps                   # materialize the manifest
 osdk deps --explain         # also explain each freshness decision
+```
+
+**Automatically (on by default):** a bare `osdk install`, `osdk run <task>` or
+`osdk exec` checks whether declared dependencies are still fresh and materializes
+them if not. So after cloning a project, `osdk run dev` just works.
+
+That check is cheap: it compares manifest hashes and **does not scan installed
+files**. Roughly 0.16ms for a 20KiB lock, 2ms for a 2MiB monorepo lock -- and on a
+hit it does nothing else, with no package manager started. Deep verification is a
+separate thing, done only when you ask for `osdk deps --verify`.
+
+Three cases never trigger it:
+
+```bash
+osdk install node@22        # a named tool installs that tool, nothing else
+osdk run build --no-deps    # skip once; install and exec take it too
+osdk run build --dry-run    # --dry-run is supposed to have no effects
+```
+
+To turn it off for a provider permanently:
+
+```toml
+[deps.pnpm]
+auto = false                # only affects automatic runs; `osdk deps` still does it
 ```
 
 With no `[deps]` section, `osdk deps` only tells you what it found:
@@ -299,7 +325,7 @@ spelling walks around is not a gate.
 disable = ["npm"]           # off here even if a broader layer enabled it
 
 [deps.pnpm]
-auto = true                 # allow materializing ahead of run/exec
+auto = true                 # the default: materialize ahead of install/run/exec
 sources = ["package.json"]  # files that decide freshness (replaces the default)
 outputs = ["node_modules"]  # missing means stale (replaces the default)
 dir = "apps/api"            # run in a subdirectory

@@ -22,13 +22,38 @@
 [deps.pnpm]
 ```
 
-然后：
+一行就够了。声明之后有两种用法。
+
+**显式调用：**
 
 ```bash
 osdk deps --list            # 探测到的 provider 与新鲜度
 osdk deps --dry-run         # 打印将执行的命令，不执行
 osdk deps                   # 兑现整份清单
 osdk deps --explain         # 附带说明每个新鲜度判定的理由
+```
+
+**自动兑现（默认开启）：** 裸跑 `osdk install`、`osdk run <任务>`、`osdk exec`
+之前，osdk 会先看声明的依赖是否还新鲜，过期才兑现。所以 clone 一个项目之后
+直接 `osdk run dev`，依赖已经就位。
+
+自动检查本身很便宜：它只比对清单哈希，**不扫描已装文件**。20KiB 的 lock 约
+0.16ms，2MiB 的巨型 monorepo lock 约 2ms——命中时除此之外不做任何事，不会启动
+包管理器。深度校验是另一回事，只在你显式要求 `osdk deps --verify` 时才做。
+
+三种情况不会自动触发：
+
+```bash
+osdk install node@22        # 带具体工具时只装那个工具，不碰项目依赖
+osdk run build --no-deps    # 单次跳过，install / exec 同样支持
+osdk run build --dry-run    # --dry-run 本就不该有副作用
+```
+
+要对某个 provider 永久关闭：
+
+```toml
+[deps.pnpm]
+auto = false                # 只影响自动触发；显式 `osdk deps` 照旧兑现它
 ```
 
 没有 `[deps]` 段时，`osdk deps` 只告诉你它找到了什么：
@@ -265,7 +290,7 @@ index = "https://registry.example.com/"
 disable = ["npm"]           # 即使上层启用了也在此关闭
 
 [deps.pnpm]
-auto = true                 # 允许在 run/exec 前自动兑现
+auto = true                 # 默认值：允许在 install / run / exec 前自动兑现
 sources = ["package.json"]  # 参与新鲜度判定的文件（替换默认值）
 outputs = ["node_modules"]  # 缺失即视为过期（替换默认值）
 dir = "apps/api"            # 在子目录里运行

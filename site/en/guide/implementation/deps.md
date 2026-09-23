@@ -453,6 +453,54 @@ A `deps` trust requirement **must not affect tool dispatch**. In
 `task_config`, and `models`. Otherwise a project that merely declares a provider
 could not run `cargo --version` -- exactly the `[syspkg]` accident.
 
+## The auto gate: freshness only, never a deep scan
+
+`auto` defaults to `true` and covers a bare `install`, `run` and `exec`. That
+default rests on a measured premise: the freshness check is cheap enough to sit in
+front of every command.
+
+Measured (via .NET SHA256, a conservative upper bound -- blake3 is faster): 0.16ms
+for a 20KiB lock, 0.39ms for 200KiB, 2.06ms for a 2MiB monorepo lock. On a hit,
+nothing else happens -- no package manager started, no directory listed, no
+installed file read.
+
+That draws a hard line: **the auto gate never runs `--verify`**. Deep verification
+reads the package manager's own receipts entry by entry (Python's
+`dist-info/RECORD` with per-file size and sha256, Node's
+`node_modules/.package-lock.json` with per-package integrity), which takes seconds.
+Putting a seconds-long scan in front of every `osdk run` does not produce "safer";
+it produces users who switch the mechanism off. So `materialize_auto` passes
+`verify: false` and `--verify` stays explicit.
+
+Nothing was holding that constraint at first. Mutating the auto path to
+`verify: true` left the whole suite **green** -- the most expensive promise in the
+feature had no guard at all. The fix was to lift the option set out of
+`materialize_auto` into `auto_options()`: it goes from "a literal buried inside one
+call" to "a value a test can read", and its four assertions (no verify, no force,
+auto-only, tools allowed) each fail under the matching mutation.
+
+The three valves live in one predicate, `wants_auto_deps`, rather than scattered
+across match arms:
+
+| case | why it does not trigger |
+| --- | --- |
+| `osdk install node@22` | an operand means "install this tool"; also rewriting the dependency tree is a side effect nobody asked for -- the same reasoning behind explicit operands skipping lock replay |
+| `--no-deps` | a single-invocation escape hatch, present on all three entry points |
+| `run --dry-run` | having no effects is the entire point of the flag |
+
+`auto = false` disables only automatic runs, not an explicit `osdk deps` -- naming
+the command is itself the opt-in. Conversely, `auto` is not a trust matter: the
+timing changed, not the danger of what gets installed, so the tiers stay as they
+were (no trust by default, custom index as `WeakensVerification`, opting into
+source builds as `ExecutesCode`), and a custom provider's `run` remains
+`ExecutesCode` unconditionally.
+
+`DepsProviderEntry`'s `Default` is written out rather than derived, because `derive`
+would give `auto: false` while the field's serde default is `true`. When those
+disagree, an entry built in code does not mean what a parsed one means -- and that
+divergence stays invisible until some test constructs an entry and draws a false
+conclusion about real config from it.
+
 ## Freshness
 
 Same shape as `tasks::freshness`: the input hash goes to

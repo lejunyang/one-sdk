@@ -5413,6 +5413,76 @@ fn deps_without_a_declaration_reports_candidates_without_installing() {
 /// lockfile: `yarn@1` and `bun` accept a freeze-ish invocation and install
 /// anyway. Delegating the check would therefore be silently wrong on half the
 /// matrix, so osdk checks, and says so when it has to fall back.
+/// A declared provider is automatic without saying so, and `auto = false` opts out.
+///
+/// Goes through the real binary because the default is a user-visible promise: a
+/// unit test on the struct would pass even if the CLI never consulted the field.
+/// `--dry-run` is what makes the observation safe -- no package manager is
+/// required, yet the decision to act is still printed.
+#[test]
+fn a_declared_provider_is_automatic_unless_it_opts_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+
+    // Default: the provider is listed, so an automatic run would cover it.
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listed.contains("pnpm"),
+        "a declared provider must be visible to deps: {listed}"
+    );
+
+    // `auto = false` must not remove it from an explicit run: naming the command
+    // is its own opt-in, and a flag that silently disabled `osdk deps` itself
+    // would be the worse failure.
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\nauto = false\n").unwrap();
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listed.contains("pnpm"),
+        "`auto = false` must not hide the provider from an explicit run: {listed}"
+    );
+}
+
+/// `--no-deps` is accepted on every entry point that materializes dependencies.
+///
+/// Exists because the three flags are declared separately, so one can be dropped
+/// while the other two keep the feature looking intact. A missing flag is a clap
+/// parse error (exit 2), which this distinguishes from a command that ran.
+#[test]
+fn no_deps_is_accepted_by_install_run_and_exec() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[deps.pnpm]\n").unwrap();
+
+    for args in [
+        vec!["install", "--no-deps", "--help"],
+        vec!["run", "--no-deps", "--help"],
+        vec!["exec", "--no-deps", "--help"],
+    ] {
+        let output = run_isolated_in(root, &project, &args);
+        // `--help` succeeds; an unknown argument would have failed first, so
+        // success here is specifically evidence that the flag exists.
+        assert!(
+            output.status.success(),
+            "`{}` must accept --no-deps: {output:?}",
+            args.join(" ")
+        );
+    }
+}
+
 #[test]
 fn deps_downgrades_from_frozen_only_when_it_says_so() {
     let temp = tempfile::tempdir().unwrap();

@@ -302,6 +302,16 @@ osdk deps                   # 兑现整份清单
 osdk deps --verify          # 按包管理器自己的收据校验已装环境
 ```
 
+声明之后不必每次手动调用：裸跑 `osdk install`、`osdk run <任务>`、`osdk exec`
+之前，osdk 会先比对清单哈希，过期才兑现。命中时只花零点几毫秒、不启动包管理器，
+也不做 `--verify` 那种深度扫描。带具体工具的 `osdk install node@22` 不会触发，
+单次跳过用 `--no-deps`，永久关闭某个 provider 用 `auto = false`：
+
+```bash
+osdk run dev                # 依赖过期就先兑现，再跑任务
+osdk run dev --no-deps      # 这一次不要
+```
+
 osdk 不把「是否冻结」交给包管理器判断，而是自己先看原生 lockfile 在不在：有就用
 冻结安装，没有就退回普通安装**并明确告知**。这一点是必要的——`yarn@1` 与 `bun` 在
 缺少 lockfile 时会照常安装而不报错，只靠传参会在半数组合上静默失效。需要严格时用

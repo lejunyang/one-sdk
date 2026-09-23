@@ -92,6 +92,16 @@ pub enum Command {
         /// copy over a tool that updated itself in place.
         #[arg(long)]
         force: bool,
+        /// Skip materializing declared `[deps]` for this command.
+        ///
+        /// A bare `osdk install` brings declared application dependencies up to
+        /// date first. This is the single-command way out; to turn it off for a
+        /// provider, set `auto = false` in `[deps.<provider>]`.
+        ///
+        /// No effect with explicit operands: `osdk install node` installs one tool
+        /// and never touches the project's dependencies.
+        #[arg(long = "no-deps")]
+        no_deps: bool,
     },
 
     /// Resolve project tools and write exact versions to osdk.lock.
@@ -123,6 +133,9 @@ pub enum Command {
         /// Tool request to expose, repeatable (e.g. --tool node@20).
         #[arg(short = 't', long = "tool", required = true)]
         tools: Vec<String>,
+        /// Skip materializing declared `[deps]` for this command.
+        #[arg(long = "no-deps")]
+        no_deps: bool,
         /// Command and arguments after `--`.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -139,6 +152,9 @@ pub enum Command {
         /// Print what would run instead of running it.
         #[arg(long)]
         dry_run: bool,
+        /// Skip materializing declared `[deps]` for this command.
+        #[arg(long = "no-deps")]
+        no_deps: bool,
         /// Arguments for the task, after `--`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

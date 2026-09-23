@@ -31,6 +31,10 @@ pub struct DepsOptions {
     pub no_install_tools: bool,
     pub frozen: bool,
     pub verify: bool,
+    /// Restrict the run to providers that opted into automatic materialization.
+    ///
+    /// Set only by [\materialize_auto\]. An explicit \osdk deps\ ignores \uto    /// entirely: asking for it by name is itself the opt-in.
+    pub auto_only: bool,
 }
 
 /// One provider ready to be reported on or run.
@@ -74,6 +78,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     };
     let enabled: Vec<&'static DepsProviderSchema> = configured
         .keys()
+        .filter(|id| !options.auto_only || configured.get(*id).is_some_and(|c| c.auto))
         .filter(|id| !selects(id, &options.skip))
         .filter(|id| options.providers.is_empty() || selects(id, &options.providers))
         .filter_map(|id| deps::provider_schema(id))
@@ -93,6 +98,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     let config_path = app.ctx.config.project_config_path.clone();
     for id in configured.keys() {
         if deps::provider_schema(id).is_some() {
+            continue;
+        }
+        if options.auto_only && !configured.get(id).is_some_and(|config| config.auto) {
             continue;
         }
         if options.skip.iter().any(|skip| skip == id) {
@@ -699,6 +707,72 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Materialize declared dependencies ahead of another command, when stale.
+///
+/// Called by a **bare** `install`, `run` and `exec`. Three properties are
+/// deliberate, each with a test that fails without it:
+///
+/// * **Only freshness is checked, never `--verify`.** The hash comparison is a
+///   cache hit in the common case and costs well under a millisecond (measured:
+///   0.16ms for a 20KiB lock, 2.06ms for a 2MiB monorepo lock). The deep receipt
+///   scan is seconds, and seconds in front of every `osdk run` would make users
+///   disable the whole mechanism. `--verify` stays explicit.
+/// * **A fresh provider costs nothing beyond that check.** No installer is
+///   spawned, so a warm project pays the millisecond and nothing else.
+/// * **Never for a command with explicit operands.** `osdk install node` asks for
+///   one tool; also rewriting the project's dependency tree would be a side
+///   effect nobody asked for. Same rule as explicit operands skipping lock replay.
+///
+/// Errors propagate: if dependencies were meant to be ready and could not be made
+/// ready, running the real command against a known-wrong environment is worse.
+pub async fn materialize_auto(app: &mut App) -> anyhow::Result<()> {
+    // Cheapest possible exit, before touching the filesystem: a project with no
+    // `[deps]` section pays nothing for this feature existing.
+    if app.ctx.config.deps.providers.is_empty() {
+        return Ok(());
+    }
+    if !configured_providers(app).values().any(|config| config.auto) {
+        return Ok(());
+    }
+
+    // Boxed on this edge, and the reason is worth keeping. `deps` transitively
+    // awaits the entire install pipeline, so giving it a *second* async caller
+    // makes the compiler inline a second copy of that future -- and the sum
+    // overflowed the main thread's 1MB stack. The symptom was not subtle but was
+    // deeply misleading: `osdk --version` died too, because a frame is reserved on
+    // entry regardless of which branch runs. Boxing `materialize_auto` itself does
+    // nothing here; the large part is what this function *contains*, not what
+    // contains it.
+    Box::pin(deps(app, auto_options())).await
+}
+
+/// The flag set an automatic run uses.
+///
+/// Split out from [`materialize_auto`] so the promises it makes are a value a test
+/// can inspect. Two of them are load-bearing and neither is observable from the
+/// outside once an install has run.
+fn auto_options() -> DepsOptions {
+    DepsOptions {
+        providers: Vec::new(),
+        list: false,
+        dry_run: false,
+        force: false,
+        explain: false,
+        skip: Vec::new(),
+        // Acquiring a package manager is part of making dependencies ready, so
+        // this path allows it. `--no-deps` opts out of the whole step rather than
+        // half of it.
+        no_install_tools: false,
+        frozen: false,
+        // Load-bearing: freshness only, never the deep receipt scan. Freshness is
+        // sub-millisecond; the scan is seconds, and seconds in front of every
+        // `osdk run` would get the whole mechanism switched off.
+        verify: false,
+        // An auto run covers only providers that asked for it.
+        auto_only: true,
+    }
+}
+
 /// Providers configured in `[deps]`, minus any the project disabled.
 fn configured_providers(app: &App) -> BTreeMap<String, ProviderConfig> {
     let deps_config = &app.ctx.config.deps;
@@ -873,4 +947,47 @@ fn report_undeclared(cwd: &Path) -> anyhow::Result<()> {
         .unwrap_or("pnpm");
     println!("  [deps.{suggestion}]");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_options;
+
+    /// The automatic path must never trigger the deep verification scan.
+    ///
+    /// This test exists because its absence was caught by mutation: setting
+    /// `verify: true` in the auto path left the entire suite green, which means the
+    /// most expensive promise in the feature had nothing holding it. `--verify`
+    /// stays an explicit request.
+    #[test]
+    fn the_auto_path_checks_freshness_and_never_scans_deeply() {
+        let options = auto_options();
+        assert!(
+            !options.verify,
+            "an automatic run must not pay for the receipt scan"
+        );
+        assert!(
+            !options.force,
+            "an automatic run must respect freshness rather than override it"
+        );
+    }
+
+    /// Automatic runs are narrowed to providers that opted in; explicit ones are not.
+    #[test]
+    fn only_the_auto_path_filters_on_the_auto_flag() {
+        assert!(
+            auto_options().auto_only,
+            "`auto = false` must exclude a provider from automatic runs"
+        );
+    }
+
+    /// An automatic run may acquire a missing package manager.
+    ///
+    /// Pinned because the opposite is a defensible-looking choice that would break
+    /// the feature's whole point: a project declaring pnpm would then fail on a
+    /// machine without it, in the one code path meant to make things just work.
+    #[test]
+    fn an_automatic_run_may_acquire_a_missing_package_manager() {
+        assert!(!auto_options().no_install_tools);
+    }
 }
