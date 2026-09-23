@@ -203,6 +203,32 @@ osdk deps --skip //apps/web:npm   # 排除一个
 osdk deps --list //apps/api:npm   # 只看它，无需 --all
 ```
 
+### 按位置筛选：`--filter`
+
+provider 名选的是**种类**，`--filter` 选的是**位置**：
+
+```bash
+osdk deps --filter 'apps/*'          # apps/ 下所有子项目，不论用哪个包管理器
+osdk deps --filter apps/api          # 就这一个
+osdk deps --filter 'apps/*' --filter 'packages/ui'   # 可重复，取并集
+osdk deps --list --filter 'apps/*'   # 筛选本身就意味着要展开，无需 --all
+```
+
+pattern 与 `roots` 是**同一套**写法（下一节），不是第二种方言：一个 `*` 不跨 `/`，
+`**` 不支持。同一份配置里两套通配语法是纯粹的认知成本——mise 声明用 `*`、寻址用
+`...`，pnpm 至今还留着一个 `legacyDirFiltering` 开关，就是因为在这件事上改过主意。
+
+**匹配不到任何子项目是错误，不是安静地成功**：
+
+```
+$ osdk deps --filter 'services/*'
+error: `--filter` matched no sub-project: services/*
+```
+
+这一点与 pnpm 相反（它的 `failIfNoMatch` 默认关）。理由和 `--verify` 拒绝把「没检查
+过的环境」报成干净一样：**「什么都没做」不能读起来像「做完了，没问题」**。CI 里一个
+筛到已改名目录的步骤应当失败，而不是什么都没构建却通过。
+
 ### 模式的匹配规则
 
 - 支持 `*`（任意字符）与 `?`（单个字符），**逐段匹配**。

@@ -33,6 +33,12 @@ pub struct DepsOptions {
     pub force: bool,
     pub explain: bool,
     pub skip: Vec<String>,
+    /// Path patterns restricting which sub-projects take part.
+    ///
+    /// Orthogonal to `providers`, which selects by kind: `--filter 'apps/*'` means
+    /// "every declared sub-project under apps/", whatever package manager each uses.
+    /// Empty means no restriction.
+    pub filter: Vec<String>,
     pub no_install_tools: bool,
     pub frozen: bool,
     pub verify: bool,
@@ -155,8 +161,30 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             {
                 continue;
             }
+            if !options.filter.is_empty()
+                && !options
+                    .filter
+                    .iter()
+                    .any(|pattern| deps::path_matches(pattern, &candidate.relative))
+            {
+                continue;
+            }
             rooted.push(candidate);
         }
+    }
+
+    // A `--filter` that matched nothing is an error, deliberately unlike pnpm, whose
+    // `failIfNoMatch` defaults to false. Same reasoning as `--verify` refusing to
+    // report a clean environment it could not examine: "nothing was done" must not
+    // read like "done, no problems". A CI step narrowing to a renamed directory
+    // should fail, not pass having built nothing.
+    if !options.filter.is_empty() && rooted.is_empty() {
+        return Err(anyhow!(
+            "`--filter` matched no sub-project: {}\n\
+             patterns are matched against paths relative to the config root, \
+             segment by segment, and only against sub-projects `[deps].roots` declares",
+            options.filter.join(", ")
+        ));
     }
 
     if detected.is_empty() && rooted.is_empty() {
@@ -769,6 +797,9 @@ fn auto_options() -> DepsOptions {
         // half of it.
         no_install_tools: false,
         frozen: false,
+        // An automatic run covers every declared root; narrowing it by path is an
+        // explicit request, never a default.
+        filter: Vec::new(),
         // Load-bearing: freshness only, never the deep receipt scan. Freshness is
         // sub-millisecond; the scan is seconds, and seconds in front of every
         // `osdk run` would get the whole mechanism switched off.
@@ -798,6 +829,12 @@ fn auto_options() -> DepsOptions {
 /// this codebase treats as worse than an error.
 fn wants_rooted(options: &DepsOptions) -> bool {
     if !options.list || options.list_all {
+        return true;
+    }
+    // A path filter only has sub-projects to match against, so asking for one is
+    // asking for the expansion. Without this, \--list --filter\ would match nothing
+    // and then fail-closed -- an error about the wrong thing entirely.
+    if !options.filter.is_empty() {
         return true;
     }
     options

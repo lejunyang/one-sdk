@@ -613,6 +613,43 @@ pub fn expand_roots(
 /// a full glob library: `**` is the one thing that would turn a declared root
 /// into an arbitrary crawl, which is exactly what this feature exists to prevent,
 /// so it is not supported rather than supported-and-restricted.
+/// Does a `/`-separated relative path match a `roots`-style pattern?
+///
+/// Built on `glob_matches` segment by segment rather than on a glob library, so a
+/// `--filter` pattern means exactly what the same text means in `[deps].roots`: one
+/// `*` never crosses a separator, `**` is not a thing, and the segment count has to
+/// line up. Two dialects in one configuration would be pure cognitive cost -- mise
+/// has `*` for declaring and `...` for addressing, and pnpm still carries a
+/// `legacyDirFiltering` switch from changing its mind about exactly this.
+///
+/// `relative` is compared as written: it comes from an id that was already
+/// `/`-normalized, not from the local filesystem.
+pub fn path_matches(pattern: &str, relative: &str) -> bool {
+    // `**` is refused rather than approximated. As a lone segment it would degenerate
+    // into `*` and match exactly one level, so `apps/**` would quietly mean `apps/*`:
+    // the user asked for recursion, got one level, and saw the command succeed.
+    // Callers surface this as "matched nothing", which fails closed.
+    if pattern.split('/').any(|segment| segment.contains("**")) {
+        return false;
+    }
+    let pattern_segments: Vec<&str> = pattern
+        .trim_start_matches("./")
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    let path_segments: Vec<&str> = relative
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if pattern_segments.len() != path_segments.len() {
+        return false;
+    }
+    pattern_segments
+        .iter()
+        .zip(&path_segments)
+        .all(|(pattern, segment)| glob_matches(pattern, segment))
+}
+
 fn glob_matches(pattern: &str, name: &str) -> bool {
     // A separator is never matchable here, by either side. Today every caller
     // passes a single directory name, so this changes nothing -- but a matcher

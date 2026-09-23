@@ -344,6 +344,17 @@ pub enum Command {
         /// Skip these providers (repeatable).
         #[arg(long = "skip", value_name = "PROVIDER")]
         skip: Vec<String>,
+        /// Restrict to sub-projects whose path matches (repeatable).
+        ///
+        /// Selects by **location**, where a provider name selects by kind:
+        /// `--filter 'apps/*'` is every declared sub-project under `apps/`,
+        /// whichever package manager each one uses.
+        ///
+        /// Patterns mean exactly what they mean in `[deps].roots` -- one `*` never
+        /// crosses a `/`, and `**` is not supported. Matching nothing is an error,
+        /// not a quiet success.
+        #[arg(long = "filter", short = 'F', value_name = "PATTERN")]
+        filter: Vec<String>,
         /// Fail instead of installing a missing package manager.
         ///
         /// For CI, where tools should come from an explicit `osdk install` so a

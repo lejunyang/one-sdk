@@ -6695,6 +6695,153 @@ fn an_unknown_rooted_task_is_reported() {
     );
 }
 
+/// `--filter` selects sub-projects by path, and matching nothing is an error.
+///
+/// Selecting by location is orthogonal to selecting by provider name: one asks
+/// "where", the other "what kind". Both halves are pinned here because the flag is
+/// only useful if it actually narrows -- a filter that silently covered everything
+/// would look like it worked.
+#[test]
+fn filter_selects_sub_projects_by_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    for relative in ["apps/api", "apps/web", "packages/ui"] {
+        std::fs::create_dir_all(project.join(relative)).unwrap();
+        std::fs::write(
+            project.join(relative).join("package.json"),
+            r#"{"name":"p","private":true}"#,
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\", \"packages/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    // Everything under apps/, regardless of package manager.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--filter", "apps/*"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    for expected in ["//apps/api:npm", "//apps/web:npm"] {
+        assert!(listed.contains(expected), "missing {expected}: {listed}");
+    }
+    assert!(
+        !listed.contains("packages/ui"),
+        "`apps/*` must not select packages/: {listed}"
+    );
+
+    // A filter names a location, so it does not need `--all` to see sub-projects.
+    assert!(
+        !listed.contains("no matching"),
+        "a filter implies the expansion it needs: {listed}"
+    );
+
+    // One exact path.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--filter", "apps/api"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(listed.contains("//apps/api:npm"), "{listed}");
+    assert!(
+        !listed.contains("//apps/web:npm"),
+        "an exact path selects one sub-project: {listed}"
+    );
+}
+
+/// A `--filter` that matches nothing fails.
+///
+/// Deliberately unlike pnpm, whose `failIfNoMatch` defaults to false. The reasoning
+/// is the one `--verify` uses for `checked == 0`: "nothing was done" must not read
+/// like "done, no problems". A CI step narrowed to a directory that has since been
+/// renamed should fail, not pass having built nothing.
+///
+/// Verified to fail by removing the check, which makes the run report success.
+#[test]
+fn a_filter_that_matches_nothing_is_an_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    std::fs::create_dir_all(project.join("apps/api")).unwrap();
+    std::fs::write(
+        project.join("apps/api/package.json"),
+        r#"{"name":"p","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    let output = run_isolated_in(
+        root,
+        &project,
+        &["deps", "--list", "--filter", "services/*"],
+    );
+    assert!(
+        !output.status.success(),
+        "a filter matching nothing must fail: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("services/*"),
+        "the error must quote the pattern that matched nothing: {stderr}"
+    );
+}
+
+/// `--filter` patterns mean what the same text means in `roots`.
+///
+/// One dialect, not two. mise has `*` for declaring and `...` for addressing, and
+/// pnpm still carries a `legacyDirFiltering` switch from changing its mind about
+/// exactly this -- both are pure cognitive cost.
+#[test]
+fn filter_patterns_use_the_same_dialect_as_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    for relative in ["apps/api", "apps/group/nested"] {
+        std::fs::create_dir_all(project.join(relative)).unwrap();
+        std::fs::write(
+            project.join(relative).join("package.json"),
+            r#"{"name":"p","private":true}"#,
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\", \"apps/*/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    // A single `*` does not cross a separator, so `apps/*` excludes the nested one.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--filter", "apps/*"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(listed.contains("//apps/api:npm"), "{listed}");
+    assert!(
+        !listed.contains("group/nested"),
+        "one `*` must not cross a `/`: {listed}"
+    );
+
+    // The depth has to be written out, exactly as in `roots`.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--filter", "apps/*/*"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(listed.contains("group/nested"), "{listed}");
+    assert!(
+        !listed.contains("//apps/api:npm"),
+        "`apps/*/*` matches only that depth: {listed}"
+    );
+
+    // `**` is not supported, so it matches nothing and therefore fails.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--filter", "apps/**"]);
+    assert!(
+        !output.status.success(),
+        "`**` must not quietly behave like a recursive glob: {output:?}"
+    );
+}
+
 /// Listing is tiered; materializing is not.
 ///
 /// Two halves, and the second is the one that matters. Defaulting `--list` to the

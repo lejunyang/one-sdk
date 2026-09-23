@@ -223,6 +223,35 @@ osdk deps --skip //apps/web:npm   # all but one
 osdk deps --list //apps/api:npm   # just this one, no --all needed
 ```
 
+### Selecting by location: `--filter`
+
+A provider name selects by **kind**; `--filter` selects by **location**:
+
+```bash
+osdk deps --filter 'apps/*'          # every sub-project under apps/, any manager
+osdk deps --filter apps/api          # just that one
+osdk deps --filter 'apps/*' --filter 'packages/ui'   # repeatable, union
+osdk deps --list --filter 'apps/*'   # filtering implies the expansion; no --all
+```
+
+Patterns are the **same** dialect as `roots` (next section), not a second one: one
+`*` never crosses a `/`, and `**` is unsupported. Two wildcard dialects in one
+configuration is pure cognitive cost -- mise has `*` for declaring and `...` for
+addressing, and pnpm still carries a `legacyDirFiltering` switch from changing its
+mind about exactly this.
+
+**Matching no sub-project is an error, not a quiet success:**
+
+```
+$ osdk deps --filter 'services/*'
+error: `--filter` matched no sub-project: services/*
+```
+
+The opposite of pnpm, whose `failIfNoMatch` defaults to off. Same reasoning as
+`--verify` refusing to report an environment it could not examine as clean:
+**"nothing was done" must not read like "done, no problems"**. A CI step narrowed to a
+directory that has since been renamed should fail, not pass having built nothing.
+
 ### How patterns match
 
 - `*` (any characters) and `?` (one character), matched **segment by segment**.
