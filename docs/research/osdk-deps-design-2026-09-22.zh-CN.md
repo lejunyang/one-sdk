@@ -389,6 +389,39 @@ mise 的内置默认是**普通安装命令**（`npm install`、`pip install -r`
 
 与 mise 一致：**不扫任意子目录**。两条途径——单个子项目用 `[deps.<p>] dir = "apps/api"`；多子项目用显式 roots 列表（形如 `[deps] roots = ["apps/*", "packages/*"]`），provider id 带 root 限定（`//apps/api:uv`）。理由与模型扫描「深度上限不能乱收窄、动态目录要显式登记」（AGENTS.md）同源：能被自动发现的集合必须是显式声明的。
 
+### 6.4 两条语法决策（已定，防劣化）
+
+这两条来自 2026-09-23 对 mise 与 pnpm `--filter` 的定向调研。写下来是因为**两者都容易在将来被"简化"掉，而简化的代价不在当时可见**。
+
+#### 一、`//` 前缀必需，不可省略
+
+`//apps/api:uv` 的 `//` 不是装饰。它承担一件具体的事：让**带 root 的 id** 与**普通 provider 名**在词法上可区分——`osdk deps uv` 与 `osdk deps //apps/api:uv` 靠它分派（`deps::parse_rooted_id`）。
+
+去掉 `//`、写成 `apps/api:uv` 也能工作，但那是**靠"provider 名恰好都不含 `:`"这个巧合**在工作，不是靠设计。AGENTS.md 记过同一形态的坑：`UV_INDEX_` 前缀匹配过宽，写窄会漏报（还有机会被发现），写宽会误判成一个看起来正常的降级行为。这里是它的镜像——判据依赖一个当前为真、但没有任何东西保证它继续为真的事实。
+
+另外 `//` 不是自造语法：Bazel 的 label 是 `//path/to/package:target`（<https://bazel.build/concepts/labels>），mise 的 monorepo task path 是 `//projects/frontend:build`（<https://mise.jdx.dev/tasks/monorepo.html>，更新 2026-09-15）。用户见到它不需要学。
+
+**顺带记一个反例**：mise 的 `:` 在它自己的语法里有三种含义——路径与任务的分隔符（`//a/b:task`）、当前 config_root 前缀（`:build`）、任务名分组层级（`test:unit:local`）。同一符号三义是它"语法奇怪"的核心来源。我们的 `:` 只有第一种含义，**保持这样**；将来若做任务分组，换别的分隔符。mise 另外还为迁移兼容保留了"两种写法都行"（`:build` 与 `build` 互为别名），我们没有迁移债务，不要一开始就引入别名。
+
+#### 二、寻址符与选择器是两层，并存而非互斥
+
+| | 寻址符 `//apps/api:uv` | 选择器（类 `--filter`） |
+| --- | --- | --- |
+| 基数 | 恰好一个 | 零到多个 |
+| 求值 | 静态、纯词法 | 动态，依赖包图或 git 状态 |
+| 幂等 | 同一字符串永远指同一对象 | 同一字符串在不同 commit 下结果不同 |
+| 找不到 | **必须报错**（用户明确指了一个东西） | 空集**可能是正常的** |
+
+**决定性差异在"找不到时该怎样"**，而这正是两者不能共用一个参数位的原因：塞在一起，osdk 无法决定该报错还是静默。pnpm 因此需要一个专门的 `--fail-if-no-match` 开关。
+
+生态先例支持并存：turbo 同时保留 `turbo run web#lint`（寻址）与 `--filter=@acme/ui...[HEAD^1]`（选择），没有用后者取代前者（<https://turborepo.dev/docs/reference/run>，更新 2026-08-30）。
+
+**若将来做 `--filter` / `--affected`，三条约束现在就定下**：
+
+1. **必须 fail-closed**：匹配不到任何 provider 要报错，不静默通过。pnpm 的 `failIfNoMatch` 默认 `false`（<https://pnpm.io/workspaces>，12.x）是历史包袱，不继承。理由与 `--verify` 的 `checked == 0` 必须报错完全同源——「什么都没做」不能读起来像「做完了没问题」。
+2. **名字用 `--filter` / `-F`**：turbo 官方称其选择器为 "pnpm-style"，这是事实标准，不自创。
+3. **glob 语义与 `roots` 保持同一套**（单层 `*`，不支持 `**`）。mise 的「声明用 `*`、寻址用 `...`」是同一份配置里两套通配语法，纯认知成本；pnpm 自己也踩过这个迁移（`legacyDirFiltering` 设置就是为回退旧的"子树"语义而存在，官方记了 issue #14101：按子树理解时递归命令会**什么都没选中**）。
+
 ---
 
 ## 7. installer 选择与「无工具自动安装」
