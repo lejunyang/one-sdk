@@ -24,6 +24,11 @@ use crate::App;
 pub struct DepsOptions {
     pub providers: Vec<String>,
     pub list: bool,
+    /// With `list`, widen it to every sub-project from `[deps].roots`.
+    ///
+    /// Only listing is tiered. Materializing always covers every declared root:
+    /// narrowing that by default would skip work without saying so.
+    pub list_all: bool,
     pub dry_run: bool,
     pub force: bool,
     pub explain: bool,
@@ -122,7 +127,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     // config root on its own, so this is the only way a monorepo's packages come
     // into scope -- and only the ones a declared pattern actually names.
     let mut rooted: Vec<deps::RootedProject> = Vec::new();
-    if !app.ctx.config.deps.roots.is_empty() {
+    if !app.ctx.config.deps.roots.is_empty() && wants_rooted(&options) {
         let Some(path) = &config_path else {
             return Err(anyhow!(
                 "`[deps].roots` needs a project config file to resolve against"
@@ -770,7 +775,35 @@ fn auto_options() -> DepsOptions {
         verify: false,
         // An auto run covers only providers that asked for it.
         auto_only: true,
+        // Not listing, so this is irrelevant; set explicitly rather than relying
+        // on a default that could change.
+        list_all: false,
     }
+}
+
+/// Should this run expand `[deps].roots` into its sub-projects?
+///
+/// Always, except for a plain `--list`. Listing is the one place where a large
+/// monorepo's full provider set is a readability problem rather than the answer,
+/// so it starts at the current config root and `--all` widens it.
+///
+/// Two cases deliberately keep expanding even under `--list`:
+///
+/// * `--list --all`, which is what the flag is for.
+/// * A rooted operand such as `//apps/api:uv`. Asking for a sub-project by name
+///   and being told it does not exist would be a lie about the configuration.
+///
+/// Materializing is never narrowed. `osdk deps` has always covered every declared
+/// root, and doing less by default would skip work silently -- the failure mode
+/// this codebase treats as worse than an error.
+fn wants_rooted(options: &DepsOptions) -> bool {
+    if !options.list || options.list_all {
+        return true;
+    }
+    options
+        .providers
+        .iter()
+        .any(|wanted| wanted.starts_with("//"))
 }
 
 /// Providers configured in `[deps]`, minus any the project disabled.

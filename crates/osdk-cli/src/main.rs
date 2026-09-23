@@ -301,6 +301,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Deps {
             providers,
             list,
+            all,
             dry_run,
             force,
             explain,
@@ -314,6 +315,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
                 deps_cmd::DepsOptions {
                     providers,
                     list,
+                    list_all: all,
                     dry_run,
                     force,
                     explain,

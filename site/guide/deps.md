@@ -172,10 +172,15 @@ roots = ["apps/*", "packages/*"]
 清单、就躺在旁边。可被自动处理的集合必须是你声明过的集合，否则 `osdk deps` 会给一个
 你根本没提到的包装依赖。
 
-每个子项目有自己的地址 `//<路径>:<provider>`：
+每个子项目有自己的地址 `//<路径>:<provider>`。列举时**默认只看当前这一层**，
+`--all` 才展开所有子项目：
 
 ```
-$ osdk deps --list --explain
+$ osdk deps --list
+npm                 stale  /repo
+
+$ osdk deps --list --all --explain
+npm                 stale  /repo
 //apps/api:npm      stale  /repo/apps/api
     from root: apps/*
 //apps/web:npm      stale  /repo/apps/web
@@ -184,12 +189,18 @@ $ osdk deps --list --explain
     from root: packages/*
 ```
 
-可以按地址只处理一个：
+分层只针对**列举**。几十个包的仓库全量列出来会把有用的部分顶出屏幕，而这是个可读性
+问题、不是正确性问题。**兑现从不分层**：裸 `osdk deps` 始终覆盖所有声明的 root，
+默认少做一部分等于悄悄跳过工作。
+
+按地址处理单个子项目也不需要 `--all`——点名要一个东西却被告知它不存在，那是对配置的
+误报：
 
 ```bash
 osdk deps //apps/api:npm          # 只这个子项目
 osdk deps npm                     # 所有 npm 子项目
 osdk deps --skip //apps/web:npm   # 排除一个
+osdk deps --list //apps/api:npm   # 只看它，无需 --all
 ```
 
 ### 模式的匹配规则

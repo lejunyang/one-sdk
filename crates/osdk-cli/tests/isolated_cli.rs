@@ -6306,6 +6306,101 @@ fn depends_orders_providers_and_refuses_a_cycle() {
 /// Each result is addressable as `//<path>:<provider>` and reports which pattern
 /// produced it, because a repo with four `npm` packages would otherwise print
 /// `npm` four times with no way to tell the lines apart.
+/// Listing is tiered; materializing is not.
+///
+/// Two halves, and the second is the one that matters. Defaulting `--list` to the
+/// current config root is a readability choice -- a large monorepo's full provider
+/// set scrolls the useful part away. Applying the same narrowing to materializing
+/// would be a correctness bug: `osdk deps` has always covered every declared root,
+/// and doing less without saying so skips work silently.
+///
+/// Verified to fail by making `wants_rooted` return true unconditionally (the
+/// default-only assertions go red) and by making it return false for every listing
+/// (the `--all` and rooted-operand assertions go red).
+#[test]
+fn listing_is_tiered_but_materializing_is_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    for relative in ["apps/api", "packages/ui"] {
+        let directory = project.join(relative);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("package.json"),
+            r#"{"name":"p","private":true}"#,
+        )
+        .unwrap();
+    }
+    // A manifest at the config root too, so the default listing has something of
+    // its own to show. Without it, "the default lists less" could not be told apart
+    // from "the default lists nothing".
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"root","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\", \"packages/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    // Default: this config root only.
+    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listed.contains("npm"),
+        "the current config root's provider must still be listed: {listed}"
+    );
+    assert!(
+        !listed.contains("//apps/api:npm") && !listed.contains("//packages/ui:npm"),
+        "a plain --list must not expand roots: {listed}"
+    );
+
+    // `--all` widens it.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--all"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    for expected in ["//apps/api:npm", "//packages/ui:npm"] {
+        assert!(
+            listed.contains(expected),
+            "--all must list {expected}: {listed}"
+        );
+    }
+
+    // A rooted operand keeps working without `--all`: asking for a sub-project by
+    // name and being told it does not exist would misreport the configuration.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "//apps/api:npm"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listed.contains("//apps/api:npm"),
+        "a rooted operand must resolve without --all: {listed}"
+    );
+
+    // Materializing is not tiered. `--dry-run` prints the plan for every provider
+    // it would act on, so the sub-projects must be there without `--all`.
+    let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    let planned = String::from_utf8_lossy(&output.stdout);
+    // --dry-run names the directory it would run in rather than the rooted id, so
+    // the sub-project paths are what prove the expansion happened. Matching on the
+    // id here would fail for a reason unrelated to the property under test.
+    for expected in ["apps", "ui"] {
+        assert!(
+            planned.contains(expected),
+            "materializing must cover the {expected} sub-project without --all: {planned}"
+        );
+    }
+    // Three providers, not one: the config root plus both sub-projects.
+    assert_eq!(
+        planned.matches("would run in").count(),
+        3,
+        "every declared root must be planned without --all: {planned}"
+    );
+}
+
 #[test]
 fn monorepo_roots_discover_only_what_was_declared() {
     let temp = tempfile::tempdir().unwrap();
@@ -6326,7 +6421,9 @@ fn monorepo_roots_discover_only_what_was_declared() {
     )
     .unwrap();
 
-    let output = run_isolated_in(root, &project, &["deps", "--list", "--explain"]);
+    // `--all` because listing now starts at the current config root; the tiering
+    // itself is covered by `listing_is_tiered_but_materializing_is_not`.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--all", "--explain"]);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -6354,7 +6451,7 @@ fn monorepo_roots_discover_only_what_was_declared() {
     // Removing the declaration removes the sub-projects: nothing is remembered
     // from a previous run, and nothing is found without a pattern.
     std::fs::write(project.join("osdk.toml"), "[deps.npm]\n").unwrap();
-    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--all"]);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -6382,15 +6479,17 @@ fn a_broken_manifest_inside_a_root_fails_closed() {
     )
     .unwrap();
 
+    // \--all\ because the broken sibling is only reached once roots expand; a
+    // plain \--list\ stays at the config root and would never see it.
     // Control: the good one alone is fine.
-    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--all"]);
     assert!(output.status.success(), "{output:?}");
 
     // A sibling whose manifest will not parse takes the whole run down.
     let bad = project.join("apps/web");
     std::fs::create_dir_all(&bad).unwrap();
     std::fs::write(bad.join("package.json"), "{ not json").unwrap();
-    let output = run_isolated_in(root, &project, &["deps", "--list"]);
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--all"]);
     assert!(
         !output.status.success(),
         "a broken sub-project must not be silently skipped: {output:?}"

@@ -101,6 +101,51 @@ scripts by default (which is why pnpm 12 reports `ERR_PNPM_IGNORED_BUILDS` and
 suggests `pnpm approve-builds`). osdk still passes `--ignore-scripts` explicitly
 rather than relying on one version's default.
 
+## Listing is tiered, materializing is not
+
+`--list` shows the current config root; `--all` expands `[deps].roots`. The asymmetry
+is deliberate, and it cannot be reversed.
+
+Listing is a **readability** problem: in a repository with dozens of packages, the
+full set scrolls "what is the state of the layer I am in" off the screen. mise makes
+the same trade with `mise tasks` versus `mise tasks --all` (the former covers the
+current config_root and its parents only), which is worth noting as corroboration.
+
+Materializing is a **correctness** problem: a bare `osdk deps` has covered every
+declared root since day one. Doing less by default presents as "the command
+succeeded but one sub-project's dependencies were never installed" -- no error, no
+warning, just some later run failing inside an incomplete environment. That is the
+failure mode this codebase keeps rejecting: worse than an error, because it looks
+like success.
+
+So `wants_rooted` defaults to expanding, and only a plain `--list` does not. Two
+cases still expand:
+
+- `--list --all`, which is what the flag is for.
+- A listing with a rooted operand (`//apps/api:uv`). Asking for a sub-project by
+  name and being told it does not exist misreports the configuration; it is not a
+  terser output.
+
+The test was **mutated in both directions**: making `wants_rooted` always true turns
+the "a plain `--list` must not expand" assertion red, and making it false for every
+listing turns the `--all` and rooted-operand assertions red. Testing one direction
+only would let an implementation that never expands pass the first half.
+
+One more thing the test recorded: `--dry-run` prints the **directory path**, not the
+rooted id, so proving "materializing covered the sub-projects" means matching paths
+and counting `would run in` occurrences. The first version matched
+`//apps/api:npm` and failed for a reason unrelated to the property under test --
+output format, not coverage.
+
+The tiering has one side effect worth stating plainly: **a plain `--list` no longer
+expands roots, so a broken manifest in a sub-project goes unnoticed during a bare
+listing**. Fail-closed itself did not loosen -- materializing, `--list --all`, and
+naming a rooted id all still error out on it. But "just list it and see" no longer
+doubles as a whole-repository check; ask for `--all` when that is what you want. An
+existing test caught this during wiring:
+`a_broken_manifest_inside_a_root_fails_closed` reaches the broken sibling only
+through `--list`, so it now has to request expansion explicitly.
+
 ## Monorepo roots: matched segment by segment, not scan-then-filter
 
 `discover_in_roots` descends one pattern segment at a time: a literal segment is a

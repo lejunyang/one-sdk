@@ -319,8 +319,19 @@ pub enum Command {
         /// Limit to these providers (repeatable). Default: every enabled one.
         providers: Vec<String>,
         /// List detected providers and their freshness without installing.
+        ///
+        /// Lists this config root only. In a monorepo, add `--all` to include the
+        /// sub-projects `[deps].roots` expands to.
         #[arg(long)]
         list: bool,
+        /// With `--list`, also list every sub-project from `[deps].roots`.
+        ///
+        /// Listing defaults to the current config root because a large monorepo's
+        /// full provider set scrolls the useful part off screen. Materializing is
+        /// unaffected: a bare `osdk deps` has always covered every declared root,
+        /// and narrowing that would silently skip work.
+        #[arg(long)]
+        all: bool,
         /// Report what would run, and why, without running it.
         #[arg(long = "dry-run")]
         dry_run: bool,

@@ -191,10 +191,15 @@ found** -- even with a perfectly good manifest sitting right beside the others.
 What can be acted on automatically has to be what was declared; otherwise
 `osdk deps` installs dependencies for a package you never mentioned.
 
-Each sub-project gets its own address, `//<path>:<provider>`:
+Each sub-project gets its own address, `//<path>:<provider>`. Listing shows **this
+config root only** by default; `--all` expands the sub-projects:
 
 ```
-$ osdk deps --list --explain
+$ osdk deps --list
+npm                 stale  /repo
+
+$ osdk deps --list --all --explain
+npm                 stale  /repo
 //apps/api:npm      stale  /repo/apps/api
     from root: apps/*
 //apps/web:npm      stale  /repo/apps/web
@@ -203,12 +208,19 @@ $ osdk deps --list --explain
     from root: packages/*
 ```
 
-Which makes one addressable on its own:
+Only **listing** is tiered. A repository with dozens of packages scrolls the useful
+part off screen, and that is a readability problem rather than a correctness one.
+**Materializing is never tiered**: a bare `osdk deps` always covers every declared
+root, and doing less by default would silently skip work.
+
+Addressing one sub-project does not need `--all` either -- asking for something by
+name and being told it does not exist would misreport the configuration:
 
 ```bash
 osdk deps //apps/api:npm          # just this sub-project
 osdk deps npm                     # every npm sub-project
 osdk deps --skip //apps/web:npm   # all but one
+osdk deps --list //apps/api:npm   # just this one, no --all needed
 ```
 
 ### How patterns match
