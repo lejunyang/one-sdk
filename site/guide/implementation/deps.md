@@ -229,9 +229,9 @@ AGENTS.md 说的「断言与被测机制脱离」——保留它们只会让 `--
 环境，比没有这层更糟。
 
 留下的是包管理器**自己写的收据**：Python 的 `dist-info/RECORD`（实测 idna 3.10 的
-15 行里 14 行带 size 与 sha256）、Node 的 `node_modules/.package-lock.json`
-（逐包 version 与 integrity）。osdk 读它们而不另造第二份依赖图——与「原生 lock 才是
-真相」是同一个判断。
+15 行里 14 行带 size 与 sha256）、npm 的 `node_modules/.package-lock.json`
+（逐包 version 与 integrity）、pnpm 的 store 索引（逐文件 size 与 sha512，见下）。
+osdk 读它们而不另造第二份依赖图——与「原生 lock 才是真相」是同一个判断。
 
 比较 size 而不是 sha256，是因为它抓到的是同一类篡改（实测追加一行让 13239 变
 13251）而成本低得多；一个因为慢而没人跑的校验保护不了任何东西。sha256 仍在 RECORD
@@ -247,6 +247,45 @@ venv 都从坏缓存复制。换全新 `UV_CACHE_DIR` 后归零。
 「干净环境也报错」当成判据不可靠而放弃 L2，结论会完全反过来。产品上，它说明
 **`uv pip sync` 不校验已装文件的内容**（实测被改过的 `core.py` 在 sync 之后仍带着
 篡改），所以「重跑一遍就好」并不成立，`--verify` 失败时给出的建议是清缓存 + 重装。
+
+### pnpm：收据在 store 里，地址从 lock 算出来
+
+pnpm 的形状**没有一处像 npm**，所以它的读法是实测出来的而不是照 npm 推的
+（pnpm 9.15.1）：
+
+- **没有** `node_modules/.package-lock.json`。
+- `node_modules/.modules.yaml` 存在，但只有 `storeDir` / `virtualStoreDir` /
+  `nodeLinker` 这类布局信息，**不含任何逐包数据**——它是定位器，不是收据。
+- `node_modules/<pkg>` 是 junction（Windows）或 symlink，指向
+  `node_modules/.pnpm/<name>@<version>/node_modules/<name>`，其中的文件再硬链接进
+  内容寻址 store。
+- `pnpm-lock.yaml` 记的 integrity 是**tarball** 的摘要，无法用解包后的目录重算。
+
+差点由此得出「pnpm 没有可离线核对的收据」。真正的收据在 store 里：
+`files/<xx>/<...>-index.json`，带**逐文件** `integrity`(sha512) + `size` + `mode`。
+实测 ms@2.1.3 的 4 个文件，每条 sha512 都与磁盘字节完全一致。
+
+关键是索引**不需要搜索**：tarball integrity 的 base64 解出来转成十六进制，第一个
+字节就是子目录名、其余是文件名主干。实测
+`sha512-6Flzub...` 精确映射到 `files/e8/5973b9...-index.json`。这条映射单独有一个
+测试钉住，用的就是实测出的那个真实路径——否则把前缀从 1 字节改成 2 字节这种改动
+不会被任何测试发现。
+
+由此得到一个必须如实说明的限制：**校验链需要两半**——项目里的 lockfile 提供地址，
+本机的 store 提供摘要。从别的机器 clone、或 store 被 prune 过时，只能报
+`ReceiptMissing`。
+
+反过来，pnpm 的收据比 npm 的**更强**：npm 只到包粒度，所以「改动后长度不变」这类
+篡改它抓不到；pnpm 逐文件有摘要，翻转一个字节也会被报出来。这一条单独有测试，因为
+若只测「改内容能被抓到」，尺寸检查就足以让它通过，摘要比较可以被删掉而无人察觉。
+
+dispatch 顺序也是承重的：先看 `.pnpm` 目录再回落 npm。一次 npm 安装之后再用 pnpm
+装，旧的 `.package-lock.json` 会留在原地；读它就是在校验一份**已经不是当前安装**的
+树，而且是静默地校验。
+
+yarn 维持不支持：Berry 的 PnP 把依赖放进单个 zip 支撑的存储，没有可逐包比对的目录
+树。加一个不管环境怎样都会通过的判据，比承认不支持更糟——这一节开头淘汰
+`pyvenv.cfg` 判据用的就是同一条理由。
 
 ### 「无法检查」不等于「检查通过」
 

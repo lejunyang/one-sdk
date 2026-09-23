@@ -272,10 +272,11 @@ detached from the mechanism under test" -- keeping them would let `--verify` pas
 an environment that is already broken, which is worse than having no layer at all.
 
 What survived is the receipt each package manager writes **itself**: Python's
-`dist-info/RECORD` (measured: 14 of idna 3.10's 15 lines carry size and sha256)
-and Node's `node_modules/.package-lock.json` (per-package version and integrity).
-osdk reads those instead of keeping a second dependency graph -- the same
-judgement as "the native lock is the source of truth".
+`dist-info/RECORD` (measured: 14 of idna 3.10's 15 lines carry size and sha256),
+npm's `node_modules/.package-lock.json` (per-package version and integrity), and
+pnpm's store index (per-file size and sha512 -- see below). osdk reads those
+instead of keeping a second dependency graph -- the same judgement as "the native
+lock is the source of truth".
 
 Size is compared rather than sha256 because it catches the same class of tampering
 (measured: appending one line took 13239 to 13251) at a fraction of the cost, and
@@ -297,6 +298,53 @@ product behaviour, it means **`uv pip sync` does not verify the contents of
 already-installed files** (measured: the modified `core.py` still carried its edit
 after a sync), so "just run it again" is not a fix. That is why a `--verify`
 failure recommends clearing the cache and reinstalling.
+
+### pnpm: the receipt is in the store, and its address comes from the lock
+
+**Nothing** about pnpm's layout resembles npm's, so how to read it was measured
+rather than inferred (pnpm 9.15.1):
+
+- There is **no** `node_modules/.package-lock.json`.
+- `node_modules/.modules.yaml` exists but carries layout metadata only --
+  `storeDir`, `virtualStoreDir`, `nodeLinker` -- and **nothing per package**. It is
+  a locator, not a receipt.
+- `node_modules/<pkg>` is a junction (Windows) or symlink into
+  `node_modules/.pnpm/<name>@<version>/node_modules/<name>`, whose files are in
+  turn hardlinks into the content-addressable store.
+- The integrity in `pnpm-lock.yaml` is the **tarball** digest, which cannot be
+  recomputed from an unpacked tree.
+
+That very nearly produced the conclusion that pnpm has nothing checkable offline.
+The real receipt is in the store: `files/<xx>/<...>-index.json`, carrying
+**per-file** `integrity` (sha512), `size` and `mode`. Measured on ms@2.1.3's four
+files, every sha512 reproduces the bytes on disk exactly.
+
+The key point is that the index does **not** have to be searched for: base64-decode
+the tarball integrity, render it as hex, and the first byte is the subdirectory
+while the rest is the filename stem. Measured: `sha512-6Flzub...` maps exactly onto
+`files/e8/5973b9...-index.json`. That mapping has a test of its own, using the real
+path pnpm wrote -- otherwise changing the prefix from one byte to two would go
+unnoticed by every test.
+
+This brings a limitation worth stating plainly: **verification needs both halves**
+-- the project's lockfile for the addresses, this machine's store for the digests.
+For a checkout from another machine, or after a prune, the only honest answer is
+`ReceiptMissing`.
+
+In exchange, pnpm's receipt is **stronger** than npm's. npm only goes down to the
+package, so an edit that preserves a file's length is invisible to it; pnpm has a
+digest per file, so flipping one byte is reported. That has its own test, because a
+test that only checks "changed contents are caught" would pass on the size
+comparison alone, leaving the digest check deletable without anything noticing.
+
+Dispatch order is load-bearing too: look for `.pnpm` first, fall back to npm. An
+npm install followed by a pnpm one leaves the old `.package-lock.json` in place, and
+reading it would verify a tree that is **no longer the one installed** -- silently.
+
+yarn stays unsupported: Berry's PnP keeps dependencies in a single zip-backed store
+with no per-package tree to compare against. Adding a predicate that would pass
+whatever the environment looked like is worse than admitting the gap -- the same
+reasoning that retired the `pyvenv.cfg` candidates at the top of this section.
 
 ### "Could not check" is not "checked and fine"
 

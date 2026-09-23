@@ -20,10 +20,37 @@
 //!
 //! * Python: `dist-info/RECORD`, which carries a per-file size and sha256
 //!   (measured: 14 of idna 3.10's 15 lines).
-//! * Node: `node_modules/.package-lock.json`, which carries a per-package
+//! * Node (npm): `node_modules/.package-lock.json`, which carries a per-package
 //!   `version` and `integrity`.
+//! * Node (pnpm): the store's `*-index.json`, which carries a per-file
+//!   `integrity` (sha512), `size` and `mode` -- finer than npm's per-package
+//!   record, and on par with Python's RECORD.
 //!
 //! osdk reads those rather than keeping a second dependency graph of its own.
+//!
+//! pnpm's shape had to be measured rather than assumed, because none of it looks
+//! like npm's (measured with pnpm 9.15.1):
+//!
+//! * There is **no** `node_modules/.package-lock.json`.
+//! * `node_modules/.modules.yaml` exists but holds layout metadata only --
+//!   `storeDir`, `virtualStoreDir`, `nodeLinker` -- and nothing per package. It
+//!   is a locator, not a receipt.
+//! * `node_modules/<pkg>` is a junction (Windows) or symlink into
+//!   `node_modules/.pnpm/<name>@<version>/node_modules/<name>`, whose files are
+//!   hardlinks into the content-addressable store.
+//! * `pnpm-lock.yaml` carries each package's tarball `integrity`. That digest is
+//!   of the *tarball*, so it cannot be recomputed from an unpacked tree -- but it
+//!   doubles as the store address: hex-decode the base64 and the first byte is
+//!   the subdirectory, the rest the filename stem. Measured: ms@2.1.3's
+//!   `sha512-6Flzub...` maps exactly onto
+//!   `files/e8/5973b9...-index.json`.
+//! * That index file is the receipt. Measured on ms@2.1.3: 4 files, each with a
+//!   size and an sha512 that reproduces the bytes on disk exactly.
+//!
+//! The chain therefore needs both halves -- the project's lockfile for the
+//! addresses and the store for the digests. When the store is elsewhere (a
+//! checkout from another machine, a pruned store) that is reported as
+//! `ReceiptMissing`, never as a clean report.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -94,14 +121,272 @@ impl Report {
     }
 }
 
-/// Verify a Node environment against `node_modules/.package-lock.json`.
+/// Verify a Node environment against whichever receipt the installer left.
+///
+/// npm and pnpm write completely different things, so the layout on disk decides
+/// which reader runs. yarn is not covered: Berry's PnP keeps dependencies in a
+/// single zip-backed store with no per-package tree to compare against, so it
+/// stays `ReceiptMissing` rather than getting a predicate that would pass
+/// regardless.
+///
+/// "Could not check" must never look like "checked and fine", which is why every
+/// unreadable case below produces `ReceiptMissing` instead of an empty report.
+pub fn verify_node(project_root: &Path) -> Result<Report> {
+    // pnpm first, because a project can contain both a stale `.package-lock.json`
+    // from an earlier npm install and a live `.pnpm` tree. The virtual store is
+    // what the current install actually uses.
+    if project_root.join("node_modules").join(".pnpm").is_dir() {
+        return verify_pnpm(project_root);
+    }
+    verify_npm(project_root)
+}
+
+/// Verify a pnpm environment against the store's per-file index.
+///
+/// Walks `node_modules/.pnpm/<name>@<version>/node_modules/<name>`, which is the
+/// real directory the top-level links point at, and compares every file the store
+/// recorded. See the module docs for the measured layout this relies on.
+fn verify_pnpm(project_root: &Path) -> Result<Report> {
+    let Some(store) = pnpm_store_dir(project_root)? else {
+        return Ok(receipt_missing("node_modules/.modules.yaml"));
+    };
+    let lock = project_root.join("pnpm-lock.yaml");
+    let lock_text = match std::fs::read_to_string(&lock) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(receipt_missing("pnpm-lock.yaml"))
+        }
+        Err(error) => return Err(Error::io(&lock, error)),
+    };
+    let integrities = pnpm_lock_integrities(&lock_text);
+    if integrities.is_empty() {
+        return Ok(receipt_missing("pnpm-lock.yaml"));
+    }
+
+    let virtual_store = project_root.join("node_modules").join(".pnpm");
+    let mut report = Report::default();
+    let mut any_index_read = false;
+
+    for entry in std::fs::read_dir(&virtual_store)
+        .map_err(|error| Error::io(&virtual_store, error))?
+        .flatten()
+    {
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        // `node_modules` and `lock.yaml` sit alongside the package directories.
+        if dir_name == "node_modules" || !entry.path().is_dir() {
+            continue;
+        }
+        let Some(integrity) = integrities.get(&dir_name) else {
+            // A directory with no lockfile entry cannot be addressed in the
+            // store. Skipping it silently would hide a real inconsistency, but
+            // reporting it as tampering would be wrong too -- peer-dependency
+            // suffixes legitimately produce names the lock spells differently.
+            continue;
+        };
+        let Some(index_path) = pnpm_index_path(&store, integrity) else {
+            continue;
+        };
+        let Ok(index_text) = std::fs::read_to_string(&index_path) else {
+            // The store was pruned, or belongs to another machine.
+            continue;
+        };
+        let index: serde_json::Value = serde_json::from_str(&index_text)
+            .map_err(|error| Error::config(format!("{}: {error}", index_path.display())))?;
+        let Some(files) = index.get("files").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        any_index_read = true;
+
+        let package = index
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&dir_name);
+        let root = virtual_store
+            .join(&dir_name)
+            .join("node_modules")
+            .join(to_native(package));
+
+        for (relative, meta) in files {
+            report.checked += 1;
+            // `relative` comes out of the store index, written by pnpm on some
+            // machine, so it is a foreign path string: always `/`-separated and
+            // converted rather than parsed with `Path`.
+            let path = root.join(to_native(relative));
+            let shown = normalize(&format!(
+                "node_modules/.pnpm/{dir_name}/node_modules/{package}/{relative}"
+            ));
+            let recorded_size = meta.get("size").and_then(serde_json::Value::as_u64);
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    report.findings.push(Finding {
+                        path: shown,
+                        kind: FindingKind::Missing,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(Error::io(&path, error)),
+            };
+            if let Some(recorded) = recorded_size {
+                if recorded != bytes.len() as u64 {
+                    report.findings.push(Finding {
+                        path: shown,
+                        kind: FindingKind::SizeMismatch {
+                            recorded,
+                            actual: bytes.len() as u64,
+                        },
+                    });
+                    // Size already proves it differs; hashing adds nothing.
+                    continue;
+                }
+            }
+            let Some(recorded) = meta.get("integrity").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let actual = sha512_integrity(&bytes);
+            if actual != recorded {
+                report.findings.push(Finding {
+                    path: shown,
+                    kind: FindingKind::DigestMismatch {
+                        recorded: recorded.to_string(),
+                        actual,
+                    },
+                });
+            }
+        }
+    }
+
+    if !any_index_read {
+        // Nothing was comparable. Reporting zero problems here would be the
+        // vacuous pass this whole module exists to avoid.
+        return Ok(receipt_missing("pnpm store index"));
+    }
+    Ok(report)
+}
+
+/// `storeDir` from `node_modules/.modules.yaml`, if it is present on this machine.
+///
+/// The recorded value is an absolute path written by whichever machine ran the
+/// install, so it may not exist here at all -- a checkout from elsewhere, or a
+/// pruned store. Returning `None` lets the caller say `ReceiptMissing`.
+fn pnpm_store_dir(project_root: &Path) -> Result<Option<PathBuf>> {
+    let modules = project_root.join("node_modules").join(".modules.yaml");
+    let text = match std::fs::read_to_string(&modules) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(Error::io(&modules, error)),
+    };
+    for line in text.lines() {
+        let Some(value) = line.strip_prefix("storeDir:") else {
+            continue;
+        };
+        let value = value.trim().trim_matches('\'').trim_matches('"');
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let path = PathBuf::from(value);
+        return Ok(path.is_dir().then_some(path));
+    }
+    Ok(None)
+}
+
+/// Map `<name>@<version>` directory names to the tarball integrity from the lock.
+///
+/// Parsed line-wise rather than with a YAML crate: the two shapes needed are the
+/// `packages:` keys and their one-line `resolution: {integrity: ...}`, and adding
+/// a YAML dependency to reach them would put a parser in the shim's graph for no
+/// benefit.
+fn pnpm_lock_integrities(lock_text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut in_packages = false;
+    let mut current: Option<String> = None;
+    for line in lock_text.lines() {
+        if line.starts_with("packages:") {
+            in_packages = true;
+            continue;
+        }
+        // Any other top-level key ends the section.
+        if in_packages && !line.starts_with(' ') && !line.trim().is_empty() {
+            break;
+        }
+        if !in_packages {
+            continue;
+        }
+        let trimmed = line.trim();
+        if let Some(key) = trimmed.strip_suffix(':') {
+            if !key.is_empty() && !key.starts_with('#') {
+                current = Some(key.trim_matches('\'').trim_matches('"').to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("resolution:") {
+            if let (Some(name), Some(integrity)) = (current.as_ref(), extract_integrity(rest)) {
+                out.insert(name.clone(), integrity);
+            }
+        }
+    }
+    out
+}
+
+/// Pull `sha512-...` out of `{integrity: sha512-..., tarball: ...}`.
+fn extract_integrity(value: &str) -> Option<String> {
+    let start = value.find("integrity:")? + "integrity:".len();
+    let rest = value[start..].trim_start();
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    let integrity = rest[..end].trim();
+    (!integrity.is_empty()).then(|| integrity.to_string())
+}
+
+/// Where the store keeps the index for a package with this tarball integrity.
+///
+/// The index is content-addressed by the tarball digest: base64-decode it, render
+/// as hex, and the first byte names the subdirectory. Measured against pnpm 9.15.1
+/// -- see the module docs.
+fn pnpm_index_path(store: &Path, integrity: &str) -> Option<PathBuf> {
+    use base64::Engine as _;
+
+    let encoded = integrity.strip_prefix("sha512-")?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let hex = hex::encode(raw);
+    // One byte of prefix, the remainder as the filename stem.
+    let (prefix, rest) = hex.split_at(2);
+    Some(
+        store
+            .join("files")
+            .join(prefix)
+            .join(format!("{rest}-index.json")),
+    )
+}
+
+/// Render bytes the way pnpm's index records them.
+fn sha512_integrity(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest as _, Sha512};
+
+    let digest = Sha512::digest(bytes);
+    format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    )
+}
+
+fn receipt_missing(path: &str) -> Report {
+    Report {
+        checked: 0,
+        findings: vec![Finding {
+            path: path.into(),
+            kind: FindingKind::ReceiptMissing,
+        }],
+    }
+}
+
+/// Verify an npm environment against `node_modules/.package-lock.json`.
 ///
 /// That file is npm's own record of what it placed where, so it stays correct
-/// without osdk maintaining a parallel graph. pnpm and yarn write different
-/// receipts; when the expected one is absent this returns `ReceiptMissing`
-/// rather than an empty clean report, because "could not check" must not look
-/// like "checked and fine".
-pub fn verify_node(project_root: &Path) -> Result<Report> {
+/// without osdk maintaining a parallel graph.
+fn verify_npm(project_root: &Path) -> Result<Report> {
     let receipt = project_root.join("node_modules").join(".package-lock.json");
     let text = match std::fs::read_to_string(&receipt) {
         Ok(text) => text,
@@ -601,5 +886,384 @@ mod tests {
         let empty = temp.path().join("empty");
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(find_site_packages(&empty).unwrap(), None);
+    }
+
+    /// A pnpm tree, built to the shape measured from pnpm 9.15.1.
+    ///
+    /// Written out by hand rather than by shelling out to pnpm, so the test runs
+    /// offline and on every platform. The shape itself is not invented: the
+    /// integrity below is the real sha512 of the bytes written, and the store path
+    /// is derived the same way pnpm derives it -- which is exactly the mapping
+    /// under test.
+    struct PnpmFixture {
+        root: PathBuf,
+        /// The file every tampering test targets.
+        target: PathBuf,
+    }
+
+    fn integrity_of(bytes: &[u8]) -> String {
+        super::sha512_integrity(bytes)
+    }
+
+    fn build_pnpm_fixture(root: &Path) -> PnpmFixture {
+        // Two packages, not one: a single package cannot expose a mix-up between
+        // "this package's files" and "some package's files", and AGENTS.md is
+        // explicit that N=1 does not surface that class of bug.
+        let store = root.join("store");
+        let virtual_store = root.join("node_modules").join(".pnpm");
+
+        let mut lock = String::from("lockfileVersion: '9.0'\n\npackages:\n\n");
+        let mut target = PathBuf::new();
+
+        for (name, version, files) in [
+            (
+                "ms",
+                "2.1.3",
+                vec![
+                    ("index.js", "module.exports = function ms() {}\n"),
+                    ("package.json", "{\"name\":\"ms\",\"version\":\"2.1.3\"}\n"),
+                ],
+            ),
+            (
+                "is-odd",
+                "3.0.1",
+                vec![
+                    ("index.js", "module.exports = n => n % 2 === 1;\n"),
+                    (
+                        "package.json",
+                        "{\"name\":\"is-odd\",\"version\":\"3.0.1\"}\n",
+                    ),
+                ],
+            ),
+        ] {
+            let dir_name = format!("{name}@{version}");
+            let package_dir = virtual_store
+                .join(&dir_name)
+                .join("node_modules")
+                .join(name);
+            std::fs::create_dir_all(&package_dir).unwrap();
+
+            let mut entries = Vec::new();
+            for (file, contents) in &files {
+                let path = package_dir.join(file);
+                std::fs::write(&path, contents).unwrap();
+                entries.push(format!(
+                    "\"{file}\":{{\"integrity\":\"{}\",\"mode\":420,\"size\":{}}}",
+                    integrity_of(contents.as_bytes()),
+                    contents.len()
+                ));
+                if *file == "index.js" && name == "ms" {
+                    target = path;
+                }
+            }
+
+            // The tarball integrity is what addresses the store. Its value does not
+            // have to be a real tarball digest for the test -- it has to be the
+            // thing the lock says and the thing the store path is derived from,
+            // which is the property being verified.
+            let tarball = integrity_of(dir_name.as_bytes());
+            let index = format!(
+                "{{\"name\":\"{name}\",\"version\":\"{version}\",\"files\":{{{}}}}}",
+                entries.join(",")
+            );
+            let index_path = super::pnpm_index_path(&store, &tarball).unwrap();
+            std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+            std::fs::write(&index_path, index).unwrap();
+
+            lock.push_str(&format!(
+                "  {dir_name}:\n    resolution: {{integrity: {tarball}}}\n\n"
+            ));
+        }
+
+        std::fs::write(root.join("pnpm-lock.yaml"), lock).unwrap();
+        std::fs::write(
+            root.join("node_modules").join(".modules.yaml"),
+            format!(
+                "nodeLinker: isolated\npackageManager: pnpm@9.15.1\nstoreDir: {}\n",
+                store.display()
+            ),
+        )
+        .unwrap();
+
+        PnpmFixture {
+            root: root.to_path_buf(),
+            target,
+        }
+    }
+
+    /// An untampered pnpm tree verifies clean, and checks a non-zero number of files.
+    ///
+    /// The `checked > 0` half is the load-bearing one: a report of "0 problems"
+    /// that examined nothing is the vacuous pass this module exists to prevent,
+    /// and it looks identical to success in the CLI output.
+    #[test]
+    fn an_untouched_pnpm_tree_verifies_clean_and_actually_checks_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert!(
+            report.is_clean(),
+            "an untouched tree must be clean: {:?}",
+            report.findings
+        );
+        assert!(
+            report.checked >= 4,
+            "must examine every recorded file of both packages, examined {}",
+            report.checked
+        );
+    }
+
+    /// Rewriting a file's contents is caught.
+    #[test]
+    fn rewriting_an_installed_file_is_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+
+        std::fs::write(&fixture.target, "module.exports = 'tampered';\n").unwrap();
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert!(!report.is_clean(), "rewritten contents must be reported");
+        assert!(
+            report.findings.iter().any(|finding| matches!(
+                finding.kind,
+                FindingKind::SizeMismatch { .. } | FindingKind::DigestMismatch { .. }
+            )),
+            "expected a size or digest finding, got {:?}",
+            report.findings
+        );
+    }
+
+    /// A same-length rewrite must still be caught, which only the digest can do.
+    ///
+    /// Separate from the test above on purpose: if the size check were the only
+    /// one, that test would still pass and the digest comparison could be deleted
+    /// without any test noticing.
+    #[test]
+    fn a_same_size_rewrite_is_caught_by_the_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+
+        let original = std::fs::read(&fixture.target).unwrap();
+        let mut tampered = original.clone();
+        // Flip one byte, keeping the length identical.
+        let last = tampered.len() - 2;
+        tampered[last] ^= 0x20;
+        std::fs::write(&fixture.target, &tampered).unwrap();
+        assert_eq!(
+            std::fs::metadata(&fixture.target).unwrap().len(),
+            original.len() as u64,
+            "the probe must keep the size identical, or it tests the wrong thing"
+        );
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| matches!(finding.kind, FindingKind::DigestMismatch { .. })),
+            "a same-size rewrite must produce a digest finding, got {:?}",
+            report.findings
+        );
+    }
+
+    /// Deleting a file the receipt lists is caught.
+    #[test]
+    fn deleting_an_installed_file_is_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+
+        std::fs::remove_file(&fixture.target).unwrap();
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == FindingKind::Missing),
+            "a deleted file must be reported missing, got {:?}",
+            report.findings
+        );
+    }
+
+    /// With no store on this machine, say so -- do not report a clean tree.
+    ///
+    /// This is the case a checkout from another machine hits: `.modules.yaml`
+    /// records an absolute `storeDir` that does not exist here. Nothing can be
+    /// compared, and "0 problems" would be a lie.
+    #[test]
+    fn a_missing_store_is_reported_rather_than_passing() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+        std::fs::remove_dir_all(temp.path().join("store")).unwrap();
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert!(!report.is_clean(), "an absent store must not verify clean");
+        assert_eq!(report.checked, 0);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == FindingKind::ReceiptMissing),
+            "expected ReceiptMissing, got {:?}",
+            report.findings
+        );
+    }
+
+    /// A pnpm tree takes the pnpm path even when a stale npm receipt is present.
+    ///
+    /// Both can coexist -- an npm install followed by a pnpm one leaves the old
+    /// `.package-lock.json` behind. Reading the stale file would verify a tree that
+    /// is no longer what is installed, and would do it silently.
+    #[test]
+    fn a_stale_npm_receipt_does_not_win_over_a_live_pnpm_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+        // A receipt claiming a package that does not exist: if this file were the
+        // one consulted, the report would contain a Missing finding for it.
+        std::fs::write(
+            fixture.root.join("node_modules").join(".package-lock.json"),
+            r#"{"packages":{"node_modules/ghost":{"version":"9.9.9"}}}"#,
+        )
+        .unwrap();
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert!(
+            report.is_clean(),
+            "the pnpm store is authoritative here: {:?}",
+            report.findings
+        );
+        assert!(report.checked >= 4);
+    }
+
+    /// The store address is derived from the integrity, not searched for.
+    ///
+    /// Pinned separately because it is the one piece of the chain that comes from
+    /// measurement rather than documentation: hex-decode the base64 digest, take
+    /// the first byte as the subdirectory. Measured against pnpm 9.15.1 with
+    /// ms@2.1.3.
+    #[test]
+    fn the_store_index_path_is_derived_from_the_tarball_integrity() {
+        let store = Path::new("/store");
+        let path = super::pnpm_index_path(
+            store,
+            "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+        )
+        .expect("a well-formed sha512 integrity must map to a path");
+        let shown = normalize(&path.to_string_lossy());
+        assert!(
+            shown.ends_with(
+                "files/e8/5973b9b4cb646dc9d9afcd542025784863ceae68c601f268253dc985ef70bb2fa1568726afece715c8ebf5d73fab73ed1f7100eb479d23bfb57b45dd645394-index.json"
+            ),
+            "derived path does not match what pnpm 9.15.1 wrote: {shown}"
+        );
+    }
+
+    /// A malformed integrity yields no path rather than a panic or a wrong one.
+    #[test]
+    fn a_malformed_integrity_produces_no_store_path() {
+        let store = Path::new("/store");
+        assert!(super::pnpm_index_path(store, "sha1-abc").is_none());
+        assert!(super::pnpm_index_path(store, "sha512-not base64!!").is_none());
+        assert!(super::pnpm_index_path(store, "").is_none());
+    }
+
+    /// Lockfile parsing stops at the end of the packages section.
+    ///
+    /// The first version of this test used a real `snapshots:` section and could
+    /// not fail: pnpm writes those entries as `ms@2.1.3: {}`, whose key does not
+    /// end in a bare `:` and carries no `resolution:` line, so overrunning the
+    /// boundary contributes nothing either way.
+    ///
+    /// This version makes the boundary decide the outcome -- a later top-level
+    /// section that does contain a parseable entry. Removing the `break` makes it
+    /// fail.
+    #[test]
+    fn lock_parsing_stops_at_the_end_of_the_packages_section() {
+        let lock = "\
+lockfileVersion: '9.0'
+
+packages:
+
+  ms@2.1.3:
+    resolution: {integrity: sha512-AAAA}
+
+patchedDependencies:
+
+  ghost@1.0.0:
+    resolution: {integrity: sha512-BBBB}
+";
+        let parsed = super::pnpm_lock_integrities(lock);
+        assert_eq!(
+            parsed.get("ms@2.1.3").map(String::as_str),
+            Some("sha512-AAAA")
+        );
+        assert!(
+            !parsed.contains_key("ghost@1.0.0"),
+            "entries after the packages section must not be collected: {parsed:?}"
+        );
+    }
+
+    /// The size check short-circuits; it is not a second line of defence.
+    ///
+    /// Mutating the size comparison away left every tampering test green, because
+    /// the digest catches the same cases. That is not a gap -- it is what the size
+    /// check is for: skipping a sha512 over a file whose length already disagrees.
+    /// Asserting that it *catches* tampering would therefore be asserting something
+    /// the digest guarantees anyway.
+    ///
+    /// What is actually specific to it is the shape of the finding: a
+    /// length-changing edit reports the sizes, which tells the reader how far off
+    /// the file is, instead of two opaque digests.
+    #[test]
+    fn a_length_changing_edit_reports_sizes_rather_than_digests() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+
+        std::fs::write(&fixture.target, "x").unwrap();
+
+        let report = verify_node(&fixture.root).unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.path.ends_with("ms/index.js"))
+            .expect("the edited file must be reported");
+        match &finding.kind {
+            FindingKind::SizeMismatch { actual, .. } => assert_eq!(*actual, 1),
+            other => panic!("expected a size finding for a length change, got {other:?}"),
+        }
+    }
+
+    /// A present store that yields no readable index must not verify clean.
+    ///
+    /// Distinct from the absent-store case, which returns early from
+    /// `pnpm_store_dir`. Here the store directory exists, so the walk runs and
+    /// finds nothing comparable -- and mutation showed the absent-store test does
+    /// not cover this path at all: deleting the fail-closed guard left it green.
+    #[test]
+    fn a_store_without_usable_indexes_is_reported_rather_than_passing() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = build_pnpm_fixture(temp.path());
+
+        // Keep the store directory, remove only what makes it readable.
+        std::fs::remove_dir_all(temp.path().join("store").join("files")).unwrap();
+        assert!(
+            temp.path().join("store").is_dir(),
+            "the store itself must still be present, or this tests the other path"
+        );
+
+        let report = verify_node(&fixture.root).unwrap();
+        assert_eq!(
+            report.checked, 0,
+            "nothing was comparable, so nothing may be counted as checked"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == FindingKind::ReceiptMissing),
+            "expected ReceiptMissing, got {:?}",
+            report.findings
+        );
     }
 }

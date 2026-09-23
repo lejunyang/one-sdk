@@ -354,18 +354,41 @@ Two layers, cheapest first:
   This catches a drift freshness structurally cannot -- the lock is untouched, so
   the hash matches, but the environment was rebuilt by something else.
 - **L2**: does every entry in the receipt still exist, at the recorded size and
-  version? Python reads `dist-info/RECORD` (per-file size and sha256); Node reads
-  `node_modules/.package-lock.json` (per-package version and integrity).
+  digest? Which receipt depends on the package manager:
+
+  | package manager | receipt read | granularity |
+  | --- | --- | --- |
+  | pip / uv | `dist-info/RECORD` | per-file size + sha256 |
+  | npm | `node_modules/.package-lock.json` | per-package version + integrity |
+  | pnpm | the store's `*-index.json` | per-file size + sha512 |
+  | yarn | not supported, reported as such | — |
+
+  pnpm's receipt is finer than npm's: it is **per-file**, on par with Python's.
+  pnpm writes no `.package-lock.json`, and `.modules.yaml` holds layout metadata
+  only; the per-file digests live in the content-addressable store's index, whose
+  address happens to be derivable from the integrity recorded in
+  `pnpm-lock.yaml`. Verifying a pnpm project therefore needs both halves: the
+  lockfile in the project and the store on this machine. For a checkout from
+  another machine, or after the store has been pruned, `--verify` says there is no
+  receipt to read rather than reporting everything fine.
+
+  yarn is deliberately out of scope: Berry's PnP keeps dependencies in a single
+  zip-backed store with no per-package tree to compare against. Saying so is better
+  than adding a predicate that would pass whatever the environment looked like.
 
 The exit code is non-zero when anything is wrong, so this works as a CI gate. The
 output also reports how much was examined: "0 problems" and "nothing was checked"
 must not read the same, so an environment with no receipt to read is **reported as
 an error rather than passed**.
 
-Four kinds of tampering were measured as detectable: deleting a file inside an
-installed package, changing a file's contents, deleting a whole installed package,
-and swapping a package's `version` in place. The last is the sneakiest -- the
+Kinds of tampering measured as detectable: deleting a file inside an installed
+package, changing a file's contents, deleting a whole installed package, and
+swapping a package's `version` in place. That last-but-one is the sneakiest -- the
 directory is there, the file count is right, only the version disagrees.
+
+On pnpm one more is caught that npm's receipt cannot see: **an edit that keeps the
+file's length**. With per-file digests, flipping a single byte is reported; a
+receipt that only goes down to the package notices nothing.
 
 ::: warning Do not just re-run the installer after a failure
 `uv pip sync` was measured **not** to repair a modified file, and the tampered

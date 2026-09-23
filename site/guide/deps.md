@@ -316,15 +316,33 @@ osdk deps --verify
 
 - **L1**：原生 lockfile 的 sha256 是否仍等于 `osdk.lock` 记录的值。能抓到「lock 没动
   所以哈希也没变，但环境被别的工具重建过」这种漂移。
-- **L2**：收据里每一条是否还在、尺寸与版本是否还对。Python 读
-  `dist-info/RECORD`（逐文件 size/sha256），Node 读
-  `node_modules/.package-lock.json`（逐包 version/integrity）。
+- **L2**：收据里每一条是否还在、尺寸与摘要是否还对。收据按包管理器而定：
+
+  | 包管理器 | 读的收据 | 粒度 |
+  | --- | --- | --- |
+  | pip / uv | `dist-info/RECORD` | 逐文件 size + sha256 |
+  | npm | `node_modules/.package-lock.json` | 逐包 version + integrity |
+  | pnpm | store 的 `*-index.json` | 逐文件 size + sha512 |
+  | yarn | 不支持，如实报告 | — |
+
+  pnpm 的收据比 npm 细：它是**逐文件**的，与 Python 同级。pnpm 不写
+  `.package-lock.json`，`.modules.yaml` 里也只有布局信息；逐文件摘要在内容寻址
+  store 的索引里，而索引地址正好能从 `pnpm-lock.yaml` 记的 integrity 算出来。
+  所以 pnpm 项目要校验需要两样都在：项目里的 lockfile，和本机上的 store。从别的
+  机器 clone 过来、或 store 被 prune 过时，`--verify` 会说「没有收据可读」，而不是
+  报一切正常。
+
+  yarn 明确不做：Berry 的 PnP 把依赖放在单个 zip 支撑的存储里，没有可逐包比对的
+  目录树。与其加一个不管环境怎样都会通过的判据，不如如实说不支持。
 
 发现问题时退出码非 0，可以直接当 CI 门禁。输出会同时报「检查了多少条」——
 「0 个问题」和「什么都没检查」不该读起来一样，所以没有收据可读时它**报错而不是通过**。
 
-实测能抓到的四种篡改：删掉包内一个文件、改一个文件的内容、删掉整个已装包、
-就地把某个包的 `version` 换掉。最后一种最隐蔽——目录在、文件数对，只有版本不符。
+实测能抓到的篡改：删掉包内一个文件、改一个文件的内容、删掉整个已装包、就地把
+某个包的 `version` 换掉。倒数第二种最隐蔽——目录在、文件数对，只有版本不符。
+
+pnpm 上还多抓到一种 npm 收据抓不到的：**改动后文件长度不变**。因为逐文件摘要在，
+翻转一个字节也会被报出来；而只到包粒度的收据对此毫无反应。
 
 ::: warning 发现篡改后不要只是重跑安装
 实测 `uv pip sync` **不会**修复被改过的文件，而且被篡改的内容可能已经进了工具的
