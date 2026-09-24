@@ -24,6 +24,7 @@ osdk 读两类配置文件，两者都是 TOML，**段与字段完全相同**：
 | `[tasks]` / `[task_config]` | 项目任务 | 是（ExecutesCode，运行时） |
 | `[deps]` | 应用依赖 provider | 视字段而定 |
 | `[models]` | 声明式模型 | 仅 endpoint/自定义来源需要 |
+| `[skills]` | 声明式 Agent skill | 仅 endpoint/自定义来源需要 |
 
 > **信任规则**：除 `tools` 和 `aliases` 外的每个顶层键都被视为「影响执行或下载来源」，
 > 需要 `osdk trust`。仅写 `[tools]` / `[aliases]` 不触发信任。被拒时 osdk 逐条列出是哪些键。
@@ -355,6 +356,33 @@ endpoint = "https://..."                           # 可选：改写来源（这
 
 ---
 
+## `[skills]` — 声明式 Agent skill
+
+与 `[models]` 同构：声明「要哪个 skill、从哪来、装给哪些 Agent」，`osdk skills sync` 据此复现。
+
+```toml
+[skills]
+# 顶层默认（都可省）
+default_agents = ["claude-code"]      # add/sync 未指定 -a 时的目标 Agent
+scope = "project"                      # project（默认）/ global
+link_mode = "symlink"                  # 可选：仅对 skill 覆盖全局 link_mode
+
+[skills.web-design]
+source = "github:vercel-labs/agent-skills"   # 必填：来源（github:owner/repo、含子目录、或本地路径）
+skill = "web-design-guidelines"               # 仓库含多 skill 时选名（可选）
+ref = "branch:main"                           # 可选：GitHub 版本；解析后钉 commit 进 lock
+agents = ["claude-code", "codex"]             # 可选：本条装给哪些 Agent；缺省用 default_agents
+when = { os = "linux" }                       # 可选：平台过滤
+# endpoint = "https://..."                    # 可选：自定义来源 —— 这一项使本条需 trust
+```
+
+- `deny_unknown_fields`：`source` 等字段拼错硬报错。
+- 只声明「要什么」不需要 trust；只有 `endpoint` / 自定义来源这类**改变字节来源**的键才需要
+  （`WeakensVerification`），skill 声明也不会阻断普通工具命令。
+- osdk 只搬运与链接 skill，**自己不执行** skill 内任何脚本，因此 `[skills]` 不引入 `ExecutesCode`。
+- 命令面见 `commands.md` 的「Agent Skills（skills）」。
+
+---
 ## 平台过滤（`when` / `os` / `arch` 通用词汇）
 
 多处（`[tools]` 的 `when`、`[tasks]` 的 `when`、`[syspkg]` 的 `os`/`arch`）共用一套词汇：

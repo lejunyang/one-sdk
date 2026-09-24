@@ -66,6 +66,7 @@ osdk（二进制名 `osdk`，仓库名 one-sdk）是一个跨平台（Windows / 
 | 配镜像 / 源 / 离线 / 校验 | `osdk source ...` / 全局 `--offline` `--require-checksums` `--attestations` |
 | 信任 / 取消信任项目配置 | `osdk trust` / `osdk untrust` |
 | 拉取 / 复现大模型快照 | `osdk model pull` / `osdk model sync` / `osdk model view ...` |
+| 给 AI Agent 装 / 复现 skill | `osdk skills add` / `osdk skills sync` / `osdk skills list` / `osdk skills agents` |
 | 看 / 调配置 | `osdk config path\|list\|get\|set\|unset` |
 | 诊断环境、切语言 | `osdk doctor [--verify]` / `--lang en\|zh` |
 

@@ -200,7 +200,37 @@ osdk model view add comfyui qwen25 --map unet/=diffusion_models
 osdk model sync
 ```
 
-## 八、容器运行时（container）
+## 八、Agent Skills（skills）
+
+`osdk skills` 安装 `SKILL.md` 包并链接进各 AI 编码 Agent 的 skills 目录。skill 是给外部
+Agent 读的内容，osdk 只负责下载、内容寻址落地与链接，自己不执行 skill 里的任何脚本。
+
+| 子命令 | 作用 |
+| --- | --- |
+| `add <SOURCE> [-s <NAME>...] [-a <ID>...] [-g] [--copy] [--ref <REF>] [-l\|--list] [--no-lock]` | 从来源安装 skill 到一个/多个 Agent。来源：`github:owner/repo`（可带子目录 `/skills/<名>`）、`owner/repo` 简写、github.com URL、本地路径。`-s` 选装仓库内指定 skill（`*` 全选）；`-a` 选目标 Agent（缺省用 `[skills].default_agents`）；`-g` 装到用户级；`--copy` 拷贝而非链接；`--ref` 指定 GitHub 版本（`branch:main`/`tag:`/`rev:`/commit）；`-l` 只列不装；`--no-lock` 不写 lock |
+| `list [-g]` | 列出已装 skill 及其链接到的 Agent（读 `osdk.lock`） |
+| `remove <NAME> [-g] [-a <ID>...]` | 从 Agent 摘除 skill；不带 `-a` 摘除全部并删 lock 条目，带 `-a` 只摘指定 Agent 并保留其余 |
+| `sync [-g]` | 按 `osdk.lock` 复现全部 skill（团队 / CI）：优先用已落地的内容寻址副本，缺副本时对 GitHub 源按记录的 commit 重新下载并核对内容哈希 |
+| `path <NAME>` | 打印某已装 skill 的内容寻址落地路径 |
+| `agents` | 列出 osdk 认识的 Agent 及其 project / global skills 目录 |
+
+```bash
+osdk skills agents
+osdk skills add github:vercel-labs/agent-skills --list          # 只列，不装
+osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
+osdk skills add ./my-skills -s my-skill -a codex                # 本地源
+osdk skills list
+osdk skills sync                                                # 按 lock 复现
+osdk skills remove web-design-guidelines
+```
+
+- **不可变身份**：`add` 把解析到的 commit 与内容哈希写进 `osdk.lock [skills.<名>]`，`sync` 据此
+  在别的机器复现；重新下载时哈希不符会 fail-closed 拒绝（防移动的 tag / 被换的镜像）。
+- **落地方式**：默认目录链接（Windows junction / Unix symlink），无链接环境或 `--copy` 时整树拷贝；
+  拒绝覆盖非 osdk 放置的真实目录。
+- **只读命令**（`agents` / `list` / `path`）不触发信任门槛；`add` / `remove` / `sync` 会写盘、保持
+  gated。声明式配置见 `configuration.md` 的 `[skills]`。
+## 九、容器运行时（container）
 
 `osdk container` 只检查与操作**宿主原生**运行时，不把镜像搬进 osdk 存储。
 
@@ -221,7 +251,7 @@ osdk container pull ubuntu:24.04
 osdk container prune --runtime docker --scope images
 ```
 
-## 九、宿主包管理器（pkg，只读为主）
+## 十、宿主包管理器（pkg，只读为主）
 
 | 子命令 | 作用 |
 | --- | --- |
@@ -238,7 +268,7 @@ osdk pkg apply --yes       # 装上（唯一改系统的）
 osdk pkg mirrors test
 ```
 
-## 十、存储与缓存（cache / prune）
+## 十一、存储与缓存（cache / prune）
 
 | 命令 | 作用 |
 | --- | --- |
@@ -254,7 +284,7 @@ osdk --yes cache clean
 osdk prune --dry-run
 ```
 
-## 十一、Shell 集成、自身管理与诊断
+## 十二、Shell 集成、自身管理与诊断
 
 | 命令 | 作用 |
 | --- | --- |

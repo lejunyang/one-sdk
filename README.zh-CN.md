@@ -617,6 +617,29 @@ osdk model env disable huggingface
 
 指南：[模型快照](site/guide/models.md)
 
+## 场景：给 AI 编码 Agent 装 skill
+
+skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI 编码 Agent 读取。osdk
+从 GitHub 或本地路径安装 skill，内容寻址落地后链接进各 Agent 的 skills 目录，并把不可变身份
+写进 `osdk.lock`，团队 `osdk skills sync` 一步复现。osdk 只搬运与链接，绝不执行 skill 里的脚本。
+
+```bash
+osdk skills agents                       # 看 osdk 认识哪些 Agent、各自的 skills 目录
+osdk skills add github:vercel-labs/agent-skills --list        # 只列仓库里有哪些 skill
+osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
+osdk skills add ./my-skills -s my-skill -a codex              # 本地源，选装指定 skill
+osdk skills list                         # 已装 skill 与其链接到的 Agent
+osdk skills sync                         # 按 osdk.lock 复现（团队 / CI）
+osdk skills remove web-design-guidelines
+```
+
+`add` 把解析到的 commit 与内容哈希写进 `osdk.lock`；`sync` 缺本地副本时按记录的 commit 重新
+下载并核对哈希，移动的 tag 或被换的镜像会被拒绝。默认目录链接（Windows junction / Unix
+symlink），无链接环境或 `--copy` 时整树拷贝，且不会覆盖非 osdk 放置的真实目录。也可以在
+`osdk.toml` 里用 `[skills]` 声明，让 `osdk skills sync` 直接复现。
+
+指南：[Agent skills](site/guide/skills.md)
+
 ## 场景：控制下载源、离线与安全策略
 
 让 osdk 排序可用下载源、固定首选镜像、添加可信内网源，或只为一条命令覆盖来源：
@@ -841,6 +864,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `conda:<package>` 安装 conda 包与 CUDA 等工具链、通过 `pypi:<project>` 安装 Python CLI（每个工具一个虚拟环境，依赖在环境间共享）、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
 | 模型平台 | Hugging Face、ModelScope |
+| Agent skills | 从 GitHub（`github:owner/repo` 含子目录）或本地路径安装 `SKILL.md` 包，链接进 Claude Code / Codex / Cursor / OpenCode / Gemini CLI / GitHub Copilot 等 Agent |
 | 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、内置 Docker Hub mirror 测速、安全原生 mirror apply、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
 | Shell | Bash、zsh、fish、PowerShell |
@@ -860,6 +884,7 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 - [Go 开发工具](site/guide/go-tools.md)
 - [直接 HTTPS 制品](site/guide/http-artifacts.md)
 - [模型快照](site/guide/models.md)
+- [Agent skills](site/guide/skills.md)
 - [下载源、离线与安全](site/guide/sources-security.md)
 - [容器运行时、Registry 与原生操作](site/guide/containers.md)
 - [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)

@@ -680,6 +680,35 @@ osdk model env disable huggingface
 
 Guide: [Model snapshots](site/en/guide/models.md)
 
+## Scenario: install a skill for an AI coding agent
+
+A skill is a `SKILL.md` instruction package that AI coding agents such as Claude
+Code, Codex, and Cursor read. osdk installs skills from GitHub or a local path,
+stages them in its content-addressed store, links them into each agent's skills
+directory, and records an immutable identity in `osdk.lock` so a team can
+reproduce them with `osdk skills sync`. osdk only stages and links; it never runs
+a skill's scripts.
+
+```bash
+osdk skills agents                       # which agents osdk knows, and their skills dirs
+osdk skills add github:vercel-labs/agent-skills --list        # list a repo's skills only
+osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
+osdk skills add ./my-skills -s my-skill -a codex              # a local source, one skill
+osdk skills list                         # installed skills and the agents they link into
+osdk skills sync                         # reproduce from osdk.lock (team / CI)
+osdk skills remove web-design-guidelines
+```
+
+`add` pins the resolved commit and a content hash into `osdk.lock`; `sync`
+re-downloads a missing local copy at that exact commit and re-checks the hash, so
+a moved tag or a substituted mirror is refused. Installs use a directory link by
+default (a junction on Windows, a symlink on Unix) and fall back to a copy where
+links are unavailable or with `--copy`, never replacing a real directory osdk did
+not place. You can also declare skills in `osdk.toml` under `[skills]` and let
+`osdk skills sync` reproduce them.
+
+Guide: [Agent skills](site/en/guide/skills.md)
+
 ## Scenario: control sources, offline use, and trust
 
 Let osdk rank available sources, pin a preferred mirror, add a trusted internal
@@ -941,6 +970,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, conda packages and toolchains such as CUDA through `conda:<package>`, Python CLIs through `pypi:<project>` (one virtual environment per tool, with dependencies shared between them), public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
 | Model providers | Hugging Face, ModelScope |
+| Agent skills | Install `SKILL.md` packages from GitHub (`github:owner/repo` with an optional subdir) or a local path, linked into Claude Code / Codex / Cursor / OpenCode / Gemini CLI / GitHub Copilot and more |
 | Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, built-in Docker Hub mirror benchmarking, safe native mirror apply, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |
 | Shells | Bash, zsh, fish, PowerShell |
@@ -960,6 +990,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 - [Go developer tools](site/en/guide/go-tools.md)
 - [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 - [Model snapshots](site/en/guide/models.md)
+- [Agent skills](site/en/guide/skills.md)
 - [Sources, offline use, and security](site/en/guide/sources-security.md)
 - [Container runtimes, registries, and native operations](site/en/guide/containers.md)
 - [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
