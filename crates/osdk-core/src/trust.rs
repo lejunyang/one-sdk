@@ -199,12 +199,19 @@ const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
 ///
 /// `tools` needs this because a single tool option (`allow_builds`) can still
 /// opt into script execution even though the surrounding table is safe.
-const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "models", "deps"];
+const INSPECTED_TABLES: &[&str] = &[
+    "tools", "aliases", "settings", "tasks", "models", "deps", "skills",
+];
 
 /// Keys under one `[models.<name>]` entry that decide where model bytes come
 /// from (or weaken how they are checked). Everything else is a harmless
 /// declaration, like declaring `npm:prettier` (research §6.4).
 const MODEL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "url", "mirror"];
+/// Keys under one `[skills.<name>]` entry that change where the skill's bytes
+/// come from. A bare `source = "github:owner/repo"` declaration is not one of
+/// them: like declaring `npm:prettier`, saying *which* skill to install is not a
+/// gate. Only a custom `endpoint` (or an insecure/mirror override) is.
+const SKILL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "mirror"];
 
 /// Keys under one `[deps.<provider>]` entry that redirect where bytes come from.
 ///
@@ -281,7 +288,7 @@ pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
         .map_or(requirement.key.as_str(), |(table, _)| table);
     match table {
         // Never reached by the shim.
-        "syspkg" | "task_config" | "models" | "deps" => false,
+        "syspkg" | "task_config" | "models" | "deps" | "skills" => false,
         // Everything else is treated as dispatch-affecting. Fail-closed on
         // purpose: `settings`, `tools`, `sources`, `registries` and any table a
         // future build does not recognize all stay gated, so adding a new
@@ -326,6 +333,7 @@ fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
             "tools" => collect_tools_requirements(value, &mut found),
             "models" => collect_models_requirements(value, &mut found),
             "deps" => collect_deps_requirements(value, &mut found),
+            "skills" => collect_skills_requirements(value, &mut found),
             "aliases" => {}
             // Declaring a task is not running one; see TRUST_REQUIRING_TABLES.
             "tasks" => {}
@@ -446,6 +454,41 @@ fn collect_models_requirements(value: &toml::Value, found: &mut Vec<TrustRequire
         {
             found.push(TrustRequirement {
                 key: format!("models.{name}.{source_key}"),
+                reason: TrustReason::WeakensVerification,
+            });
+        }
+    }
+}
+
+/// Inspect `[skills]` entries for keys that redirect the byte source.
+///
+/// The `[skills]` table flattens two kinds of key: top-level defaults
+/// (`default_agents`, `scope`, `link_mode`), which are scalars/arrays and never
+/// require trust, and named `[skills.<name>]` sub-tables. A bare
+/// `source = "github:owner/repo"` is a harmless declaration, exactly like
+/// declaring `npm:prettier`; only a custom `endpoint` (or an insecure/mirror
+/// override) changes where the bytes come from and is reported per skill.
+fn collect_skills_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let Some(skills) = value.as_table() else {
+        // A malformed `skills` table cannot be shown harmless.
+        found.push(TrustRequirement {
+            key: "skills".into(),
+            reason: TrustReason::WeakensVerification,
+        });
+        return;
+    };
+    for (name, entry) in skills {
+        // Only named sub-tables are skills; a scalar/array is a top-level
+        // default (default_agents/scope/link_mode) and needs no trust.
+        let Some(fields) = entry.as_table() else {
+            continue;
+        };
+        for source_key in fields
+            .keys()
+            .filter(|k| SKILL_SOURCE_KEYS.contains(&k.as_str()) || k.as_str().contains("endpoint"))
+        {
+            found.push(TrustRequirement {
+                key: format!("skills.{name}.{source_key}"),
                 reason: TrustReason::WeakensVerification,
             });
         }
@@ -1372,6 +1415,62 @@ insecure = true
         assert!(!dispatch_affecting("models"));
         assert!(!dispatch_affecting("models.sd.endpoint"));
         assert!(!dispatch_affecting("models.sd.insecure"));
+    }
+
+    /// A skill declaration is harmless; only an endpoint override needs trust,
+    /// and the top-level `[skills]` defaults never do.
+    #[test]
+    fn declaring_a_skill_is_safe_but_an_endpoint_override_requires_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        // Defaults plus a bare source declaration: no trust.
+        std::fs::write(
+            &path,
+            concat!(
+                "[skills]\n",
+                "default_agents = [\"claude-code\"]\n",
+                "scope = \"project\"\n",
+                "[skills.web-design]\n",
+                "source = \"github:vercel-labs/agent-skills\"\n",
+                "agents = [\"claude-code\"]\n",
+            ),
+        )
+        .unwrap();
+        assert!(
+            !requires_trust(&path).unwrap(),
+            "a skill declaration with no endpoint must need no trust"
+        );
+
+        // An endpoint override is reported per skill, not as the whole table.
+        std::fs::write(
+            &path,
+            concat!(
+                "[skills.web-design]\n",
+                "source = \"github:vercel-labs/agent-skills\"\n",
+                "endpoint = \"https://mirror.example.com\"\n",
+            ),
+        )
+        .unwrap();
+        let found = trust_requirements(&path).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "skills.web-design.endpoint");
+        assert_eq!(found[0].reason, TrustReason::WeakensVerification);
+    }
+
+    /// A skill requirement must never block the shim, exactly like a model one:
+    /// the shim cannot reach a skill source, and gating it would make an ordinary
+    /// tool command fail in a project that merely declares skills.
+    #[test]
+    fn skill_requirements_never_affect_tool_dispatch() {
+        let dispatch_affecting = |key: &str| {
+            affects_tool_dispatch(&TrustRequirement {
+                key: key.to_string(),
+                reason: TrustReason::WeakensVerification,
+            })
+        };
+        assert!(!dispatch_affecting("skills"));
+        assert!(!dispatch_affecting("skills.web-design.endpoint"));
     }
 
     /// Editing a harmless declaration field must not invalidate a trust record

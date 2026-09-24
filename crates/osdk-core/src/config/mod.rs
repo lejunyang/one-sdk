@@ -47,6 +47,13 @@ pub struct Config {
     /// the shim never reads model declarations.
     #[cfg(feature = "install")]
     pub models: BTreeMap<String, ModelDeclaration>,
+    /// Declared agent skills (`[skills.<name>]`). Install-gated like models: the
+    /// shim never installs a skill.
+    #[cfg(feature = "install")]
+    pub skills: BTreeMap<String, SkillDeclaration>,
+    /// Top-level `[skills]` defaults (default agents, scope, link mode).
+    #[cfg(feature = "install")]
+    pub skills_defaults: SkillsDefaults,
     /// Application dependency providers (`[deps.<provider>]`). Install-gated for
     /// the same reason: the shim never materializes a dependency closure.
     #[cfg(feature = "install")]
@@ -1016,6 +1023,66 @@ impl Default for ModelViewDeclaration {
     }
 }
 
+/// One declared agent skill (`[skills.<name>]`).
+///
+/// Shaped like [`ModelDeclaration`]: it states *what* skill to install and from
+/// *where*, and only the byte-source key (`endpoint`) makes the entry
+/// trust-requiring (see `trust::collect_skills_requirements`). `deny_unknown_fields`
+/// makes a typo fail loudly rather than silently skip a skill.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillDeclaration {
+    /// Source reference, e.g. `github:vercel-labs/agent-skills`.
+    pub source: String,
+    /// When the repository holds several skills, which one to install.
+    pub skill: Option<String>,
+    /// Version selector for the source, e.g. `branch:main` or `rev:<sha>`.
+    /// Resolved to an immutable commit that is pinned into `osdk.lock`.
+    pub r#ref: Option<String>,
+    /// Which agents to install into; empty falls back to `[skills].default_agents`.
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// Optional platform filter (same `when` shape as tools and models).
+    pub when: Option<crate::platform::PlatformFilter>,
+    /// Custom source endpoint. Its presence is what makes this entry
+    /// trust-requiring (`WeakensVerification`), matching `[models].endpoint`.
+    pub endpoint: Option<String>,
+}
+
+/// Top-level `[skills]` defaults, beside the per-skill `[skills.<name>]` entries
+/// the way `[deps]` top-level keys sit beside `[deps.<provider>]`.
+///
+/// Every field is optional: an empty `[skills]` table means "use built-in
+/// defaults", and declaring only `[skills.<name>]` entries never needs this block.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsDefaults {
+    /// Agents an `add`/`sync` targets when a skill names none of its own.
+    #[serde(default)]
+    pub default_agents: Vec<String>,
+    /// Install scope: `project` (default) or `global`.
+    pub scope: Option<String>,
+    /// Link-mode override for staged skills only, e.g. `symlink` / `copy`.
+    pub link_mode: Option<String>,
+}
+
+/// The `[skills]` table as written in a file: optional top-level defaults plus a
+/// flattened map of named skill entries.
+///
+/// Split from [`SkillsDefaults`] so the top-level keys stay `deny_unknown_fields`
+/// while the named entries flatten in beside them, exactly as `[deps]` combines
+/// `disable`/`roots` with `[deps.<provider>]`.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct SkillsFile {
+    #[serde(flatten)]
+    defaults: SkillsDefaults,
+    #[serde(flatten)]
+    entries: BTreeMap<String, SkillDeclaration>,
+}
 /// On-disk config file shape (a subset that users edit).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1032,6 +1099,9 @@ struct ConfigFile {
     tasks: BTreeMap<String, crate::tasks::TaskEntry>,
     #[cfg(feature = "install")]
     models: BTreeMap<String, ModelDeclaration>,
+    /// The `[skills]` table: top-level defaults flattened with named entries.
+    #[cfg(feature = "install")]
+    skills: SkillsFile,
     #[cfg(feature = "install")]
     deps: Option<DepsConfig>,
     #[cfg(feature = "install")]
@@ -1059,6 +1129,10 @@ impl Default for Config {
             tasks: crate::tasks::TaskSet::default(),
             #[cfg(feature = "install")]
             models: BTreeMap::new(),
+            #[cfg(feature = "install")]
+            skills: BTreeMap::new(),
+            #[cfg(feature = "install")]
+            skills_defaults: SkillsDefaults::default(),
             #[cfg(feature = "install")]
             deps: DepsConfig::default(),
             project_config_path: None,
@@ -1141,6 +1215,23 @@ impl Config {
             // unit, like tools: the project is the more specific statement of
             // which models it needs.
             self.models.extend(file.models);
+        }
+        #[cfg(feature = "install")]
+        {
+            // Named skills extend/replace by name, like models. Top-level
+            // `[skills]` defaults replace as a unit only when the layer states
+            // them, so a project block does not silently blank a user default.
+            self.skills.extend(file.skills.entries);
+            let defaults = file.skills.defaults;
+            if !defaults.default_agents.is_empty() {
+                self.skills_defaults.default_agents = defaults.default_agents;
+            }
+            if defaults.scope.is_some() {
+                self.skills_defaults.scope = defaults.scope;
+            }
+            if defaults.link_mode.is_some() {
+                self.skills_defaults.link_mode = defaults.link_mode;
+            }
         }
         self.apply_tool_configs(&file.tools)?;
         for (tool, aliases) in file.aliases {
@@ -2911,5 +3002,66 @@ source = "hf:o/r@main"
             "{}",
             error.localized()
         );
+    }
+
+    #[test]
+    fn skills_section_parses_entries_and_defaults() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("osdk.toml");
+        std::fs::write(
+            &config_file,
+            "[skills]\n\
+             default_agents = [\"claude-code\"]\n\
+             scope = \"project\"\n\
+             [skills.web-design]\n\
+             source = \"github:vercel-labs/agent-skills\"\n\
+             skill = \"web-design-guidelines\"\n\
+             ref = \"branch:main\"\n\
+             agents = [\"claude-code\", \"codex\"]\n\
+             when = { os = \"linux\" }\n",
+        )
+        .unwrap();
+
+        let config = Config::load_user(&config_file).unwrap();
+        assert_eq!(config.skills_defaults.default_agents, vec!["claude-code"]);
+        assert_eq!(config.skills_defaults.scope.as_deref(), Some("project"));
+
+        let web = config.skills.get("web-design").expect("skill parsed");
+        assert_eq!(web.source, "github:vercel-labs/agent-skills");
+        assert_eq!(web.skill.as_deref(), Some("web-design-guidelines"));
+        assert_eq!(web.r#ref.as_deref(), Some("branch:main"));
+        assert_eq!(web.agents, vec!["claude-code", "codex"]);
+        assert_eq!(web.when.as_ref().unwrap().os.len(), 1);
+        assert!(web.endpoint.is_none());
+    }
+
+    #[test]
+    fn skills_top_level_defaults_are_not_mistaken_for_a_skill() {
+        // The `[skills]` table flattens defaults with named entries; a scalar
+        // default (`scope`) must not surface as a skill named "scope".
+        let temporary = tempfile::tempdir().unwrap();
+        let config_file = temporary.path().join("osdk.toml");
+        std::fs::write(
+            &config_file,
+            "[skills]\nscope = \"global\"\n[skills.only]\nsource = \"github:o/r\"\n",
+        )
+        .unwrap();
+        let config = Config::load_user(&config_file).unwrap();
+        assert_eq!(config.skills.len(), 1);
+        assert!(config.skills.contains_key("only"));
+        assert_eq!(config.skills_defaults.scope.as_deref(), Some("global"));
+    }
+
+    #[test]
+    fn skills_unknown_entry_key_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let bad = temporary.path().join("bad.toml");
+        std::fs::write(
+            &bad,
+            "[skills.m]\nsource = \"github:o/r\"\nsorce = \"typo\"\n",
+        )
+        .unwrap();
+        let error = Config::load_user(&bad).unwrap_err();
+        assert!(error.localized().contains("sorce"), "{}", error.localized());
     }
 }
