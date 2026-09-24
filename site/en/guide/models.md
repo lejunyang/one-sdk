@@ -7,7 +7,7 @@ manifests, current-snapshot pointers, and environment adapters remain separate.
 ## Command reference
 
 ```text
-osdk model pull NAME REFERENCE
+osdk model pull NAME [REFERENCE]
   [--endpoint URL]
   [--forward-credentials]
   [--include GLOB]...
@@ -37,8 +37,8 @@ osdk model view doctor <comfyui|hf-cache> [--profile P]
 | `pull` argument | Effect |
 | --- | --- |
 | `NAME` | Local logical name containing only ASCII letters, digits, `.`, `_`, or `-` |
-| `REFERENCE` | `PROVIDER:owner/repo@revision` |
-| `--endpoint URL` | Override the provider endpoint ahead of environment and source selection |
+| `REFERENCE` | Optional `PROVIDER:owner/repo@revision`; when omitted, read `[models.NAME].source` |
+| `--endpoint URL` | Override the provider endpoint ahead of declaration, environment, and source selection |
 | `--forward-credentials` | Allow this explicit custom endpoint to receive the provider token |
 | `--include GLOB` | Repeatable; a file must match at least one include when includes are present |
 | `--exclude GLOB` | Repeatable; remove matches from the include result |
@@ -154,13 +154,14 @@ osdk source unpin hf             # drop the pin and return to auto-selection
 
 ### Restoring from the lock
 
-`osdk model sync` is the reader the `[models]` section never had -- `pull` writes,
-`sync` replays, the same relationship tools have between `lock` and `install`.
-`osdk install` deliberately does not fetch models: weights are far too large to
-download as a side effect of installing tools, so this is its own verb.
+`osdk model sync` first replays immutable model results from the lock. When the lock
+has no model entries yet, it reads the `[models]` declarations applicable to this
+platform, performs the initial pulls, and creates those lock entries. Later syncs
+replay the lock. `osdk install` deliberately does not fetch models: weights are far
+too large to download as a side effect of installing tools, so this is its own verb.
 
 ```bash
-osdk model sync                 # restore every model the lock declares
+osdk model sync                 # replay the lock; bootstrap [models] when it has no model entries
 osdk model sync --dry-run       # report what would happen
 osdk model sync --prune         # also delete snapshots the lock no longer declares
 osdk model sync --prune --dry-run
@@ -201,6 +202,7 @@ Resolution priority is:
 
 ```text
 --endpoint
+> [models.<name>].endpoint
 > HF_ENDPOINT / MODELSCOPE_ENDPOINT / MODELSCOPE_DOMAIN
 > source pin, probe ranking, and built-in endpoint
 ```
@@ -228,7 +230,7 @@ osdk source pin huggingface|modelscope ID
 osdk source unpin huggingface|modelscope
 ```
 
-The probe resolves repository metadata and then samples up to 1 MiB from a real
+The probe resolves repository metadata and then samples 64 KiB from a real
 file. Anonymous and credential-bearing probes use different cache keys. See
 [Sources and Supply-chain Security](./sources-security) for source behavior.
 
@@ -236,8 +238,10 @@ file. Anonymous and credential-bearing probes use different cache keys. See
 
 Instead of pulling first and locking afterwards, you can declare models directly
 in the project `osdk.toml`. Declaring does not download anything; a later
-`osdk model pull <name>` matches the declaration, records the consumer views into
-the lock, and renders them immediately:
+`osdk model pull <name>` reads the matching declaration, while `osdk model sync`
+bootstraps all applicable declarations when the lock has no model entries. Both
+paths record immutable results and consumer views into the lock and render those
+views immediately:
 
 ```toml
 [models.flux]
@@ -258,8 +262,11 @@ profile  = "desktop"                   # defaults to "default" when omitted
 ```
 
 The fields mirror the `model pull` flags (`source`/`include`/`exclude`/
-`variant`/`when`) plus `views` (consumer name -> that consumer's `profile` and
-`map`). A `map` key is a **repo-relative path prefix** (normalized to `/`) and
+`variant`/`when`/`endpoint`), plus `views` (consumer name -> that consumer's
+`profile` and `map`). An explicit reference, `--include`, `--exclude`, `--variant`,
+or `--endpoint` overrides the corresponding declaration field. A declaration whose
+`when` does not match the current platform is ignored by a name-only pull and the
+initial sync. A `map` key is a **repo-relative path prefix** (normalized to `/`) and
 its value is a consumer category, using exactly the same rules as
 `model view add --map`. A misspelled field is an error
 (`deny_unknown_fields`), never silently ignored.

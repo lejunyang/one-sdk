@@ -642,7 +642,7 @@ osdk model path qwen25
 # so feed this one to ComfyUI, llama.cpp or a script instead
 osdk model path qwen25 --stable
 
-# Restore the same snapshots elsewhere from osdk.lock (pull writes, sync replays)
+# Restore osdk.lock; with no model entries yet, materialize [models] and create them
 osdk model sync
 osdk model list
 ```
@@ -672,7 +672,10 @@ source = "hf:black-forest-labs/FLUX.1-dev@main"
 "vae/"  = "vae"
 ```
 
-`osdk model sync` restores every locked model **and** rebuilds its views.
+`osdk model sync` restores every locked model **and** rebuilds its views. If the lock
+has no model entries yet, it uses the applicable `[models]` declarations for the
+first pull and writes their immutable results into the lock. An explicit pull
+reference or flag overrides the corresponding declaration field.
 
 
 Enable provider endpoint and cache variables for activated shells when model

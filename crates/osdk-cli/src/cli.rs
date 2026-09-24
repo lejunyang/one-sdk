@@ -744,7 +744,8 @@ pub enum ModelCommand {
         /// Local logical name for the model.
         name: String,
         /// Provider reference, e.g. hf:Qwen/Qwen2.5-7B-Instruct@main.
-        reference: String,
+        /// Omit it to use `[models.<name>].source` from project configuration.
+        reference: Option<String>,
         /// Override the provider endpoint.
         #[arg(long)]
         endpoint: Option<String>,

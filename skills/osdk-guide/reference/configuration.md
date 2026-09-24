@@ -334,7 +334,8 @@ allow_build_from_source = true     # 允许从源码构建 / 跑生命周期脚�
 
 ## `[models]` — 声明式模型
 
-`osdk model pull <name>` 会读取声明、写进 lock 并立即渲染视图。
+`osdk model pull <name>` 会读取同名声明；模型 lock 尚为空时，`osdk model sync` 会按
+当前平台适用的声明批量完成首次拉取。两者都会写 lock 并立即渲染视图。
 
 ```toml
 [models.flux]
@@ -350,6 +351,8 @@ endpoint = "https://..."                           # 可选：改写来源（这
 "unet/" = "diffusion_models"
 "vae/"  = "vae"
 ```
+- 显式 reference、`--include`、`--exclude`、`--variant`、`--endpoint` 覆盖声明对应字段；
+  `when` 不匹配当前平台的声明不会参与单参 pull 或首次 sync。
 - `deny_unknown_fields`：`source`/`endpoint` 拼错会硬报错。
 - 只声明「要什么」不需要 trust；只有 `endpoint` / 自定义来源这类**改变字节来源**的键才需要，
   且模型声明不会阻断普通工具命令。

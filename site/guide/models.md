@@ -6,7 +6,7 @@ osdk 把 Hugging Face 与 ModelScope 仓库作为多文件、不可变快照管�
 ## 命令参考
 
 ```text
-osdk model pull NAME REFERENCE
+osdk model pull NAME [REFERENCE]
   [--endpoint URL]
   [--forward-credentials]
   [--include GLOB]...
@@ -36,8 +36,8 @@ osdk model view doctor <comfyui|hf-cache> [--profile P]
 | `pull` 参数 | 作用 |
 | --- | --- |
 | `NAME` | 本地逻辑名；只允许 ASCII 字母、数字、`.`、`_`、`-` |
-| `REFERENCE` | `PROVIDER:owner/repo@revision` |
-| `--endpoint URL` | 覆盖 provider endpoint；优先于环境变量和 source 选择 |
+| `REFERENCE` | 可选的 `PROVIDER:owner/repo@revision`；省略时读取同名 `[models.NAME].source` |
+| `--endpoint URL` | 覆盖 provider endpoint；优先于声明、环境变量和 source 选择 |
 | `--forward-credentials` | 允许这个显式自定义 endpoint 接收 provider token |
 | `--include GLOB` | 可重复；至少匹配一个 include 时才下载 |
 | `--exclude GLOB` | 可重复；在 include 结果上继续排除 |
@@ -139,12 +139,13 @@ osdk source unpin hf             # 取消固定，恢复自动选择
 
 ### 从 lock 还原
 
-`osdk model sync` 是 `[models]` 段的读取方——`pull` 写、`sync` 复现，二者的关系与
-工具的 `lock` / `install` 相同。`osdk install` 刻意不代拉模型：权重太大，不该作为
-装工具的副作用被下载，所以这是一个独立动词。
+`osdk model sync` 优先复现 lock 里的不可变模型结果。lock 尚无模型条目时，它读取当前
+平台适用的 `[models]` 声明，完成首次拉取并创建模型 lock；后续 sync 再按 lock 复现。
+`osdk install` 刻意不代拉模型：权重太大，不该作为装工具的副作用被下载，所以这是一个
+独立动词。
 
 ```bash
-osdk model sync                 # 还原 lock 声明的全部模型
+osdk model sync                 # 复现 lock；无模型 lock 时按 [models] 首次拉取
 osdk model sync --dry-run       # 只报告会做什么
 osdk model sync --prune         # 同时删除 lock 不再声明的本地快照
 osdk model sync --prune --dry-run
@@ -178,6 +179,7 @@ osdk model sync --prune --dry-run
 
 ```text
 --endpoint
+> [models.<name>].endpoint
 > HF_ENDPOINT / MODELSCOPE_ENDPOINT / MODELSCOPE_DOMAIN
 > source pin、测速排名和内置 endpoint
 ```
@@ -206,14 +208,15 @@ osdk source pin huggingface|modelscope ID
 osdk source unpin huggingface|modelscope
 ```
 
-探测会先解析目标仓库 metadata，再对一个真实文件做最多 1 MiB 的 Range 下载；
+探测会先解析目标仓库 metadata，再对一个真实文件做 64 KiB 的 Range 下载；
 匿名与带凭据模式使用不同缓存键。更多 source 规则见[下载源与供应链安全](./sources-security)。
 
 ## 在 `osdk.toml` 中声明模型
 
 除了先 `pull` 再入 lock，也可以直接在项目 `osdk.toml` 里声明模型。声明本身不下载
-权重；之后 `osdk model pull <name>` 会匹配这份声明，并把消费者视图一起写进 lock、
-立即渲染：
+权重；之后 `osdk model pull <name>` 会读取同名声明，或者在尚无模型 lock 时运行
+`osdk model sync` 批量完成首次拉取。两条路径都会把不可变结果和消费者视图写进 lock，
+并立即渲染视图：
 
 ```toml
 [models.flux]
@@ -234,7 +237,9 @@ profile  = "desktop"                   # 省略时为 "default"
 ```
 
 字段含义与 `model pull` 参数一致：`source` / `include` / `exclude` / `variant` /
-`when`，外加 `views`（consumer 名 -> 该 consumer 的 `profile` 与 `map`）。`map` 的
+`when` / `endpoint`，外加 `views`（consumer 名 -> 该 consumer 的 `profile` 与 `map`）。
+显式 reference、`--include`、`--exclude`、`--variant`、`--endpoint` 覆盖声明中的对应值；
+声明的 `when` 不匹配当前平台时不会参与单参 pull 或首次 sync。`map` 的
 key 是**仓库内相对路径前缀**（一律以 `/` 归一），value 是消费者类别，规则与
 `model view add --map` 完全相同。写错字段名会直接报错（`deny_unknown_fields`），
 不会被静默忽略。

@@ -6169,96 +6169,47 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
             variant,
             no_lock,
         } => {
+            let declaration = applicable_model_declaration(app, &name);
+            let reference = reference
+                .or_else(|| declaration.map(|entry| entry.source.clone()))
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "model pull {name} needs a reference or an applicable [models.{name}] declaration"
+                    )
+                })?;
             let reference = osdk_core::model::ModelRef::parse(&reference)?;
-            let explicit_endpoint = endpoint.or_else(|| provider_endpoint_env(reference.provider));
-            let sources = if let Some(endpoint) = explicit_endpoint {
-                let mut source = osdk_core::source::Source::mirror("explicit", &endpoint, i32::MIN);
-                source.kind = osdk_core::source::SourceKind::Custom;
-                source.forward_credentials =
-                    forward_credentials || official_model_endpoint(reference.provider, &endpoint);
-                vec![source]
-            } else {
-                let mut sources = osdk_core::model::source::ranked_sources(
-                    &app.ctx,
-                    &reference,
-                    app.refresh_sources,
-                )
-                .await?;
-                if let Some(id) = app.source_override.as_deref() {
-                    let index = sources
-                        .iter()
-                        .position(|source| source.id == id)
-                        .ok_or_else(|| {
-                            anyhow!(t!("err.unknown_source", id = id, tool = reference.provider))
-                        })?;
-                    let selected = sources.remove(index);
-                    sources.insert(0, selected);
-                }
-                sources
-            };
             let options = osdk_core::model::pull::PullOptions {
-                include,
-                exclude,
-                variant,
+                include: if include.is_empty() {
+                    declaration
+                        .map(|entry| entry.include.clone())
+                        .unwrap_or_default()
+                } else {
+                    include
+                },
+                exclude: if exclude.is_empty() {
+                    declaration
+                        .map(|entry| entry.exclude.clone())
+                        .unwrap_or_default()
+                } else {
+                    exclude
+                },
+                variant: variant.or_else(|| declaration.and_then(|entry| entry.variant.clone())),
             };
-            let mut installed = None;
-            let mut last_error = None;
-            for source in sources {
-                let provider = osdk_core::model::source::provider(
-                    reference.provider,
-                    source.forward_credentials,
-                );
-                match osdk_core::model::pull::pull(
-                    &app.ctx,
-                    provider.as_ref(),
-                    &name,
-                    &reference,
-                    &source.download_url,
-                    &options,
-                )
-                .await
-                {
-                    Ok(model) => {
-                        installed = Some(model);
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            source = %source.id,
-                            endpoint = %source.download_url,
-                            error = %error,
-                            "model source failed, trying next endpoint"
-                        );
-                        last_error = Some(error);
-                    }
-                }
-            }
-            let installed = installed.ok_or_else(|| {
-                anyhow!(
-                    "{}",
-                    last_error
-                        .map(|error| error.to_string())
-                        .unwrap_or_else(|| "no model source candidates".into())
-                )
-            })?;
+            let endpoint = endpoint
+                .or_else(|| declaration.and_then(|entry| entry.endpoint.clone()))
+                .or_else(|| provider_endpoint_env(reference.provider));
+            let installed = pull_model_from_sources(
+                app,
+                &name,
+                &reference,
+                &options,
+                endpoint,
+                forward_credentials,
+            )
+            .await?;
             if !no_lock {
-                let cwd = std::env::current_dir()?;
-                let path = project_lock_path(app, &cwd);
-                crate::lockfile::merge_model(&path, &installed.manifest)?;
-                // If this pull corresponds to a `[models.<name>]` declaration,
-                // carry its view declarations into the lock so another machine's
-                // `model sync` rebuilds the same consumer views. Without a
-                // declaration, views stay empty (skip_serializing_if).
-                let declared_views = app
-                    .ctx
-                    .config
-                    .models
-                    .get(&name)
-                    .map(|m| crate::lockfile::locked_views_from_declaration(&m.views));
-                if let Some(views) = declared_views {
-                    crate::lockfile::set_model_views(&path, &name, views.clone())?;
-                    crate::model_view::reconcile_declared_views(app, &name, &views)?;
-                }
+                let path = persist_model_pull(app, &name, &installed)?;
                 println!("updated {}", path.display());
             }
             println!(
@@ -6331,6 +6282,100 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
     Ok(())
 }
 
+fn applicable_model_declaration<'a>(
+    app: &'a App,
+    name: &str,
+) -> Option<&'a osdk_core::config::ModelDeclaration> {
+    app.ctx.config.models.get(name).filter(|entry| {
+        entry
+            .when
+            .as_ref()
+            .map(|filter| filter.matches(&app.ctx.platform))
+            .unwrap_or(true)
+    })
+}
+
+async fn pull_model_from_sources(
+    app: &App,
+    name: &str,
+    reference: &osdk_core::model::ModelRef,
+    options: &osdk_core::model::pull::PullOptions,
+    endpoint: Option<String>,
+    forward_credentials: bool,
+) -> Result<osdk_core::model::InstalledModel> {
+    let sources = if let Some(endpoint) = endpoint {
+        let mut source = osdk_core::source::Source::mirror("explicit", &endpoint, i32::MIN);
+        source.kind = osdk_core::source::SourceKind::Custom;
+        source.forward_credentials =
+            forward_credentials || official_model_endpoint(reference.provider, &endpoint);
+        vec![source]
+    } else {
+        let mut sources =
+            osdk_core::model::source::ranked_sources(&app.ctx, reference, app.refresh_sources)
+                .await?;
+        if let Some(id) = app.source_override.as_deref() {
+            let index = sources
+                .iter()
+                .position(|source| source.id == id)
+                .ok_or_else(|| {
+                    anyhow!(t!("err.unknown_source", id = id, tool = reference.provider))
+                })?;
+            let selected = sources.remove(index);
+            sources.insert(0, selected);
+        }
+        sources
+    };
+
+    let mut last_error = None;
+    for source in sources {
+        let provider =
+            osdk_core::model::source::provider(reference.provider, source.forward_credentials);
+        match osdk_core::model::pull::pull(
+            &app.ctx,
+            provider.as_ref(),
+            name,
+            reference,
+            &source.download_url,
+            options,
+        )
+        .await
+        {
+            Ok(model) => return Ok(model),
+            Err(error) => {
+                tracing::warn!(
+                    source = %source.id,
+                    endpoint = %source.download_url,
+                    error = %error,
+                    "model source failed, trying next endpoint"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(anyhow!(
+        "{}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no model source candidates".into())
+    ))
+}
+
+fn persist_model_pull(
+    app: &App,
+    name: &str,
+    installed: &osdk_core::model::InstalledModel,
+) -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let path = project_lock_path(app, &cwd);
+    crate::lockfile::merge_model(&path, &installed.manifest)?;
+    if let Some(declaration) = applicable_model_declaration(app, name) {
+        let views = crate::lockfile::locked_views_from_declaration(&declaration.views);
+        crate::lockfile::set_model_views(&path, name, views.clone())?;
+        crate::model_view::reconcile_declared_views(app, name, &views)?;
+    }
+    Ok(path)
+}
+
 /// Materialize what the project lock declares, and optionally drop what it does
 /// not.
 ///
@@ -6353,14 +6398,71 @@ async fn model_sync(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
-    let locked = crate::lockfile::locked_models(&path)?;
-    if locked.is_empty() && !prune {
-        println!("no models declared in {}", path.display());
-        return Ok(());
+    let mut locked = crate::lockfile::locked_models(&path)?;
+    let configured: Vec<_> = app
+        .ctx
+        .config
+        .models
+        .iter()
+        .filter(|(name, _)| applicable_model_declaration(app, name).is_some())
+        .map(|(name, declaration)| (name.clone(), declaration.clone()))
+        .collect();
+    let mut restored = 0usize;
+    let mut bootstrapped = std::collections::BTreeSet::new();
+
+    if locked.is_empty() {
+        for (name, declaration) in &configured {
+            if declaration.source.trim().is_empty() {
+                anyhow::bail!("[models.{name}].source cannot be empty");
+            }
+            if dry_run {
+                println!(
+                    "would pull {name} ({}) from project declaration",
+                    declaration.source
+                );
+                restored += 1;
+                continue;
+            }
+            let reference = osdk_core::model::ModelRef::parse(&declaration.source)?;
+            let options = osdk_core::model::pull::PullOptions {
+                include: declaration.include.clone(),
+                exclude: declaration.exclude.clone(),
+                variant: declaration.variant.clone(),
+            };
+            let endpoint = declaration
+                .endpoint
+                .clone()
+                .or_else(|| provider_endpoint_env(reference.provider));
+            let installed =
+                pull_model_from_sources(app, name, &reference, &options, endpoint, false)
+                    .await
+                    .with_context(|| format!("pulling declared model {name}"))?;
+            let lock_path = persist_model_pull(app, name, &installed)?;
+            println!(
+                "pulled declared model {name} at revision {} -> {}",
+                installed.manifest.revision,
+                installed.path.display()
+            );
+            println!("updated {}", lock_path.display());
+            bootstrapped.insert(name.clone());
+            restored += 1;
+        }
+        if !dry_run {
+            locked = crate::lockfile::locked_models(&path)?;
+        }
     }
 
-    let mut restored = 0usize;
+    if locked.is_empty() && configured.is_empty() && !prune {
+        println!(
+            "no models declared in {} or project configuration",
+            path.display()
+        );
+        return Ok(());
+    }
     for (name, entry) in &locked {
+        if bootstrapped.contains(name) {
+            continue;
+        }
         // Verify before deciding, so an intact snapshot is left alone and a
         // corrupted one is not mistaken for a present one.
         let present = store
@@ -6448,8 +6550,11 @@ async fn model_sync(
     }
 
     if prune {
-        let declared: std::collections::BTreeSet<_> =
-            locked.iter().map(|(name, _)| name.clone()).collect();
+        let declared: std::collections::BTreeSet<_> = if locked.is_empty() {
+            configured.iter().map(|(name, _)| name.clone()).collect()
+        } else {
+            locked.iter().map(|(name, _)| name.clone()).collect()
+        };
         let mut pruned = 0usize;
         for installed in store.list()? {
             let name = installed.manifest.name.clone();

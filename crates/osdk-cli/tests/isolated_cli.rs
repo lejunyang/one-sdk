@@ -510,6 +510,41 @@ fn package_cache_hook_refreshes_managed_values_and_preserves_user_overrides() {
         .contains(&format!("export npm_config_cache='{}'", expected.display())));
 }
 
+#[test]
+fn model_pull_without_reference_requires_an_applicable_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_isolated(temporary.path(), &["model", "pull", "fixture"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("needs a reference or an applicable [models.fixture] declaration"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn model_sync_dry_run_bootstraps_an_empty_lock_from_declarations() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.fixture]\nsource = \"hf:owner/repo@main\"\ninclude = [\"*.safetensors\"]\n",
+    )
+    .unwrap();
+
+    let output = run_isolated(temporary.path(), &["model", "sync", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("would pull fixture (hf:owner/repo@main) from project declaration"),
+        "{stdout}"
+    );
+    assert!(!temporary.path().join("osdk.lock").exists());
+}
+
 // Windows runners can block a child process from connecting back to a listener
 // owned by the test process. The same provider/pull contract runs in-process in
 // osdk-core on Windows; keep this cross-process CLI topology on Unix.
@@ -561,16 +596,19 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
 
     let temporary = tempfile::tempdir().unwrap();
     let endpoint = format!("http://{address}");
-    let output = run_isolated(
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        format!(
+            "[models.fixture]\nsource = \"hf:owner/repo@main\"\nendpoint = \"{endpoint}\"\ninclude = [\"config.json\"]\nvariant = \"declared\"\n"
+        ),
+    )
+    .unwrap();
+    let trusted = temporary.path().to_string_lossy().into_owned();
+    let output = run_isolated_in_with_env(
         temporary.path(),
-        &[
-            "model",
-            "pull",
-            "fixture",
-            "hf:owner/repo@main",
-            "--endpoint",
-            &endpoint,
-        ],
+        temporary.path(),
+        &["model", "pull", "fixture"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
     );
     assert!(
         output.status.success(),
@@ -588,6 +626,7 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
     let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
     assert!(lock.contains("[models.fixture]"));
     assert!(lock.contains("revision = \"abc123\""));
+    assert!(lock.contains("variant = \"declared\""));
     assert!(lock.contains("sha256 ="));
 }
 
@@ -644,27 +683,22 @@ fn declared_model_pull_records_views_in_lock_and_renders_view() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    // A source-only declaration (no endpoint): needs no trust, and maps the
-    // repo-root config.json into ComfyUI's `configs` category.
+    let endpoint = format!("http://{address}");
     std::fs::write(
         project.join("osdk.toml"),
-        "[models.fixture]\nsource = \"hf:owner/repo@main\"\n\
-         [models.fixture.views.comfyui]\n\
-         map = { \"config.json\" = \"configs\" }\n",
+        format!(
+            "[models.fixture]\nsource = \"hf:owner/repo@main\"\nendpoint = \"{endpoint}\"\n\
+             [models.fixture.views.comfyui]\n\
+             map = {{ \"config.json\" = \"configs\" }}\n"
+        ),
     )
     .unwrap();
-    let endpoint = format!("http://{address}");
-    let output = run_isolated_in(
+    let trusted = project.to_string_lossy().into_owned();
+    let output = run_isolated_in_with_env(
         temporary.path(),
         &project,
-        &[
-            "model",
-            "pull",
-            "fixture",
-            "hf:owner/repo@main",
-            "--endpoint",
-            &endpoint,
-        ],
+        &["model", "sync"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
     );
     assert!(
         output.status.success(),

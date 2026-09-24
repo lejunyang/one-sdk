@@ -192,8 +192,8 @@ osdk trust list
 
 | 命令 | 作用 |
 | --- | --- |
-| `model pull <name> <reference> [--include/--exclude glob] [--variant v] [--endpoint u] [--forward-credentials] [--no-lock]` | 解析并下载不可变模型快照；`reference` 形如 `hf:Qwen/Qwen2.5-7B-Instruct@main`、`ms:...` |
-| `model sync [--prune] [--dry-run]` | 按项目 lock 物化全部声明的模型（pull 写、sync 复现）；`--prune` 删除 lock 不再声明的本地快照 |
+| `model pull <name> [reference] [--include/--exclude glob] [--variant v] [--endpoint u] [--forward-credentials] [--no-lock]` | 解析并下载不可变模型快照；省略 `reference` 时读取同名 `[models.<name>].source`，显式参数覆盖声明 |
+| `model sync [--prune] [--dry-run]` | 有模型 lock 时复现；无模型 lock 时按当前平台适用的 `[models]` 首次拉取并写 lock；`--prune` 删除 lock 不再声明的本地快照 |
 | `model list` | 列出本地已物化快照 |
 | `model path <name> [--stable]` | 打印当前快照路径；`--stable` 打印稳定 `current` 路径（写进 ComfyUI / llama.cpp / 脚本用这个） |
 | `model verify <name>` | 校验某快照全部文件 |

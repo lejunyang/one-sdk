@@ -580,7 +580,7 @@ osdk model path qwen25
 # 要写进 ComfyUI、llama.cpp 或脚本里的路径请用这个
 osdk model path qwen25 --stable
 
-# 在另一台机器上按 osdk.lock 还原同一批快照（pull 写、sync 复现）
+# 有模型 lock 时复现；尚无模型 lock 时按 [models] 首次拉取并创建 lock
 osdk model sync
 osdk model list
 ```
@@ -608,7 +608,9 @@ source = "hf:black-forest-labs/FLUX.1-dev@main"
 "vae/"  = "vae"
 ```
 
-`osdk model sync` 会还原 lock 声明的全部模型，**并**重建它们的视图。
+`osdk model sync` 会还原 lock 声明的全部模型，**并**重建它们的视图。lock 尚无模型
+条目时，它会按当前平台适用的 `[models]` 声明完成首次拉取，并把不可变结果写入 lock。
+显式传给 `pull` 的 reference 或选项优先于声明中的对应字段。
 
 
 需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用
