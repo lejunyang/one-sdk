@@ -23,9 +23,18 @@ osdk skills add <SOURCE>
 osdk skills list [-g]
 osdk skills remove NAME [-g] [-a ID]...
 osdk skills sync [-g]
+osdk skills update [SKILL...] [-g]
 osdk skills path NAME
+osdk skills use <SOURCE> [-s NAME] [-a ID] [--ref REF]
+osdk skills init [NAME]
 osdk skills agents
 ```
+
+`sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit（不变），`update` 把浮动 ref
+（分支/标签，取自 `[skills.<名>].ref`）重新解析到当前 commit，变了才重下并写回 lock。
+`use` 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可
+`osdk skills use owner/repo | claude` 管道），`-a <id>` 时用该 Agent 的 CLI 交互式启动。
+`init` 生成 `SKILL.md` 模板，帮你开始写自己的 skill。
 
 ### 来源格式
 

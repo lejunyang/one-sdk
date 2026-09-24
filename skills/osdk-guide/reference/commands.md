@@ -211,7 +211,9 @@ Agent 读的内容，osdk 只负责下载、内容寻址落地与链接，自己
 | `list [-g]` | 列出已装 skill 及其链接到的 Agent（读 `osdk.lock`） |
 | `remove <NAME> [-g] [-a <ID>...]` | 从 Agent 摘除 skill；不带 `-a` 摘除全部并删 lock 条目，带 `-a` 只摘指定 Agent 并保留其余 |
 | `sync [-g]` | 按 `osdk.lock` 复现全部 skill（团队 / CI）：优先用已落地的内容寻址副本，缺副本时对 GitHub 源按记录的 commit 重新下载并核对内容哈希 |
-| `path <NAME>` | 打印某已装 skill 的内容寻址落地路径 |
+| `update [SKILL...] [-g]` | 与 `sync` 相对：`sync` 复现 lock 记录的 commit，`update` 把浮动 ref（分支/标签，取自 `[skills.<名>].ref`）重新解析到当前 commit，变了才重下并写回 lock；钉死 commit 的无可更新 |
+| `use <SOURCE> [-s <NAME>] [-a <ID>] [--ref <REF>]` | 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可 `\| claude` 管道），`-a <id>` 时用该 Agent 的 CLI 交互式启动并带上 prompt |
+| `init [NAME]` | 生成 `SKILL.md` 模板开始写自己的 skill；`NAME/`（或当前目录），拒绝覆盖已存在的 `SKILL.md` || `path <NAME>` | 打印某已装 skill 的内容寻址落地路径 |
 | `agents` | 列出 osdk 认识的 Agent 及其 project / global skills 目录 |
 
 ```bash

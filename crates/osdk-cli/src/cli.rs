@@ -954,6 +954,42 @@ pub enum SkillsCommand {
         /// Skill name.
         name: String,
     },
+    /// Update installed skills to the latest resolution of their source.
+    ///
+    /// The counterpart to `sync`: `sync` reproduces the commit the lock records,
+    /// `update` re-resolves a floating ref (a branch/tag) to its current commit
+    /// and rewrites the lock. A skill pinned to an exact commit has nothing to
+    /// update and is left alone.
+    Update {
+        /// Skills to update by name; omit to update all.
+        skills: Vec<String>,
+        /// Update only the user-level lock instead of the project lock.
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Use one skill without installing it: print its prompt, or start an agent.
+    ///
+    /// With no `--agent`, the generated prompt is written to stdout (pipe it,
+    /// e.g. `osdk skills use owner/repo | claude`). With `--agent`, that agent is
+    /// started interactively with the prompt.
+    Use {
+        /// Source: `github:owner/repo`, `owner/repo`, a github.com URL, or a local path.
+        source: String,
+        /// When the repo holds several skills, pick one by name.
+        #[arg(short = 's', long = "skill", value_name = "NAME")]
+        skill: Option<String>,
+        /// Start this agent interactively with the generated prompt.
+        #[arg(short = 'a', long = "agent", value_name = "ID")]
+        agent: Option<String>,
+        /// Version selector for a GitHub source, e.g. `branch:main` or a commit.
+        #[arg(long, value_name = "REF")]
+        r#ref: Option<String>,
+    },
+    /// Create a SKILL.md template to start authoring a skill.
+    Init {
+        /// Directory to create the skill in; defaults to the current directory.
+        name: Option<String>,
+    },
     /// List the agents osdk can install skills into, and their directories.
     Agents,
 }

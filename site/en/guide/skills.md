@@ -26,9 +26,21 @@ osdk skills add <SOURCE>
 osdk skills list [-g]
 osdk skills remove NAME [-g] [-a ID]...
 osdk skills sync [-g]
+osdk skills update [SKILL...] [-g]
 osdk skills path NAME
+osdk skills use <SOURCE> [-s NAME] [-a ID] [--ref REF]
+osdk skills init [NAME]
 osdk skills agents
 ```
+
+`sync` and `update` are a pair: `sync` reproduces the commit the lock records
+(unchanged), while `update` re-resolves a floating ref (a branch/tag, taken from
+`[skills.<name>].ref`) to its current commit and rewrites the lock only when it
+moved. `use` installs nothing and writes no lock — it uses one skill on the fly:
+with no `-a` it writes the generated prompt to stdout (pipe it, e.g.
+`osdk skills use owner/repo | claude`), and with `-a <id>` it starts that agent's
+CLI interactively with the prompt. `init` scaffolds a `SKILL.md` template so you
+can start authoring a skill.
 
 ### Source formats
 

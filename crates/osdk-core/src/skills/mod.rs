@@ -50,6 +50,10 @@ pub struct AgentTarget {
     /// Global (user-scoped) skills directory, relative to `$HOME`; `None` when
     /// the agent has no user-level location.
     pub global: Option<&'static str>,
+    /// The command that starts this agent's CLI, for `osdk skills use --agent`.
+    /// `None` when the agent has no launchable CLI osdk drives (it can still be a
+    /// skill target). Looked up on PATH; osdk never bundles the agent.
+    pub launch: Option<&'static str>,
 }
 
 /// Agents osdk can install skills into.
@@ -65,42 +69,49 @@ pub static AGENT_TARGETS: &[AgentTarget] = &[
         name: "Claude Code",
         project: ".claude/skills",
         global: Some(".claude/skills"),
+        launch: Some("claude"),
     },
     AgentTarget {
         id: "codex",
         name: "Codex",
         project: ".agents/skills",
         global: Some(".codex/skills"),
+        launch: Some("codex"),
     },
     AgentTarget {
         id: "cursor",
         name: "Cursor",
         project: ".agents/skills",
         global: Some(".cursor/skills"),
+        launch: Some("cursor"),
     },
     AgentTarget {
         id: "opencode",
         name: "OpenCode",
         project: ".agents/skills",
         global: Some(".config/opencode/skills"),
+        launch: Some("opencode"),
     },
     AgentTarget {
         id: "gemini-cli",
         name: "Gemini CLI",
         project: ".agents/skills",
         global: Some(".gemini/skills"),
+        launch: Some("gemini"),
     },
     AgentTarget {
         id: "github-copilot",
         name: "GitHub Copilot",
         project: ".agents/skills",
         global: Some(".copilot/skills"),
+        launch: None,
     },
     AgentTarget {
         id: "universal",
         name: "Universal (.agents)",
         project: ".agents/skills",
         global: Some(".config/agents/skills"),
+        launch: None,
     },
 ];
 
@@ -433,6 +444,29 @@ mod tests {
     fn agent_lookup_resolves_known_and_rejects_unknown() {
         assert_eq!(agent_target("claude-code").unwrap().name, "Claude Code");
         assert!(agent_target("nope").is_none());
+    }
+
+    #[test]
+    fn agent_launch_commands_are_bare_program_names() {
+        // `use --agent` runs the launch command directly (no shell), so a launch
+        // entry must be a plain program name found on PATH, never a path or a
+        // command line with arguments. At least one agent must be launchable, or
+        // `use --agent` could never work.
+        let mut launchable = 0;
+        for target in AGENT_TARGETS {
+            if let Some(launch) = target.launch {
+                launchable += 1;
+                assert!(!launch.is_empty(), "{} launch is empty", target.id);
+                assert!(
+                    !launch.contains(['/', '\\', ' ']),
+                    "{} launch `{launch}` must be a bare program name",
+                    target.id
+                );
+            }
+        }
+        assert!(launchable >= 1, "at least one agent must be launchable");
+        // Claude Code is the reference launchable agent.
+        assert_eq!(agent_target("claude-code").unwrap().launch, Some("claude"));
     }
 
     #[test]

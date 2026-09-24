@@ -52,6 +52,23 @@ pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
             agents,
         } => remove(app, &name, global, &agents),
         SkillsCommand::Sync { global } => sync(app, global).await,
+        SkillsCommand::Update { skills, global } => update(app, &skills, global).await,
+        SkillsCommand::Use {
+            source,
+            skill,
+            agent,
+            r#ref,
+        } => {
+            use_skill(
+                app,
+                &source,
+                skill.as_deref(),
+                agent.as_deref(),
+                r#ref.as_deref(),
+            )
+            .await
+        }
+        SkillsCommand::Init { name } => init(name.as_deref()),
     }
 }
 
@@ -359,8 +376,195 @@ async fn refetch_staged(app: &App, name: &str, entry: &LockedSkill) -> Result<Op
     Ok(Some(staged))
 }
 
-// --- helpers ---------------------------------------------------------------
+/// Update installed skills to the latest resolution of their source.
+///
+/// For each targeted skill, re-resolve its GitHub source's ref to the current
+/// commit; if that differs from the lock, re-download, re-stage, re-link the
+/// agents it was in, and rewrite the lock. Local sources and commit-pinned
+/// GitHub sources have nothing to re-resolve and are reported as up to date.
+async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
+    let lock_path = lock_path_for(app, global);
+    if !lock_path.is_file() {
+        println!("No lockfile; nothing to update.");
+        return Ok(());
+    }
+    let mut lock = lockfile::load(&lock_path)?;
+    let names: Vec<String> = if wanted.is_empty() {
+        lock.skills.keys().cloned().collect()
+    } else {
+        wanted.to_vec()
+    };
+    if names.is_empty() {
+        println!("No skills in the lock to update.");
+        return Ok(());
+    }
 
+    let scope_root = scope_root(app, global)?;
+    let mode = link_mode(app, false);
+    let mut changed = false;
+    for name in &names {
+        let Some(entry) = lock.skills.get(name).cloned() else {
+            anyhow::bail!("skill `{name}` is not recorded in the lock");
+        };
+        let source = SkillSource::parse(&entry.source)?;
+        let SkillSource::GitHub {
+            owner,
+            repo,
+            subdir,
+        } = &source
+        else {
+            println!("`{name}`: local source, nothing to update");
+            continue;
+        };
+        // Re-resolve the recorded ref. Without a ref, HEAD of the default branch
+        // is the moving target; a commit-pinned entry resolves to itself.
+        // The original ref lives in the project config, not the lock, so read it
+        // from there; absent, HEAD of the default branch is the moving target.
+        let reference = app
+            .ctx
+            .config
+            .skills
+            .get(name)
+            .and_then(|declaration| declaration.r#ref.clone());
+        let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference.as_deref())
+            .await
+            .with_context(|| format!("re-resolving {owner}/{repo}"))?;
+        if Some(&commit) == entry.resolved_commit.as_ref() {
+            println!("`{name}`: already at {}", &commit[..commit.len().min(12)]);
+            continue;
+        }
+
+        let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
+        let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
+        let wanted_dir = entry.skill.clone().unwrap_or_else(|| name.clone());
+        let skill_root = if root.join(install::SKILL_MANIFEST).is_file() {
+            root
+        } else {
+            root.join(&wanted_dir)
+        };
+        let package = install::read_skill_dir(&skill_root)?;
+        let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
+        for agent_id in &entry.agents {
+            let Some(target) = agent_target(agent_id) else {
+                continue;
+            };
+            let agent_dir = agent_dir(target, &scope_root, global)?;
+            install::link_into(&agent_dir, name, &staged, mode)?;
+        }
+        if let Some(existing) = lock.skills.get_mut(name) {
+            existing.resolved_commit = Some(commit.clone());
+            existing.content_hash = package.content_hash();
+        }
+        changed = true;
+        println!("`{name}`: updated to {}", &commit[..commit.len().min(12)]);
+    }
+
+    if changed {
+        lockfile::save(&lock_path, &lock)?;
+    }
+    Ok(())
+}
+
+/// Use a skill without installing it: print its prompt, or start an agent.
+async fn use_skill(
+    app: &mut App,
+    source_str: &str,
+    skill: Option<&str>,
+    agent: Option<&str>,
+    reference: Option<&str>,
+) -> Result<()> {
+    let source = SkillSource::parse(source_str)?;
+    let wanted: Vec<String> = skill.map(|s| vec![s.to_string()]).unwrap_or_default();
+
+    // Resolve to one skill directory (local or GitHub), without staging or lock.
+    let root = match &source {
+        SkillSource::Local { path } => path.clone(),
+        SkillSource::GitHub {
+            owner,
+            repo,
+            subdir,
+        } => {
+            let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference).await?;
+            let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
+            skills::fetch::subtree(&tree, subdir.as_deref())?
+        }
+    };
+    let roots = local_roots(&root, &wanted)?;
+    if roots.len() != 1 {
+        anyhow::bail!(
+            "`use` needs exactly one skill; {} matched -- pass -s <name> to pick one",
+            roots.len()
+        );
+    }
+    let package = install::read_skill_dir(&roots[0].1)?;
+    let manifest = package
+        .files
+        .iter()
+        .find(|f| f.path == install::SKILL_MANIFEST)
+        .map(|f| String::from_utf8_lossy(&f.bytes).into_owned())
+        .unwrap_or_default();
+    let prompt = format!(
+        "Use the following skill for this session.\n\n# Skill: {}\n\n{}\n",
+        package.name, manifest
+    );
+
+    match agent {
+        None => {
+            // Pipe target: only the prompt goes to stdout.
+            print!("{prompt}");
+            Ok(())
+        }
+        Some(agent_id) => {
+            let target =
+                agent_target(agent_id).with_context(|| format!("unknown agent `{agent_id}`"))?;
+            let launch = target.launch.with_context(|| {
+                format!("agent `{agent_id}` has no launchable CLI osdk can start")
+            })?;
+            // Start the agent interactively with the prompt as its argument,
+            // inheriting stdio so the session is the user's.
+            let status = std::process::Command::new(launch)
+                .arg(&prompt)
+                .status()
+                .with_context(|| format!("starting `{launch}` (is it on PATH?)"))?;
+            if !status.success() {
+                anyhow::bail!("`{launch}` exited with {status}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Create a SKILL.md template to start authoring a skill.
+fn init(name: Option<&str>) -> Result<()> {
+    let dir = match name {
+        Some(n) => {
+            osdk_core::skills::validate_skill_name(n)?;
+            std::env::current_dir()?.join(n)
+        }
+        None => std::env::current_dir()?,
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let manifest = dir.join(install::SKILL_MANIFEST);
+    if manifest.exists() {
+        anyhow::bail!(
+            "{} already exists; refusing to overwrite",
+            manifest.display()
+        );
+    }
+    let leaf = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "my-skill".to_string());
+    let template = format!(
+        "---\nname: {leaf}\ndescription: One sentence on what this skill does and when to use it.\n---\n\n# {leaf}\n\nWrite the skill's instructions here.\n"
+    );
+    std::fs::write(&manifest, template)
+        .with_context(|| format!("writing {}", manifest.display()))?;
+    println!("Created {}", manifest.display());
+    Ok(())
+}
+
+// --- helpers ---------------------------------------------------------------
 /// Conventional directories that hold a collection of skills inside a repo.
 ///
 /// The wider ecosystem publishes skills under `skills/` (and agents mount them
