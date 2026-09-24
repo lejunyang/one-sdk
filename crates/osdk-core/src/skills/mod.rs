@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+pub mod fetch;
 pub mod install;
 
 /// One agent osdk knows how to install a skill into.

@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use osdk_core::skills;
 use osdk_core::skills::{agent_target, install, AgentTarget, SkillSource, AGENT_TARGETS};
 use osdk_core::store::link::LinkMode;
 
@@ -128,25 +129,34 @@ struct AddArgs {
 async fn add(app: &mut App, args: AddArgs) -> Result<()> {
     let source = SkillSource::parse(&args.source)?;
 
-    // Resolve the source to one or more on-disk skill roots. P0-4a handles local
-    // sources; GitHub is wired in P0-4b.
-    let (roots, _resolved_commit): (Vec<(String, PathBuf)>, Option<String>) = match &source {
+    // Resolve the source to one or more on-disk skill roots plus, for GitHub, the
+    // immutable commit the ref pinned to. Both source kinds converge on
+    // `local_roots`, which handles "one skill dir" and "a directory of skills".
+    let (roots, resolved_commit): (Vec<(String, PathBuf)>, Option<String>) = match &source {
         SkillSource::Local { path } => {
             if args.reference.is_some() {
                 anyhow::bail!("--ref applies only to a GitHub source, not a local path");
             }
             (local_roots(path, &args.skills)?, None)
         }
-        SkillSource::GitHub { .. } => {
-            let selector = args
-                .reference
-                .as_deref()
-                .map(|r| format!(" (requested ref `{r}`)"))
-                .unwrap_or_default();
-            anyhow::bail!(
-                "GitHub sources are not available yet in this build{selector}; install from a \
-                 local path for now (this is the P0-4b step)"
-            )
+        SkillSource::GitHub {
+            owner,
+            repo,
+            subdir,
+        } => {
+            let commit =
+                skills::fetch::resolve_commit(&app.ctx, owner, repo, args.reference.as_deref())
+                    .await
+                    .with_context(|| format!("resolving {owner}/{repo}"))?;
+            println!(
+                "Resolved {owner}/{repo} to commit {}",
+                &commit[..commit.len().min(12)]
+            );
+            let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit)
+                .await
+                .with_context(|| format!("downloading {owner}/{repo}@{commit}"))?;
+            let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
+            (local_roots(&root, &args.skills)?, Some(commit))
         }
     };
 
@@ -187,7 +197,7 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
             LockedSkill {
                 source: source.canonical(),
                 content_hash: package.content_hash(),
-                resolved_commit: _resolved_commit.clone(),
+                resolved_commit: resolved_commit.clone(),
                 skill: (name != &package.name).then(|| name.clone()),
                 agents: linked_agents,
             },
@@ -264,17 +274,27 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
         return Ok(());
     }
 
-    // The staged copy is content-addressed, so a sync can only replay a skill
-    // whose staged content is still present. Re-fetching a missing GitHub source
-    // is the P0-4b path; here we replay what is staged and report what is not.
+    // Reproduce each skill from its staged copy. When the copy is gone, a GitHub
+    // source is re-fetched at its recorded commit and re-staged; the content hash
+    // is then re-checked so a moved tag or a tampered mirror cannot silently swap
+    // the bytes. A local source that has lost its staged copy cannot be replayed
+    // (its origin path may be gone), so it is reported rather than guessed at.
     let scope_root = scope_root(app, global)?;
     let mode = link_mode(app, false);
     let mut missing = Vec::new();
     for (name, entry) in &skills {
-        let staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
+        let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
         if !staged.exists() {
-            missing.push(name.clone());
-            continue;
+            match refetch_staged(app, name, entry).await {
+                Ok(Some(path)) => staged = path,
+                Ok(None) => {
+                    missing.push(name.clone());
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error.context(format!("re-fetching skill `{name}` for sync")));
+                }
+            }
         }
         for agent_id in &entry.agents {
             let Some(target) = agent_target(agent_id) else {
@@ -287,7 +307,7 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
     }
     if !missing.is_empty() {
         anyhow::bail!(
-            "cannot reproduce {} skill(s) with no staged copy: {} (re-adding from source is the P0-4b path)",
+            "cannot reproduce {} skill(s) with no staged copy and no re-fetchable source: {}",
             missing.len(),
             missing.join(", ")
         );
@@ -295,13 +315,65 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
     Ok(())
 }
 
+/// Re-stage a skill whose CAS copy is gone, from its recorded source.
+///
+/// Returns the staged path on success, `None` when the source cannot be
+/// re-fetched (a local source, whose origin may no longer exist). The re-staged
+/// content hash must match what the lock recorded, or the sync fails closed: a
+/// moved ref or a substituted mirror must not quietly change what is installed.
+async fn refetch_staged(app: &App, name: &str, entry: &LockedSkill) -> Result<Option<PathBuf>> {
+    let source = SkillSource::parse(&entry.source)?;
+    let SkillSource::GitHub {
+        owner,
+        repo,
+        subdir,
+    } = &source
+    else {
+        // A local source is not re-fetchable during sync.
+        return Ok(None);
+    };
+    let commit = entry
+        .resolved_commit
+        .clone()
+        .with_context(|| format!("skill `{name}` has no recorded commit to re-fetch"))?;
+    let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
+    let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
+    // Pick the same skill within the repo the lock recorded.
+    let wanted = entry.skill.clone().unwrap_or_else(|| name.to_string());
+    let skill_root = if root.join(install::SKILL_MANIFEST).is_file() {
+        root
+    } else {
+        root.join(&wanted)
+    };
+    let package = install::read_skill_dir(&skill_root)?;
+    let mode = link_mode(app, false);
+    let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
+    if package.content_hash() != entry.content_hash {
+        anyhow::bail!(
+            "re-fetched `{name}` hashes to {} but the lock recorded {}; refusing to install \
+             different bytes",
+            package.content_hash(),
+            entry.content_hash
+        );
+    }
+    Ok(Some(staged))
+}
+
 // --- helpers ---------------------------------------------------------------
 
-/// Enumerate skill roots from a local source, honoring `--skill` selection.
+/// Conventional directories that hold a collection of skills inside a repo.
 ///
-/// A directory that is itself a skill (has `SKILL.md`) is one root named by its
-/// frontmatter. A directory of skills (subdirectories each with `SKILL.md`) is
-/// several; `--skill` narrows them by directory name.
+/// The wider ecosystem publishes skills under `skills/` (and agents mount them
+/// from `.agents/skills` / `.claude/skills`), so a repo root that is not itself a
+/// skill is searched in these containers too, not only its immediate children.
+const SKILL_CONTAINERS: &[&str] = &["", "skills", ".agents/skills", ".claude/skills"];
+
+/// Enumerate skill roots from a local (or extracted) source, honoring `--skill`.
+///
+/// Three shapes are handled: a directory that is itself a skill (one root, named
+/// by its frontmatter); a directory whose immediate children are skills; and a
+/// repo that keeps skills under a conventional container such as `skills/`.
+/// `--skill` narrows the multi-skill cases by directory name (`*` selects all).
 fn local_roots(path: &Path, wanted: &[String]) -> Result<Vec<(String, PathBuf)>> {
     if !path.is_dir() {
         anyhow::bail!("local skill source `{}` is not a directory", path.display());
@@ -312,30 +384,47 @@ fn local_roots(path: &Path, wanted: &[String]) -> Result<Vec<(String, PathBuf)>>
         return Ok(vec![(package.name, path.to_path_buf())]);
     }
 
-    // A directory of skills: each immediate subdir that holds a SKILL.md.
-    let mut roots = Vec::new();
-    for entry in std::fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+    // A collection of skills: scan each conventional container for immediate
+    // subdirectories that hold a SKILL.md. Keyed by name so the same skill found
+    // via two containers is not staged twice.
+    let mut roots: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
+    for container in SKILL_CONTAINERS {
+        let dir = if container.is_empty() {
+            path.to_path_buf()
+        } else {
+            let mut dir = path.to_path_buf();
+            for segment in container.split('/') {
+                dir.push(segment);
+            }
+            dir
+        };
+        if !dir.is_dir() {
             continue;
         }
-        let child = entry.path();
-        if child.join(install::SKILL_MANIFEST).is_file() {
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            if wanted.is_empty() || wanted.iter().any(|w| w == "*" || w == &dir_name) {
-                roots.push((dir_name, child));
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let child = entry.path();
+            if child.join(install::SKILL_MANIFEST).is_file() {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if wanted.is_empty() || wanted.iter().any(|w| w == "*" || w == &dir_name) {
+                    roots.entry(dir_name).or_insert(child);
+                }
             }
         }
     }
     if roots.is_empty() {
         anyhow::bail!(
-            "no {} found in {} or its immediate subdirectories",
+            "no {} found in {} (looked in the root, its subdirectories, and skills/)",
             install::SKILL_MANIFEST,
             path.display()
         );
     }
-    roots.sort();
-    Ok(roots)
+    Ok(roots.into_iter().collect())
 }
 
 /// Which agents an install targets: explicit flags, else configured defaults,
