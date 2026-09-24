@@ -245,26 +245,57 @@ fn remove(app: &mut App, name: &str, global: bool, only_agents: &[String]) -> Re
     } else {
         only_agents.to_vec()
     };
-    let mut removed_any = false;
-    for agent_id in &remove_from {
-        let Some(target) = agent_target(agent_id) else {
-            anyhow::bail!("unknown agent `{agent_id}`");
-        };
-        let agent_dir = agent_dir(target, &scope_root, global)?;
-        if install::unlink_from(&agent_dir, name)? {
-            removed_any = true;
-            println!("removed `{name}` from {agent_id}");
-        }
-    }
-
-    // Update the lock: drop the whole entry when no agent still holds it,
-    // otherwise keep it with the remaining agents.
+    // Agents that keep the skill after this removal.
     let remaining: Vec<String> = entry
         .agents
         .iter()
         .filter(|a| !remove_from.contains(a))
         .cloned()
         .collect();
+
+    // Resolve each agent's on-disk directory. Several agents share one skills
+    // directory (codex / cursor / opencode all use `.agents/skills`), so a plan
+    // decides which removed agents should physically unlink and which only drop
+    // ownership because a *remaining* agent still points at the same directory.
+    let mut dir_of: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
+    for agent_id in remove_from.iter().chain(remaining.iter()) {
+        let Some(target) = agent_target(agent_id) else {
+            if remove_from.contains(agent_id) {
+                anyhow::bail!("unknown agent `{agent_id}`");
+            }
+            continue;
+        };
+        let dir = agent_dir(target, &scope_root, global)?;
+        let canonical = dir.canonicalize().unwrap_or(dir);
+        dir_of.insert(agent_id.clone(), canonical);
+    }
+    let plan = plan_unlinks(&remove_from, &remaining, &dir_of);
+
+    let mut removed_any = false;
+    for step in &plan {
+        if step.physically_unlink {
+            let dir = agent_dir(
+                agent_target(&step.agent).expect("planned agent exists"),
+                &scope_root,
+                global,
+            )?;
+            if install::unlink_from(&dir, name)? {
+                removed_any = true;
+                println!("removed `{name}` from {}", step.agent);
+            }
+        } else {
+            // A remaining agent shares this directory, or another removed agent
+            // already unlinked it: keep the files, only drop ownership in lock.
+            removed_any = true;
+            println!(
+                "unlinked `{name}` from {} (shared dir kept for other agents)",
+                step.agent
+            );
+        }
+    }
+
+    // Update the lock: drop the whole entry when no agent still holds it,
+    // otherwise keep it with the remaining agents.
     if remaining.is_empty() {
         lock.skills.remove(name);
     } else if let Some(existing) = lock.skills.get_mut(name) {
@@ -743,4 +774,114 @@ fn home_dir() -> Result<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
         .with_context(|| format!("cannot determine home directory (${key} is unset)"))
+}
+
+/// One removed agent's action: unlink its directory, or only drop ownership.
+#[derive(Debug, PartialEq, Eq)]
+struct UnlinkStep {
+    agent: String,
+    physically_unlink: bool,
+}
+
+/// Decide, for each agent being removed, whether to physically unlink its skills
+/// directory or only drop the lock ownership.
+///
+/// The hazard this exists for: codex / cursor / opencode all read `.agents/skills`,
+/// so removing one must not delete a directory a *remaining* agent still uses, and
+/// two removed agents that share a directory must unlink it once. An agent
+/// physically unlinks only when no remaining agent maps to its directory and no
+/// earlier removed agent already unlinked that same directory.
+fn plan_unlinks(
+    remove_from: &[String],
+    remaining: &[String],
+    dir_of: &std::collections::BTreeMap<String, PathBuf>,
+) -> Vec<UnlinkStep> {
+    let remaining_dirs: std::collections::BTreeSet<&PathBuf> =
+        remaining.iter().filter_map(|a| dir_of.get(a)).collect();
+    let mut already: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut plan = Vec::new();
+    for agent in remove_from {
+        let Some(dir) = dir_of.get(agent) else {
+            continue;
+        };
+        let shared_with_remaining = remaining_dirs.contains(dir);
+        let already_unlinked = already.contains(dir);
+        let physically_unlink = !shared_with_remaining && !already_unlinked;
+        if physically_unlink {
+            already.insert(dir.clone());
+        }
+        plan.push(UnlinkStep {
+            agent: agent.clone(),
+            physically_unlink,
+        });
+    }
+    plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dirs(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, PathBuf> {
+        pairs
+            .iter()
+            .map(|(a, d)| (a.to_string(), PathBuf::from(d)))
+            .collect()
+    }
+
+    /// N=2 shared directory: removing one of two agents that share `.agents/skills`
+    /// must NOT physically unlink, or the remaining agent loses files it owns.
+    /// This is the regression for the real bug found by probing with two agents.
+    #[test]
+    fn removing_one_of_two_agents_sharing_a_dir_keeps_the_files() {
+        // codex and cursor both map to the same `.agents/skills`.
+        let dir_of = dirs(&[
+            ("codex", "/p/.agents/skills"),
+            ("cursor", "/p/.agents/skills"),
+        ]);
+        let plan = plan_unlinks(&["codex".into()], &["cursor".into()], &dir_of);
+        assert_eq!(
+            plan,
+            vec![UnlinkStep {
+                agent: "codex".into(),
+                physically_unlink: false
+            }],
+            "codex must not delete the dir cursor still uses"
+        );
+    }
+
+    /// Removing the last owner of a shared dir does physically unlink it.
+    #[test]
+    fn removing_the_last_owner_unlinks_the_shared_dir() {
+        let dir_of = dirs(&[("cursor", "/p/.agents/skills")]);
+        let plan = plan_unlinks(&["cursor".into()], &[], &dir_of);
+        assert!(plan[0].physically_unlink);
+    }
+
+    /// Two removed agents sharing one dir unlink it exactly once.
+    #[test]
+    fn two_removed_agents_sharing_a_dir_unlink_once() {
+        let dir_of = dirs(&[
+            ("codex", "/p/.agents/skills"),
+            ("cursor", "/p/.agents/skills"),
+        ]);
+        let plan = plan_unlinks(&["codex".into(), "cursor".into()], &[], &dir_of);
+        let physical: Vec<bool> = plan.iter().map(|s| s.physically_unlink).collect();
+        assert_eq!(
+            physical,
+            vec![true, false],
+            "the shared dir is unlinked once"
+        );
+    }
+
+    /// An agent with its own private directory always unlinks.
+    #[test]
+    fn a_private_dir_always_unlinks() {
+        let dir_of = dirs(&[
+            ("claude-code", "/p/.claude/skills"),
+            ("codex", "/p/.agents/skills"),
+        ]);
+        let plan = plan_unlinks(&["claude-code".into()], &["codex".into()], &dir_of);
+        assert!(plan[0].physically_unlink);
+    }
 }
