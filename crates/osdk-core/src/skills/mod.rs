@@ -29,6 +29,7 @@ use crate::error::{Error, Result};
 
 pub mod fetch;
 pub mod install;
+pub mod search;
 
 /// One agent osdk knows how to install a skill into.
 ///

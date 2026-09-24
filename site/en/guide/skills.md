@@ -24,6 +24,7 @@ osdk skills add <SOURCE>
   [--no-lock]                 # do not record the install in osdk.lock
 
 osdk skills list [-g]
+osdk skills find [QUERY...] [--owner OWNER] [--limit N]
 osdk skills remove NAME [-g] [-a ID]...
 osdk skills sync [-g]
 osdk skills update [SKILL...] [-g]
@@ -32,6 +33,13 @@ osdk skills use <SOURCE> [-s NAME] [-a ID] [--ref REF]
 osdk skills init [NAME]
 osdk skills agents
 ```
+
+`find` (alias `search`) searches GitHub for installable skill repositories and
+prints each hit as `owner/repo`, ready to pass to `add`. It queries GitHub's
+public search API anonymously and only falls back to `GITHUB_TOKEN`/`GH_TOKEN`
+when it hits the anonymous rate limit; it **never contacts skills.sh**, so no
+registry key is needed. `--owner` restricts to one org/user and `--limit` caps
+the result count (1–50).
 
 `sync` and `update` are a pair: `sync` reproduces the commit the lock records
 (unchanged), while `update` re-resolves a floating ref (a branch/tag, taken from

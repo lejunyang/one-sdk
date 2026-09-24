@@ -21,6 +21,7 @@ osdk skills add <SOURCE>
   [--no-lock]                 # 不写 osdk.lock
 
 osdk skills list [-g]
+osdk skills find [QUERY...] [--owner OWNER] [--limit N]
 osdk skills remove NAME [-g] [-a ID]...
 osdk skills sync [-g]
 osdk skills update [SKILL...] [-g]
@@ -29,6 +30,11 @@ osdk skills use <SOURCE> [-s NAME] [-a ID] [--ref REF]
 osdk skills init [NAME]
 osdk skills agents
 ```
+
+`find`（别名 `search`）在 GitHub 上搜可安装的 skill 仓库，命中以 `owner/repo` 打印，可直接
+交给 `add`。它匿名请求 GitHub 公开搜索 API，只有撞上匿名限流才回退到 `GITHUB_TOKEN`/
+`GH_TOKEN`；**不接触 skills.sh**，因此不需要任何注册表密钥。`--owner` 限定某 org/user，
+`--limit` 限结果数（1–50）。
 
 `sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit（不变），`update` 把浮动 ref
 （分支/标签，取自 `[skills.<名>].ref`）重新解析到当前 commit，变了才重下并写回 lock。

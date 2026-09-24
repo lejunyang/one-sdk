@@ -625,6 +625,7 @@ skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI �
 
 ```bash
 osdk skills agents                       # 看 osdk 认识哪些 Agent、各自的 skills 目录
+osdk skills find agent skills             # 在 GitHub 上搜可安装的 skill（匿名，不接触 skills.sh）
 osdk skills add github:vercel-labs/agent-skills --list        # 只列仓库里有哪些 skill
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
 osdk skills add ./my-skills -s my-skill -a codex              # 本地源，选装指定 skill

@@ -209,15 +209,19 @@ Agent 读的内容，osdk 只负责下载、内容寻址落地与链接，自己
 | --- | --- |
 | `add <SOURCE> [-s <NAME>...] [-a <ID>...] [-g] [--copy] [--ref <REF>] [-l\|--list] [--no-lock]` | 从来源安装 skill 到一个/多个 Agent。来源：`github:owner/repo`（可带子目录 `/skills/<名>`）、`owner/repo` 简写、github.com URL、本地路径。`-s` 选装仓库内指定 skill（`*` 全选）；`-a` 选目标 Agent（缺省用 `[skills].default_agents`）；`-g` 装到用户级；`--copy` 拷贝而非链接；`--ref` 指定 GitHub 版本（`branch:main`/`tag:`/`rev:`/commit）；`-l` 只列不装；`--no-lock` 不写 lock |
 | `list [-g]` | 列出已装 skill 及其链接到的 Agent（读 `osdk.lock`） |
+| `find [QUERY...] [--owner <OWNER>] [--limit <N>]`（别名 `search`） | 在 GitHub 上搜可安装的 skill 仓库（含 `SKILL.md` 的仓库）。匿名请求 GitHub 公开搜索 API，撞匿名限流才回退到 `GITHUB_TOKEN`/`GH_TOKEN`；**不接触 skills.sh**。命中以 `owner/repo` 打印，可直接交给 `add`。`--owner` 限定某 org/user，`--limit` 限结果数（1–50，默认 20） |
 | `remove <NAME> [-g] [-a <ID>...]` | 从 Agent 摘除 skill；不带 `-a` 摘除全部并删 lock 条目，带 `-a` 只摘指定 Agent 并保留其余 |
 | `sync [-g]` | 按 `osdk.lock` 复现全部 skill（团队 / CI）：优先用已落地的内容寻址副本，缺副本时对 GitHub 源按记录的 commit 重新下载并核对内容哈希 |
 | `update [SKILL...] [-g]` | 与 `sync` 相对：`sync` 复现 lock 记录的 commit，`update` 把浮动 ref（分支/标签，取自 `[skills.<名>].ref`）重新解析到当前 commit，变了才重下并写回 lock；钉死 commit 的无可更新 |
 | `use <SOURCE> [-s <NAME>] [-a <ID>] [--ref <REF>]` | 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可 `\| claude` 管道），`-a <id>` 时用该 Agent 的 CLI 交互式启动并带上 prompt |
-| `init [NAME]` | 生成 `SKILL.md` 模板开始写自己的 skill；`NAME/`（或当前目录），拒绝覆盖已存在的 `SKILL.md` || `path <NAME>` | 打印某已装 skill 的内容寻址落地路径 |
+| `init [NAME]` | 生成 `SKILL.md` 模板开始写自己的 skill；`NAME/`（或当前目录），拒绝覆盖已存在的 `SKILL.md` |
+| `path <NAME>` | 打印某已装 skill 的内容寻址落地路径 |
 | `agents` | 列出 osdk 认识的 Agent 及其 project / global skills 目录 |
 
 ```bash
 osdk skills agents
+osdk skills find agent skills --limit 10                        # 搜 GitHub（匿名）
+osdk skills find --owner vercel-labs                            # 浏览某 owner 的 skill
 osdk skills add github:vercel-labs/agent-skills --list          # 只列，不装
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
 osdk skills add ./my-skills -s my-skill -a codex                # 本地源
@@ -230,7 +234,7 @@ osdk skills remove web-design-guidelines
   在别的机器复现；重新下载时哈希不符会 fail-closed 拒绝（防移动的 tag / 被换的镜像）。
 - **落地方式**：默认目录链接（Windows junction / Unix symlink），无链接环境或 `--copy` 时整树拷贝；
   拒绝覆盖非 osdk 放置的真实目录。
-- **只读命令**（`agents` / `list` / `path`）不触发信任门槛；`add` / `remove` / `sync` 会写盘、保持
+- **只读命令**（`agents` / `list` / `path` / `find`）不触发信任门槛；`add` / `remove` / `sync` / `update` 会写盘、保持
   gated。声明式配置见 `configuration.md` 的 `[skills]`。
 ## 九、容器运行时（container）
 

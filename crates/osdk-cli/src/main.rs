@@ -255,12 +255,14 @@ fn bypasses_trust_check(command: &Command) -> bool {
                     | crate::cli::TaskCommand::Info { .. }
                     | crate::cli::TaskCommand::Deps { .. }
             }
-            // `skills agents` / `list` / `path` only report state; `add`,
-            // `remove` and `sync` act on disk and stay gated.
+            // `skills agents` / `list` / `path` / `find` only report state (find
+            // is a read-only GitHub search); `add`, `remove`, `sync`, `update`
+            // and `use` act on disk or the lock and stay gated.
             | Command::Skills {
                 command: crate::cli::SkillsCommand::Agents
                     | crate::cli::SkillsCommand::List { .. }
                     | crate::cli::SkillsCommand::Path { .. }
+                    | crate::cli::SkillsCommand::Find { .. }
             }
     )
 }

@@ -69,6 +69,11 @@ pub async fn run(app: &mut App, command: SkillsCommand) -> Result<()> {
             .await
         }
         SkillsCommand::Init { name } => init(name.as_deref()),
+        SkillsCommand::Find {
+            query,
+            owner,
+            limit,
+        } => find(app, &query.join(" "), owner.as_deref(), limit).await,
     }
 }
 
@@ -593,6 +598,51 @@ fn init(name: Option<&str>) -> Result<()> {
         .with_context(|| format!("writing {}", manifest.display()))?;
     println!("Created {}", manifest.display());
     Ok(())
+}
+
+/// Search GitHub for installable skills and print `owner/repo` hits.
+///
+/// Discovery only: it never writes an agent directory or the lock. The network
+/// call reuses osdk's GitHub transport (anonymous first, `GITHUB_TOKEN` only as
+/// a rate-limit fallback), so a hit list is one `osdk skills add <owner/repo>`
+/// away from installing.
+async fn find(app: &mut App, query: &str, owner: Option<&str>, limit: u8) -> Result<()> {
+    let hits = skills::search::search(&app.ctx, query, owner, limit)
+        .await
+        .context("searching GitHub for skills")?;
+    if hits.is_empty() {
+        println!(
+            "No skills found. Try broader keywords, or `--owner <OWNER>` to browse one owner."
+        );
+        return Ok(());
+    }
+    println!(
+        "Found {} skill {} (install with `osdk skills add <owner/repo>`):\n",
+        hits.len(),
+        if hits.len() == 1 { "repo" } else { "repos" }
+    );
+    for hit in &hits {
+        // Stars give a quick sense of adoption; the description (when present)
+        // says what it is. Keep the line scannable: name, stars, then blurb.
+        let blurb = if hit.description.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", truncate_blurb(&hit.description, 100))
+        };
+        println!("  {}  (\u{2605}{}){}", hit.full_name, hit.stars, blurb);
+    }
+    Ok(())
+}
+
+/// Trim a one-line blurb to `max` chars on a char boundary, adding an ellipsis.
+fn truncate_blurb(text: &str, max: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max {
+        return one_line;
+    }
+    let mut out: String = one_line.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
 }
 
 // --- helpers ---------------------------------------------------------------

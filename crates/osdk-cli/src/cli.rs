@@ -954,6 +954,23 @@ pub enum SkillsCommand {
         /// Skill name.
         name: String,
     },
+    /// Search GitHub for installable skills (repos containing a SKILL.md).
+    ///
+    /// Mirrors `npx skills find`: it queries GitHub's public search API
+    /// anonymously and only falls back to `GITHUB_TOKEN`/`GH_TOKEN` when it hits
+    /// the anonymous rate limit. It never contacts skills.sh. Hits print as
+    /// `owner/repo` you can pass straight to `osdk skills add`.
+    #[command(alias = "search")]
+    Find {
+        /// Keywords to search for; omit (with `--owner`) to list an owner's skills.
+        query: Vec<String>,
+        /// Restrict the search to one GitHub owner (org or user).
+        #[arg(long, value_name = "OWNER")]
+        owner: Option<String>,
+        /// Maximum number of results to show (1-50).
+        #[arg(long, default_value_t = 20, value_name = "N")]
+        limit: u8,
+    },
     /// Update installed skills to the latest resolution of their source.
     ///
     /// The counterpart to `sync`: `sync` reproduces the commit the lock records,

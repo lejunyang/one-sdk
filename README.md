@@ -691,6 +691,7 @@ a skill's scripts.
 
 ```bash
 osdk skills agents                       # which agents osdk knows, and their skills dirs
+osdk skills find agent skills             # search GitHub for installable skills (anonymous, no skills.sh)
 osdk skills add github:vercel-labs/agent-skills --list        # list a repo's skills only
 osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
 osdk skills add ./my-skills -s my-skill -a codex              # a local source, one skill

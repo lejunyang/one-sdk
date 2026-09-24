@@ -115,7 +115,7 @@ agent skills 生态」的包管理器，支持 75+ Agent；skill 定义为带 YA
 | 安装方式 | symlink（推荐）/ `--copy` | **复用 osdk link mode**：symlink / hardlink / copy / clone，`--copy` 强制拷贝 |
 | 版本 / 更新 | `update` 更新到最新（分支通常可变） | **不可变身份**：钉 commit SHA + 内容哈希进 lock，`update` 是显式再解析，`sync` 复现（§6） |
 | 下载限额 | 10 MiB 下载 / 25 MiB 解压 / 1000 文件，可用 `SKILLS_*` 覆盖 | **复用 osdk http backend 既有限额与 fail-closed**（§7），量级与来源信任挂钩 |
-| 注册表 / 搜索 | `find` 走 skills.sh 注册表（有公开 `/api/v1/` JSON API） | `find` 的注册表来源列为**待决**（§10.2）：skills.sh API 提供 search / audit / 内容 hash，但实测匿名访问被拦（需申请 key），否则退回仅 GitHub owner 扫描 |
+| 注册表 / 搜索 | `find` 主通路**匿名打 GitHub**（Trees API + raw + blob，源码级已查证），撞限流/私有仓才懒加载 `GITHUB_TOKEN`；skills.sh `/api/v1/` 仅用于其 JSON API 增强 | `find` **照抄该匿名 + 懒鉴权路径**（§10.2），不依赖 skills.sh、无需 key；skills.sh 增强列为 P2 |
 | 私有仓认证 | git 凭据助手 → gh CLI → SSH 回退 | GitHub API 匿名 → 显式 token（`GITHUB_TOKEN`/`GH_TOKEN`）→ 待定（§10.1） |
 | 供应链信任 | 无显式 trust 层 | **osdk trust 分级 + 内容摘要预览**（§7），差异化重点 |
 
@@ -357,40 +357,53 @@ link_mode = "symlink"                         # 可选：覆盖全局 link_mode�
 
 建议 P0 做 A，B 视需求再议。
 
-### 10.2 `find` 的注册表来源（skills.sh 已实测，含一条硬约束）
+### 10.2 `find` 的注册表来源（已扒 `npx skills` 源码，纠正早先结论）
 
-`npx skills find` 依赖 skills.sh。它确有一套公开 JSON API（`https://skills.sh/api/v1/`，已查证
-其官方 API 文档），对 osdk 尤其顺手的是：
+**早先结论已被源码推翻，此处更正。** 2026-09-24 首轮只裸调了 skills.sh 的 `/api/v1/` JSON
+API、拿到 401，据此推断「`find` 靠内置凭据才能打通、osdk 匿名必吃 401」。随后扒了
+`vercel-labs/skills` 仓库源码（`src/find.ts` / `src/blob.ts` / `src/cli.ts`，经 DeepWiki 索引
+到行号级）发现：**`npx skills find` 的主通路根本不是 skills.sh API，而是匿名打 GitHub。**
+
+**`npx skills` 实际怎么工作的（源码级，已查证）**：
+
+- 它是普通 npm 包，**不内置任何 API key / 凭据**（内置密钥一发布即泄露）。`find`（`runFind()`，
+  `src/find.ts`）与 `add` 的 blob fast-path（`src/blob.ts`）实际发的请求是三类**公开、默认匿名**
+  的 GitHub 端点：① **GitHub Trees API** 递归列出仓库里的 `SKILL.md`（`fetchRepoTree`）；②
+  `raw.githubusercontent.com` 抓每个 `SKILL.md` 的 frontmatter 解析名称/描述；③ 下载/blob
+  服务抓完整文件快照 + hash（`fetchSkillSnapshot`）。
+- **token 是「懒加载兜底」，不是前提**（`fetchRepoTree` 的 lazy-auth，`src/blob.ts:128-228`）：
+  先匿名试 → 收到 `403 + x-ratelimit-remaining: 0`（撞匿名 60 次/小时限额）或 `401/404`（私有
+  仓）**才**去调 `getToken`，读用户本机的 `process.env.GITHUB_TOKEN`，或退回本机 `gh api`
+  重试。用的是**用户机器上的** GitHub 登录态，不是包自带的。公开仓 + 用得不频繁，全程匿名即可。
+- **Vercel OIDC token 是另一回事**：changelog《The skills.sh API is now available》说的
+  `getVercelOidcToken()` + `Authorization: Bearer` 是给「部署在 Vercel 上的第三方 app」去调
+  skills.sh 的 `/api/v1/` JSON API 用的鉴权，面向「写个 app 查 60 万 skills」的场景，**不是 CLI
+  的 `find` 走的路**。我早先实测 401 的正是这个 JSON API，与 CLI 主通路无关——所以那条「匿名被
+  拦 ⇒ CLI 靠内置凭据」的推断是错的。
+
+skills.sh 仍有那套公开 JSON API（下表，可作**可选增强**，非必需）：
 
 | 端点 | 返回 | 对 osdk 的价值 |
 | --- | --- | --- |
-| `GET /skills/search?q=&limit=` | 命中列表；单词=模糊、多词=语义 | `find` 的直接后端 |
+| `GET /skills/search?q=&limit=` | 命中列表；单词=模糊、多词=语义 | 增强版 `find` 的后端 |
 | `GET /skills?view=all-time\|trending\|hot` | 排行榜（分页） | 无关键词时的浏览 |
-| `GET /skills/curated` | 官方一方 skill 集（约 342 个 / 87 owner） | 可信来源白名单候选 |
-| `GET /skills/{source}/{skill}` | 完整文件树 + **内容 SHA-256 `hash`** | 直接喂 §6 的不可变身份 / §7.3 的预览 |
-| `GET /skills/audit/{source}/{skill}` | 第三方安全审计（pass/warn/fail + 风险级别） | §7.3 的参考信息 |
+| `GET /skills/curated` | 官方一方 skill 集 | 可信来源白名单候选 |
+| `GET /skills/{source}/{skill}` | 文件树 + 内容 SHA-256 | 参考（注：与 osdk 的 BLAKE3 身份不互认，§6） |
+| `GET /skills/audit/{source}/{skill}` | 第三方安全审计 | §7.3 的参考信息 |
 
-每个 skill 对象带稳定 `id`（`{source}/{slug}`）、`installUrl`（即 `owner/repo`，可直接交给
-§10.1-A 的下载路径）、`isDuplicate`（fork/抄袭标记）。
+该 JSON API 的鉴权（OIDC token / 申请 key）与 401 约束仅适用于**这一层**；osdk 若要用它，前提
+不变。但它对 `find` 已不是必需项。
 
-**一条实测硬约束（会改变 P0 是否含 `find`）**：API 文档称「匿名可访问，仅限流更严」，但本机
-用带浏览器 UA 的请求实测得到 **401 Unauthorized**，自动化抓取路径也被 `robots.txt` 拒绝
-（2026-09-24 实测，§11）。osdk 的 HTTP client 固定发 `osdk/<version>` UA
-（`crates/osdk-core/src/http/mod.rs:21`），大概率同样吃 401。含义：**要对接 skills.sh，很可能
-必须走 `Authorization: Bearer <key>`（需向 `skills-api@vercel.com` 申请），不能假设匿名可用。**
+**osdk 的方案（收敛）**：`find` **照抄 `npx skills` 的 GitHub 匿名 + 懒鉴权路径**，不依赖
+skills.sh、不需要任何 key——
 
-三条路（按 osdk 意愿排序）：
-
-- **A（P0 最稳）**：不接任何集中注册表，`find` = 按 GitHub owner / 关键词扫描仓库（复用 GitHub
-  搜索 API，匿名 → `GITHUB_TOKEN`）。无第三方绑定、无 key 依赖。**或干脆 P0 省掉 `find`**，
-  只保留 `add <owner/repo> --list`，把搜索留给 P1。
-- **B（联邦 skills.sh，P1+）**：接入上表的 API，但因匿名被拦，要么内置/让用户配 API key，
-  要么接受 `find` 在无 key 时不可用并如实报错。绑定第三方 API 的稳定性与限流也要承担。
-- **C（混合）**：`find` 默认走 A 的 GitHub 扫描；检测到用户配了 skills.sh key 时，额外用
-  skills.sh 的 search/audit 增强结果。
-
-建议 **P0 走 A（或省掉 `find`）**；skills.sh 的 search/audit/hash 作为 P1 的增强项（C），
-且实现里必须把「匿名被拦、需 key」当既定前提，而不是文档里的「匿名可访问」。
+- `find [QUERY] [--owner <OWNER>]`：用 GitHub 搜索 API 匿名列出带 `SKILL.md` 的仓库（`--owner`
+  限定某 org/user），抓 frontmatter 解析名称/描述后展示；命中项可直接交给 §10.1-A 的
+  `add <owner/repo>` 下载路径。
+- **懒鉴权兜底**：命中 GitHub 匿名限流（403 + `x-ratelimit-remaining: 0`）或私有仓（401/404）
+  时，读 `GITHUB_TOKEN` 加 `Authorization` header 重试；`osdk-core` 的 `http` / `fetch.rs` 已有
+  GitHub 请求逻辑（官方 + CN 代理候选），只需补一个 header。
+- skills.sh 的 `/api/v1/` search/audit 作为 **P2 可选增强**（用户配了 key 时才启用），默认不碰。
 
 ### 10.3 与 `.agents/skills/` 的多 Agent 共享目录
 
@@ -453,8 +466,8 @@ model / tool 都进统一 `osdk.lock`。skill 建议**也进 `osdk.lock` 的 `[s
   落进 CAS store + symlink/copy 进 §5.3 的主流 Agent；`[skills]` 配置段 + `osdk.lock [skills]`；
   安装前摘要预览（§7.3）。**验收**：clone 一个仓库 → `osdk skills sync` → 目标 Agent 目录出现
   skill；改动源 commit → `update` → lock 变化、内容哈希变化；`doctor` 能报断链与就地改动。
-- **P1**：`update` 的批量 / 范围语义、`use`（临时取用）、`find` 最小版（§10.2-A：GitHub 扫描，
-  不依赖 skills.sh key）、更多 Agent 表项、`--copy` 与 link mode 覆盖、共享 `.agents/skills/`
+- **P1**：`update` 的批量 / 范围语义、`use`（临时取用）、`find`（§10.2：GitHub 匿名扫描 +
+  懒加载 `GITHUB_TOKEN` 兜底，不依赖 skills.sh）、更多 Agent 表项、`--copy` 与 link mode 覆盖、共享 `.agents/skills/`
   的归属计数（§10.3，测试 N≥2）。
 - **P2（视需求）**：git-over-SSH / 任意 host（§10.1-B）、接入 skills.sh 增强 `find`
   （§10.2-B/C，需处理 API key 与 401）、`attestations` / 签名校验接入 skill 下载。
