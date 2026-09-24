@@ -660,6 +660,18 @@ osdk source add node --id mycorp \
 osdk --source official install go@1.22
 ```
 
+模型仓库的 metadata 与 CDN 冷启动比 SDK 索引更重，因此使用独立探测预算：默认
+`sources.model_probe_timeout_ms = 8000`，分别应用于 metadata 解析、响应头和 64 KiB
+样本读取。osdk 优先探测仓库中最小的非空文件；只要成功拿到响应，就认定来源可达，
+即使样本 body 超时也只记为吞吐未知，不再误报 `unreachable`。全部来源均失败的结果
+不会按常规 6 小时 TTL 缓存。
+
+由 osdk 自身执行的归档和模型文件下载并非失败即停：共享下载管线会对瞬时错误最多
+尝试 3 次，前两次分别等待 400 ms、800 ms。下载使用 `.partial` 文件并保存 ETag /
+Last-Modified，重试时通过 `Range` + `If-Range` 断点续传；服务端忽略 Range 或对象已
+变化时会安全重头下载。模型在某个来源耗尽重试后，还会继续尝试下一个排序后的来源。
+不可重试错误，或第三次尝试及全部来源回退都失败时，命令才会停止。
+
 环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
 等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会
 仅因为存在就胜出；不可用时会给出提示而不是被静默忽略。如果需要无条件遵循它，

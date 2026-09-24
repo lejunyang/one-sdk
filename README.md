@@ -731,6 +731,20 @@ osdk source add node --id mycorp \
 osdk --source official install go@1.22
 ```
 
+Model repositories use a separate probe budget because metadata requests and CDN cold starts
+are heavier than SDK indexes. The default `sources.model_probe_timeout_ms = 8000` applies
+independently to metadata resolution, response headers, and a 64 KiB sample. osdk probes the
+smallest non-empty repository file; a successful response marks the source reachable even when
+the sample body exceeds its budget, in which case throughput is unknown rather than
+`unreachable`. An all-failed probe set is not cached for the normal six-hour TTL.
+
+Downloads performed directly by osdk are not single-shot. The shared archive/model downloader
+retries transient failures up to three attempts, backing off for 400 ms and then 800 ms. It
+keeps a `.partial` file plus ETag/Last-Modified metadata and resumes with `Range` + `If-Range`;
+an ignored range or changed object causes a safe restart. Model pulls also fall through to the
+next ranked source after one source exhausts its retries. A non-transient error, or failure after
+the third attempt and all source fallbacks, stops the command.
+
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
 `npm_config_registry`, and the like) is validated and then raced against osdk's
 built-in mirrors, so a stale or unreachable value cannot win by default; an

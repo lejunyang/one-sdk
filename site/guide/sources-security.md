@@ -71,7 +71,8 @@ endpoint 或 pin、选择策略为 `auto` 且非 offline 时刷新。当前对 `
 [sources]
 selection = "auto"       # auto|pinned|ordered
 mode = "auto"            # auto|env，见下文「环境变量里的镜像」
-probe_timeout_ms = 1500
+probe_timeout_ms = 1500        # SDK / 工具来源探测
+model_probe_timeout_ms = 8000  # 模型 metadata / 响应头 / 样本各阶段预算
 cache_ttl = "6h"
 
 [sources.node]
@@ -110,11 +111,21 @@ enabled = true
 | `pinned` | 没有具体 `sources.<tool>.pin` 时与 `ordered` 相同 |
 
 具体 pin 会把该来源移到第一位，但其余来源仍保留为失败回退，并非“只允许这一源”。
-默认探测超时 1500 ms、缓存 TTL 6h；非法 TTL 当前静默回退为 6h。普通 SDK probe
-最多读约 1,000,000 bytes；模型 probe 最多 1 MiB。
+SDK / 工具来源探测默认预算为 1500 ms。模型探测改用独立的
+`model_probe_timeout_ms = 8000`，metadata、响应头、64 KiB 样本读取三个阶段分别
+拥有这份预算，并优先选择仓库中最小的非空文件。只要成功拿到响应，就认定来源可达；
+样本 body 超时只会让吞吐未知，不再误报 `unreachable`。全部模型来源都失败的结果
+不会按常规 6h TTL 缓存，因此短暂网络拥塞不会把所有来源长期钉死。非法 TTL 当前
+仍静默回退为 6h。
 
-metadata 或下载失败时，backend 按排序后的候选继续尝试。HTTP metadata 缓存允许
-在线请求失败后使用 stale 值；严格 offline 则只读已有缓存。
+由 osdk 自身执行的下载走共享流式管线，并非一次请求失败就停止。连接、超时、中断、
+限流和服务端错误等瞬时失败最多尝试 3 次，前两次分别等待 400 ms、800 ms。管线保留
+`.partial` 文件及 ETag / Last-Modified 元数据，重试时用 `Range` + `If-Range` 续传；
+服务端忽略 Range 或对象已变化时会安全重头下载。模型在某个来源耗尽重试后，还会
+继续尝试剩余排序来源。不可重试错误，或第三次尝试及全部来源回退都失败时才终止。
+npm、uv 等受委托包管理器自行负责其网络行为；这里的保证只适用于 osdk 直接执行的
+归档与模型文件下载。HTTP metadata 在线请求失败后可使用 stale 缓存；严格 offline
+只读已有缓存。
 
 ## 离线模式
 

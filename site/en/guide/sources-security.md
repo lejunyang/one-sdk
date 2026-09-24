@@ -82,7 +82,8 @@ nothing was chosen deliberately.
 [sources]
 selection = "auto"       # auto|pinned|ordered
 mode = "auto"            # auto|env, see "Mirrors set in the environment"
-probe_timeout_ms = 1500
+probe_timeout_ms = 1500        # SDK/tool probes
+model_probe_timeout_ms = 8000  # each model metadata/header/sample phase
 cache_ttl = "6h"
 
 [sources.node]
@@ -126,14 +127,27 @@ prefix is isolated; use an anonymous configured registry for global installs.
 | `pinned` | Behave like `ordered` when no concrete `sources.<tool>.pin` exists |
 
 A concrete pin moves that source to the front but retains every other source as
-a failure fallback; it is not strict “only this source” enforcement. Defaults are
-a 1500 ms probe timeout and 6-hour cache TTL. An invalid TTL currently falls
-back silently to 6 hours. SDK probes read at most about 1,000,000 bytes; model
-probes sample at most 1 MiB.
+a failure fallback; it is not strict “only this source” enforcement. SDK/tool
+probes default to 1500 ms. Model probes instead use
+`model_probe_timeout_ms = 8000` as an independent budget for each metadata,
+response-header, and 64 KiB sample phase. They choose the smallest non-empty
+repository file. A successful response marks the source reachable even if sample
+body reading exceeds its budget; throughput is then unknown, not `unreachable`.
+An all-failed model probe set is not cached for the normal 6-hour TTL, so a brief
+outage cannot pin every source as dead. An invalid TTL currently falls back
+silently to 6 hours.
 
-When metadata or a download fails, the backend tries the remaining ranked
-candidates. Online metadata access may use a stale cached value after a request
-failure. Strict offline mode only reads an existing cache.
+Downloads performed by osdk itself use the shared streaming pipeline rather than
+failing after one request. Transient connection, timeout, interruption, rate-limit,
+and server errors receive up to three attempts, with 400 ms and 800 ms backoff.
+A `.partial` file and its ETag/Last-Modified metadata are retained, so a retry
+resumes with `Range` + `If-Range`; an ignored range or changed object restarts
+safely. Model pulls additionally try the remaining ranked sources after one source
+exhausts its retries. Non-transient errors, or exhaustion of the third attempt and
+all source fallbacks, remain terminal. Delegated package managers such as npm and
+uv own their network behavior; these guarantees apply to downloads osdk performs
+directly. Online metadata access may use stale cache after a request failure;
+strict offline mode only reads existing cache.
 
 ## Offline mode
 
