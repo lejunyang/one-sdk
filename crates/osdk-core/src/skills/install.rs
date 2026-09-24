@@ -310,6 +310,10 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
 /// its following indented lines into the value.
 fn parse_frontmatter(bytes: &[u8]) -> Result<(String, String)> {
     let text = String::from_utf8_lossy(bytes);
+    // Tolerate a leading UTF-8 BOM: editors and some generators write one, and a
+    // BOM before the `---` fence would otherwise make a perfectly valid skill
+    // look like it has no frontmatter.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut lines = text.lines();
     // The first non-empty line must be the opening fence.
     let opened = lines
@@ -438,6 +442,23 @@ mod tests {
             _ => None,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn reads_frontmatter_through_a_utf8_bom() {
+        // Editors and PowerShell's `Set-Content -Encoding utf8` prepend a BOM; a
+        // BOM before the `---` fence must not make a valid skill look unparsable.
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("skill");
+        std::fs::create_dir_all(&src).unwrap();
+        let body = "---\nname: bom\ndescription: has a leading BOM\n---\n";
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(body.as_bytes());
+        std::fs::write(src.join("SKILL.md"), bytes).unwrap();
+
+        let package = read_skill_dir(&src).unwrap();
+        assert_eq!(package.name, "bom");
+        assert_eq!(package.description, "has a leading BOM");
     }
 
     #[test]

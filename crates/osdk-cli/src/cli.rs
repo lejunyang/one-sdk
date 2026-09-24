@@ -309,6 +309,12 @@ pub enum Command {
         command: ModelCommand,
     },
 
+    /// Manage agent skills: install SKILL.md packages and link them into agents.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
+
     /// Install a project's application dependencies from its own manifests.
     ///
     /// Distinct from `install`, which installs *tools*: `[tools]` brings the
@@ -884,6 +890,72 @@ pub enum ModelEnvCommand {
     },
     /// Show persisted adapter state and the variables it would export.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillsCommand {
+    /// Install a skill from a source into one or more agents.
+    Add {
+        /// Source: `github:owner/repo`, `owner/repo`, a github.com URL, or a
+        /// local path. P0 resolves GitHub and local sources.
+        source: String,
+        /// When the repository holds several skills, install these by name
+        /// (repeatable). Omit to install the single skill a repo/dir root holds.
+        #[arg(short = 's', long = "skill", value_name = "NAME")]
+        skills: Vec<String>,
+        /// Target agents (repeatable). Defaults to `[skills].default_agents`, or
+        /// prompts when none is configured.
+        #[arg(short = 'a', long = "agent", value_name = "ID")]
+        agents: Vec<String>,
+        /// Install into each agent's user-level directory instead of the project.
+        #[arg(short, long)]
+        global: bool,
+        /// Copy the skill into each agent directory instead of linking it.
+        #[arg(long)]
+        copy: bool,
+        /// Version selector for a GitHub source, e.g. `branch:main` or a commit.
+        #[arg(long, value_name = "REF")]
+        r#ref: Option<String>,
+        /// List the skills a source offers without installing anything.
+        #[arg(short, long)]
+        list: bool,
+        /// Do not record the install in osdk.lock.
+        #[arg(long = "no-lock")]
+        no_lock: bool,
+    },
+    /// List installed skills and the agents they are linked into.
+    #[command(alias = "ls")]
+    List {
+        /// Inspect the user-level agent directories instead of the project.
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Remove an installed skill from its agents.
+    #[command(alias = "rm")]
+    Remove {
+        /// Skill name to remove.
+        name: String,
+        /// Remove from user-level agent directories instead of the project.
+        #[arg(short, long)]
+        global: bool,
+        /// Limit removal to these agents (repeatable). Default: every agent that
+        /// has it.
+        #[arg(short = 'a', long = "agent", value_name = "ID")]
+        agents: Vec<String>,
+    },
+    /// Materialize every skill declared in osdk.lock (the reproduce path).
+    Sync {
+        /// Install into user-level agent directories instead of the project.
+        #[arg(short, long)]
+        global: bool,
+    },
+    /// Print the staged store path of an installed skill.
+    Path {
+        /// Skill name.
+        name: String,
+    },
+    /// List the agents osdk can install skills into, and their directories.
+    Agents,
 }
 
 #[derive(Debug, Subcommand)]

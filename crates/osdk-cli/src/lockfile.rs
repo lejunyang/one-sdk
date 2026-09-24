@@ -55,6 +55,11 @@ pub struct Lockfile {
     /// ignores the section instead of failing (no deny_unknown_fields here).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deps: BTreeMap<String, LockedDeps>,
+    /// Installed agent skills, keyed by skill name. Skipped when empty so
+    /// existing locks serialize byte-identically and an older build ignores the
+    /// section instead of failing (no deny_unknown_fields here).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skills: BTreeMap<String, LockedSkill>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -358,6 +363,30 @@ pub struct LockedModelView {
     pub map: BTreeMap<String, String>,
 }
 
+/// A skill recorded in the lock so `osdk skills sync` can reproduce it.
+///
+/// The bytes are not stored (like models and http artifacts); the `content_hash`
+/// pins the exact staged content, `resolved_commit` records the immutable commit
+/// a floating GitHub ref resolved to, and `agents` records where it was linked.
+/// No `deny_unknown_fields`, matching the other lock entries, so a newer field
+/// does not make an older build reject the file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedSkill {
+    /// Canonical source string, e.g. `github:vercel-labs/agent-skills`.
+    pub source: String,
+    /// osdk's BLAKE3 content digest of the staged skill (`b3-v2:...`).
+    pub content_hash: String,
+    /// Immutable commit a GitHub source resolved to, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_commit: Option<String>,
+    /// Selected skill name within a multi-skill repository, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    /// Agent ids this skill is linked into.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedModelFile {
     pub path: String,
@@ -428,6 +457,7 @@ impl Default for Lockfile {
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         }
     }
 }
@@ -1560,6 +1590,7 @@ pub fn merge_resolved_with_scope(
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         }
     };
     if lockfile.schema == 1 {
@@ -2379,7 +2410,7 @@ fn locked_native_lock_from_options(version: &ToolVersion) -> Result<Option<Locke
     Ok(Some(native_lock))
 }
 
-fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
+pub(crate) fn save(path: &Path, lockfile: &Lockfile) -> Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -2757,6 +2788,7 @@ mod tests {
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         };
         initial.platforms.insert(
             "windows-x64".into(),
@@ -2891,6 +2923,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             platforms: BTreeMap::new(),
             models: BTreeMap::new(),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         };
         save(&path, &legacy).unwrap();
         assert_eq!(load(&path).unwrap().schema, schema_version());
@@ -2923,6 +2956,7 @@ graph = "osdk.lock.d/npm/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             )]),
             models: BTreeMap::new(),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         };
         save(&path, &legacy).unwrap();
         let lock = load(&path).unwrap();
@@ -3033,6 +3067,7 @@ version = "3.6.2"
                 },
             )]),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         };
 
         let error = save(&path, &lockfile).unwrap_err();
@@ -5360,6 +5395,7 @@ sha256 = "{sha256}"
             )]),
             models: BTreeMap::new(),
             deps: BTreeMap::new(),
+            skills: BTreeMap::new(),
         };
         assert!(validate_schema_three(&old)
             .unwrap_err()

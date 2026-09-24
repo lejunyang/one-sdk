@@ -11,6 +11,7 @@ mod model_view;
 mod pkg;
 mod prompt;
 mod proxy_diag;
+mod skills_cmd;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
@@ -254,6 +255,13 @@ fn bypasses_trust_check(command: &Command) -> bool {
                     | crate::cli::TaskCommand::Info { .. }
                     | crate::cli::TaskCommand::Deps { .. }
             }
+            // `skills agents` / `list` / `path` only report state; `add`,
+            // `remove` and `sync` act on disk and stay gated.
+            | Command::Skills {
+                command: crate::cli::SkillsCommand::Agents
+                    | crate::cli::SkillsCommand::List { .. }
+                    | crate::cli::SkillsCommand::Path { .. }
+            }
     )
 }
 
@@ -298,6 +306,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
         Command::Python { command } => commands::python(app, command),
         Command::Android { command } => commands::android(app, command).await,
         Command::Model { command } => commands::model(app, command).await,
+        Command::Skills { command } => return skills_cmd::run(app, command).await.map(|()| None),
         Command::Deps {
             providers,
             list,
