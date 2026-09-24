@@ -214,6 +214,35 @@ fn sources_probe_timeout_round_trips_through_config_commands() {
         String::from_utf8_lossy(&default.stderr)
     );
     assert_eq!(String::from_utf8(default.stdout).unwrap().trim(), "1500");
+    let model_default = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.model_probe_timeout_ms"],
+    );
+    assert!(model_default.status.success(), "{model_default:?}");
+    assert_eq!(
+        String::from_utf8(model_default.stdout).unwrap().trim(),
+        "8000"
+    );
+
+    let model_set = run_isolated(
+        temp.path(),
+        &[
+            "config",
+            "set",
+            "-g",
+            "sources.model_probe_timeout_ms",
+            "12000",
+        ],
+    );
+    assert!(model_set.status.success(), "{model_set:?}");
+    let model_read = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.model_probe_timeout_ms"],
+    );
+    assert_eq!(
+        String::from_utf8(model_read.stdout).unwrap().trim(),
+        "12000"
+    );
 
     let set = run_isolated(
         temp.path(),

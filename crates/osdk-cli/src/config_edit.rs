@@ -636,6 +636,11 @@ pub const SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::PositiveInt,
     },
     SettingSpec {
+        key: "sources.model_probe_timeout_ms",
+        path: &["sources", "model_probe_timeout_ms"],
+        kind: SettingKind::PositiveInt,
+    },
+    SettingSpec {
         key: "registries.python.urls",
         path: &["registries", "python", "urls"],
         kind: SettingKind::List,

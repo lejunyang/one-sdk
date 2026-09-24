@@ -5434,6 +5434,7 @@ fn sources_setting_display(
 ) -> Option<String> {
     match key {
         "sources.probe_timeout_ms" => Some(sources.probe_timeout_ms.to_string()),
+        "sources.model_probe_timeout_ms" => Some(sources.model_probe_timeout_ms.to_string()),
         _ => None,
     }
 }

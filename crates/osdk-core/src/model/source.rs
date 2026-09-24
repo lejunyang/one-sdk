@@ -154,7 +154,7 @@ pub async fn refresh(ctx: &Ctx, reference: &ModelRef) -> Result<Vec<ProbeResult>
 }
 
 pub async fn probe_all(ctx: &Ctx, reference: &ModelRef, sources: &[Source]) -> Vec<ProbeResult> {
-    let timeout = Duration::from_millis(ctx.config.sources.probe_timeout_ms);
+    let timeout = Duration::from_millis(ctx.config.sources.model_probe_timeout_ms);
     let mut handles = Vec::with_capacity(sources.len());
     for source in sources {
         let ctx = ProbeContext {
@@ -167,10 +167,9 @@ pub async fn probe_all(ctx: &Ctx, reference: &ModelRef, sources: &[Source]) -> V
         let reference = reference.clone();
         let source = source.clone();
         handles.push(tokio::spawn(async move {
-            match tokio::time::timeout(timeout, probe_one(ctx, reference, source.clone())).await {
-                Ok(Ok(result)) => result,
-                _ => ProbeResult::failed(&source.id),
-            }
+            probe_one(ctx, reference, source.clone(), timeout)
+                .await
+                .unwrap_or_else(|_| ProbeResult::failed(&source.id))
         }));
     }
     let mut results = Vec::with_capacity(handles.len());
@@ -203,58 +202,94 @@ impl ProbeContext {
     }
 }
 
+const MODEL_PROBE_SAMPLE_BYTES: u64 = 64 * 1024;
+
 async fn probe_one(
     probe: ProbeContext,
     reference: ModelRef,
     source: Source,
+    timeout: Duration,
 ) -> Result<ProbeResult> {
     let provider = provider(reference.provider, source.forward_credentials);
     let ctx = probe.as_ctx();
-    let snapshot = provider
-        .resolve(&ctx, &reference, &source.download_url)
-        .await?;
+    // Metadata and sample transfer have independent budgets. Sharing one budget
+    // made two individually healthy 1-second phases fail a 1.5-second probe.
+    let snapshot = tokio::time::timeout(
+        timeout,
+        provider.resolve(&ctx, &reference, &source.download_url),
+    )
+    .await
+    .map_err(|_| Error::other("model source metadata probe timed out"))??;
     let file = probe_file(&snapshot.files)
         .ok_or_else(|| Error::other("model source returned no probeable files"))?;
     let headers = header_map(&file.headers)?;
     let start = Instant::now();
-    let response = probe
-        .client
-        .get(&file.url)
-        .headers(headers)
-        .header(RANGE, "bytes=0-1048575")
-        .send()
-        .await
-        .map_err(|error| Error::network(&file.url, error))?
-        .error_for_status()
-        .map_err(|error| Error::network(&file.url, error))?;
+    let response = tokio::time::timeout(
+        timeout,
+        probe
+            .client
+            .get(&file.url)
+            .headers(headers)
+            .header(RANGE, format!("bytes=0-{}", MODEL_PROBE_SAMPLE_BYTES - 1))
+            .send(),
+    )
+    .await
+    .map_err(|_| Error::other("model source response-header probe timed out"))?
+    .map_err(|error| Error::network(&file.url, error))?
+    .error_for_status()
+    .map_err(|error| Error::network(&file.url, error))?;
     let ttfb = start.elapsed();
-    let mut stream = response.bytes_stream();
     let body_start = Instant::now();
-    let mut downloaded = 0u64;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| Error::network(&file.url, error))?;
-        downloaded += chunk.len() as u64;
-        if downloaded >= 1_048_576 {
-            break;
+    let downloaded = tokio::time::timeout(timeout, read_probe_sample(response)).await;
+    // Receiving a successful response already proves reachability. If the sample
+    // cannot complete within the throughput budget, keep the source usable with
+    // unknown throughput instead of misclassifying it as unreachable.
+    let downloaded = match downloaded {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            tracing::debug!(source = %source.id, %error, "model source reachable but sample read failed");
+            0
         }
-    }
-    if downloaded == 0 {
-        return Err(Error::other("model source probe returned no bytes"));
-    }
+        Err(_) => {
+            tracing::debug!(source = %source.id, "model source reachable but sample read timed out");
+            0
+        }
+    };
     Ok(ProbeResult {
         source_id: source.id,
-        throughput: downloaded as f64 / body_start.elapsed().as_secs_f64().max(0.001),
+        throughput: if downloaded == 0 {
+            0.0
+        } else {
+            downloaded as f64 / body_start.elapsed().as_secs_f64().max(0.001)
+        },
         ttfb_ms: ttfb.as_millis() as u64,
         ok: true,
         measured_at: crate::source::now_secs(),
     })
 }
 
+async fn read_probe_sample(response: reqwest::Response) -> Result<u64> {
+    let url = response.url().to_string();
+    let mut stream = response.bytes_stream();
+    let mut downloaded = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| Error::network(&url, error))?;
+        downloaded += chunk.len() as u64;
+        if downloaded >= MODEL_PROBE_SAMPLE_BYTES {
+            break;
+        }
+    }
+    Ok(downloaded)
+}
+
 fn probe_file(files: &[RemoteModelFile]) -> Option<&RemoteModelFile> {
+    // The largest blob is the worst possible reachability probe: CDN cold-start
+    // cost grows with the artifact while reachability does not. Prefer the
+    // smallest non-empty file, falling back only when sizes are unavailable.
     files
         .iter()
         .filter(|file| file.size.unwrap_or_default() > 0)
-        .max_by_key(|file| file.size.unwrap_or_default())
+        .min_by_key(|file| file.size.unwrap_or_default())
         .or_else(|| files.first())
 }
 
@@ -316,6 +351,9 @@ fn fresh_cache(ctx: &Ctx, reference: &ModelRef, sources: &[Source]) -> Option<Pr
 }
 
 fn save_cache(ctx: &Ctx, reference: &ModelRef, sources: &[Source], results: &[ProbeResult]) {
+    if !results.iter().any(|result| result.ok) {
+        return;
+    }
     let path = cache_path(ctx, reference, sources);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -442,7 +480,7 @@ mod tests {
                 } else {
                     assert!(request
                         .to_ascii_lowercase()
-                        .contains("range: bytes=0-1048575"));
+                        .contains("range: bytes=0-65535"));
                     stream
                         .write_all(
                             b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\ndata",
@@ -470,6 +508,103 @@ mod tests {
         assert_eq!(first[0].id, "fixture");
         let second = ranked_sources(&ctx, &reference, false).await.unwrap();
         assert_eq!(second[0].id, "fixture");
+    }
+
+    #[test]
+    fn probe_prefers_a_small_file_over_the_largest_blob() {
+        let files = vec![
+            RemoteModelFile {
+                path: "weights.safetensors".into(),
+                url: "https://example.test/weights".into(),
+                size: Some(7_000_000_000),
+                sha256: None,
+                etag: None,
+                headers: Vec::new(),
+            },
+            RemoteModelFile {
+                path: "config.json".into(),
+                url: "https://example.test/config".into(),
+                size: Some(1024),
+                sha256: None,
+                etag: None,
+                headers: Vec::new(),
+            },
+        ];
+        assert_eq!(probe_file(&files).unwrap().path, "config.json");
+    }
+
+    #[tokio::test]
+    async fn response_headers_prove_reachability_even_when_sample_body_is_slow() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for request_number in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                if request_number == 0 {
+                    let body =
+                        r#"{"sha":"abc123","siblings":[{"rfilename":"config.json","size":65536}]}"#;
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 65536\r\nContent-Range: bytes 0-65535/65536\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                    std::thread::sleep(Duration::from_millis(150));
+                    let _ = stream.write_all(b"late");
+                }
+            }
+        });
+
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temporary.path());
+        let probe = ProbeContext {
+            client: ctx.client.clone(),
+            dirs: ctx.dirs.clone(),
+            config: ctx.config.clone(),
+            cas: ctx.cas.clone(),
+            platform: ctx.platform,
+        };
+        let source = Source::mirror("slow-body", &format!("http://{address}"), 0);
+        let result = probe_one(
+            probe,
+            ModelRef::parse("hf:owner/repo@main").unwrap(),
+            source,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert!(result.ok, "response headers already proved reachability");
+        assert_eq!(result.throughput, 0.0, "timed-out throughput is unknown");
+    }
+
+    #[test]
+    fn all_failed_probe_results_are_not_cached_for_the_normal_ttl() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(temporary.path());
+        let reference = ModelRef::parse("hf:owner/repo@main").unwrap();
+        let sources = vec![Source::mirror("dead", "https://dead.example", 0)];
+        save_cache(&ctx, &reference, &sources, &[ProbeResult::failed("dead")]);
+        assert!(
+            !cache_path(&ctx, &reference, &sources).exists(),
+            "a transient all-failed result must not be cached for six hours"
+        );
     }
 
     fn test_ctx(root: &std::path::Path) -> Ctx {

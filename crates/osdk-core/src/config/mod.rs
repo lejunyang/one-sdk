@@ -323,6 +323,10 @@ pub struct SourcesConfig {
     /// built-in sources (`auto`) or obeyed on its own (`env`).
     pub mode: SourceMode,
     pub probe_timeout_ms: u64,
+    /// Per-stage budget for model metadata, response headers, and sample reads.
+    /// Model repositories are much heavier than SDK version indexes, so they
+    /// need a separate default rather than inheriting the 1500 ms tool budget.
+    pub model_probe_timeout_ms: u64,
     /// TTL for cached probe results, as a human string like "6h".
     pub cache_ttl: String,
     /// Per-tool source overrides.
@@ -355,6 +359,7 @@ impl Default for SourcesConfig {
             selection: Selection::Auto,
             mode: SourceMode::default(),
             probe_timeout_ms: 1500,
+            model_probe_timeout_ms: 8000,
             cache_ttl: "6h".to_string(),
             per_tool: BTreeMap::new(),
             registries: RegistriesConfig::default(),
@@ -1179,6 +1184,7 @@ impl Config {
                 selection: src.selection,
                 mode: src.mode,
                 probe_timeout_ms: src.probe_timeout_ms,
+                model_probe_timeout_ms: src.model_probe_timeout_ms,
                 cache_ttl: src.cache_ttl,
                 per_tool: merged,
                 registries: self.sources.registries.clone(),
