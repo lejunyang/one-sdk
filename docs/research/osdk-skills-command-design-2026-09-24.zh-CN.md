@@ -6,8 +6,9 @@
 `npx skills` 的 skill 管理命令」，目标是让人据以拍板并分批开工，不追求穷尽到可跳过评审。
 
 外部事实基准日：2026-09-24。仓库代码事实均给出文件与行号；外部工具（`npx skills` /
-Vercel Labs `skills` CLI、Anthropic Agent Skills 约定）行为区分**已查证**（官方文档 / 源码
-URL）与**推导 / 待核**（§11 诚实清单逐条列出）。凡待核项不得在实现时当既定事实使用。
+Vercel Labs `skills` CLI、skills.sh 注册表 API、Anthropic Agent Skills 约定）行为区分
+**已查证**（官方文档 / 源码 URL / 本机实测）与**推导 / 待核**（§11 诚实清单逐条列出）。凡待核项
+不得在实现时当既定事实使用。
 
 ---
 
@@ -114,7 +115,7 @@ agent skills 生态」的包管理器，支持 75+ Agent；skill 定义为带 YA
 | 安装方式 | symlink（推荐）/ `--copy` | **复用 osdk link mode**：symlink / hardlink / copy / clone，`--copy` 强制拷贝 |
 | 版本 / 更新 | `update` 更新到最新（分支通常可变） | **不可变身份**：钉 commit SHA + 内容哈希进 lock，`update` 是显式再解析，`sync` 复现（§6） |
 | 下载限额 | 10 MiB 下载 / 25 MiB 解压 / 1000 文件，可用 `SKILLS_*` 覆盖 | **复用 osdk http backend 既有限额与 fail-closed**（§7），量级与来源信任挂钩 |
-| 注册表 / 搜索 | `find` 走 skills.sh 注册表 | `find` 的注册表来源列为**待决**（§10.2）：联邦 skills.sh，还是仅 GitHub owner 扫描 |
+| 注册表 / 搜索 | `find` 走 skills.sh 注册表（有公开 `/api/v1/` JSON API） | `find` 的注册表来源列为**待决**（§10.2）：skills.sh API 提供 search / audit / 内容 hash，但实测匿名访问被拦（需申请 key），否则退回仅 GitHub owner 扫描 |
 | 私有仓认证 | git 凭据助手 → gh CLI → SSH 回退 | GitHub API 匿名 → 显式 token（`GITHUB_TOKEN`/`GH_TOKEN`）→ 待定（§10.1） |
 | 供应链信任 | 无显式 trust 层 | **osdk trust 分级 + 内容摘要预览**（§7），差异化重点 |
 
@@ -278,6 +279,12 @@ skill 会改变**下游 AI Agent 的行为**，这是 model / tool 没有的风�
   看清「这份 skill 会让 Agent 获得什么能力、读到什么指令」。`-y` 跳过，CI 显式声明信任来源。
 - **记录内容哈希**，`skills doctor` 能报告 Agent 目录里的 skill 是否被就地改动（对齐
   `doctor --verify` 对工具文件的「装后被改」检测思路，`cli.rs:423-441`）。
+- **可选地展示第三方审计结论作为参考，但不作信任依据**：skills.sh 有
+  `GET /api/v1/skills/audit/{source}/{skill}` 端点，返回 Socket / Snyk / Agent Trust Hub 等
+  合作方的 pass/warn/fail 与风险级别（NONE…CRITICAL）（已查证，§11）。若来源正是 skills.sh，
+  `find` / `add` 可顺带把这些审计打印出来给用户参考；但 osdk **不得**把「skills.sh 说 pass」
+  当成放行依据——它是第三方结论、可能缺失（首装几分钟内无审计、返回 404）、且实测该 API 匿名
+  被拦（§10.2）。osdk 自己的 fail-closed 下载与内容哈希才是信任边界，审计只是附加信息。
 - 这不是要 osdk 审查 skill 语义（做不到也不该做），而是把「装了什么」摊开，把决定权交给用户。
 
 ### 7.4 跨平台落地安全
@@ -350,15 +357,40 @@ link_mode = "symlink"                         # 可选：覆盖全局 link_mode�
 
 建议 P0 做 A，B 视需求再议。
 
-### 10.2 `find` 的注册表来源
+### 10.2 `find` 的注册表来源（skills.sh 已实测，含一条硬约束）
 
-`npx skills find` 依赖 skills.sh 注册表。osdk 要不要：
+`npx skills find` 依赖 skills.sh。它确有一套公开 JSON API（`https://skills.sh/api/v1/`，已查证
+其官方 API 文档），对 osdk 尤其顺手的是：
 
-- **A**：不做集中注册表，`find` = 「按 GitHub owner / 关键词扫描仓库」（复用 GitHub 搜索 API），
-  无第三方依赖。
-- **B**：联邦 skills.sh（读它的公开索引）。需评估其 API 稳定性与 osdk 是否愿意绑定第三方。
+| 端点 | 返回 | 对 osdk 的价值 |
+| --- | --- | --- |
+| `GET /skills/search?q=&limit=` | 命中列表；单词=模糊、多词=语义 | `find` 的直接后端 |
+| `GET /skills?view=all-time\|trending\|hot` | 排行榜（分页） | 无关键词时的浏览 |
+| `GET /skills/curated` | 官方一方 skill 集（约 342 个 / 87 owner） | 可信来源白名单候选 |
+| `GET /skills/{source}/{skill}` | 完整文件树 + **内容 SHA-256 `hash`** | 直接喂 §6 的不可变身份 / §7.3 的预览 |
+| `GET /skills/audit/{source}/{skill}` | 第三方安全审计（pass/warn/fail + 风险级别） | §7.3 的参考信息 |
 
-建议 P0 先做 A 的最小版（或直接省掉 `find`，只保留 `add <owner/repo> --list`）。
+每个 skill 对象带稳定 `id`（`{source}/{slug}`）、`installUrl`（即 `owner/repo`，可直接交给
+§10.1-A 的下载路径）、`isDuplicate`（fork/抄袭标记）。
+
+**一条实测硬约束（会改变 P0 是否含 `find`）**：API 文档称「匿名可访问，仅限流更严」，但本机
+用带浏览器 UA 的请求实测得到 **401 Unauthorized**，自动化抓取路径也被 `robots.txt` 拒绝
+（2026-09-24 实测，§11）。osdk 的 HTTP client 固定发 `osdk/<version>` UA
+（`crates/osdk-core/src/http/mod.rs:21`），大概率同样吃 401。含义：**要对接 skills.sh，很可能
+必须走 `Authorization: Bearer <key>`（需向 `skills-api@vercel.com` 申请），不能假设匿名可用。**
+
+三条路（按 osdk 意愿排序）：
+
+- **A（P0 最稳）**：不接任何集中注册表，`find` = 按 GitHub owner / 关键词扫描仓库（复用 GitHub
+  搜索 API，匿名 → `GITHUB_TOKEN`）。无第三方绑定、无 key 依赖。**或干脆 P0 省掉 `find`**，
+  只保留 `add <owner/repo> --list`，把搜索留给 P1。
+- **B（联邦 skills.sh，P1+）**：接入上表的 API，但因匿名被拦，要么内置/让用户配 API key，
+  要么接受 `find` 在无 key 时不可用并如实报错。绑定第三方 API 的稳定性与限流也要承担。
+- **C（混合）**：`find` 默认走 A 的 GitHub 扫描；检测到用户配了 skills.sh key 时，额外用
+  skills.sh 的 search/audit 增强结果。
+
+建议 **P0 走 A（或省掉 `find`）**；skills.sh 的 search/audit/hash 作为 P1 的增强项（C），
+且实现里必须把「匿名被拦、需 key」当既定前提，而不是文档里的「匿名可访问」。
 
 ### 10.3 与 `.agents/skills/` 的多 Agent 共享目录
 
@@ -390,6 +422,12 @@ model / tool 都进统一 `osdk.lock`。skill 建议**也进 `osdk.lock` 的 `[s
 - CAS store、link mode、指纹化安装根共存：README.zh-CN.md「快速开始」尾段；`dirs.rs`。
 - `npx skills` 子命令 / 来源格式 / 范围 / symlink / 限额 / Supported Agents 表：
   <https://github.com/vercel-labs/skills> README（2026-09-24 读取）。
+- skills.sh 公开 API 的端点与响应字段（`/skills`、`/skills/search`、`/skills/curated`、
+  `/skills/{source}/{skill}` 含 `hash` + `files`、`/skills/audit/...`）：
+  <https://skills.sh/docs/api>（2026-09-24 读取）。
+- **skills.sh API 匿名访问实测被拦**：带浏览器 UA 的 `Invoke-RestMethod` 返回 401，自动化抓取
+  被 `robots.txt` 拒绝（2026-09-24 本机实测）。文档写「匿名可访问」，与实测不符——以实测为准。
+- osdk HTTP client 固定发 `osdk/<version>` User-Agent：`crates/osdk-core/src/http/mod.rs:21`。
 
 **待核（实现前必须验证，不得当既定事实用）**
 
@@ -402,6 +440,9 @@ model / tool 都进统一 `osdk.lock`。skill 建议**也进 `osdk.lock` 的 `[s
   的哈希（工具是「一个安装根」，skill 是「一份目录内容」，粒度需确认）。
 - `[skills]` 段进入 lock 后，`--offline` 复现路径是否能完全复用 model 的离线重放（model 是权重，
   skill 是文本目录，store 落地方式需确认一致）。
+- skills.sh API 用 `Authorization: Bearer <key>` 是否真能解除 §10.2 实测到的 401（本机无 key，
+  未能验证 key 之后是否放行、限流与稳定性如何）；以及它对内容 `hash` 用的算法是否与 osdk 的
+  `b3-v2:` 一致（文档写 SHA-256，osdk 身份哈希是 BLAKE3，两者不能直接互认，需各自计算）。
 
 ---
 
@@ -412,10 +453,11 @@ model / tool 都进统一 `osdk.lock`。skill 建议**也进 `osdk.lock` 的 `[s
   落进 CAS store + symlink/copy 进 §5.3 的主流 Agent；`[skills]` 配置段 + `osdk.lock [skills]`；
   安装前摘要预览（§7.3）。**验收**：clone 一个仓库 → `osdk skills sync` → 目标 Agent 目录出现
   skill；改动源 commit → `update` → lock 变化、内容哈希变化；`doctor` 能报断链与就地改动。
-- **P1**：`update` 的批量 / 范围语义、`use`（临时取用）、`find` 最小版（§10.2-A）、更多
-  Agent 表项、`--copy` 与 link mode 覆盖、共享 `.agents/skills/` 的归属计数（§10.3，测试 N≥2）。
-- **P2（视需求）**：git-over-SSH / 任意 host（§10.1-B）、联邦 skills.sh（§10.2-B）、
-  `attestations` / 签名校验接入 skill 下载。
+- **P1**：`update` 的批量 / 范围语义、`use`（临时取用）、`find` 最小版（§10.2-A：GitHub 扫描，
+  不依赖 skills.sh key）、更多 Agent 表项、`--copy` 与 link mode 覆盖、共享 `.agents/skills/`
+  的归属计数（§10.3，测试 N≥2）。
+- **P2（视需求）**：git-over-SSH / 任意 host（§10.1-B）、接入 skills.sh 增强 `find`
+  （§10.2-B/C，需处理 API key 与 401）、`attestations` / 签名校验接入 skill 下载。
 
 每批遵循 AGENTS.md：单独 commit、跑范围最小的相关测试、跨平台改动在另一侧实跑、Windows 落地
 改动跑 `windows-runtime-smoke.ps1`、面向用户能力变更同步两份 README + 两语言 site 文档 +
