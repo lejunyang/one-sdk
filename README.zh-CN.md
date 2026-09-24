@@ -300,6 +300,9 @@ osdk deps --list            # 列出探测到的 provider 与新鲜度
 osdk deps --dry-run         # 打印将要执行的命令，不执行
 osdk deps                   # 兑现整份清单
 osdk deps --verify          # 按包管理器自己的收据校验已装环境
+osdk deps npm               # 当前工作目录最近的 npm 项目
+osdk deps //:npm            # 只处理配置根
+osdk deps //apps/api:npm    # 只处理指定子项目
 ```
 
 声明之后不必每次手动调用：裸跑 `osdk install`、`osdk run <任务>`、`osdk exec`

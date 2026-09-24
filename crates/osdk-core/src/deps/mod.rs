@@ -439,11 +439,12 @@ impl RootedProject {
 /// Parse a rooted provider id back into its parts.
 ///
 /// Returns `None` for a plain provider name, which is how the CLI tells the two
-/// forms apart without a second flag.
+/// forms apart without a second flag. An empty relative path is valid and denotes
+/// the config root, so `//:uv` is the root counterpart of `//apps/api:uv`.
 pub fn parse_rooted_id(value: &str) -> Option<(&str, &str)> {
     let rest = value.strip_prefix("//")?;
     let (relative, provider) = rest.rsplit_once(':')?;
-    if relative.is_empty() || provider.is_empty() {
+    if provider.is_empty() {
         return None;
     }
     Some((relative, provider))
@@ -1227,7 +1228,11 @@ mod tests {
         );
         // A plain name has no `//`, which is how the two forms stay distinct.
         assert_eq!(parse_rooted_id("uv"), None);
-        assert_eq!(parse_rooted_id("//:uv"), None);
+        assert_eq!(
+            parse_rooted_id("//:uv"),
+            Some(("", "uv")),
+            "an empty relative path explicitly addresses the config root"
+        );
         assert_eq!(parse_rooted_id("//apps/api:"), None);
         assert_eq!(parse_rooted_id("//apps/api"), None);
     }

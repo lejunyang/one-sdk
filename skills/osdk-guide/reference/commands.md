@@ -130,7 +130,12 @@ osdk deps --dry-run
 osdk deps                 # 兑现整份清单（stale 才动）
 osdk deps --frozen        # 严格：无原生 lock 即失败
 osdk deps --verify
+osdk deps npm             # 当前工作目录最近的 npm root
+osdk deps //:npm          # 配置根
+osdk deps //apps/api:npm  # 指定子项目
 ```
+> 无 provider 操作数时覆盖所有声明 root；裸 provider 名只命中最近 root，完整 `//路径:provider` 精确寻址。
+>
 > `pip-requirements` 使用 `uv pip install -r` 解析传递依赖；普通 `requirements.txt`
 > 不是完整 lock，不能与 `--frozen` 合用，也不会按集合语义清理额外包。
 >

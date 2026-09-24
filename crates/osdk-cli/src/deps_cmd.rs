@@ -26,8 +26,8 @@ pub struct DepsOptions {
     pub list: bool,
     /// With `list`, widen it to every sub-project from `[deps].roots`.
     ///
-    /// Only listing is tiered. Materializing always covers every declared root:
-    /// narrowing that by default would skip work without saying so.
+    /// An operand-free materialization covers every declared root. Supplying a
+    /// provider name narrows it to the nearest root; rooted ids are exact.
     pub list_all: bool,
     pub dry_run: bool,
     pub force: bool,
@@ -78,10 +78,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     }
 
     // An operand may be a plain provider name or a rooted id (`//apps/api:npm`).
-    // Both have to select the underlying provider here, before roots are
-    // expanded: filtering `enabled` by the literal operand would leave it empty
-    // for a rooted id and there would be nothing left to expand.
-    let selects = |id: &str, operands: &[String]| {
+    // Both have to enable the underlying provider schema before discovery, but
+    // scope is applied afterwards: a bare name means the nearest project while a
+    // rooted id means exactly the addressed project.
+    let selects_kind = |id: &str, operands: &[String]| {
         operands.iter().any(|operand| {
             operand == id
                 || deps::parse_rooted_id(operand).is_some_and(|(_, provider)| provider == id)
@@ -90,23 +90,62 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     let enabled: Vec<&'static DepsProviderSchema> = configured
         .keys()
         .filter(|id| !options.auto_only || configured.get(*id).is_some_and(|c| c.auto))
-        .filter(|id| !selects(id, &options.skip))
-        .filter(|id| options.providers.is_empty() || selects(id, &options.providers))
+        // A bare skip disables that provider everywhere. A rooted skip is applied
+        // only after projects have addresses; disabling the schema here would
+        // accidentally hide every root with the same provider.
+        .filter(|id| !options.skip.iter().any(|skip| skip == *id))
+        .filter(|id| options.providers.is_empty() || selects_kind(id, &options.providers))
         .filter_map(|id| deps::provider_schema(id))
         .collect();
-    let ceiling = app
-        .ctx
-        .config
-        .project_config_path
-        .as_deref()
-        .and_then(Path::parent);
-    let mut detected = deps::discover(&cwd, ceiling, &enabled)?;
+    let config_path = app.ctx.config.project_config_path.clone();
+    let config_root = config_path.as_deref().and_then(Path::parent);
+    let mut detected = deps::discover(&cwd, config_root, &enabled)?;
+
+    // `//:provider` explicitly addresses the config root. From a sub-project,
+    // nearest-project discovery stops before reaching that root, so add a direct
+    // root probe for the requested provider schemas.
+    if let Some(root) = config_root {
+        for schema in &enabled {
+            let wants_config_root = options.providers.iter().any(|operand| {
+                deps::parse_rooted_id(operand).is_some_and(|(relative, provider)| {
+                    relative.is_empty() && provider == schema.id
+                })
+            });
+            if wants_config_root
+                && !detected
+                    .iter()
+                    .any(|project| project.provider == schema.id && project.root == root)
+            {
+                detected.extend(deps::discover(root, Some(root), &[*schema])?);
+            }
+        }
+    }
+
+    detected.retain(|project| {
+        let selected = options.providers.is_empty()
+            || options.providers.iter().any(|operand| {
+                operand.as_str() == &*project.provider
+                    || deps::parse_rooted_id(operand).is_some_and(|(relative, provider)| {
+                        relative.is_empty()
+                            && provider == &*project.provider
+                            && config_root.is_some_and(|root| project.root == root)
+                    })
+            });
+        let skipped = options.skip.iter().any(|operand| {
+            operand.as_str() == &*project.provider
+                || deps::parse_rooted_id(operand).is_some_and(|(relative, provider)| {
+                    relative.is_empty()
+                        && provider == &*project.provider
+                        && config_root.is_some_and(|root| project.root == root)
+                })
+        });
+        selected && !skipped
+    });
 
     // Custom providers are not discovered, they are declared: there is no
     // manifest to find. Their root is the directory of the config that declared
     // them, which keeps `sources`/`outputs` relative to the same place a built-in
     // provider's would be.
-    let config_path = app.ctx.config.project_config_path.clone();
     for id in configured.keys() {
         if deps::provider_schema(id).is_some() {
             continue;
@@ -114,10 +153,20 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if options.auto_only && !configured.get(id).is_some_and(|config| config.auto) {
             continue;
         }
-        if options.skip.iter().any(|skip| skip == id) {
+        if options.skip.iter().any(|skip| {
+            skip == id
+                || deps::parse_rooted_id(skip)
+                    .is_some_and(|(relative, provider)| relative.is_empty() && provider == id)
+        }) {
             continue;
         }
-        if !options.providers.is_empty() && !options.providers.iter().any(|p| p == id) {
+        if !options.providers.is_empty()
+            && !options.providers.iter().any(|provider| {
+                provider == id
+                    || deps::parse_rooted_id(provider)
+                        .is_some_and(|(relative, rooted)| relative.is_empty() && rooted == id)
+            })
+        {
             continue;
         }
         let Some(path) = &config_path else {
@@ -143,8 +192,9 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         for candidate in deps::discover_in_roots(config_root, &app.ctx.config.deps.roots, &enabled)?
         {
             let id = candidate.id();
-            // Selectable either by full id (`//apps/api:uv`) or by provider name,
-            // so `osdk deps uv` still means "every uv project" in a monorepo.
+            // A rooted project is selected by its exact id. A bare provider may
+            // reach rooted projects only when `--all` or `--filter` explicitly
+            // widens the request beyond the nearest root.
             let provider = candidate.project.provider.to_string();
             if options
                 .skip
@@ -154,10 +204,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 continue;
             }
             if !options.providers.is_empty()
-                && !options
-                    .providers
-                    .iter()
-                    .any(|wanted| *wanted == id || *wanted == provider)
+                && !options.providers.iter().any(|wanted| {
+                    *wanted == id
+                        || ((options.list_all || !options.filter.is_empty()) && *wanted == provider)
+                })
             {
                 continue;
             }
@@ -814,33 +864,22 @@ fn auto_options() -> DepsOptions {
 
 /// Should this run expand `[deps].roots` into its sub-projects?
 ///
-/// Always, except for a plain `--list`. Listing is the one place where a large
-/// monorepo's full provider set is a readability problem rather than the answer,
-/// so it starts at the current config root and `--all` widens it.
-///
-/// Two cases deliberately keep expanding even under `--list`:
-///
-/// * `--list --all`, which is what the flag is for.
-/// * A rooted operand such as `//apps/api:uv`. Asking for a sub-project by name
-///   and being told it does not exist would be a lie about the configuration.
-///
-/// Materializing is never narrowed. `osdk deps` has always covered every declared
-/// root, and doing less by default would skip work silently -- the failure mode
-/// this codebase treats as worse than an error.
+/// A run expands roots when it requests the whole declared set, asks for a
+/// sub-project explicitly, or supplies a path filter. A bare provider operand is
+/// intentionally local to the nearest project; expanding it would make
+/// `osdk deps uv` affect every `uv` root in a monorepo.
 fn wants_rooted(options: &DepsOptions) -> bool {
-    if !options.list || options.list_all {
+    if options.list_all || !options.filter.is_empty() {
         return true;
     }
-    // A path filter only has sub-projects to match against, so asking for one is
-    // asking for the expansion. Without this, \--list --filter\ would match nothing
-    // and then fail-closed -- an error about the wrong thing entirely.
-    if !options.filter.is_empty() {
-        return true;
+    if options.providers.is_empty() {
+        // Preserve the established batch operation: an unqualified `osdk deps`
+        // materializes every declared root, while a plain list stays local.
+        return !options.list;
     }
-    options
-        .providers
-        .iter()
-        .any(|wanted| wanted.starts_with("//"))
+    options.providers.iter().any(|wanted| {
+        deps::parse_rooted_id(wanted).is_some_and(|(relative, _)| !relative.is_empty())
+    })
 }
 
 /// Providers configured in `[deps]`, minus any the project disabled.

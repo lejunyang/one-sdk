@@ -188,22 +188,22 @@ npm                 stale  /repo
 ```
 
 分层只针对**列举**。几十个包的仓库全量列出来会把有用的部分顶出屏幕，而这是个可读性
-问题、不是正确性问题。**兑现从不分层**：裸 `osdk deps` 始终覆盖所有声明的 root，
-默认少做一部分等于悄悄跳过工作。
+问题、不是正确性问题。**无操作数的** `osdk deps` 仍覆盖所有声明的 root，避免批量兑现时
+悄悄漏掉工作；但一旦给出 provider 名，它只作用于当前工作目录最近的项目 root。
 
-按地址处理单个子项目也不需要 `--all`——点名要一个东西却被告知它不存在，那是对配置的
-误报：
+按地址处理单个位置不需要 `--all`。空路径 `//:` 显式表示配置根：
 
 ```bash
-osdk deps //apps/api:npm          # 只这个子项目
-osdk deps npm                     # 所有 npm 子项目
-osdk deps --skip //apps/web:npm   # 排除一个
+osdk deps npm                     # 当前目录最近的 npm 项目
+osdk deps //:npm                  # 只处理配置根
+osdk deps //apps/api:npm          # 只处理这个子项目
+osdk deps --skip //apps/web:npm   # 全量兑现时排除一个
 osdk deps --list //apps/api:npm   # 只看它，无需 --all
 ```
 
 ### 按位置筛选：`--filter`
 
-provider 名选的是**种类**，`--filter` 选的是**位置**：
+裸 provider 名选最近 root；`--filter` 显式扩大到匹配的子项目位置：
 
 ```bash
 osdk deps --filter 'apps/*'          # apps/ 下所有子项目，不论用哪个包管理器

@@ -6855,7 +6855,7 @@ fn filter_patterns_use_the_same_dialect_as_roots() {
 /// default-only assertions go red) and by making it return false for every listing
 /// (the `--all` and rooted-operand assertions go red).
 #[test]
-fn listing_is_tiered_but_materializing_is_not() {
+fn listing_is_tiered_but_operand_free_materializing_is_not() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let project = root.join("repo");
@@ -6906,6 +6906,13 @@ fn listing_is_tiered_but_materializing_is_not() {
         );
     }
 
+    // `--all` explicitly widens even a bare provider operand.
+    let output = run_isolated_in(root, &project, &["deps", "--list", "--all", "npm"]);
+    assert!(output.status.success(), "{output:?}");
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(listed.contains("//apps/api:npm"), "{listed}");
+    assert!(listed.contains("//packages/ui:npm"), "{listed}");
+
     // A rooted operand keeps working without `--all`: asking for a sub-project by
     // name and being told it does not exist would misreport the configuration.
     let output = run_isolated_in(root, &project, &["deps", "--list", "//apps/api:npm"]);
@@ -6914,6 +6921,11 @@ fn listing_is_tiered_but_materializing_is_not() {
     assert!(
         listed.contains("//apps/api:npm"),
         "a rooted operand must resolve without --all: {listed}"
+    );
+    assert_eq!(
+        listed.lines().filter(|line| line.contains("stale")).count(),
+        1,
+        "a rooted operand must not also select the config root: {listed}"
     );
 
     // Materializing is not tiered. `--dry-run` prints the plan for every provider
@@ -6936,6 +6948,53 @@ fn listing_is_tiered_but_materializing_is_not() {
         3,
         "every declared root must be planned without --all: {planned}"
     );
+}
+
+/// Provider operands are scoped: bare names select the nearest project, while
+/// rooted ids select exactly one addressed project (including `//:` for root).
+///
+/// Counting actual dry-run plans makes this fail if an implementation merely
+/// changes labels while still executing more than one root.
+#[test]
+fn provider_operands_select_exactly_one_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let project = root.join("repo");
+    let child = project.join("apps").join("api");
+    std::fs::create_dir_all(&child).unwrap();
+    for directory in [&project, &child] {
+        std::fs::write(
+            directory.join("package.json"),
+            r#"{"name":"p","private":true}"#,
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("osdk.toml"),
+        "[deps]\nroots = [\"apps/*\"]\n\n[deps.npm]\n",
+    )
+    .unwrap();
+
+    let assert_only = |cwd: &Path, selector: &str, expected: &Path| {
+        let output = run_isolated_in(root, cwd, &["deps", selector, "--dry-run", "--force"]);
+        assert!(output.status.success(), "{selector}: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.matches("would run in").count(),
+            1,
+            "{selector} must select exactly one root: {stdout}"
+        );
+        assert!(
+            stdout.contains(&expected.display().to_string()),
+            "{selector} must select {}: {stdout}",
+            expected.display()
+        );
+    };
+
+    assert_only(&project, "npm", &project);
+    assert_only(&child, "npm", &child);
+    assert_only(&child, "//:npm", &project);
+    assert_only(&project, "//apps/api:npm", &child);
 }
 
 #[test]

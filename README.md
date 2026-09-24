@@ -333,6 +333,9 @@ osdk deps --list            # detected providers and their freshness
 osdk deps --dry-run         # print what would run, without running it
 osdk deps                   # materialize the manifest
 osdk deps --verify          # check the installed tree against its own receipts
+osdk deps npm               # nearest npm project to the working directory
+osdk deps //:npm            # config root only
+osdk deps //apps/api:npm    # one declared sub-project
 ```
 
 You don't have to call it every time. A bare `osdk install`, `osdk run <task>` or

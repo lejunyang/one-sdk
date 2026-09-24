@@ -322,7 +322,11 @@ pub enum Command {
     /// project's whole dependency closure lands inside the project. Adding or
     /// removing a single dependency stays with `osdk install <npm:pkg>`.
     Deps {
-        /// Limit to these providers (repeatable). Default: every enabled one.
+        /// Limit to these providers or rooted ids (repeatable).
+        ///
+        /// A bare name selects the nearest project root. Use `//:name` for the
+        /// config root or `//path:name` for a declared sub-project. With no
+        /// operand, every enabled provider in every declared root is selected.
         providers: Vec<String>,
         /// List detected providers and their freshness without installing.
         ///

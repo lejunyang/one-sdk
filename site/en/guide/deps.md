@@ -210,22 +210,25 @@ npm                 stale  /repo
 
 Only **listing** is tiered. A repository with dozens of packages scrolls the useful
 part off screen, and that is a readability problem rather than a correctness one.
-**Materializing is never tiered**: a bare `osdk deps` always covers every declared
-root, and doing less by default would silently skip work.
+An operand-free `osdk deps` still covers every declared root, so batch
+materialization cannot silently skip work. Once a provider operand is present,
+however, its bare name applies only to the project root nearest the working directory.
 
-Addressing one sub-project does not need `--all` either -- asking for something by
-name and being told it does not exist would misreport the configuration:
+Addressing one location does not need `--all`. An empty path in `//:` explicitly
+means the config root:
 
 ```bash
-osdk deps //apps/api:npm          # just this sub-project
-osdk deps npm                     # every npm sub-project
-osdk deps --skip //apps/web:npm   # all but one
+osdk deps npm                     # nearest npm project to the working directory
+osdk deps //:npm                  # config root only
+osdk deps //apps/api:npm          # this sub-project only
+osdk deps --skip //apps/web:npm   # exclude one from an all-root run
 osdk deps --list //apps/api:npm   # just this one, no --all needed
 ```
 
 ### Selecting by location: `--filter`
 
-A provider name selects by **kind**; `--filter` selects by **location**:
+A bare provider selects the nearest root; `--filter` explicitly widens the request
+to matching sub-project locations:
 
 ```bash
 osdk deps --filter 'apps/*'          # every sub-project under apps/, any manager
