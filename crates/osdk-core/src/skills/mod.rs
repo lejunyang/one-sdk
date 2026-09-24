@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+pub mod install;
+
 /// One agent osdk knows how to install a skill into.
 ///
 /// `project` is relative to a project root; `global` is relative to the user's
