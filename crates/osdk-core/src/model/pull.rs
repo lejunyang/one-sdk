@@ -84,13 +84,21 @@ async fn download_file(
     }
     if !ctx.config.settings.offline {
         let headers = header_map(&file.headers)?;
-        download::download_with_headers(
+        download::download_with_headers_and_policy(
             &ctx.client,
             &file.url,
             &destination,
             &format!("{}:{}", reference.repository, file.path),
             ctx.show_progress,
             &headers,
+            download::RetryPolicy {
+                max_attempts: ctx.config.sources.model_download_attempts,
+                base_delay: std::time::Duration::from_millis(
+                    ctx.config.sources.model_download_retry_base_ms,
+                ),
+                max_delay: std::time::Duration::from_secs(8),
+                visible: true,
+            },
         )
         .await?;
     }

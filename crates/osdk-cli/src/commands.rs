@@ -5435,6 +5435,10 @@ fn sources_setting_display(
     match key {
         "sources.probe_timeout_ms" => Some(sources.probe_timeout_ms.to_string()),
         "sources.model_probe_timeout_ms" => Some(sources.model_probe_timeout_ms.to_string()),
+        "sources.model_download_attempts" => Some(sources.model_download_attempts.to_string()),
+        "sources.model_download_retry_base_ms" => {
+            Some(sources.model_download_retry_base_ms.to_string())
+        }
         _ => None,
     }
 }

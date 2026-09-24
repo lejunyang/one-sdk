@@ -224,6 +224,44 @@ fn sources_probe_timeout_round_trips_through_config_commands() {
         "8000"
     );
 
+    let attempts_default = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.model_download_attempts"],
+    );
+    assert_eq!(
+        String::from_utf8(attempts_default.stdout).unwrap().trim(),
+        "6"
+    );
+    let retry_base_default = run_isolated(
+        temp.path(),
+        &[
+            "config",
+            "get",
+            "-g",
+            "sources.model_download_retry_base_ms",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8(retry_base_default.stdout).unwrap().trim(),
+        "1000"
+    );
+    let attempts_set = run_isolated(
+        temp.path(),
+        &[
+            "config",
+            "set",
+            "-g",
+            "sources.model_download_attempts",
+            "8",
+        ],
+    );
+    assert!(attempts_set.status.success(), "{attempts_set:?}");
+    let attempts_read = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.model_download_attempts"],
+    );
+    assert_eq!(String::from_utf8(attempts_read.stdout).unwrap().trim(), "8");
+
     let model_set = run_isolated(
         temp.path(),
         &[

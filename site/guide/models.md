@@ -88,8 +88,10 @@ commit 时，osdk 以请求 revision 和排序后的文件路径、大小、SHA-
 
 ## 下载、校验与本地布局
 
-文件按 `settings.jobs` 并发下载，支持 Range/ETag 续传。上游提供 SHA-256 时强制
-校验；未提供时仍计算并记录本地 SHA-256。`model verify` 同时检查 CAS BLAKE3 与
+文件按 `settings.jobs` 并发下载。模型文件默认尝试 6 次，按 1/2/4/8/8 秒退避并输出
+可见重试警告；使用 `osdk config set` 调整 `sources.model_download_attempts` 与
+`sources.model_download_retry_base_ms`。下载支持 Range/ETag 续传。上游提供 SHA-256
+时强制校验；未提供时仍计算并记录本地 SHA-256。`model verify` 同时检查 CAS BLAKE3 与
 manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 rename 发布；这不
 保证 fsync 持久性、跨平台替换原子性或不同 snapshot writer 之间的事务隔离。
 

@@ -94,8 +94,11 @@ file paths, sizes, and SHA-256 values. Remote paths must be safe relative paths.
 
 ## Downloads, verification, and local layout
 
-Files download concurrently according to `settings.jobs` and support Range/ETag
-resume. An upstream SHA-256 is enforced when available; otherwise osdk still
+Files download concurrently according to `settings.jobs`. Model files default to
+six attempts with 1/2/4/8/8-second backoff and visible retry warnings. Configure
+`sources.model_download_attempts` and `sources.model_download_retry_base_ms` with
+`osdk config set`. Downloads support Range/ETag resume. An upstream SHA-256 is
+enforced when available; otherwise osdk still
 computes and records a local SHA-256. `model verify` checks both CAS BLAKE3 and
 manifest SHA-256. Snapshots and `current.json` are published through same-directory
 temporary paths followed by rename; this does not guarantee fsync durability,

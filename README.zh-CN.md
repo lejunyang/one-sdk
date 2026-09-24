@@ -668,11 +668,13 @@ osdk --source official install go@1.22
 即使样本 body 超时也只记为吞吐未知，不再误报 `unreachable`。全部来源均失败的结果
 不会按常规 6 小时 TTL 缓存。
 
-由 osdk 自身执行的归档和模型文件下载并非失败即停：共享下载管线会对瞬时错误最多
-尝试 3 次，前两次分别等待 400 ms、800 ms。下载使用 `.partial` 文件并保存 ETag /
-Last-Modified，重试时通过 `Range` + `If-Range` 断点续传；服务端忽略 Range 或对象已
-变化时会安全重头下载。模型在某个来源耗尽重试后，还会继续尝试下一个排序后的来源。
-不可重试错误，或第三次尝试及全部来源回退都失败时，命令才会停止。
+由 osdk 自身执行的下载并非失败即停。普通归档保持最多 3 次（等待 400 ms、800 ms）；
+模型文件默认尝试 6 次，按 1/2/4/8/8 秒指数退避，并输出可见的重试警告。可通过
+`osdk config set` 调整 `sources.model_download_attempts` 和
+`sources.model_download_retry_base_ms`。两类下载都保留 `.partial` 文件及 ETag /
+Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返回错误 Range、对象
+变化、来源 URL 改变时会安全重头下载。模型在某个来源耗尽尝试后还会继续下一个排序
+来源；不可重试错误或所有来源都耗尽后才终止。
 
 环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
 等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会

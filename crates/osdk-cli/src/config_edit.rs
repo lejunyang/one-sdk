@@ -641,6 +641,16 @@ pub const SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::PositiveInt,
     },
     SettingSpec {
+        key: "sources.model_download_attempts",
+        path: &["sources", "model_download_attempts"],
+        kind: SettingKind::PositiveInt,
+    },
+    SettingSpec {
+        key: "sources.model_download_retry_base_ms",
+        path: &["sources", "model_download_retry_base_ms"],
+        kind: SettingKind::PositiveInt,
+    },
+    SettingSpec {
         key: "registries.python.urls",
         path: &["registries", "python", "urls"],
         kind: SettingKind::List,

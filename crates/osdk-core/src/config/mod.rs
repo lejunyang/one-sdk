@@ -327,6 +327,10 @@ pub struct SourcesConfig {
     /// Model repositories are much heavier than SDK version indexes, so they
     /// need a separate default rather than inheriting the 1500 ms tool budget.
     pub model_probe_timeout_ms: u64,
+    /// Maximum attempts per model file before falling through to another source.
+    pub model_download_attempts: u32,
+    /// Initial retry delay for model files. Later delays double up to 8 seconds.
+    pub model_download_retry_base_ms: u64,
     /// TTL for cached probe results, as a human string like "6h".
     pub cache_ttl: String,
     /// Per-tool source overrides.
@@ -360,6 +364,8 @@ impl Default for SourcesConfig {
             mode: SourceMode::default(),
             probe_timeout_ms: 1500,
             model_probe_timeout_ms: 8000,
+            model_download_attempts: 6,
+            model_download_retry_base_ms: 1000,
             cache_ttl: "6h".to_string(),
             per_tool: BTreeMap::new(),
             registries: RegistriesConfig::default(),
@@ -1185,6 +1191,8 @@ impl Config {
                 mode: src.mode,
                 probe_timeout_ms: src.probe_timeout_ms,
                 model_probe_timeout_ms: src.model_probe_timeout_ms,
+                model_download_attempts: src.model_download_attempts,
+                model_download_retry_base_ms: src.model_download_retry_base_ms,
                 cache_ttl: src.cache_ttl,
                 per_tool: merged,
                 registries: self.sources.registries.clone(),

@@ -152,8 +152,11 @@ python = { work = "3.12" }
 [sources]
 selection = "auto"          # auto（测速排序）/ 其他选择策略
 mode = "auto"               # auto：环境镜像参与测速；env：原样遵循、缺失即报错
-probe_timeout_ms = 1500     # 单次测速超时
-cache_ttl = "6h"            # 测速结果缓存有效期（人类可读时长）
+probe_timeout_ms = 1500              # 普通 SDK / 工具源单次测速超时
+model_probe_timeout_ms = 8000        # 模型 metadata / 响应头 / 64 KiB 样本各阶段预算
+model_download_attempts = 6          # 每个模型文件、每个来源的最大尝试次数
+model_download_retry_base_ms = 1000  # 模型重试初始退避；指数增长并封顶 8 秒
+cache_ttl = "6h"                     # 测速结果缓存有效期（人类可读时长）
 
 # 每工具覆盖：键是工具名（或 self / go-modules 这类特殊源名）
 [sources.node]

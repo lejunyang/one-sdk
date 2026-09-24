@@ -741,12 +741,14 @@ smallest non-empty repository file; a successful response marks the source reach
 the sample body exceeds its budget, in which case throughput is unknown rather than
 `unreachable`. An all-failed probe set is not cached for the normal six-hour TTL.
 
-Downloads performed directly by osdk are not single-shot. The shared archive/model downloader
-retries transient failures up to three attempts, backing off for 400 ms and then 800 ms. It
-keeps a `.partial` file plus ETag/Last-Modified metadata and resumes with `Range` + `If-Range`;
-an ignored range or changed object causes a safe restart. Model pulls also fall through to the
-next ranked source after one source exhausts its retries. A non-transient error, or failure after
-the third attempt and all source fallbacks, stops the command.
+Downloads performed directly by osdk are not single-shot. Regular archives keep the existing
+three attempts (400 ms, then 800 ms). Model files default to six attempts with visible retry
+warnings and 1/2/4/8/8-second exponential backoff; tune them with
+`sources.model_download_attempts` and `sources.model_download_retry_base_ms` through
+`osdk config set`. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
+with `Range` + `If-Range`; an ignored or invalid range, changed object, or changed source URL
+causes a safe restart. Model pulls also fall through to the next ranked source after one source
+exhausts its attempts. Non-transient errors, or exhaustion of every source, remain terminal.
 
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
 `npm_config_registry`, and the like) is validated and then raced against osdk's
