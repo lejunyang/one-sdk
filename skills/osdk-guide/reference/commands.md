@@ -1,7 +1,7 @@
 # osdk 命令用法参考（按功能分类）
 
 本文覆盖 `osdk` 的**全部一级命令**，按功能分组。命令面对齐
-`crates/osdk-cli/src/cli.rs` 的 `enum Command`（实测版本 `osdk 0.0.2`）。每个命令的权威
+`crates/osdk-cli/src/cli.rs` 的 `enum Command`（实测版本 `osdk 0.0.3`）。每个命令的权威
 帮助仍是 `osdk <command> --help`；本文补充的是分类、意图和易错点。
 
 ## 全局参数（放在子命令之前，对所有命令生效）

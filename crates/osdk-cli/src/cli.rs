@@ -467,7 +467,7 @@ pub enum SelfCommand {
     /// turned off rather than renaming the selector.
     #[command(disable_version_flag = true)]
     Upgrade {
-        /// Install this release instead of the latest one, e.g. `0.0.2`.
+        /// Install this release instead of the latest one, e.g. `0.0.3`.
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
         /// Report the available version without downloading or replacing it.

@@ -3214,8 +3214,8 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
     m.insert(
         "help.self.upgrade.flag.version",
         (
-            "Install this release instead of the latest one, e.g. 0.0.2",
-            "安装指定发行版而非最新版，例如 0.0.2",
+            "Install this release instead of the latest one, e.g. 0.0.3",
+            "安装指定发行版而非最新版，例如 0.0.3",
         ),
     );
     m.insert(

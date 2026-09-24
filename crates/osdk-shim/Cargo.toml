@@ -26,7 +26,7 @@ path = "src/main.rs"
 # This only holds when the shim is built in its own cargo invocation. Cargo
 # unifies features across one `--workspace` build, which would put the install
 # path back. See .github/workflows/publish.yml.
-osdk-core = { path = "../osdk-core", version = "0.0.2", default-features = false }
+osdk-core = { path = "../osdk-core", version = "0.0.3", default-features = false }
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
