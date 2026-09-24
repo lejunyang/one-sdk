@@ -8,6 +8,7 @@
 //! ├── store/                 content-addressed blobs   (OSDK_STORE_DIR)
 //! ├── installs/<tool>/<ver>/ materialized tool versions (OSDK_INSTALL_DIR)
 //! ├── models/<name>/          materialized model snapshots
+//! ├── skills/<id>/<hash>/     staged agent-skill copies (linked into agents)
 //! ├── shims/                 shim launchers + osdk-shim
 //! ├── rustup/  cargo/        self-contained homes for delegate backends
 //! └── plugins/               future external backends
@@ -279,6 +280,16 @@ impl Dirs {
     }
     pub fn plugins(&self) -> PathBuf {
         self.data.join("plugins")
+    }
+    /// Canonical copies of installed agent skills, keyed `<id>/<content-hash>`.
+    ///
+    /// A skill is neither a tool nor a model: it is content osdk stages here once
+    /// and then links into each target agent's own `skills/` directory. Nothing
+    /// under here is loaded by osdk itself -- that is what `plugins` is for; osdk
+    /// only stages and links it -- and it stays outside the inventory scan's reach
+    /// so staging a skill cannot slow down `hook-env`.
+    pub fn skills(&self) -> PathBuf {
+        self.data.join("skills")
     }
     /// Materialized model snapshots and per-model current-revision markers.
     pub fn models(&self) -> PathBuf {

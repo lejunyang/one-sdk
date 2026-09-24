@@ -11,6 +11,7 @@
 //! - [`pipeline`] — download → verify → extract → CAS ingest orchestrator.
 //! - [`backend`]  — the `Backend` trait, contexts, registry, and SDK impls.
 //! - [`shim`]     — shim launcher generation.
+//! - `skills`     — staging agent-skill packages and linking them into agents.
 //! - `syspkg`     — read-only discovery of host package managers (winget/brew).
 //! - [`lock`]     — cross-process file locks.
 //! - `self_update` — replacing osdk's own binaries from its GitHub releases.
@@ -66,6 +67,12 @@ pub mod backend_discovery;
 #[cfg(feature = "install")]
 pub mod self_update;
 pub mod shim;
+// Agent skills are staged and linked only by `osdk skills` (a CLI-only command).
+// The shim dispatches an already-installed tool and never touches a skill, so
+// gating the module keeps its agent table, source parsing and staging out of the
+// shim's binary -- the same reasoning as `deps`/`tasks`/`syspkg`.
+#[cfg(feature = "install")]
+pub mod skills;
 pub mod source;
 pub mod store;
 // Inspecting the host's package managers is a CLI diagnostic: the shim only
