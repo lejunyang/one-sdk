@@ -325,7 +325,7 @@ Declare a provider in `osdk.toml`, then run it:
 # [deps.go]          # Go / Rust / Deno: go, cargo, deno
 # roots = ["apps/*"]  # monorepo: declare sub-projects; never scanned for
 # [deps.uv]          # Python: pyproject.toml + uv.lock
-# [deps.pip-requirements]   # Python: requirements.txt
+# [deps.pip-requirements]   # Python: requirements.txt (resolves transitive deps; not frozen)
 ```
 
 ```bash
@@ -346,7 +346,10 @@ osdk run dev                # materialize if stale, then run the task
 osdk run dev --no-deps      # not this time
 ```
 
-osdk decides frozen-vs-not by looking for the native lockfile itself rather than
+For `pip-requirements`, osdk resolves the full transitive closure with
+`uv pip install -r`; a top-level `requirements.txt` is not treated as an exact
+lock or synchronized set. For providers with native locks, osdk decides
+frozen-vs-not by looking for the lockfile itself rather than
 delegating it: with a lockfile it installs frozen, without one it falls back to
 a plain install **and says so**. That matters because `yarn@1` and `bun` install
 happily with no lockfile at all, so passing a flag and trusting it would be

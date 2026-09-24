@@ -425,23 +425,32 @@ old set, the newly added dependency missing, because its only promise is not to
 update the lock. Checking consistency is `--locked`. `npm ci` fails in that same
 situation, so osdk passes both flags to uv.
 
+**Three: top-level requirements must not be handed to `pip sync`.** Measured with
+a file containing only `aiohttp==3.14.3`, `uv pip sync` installs aiohttp without
+multidict/yarl; rerunning it over a complete environment actively removes those
+transitive dependencies. `==` pins a root version but does not prove the file
+contains the complete closure. `pip-requirements` therefore uses
+`uv pip install -r`, preserving dependency resolution. The tradeoff is deliberate:
+it does not prune extra packages and never claims to be frozen. Strict reproduction
+uses the `uv` provider with `uv.lock`.
+
 ## The prelude, and why a "before" step exists
 
-`uv sync` creates the project environment itself; `uv pip sync` refuses without
-one (`No virtual environment found`). Papering over that asymmetry with an
+`uv sync` creates the project environment itself; `uv pip install` needs an
+existing target environment to put dependencies in the project's `.venv`.
+Papering over that asymmetry with an
 implicit `uv venv` inside the runner would hide it from `--dry-run` and from the
 freshness hash.
 
 So `RunPlan` carries `prelude: Vec<Vec<String>>`: same program, same cwd, same
 env, run first and in order. It appears in the printed command string and
-therefore in the hash -- otherwise "create the environment, then sync" and "sync
-into whatever is already there" would hash identically.
+therefore in the hash -- otherwise "create the environment, then install" and
+"install into whatever is already there" would hash identically.
 
 The prelude has to be **idempotent**: plain `uv venv` exits 2 (`Failed to create
 virtual environment`) once one exists, so every run after the first would fail
-before reaching the sync. `--allow-existing` reuses it, which is also the correct
-behaviour -- `uv pip sync` is what makes the contents match the file, so
-recreating the environment would only discard a cache.
+before reaching the install. `--allow-existing` reuses it instead of rebuilding
+and discarding the cache on every run.
 
 ## `[deps.<p>].dir` was declared but did nothing
 

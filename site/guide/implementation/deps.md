@@ -351,20 +351,25 @@ Python。若按对称性推导，写出来会是一个看起来生效、实际�
 「不更新 lock」。要校验一致性得用 `--locked`。`npm ci` 在同样情形下会失败，所以两个
 生态不对称，osdk 对 uv 两个 flag 都传。
 
+**三、顶层 requirements 不能交给 `pip sync`。** 实测只有
+`aiohttp==3.14.3` 的文件经 `uv pip sync` 后只装 aiohttp，不装 multidict/yarl；在一个
+完整环境上重跑还会主动卸载这些传递依赖。`==` 只能固定顶层版本，不能证明文件含完整闭包。
+因此 `pip-requirements` 使用 `uv pip install -r`，以保留解析传递依赖的语义；代价是它不再
+清理额外包，也永远不声称 frozen。严格复现走 `uv` provider + `uv.lock`。
+
 ## prelude：为什么需要一个「前置命令」概念
 
-`uv sync` 会自建项目环境，而 `uv pip sync` 在没有环境时直接拒绝
-（`No virtual environment found`）。这个不对称如果藏进 runner 里隐式补一句
+`uv sync` 会自建项目环境，而 `uv pip install` 在没有目标环境时不能把依赖装进
+项目自己的 `.venv`。这个不对称如果藏进 runner 里隐式补一句
 `uv venv`，那么 `--dry-run` 看不到它、freshness 哈希也不包含它。
 
 所以 `RunPlan` 有 `prelude: Vec<Vec<String>>`：同一个程序、同一个 cwd、同一份 env，
-按序先跑。它出现在打印出来的命令串里，因此也进入哈希——否则「先建环境再 sync」与
-「往已有环境里 sync」会被哈希成同一件事。
+按序先跑。它出现在打印出来的命令串里，因此也进入哈希——否则「先建环境再 install」与
+「往已有环境里 install」会被哈希成同一件事。
 
 prelude 必须**幂等**：`uv venv` 在环境已存在时 exit=2（`Failed to create virtual
-environment`），于是第一次之后每次都会在到达 sync 之前失败。用
-`--allow-existing` 复用，这也是正确行为——`uv pip sync` 本来就负责让环境内容与
-文件一致，重建只会丢掉缓存。
+environment`），于是第一次之后每次都会在到达 install 之前失败。用
+`--allow-existing` 复用环境，避免每次重建并丢掉缓存。
 
 ## `[deps.<p>].dir` 曾经声明了却不生效
 

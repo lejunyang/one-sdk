@@ -59,9 +59,9 @@ pub static PIP_REQUIREMENTS: DepsProviderSchema = DepsProviderSchema {
     id: "pip-requirements",
     ecosystem: Ecosystem::Python,
     manifests: &["requirements.txt"],
-    // requirements.txt is both the manifest and, when fully pinned, the lock.
-    // There is no separate native lockfile to point at, so freezing is decided
-    // differently from the Node providers -- see `plan`.
+    // A requirements file is an input to resolution, not proof that it contains
+    // the complete transitive closure. Even `name==version` may name only a root
+    // package, so this provider has no native lock.
     native_locks: &[],
     default_sources: &["requirements.txt"],
     default_outputs: &[VENV],
@@ -119,10 +119,10 @@ pub fn plan(
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     let mut downgraded_reason = None;
     let mut frozen = false;
-    // Commands that must succeed before the main one. `uv pip sync` refuses when
-    // there is no environment yet ("No virtual environment found"), whereas
-    // `uv sync` creates one itself -- so the requirements provider has to ask for
-    // the venv explicitly rather than assume the project already has one.
+    // Commands that must succeed before the main one. `uv sync` creates its
+    // project environment itself, whereas `uv pip install` needs a target venv --
+    // so the requirements provider asks for it explicitly rather than assuming
+    // the project already has one.
     let mut prelude: Vec<Vec<String>> = Vec::new();
 
     match project.provider.as_ref() {
@@ -145,38 +145,36 @@ pub fn plan(
             }
         }
         "pip-requirements" => {
-            // `uv pip sync` makes the environment match the file exactly,
-            // removing anything not listed. That is the closest thing to a
-            // frozen install this provider has: requirements.txt is the lock
-            // when it is fully pinned.
-            // `--allow-existing` because the prelude has to be idempotent:
-            // plain `uv venv` exits 2 with "Failed to create virtual
-            // environment" once one is there, so every run after the first
-            // would fail before reaching the sync. Reusing the environment is
-            // also the right behaviour -- `uv pip sync` is what makes its
-            // contents match the file, so recreating it would only discard a
-            // cache.
+            // A requirements file normally lists roots, not the full transitive
+            // closure. `uv pip sync` treats it as the *entire* environment and
+            // removes every dependency absent from the file; even
+            // `aiohttp==3.14.3` therefore installs without multidict/yarl. Use the
+            // resolver-backed install form so root requirements bring their
+            // dependencies with them. This deliberately gives up pruning extras:
+            // a plain requirements file is not a lock and cannot safely define
+            // the exact environment set.
+            //
+            // `--allow-existing` keeps environment creation idempotent: plain
+            // `uv venv` exits 2 once the environment exists.
             prelude.push(vec!["venv".into(), "--allow-existing".into()]);
             args.push("pip".into());
-            args.push("sync".into());
+            args.push("install".into());
+            args.push("--requirements".into());
             let manifest = project
                 .manifest
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("requirements.txt");
             args.push(manifest.to_string());
-            // Honest about what this does and does not guarantee: uv accepts an
-            // unpinned requirements.txt (measured: exit 0), so "synced" does not
-            // imply "reproducible" the way a real lockfile does.
-            if !fully_pinned(&project.manifest)? {
-                downgraded_reason = Some(format!(
-                    "{} is not fully pinned, so this install is not reproducible; \
-                     pin every requirement (or use uv with a uv.lock) to make it so",
-                    project.manifest.display()
-                ));
-            } else {
-                frozen = true;
-            }
+            // Pinning top-level entries does not turn this into a complete lock:
+            // transitive versions can still change. Report that limitation and
+            // never let `--frozen` accept this provider.
+            downgraded_reason = Some(format!(
+                "{} is an input requirements file, not a complete dependency lock; \
+                 resolving it with `uv pip install`, which installs transitive \
+                 dependencies but does not prune packages absent from the file",
+                project.manifest.display()
+            ));
         }
         other => {
             return Err(Error::other(format!(
@@ -219,48 +217,6 @@ pub fn plan(
         downgraded_reason,
         prelude,
     })
-}
-
-/// Is every requirement in the file pinned to an exact version?
-///
-/// Only `==` counts. `>=` and a bare name both let the resolver pick something
-/// different tomorrow, which is precisely what makes an install non-reproducible.
-/// Comments, blank lines, and `-r`/`-c` includes are skipped; an include is
-/// reported as not pinned because this function cannot see inside it, and
-/// claiming otherwise would overstate the guarantee.
-fn fully_pinned(path: &Path) -> Result<bool> {
-    let text = std::fs::read_to_string(path).map_err(|error| Error::io(path, error))?;
-    let mut saw_requirement = false;
-    for line in text.lines() {
-        let line = match line.split_once('#') {
-            Some((before, _)) => before.trim(),
-            None => line.trim(),
-        };
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('-') {
-            // An option line. `-r other.txt` pulls in requirements this function
-            // cannot inspect, so the file cannot be called fully pinned.
-            if line.starts_with("-r") || line.starts_with("-c") || line.starts_with("--requirement")
-            {
-                return Ok(false);
-            }
-            continue;
-        }
-        saw_requirement = true;
-        // A URL or path requirement has no version to pin.
-        if line.contains("://") || line.starts_with('.') {
-            return Ok(false);
-        }
-        let spec = line.split(';').next().unwrap_or(line).trim();
-        if !spec.contains("==") {
-            return Ok(false);
-        }
-    }
-    // An empty file pins nothing; treat it as not frozen rather than vacuously
-    // frozen -- the same vacuous-truth trap the freshness code guards against.
-    Ok(saw_requirement)
 }
 
 #[cfg(test)]
@@ -424,40 +380,19 @@ mod tests {
         assert!(!got.env.contains_key("UV_INDEX_URL"));
     }
 
-    /// `requirements.txt` is only treated as a lock when every line pins a
-    /// version, and the unpinned case is reported instead of being passed off as
-    /// reproducible.
+    /// A requirements file always uses resolver-backed install rather than sync.
     ///
-    /// Both directions are asserted: uv accepts an unpinned file (measured,
-    /// exit 0), so "it installed" is not evidence of reproducibility.
+    /// `uv pip sync requirements.txt` interprets the file as the complete
+    /// environment set. A perfectly pinned root such as `aiohttp==3.14.3` is
+    /// therefore installed without multidict/yarl and can even remove those
+    /// packages on a rerun. The command shape here is the regression boundary:
+    /// `install -r` resolves the transitive closure and never claims frozen.
     #[test]
-    fn requirements_count_as_frozen_only_when_every_line_is_pinned() {
+    fn requirements_resolve_transitive_dependencies_instead_of_syncing_roots() {
         let temp = tempfile::tempdir().unwrap();
         let manifest = temp.path().join("requirements.txt");
+        std::fs::write(&manifest, "aiohttp==3.14.3\n").unwrap();
 
-        for (body, expected, note) in [
-            ("idna==3.10\nsix==1.17.0\n", true, "all pinned"),
-            (
-                "# comment\n\nidna==3.10\n",
-                true,
-                "comments and blanks skipped",
-            ),
-            (
-                "idna==3.10 ; python_version >= \"3.9\"\n",
-                true,
-                "marker kept",
-            ),
-            ("idna\n", false, "bare name"),
-            ("idna>=3.0\n", false, "range"),
-            ("-r other.txt\n", false, "include cannot be inspected"),
-            ("https://example.com/pkg.whl\n", false, "url has no version"),
-            ("", false, "an empty file pins nothing"),
-        ] {
-            std::fs::write(&manifest, body).unwrap();
-            assert_eq!(fully_pinned(&manifest).unwrap(), expected, "{note}");
-        }
-
-        std::fs::write(&manifest, "idna\n").unwrap();
         let got = plan(
             &project("pip-requirements", &manifest, None),
             &choice("pip-requirements"),
@@ -465,7 +400,20 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        assert!(!got.frozen);
+
+        assert_eq!(
+            got.args[..3],
+            ["pip", "install", "--requirements"],
+            "sync silently drops every transitive dependency: {:?}",
+            got.args
+        );
+        assert_eq!(got.args[3], "requirements.txt");
+        assert!(
+            !got.args.iter().any(|arg| arg == "sync"),
+            "sync treats top-level requirements as the entire environment: {:?}",
+            got.args
+        );
+        assert!(!got.frozen, "top-level pins are not a complete lock");
         assert!(got.downgraded_reason.is_some());
     }
 

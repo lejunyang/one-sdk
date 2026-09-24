@@ -204,7 +204,7 @@ pub trait DepsProvider: Send + Sync {
 | `yarn` | Node | `package.json` | `yarn.lock` | **按 major 分派**：berry `yarn install --immutable`（禁脚本用 `YARN_ENABLE_SCRIPTS=false`，**没有** `--ignore-scripts`）；classic `yarn install --frozen-lockfile --ignore-scripts` + **osdk 自己预检 lock 存在**（classic 缺 lock 时不报错） | `node_modules/` | `node`, `yarn` | D1 |
 | `bun` | Node | `package.json` | `bun.lock`（新格式；`bun.lockb` 为旧二进制格式） | `bun install --frozen-lockfile --ignore-scripts` + **osdk 自己预检 lock 存在**（bun 缺 lock 时不报错） | `node_modules/` | `bun` | D1 |
 | `uv` | Python | `pyproject.toml` | `uv.lock` | `uv sync --frozen` | `.venv/`（OptionalOnceSeen） | `python`, `uv` | P2 |
-| `pip-requirements` | Python | `requirements.txt` | 无（可选 `requirements.lock`） | `uv pip sync requirements.txt`（回退 `uv pip install -r`，降级要报告） | `.venv/` | `python`, `uv` | P2 |
+| `pip-requirements` | Python | `requirements.txt` | 无 | `uv pip install -r requirements.txt`（解析传递依赖；不作精确同步或冻结承诺） | `.venv/` | `python`, `uv` | P2 |
 | `poetry` | Python | `pyproject.toml` | `poetry.lock` | `poetry install --sync` | `.venv/` | `python`, `poetry`(pypi:) | P3 |
 | `go` | Go | `go.mod` | `go.sum` | `go mod download`（有 `vendor/` 时 `go mod vendor`） | `vendor/`（OptionalOnceSeen） | `go` | P3 |
 | `cargo` | Rust | `Cargo.toml` | `Cargo.lock` | `cargo fetch --locked` | 无（cargo 装进 `CARGO_HOME`，**非项目内**，见下） | `rust` | P3 |
@@ -274,8 +274,8 @@ pub trait DepsProvider: Send + Sync {
 | 无 `uv.lock` 时 `uv sync --frozen` | 1 | 未创建 lock、venv 未填充 | **明确失败**，与 npm/pnpm/yarn-berry 同类 |
 | 有 lock 时 `uv sync --frozen` | 0 | `uv.lock` 在、包装进**项目自己的 `.venv`** | 正常 |
 | lock 与 `pyproject.toml` 不一致时 `--frozen` | **0** | 新增的 `six` **未**被装上 | `--frozen` 的语义是「不更新 lock、按 lock 装」，**不报告不一致** |
-| `uv pip sync requirements.txt` | 0 | 装上 | 可用 |
-| `uv pip sync` 传未钉版本的需求 | 0 | — | 容忍未钉版本，不强制全钉 |
+| `uv pip sync requirements.txt` | 0 | 只装文件显式条目 | **后续反例推翻“可用”结论**：顶层清单不会解析传递依赖 |
+| `uv pip sync` 传未钉版本的需求 | 0 | 会卸载文件未列出的包 | 这是集合对齐语义，不适合普通顶层 requirements |
 
 第三行值得单独说明：uv 的 `--frozen` 不等于「校验 lock 是最新的」。要那个语义得用
 `--locked`（`Assert that the uv.lock will remain unchanged`，带
@@ -283,6 +283,11 @@ pub trait DepsProvider: Send + Sync {
 失败。**所以 osdk 对 uv 用 `--frozen` 只能保证「不改 lock」，要保证「lock 与清单一致」
 必须另加 `--locked`。** 这一条会影响 D4 的深度校验设计：Python 侧「lock 是否仍然当令」
 不能假定被 `--frozen` 覆盖。
+
+2026-09-24 的后续反例还推翻了上表早期对 `uv pip sync requirements.txt` 的“可用”判断：
+只含 `aiohttp==3.14.3` 的顶层清单会得到缺少 multidict/yarl 的损坏环境，且重跑 sync 会
+主动删除这些传递依赖。因此 `pip-requirements` 必须使用 resolver-backed
+`uv pip install -r`；普通 requirements 不构成完整 lock，也不能支持 `--frozen`。
 
 好消息是它印证了设计里坚持的一点：`uv sync` 会把依赖装进**项目自己的 `.venv`**，
 与 osdk「应用环境落在项目内、工具落在隔离目录」的分层天然一致，不需要额外手段去

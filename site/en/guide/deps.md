@@ -76,7 +76,7 @@ enable one in osdk.toml, for example:
 | --- | --- | --- | --- |
 | `npm` / `pnpm` / `yarn` / `bun` | Node | `package.json` | its own lockfile |
 | `uv` | Python | `pyproject.toml` | `uv.lock` |
-| `pip-requirements` | Python | `requirements.txt` | none (it *is* the lock when fully pinned) |
+| `pip-requirements` | Python | `requirements.txt` | none (ordinary requirements are not a complete dependency lock) |
 | `go` | Go | `go.mod` | `go.sum` |
 | `cargo` | Rust | `Cargo.toml` | `Cargo.lock` |
 | `deno` | Deno | `deno.json` / `deno.jsonc` | `deno.lock` |
@@ -118,14 +118,14 @@ dependency simply missing. Asserting the lock is current is `--locked`, so osdk
 passes both. `npm ci` fails in that situation, so the ecosystems are not
 symmetric.
 
-**A `requirements.txt` is only reproducible when every line is pinned.** uv
-installs an unpinned file happily (exit 0), so "it installed" says nothing about
-reproducibility. osdk checks and says so:
-
-```
-warning: requirements.txt is not fully pinned, so this install is not
-reproducible; pin every requirement (or use uv with a uv.lock) to make it so
-```
+**A `requirements.txt` is resolution input, not a complete dependency lock.**
+Even when every line uses `==`, it commonly lists only root packages. `uv pip sync`
+treats the file as the entire environment set, installs only explicit entries, and
+removes transitive dependencies absent from the file. osdk therefore runs
+`uv pip install -r requirements.txt`: it resolves and installs the complete
+transitive closure, but does not prune packages outside the file and never lets
+`--frozen` mistake pinned roots for a complete lock. Use `[deps.uv]` with `uv.lock`
+when a reproducible Python environment is required.
 
 Dependencies land in the project's own `.venv`, matching the same split as
 everywhere else: application dependencies in the project, tools in isolated

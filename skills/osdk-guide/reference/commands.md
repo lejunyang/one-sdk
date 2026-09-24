@@ -131,6 +131,9 @@ osdk deps                 # 兑现整份清单（stale 才动）
 osdk deps --frozen        # 严格：无原生 lock 即失败
 osdk deps --verify
 ```
+> `pip-requirements` 使用 `uv pip install -r` 解析传递依赖；普通 `requirements.txt`
+> 不是完整 lock，不能与 `--frozen` 合用，也不会按集合语义清理额外包。
+>
 > 声明后，裸 `osdk install` / `osdk run` / `osdk exec` 会先做哈希新鲜度快判、过期才兑现；
 > 单次跳过用 `--no-deps`，永久关闭某 provider 用 `auto = false`（见 `configuration.md`）。
 

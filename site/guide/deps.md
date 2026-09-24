@@ -73,7 +73,7 @@ enable one in osdk.toml, for example:
 | --- | --- | --- | --- |
 | `npm` / `pnpm` / `yarn` / `bun` | Node | `package.json` | 各自的 lockfile |
 | `uv` | Python | `pyproject.toml` | `uv.lock` |
-| `pip-requirements` | Python | `requirements.txt` | 无（全钉版本时它自己就是 lock） |
+| `pip-requirements` | Python | `requirements.txt` | 无（普通 requirements 不是完整依赖 lock） |
 | `go` | Go | `go.mod` | `go.sum` |
 | `cargo` | Rust | `Cargo.toml` | `Cargo.lock` |
 | `deno` | Deno | `deno.json` / `deno.jsonc` | `deno.lock` |
@@ -109,13 +109,11 @@ lock」，**不**校验 lock 与 `pyproject.toml` 是否一致——实测：loc
 并按旧 lock 装，新加的依赖根本没装上。要「lock 必须当令」得用 `--locked`，所以 osdk
 两个都传。这与 `npm ci` 不同（后者在不一致时会失败）。
 
-**`requirements.txt` 只有全钉版本才算可复现。** uv 会照常安装未钉版本的文件
-（exit=0），所以「装上了」不等于「可复现」。osdk 会检查并明确告知：
-
-```
-warning: requirements.txt is not fully pinned, so this install is not
-reproducible; pin every requirement (or use uv with a uv.lock) to make it so
-```
+**`requirements.txt` 是解析输入，不是完整依赖 lock。** 即使每一行都写成 `==`，
+它通常仍只列顶层包；`uv pip sync` 会把文件当成环境的完整集合，只安装显式条目并卸载
+未列出的传递依赖。osdk 因此使用 `uv pip install -r requirements.txt`：解析并安装完整
+传递闭包，但不清理文件之外的包，也不允许 `--frozen` 把顶层版本钉死误报成完整锁。
+需要严格可复现的 Python 环境时，改用 `[deps.uv]` 和 `uv.lock`。
 
 依赖装进项目自己的 `.venv`，与「应用依赖在项目内、工具在隔离目录」的分层一致。
 osdk 还会传 `UV_PYTHON_DOWNLOADS=never`，确保用的是 osdk 选定的解释器，
