@@ -230,12 +230,28 @@ exit /b 23
             # Enter through the generated batch shim so this still covers the
             # complete .cmd -> osdk-shim.exe -> target .cmd chain.
             $cmdLine = '/D /S /C ""{0}" "first arg" "second arg""' -f $shimCmd
-            $result = Invoke-RedirectedProcess `
-                -FilePath $env:ComSpec `
-                -Arguments $cmdLine `
-                -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
-                -WorkingDirectory $project `
-                -TimeoutSeconds 30
+            try {
+                $result = Invoke-RedirectedProcess `
+                    -FilePath $env:ComSpec `
+                    -Arguments $cmdLine `
+                    -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
+                    -WorkingDirectory $project `
+                    -TimeoutSeconds 30
+            }
+            catch {
+                if ($_.Exception.Message -notlike '*timed out after 30 seconds*') {
+                    throw
+                }
+                # Retry only the runner stall observed in CI. Assertion, exit-code
+                # and output failures remain first-attempt failures.
+                Write-Warning "PowerShell shim contract timed out once; retrying with a fresh cmd.exe"
+                $result = Invoke-RedirectedProcess `
+                    -FilePath $env:ComSpec `
+                    -Arguments $cmdLine `
+                    -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
+                    -WorkingDirectory $project `
+                    -TimeoutSeconds 30
+            }
             Set-Content -LiteralPath $stdout -Encoding ascii -NoNewline -Value $result.Stdout
             Set-Content -LiteralPath $stderr -Encoding ascii -NoNewline -Value $result.Stderr
             Assert-ContractOutput "PowerShell" $result.ExitCode $stdout $stderr

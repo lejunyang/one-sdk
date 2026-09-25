@@ -71,7 +71,7 @@ jobs:
       - name: Unix installer
         if: runner.os != 'Windows'
         shell: bash
-        run: ./scripts/test-installers.sh
+        run: ./scripts/run-unix-installer-smoke.sh
       - name: PowerShell installer
         if: runner.os == 'Windows'
         shell: pwsh

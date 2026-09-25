@@ -8,10 +8,11 @@
 # Matches rust-toolchain.toml. Both exist on purpose: rust-toolchain.toml is what
 # cargo and rust-analyzer read without osdk, this is what osdk installs.
 #
-# `targets` carries the Windows GNU triple because that is what
-# scripts/windows-wine-tests.sh cross-compiles for -- CI installs it as a
-# separate step, and a contributor who does not have it gets a link error rather
-# than an explanation.
+# `targets` carries the two non-host triples used by repository checks:
+# Windows GNU is cross-compiled for scripts/windows-wine-tests.sh, while Linux
+# musl builds the binary executed inside Alpine by distro-detection. CI installs
+# both targets explicitly; declaring them here gives local contributors the same
+# prerequisites instead of a late linker error.
 rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc-windows-gnu,x86_64-unknown-linux-musl" }
 
 # scripts/test-installers.sh serves the fixture archives over `python3 -m
@@ -133,7 +134,7 @@ when = { os = "linux" }
 
 [tasks.installers]
 description = "Installer smoke test"
-run = "./scripts/test-installers.sh"
+run = "./scripts/run-unix-installer-smoke.sh"
 when = { os = ["linux", "macos"] }
 
 [tasks.installers-windows]
