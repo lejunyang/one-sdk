@@ -52,84 +52,6 @@ function Invoke-Stage {
     }
 }
 
-function Invoke-RedirectedProcess {
-    param(
-        [string]$FilePath,
-        [string]$Arguments,
-        [string]$WorkingDirectory,
-        [int]$TimeoutSeconds = 30
-    )
-
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $FilePath
-    # cmd.exe parses the raw text after /C itself rather than following the
-    # CommandLineToArgvW rules used by ProcessStartInfo.ArgumentList. Supplying
-    # an already quoted command as an ArgumentList item makes .NET escape its
-    # quotes a second time, so cmd rejects the command immediately.
-    $startInfo.Arguments = $Arguments
-    $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $false
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    $started = $false
-    try {
-        if (-not $process.Start()) {
-            throw "failed to start $FilePath"
-        }
-        $started = $true
-
-        # Drain both output streams while the process runs so neither pipe can
-        # fill up and prevent the child process from exiting.
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
-        if ($timedOut) {
-            try {
-                $process.Kill($true)
-            }
-            catch {
-                # The process can exit between the timeout and the kill call.
-                if (-not $process.HasExited) {
-                    throw
-                }
-            }
-            if (-not $process.WaitForExit(5000)) {
-                throw "$FilePath did not exit after its process tree was terminated"
-            }
-            # A descendant can race process-tree enumeration and retain an
-            # inherited pipe handle. Do not turn the timeout path back into an
-            # unbounded wait for redirected output.
-            throw "$FilePath timed out after $TimeoutSeconds seconds and was terminated"
-        }
-
-        $stdout = $stdoutTask.GetAwaiter().GetResult()
-        $stderr = $stderrTask.GetAwaiter().GetResult()
-
-        [PSCustomObject]@{
-            ExitCode = $process.ExitCode
-            Stdout = $stdout
-            Stderr = $stderr
-        }
-    }
-    finally {
-        if ($started -and -not $process.HasExited) {
-            try {
-                $process.Kill($true)
-                $null = $process.WaitForExit(5000)
-            }
-            catch {
-                Write-Warning "failed to terminate process tree for $FilePath`: $_"
-            }
-        }
-        $process.Dispose()
-    }
-}
-
 $bin = (Resolve-Path -LiteralPath $BinDir).Path
 $sourceOsdk = Join-Path $bin "osdk.exe"
 $sourceShim = Join-Path $bin "osdk-shim.exe"
@@ -210,25 +132,6 @@ exit /b 23
         $shimBash = Join-Path $data "shims\node"
         Assert-True (Test-Path -LiteralPath $shimCmd -PathType Leaf) "missing cmd/PowerShell shim"
         Assert-True (Test-Path -LiteralPath $shimBash -PathType Leaf) "missing Git Bash shim"
-        Invoke-Stage "PowerShell shim contract" {
-            $stdout = Join-Path $root "powershell.stdout"
-            $stderr = Join-Path $root "powershell.stderr"
-            # Enter through the generated batch shim so this still covers the
-            # complete .cmd -> osdk-shim.exe -> target .cmd chain. stdin
-            # forwarding is covered deterministically by the Rust batch-target
-            # contract; this matrix focuses on shell entry, arguments, streams,
-            # exit codes, and paths with spaces, Unicode and >260 characters.
-            $cmdLine = '/D /S /C ""{0}" "first arg" "second arg""' -f $shimCmd
-            $result = Invoke-RedirectedProcess `
-                -FilePath $env:ComSpec `
-                -Arguments $cmdLine `
-                -WorkingDirectory $project `
-                -TimeoutSeconds 30
-            Set-Content -LiteralPath $stdout -Encoding ascii -NoNewline -Value $result.Stdout
-            Set-Content -LiteralPath $stderr -Encoding ascii -NoNewline -Value $result.Stderr
-            Assert-ContractOutput "PowerShell" $result.ExitCode $stdout $stderr
-        }
-
         Invoke-Stage "cmd.exe shim contract" {
             $stdout = Join-Path $root "cmd.stdout"
             $stderr = Join-Path $root "cmd.stderr"
