@@ -671,7 +671,8 @@ osdk --source official install go@1.22
 由 osdk 自身执行的下载并非失败即停。普通归档保持最多 3 次（等待 400 ms、800 ms）；
 模型文件默认尝试 6 次，按 1/2/4/8/8 秒指数退避，并输出可见的重试警告。可通过
 `osdk config set` 调整 `sources.model_download_attempts` 和
-`sources.model_download_retry_base_ms`。两类下载都保留 `.partial` 文件及 ETag /
+`sources.model_download_retry_base_ms`；`sources.model_read_timeout_ms`（默认 60000）会让中途
+断流的请求超时失败并转入重试，而不是永久挂起。两类下载都保留 `.partial` 文件及 ETag /
 Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返回错误 Range、对象
 变化、来源 URL 改变时会安全重头下载。模型在某个来源耗尽尝试后还会继续下一个排序
 来源；不可重试错误或所有来源都耗尽后才终止。

@@ -93,7 +93,9 @@ commit 时，osdk 以请求 revision 和排序后的文件路径、大小、SHA-
 相互独立且相乘，因此默认取较小值以免打爆连接数或触发来源限流；lock 写入始终串行。
 模型文件默认尝试 6 次，按 1/2/4/8/8 秒退避并输出可见重试警告；使用 `osdk config set`
 调整 `sources.model_download_attempts` 与 `sources.model_download_retry_base_ms`。下载
-支持 Range/ETag 续传。上游提供 SHA-256
+支持 Range/ETag 续传。若连接中途断流（长时间收不到字节），`sources.model_read_timeout_ms`
+（默认 60000）会让该次请求超时失败，进而触发上述重试与续传，而不是永久挂起；它只约束
+「无进展」时长，不限制总下载时间，大文件只要持续传输就不受影响。上游提供 SHA-256
 时强制校验；未提供时仍计算并记录本地 SHA-256。`model verify` 同时检查 CAS BLAKE3 与
 manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 rename 发布；这不
 保证 fsync 持久性、跨平台替换原子性或不同 snapshot writer 之间的事务隔离。

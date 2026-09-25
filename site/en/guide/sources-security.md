@@ -142,6 +142,9 @@ failing after one request. Regular archives retain three attempts with 400 ms an
 800 ms backoff. Model files default to six attempts with visible warnings and
 1/2/4/8/8-second exponential backoff; `sources.model_download_attempts` and
 `sources.model_download_retry_base_ms` are configurable through `osdk config set`.
+`sources.model_read_timeout_ms` (default 60000) bounds the no-progress interval, so a
+connection that stalls mid-transfer fails that request into the retry above instead of
+hanging forever.
 A `.partial` file and its ETag/Last-Modified metadata are retained, so a retry
 resumes with `Range` + `If-Range`; an ignored or invalid range, changed object, or
 changed source URL restarts safely. Model pulls additionally try the remaining

@@ -157,6 +157,7 @@ model_probe_timeout_ms = 8000        # 模型 metadata / 响应头 / 64 KiB 样�
 model_download_attempts = 6          # 每个模型文件、每个来源的最大尝试次数
 model_download_retry_base_ms = 1000  # 模型重试初始退避；指数增长并封顶 8 秒
 model_jobs = 2                       # model sync 同时下载的模型数；与 settings.jobs（单模型内文件并发）相乘，lock 写入始终串行
+model_read_timeout_ms = 60000        # 模型下载「无字节进展」超时；断流超过此值即失败并重试续传，不限制总下载时长
 cache_ttl = "6h"                     # 测速结果缓存有效期（人类可读时长）
 
 # 每工具覆盖：键是工具名（或 self / go-modules 这类特殊源名）

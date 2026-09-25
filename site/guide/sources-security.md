@@ -121,7 +121,9 @@ SDK / 工具来源探测默认预算为 1500 ms。模型探测改用独立的
 由 osdk 自身执行的下载走共享流式管线，并非一次请求失败就停止。普通归档保持最多
 3 次（等待 400 ms、800 ms）；模型文件默认尝试 6 次，按 1/2/4/8/8 秒指数退避，并
 输出可见警告。可通过 `osdk config set` 调整 `sources.model_download_attempts` 与
-`sources.model_download_retry_base_ms`。管线保留 `.partial` 文件及 ETag /
+`sources.model_download_retry_base_ms`；`sources.model_read_timeout_ms`（默认 60000）
+限定「无字节进展」时长，连接中途断流超过此值即让该次请求失败并进入上述重试，而不是永久挂起。
+管线保留 `.partial` 文件及 ETag /
 Last-Modified，重试时用 `Range` + `If-Range` 续传；服务端忽略或返回错误 Range、对象
 变化、来源 URL 改变时会安全重头下载。模型在某个来源耗尽尝试后还会继续剩余排序来源；
 不可重试错误或所有来源都耗尽后才终止。npm、uv 等受委托包管理器自行负责其网络行为；

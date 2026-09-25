@@ -289,6 +289,46 @@ fn sources_probe_timeout_round_trips_through_config_commands() {
         "zero model_jobs stalls sync"
     );
 
+    // model_read_timeout_ms: the no-progress timeout for model downloads (bug
+    // 007). Default 60s, settable, and rejected at zero like the other knobs.
+    let read_timeout_default = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.model_read_timeout_ms"],
+    );
+    assert_eq!(
+        String::from_utf8(read_timeout_default.stdout)
+            .unwrap()
+            .trim(),
+        "60000"
+    );
+    let read_timeout_set = run_isolated(
+        temp.path(),
+        &[
+            "config",
+            "set",
+            "-g",
+            "sources.model_read_timeout_ms",
+            "30000",
+        ],
+    );
+    assert!(read_timeout_set.status.success(), "{read_timeout_set:?}");
+    let read_timeout_read = run_isolated(
+        temp.path(),
+        &["config", "get", "-g", "sources.model_read_timeout_ms"],
+    );
+    assert_eq!(
+        String::from_utf8(read_timeout_read.stdout).unwrap().trim(),
+        "30000"
+    );
+    let read_timeout_zero = run_isolated(
+        temp.path(),
+        &["config", "set", "-g", "sources.model_read_timeout_ms", "0"],
+    );
+    assert!(
+        !read_timeout_zero.status.success(),
+        "zero read timeout would disable the stall guard"
+    );
+
     let model_set = run_isolated(
         temp.path(),
         &[

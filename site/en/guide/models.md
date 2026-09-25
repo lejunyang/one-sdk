@@ -101,7 +101,11 @@ are independent and multiply, so the default is kept small to avoid exhausting
 connections or tripping source rate limits; lock writes stay serial. Model files
 default to six attempts with 1/2/4/8/8-second backoff and visible retry warnings.
 Configure `sources.model_download_attempts` and `sources.model_download_retry_base_ms`
-with `osdk config set`. Downloads support Range/ETag resume. An upstream SHA-256 is
+with `osdk config set`. Downloads support Range/ETag resume. If a connection stalls
+mid-transfer (no bytes for a while), `sources.model_read_timeout_ms` (default 60000)
+fails that request so the retry and resume above take over instead of hanging forever;
+it bounds only the no-progress interval, not total download time, so a large file that
+keeps progressing is unaffected. An upstream SHA-256 is
 enforced when available; otherwise osdk still
 computes and records a local SHA-256. `model verify` checks both CAS BLAKE3 and
 manifest SHA-256. Snapshots and `current.json` are published through same-directory

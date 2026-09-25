@@ -395,6 +395,75 @@ mod tests {
         assert!(!sibling_with_suffix(&temp.path().join("artifact.bin"), ".partial").exists());
     }
 
+    // Bug 007: a connection that stops sending mid-body without closing used to
+    // hang `stream.next()` forever. With a read (no-progress) timeout on the
+    // client, the stalled read fails instead, so the download returns an error
+    // the retry+resume loop can act on rather than blocking indefinitely.
+    //
+    // The isolation that makes this test meaningful: the server sends part of the
+    // body and then stays silent AND open, never closing. So the only thing that
+    // can end the read is the client's own read timeout. The outer guard (3s) is
+    // far longer than the 300ms read timeout but the server never acts within it,
+    // so a passing run proves the timeout fired -- not a server-side close. If the
+    // timeout were absent the read would hang, the outer guard would elapse, and
+    // `outcome` would be `Err`, failing the test. The server thread is detached
+    // (never joined) precisely because it is meant to stay blocked.
+    #[tokio::test]
+    async fn read_timeout_fails_a_stalled_stream_instead_of_hanging() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            // Promise 10 bytes, deliver 5, then stay silent without closing: hold
+            // the socket by blocking on a read that never returns data.
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcde")
+                .unwrap();
+            stream.flush().unwrap();
+            let mut sink = [0u8; 64];
+            let _ = stream.read(&mut sink);
+            // Keep the connection object alive so it is not dropped/closed.
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(stream);
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().join("stalled.bin");
+        let url = format!("http://{address}/stalled.bin");
+        let client = reqwest::Client::builder()
+            .read_timeout(std::time::Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            download_once(
+                &client,
+                &url,
+                &dest,
+                "stalled",
+                false,
+                &reqwest::header::HeaderMap::new(),
+            ),
+        )
+        .await;
+        // `Ok(..)` means the call returned on its own inside the guard -- i.e. the
+        // read timeout fired. A hang would make this the outer timeout's `Err`.
+        let result = outcome.expect("download_once hung: the read timeout did not fire");
+        assert!(
+            result.is_err(),
+            "a stalled stream should fail, not complete: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn invalid_content_range_restarts_without_range() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

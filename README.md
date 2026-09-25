@@ -749,7 +749,8 @@ Downloads performed directly by osdk are not single-shot. Regular archives keep 
 three attempts (400 ms, then 800 ms). Model files default to six attempts with visible retry
 warnings and 1/2/4/8/8-second exponential backoff; tune them with
 `sources.model_download_attempts` and `sources.model_download_retry_base_ms` through
-`osdk config set`. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
+`osdk config set`; `sources.model_read_timeout_ms` (default 60000) fails a request that stalls
+mid-stream so it retries instead of hanging. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
 with `Range` + `If-Range`; an ignored or invalid range, changed object, or changed source URL
 causes a safe restart. Model pulls also fall through to the next ranked source after one source
 exhausts its attempts. Non-transient errors, or exhaustion of every source, remain terminal.

@@ -41,10 +41,15 @@ pub async fn pull(
 
     let jobs = ctx.config.settings.jobs.max(1);
     let revision = remote.revision.clone();
+    // A client with a read (no-progress) timeout, so a connection that dies
+    // mid-stream fails and hits the retry+resume loop instead of hanging forever
+    // (bug 007). Built once here and shared by every file's download.
+    let download_client =
+        crate::http::client_with_read_timeout(ctx.config.sources.model_read_timeout_ms)?;
     let downloaded = stream::iter(
         files
             .into_iter()
-            .map(|file| download_file(ctx, reference, &revision, file)),
+            .map(|file| download_file(ctx, &download_client, reference, &revision, file)),
     )
     .buffer_unordered(jobs)
     .try_collect::<Vec<_>>()
@@ -70,6 +75,7 @@ pub async fn pull(
 
 async fn download_file(
     ctx: &Ctx,
+    client: &reqwest::Client,
     reference: &ModelRef,
     revision: &str,
     file: RemoteModelFile,
@@ -83,9 +89,32 @@ async fn download_file(
         )));
     }
     if !ctx.config.settings.offline {
+        // Cross-process guard on this exact file: `download_path` is keyed only by
+        // provider/repository/revision/relative-path, so two osdk processes pulling
+        // the same file resolve to the same `.partial` and would clobber each
+        // other's progress (bug 007 saw ~7 GB reset to zero this way). In-process
+        // concurrency never collides here -- distinct files and distinct models map
+        // to distinct paths -- so this only ever contends across processes. Try
+        // first, and if another process holds it, say so and then wait rather than
+        // fail: the waiter resumes or, more often, finds the file already complete.
+        let lock_path = download_lock_path(&destination);
+        let _lock = match crate::lock::FileLock::try_acquire(&lock_path)? {
+            Some(lock) => lock,
+            None => {
+                if ctx.show_progress {
+                    eprintln!(
+                        "waiting: another osdk process is downloading {} ({})",
+                        reference.repository, file.path
+                    );
+                }
+                crate::lock::FileLock::acquire(&lock_path)?
+            }
+        };
+        // Another holder may have finished the download while we waited; the
+        // download call itself also short-circuits when `destination` exists.
         let headers = header_map(&file.headers)?;
         download::download_with_headers_and_policy(
-            &ctx.client,
+            client,
             &file.url,
             &destination,
             &format!("{}:{}", reference.repository, file.path),
@@ -150,6 +179,17 @@ fn download_path(ctx: &Ctx, reference: &ModelRef, revision: &str, path: &Path) -
         .join(crate::dirs::sanitize_tool_id(&reference.repository))
         .join(crate::dirs::sanitize_tool_id(revision))
         .join(path)
+}
+
+/// The cross-process lock path for a downloaded file: `<file>.osdk-lock`.
+///
+/// A distinct suffix so it is never confused with the `.partial`/`.partial.json`
+/// the download itself writes, and built by appending to the full file name so a
+/// real extension (like `.gguf`) is preserved rather than replaced.
+fn download_lock_path(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(".osdk-lock");
+    PathBuf::from(name)
 }
 
 fn header_map(headers: &[(String, String)]) -> Result<HeaderMap> {
@@ -433,6 +473,50 @@ mod tests {
                 files: Vec::new(),
             })
         }
+    }
+
+    #[test]
+    fn download_lock_path_is_a_distinct_sibling_that_keeps_the_extension() {
+        let dest = Path::new("/data/models/hf/org/repo/rev/qwen.gguf");
+        let lock = download_lock_path(dest);
+        // Distinct suffix, so it never collides with the download's own scratch
+        // files, and the real extension is preserved rather than replaced.
+        assert_eq!(
+            lock,
+            Path::new("/data/models/hf/org/repo/rev/qwen.gguf.osdk-lock")
+        );
+        assert_ne!(lock, dest.with_extension("partial"));
+        assert!(lock.to_string_lossy().ends_with(".gguf.osdk-lock"));
+    }
+
+    // Bug 007: two processes pulling the same file resolve to the same
+    // `download_path`, so the download now takes a cross-process lock on it. This
+    // asserts the primitive that guard relies on -- a second acquirer of the same
+    // lock path is refused while the first holds it, and succeeds once released.
+    #[test]
+    fn same_download_lock_path_is_mutually_exclusive() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dest = temporary.path().join("weights.safetensors");
+        let lock_path = download_lock_path(&dest);
+
+        let first = crate::lock::FileLock::try_acquire(&lock_path).unwrap();
+        assert!(first.is_some(), "first acquirer should get the lock");
+        // While held, a second attempt on the same path is refused rather than
+        // both proceeding to write the same partial.
+        assert!(
+            crate::lock::FileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_none(),
+            "a second acquirer must be refused while the lock is held"
+        );
+        drop(first);
+        // Released: the path is acquirable again.
+        assert!(
+            crate::lock::FileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_some(),
+            "the lock should be free again after the holder drops"
+        );
     }
 
     #[tokio::test]

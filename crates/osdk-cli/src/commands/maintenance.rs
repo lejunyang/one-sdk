@@ -769,6 +769,7 @@ pub(crate) fn sources_setting_display(
             Some(sources.model_download_retry_base_ms.to_string())
         }
         "sources.model_jobs" => Some(sources.model_jobs.to_string()),
+        "sources.model_read_timeout_ms" => Some(sources.model_read_timeout_ms.to_string()),
         _ => None,
     }
 }
