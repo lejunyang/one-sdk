@@ -2316,6 +2316,10 @@ mod tests {
                 models: Default::default(),
                 #[cfg(feature = "install")]
                 deps: Default::default(),
+                #[cfg(feature = "install")]
+                skills: Default::default(),
+                #[cfg(feature = "install")]
+                skills_defaults: Default::default(),
             },
             client: reqwest::Client::new(),
             show_progress: false,
