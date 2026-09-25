@@ -12,7 +12,7 @@
 # scripts/windows-wine-tests.sh cross-compiles for -- CI installs it as a
 # separate step, and a contributor who does not have it gets a link error rather
 # than an explanation.
-rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc-windows-gnu" }
+rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc-windows-gnu,x86_64-unknown-linux-musl" }
 
 # scripts/test-installers.sh serves the fixture archives over `python3 -m
 # http.server`. Without it the installer smoke exits before printing anything.
@@ -55,6 +55,7 @@ python = "3.12"
 # (`xcode-select --install`), not from any package manager osdk drives, so an
 # entry here could only ever be wrong. See the note below.
 "apt:build-essential" = { version = "latest", os = "linux" }
+"apt:musl-tools" = { version = "latest", os = "linux" }
 "dnf:gcc" = { version = "latest", os = "linux" }
 "pacman:gcc" = { version = "latest", os = "linux" }
 "apk:build-base" = { version = "latest", os = "linux" }

@@ -178,7 +178,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
+      - name: install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       # Records the runtime and image digests. When a base image changes what it
       # ships -- which is how `jq` quietly became preinstalled on archlinux and
       # turned the pacman case into a no-op -- this is what makes the change

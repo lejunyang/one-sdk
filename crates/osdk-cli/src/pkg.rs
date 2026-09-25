@@ -241,21 +241,42 @@ fn build_plan(app: &App) -> Result<(syspkg::InstallPlan, syspkg::StatusReport)> 
     Ok((plan, report))
 }
 
+/// Whether an empty executable plan really means every request is present.
+///
+/// A plan can have no runnable commands because osdk deliberately refuses an
+/// operation, as with pacman partial upgrades. That is actionable work left for
+/// the user, not evidence that the package is installed.
+fn all_requests_present(plan: &syspkg::InstallPlan) -> bool {
+    plan.skipped.iter().all(|package| {
+        matches!(
+            package.reason,
+            syspkg::SkipReason::AlreadySatisfied | syspkg::SkipReason::VersionDiffersButPresent
+        )
+    })
+}
+
 /// Install what is missing, after showing exactly what that is.
 async fn apply_packages(app: &App, dry_run: bool, yes: bool, json: bool) -> Result<()> {
     let mut stdout = std::io::stdout();
     let (plan, _) = build_plan(app)?;
 
     if plan.is_empty() {
-        if json {
-            serde_json::to_writer(&mut stdout, &serde_json::json!({ "installed": [] }))
-                .context("serializing package apply result")?;
+        if all_requests_present(&plan) {
+            if json {
+                serde_json::to_writer(&mut stdout, &serde_json::json!({ "installed": [] }))
+                    .context("serializing package apply result")?;
+                writeln!(stdout)?;
+            } else {
+                writeln!(
+                    stdout,
+                    "Nothing to install: every requested package is present."
+                )?;
+            }
+        } else if json {
+            serde_json::to_writer(&mut stdout, &plan).context("serializing package plan")?;
             writeln!(stdout)?;
         } else {
-            writeln!(
-                stdout,
-                "Nothing to install: every requested package is present."
-            )?;
+            write_install_plan(&mut stdout, &plan)?;
         }
         return Ok(());
     }
@@ -1067,6 +1088,23 @@ mod tests {
     /// The label must not name only the OS: an arch-only filter produces the
     /// same state, and telling someone "not for this os" while their OS matches
     /// sends them looking in the wrong place.
+    #[test]
+    fn a_pacman_advice_only_plan_is_not_reported_as_fully_installed() {
+        let plan = syspkg::InstallPlan {
+            installs: Vec::new(),
+            skipped: vec![syspkg::SkippedPackage {
+                id: "sl".to_owned(),
+                reason: syspkg::SkipReason::PacmanWantsAFullUpgrade,
+            }],
+        };
+
+        assert!(plan.is_empty(), "there is no command osdk may run");
+        assert!(
+            !all_requests_present(&plan),
+            "a refused partial upgrade still needs user action"
+        );
+    }
+
     #[test]
     fn the_inapplicable_label_covers_arch_as_well_as_os() {
         let state = state_label(syspkg::PackageState::NotApplicable);

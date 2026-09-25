@@ -23,11 +23,12 @@
 #   * TLS roots come from the OS trust store, so a slim image without
 #     `ca-certificates` fails every HTTPS request with "http error: builder
 #     error" -- a message about building the HTTP client, not about the network.
-#   * Alpine runs the glibc binary through gcompat, which needs `libgcc` as well
-#     for the unwinder; without it the binary cannot start and nothing is tested.
+#   * Alpine must run a native musl build. `gcompat` is not a stable bridge for a
+#     binary produced by a newer glibc toolchain: Ubuntu 26 emits `__isoc23_*`
+#     references that Alpine's compatibility layer does not expose.
 #
-# Both are installed in the prelude below, per image, and deliberately not
-# treated as something the host provides.
+# Debian gets its CA bundle in the prelude below. Alpine gets a separate musl
+# target binary, so the smoke test executes the ABI its image actually provides.
 
 set -euo pipefail
 
@@ -48,19 +49,29 @@ fi
 
 echo "using container runtime: $runtime"
 
-# Built once for the GNU target so the same binary runs in every container,
-# including Alpine -- which is why musl would be the wrong choice here only if
-# the images differed in libc. glibc images are used throughout for that reason,
-# with Alpine handled by installing gcompat.
-target="x86_64-unknown-linux-gnu"
-echo "building osdk for $target"
-cargo build --locked -p osdk-cli --bin osdk --target "$target"
-binary="$repo_root/target/$target/debug/osdk"
-
-if [[ ! -x "$binary" ]]; then
-    echo "fail: expected a built binary at $binary" >&2
-    exit 1
+# Build the glibc binary for glibc distributions and a native musl binary for
+# Alpine. gcompat is not a stable ABI bridge for a binary built against a newer
+# glibc: Ubuntu 26's toolchain emits __isoc23_* references that Alpine's gcompat
+# does not provide, so a shared glibc build can fail before osdk starts.
+glibc_target="x86_64-unknown-linux-gnu"
+musl_target="x86_64-unknown-linux-musl"
+for target in "$glibc_target" "$musl_target"; do
+    echo "building osdk for $target"
+    cargo build --locked -p osdk-cli --bin osdk --target "$target"
+done
+target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$target_dir" != /* ]]; then
+    target_dir="$repo_root/$target_dir"
 fi
+glibc_binary="$target_dir/$glibc_target/debug/osdk"
+musl_binary="$target_dir/$musl_target/debug/osdk"
+
+for binary in "$glibc_binary" "$musl_binary"; do
+    if [[ ! -x "$binary" ]]; then
+        echo "fail: expected a built binary at $binary" >&2
+        exit 1
+    fi
+done
 
 # image | manager it ships | managers it does not | a package it always has |
 # a package it does NOT have
@@ -76,19 +87,33 @@ fi
 cases=(
     "debian:stable-slim|apt|pacman dnf|coreutils|jq"
     "alpine:latest|apk|apt pacman dnf|busybox|jq"
-    "archlinux:latest|pacman|apt dnf|coreutils|cowsay"
+    "archlinux:latest|pacman|apt dnf|coreutils|sl"
     "fedora:latest|dnf|apt pacman|coreutils|jq"
 )
 
 failures=0
 
+# Ask the distribution database, not PATH. A package can be installed while its
+# command has a different name or lives outside the base image's default PATH;
+# using `command -v` let that state pass as "absent" and turned the pacman branch
+# into a false-green `Nothing to install`.
+package_query_command() {
+    local manager="$1" package="$2"
+    case "$manager" in
+        apt) printf "dpkg-query -W -f='\${Version}' -- '%s' >/dev/null 2>&1" "$package" ;;
+        apk) printf "apk info -e '%s' >/dev/null 2>&1" "$package" ;;
+        pacman) printf "pacman -Q '%s' >/dev/null 2>&1" "$package" ;;
+        dnf) printf "rpm -q '%s' >/dev/null 2>&1" "$package" ;;
+    esac
+}
+
 # Column 5 must be absent from the base image, or the check it feeds silently
-# proves nothing. Verified against the image rather than assumed, because the
-# symptom of getting it wrong is a cheerful "Nothing to install".
+# proves nothing. Verify that with the same package-manager query osdk uses.
 assert_absent_in_image() {
-    local image="$1" package="$2"
-    if "$runtime" run --rm "$image" sh -c "command -v $package >/dev/null 2>&1"; then
-        echo "  FAIL: $package is already present in $image, so installing it proves nothing" >&2
+    local image="$1" manager="$2" package="$3" query
+    query="$(package_query_command "$manager" "$package")"
+    if "$runtime" run --rm "$image" sh -c "$query"; then
+        echo "  FAIL: $package is already installed in $image, so installing it proves nothing" >&2
         echo "        pick a package the base image does not ship (column 5)" >&2
         return 1
     fi
@@ -100,20 +125,12 @@ for case_line in "${cases[@]}"; do
     echo
     echo "=== $image: expecting $expect_present ==="
 
-    # Alpine runs a glibc binary through gcompat, which needs libgcc too: the
-    # unwinder lives in libgcc_s.so.1 and every _Unwind_* symbol resolves
-    # against it. Installing only gcompat produced a binary that could not
-    # start at all -- "Error loading shared library libgcc_s.so.1", followed by
-    # a page of relocation errors -- which the script then reported as a
-    # detection failure, blaming the code for something that never ran.
-    #
-    # Debian slim carries no CA bundle, and osdk reads TLS roots from the OS
-    # trust store. Without it every HTTPS request fails as "http error: builder
-    # error" -- reqwest failing to construct a client with an empty root store,
-    # which reads like a product bug and is not one.
+    # Select a binary that matches the container ABI. Debian slim also needs a
+    # CA bundle because reqwest reads the OS trust store.
+    binary="$glibc_binary"
     prelude="true"
     case "$image" in
-        alpine:*) prelude="apk add --no-cache gcompat libgcc >/dev/null 2>&1" ;;
+        alpine:*) binary="$musl_binary" ;;
         debian:*) prelude="apt-get update >/dev/null 2>&1 && apt-get install -y --no-install-recommends ca-certificates >/dev/null 2>&1" ;;
     esac
 
@@ -207,12 +224,13 @@ osdk pkg status --json" 2>&1
     #
     # pacman is excluded on purpose: osdk declines to install there, and the
     # assertion below is that it declines rather than that it succeeds.
-    if ! assert_absent_in_image "$image" "$installable"; then
+    if ! assert_absent_in_image "$image" "$expect_present" "$installable"; then
         failures=$((failures + 1))
         continue
     fi
 
     if [[ "$expect_present" != "pacman" ]]; then
+        package_query="$(package_query_command "$expect_present" "$installable")"
         install_output="$(
             "$runtime" run --rm \
                 -v "$binary:/usr/local/bin/osdk:ro" \
@@ -233,14 +251,14 @@ TOML
 osdk --yes trust >/dev/null 2>&1
 osdk pkg apply --yes 2>&1
 echo \"---exit:\$?\"
-command -v $installable >/dev/null 2>&1 && echo 'BINARY-PRESENT' || echo 'BINARY-ABSENT'" 2>&1
+$package_query && echo 'PACKAGE-PRESENT' || echo 'PACKAGE-ABSENT'" 2>&1
         )" || true
 
         # Containers run as root, so elevation resolves to AlreadyRoot and the
         # command runs directly. A refusal here would mean the root case is
         # broken, which no amount of unit testing would show.
-        if grep -q 'BINARY-PRESENT' <<<"$install_output"; then
-            echo "  ok: $installable was installed and is on PATH"
+        if grep -q 'PACKAGE-PRESENT' <<<"$install_output"; then
+            echo "  ok: $installable was installed according to $expect_present"
         else
             echo "  FAIL: $installable did not end up installed" >&2
             echo "$install_output" | tail -20 >&2
