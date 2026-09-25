@@ -262,6 +262,33 @@ fn sources_probe_timeout_round_trips_through_config_commands() {
     );
     assert_eq!(String::from_utf8(attempts_read.stdout).unwrap().trim(), "8");
 
+    // model_jobs bounds how many models `model sync` downloads at once; default 2,
+    // settable, and rejected at zero like the other concurrency knob.
+    let model_jobs_default =
+        run_isolated(temp.path(), &["config", "get", "-g", "sources.model_jobs"]);
+    assert_eq!(
+        String::from_utf8(model_jobs_default.stdout).unwrap().trim(),
+        "2"
+    );
+    let model_jobs_set = run_isolated(
+        temp.path(),
+        &["config", "set", "-g", "sources.model_jobs", "3"],
+    );
+    assert!(model_jobs_set.status.success(), "{model_jobs_set:?}");
+    let model_jobs_read = run_isolated(temp.path(), &["config", "get", "-g", "sources.model_jobs"]);
+    assert_eq!(
+        String::from_utf8(model_jobs_read.stdout).unwrap().trim(),
+        "3"
+    );
+    let model_jobs_zero = run_isolated(
+        temp.path(),
+        &["config", "set", "-g", "sources.model_jobs", "0"],
+    );
+    assert!(
+        !model_jobs_zero.status.success(),
+        "zero model_jobs stalls sync"
+    );
+
     let model_set = run_isolated(
         temp.path(),
         &[
@@ -655,6 +682,41 @@ fn model_sync_dry_run_relocks_a_changed_declaration() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("would re-lock fixture (hf:owner/repo@dev) from declaration changed"),
+        "{stdout}"
+    );
+}
+
+// Several declared models are all collected for the (concurrent) pull pass, not
+// just the first. Dry run keeps this cross-platform; concurrency itself is
+// bounded by `sources.model_jobs` and exercised by the pull path's own tests.
+#[test]
+fn model_sync_dry_run_reports_every_declared_model() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.first]\nsource = \"hf:owner/first@main\"\n\n\
+         [models.second]\nsource = \"hf:owner/second@main\"\n\n\
+         [models.third]\nsource = \"ms:owner/third@master\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated(temporary.path(), &["model", "sync", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("would pull first (hf:owner/first@main) from project declaration"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("would pull second (hf:owner/second@main) from project declaration"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("would pull third (ms:owner/third@master) from project declaration"),
         "{stdout}"
     );
 }

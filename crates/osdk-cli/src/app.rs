@@ -16,6 +16,7 @@ use crate::prompt::{Prompt, TerminalPrompt};
 #[derive(Debug, Default, Clone)]
 pub struct GlobalOverrides {
     pub jobs: Option<usize>,
+    pub model_jobs: Option<usize>,
     pub yes: bool,
     pub quiet: bool,
     pub source: Option<String>,
@@ -213,6 +214,11 @@ impl App {
         if let Some(j) = overrides.jobs {
             if j > 0 {
                 config.settings.jobs = j;
+            }
+        }
+        if let Some(j) = overrides.model_jobs {
+            if j > 0 {
+                config.sources.model_jobs = j;
             }
         }
         if overrides.yes {

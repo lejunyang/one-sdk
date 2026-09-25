@@ -610,7 +610,7 @@ source = "hf:black-forest-labs/FLUX.1-dev@main"
 
 `osdk model sync` 会还原 lock 声明的全部模型，**并**重建它们的视图。lock 尚无模型
 条目时，它会按当前平台适用的 `[models]` 声明完成首次拉取，并把不可变结果写入 lock。
-显式传给 `pull` 的 reference 或选项优先于声明中的对应字段。
+显式传给 `pull` 的 reference 或选项优先于声明中的对应字段。多个模型会并发下载，数量由 `sources.model_jobs`（默认 2，或 `--model-jobs`）控制；它独立于 `--jobs`（后者并行下载单个模型内部的文件）。
 
 
 需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用

@@ -5439,6 +5439,7 @@ fn sources_setting_display(
         "sources.model_download_retry_base_ms" => {
             Some(sources.model_download_retry_base_ms.to_string())
         }
+        "sources.model_jobs" => Some(sources.model_jobs.to_string()),
         _ => None,
     }
 }
@@ -6468,6 +6469,14 @@ async fn model_sync(
     // repository, requested revision, and variant -- because `include`/`exclude`
     // are globs the lock stores only as their expanded file list; changing those
     // to widen a selection is still a `model pull`.
+    //
+    // The list is settled first so the downloads can run concurrently: several
+    // models are large and independent, so fetching them one after another wastes
+    // the link. `sources.model_jobs` bounds how many run at once (default 2), kept
+    // separate from `settings.jobs`, which parallelizes the files within one
+    // model -- the two multiply. Writing the lock is deliberately left serial
+    // after the downloads join, so concurrent pulls cannot race on `osdk.lock`.
+    let mut to_pull = Vec::new();
     for (name, declaration) in &configured {
         if declaration.source.trim().is_empty() {
             anyhow::bail!("[models.{name}].source cannot be empty");
@@ -6493,38 +6502,84 @@ async fn model_sync(
             restored += 1;
             continue;
         }
-        let reference = osdk_core::model::ModelRef::parse(&declaration.source)?;
-        let options = osdk_core::model::pull::PullOptions {
-            include: declaration.include.clone(),
-            exclude: declaration.exclude.clone(),
-            variant: declaration.variant.clone(),
-        };
-        let endpoint = declaration
-            .endpoint
-            .clone()
-            .or_else(|| provider_endpoint_env(reference.provider));
-        let installed = pull_model_from_sources(app, name, &reference, &options, endpoint, false)
-            .await
-            .with_context(|| format!("pulling declared model {name}"))?;
-        let lock_path = persist_model_pull(app, name, &installed)?;
-        let verb = if matches!(change, ModelLockState::Changed) {
-            "re-locked declared model"
-        } else {
-            "pulled declared model"
-        };
-        println!(
-            "{verb} {name} at revision {} -> {}",
-            installed.manifest.revision,
-            installed.path.display()
-        );
-        println!("updated {}", lock_path.display());
-        bootstrapped.insert(name.clone());
-        restored += 1;
+        to_pull.push((name.clone(), declaration.clone(), change));
+    }
+
+    if !to_pull.is_empty() {
+        let model_jobs = app.ctx.config.sources.model_jobs.max(1);
+        // Each future only reads `app` (network + CAS); the lock write is not in
+        // here, so these can share `&app` and run concurrently.
+        let downloads = to_pull.iter().map(|(name, declaration, _change)| {
+            let name = name.clone();
+            async move {
+                let reference = match osdk_core::model::ModelRef::parse(&declaration.source) {
+                    Ok(reference) => reference,
+                    Err(error) => return (name, Err(anyhow::Error::from(error))),
+                };
+                let options = osdk_core::model::pull::PullOptions {
+                    include: declaration.include.clone(),
+                    exclude: declaration.exclude.clone(),
+                    variant: declaration.variant.clone(),
+                };
+                let endpoint = declaration
+                    .endpoint
+                    .clone()
+                    .or_else(|| provider_endpoint_env(reference.provider));
+                let result =
+                    pull_model_from_sources(app, &name, &reference, &options, endpoint, false)
+                        .await
+                        .with_context(|| format!("pulling declared model {name}"));
+                (name, result)
+            }
+        });
+        let results: Vec<(String, Result<osdk_core::model::InstalledModel>)> =
+            stream::iter(downloads)
+                .buffer_unordered(model_jobs)
+                .collect()
+                .await;
+
+        // Serial tail: persist each successful pull to the lock, report each
+        // outcome, and remember the first failure so a partial batch still writes
+        // the lock entries it did complete before surfacing the error.
+        let mut first_error = None;
+        for (name, result) in results {
+            let change = to_pull
+                .iter()
+                .find(|(candidate, _, _)| candidate == &name)
+                .map(|(_, _, change)| *change)
+                .unwrap_or(ModelLockState::Missing);
+            match result {
+                Ok(installed) => {
+                    let lock_path = persist_model_pull(app, &name, &installed)?;
+                    let verb = if matches!(change, ModelLockState::Changed) {
+                        "re-locked declared model"
+                    } else {
+                        "pulled declared model"
+                    };
+                    println!(
+                        "{verb} {name} at revision {} -> {}",
+                        installed.manifest.revision,
+                        installed.path.display()
+                    );
+                    println!("updated {}", lock_path.display());
+                    bootstrapped.insert(name);
+                    restored += 1;
+                }
+                Err(error) => {
+                    eprintln!("failed to pull {name}: {error:#}");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
     }
     if !dry_run && !bootstrapped.is_empty() {
         locked = crate::lockfile::locked_models(&path)?;
     }
-
     if locked.is_empty() && configured.is_empty() && !prune {
         println!(
             "no models declared in {} or project configuration",
@@ -6532,6 +6587,11 @@ async fn model_sync(
         );
         return Ok(());
     }
+    // First decide, serially, which locked models actually need fetching: an
+    // intact snapshot is left alone (and only its views reconciled), a dry run
+    // just reports. Verifying is local IO, so it stays out of the concurrent
+    // section; only the network restores below are parallelized.
+    let mut to_restore = Vec::new();
     for (name, entry) in &locked {
         if bootstrapped.contains(name) {
             continue;
@@ -6558,68 +6618,124 @@ async fn model_sync(
             restored += 1;
             continue;
         }
-        // The lock pins the immutable revision, so the reference is rebuilt from
-        // it rather than from `requested_revision`: replaying a branch name would
-        // resolve to whatever it points at now.
-        let reference = osdk_core::model::ModelRef {
-            provider: entry.provider,
-            repository: entry.repository.clone(),
-            revision: entry.revision.clone(),
-        };
-        // Only the files the lock names, so a repository that gained files since
-        // the lock was written does not silently grow the snapshot.
-        let options = osdk_core::model::pull::PullOptions {
-            include: entry
-                .files
-                .iter()
-                .map(|file| glob_escape(&file.path))
-                .collect(),
-            exclude: Vec::new(),
-            variant: entry.variant.clone(),
-        };
-        let sources =
-            osdk_core::model::source::ranked_sources(&app.ctx, &reference, app.refresh_sources)
-                .await?;
-        let mut installed = None;
-        let mut last_error = None;
-        for source in sources {
-            let provider =
-                osdk_core::model::source::provider(reference.provider, source.forward_credentials);
-            match osdk_core::model::pull::pull(
-                &app.ctx,
-                provider.as_ref(),
-                name,
-                &reference,
-                &source.download_url,
-                &options,
-            )
-            .await
-            {
-                Ok(model) => {
-                    installed = Some(model);
-                    break;
+        to_restore.push((name.clone(), entry));
+    }
+
+    if !to_restore.is_empty() {
+        let model_jobs = app.ctx.config.sources.model_jobs.max(1);
+        // Restores run concurrently up to `model_jobs`; each future only reads
+        // `app` and downloads into the CAS. The lock-facing tail (digest check
+        // against the lock, view reconcile) is serial below.
+        let restores = to_restore.iter().map(|(name, entry)| {
+            let name = name.clone();
+            async move {
+                // The lock pins the immutable revision, so the reference is rebuilt
+                // from it rather than from `requested_revision`: replaying a branch
+                // name would resolve to whatever it points at now.
+                let reference = osdk_core::model::ModelRef {
+                    provider: entry.provider,
+                    repository: entry.repository.clone(),
+                    revision: entry.revision.clone(),
+                };
+                // Only the files the lock names, so a repository that gained files
+                // since the lock was written does not silently grow the snapshot.
+                let options = osdk_core::model::pull::PullOptions {
+                    include: entry
+                        .files
+                        .iter()
+                        .map(|file| glob_escape(&file.path))
+                        .collect(),
+                    exclude: Vec::new(),
+                    variant: entry.variant.clone(),
+                };
+                let sources = match osdk_core::model::source::ranked_sources(
+                    &app.ctx,
+                    &reference,
+                    app.refresh_sources,
+                )
+                .await
+                {
+                    Ok(sources) => sources,
+                    Err(error) => return (name, Err(anyhow::Error::from(error))),
+                };
+                let mut installed = None;
+                let mut last_error = None;
+                for source in sources {
+                    let provider = osdk_core::model::source::provider(
+                        reference.provider,
+                        source.forward_credentials,
+                    );
+                    match osdk_core::model::pull::pull(
+                        &app.ctx,
+                        provider.as_ref(),
+                        &name,
+                        &reference,
+                        &source.download_url,
+                        &options,
+                    )
+                    .await
+                    {
+                        Ok(model) => {
+                            installed = Some(model);
+                            break;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
                 }
-                Err(error) => last_error = Some(error),
+                let result = installed.ok_or_else(|| {
+                    anyhow!(
+                        "cannot restore model {name}: {}",
+                        last_error
+                            .map(|error| error.to_string())
+                            .unwrap_or_else(|| "no usable model source".into())
+                    )
+                });
+                (name, result)
             }
+        });
+        let results: Vec<(String, Result<osdk_core::model::InstalledModel>)> =
+            stream::iter(restores)
+                .buffer_unordered(model_jobs)
+                .collect()
+                .await;
+
+        let mut first_error = None;
+        for (name, result) in results {
+            let entry = to_restore
+                .iter()
+                .find(|(candidate, _)| candidate == &name)
+                .map(|(_, entry)| *entry)
+                .expect("restored name is one we queued");
+            let installed = match result {
+                Ok(installed) => installed,
+                Err(error) => {
+                    eprintln!("failed to restore {name}: {error:#}");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
+            };
+            // A restore that produced different bytes is a failure, not a success:
+            // the point of the lock is that it pins content.
+            if let Err(error) = verify_restored_against_lock(&name, entry, &installed.manifest) {
+                eprintln!("failed to restore {name}: {error:#}");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+            crate::model_view::reconcile_declared_views(app, &name, &entry.views)?;
+            println!(
+                "restored {name} at revision {} -> {}",
+                installed.manifest.revision,
+                installed.path.display()
+            );
+            restored += 1;
         }
-        let installed = installed.ok_or_else(|| {
-            anyhow!(
-                "cannot restore model {name}: {}",
-                last_error
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "no usable model source".into())
-            )
-        })?;
-        // A restore that produced different bytes is a failure, not a success:
-        // the point of the lock is that it pins content.
-        verify_restored_against_lock(name, entry, &installed.manifest)?;
-        crate::model_view::reconcile_declared_views(app, name, &entry.views)?;
-        println!(
-            "restored {name} at revision {} -> {}",
-            installed.manifest.revision,
-            installed.path.display()
-        );
-        restored += 1;
+        if let Some(error) = first_error {
+            return Err(error);
+        }
     }
 
     if prune {

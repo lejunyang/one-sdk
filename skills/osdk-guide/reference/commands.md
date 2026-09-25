@@ -11,6 +11,7 @@
 | `-v, --verbose...` | 增加日志详细度，可重复 | — |
 | `-q, --quiet` | 抑制进度输出 | — |
 | `-j, --jobs <N>` | 最大并发下载 / 安装数 | `OSDK_JOBS` |
+| `--model-jobs <N>` | `model sync` 同时下载的模型数（默认 2）；独立于 `--jobs`（单模型内文件并发），二者相乘 | `OSDK_MODEL_JOBS` |
 | `-y, --yes` | 对提示默认「是」 | — |
 | `--source <ID>` | 本次调用强制使用某个源 id | — |
 | `--refresh-sources` | 忽略缓存的测速结果，重新探测源 | — |

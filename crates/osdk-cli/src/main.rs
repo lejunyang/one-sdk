@@ -65,6 +65,7 @@ fn main_inner() {
 
     let overrides = GlobalOverrides {
         jobs: cli.global.jobs,
+        model_jobs: cli.global.model_jobs,
         yes: cli.global.yes,
         quiet: cli.global.quiet,
         source: cli.global.source.clone(),

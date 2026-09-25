@@ -677,7 +677,9 @@ picks up `[models]` declarations that the lock does not yet describe or describe
 differently: a new one is pulled and locked, and one whose `source` or `variant`
 changed is re-pulled and its entry rewritten, so a hand-edited `[models]` needs no
 separate `model pull`. An explicit pull reference or flag overrides the
-corresponding declaration field.
+corresponding declaration field. Several models download concurrently, bounded by
+`sources.model_jobs` (default 2, or `--model-jobs`); this is independent of `--jobs`,
+which parallelizes files within one model.
 
 
 Enable provider endpoint and cache variables for activated shells when model

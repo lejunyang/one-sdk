@@ -651,6 +651,11 @@ pub const SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::PositiveInt,
     },
     SettingSpec {
+        key: "sources.model_jobs",
+        path: &["sources", "model_jobs"],
+        kind: SettingKind::PositiveInt,
+    },
+    SettingSpec {
         key: "registries.python.urls",
         path: &["registries", "python", "urls"],
         kind: SettingKind::List,

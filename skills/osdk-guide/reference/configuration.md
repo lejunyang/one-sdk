@@ -156,6 +156,7 @@ probe_timeout_ms = 1500              # 普通 SDK / 工具源单次测速超时
 model_probe_timeout_ms = 8000        # 模型 metadata / 响应头 / 64 KiB 样本各阶段预算
 model_download_attempts = 6          # 每个模型文件、每个来源的最大尝试次数
 model_download_retry_base_ms = 1000  # 模型重试初始退避；指数增长并封顶 8 秒
+model_jobs = 2                       # model sync 同时下载的模型数；与 settings.jobs（单模型内文件并发）相乘，lock 写入始终串行
 cache_ttl = "6h"                     # 测速结果缓存有效期（人类可读时长）
 
 # 每工具覆盖：键是工具名（或 self / go-modules 这类特殊源名）

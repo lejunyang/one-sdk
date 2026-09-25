@@ -331,6 +331,12 @@ pub struct SourcesConfig {
     pub model_download_attempts: u32,
     /// Initial retry delay for model files. Later delays double up to 8 seconds.
     pub model_download_retry_base_ms: u64,
+    /// How many models `model sync` downloads at once. This is independent of
+    /// `settings.jobs`, which controls parallelism *within* one model (its
+    /// files): the two multiply, so a small default keeps a many-model sync from
+    /// opening `model_jobs * jobs` connections and tripping provider rate limits.
+    /// Lock writes stay serialized regardless.
+    pub model_jobs: usize,
     /// TTL for cached probe results, as a human string like "6h".
     pub cache_ttl: String,
     /// Per-tool source overrides.
@@ -366,6 +372,7 @@ impl Default for SourcesConfig {
             model_probe_timeout_ms: 8000,
             model_download_attempts: 6,
             model_download_retry_base_ms: 1000,
+            model_jobs: 2,
             cache_ttl: "6h".to_string(),
             per_tool: BTreeMap::new(),
             registries: RegistriesConfig::default(),
@@ -1193,6 +1200,7 @@ impl Config {
                 model_probe_timeout_ms: src.model_probe_timeout_ms,
                 model_download_attempts: src.model_download_attempts,
                 model_download_retry_base_ms: src.model_download_retry_base_ms,
+                model_jobs: src.model_jobs,
                 cache_ttl: src.cache_ttl,
                 per_tool: merged,
                 registries: self.sources.registries.clone(),

@@ -32,6 +32,11 @@ pub struct GlobalArgs {
     #[arg(short = 'j', long, global = true, env = "OSDK_JOBS")]
     pub jobs: Option<usize>,
 
+    /// How many models `model sync` downloads at once (default 2). Independent
+    /// of `--jobs`, which parallelizes files within one model.
+    #[arg(long = "model-jobs", global = true, env = "OSDK_MODEL_JOBS")]
+    pub model_jobs: Option<usize>,
+
     /// Assume yes for prompts.
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
