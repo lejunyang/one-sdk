@@ -1,0 +1,9 @@
+schema = 4
+
+[platforms]
+
+[skills.jscpd]
+source = "github:kucherenko/jscpd"
+content_hash = "b3-v2:53f512e2985e6617281b7bf22274b7c92db98878537e5d7419e14926d2837069"
+resolved_commit = "2a5f6d62a419b47a8f076c6702788569d7cc43be"
+agents = ["universal"]

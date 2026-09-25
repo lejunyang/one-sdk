@@ -4,3 +4,6 @@ Cargo.lock.orig
 /site/node_modules
 /site/.vitepress/cache
 /site/.vitepress/dist
+/.jscpd-report
+# Agent skill mounts are machine-local junctions; reproduce them with 'osdk skills sync' from osdk.lock
+/.agents
