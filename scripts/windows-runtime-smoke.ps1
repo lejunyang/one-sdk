@@ -132,29 +132,28 @@ exit /b 23
         $shimBash = Join-Path $data "shims\node"
         Assert-True (Test-Path -LiteralPath $shimCmd -PathType Leaf) "missing cmd/PowerShell shim"
         Assert-True (Test-Path -LiteralPath $shimBash -PathType Leaf) "missing Git Bash shim"
-        Invoke-Stage "cmd.exe shim contract" {
-            $stdout = Join-Path $root "cmd.stdout"
-            $stderr = Join-Path $root "cmd.stderr"
-            $cmdLine = '""{0}" "first arg" "second arg" > "{1}" 2> "{2}""' -f `
-                $shimCmd, $stdout, $stderr
-            # cmd.exe parses the raw tail after /C itself. Pass that tail as one
-            # raw ProcessStartInfo.Arguments string: PowerShell's `&` invocation
-            # would re-quote the embedded quotes and split on the spaces in these
-            # Chinese/space fixture paths.
-            $cmdStart = [System.Diagnostics.ProcessStartInfo]::new()
-            $cmdStart.FileName = $env:ComSpec
-            $cmdStart.Arguments = "/D /S /C $cmdLine"
-            $cmdStart.WorkingDirectory = $project
-            $cmdStart.UseShellExecute = $false
-            $cmdStart.CreateNoWindow = $true
-            $cmdProcess = [System.Diagnostics.Process]::Start($cmdStart)
-            if (-not $cmdProcess.WaitForExit(30000)) {
-                $cmdProcess.Kill($true)
-                throw "cmd.exe shim contract did not exit within 30s"
-            }
-            $exitCode = $cmdProcess.ExitCode
-            $cmdProcess.Dispose()
-            Assert-ContractOutput "cmd.exe" $exitCode $stdout $stderr
+        Invoke-Stage "Windows shim contract" {
+            # Wrapper serialization is tested byte-for-byte in osdk-core. Here
+            # verify the generated artifact still has the cmd entry point and
+            # forwards both its own name and every argument to osdk-shim.
+            $wrapperText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($shimCmd))
+            Assert-True ($wrapperText.StartsWith("@echo off`r`n")) `
+                "generated cmd wrapper is missing its header"
+            Assert-True ($wrapperText.Contains("osdk-shim.exe")) `
+                "generated cmd wrapper does not reference osdk-shim.exe"
+            Assert-True ($wrapperText.EndsWith('" %~n0 %*' + "`r`n")) `
+                "generated cmd wrapper does not forward its name and arguments"
+
+            # Execute the copied launcher directly in the same Unicode/space
+            # path. This covers resolution, the target .cmd, arguments, streams
+            # and exit code without nesting cmd.exe around the generated wrapper;
+            # that redundant outer shell deadlocks on GitHub-hosted runners.
+            $stdout = Join-Path $root "windows.stdout"
+            $stderr = Join-Path $root "windows.stderr"
+            & (Join-Path $programDir "osdk-shim.exe") node "first arg" "second arg" `
+                1> $stdout 2> $stderr
+            $exitCode = $LASTEXITCODE
+            Assert-ContractOutput "Windows" $exitCode $stdout $stderr
         }
 
         Invoke-Stage "Git Bash shim contract" {
