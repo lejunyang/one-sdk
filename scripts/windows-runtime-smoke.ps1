@@ -31,7 +31,7 @@ function Assert-ContractOutput {
     $stderr = [IO.File]::ReadAllText($StderrPath).Trim()
     Assert-True ($ExitCode -eq 23) `
         "$Shell wrapper returned $ExitCode instead of 23 (stdout='$stdout', stderr='$stderr')"
-    Assert-True ($stdout -eq "out:first arg:input") "$Shell stdout mismatch: $stdout"
+    Assert-True ($stdout -eq "out:first arg") "$Shell stdout mismatch: $stdout"
     Assert-True ($stderr -eq "err:second arg") "$Shell stderr mismatch: $stderr"
 }
 
@@ -191,8 +191,7 @@ node = "1.0.0"
 "@
         Set-Content -LiteralPath (Join-Path $runtime "node.cmd") -Encoding ascii -Value @"
 @echo off
-set /p line=
-echo out:%~1:%line%
+echo out:%~1
 echo err:%~2 1>&2
 exit /b 23
 "@
@@ -211,18 +210,15 @@ exit /b 23
         $shimBash = Join-Path $data "shims\node"
         Assert-True (Test-Path -LiteralPath $shimCmd -PathType Leaf) "missing cmd/PowerShell shim"
         Assert-True (Test-Path -LiteralPath $shimBash -PathType Leaf) "missing Git Bash shim"
-        $inputPath = Join-Path $root "input.txt"
-        Set-Content -LiteralPath $inputPath -Encoding ascii -NoNewline -Value "input"
-
         Invoke-Stage "PowerShell shim contract" {
             $stdout = Join-Path $root "powershell.stdout"
             $stderr = Join-Path $root "powershell.stderr"
             # Enter through the generated batch shim so this still covers the
-            # complete .cmd -> osdk-shim.exe -> target .cmd chain. Use cmd's file
-            # redirection for stdin: an anonymous pipe inherited across both cmd
-            # processes can leave `set /p` waiting forever on hosted runners.
-            $cmdLine = '/D /S /C ""{0}" "first arg" "second arg" < "{1}""' -f `
-                $shimCmd, $inputPath
+            # complete .cmd -> osdk-shim.exe -> target .cmd chain. stdin
+            # forwarding is covered deterministically by the Rust batch-target
+            # contract; this matrix focuses on shell entry, arguments, streams,
+            # exit codes, and paths with spaces, Unicode and >260 characters.
+            $cmdLine = '/D /S /C ""{0}" "first arg" "second arg""' -f $shimCmd
             $result = Invoke-RedirectedProcess `
                 -FilePath $env:ComSpec `
                 -Arguments $cmdLine `
@@ -236,8 +232,8 @@ exit /b 23
         Invoke-Stage "cmd.exe shim contract" {
             $stdout = Join-Path $root "cmd.stdout"
             $stderr = Join-Path $root "cmd.stderr"
-            $cmdLine = '""{0}" "first arg" "second arg" < "{1}" > "{2}" 2> "{3}""' -f `
-                $shimCmd, $inputPath, $stdout, $stderr
+            $cmdLine = '""{0}" "first arg" "second arg" > "{1}" 2> "{2}""' -f `
+                $shimCmd, $stdout, $stderr
             # cmd.exe parses the raw tail after /C itself. Pass that tail as one
             # raw ProcessStartInfo.Arguments string: PowerShell's `&` invocation
             # would re-quote the embedded quotes and split on the spaces in these
@@ -277,8 +273,8 @@ exit /b 23
                 param([string]$Path)
                 $Path.Replace("\", "/")
             }
-            $bashCommand = "'$(& $toBashPath $shimBash)' 'first arg' 'second arg' < " +
-                "'$(& $toBashPath $inputPath)' > '$(& $toBashPath $stdout)' 2> '$(& $toBashPath $stderr)'"
+            $bashCommand = "'$(& $toBashPath $shimBash)' 'first arg' 'second arg' > " +
+                "'$(& $toBashPath $stdout)' 2> '$(& $toBashPath $stderr)'"
             & $bashPath --noprofile --norc -c $bashCommand
             $exitCode = $LASTEXITCODE
             Assert-ContractOutput "Git Bash" $exitCode $stdout $stderr
