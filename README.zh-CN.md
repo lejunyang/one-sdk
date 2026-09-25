@@ -580,7 +580,7 @@ osdk model path qwen25
 # 要写进 ComfyUI、llama.cpp 或脚本里的路径请用这个
 osdk model path qwen25 --stable
 
-# 有模型 lock 时复现；尚无模型 lock 时按 [models] 首次拉取并创建 lock
+# 拉取 [models] 中 lock 未描述或已变更的声明，其余按 lock 复现
 osdk model sync
 osdk model list
 ```

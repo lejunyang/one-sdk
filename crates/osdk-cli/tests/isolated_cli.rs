@@ -583,6 +583,82 @@ fn model_sync_dry_run_bootstraps_an_empty_lock_from_declarations() {
     assert!(!temporary.path().join("osdk.lock").exists());
 }
 
+// The regression this fixes: bootstrapping used to trigger only when the whole
+// model lock was empty, so a `[models]` entry added by hand to a project that
+// already had a locked model was silently ignored. With a non-empty lock, a
+// newly declared model must still be recognized and (dry-run) reported as a
+// pull. Dry run keeps this cross-platform -- no fixture server needed.
+#[test]
+fn model_sync_dry_run_pulls_a_declaration_added_to_a_non_empty_lock() {
+    let temporary = tempfile::tempdir().unwrap();
+    // A lock that already describes one model (no local snapshot behind it).
+    std::fs::write(
+        temporary.path().join("osdk.lock"),
+        "schema = 2\n\n[models.existing]\nprovider = \"huggingface\"\n\
+         repository = \"owner/existing\"\nrequested_revision = \"main\"\n\
+         revision = \"abc123\"\nendpoint = \"https://huggingface.co\"\nfiles = []\n",
+    )
+    .unwrap();
+    // Config declares the existing model plus a brand-new one.
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.existing]\nsource = \"hf:owner/existing@main\"\n\n\
+         [models.added]\nsource = \"hf:owner/added@main\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated(temporary.path(), &["model", "sync", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The newly declared model is picked up despite the lock being non-empty.
+    assert!(
+        stdout.contains("would pull added (hf:owner/added@main) from project declaration"),
+        "{stdout}"
+    );
+    // The already-locked, unchanged declaration is not reported as a config
+    // bootstrap; it belongs to the replay pass instead.
+    assert!(
+        !stdout.contains("existing (hf:owner/existing@main) from project declaration"),
+        "{stdout}"
+    );
+}
+
+// A declaration whose identity changed against the lock (edited `source`) must
+// be reported as a re-lock, not treated as up to date.
+#[test]
+fn model_sync_dry_run_relocks_a_changed_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.lock"),
+        "schema = 2\n\n[models.fixture]\nprovider = \"huggingface\"\n\
+         repository = \"owner/repo\"\nrequested_revision = \"main\"\n\
+         revision = \"abc123\"\nendpoint = \"https://huggingface.co\"\nfiles = []\n",
+    )
+    .unwrap();
+    // Same name, different requested revision than the lock records.
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.fixture]\nsource = \"hf:owner/repo@dev\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated(temporary.path(), &["model", "sync", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("would re-lock fixture (hf:owner/repo@dev) from declaration changed"),
+        "{stdout}"
+    );
+}
+
 // Windows runners can block a child process from connecting back to a listener
 // owned by the test process. The same provider/pull contract runs in-process in
 // osdk-core on Windows; keep this cross-process CLI topology on Unix.

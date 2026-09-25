@@ -6380,14 +6380,60 @@ fn persist_model_pull(
     Ok(path)
 }
 
-/// Materialize what the project lock declares, and optionally drop what it does
-/// not.
+/// Whether a `[models.<name>]` declaration is already faithfully described by the
+/// lock, absent from it, or described with a different identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelLockState {
+    /// The lock has an entry whose provider, repository, requested revision, and
+    /// variant all match the declaration. Nothing to (re-)pull here; the replay
+    /// pass verifies the snapshot and restores it if the bytes are missing.
+    UpToDate,
+    /// The lock has no entry for this name yet -- the bootstrap case.
+    Missing,
+    /// The lock has an entry, but the declaration now asks for a different
+    /// identity (edited `source` or `variant`), so it must be re-pulled and the
+    /// lock entry rewritten.
+    Changed,
+}
+
+/// Compare a declaration against its lock entry over the fields the lock can
+/// hold verbatim.
 ///
-/// This is the reader the `[models]` section never had. `pull` wrote entries that
-/// nothing consulted, so a committed lock described a state no command could
-/// restore; `install` deliberately does not reach for models (weights are far too
-/// large to fetch as a side effect of installing tools), which is why this is its
-/// own verb.
+/// `include`/`exclude` are deliberately not compared: they are globs, and the
+/// lock stores only their expanded file list, so there is nothing to compare
+/// them against without re-resolving the remote. Widening a selection therefore
+/// stays a `model pull`, which is the one operation that re-resolves files. A
+/// `source` that cannot be parsed is treated as `Changed` so the pull below
+/// surfaces the real parse error instead of being silently skipped.
+fn model_declaration_lock_state(
+    declaration: &osdk_core::config::ModelDeclaration,
+    locked: Option<&crate::lockfile::LockedModel>,
+) -> ModelLockState {
+    let Some(entry) = locked else {
+        return ModelLockState::Missing;
+    };
+    let Ok(reference) = osdk_core::model::ModelRef::parse(&declaration.source) else {
+        return ModelLockState::Changed;
+    };
+    let same = reference.provider == entry.provider
+        && reference.repository == entry.repository
+        && reference.revision == entry.requested_revision
+        && declaration.variant == entry.variant;
+    if same {
+        ModelLockState::UpToDate
+    } else {
+        ModelLockState::Changed
+    }
+}
+
+/// Materialize what the project declares: replay the lock, and pull any
+/// `[models]` entry the lock does not yet describe or describes differently.
+///
+/// `install` deliberately does not reach for models (weights are far too large to
+/// fetch as a side effect of installing tools), which is why this is its own
+/// verb. Two passes run in order: first every applicable declaration is compared
+/// against the lock and (re-)pulled when it is missing or changed, writing the
+/// resulting entry back; then every locked entry is replayed.
 ///
 /// A snapshot already present is verified rather than re-fetched: the lock carries
 /// each file's SHA-256, so "is this the thing the lock describes" is answerable
@@ -6414,46 +6460,69 @@ async fn model_sync(
     let mut restored = 0usize;
     let mut bootstrapped = std::collections::BTreeSet::new();
 
-    if locked.is_empty() {
-        for (name, declaration) in &configured {
-            if declaration.source.trim().is_empty() {
-                anyhow::bail!("[models.{name}].source cannot be empty");
-            }
-            if dry_run {
-                println!(
-                    "would pull {name} ({}) from project declaration",
-                    declaration.source
-                );
-                restored += 1;
-                continue;
-            }
-            let reference = osdk_core::model::ModelRef::parse(&declaration.source)?;
-            let options = osdk_core::model::pull::PullOptions {
-                include: declaration.include.clone(),
-                exclude: declaration.exclude.clone(),
-                variant: declaration.variant.clone(),
+    // A declared model is (re-)pulled when the lock does not describe it, or
+    // describes a different identity than the declaration now asks for. This is
+    // what lets `sync` pick up a `[models]` entry added or edited by hand,
+    // rather than only bootstrapping when the whole model lock is empty. The
+    // comparison is over what the lock can faithfully hold -- provider,
+    // repository, requested revision, and variant -- because `include`/`exclude`
+    // are globs the lock stores only as their expanded file list; changing those
+    // to widen a selection is still a `model pull`.
+    for (name, declaration) in &configured {
+        if declaration.source.trim().is_empty() {
+            anyhow::bail!("[models.{name}].source cannot be empty");
+        }
+        let locked_entry = locked.iter().find(|(locked_name, _)| locked_name == name);
+        let change =
+            model_declaration_lock_state(declaration, locked_entry.map(|(_, entry)| entry));
+        let reason = match change {
+            ModelLockState::UpToDate => continue,
+            ModelLockState::Missing => "project declaration",
+            ModelLockState::Changed => "declaration changed",
+        };
+        if dry_run {
+            let verb = if matches!(change, ModelLockState::Changed) {
+                "would re-lock"
+            } else {
+                "would pull"
             };
-            let endpoint = declaration
-                .endpoint
-                .clone()
-                .or_else(|| provider_endpoint_env(reference.provider));
-            let installed =
-                pull_model_from_sources(app, name, &reference, &options, endpoint, false)
-                    .await
-                    .with_context(|| format!("pulling declared model {name}"))?;
-            let lock_path = persist_model_pull(app, name, &installed)?;
-            println!(
-                "pulled declared model {name} at revision {} -> {}",
-                installed.manifest.revision,
-                installed.path.display()
-            );
-            println!("updated {}", lock_path.display());
+            println!("{verb} {name} ({}) from {reason}", declaration.source);
+            // Recorded even in a dry run so the replay pass below does not also
+            // report this name (a `Changed` entry still exists in `locked`).
             bootstrapped.insert(name.clone());
             restored += 1;
+            continue;
         }
-        if !dry_run {
-            locked = crate::lockfile::locked_models(&path)?;
-        }
+        let reference = osdk_core::model::ModelRef::parse(&declaration.source)?;
+        let options = osdk_core::model::pull::PullOptions {
+            include: declaration.include.clone(),
+            exclude: declaration.exclude.clone(),
+            variant: declaration.variant.clone(),
+        };
+        let endpoint = declaration
+            .endpoint
+            .clone()
+            .or_else(|| provider_endpoint_env(reference.provider));
+        let installed = pull_model_from_sources(app, name, &reference, &options, endpoint, false)
+            .await
+            .with_context(|| format!("pulling declared model {name}"))?;
+        let lock_path = persist_model_pull(app, name, &installed)?;
+        let verb = if matches!(change, ModelLockState::Changed) {
+            "re-locked declared model"
+        } else {
+            "pulled declared model"
+        };
+        println!(
+            "{verb} {name} at revision {} -> {}",
+            installed.manifest.revision,
+            installed.path.display()
+        );
+        println!("updated {}", lock_path.display());
+        bootstrapped.insert(name.clone());
+        restored += 1;
+    }
+    if !dry_run && !bootstrapped.is_empty() {
+        locked = crate::lockfile::locked_models(&path)?;
     }
 
     if locked.is_empty() && configured.is_empty() && !prune {
