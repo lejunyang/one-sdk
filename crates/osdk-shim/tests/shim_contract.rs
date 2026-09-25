@@ -720,9 +720,12 @@ fn dynamic_npm_shim_injects_managed_node_and_uses_inventory_owned_bin() {
                 .path()
                 .join("installs/node/1.0.0/bin/node")
                 .display(),
-            isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0")
-                .join("project/node_modules/@antfu/ni/bin/ni")
-                .display()
+            std::fs::canonicalize(
+                isolated_dynamic_npm_root(temporary.path(), "npm:@antfu/ni", "1.0.0")
+                    .join("project/node_modules/@antfu/ni/bin/ni"),
+            )
+            .unwrap()
+            .display()
         )
     );
 }
@@ -1047,7 +1050,9 @@ fn dynamic_npm_shim_restarts_from_global_only_canonical_root() {
                 .path()
                 .join("installs/node/1.0.0/bin/node")
                 .display(),
-            global_root.join("bin/fixture-cli").display()
+            std::fs::canonicalize(global_root.join("bin/fixture-cli"))
+                .unwrap()
+                .display()
         )
     );
 }
