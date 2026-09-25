@@ -56,7 +56,6 @@ function Invoke-RedirectedProcess {
     param(
         [string]$FilePath,
         [string]$Arguments,
-        [string]$StandardInput,
         [string]$WorkingDirectory,
         [int]$TimeoutSeconds = 30
     )
@@ -71,7 +70,7 @@ function Invoke-RedirectedProcess {
     $startInfo.WorkingDirectory = $WorkingDirectory
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardInput = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
 
@@ -88,15 +87,6 @@ function Invoke-RedirectedProcess {
         # fill up and prevent the child process from exiting.
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        try {
-            $process.StandardInput.WriteLine($StandardInput)
-        }
-        finally {
-            # The target batch file uses `set /p`, so provide a complete line
-            # and then close stdin explicitly to propagate EOF as well.
-            $process.StandardInput.Close()
-        }
-
         $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
         if ($timedOut) {
             try {
@@ -228,30 +218,16 @@ exit /b 23
             $stdout = Join-Path $root "powershell.stdout"
             $stderr = Join-Path $root "powershell.stderr"
             # Enter through the generated batch shim so this still covers the
-            # complete .cmd -> osdk-shim.exe -> target .cmd chain.
-            $cmdLine = '/D /S /C ""{0}" "first arg" "second arg""' -f $shimCmd
-            try {
-                $result = Invoke-RedirectedProcess `
-                    -FilePath $env:ComSpec `
-                    -Arguments $cmdLine `
-                    -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
-                    -WorkingDirectory $project `
-                    -TimeoutSeconds 30
-            }
-            catch {
-                if ($_.Exception.Message -notlike '*timed out after 30 seconds*') {
-                    throw
-                }
-                # Retry only the runner stall observed in CI. Assertion, exit-code
-                # and output failures remain first-attempt failures.
-                Write-Warning "PowerShell shim contract timed out once; retrying with a fresh cmd.exe"
-                $result = Invoke-RedirectedProcess `
-                    -FilePath $env:ComSpec `
-                    -Arguments $cmdLine `
-                    -StandardInput (Get-Content -LiteralPath $inputPath -Raw) `
-                    -WorkingDirectory $project `
-                    -TimeoutSeconds 30
-            }
+            # complete .cmd -> osdk-shim.exe -> target .cmd chain. Use cmd's file
+            # redirection for stdin: an anonymous pipe inherited across both cmd
+            # processes can leave `set /p` waiting forever on hosted runners.
+            $cmdLine = '/D /S /C ""{0}" "first arg" "second arg" < "{1}""' -f `
+                $shimCmd, $inputPath
+            $result = Invoke-RedirectedProcess `
+                -FilePath $env:ComSpec `
+                -Arguments $cmdLine `
+                -WorkingDirectory $project `
+                -TimeoutSeconds 30
             Set-Content -LiteralPath $stdout -Encoding ascii -NoNewline -Value $result.Stdout
             Set-Content -LiteralPath $stderr -Encoding ascii -NoNewline -Value $result.Stderr
             Assert-ContractOutput "PowerShell" $result.ExitCode $stdout $stderr
