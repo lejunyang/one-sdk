@@ -686,7 +686,10 @@ END_MARKER='# <<< osdk initialize <<<'
 SUPPORTED_SHELLS='bash zsh fish pwsh'
 
 tty_readable=0
-if [ -r /dev/tty ] && [ -w /dev/tty ] && { : >/dev/tty; } 2>/dev/null; then
+# A redirection failure on a POSIX special builtin can terminate dash even when
+# the command appears inside an `if`. Probe in a subshell so a present /dev/tty
+# without a controlling terminal is a normal false result rather than exit 2.
+if [ -r /dev/tty ] && [ -w /dev/tty ] && ( : >/dev/tty ) 2>/dev/null; then
   tty_readable=1
 fi
 

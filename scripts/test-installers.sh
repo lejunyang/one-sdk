@@ -254,6 +254,17 @@ OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
 assert_install_set "$install_dir" fixture
 assert_no_transaction_dirs "$install_dir"
 
+# GitHub's Ubuntu runner has /dev/tty permissions but no controlling terminal.
+# dash treats a failed redirection on the `:` special builtin as fatal, so this
+# must exercise the real installer inside a fresh session rather than merely
+# checking `[ -r /dev/tty ]` in the current shell.
+if [[ $(uname -s) == Linux ]] && command -v setsid >/dev/null 2>&1; then
+  no_tty_install_dir="$test_root/no-tty-bin"
+  setsid -w env     OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port"     OSDK_REPOSITORY=example/one-sdk     OSDK_SETUP_SHELLS=none     sh "$repo_root/install.sh"       --version 9.8.7       --target "$target"       --install-dir "$no_tty_install_dir"       </dev/null
+  assert_install_set "$no_tty_install_dir" fixture
+  assert_no_transaction_dirs "$no_tty_install_dir"
+fi
+
 # Probe recovery independently from a successful reinstall: the wrapper aborts
 # the next transaction's first stage copy, before it can touch a destination.
 init_recovery_dir="$test_root/init-recovery-bin"
