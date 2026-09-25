@@ -1801,12 +1801,7 @@ fn static_catalog_cache(ctx: &Ctx, digest: &str) -> PathBuf {
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
-    }
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&temporary, bytes).map_err(|error| Error::io(&temporary, error))?;
-    std::fs::rename(&temporary, path).map_err(|error| Error::io(path, error))
+    crate::fs::write_atomic(path, bytes).map_err(|error| Error::io(path, error))
 }
 
 fn postprocess_archive(ctx: &Ctx, locator: &InstallLocator, rules: &AssetRules) -> Result<()> {

@@ -40,6 +40,7 @@ pub mod container;
 pub mod deps;
 pub mod dirs;
 pub mod error;
+pub mod fs;
 pub mod http;
 pub mod i18n;
 pub mod inventory;

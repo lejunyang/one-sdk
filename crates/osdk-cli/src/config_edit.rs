@@ -978,8 +978,10 @@ fn save_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
         file.sync_all()
             .with_context(|| format!("syncing {}", temporary.display()))?;
         drop(file);
-        replace_file(&temporary, path)?;
-        sync_parent_directory(parent)?;
+        osdk_core::fs::atomic_replace(&temporary, path)
+            .with_context(|| "replacing configuration file".to_string())?;
+        osdk_core::fs::sync_parent(parent)
+            .with_context(|| format!("syncing configuration directory {}", parent.display()))?;
         Ok(())
     })();
     if result.is_err() {
@@ -987,58 +989,6 @@ fn save_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
     }
     result
 }
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(source, destination)
-        .with_context(|| format!("replacing {}", destination.display()))
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-    }
-    const REPLACE_EXISTING: u32 = 0x1;
-    const WRITE_THROUGH: u32 = 0x8;
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            REPLACE_EXISTING | WRITE_THROUGH,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| "replacing configuration file".to_string());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> Result<()> {
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| format!("syncing configuration directory {}", parent.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> Result<()> {
-    Ok(())
-}
-
 fn find_project_config(start: &Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(dir) = cur {

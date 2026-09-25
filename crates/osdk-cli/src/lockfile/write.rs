@@ -1112,65 +1112,14 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all()
             .with_context(|| osdk_core::t!("err.fs_file_sync", path = temporary.display()))?;
         drop(file);
-        atomic_replace(&temporary, path)?;
-        sync_parent_directory(parent)?;
+        osdk_core::fs::atomic_replace(&temporary, path)
+            .with_context(|| osdk_core::t!("err.fs_file_replace", path = path.display()))?;
+        osdk_core::fs::sync_parent(parent)
+            .with_context(|| format!("syncing lockfile directory {}", parent.display()))?;
         Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
     result
-}
-
-#[cfg(unix)]
-pub(crate) fn sync_parent_directory(parent: &Path) -> Result<()> {
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| format!("syncing lockfile directory {}", parent.display()))
-}
-
-#[cfg(not(unix))]
-pub(crate) fn sync_parent_directory(_parent: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(not(windows))]
-pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(source, destination)
-        .with_context(|| osdk_core::t!("err.fs_file_replace", path = destination.display()))
-}
-
-#[cfg(windows)]
-pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn MoveFileExW(
-            existing_file_name: *const u16,
-            new_file_name: *const u16,
-            flags: u32,
-        ) -> i32;
-    }
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| osdk_core::t!("err.fs_file_replace", path = destination.display()));
-    }
-    Ok(())
 }
