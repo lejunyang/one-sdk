@@ -765,11 +765,17 @@ pub enum ModelCommand {
         #[arg(long)]
         no_lock: bool,
     },
-    /// Materialize every model the project lock declares.
+    /// Materialize every declared model: replay the lock, or bootstrap `[models]`.
     ///
-    /// The counterpart to `install` for tools: `pull` writes the lock, `sync`
-    /// replays it. Without this the `[models]` section could be written but never
-    /// read back, so a committed lock did not describe a reproducible state.
+    /// The no-argument way to fetch a whole project's models. When the lock has
+    /// model entries it replays them; when it has none it reads the `[models]`
+    /// declarations applicable to this platform, performs the first pull, and
+    /// writes the resulting lock entries. A snapshot already present and
+    /// verifying is skipped rather than re-downloaded.
+    ///
+    /// This is the counterpart to `install` for tools, but a separate verb:
+    /// `install` deliberately does not fetch models, because weights are far too
+    /// large to download as a side effect of installing tools.
     Sync {
         /// Remove local snapshots the lock no longer declares.
         ///
