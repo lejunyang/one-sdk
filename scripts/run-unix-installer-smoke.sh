@@ -11,13 +11,13 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
 set +e
-"$installer_smoke" 2>&1 | tee "$log"
+bash "$installer_smoke" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 set -e
 
 if [[ $status -eq 2 && ! -s "$log" ]]; then
     echo "installer smoke exited 2 without output; retrying once" >&2
-    "$installer_smoke"
+    bash "$installer_smoke"
     exit $?
 fi
 

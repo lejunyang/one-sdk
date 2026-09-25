@@ -654,8 +654,17 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
         String::from_utf8_lossy(&output.stderr)
     );
     server.join().unwrap();
-    let path = run_isolated(temporary.path(), &["model", "path", "fixture"]);
-    assert!(path.status.success());
+    let path = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["model", "path", "fixture"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        path.status.success(),
+        "{}",
+        String::from_utf8_lossy(&path.stderr)
+    );
     let snapshot = PathBuf::from(String::from_utf8(path.stdout).unwrap().trim());
     assert_eq!(
         std::fs::read(snapshot.join("config.json")).unwrap(),
@@ -752,10 +761,16 @@ fn declared_model_pull_records_views_in_lock_and_renders_view() {
     assert!(lock.contains("\"config.json\" = \"configs\""), "{lock}");
 
     // 2) The view was rendered: read the actual placed file through the view.
-    let view_list = run_isolated_in(
+    let view_list = run_isolated_in_with_env(
         temporary.path(),
         &project,
         &["model", "view", "path", "comfyui"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        view_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&view_list.stderr)
     );
     let view_root = PathBuf::from(String::from_utf8(view_list.stdout).unwrap().trim());
     let placed = view_root.join("configs").join("config.json");
@@ -884,7 +899,7 @@ fn model_source_test_probes_target_file_and_prints_ranking() {
             } else {
                 assert!(request
                     .to_ascii_lowercase()
-                    .contains("range: bytes=0-1048575"));
+                    .contains("range: bytes=0-65535"));
                 stream
                     .write_all(
                         b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/4\r\nConnection: close\r\n\r\ndata",
@@ -6244,7 +6259,7 @@ fn a_custom_provider_runs_and_tracks_its_own_freshness() {
     let run = if cfg!(windows) {
         "cmd /c mkdir generated"
     } else {
-        "mkdir generated"
+        "/bin/mkdir generated"
     };
     std::fs::write(
         project.join("osdk.toml"),
