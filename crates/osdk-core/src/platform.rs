@@ -205,22 +205,19 @@ impl Arch {
 }
 
 impl Libc {
-    /// Detect libc flavor. Only meaningful on Linux; elsewhere returns `None`.
+    /// Detect the libc ABI this binary was built for.
     ///
-    /// We detect musl by checking whether the dynamic loader path or ldd output
-    /// mentions musl. This is best-effort; backends can override.
+    /// A host may have several libc loaders installed at once (for example,
+    /// `musl-tools` on Ubuntu). Their presence does not change the ABI of the
+    /// running executable, so filesystem probes would make platform keys and
+    /// artifact selection depend on unrelated cross-compilation packages.
     pub fn current() -> Libc {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_env = "musl"))]
         {
-            if cfg!(target_env = "musl") {
-                return Libc::Musl;
-            }
-            // Best-effort runtime detection: musl systems ship `ld-musl-*.so`.
-            if std::path::Path::new("/lib/ld-musl-x86_64.so.1").exists()
-                || std::path::Path::new("/lib/ld-musl-aarch64.so.1").exists()
-            {
-                return Libc::Musl;
-            }
+            Libc::Musl
+        }
+        #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+        {
             Libc::Glibc
         }
         #[cfg(not(target_os = "linux"))]
@@ -456,6 +453,16 @@ impl fmt::Display for Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_libc_follows_the_binary_abi() {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        assert_eq!(Libc::current(), Libc::Glibc);
+        #[cfg(all(target_os = "linux", target_env = "musl"))]
+        assert_eq!(Libc::current(), Libc::Musl);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(Libc::current(), Libc::None);
+    }
 
     #[test]
     fn llvm_triple_shape() {
