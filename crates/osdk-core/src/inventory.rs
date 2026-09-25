@@ -489,6 +489,12 @@ pub fn scan_installs(scan_root: &Path, options: &ScanOptions) -> Result<ScanRepo
     scan_installs_within(scan_root, scan_root, options)
 }
 
+fn regular_file_in(directory: &Path, name: &str) -> Option<PathBuf> {
+    let path = directory.join(name);
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    (!metadata.file_type().is_symlink() && metadata.is_file()).then_some(path)
+}
+
 /// `identity_root` is what an install root is checked to be canonical against;
 /// `scan_root` is only where the walk starts. They differ when scanning a single
 /// tool's subtree -- see `scan_installs_for_tool`.
@@ -571,16 +577,44 @@ fn scan_installs_within(
     // `installs/<tool>/<version>/<install_id>` -- so nothing inside an install
     // can itself be a canonical install root. Descending into one therefore
     // cannot find another manifest, it only walks the payload: one conda prefix
-    // carries a full Python/mingw distribution. Measured on this machine, this
-    // pruning takes the walk from 8,268 directories and 84,352 stat calls down
-    // to 7,268 and 65,736 -- real, but only 12% of the waste, because it can
-    // only fire inside an install. The namespace filter above is what removes
-    // the rest. Manual iteration (rather than a `for` loop) is what lets us
-    // call `skip_current_dir`.
+    // carries a full Python/mingw distribution.
+    //
+    // Probe when the directory itself is yielded. Waiting until WalkDir yields
+    // the manifest file is order-dependent: if it enumerates `share/` first,
+    // `skip_current_dir` comes too late and the payload has already been walked.
+    // The file branch remains as a race-safe fallback for a manifest created
+    // after its parent directory was yielded.
     while let Some(entry) = walker.next() {
         match entry {
             Ok(entry) => {
-                if entry.file_type().is_symlink() || !entry.file_type().is_file() {
+                if entry.file_type().is_symlink() {
+                    continue;
+                }
+                if entry.file_type().is_dir() {
+                    let current_manifest = regular_file_in(entry.path(), INVENTORY_FILE);
+                    let legacy_manifest = regular_file_in(entry.path(), LEGACY_INVENTORY_FILE);
+                    if current_manifest.is_some() || legacy_manifest.is_some() {
+                        if let Some(manifest_path) = current_manifest {
+                            manifest_paths.push(manifest_path);
+                        }
+                        if let Some(manifest_path) = legacy_manifest {
+                            legacy_installs.push(LegacyDynamicInstall {
+                                install_root: entry.path().to_path_buf(),
+                                manifest_path,
+                            });
+                        }
+                        walker.skip_current_dir();
+                        if manifest_paths.len() + legacy_installs.len() > options.max_manifests {
+                            return Err(Error::other(format!(
+                                "dynamic tool inventory scan exceeded manifest limit of {} under {}",
+                                options.max_manifests,
+                                scan_root.display()
+                            )));
+                        }
+                    }
+                    continue;
+                }
+                if !entry.file_type().is_file() {
                     continue;
                 }
                 if entry.file_name() == LEGACY_INVENTORY_FILE {
@@ -591,8 +625,6 @@ fn scan_installs_within(
                             manifest_path,
                         });
                     }
-                    // Same reasoning as the current-format branch below: an
-                    // install's payload cannot contain another install root.
                     walker.skip_current_dir();
                     if manifest_paths.len() + legacy_installs.len() > options.max_manifests {
                         return Err(Error::other(format!(
@@ -607,8 +639,6 @@ fn scan_installs_within(
                     continue;
                 }
                 manifest_paths.push(entry.into_path());
-                // Stop descending: the rest of this directory is the installed
-                // payload, and no canonical install root can live inside it.
                 walker.skip_current_dir();
                 if manifest_paths.len() > options.max_manifests {
                     return Err(Error::other(format!(
