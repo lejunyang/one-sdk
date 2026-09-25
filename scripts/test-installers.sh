@@ -260,7 +260,15 @@ assert_no_transaction_dirs "$install_dir"
 # checking `[ -r /dev/tty ]` in the current shell.
 if [[ $(uname -s) == Linux ]] && command -v setsid >/dev/null 2>&1; then
   no_tty_install_dir="$test_root/no-tty-bin"
-  setsid -w env     OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port"     OSDK_REPOSITORY=example/one-sdk     OSDK_SETUP_SHELLS=none     sh "$repo_root/install.sh"       --version 9.8.7       --target "$target"       --install-dir "$no_tty_install_dir"       </dev/null
+  setsid -w env \
+    OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
+    OSDK_REPOSITORY=example/one-sdk \
+    OSDK_SETUP_SHELLS=none \
+    sh "$repo_root/install.sh" \
+      --version 9.8.7 \
+      --target "$target" \
+      --install-dir "$no_tty_install_dir" \
+      </dev/null
   assert_install_set "$no_tty_install_dir" fixture
   assert_no_transaction_dirs "$no_tty_install_dir"
 fi
