@@ -1297,25 +1297,26 @@ fn avd_env_applies(family: &str) -> bool {
 /// separator, a different case on Windows, or a path reached through a link --
 /// is not reported as a conflict. Falls back to a literal comparison when a path
 /// cannot be canonicalized, which happens when it does not exist yet.
+fn normalized_directory_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().replace('/', "\\");
+    let trimmed = text.trim_end_matches('\\');
+    if cfg!(windows) {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn same_directory(external: &str, managed: &std::path::Path) -> bool {
     let external = std::path::Path::new(external);
     match (
         dunce::canonicalize(external).ok(),
         dunce::canonicalize(managed).ok(),
     ) {
-        (Some(left), Some(right)) => left == right,
-        _ => {
-            let normalize = |path: &std::path::Path| {
-                let text = path.to_string_lossy().replace('/', "\\");
-                let trimmed = text.trim_end_matches('\\').to_string();
-                if cfg!(windows) {
-                    trimmed.to_ascii_lowercase()
-                } else {
-                    trimmed
-                }
-            };
-            normalize(external) == normalize(managed)
+        (Some(left), Some(right)) => {
+            normalized_directory_path(&left) == normalized_directory_path(&right)
         }
+        _ => normalized_directory_path(external) == normalized_directory_path(managed),
     }
 }
 
