@@ -11,7 +11,7 @@ pub(crate) fn package_install_dir(project_dir: &Path, package: &str) -> PathBuf 
     node_modules.join(package)
 }
 
-pub(crate) fn package_bin_entries(
+pub fn package_bin_entries(
     manifest: &serde_json::Value,
     package: &str,
 ) -> Result<Vec<(String, PathBuf)>> {
@@ -63,12 +63,17 @@ pub(crate) fn package_bin_entries(
 }
 
 pub(crate) fn valid_project_bin_name(name: &str) -> bool {
+    // The last clause folds in the cmd/PowerShell metacharacters the global
+    // install path used to reject on its own: a bin name reaching a Windows
+    // .cmd launcher must not carry shell operators. Keeping it here means both
+    // the project and global paths share one rule instead of two that drift.
     !name.is_empty()
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\'])
         && !name.chars().any(char::is_control)
         && !is_windows_reserved_component(name)
+        && !name.contains(['%', '!', '^', '&', '|', '<', '>', '(', ')'])
 }
 
 #[cfg(not(windows))]
@@ -521,7 +526,7 @@ pub(crate) fn discover_global_bins(
     Ok(bins)
 }
 
-pub(crate) fn global_bin_entry(bin_dir: &Path, name: &str) -> Option<PathBuf> {
+pub fn global_bin_entry(bin_dir: &Path, name: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     let candidates = [
         bin_dir.join(format!("{name}.cmd")),

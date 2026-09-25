@@ -617,7 +617,8 @@ pub(crate) fn normalize_global_bins(
         )
     })?;
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&package_json)?)?;
-    let entries = package_bin_entries(&manifest, backend.package())?;
+    let entries =
+        osdk_core::backend::npm_package::package_bin_entries(&manifest, backend.package())?;
     let package_dir = package_json
         .parent()
         .ok_or_else(|| anyhow!("package manifest has no parent"))?;
@@ -1153,7 +1154,7 @@ pub(crate) fn validate_declared_package_bins(
             manifest_path.display()
         )
     })?;
-    let entries = package_bin_entries(manifest, package)?;
+    let entries = osdk_core::backend::npm_package::package_bin_entries(manifest, package)?;
     let canonical_package = dunce::canonicalize(package_dir)?;
     for (name, target) in entries {
         if target.is_absolute()
@@ -1179,12 +1180,13 @@ pub(crate) fn validate_declared_package_bins(
                 package_dir.display()
             ));
         }
-        let _launcher = global_bin_entry(bin_dir, &name).ok_or_else(|| {
-            anyhow!(
-                "global npm package {package} did not publish declared bin `{name}` under {}",
-                bin_dir.display()
-            )
-        })?;
+        let _launcher = osdk_core::backend::npm_package::global_bin_entry(bin_dir, &name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "global npm package {package} did not publish declared bin `{name}` under {}",
+                    bin_dir.display()
+                )
+            })?;
         #[cfg(unix)]
         {
             let metadata = std::fs::symlink_metadata(&_launcher)?;
@@ -1293,53 +1295,6 @@ pub(crate) fn parse_windows_node_wrapper(path: &Path) -> Result<PathBuf> {
     }
     target.ok_or_else(|| anyhow!("missing command in Windows npm wrapper {}", path.display()))
 }
-
-pub(crate) fn package_bin_entries(
-    manifest: &serde_json::Value,
-    package: &str,
-) -> Result<Vec<(String, PathBuf)>> {
-    let mut entries = match manifest.get("bin") {
-        Some(serde_json::Value::String(path)) => vec![(
-            package.rsplit('/').next().unwrap_or(package).to_string(),
-            PathBuf::from(path),
-        )],
-        Some(serde_json::Value::Object(entries)) => entries
-            .iter()
-            .filter_map(|(name, path)| {
-                path.as_str()
-                    .map(|path| (name.clone(), PathBuf::from(path)))
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-    entries.retain(|(name, _)| {
-        !name.is_empty()
-            && !name.contains(['/', '\\'])
-            && !name.contains(['%', '!', '^', '&', '|', '<', '>', '(', ')'])
-    });
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    entries.dedup_by(|left, right| left.0 == right.0);
-    if entries.is_empty() {
-        return Err(anyhow!(
-            "npm package {package} declares no safe executable bins"
-        ));
-    }
-    Ok(entries)
-}
-
-pub(crate) fn global_bin_entry(bin_dir: &Path, name: &str) -> Option<PathBuf> {
-    #[cfg(windows)]
-    let candidates = [
-        bin_dir.join(format!("{name}.cmd")),
-        bin_dir.join(format!("{name}.exe")),
-        bin_dir.join(format!("{name}.bat")),
-        bin_dir.join(name),
-    ];
-    #[cfg(not(windows))]
-    let candidates = [bin_dir.join(name)];
-    candidates.into_iter().find(|candidate| candidate.exists())
-}
-
 pub(crate) fn find_package_json(root: &Path, package: &str) -> Option<PathBuf> {
     let suffix = format!("node_modules/{package}/package.json").replace('\\', "/");
     walkdir::WalkDir::new(root)
