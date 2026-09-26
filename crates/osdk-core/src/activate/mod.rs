@@ -97,7 +97,7 @@ _osdk_hook
         Shell::Powershell => format!(
             r#"# osdk shell integration (powershell)
 $script:OsdkHookRunning = $false
-function Invoke-OsdkHook {{
+function global:Invoke-OsdkHook {{
   # Inside `osdk run`, the task already received its environment from the
   # runner. Re-deriving it here would discard the per-task `env` and any tool
   # the task just installed -- and on a project whose config is untrusted it
@@ -245,7 +245,7 @@ if ((Test-Path Variable:script:OsdkOriginalPrompt) -and $script:OsdkOriginalProm
 # Older sessions activated before the prompt hook wired PostCommandLookupAction;
 # clear it too so deactivating an already-running shell fully unhooks.
 $ExecutionContext.SessionState.InvokeCommand.PostCommandLookupAction = $null
-Remove-Item Function:Invoke-OsdkHook -ErrorAction SilentlyContinue
+Remove-Item Function:\Invoke-OsdkHook -ErrorAction SilentlyContinue
 Remove-Variable OsdkHookRunning -Scope Script -ErrorAction SilentlyContinue
 Remove-Item Env:OSDK_MANAGED_ENV,Env:OSDK_ORIGINAL_PATH,Env:OSDK_ORIGINAL_PATH_SET -ErrorAction SilentlyContinue
 "#
@@ -1035,6 +1035,7 @@ mod tests {
 
         let powershell = deactivation_script(Shell::Powershell);
         assert!(powershell.contains("PostCommandLookupAction = $null"));
+        assert!(powershell.contains(r"Remove-Item Function:\Invoke-OsdkHook"));
         assert!(powershell.contains("Remove-Variable OsdkHookRunning"));
     }
 
@@ -1099,6 +1100,7 @@ mod tests {
                 "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n\
                  function global:prompt {{ 'probe> ' }}\n{snippet}\n\
                  if (-not (prompt)) {{ throw 'prompt returned nothing' }}\n\
+                 if ('{label}' -eq 'activation then deactivation' -and (Test-Path Function:global:Invoke-OsdkHook)) {{ throw 'global hook was not removed' }}\n\
                  Write-Output 'STRICT_MODE_OK'\n"
             );
             let output = std::process::Command::new(&pwsh)
