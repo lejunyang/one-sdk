@@ -288,8 +288,9 @@ lua = "..."                          # 或嵌入 Lua（scripts feature，默认�
 容忍失败继续（打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。
 Lua 内的 `osdk.run(...)` / `osdk.sh(...)` 使用任务的 `dir`、环境和 `timeout`；
 `osdk.argv` 保留每个透传参数的原始边界（含空格的参数仍是一个值）。
-常用短名可省略 `osdk.`：`run`、`sh`、`exec`、`env`、`join`、`exists`、`root`、
-`dir`、`task`、`args`、`argv`、`platform`。`exec("prog", ...)` 捕获 stdout/stderr
+常用短名可省略 `osdk.`：`run`、`sh`、`exec`、`which`、`env`、`join`、`exists`、
+`mkdir`、`read`、`write`、`copy`、`move`、`remove`、`glob`、`root`、`dir`、`task`、
+`args`、`argv`、`platform`；另有短表 `path` / `fs`。`exec("prog", ...)` 捕获 stdout/stderr
 并返回 `{code, success, stdout, stderr, *_truncated}`；表形式支持 `cwd`、`env`、
 `stdin`、`check`，或用 `command = "..."` 经平台 shell 捕获。
 **不要用 shell 的 `&`**——它在 cmd、PowerShell 7 与 5.1 下含义各异。

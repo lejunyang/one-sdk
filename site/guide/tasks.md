@@ -198,14 +198,21 @@ return 0
 | `osdk.exec(prog, ...)` | 直接执行并捕获输出，返回结果表 |
 | `osdk.path.join(...)` | 按当前平台的分隔符拼接 |
 | `osdk.path.exists(p)` | 路径是否存在 |
+| `osdk.path.is_file/is_dir/is_absolute(p)` | 路径类型判断 |
+| `osdk.path.parent/basename/extension(p)` | 拆分路径，缺少对应部分时返回 nil |
+| `osdk.path.absolute(p)` / `.relative(target, base?)` | 词法绝对化与相对化，不要求路径已存在 |
+| `osdk.fs.mkdir/read/write/copy/move/remove/glob` | 跨平台文件操作 |
+| `osdk.which(program)` | 按任务的 PATH 查找可执行文件，找不到返回 nil |
 | `osdk.env(name)` | 读环境变量，未设置返回 nil |
 | `osdk.platform.os` / `.windows` / `.arch` | 平台判断 |
 | `osdk.project_root` / `osdk.dir` / `osdk.task` | 位置与身份 |
 | `osdk.args.<名字>` / `osdk.argv` | 声明的参数与剩余参数 |
 
-常用名字同时直接放在全局作用域：`run`、`sh`、`exec`、`env`、`path`、`join`、
-`exists`、`root`、`dir`、`task`、`args`、`argv`、`platform`。因此简单任务不必反复写
-`osdk.`；显式的 `osdk.*` 写法会一直保留，适合担心名字冲突的脚本。
+常用名字同时直接放在全局作用域：`run`、`sh`、`exec`、`which`、`env`、
+`join`、`exists`、`mkdir`、`read`、`write`、`copy`、`move`、`remove`、`glob`，
+以及 `root`、`dir`、`task`、`args`、`argv`、`platform`。`path` 和 `fs` 短表也可用。
+因此简单任务不必反复写 `osdk.`；显式的 `osdk.*` 写法会一直保留，适合担心
+名字冲突的脚本。
 
 构建命令时优先用 `osdk.run`：它的每个参数直接成为一个 argv 条目，含空格或
 特殊字符的值不会被拆开或重新解释。`osdk.sh` 适合写固定的一行命令。
@@ -241,6 +248,27 @@ local result = exec {
 
 local piped = exec { command = "tool-a | tool-b" }
 ```
+
+### 跨平台文件与路径
+
+常见文件操作不需要再分 Windows 和 Unix 写两套命令：
+
+```lua
+local out = join(root, "dist", platform.os)
+mkdir(out)
+write(join(out, "version.txt"), "1.2.3\n")
+copy("assets", join(out, "assets"))       -- 文件或整棵目录
+
+for _, file in ipairs(glob("src/**/*.lua")) do
+  print(relative(file, root))
+end
+```
+
+`read` / `write` 接受 Lua 字符串的原始字节，不强制 UTF-8；`write`、`copy` 和
+`move` 会创建目标的父目录。`remove` 删除文件或整棵目录，目标不存在时返回 false。
+`move` 使用原生 rename，因此源和目标要在同一文件系统。`glob` 的 pattern 相对
+任务 `dir`，返回按字典序排列的绝对路径；目录复制保留符号链接，Windows 上仍受
+系统的符号链接权限约束。
 
 ### 标准库与环境变量
 

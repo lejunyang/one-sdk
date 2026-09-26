@@ -197,8 +197,9 @@ osdk run ci --dry-run
 [项目任务](site/guide/tasks.md)。
 
 需要分支、循环或读取子进程输出时可用内嵌 Lua；常用能力无需长前缀：
-`run("cargo", "test")` 流式执行，`exec("git", "status", "--short")` 捕获输出，
-同时保留完整的 `osdk.*` 写法。
+`run("cargo", "test")` 流式执行，`exec("git", "status", "--short")` 捕获输出；
+`join`、`mkdir`、`copy`、`glob` 等函数则避免依赖平台专属文件命令，同时保留完整的
+`osdk.*` 写法。
 
 ## 场景：从直接 HTTPS 制品安装工具
 

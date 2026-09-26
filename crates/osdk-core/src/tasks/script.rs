@@ -285,7 +285,183 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
         .create_function(move |_, target: String| Ok(resolve_path(&dir, &target).exists()))
         .map_err(to_lua)?;
     path.set("exists", exists).map_err(to_lua)?;
+    let dir = context.dir.clone();
+    path.set(
+        "is_file",
+        lua.create_function(move |_, target: String| Ok(resolve_path(&dir, &target).is_file()))
+            .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    path.set(
+        "is_dir",
+        lua.create_function(move |_, target: String| Ok(resolve_path(&dir, &target).is_dir()))
+            .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    path.set(
+        "is_absolute",
+        lua.create_function(|_, target: String| Ok(Path::new(&target).is_absolute()))
+            .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    path.set(
+        "parent",
+        lua.create_function(|_, target: String| {
+            Ok(Path::new(&target)
+                .parent()
+                .map(|path| path.to_string_lossy().to_string()))
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    path.set(
+        "basename",
+        lua.create_function(|_, target: String| {
+            Ok(Path::new(&target)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string()))
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    path.set(
+        "extension",
+        lua.create_function(|_, target: String| {
+            Ok(Path::new(&target)
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_string()))
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    path.set(
+        "absolute",
+        lua.create_function(move |_, target: String| {
+            Ok(normalize_path(&resolve_path(&dir, &target))
+                .to_string_lossy()
+                .to_string())
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    path.set(
+        "relative",
+        lua.create_function(move |_, (target, base): (String, Option<String>)| {
+            let target = normalize_path(&resolve_path(&dir, &target));
+            let base = normalize_path(&resolve_path(&dir, base.as_deref().unwrap_or(".")));
+            Ok(relative_path(&target, &base).to_string_lossy().to_string())
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
     osdk.set("path", path).map_err(to_lua)?;
+
+    // File helpers resolve relative paths from the task directory and raise on
+    // failure. They make the portable spelling shorter than shelling out to
+    // cp/mkdir/rm (which do not exist on a clean Windows machine).
+    let fs = lua.create_table().map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "mkdir",
+        lua.create_function(move |_, target: String| {
+            let target = resolve_path(&dir, &target);
+            std::fs::create_dir_all(&target).map_err(|error| fs_error("mkdir", &target, error))?;
+            Ok(target.to_string_lossy().to_string())
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "read",
+        lua.create_function(move |lua, target: String| {
+            let target = resolve_path(&dir, &target);
+            let contents =
+                std::fs::read(&target).map_err(|error| fs_error("read", &target, error))?;
+            lua.create_string(contents)
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "write",
+        lua.create_function(move |_, (target, contents): (String, mlua::String)| {
+            let target = resolve_path(&dir, &target);
+            ensure_parent(&target)?;
+            std::fs::write(&target, contents.as_bytes())
+                .map_err(|error| fs_error("write", &target, error))?;
+            Ok(target.to_string_lossy().to_string())
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "copy",
+        lua.create_function(move |_, (source, target): (String, String)| {
+            let source = resolve_path(&dir, &source);
+            let target = resolve_path(&dir, &target);
+            copy_path(&source, &target)?;
+            Ok(target.to_string_lossy().to_string())
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "move",
+        lua.create_function(move |_, (source, target): (String, String)| {
+            let source = resolve_path(&dir, &source);
+            let target = resolve_path(&dir, &target);
+            ensure_parent(&target)?;
+            std::fs::rename(&source, &target).map_err(|error| fs_error("move", &source, error))?;
+            Ok(target.to_string_lossy().to_string())
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "remove",
+        lua.create_function(move |_, target: String| {
+            let target = resolve_path(&dir, &target);
+            remove_path(&target)
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let dir = context.dir.clone();
+    fs.set(
+        "glob",
+        lua.create_function(move |lua, pattern: String| {
+            let matches = glob_paths(&dir, &pattern)?;
+            let result = lua.create_table()?;
+            for (index, path) in matches.iter().enumerate() {
+                result.set(index + 1, path.to_string_lossy().to_string())?;
+            }
+            Ok(result)
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    osdk.set("fs", fs).map_err(to_lua)?;
+
+    let dir = context.dir.clone();
+    let search_path = context.env.get("PATH").cloned();
+    osdk.set(
+        "which",
+        lua.create_function(move |_, program: String| {
+            Ok(which::which_in(&program, search_path.as_deref(), &dir)
+                .ok()
+                .map(|path| path.to_string_lossy().to_string()))
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
 
     // `osdk.env(name)` -- read an environment variable, nil when unset.
     let env_lookup = context.env.clone();
@@ -302,15 +478,33 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     // The table remains the explicit, collision-resistant API. Task scripts
     // also get a small prelude so the common case reads like a task DSL rather
     // than host-API plumbing: `run(...)`, `exec(...)`, `root`, `args`.
-    for name in ["run", "sh", "exec", "env"] {
+    for name in ["run", "sh", "exec", "env", "which"] {
         let value: Value = osdk.get(name).map_err(to_lua)?;
         globals.set(name, value).map_err(to_lua)?;
     }
     let path: Value = osdk.get("path").map_err(to_lua)?;
     globals.set("path", path).map_err(to_lua)?;
     let path: mlua::Table = osdk.get("path").map_err(to_lua)?;
-    for name in ["join", "exists"] {
+    for name in [
+        "join",
+        "exists",
+        "is_file",
+        "is_dir",
+        "is_absolute",
+        "parent",
+        "basename",
+        "extension",
+        "absolute",
+        "relative",
+    ] {
         let value: Value = path.get(name).map_err(to_lua)?;
+        globals.set(name, value).map_err(to_lua)?;
+    }
+    let fs: Value = osdk.get("fs").map_err(to_lua)?;
+    globals.set("fs", fs).map_err(to_lua)?;
+    let fs: mlua::Table = osdk.get("fs").map_err(to_lua)?;
+    for name in ["mkdir", "read", "write", "copy", "move", "remove", "glob"] {
+        let value: Value = fs.get(name).map_err(to_lua)?;
         globals.set(name, value).map_err(to_lua)?;
     }
     for (short, full) in [
@@ -478,6 +672,183 @@ fn resolve_path(dir: &Path, target: &str) -> PathBuf {
     }
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .file_name()
+                    .is_some_and(|name| name != std::ffi::OsStr::new(".."))
+                {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn relative_path(target: &Path, base: &Path) -> PathBuf {
+    let target: Vec<_> = target.components().collect();
+    let base: Vec<_> = base.components().collect();
+    let common = target
+        .iter()
+        .zip(&base)
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    // Different Windows drive prefixes (or absolute versus relative inputs)
+    // have no meaningful lexical relative path.
+    if common == 0 && (target.first() != base.first()) {
+        return target
+            .iter()
+            .map(|component| component.as_os_str())
+            .collect();
+    }
+
+    let mut result = PathBuf::new();
+    for component in &base[common..] {
+        if matches!(component, std::path::Component::Normal(_)) {
+            result.push("..");
+        }
+    }
+    for component in &target[common..] {
+        result.push(component.as_os_str());
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    result
+}
+
+fn fs_error(action: &str, path: &Path, error: std::io::Error) -> mlua::Error {
+    mlua::Error::external(format!("cannot {action} `{}`: {error}", path.display()))
+}
+
+fn ensure_parent(path: &Path) -> mlua::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| fs_error("create directory", parent, error))?;
+    }
+    Ok(())
+}
+
+fn copy_path(source: &Path, target: &Path) -> mlua::Result<()> {
+    let metadata =
+        std::fs::symlink_metadata(source).map_err(|error| fs_error("inspect", source, error))?;
+    if metadata.file_type().is_symlink() {
+        ensure_parent(target)?;
+        let link =
+            std::fs::read_link(source).map_err(|error| fs_error("read link", source, error))?;
+        create_symlink(&link, target, source)
+            .map_err(|error| fs_error("copy link", source, error))?;
+        return Ok(());
+    }
+    if metadata.is_file() {
+        ensure_parent(target)?;
+        std::fs::copy(source, target).map_err(|error| fs_error("copy", source, error))?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(mlua::Error::external(format!(
+            "cannot copy `{}`: unsupported file type",
+            source.display()
+        )));
+    }
+
+    std::fs::create_dir_all(target).map_err(|error| fs_error("create directory", target, error))?;
+    for entry in
+        std::fs::read_dir(source).map_err(|error| fs_error("read directory", source, error))?
+    {
+        let entry = entry.map_err(|error| fs_error("read directory", source, error))?;
+        copy_path(&entry.path(), &target.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(link: &Path, target: &Path, _source: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(link, target)
+}
+
+#[cfg(windows)]
+fn create_symlink(link: &Path, target: &Path, source: &Path) -> std::io::Result<()> {
+    if std::fs::metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
+        std::os::windows::fs::symlink_dir(link, target)
+    } else {
+        std::os::windows::fs::symlink_file(link, target)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_link: &Path, _target: &Path, _source: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symbolic links are not supported on this platform",
+    ))
+}
+
+fn remove_path(target: &Path) -> mlua::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(fs_error("inspect", target, error)),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(target).map_err(|error| fs_error("remove", target, error))?;
+    } else {
+        std::fs::remove_file(target).map_err(|error| fs_error("remove", target, error))?;
+    }
+    Ok(true)
+}
+
+fn glob_paths(dir: &Path, pattern: &str) -> mlua::Result<Vec<PathBuf>> {
+    if Path::new(pattern).is_absolute() {
+        return Err(mlua::Error::external(
+            "glob patterns must be relative to the task directory",
+        ));
+    }
+    let pattern = pattern.replace('\\', "/");
+    let matcher = globset::Glob::new(&pattern)
+        .map_err(mlua::Error::external)?
+        .compile_matcher();
+    let mut base = dir.to_path_buf();
+    for segment in pattern.split('/') {
+        if segment.chars().any(|character| "*?[{".contains(character)) {
+            break;
+        }
+        if !segment.is_empty() && segment != "." {
+            base.push(segment);
+        }
+    }
+    let mut matches = Vec::new();
+    if !base.exists() {
+        return Ok(matches);
+    }
+    for entry in walkdir::WalkDir::new(base).follow_links(false) {
+        let entry = entry.map_err(mlua::Error::external)?;
+        let relative = entry
+            .path()
+            .strip_prefix(dir)
+            .map_err(mlua::Error::external)?;
+        let portable = relative.to_string_lossy().replace('\\', "/");
+        if matcher.is_match(&portable) {
+            matches.push(entry.into_path());
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -635,8 +1006,17 @@ mod tests {
                 and exec == osdk.exec
                 and env == osdk.env
                 and path == osdk.path
+                and fs == osdk.fs
+                and which == osdk.which
                 and join == osdk.path.join
                 and exists == osdk.path.exists
+                and mkdir == osdk.fs.mkdir
+                and read == osdk.fs.read
+                and write == osdk.fs.write
+                and copy == osdk.fs.copy
+                and move == osdk.fs.move
+                and remove == osdk.fs.remove
+                and glob == osdk.fs.glob
                 and root == osdk.project_root
                 and dir == osdk.dir
                 and task == osdk.task
@@ -646,6 +1026,63 @@ mod tests {
                 and 0 or 1
         "#;
         assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
+
+    #[test]
+    fn filesystem_and_path_helpers_are_relative_to_the_task_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = context();
+        ctx.dir = temp.path().to_path_buf();
+        ctx.project_root = temp.path().to_path_buf();
+
+        let source = r#"
+            mkdir("source/nested")
+            local bytes = "hello" .. string.char(0, 255)
+            write("source/nested/a.txt", bytes)
+            if read("source/nested/a.txt") ~= bytes then return 11 end
+            if not is_file("source/nested/a.txt") then return 12 end
+            if not is_dir("source/nested") then return 13 end
+
+            copy("source", "copied")
+            if read("copied/nested/a.txt") ~= bytes then return 14 end
+            local matched = glob("copied/**/*.txt")
+            if #matched ~= 1 then return 15 end
+
+            local absolute_file = absolute("copied/nested/a.txt")
+            if not is_absolute(absolute_file) then return 16 end
+            if basename(absolute_file) ~= "a.txt" then return 17 end
+            if extension(absolute_file) ~= "txt" then return 18 end
+            if parent(absolute_file) ~= join(dir, "copied", "nested") then return 19 end
+            if relative(absolute_file, dir) ~= join("copied", "nested", "a.txt") then return 20 end
+
+            move("copied/nested/a.txt", "moved/result.txt")
+            if exists("copied/nested/a.txt") or not exists("moved/result.txt") then return 21 end
+            if not remove("copied") then return 22 end
+            if remove("copied") then return 23 end
+            return 0
+        "#;
+        assert_eq!(eval(source, &ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn which_uses_the_task_path() {
+        let executable = std::env::current_exe().unwrap();
+        let mut ctx = context();
+        ctx.dir = executable.parent().unwrap().to_path_buf();
+        ctx.env.insert(
+            "PATH".into(),
+            std::env::join_paths([ctx.dir.clone()])
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+        let name = executable.file_name().unwrap().to_string_lossy();
+        let name = name.replace('\\', "\\\\").replace('"', "\\\"");
+
+        assert_eq!(
+            eval(&format!(r#"return which("{name}") and 0 or 1"#), &ctx).unwrap(),
+            0
+        );
     }
 
     #[test]

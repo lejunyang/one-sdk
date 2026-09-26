@@ -218,15 +218,22 @@ message.
 | `osdk.exec(prog, ...)` | Exec directly and capture output, returning a result table |
 | `osdk.path.join(...)` | Join with the host separator |
 | `osdk.path.exists(p)` | Whether a path exists |
+| `osdk.path.is_file/is_dir/is_absolute(p)` | Inspect the path kind |
+| `osdk.path.parent/basename/extension(p)` | Split a path, returning nil when that part is absent |
+| `osdk.path.absolute(p)` / `.relative(target, base?)` | Lexical absolute/relative paths; files need not exist |
+| `osdk.fs.mkdir/read/write/copy/move/remove/glob` | Cross-platform filesystem operations |
+| `osdk.which(program)` | Resolve an executable on the task PATH, or nil |
 | `osdk.env(name)` | Read an environment variable, nil when unset |
 | `osdk.platform.os` / `.windows` / `.arch` | Platform facts |
 | `osdk.project_root` / `osdk.dir` / `osdk.task` | Location and identity |
 | `osdk.args.<name>` / `osdk.argv` | Declared arguments and the leftovers |
 
 The common names are also available directly as globals: `run`, `sh`, `exec`,
-`env`, `path`, `join`, `exists`, `root`, `dir`, `task`, `args`, `argv`, and
-`platform`. Small tasks therefore need no repeated `osdk.` prefix. The explicit
-`osdk.*` spellings remain stable for scripts that want collision-resistant names.
+`which`, `env`, `join`, `exists`, `mkdir`, `read`, `write`, `copy`, `move`,
+`remove`, `glob`, `root`, `dir`, `task`, `args`, `argv`, and `platform`. The
+short tables `path` and `fs` are available too. Small tasks therefore need no
+repeated `osdk.` prefix. The explicit `osdk.*` spellings remain stable for
+scripts that want collision-resistant names.
 
 Prefer `osdk.run` when building a command from data: each argument becomes one
 argv entry, so a value with spaces or metacharacters cannot split or be
@@ -266,6 +273,29 @@ local result = exec {
 
 local piped = exec { command = "tool-a | tool-b" }
 ```
+
+### Cross-platform files and paths
+
+Common file operations no longer need separate Windows and Unix commands:
+
+```lua
+local out = join(root, "dist", platform.os)
+mkdir(out)
+write(join(out, "version.txt"), "1.2.3\n")
+copy("assets", join(out, "assets"))       -- a file or a whole directory
+
+for _, file in ipairs(glob("src/**/*.lua")) do
+  print(relative(file, root))
+end
+```
+
+`read` and `write` accept the raw bytes of a Lua string rather than requiring
+UTF-8. `write`, `copy`, and `move` create destination parents. `remove` deletes
+a file or a whole directory and returns false when it was already absent.
+`move` uses the native rename operation, so source and destination must be on
+the same filesystem. `glob` patterns are relative to the task `dir` and return
+sorted absolute paths. Directory copies preserve symbolic links; on Windows,
+creating those links still depends on the host's symlink permissions.
 
 ### Standard library and environment variables
 
