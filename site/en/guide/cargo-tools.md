@@ -68,9 +68,25 @@ including an explicitly requested prerelease, are accepted when the release
 exists and is not yanked. Semver ranges, wildcards, a leading `v`, and Cargo
 requirement syntax such as `^14` are not accepted.
 
-`osdk list-remote cargo:ripgrep` lists the versions visible through the selected
-Cargo metadata source. osdk currently has crates.io and rsproxy defaults and
-uses the normal source probing and cache policy before choosing one.
+`osdk list-remote cargo:ripgrep` reads the selected registry's standard sparse
+index directly and lists its non-yanked versions. osdk currently has crates.io
+and rsproxy defaults; the same sharded crate entry is used for probing, metadata
+fetching, and caching, so a mirror need not implement crates.io's proprietary Web API.
+
+For a custom Cargo mirror, `--index-url` is the sole authoritative sparse index:
+osdk strips `sparse+` to read version metadata, while Cargo consumes the original
+value. The generic `source add` surface still requires `--download-url`; use the
+same index's ordinary HTTPS base there to keep the configuration unambiguous:
+
+```bash
+osdk source add cargo:ripgrep --id corp \
+  --download-url https://mirror.example.test/index/ \
+  --index-url sparse+https://mirror.example.test/index/
+```
+
+The Cargo backend rejects a missing or non-canonical sparse HTTPS `index_url`
+during probing. Cargo metadata resolution no longer reads crates.io's Web API or
+infers a second registry from `download_url`.
 
 ## Install from an HTTPS Git repository
 
@@ -150,8 +166,11 @@ Both providers run with the ambient environment cleared. osdk supplies a staged
 private `HOME`, `CARGO_HOME`, target directory, temporary directory, and install
 root; `PATH` starts with the selected managed Rust toolchain's bin directory
 and retains sanitized system paths for linkers and build tools, while `RUSTC`
-points to that toolchain. The provider cannot install into the user's normal
-Cargo home or shadow the selected Cargo/rustc through PATH.
+points to that toolchain. For a non-crates.io index, a stage-private Cargo source
+replacement redirects `crates-io` as a whole, so the root crate and every
+transitive dependency use the same mirror without reading or modifying the user's
+normal Cargo configuration. On Windows, only allow-listed variables needed by
+Cargo/libcurl, MSVC discovery, and proxies are restored.
 
 Only validated binaries are published from the stage into the fingerprinted
 osdk install root. Cargo source and build directories are temporary provider

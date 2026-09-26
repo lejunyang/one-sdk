@@ -26,10 +26,11 @@ feature 会经过校验、排序和去重；默认值 `default-features=true` �
 
 ## 解析与精确 Rust 绑定
 
-Registry 解析向常规 ranked-source selector 请求 Cargo metadata。默认来源把
-`https://crates.io/api/v1/crates` 与 `sparse+https://index.crates.io/` 配对，也把
-rsproxy API 与其 sparse index 配对，因此所选 metadata endpoint 与 Cargo index 始终
-一致。响应与缓存 metadata 上限均为 8 MiB。解析会移除 yanked release，再排序和去重；
+Registry 解析向常规 ranked-source selector 请求 Cargo metadata。每个候选都从其标准
+sparse index 按 crate 名长度计算分片路径，并读取逐行 JSON 记录；crates.io 与 rsproxy
+不再需要各自的 Web API。用于探测、实时 metadata 和离线缓存的都是同一个 crate 分片
+URL，因此健康判定与真正的版本解析不会分叉。响应与缓存 metadata 上限均为 8 MiB。
+解析会移除 yanked release，再排序和去重；
 `latest`/前缀请求选择最高稳定匹配，精确请求则可以选择一个未 yanked 的预发布版本。
 所选 index 作为私有解析 metadata 保存，之后传给 provider。Git selector 不需要远端
 版本列表请求，会按原文保留。
@@ -86,7 +87,10 @@ osdk 发布其输出。只有退出码 94 表示“没有兼容 binary artifact�
 权限错误、超时或 capture 失败都是终止错误，不会尝试第二个 provider。Git 来源及需要
 source build 的选项会直接走 `cargo install`。
 
-对于 Registry crate，`cargo install` 会收到精确的 `=<version>`。Git 请求会把 selector
+对于 Registry crate，`cargo install` 会收到精确的 `=<version>`。当 index 不是 crates.io
+官方 sparse index 时，backend 还会只在 stage 私有 `CARGO_HOME/config.toml` 写入
+`[source.crates-io] replace-with`，使完整依赖图都指向所选镜像；单独的 `--index` 仍保留，
+用于明确顶层 Registry。Git 请求会把 selector
 分别转换成 HEAD 不加 flag，或者 `--tag`、`--branch`、`--rev`。Git 专用的 `crate` 值
 会成为 Cargo package 参数。两个路径都会按需传递 `features`、
 `--no-default-features`、`--bin` 和 `--locked`。
@@ -184,7 +188,7 @@ runtime 绑定，因此其中任何 `cargo:` 条目都会被拒绝，必须重�
 针对性回归覆盖：
 
 - 严格的 Registry/Git ID、selector、option 和 lock key 校验；
-- 排除 yanked 版本的 Registry 解析及离线 metadata-cache 读取；
+- sparse index 四类 crate 名分片、逐行 JSON、排除 yanked 版本及离线 metadata-cache 读取；
 - 精确 Rust 注入、Rust-first 调度，以及 lock/runtime 一致性；
 - 大小写不同的 Git 身份和对选项敏感的指纹；
 - 受控 `cargo-binstall` 选择、成功路径、退出码 94 reset/fallback，以及其他所有失败的

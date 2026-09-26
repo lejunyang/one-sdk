@@ -38,10 +38,11 @@ identity.
 ## Resolution and exact Rust binding
 
 Registry resolution asks the normal ranked-source selector for Cargo metadata.
-The defaults pair `https://crates.io/api/v1/crates` with
-`sparse+https://index.crates.io/`, and rsproxy's API with its sparse index. The
-chosen metadata endpoint and Cargo index therefore stay paired. Responses and
-cached metadata are bounded to 8 MiB. Yanked releases are removed, versions are
+Every candidate computes the crate-name shard path in its standard sparse index
+and reads newline-delimited JSON records; neither crates.io nor rsproxy needs a
+separate Web API. Probing, live metadata, and offline caching all use the same
+sharded crate URL, so health ranking cannot diverge from actual version
+resolution. Responses and cached metadata are bounded to 8 MiB. Yanked releases are removed, versions are
 sorted and deduplicated, and `latest`/prefix requests choose the highest stable
 match. An exact request can select a non-yanked prerelease. The selected index
 is carried as private resolution metadata and later passed to the provider. Git
@@ -112,7 +113,11 @@ exit code, spawn error, permission error, timeout, or capture failure is
 terminal; no second provider is tried. Git sources and source-build options go
 directly to `cargo install`.
 
-`cargo install` receives an exact `=<version>` for registry crates. Git requests
+`cargo install` receives an exact `=<version>` for registry crates. When the
+index is not the official crates.io sparse index, the backend also writes a
+`[source.crates-io] replace-with` entry only in the stage-private
+`CARGO_HOME/config.toml`, directing the complete dependency graph to the selected
+mirror; the explicit `--index` still identifies the root registry. Git requests
 translate the selector to no flag for HEAD, or to `--tag`, `--branch`, or
 `--rev`. A Git-only `crate` value supplies Cargo's package argument. Both paths
 pass the requested `features`, `--no-default-features`, `--bin`, and `--locked`
@@ -224,7 +229,7 @@ a dependency graph or cold-offline guarantee.
 The narrow regression suites cover:
 
 - strict registry/Git ID, selector, option, and lock-key validation;
-- non-yanked registry resolution and offline metadata-cache reads;
+- all four sparse-index crate-name shards, newline-delimited JSON, non-yanked registry resolution, and offline metadata-cache reads;
 - exact Rust injection, Rust-first scheduling, and lock/runtime agreement;
 - case-distinct Git identities and option-sensitive fingerprints;
 - controlled `cargo-binstall` selection, success, exit-94 reset/fallback, and

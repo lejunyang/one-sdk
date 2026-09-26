@@ -17,6 +17,19 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
+/// Copy a named allow-list from the current process for a child whose ambient
+/// environment will otherwise be cleared.
+///
+/// The allow-list deliberately remains at each caller: Windows host plumbing,
+/// proxy settings, and compiler discovery are different capabilities, and one
+/// provider must not silently broaden every other provider's environment.
+pub(crate) fn inherited_env_allowlist(names: &[&str]) -> BTreeMap<OsString, OsString> {
+    names
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
+        .collect()
+}
+
 /// A command description that is intentionally not serializable.
 ///
 /// Argument and environment values may contain credentials. Diagnostic output

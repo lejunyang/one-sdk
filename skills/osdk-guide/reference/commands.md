@@ -182,11 +182,13 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 ```bash
 osdk source test node
 osdk source pin node tuna
+osdk source add cargo:ripgrep --id corp --download-url https://mirror.example.test/index/ --index-url sparse+https://mirror.example.test/index/
 osdk --source official install go@1.22
 osdk --yes trust ./osdk.toml
 osdk trust list
 ```
 > 仅声明「装哪些工具/包」不需要 trust；被拒绝时 osdk 会逐条列出是哪些键、各自原因。
+> Cargo 自定义源以 `--index-url sparse+https://.../` 为唯一权威地址；通用命令仍要求 `--download-url`，建议填同一 index 去掉 `sparse+` 后的 HTTPS 基址。
 > 特殊源名：`self`（osdk 自身更新源）、`go-modules`（`GOPROXY`，与工具链源 `go` 独立）。
 
 ## 七、模型快照（model）

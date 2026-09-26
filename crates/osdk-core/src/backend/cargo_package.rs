@@ -29,7 +29,7 @@ use crate::source::Source;
 use crate::tool::{InstallDependency, InstallDependencyKind, InstallIdentity, ToolId};
 use crate::version::{ToolRequest, ToolVersion, VersionInfo, VersionSpec};
 
-const CRATES_IO_API: &str = "https://crates.io/api/v1/crates";
+const CRATES_IO_SPARSE_INDEX: &str = "sparse+https://index.crates.io/";
 const CARGO_METADATA_LIMIT: usize = 8 * 1024 * 1024;
 const CARGO_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const CARGO_RESOLUTION_FILE: &str = "cargo-resolution.json";
@@ -45,7 +45,13 @@ pub fn validate_registry_index(value: &str) -> Result<()> {
         .ok_or_else(|| Error::config("Cargo registry source must use sparse HTTPS"))?;
     let url = reqwest::Url::parse(parsed)
         .map_err(|_| Error::config("Cargo registry source is invalid"))?;
-    if url.scheme() != "https"
+    let loopback_http = cfg!(test)
+        && url.scheme() == "http"
+        && url
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback());
+    if (url.scheme() != "https" && !loopback_http)
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -84,9 +90,9 @@ fn version_infos(metadata: CratesResponse) -> Vec<VersionInfo> {
         .into_iter()
         .filter(|version| !version.yanked)
         .map(|version| VersionInfo {
-            stable: semver::Version::parse(&version.num)
+            stable: semver::Version::parse(&version.vers)
                 .is_ok_and(|version| version.pre.is_empty()),
-            version: version.num,
+            version: version.vers,
             lts: None,
         })
         .collect::<Vec<_>>();
@@ -94,6 +100,84 @@ fn version_infos(metadata: CratesResponse) -> Vec<VersionInfo> {
         .sort_by(|left, right| crate::backend::python::cmp_versions(&left.version, &right.version));
     versions.dedup_by(|left, right| left.version == right.version);
     versions
+}
+
+/// Point the whole dependency graph at the selected index, not just the crate
+/// being installed.
+///
+/// `cargo install --index` redirects only the top-level crate; every
+/// dependency is still fetched from `crates-io`, so a working mirror plus an
+/// unreachable default registry fails on the first transitive dependency
+/// (`unable to update registry crates-io`). Source replacement is the
+/// mechanism that covers the whole graph. This writes into the stage-private
+/// `CARGO_HOME` that `command_env` hands cargo, so the real
+/// `~/.cargo/config.toml` is never read or modified. When the selection is
+/// the official index there is nothing to replace and no file is written.
+fn write_registry_replacement(cargo_home: &Path, tv: &ToolVersion) -> Result<()> {
+    let Some(index) = tv.options.get(LOCKED_CARGO_INDEX_OPTION) else {
+        return Ok(());
+    };
+    if index == CRATES_IO_SPARSE_INDEX {
+        return Ok(());
+    }
+    validate_registry_index(index)?;
+    let config = cargo_home.join("config.toml");
+    let body = format!(
+        "[source.crates-io]\nreplace-with = \"osdk-mirror\"\n\n[source.osdk-mirror]\nregistry = \"{index}\"\n"
+    );
+    std::fs::write(&config, body).map_err(|error| Error::io(&config, error))
+}
+
+/// Where a crate lives in a sparse index.
+///
+/// The registry protocol shards by name length: 1 and 2 character names sit
+/// under `1/` and `2/`, three character names under `3/<first>/`, and
+/// everything else under `<first two>/<next two>/`. Names are lowercased.
+fn sparse_index_crate_path(package: &str) -> String {
+    let name = package.to_ascii_lowercase();
+    match name.len() {
+        0 => name,
+        1 => format!("1/{name}"),
+        2 => format!("2/{name}"),
+        3 => format!("3/{}/{name}", &name[0..1]),
+        _ => format!("{}/{}/{name}", &name[0..2], &name[2..4]),
+    }
+}
+
+/// The metadata URL for a crate in the source's standard sparse index.
+///
+/// Probing and fetching both go through here so that a source osdk ranked as
+/// healthy is a source it can also read versions from -- and, crucially, one
+/// `cargo install` can use, since the index is what cargo itself talks to.
+fn crate_metadata_url(source: &Source, package: &str) -> Result<String> {
+    let index = registry_index(source)?;
+    let base = index
+        .strip_prefix("sparse+")
+        .expect("registry_index validated the sparse prefix");
+    Ok(crate::http::join_url(
+        base,
+        &sparse_index_crate_path(package),
+    ))
+}
+
+/// Parse the newline-delimited JSON records served by a sparse registry index.
+fn parse_crate_metadata(bytes: &[u8]) -> Result<CratesResponse> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| Error::other("Cargo registry metadata is not valid UTF-8"))?;
+    let mut versions = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        versions.push(serde_json::from_str::<CratesVersion>(line)?);
+    }
+    if versions.is_empty() {
+        return Err(Error::other(
+            "Cargo registry metadata contained no versions",
+        ));
+    }
+    Ok(CratesResponse { versions })
 }
 
 fn registry_index(source: &Source) -> Result<String> {
@@ -109,7 +193,7 @@ fn registry_index(source: &Source) -> Result<String> {
 
 #[derive(Debug, Deserialize)]
 struct CratesVersion {
-    num: String,
+    vers: String,
     #[serde(default)]
     yanked: bool,
 }
@@ -341,7 +425,7 @@ impl CargoPackageBackend {
                     last_error = Some(error);
                     continue;
                 }
-                let url = crate::http::join_url(&source.download_url, package);
+                let url = crate_metadata_url(source, package)?;
                 match fetch_live_crate_metadata(ctx, source, &url).await {
                     Ok(metadata) => {
                         return Ok(CargoRegistrySelection {
@@ -361,7 +445,7 @@ impl CargoPackageBackend {
                 }
                 continue;
             }
-            let url = crate::http::join_url(&source.download_url, package);
+            let url = crate_metadata_url(&source, package)?;
             match read_source_cached_crate_metadata(ctx, &source, &url) {
                 Ok(metadata) => {
                     tracing::warn!(
@@ -456,6 +540,7 @@ impl CargoPackageBackend {
     fn command_env(
         &self,
         ctx: &Ctx,
+        tv: &ToolVersion,
         stage: &Path,
         toolchain_bin: &Path,
         rustc: &Path,
@@ -467,8 +552,9 @@ impl CargoPackageBackend {
         for path in [&home, &cargo_home, &target, &tmp] {
             std::fs::create_dir_all(path).map_err(|error| Error::io(path, error))?;
         }
+        write_registry_replacement(&cargo_home, tv)?;
         let path = sanitized_provider_path(ctx, toolchain_bin, std::env::var_os("PATH"))?;
-        Ok(BTreeMap::from([
+        let mut env = BTreeMap::from([
             (OsString::from("HOME"), home.into_os_string()),
             (
                 OsString::from("USERPROFILE"),
@@ -491,7 +577,48 @@ impl CargoPackageBackend {
             (OsString::from("TMP"), stage.join("tmp").into_os_string()),
             (OsString::from("CARGO_TERM_COLOR"), OsString::from("never")),
             (OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")),
-        ]))
+        ]);
+        // Cargo downloads through libcurl, and on Windows a child process
+        // without these cannot resolve a hostname at all: the index fetch dies
+        // with `Could not resolve host: index.crates.io` while the very same
+        // URL answers fine from a shell. Measured directly -- dropping only
+        // `SystemRoot` turns curl exit 0 into exit 6. `go_package` and
+        // `native_npm` already carry these for the same reason; this was the
+        // one provider path that did not, so every `cargo:` install failed
+        // on Windows right after osdk had proved the registry reachable.
+        if ctx.platform.os == crate::platform::Os::Windows {
+            // Two separate needs, both measured on a real host:
+            //   * libcurl cannot resolve a hostname without `SystemRoot`
+            //     (dropping just that one turns curl exit 0 into exit 6);
+            //   * rustc finds the MSVC linker through the Visual Studio
+            //     instance manifests under `ProgramData`, so without it the
+            //     build dies with `linker \`link.exe\` not found` even though
+            //     Build Tools are installed. `ProgramFiles`/(x86) are the
+            //     roots it walks from there.
+            env.extend(crate::process::inherited_env_allowlist(&[
+                "SystemRoot",
+                "SYSTEMROOT",
+                "WINDIR",
+                "ComSpec",
+                "PATHEXT",
+                "ProgramData",
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+            ]));
+        }
+        // A mirror or corporate egress is usually expressed as a proxy in the
+        // environment. osdk's own client reads it, so resolving the version
+        // succeeds; without forwarding it the `cargo install` that follows
+        // would fail against a network osdk just probed successfully.
+        env.extend(crate::process::inherited_env_allowlist(&[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+        ]));
+        Ok(env)
     }
 
     fn cargo_install_args(&self, tv: &ToolVersion, stage: &Path) -> Result<Vec<OsString>> {
@@ -644,7 +771,7 @@ impl CargoPackageBackend {
         }
         let (toolchain_bin, _cargo, rustc) = self.toolchain_bins(ctx, &tv.options)?;
         let stage_root = stage.path().to_path_buf();
-        let env = self.command_env(ctx, &stage_root, &toolchain_bin, &rustc)?;
+        let env = self.command_env(ctx, tv, &stage_root, &toolchain_bin, &rustc)?;
 
         if self.binstall_eligible(ctx, tv) {
             let binstall = controlled_binstall(ctx).expect("eligibility checked");
@@ -670,7 +797,7 @@ impl CargoPackageBackend {
         }
 
         let (toolchain_bin, cargo, rustc) = self.toolchain_bins(ctx, &tv.options)?;
-        let env = self.command_env(ctx, stage.path(), &toolchain_bin, &rustc)?;
+        let env = self.command_env(ctx, tv, stage.path(), &toolchain_bin, &rustc)?;
         match self.run_provider(
             runner,
             &cargo,
@@ -791,7 +918,13 @@ fn clean_provider_workspace(stage: &Path) -> Result<()> {
                     path.display()
                 )));
             }
-            Ok(_) => std::fs::remove_dir_all(&path).map_err(|error| Error::io(&path, error))?,
+            // Forced: a finished `cargo install` leaves a read-only registry
+            // cache under HOME/CARGO_HOME, and a plain remove_dir_all fails on
+            // it with PermissionDenied -- losing an install that had already
+            // succeeded.
+            Ok(_) => {
+                crate::fs::remove_dir_all_forced(&path).map_err(|error| Error::io(&path, error))?
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Error::io(&path, error)),
         }
@@ -879,20 +1012,25 @@ impl Backend for CargoPackageBackend {
     fn default_sources(&self) -> Vec<Source> {
         match self.source {
             CargoSource::Registry { .. } => vec![
-                Source::official("crates-io", CRATES_IO_API)
-                    .with_index("sparse+https://index.crates.io/"),
-                Source::mirror("rsproxy", "https://rsproxy.cn/api/v1/crates", 10)
+                Source::official("crates-io", "https://index.crates.io/")
+                    .with_index(CRATES_IO_SPARSE_INDEX),
+                Source::mirror("rsproxy", "https://rsproxy.cn/index/", 10)
                     .with_index("sparse+https://rsproxy.cn/index/"),
             ],
             CargoSource::Git { .. } => Vec::new(),
         }
     }
 
+    /// Probe the endpoint cargo itself depends on: the sparse index, not the
+    /// web API.
+    ///
+    /// A mirror is free to serve only the index, so probing a vendor-specific
+    /// API can reject a registry Cargo itself could use. The crate entry is a
+    /// stronger probe than `config.json`: it verifies both index reachability
+    /// and availability of the requested package.
     fn probe_url(&self, _ctx: &Ctx, source: &Source) -> Option<String> {
         match &self.source {
-            CargoSource::Registry { package } => {
-                Some(crate::http::join_url(&source.download_url, package))
-            }
+            CargoSource::Registry { package } => crate_metadata_url(source, package).ok(),
             CargoSource::Git { .. } => None,
         }
     }
@@ -1133,7 +1271,7 @@ async fn fetch_live_crate_metadata(
             ))
         }
     };
-    let parsed = serde_json::from_slice(&bytes)?;
+    let parsed = parse_crate_metadata(&bytes)?;
     if let Some(parent) = cache.parent() {
         std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
     }
@@ -1158,7 +1296,7 @@ fn read_source_cached_crate_metadata(
 fn read_cached_crate_metadata(path: &Path) -> Result<CratesResponse> {
     let bytes = crate::inventory::read_stable_regular_file(path, CARGO_METADATA_LIMIT as u64)
         .map_err(|error| Error::io(path, error))?;
-    Ok(serde_json::from_slice(&bytes)?)
+    parse_crate_metadata(&bytes)
 }
 
 #[cfg(test)]
@@ -1304,10 +1442,10 @@ mod tests {
         backend: &CargoPackageBackend,
         base_url: &str,
     ) -> (Source, Source) {
-        let preferred = Source::mirror("preferred", &format!("{base_url}/preferred"), 0)
-            .with_index("sparse+https://preferred.example.test/index/");
-        let fallback = Source::mirror("fallback", &format!("{base_url}/fallback"), 10)
-            .with_index("sparse+https://fallback.example.test/index/");
+        let preferred = Source::mirror("preferred", "https://unused.example.test", 0)
+            .with_index(&format!("sparse+{base_url}/preferred/"));
+        let fallback = Source::mirror("fallback", "https://unused.example.test", 10)
+            .with_index(&format!("sparse+{base_url}/fallback/"));
         ctx.config.sources.selection = crate::source::Selection::Ordered;
         ctx.config.sources.per_tool.insert(
             backend.id().into(),
@@ -1321,7 +1459,7 @@ mod tests {
     }
 
     fn write_crate_metadata_cache(ctx: &Ctx, source: &Source, package: &str, body: &[u8]) {
-        let url = crate::http::join_url(&source.download_url, package);
+        let url = crate_metadata_url(source, package).unwrap();
         let cache = crate::http::source_metadata_cache_path(ctx, source, &url).unwrap();
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(cache, body).unwrap();
@@ -1470,6 +1608,44 @@ mod tests {
         assert!(CargoPackageBackend::from_id("cargo:http://example.test/tool").is_none());
     }
 
+    #[test]
+    fn sparse_index_paths_cover_every_name_length_bucket() {
+        assert_eq!(sparse_index_crate_path("A"), "1/a");
+        assert_eq!(sparse_index_crate_path("Ab"), "2/ab");
+        assert_eq!(sparse_index_crate_path("Abc"), "3/a/abc");
+        assert_eq!(sparse_index_crate_path("Serde"), "se/rd/serde");
+    }
+
+    #[test]
+    fn sparse_metadata_parser_filters_yanked_versions() {
+        let metadata = parse_crate_metadata(
+            b"{\"name\":\"demo\",\"vers\":\"2.0.0\",\"yanked\":true}\n{\"name\":\"demo\",\"vers\":\"1.0.0\",\"yanked\":false}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            version_infos(metadata)
+                .into_iter()
+                .map(|version| version.version)
+                .collect::<Vec<_>>(),
+            ["1.0.0"]
+        );
+    }
+
+    #[test]
+    fn selected_mirror_writes_private_cargo_source_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut version = ToolVersion::new("cargo:ripgrep", "14.1.1");
+        version.options.insert(
+            LOCKED_CARGO_INDEX_OPTION.into(),
+            "sparse+https://mirror.example.test/index/".into(),
+        );
+        write_registry_replacement(temporary.path(), &version).unwrap();
+        let config = std::fs::read_to_string(temporary.path().join("config.toml")).unwrap();
+        assert!(config.contains("[source.crates-io]"));
+        assert!(config.contains("replace-with = \"osdk-mirror\""));
+        assert!(config.contains("registry = \"sparse+https://mirror.example.test/index/\""));
+    }
+
     #[tokio::test]
     async fn exact_registry_resolution_is_network_free_and_records_replay() {
         let temp = tempfile::tempdir().unwrap();
@@ -1491,8 +1667,8 @@ mod tests {
     #[tokio::test]
     async fn online_exact_registry_resolution_requires_non_yanked_metadata_evidence() {
         let server = MetadataServer::start(vec![
-            ("/preferred/ripgrep", "503 Service Unavailable", ""),
-            ("/fallback/ripgrep", "503 Service Unavailable", ""),
+            ("/preferred/ri/pg/ripgrep", "503 Service Unavailable", ""),
+            ("/fallback/ri/pg/ripgrep", "503 Service Unavailable", ""),
         ]);
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = context(temp.path(), false);
@@ -1502,7 +1678,7 @@ mod tests {
             &ctx,
             &preferred,
             "ripgrep",
-            br#"{"versions":[{"num":"14.1.1","yanked":false},{"num":"14.1.0","yanked":true}]}"#,
+            b"{\"name\":\"ripgrep\",\"vers\":\"14.1.1\",\"yanked\":false}\n{\"name\":\"ripgrep\",\"vers\":\"14.1.0\",\"yanked\":true}\n",
         );
 
         let exact = backend
@@ -1512,7 +1688,7 @@ mod tests {
         assert_eq!(exact.version, "14.1.1");
         assert_eq!(
             exact.options[LOCKED_CARGO_INDEX_OPTION],
-            "sparse+https://preferred.example.test/index/"
+            format!("sparse+{}/preferred/", server.base_url)
         );
 
         for missing in ["14.1.0", "99.0.0"] {
@@ -1528,12 +1704,12 @@ mod tests {
         assert_eq!(
             server.requests(),
             vec![
-                "/preferred/ripgrep",
-                "/fallback/ripgrep",
-                "/preferred/ripgrep",
-                "/fallback/ripgrep",
-                "/preferred/ripgrep",
-                "/fallback/ripgrep",
+                "/preferred/ri/pg/ripgrep",
+                "/fallback/ri/pg/ripgrep",
+                "/preferred/ri/pg/ripgrep",
+                "/fallback/ri/pg/ripgrep",
+                "/preferred/ri/pg/ripgrep",
+                "/fallback/ri/pg/ripgrep",
             ]
         );
     }
@@ -1541,11 +1717,11 @@ mod tests {
     #[tokio::test]
     async fn latest_live_fallback_beats_preferred_stale_metadata() {
         let server = MetadataServer::start(vec![
-            ("/preferred/ripgrep", "503 Service Unavailable", ""),
+            ("/preferred/ri/pg/ripgrep", "503 Service Unavailable", ""),
             (
-                "/fallback/ripgrep",
+                "/fallback/ri/pg/ripgrep",
                 "200 OK",
-                r#"{"versions":[{"num":"14.1.1","yanked":false}]}"#,
+                "{\"name\":\"ripgrep\",\"vers\":\"14.1.1\",\"yanked\":false}\n",
             ),
         ]);
         let temp = tempfile::tempdir().unwrap();
@@ -1556,7 +1732,7 @@ mod tests {
             &ctx,
             &preferred,
             "ripgrep",
-            br#"{"versions":[{"num":"99.0.0","yanked":false}]}"#,
+            b"{\"name\":\"ripgrep\",\"vers\":\"99.0.0\",\"yanked\":false}\n",
         );
 
         let resolved = backend
@@ -1567,22 +1743,22 @@ mod tests {
         assert_eq!(resolved.version, "14.1.1");
         assert_eq!(
             resolved.options[LOCKED_CARGO_INDEX_OPTION],
-            "sparse+https://fallback.example.test/index/"
+            format!("sparse+{}/fallback/", server.base_url)
         );
         assert_eq!(
             server.requests(),
-            vec!["/preferred/ripgrep", "/fallback/ripgrep"]
+            vec!["/preferred/ri/pg/ripgrep", "/fallback/ri/pg/ripgrep"]
         );
     }
 
     #[tokio::test]
     async fn exact_live_fallback_yank_state_beats_preferred_stale_metadata() {
         let server = MetadataServer::start(vec![
-            ("/preferred/ripgrep", "503 Service Unavailable", ""),
+            ("/preferred/ri/pg/ripgrep", "503 Service Unavailable", ""),
             (
-                "/fallback/ripgrep",
+                "/fallback/ri/pg/ripgrep",
                 "200 OK",
-                r#"{"versions":[{"num":"14.1.1","yanked":true}]}"#,
+                "{\"name\":\"ripgrep\",\"vers\":\"14.1.1\",\"yanked\":true}\n",
             ),
         ]);
         let temp = tempfile::tempdir().unwrap();
@@ -1593,7 +1769,7 @@ mod tests {
             &ctx,
             &preferred,
             "ripgrep",
-            br#"{"versions":[{"num":"14.1.1","yanked":false}]}"#,
+            b"{\"name\":\"ripgrep\",\"vers\":\"14.1.1\",\"yanked\":false}\n",
         );
 
         let error = backend
@@ -1604,15 +1780,15 @@ mod tests {
         assert!(error.to_string().contains("missing or yanked"), "{error}");
         assert_eq!(
             server.requests(),
-            vec!["/preferred/ripgrep", "/fallback/ripgrep"]
+            vec!["/preferred/ri/pg/ripgrep", "/fallback/ri/pg/ripgrep"]
         );
     }
 
     #[tokio::test]
     async fn stale_fallback_preserves_the_cached_sources_index() {
         let server = MetadataServer::start(vec![
-            ("/preferred/ripgrep", "503 Service Unavailable", ""),
-            ("/fallback/ripgrep", "503 Service Unavailable", ""),
+            ("/preferred/ri/pg/ripgrep", "503 Service Unavailable", ""),
+            ("/fallback/ri/pg/ripgrep", "503 Service Unavailable", ""),
         ]);
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = context(temp.path(), false);
@@ -1624,7 +1800,7 @@ mod tests {
             &ctx,
             &fallback,
             "ripgrep",
-            br#"{"versions":[{"num":"13.0.0","yanked":false}]}"#,
+            b"{\"name\":\"ripgrep\",\"vers\":\"13.0.0\",\"yanked\":false}\n",
         );
 
         let resolved = backend
@@ -1635,11 +1811,11 @@ mod tests {
         assert_eq!(resolved.version, "13.0.0");
         assert_eq!(
             resolved.options[LOCKED_CARGO_INDEX_OPTION],
-            "sparse+https://fallback.example.test/index/"
+            format!("sparse+{}/fallback/", server.base_url)
         );
         assert_eq!(
             server.requests(),
-            vec!["/preferred/ripgrep", "/fallback/ripgrep"]
+            vec!["/preferred/ri/pg/ripgrep", "/fallback/ri/pg/ripgrep"]
         );
     }
 
@@ -1755,6 +1931,20 @@ mod tests {
             .any(|argument| argument == "--no-discover-github-token"));
         for name in ["HOME", "CARGO_HOME", "CARGO_TARGET_DIR", "RUSTC"] {
             assert!(call.environment().contains_key(std::ffi::OsStr::new(name)));
+        }
+        #[cfg(windows)]
+        for name in [
+            "SystemRoot",
+            "ProgramData",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+        ] {
+            if std::env::var_os(name).is_some() {
+                assert!(
+                    call.environment().contains_key(std::ffi::OsStr::new(name)),
+                    "cleared Cargo environment must restore {name}"
+                );
+            }
         }
         assert_eq!(
             std::env::split_paths(

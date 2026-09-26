@@ -501,7 +501,7 @@ pub enum SourceCommand {
         /// Unique source id.
         #[arg(long)]
         id: String,
-        /// Base URL for archive downloads.
+        /// Base HTTP URL used by the backend for downloads or metadata.
         #[arg(long = "download-url")]
         download_url: String,
         /// Version-index / metadata URL (if different from downloads).

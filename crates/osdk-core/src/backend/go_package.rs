@@ -537,11 +537,12 @@ impl GoPackageBackend {
             }
         }
         if ctx.platform.os == crate::platform::Os::Windows {
-            for name in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
-                if let Some(value) = std::env::var_os(name) {
-                    env.insert(OsString::from(name), value);
-                }
-            }
+            env.extend(crate::process::inherited_env_allowlist(&[
+                "SystemRoot",
+                "WINDIR",
+                "ComSpec",
+                "PATHEXT",
+            ]));
         }
         Ok(env)
     }
