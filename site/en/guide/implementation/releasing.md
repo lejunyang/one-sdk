@@ -28,6 +28,15 @@ creates the GitHub tag and Release only after every crate has published, then
 attaches five platform archives and `SHA256SUMS`. A crates.io failure therefore
 cannot leave behind a GitHub Release that appears complete.
 
+The two GNU/Linux archives are built natively by architecture inside an
+`ubuntu:20.04` container. This makes glibc 2.31 the declared minimum instead of
+inheriting whichever libc happens to be on the rolling GitHub runner. Packaging
+also runs the `glibc-baseline` task over both ELFs; it reads their imported
+symbol versions and rejects anything above `GLIBC_2.31`. The workflow first
+runs the same checker with an impossible `0.0` ceiling and requires that probe
+to fail, so a broken parser cannot turn the real green result into false
+evidence.
+
 Install the primary commands from crates.io with:
 
 ```bash

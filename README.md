@@ -37,7 +37,9 @@ irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
 The installers download the latest release and verify it against `SHA256SUMS`.
-They then detect the shells on your system, ask which to configure, and let you
+GNU/Linux release binaries have an explicit glibc 2.31 baseline (Ubuntu 20.04
+or a distribution with a newer glibc). They then detect the shells on your
+system, ask which to configure, and let you
 confirm or change where osdk keeps its config, data, and cache. Each selected
 shell gets the environment variables plus `osdk activate`, so a new shell is
 ready to use. On Windows the current session is activated too; on Unix, add

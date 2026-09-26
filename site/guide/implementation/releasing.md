@@ -22,6 +22,12 @@ crates.io index 与仓库 lockfile 校验可发布依赖。只有 crate
 发布全部成功后，流水线才创建 GitHub tag/Release、归档五个平台的预编译程序并生成
 `SHA256SUMS`。这样不会在 crates.io 发布失败时留下一个看似完整的 GitHub Release。
 
+两个 GNU/Linux 归档按各自架构在 `ubuntu:20.04` 容器里原生构建，因此明确以 glibc 2.31
+为最低版本，不会继承滚动 GitHub runner 当时恰好安装的 libc。打包前还会对两个 ELF 运行
+`glibc-baseline` 任务：读取其导入的符号版本，任何一个超过 `GLIBC_2.31` 都会拒绝发布。
+流水线会先用不可能满足的 `0.0` 上限运行同一检查并要求它失败，避免解析器失效后真实检查
+仍给出虚假的绿色结果。
+
 用户安装主命令时使用：
 
 ```bash

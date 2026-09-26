@@ -17,6 +17,10 @@ curl --proto '=https' --tlsv1.2 -sSf \
 默认安装到 `~/.local/bin`。安装器随后会引导完成 shell 配置，见
 [安装后的 shell 配置](#安装后的-shell-配置)。
 
+GNU/Linux 归档明确以 glibc 2.31 为最低版本（Ubuntu 20.04，或带更新 glibc 的发行版）。
+Release CI 在 Ubuntu 20.04 内构建，并检查两个二进制导入的 GLIBC 符号版本；任何一个超过
+2.31 都会阻断发布。
+
 ## Windows
 
 在 PowerShell 中运行：

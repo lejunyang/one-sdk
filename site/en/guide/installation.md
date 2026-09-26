@@ -16,6 +16,10 @@ curl --proto '=https' --tlsv1.2 -sSf \
 The default destination is `~/.local/bin`. The installer then walks you through
 shell setup, described in [Shell setup](#shell-setup) below.
 
+The GNU/Linux archives have a checked glibc 2.31 minimum (Ubuntu 20.04 or a
+distribution with a newer glibc). Release CI builds them inside Ubuntu 20.04
+and rejects either binary if its imported GLIBC symbol versions exceed 2.31.
+
 ## Windows
 
 Run this in PowerShell:

@@ -141,6 +141,12 @@ when = { os = ["linux", "macos"] }
 description = "Installer smoke test (PowerShell installer)"
 run = "pwsh -NoProfile -File scripts/test-installers.ps1"
 when = { os = "windows" }
+
+[tasks.glibc-baseline]
+description = "Release ELF symbol versions stay at or below the glibc 2.31 contract"
+run = "./scripts/check-glibc-baseline.sh"
+when = { os = "linux" }
+
 [tasks.comfyui-view-e2e]
 description = "ComfyUI model-view end-to-end (real CLI + headless source-tree ComfyUI)"
 # Drives pull -> declarative [models] render -> extra_model_paths.yaml export ->

@@ -51,8 +51,8 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: build (${{ matrix.target }})
+  build-linux-gnu:
+    name: build (${{ matrix.target }}, glibc 2.31 baseline)
     needs: prepare
     strategy:
       fail-fast: false
@@ -60,10 +60,86 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: tar
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            archive: tar
+    runs-on: ${{ matrix.runner }}
+    # Ubuntu 20.04 is the oldest still-maintained Ubuntu LTS and supplies glibc
+    # 2.31. The symbol-version gate below is the binding contract: changing the
+    # image or toolchain cannot silently raise the published ABI floor.
+    container: ubuntu:20.04
+    env:
+      OSDK_RELEASE_BIN_DIR: target/${{ matrix.target }}/release
+    steps:
+      - name: Install build prerequisites
+        run: >-
+          apt-get update &&
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+          binutils build-essential ca-certificates curl git
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.98.0
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain 1.98.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add "${{ matrix.target }}" \
+            --toolchain 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-${{ matrix.target }}-glibc-2.31
+      # Built in two invocations on purpose. The shim depends on osdk-core with
+      # `default-features = false` so the download pipeline and sigstore
+      # verification stay out of it (7.4 MB -> 3.2 MB), but Cargo unifies
+      # features across a single `--workspace` build and would put them back.
+      # A compile-time assertion in the shim fails the release build if these
+      # are ever merged back into one command.
+      - name: Build release CLI
+        run: >-
+          cargo build --locked --release
+          -p osdk-cli
+          --target ${{ matrix.target }}
+      - name: Build release shim
+        run: >-
+          cargo build --locked --release
+          -p osdk-shim
+          --target ${{ matrix.target }}
+      - name: Verify the glibc compatibility contract
+        shell: bash
+        run: |
+          failure_log="$RUNNER_TEMP/glibc-baseline-negative-control.log"
+          if OSDK_GLIBC_BASELINE=0.0 \
+            "$OSDK_RELEASE_BIN_DIR/osdk" run glibc-baseline \
+              >"$failure_log" 2>&1; then
+            echo "The glibc checker accepted an intentionally impossible baseline." >&2
+            exit 1
+          fi
+          grep -F 'exceeding the supported GLIBC_0.0 baseline' "$failure_log"
+          "$OSDK_RELEASE_BIN_DIR/osdk" run glibc-baseline
+      - name: Package Unix binaries
+        shell: bash
+        run: |
+          stage="$RUNNER_TEMP/osdk-${{ matrix.target }}"
+          mkdir -p "$stage" dist
+          cp \
+            "target/${{ matrix.target }}/release/osdk" \
+            "target/${{ matrix.target }}/release/osdk-shim" \
+            "$stage/"
+          tar -C "$stage" -czf \
+            "dist/osdk-${{ matrix.target }}.tar.gz" \
+            osdk osdk-shim
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osdk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-native:
+    name: build (${{ matrix.target }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar
@@ -132,7 +208,7 @@ jobs:
 
   crates:
     name: publish crates.io
-    needs: [prepare, build]
+    needs: [prepare, build-linux-gnu, build-native]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -195,7 +271,7 @@ jobs:
 
   release:
     name: publish v${{ needs.prepare.outputs.version }}
-    needs: [prepare, build, crates]
+    needs: [prepare, build-linux-gnu, build-native, crates]
     runs-on: ubuntu-latest
     permissions:
       contents: write

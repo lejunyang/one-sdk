@@ -51,6 +51,8 @@ osdk（二进制名 `osdk`，仓库名 one-sdk）是一个跨平台（Windows / 
   用户全局 `config.toml` → 内置默认。
 - **不要手写 osdk 管控目录（data/config）下的配置或代理源**：源与配置一律通过
   `osdk source` / `osdk config` 等 osdk 自身命令管理。
+- **GNU/Linux 预编译包的最低基线是 glibc 2.31**（Ubuntu 20.04 或更新环境）。发布流水线
+  会检查 ELF 导入的 GLIBC 符号版本，不能把滚动构建机上的更高版本静默带进产物。
 
 ## 快速定位（意图 → 命令，细节进 reference）
 

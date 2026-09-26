@@ -34,8 +34,9 @@ Windows PowerShell：
 irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
-安装器会下载最新版本并用 `SHA256SUMS` 校验，随后检测本机已有的 shell，询问需要
-配置哪些，并让你确认或修改 osdk 存放配置、数据和缓存的位置。被选中的 shell 会写入
+安装器会下载最新版本并用 `SHA256SUMS` 校验。GNU/Linux Release 二进制明确以
+glibc 2.31 为最低基线（Ubuntu 20.04，或带更新 glibc 的发行版）。随后安装器检测本机已有的
+shell，询问需要配置哪些，并让你确认或修改 osdk 存放配置、数据和缓存的位置。被选中的 shell 会写入
 这些环境变量和 `osdk activate`，新开的 shell 即可直接使用。Windows 上还会激活当前
 会话；Unix 上加 `--print-activation` 并 eval 其输出，即可激活正在使用的 shell：
 
