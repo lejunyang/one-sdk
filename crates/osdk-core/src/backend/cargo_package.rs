@@ -769,11 +769,10 @@ impl CargoPackageBackend {
                 self.id
             )));
         }
-        let (toolchain_bin, _cargo, rustc) = self.toolchain_bins(ctx, &tv.options)?;
-        let stage_root = stage.path().to_path_buf();
-        let env = self.command_env(ctx, tv, &stage_root, &toolchain_bin, &rustc)?;
-
         if self.binstall_eligible(ctx, tv) {
+            let (toolchain_bin, _cargo, rustc) = self.toolchain_bins(ctx, &tv.options)?;
+            let stage_root = stage.path().to_path_buf();
+            let env = self.command_env(ctx, tv, &stage_root, &toolchain_bin, &rustc)?;
             let binstall = controlled_binstall(ctx).expect("eligibility checked");
             match self.run_provider(
                 runner,
@@ -784,8 +783,9 @@ impl CargoPackageBackend {
                 "cargo-binstall",
             ) {
                 ProviderStatus::Success => {
-                    clean_provider_workspace(&stage_root)?;
-                    write_resolution(&stage_root, &self.resolution(tv))?;
+                    reject_provider_resolution(&stage_root)?;
+                    stage.retain_bin_only()?;
+                    write_resolution(stage.path(), &self.resolution(tv))?;
                     stage.publish(NativeToolProvider::CargoBinstall)?;
                     return Ok(());
                 }
@@ -811,7 +811,8 @@ impl CargoPackageBackend {
                 return Err(error)
             }
         }
-        clean_provider_workspace(stage.path())?;
+        reject_provider_resolution(stage.path())?;
+        stage.retain_bin_only()?;
         write_resolution(stage.path(), &self.resolution(tv))?;
         stage.publish(NativeToolProvider::CargoInstall)?;
         Ok(())
@@ -908,45 +909,16 @@ fn controlled_binstall(ctx: &Ctx) -> Option<PathBuf> {
     regular_file(&path).then_some(path)
 }
 
-fn clean_provider_workspace(stage: &Path) -> Result<()> {
-    for name in ["home", "cargo-home", "target", "tmp"] {
-        let path = stage.join(name);
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(Error::other(format!(
-                    "Cargo provider workspace is unsafe: {}",
-                    path.display()
-                )));
-            }
-            // Forced: a finished `cargo install` leaves a read-only registry
-            // cache under HOME/CARGO_HOME, and a plain remove_dir_all fails on
-            // it with PermissionDenied -- losing an install that had already
-            // succeeded.
-            Ok(_) => {
-                crate::fs::remove_dir_all_forced(&path).map_err(|error| Error::io(&path, error))?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::io(&path, error)),
-        }
+fn reject_provider_resolution(root: &Path) -> Result<()> {
+    let path = root.join(CARGO_RESOLUTION_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::io(&path, error)),
+        Ok(_) => Err(Error::other(format!(
+            "Cargo provider wrote reserved metadata path {}",
+            path.display()
+        ))),
     }
-    let crates_metadata = stage.join(".crates.toml");
-    let crates2_metadata = stage.join(".crates2.json");
-    for path in [&crates_metadata, &crates2_metadata] {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                std::fs::remove_file(path).map_err(|error| Error::io(path, error))?;
-            }
-            Ok(_) => {
-                return Err(Error::other(format!(
-                    "Cargo provider metadata is unsafe: {}",
-                    path.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::io(path, error)),
-        }
-    }
-    Ok(())
 }
 
 fn write_resolution(root: &Path, resolution: &CargoResolution) -> Result<()> {
@@ -1550,6 +1522,50 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    struct LockedWorkspaceRunner {
+        inner: FixtureRunner,
+        locked: Mutex<Option<std::fs::File>>,
+    }
+
+    #[cfg(windows)]
+    impl LockedWorkspaceRunner {
+        fn new() -> Self {
+            Self {
+                inner: FixtureRunner::new([0]),
+                locked: Mutex::new(None),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    impl CommandRunner for LockedWorkspaceRunner {
+        fn run_captured(&self, command: &CommandSpec, limits: CaptureLimits) -> CommandOutcome {
+            let outcome = self.inner.run_captured(command, limits);
+            let locked = command
+                .working_directory()
+                .unwrap()
+                .join("home/AppData/Local/Microsoft/Windows/INetCache/IE/container.dat");
+            std::fs::create_dir_all(locked.parent().unwrap()).unwrap();
+            std::fs::write(&locked, b"cache").unwrap();
+            use std::os::windows::fs::OpenOptionsExt;
+            let handle = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(locked)
+                .unwrap();
+            *self.locked.lock().unwrap() = Some(handle);
+            outcome
+        }
+
+        fn run_foreground(
+            &self,
+            _command: &CommandSpec,
+        ) -> std::io::Result<std::process::ExitStatus> {
+            unreachable!()
+        }
+    }
+
     impl CommandRunner for FixtureRunner {
         fn run_captured(&self, command: &CommandSpec, _limits: CaptureLimits) -> CommandOutcome {
             self.calls.lock().unwrap().push(command.clone());
@@ -1892,6 +1908,28 @@ mod tests {
         assert_ne!(upper.lock_path(), lower.lock_path());
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn successful_install_publishes_when_workspace_cache_is_still_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = context(temp.path(), false);
+        managed_rust(&ctx, "1.91.1");
+        let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
+        let mut selected = version(&backend, "1.91.1");
+        selected.options.insert("features".into(), "pcre2".into());
+        let runner = LockedWorkspaceRunner::new();
+
+        backend
+            .install_with_runner(&ctx, &selected, &runner)
+            .await
+            .unwrap();
+
+        let lifecycle = backend.lifecycle(&ctx, &selected).unwrap();
+        assert!(lifecycle.install_root().join("bin/rg.exe").is_file());
+        assert!(!lifecycle.install_root().join("home").exists());
+        assert!(!lifecycle.install_root().join("target").exists());
+    }
+
     #[tokio::test]
     async fn binstall_success_uses_controlled_binary_and_isolated_environment() {
         let temp = tempfile::tempdir().unwrap();
@@ -1982,7 +2020,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(runner.calls.lock().unwrap().len(), 2);
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(
+            calls[0].working_directory(),
+            calls[1].working_directory(),
+            "fallback must use a fresh stage so late provider writes cannot race with it"
+        );
+        drop(calls);
         let lifecycle = backend.lifecycle(&ctx, &version).unwrap();
         assert!(!lifecycle.install_root().join("partial").exists());
         let receipt = native_tool::load_receipt(lifecycle.install_root()).unwrap();

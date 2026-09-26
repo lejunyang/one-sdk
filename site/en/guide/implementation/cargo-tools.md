@@ -106,9 +106,10 @@ true:
 `bin`, `locked`, exact version, install root, and the selected index are passed
 to `cargo-binstall`; confirmation, telemetry, GitHub-token discovery, and its
 compile/quick-install strategies are disabled. On success, osdk publishes its
-output. Exit code 94 alone
-means “no compatible binary artifact”: the stage is deleted and recreated under
-the same held identity lock, then one `cargo install` attempt is made. Any other
+output. Exit code 94 alone means “no compatible binary artifact”: while
+retaining the same identity lock, osdk switches to a new unique stage before making
+one `cargo install` attempt. It never reuses the old path, avoiding races with late
+provider writes on Windows. Any other
 exit code, spawn error, permission error, timeout, or capture failure is
 terminal; no second provider is tried. Git sources and source-build options go
 directly to `cargo install`.
@@ -144,9 +145,12 @@ GIT_TERMINAL_PROMPT      = 0
 
 The exact toolchain directory is always first; osdk removes its own shims and
 Cargo-home proxies and deduplicates the rest while preserving system paths
-needed by linkers and build helpers. Before publication, osdk removes the private home,
-Cargo home, target, temp directory, and Cargo's tracking metadata; none becomes
-part of the installed tool.
+needed by linkers and build helpers. After the provider succeeds, osdk first rejects
+provider-forged reserved metadata, then moves only `bin/` into a new clean stage for
+publication. The private home, Cargo home, target, temp directory, and Cargo tracking
+metadata remain in the retired workspace for best-effort cleanup. They never become
+part of the installed tool, and a transient Windows system-cache handle cannot turn
+a successful install into a failure.
 
 ## Staging, publication, and reuse
 

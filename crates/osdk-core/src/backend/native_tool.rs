@@ -1404,6 +1404,7 @@ impl NativeToolLifecycle {
                         locator: self.locator.clone(),
                         family: self.family,
                         stage_root: Some(stage_root),
+                        retired_stage_roots: Vec::new(),
                         _lock: lock,
                     });
                 }
@@ -1426,6 +1427,7 @@ pub struct NativeToolStage {
     locator: InstallLocator,
     family: NativeToolFamily,
     stage_root: Option<PathBuf>,
+    retired_stage_roots: Vec<PathBuf>,
     _lock: crate::lock::FileLock,
 }
 
@@ -1450,8 +1452,14 @@ impl NativeToolStage {
         self.path().join("bin")
     }
 
-    /// Clear provider output before an explicitly permitted fallback while
-    /// retaining the staging identity and its cross-process lock.
+    /// Switch to a fresh stage before an explicitly permitted provider fallback.
+    ///
+    /// Reusing the same path after deleting it races on Windows with provider
+    /// descendants and filesystem filters that can outlive the provider process:
+    /// they may recreate an old child just as the fallback prepares its private
+    /// HOME/CARGO_HOME, producing a transient AccessDenied. A new unique sibling
+    /// makes late writes harmless. The retired tree is cleaned best-effort after
+    /// publication or when the stage is dropped.
     pub fn reset(&mut self) -> Result<()> {
         let path = self.path().to_path_buf();
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| Error::io(&path, error))?;
@@ -1461,13 +1469,61 @@ impl NativeToolStage {
                 path.display()
             )));
         }
-        create_managed_directory_chain(
-            self.locator.installs_root(),
-            path.parent()
-                .ok_or_else(|| Error::other("native tool stage has no parent"))?,
-        )?;
-        std::fs::remove_dir_all(&path).map_err(|error| Error::io(&path, error))?;
-        std::fs::create_dir(&path).map_err(|error| Error::io(&path, error))
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::other("native tool stage has no parent"))?;
+        create_managed_directory_chain(self.locator.installs_root(), parent)?;
+        let component = self
+            .locator
+            .install_root()
+            .file_name()
+            .ok_or_else(|| Error::other("native tool install root has no filename"))?
+            .to_string_lossy();
+        loop {
+            let serial = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
+            let replacement = parent.join(format!(
+                ".{component}.stage-{}-{serial}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&replacement) {
+                Ok(()) => {
+                    self.stage_root = Some(replacement);
+                    self.retired_stage_roots.push(path);
+                    return Ok(());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(Error::io(replacement, error)),
+            }
+        }
+    }
+
+    /// Move only provider executables into a fresh stage before publication.
+    ///
+    /// Provider workspaces can contain transiently locked caches (notably the
+    /// Windows profile cache created below HOME). Those files are build scratch,
+    /// not install payload. Moving `bin` into a new stage avoids publishing the
+    /// scratch tree and prevents a successful install from being rejected just
+    /// because an unrelated cache handle outlived the provider process.
+    pub fn retain_bin_only(&mut self) -> Result<()> {
+        let source = self.bin_dir();
+        let metadata =
+            std::fs::symlink_metadata(&source).map_err(|error| Error::io(&source, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(Error::other(format!(
+                "native tool provider bin directory is unsafe: {}",
+                source.display()
+            )));
+        }
+        self.reset()?;
+        let destination = self.bin_dir();
+        std::fs::rename(&source, &destination).map_err(|error| Error::io(&source, error))?;
+        self.cleanup_retired_stages();
+        Ok(())
+    }
+
+    fn cleanup_retired_stages(&mut self) {
+        self.retired_stage_roots
+            .retain(|path| crate::fs::remove_dir_all_forced(path).is_err());
     }
 
     /// Validate provider output, write receipt/inventory/completion metadata in
@@ -1514,22 +1570,24 @@ impl NativeToolStage {
         std::fs::write(stage_root.join(".osdk-complete"), b"")
             .map_err(|error| Error::io(stage_root.join(".osdk-complete"), error))?;
 
-        let final_root = self.locator.install_root();
+        let final_root = self.locator.install_root().to_path_buf();
         write_metadata_seal(&self.locator, stage_root)?;
-        if let Err(error) = publish_directory_no_replace(stage_root, final_root) {
+        if let Err(error) = publish_directory_no_replace(stage_root, &final_root) {
             let _ = remove_metadata_seal(&self.locator);
             return Err(error);
         }
         self.stage_root = None;
-        Ok(final_root.to_path_buf())
+        self.cleanup_retired_stages();
+        Ok(final_root)
     }
 }
 
 impl Drop for NativeToolStage {
     fn drop(&mut self) {
         if let Some(path) = self.stage_root.take() {
-            let _ = std::fs::remove_dir_all(path);
+            let _ = crate::fs::remove_dir_all_forced(&path);
         }
+        self.cleanup_retired_stages();
     }
 }
 
@@ -2677,15 +2735,18 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_first_provider_output_without_releasing_the_stage() {
+    fn reset_retires_first_provider_output_without_reusing_its_path() {
         let temporary = tempfile::tempdir().unwrap();
         let lifecycle = cargo_lifecycle(temporary.path(), "1.91.1");
         let mut stage = new_stage(&lifecycle);
-        let first = stage.path().join("partial");
-        std::fs::write(&first, b"binstall partial").unwrap();
+        let first_root = stage.path().to_path_buf();
+        std::fs::write(first_root.join("partial"), b"binstall partial").unwrap();
+
         stage.reset().unwrap();
+
         assert!(stage.path().is_dir());
-        assert!(!first.exists());
+        assert_ne!(stage.path(), first_root);
+        assert!(!stage.path().join("partial").exists());
         write_executable(
             &stage.bin_dir().join(if cfg!(windows) {
                 "fixture.exe"
@@ -2698,6 +2759,7 @@ mod tests {
             .publish(NativeToolProvider::CargoInstall)
             .unwrap()
             .is_dir());
+        assert!(!first_root.exists());
     }
 
     #[test]

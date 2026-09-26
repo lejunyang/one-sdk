@@ -82,8 +82,9 @@ source、version、backend 与 replay 分类，并在复用时校验。
 
 `bin`、`locked`、精确版本、安装根与所选 index 都会传给 `cargo-binstall`；同时禁用
 确认、telemetry、GitHub token discovery 及其 compile/quick-install strategy。成功后，
-osdk 发布其输出。只有退出码 94 表示“没有兼容 binary artifact”：stage 会在继续持有
-同一身份锁时删除并重建，然后仅尝试一次 `cargo install`。其他退出码、spawn 错误、
+osdk 发布其输出。只有退出码 94 表示“没有兼容 binary artifact”：osdk 会在继续持有同一身份锁时
+切换到新的唯一 stage，然后仅尝试一次 `cargo install`；不复用旧路径，避免 Windows 上
+provider 的迟到写入与 fallback 争用。其他退出码、spawn 错误、
 权限错误、超时或 capture 失败都是终止错误，不会尝试第二个 provider。Git 来源及需要
 source build 的选项会直接走 `cargo install`。
 
@@ -115,9 +116,10 @@ GIT_TERMINAL_PROMPT      = 0
 ```
 
 精确 toolchain 目录始终排在首位；osdk 会移除自身 shim 与 Cargo-home proxy 路径、
-去重其余项，并保留 linker 与构建辅助程序需要的系统路径。发布前，osdk 会删除私有 home、
-Cargo home、target、临时目录和 Cargo tracking metadata；它们都不会成为已安装工具
-的一部分。
+去重其余项，并保留 linker 与构建辅助程序需要的系统路径。provider 成功后，osdk 先拒绝
+其伪造保留 metadata，再把唯一需要发布的 `bin/` 迁入新的干净 stage；私有 home、Cargo
+home、target、临时目录和 Cargo tracking metadata 留在旧 workspace 中做尽力清理，不会
+成为已安装工具的一部分，也不会因 Windows 系统缓存句柄短暂占用而把成功安装判成失败。
 
 ## Staging、发布与复用
 
