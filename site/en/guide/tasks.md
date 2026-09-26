@@ -226,6 +226,9 @@ message.
 Prefer `osdk.run` when building a command from data: each argument becomes one
 argv entry, so a value with spaces or metacharacters cannot split or be
 reinterpreted. `osdk.sh` suits a fixed one-liner.
+Relative paths resolve from the task's `dir` (the project root by default).
+`osdk.run` and `osdk.sh` inherit the task environment, obey `timeout`, and
+terminate the whole child process tree on expiry just like ordinary task steps.
 
 ### Standard library and environment variables
 

@@ -286,6 +286,8 @@ lua = "..."                          # 或嵌入 Lua（scripts feature，默认�
 
 `run` 步骤语义：数组内命令**顺序执行、失败即停**；`{ cmd = "...", ignore_error = true }`
 容忍失败继续（打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。
+Lua 内的 `osdk.run(...)` / `osdk.sh(...)` 使用任务的 `dir`、环境和 `timeout`；
+`osdk.argv` 保留每个透传参数的原始边界（含空格的参数仍是一个值）。
 **不要用 shell 的 `&`**——它在 cmd、PowerShell 7 与 5.1 下含义各异。
 
 `[task_config]`（runner 级默认，整体替换而非字段级合并）：

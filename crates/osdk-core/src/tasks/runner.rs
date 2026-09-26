@@ -378,6 +378,10 @@ pub struct ProcessSpawner {
     /// never through a parser -- exactly the guarantee interpolating into a
     /// `cmd` string cannot make.
     pub arg_env: BTreeMap<String, String>,
+    /// Parsed argument values, kept separately so Lua sees the original argv
+    /// boundaries instead of reconstructing them from the shell-oriented
+    /// `osdk_args` environment variable.
+    pub arg_values: crate::tasks::args::Values,
 }
 
 impl Spawner for ProcessSpawner {
@@ -397,7 +401,7 @@ impl Spawner for ProcessSpawner {
         for (key, value) in &self.arg_env {
             child.env(key, value);
         }
-        self.run_to_completion(task, program, child)
+        run_command_to_completion(task, program, child, self.timeout)
     }
 
     #[cfg(feature = "scripts")]
@@ -430,20 +434,10 @@ impl Spawner for ProcessSpawner {
             dir: dir.to_path_buf(),
             project_root: self.project_root.clone(),
             name: task.to_string(),
-            args: self
-                .arg_env
-                .iter()
-                .filter_map(|(key, value)| {
-                    key.strip_prefix("osdk_arg_")
-                        .map(|name| (name.to_string(), value.clone()))
-                })
-                .collect(),
-            argv: self
-                .arg_env
-                .get("osdk_args")
-                .map(|rest| rest.split(' ').map(str::to_string).collect())
-                .unwrap_or_default(),
+            args: self.arg_values.named.clone(),
+            argv: self.arg_values.rest.clone(),
             env,
+            timeout: self.timeout,
         };
         script::eval(source, &context)
     }
@@ -460,37 +454,39 @@ impl Spawner for ProcessSpawner {
         for (key, value) in &self.arg_env {
             child.env(key, value);
         }
-        self.run_to_completion(task, program, child)
+        run_command_to_completion(task, program, child, self.timeout)
     }
 }
 
-impl ProcessSpawner {
-    /// Spawn inside a killable process group and wait, honouring the timeout.
-    ///
-    /// The grouping is established at spawn time even when no timeout is set:
-    /// after a process has forked there is no reliable way to find what it
-    /// started, so the decision cannot be deferred to the moment it is needed.
-    fn run_to_completion(&self, task: &str, program: &str, mut command: Command) -> Result<i32> {
-        use crate::tasks::tree;
+/// Spawn inside a killable process group and wait, honouring the timeout.
+///
+/// Shared with the Lua host API so an external command has identical cwd,
+/// process-tree and timeout behaviour whether it came from `run`, an argv step,
+/// or `run(...)` inside a Lua task.
+pub(crate) fn run_command_to_completion(
+    task: &str,
+    program: &str,
+    mut command: Command,
+    timeout: Option<std::time::Duration>,
+) -> Result<i32> {
+    use crate::tasks::tree;
 
-        let (mut child, mut handle) = tree::spawn_in_tree(&mut command).map_err(|error| {
-            Error::other(format!("task `{task}`: cannot run `{program}`: {error}"))
-        })?;
+    let (mut child, mut handle) = tree::spawn_in_tree(&mut command)
+        .map_err(|error| Error::other(format!("task `{task}`: cannot run `{program}`: {error}")))?;
 
-        match tree::wait_with_timeout(&mut child, &mut handle, self.timeout) {
-            // A signal-killed child reports no code; treat it as failure rather
-            // than silently succeeding.
-            Ok(Some(code)) => Ok(code),
-            Ok(None) => Err(Error::other(format!(
-                "task `{task}`: timed out after {}; the process tree was terminated",
-                self.timeout
-                    .map(|limit| format!("{}s", limit.as_secs()))
-                    .unwrap_or_else(|| "the configured limit".into())
-            ))),
-            Err(error) => Err(Error::other(format!(
-                "task `{task}`: waiting for `{program}` failed: {error}"
-            ))),
-        }
+    match tree::wait_with_timeout(&mut child, &mut handle, timeout) {
+        // A signal-killed child reports no code; treat it as failure rather
+        // than silently succeeding.
+        Ok(Some(code)) => Ok(code),
+        Ok(None) => Err(Error::other(format!(
+            "task `{task}`: timed out after {}; the process tree was terminated",
+            timeout
+                .map(|limit| format!("{}s", limit.as_secs()))
+                .unwrap_or_else(|| "the configured limit".into())
+        ))),
+        Err(error) => Err(Error::other(format!(
+            "task `{task}`: waiting for `{program}` failed: {error}"
+        ))),
     }
 }
 
@@ -2034,6 +2030,31 @@ shell = "pwsh -Command"
 
         let absolute = if cfg!(windows) { r"C:\other" } else { "/other" };
         assert_eq!(resolve_dir(root, Some(absolute)), PathBuf::from(absolute));
+    }
+
+    #[cfg(feature = "scripts")]
+    #[test]
+    fn lua_receives_unflattened_remaining_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let values = crate::tasks::args::Values {
+            named: BTreeMap::from([("mode".into(), "release build".into())]),
+            rest: vec!["one argument".into(), "second".into()],
+        };
+        let mut spawner = ProcessSpawner {
+            env: TaskEnv::default(),
+            defs: BTreeMap::new(),
+            base_path: std::env::var("PATH").unwrap_or_default(),
+            timeout: None,
+            project_root: temp.path().to_path_buf(),
+            arg_env: values.env_vars(),
+            arg_values: values,
+        };
+
+        let source = "return osdk.args.mode == 'release build' \
+            and #osdk.argv == 2 \
+            and osdk.argv[1] == 'one argument' \
+            and osdk.argv[2] == 'second' and 0 or 1";
+        assert_eq!(spawner.run_lua("demo", source, temp.path()).unwrap(), 0);
     }
 
     #[test]

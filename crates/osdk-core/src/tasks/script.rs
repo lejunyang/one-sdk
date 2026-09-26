@@ -21,8 +21,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use mlua::{Lua, Value};
+use mlua::{HookTriggers, Lua, Value, VmState};
 
 use crate::error::{Error, Result};
 
@@ -40,6 +41,8 @@ pub struct ScriptContext {
     pub argv: Vec<String>,
     /// Environment the runner would give a spawned command.
     pub env: BTreeMap<String, String>,
+    /// Wall-clock limit inherited from the task definition.
+    pub timeout: Option<Duration>,
 }
 
 /// Evaluate `source`, returning the exit code the task should report.
@@ -51,6 +54,22 @@ pub struct ScriptContext {
 /// exceptional one.
 pub fn eval(source: &str, context: &ScriptContext) -> Result<i32> {
     let lua = Lua::new();
+    if let Some(limit) = context.timeout {
+        let started = Instant::now();
+        let task = context.name.clone();
+        lua.set_hook(
+            HookTriggers::new().every_nth_instruction(1_024),
+            move |_, _| {
+                if started.elapsed() >= limit {
+                    return Err(mlua::Error::runtime(format!(
+                        "task `{task}`: timed out after {}s",
+                        limit.as_secs_f64()
+                    )));
+                }
+                Ok(VmState::Continue)
+            },
+        );
+    }
     install_host_api(&lua, context)?;
 
     let chunk = lua.load(source).set_name(format!("task {}", context.name));
@@ -126,6 +145,7 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     let dir = context.dir.clone();
     let env = context.env.clone();
     let task = context.name.clone();
+    let timeout = context.timeout;
     let sh = lua
         .create_function(move |_, command: String| {
             let mut child = shell_command(&command);
@@ -133,10 +153,8 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
             for (key, value) in &env {
                 child.env(key, value);
             }
-            let status = child.status().map_err(|error| {
-                mlua::Error::external(format!("task `{task}`: cannot run shell: {error}"))
-            })?;
-            Ok(status.code().unwrap_or(1))
+            crate::tasks::runner::run_command_to_completion(&task, "shell", child, timeout)
+                .map_err(mlua::Error::external)
         })
         .map_err(to_lua)?;
     osdk.set("sh", sh).map_err(to_lua)?;
@@ -149,6 +167,7 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     let dir = context.dir.clone();
     let env = context.env.clone();
     let task = context.name.clone();
+    let timeout = context.timeout;
     let run = lua
         .create_function(move |_, argv: mlua::Variadic<String>| {
             let argv: Vec<String> = argv.into_iter().collect();
@@ -162,10 +181,8 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
             for (key, value) in &env {
                 child.env(key, value);
             }
-            let status = child.status().map_err(|error| {
-                mlua::Error::external(format!("task `{task}`: cannot run `{program}`: {error}"))
-            })?;
-            Ok(status.code().unwrap_or(1))
+            crate::tasks::runner::run_command_to_completion(&task, program, child, timeout)
+                .map_err(mlua::Error::external)
         })
         .map_err(to_lua)?;
     osdk.set("run", run).map_err(to_lua)?;
@@ -183,8 +200,9 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
         })
         .map_err(to_lua)?;
     path.set("join", join).map_err(to_lua)?;
+    let dir = context.dir.clone();
     let exists = lua
-        .create_function(|_, target: String| Ok(Path::new(&target).exists()))
+        .create_function(move |_, target: String| Ok(resolve_path(&dir, &target).exists()))
         .map_err(to_lua)?;
     path.set("exists", exists).map_err(to_lua)?;
     osdk.set("path", path).map_err(to_lua)?;
@@ -237,6 +255,15 @@ fn shell_command(command: &str) -> std::process::Command {
     let mut child = std::process::Command::new(&shell[0]);
     child.args(&shell[1..]).arg(command);
     child
+}
+
+fn resolve_path(dir: &Path, target: &str) -> PathBuf {
+    let target = Path::new(target);
+    if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        dir.join(target)
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +321,7 @@ mod tests {
             args: BTreeMap::new(),
             argv: Vec::new(),
             env: BTreeMap::new(),
+            timeout: None,
         }
     }
 
@@ -360,6 +388,19 @@ mod tests {
             return p == ("a" .. sep .. "b" .. sep .. "c") and 0 or 1
         "#;
         assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
+
+    #[test]
+    fn relative_path_checks_start_at_the_task_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("marker.txt"), b"ok").unwrap();
+        let mut ctx = context();
+        ctx.dir = temp.path().to_path_buf();
+
+        assert_eq!(
+            eval("return osdk.path.exists('marker.txt') and 0 or 1", &ctx).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -495,5 +536,35 @@ mod tests {
             return failures
         "#;
         assert_eq!(eval(source, &ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn lua_instructions_honour_the_task_timeout() {
+        let mut ctx = context();
+        ctx.timeout = Some(Duration::from_millis(20));
+
+        let error = eval("while true do end", &ctx).unwrap_err().to_string();
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn commands_started_by_lua_honour_the_task_timeout() {
+        const CHILD: &str = "OSDK_LUA_TIMEOUT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            std::thread::sleep(Duration::from_secs(5));
+            return;
+        }
+
+        let executable = std::env::current_exe().unwrap();
+        let executable = executable.to_string_lossy().replace('\\', "\\\\");
+        let mut ctx = context();
+        ctx.timeout = Some(Duration::from_millis(100));
+        ctx.env.insert(CHILD.into(), "1".into());
+        let source = format!(
+            r#"return osdk.run("{executable}", "--exact", "tasks::script::tests::commands_started_by_lua_honour_the_task_timeout", "--nocapture")"#
+        );
+
+        let error = eval(&source, &ctx).unwrap_err().to_string();
+        assert!(error.contains("timed out"), "{error}");
     }
 }

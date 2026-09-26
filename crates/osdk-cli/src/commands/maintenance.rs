@@ -470,6 +470,7 @@ pub fn run_task(
         defs,
         base_path,
         arg_env: values.env_vars(),
+        arg_values: values.clone(),
         // Set per task by the runner; this is just the initial value.
         timeout: None,
         project_root: config_root.clone(),
