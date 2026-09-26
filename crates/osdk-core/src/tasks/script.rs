@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use mlua::{HookTriggers, Lua, Value, VmState};
+use mlua::{DeserializeOptions, HookTriggers, Lua, LuaSerdeExt, Value, VmState};
 
 use crate::error::{Error, Result};
 
@@ -463,6 +463,71 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     )
     .map_err(to_lua)?;
 
+    // Data codecs use serde through mlua, preserving JSON null and array
+    // identity so a decode/edit/encode round trip does not silently change the
+    // shape of empty arrays or null-valued fields.
+    let json = lua.create_table().map_err(to_lua)?;
+    json.set("null", lua.null()).map_err(to_lua)?;
+    json.set(
+        "decode",
+        lua.create_function(|lua, source: mlua::String| {
+            let value: serde_json::Value = serde_json::from_slice(source.as_bytes().as_ref())
+                .map_err(mlua::Error::external)?;
+            lua.to_value(&value)
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    json.set(
+        "encode",
+        lua.create_function(|lua, (value, pretty): (Value, Option<bool>)| {
+            let value: serde_json::Value =
+                lua.from_value_with(value, DeserializeOptions::new().sort_keys(true))?;
+            if pretty.unwrap_or(false) {
+                serde_json::to_string_pretty(&value).map_err(mlua::Error::external)
+            } else {
+                serde_json::to_string(&value).map_err(mlua::Error::external)
+            }
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    let array_metatable = lua.array_metatable();
+    json.set(
+        "array",
+        lua.create_function(move |_, table: mlua::Table| {
+            table.set_metatable(Some(array_metatable.clone()));
+            Ok(table)
+        })
+        .map_err(to_lua)?,
+    )
+    .map_err(to_lua)?;
+    osdk.set("json", json).map_err(to_lua)?;
+
+    let toml_api = lua.create_table().map_err(to_lua)?;
+    toml_api
+        .set(
+            "decode",
+            lua.create_function(|lua, source: String| {
+                let value: toml::Value = toml::from_str(&source).map_err(mlua::Error::external)?;
+                lua.to_value(&value)
+            })
+            .map_err(to_lua)?,
+        )
+        .map_err(to_lua)?;
+    toml_api
+        .set(
+            "encode",
+            lua.create_function(|lua, value: Value| {
+                let value: toml::Value =
+                    lua.from_value_with(value, DeserializeOptions::new().sort_keys(true))?;
+                toml::to_string(&value).map_err(mlua::Error::external)
+            })
+            .map_err(to_lua)?,
+        )
+        .map_err(to_lua)?;
+    osdk.set("toml", toml_api).map_err(to_lua)?;
+
     // `osdk.env(name)` -- read an environment variable, nil when unset.
     let env_lookup = context.env.clone();
     let env_fn = lua
@@ -505,6 +570,10 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
     let fs: mlua::Table = osdk.get("fs").map_err(to_lua)?;
     for name in ["mkdir", "read", "write", "copy", "move", "remove", "glob"] {
         let value: Value = fs.get(name).map_err(to_lua)?;
+        globals.set(name, value).map_err(to_lua)?;
+    }
+    for name in ["json", "toml"] {
+        let value: Value = osdk.get(name).map_err(to_lua)?;
         globals.set(name, value).map_err(to_lua)?;
     }
     for (short, full) in [
@@ -1007,6 +1076,8 @@ mod tests {
                 and env == osdk.env
                 and path == osdk.path
                 and fs == osdk.fs
+                and json == osdk.json
+                and toml == osdk.toml
                 and which == osdk.which
                 and join == osdk.path.join
                 and exists == osdk.path.exists
@@ -1062,6 +1133,48 @@ mod tests {
             return 0
         "#;
         assert_eq!(eval(source, &ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn json_round_trips_arrays_null_and_pretty_output() {
+        let source = r#"
+            local value = json.decode('{"name":"demo","items":[1,null,3]}')
+            if value.name ~= "demo" or value.items[2] ~= json.null then return 11 end
+            value.empty = json.array({})
+            local compact = json.encode(value)
+            local decoded = json.decode(compact)
+            if #decoded.items ~= 3 or decoded.items[2] ~= json.null then return 12 end
+            if #decoded.empty ~= 0 then return 13 end
+            local pretty = json.encode(value, true)
+            return string.find(pretty, "\n", 1, true) and 0 or 14
+        "#;
+        assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
+
+    #[test]
+    fn toml_round_trips_tables_and_arrays() {
+        let source = r#"
+            local value = toml.decode('name = "demo"\nitems = [1, 2, 3]\n')
+            if value.name ~= "demo" or value.items[2] ~= 2 then return 11 end
+            value.enabled = true
+            local encoded = toml.encode(value)
+            local decoded = toml.decode(encoded)
+            return decoded.enabled and decoded.items[3] == 3 and 0 or 12
+        "#;
+        assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
+
+    #[test]
+    fn invalid_codec_input_is_an_actionable_error() {
+        let json_error = eval("return json.decode('{')", &context())
+            .unwrap_err()
+            .to_string();
+        assert!(json_error.contains("EOF"), "{json_error}");
+
+        let toml_error = eval("return toml.decode('=')", &context())
+            .unwrap_err()
+            .to_string();
+        assert!(toml_error.contains("invalid key"), "{toml_error}");
     }
 
     #[test]

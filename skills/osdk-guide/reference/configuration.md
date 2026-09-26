@@ -293,6 +293,8 @@ Lua 内的 `osdk.run(...)` / `osdk.sh(...)` 使用任务的 `dir`、环境和 `t
 `args`、`argv`、`platform`；另有短表 `path` / `fs`。`exec("prog", ...)` 捕获 stdout/stderr
 并返回 `{code, success, stdout, stderr, *_truncated}`；表形式支持 `cwd`、`env`、
 `stdin`、`check`，或用 `command = "..."` 经平台 shell 捕获。
+数据文件可用 `json.decode/encode`、`toml.decode/encode`；JSON null 对应
+`json.null`，空数组用 `json.array({})` 保留数组类型。
 **不要用 shell 的 `&`**——它在 cmd、PowerShell 7 与 5.1 下含义各异。
 
 `[task_config]`（runner 级默认，整体替换而非字段级合并）：

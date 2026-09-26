@@ -203,6 +203,8 @@ return 0
 | `osdk.path.absolute(p)` / `.relative(target, base?)` | 词法绝对化与相对化，不要求路径已存在 |
 | `osdk.fs.mkdir/read/write/copy/move/remove/glob` | 跨平台文件操作 |
 | `osdk.which(program)` | 按任务的 PATH 查找可执行文件，找不到返回 nil |
+| `osdk.json.decode/encode` | JSON 与 Lua 值互转；`encode(value, true)` 美化输出 |
+| `osdk.toml.decode/encode` | TOML 与 Lua 值互转 |
 | `osdk.env(name)` | 读环境变量，未设置返回 nil |
 | `osdk.platform.os` / `.windows` / `.arch` | 平台判断 |
 | `osdk.project_root` / `osdk.dir` / `osdk.task` | 位置与身份 |
@@ -269,6 +271,24 @@ end
 `move` 使用原生 rename，因此源和目标要在同一文件系统。`glob` 的 pattern 相对
 任务 `dir`，返回按字典序排列的绝对路径；目录复制保留符号链接，Windows 上仍受
 系统的符号链接权限约束。
+
+### JSON 与 TOML
+
+`json`、`toml` 是顶层短表，不需要写 `osdk.json` / `osdk.toml`：
+
+```lua
+local package = json.decode(read("package.json"))
+package.private = true
+write("package.json", json.encode(package, true) .. "\n")
+
+local config = toml.decode(read("tool.toml"))
+config.release = { enabled = true }
+write("tool.toml", toml.encode(config))
+```
+
+JSON 的 `null` 会解码成 `json.null`；创建空数组时用 `json.array({})`，否则 Lua 的
+空 table 没有足够信息区分 JSON `{}` 与 `[]`。从 JSON 解出的数组已自动保留这个
+标记。codec 错误会直接终止任务，不会返回半解析的数据。
 
 ### 标准库与环境变量
 

@@ -216,9 +216,9 @@ something different in cmd, PowerShell 7, and PowerShell 5.1. See
 
 Embedded Lua handles branches, loops, and captured subprocess output without
 long prefixes: `run("cargo", "test")` streams a command while
-`exec("git", "status", "--short")` captures it. Helpers such as `join`, `mkdir`,
-`copy`, and `glob` avoid platform-specific filesystem commands. The explicit `osdk.*`
-forms remain available.
+`exec("git", "status", "--short")` captures it. Helpers such as `join`, `mkdir`, `copy`, and `glob` avoid platform-specific
+filesystem commands; `json.decode` and `toml.decode` handle data files. The explicit
+`osdk.*` forms remain available.
 
 ## Scenario: install a tool from a direct HTTPS artifact
 

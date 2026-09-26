@@ -223,6 +223,8 @@ message.
 | `osdk.path.absolute(p)` / `.relative(target, base?)` | Lexical absolute/relative paths; files need not exist |
 | `osdk.fs.mkdir/read/write/copy/move/remove/glob` | Cross-platform filesystem operations |
 | `osdk.which(program)` | Resolve an executable on the task PATH, or nil |
+| `osdk.json.decode/encode` | Convert JSON and Lua values; `encode(value, true)` pretty-prints |
+| `osdk.toml.decode/encode` | Convert TOML and Lua values |
 | `osdk.env(name)` | Read an environment variable, nil when unset |
 | `osdk.platform.os` / `.windows` / `.arch` | Platform facts |
 | `osdk.project_root` / `osdk.dir` / `osdk.task` | Location and identity |
@@ -296,6 +298,26 @@ a file or a whole directory and returns false when it was already absent.
 the same filesystem. `glob` patterns are relative to the task `dir` and return
 sorted absolute paths. Directory copies preserve symbolic links; on Windows,
 creating those links still depends on the host's symlink permissions.
+
+### JSON and TOML
+
+`json` and `toml` are top-level short tables, so the common form does not need
+`osdk.json` or `osdk.toml`:
+
+```lua
+local package = json.decode(read("package.json"))
+package.private = true
+write("package.json", json.encode(package, true) .. "\n")
+
+local config = toml.decode(read("tool.toml"))
+config.release = { enabled = true }
+write("tool.toml", toml.encode(config))
+```
+
+JSON `null` decodes to `json.null`. Use `json.array({})` to create an empty
+array, since an empty Lua table alone cannot distinguish JSON `{}` from `[]`.
+Arrays decoded from JSON already retain that marker. Codec errors stop the task
+instead of returning partially parsed data.
 
 ### Standard library and environment variables
 
