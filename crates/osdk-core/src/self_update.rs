@@ -27,7 +27,7 @@ use crate::backend::Ctx;
 use crate::error::{Error, Result};
 use crate::http;
 use crate::pipeline::{self, ArchiveKind};
-use crate::platform::{Arch, Os, Platform};
+use crate::platform::{Arch, Libc, Os, Platform};
 use crate::source::{select, Source};
 
 /// The repository osdk updates itself from.
@@ -159,12 +159,14 @@ fn probe_timeout(ctx: &Ctx) -> std::time::Duration {
 /// The names match what `.github/workflows/publish.yml` uploads, so a platform
 /// absent from that matrix is reported as unsupported instead of 404-ing.
 pub fn asset_name(platform: Platform) -> Option<String> {
-    let target = match (platform.os, platform.arch) {
-        (Os::Linux, Arch::X64) => "x86_64-unknown-linux-gnu",
-        (Os::Linux, Arch::Arm64) => "aarch64-unknown-linux-gnu",
-        (Os::Macos, Arch::X64) => "x86_64-apple-darwin",
-        (Os::Macos, Arch::Arm64) => "aarch64-apple-darwin",
-        (Os::Windows, Arch::X64) => "x86_64-pc-windows-msvc",
+    let target = match (platform.os, platform.arch, platform.libc) {
+        (Os::Linux, Arch::X64, Libc::Musl) => "x86_64-unknown-linux-musl",
+        (Os::Linux, Arch::Arm64, Libc::Musl) => "aarch64-unknown-linux-musl",
+        (Os::Linux, Arch::X64, _) => "x86_64-unknown-linux-gnu",
+        (Os::Linux, Arch::Arm64, _) => "aarch64-unknown-linux-gnu",
+        (Os::Macos, Arch::X64, _) => "x86_64-apple-darwin",
+        (Os::Macos, Arch::Arm64, _) => "aarch64-apple-darwin",
+        (Os::Windows, Arch::X64, _) => "x86_64-pc-windows-msvc",
         _ => return None,
     };
     let extension = if matches!(platform.os, Os::Windows) {
@@ -471,7 +473,6 @@ async fn published_checksum(ctx: &Ctx, target: &ReleaseTarget) -> Option<pipelin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::Libc;
 
     fn platform(os: Os, arch: Arch) -> Platform {
         Platform {
@@ -481,18 +482,34 @@ mod tests {
         }
     }
 
+    fn linux(arch: Arch, libc: Libc) -> Platform {
+        Platform {
+            os: Os::Linux,
+            arch,
+            libc,
+        }
+    }
+
     #[test]
     fn asset_names_match_the_published_release_matrix() {
         // These are exactly the artifact names publish.yml uploads. A mismatch
         // here is a 404 at upgrade time, which no test of ours would otherwise
         // catch until a user hit it.
         assert_eq!(
-            asset_name(platform(Os::Linux, Arch::X64)).unwrap(),
+            asset_name(linux(Arch::X64, Libc::Glibc)).unwrap(),
             "osdk-x86_64-unknown-linux-gnu.tar.gz"
         );
         assert_eq!(
-            asset_name(platform(Os::Linux, Arch::Arm64)).unwrap(),
+            asset_name(linux(Arch::Arm64, Libc::Glibc)).unwrap(),
             "osdk-aarch64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            asset_name(linux(Arch::X64, Libc::Musl)).unwrap(),
+            "osdk-x86_64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            asset_name(linux(Arch::Arm64, Libc::Musl)).unwrap(),
+            "osdk-aarch64-unknown-linux-musl.tar.gz"
         );
         assert_eq!(
             asset_name(platform(Os::Macos, Arch::X64)).unwrap(),
@@ -509,7 +526,25 @@ mod tests {
         // No release is published for these, so an upgrade must say so rather
         // than download a 404 page.
         assert!(asset_name(platform(Os::Windows, Arch::Arm64)).is_none());
-        assert!(asset_name(platform(Os::Linux, Arch::X86)).is_none());
+        assert!(asset_name(linux(Arch::X86, Libc::Glibc)).is_none());
+
+        let expected_targets = [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        let workflow = include_str!("../../../.github/workflows/publish.yml");
+        let published_targets = workflow
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("target: "))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(published_targets, expected_targets);
     }
 
     #[test]

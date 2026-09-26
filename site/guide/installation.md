@@ -17,9 +17,12 @@ curl --proto '=https' --tlsv1.2 -sSf \
 默认安装到 `~/.local/bin`。安装器随后会引导完成 shell 配置，见
 [安装后的 shell 配置](#安装后的-shell-配置)。
 
-GNU/Linux 归档明确以 glibc 2.31 为最低版本（Ubuntu 20.04，或带更新 glibc 的发行版）。
-Release CI 在 Ubuntu 20.04 内构建，并检查两个二进制导入的 GLIBC 符号版本；任何一个超过
-2.31 都会阻断发布。
+GNU/Linux 的 GNU 归档明确以 glibc 2.31 为最低版本（Ubuntu 20.04，或带更新 glibc 的
+发行版），同时为 x64 和 arm64 发布完全静态的 musl 归档。安装器读取
+`getconf GNU_LIBC_VERSION`：检测到 2.31 或更新版本时选择 GNU，glibc 更旧、不存在或
+无法识别时选择 musl；显式传入 `--target` / `OSDK_TARGET` 仍会覆盖自动选择。Release CI
+既限制 GNU 二进制导入的 GLIBC 符号不得超过 2.31，也拒绝带 ELF interpreter 或动态
+`NEEDED` 条目的 musl 二进制。
 
 ## Windows
 
@@ -133,7 +136,7 @@ sh install.sh \
 | `--install-dir` | `OSDK_BIN_DIR` | 二进制安装目录 |
 | `--repository` | `OSDK_REPOSITORY` | GitHub 的 `owner/repo` |
 | `--base-url` | `OSDK_DOWNLOAD_BASE_URL` | GitHub 或下载镜像根地址 |
-| `--target` | `OSDK_TARGET` | 覆盖自动识别的平台目标 |
+| `--target` | `OSDK_TARGET` | 覆盖自动识别的平台目标及 Linux libc |
 | `--skip-verify` | `OSDK_SKIP_VERIFY=1` | 跳过 SHA-256 校验，不推荐 |
 | `--shells` | `OSDK_SETUP_SHELLS` | 要配置的 shell：`all`、`none` 或逗号分隔列表 |
 | `--no-modify-shell` | — | 等价于 `--shells none` |
@@ -230,6 +233,9 @@ osdk source test self          # 实测各个候选源
 osdk source pin self ghproxy   # 固定使用镜像
 osdk --source github self upgrade   # 只对这一次生效
 ```
+
+Linux 上的 musl 构建会继续升级到对应的 musl Release 产物，而不会切回 GNU。因此，因
+glibc 过旧或宿主不是 glibc 而选择的安装，在后续升级后仍保持可运行。
 
 要安装指定版本（包括退回到更早的版本）：
 

@@ -37,9 +37,10 @@ irm https://raw.githubusercontent.com/lejunyang/one-sdk/main/install.ps1 | iex
 ```
 
 The installers download the latest release and verify it against `SHA256SUMS`.
-GNU/Linux release binaries have an explicit glibc 2.31 baseline (Ubuntu 20.04
-or a distribution with a newer glibc). They then detect the shells on your
-system, ask which to configure, and let you
+On Linux, the installer selects the GNU archive when it detects glibc 2.31 or
+newer and otherwise selects a fully static musl archive; an explicit `--target`
+overrides this choice. It then detects the shells on your system, asks which to
+configure, and lets you
 confirm or change where osdk keeps its config, data, and cache. Each selected
 shell gets the environment variables plus `osdk activate`, so a new shell is
 ready to use. On Windows the current session is activated too; on Unix, add
@@ -95,8 +96,9 @@ osdk self upgrade --dry-run   # what is available
 osdk self upgrade             # download it and replace this installation
 ```
 
-Both programs are replaced together and the download is checksum-verified.
-Update sources are speed-probed just like tool downloads, so a GitHub mirror is
+Both programs are replaced together and the download is checksum-verified. Linux
+self-updates preserve the installed GNU or musl ABI. Update sources are
+speed-probed just like tool downloads, so a GitHub mirror is
 used automatically when it is faster; `osdk source test self` shows the
 measurement and `osdk source pin self <id>` fixes the choice.
 

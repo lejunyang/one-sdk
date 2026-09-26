@@ -63,12 +63,13 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
-    # Ubuntu 20.04 is the oldest still-maintained Ubuntu LTS and supplies glibc
-    # 2.31. The symbol-version gate below is the binding contract: changing the
+    # Ubuntu 20.04 is a fixed maintained LTS and supplies glibc 2.31. The
+    # symbol-version gate below is the binding contract: changing the
     # image or toolchain cannot silently raise the published ABI floor.
     container: ubuntu:20.04
     env:
       OSDK_RELEASE_BIN_DIR: target/${{ matrix.target }}/release
+      OSDK_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
     steps:
       - name: Install build prerequisites
         run: >-
@@ -140,6 +141,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar
@@ -152,6 +159,22 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl linker
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Configure native musl compiler
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        shell: bash
+        run: |
+          target="${{ matrix.target }}"
+          target_env=${target//-/_}
+          cargo_target_env=$(printf '%s' "$target_env" | tr '[:lower:]' '[:upper:]')
+          echo "CC_${target_env}=musl-gcc" >> "$GITHUB_ENV"
+          # C build scripts need musl headers, while rustc's bundled linker and
+          # CRT produce the portable static PIE. Using musl-gcc as rustc's final
+          # linker instead emits an interpreter on Debian/Ubuntu.
+          echo "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=-C link-self-contained=yes" \
+            >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.target }}
@@ -174,6 +197,26 @@ jobs:
           cargo build --locked --release
           -p osdk-shim
           --target ${{ matrix.target }}
+      - name: Verify static musl binaries
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        shell: bash
+        env:
+          OSDK_RELEASE_BIN_DIR: target/${{ matrix.target }}/release
+          OSDK_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+        run: |
+          failure_dir="$RUNNER_TEMP/dynamic-negative-control"
+          failure_log="$RUNNER_TEMP/musl-static-negative-control.log"
+          mkdir -p "$failure_dir"
+          cp /bin/sh "$failure_dir/osdk"
+          cp /bin/sh "$failure_dir/osdk-shim"
+          if OSDK_RELEASE_BIN_DIR="$failure_dir" \
+            "$OSDK_RELEASE_BIN_DIR/osdk" run musl-static \
+              >"$failure_log" 2>&1; then
+            echo "The musl checker accepted intentionally dynamic binaries." >&2
+            exit 1
+          fi
+          grep -F 'is not a static musl binary' "$failure_log"
+          "$OSDK_RELEASE_BIN_DIR/osdk" run musl-static
       - name: Package Unix binaries
         if: ${{ matrix.archive == 'tar' }}
         shell: bash

@@ -151,6 +151,18 @@ write_checksum() {
   printf '%s  %s\n' "$digest" "${archive_path##*/}" > "$checksum_path"
 }
 
+append_checksum() {
+  local archive_path=$1
+  local checksum_path=$2
+  local digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum "$archive_path" | awk '{ print $1 }')
+  else
+    digest=$(shasum -a 256 "$archive_path" | awk '{ print $1 }')
+  fi
+  printf '%s  %s\n' "$digest" "${archive_path##*/}" >> "$checksum_path"
+}
+
 export HOME="$test_root/home"
 export XDG_CACHE_HOME="$test_root/xdg-cache"
 export XDG_CONFIG_HOME="$test_root/xdg-config"
@@ -205,6 +217,21 @@ write_install_set "$fixture_dir" fixture
 tar -C "$fixture_dir" -czf "$asset_dir/osdk-$target.tar.gz" osdk osdk-shim
 write_checksum "$asset_dir/osdk-$target.tar.gz" "$asset_dir/SHA256SUMS"
 cp "$asset_dir/osdk-$target.tar.gz" "$asset_dir/SHA256SUMS" "$latest_dir/"
+
+if [[ $(uname -s) == Linux ]]; then
+  case $(uname -m) in
+    x86_64|amd64) musl_target=x86_64-unknown-linux-musl ;;
+    aarch64|arm64) musl_target=aarch64-unknown-linux-musl ;;
+  esac
+  musl_fixture_dir="$test_root/musl-fixtures"
+  write_install_set "$musl_fixture_dir" musl
+  tar -C "$musl_fixture_dir" -czf \
+    "$asset_dir/osdk-$musl_target.tar.gz" osdk osdk-shim
+  append_checksum \
+    "$asset_dir/osdk-$musl_target.tar.gz" "$asset_dir/SHA256SUMS"
+  cp "$asset_dir/osdk-$musl_target.tar.gz" "$latest_dir/"
+  cp "$asset_dir/SHA256SUMS" "$latest_dir/SHA256SUMS"
+fi
 
 missing_asset_dir="$release_root/download/v9.8.6"
 mkdir -p "$missing_asset_dir"
@@ -344,6 +371,62 @@ OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
 
 assert_install_set "$latest_install_dir" fixture
 assert_no_transaction_dirs "$latest_install_dir"
+
+if [[ $(uname -s) == Linux ]]; then
+  getconf_wrapper_dir="$test_root/getconf-wrapper"
+  mkdir -p "$getconf_wrapper_dir"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$OSDK_TEST_GETCONF_OUTPUT"' \
+    > "$getconf_wrapper_dir/getconf"
+  chmod +x "$getconf_wrapper_dir/getconf"
+
+  baseline_install_dir="$test_root/glibc-baseline-bin"
+  PATH="$getconf_wrapper_dir:$PATH" \
+    OSDK_TEST_GETCONF_OUTPUT='glibc 2.31' \
+    OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
+    OSDK_REPOSITORY=example/one-sdk \
+    sh "$repo_root/install.sh" \
+      --version 9.8.7 \
+      --install-dir "$baseline_install_dir"
+  assert_install_set "$baseline_install_dir" fixture
+
+  musl_install_dir="$test_root/musl-fallback-bin"
+  musl_selection_log="$test_root/musl-selection.log"
+  PATH="$getconf_wrapper_dir:$PATH" \
+    OSDK_TEST_GETCONF_OUTPUT='glibc 2.30' \
+    OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
+    OSDK_REPOSITORY=example/one-sdk \
+    sh "$repo_root/install.sh" \
+      --version 9.8.7 \
+      --install-dir "$musl_install_dir" \
+      >"$musl_selection_log"
+  assert_install_set "$musl_install_dir" musl
+  grep -F -- \
+    "Detected glibc 2.30, below the 2.31 release baseline; using $musl_target." \
+    "$musl_selection_log" >/dev/null
+
+  unknown_libc_install_dir="$test_root/unknown-libc-bin"
+  PATH="$getconf_wrapper_dir:$PATH" \
+    OSDK_TEST_GETCONF_OUTPUT='musl libc 1.2.5' \
+    OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
+    OSDK_REPOSITORY=example/one-sdk \
+    sh "$repo_root/install.sh" \
+      --version 9.8.7 \
+      --install-dir "$unknown_libc_install_dir"
+  assert_install_set "$unknown_libc_install_dir" musl
+
+  override_install_dir="$test_root/explicit-gnu-bin"
+  PATH="$getconf_wrapper_dir:$PATH" \
+    OSDK_TEST_GETCONF_OUTPUT='glibc 2.30' \
+    OSDK_DOWNLOAD_BASE_URL="http://127.0.0.1:$port" \
+    OSDK_REPOSITORY=example/one-sdk \
+    sh "$repo_root/install.sh" \
+      --version 9.8.7 \
+      --target "$target" \
+      --install-dir "$override_install_dir"
+  assert_install_set "$override_install_dir" fixture
+fi
 
 incomplete_install_dir="$test_root/incomplete-bin"
 write_install_set "$incomplete_install_dir" old

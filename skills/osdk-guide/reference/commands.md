@@ -310,7 +310,7 @@ osdk prune --dry-run
 | `config get <key> [-g]` | 读一个设置；`-g` 读用户全局配置 |
 | `config set <key> <value> [-g]` | 写一个设置到项目配置（`-g` 写全局）；列表型接受逗号分隔值 |
 | `config unset <key> [-g]` | 删一个设置，恢复默认 |
-| `self upgrade [--version <v>] [--dry-run] [--force]` | 下载最新（或指定）release 并替换当前安装；`osdk` 与 `osdk-shim` 一起替换 |
+| `self upgrade [--version <v>] [--dry-run] [--force]` | 下载最新（或指定）release 并替换当前安装；`osdk` 与 `osdk-shim` 一起替换，Linux musl 安装继续选择 musl 产物 |
 | `doctor [--verify] [--tool <t>]` | 诊断目录 / 镜像 / 同盘 / link mode / 代理；`--verify` 重新哈希每个已装文件找出与安装时不一致的（慢，可 `--tool` 限定） |
 
 ```bash

@@ -25,8 +25,9 @@ visible. The publish job removes the repository build-mirror configuration and
 validates publishable dependencies against the official crates.io index and
 the repository lockfile. The workflow
 creates the GitHub tag and Release only after every crate has published, then
-attaches five platform archives and `SHA256SUMS`. A crates.io failure therefore
-cannot leave behind a GitHub Release that appears complete.
+attaches seven platform archives and `SHA256SUMS`: GNU and musl Linux archives
+for x64 and arm64, two macOS archives, and Windows x64. A crates.io failure
+therefore cannot leave behind a GitHub Release that appears complete.
 
 The two GNU/Linux archives are built natively by architecture inside an
 `ubuntu:20.04` container. This makes glibc 2.31 the declared minimum instead of
@@ -36,6 +37,14 @@ symbol versions and rejects anything above `GLIBC_2.31`. The workflow first
 runs the same checker with an impossible `0.0` ceiling and requires that probe
 to fail, so a broken parser cannot turn the real green result into false
 evidence.
+
+The two Linux musl targets are built natively on their matching x64 and arm64
+runners. C build scripts use `musl-gcc`, while rustc's self-contained link
+produces a static PIE; using `musl-gcc` as rustc's final linker would instead
+emit an interpreter on Debian and Ubuntu. The `musl-static` task rejects an
+interpreter or any dynamic `NEEDED` entry in either executable. It too has a
+negative control: the checker must reject copies of the runner's dynamic
+`/bin/sh` before its result for the release binaries is trusted.
 
 Install the primary commands from crates.io with:
 
@@ -184,7 +193,9 @@ platform archive plus the `SHA256SUMS` next to it. That coupling is the reason
 the command lives in the same document as the pipeline. The asset name it asks
 for is derived from the host, and the mapping is asserted against the build
 matrix by a unit test, so a platform that the workflow stops publishing becomes
-an "unsupported platform" error rather than a download of a 404 page.
+an "unsupported platform" error rather than a download of a 404 page. Linux
+includes the running binary's libc ABI in that mapping, so a musl installation
+keeps downloading musl releases during later upgrades.
 
 An upgrade proceeds in four steps:
 

@@ -147,6 +147,11 @@ description = "Release ELF symbol versions stay at or below the glibc 2.31 contr
 run = "./scripts/check-glibc-baseline.sh"
 when = { os = "linux" }
 
+[tasks.musl-static]
+description = "Release musl binaries are fully static ELF files"
+run = "./scripts/check-musl-static.sh"
+when = { os = "linux" }
+
 [tasks.comfyui-view-e2e]
 description = "ComfyUI model-view end-to-end (real CLI + headless source-tree ComfyUI)"
 # Drives pull -> declarative [models] render -> extra_model_paths.yaml export ->

@@ -19,14 +19,21 @@
 省略。core 在自身上传前经过 dry-run，两个依赖它的 package 则在 core 可见后一起
 经过 `cargo publish --locked --dry-run`。发布 job 会移除仓库的构建镜像配置，并使用官方
 crates.io index 与仓库 lockfile 校验可发布依赖。只有 crate
-发布全部成功后，流水线才创建 GitHub tag/Release、归档五个平台的预编译程序并生成
-`SHA256SUMS`。这样不会在 crates.io 发布失败时留下一个看似完整的 GitHub Release。
+发布全部成功后，流水线才创建 GitHub tag/Release、归档七个平台产物并生成
+`SHA256SUMS`：x64/arm64 Linux 各有 GNU 和 musl 两份，加上两份 macOS 和 Windows x64。
+这样不会在 crates.io 发布失败时留下一个看似完整的 GitHub Release。
 
 两个 GNU/Linux 归档按各自架构在 `ubuntu:20.04` 容器里原生构建，因此明确以 glibc 2.31
 为最低版本，不会继承滚动 GitHub runner 当时恰好安装的 libc。打包前还会对两个 ELF 运行
 `glibc-baseline` 任务：读取其导入的符号版本，任何一个超过 `GLIBC_2.31` 都会拒绝发布。
 流水线会先用不可能满足的 `0.0` 上限运行同一检查并要求它失败，避免解析器失效后真实检查
 仍给出虚假的绿色结果。
+
+两个 Linux musl 目标同样在对应的 x64、arm64 runner 上原生构建：C 构建脚本使用
+`musl-gcc`，rustc 则用 self-contained link 生成 static PIE；若让 rustc 最终也通过
+`musl-gcc` 链接，Debian/Ubuntu 上反而会生成带 interpreter 的产物。`musl-static` 任务会
+拒绝任一程序带 ELF interpreter 或动态 `NEEDED` 条目。它也有负向对照：先要求检查器拒绝
+runner 上动态链接的 `/bin/sh` 副本，再相信发布产物的绿色结果。
 
 用户安装主命令时使用：
 
@@ -121,6 +128,7 @@ OIDC 换取任务生命周期内的短期 token，并在 job 结束时自动撤�
 它并排的 `SHA256SUMS`。这种耦合正是该命令和发布流水线写在同一篇文档里的原因。
 它请求的资产名由宿主平台推导，映射关系有单元测试对着构建矩阵断言，因此一旦某个
 平台不再发布，用户得到的是"平台不受支持"的报错，而不是下载回一个 404 页面。
+Linux 映射还包含当前运行二进制的 libc ABI，因此 musl 安装后续仍下载 musl 产物。
 
 升级分四步：
 

@@ -16,9 +16,14 @@ curl --proto '=https' --tlsv1.2 -sSf \
 The default destination is `~/.local/bin`. The installer then walks you through
 shell setup, described in [Shell setup](#shell-setup) below.
 
-The GNU/Linux archives have a checked glibc 2.31 minimum (Ubuntu 20.04 or a
-distribution with a newer glibc). Release CI builds them inside Ubuntu 20.04
-and rejects either binary if its imported GLIBC symbol versions exceed 2.31.
+GNU/Linux archives have a checked glibc 2.31 minimum (Ubuntu 20.04 or a
+distribution with a newer glibc), plus fully static musl counterparts for x64
+and arm64. The installer reads `getconf GNU_LIBC_VERSION`: it selects GNU when
+the detected version is at least 2.31 and musl when glibc is older, absent, or
+cannot be identified. An explicit `--target` / `OSDK_TARGET` remains an
+override. Release CI both caps the GNU binaries' imported GLIBC symbols at 2.31
+and rejects musl binaries that contain an ELF interpreter or dynamic `NEEDED`
+entry.
 
 ## Windows
 
@@ -133,7 +138,7 @@ sh install.sh \
 | `--install-dir` | `OSDK_BIN_DIR` | Binary destination |
 | `--repository` | `OSDK_REPOSITORY` | GitHub `owner/repo` |
 | `--base-url` | `OSDK_DOWNLOAD_BASE_URL` | GitHub or mirror base URL |
-| `--target` | `OSDK_TARGET` | Override automatic platform detection |
+| `--target` | `OSDK_TARGET` | Override automatic platform and Linux libc detection |
 | `--skip-verify` | `OSDK_SKIP_VERIFY=1` | Skip SHA-256 verification; not recommended |
 | `--shells` | `OSDK_SETUP_SHELLS` | Shells to configure: `all`, `none`, or a comma-separated list |
 | `--no-modify-shell` | — | Equivalent to `--shells none` |
@@ -235,6 +240,10 @@ osdk source test self          # measure the candidates
 osdk source pin self ghproxy   # always use the mirror
 osdk --source github self upgrade   # override once
 ```
+
+On Linux, a musl build upgrades to the matching musl release asset rather than
+switching back to GNU. This keeps installations selected for an older or
+non-glibc host runnable after later upgrades.
 
 To install a specific release, including going back to an earlier one:
 

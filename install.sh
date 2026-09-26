@@ -7,6 +7,7 @@ INSTALL_DIR=${OSDK_BIN_DIR:-"$HOME/.local/bin"}
 BASE_URL=${OSDK_DOWNLOAD_BASE_URL:-https://github.com}
 TARGET=${OSDK_TARGET:-}
 SKIP_VERIFY=${OSDK_SKIP_VERIFY:-0}
+GLIBC_BASELINE=2.31
 
 # Post-install shell setup. The three directory variables seed the proposed
 # defaults from the environment, so a shell that already exports them keeps its
@@ -35,7 +36,7 @@ Download options:
   --install-dir <path>      Binary directory (default: $HOME/.local/bin)
   --repository <owner/repo> GitHub repository (default: lejunyang/one-sdk)
   --base-url <url>          Download base or mirror URL (default: https://github.com)
-  --target <target>         Override the detected Rust target triple
+  --target <target>         Override detected platform and Linux libc target
   --skip-verify             Skip SHA-256 verification
   -h, --help                Show this help
 
@@ -82,6 +83,63 @@ say() {
 
 need_value() {
   [ "$#" -ge 2 ] || fail "$1 requires a value"
+}
+
+version_at_least() {
+  osdk_version_current=$1
+  osdk_version_required=$2
+  osdk_version_current_major=${osdk_version_current%%.*}
+  osdk_version_current_rest=${osdk_version_current#*.}
+  osdk_version_current_minor=${osdk_version_current_rest%%.*}
+  osdk_version_required_major=${osdk_version_required%%.*}
+  osdk_version_required_rest=${osdk_version_required#*.}
+  osdk_version_required_minor=${osdk_version_required_rest%%.*}
+
+  case "$osdk_version_current_major:$osdk_version_current_minor" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  if [ "$osdk_version_current_major" -gt "$osdk_version_required_major" ]; then
+    return 0
+  fi
+  [ "$osdk_version_current_major" -eq "$osdk_version_required_major" ] &&
+    [ "$osdk_version_current_minor" -ge "$osdk_version_required_minor" ]
+}
+
+detect_glibc_version() {
+  command -v getconf >/dev/null 2>&1 || return 1
+  osdk_getconf_output=$(LC_ALL=C getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
+  case "$osdk_getconf_output" in
+    'glibc '*) osdk_glibc_version=${osdk_getconf_output#glibc } ;;
+    *) return 1 ;;
+  esac
+  case "$osdk_glibc_version" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  osdk_glibc_major=${osdk_glibc_version%%.*}
+  osdk_glibc_rest=${osdk_glibc_version#*.}
+  osdk_glibc_minor=${osdk_glibc_rest%%.*}
+  case "$osdk_glibc_major:$osdk_glibc_minor" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  printf '%s.%s\n' "$osdk_glibc_major" "$osdk_glibc_minor"
+}
+
+select_linux_target() {
+  osdk_linux_arch=$1
+  osdk_detected_glibc=
+  if osdk_detected_glibc=$(detect_glibc_version) &&
+     version_at_least "$osdk_detected_glibc" "$GLIBC_BASELINE"; then
+    TARGET="$osdk_linux_arch-unknown-linux-gnu"
+    return
+  fi
+
+  TARGET="$osdk_linux_arch-unknown-linux-musl"
+  if [ -n "$osdk_detected_glibc" ]; then
+    libc_selection_message="Detected glibc $osdk_detected_glibc, below the $GLIBC_BASELINE release baseline; using $TARGET."
+  else
+    libc_selection_message="glibc $GLIBC_BASELINE or newer was not detected; using $TARGET."
+  fi
 }
 
 while [ "$#" -gt 0 ]; do
@@ -168,12 +226,13 @@ command -v tar >/dev/null 2>&1 || fail "tar is required"
 if [ -z "$TARGET" ]; then
   kernel=$(uname -s)
   machine=$(uname -m)
+  libc_selection_message=
   case "$kernel:$machine" in
     Linux:x86_64|Linux:amd64)
-      TARGET=x86_64-unknown-linux-gnu
+      select_linux_target x86_64
       ;;
     Linux:aarch64|Linux:arm64)
-      TARGET=aarch64-unknown-linux-gnu
+      select_linux_target aarch64
       ;;
     Darwin:x86_64|Darwin:amd64)
       TARGET=x86_64-apple-darwin
@@ -185,6 +244,7 @@ if [ -z "$TARGET" ]; then
       fail "unsupported platform: $kernel $machine (use --target to override)"
       ;;
   esac
+  [ -z "$libc_selection_message" ] || say '%s\n' "$libc_selection_message"
 fi
 
 case "$VERSION" in
