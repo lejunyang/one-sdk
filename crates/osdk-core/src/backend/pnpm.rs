@@ -128,18 +128,26 @@ fn cache_mapping(version: &str) -> (&'static str, &'static str) {
     }
 }
 
+fn launcher_module(bin_dir: &std::path::Path, name: &str) -> Result<(PathBuf, &'static str)> {
+    for extension in ["mjs", "cjs"] {
+        let module = bin_dir.join(format!("{name}.{extension}"));
+        if module.is_file() {
+            return Ok((module, extension));
+        }
+    }
+    Err(Error::other(format!(
+        "pnpm distribution is missing {} and {}",
+        bin_dir.join(format!("{name}.mjs")).display(),
+        bin_dir.join(format!("{name}.cjs")).display()
+    )))
+}
+
 #[cfg(unix)]
 fn write_launchers(bin_dir: &std::path::Path, _os: Os) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     for name in ["pnpm", "pnpx"] {
         let path = bin_dir.join(name);
-        let module = bin_dir.join(format!("{name}.mjs"));
-        if !module.is_file() {
-            return Err(Error::other(format!(
-                "pnpm distribution is missing {}",
-                module.display()
-            )));
-        }
+        let (module, _) = launcher_module(bin_dir, name)?;
         let script = format!("#!/bin/sh\nexec node \"{}\" \"$@\"\n", module.display());
         std::fs::write(&path, script).map_err(|error| Error::io(&path, error))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -151,15 +159,9 @@ fn write_launchers(bin_dir: &std::path::Path, _os: Os) -> Result<()> {
 #[cfg(windows)]
 fn write_launchers(bin_dir: &std::path::Path, _os: Os) -> Result<()> {
     for name in ["pnpm", "pnpx"] {
-        let module = bin_dir.join(format!("{name}.mjs"));
-        if !module.is_file() {
-            return Err(Error::other(format!(
-                "pnpm distribution is missing {}",
-                module.display()
-            )));
-        }
+        let (_, extension) = launcher_module(bin_dir, name)?;
         let path = bin_dir.join(format!("{name}.cmd"));
-        let script = format!("@echo off\r\nnode \"%~dp0{name}.mjs\" %*\r\n");
+        let script = format!("@echo off\r\nnode \"%~dp0{name}.{extension}\" %*\r\n");
         std::fs::write(&path, script).map_err(|error| Error::io(&path, error))?;
     }
     Ok(())
@@ -213,24 +215,26 @@ mod tests {
     }
 
     #[test]
-    fn launchers_target_complete_distribution_modules() {
-        let temporary = tempfile::tempdir().unwrap();
-        let bin = temporary.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        std::fs::write(bin.join("pnpm.mjs"), b"export {};").unwrap();
-        std::fs::write(bin.join("pnpx.mjs"), b"export {};").unwrap();
-        write_launchers(&bin, Os::Linux).unwrap();
-        #[cfg(unix)]
-        {
-            let pnpm = std::fs::read_to_string(bin.join("pnpm")).unwrap();
-            assert!(pnpm.contains("bin/pnpm.mjs"), "{pnpm}");
-            assert!(std::fs::metadata(bin.join("pnpm")).unwrap().is_file());
-        }
-        #[cfg(windows)]
-        {
-            let pnpm = std::fs::read_to_string(bin.join("pnpm.cmd")).unwrap();
-            assert!(pnpm.contains("%~dp0pnpm.mjs"), "{pnpm}");
-            assert!(std::fs::metadata(bin.join("pnpm.cmd")).unwrap().is_file());
+    fn launchers_support_current_mjs_and_pnpm_9_cjs_layouts() {
+        for extension in ["mjs", "cjs"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let bin = temporary.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            std::fs::write(bin.join(format!("pnpm.{extension}")), b"module").unwrap();
+            std::fs::write(bin.join(format!("pnpx.{extension}")), b"module").unwrap();
+            write_launchers(&bin, Os::Linux).unwrap();
+            #[cfg(unix)]
+            {
+                let pnpm = std::fs::read_to_string(bin.join("pnpm")).unwrap();
+                assert!(pnpm.contains(&format!("bin/pnpm.{extension}")), "{pnpm}");
+                assert!(std::fs::metadata(bin.join("pnpm")).unwrap().is_file());
+            }
+            #[cfg(windows)]
+            {
+                let pnpm = std::fs::read_to_string(bin.join("pnpm.cmd")).unwrap();
+                assert!(pnpm.contains(&format!("%~dp0pnpm.{extension}")), "{pnpm}");
+                assert!(std::fs::metadata(bin.join("pnpm.cmd")).unwrap().is_file());
+            }
         }
     }
 

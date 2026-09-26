@@ -44,13 +44,15 @@ osdk install bun@latest deno@latest
 | Deno | `@deno/*` 平台包，SRI | `deno` | 否 |
 
 pnpm 从完整 `pnpm` package 解析版本和安装 JavaScript distribution，并使用受管 Node
-启动；它不会直接提取只含 SEA 二进制的 `@pnpm/<os>-<arch>` package。Bun 与 Deno 则直接
-以当前平台实际安装的 npm platform package 为准。
+启动；它不会直接提取只含 SEA 二进制的 `@pnpm/<os>-<arch>` package。pnpm 9 的 `.cjs`
+入口和新版本的 `.mjs` 入口都支持。Bun 与 Deno 则直接以当前平台实际安装的 npm
+platform package 为准。
 
 npm 和 Yarn 的 launcher 调用 `PATH` 中的 Node。只要一次请求含 `npm`、`pnpm` 或
 `yarn` 而没有 Node，osdk 就自动加入 Node：先按项目规则选择版本，找不到时用
 `latest`。该规则也适用于显式工具列表；manager bin 排在受管 Node bin 之前，不依赖
 用户全局 Node。
+
 
 ## `packageManager` 自动发现
 
