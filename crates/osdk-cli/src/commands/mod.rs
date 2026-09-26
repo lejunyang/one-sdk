@@ -227,6 +227,38 @@ mod command_flow_tests {
     }
 
     #[test]
+    fn corepack_launchers_resolve_to_independent_backends_instead_of_conflicting() {
+        for (name, manager) in [
+            ("npm", "npm"),
+            ("npx", "npm"),
+            ("pnpm", "pnpm"),
+            ("pnpx", "pnpm"),
+            ("yarn", "yarn"),
+            ("yarnpkg", "yarn"),
+        ] {
+            let owners =
+                std::collections::BTreeSet::from(["node".to_string(), manager.to_string()]);
+            assert!(!is_real_shim_conflict(name, &owners), "{name}");
+            assert_eq!(
+                osdk_core::shim::precedence_winner(name, &owners),
+                Some(manager),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn corepack_precedence_rejects_unexpected_third_owners() {
+        let owners = std::collections::BTreeSet::from([
+            "node".to_string(),
+            "pnpm".to_string(),
+            "npm:pnpm-lookalike".to_string(),
+        ]);
+        assert_eq!(osdk_core::shim::precedence_winner("pnpm", &owners), None);
+        assert!(is_real_shim_conflict("pnpm", &owners));
+    }
+
+    #[test]
     fn android_r8_tools_resolve_to_build_tools_instead_of_conflicting() {
         // Google ships the same R8 launchers in two families. Without a
         // precedence rule this refused every shim of whichever family was

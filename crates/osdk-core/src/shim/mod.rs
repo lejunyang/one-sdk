@@ -25,10 +25,22 @@ use crate::npm_tools::{ToolScope, LOCKED_NPM_SCOPE_OPTION};
 use crate::version::ToolVersion;
 use crate::version::{ToolRequest, VersionSpec};
 
+/// The independent backend that owns a package-manager command bundled by
+/// Node/Corepack. Node may route these launchers when no independent selection
+/// exists, but it must not override an explicitly managed backend.
+pub fn package_manager_backend_for_command(name: &str) -> Option<&'static str> {
+    match name {
+        "npm" | "npx" => Some("npm"),
+        "pnpm" | "pnpx" => Some("pnpm"),
+        "yarn" | "yarnpkg" => Some("yarn"),
+        _ => None,
+    }
+}
+
 /// Executable names that should route through the shim for an installed
 /// backend version. These are deliberately separate from backend ownership:
-/// Node does not own npm/npx, but its bundled launchers still need routing
-/// shims so Node-only activations cannot bypass package-registry preflight.
+/// Node does not own package-manager launchers, but its bundled copies still
+/// need routing shims so Node-only activations cannot bypass registry preflight.
 pub fn routed_bin_names(
     ctx: &Ctx,
     backend: &dyn Backend,
@@ -40,7 +52,7 @@ pub fn routed_bin_names(
         .collect::<BTreeSet<_>>();
     if backend.id() == "node" {
         for name in crate::backend::bin_names_in_dirs(&backend.bin_paths(ctx, version)?) {
-            if matches!(name.as_str(), "npm" | "npx") {
+            if package_manager_backend_for_command(&name).is_some() {
                 names.insert(name);
             }
         }
@@ -70,6 +82,15 @@ pub fn precedence_winner<'a>(name: &str, owner_ids: &'a BTreeSet<String>) -> Opt
     // other tool claims.
     if owner_ids.len() < 2 {
         return None;
+    }
+    if let Some(manager) = package_manager_backend_for_command(name) {
+        if owner_ids.contains(manager)
+            && owner_ids
+                .iter()
+                .all(|owner_id| matches!(owner_id.as_str(), "node") || owner_id == manager)
+        {
+            return owner_ids.get(manager).map(String::as_str);
+        }
     }
     if !ANDROID_R8_TOOLS.contains(&name) {
         return None;
@@ -1485,6 +1506,25 @@ mod tests {
     // If they diverge, the shim dispatches to a copy other than the one it
     // was generated for, which is invisible until a build misbehaves.
     #[test]
+    fn shared_corepack_launchers_resolve_to_independent_backends() {
+        for (name, manager) in [
+            ("npm", "npm"),
+            ("npx", "npm"),
+            ("pnpm", "pnpm"),
+            ("pnpx", "pnpm"),
+            ("yarn", "yarn"),
+            ("yarnpkg", "yarn"),
+        ] {
+            let owners = super::BTreeSet::from(["node".to_string(), manager.to_string()]);
+            assert_eq!(
+                super::precedence_winner(name, &owners),
+                Some(manager),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn shared_android_r8_launchers_resolve_to_build_tools() {
         let both = super::BTreeSet::from([
             "android-cmdline-tools".to_string(),
@@ -2271,9 +2311,8 @@ mod tests {
         assert!(!wrapper.exists());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn node_routing_names_include_bundled_npm_without_changing_backend_ownership() {
+    fn node_routes_bundled_package_managers_without_claiming_ownership() {
         use std::sync::Arc;
 
         use super::*;
@@ -2327,20 +2366,31 @@ mod tests {
         let version = ToolVersion::new("node", "20.0.0");
         let bin = NodeBackend.bin_paths(&ctx, &version).unwrap().remove(0);
         std::fs::create_dir_all(&bin).unwrap();
-        for name in ["node", "npm", "npx"] {
-            let path = bin.join(name);
+        let package_managers = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
+        for name in std::iter::once("node").chain(package_managers) {
+            let file_name = if cfg!(windows) {
+                format!("{name}.cmd")
+            } else {
+                name.to_string()
+            };
+            let path = bin.join(file_name);
             std::fs::write(&path, b"#!/bin/sh\n").unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
 
         let owned = NodeBackend.bin_names(&ctx, &version).unwrap();
         assert!(owned.contains(&"node".to_string()));
-        assert!(!owned.contains(&"npm".to_string()));
-        assert!(!owned.contains(&"npx".to_string()));
+        for name in package_managers {
+            assert!(!owned.contains(&name.to_string()), "{name}");
+        }
 
         let routed = routed_bin_names(&ctx, &NodeBackend, &version).unwrap();
-        assert!(routed.contains(&"npm".to_string()));
-        assert!(routed.contains(&"npx".to_string()));
+        for name in package_managers {
+            assert!(routed.contains(&name.to_string()), "{name}");
+        }
     }
 }

@@ -53,6 +53,10 @@ npm 和 Yarn 的 launcher 调用 `PATH` 中的 Node。只要一次请求含 `npm
 `latest`。该规则也适用于显式工具列表；manager bin 排在受管 Node bin 之前，不依赖
 用户全局 Node。
 
+Node 的 Corepack 也可能在 Node 安装目录中提供 `npm`/`npx`、`pnpm`/`pnpx` 和
+`yarn`/`yarnpkg`。osdk 只把这些当作 Node 的回退路由，不把它们算成 Node 自己拥有的
+命令：项目或全局配置选中了独立 manager 时，对应 shim 始终路由到独立 backend；没有
+独立选择时，才使用当前 Node 安装中实际存在的 Corepack launcher。
 
 ## `packageManager` 自动发现
 

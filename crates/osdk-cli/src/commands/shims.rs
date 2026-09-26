@@ -520,13 +520,6 @@ pub(crate) fn is_real_shim_conflict(
     if owner_ids.len() <= 1 {
         return false;
     }
-    if matches!(name, "npm" | "npx")
-        && owner_ids
-            .iter()
-            .all(|owner_id| matches!(owner_id.as_str(), "node" | "npm"))
-    {
-        return false;
-    }
     if osdk_core::shim::precedence_winner(name, owner_ids).is_some() {
         return false;
     }

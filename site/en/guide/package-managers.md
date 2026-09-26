@@ -58,6 +58,12 @@ project discovery and falls back to `latest`. This also applies to explicit tool
 lists. Manager bins precede the managed Node bin, so they do not depend on a
 user-global Node.
 
+Node's Corepack can also place `npm`/`npx`, `pnpm`/`pnpx`, and `yarn`/`yarnpkg`
+launchers in the Node installation. osdk treats those as Node fallback routes,
+not as commands owned by Node: when project or global configuration selects an
+independent manager, its shims always route to that backend; without an
+independent selection, osdk uses an existing Corepack launcher from the active
+Node installation.
 
 ## `packageManager` discovery
 

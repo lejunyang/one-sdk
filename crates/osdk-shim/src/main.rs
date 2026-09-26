@@ -489,17 +489,23 @@ fn package_manager_for_backend(
     backend_version: &str,
 ) -> Option<PackageManager> {
     let belongs_to_manager = match backend {
-        // npm/npx may be supplied by the independent npm backend or by a Node
-        // installation. npm registry behavior is version-independent.
-        "npm" | "node" => matches!(executable_alias, "npm" | "npx"),
+        // Package-manager launchers may come from their independent backend
+        // or from Node/Corepack. Registry behavior follows the command name.
+        "node" => osdk_core::shim::package_manager_backend_for_command(executable_alias).is_some(),
+        "npm" => matches!(executable_alias, "npm" | "npx"),
         "pnpm" => matches!(executable_alias, "pnpm" | "pnpx"),
         "yarn" => matches!(executable_alias, "yarn" | "yarnpkg"),
         "bun" => matches!(executable_alias, "bun" | "bunx"),
         "deno" => executable_alias == "deno",
         _ => false,
     };
+    let version = if backend == "node" && matches!(executable_alias, "yarn" | "yarnpkg") {
+        None
+    } else {
+        Some(backend_version)
+    };
     belongs_to_manager
-        .then(|| manager_for_command(executable_alias, Some(backend_version)))
+        .then(|| manager_for_command(executable_alias, version))
         .flatten()
 }
 
@@ -619,19 +625,26 @@ fn owning_backend(
     tool_name: &str,
     dynamic_report: Option<&ScanReport>,
 ) -> Option<std::sync::Arc<dyn osdk_core::backend::Backend>> {
-    if matches!(tool_name, "npm" | "npx") {
-        let npm = registry.get("npm").ok()?;
-        // An explicit independent npm selection is authoritative, including
-        // when its selected version is missing: do not silently fall back to
-        // the bundled copy and hide a broken project pin.
-        if resolve_active("npm", cwd, &ctx.config.tools, npm.idiomatic_files()).is_some() {
-            return Some(npm);
+    if let Some(manager_id) = osdk_core::shim::package_manager_backend_for_command(tool_name) {
+        let manager = registry.get(manager_id).ok()?;
+        // An explicit independent package-manager selection is authoritative,
+        // including when its selected version is missing: do not silently fall
+        // back to the bundled copy and hide a broken project pin.
+        if resolve_active(
+            manager_id,
+            cwd,
+            &ctx.config.tools,
+            manager.idiomatic_files(),
+        )
+        .is_some()
+        {
+            return Some(manager);
         }
 
-        // Node intentionally does not claim npm/npx in `bin_names`, because
-        // the independent npm backend owns those public tool IDs. A routing
+        // Node intentionally does not claim package managers in `bin_names`,
+        // because independent backends own those public tool IDs. A routing
         // shim may still dispatch to the selected Node installation's bundled
-        // launcher when no independent npm version is selected.
+        // launcher when no independent package manager is selected.
         let node = registry.get("node").ok()?;
         if let Some(active) = resolve_active("node", cwd, &ctx.config.tools, node.idiomatic_files())
         {
@@ -650,7 +663,7 @@ fn owning_backend(
             }
         }
 
-        return (tool_name == "npm").then_some(npm);
+        return (tool_name == manager_id).then_some(manager);
     }
     if let Ok(b) = registry.get(tool_name) {
         return Some(b);
@@ -1016,6 +1029,23 @@ fn strip_verbatim_prefix(path: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::os::windows::ffi::OsStrExt;
+
+    #[test]
+    fn corepack_package_managers_use_safe_registry_classification() {
+        assert_eq!(
+            package_manager_for_backend("node", "npm", "22.0.0"),
+            Some(PackageManager::Npm)
+        );
+        assert_eq!(
+            package_manager_for_backend("node", "pnpm", "22.0.0"),
+            Some(PackageManager::Pnpm)
+        );
+        assert_eq!(package_manager_for_backend("node", "yarn", "22.0.0"), None);
+        assert_eq!(
+            package_manager_for_backend("yarn", "yarn", "4.10.3"),
+            Some(PackageManager::YarnBerry)
+        );
+    }
 
     #[test]
     fn batch_targets_run_through_comspec() {
