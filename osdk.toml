@@ -18,6 +18,7 @@ rust = { version = "1.98.0", components = "rustfmt,clippy", targets = "x86_64-pc
 # scripts/test-installers.sh serves the fixture archives over `python3 -m
 # http.server`. Without it the installer smoke exits before printing anything.
 python = "3.12"
+"cargo:jscpd" = "5.3.2"
 
 # System packages the Wine cross-test needs. Declaring them here does not install
 # anything: `[syspkg]` is a declaration, `osdk pkg status` is read-only, and only
@@ -187,11 +188,5 @@ dir = "site"
 run = "bun run build"
 
 [tasks.dupcheck]
-description = "Copy-paste duplication guard (jscpd), gated at the .jscpd.json threshold"
-# jscpd is a Node CLI, so it runs through a managed node rather than a bare npx:
-# the shim rejects an unselected node, and osdk exec gives the task a node for
-# just this invocation without pinning one in [tools]. Config (formats, ignores,
-# threshold) lives in .jscpd.json so the command stays a one-liner and the gate
-# is the exit code. Not part of ci: it needs Node and is a drift guard, not
-# a build gate -- run it deliberately after large moves or before a cleanup pass.
-run = "osdk exec --tool node@22 -- npx --yes jscpd@latest crates"
+run = "jscpd --config .jscpd.json crates"
+description = "Copy-paste duplication guard (Rust jscpd), gated at the .jscpd.json threshold"
