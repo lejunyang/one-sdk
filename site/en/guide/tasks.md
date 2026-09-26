@@ -193,9 +193,8 @@ use `lua`:
 ```toml
 [tasks.sync]
 lua = """
-for _, target in ipairs(osdk.argv) do
-  local dest = osdk.path.join(osdk.project_root, "dist", target)
-  local code = osdk.run("cp", "-r", target, dest)
+for _, package in ipairs(argv) do
+  local code = run("cargo", "test", "-p", package)
   if code ~= 0 then return code end
 end
 return 0
@@ -216,6 +215,7 @@ message.
 | --- | --- |
 | `osdk.sh(cmd)` | Run through the platform shell, **returning an exit code** rather than throwing |
 | `osdk.run(prog, ...)` | Exec directly; each argument stays separate, no shell |
+| `osdk.exec(prog, ...)` | Exec directly and capture output, returning a result table |
 | `osdk.path.join(...)` | Join with the host separator |
 | `osdk.path.exists(p)` | Whether a path exists |
 | `osdk.env(name)` | Read an environment variable, nil when unset |
@@ -223,12 +223,49 @@ message.
 | `osdk.project_root` / `osdk.dir` / `osdk.task` | Location and identity |
 | `osdk.args.<name>` / `osdk.argv` | Declared arguments and the leftovers |
 
+The common names are also available directly as globals: `run`, `sh`, `exec`,
+`env`, `path`, `join`, `exists`, `root`, `dir`, `task`, `args`, `argv`, and
+`platform`. Small tasks therefore need no repeated `osdk.` prefix. The explicit
+`osdk.*` spellings remain stable for scripts that want collision-resistant names.
+
 Prefer `osdk.run` when building a command from data: each argument becomes one
 argv entry, so a value with spaces or metacharacters cannot split or be
 reinterpreted. `osdk.sh` suits a fixed one-liner.
 Relative paths resolve from the task's `dir` (the project root by default).
 `osdk.run` and `osdk.sh` inherit the task environment, obey `timeout`, and
 terminate the whole child process tree on expiry just like ordinary task steps.
+
+Use `exec` when output is data rather than a live log. The short form is just
+an argv list:
+
+```lua
+local result = exec("git", "rev-parse", "HEAD")
+if not result.success then
+  print(result.stderr)
+  return result.code
+end
+print(result.stdout)
+```
+
+The result has `code`, `success`, `stdout`, `stderr`, `stdout_truncated`, and
+`stderr_truncated`. Each output stream retains at most 4 MiB while continuing
+to drain the pipe, so a verbose child cannot deadlock; use `run` for unbounded
+streaming logs.
+
+The table form adds options. Positional entries, `argv = {...}`, and
+`command = "..."` are three mutually exclusive ways to specify the command:
+
+```lua
+local result = exec {
+  "tool", "--format", "json",
+  cwd = "packages/app",           -- relative to the task dir
+  env = { MODE = "release" },     -- overrides the task environment
+  stdin = "input\n",
+  check = true,                    -- raise on a non-zero exit
+}
+
+local piped = exec { command = "tool-a | tool-b" }
+```
 
 ### Standard library and environment variables
 

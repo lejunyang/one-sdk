@@ -175,9 +175,8 @@ NTFS 没有执行位，所以判据是**扩展名在 `exe/bat/cmd/com/ps1/vbs` �
 ```toml
 [tasks.sync]
 lua = """
-for _, target in ipairs(osdk.argv) do
-  local dest = osdk.path.join(osdk.project_root, "dist", target)
-  local code = osdk.run("cp", "-r", target, dest)
+for _, package in ipairs(argv) do
+  local code = run("cargo", "test", "-p", package)
   if code ~= 0 then return code end
 end
 return 0
@@ -196,6 +195,7 @@ return 0
 | --- | --- |
 | `osdk.sh(cmd)` | 走平台 shell 执行，**返回退出码**而非抛错 |
 | `osdk.run(prog, ...)` | 直接 exec，每个参数独立，不经 shell |
+| `osdk.exec(prog, ...)` | 直接执行并捕获输出，返回结果表 |
 | `osdk.path.join(...)` | 按当前平台的分隔符拼接 |
 | `osdk.path.exists(p)` | 路径是否存在 |
 | `osdk.env(name)` | 读环境变量，未设置返回 nil |
@@ -203,10 +203,44 @@ return 0
 | `osdk.project_root` / `osdk.dir` / `osdk.task` | 位置与身份 |
 | `osdk.args.<名字>` / `osdk.argv` | 声明的参数与剩余参数 |
 
+常用名字同时直接放在全局作用域：`run`、`sh`、`exec`、`env`、`path`、`join`、
+`exists`、`root`、`dir`、`task`、`args`、`argv`、`platform`。因此简单任务不必反复写
+`osdk.`；显式的 `osdk.*` 写法会一直保留，适合担心名字冲突的脚本。
+
 构建命令时优先用 `osdk.run`：它的每个参数直接成为一个 argv 条目，含空格或
 特殊字符的值不会被拆开或重新解释。`osdk.sh` 适合写固定的一行命令。
 相对路径从任务的 `dir`（默认项目根）解析；`osdk.run` / `osdk.sh` 与普通任务
 命令一样继承任务环境、受 `timeout` 约束，并在超时时终止整棵子进程树。
+
+需要读取输出时用 `exec`。短写法直接列 argv：
+
+```lua
+local result = exec("git", "rev-parse", "HEAD")
+if not result.success then
+  print(result.stderr)
+  return result.code
+end
+print(result.stdout)
+```
+
+结果包含 `code`、`success`、`stdout`、`stderr`、`stdout_truncated` 和
+`stderr_truncated`。两条输出流各最多保留 4 MiB，达到上限后仍会持续排空，避免
+子进程卡在满管道上；要流式显示不限量日志则用 `run`。
+
+表形式支持额外选项，并且位置数组、`argv = {...}`、`command = "..."` 三种命令
+写法只能选一种：
+
+```lua
+local result = exec {
+  "tool", "--format", "json",
+  cwd = "packages/app",           -- 相对任务 dir
+  env = { MODE = "release" },     -- 覆盖任务环境
+  stdin = "input\n",
+  check = true,                    -- 非零退出直接抛错
+}
+
+local piped = exec { command = "tool-a | tool-b" }
+```
 
 ### 标准库与环境变量
 

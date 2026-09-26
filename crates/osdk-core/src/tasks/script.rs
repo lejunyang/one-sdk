@@ -27,6 +27,19 @@ use mlua::{HookTriggers, Lua, Value, VmState};
 
 use crate::error::{Error, Result};
 
+/// Captured stdout and stderr are deliberately bounded. A task that needs to
+/// stream an unbounded build log should use `run`, whose stdio is inherited.
+const EXEC_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+
+struct ExecRequest {
+    argv: Vec<String>,
+    shell: bool,
+    cwd: PathBuf,
+    env: BTreeMap<String, String>,
+    input: Option<Vec<u8>>,
+    check: bool,
+}
+
 /// What a Lua script is allowed to know about its surroundings.
 pub struct ScriptContext {
     /// Directory the task runs in.
@@ -187,6 +200,73 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
         .map_err(to_lua)?;
     osdk.set("run", run).map_err(to_lua)?;
 
+    // `exec("prog", "arg")` captures a direct command. The table form adds
+    // cwd/env/stdin/check without making the common case pay for ceremony:
+    // `exec { "prog", "arg", cwd = "subdir" }`.
+    let default_dir = context.dir.clone();
+    let default_env = context.env.clone();
+    let task = context.name.clone();
+    let timeout = context.timeout;
+    let exec = lua
+        .create_function(move |lua, values: mlua::Variadic<Value>| {
+            let request = parse_exec_request(values, &default_dir, &default_env)?;
+            let (program, mut command) = if request.shell {
+                ("shell".to_string(), shell_command(&request.argv[0]))
+            } else {
+                let Some((program, rest)) = request.argv.split_first() else {
+                    return Err(mlua::Error::external(format!(
+                        "task `{task}`: exec needs a program name"
+                    )));
+                };
+                let mut command = std::process::Command::new(program);
+                command.args(rest);
+                (program.clone(), command)
+            };
+            command.current_dir(&request.cwd).envs(&request.env);
+            let captured = crate::tasks::tree::run_captured(
+                &mut command,
+                timeout,
+                request.input,
+                EXEC_OUTPUT_LIMIT,
+            )
+            .map_err(|error| {
+                mlua::Error::external(format!("task `{task}`: cannot run `{program}`: {error}"))
+            })?
+            .ok_or_else(|| {
+                mlua::Error::external(format!(
+                    "task `{task}`: timed out after {}; the process tree was terminated",
+                    timeout
+                        .map(|limit| format!("{}s", limit.as_secs()))
+                        .unwrap_or_else(|| "the configured limit".into())
+                ))
+            })?;
+
+            if request.check && captured.code != 0 {
+                let stderr = String::from_utf8_lossy(&captured.stderr);
+                let detail = stderr.trim();
+                let suffix = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                };
+                return Err(mlua::Error::external(format!(
+                    "task `{task}`: `{program}` exited with code {}{suffix}",
+                    captured.code
+                )));
+            }
+
+            let result = lua.create_table()?;
+            result.set("code", captured.code)?;
+            result.set("success", captured.code == 0)?;
+            result.set("stdout", lua.create_string(&captured.stdout)?)?;
+            result.set("stderr", lua.create_string(&captured.stderr)?)?;
+            result.set("stdout_truncated", captured.stdout_truncated)?;
+            result.set("stderr_truncated", captured.stderr_truncated)?;
+            Ok(result)
+        })
+        .map_err(to_lua)?;
+    osdk.set("exec", exec).map_err(to_lua)?;
+
     // Path helpers: the reason a script reaches for Lua in the first place is
     // often just "join these with the right separator".
     let path = lua.create_table().map_err(to_lua)?;
@@ -219,6 +299,31 @@ fn install_host_api(lua: &Lua, context: &ScriptContext) -> Result<()> {
         .map_err(to_lua)?;
     osdk.set("env", env_fn).map_err(to_lua)?;
 
+    // The table remains the explicit, collision-resistant API. Task scripts
+    // also get a small prelude so the common case reads like a task DSL rather
+    // than host-API plumbing: `run(...)`, `exec(...)`, `root`, `args`.
+    for name in ["run", "sh", "exec", "env"] {
+        let value: Value = osdk.get(name).map_err(to_lua)?;
+        globals.set(name, value).map_err(to_lua)?;
+    }
+    let path: Value = osdk.get("path").map_err(to_lua)?;
+    globals.set("path", path).map_err(to_lua)?;
+    let path: mlua::Table = osdk.get("path").map_err(to_lua)?;
+    for name in ["join", "exists"] {
+        let value: Value = path.get(name).map_err(to_lua)?;
+        globals.set(name, value).map_err(to_lua)?;
+    }
+    for (short, full) in [
+        ("root", "project_root"),
+        ("dir", "dir"),
+        ("task", "task"),
+        ("args", "args"),
+        ("argv", "argv"),
+        ("platform", "platform"),
+    ] {
+        let value: Value = osdk.get(full).map_err(to_lua)?;
+        globals.set(short, value).map_err(to_lua)?;
+    }
     globals.set("osdk", osdk).map_err(to_lua)?;
 
     // Replace `os.getenv` so it cannot quietly disagree with `osdk.env`.
@@ -255,6 +360,113 @@ fn shell_command(command: &str) -> std::process::Command {
     let mut child = std::process::Command::new(&shell[0]);
     child.args(&shell[1..]).arg(command);
     child
+}
+
+fn parse_exec_request(
+    values: mlua::Variadic<Value>,
+    default_dir: &Path,
+    default_env: &BTreeMap<String, String>,
+) -> mlua::Result<ExecRequest> {
+    let values: Vec<Value> = values.into_iter().collect();
+    let (argv, shell, cwd, env, input, check) = if let [Value::Table(options)] = values.as_slice() {
+        for pair in options.clone().pairs::<Value, Value>() {
+            let (key, _) = pair?;
+            match key {
+                Value::Integer(_) => {}
+                Value::String(key)
+                    if matches!(
+                        key.to_str()?.as_ref(),
+                        "argv" | "command" | "cwd" | "env" | "stdin" | "check"
+                    ) => {}
+                Value::String(key) => {
+                    return Err(mlua::Error::external(format!(
+                        "unknown exec option `{}`",
+                        key.to_string_lossy()
+                    )));
+                }
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "exec option keys must be names or argv indexes, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+        let explicit_argv: Option<mlua::Table> = options.get("argv")?;
+        let command: Option<String> = options.get("command")?;
+        let positional = options.raw_len() > 0;
+        let selected = usize::from(explicit_argv.is_some())
+            + usize::from(command.is_some())
+            + usize::from(positional);
+        if selected != 1 {
+            return Err(mlua::Error::external(
+                "exec table sets exactly one of positional argv, `argv`, or `command`",
+            ));
+        }
+        let (argv, shell) = if let Some(command) = command {
+            (vec![command], true)
+        } else {
+            let table = explicit_argv.as_ref().unwrap_or(options);
+            let argv = table
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            (argv, false)
+        };
+        let cwd: Option<String> = options.get("cwd")?;
+        let mut env = default_env.clone();
+        if let Some(overrides) = options.get::<Option<mlua::Table>>("env")? {
+            for pair in overrides.pairs::<String, String>() {
+                let (key, value) = pair?;
+                env.insert(key, value);
+            }
+        }
+        let input = options
+            .get::<Option<mlua::String>>("stdin")?
+            .map(|value| value.as_bytes().to_vec());
+        let check = options.get::<Option<bool>>("check")?.unwrap_or(false);
+        (
+            argv,
+            shell,
+            cwd.map_or_else(
+                || default_dir.to_path_buf(),
+                |cwd| resolve_path(default_dir, &cwd),
+            ),
+            env,
+            input,
+            check,
+        )
+    } else {
+        let argv = values
+            .into_iter()
+            .map(|value| match value {
+                Value::String(value) => value.to_str().map(|value| value.to_string()),
+                other => Err(mlua::Error::external(format!(
+                    "exec arguments must be strings, got {}",
+                    other.type_name()
+                ))),
+            })
+            .collect::<mlua::Result<Vec<_>>>()?;
+        (
+            argv,
+            false,
+            default_dir.to_path_buf(),
+            default_env.clone(),
+            None,
+            false,
+        )
+    };
+
+    if argv.is_empty() || argv[0].is_empty() {
+        return Err(mlua::Error::external("exec needs a program or command"));
+    }
+    Ok(ExecRequest {
+        argv,
+        shell,
+        cwd,
+        env,
+        input,
+        check,
+    })
 }
 
 fn resolve_path(dir: &Path, target: &str) -> PathBuf {
@@ -416,6 +628,27 @@ mod tests {
     }
 
     #[test]
+    fn short_names_alias_the_explicit_host_api() {
+        let source = r#"
+            return run == osdk.run
+                and sh == osdk.sh
+                and exec == osdk.exec
+                and env == osdk.env
+                and path == osdk.path
+                and join == osdk.path.join
+                and exists == osdk.path.exists
+                and root == osdk.project_root
+                and dir == osdk.dir
+                and task == osdk.task
+                and args == osdk.args
+                and argv == osdk.argv
+                and platform == osdk.platform
+                and 0 or 1
+        "#;
+        assert_eq!(eval(source, &context()).unwrap(), 0);
+    }
+
+    #[test]
     fn arguments_are_visible_as_a_table_and_argv_is_one_based() {
         let mut ctx = context();
         ctx.args.insert("env".into(), "prod".into());
@@ -536,6 +769,77 @@ mod tests {
             return failures
         "#;
         assert_eq!(eval(source, &ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn exec_captures_both_streams_and_accepts_options() {
+        const CHILD: &str = "OSDK_LUA_EXEC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).unwrap();
+            let cwd = std::env::current_dir().unwrap();
+            println!("OUT:{input}:{}", cwd.file_name().unwrap().to_string_lossy());
+            eprintln!("ERR:{}", std::env::var(CHILD).unwrap());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let executable = executable.to_string_lossy().replace('\\', "\\\\");
+        let mut ctx = context();
+        ctx.dir = temp.path().to_path_buf();
+        let source = format!(
+            r#"
+            local result = exec {{
+              "{executable}", "--exact", "tasks::script::tests::exec_captures_both_streams_and_accepts_options", "--nocapture",
+              cwd = "nested",
+              env = {{ {CHILD} = "from-option" }},
+              stdin = "from-stdin",
+            }}
+            return result.success
+              and result.code == 0
+              and string.find(result.stdout, "OUT:from-stdin:nested", 1, true)
+              and string.find(result.stderr, "ERR:from-option", 1, true)
+              and not result.stdout_truncated
+              and not result.stderr_truncated
+              and 0 or 1
+            "#
+        );
+        assert_eq!(eval(&source, &ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn exec_check_turns_a_nonzero_status_into_an_error() {
+        let error = eval(
+            "return exec { command = 'exit 7', check = true }",
+            &context(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("code 7"), "{error}");
+    }
+
+    #[test]
+    fn exec_rejects_a_misspelled_option() {
+        let error = eval("return exec { 'tool', stdn = 'oops' }", &context())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown exec option `stdn`"), "{error}");
+    }
+
+    #[test]
+    fn captured_commands_honour_the_task_timeout() {
+        let mut ctx = context();
+        ctx.timeout = Some(Duration::from_millis(100));
+        let source = if cfg!(windows) {
+            "return exec { command = 'ping -n 60 127.0.0.1 >nul' }"
+        } else {
+            "return exec { command = 'sleep 60' }"
+        };
+
+        let error = eval(source, &ctx).unwrap_err().to_string();
+        assert!(error.contains("timed out"), "{error}");
     }
 
     #[test]

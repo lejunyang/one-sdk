@@ -22,7 +22,10 @@
 //! because after it has forked there is no longer a reliable way to find its
 //! descendants.
 
-use std::process::{Child, Command};
+use std::io::{self, Read, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Duration;
 #[allow(unused_imports)]
 use std::time::Instant;
@@ -240,6 +243,211 @@ pub fn wait_with_timeout(
     }
 }
 
+/// Output from a task subprocess whose two streams were drained concurrently.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Captured {
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+enum StreamEvent {
+    Data(Stream, Vec<u8>),
+    Truncated(Stream),
+    Done(Stream),
+    Error(io::ErrorKind),
+}
+
+#[derive(Default)]
+struct CaptureState {
+    captured: Captured,
+    stdout_done: bool,
+    stderr_done: bool,
+    error: Option<io::ErrorKind>,
+}
+
+impl CaptureState {
+    fn apply(&mut self, event: StreamEvent) {
+        match event {
+            StreamEvent::Data(Stream::Stdout, bytes) => self.captured.stdout.extend(bytes),
+            StreamEvent::Data(Stream::Stderr, bytes) => self.captured.stderr.extend(bytes),
+            StreamEvent::Truncated(Stream::Stdout) => self.captured.stdout_truncated = true,
+            StreamEvent::Truncated(Stream::Stderr) => self.captured.stderr_truncated = true,
+            StreamEvent::Done(Stream::Stdout) => self.stdout_done = true,
+            StreamEvent::Done(Stream::Stderr) => self.stderr_done = true,
+            StreamEvent::Error(kind) => {
+                self.error.get_or_insert(kind);
+            }
+        };
+    }
+
+    fn complete(&self) -> bool {
+        self.stdout_done && self.stderr_done
+    }
+}
+
+/// Run a task subprocess with bounded capture and the same process-tree timeout
+/// guarantee as foreground task commands.
+///
+/// `Ok(None)` means the timeout fired and the process tree was terminated.
+pub fn run_captured(
+    command: &mut Command,
+    timeout: Option<Duration>,
+    input: Option<Vec<u8>>,
+    output_limit: usize,
+) -> io::Result<Option<Captured>> {
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let (mut child, mut tree) = spawn_in_tree(command)?;
+
+    let Some(stdout) = child.stdout.take() else {
+        tree.kill_tree(&mut child)?;
+        return Err(io::Error::other("missing stdout pipe"));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        tree.kill_tree(&mut child)?;
+        return Err(io::Error::other("missing stderr pipe"));
+    };
+    let (sender, receiver) = mpsc::channel();
+    if let Err(error) = spawn_drain(stdout, Stream::Stdout, output_limit, sender.clone()) {
+        tree.kill_tree(&mut child)?;
+        return Err(error);
+    }
+    if let Err(error) = spawn_drain(stderr, Stream::Stderr, output_limit, sender) {
+        tree.kill_tree(&mut child)?;
+        return Err(error);
+    }
+
+    if let Some(input) = input {
+        let Some(mut stdin) = child.stdin.take() else {
+            tree.kill_tree(&mut child)?;
+            return Err(io::Error::other("missing stdin pipe"));
+        };
+        if let Err(error) = thread::Builder::new()
+            .name("osdk-task-stdin".into())
+            .spawn(move || {
+                let _ = stdin.write_all(&input);
+            })
+        {
+            tree.kill_tree(&mut child)?;
+            return Err(error);
+        }
+    }
+
+    let code = wait_with_timeout(&mut child, &mut tree, timeout)?;
+    let mut state = CaptureState::default();
+    finish_capture(&receiver, &mut state, Duration::from_secs(1));
+    if let Some(kind) = state.error {
+        return Err(io::Error::from(kind));
+    }
+    let Some(code) = code else {
+        return Ok(None);
+    };
+    state.captured.code = code;
+    Ok(Some(state.captured))
+}
+
+fn spawn_drain(
+    reader: impl Read + Send + 'static,
+    stream: Stream,
+    limit: usize,
+    sender: mpsc::Sender<StreamEvent>,
+) -> io::Result<()> {
+    thread::Builder::new()
+        .name(
+            match stream {
+                Stream::Stdout => "osdk-task-stdout",
+                Stream::Stderr => "osdk-task-stderr",
+            }
+            .into(),
+        )
+        .spawn(move || drain_stream(reader, stream, limit, sender))?;
+    Ok(())
+}
+
+fn drain_stream(
+    mut reader: impl Read,
+    stream: Stream,
+    limit: usize,
+    sender: mpsc::Sender<StreamEvent>,
+) {
+    let mut retained = 0usize;
+    let mut reported_truncation = false;
+    let mut buffer = [0u8; 8 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = sender.send(StreamEvent::Error(error.kind()));
+                break;
+            }
+        };
+        let keep = count.min(limit.saturating_sub(retained));
+        if keep > 0 {
+            if sender
+                .send(StreamEvent::Data(stream, buffer[..keep].to_vec()))
+                .is_err()
+            {
+                return;
+            }
+            retained += keep;
+        }
+        if keep < count && !reported_truncation {
+            if sender.send(StreamEvent::Truncated(stream)).is_err() {
+                return;
+            }
+            reported_truncation = true;
+        }
+    }
+    let _ = sender.send(StreamEvent::Done(stream));
+}
+
+fn receive_available(receiver: &Receiver<StreamEvent>, state: &mut CaptureState) {
+    loop {
+        match receiver.try_recv() {
+            Ok(event) => state.apply(event),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+        }
+    }
+}
+
+fn finish_capture(receiver: &Receiver<StreamEvent>, state: &mut CaptureState, max_wait: Duration) {
+    receive_available(receiver, state);
+    let started = Instant::now();
+    while !state.complete() {
+        let remaining = max_wait.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(event) => state.apply(event),
+            Err(_) => break,
+        }
+    }
+    receive_available(receiver, state);
+    // A descendant that outlives the direct child can keep an inherited pipe
+    // open. Do not hang forever waiting for EOF; report that the corresponding
+    // stream is incomplete just like a byte-limit truncation.
+    state.captured.stdout_truncated |= !state.stdout_done;
+    state.captured.stderr_truncated |= !state.stderr_done;
+}
+
 /// Parse a duration like `30s`, `5m`, `1h`.
 pub fn parse_duration(text: &str) -> Option<Duration> {
     let text = text.trim();
@@ -438,5 +646,27 @@ mod tests {
             wait_with_timeout(&mut child, &mut handle, None).unwrap(),
             Some(7)
         );
+    }
+
+    #[test]
+    fn captured_output_keeps_both_streams_bounded() {
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/c", "echo 123456789& echo abcdefghi 1>&2"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "printf 123456789; printf abcdefghi >&2"]);
+            c
+        };
+        let captured = run_captured(&mut command, Some(Duration::from_secs(30)), None, 5)
+            .unwrap()
+            .expect("command should not time out");
+
+        assert_eq!(captured.code, 0);
+        assert_eq!(captured.stdout, b"12345");
+        assert_eq!(captured.stderr, b"abcde");
+        assert!(captured.stdout_truncated);
+        assert!(captured.stderr_truncated);
     }
 }

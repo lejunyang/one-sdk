@@ -214,6 +214,11 @@ together and waits for all. Do not reach for the shell's `&` -- it means
 something different in cmd, PowerShell 7, and PowerShell 5.1. See
 [Project tasks](site/en/guide/tasks.md).
 
+Embedded Lua handles branches, loops, and captured subprocess output without
+long prefixes: `run("cargo", "test")` streams a command while
+`exec("git", "status", "--short")` captures it. The explicit `osdk.*` forms
+remain available.
+
 ## Scenario: install a tool from a direct HTTPS artifact
 
 For a tool without a dedicated backend, bind one exact semantic version to an

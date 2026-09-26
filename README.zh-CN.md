@@ -196,6 +196,10 @@ osdk run ci --dry-run
 `&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
 [项目任务](site/guide/tasks.md)。
 
+需要分支、循环或读取子进程输出时可用内嵌 Lua；常用能力无需长前缀：
+`run("cargo", "test")` 流式执行，`exec("git", "status", "--short")` 捕获输出，
+同时保留完整的 `osdk.*` 写法。
+
 ## 场景：从直接 HTTPS 制品安装工具
 
 对于没有专用 backend 的工具，可以把一个精确语义化版本绑定到 HTTPS `{version}` URL
