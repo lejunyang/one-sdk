@@ -108,10 +108,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub fn remove_dir_all_forced(path: &Path) -> std::io::Result<()> {
     #[cfg(not(windows))]
     {
-        return match std::fs::remove_dir_all(path) {
+        match std::fs::remove_dir_all(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             result => result,
-        };
+        }
     }
 
     #[cfg(windows)]
