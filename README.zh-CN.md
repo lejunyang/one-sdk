@@ -221,7 +221,7 @@ osdk install \
 ## 场景：使用包管理器并自动选择可用 Registry
 
 可以独立安装 npm、pnpm 或 Yarn，也可以让 `package.json#packageManager` 中的
-精确版本自动加入项目工具链：
+精确版本自动加入项目工具链；显式选择的 manager 优先于 Node 随附的 Corepack launcher：
 
 ```bash
 osdk install npm@11.5.2
@@ -583,7 +583,7 @@ osdk model path qwen25
 # 要写进 ComfyUI、llama.cpp 或脚本里的路径请用这个
 osdk model path qwen25 --stable
 
-# 有模型 lock 时复现；尚无模型 lock 时按 [models] 首次拉取并创建 lock
+# 拉取 [models] 中 lock 未描述或已变更的声明，其余按 lock 复现
 osdk model sync
 osdk model list
 ```
@@ -613,7 +613,7 @@ source = "hf:black-forest-labs/FLUX.1-dev@main"
 
 `osdk model sync` 会还原 lock 声明的全部模型，**并**重建它们的视图。lock 尚无模型
 条目时，它会按当前平台适用的 `[models]` 声明完成首次拉取，并把不可变结果写入 lock。
-显式传给 `pull` 的 reference 或选项优先于声明中的对应字段。
+显式传给 `pull` 的 reference 或选项优先于声明中的对应字段。多个模型会并发下载，数量由 `sources.model_jobs`（默认 2，或 `--model-jobs`）控制；它独立于 `--jobs`（后者并行下载单个模型内部的文件）。
 
 
 需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用
@@ -674,7 +674,8 @@ osdk --source official install go@1.22
 由 osdk 自身执行的下载并非失败即停。普通归档保持最多 3 次（等待 400 ms、800 ms）；
 模型文件默认尝试 6 次，按 1/2/4/8/8 秒指数退避，并输出可见的重试警告。可通过
 `osdk config set` 调整 `sources.model_download_attempts` 和
-`sources.model_download_retry_base_ms`。两类下载都保留 `.partial` 文件及 ETag /
+`sources.model_download_retry_base_ms`；`sources.model_read_timeout_ms`（默认 60000）会让中途
+断流的请求超时失败并转入重试，而不是永久挂起。两类下载都保留 `.partial` 文件及 ETag /
 Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返回错误 Range、对象
 变化、来源 URL 改变时会安全重头下载。模型在某个来源耗尽尝试后还会继续下一个排序
 来源；不可重试错误或所有来源都耗尽后才终止。

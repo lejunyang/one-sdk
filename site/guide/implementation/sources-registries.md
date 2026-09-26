@@ -55,6 +55,12 @@ Go command 工具有更严格的边界：存在 custom source 时只对这些 cu
 
 registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs)，调用点是 [`apply_package_registry_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)。它只处理明确 allow-list 中可能拉取 npm 包的命令，并先识别 manager family；Yarn major 无法可靠确定时保守透传。
 
+直接 shim 的 manager 归属与 shim 生成共享同一组 Corepack 命令映射：`npm`/`npx`、
+`pnpm`/`pnpx`、`yarn`/`yarnpkg`。独立 backend 有有效选择时优先；否则才回退到选中 Node
+安装中实际存在的 Corepack launcher。Node 不把这些名字计入自身 ownership，因此
+`reshim` 不会把刚为独立 manager 生成的 shim 当成冲突删除。Node/Corepack 下的 npm
+和 pnpm 仍进入 registry planner；Yarn major 无法从 Node 版本推断，因此保守透传。
+
 对需要预检的命令，每次调用都会执行新的、并发的匿名探测，不复用 SDK source probe cache。候选 endpoint 是 npm-compatible Registry 的标准 `<base>/-/ping`，必须满足：成功 HTTP 状态、非空 JSON object、响应不超过 64 KiB。每个请求有界超时；redirect chain 最多包含三个 URL（即最多跟随两次 redirect），且必须始终为原始 HTTPS origin，禁止降级、跨 origin、凭据 URL 与循环。探测不会携带 registry token、cookie 或从 manager 配置提取的 Authorization；普通系统 HTTP(S) proxy 环境仍由 HTTP client 使用。
 
 候选选择规则：

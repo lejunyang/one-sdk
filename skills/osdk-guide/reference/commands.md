@@ -11,6 +11,7 @@
 | `-v, --verbose...` | 增加日志详细度，可重复 | — |
 | `-q, --quiet` | 抑制进度输出 | — |
 | `-j, --jobs <N>` | 最大并发下载 / 安装数 | `OSDK_JOBS` |
+| `--model-jobs <N>` | `model sync` 同时下载的模型数（默认 2）；独立于 `--jobs`（单模型内文件并发），二者相乘 | `OSDK_MODEL_JOBS` |
 | `-y, --yes` | 对提示默认「是」 | — |
 | `--source <ID>` | 本次调用强制使用某个源 id | — |
 | `--refresh-sources` | 忽略缓存的测速结果，重新探测源 | — |
@@ -181,11 +182,13 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 ```bash
 osdk source test node
 osdk source pin node tuna
+osdk source add cargo:ripgrep --id corp --download-url https://mirror.example.test/index/ --index-url sparse+https://mirror.example.test/index/
 osdk --source official install go@1.22
 osdk --yes trust ./osdk.toml
 osdk trust list
 ```
 > 仅声明「装哪些工具/包」不需要 trust；被拒绝时 osdk 会逐条列出是哪些键、各自原因。
+> Cargo 自定义源以 `--index-url sparse+https://.../` 为唯一权威地址；通用命令仍要求 `--download-url`，建议填同一 index 去掉 `sparse+` 后的 HTTPS 基址。
 > 特殊源名：`self`（osdk 自身更新源）、`go-modules`（`GOPROXY`，与工具链源 `go` 独立）。
 
 ## 七、模型快照（model）
@@ -193,7 +196,7 @@ osdk trust list
 | 命令 | 作用 |
 | --- | --- |
 | `model pull <name> [reference] [--include/--exclude glob] [--variant v] [--endpoint u] [--forward-credentials] [--no-lock]` | 解析并下载不可变模型快照；省略 `reference` 时读取同名 `[models.<name>].source`，显式参数覆盖声明 |
-| `model sync [--prune] [--dry-run]` | 有模型 lock 时复现；无模型 lock 时按当前平台适用的 `[models]` 首次拉取并写 lock；`--prune` 删除 lock 不再声明的本地快照 |
+| `model sync [--prune] [--dry-run]` | 无参拉取整个项目的模型：`[models]` 中 lock 未描述的声明会被拉取并写入 lock，`source`/`variant` 与 lock 不一致的声明会重新拉取并改写条目，其余按 lock 复现（已存在且校验通过的跳过）；手动新增或修改 `[models]` 无需再单独 `model pull`；`--prune` 删除 lock 不再声明的本地快照 |
 | `model list` | 列出本地已物化快照 |
 | `model path <name> [--stable]` | 打印当前快照路径；`--stable` 打印稳定 `current` 路径（写进 ComfyUI / llama.cpp / 脚本用这个） |
 | `model verify <name>` | 校验某快照全部文件 |

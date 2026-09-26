@@ -141,23 +141,39 @@ fn npm_env(request: &NativeNpmInstall<'_>) -> Result<BTreeMap<String, String>> {
     env.insert("NO_UPDATE_NOTIFIER".to_string(), "1".to_string());
     // npm shells out for lifecycle scripts and git dependencies; on Windows a
     // child process without these cannot resolve system libraries at all.
-    for key in ["SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "PATHEXT"] {
-        if let Some(value) = std::env::var_os(key) {
-            env.insert(key.to_string(), value.to_string_lossy().into_owned());
-        }
-    }
-    for key in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            env.insert(key.to_string(), value.to_string_lossy().into_owned());
-        }
-    }
+    env.extend(
+        crate::process::inherited_env_allowlist(&[
+            "SYSTEMROOT",
+            "SystemRoot",
+            "COMSPEC",
+            "ComSpec",
+            "PATHEXT",
+        ])
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        }),
+    );
+    env.extend(
+        crate::process::inherited_env_allowlist(&[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+        ])
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        }),
+    );
     Ok(env)
 }
 

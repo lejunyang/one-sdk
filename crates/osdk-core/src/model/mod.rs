@@ -545,13 +545,8 @@ fn snapshot_key(identity: &SnapshotIdentity, files: &[DownloadedModelFile]) -> S
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        create_dir_all(parent)?;
-    }
     let bytes = serde_json::to_vec_pretty(value)?;
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&temporary, bytes).map_err(|error| Error::io(&temporary, error))?;
-    std::fs::rename(&temporary, path).map_err(|error| Error::io(path, error))
+    crate::fs::write_atomic(path, &bytes).map_err(|error| Error::io(path, error))
 }
 
 #[cfg(test)]

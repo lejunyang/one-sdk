@@ -32,6 +32,11 @@ pub struct GlobalArgs {
     #[arg(short = 'j', long, global = true, env = "OSDK_JOBS")]
     pub jobs: Option<usize>,
 
+    /// How many models `model sync` downloads at once (default 2). Independent
+    /// of `--jobs`, which parallelizes files within one model.
+    #[arg(long = "model-jobs", global = true, env = "OSDK_MODEL_JOBS")]
+    pub model_jobs: Option<usize>,
+
     /// Assume yes for prompts.
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
@@ -496,7 +501,7 @@ pub enum SourceCommand {
         /// Unique source id.
         #[arg(long)]
         id: String,
-        /// Base URL for archive downloads.
+        /// Base HTTP URL used by the backend for downloads or metadata.
         #[arg(long = "download-url")]
         download_url: String,
         /// Version-index / metadata URL (if different from downloads).
@@ -765,11 +770,20 @@ pub enum ModelCommand {
         #[arg(long)]
         no_lock: bool,
     },
-    /// Materialize every model the project lock declares.
+    /// Materialize every declared model: pull what `[models]` adds, replay the lock.
     ///
-    /// The counterpart to `install` for tools: `pull` writes the lock, `sync`
-    /// replays it. Without this the `[models]` section could be written but never
-    /// read back, so a committed lock did not describe a reproducible state.
+    /// The no-argument way to fetch a whole project's models. Each `[models]`
+    /// declaration applicable to this platform is compared against the lock: one
+    /// the lock does not describe is pulled and locked, and one whose `source` or
+    /// `variant` no longer matches the lock is re-pulled and its entry rewritten.
+    /// Everything the lock already describes is then replayed, and a snapshot
+    /// already present and verifying is skipped rather than re-downloaded. So a
+    /// `[models]` entry added or edited by hand is picked up here without a
+    /// separate `model pull`.
+    ///
+    /// This is the counterpart to `install` for tools, but a separate verb:
+    /// `install` deliberately does not fetch models, because weights are far too
+    /// large to download as a side effect of installing tools.
     Sync {
         /// Remove local snapshots the lock no longer declares.
         ///

@@ -64,6 +64,15 @@ because `go install` cannot enforce osdk's per-request forwarding policy.
 
 The planner lives in [`package_registry.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/package_registry.rs), called by [`apply_package_registry_plan`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs). It handles only an explicit allow-list of commands that may fetch npm packages and first identifies the manager family. An unknown Yarn major is conservatively passed through.
 
+Direct-shim ownership and shim generation share one Corepack command mapping:
+`npm`/`npx`, `pnpm`/`pnpx`, and `yarn`/`yarnpkg`. A valid independent backend
+selection wins; otherwise routing falls back to an existing Corepack launcher in
+the selected Node installation. Node does not count these names as its own
+commands, so `reshim` cannot delete a newly generated independent-manager shim as
+a conflict. npm and pnpm reached through Node/Corepack still enter registry
+planning; a Yarn major cannot be inferred from the Node version, so it is passed
+through conservatively.
+
 Every eligible invocation performs fresh concurrent anonymous probes; it does not reuse the SDK-source probe cache. The endpoint is the standard npm-compatible `<base>/-/ping` and must return a successful status plus a non-empty JSON object no larger than 64 KiB. Each request has a bounded timeout. The redirect chain may contain at most three URLs, meaning at most two redirects are followed, and it must remain on the original HTTPS origin with no downgrade, cross-origin target, URL credentials, or loop. Probes send no registry token, cookie, or Authorization extracted from native configuration. Ordinary system HTTP(S) proxy settings still apply.
 
 Candidate selection is intentionally precise:

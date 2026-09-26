@@ -1,0 +1,39 @@
+schema = 4
+
+[platforms.windows-x64.tools."cargo:jscpd"]
+request = "5.3.2"
+version = "5.3.2"
+
+[platforms.windows-x64.tools."cargo:jscpd".native]
+runtime = "rust"
+runtime_version = "1.98.0"
+replay = "version-only"
+source = "sparse+https://rsproxy.cn/index/"
+
+[platforms.windows-x64.tools.python]
+request = "3.12"
+version = "3.12.14"
+
+[platforms.windows-x64.tools.python.options]
+implementation = "cpython"
+python-version = "3.12.14"
+variant = "default"
+
+[platforms.windows-x64.tools.python.artifact]
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20260814/cpython-3.12.14+20260814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+file_name = "cpython-3.12.14+20260814-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+checksum = "sha256:89f18f6932917163b74339ebcec2645c8e47ae7f1c5f2ac37f2b4f4cf3beb647"
+
+[platforms.windows-x64.tools.rust]
+request = "1.98.0"
+version = "1.98.0"
+
+[platforms.windows-x64.tools.rust.options]
+components = "rustfmt,clippy"
+targets = "x86_64-pc-windows-gnu,x86_64-unknown-linux-musl"
+
+[skills.jscpd]
+source = "github:kucherenko/jscpd"
+content_hash = "b3-v2:53f512e2985e6617281b7bf22274b7c92db98878537e5d7419e14926d2837069"
+resolved_commit = "2a5f6d62a419b47a8f076c6702788569d7cc43be"
+agents = ["universal"]

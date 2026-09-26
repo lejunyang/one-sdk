@@ -48,7 +48,8 @@ backend options.
 
 pnpm resolves and installs the complete `pnpm` JavaScript distribution and runs
 it with managed Node; it does not directly extract the SEA-only
-`@pnpm/<os>-<arch>` package. Bun and Deno resolve directly against the npm
+`@pnpm/<os>-<arch>` package. Both pnpm 9's `.cjs` entry points and newer `.mjs`
+entry points are supported. Bun and Deno resolve directly against the npm
 platform package installed for the current target.
 
 npm and Yarn launchers use Node from `PATH`. Whenever a request contains npm,
@@ -56,6 +57,13 @@ pnpm, or Yarn but not Node, osdk adds Node automatically: it first follows
 project discovery and falls back to `latest`. This also applies to explicit tool
 lists. Manager bins precede the managed Node bin, so they do not depend on a
 user-global Node.
+
+Node's Corepack can also place `npm`/`npx`, `pnpm`/`pnpx`, and `yarn`/`yarnpkg`
+launchers in the Node installation. osdk treats those as Node fallback routes,
+not as commands owned by Node: when project or global configuration selects an
+independent manager, its shims always route to that backend; without an
+independent selection, osdk uses an existing Corepack launcher from the active
+Node installation.
 
 ## `packageManager` discovery
 

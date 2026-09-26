@@ -94,10 +94,18 @@ file paths, sizes, and SHA-256 values. Remote paths must be safe relative paths.
 
 ## Downloads, verification, and local layout
 
-Files download concurrently according to `settings.jobs`. Model files default to
-six attempts with 1/2/4/8/8-second backoff and visible retry warnings. Configure
-`sources.model_download_attempts` and `sources.model_download_retry_base_ms` with
-`osdk config set`. Downloads support Range/ETag resume. An upstream SHA-256 is
+Within one model, files download concurrently according to `settings.jobs`; when
+`osdk model sync` fetches several models it downloads distinct models concurrently
+up to `sources.model_jobs` (default 2, overridable with `--model-jobs`). The two
+are independent and multiply, so the default is kept small to avoid exhausting
+connections or tripping source rate limits; lock writes stay serial. Model files
+default to six attempts with 1/2/4/8/8-second backoff and visible retry warnings.
+Configure `sources.model_download_attempts` and `sources.model_download_retry_base_ms`
+with `osdk config set`. Downloads support Range/ETag resume. If a connection stalls
+mid-transfer (no bytes for a while), `sources.model_read_timeout_ms` (default 60000)
+fails that request so the retry and resume above take over instead of hanging forever;
+it bounds only the no-progress interval, not total download time, so a large file that
+keeps progressing is unaffected. An upstream SHA-256 is
 enforced when available; otherwise osdk still
 computes and records a local SHA-256. `model verify` checks both CAS BLAKE3 and
 manifest SHA-256. Snapshots and `current.json` are published through same-directory
@@ -157,14 +165,23 @@ osdk source unpin hf             # drop the pin and return to auto-selection
 
 ### Restoring from the lock
 
-`osdk model sync` first replays immutable model results from the lock. When the lock
-has no model entries yet, it reads the `[models]` declarations applicable to this
-platform, performs the initial pulls, and creates those lock entries. Later syncs
-replay the lock. `osdk install` deliberately does not fetch models: weights are far
-too large to download as a side effect of installing tools, so this is its own verb.
+`osdk model sync` fetches a whole project's models with no arguments. It compares
+each `[models]` declaration applicable to this platform against the lock: a
+declaration the lock does not describe is pulled and locked; one whose `source`
+(provider / repository / requested revision) or `variant` no longer matches the
+lock is re-pulled and its entry rewritten; everything else is left to the replay
+of the lock. So a `[models]` entry added or edited by hand is picked up here
+without a separate `model pull`. `osdk install` deliberately does not fetch
+models: weights are far too large to download as a side effect of installing
+tools, so this is its own verb.
+
+`include`/`exclude` are globs, and the lock stores only their expanded file list,
+so changes to them do not participate in that comparison -- widening a selection
+through `include` is still a `model pull`, the one operation that re-resolves the
+remote file list.
 
 ```bash
-osdk model sync                 # replay the lock; bootstrap [models] when it has no model entries
+osdk model sync                 # pull [models] entries added/changed vs the lock, replay the rest
 osdk model sync --dry-run       # report what would happen
 osdk model sync --prune         # also delete snapshots the lock no longer declares
 osdk model sync --prune --dry-run
@@ -242,9 +259,9 @@ file. Anonymous and credential-bearing probes use different cache keys. See
 Instead of pulling first and locking afterwards, you can declare models directly
 in the project `osdk.toml`. Declaring does not download anything; a later
 `osdk model pull <name>` reads the matching declaration, while `osdk model sync`
-bootstraps all applicable declarations when the lock has no model entries. Both
-paths record immutable results and consumer views into the lock and render those
-views immediately:
+pulls every applicable declaration the lock does not yet describe or describes
+differently. Both paths record immutable results and consumer views into the lock
+and render those views immediately:
 
 ```toml
 [models.flux]

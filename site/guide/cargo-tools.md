@@ -62,8 +62,22 @@ Registry crate 名会规范化为小写。明确请求的预发布精确语义�
 也可使用。这里不接受 semver range、通配符、前导 `v`，以及 `^14` 这类 Cargo
 requirement 语法。
 
-`osdk list-remote cargo:ripgrep` 会列出所选 Cargo metadata source 中可见的版本。
-osdk 当前内置 crates.io 与 rsproxy 默认来源，并在选择前使用常规 source 探测与缓存策略。
+`osdk list-remote cargo:ripgrep` 会直接读取所选 Registry 的标准 sparse index，
+并列出其中未 yanked 的版本。osdk 当前内置 crates.io 与 rsproxy 默认来源，并用同一个
+crate 分片条目完成探测、metadata 获取与缓存；镜像不需要实现 crates.io 专有 Web API。
+
+自定义 Cargo 镜像时，`--index-url` 是唯一权威的 sparse index；osdk 去掉 `sparse+`
+后读取版本元数据，Cargo 则直接使用原值。通用 `source add` 当前仍要求
+`--download-url`，为避免配置歧义可填写同一 index 的普通 HTTPS 基址：
+
+```bash
+osdk source add cargo:ripgrep --id corp \
+  --download-url https://mirror.example.test/index/ \
+  --index-url sparse+https://mirror.example.test/index/
+```
+
+Cargo backend 会在探测时拒绝缺失或非规范的 sparse HTTPS `index_url`；Cargo 元数据解析
+不会再读取 crates.io Web API，也不会从 `download_url` 推断另一套 Registry。
 
 ## 从 HTTPS Git 仓库安装
 
@@ -135,7 +149,10 @@ osdk install rust@1.91.1 \
 两个 provider 都会清空环境后运行。osdk 会提供 staging 内私有的 `HOME`、
 `CARGO_HOME`、target 目录、临时目录和安装根；`PATH` 先放所选受管 Rust toolchain 的
 bin 目录，并保留经过清理、供 linker 与构建工具使用的系统路径，`RUSTC` 也明确指向该
-toolchain。provider 不会安装到用户的常规 Cargo home，环境中的 Cargo/rustc 也不能抢占。
+toolchain。选择非 crates.io index 时，stage 私有 Cargo 配置还会用 source replacement
+把 `crates-io` 整体替换为该 index，使顶层 crate 与全部传递依赖使用同一镜像；不会读取或
+修改用户的常规 Cargo 配置。Windows 上仅转发 Cargo/libcurl、MSVC 发现与代理所需的
+白名单变量。
 
 只有通过校验的 binary 才会从 stage 发布到 osdk 的指纹化安装根。Cargo source 和
 构建目录只是临时 provider workspace，会在发布前删除。

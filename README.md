@@ -243,7 +243,8 @@ Guide: [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 ## Scenario: use package managers with an available registry
 
 Install npm, pnpm, or Yarn independently, or let an exact
-`package.json#packageManager` selection join the project toolchain:
+`package.json#packageManager` selection join the project toolchain. An explicitly
+selected manager takes precedence over Node's bundled Corepack launcher:
 
 ```bash
 osdk install npm@11.5.2
@@ -646,7 +647,7 @@ osdk model path qwen25
 # so feed this one to ComfyUI, llama.cpp or a script instead
 osdk model path qwen25 --stable
 
-# Restore osdk.lock; with no model entries yet, materialize [models] and create them
+# Pull [models] entries the lock does not yet describe or describes differently, replay the rest
 osdk model sync
 osdk model list
 ```
@@ -676,10 +677,14 @@ source = "hf:black-forest-labs/FLUX.1-dev@main"
 "vae/"  = "vae"
 ```
 
-`osdk model sync` restores every locked model **and** rebuilds its views. If the lock
-has no model entries yet, it uses the applicable `[models]` declarations for the
-first pull and writes their immutable results into the lock. An explicit pull
-reference or flag overrides the corresponding declaration field.
+`osdk model sync` restores every locked model **and** rebuilds its views. It also
+picks up `[models]` declarations that the lock does not yet describe or describes
+differently: a new one is pulled and locked, and one whose `source` or `variant`
+changed is re-pulled and its entry rewritten, so a hand-edited `[models]` needs no
+separate `model pull`. An explicit pull reference or flag overrides the
+corresponding declaration field. Several models download concurrently, bounded by
+`sources.model_jobs` (default 2, or `--model-jobs`); this is independent of `--jobs`,
+which parallelizes files within one model.
 
 
 Enable provider endpoint and cache variables for activated shells when model
@@ -749,7 +754,8 @@ Downloads performed directly by osdk are not single-shot. Regular archives keep 
 three attempts (400 ms, then 800 ms). Model files default to six attempts with visible retry
 warnings and 1/2/4/8/8-second exponential backoff; tune them with
 `sources.model_download_attempts` and `sources.model_download_retry_base_ms` through
-`osdk config set`. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
+`osdk config set`; `sources.model_read_timeout_ms` (default 60000) fails a request that stalls
+mid-stream so it retries instead of hanging. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
 with `Range` + `If-Range`; an ignored or invalid range, changed object, or changed source URL
 causes a safe restart. Model pulls also fall through to the next ranked source after one source
 exhausts its attempts. Non-transient errors, or exhaustion of every source, remain terminal.

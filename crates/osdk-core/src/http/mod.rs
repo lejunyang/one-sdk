@@ -16,6 +16,26 @@ pub fn client() -> Result<reqwest::Client> {
         .map_err(Error::from)
 }
 
+/// A client like [`client`], but with a read (no-progress) timeout for large
+/// streaming downloads.
+///
+/// `read_timeout` fires when no bytes arrive within the window, which is exactly
+/// a connection that died mid-stream: it turns an otherwise unbounded body read
+/// into an error the download's retry+resume loop can act on. It bounds stalls,
+/// not total transfer time, so a large file that keeps progressing is unaffected.
+/// It lives on the client rather than the request because reqwest only exposes it
+/// on `ClientBuilder`. A zero timeout disables it, yielding the ordinary client.
+pub fn client_with_read_timeout(read_timeout_ms: u64) -> Result<reqwest::Client> {
+    if read_timeout_ms == 0 {
+        return client();
+    }
+    client_builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .read_timeout(Duration::from_millis(read_timeout_ms))
+        .build()
+        .map_err(Error::from)
+}
+
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!("osdk/", env!("CARGO_PKG_VERSION")))

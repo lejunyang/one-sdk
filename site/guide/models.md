@@ -88,9 +88,14 @@ commit 时，osdk 以请求 revision 和排序后的文件路径、大小、SHA-
 
 ## 下载、校验与本地布局
 
-文件按 `settings.jobs` 并发下载。模型文件默认尝试 6 次，按 1/2/4/8/8 秒退避并输出
-可见重试警告；使用 `osdk config set` 调整 `sources.model_download_attempts` 与
-`sources.model_download_retry_base_ms`。下载支持 Range/ETag 续传。上游提供 SHA-256
+单个模型内部，文件按 `settings.jobs` 并发下载；`osdk model sync` 拉取多个模型时，
+按 `sources.model_jobs`（默认 2）并发下载不同模型，可用 `--model-jobs` 覆盖。两者
+相互独立且相乘，因此默认取较小值以免打爆连接数或触发来源限流；lock 写入始终串行。
+模型文件默认尝试 6 次，按 1/2/4/8/8 秒退避并输出可见重试警告；使用 `osdk config set`
+调整 `sources.model_download_attempts` 与 `sources.model_download_retry_base_ms`。下载
+支持 Range/ETag 续传。若连接中途断流（长时间收不到字节），`sources.model_read_timeout_ms`
+（默认 60000）会让该次请求超时失败，进而触发上述重试与续传，而不是永久挂起；它只约束
+「无进展」时长，不限制总下载时间，大文件只要持续传输就不受影响。上游提供 SHA-256
 时强制校验；未提供时仍计算并记录本地 SHA-256。`model verify` 同时检查 CAS BLAKE3 与
 manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 rename 发布；这不
 保证 fsync 持久性、跨平台替换原子性或不同 snapshot writer 之间的事务隔离。
@@ -141,13 +146,18 @@ osdk source unpin hf             # 取消固定，恢复自动选择
 
 ### 从 lock 还原
 
-`osdk model sync` 优先复现 lock 里的不可变模型结果。lock 尚无模型条目时，它读取当前
-平台适用的 `[models]` 声明，完成首次拉取并创建模型 lock；后续 sync 再按 lock 复现。
-`osdk install` 刻意不代拉模型：权重太大，不该作为装工具的副作用被下载，所以这是一个
-独立动词。
+`osdk model sync` 无参拉取整个项目的模型。它逐个比对当前平台适用的 `[models]` 声明与
+lock：lock 尚未描述的声明会被拉取并写入 lock；`source`（provider / 仓库 / 请求 revision）
+或 `variant` 与 lock 记录不一致的声明会重新拉取并改写对应条目；其余交给按 lock 的复现。
+因此手动往 `[models]` 里新增或修改一个模型，`sync` 会直接识别并处理，不必再单独
+`model pull`。`osdk install` 刻意不代拉模型：权重太大，不该作为装工具的副作用被下载，
+所以这是一个独立动词。
+
+`include`/`exclude` 是 glob，lock 只存展开后的文件列表，因此它们的改动不参与上面的
+比对——想借改 `include` 纳入更多文件仍然走 `model pull`（重新解析远端文件的唯一操作）。
 
 ```bash
-osdk model sync                 # 复现 lock；无模型 lock 时按 [models] 首次拉取
+osdk model sync                 # 拉取 [models] 新增/变更的声明，其余按 lock 复现
 osdk model sync --dry-run       # 只报告会做什么
 osdk model sync --prune         # 同时删除 lock 不再声明的本地快照
 osdk model sync --prune --dry-run
@@ -216,9 +226,9 @@ osdk source unpin huggingface|modelscope
 ## 在 `osdk.toml` 中声明模型
 
 除了先 `pull` 再入 lock，也可以直接在项目 `osdk.toml` 里声明模型。声明本身不下载
-权重；之后 `osdk model pull <name>` 会读取同名声明，或者在尚无模型 lock 时运行
-`osdk model sync` 批量完成首次拉取。两条路径都会把不可变结果和消费者视图写进 lock，
-并立即渲染视图：
+权重；之后 `osdk model pull <name>` 会读取同名声明，或者运行 `osdk model sync`
+批量拉取 `[models]` 里 lock 尚未描述或已变更的声明。两条路径都会把不可变结果和消费者
+视图写进 lock，并立即渲染视图：
 
 ```toml
 [models.flux]

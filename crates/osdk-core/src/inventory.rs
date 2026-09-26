@@ -1184,9 +1184,9 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         file.sync_all()
             .map_err(|error| Error::io(&temporary, error))?;
     }
-    if let Err(error) = atomic_replace(&temporary, path) {
+    if let Err(error) = crate::fs::atomic_replace(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
-        return Err(error);
+        return Err(Error::io(path, error));
     }
     Ok(())
 }
@@ -1205,33 +1205,6 @@ fn unique_temporary_path(parent: &Path, file_name: &std::ffi::OsStr) -> PathBuf 
     }
     parent.join(format!(".{file_name}.tmp-{}-fallback", std::process::id()))
 }
-
-#[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(source, destination).map_err(|error| Error::io(destination, error))
-}
-
-#[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    let result = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
-    if result == 0 {
-        return Err(Error::io(destination, std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod install_manifest_tests {
     use super::*;

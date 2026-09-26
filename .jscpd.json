@@ -1,0 +1,11 @@
+{
+  "threshold": 7,
+  "reporters": ["ai"],
+  "format": ["rust"],
+  "ignore": [
+    "**/target/**",
+    "**/.jscpd-report/**"
+  ],
+  "absolute": false,
+  "gitignore": true
+}

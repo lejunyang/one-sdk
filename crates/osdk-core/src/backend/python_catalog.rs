@@ -442,12 +442,7 @@ async fn read_source(ctx: &Ctx, source: &str) -> Result<Vec<u8>> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
-    }
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&temporary, bytes).map_err(|error| Error::io(&temporary, error))?;
-    std::fs::rename(&temporary, path).map_err(|error| Error::io(path, error))
+    crate::fs::write_atomic(path, bytes).map_err(|error| Error::io(path, error))
 }
 
 #[cfg(test)]

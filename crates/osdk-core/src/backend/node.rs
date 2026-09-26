@@ -461,12 +461,12 @@ impl Backend for NodeBackend {
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
-        // npm/npx are managed by the independent npm backend; do not claim
-        // ownership here even when Node's archive includes bundled launchers.
+        // Package managers are managed by independent backends; do not claim
+        // ownership here even when Corepack installed launchers beside Node.
         let paths = self.bin_paths(ctx, tv)?;
         let discovered = crate::backend::bin_names_in_dirs(&paths)
             .into_iter()
-            .filter(|name| name != "npm" && name != "npx")
+            .filter(|name| crate::shim::package_manager_backend_for_command(name).is_none())
             .collect::<Vec<_>>();
         if discovered.is_empty() {
             // Fallback to the canonical set if the dir isn't populated yet.

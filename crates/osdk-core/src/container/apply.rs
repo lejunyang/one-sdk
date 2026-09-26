@@ -178,7 +178,9 @@ fn atomic_write(
         let _ = std::fs::remove_file(&temporary);
         return Err(MirrorApplyError::StaleInput);
     }
-    if let Err(error) = atomic_replace(&temporary, target).and_then(|_| sync_parent(parent)) {
+    if let Err(error) =
+        crate::fs::atomic_replace(&temporary, target).and_then(|_| crate::fs::sync_parent(parent))
+    {
         let _ = std::fs::remove_file(&temporary);
         return Err(MirrorApplyError::Write(error.kind()));
     }
@@ -250,49 +252,6 @@ fn temporary_path(parent: &Path, target: &Path) -> PathBuf {
         .unwrap_or("native-config");
     parent.join(format!(".{name}"))
 }
-
-#[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    std::fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    std::fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

@@ -93,6 +93,10 @@ try {
     $env:PATH = [Environment]::GetEnvironmentVariable("PATH", "Machine")
     $env:OSDK_OFFLINE = "true"
     Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+    # `osdk run` marks its child with OSDK_TASK so an already-active parent hook
+    # cannot overwrite task-specific environment. This script is testing that
+    # hook itself, so the nested activation must not inherit the bypass marker.
+    Remove-Item Env:OSDK_TASK -ErrorAction SilentlyContinue
     # Drop shell-activation bookkeeping inherited from the caller so the
     # activation/deactivation stage starts clean even when this runs inside an
     # already osdk-activated parent shell.

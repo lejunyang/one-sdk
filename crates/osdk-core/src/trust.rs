@@ -895,52 +895,13 @@ fn write_store(config_dir: &Path, store: &TrustStore) -> Result<()> {
         .keep()
         .map_err(|error| Error::io(&temporary_path, error.error))?;
     drop(temporary_file);
-    if let Err(error) = atomic_replace(&temporary_path, &path) {
+    if let Err(error) = crate::fs::atomic_replace(&temporary_path, &path) {
         let _ = std::fs::remove_file(&temporary_path);
-        return Err(error);
+        return Err(Error::io(&path, error));
     }
-    sync_parent_directory(config_dir)?;
+    crate::fs::sync_parent(config_dir).map_err(|error| Error::io(config_dir, error))?;
     Ok(())
 }
-
-#[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    std::fs::rename(source, destination).map_err(|error| Error::io(destination, error))
-}
-
-#[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-    let result = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
-    if result == 0 {
-        return Err(Error::io(destination, std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(parent: &Path) -> Result<()> {
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| Error::io(parent, error))
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_parent: &Path) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{mpsc, Arc, Barrier};
