@@ -1,78 +1,123 @@
 ---
 name: osdk-guide
 description: >-
-  osdk（one-sdk）命令行使用指引。当需要用 osdk 安装 / 切换语言运行时、包管理器、
-  开发工具、Android SDK 或大模型快照，声明并复现项目工具链（osdk.toml / osdk.lock），
-  用 [tasks] 跑项目任务，装项目自身的应用依赖（[deps]），配置下载源 / 镜像 /
-  离线 / 校验策略，信任项目配置，管理容器运行时与宿主包管理器，或需要查阅 osdk 的
-  命令用法与 osdk.toml / config.toml 配置字段写法时使用。仅覆盖 osdk 自身的 CLI 与
-  配置，不涉及被它管理的各语言工具本身的用法。
+  osdk（one-sdk）CLI 与配置的分区使用指引。用于安装、选择、锁定、升级或卸载工具，
+  运行项目任务与内嵌 Lua，管理应用依赖、模型、Agent skills、Android/Rust/Node/Python
+  专属工作流、下载源、Registry、容器、宿主包、缓存、shell 集成、信任和诊断；也用于
+  编写或排查 osdk.toml、.osdk.toml、config.toml 与 osdk.lock。仅覆盖 osdk 本身，
+  不替代被管理语言或工具的使用文档。
 ---
 
 # osdk 使用指引
 
-osdk（二进制名 `osdk`，仓库名 one-sdk）是一个跨平台（Windows / macOS / Linux）的
-统一 SDK 管理器：用一套命令管理语言运行时、包管理器、开发工具、Android SDK 与大模型
-快照，并为团队和 CI 保存区分平台、可复现的项目锁定结果。
+把本页当路由表。先识别一级命令或 TOML 顶层段，只读取直接对应的 reference；不要先
+加载整套文档。实际二进制版本的参数面以 `osdk <command> --help` 为最终权威。
 
-本 skill 是 osdk 命令与配置的**速查与索引**。它不替代 `osdk --help`：`--help` 永远是某个
-版本命令面的权威来源；本指引提供的是「按功能找到该用哪个命令」「配置字段怎么写」这类
-`--help` 不擅长回答的问题。
+## 使用流程
 
-## 什么时候读哪个 reference
+1. 先运行 `osdk --version`，需要精确参数时再运行对应层级的 `--help`。
+2. 从下面的命令或配置索引读取相关 reference。
+3. 写配置前确认作用域：项目 `osdk.toml` / `.osdk.toml`，或用户
+   `$OSDK_CONFIG_DIR/config.toml`。
+4. 执行会改系统、删除数据或改下载来源的命令前，读取对应 reference 的安全边界。
+5. 在 one-sdk 仓库开发 CI 时，以 `osdk task list` 为检查清单，不从 workflow 手抄命令。
 
-先判断意图属于哪一类，再 `Read` 对应文件，不要凭本页摘要直接下结论：
+## 先记住的边界
 
-- **要查某个命令怎么用、有哪些子命令和参数、按功能分类的命令清单** →
-  `reference/commands.md`。它按「工具生命周期 / 项目复现 / 任务 / 应用依赖 / 生态专属 /
-  源与安全 / 模型 / 容器 / 宿主包 / 存储缓存 / 自身与诊断」分类，覆盖全部一级命令。
-- **要写或改 `osdk.toml` / 全局 `config.toml`，想知道有哪些段、字段名怎么拼、取值范围** →
-  `reference/configuration.md`。它按 TOML 段（`[settings]` / `[tools]` / `[sources]` /
-  `[registries]` / `[containers]` / `[syspkg]` / `[tasks]` / `[deps]` / `[models]` /
-  `[aliases]` / `[task_config]`）逐一给出字段、类型、默认值与最小示例。
+- 使用 `osdk run <name>` 执行任务；不存在裸 `osdk <name>`。
+- 使用 `install` 安装工具，使用 `deps` 安装项目自身依赖，使用 `model sync` 下载模型。
+- 动态工具使用 `npm:`、`cargo:`、`go:`、`conda:`、`pypi:`、`github:`、`http:` 前缀。
+- CLI → 环境变量 → 项目配置 → 用户配置 → 内置默认，优先级依次降低。
+- 需要执行代码或改变字节来源的项目配置先用 `osdk trust`；安全声明不会无故要求信任。
+- `skills/` 是给外部 AI Agent 读取的内容；它不是 osdk 从 data/config 的 `plugins`
+  目录加载的声明式 backend。
 
-两个 reference 都以「与当前实现一致」为第一要求：命令面对齐 `crates/osdk-cli/src/cli.rs`
-的 `enum Command`，配置字段对齐 `crates/osdk-core/src/config/mod.rs` 的 `ConfigFile` 及各
-子结构。修改 osdk 能力后，这两份文档要与两份 README、两种语言的 site 文档一起同步更新
-（见仓库根 `AGENTS.md`）。
+通用参数见 [全局参数](reference/global-options/guide.md)，工具请求语法见
+[工具请求与 backend 选项](reference/tool-requests/guide.md)。
 
-## 关键前提（先记住，避免走弯路）
+## 一级命令索引
 
-- **`osdk run <name>` 才是跑任务，没有裸 `osdk <name>`。** 裸形式会被以后新增的子命令
-  遮蔽，因此项目任务一律 `osdk run`。
-- **`install` 装工具，`deps` 装项目自己的依赖。** `[tools]` 把包管理器本身准备好，
-  `osdk deps` 再驱动它读 `package.json` / `pyproject.toml` 等，把整份依赖闭包装进项目。
-  增删单个依赖仍走 `osdk install <npm:pkg>`。
-- **动态工具带命名空间前缀**：`npm:`、`cargo:`、`go:`、`conda:`、`pypi:`、`github:`、
-  `http:`。例如 `osdk use npm:prettier@3`、`osdk install github:sharkdp/fd`。
-- **会执行代码或削弱校验的项目配置要先 `osdk trust`**。仅声明「装哪些工具/包」不需要
-  信任；`[syspkg]`、源/镜像改写、`allow_build_from_source`、自定义 index 等才需要。
-- **配置分层，高者胜**：CLI 参数 → 环境变量（`OSDK_*`）→ 项目 `osdk.toml`（向上查找）→
-  用户全局 `config.toml` → 内置默认。
-- **不要手写 osdk 管控目录（data/config）下的配置或代理源**：源与配置一律通过
-  `osdk source` / `osdk config` 等 osdk 自身命令管理。
-- **Linux 安装器会按 libc 选择产物**：检测到 glibc 2.31+ 时用 GNU 包；glibc 更旧、
-  不存在或无法识别时用完全静态的 musl 包。显式 `--target` / `OSDK_TARGET` 可覆盖；musl
-  安装执行 `osdk self upgrade` 时仍保持 musl。发布流水线会校验 GNU 符号上限与 musl
-  静态链接属性。
+### 工具生命周期与复现
 
-## 快速定位（意图 → 命令，细节进 reference）
-
-| 想做什么 | 入口命令 |
+| 一级命令 | 读取 |
 | --- | --- |
-| 装 / 切换 / 卸载某个运行时或工具 | `osdk install` / `osdk use` / `osdk uninstall` |
-| 查已装 / 可装版本、当前生效版本、安装路径 | `osdk list` / `osdk list-remote` / `osdk current` / `osdk where` |
-| 固定并复现项目工具链 | `osdk use` → `osdk lock` → `osdk install`；`osdk outdated` / `osdk upgrade` |
-| 用项目任务替代 Makefile | `osdk run <name>` / `osdk task list` / `osdk task info` |
-| 装项目自身应用依赖 | `osdk deps [--list\|--dry-run\|--frozen\|--verify]` |
-| 临时用某工具跑一条命令 | `osdk exec --tool <t> -- <cmd>` |
-| Shell 按目录自动切换 | `osdk activate <shell>` / `osdk deactivate <shell>` |
-| 配镜像 / 源 / 离线 / 校验 | `osdk source ...` / 全局 `--offline` `--require-checksums` `--attestations` |
-| 信任 / 取消信任项目配置 | `osdk trust` / `osdk untrust` |
-| 拉取 / 复现大模型快照 | `osdk model pull` / `osdk model sync` / `osdk model view ...` |
-| 给 AI Agent 搜 / 装 / 复现 skill | `osdk skills find` / `osdk skills add` / `osdk skills sync` / `osdk skills list` / `osdk skills agents` |
-| 看 / 调配置 | `osdk config path\|list\|get\|set\|unset` |
-| 诊断环境、切语言 | `osdk doctor [--verify]` / `--lang en\|zh` |
+| `install` / `i` | [reference/install/guide.md](reference/install/guide.md) |
+| `use` / `u` | [reference/use/guide.md](reference/use/guide.md) |
+| `uninstall` / `rm` | [reference/uninstall/guide.md](reference/uninstall/guide.md) |
+| `list` / `ls` | [reference/list/guide.md](reference/list/guide.md) |
+| `list-remote` / `lsr` | [reference/list-remote/guide.md](reference/list-remote/guide.md) |
+| `current` | [reference/current/guide.md](reference/current/guide.md) |
+| `where` | [reference/where/guide.md](reference/where/guide.md) |
+| `reshim` | [reference/reshim/guide.md](reference/reshim/guide.md) |
+| `lock` | [reference/lock/guide.md](reference/lock/guide.md) |
+| `outdated` | [reference/outdated/guide.md](reference/outdated/guide.md) |
+| `upgrade` | [reference/upgrade/guide.md](reference/upgrade/guide.md) |
+| `exec` | [reference/exec/guide.md](reference/exec/guide.md) |
 
-> 表中列出的是「从哪里进」，具体参数、别名、平台差异与边界都在 `reference/commands.md`；
-> 涉及写进 `osdk.toml` 的等价声明在 `reference/configuration.md`。
+### 项目任务与依赖
+
+| 一级命令 | 读取 |
+| --- | --- |
+| `run` | [reference/run/guide.md](reference/run/guide.md)；Lua 直接读 [reference/run/lua.md](reference/run/lua.md) |
+| `task` | [reference/task/guide.md](reference/task/guide.md) |
+| `deps` | [reference/deps/guide.md](reference/deps/guide.md) |
+
+### 平台与生态工作流
+
+| 一级命令 | 读取 |
+| --- | --- |
+| `node` | [reference/node/guide.md](reference/node/guide.md) |
+| `python` | [reference/python/guide.md](reference/python/guide.md) |
+| `rust` | [reference/rust/guide.md](reference/rust/guide.md) |
+| `android` | [reference/android/guide.md](reference/android/guide.md) |
+| `model` | [reference/model/guide.md](reference/model/guide.md) |
+| `skills` | [reference/skills/guide.md](reference/skills/guide.md) |
+| `container` | [reference/container/guide.md](reference/container/guide.md) |
+| `pkg` | [reference/pkg/guide.md](reference/pkg/guide.md) |
+
+### 配置、源、安全与维护
+
+| 一级命令 | 读取 |
+| --- | --- |
+| `source` | [reference/source/guide.md](reference/source/guide.md) |
+| `registry` | [reference/registry/guide.md](reference/registry/guide.md) |
+| `config` | [reference/config/guide.md](reference/config/guide.md) |
+| `trust` | [reference/trust/guide.md](reference/trust/guide.md) |
+| `untrust` | [reference/untrust/guide.md](reference/untrust/guide.md) |
+| `cache` | [reference/cache/guide.md](reference/cache/guide.md) |
+| `prune` | [reference/prune/guide.md](reference/prune/guide.md) |
+| `doctor` | [reference/doctor/guide.md](reference/doctor/guide.md) |
+| `self` | [reference/self/guide.md](reference/self/guide.md) |
+
+### Shell 与帮助
+
+| 一级命令 | 读取 |
+| --- | --- |
+| `activate` | [reference/activate/guide.md](reference/activate/guide.md) |
+| `deactivate` | [reference/deactivate/guide.md](reference/deactivate/guide.md) |
+| `completions` | [reference/completions/guide.md](reference/completions/guide.md) |
+| `hook-env`（隐藏内部命令） | [reference/hook-env/guide.md](reference/hook-env/guide.md) |
+| `help`（Clap 自动入口） | [reference/help/guide.md](reference/help/guide.md) |
+| `alias` | [reference/alias/guide.md](reference/alias/guide.md) |
+
+## 配置段索引
+
+先读 [配置总览](reference/configuration/overview.md)，再只读取涉及的顶层段：
+
+| 配置段 | 读取 |
+| --- | --- |
+| `[settings]` | [reference/configuration/settings.md](reference/configuration/settings.md) |
+| `[tools]` | [reference/configuration/tools.md](reference/configuration/tools.md) |
+| `[aliases]` | [reference/configuration/aliases.md](reference/configuration/aliases.md) |
+| `[sources]` | [reference/configuration/sources.md](reference/configuration/sources.md) |
+| `[registries]` | [reference/configuration/registries.md](reference/configuration/registries.md) |
+| `[containers]` | [reference/configuration/containers.md](reference/configuration/containers.md) |
+| `[syspkg]` | [reference/configuration/syspkg.md](reference/configuration/syspkg.md) |
+| `[tasks]` | [reference/configuration/tasks.md](reference/configuration/tasks.md)；Lua 另见 [reference/run/lua.md](reference/run/lua.md) |
+| `[task_config]` | [reference/configuration/task-config.md](reference/configuration/task-config.md) |
+| `[deps]` | [reference/configuration/deps.md](reference/configuration/deps.md) |
+| `[models]` | [reference/configuration/models.md](reference/configuration/models.md) |
+| `[skills]` | [reference/configuration/skills.md](reference/configuration/skills.md) |
+
+不要根据本页摘要猜未列出的参数。对状态变化命令，先用 `--dry-run` / plan / preview
+（若支持）并读取对应 reference；没有预览能力时精确限定工具、模型、skill 或路径。

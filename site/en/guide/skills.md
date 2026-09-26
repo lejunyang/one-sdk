@@ -146,4 +146,4 @@ agents = ["claude-code", "codex"]
 The top-level `[skills]` table accepts `default_agents`, `scope`
 (`project`/`global`), and `link_mode`; each `[skills.<name>]` accepts `source`,
 `skill`, `ref`, `agents`, `when`, and `endpoint`, and a misspelled field errors
-loudly. The `osdk-guide` skill's `reference/configuration.md` documents each field.
+loudly. The `osdk-guide` skill's `reference/configuration/skills.md` documents each field.

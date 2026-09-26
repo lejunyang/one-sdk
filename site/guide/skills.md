@@ -124,4 +124,5 @@ agents = ["claude-code", "codex"]
 
 顶层 `[skills]` 支持 `default_agents`、`scope`（`project`/`global`）、`link_mode`；每条
 `[skills.<名>]` 支持 `source`、`skill`、`ref`、`agents`、`when`、`endpoint`，其中拼错的字段会
-硬报错。仓库内给 AI Agent 阅读的 `osdk-guide` 指引里，`reference/configuration.md` 有逐字段说明。
+硬报错。仓库内给 AI Agent 阅读的 `osdk-guide` 指引里，
+`reference/configuration/skills.md` 有逐字段说明。
