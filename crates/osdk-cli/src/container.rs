@@ -2257,6 +2257,10 @@ mod tests {
     const DEFAULT_TEST_CONTAINERD_ADDRESS: &str = "unix:///run/containerd/containerd.sock";
     #[cfg(windows)]
     const DEFAULT_TEST_CONTAINERD_ADDRESS: &str = "npipe:////./pipe/containerd-containerd";
+    #[cfg(not(windows))]
+    const DEFAULT_TEST_CTR_ADDRESS: &str = "/run/containerd/containerd.sock";
+    #[cfg(windows)]
+    const DEFAULT_TEST_CTR_ADDRESS: &str = DEFAULT_TEST_CONTAINERD_ADDRESS;
     const DEFAULT_CONTAINERD_NAMESPACE: &str = "default";
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2519,7 +2523,7 @@ mod tests {
             calls.last().unwrap().arguments,
             [
                 "--address",
-                DEFAULT_TEST_CONTAINERD_ADDRESS,
+                DEFAULT_TEST_CTR_ADDRESS,
                 "--namespace",
                 DEFAULT_CONTAINERD_NAMESPACE,
                 "images",
