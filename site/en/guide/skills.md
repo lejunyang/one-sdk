@@ -46,7 +46,7 @@ the result count (1–50).
 branch when none is configured) and rewrites the lock only when it moved. A bare
 40-hex commit stored by an existing project is treated as an installation
 snapshot, so `update` follows the default branch; spell an immutable pin
-pin explicitly as `ref = "rev:<commit>"`. `use` installs nothing and writes no
+explicitly as `ref = "rev:<commit>"`. `use` installs nothing and writes no
 lock — it uses one skill on the fly: with no `-a` it writes the generated prompt
 to stdout (pipe it, e.g. `osdk skills use owner/repo | claude`), and with `-a <id>`
 it starts that agent's CLI interactively with the prompt. `init` scaffolds a
