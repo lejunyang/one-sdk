@@ -110,6 +110,10 @@ without policy are upstream-only. API-only runs probe
 `/v2/` on upstream and each mirror. Image runs resolve and verify upstream first,
 then query every mirror by the resolved digest rather than re-resolving a moving
 tag. The image registry must match the positional registry.
+A caller-supplied digest is already an immutable content identity, so if the
+upstream is unavailable osdk may instead fetch and hash that exact digest at
+each mirror, perform the same index/platform and layer checks there, and rank
+successful mirrors. This fallback never applies to a mutable tag.
 
 [`RegistryEndpoint`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/container/registry.rs)
 accepts HTTPS without userinfo, query, fragment, percent encoding, or parent
@@ -203,6 +207,9 @@ target; a post-replacement directory-sync failure is reported as such. Unattende
 additionally requires `--accept-plan` to equal the newly generated ID; `--dry-run` prints the ID
 without prompting or writing. This path does not elevate, restart a daemon, or
 recreate a builder.
+Before returning the no-verified-mirror error, human mode renders the registry
+report and JSON mode emits a schema-version-1 failure envelope containing that
+complete report, so automation retains the reason each candidate was excluded.
 
 ## Native cache ownership
 

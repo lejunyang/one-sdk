@@ -70,12 +70,20 @@ struct MirrorApplyOutput<'a> {
     applied: Option<&'a MirrorApplyReport>,
 }
 
+#[derive(Debug, Serialize)]
+struct MirrorApplyDiagnosticOutput<'a> {
+    schema_version: u32,
+    status: MirrorApplyStatus,
+    diagnostic: &'a RegistryDiagnosticReport,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum MirrorApplyStatus {
     Preview,
     Applied,
     Cancelled,
+    NoVerifiedMirror,
 }
 
 pub async fn run(app: &App, command: ContainerCommand) -> Result<Option<ExitStatus>> {
@@ -916,6 +924,20 @@ async fn mirror_apply<T: RegistryTransport>(
     )
     .await?;
     if diagnostic.recommended_mirror_order.is_empty() {
+        if json {
+            serde_json::to_writer(
+                &mut *output,
+                &MirrorApplyDiagnosticOutput {
+                    schema_version: 1,
+                    status: MirrorApplyStatus::NoVerifiedMirror,
+                    diagnostic: &diagnostic,
+                },
+            )
+            .context("serializing failed native mirror diagnostic")?;
+            writeln!(output)?;
+        } else {
+            write_registry_human(output, &diagnostic, i18n::current())?;
+        }
         return Err(anyhow!(osdk_core::t!("err.container.no_verified_mirror")));
     }
     let selected_mirrors = diagnostic
@@ -3030,6 +3052,48 @@ mod tests {
         assert_eq!(*factory_calls.lock().unwrap(), 0);
         assert!(runner.calls().is_empty());
         assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mirror_apply_failure_keeps_the_full_json_diagnostic() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("daemon.json");
+        let runner = FakeRunner::new([]);
+        let prompt = FakePrompt::declining();
+        let mut output = Vec::new();
+
+        let error = mirror_apply(
+            &runner,
+            &FakeTransport::available(2),
+            &prompt,
+            &Default::default(),
+            false,
+            false,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            &mut output,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no mirror passed"));
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["status"], "no-verified-mirror");
+        assert_eq!(value["diagnostic"]["schema_version"], 2);
+        assert!(value["diagnostic"]["mirrors"].is_array());
+        assert!(runner.calls().is_empty());
+        assert!(prompt.questions().is_empty());
+        assert!(!target.exists());
     }
 
     #[tokio::test]

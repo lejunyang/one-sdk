@@ -878,7 +878,7 @@ schema-version-2 JSON omits context, builder and node names, namespaces, native
 config paths, and secret-bearing endpoint paths or queries.
 
 Registry tests use anonymous HTTPS only, validate image digests, platform
-selection, bounded Range support, and rank verified mirrors. A mirror plan
+selection, bounded Range support, and rank verified mirrors. A digest-pinned image can still validate mirrors when the upstream is unavailable; mutable tags remain upstream-authoritative. A mirror plan
 always targets one configured or Docker Hub built-in registry policy and one
 explicit Docker, containerd, or BuildKit control plane. It reports a
 deterministic `plan_id`;
@@ -892,7 +892,7 @@ interactively without asking you to copy the ID, then rechecks the input under
 a lock, validates the generated daemon JSON with `dockerd --validate`, and atomically
 replaces the file. It never elevates privileges or
 restarts/recreates the native service. Unattended `--yes` requires the exact
-fresh `--accept-plan`; use `--dry-run --json` to obtain it.
+fresh `--accept-plan`; use `--dry-run --json` to obtain it. A failed JSON preview still emits the full Registry diagnostic before exiting nonzero.
 
 `container pull` uses the effective runtime and platform unless you override
 them. In `auto` mode it performs one bounded read-only Docker/containerd

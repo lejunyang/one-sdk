@@ -786,7 +786,8 @@ Buildx driver、节点状态、BuildKit 版本、endpoint 与平台。其 schema
 context、builder、节点名称、namespace、原生配置路径及可能带敏感信息的 endpoint path/query。
 
 Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并对通过
-内容校验的 mirror 排序。每份 mirror plan 只针对一个已配置 policy（Docker Hub 也可使用
+内容校验的 mirror 排序。固定 digest 的镜像即使 upstream 不可达也能验证 mirror；可变 tag
+仍必须由 upstream 解析。每份 mirror plan 只针对一个已配置 policy（Docker Hub 也可使用
 内置 policy）和一个显式 Docker、containerd 或 BuildKit 控制面，并报告确定的 `plan_id`；
 本来可执行的本地 plan 如果没有
 显式原生配置路径，会标为 `manual-only`。规划不会写原生配置、启动 builder 或重启 daemon。
@@ -794,7 +795,7 @@ Plan JSON 可能包含操作所需的绝对路径、builder 名、mirror origin 
 但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。`mirrors apply` 在一次
 调用内完成测速与规划，交互确认时不要求复制 ID；确认后会在锁内复核输入，使用 `dockerd --validate` 校验生成的 daemon JSON，
 再原子替换文件。它不会自动提权，也不会重启 daemon 或重建 builder。无人值守 `--yes` 必须带本次计划对应的
-`--accept-plan`；先用 `--dry-run --json` 获取 ID。
+`--accept-plan`；先用 `--dry-run --json` 获取 ID。JSON 预览失败时仍会先输出完整 Registry 诊断，再以非零状态退出。
 
 `container pull` 默认使用生效的 runtime 与 platform。`auto` 模式对 Docker 与 containerd
 执行一次有界只读解析，再启动恰好一次原生前台拉取。显式选择 containerd 时必须成对提供

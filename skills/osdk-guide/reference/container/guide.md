@@ -26,6 +26,10 @@ Docker apply/dry-run 还会先用 `dockerd --validate` 校验生成的 daemon JS
 写文件。无人值守 `--yes` 仍必须同时给 `--accept-plan`。`prune` 同理要求接受精确 preview
 id，避免机器状态变化后误删。配置见 `reference/configuration/containers.md`。
 
+当 upstream 不可达时，带 digest 的 `--image` 仍可直接对 mirror 校验相同内容；tag 不会在
+mirror 上重新解析。`mirrors apply --json` 找不到合格 mirror 时会先输出包含完整诊断的
+`no-verified-mirror` JSON，再以非零状态退出。
+
 自动化时注意：`pull` 透传原生运行时退出码（Unix 信号转为 `128 + signal`）；带
 `--json` 的诊断/计划输出有稳定 schema，但实时延迟值允许变化。plan/preview id 绑定
 当时状态，不应保存成长期配置。

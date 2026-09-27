@@ -251,6 +251,12 @@ only mirrors whose manifest is equivalent and whose Range response returned
 valid bytes. API-only ranking measures reachability latency only; automatic
 application always requires an image benchmark.
 
+A digest selector is itself an immutable content identity. If the upstream API
+is unavailable, osdk may therefore fetch that exact digest from each mirror,
+verify its bytes, select the requested platform, and sample the layer without
+allowing the mirror to resolve a tag. A tag selector never takes this fallback:
+the upstream must first freeze it to a digest.
+
 `--image` accepts tags and digests. A digest selector must match the returned
 manifest bytes. For an image index, `--platform` selects exactly one child and
 verifies its descriptor digest and size. The CLI value overrides an explicit
@@ -277,8 +283,8 @@ default, with a hard ceiling of 64, and three redirects per request chain; it
 bounds API/token/manifest bodies,
 and reads at most the 16 KiB layer sample. `--offline` rejects this network
 diagnostic before constructing its transport. `resolve` and `anonymous_only` do
-not relax this command: upstream remains authoritative and the test remains
-anonymous.
+not relax anonymity. The upstream remains authoritative for tags; an explicitly
+supplied digest is the authority for the bounded fallback described above.
 
 Human output is localized and conclusion-first. `--json` emits registry report
 schema version 2 with typed API, manifest, blob-range, per-mirror microsecond
@@ -391,6 +397,9 @@ configuration is written.
 Apply never invokes sudo, configures remote contexts or Docker Desktop, or
 automatically performs `restart-daemon`/`recreate-builder`; success output names
 the remaining activation. `--dry-run` neither prompts nor writes.
+If no mirror passes, human output includes the diagnostic before the error;
+`--json` writes a schema-version-1 `no-verified-mirror` envelope containing the
+complete registry diagnostic, then exits nonzero.
 
 ## Status guidance
 

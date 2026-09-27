@@ -89,6 +89,9 @@ DaoCloud `docker.m.daocloud.io` 两个内置候选；显式 policy 完整覆盖�
 没有 policy 时只测试 upstream。只测 API 时在 upstream 和每个 mirror 上请求
 `/v2/`；指定 image 时先解析并验证 upstream，再按解析出的 digest 请求每个 mirror，不会
 重新解析可变 tag。Image registry 必须与位置参数 Registry 相同。
+调用方提供的 digest 已经是不可变内容身份，因此 upstream 不可达时，osdk 可以改为在每个
+mirror 获取并哈希该精确 digest，在 mirror 上完成同样的 index/platform 与 layer 检查，再对
+通过项排序。这条降级路径绝不适用于可变 tag。
 
 [`RegistryEndpoint`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/container/registry.rs)
 只接受 HTTPS，拒绝 userinfo、query、fragment、percent encoding 与 parent component。
@@ -165,6 +168,8 @@ flush/sync 后再次检查输入，再原子替换并同步父目录（Unix）�
 覆盖目标；替换后的父目录同步失败会原样报告。无人值守 `--yes` 额外要求
 `--accept-plan` 等于本次新生成的 ID；`--dry-run` 输出 ID 但不提示、不写入。该路径不提权、
 不重启 daemon、不重建 builder。
+返回 no-verified-mirror 错误前，人类模式会渲染 Registry 报告，JSON 模式会输出包含完整报告
+的 schema-version-1 失败 envelope，使自动化仍能看到每个候选被排除的原因。
 
 ## 原生缓存所有权
 

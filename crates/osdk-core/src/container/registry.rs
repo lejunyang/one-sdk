@@ -911,6 +911,9 @@ pub async fn diagnose_registry<T: RegistryTransport>(
     }
 
     if let Some(image) = state.options.image.clone() {
+        let mut resolved = None;
+        let mut probe_manifest = None;
+        let mut probe_blob = None;
         if matches!(
             report.api.status,
             ApiCheckStatus::Available | ApiCheckStatus::BearerChallenge
@@ -926,20 +929,30 @@ pub async fn diagnose_registry<T: RegistryTransport>(
             .await;
             report.manifest = result.manifest;
             report.blob_range = result.blob_range;
-
-            if let Some(resolved) = result.resolved_digest {
-                for (index, mirror) in state.options.mirrors.clone().into_iter().enumerate() {
-                    report.mirrors[index] = check_mirror(
-                        &mut state,
-                        index,
-                        &mirror,
-                        &image,
-                        &resolved,
-                        result.probe_manifest.as_ref(),
-                        result.probe_blob.as_ref(),
-                    )
-                    .await;
-                }
+            resolved = result.resolved_digest;
+            probe_manifest = result.probe_manifest;
+            probe_blob = result.probe_blob;
+        }
+        let resolved = resolved.or_else(|| match image.selector() {
+            // A caller-supplied digest is already an immutable content
+            // identity. If the upstream is unreachable, mirrors can still
+            // prove that they serve exactly those bytes without resolving or
+            // trusting a mutable tag at the mirror.
+            ImageSelector::Digest(digest) => Some(digest.clone()),
+            ImageSelector::Tag(_) => None,
+        });
+        if let Some(resolved) = resolved {
+            for (index, mirror) in state.options.mirrors.clone().into_iter().enumerate() {
+                report.mirrors[index] = check_mirror(
+                    &mut state,
+                    index,
+                    &mirror,
+                    &image,
+                    &resolved,
+                    probe_manifest.as_ref(),
+                    probe_blob.as_ref(),
+                )
+                .await;
             }
         }
     } else {
@@ -1939,6 +1952,36 @@ async fn check_mirror<T: RegistryTransport>(
             );
         }
     };
+    if probe_manifest.is_none()
+        && probe_blob.is_none()
+        && matches!(image.selector(), ImageSelector::Digest(_))
+    {
+        let platform = state.options.platform.clone();
+        let result = inspect_image(
+            state,
+            mirror,
+            image,
+            platform.as_ref(),
+            authorization.as_ref(),
+        )
+        .await;
+        let status = if result.manifest.status == ManifestCheckStatus::Verified
+            && result.manifest.digest.as_ref() == Some(expected)
+        {
+            MirrorCheckStatus::Equivalent
+        } else {
+            mirror_status_from_manifest(result.manifest.status)
+        };
+        return MirrorCheck {
+            order,
+            origin: mirror.report_origin().to_owned(),
+            status,
+            digest: result.manifest.digest,
+            blob_range: result.blob_range,
+            elapsed_micros: elapsed_micros(started),
+            recommended_rank: None,
+        };
+    }
     let path = manifest_path(image, expected.as_str());
     let result = fetch_manifest(state, mirror, &path, authorization.as_ref(), None).await;
     match result {
@@ -2184,6 +2227,9 @@ fn mirror_status_from_api(status: ApiCheckStatus) -> MirrorCheckStatus {
 
 fn mirror_status_from_manifest(status: ManifestCheckStatus) -> MirrorCheckStatus {
     match status {
+        ManifestCheckStatus::DigestMismatch | ManifestCheckStatus::SizeMismatch => {
+            MirrorCheckStatus::Diverged
+        }
         ManifestCheckStatus::AuthenticationRequired => MirrorCheckStatus::AuthenticationRequired,
         ManifestCheckStatus::AccessDenied => MirrorCheckStatus::AccessDenied,
         ManifestCheckStatus::RateLimited => MirrorCheckStatus::RateLimited,
@@ -2624,6 +2670,63 @@ mod tests {
         assert_eq!(seen[1].accept, Some(ACCEPT_MANIFESTS));
         assert_eq!(seen[2].range, Some((0, 15)));
         assert_eq!(seen[2].max_body_bytes, DEFAULT_BLOB_SAMPLE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn pinned_digest_can_verify_a_mirror_when_upstream_is_unreachable() {
+        let layer = b"mirror layer";
+        let (manifest, layer_digest) = image_manifest(layer);
+        let digest = sha256_digest(&manifest).unwrap();
+        let transport = MockTransport::new([
+            MockStep::Error(RegistryTransportError::Timeout),
+            response(200),
+            manifest_response(manifest),
+            MockStep::Response(
+                RegistryResponse::new(206)
+                    .header("content-range", "bytes 0-11/12")
+                    .body(layer.to_vec()),
+            ),
+        ]);
+        let report = diagnose_registry(
+            &transport,
+            options(Some(image(&format!("registry.example/team/app@{digest}"))))
+                .with_mirrors(vec![endpoint("mirror.example")]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.api.status, ApiCheckStatus::TimedOut);
+        assert_eq!(report.manifest.status, ManifestCheckStatus::NotRequested);
+        assert_eq!(report.mirrors[0].status, MirrorCheckStatus::Equivalent);
+        assert_eq!(report.mirrors[0].digest, Some(digest.clone()));
+        assert_eq!(report.mirrors[0].blob_range.digest, Some(layer_digest));
+        assert_eq!(
+            report.mirrors[0].blob_range.status,
+            BlobRangeStatus::Supported
+        );
+        assert_eq!(report.recommended_mirror_order, [0]);
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[0].origin, "https://registry.example");
+        assert_eq!(seen[1].origin, "https://mirror.example");
+        assert!(seen[2].path.ends_with(digest.as_str()));
+    }
+
+    #[tokio::test]
+    async fn mutable_tag_does_not_fall_back_to_mirror_resolution() {
+        let transport = MockTransport::new([MockStep::Error(RegistryTransportError::Timeout)]);
+        let report = diagnose_registry(
+            &transport,
+            options(Some(image("registry.example/team/app:moving")))
+                .with_mirrors(vec![endpoint("mirror.example")]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.api.status, ApiCheckStatus::TimedOut);
+        assert_eq!(report.mirrors[0].status, MirrorCheckStatus::NotTested);
+        assert!(report.recommended_mirror_order.is_empty());
+        assert_eq!(transport.seen().len(), 1);
     }
 
     #[tokio::test]

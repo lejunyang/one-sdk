@@ -218,6 +218,10 @@ image 时，对 upstream 与每个 mirror 调用 `/v2/`。指定 `--image` 时�
 Manifest 等价且 Range 返回有效字节的 mirror 按总耗时列入推荐顺序。API-only 模式的排序
 只代表连通性延迟，自动应用始终要求 image benchmark。
 
+Digest selector 本身就是不可变内容身份。因此 upstream API 不可达时，osdk 仍可从各 mirror
+获取该精确 digest、校验字节、选择请求平台并采样 layer，全程不允许 mirror 解析 tag。
+Tag selector 不会走这条降级路径：必须先由 upstream 将其固定为 digest。
+
 `--image` 接受 tag 或 digest；digest selector 必须与返回的 manifest 字节一致。对于 image
 index，`--platform` 必须唯一选中一个 child，并校验 descriptor digest 和 size。CLI 参数
 覆盖显式 `[containers].platform`；两处都未提供平台时，遇到 index 会报告
@@ -238,7 +242,8 @@ mirror。Redirect 只会在 HTTPS、同 origin 且仍在 request/redirect budget
 默认最多 48 个请求、硬上限 64 个请求，每条请求链最多 3 次 redirect，并限制
 API/token/manifest body，只读取
 最多 16 KiB 的 layer sample。`--offline` 会在构造网络 transport 前拒绝该命令。
-`resolve` 与 `anonymous_only` 不会放宽这条命令：upstream 始终是权威来源，测试始终匿名。
+`resolve` 与 `anonymous_only` 不会放宽匿名边界。Tag 仍以上游为权威；显式提供的 digest
+则是上述有界降级路径的权威内容身份。
 
 人类输出支持中英文并以结论开头。`--json` 输出 Registry report schema version 2，包含
 类型化 API、manifest、blob-range、每个 mirror 的微秒耗时/排名和推荐顺序；实时耗时会变化，
@@ -329,6 +334,8 @@ Docker 还会对生成的 daemon JSON 执行 `dockerd --validate`。随后在目
 
 Apply 不使用 sudo、不配置 remote context 或 Docker Desktop，也不自动执行 `restart-daemon`
 或 `recreate-builder`；成功信息会明确列出仍需用户完成的激活动作。`--dry-run` 不提示且不写入。
+若没有 mirror 通过，人类输出会先展示诊断再报错；`--json` 会输出 schema version 1 的
+`no-verified-mirror` envelope，内含完整 Registry 诊断，然后以非零状态退出。
 
 ## 状态处理建议
 
