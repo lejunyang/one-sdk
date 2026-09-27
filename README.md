@@ -889,7 +889,8 @@ and mirror origins plus whether a path prefix exists; exact mirror prefixes,
 existing configuration contents, and generated candidate bytes remain hidden.
 `mirrors apply` performs that benchmark and plan in one invocation, prompts
 interactively without asking you to copy the ID, then rechecks the input under
-a lock and atomically replaces the file. It never elevates privileges or
+a lock, validates the generated daemon JSON with `dockerd --validate`, and atomically
+replaces the file. It never elevates privileges or
 restarts/recreates the native service. Unattended `--yes` requires the exact
 fresh `--accept-plan`; use `--dry-run --json` to obtain it.
 

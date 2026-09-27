@@ -321,9 +321,10 @@ Docker Hub 默认使用 `library/alpine:latest` 做内容等价与有界 Range �
 无人值守调用采用两步握手：先运行 `--dry-run --json` 取得本次 `plan_id`，再带全局
 `--yes --accept-plan <plan_id>` 重新测速和规划；ID 与新的 runtime identity、policy、input 和
 candidate 任一项不一致都会拒绝。写入仅接受 `ready` 且恰好包含一个 candidate 的计划；
-它获取 osdk apply lock，再以 no-follow 方式重新捕获输入 fingerprint，解析候选 JSON/TOML，
-在目标同目录先创建权限受限的备份，再写入并 flush/sync 临时文件，最后原子替换且保留
-原文件权限；成功输出包含备份路径。
+它获取 osdk apply lock，再以 no-follow 方式重新捕获输入 fingerprint，解析候选 JSON/TOML；
+Docker 还会对生成的 daemon JSON 执行 `dockerd --validate`。随后在目标同目录创建权限受限的
+备份，再写入并 flush/sync 临时文件，最后原子替换且保留原文件权限；成功输出包含备份路径。
+该原生校验在 `mirrors apply --dry-run` 中也会运行；`dockerd` 缺失或拒绝配置时不会写入文件。
 
 Apply 不使用 sudo、不配置 remote context 或 Docker Desktop，也不自动执行 `restart-daemon`
 或 `recreate-builder`；成功信息会明确列出仍需用户完成的激活动作。`--dry-run` 不提示且不写入。

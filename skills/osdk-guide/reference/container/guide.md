@@ -22,8 +22,9 @@ osdk container prune --runtime docker --scope images
 ```
 
 `mirrors plan` 不写入；`mirrors apply --dry-run` 会测速并给出绑定当前输入的 plan id。
-无人值守 `--yes` 仍必须同时给 `--accept-plan`。`prune` 同理要求接受精确 preview id，
-避免机器状态变化后误删。配置见 `reference/configuration/containers.md`。
+Docker apply/dry-run 还会先用 `dockerd --validate` 校验生成的 daemon JSON；校验失败不会
+写文件。无人值守 `--yes` 仍必须同时给 `--accept-plan`。`prune` 同理要求接受精确 preview
+id，避免机器状态变化后误删。配置见 `reference/configuration/containers.md`。
 
 自动化时注意：`pull` 透传原生运行时退出码（Unix 信号转为 `128 + signal`）；带
 `--json` 的诊断/计划输出有稳定 schema，但实时延迟值允许变化。plan/preview id 绑定

@@ -379,10 +379,13 @@ Unattended use is a two-step handshake: obtain the current `plan_id` with
 change in runtime identity, policy, input, or candidate produces a different ID
 and is rejected. Apply accepts only a `ready` plan with exactly one candidate,
 takes an osdk apply lock, recaptures the input with no-follow checks, validates
-the candidate JSON/TOML, creates a restricted sibling backup for an existing
-file, flushes and syncs a sibling temporary file, and atomically replaces the
-target while preserving existing permissions. Successful output includes the
-backup path.
+the candidate JSON/TOML, and, for Docker, runs `dockerd --validate` against the
+generated daemon JSON. It then creates a restricted sibling backup for an
+existing file, flushes and syncs a sibling temporary file, and atomically
+replaces the target while preserving existing permissions. Successful output
+includes the backup path. The native validation also runs during `mirrors apply
+--dry-run`; a missing or rejecting `dockerd` fails before any native
+configuration is written.
 
 Apply never invokes sudo, configures remote contexts or Docker Desktop, or
 automatically performs `restart-daemon`/`recreate-builder`; success output names

@@ -192,11 +192,14 @@ self-authenticating plan with exactly one candidate. After interactive approval
 it repeats native discovery and snapshotting and requires the fresh plan ID to
 equal the displayed ID. It then takes an osdk apply lock and captures the input
 again with no-follow checks, comparing the full metadata/content
-fingerprint. Candidate JSON/TOML is reparsed before a unique sibling temporary
-file is written, permission-preserved, flushed/synced, checked again against the
-input, atomically installed, and the parent directory synced on Unix. Failures
-before replacement remove the temporary file without overwriting the target; a
-post-replacement directory-sync failure is reported as such. Unattended `--yes`
+fingerprint. Candidate JSON/TOML is reparsed, and a Docker candidate is written
+to a restricted temporary file and accepted only when `dockerd --validate
+--config-file` exits successfully. This native validation also runs for dry-run
+and completes before any target or backup is created. A unique sibling temporary
+file is then written, permission-preserved, flushed/synced, checked again against
+the input, atomically installed, and the parent directory synced on Unix.
+Failures before replacement remove the temporary file without overwriting the
+target; a post-replacement directory-sync failure is reported as such. Unattended `--yes`
 additionally requires `--accept-plan` to equal the newly generated ID; `--dry-run` prints the ID
 without prompting or writing. This path does not elevate, restart a daemon, or
 recreate a builder.

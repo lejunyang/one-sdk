@@ -939,6 +939,7 @@ async fn mirror_apply<T: RegistryTransport>(
         Some(native_config),
         containerd_main_config,
     )?;
+    validate_native_mirror_candidate(runner, &bundle, capture_limits(config.probe_timeout_ms))?;
     if !json {
         write_registry_human(output, &diagnostic, i18n::current())?;
         write_mirror_plan_human(output, &bundle.plan, i18n::current())?;
@@ -1043,6 +1044,51 @@ async fn mirror_apply<T: RegistryTransport>(
         write_mirror_apply_human(output, &report, bundle.plan.activation, i18n::current())?;
     }
     Ok(())
+}
+
+fn validate_native_mirror_candidate(
+    runner: &dyn CommandRunner,
+    bundle: &MirrorPlanBundle,
+    limits: CaptureLimits,
+) -> Result<()> {
+    if !bundle
+        .plan
+        .validation
+        .contains(&osdk_core::container::ValidationStep::ValidateDockerDaemonConfig)
+    {
+        return Ok(());
+    }
+    let [candidate] = bundle.candidates.as_slice() else {
+        return Ok(());
+    };
+    if candidate.fingerprint().format != osdk_core::container::NativeConfigFormat::Json {
+        return Err(anyhow!(osdk_core::t!(
+            "err.container.docker_config_validation"
+        )));
+    }
+
+    let mut file = tempfile::Builder::new()
+        .prefix("osdk-docker-daemon-")
+        .suffix(".json")
+        .tempfile()
+        .map_err(|_| anyhow!(osdk_core::t!("err.container.docker_config_validation")))?;
+    file.write_all(candidate.bytes())
+        .and_then(|_| file.as_file().sync_all())
+        .map_err(|_| anyhow!(osdk_core::t!("err.container.docker_config_validation")))?;
+    let outcome = runner.run_captured(
+        &CommandSpec::new("dockerd").args([
+            "--validate".into(),
+            "--config-file".into(),
+            file.path().as_os_str().to_owned(),
+        ]),
+        limits,
+    );
+    match outcome {
+        CommandOutcome::Exited { status, .. } if status.success() => Ok(()),
+        _ => Err(anyhow!(osdk_core::t!(
+            "err.container.docker_config_validation"
+        ))),
+    }
 }
 
 fn write_mirror_apply_human(
@@ -2281,6 +2327,10 @@ mod tests {
         ]
     }
 
+    fn successful_docker_validation() -> CommandOutcome {
+        success("configuration OK\n")
+    }
+
     fn healthy_containerd() -> [CommandOutcome; 3] {
         [
             success("containerd github.com/containerd/containerd v1.7.22 abc"),
@@ -2992,7 +3042,14 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path().join("daemon.json");
         std::fs::write(&target, b"{\"debug\":true}").unwrap();
-        let runner = FakeRunner::new([healthy_local_docker(), healthy_local_docker()].concat());
+        let runner = FakeRunner::new(
+            [
+                healthy_local_docker().to_vec(),
+                vec![successful_docker_validation()],
+                healthy_local_docker().to_vec(),
+            ]
+            .concat(),
+        );
         let transport = successful_benchmark_transport();
         let prompt = FakePrompt::accepting();
         let mut output = Vec::new();
@@ -3048,7 +3105,13 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path().join("daemon.json");
         std::fs::write(&target, b"{}").unwrap();
-        let runner = FakeRunner::new([healthy_local_docker(), healthy_local_docker()].concat());
+        let runner = FakeRunner::new(
+            [
+                healthy_local_docker().to_vec(),
+                vec![successful_docker_validation()],
+            ]
+            .concat(),
+        );
         let transport = successful_benchmark_transport();
         let prompt = FakePrompt::declining();
         let error = mirror_apply(
@@ -3076,6 +3139,55 @@ mod tests {
         assert!(error.to_string().contains("--accept-plan sha256:"));
         assert_eq!(std::fs::read(&target).unwrap(), b"{}");
         assert!(prompt.questions().is_empty());
+        let calls = runner.calls();
+        let validation = calls.last().unwrap();
+        assert_eq!(validation.program, "dockerd");
+        assert_eq!(validation.arguments[0], "--validate");
+        assert_eq!(validation.arguments[1], "--config-file");
+        assert_eq!(validation.arguments.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mirror_apply_rejects_a_candidate_rejected_by_dockerd() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("daemon.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let runner = FakeRunner::new(
+            [
+                healthy_local_docker().to_vec(),
+                vec![failure("secret native validation details")],
+            ]
+            .concat(),
+        );
+        let prompt = FakePrompt::declining();
+
+        let error = mirror_apply(
+            &runner,
+            &successful_benchmark_transport(),
+            &prompt,
+            &Default::default(),
+            false,
+            false,
+            temporary.path(),
+            "docker.io".into(),
+            ContainerMirrorRuntimeArg::Docker,
+            None,
+            &target,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Docker daemon rejected"));
+        assert!(!error.to_string().contains("secret"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"{}");
+        assert!(prompt.questions().is_empty());
     }
 
     #[tokio::test]
@@ -3083,7 +3195,13 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let target = temporary.path().join("daemon.json");
         std::fs::write(&target, b"{}").unwrap();
-        let runner = FakeRunner::new(healthy_local_docker());
+        let runner = FakeRunner::new(
+            [
+                healthy_local_docker().to_vec(),
+                vec![successful_docker_validation()],
+            ]
+            .concat(),
+        );
         let transport = successful_benchmark_transport();
         let prompt = FakePrompt::declining();
         let mut output = Vec::new();
@@ -3130,7 +3248,13 @@ mod tests {
         config.registries.insert("docker.io".into(), policy);
         let mut preview = Vec::new();
         mirror_apply(
-            &FakeRunner::new(healthy_local_docker()),
+            &FakeRunner::new(
+                [
+                    healthy_local_docker().to_vec(),
+                    vec![successful_docker_validation()],
+                ]
+                .concat(),
+            ),
             &successful_benchmark_transport(),
             &prompt,
             &config,
@@ -3154,7 +3278,14 @@ mod tests {
         let preview: serde_json::Value = serde_json::from_slice(&preview).unwrap();
         let accepted_plan = preview["plan_id"].as_str().unwrap();
 
-        let runner = FakeRunner::new([healthy_local_docker(), healthy_local_docker()].concat());
+        let runner = FakeRunner::new(
+            [
+                healthy_local_docker().to_vec(),
+                vec![successful_docker_validation()],
+                healthy_local_docker().to_vec(),
+            ]
+            .concat(),
+        );
         let mut output = Vec::new();
         mirror_apply(
             &runner,

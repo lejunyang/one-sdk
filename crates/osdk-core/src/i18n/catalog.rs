@@ -1070,6 +1070,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.container.docker_config_validation",
+        (
+            "Docker daemon rejected the generated mirror configuration",
+            "Docker daemon 拒绝了生成的镜像配置",
+        ),
+    );
+    m.insert(
         "err.container.mirror_plan_not_ready",
         (
             "the generated native mirror plan is not safe for automatic application",
@@ -3621,6 +3628,7 @@ mod tests {
             "err.container.registry_not_configured",
             "err.container.mirror_image_required",
             "err.container.no_verified_mirror",
+            "err.container.docker_config_validation",
             "err.container.mirror_plan_not_ready",
             "err.container.accept_plan_required",
             "err.container.accept_plan_mismatch",

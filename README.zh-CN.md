@@ -792,8 +792,8 @@ Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与�
 显式原生配置路径，会标为 `manual-only`。规划不会写原生配置、启动 builder 或重启 daemon。
 Plan JSON 可能包含操作所需的绝对路径、builder 名、mirror origin 及是否存在 path prefix，
 但不显示精确 mirror prefix、现有配置内容或生成的 candidate bytes。`mirrors apply` 在一次
-调用内完成测速与规划，交互确认时不要求复制 ID；确认后会在锁内复核输入并原子替换文件。
-它不会自动提权，也不会重启 daemon 或重建 builder。无人值守 `--yes` 必须带本次计划对应的
+调用内完成测速与规划，交互确认时不要求复制 ID；确认后会在锁内复核输入，使用 `dockerd --validate` 校验生成的 daemon JSON，
+再原子替换文件。它不会自动提权，也不会重启 daemon 或重建 builder。无人值守 `--yes` 必须带本次计划对应的
 `--accept-plan`；先用 `--dry-run --json` 获取 ID。
 
 `container pull` 默认使用生效的 runtime 与 platform。`auto` 模式对 Docker 与 containerd

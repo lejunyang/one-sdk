@@ -158,9 +158,11 @@ candidate bundle，只打印 plan，因此始终只读。
 `mirrors apply` 在同一进程内保留 candidate，且只接受 `ready`、恰好一个 candidate、
 自认证 ID 有效的 plan。交互确认后再执行一次原生发现和 snapshot，要求新 plan ID 与展示给
 用户的 ID 一致；随后获取 osdk apply lock，并在锁内再次以 no-follow 方式捕获输入，比较完整
-metadata/content fingerprint。写入前重新解析完整 JSON/TOML，在同目录创建唯一临时文件，
-写入、保留权限、flush/sync 后再次检查输入，再原子替换并同步父目录（Unix）。替换前失败会
-清理临时文件且不覆盖目标；替换后的父目录同步失败会原样报告。无人值守 `--yes` 额外要求
+metadata/content fingerprint。写入前重新解析完整 JSON/TOML；Docker candidate 会先写入权限
+受限的临时文件，且只有 `dockerd --validate --config-file` 成功才继续。该原生校验也在 dry-run
+执行，并且发生在创建任何目标或备份之前。随后在同目录创建唯一临时文件，写入、保留权限、
+flush/sync 后再次检查输入，再原子替换并同步父目录（Unix）。替换前失败会清理临时文件且不
+覆盖目标；替换后的父目录同步失败会原样报告。无人值守 `--yes` 额外要求
 `--accept-plan` 等于本次新生成的 ID；`--dry-run` 输出 ID 但不提示、不写入。该路径不提权、
 不重启 daemon、不重建 builder。
 
