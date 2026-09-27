@@ -799,7 +799,9 @@ Plan JSON 可能包含操作所需的绝对路径、builder 名、mirror origin 
 `container pull` 默认使用生效的 runtime 与 platform。`auto` 模式对 Docker 与 containerd
 执行一次有界只读解析，再启动恰好一次原生前台拉取。显式选择 containerd 时必须成对提供
 `--address` 与 `--namespace`；`auto` 仅在 containerd 胜出时要求二者，因此 Docker 无需它们
-即可继续。子进程继承 stdio，osdk 等待它结束并返回直接退出码；Unix 上若由信号终止，则
+即可继续。在 Unix 上，osdk 接受规范的 `unix:///path/to/containerd.sock` selector，并在
+调用 `ctr` 时渲染成它要求的原生 `/path/to/containerd.sock` 参数。子进程继承 stdio，osdk
+等待它结束并返回直接退出码；Unix 上若由信号终止，则
 规范化为 `128 + signal`。启动后不会回退到其他 runtime，也不会把镜像复制到 osdk 存储。
 
 `container prune` 默认只输出预览，可针对一个已发现的 Docker context 或 Buildx builder，

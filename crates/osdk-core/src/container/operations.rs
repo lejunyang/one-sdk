@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use super::buildkit::BuildxBuilderSelector;
 use super::cache::NativeCacheOwner;
-use super::containerd::{ContainerdAdapter, ContainerdParseError};
+use super::containerd::{ctr_address_argument, ContainerdAdapter, ContainerdParseError};
 use super::docker::DockerContext;
 use super::plan::Fingerprint;
 use super::redact::{CommandPurpose, NativeProgram};
@@ -155,7 +155,7 @@ impl ContainerdPull {
     pub fn into_command(self) -> ForegroundCommand {
         let mut command = CommandSpec::new("ctr").args([
             "--address",
-            self.selectors.address.as_str(),
+            ctr_address_argument(&self.selectors.address),
             "--namespace",
             self.selectors.namespace.as_str(),
             "images",
@@ -783,7 +783,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].program, "ctr");
         assert_eq!(calls[0].arguments[0], "--address");
-        assert_eq!(calls[0].arguments[1], explicit_containerd_address());
+        assert_eq!(
+            calls[0].arguments[1],
+            ctr_address_argument(explicit_containerd_address())
+        );
         assert_eq!(
             &calls[0].arguments[2..],
             [

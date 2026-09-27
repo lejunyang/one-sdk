@@ -51,7 +51,10 @@ docker info --format '<json-template>'
 The containerd adapter runs `containerd --version`, `ctr --address ...
 --namespace ... version`, and, only for a local endpoint, `containerd config
 dump`. Explicit address and namespace selectors are passed as arguments instead
-of inferred from ambient native environment variables.
+of inferred from ambient native environment variables. On Unix, the validated
+and reportable `unix:///...` endpoint is rendered as the native `/...` socket
+path before invoking `ctr`; recent containerd clients otherwise interpret the
+URL literally as a nonexistent filesystem path.
 
 The BuildKit adapter uses `docker buildx version`, machine-readable `buildx ls`,
 and `buildx inspect` for the exact selected list result. It deliberately omits

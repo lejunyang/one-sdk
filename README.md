@@ -897,8 +897,10 @@ fresh `--accept-plan`; use `--dry-run --json` to obtain it.
 them. In `auto` mode it performs one bounded read-only Docker/containerd
 resolution, then starts exactly one native foreground pull. Explicit containerd
 selection requires paired `--address` and `--namespace` values; `auto` requires
-them only if containerd wins, so Docker can proceed without them. The child
-inherits stdio and osdk waits for it, returning its direct exit code or, on Unix,
+them only if containerd wins, so Docker can proceed without them. On Unix, osdk
+accepts a canonical `unix:///path/to/containerd.sock` selector and renders the
+native `/path/to/containerd.sock` argument expected by `ctr`. The child inherits
+stdio and osdk waits for it, returning its direct exit code or, on Unix,
 normalized `128 + signal`; it does not fall back to another runtime or copy the
 image into an osdk store.
 

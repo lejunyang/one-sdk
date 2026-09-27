@@ -88,7 +88,9 @@ Runtime 和 platform 默认来自生效的 `[containers]` 配置。使用 `--run
 
 显式选择 `--runtime containerd` 时必须同时提供 `--address` 与 `--namespace`；这两个 selector
 始终要求成对出现。使用 `--runtime auto` 时，只有 containerd 胜出才要求二者，Docker 无需
-它们即可继续。
+它们即可继续。在 Unix 上，osdk 接受规范的 `unix:///path/to/containerd.sock` endpoint，
+并在调用 `ctr` 时渲染成它要求的原生 `/path/to/containerd.sock` 参数；报告仍按类型化 URL
+分类和脱敏。
 
 原生子进程继承 stdio，osdk 会等待它结束。Docker 收到直接的 `docker image pull`；
 containerd 收到直接的 `ctr --address ADDRESS --namespace NAMESPACE images pull`。osdk 返回

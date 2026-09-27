@@ -28,3 +28,6 @@ osdk container prune --runtime docker --scope images
 自动化时注意：`pull` 透传原生运行时退出码（Unix 信号转为 `128 + signal`）；带
 `--json` 的诊断/计划输出有稳定 schema，但实时延迟值允许变化。plan/preview id 绑定
 当时状态，不应保存成长期配置。
+
+Unix 上 containerd selector 使用规范的 `unix:///path/to/containerd.sock`；osdk 会在
+调用 `ctr` 时渲染成它要求的原生 `/path/to/containerd.sock` 参数。

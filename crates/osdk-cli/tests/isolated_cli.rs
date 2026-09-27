@@ -5461,7 +5461,7 @@ fn explicit_containerd_pull_requires_and_forwards_target_selectors() {
     assert!(output.status.success());
     assert_eq!(
         std::fs::read_to_string(calls).unwrap(),
-        "--address\nunix:///run/private/containerd.sock\n--namespace\nk8s.io\nimages\npull\ndocker.io/library/alpine:3\n"
+        "--address\n/run/private/containerd.sock\n--namespace\nk8s.io\nimages\npull\ndocker.io/library/alpine:3\n"
     );
 }
 

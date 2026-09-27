@@ -101,6 +101,9 @@ reported by the owner that actually ran.
 Explicit `--runtime containerd` requires both `--address` and `--namespace`; the
 two selectors must always be supplied together. With `--runtime auto`, they are
 required only if containerd wins selection—Docker can proceed without them.
+On Unix, osdk accepts a canonical `unix:///path/to/containerd.sock` endpoint and
+renders the native `/path/to/containerd.sock` argument expected by `ctr`;
+reports continue to classify and redact the typed URL.
 
 The native child inherits stdio and osdk waits for it. Docker receives a direct
 `docker image pull`; containerd receives a direct `ctr --address ADDRESS

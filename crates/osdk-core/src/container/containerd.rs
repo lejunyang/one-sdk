@@ -26,6 +26,22 @@ const DEFAULT_ADDRESS: &str = "unix:///run/containerd/containerd.sock";
 const DEFAULT_ADDRESS: &str = "npipe:////./pipe/containerd-containerd";
 const DEFAULT_NAMESPACE: &str = "default";
 
+/// Render the validated endpoint in the form accepted by `ctr`.
+///
+/// osdk keeps Unix sockets as URLs so they can be classified and redacted
+/// consistently with the other native endpoints. `ctr`, however, documents
+/// and accepts a native filesystem path for `--address`; recent containerd
+/// releases treat the literal `unix:///...` URL as a path and fail to find it.
+#[cfg(not(windows))]
+pub(crate) fn ctr_address_argument(address: &str) -> &str {
+    address.strip_prefix("unix://").unwrap_or(address)
+}
+
+#[cfg(windows)]
+pub(crate) fn ctr_address_argument(address: &str) -> &str {
+    address
+}
+
 /// Client and server versions reported by the native programs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContainerdVersions {
@@ -355,7 +371,7 @@ impl ContainerdAdapter {
     fn ctr_command(&self) -> CommandSpec {
         CommandSpec::new("ctr").args([
             "--address",
-            self.address.as_str(),
+            ctr_address_argument(&self.address),
             "--namespace",
             self.namespace.as_str(),
         ])
@@ -820,7 +836,7 @@ capabilities = ["pull"]
             [
                 "ctr",
                 "--address",
-                "unix:///custom/containerd.sock",
+                "/custom/containerd.sock",
                 "--namespace",
                 "k8s.io",
                 "version"
@@ -914,7 +930,13 @@ capabilities = ["pull"]
         #[cfg(windows)]
         assert_eq!(adapter.address, "npipe:////./pipe/containerd-containerd");
         #[cfg(not(windows))]
-        assert_eq!(adapter.address, "unix:///run/containerd/containerd.sock");
+        {
+            assert_eq!(adapter.address, "unix:///run/containerd/containerd.sock");
+            assert_eq!(
+                ctr_address_argument(&adapter.address),
+                "/run/containerd/containerd.sock"
+            );
+        }
     }
 
     #[test]

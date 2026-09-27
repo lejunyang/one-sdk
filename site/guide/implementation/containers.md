@@ -42,7 +42,9 @@ docker info --format '<json-template>'
 
 containerd 适配器运行 `containerd --version`、`ctr --address ... --namespace ...
 version`，并且只对本地 endpoint 执行 `containerd config dump`。显式 address 和
-namespace 以参数传递，不从原生工具的环境变量中隐式推断。
+namespace 以参数传递，不从原生工具的环境变量中隐式推断。在 Unix 上，经过校验、可用于
+报告的 `unix:///...` endpoint 会在调用 `ctr` 前渲染成原生 `/...` socket 路径；较新的
+containerd 客户端会把未转换的 URL 当成不存在的文件路径。
 
 BuildKit 适配器使用 `docker buildx version`、机器可读的 `buildx ls`，再对列表中
 精确选中的结果执行 `buildx inspect`。它刻意不加 `--bootstrap`，所以检查不会启动
