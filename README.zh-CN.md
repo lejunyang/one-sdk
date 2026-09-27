@@ -612,12 +612,15 @@ skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI �
 osdk skills agents                       # 看 osdk 认识哪些 Agent、各自的 skills 目录
 osdk skills find agent skills             # 在 GitHub 上搜可安装的 skill（匿名，不接触 skills.sh）
 osdk skills add github:vercel-labs/agent-skills --list        # 只列仓库里有哪些 skill
-osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
+osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # 交互选择 Agent 与链接/复制
 osdk skills add ./my-skills -s my-skill -a codex              # 本地源，选装指定 skill
 osdk skills list                         # 已装 skill 与其链接到的 Agent
 osdk skills sync                         # 按 osdk.lock 复现（团队 / CI）
 osdk skills remove web-design-guidelines
 ```
+
+交互终端未传 `-a` 且没有 `[skills].default_agents` 时，`add` 会先显示 Agent 编号多选，
+再选择链接（推荐）或复制。非交互调用必须传 `-a` 或配置默认 Agent。
 
 `add` 把解析到的 commit 与内容哈希写进 `osdk.lock`；`sync` 缺本地副本时按记录的 commit 重新
 下载并核对哈希，移动的 tag 或被换的镜像会被拒绝。`skills update` 则重新解析分支/标签或默认

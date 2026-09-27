@@ -192,7 +192,7 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
     }
 
     let targets = resolve_agents(app, &args.agents)?;
-    let mode = link_mode(app, args.copy);
+    let mode = add_link_mode(app, args.copy)?;
     let scope_root = scope_root(app, args.global)?;
 
     let mut lock_entries: Vec<(String, LockedSkill)> = Vec::new();
@@ -748,20 +748,14 @@ fn local_roots(path: &Path, wanted: &[String]) -> Result<Vec<(String, PathBuf)>>
     Ok(roots.into_iter().collect())
 }
 
-/// Which agents an install targets: explicit flags, else configured defaults,
-/// else an error that tells the user how to choose.
+/// Which agents an install targets: explicit flags, then configured defaults,
+/// then an interactive multi-select. Non-interactive callers must be explicit.
 fn resolve_agents(app: &App, explicit: &[String]) -> Result<Vec<&'static AgentTarget>> {
-    let ids: Vec<String> = if !explicit.is_empty() {
-        explicit.to_vec()
-    } else {
-        app.ctx.config.skills_defaults.default_agents.clone()
-    };
-    if ids.is_empty() {
-        anyhow::bail!(
-            "no target agent: pass -a/--agent (e.g. -a claude-code) or set \
-             [skills].default_agents in osdk.toml; `osdk skills agents` lists them"
-        );
-    }
+    let ids = resolve_agent_ids(
+        explicit,
+        &app.ctx.config.skills_defaults.default_agents,
+        app.prompt.as_ref(),
+    )?;
     let mut targets = Vec::new();
     for id in &ids {
         let target = agent_target(id).with_context(|| {
@@ -774,8 +768,90 @@ fn resolve_agents(app: &App, explicit: &[String]) -> Result<Vec<&'static AgentTa
     Ok(targets)
 }
 
-/// The link mode for staging and linking: explicit `--copy`, else the
-/// `[skills].link_mode` override, else the global link mode.
+fn resolve_agent_ids(
+    explicit: &[String],
+    defaults: &[String],
+    prompt: &dyn crate::prompt::Prompt,
+) -> Result<Vec<String>> {
+    if !explicit.is_empty() {
+        return Ok(explicit.to_vec());
+    }
+    if !defaults.is_empty() {
+        return Ok(defaults.to_vec());
+    }
+    if !prompt.is_interactive() {
+        anyhow::bail!(
+            "no target agent in this non-interactive session: pass -a/--agent \
+             (e.g. -a claude-code) or set [skills].default_agents in osdk.toml; \
+             `osdk skills agents` lists them"
+        );
+    }
+
+    let options = AGENT_TARGETS
+        .iter()
+        .map(|target| format!("{} ({})", target.name, target.id))
+        .collect::<Vec<_>>();
+    let selected = prompt.select_many(
+        "Select the agents that should receive this skill:",
+        &options,
+    )?;
+    let mut ids = Vec::new();
+    for index in selected {
+        let target = AGENT_TARGETS
+            .get(index)
+            .with_context(|| format!("prompt returned invalid agent index {index}"))?;
+        if !ids.iter().any(|id| id == target.id) {
+            ids.push(target.id.to_string());
+        }
+    }
+    if ids.is_empty() {
+        anyhow::bail!("select at least one target agent");
+    }
+    Ok(ids)
+}
+
+/// Pick link vs copy for `skills add`. Explicit flags and configuration win;
+/// otherwise a terminal user chooses, while non-interactive callers retain the
+/// configured global fallback and never block for input.
+fn add_link_mode(app: &App, copy: bool) -> Result<LinkMode> {
+    resolve_add_link_mode(
+        copy,
+        app.ctx.config.skills_defaults.link_mode.as_deref(),
+        app.ctx.config.settings.link_mode,
+        app.prompt.as_ref(),
+    )
+}
+
+fn resolve_add_link_mode(
+    copy: bool,
+    configured: Option<&str>,
+    fallback: LinkMode,
+    prompt: &dyn crate::prompt::Prompt,
+) -> Result<LinkMode> {
+    if copy {
+        return Ok(LinkMode::Copy);
+    }
+    if let Some(configured) = configured {
+        return configured.parse::<LinkMode>().map_err(Into::into);
+    }
+    if prompt.is_interactive() {
+        let options = vec![
+            "Link (recommended: junction on Windows, symlink on Unix)".to_string(),
+            "Copy (independent files, uses more disk space)".to_string(),
+        ];
+        return Ok(
+            match prompt.select_one("How should osdk install the skill?", &options, 0)? {
+                0 => LinkMode::Auto,
+                1 => LinkMode::Copy,
+                other => anyhow::bail!("prompt returned invalid install method index {other}"),
+            },
+        );
+    }
+    Ok(fallback)
+}
+
+/// The link mode for non-add operations: the `[skills].link_mode` override, else
+/// the global link mode.
 fn link_mode(app: &App, copy: bool) -> LinkMode {
     if copy {
         return LinkMode::Copy;
@@ -969,6 +1045,117 @@ mod tests {
         ]);
         let plan = plan_unlinks(&["claude-code".into()], &["codex".into()], &dir_of);
         assert!(plan[0].physically_unlink);
+    }
+
+    struct SelectionPrompt {
+        interactive: bool,
+        many: Vec<usize>,
+        one: usize,
+    }
+
+    impl crate::prompt::Prompt for SelectionPrompt {
+        fn confirm(&self, _question: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn is_interactive(&self) -> bool {
+            self.interactive
+        }
+
+        fn select_many(&self, _question: &str, _options: &[String]) -> Result<Vec<usize>> {
+            Ok(self.many.clone())
+        }
+
+        fn select_one(
+            &self,
+            _question: &str,
+            _options: &[String],
+            _default: usize,
+        ) -> Result<usize> {
+            Ok(self.one)
+        }
+    }
+
+    #[test]
+    fn agent_selection_prefers_explicit_then_defaults_then_prompt() {
+        let prompt = SelectionPrompt {
+            interactive: true,
+            many: vec![1, 1, 0],
+            one: 0,
+        };
+        assert_eq!(
+            resolve_agent_ids(&["cursor".into()], &["claude-code".into()], &prompt).unwrap(),
+            vec!["cursor"]
+        );
+        assert_eq!(
+            resolve_agent_ids(&[], &["claude-code".into()], &prompt).unwrap(),
+            vec!["claude-code"]
+        );
+        assert_eq!(
+            resolve_agent_ids(&[], &[], &prompt).unwrap(),
+            vec!["codex", "claude-code"]
+        );
+    }
+
+    #[test]
+    fn missing_agent_fails_only_when_the_session_is_non_interactive() {
+        let prompt = SelectionPrompt {
+            interactive: false,
+            many: vec![],
+            one: 0,
+        };
+        let error = resolve_agent_ids(&[], &[], &prompt).unwrap_err();
+        assert!(error.to_string().contains("non-interactive"));
+    }
+
+    #[test]
+    fn interactive_agent_selection_rejects_invalid_prompt_indexes() {
+        let prompt = SelectionPrompt {
+            interactive: true,
+            many: vec![AGENT_TARGETS.len()],
+            one: 0,
+        };
+        assert!(resolve_agent_ids(&[], &[], &prompt).is_err());
+    }
+
+    #[test]
+    fn add_link_mode_obeys_flags_config_and_interactive_choice() {
+        let link_prompt = SelectionPrompt {
+            interactive: true,
+            many: vec![],
+            one: 0,
+        };
+        let copy_prompt = SelectionPrompt {
+            interactive: true,
+            many: vec![],
+            one: 1,
+        };
+        let noninteractive = SelectionPrompt {
+            interactive: false,
+            many: vec![],
+            one: 1,
+        };
+
+        assert_eq!(
+            resolve_add_link_mode(true, Some("symlink"), LinkMode::Hardlink, &copy_prompt).unwrap(),
+            LinkMode::Copy
+        );
+        assert_eq!(
+            resolve_add_link_mode(false, Some("hardlink"), LinkMode::Auto, &copy_prompt).unwrap(),
+            LinkMode::Hardlink
+        );
+        assert_eq!(
+            resolve_add_link_mode(false, None, LinkMode::Hardlink, &noninteractive).unwrap(),
+            LinkMode::Hardlink
+        );
+        assert_eq!(
+            resolve_add_link_mode(false, None, LinkMode::Hardlink, &link_prompt).unwrap(),
+            LinkMode::Auto
+        );
+        assert_eq!(
+            resolve_add_link_mode(false, None, LinkMode::Auto, &copy_prompt).unwrap(),
+            LinkMode::Copy
+        );
     }
 
     /// A bare commit recorded in a declaration is an installation snapshot, not

@@ -16,7 +16,7 @@ content-addressed store, link modes, and `osdk.lock`.
 ```text
 osdk skills add <SOURCE>
   [-s|--skill NAME]...        # pick skills by name in a multi-skill repo (* for all)
-  [-a|--agent ID]...          # target agents; defaults to [skills].default_agents
+  [-a|--agent ID]...          # target agents; config default, or interactive multi-select
   [-g|--global]               # install into the agent's user-level dir, not the project
   [--copy]                    # copy instead of linking
   [--ref REF]                 # GitHub version: branch:main / tag:v1 / rev:<sha> / branch / commit
@@ -83,9 +83,11 @@ directories:
 | Universal | `universal` | `.agents/skills` | `~/.config/agents/skills` |
 
 Several agents share `.agents/skills` on purpose: one install serves them all, and
-`remove` counts how many agents still reference a skill. osdk deliberately does not
-write into "every detected agent" — pass `-a` explicitly or set
-`[skills].default_agents`, or the command errors and tells you how to choose.
+`remove` counts how many agents still reference a skill. Explicit `-a` values win,
+then `[skills].default_agents`; when neither is present, an interactive terminal
+shows a numbered multi-select, while a non-interactive call fails immediately. The
+interactive default path also asks whether to link (recommended) or copy; explicit
+`--copy` and `[skills].link_mode` both take precedence over the prompt.
 
 ## Immutable identity and reproduction
 

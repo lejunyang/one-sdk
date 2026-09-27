@@ -13,7 +13,7 @@ osdk 已有的内容寻址存储、link mode 与 `osdk.lock`。
 ```text
 osdk skills add <SOURCE>
   [-s|--skill NAME]...        # 仓库含多 skill 时按名选装（* 全选）
-  [-a|--agent ID]...          # 目标 Agent；缺省用 [skills].default_agents
+  [-a|--agent ID]...          # 目标 Agent；缺省用配置，交互终端没有配置时多选
   [-g|--global]               # 装到 Agent 的用户级目录而非项目
   [--copy]                    # 拷贝而非链接
   [--ref REF]                 # GitHub 版本：branch:main / tag:v1 / rev:<sha> / 分支名 / commit
@@ -73,8 +73,9 @@ osdk skills agents
 | 通用 | `universal` | `.agents/skills` | `~/.config/agents/skills` |
 
 多个 Agent 共用 `.agents/skills` 是刻意的：装一次即被它们共享，`remove` 时按「还有哪些 Agent
-引用」计数。缺省不会写进「检测到的所有 Agent」——要么显式 `-a`，要么配 `[skills].default_agents`，
-否则报错并提示怎么选。
+引用」计数。命令行 `-a` 优先，其次使用 `[skills].default_agents`；两者都没有时，交互终端显示
+编号多选，而非交互调用立即报错。交互缺省路径还会选择链接（推荐）或复制；显式 `--copy` 与
+`[skills].link_mode` 均优先于提示。
 
 ## 不可变身份与复现
 

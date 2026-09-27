@@ -21,4 +21,6 @@ when = { os = ["linux", "macos"] }
 `source` 必填，可为 GitHub 来源或本地路径。GitHub ref 在 lock 中解析为 commit 并记录内容
 哈希；`sync` 始终复现该不可变 lock，`update` 重新解析分支/标签或默认分支。只有显式
 `ref = "rev:<commit>"` 才在 `update` 时永久固定；已有项目保存的裸 40 位 commit 视为一次
-安装快照，更新时继续跟随默认分支。`agents` 为空时回退 `default_agents`。未知字段硬报错。
+安装快照，更新时继续跟随默认分支。`agents` 为空时回退 `default_agents`；交互终端两者都未
+指定时会多选 Agent，非交互调用必须显式指定其一。`link_mode` 未配置且未传 `--copy` 时，交互
+终端会选择链接或复制。未知字段硬报错。

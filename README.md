@@ -681,12 +681,16 @@ a skill's scripts.
 osdk skills agents                       # which agents osdk knows, and their skills dirs
 osdk skills find agent skills             # search GitHub for installable skills (anonymous, no skills.sh)
 osdk skills add github:vercel-labs/agent-skills --list        # list a repo's skills only
-osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines -a claude-code
+osdk skills add github:vercel-labs/agent-skills/skills/web-design-guidelines # choose agents and link/copy interactively
 osdk skills add ./my-skills -s my-skill -a codex              # a local source, one skill
 osdk skills list                         # installed skills and the agents they link into
 osdk skills sync                         # reproduce from osdk.lock (team / CI)
 osdk skills remove web-design-guidelines
 ```
+
+When an interactive terminal has neither `-a` nor `[skills].default_agents`, `add`
+shows a numbered multi-select for target agents, then asks whether to link
+(recommended) or copy. Non-interactive use must pass `-a` or configure defaults.
 
 `add` pins the resolved commit and a content hash into `osdk.lock`; `sync`
 re-downloads a missing local copy at that exact commit and re-checks the hash, so

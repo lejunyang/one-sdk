@@ -4,7 +4,7 @@
 
 | 子命令 | 主要参数 | 语义 |
 | --- | --- | --- |
-| `add <SOURCE>` | `-s/--skill`、`-a/--agent` 可重复；`-g`、`--copy`、`--ref`、`-l/--list`、`--no-lock` | 列出或安装来源中的 skill |
+| `add <SOURCE>` | `-s/--skill`、`-a/--agent` 可重复；`-g`、`--copy`、`--ref`、`-l/--list`、`--no-lock` | 列出或安装来源中的 skill；交互终端缺少默认 Agent 时多选 Agent，并选择链接或复制 |
 | `list`（`ls`） | `-g` | 从项目或用户 lock 列已安装 skill 与 Agent |
 | `remove <NAME>`（`rm`） | `-g`、`-a/--agent` 可重复 | 摘除全部或指定 Agent 链接 |
 | `sync` | `-g` | 按 lock 的 commit 与内容哈希复现 |
