@@ -218,6 +218,9 @@ snapshot, and CRI views, but no single supported aggregate equivalent. Walking
 `/var/lib/containerd`, Docker roots, BuildKit state, or any private native store
 would couple osdk to implementation details and can cross privilege boundaries,
 so this path never does that.
+Consequently, cache `auto` selects Docker directly instead of using the generic
+runtime health ranking: a healthy containerd daemon still cannot satisfy this
+operation, while a Docker permission or availability result remains actionable.
 
 ## Preview-bound native pruning
 

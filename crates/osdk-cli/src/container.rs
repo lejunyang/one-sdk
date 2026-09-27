@@ -1224,15 +1224,10 @@ fn cache_status(
         ContainerCacheRuntimeArg::Docker => DockerCacheQuery.query(runner, limits),
         ContainerCacheRuntimeArg::Containerd => ContainerdCacheQuery.query(runner, limits),
         ContainerCacheRuntimeArg::Buildkit => BuildxCacheQuery::new(builder).query(runner, limits),
-        ContainerCacheRuntimeArg::Auto => {
-            let docker = DockerAdapter.diagnose(runner, limits);
-            let containerd = ContainerdAdapter::default().diagnose(runner, limits);
-            if status_rank(docker.status) >= status_rank(containerd.status) {
-                DockerCacheQuery.query(runner, limits)
-            } else {
-                ContainerdCacheQuery.query(runner, limits)
-            }
-        }
+        // Docker is the only runtime candidate with a supported aggregate
+        // cache contract. Selecting a healthier containerd daemon here would
+        // replace an actionable Docker error with a guaranteed `unsupported`.
+        ContainerCacheRuntimeArg::Auto => DockerCacheQuery.query(runner, limits),
     }
 }
 
@@ -3882,21 +3877,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_auto_uses_diagnostic_selection_and_containerd_is_unsupported() {
-        let docker_selected = FakeRunner::new(
-            [
-                healthy_docker().into_iter().collect(),
-                    vec![
-                        CommandOutcome::NotInstalled,
-                        CommandOutcome::NotInstalled,
-                        CommandOutcome::NotInstalled,
-                    ],
-                vec![success(
-                    r#"{"Type":"Images","TotalCount":"2","Active":"1","Size":"10MB","Reclaimable":"4MB (40%)"}"#,
-                )],
-            ]
-            .concat(),
-        );
+    fn cache_auto_selects_the_only_supported_runtime_without_discovery() {
+        let docker_selected = FakeRunner::new([success(
+            r#"{"Type":"Images","TotalCount":"2","Active":"1","Size":"10MB","Reclaimable":"4MB (40%)"}"#,
+        )]);
         let status = cache_status(
             &docker_selected,
             CaptureLimits::default(),
@@ -3909,23 +3893,18 @@ mod tests {
             docker_selected.calls().last().unwrap().arguments[0],
             "system"
         );
+        assert_eq!(docker_selected.calls().len(), 1);
 
-        let containerd_selected = FakeRunner::new(
-            [
-                vec![CommandOutcome::NotInstalled],
-                healthy_containerd().into_iter().collect(),
-            ]
-            .concat(),
-        );
+        let denied = FakeRunner::new([failure("permission denied")]);
         let status = cache_status(
-            &containerd_selected,
+            &denied,
             CaptureLimits::default(),
             ContainerCacheRuntimeArg::Auto,
             BuildxBuilderSelector::Auto,
         );
-        assert_eq!(status.runtime, RuntimeKind::Containerd);
-        assert_eq!(status.status, CacheQueryStatus::Unsupported);
-        assert_eq!(containerd_selected.calls().len(), 4);
+        assert_eq!(status.runtime, RuntimeKind::Docker);
+        assert_eq!(status.status, CacheQueryStatus::PermissionDenied);
+        assert_eq!(denied.calls().len(), 1);
     }
 
     #[test]

@@ -60,10 +60,11 @@ private content, snapshot, or metadata stores.
 `--builder NAME` overrides the configured builder for cache status just as it
 does for doctor; it affects the BuildKit query and is otherwise ignored.
 
-For `auto`, osdk applies the same runtime-status selection as `doctor`. If
-Docker is selected it queries Docker Engine; if containerd is selected it
-returns containerd's explicit unsupported result. Select `--runtime buildkit`
-when you specifically want builder cache usage.
+For `auto`, osdk selects Docker because it is the only runtime candidate with a
+supported aggregate cache contract. This preserves an actionable Docker state
+such as `permission-denied` instead of replacing it with containerd's guaranteed
+`unsupported`. Select `--runtime buildkit` when you specifically want builder
+cache usage, or explicit `containerd` when you need its typed unsupported result.
 
 Cache JSON is the native-cache schema version 1. It contains only typed
 categories, counts, byte totals, reclaimable bytes, status, owner, and redacted

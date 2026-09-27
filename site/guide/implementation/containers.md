@@ -177,6 +177,8 @@ containerd 不执行缓存命令，直接返回类型化的 `unsupported` 状态
 多个依赖 namespace 的 content、image、snapshot 与 CRI 视图，但没有单一的受支持
 聚合接口。遍历 `/var/lib/containerd`、Docker 根目录、BuildKit 状态或任何原生私有
 存储，会使 osdk 绑定实现细节并可能跨越权限边界，因此此路径永远不会这样做。
+因此 cache 的 `auto` 会直接选择 Docker，而不是复用通用 runtime 健康度排序：健康的
+containerd 仍无法满足这项操作，而 Docker 的权限或可用性结果仍具有可操作性。
 
 ## 绑定预览的原生 prune
 

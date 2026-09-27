@@ -52,9 +52,10 @@ osdk container cache status --runtime containerd --json
 `--builder NAME` 与 doctor 一样会覆盖缓存状态命令的配置构建器；它只影响 BuildKit
 查询，对其他运行时会被忽略。
 
-`auto` 使用与 `doctor` 相同的运行时状态选择。如果选中 Docker，则查询 Docker
-Engine；如果选中 containerd，则返回其明确的“不支持”结果。要专门查看构建缓存，
-请使用 `--runtime buildkit`。
+`auto` 会选择 Docker，因为它是运行时候选中唯一具有受支持聚合缓存契约的一项。这样会保留
+`permission-denied` 等可操作的 Docker 状态，而不是用 containerd 必然返回的 `unsupported`
+覆盖它。要专门查看构建缓存，请使用 `--runtime buildkit`；需要 containerd 的类型化不支持
+结果时再显式选择 `containerd`。
 
 缓存 JSON 使用原生缓存 schema version 1，只包含类型化分类、数量、字节总量、可回收
 字节数、状态、所有者和已脱敏的命令证据。原生对象 ID、描述、构建器名称、命令原始
