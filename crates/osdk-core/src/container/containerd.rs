@@ -836,7 +836,7 @@ capabilities = ["pull"]
             [
                 "ctr",
                 "--address",
-                "/custom/containerd.sock",
+                ctr_address_argument("unix:///custom/containerd.sock"),
                 "--namespace",
                 "k8s.io",
                 "version"
