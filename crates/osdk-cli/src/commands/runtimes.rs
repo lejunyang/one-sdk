@@ -409,6 +409,87 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
                 model_sync(app, &store, Some(&name), false, false, false).await?;
             }
         }
+        ModelCommand::Import {
+            name,
+            path,
+            target_path,
+            variant,
+            kind,
+            family,
+            derived_from,
+            view,
+            profile,
+            map,
+            json,
+        } => {
+            if app.ctx.config.models.contains_key(&name) {
+                anyhow::bail!(
+                    "model `{name}` is declared by the project; use another name or `osdk model unuse {name}` before importing local bytes"
+                );
+            }
+            let cwd = std::env::current_dir()?;
+            let lock_path = project_lock_path(app, &cwd);
+            if crate::lockfile::locked_models(&lock_path)?
+                .iter()
+                .any(|(locked_name, _)| locked_name == &name)
+            {
+                anyhow::bail!(
+                    "model `{name}` has a project lock entry; use another name or `osdk model unuse {name}` before importing local bytes"
+                );
+            }
+            let view = match view {
+                Some(osdk_core::model::view::ViewKind::Comfyui) => Some((
+                    osdk_core::model::view::ViewKind::Comfyui,
+                    profile,
+                    crate::model_view::parse_mappings(&map)?,
+                )),
+                Some(osdk_core::model::view::ViewKind::HfCache) => {
+                    anyhow::bail!(
+                        "local model imports cannot claim a Hugging Face cache identity; use --view comfyui or omit --view"
+                    )
+                }
+                None => None,
+            };
+            let installed = osdk_core::model::local::import_local_model(
+                &store,
+                &name,
+                &path,
+                osdk_core::model::local::LocalImportOptions {
+                    target_path,
+                    variant,
+                    kind,
+                    family,
+                    derived_from,
+                },
+            )?;
+            match view {
+                Some((consumer, profile, map)) => {
+                    let declared = std::collections::BTreeMap::from([(
+                        consumer.as_str().to_string(),
+                        crate::lockfile::LockedModelView { profile, map },
+                    )]);
+                    crate::model_view::reconcile_declared_views(app, &name, &declared, json)?;
+                }
+                None => crate::model_view::refresh_model_views(app, &name, true)?,
+            }
+            if json {
+                let stable = app.ctx.dirs.models().join(&name).join("current");
+                crate::model_output::write_json(&crate::model_output::ModelShowOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    model: crate::model_output::ModelOutput::from_installed(installed, &stable),
+                })?;
+            } else {
+                println!(
+                    "imported local model {name}: {} file(s), revision {}, snapshot {}",
+                    installed.manifest.files.len(),
+                    installed.manifest.revision,
+                    installed.path.display()
+                );
+                println!(
+                    "local imports are machine-local snapshots and are not written to osdk.toml or osdk.lock"
+                );
+            }
+        }
         ModelCommand::Unuse {
             name,
             keep_snapshot,
@@ -1363,6 +1444,7 @@ pub(crate) fn provider_endpoint_env(provider: osdk_core::model::ProviderId) -> O
             .ok()
             .or_else(|| std::env::var("MODELSCOPE_DOMAIN").ok()),
         osdk_core::model::ProviderId::Civitai => std::env::var("CIVITAI_ENDPOINT").ok(),
+        osdk_core::model::ProviderId::Local => None,
     }
 }
 
@@ -1380,6 +1462,7 @@ pub(crate) fn official_model_endpoint(
             )
         }
         osdk_core::model::ProviderId::Civitai => endpoint == "https://civitai.com",
+        osdk_core::model::ProviderId::Local => false,
     }
 }
 

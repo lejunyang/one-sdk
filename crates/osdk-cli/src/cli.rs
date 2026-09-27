@@ -784,6 +784,40 @@ pub enum ModelCommand {
         #[arg(long)]
         sync: bool,
     },
+    /// Import a local file or directory into an immutable snapshot without declaring or locking it.
+    Import {
+        /// Local logical name for the imported model.
+        name: String,
+        /// Existing local file or directory to import.
+        path: std::path::PathBuf,
+        /// Snapshot-relative destination for a single file.
+        #[arg(long, value_name = "PATH")]
+        target_path: Option<String>,
+        /// Optional format or quantization label.
+        #[arg(long)]
+        variant: Option<String>,
+        /// Semantic role of the model bytes.
+        #[arg(long)]
+        kind: Option<osdk_core::model::ModelKind>,
+        /// Architecture/ecosystem family, e.g. sdxl or flux.
+        #[arg(long)]
+        family: Option<String>,
+        /// Upstream/base-model lineage chosen by the caller.
+        #[arg(long)]
+        derived_from: Option<String>,
+        /// Render one consumer view after import.
+        #[arg(long)]
+        view: Option<osdk_core::model::view::ViewKind>,
+        /// View profile used with --view.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Snapshot-prefix to category mapping used with --view (repeatable).
+        #[arg(long, requires = "view")]
+        map: Vec<String>,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove project intent, lock state, views, and normally the local snapshot.
     Unuse {
         /// Local logical name to stop declaring.
@@ -866,7 +900,7 @@ pub enum ModelCommand {
         #[command(subcommand)]
         command: ModelEnvCommand,
     },
-    /// Render and manage consumer-shaped views over pulled models.
+    /// Render and manage consumer-shaped views over materialized models.
     View {
         #[command(subcommand)]
         command: ModelViewCommand,
@@ -875,11 +909,11 @@ pub enum ModelCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelViewCommand {
-    /// Add a pulled model to a consumer view and (re)render it.
+    /// Add a materialized model to a consumer view and (re)render it.
     Add {
         /// Consumer shape: comfyui | hf-cache.
         kind: osdk_core::model::view::ViewKind,
-        /// Logical model name (as declared with `model use`).
+        /// Logical model name (materialized by `model sync` or `model import`).
         model: String,
         /// View profile; defaults to `default`.
         #[arg(long, default_value = "default")]

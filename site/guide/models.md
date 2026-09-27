@@ -10,6 +10,9 @@ osdk model use NAME REFERENCE [--endpoint URL]
   [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
   [--kind KIND] [--family FAMILY] [--derived-from REFERENCE]
   [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
+osdk model import NAME PATH [--target-path PATH] [--variant LABEL]
+  [--kind KIND] [--family FAMILY] [--derived-from REFERENCE]
+  [--view comfyui] [--profile P] [--map PREFIX=CATEGORY]... [--json]
 osdk model unuse NAME [--keep-snapshot]
 osdk model sync [NAME] [--prune] [--dry-run] [--jsonl]
 osdk model list [--json]
@@ -29,7 +32,7 @@ osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 
 ## 机器可读输出
 
-`model list/show/path/verify --json` 与 `model view list/path/doctor --json` 各自在 stdout
+`model import --json`、`model list/show/path/verify --json` 与 `model view list/path/doctor --json` 各自在 stdout
 输出一个 `schema_version: 1` JSON 文档。模型文档包含 provider、repository、请求/不可变
 revision、endpoint、variant、文件路径/大小/摘要、创建时间以及当前快照和稳定路径；view
 文档还用 `stable_path_available` 报告稳定路径是否已可用，但不会为查询创建缺失链接。view 文档包含 consumer、profile、根路径、模型与映射，doctor 还包含 placed、unclassified 和
@@ -81,6 +84,21 @@ commit 时，osdk 以请求 revision 和排序后的文件路径、大小、SHA-
 `kind` 是稳定枚举：`checkpoint`、`lora`、`vae`、`text-encoder`、`diffusion-model`、`controlnet`、`upscaler`、`embedding`、`other`。`family` 记录架构/生态家族（如 `sdxl`、`flux`），`derived_from` 记录调用方确认的基础模型或上游引用。OSDK 不猜测后两者，也不解析 trigger word。
 
 三字段进入快照身份、`.osdk-model.json`、`osdk.lock` 和 `--json` 输出；任一变化会产生新快照并触发 re-lock。值必须非空、去除首尾空白、无控制字符；`family` 最多 256 字节，`derived_from` 最多 2048 字节。
+
+## 导入本地模型
+
+`osdk model import NAME PATH` 接受单个文件或目录，把每个文件计算 SHA-256 后复制进 CAS 并发布不可变快照。目录保持原有相对布局；单文件可用 `--target-path` 指定快照内路径，或按 `--kind` 自动进入 `checkpoints/`、`loras/`、`vae/`、`text_encoders/`、`diffusion_models/`、`controlnet/`、`upscale_models/`、`embeddings/`。内容 revision 由排序后的相对路径、大小与 SHA-256 计算，修改源文件后二次导入会产生新快照，并自动刷新该逻辑名已有的 ComfyUI view。
+
+```bash
+osdk model import local-style C:\models\style.safetensors \
+  --kind lora --family sdxl --derived-from hf:org/base@main \
+  --view comfyui --json
+osdk model import local-bundle C:\models\bundle --variant fp16
+```
+
+本地导入显示为 `provider: "local"`，但 `local:` 不是可用于 `model use` 的在线引用。OSDK 不把原始绝对路径写入 manifest，也不写 `osdk.toml` 或 `osdk.lock`：任意本地路径无法在另一台机器上可靠恢复，所以缺失后必须从原始字节重新导入。为避免状态冲突，同名项目声明或 lock 存在时导入会失败；本地导入也不支持 `hf-cache` view，因为它没有可诚实声明的 Hugging Face 仓库身份。
+
+目录遍历不跟随链接，并拒绝 symlink、Windows junction/reparse point、特殊文件、非 UTF-8 或跨平台不安全的相对路径。`--json` 成功时 stdout 只输出现有 schema 1 模型文档，错误仍写 stderr 并返回非零。
 
 ## 下载、校验与本地布局
 

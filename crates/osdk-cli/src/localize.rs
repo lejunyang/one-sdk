@@ -170,6 +170,24 @@ fn localize_subcommands(cmd: Command) -> Command {
                     .mut_arg("map", |a| a.help(h("help.model.use.flag.map")))
                     .mut_arg("sync", |a| a.help(h("help.model.use.flag.sync")))
             })
+            .mut_subcommand("import", |s| {
+                s.about(h("help.model.import.about"))
+                    .mut_arg("name", |a| a.help(h("help.model.import.arg.name")))
+                    .mut_arg("path", |a| a.help(h("help.model.import.arg.path")))
+                    .mut_arg("target_path", |a| {
+                        a.help(h("help.model.import.flag.target_path"))
+                    })
+                    .mut_arg("variant", |a| a.help(h("help.model.use.flag.variant")))
+                    .mut_arg("kind", |a| a.help(h("help.model.use.flag.kind")))
+                    .mut_arg("family", |a| a.help(h("help.model.use.flag.family")))
+                    .mut_arg("derived_from", |a| {
+                        a.help(h("help.model.use.flag.derived_from"))
+                    })
+                    .mut_arg("view", |a| a.help(h("help.model.import.flag.view")))
+                    .mut_arg("profile", |a| a.help(h("help.model.use.flag.profile")))
+                    .mut_arg("map", |a| a.help(h("help.model.use.flag.map")))
+                    .mut_arg("json", |a| a.help(h("help.model.flag.json")))
+            })
             .mut_subcommand("unuse", |s| {
                 s.about(h("help.model.unuse.about"))
                     .mut_arg("name", |a| a.help(h("help.model.unuse.arg.name")))

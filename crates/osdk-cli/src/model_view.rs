@@ -36,6 +36,7 @@ pub(crate) fn reconcile_declared_views(
         } else {
             view.profile.as_str()
         };
+        views.ensure_model_supports_view(kind, model)?;
         state.add(
             kind,
             profile,
@@ -49,6 +50,28 @@ pub(crate) fn reconcile_declared_views(
         let reports = views.render(kind, profile, &entries)?;
         if !quiet {
             print_render_report(model, reports.get(model));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn refresh_model_views(
+    app: &crate::App,
+    model: &str,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    let views = view_store(app);
+    let state = ViewState::load(&app.ctx.dirs)?;
+    for kind in ViewKind::all() {
+        for (profile, specs) in state.profiles(*kind) {
+            if !specs.iter().any(|entry| entry.model == model) {
+                continue;
+            }
+            let entries = entries_for(&state, *kind, profile);
+            let reports = views.render(*kind, profile, &entries)?;
+            if !quiet {
+                print_render_report(model, reports.get(model));
+            }
         }
     }
     Ok(())
@@ -137,14 +160,15 @@ pub fn model_view(app: &App, command: ModelViewCommand) -> anyhow::Result<()> {
         } => {
             osdk_core::model::validate_model_name(&model)?;
             let map = parse_mappings(&map)?;
-            // Fail fast if the model is not pulled: a view over a missing
+            // Fail fast if the model is not materialized: a view over a missing
             // snapshot renders nothing, and silently accepting would make
             // `add` look successful with an empty category.
             if !views.model_exists(&model)? {
                 return Err(anyhow!(
-                    "model `{model}` is not materialized; run `osdk model sync {model}` first"
+                    "model `{model}` is not materialized; run `osdk model sync {model}` for a declared model or `osdk model import {model} PATH` for local bytes"
                 ));
             }
+            views.ensure_model_supports_view(kind, &model)?;
             state.add(
                 kind,
                 &profile,

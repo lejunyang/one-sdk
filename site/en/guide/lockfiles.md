@@ -17,6 +17,7 @@ osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
 osdk model use NAME REFERENCE [OPTIONS]
+osdk model import NAME PATH [OPTIONS]
 osdk model sync [NAME]
 ```
 
@@ -30,6 +31,7 @@ osdk model sync [NAME]
 | `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map (project tools only, likewise) |
 | `exec` | No | No |
 | `model use` | No | Writes project intent; does not write the lock itself |
+| `model import NAME PATH` | Yes, only to reject a same-name conflict | No; local paths are not portable |
 | `model sync [NAME]` | Yes | Resolves added/changed declarations and merges model locks |
 | `list`, `current`, `where` | No | No |
 
@@ -185,6 +187,8 @@ profile = "default"
 [models.qwen.views.comfyui.map]
 "unet/" = "diffusion_models"
 ```
+
+A model with `provider = "local"` cannot be written to or replayed from the lock. A `model import` snapshot must be re-imported from its original bytes.
 
 The `views` table is written only when non-empty and records consumer ->
 profile plus a repo-relative-prefix -> category map; it never records the

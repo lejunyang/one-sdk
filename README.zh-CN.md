@@ -577,6 +577,7 @@ osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' --sync
 osdk model use character-lora civitai:456@123 --view comfyui \
   --kind lora --family sdxl --derived-from hf:stabilityai/stable-diffusion-xl-base-1.0@main --sync
+osdk model import local-style C:\models\style.safetensors --kind lora --view comfyui --json
 osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # 单个模型
@@ -595,9 +596,10 @@ osdk model use flux hf:black-forest-labs/FLUX.1-dev@main \
 osdk model view path comfyui
 ```
 
-`model sync` 会在 source、variant、include 或 exclude 变化时重新解析，并复现不可变 lock。
-`model unuse NAME` 会移除项目声明、lock、视图和默认的本地字节；`--keep-snapshot` 可保留
-字节。`model remove NAME` 只删除本地字节和视图。
+`model sync` 会在 source、variant、语义元数据、include 或 exclude 变化时重新解析，并复现不可变 lock。
+`model import NAME PATH` 把本地文件或目录内容寻址写入 CAS，但不创建项目声明或 lock；本地导入只在
+当前机器可用，需要从原始字节重新导入。`model unuse NAME` 会移除项目声明、lock、视图和默认的
+本地字节；`--keep-snapshot` 可保留字节。`model remove NAME` 只删除本地字节和视图。
 
 指南：[模型快照](site/guide/models.md)
 ## 场景：给 AI 编码 Agent 装 skill

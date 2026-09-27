@@ -2886,6 +2886,35 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("Materialize this model immediately", "立即物化此模型"),
     );
     m.insert(
+        "help.model.import.about",
+        (
+            "Import local model bytes into an immutable snapshot",
+            "将本地模型文件导入不可变快照",
+        ),
+    );
+    m.insert(
+        "help.model.import.arg.name",
+        ("Local logical model name", "本地逻辑模型名称"),
+    );
+    m.insert(
+        "help.model.import.arg.path",
+        ("Existing local file or directory", "现有本地文件或目录"),
+    );
+    m.insert(
+        "help.model.import.flag.target_path",
+        (
+            "Snapshot-relative destination for a single file",
+            "单文件在快照内的相对目标路径",
+        ),
+    );
+    m.insert(
+        "help.model.import.flag.view",
+        (
+            "Render a consumer view after import",
+            "导入后渲染消费者视图",
+        ),
+    );
+    m.insert(
         "help.model.unuse.about",
         (
             "Remove a project model declaration and managed state",

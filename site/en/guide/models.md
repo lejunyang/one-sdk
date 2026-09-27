@@ -11,6 +11,9 @@ osdk model use NAME REFERENCE [--endpoint URL]
   [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
   [--kind KIND] [--family FAMILY] [--derived-from REFERENCE]
   [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
+osdk model import NAME PATH [--target-path PATH] [--variant LABEL]
+  [--kind KIND] [--family FAMILY] [--derived-from REFERENCE]
+  [--view comfyui] [--profile P] [--map PREFIX=CATEGORY]... [--json]
 osdk model unuse NAME [--keep-snapshot]
 osdk model sync [NAME] [--prune] [--dry-run] [--jsonl]
 osdk model list [--json]
@@ -31,7 +34,7 @@ retains bytes. `remove` deletes only local bytes and views while retaining proje
 
 ## Machine-readable output
 
-`model list/show/path/verify --json` and `model view list/path/doctor --json` each write one
+`model import --json`, `model list/show/path/verify --json`, and `model view list/path/doctor --json` each write one
 `schema_version: 1` JSON document to stdout. Model documents include provider, repository,
 requested and immutable revisions, endpoint, variant, file paths/sizes/digests, creation time, and
 snapshot/stable paths plus `stable_path_available` without creating a missing link. View documents include consumer, profile, root, model mappings, and, for
@@ -88,6 +91,21 @@ rendering; its effective `kind` defaults to `lora`. Remote paths must be safe re
 `kind` is a stable enum: `checkpoint`, `lora`, `vae`, `text-encoder`, `diffusion-model`, `controlnet`, `upscaler`, `embedding`, or `other`. `family` names an architecture/ecosystem such as `sdxl` or `flux`; `derived_from` records a caller-confirmed base model or upstream reference. osdk does not infer the latter two or match trigger words.
 
 All three fields enter snapshot identity, `.osdk-model.json`, `osdk.lock`, and `--json` output. Changing any one creates a distinct snapshot and triggers re-locking. Values must be non-empty, trimmed, and free of control characters; `family` is limited to 256 bytes and `derived_from` to 2048 bytes.
+
+## Importing local models
+
+`osdk model import NAME PATH` accepts one file or a directory, hashes every file with SHA-256, copies content into the CAS, and publishes an immutable snapshot. A directory retains its relative layout. A single file can use `--target-path`, or `--kind` can place it under `checkpoints/`, `loras/`, `vae/`, `text_encoders/`, `diffusion_models/`, `controlnet/`, `upscale_models/`, or `embeddings/`. The content revision covers sorted relative paths, sizes, and SHA-256 values. Re-importing changed bytes creates a new snapshot and refreshes existing ComfyUI views for that logical name.
+
+```bash
+osdk model import local-style C:\models\style.safetensors \
+  --kind lora --family sdxl --derived-from hf:org/base@main \
+  --view comfyui --json
+osdk model import local-bundle C:\models\bundle --variant fp16
+```
+
+An imported snapshot reports `provider: "local"`, but `local:` is not an online reference accepted by `model use`. osdk does not persist the original absolute path and writes neither `osdk.toml` nor `osdk.lock`: an arbitrary local path cannot be replayed honestly on another machine, so missing content must be imported again from its original bytes. Import refuses a name already present in a project declaration or lock. It also rejects `hf-cache` views because no truthful Hugging Face repository identity exists.
+
+Traversal never follows links and rejects symlinks, Windows junctions/reparse points, special files, non-UTF-8 paths, and relative paths whose meaning would change across platforms. On success `--json` writes only the existing schema-1 model document to stdout; errors remain on stderr with a non-zero exit code.
 
 ## Downloads, verification, and local layout
 

@@ -14,6 +14,7 @@ use crate::store::manifest::{FileEntry, Manifest};
 use crate::store::Cas;
 
 pub mod env;
+pub mod local;
 pub mod provider;
 pub mod pull;
 pub mod source;
@@ -39,6 +40,9 @@ pub enum ProviderId {
     ModelScope,
     #[serde(rename = "civitai", alias = "civi")]
     Civitai,
+    /// Machine-local imported bytes. Not accepted by `ModelRef` or online sources.
+    #[serde(rename = "local")]
+    Local,
 }
 
 impl ProviderId {
@@ -47,6 +51,7 @@ impl ProviderId {
             Self::HuggingFace => "huggingface",
             Self::ModelScope => "modelscope",
             Self::Civitai => "civitai",
+            Self::Local => "local",
         }
     }
 }
@@ -145,6 +150,11 @@ impl ModelRef {
                 "invalid model reference `{value}` (expected hf:owner/repo@revision or civitai:model-id@model-version-id)"
             ))
         })?;
+        if provider.trim().eq_ignore_ascii_case("local") {
+            return Err(Error::config(
+                "local model references are not supported; use `osdk model import`",
+            ));
+        }
         let provider = provider.parse()?;
         let (repository, revision) = match rest.rsplit_once('@') {
             Some(parts) => parts,
@@ -558,10 +568,14 @@ fn default_revision(provider: ProviderId) -> &'static str {
         ProviderId::HuggingFace => "main",
         ProviderId::ModelScope => "master",
         ProviderId::Civitai => unreachable!("Civitai references require an explicit version id"),
+        ProviderId::Local => unreachable!("local models are created only by model import"),
     }
 }
 
 fn validate_repository(provider: ProviderId, repository: &str) -> Result<()> {
+    if provider == ProviderId::Local {
+        return validate_model_name(repository);
+    }
     if provider == ProviderId::Civitai {
         if repository.parse::<u64>().is_ok_and(|value| value > 0) {
             return Ok(());
@@ -708,6 +722,10 @@ mod tests {
         assert_eq!(civitai.repository, "456");
         assert_eq!(civitai.revision, "123");
         assert!(ModelRef::parse("civi:123").is_err());
+        assert!(ModelRef::parse("local:anything@revision")
+            .unwrap_err()
+            .to_string()
+            .contains("use `osdk model import`"));
         assert!(ModelRef::parse("civitai:not-a-number@123").is_err());
         assert!(ModelRef::parse("civitai:456@not-a-number").is_err());
         assert!(ModelRef::parse("hf:../secret").is_err());

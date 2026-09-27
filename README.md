@@ -642,6 +642,7 @@ osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' --sync
 osdk model use character-lora civitai:456@123 --view comfyui \
   --kind lora --family sdxl --derived-from hf:stabilityai/stable-diffusion-xl-base-1.0@main --sync
+osdk model import local-style C:\models\style.safetensors --kind lora --view comfyui --json
 osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # one model
@@ -660,9 +661,11 @@ osdk model use flux hf:black-forest-labs/FLUX.1-dev@main \
 osdk model view path comfyui
 ```
 
-`model sync` re-resolves changes to source, variant, include, or exclude, then replays immutable
-lock entries. `model unuse NAME` removes project intent, lock state, views, and normally local
-bytes; `--keep-snapshot` retains bytes. `model remove NAME` removes only local bytes and views.
+`model sync` re-resolves changes to source, variant, semantic metadata, include, or exclude, then replays immutable
+lock entries. `model import NAME PATH` snapshots a local file or directory into CAS without creating a
+project declaration or lock entry; local imports are machine-specific and must be re-imported from their
+original bytes. `model unuse NAME` removes project intent, lock state, views, and normally local bytes;
+`--keep-snapshot` retains bytes. `model remove NAME` removes only local bytes and views.
 
 Guide: [Model snapshots](site/en/guide/models.md)
 ## Scenario: install a skill for an AI coding agent

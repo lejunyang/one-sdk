@@ -454,6 +454,11 @@ pub(crate) fn relative_to_lock(lock_dir: &Path, target: &Path) -> String {
 }
 
 pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -> Result<()> {
+    if manifest.provider == osdk_core::model::ProviderId::Local {
+        anyhow::bail!(
+            "local model snapshots are machine-specific and cannot be written to osdk.lock"
+        );
+    }
     let mut lockfile = if path.is_file() {
         load(path)?
     } else {

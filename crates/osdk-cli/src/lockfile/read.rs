@@ -99,7 +99,16 @@ pub fn locked_models(path: &Path) -> Result<Vec<(String, LockedModel)>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    Ok(load(path)?.models.into_iter().collect())
+    let models: Vec<_> = load(path)?.models.into_iter().collect();
+    if let Some((name, _)) = models
+        .iter()
+        .find(|(_, model)| model.provider == osdk_core::model::ProviderId::Local)
+    {
+        anyhow::bail!(
+            "model `{name}` has a non-reproducible local lock entry; local imports are snapshots only and must be re-imported from their original bytes"
+        );
+    }
+    Ok(models)
 }
 
 pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<ToolRequest>>> {

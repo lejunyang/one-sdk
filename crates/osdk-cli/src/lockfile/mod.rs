@@ -1818,6 +1818,18 @@ lockfile = "lockfileVersion: '9.0'"
         assert_eq!(lock.models["qwen"].files[0].sha256, "sha256");
     }
 
+    #[test]
+    fn local_model_snapshots_cannot_be_written_to_the_project_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let mut manifest = test_model_manifest();
+        manifest.provider = osdk_core::model::ProviderId::Local;
+        manifest.repository = "local-model".into();
+        manifest.endpoint = "local".into();
+        let error = merge_model(&path, &manifest).unwrap_err();
+        assert!(error.to_string().contains("cannot be written to osdk.lock"));
+        assert!(!path.exists());
+    }
     /// A `[deps]` section round-trips, and an empty one is omitted so existing
     /// locks keep serializing byte-identically.
     ///

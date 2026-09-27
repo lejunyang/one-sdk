@@ -42,6 +42,7 @@ pub fn default_sources(provider: ProviderId) -> Vec<Source> {
             ]
         }
         ProviderId::Civitai => vec![Source::official("official", "https://civitai.com")],
+        ProviderId::Local => Vec::new(),
     }
 }
 
@@ -300,6 +301,7 @@ pub fn provider(provider: ProviderId, allow_auth: bool) -> Box<dyn ModelProvider
         ProviderId::HuggingFace => Box::new(HuggingFace::new(allow_auth)),
         ProviderId::ModelScope => Box::new(ModelScope::new(allow_auth)),
         ProviderId::Civitai => Box::new(Civitai::new(allow_auth)),
+        ProviderId::Local => unreachable!("local models do not have an online provider"),
     }
 }
 

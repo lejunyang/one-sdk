@@ -687,6 +687,203 @@ fn model_use_writes_a_project_declaration_without_downloading() {
 }
 
 #[test]
+fn model_import_materializes_local_lora_without_project_or_lock_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let input = temporary.path().join("style.safetensors");
+    std::fs::write(&input, b"local lora bytes").unwrap();
+    let input = input.to_str().unwrap();
+    let output = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "import",
+            "style",
+            input,
+            "--kind",
+            "lora",
+            "--family",
+            "sdxl",
+            "--derived-from",
+            "hf:org/base@main",
+            "--view",
+            "comfyui",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["model"]["provider"], "local");
+    assert_eq!(document["model"]["kind"], "lora");
+    assert_eq!(document["model"]["family"], "sdxl");
+    assert_eq!(document["model"]["derived_from"], "hf:org/base@main");
+    assert_eq!(
+        document["model"]["files"][0]["path"],
+        "loras/style.safetensors"
+    );
+    assert!(document["model"]["revision"]
+        .as_str()
+        .unwrap()
+        .starts_with("local-"));
+    assert!(!temporary.path().join("osdk.toml").exists());
+    assert!(!temporary.path().join("osdk.lock").exists());
+    let view = temporary
+        .path()
+        .join("data/views/comfyui/default/loras/style.safetensors");
+    assert_eq!(std::fs::read(&view).unwrap(), b"local lora bytes");
+
+    std::fs::write(input, b"updated local lora").unwrap();
+    let updated = run_isolated(
+        temporary.path(),
+        &[
+            "model", "import", "style", input, "--kind", "lora", "--json",
+        ],
+    );
+    assert!(updated.status.success());
+    let updated_document: serde_json::Value = serde_json::from_slice(&updated.stdout).unwrap();
+    assert_ne!(
+        document["model"]["revision"],
+        updated_document["model"]["revision"]
+    );
+    assert_eq!(std::fs::read(&view).unwrap(), b"updated local lora");
+
+    let verify = run_isolated(temporary.path(), &["model", "verify", "style", "--json"]);
+    assert!(verify.status.success());
+    let verified: serde_json::Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(verified["status"], "verified");
+    assert_eq!(verified["model"]["provider"], "local");
+}
+
+#[test]
+fn model_import_rejects_target_path_for_a_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let input = temporary.path().join("bundle");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::write(input.join("model.safetensors"), b"weights").unwrap();
+    let output = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "import",
+            "bundle",
+            input.to_str().unwrap(),
+            "--target-path",
+            "loras/model.safetensors",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--target-path is supported only when importing one file"));
+    assert!(!temporary.path().join("osdk.toml").exists());
+    assert!(!temporary.path().join("osdk.lock").exists());
+}
+#[test]
+fn model_import_rejects_conflicting_project_state_and_non_reproducible_views() {
+    let temporary = tempfile::tempdir().unwrap();
+    let input = temporary.path().join("style.safetensors");
+    std::fs::write(&input, b"weights").unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.style]\nsource = \"hf:owner/repo@main\"\n",
+    )
+    .unwrap();
+    let conflict = run_isolated(
+        temporary.path(),
+        &["model", "import", "style", input.to_str().unwrap()],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("declared by the project"));
+    assert!(!temporary
+        .path()
+        .join("data/models/style/current.json")
+        .exists());
+
+    std::fs::remove_file(temporary.path().join("osdk.toml")).unwrap();
+    let hf_cache = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "import",
+            "style",
+            input.to_str().unwrap(),
+            "--view",
+            "hf-cache",
+        ],
+    );
+    assert!(!hf_cache.status.success());
+    assert!(String::from_utf8_lossy(&hf_cache.stderr)
+        .contains("cannot claim a Hugging Face cache identity"));
+    assert!(!temporary
+        .path()
+        .join("data/models/style/current.json")
+        .exists());
+}
+
+#[test]
+fn model_view_add_rejects_hf_cache_for_an_imported_local_model_without_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let input = temporary.path().join("style.safetensors");
+    std::fs::write(&input, b"weights").unwrap();
+    let imported = run_isolated(
+        temporary.path(),
+        &["model", "import", "style", input.to_str().unwrap()],
+    );
+    assert!(imported.status.success());
+    let rejected = run_isolated(
+        temporary.path(),
+        &["model", "view", "add", "hf-cache", "style"],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("cannot claim a Hugging Face cache identity"));
+    assert!(!temporary
+        .path()
+        .join("data/views/.osdk-views.json")
+        .exists());
+}
+#[test]
+fn model_import_rejects_cross_platform_unsafe_target_paths_and_local_locks() {
+    let temporary = tempfile::tempdir().unwrap();
+    let input = temporary.path().join("style.safetensors");
+    std::fs::write(&input, b"weights").unwrap();
+    let unsafe_target = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "import",
+            "style",
+            input.to_str().unwrap(),
+            "--target-path",
+            "..\\outside.safetensors",
+        ],
+    );
+    assert!(!unsafe_target.status.success());
+    assert!(
+        String::from_utf8_lossy(&unsafe_target.stderr).contains("unsafe local model target path")
+    );
+    assert!(!temporary
+        .path()
+        .join("data/models/style/current.json")
+        .exists());
+
+    std::fs::write(
+        temporary.path().join("osdk.lock"),
+        "schema = 4\n\n[models.style]\nprovider = \"local\"\nrepository = \"style\"\nrequested_revision = \"local-deadbeef\"\nrevision = \"local-deadbeef\"\nendpoint = \"local\"\nfiles = []\n",
+    )
+    .unwrap();
+    let locked = run_isolated(
+        temporary.path(),
+        &["model", "sync", "style", "--dry-run", "--jsonl"],
+    );
+    assert!(!locked.status.success());
+    assert!(locked.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&locked.stderr).contains("non-reproducible local lock entry"));
+}
+#[test]
 fn model_sync_name_limits_dry_run_to_one_declaration() {
     let temporary = tempfile::tempdir().unwrap();
     std::fs::write(

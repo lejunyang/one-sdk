@@ -15,6 +15,7 @@ osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
 osdk model use NAME REFERENCE [OPTIONS]
+osdk model import NAME PATH [OPTIONS]
 osdk model sync [NAME]
 ```
 
@@ -28,6 +29,7 @@ osdk model sync [NAME]
 | `upgrade` | 否；重新解析配置或显式请求 | 是，重建 host 平台工具表（同样只记项目工具） |
 | `exec` | 否 | 否 |
 | `model use` | 否 | 写项目声明；本身不写 lock |
+| `model import NAME PATH` | 是，仅用于拒绝同名冲突 | 否；本地路径不可跨机器恢复 |
 | `model sync [NAME]` | 是 | 解析新增/变更声明并合并模型 lock |
 | `list`、`current`、`where` | 否 | 否 |
 
@@ -174,6 +176,8 @@ profile = "default"
 "unet/" = "diffusion_models"
 ```
 
+
+`provider = "local"` 不允许写入或读取为可恢复模型；`model import` 的本机快照必须从原始字节重新导入。
 
 `views` 段只在非空时写出，记录的是 consumer -> profile 与「仓库相对前缀 ->
 类别」映射；**不记录**视图的本机绝对路径和实际链接方式（那是机器相关的）。

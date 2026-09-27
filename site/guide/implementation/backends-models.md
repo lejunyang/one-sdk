@@ -135,9 +135,13 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 5. [`ModelStore`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 再次校验文件，写入共享 CAS，在隐藏临时目录完成 snapshot 后 rename 到 `<models>/<logical-name>/snapshots/<snapshot-key>`，再以临时文件加 rename 更新 `current.json`；这些 rename 没有跨平台替换原子性或 durability 保证。随后把 `<models>/<logical-name>/current` 这个目录链接重指向新快照：快照目录名由内容哈希决定（包含文件选择），因此换 `--include` 就会换目录，外部配置里写死的路径会静默失效，而 ComfyUI、llama.cpp、vLLM 都只接受一个会被保存下来的路径。Windows 上用 junction 而非符号链接，因为符号链接需要 Developer Mode 或提权，junction 不需要；重指向时如果 `current` 位置是真实目录会显式报错，不会静默删除用户数据。链接创建失败只记 warning 不中断发布——此时快照与 `current.json` 已经落盘，为一个链接丢弃整次下载并不合理，`model path`（不带 `--stable`）仍可从 `current.json` 作答。
 6. 把 provider、repo、requested/resolved revision、endpoint、variant、`kind/family/derived_from` 以及每个文件的 size/SHA-256 写入 `osdk.lock` 的顶层 `[models]`；同样的语义元数据已写入 `.osdk-model.json`，机器 JSON 直接从 manifest 回读。token 和短期下载 URL 不落盘。
 
+本地导入走 [`model/local.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/local.rs)，不进入 `ModelProvider`：它用 `symlink_metadata` 逐级遍历，进入子目录前拒绝 symlink、Windows reparse point/junction 和特殊文件；路径分隔符归一为 `/` 后拒绝绝对路径、空段、`.`/`..`、冒号与控制字符。每个普通文件先计算 SHA-256，排序后的 path/size/SHA-256 生成 `local-<24 hex>` revision，再由同一个 `ModelStore::publish` 复制进 CAS 并原子发布。`ProviderId::Local` 只用于 manifest/机器输出，`ModelRef::parse`、source/provider/env 路径都不接受它。
+
+本地 snapshot 的 manifest 不保存输入绝对路径；lock 读写两端都拒绝 `provider=local`，因为另一台机器无法按任意本地路径复现。CLI 在发布前拒绝同名声明/lock 和 `hf-cache` view；成功后可渲染 ComfyUI view，重复导入会按持久化 view state 重渲染既有视图。`--json` 复用 schema 1 `ModelShowOutput`，stdout 不混入人类报告。
+
 `model list/show/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 sync 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。
 
-机器协议集中在 [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs)，与快照、lock 和 view state 的磁盘 schema 分离。`list/show/path/verify` 及只读 view 命令输出单个 schema 1 JSON，`sync --jsonl` 通过统一 emitter 输出逐行事件；人类模式仍使用原文案。所有机器 stdout 写入都经过同一序列化入口，view reconcile 在 JSONL 模式下仍执行但不打印普通报告，错误继续由顶层写 stderr 并返回非零。协议中的绝对路径是本机位置，保留原生分隔符；manifest 相对路径来自跨平台产物，保持 `/`。
+机器协议集中在 [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs)，与快照、lock 和 view state 的磁盘 schema 分离。`import --json`、`list/show/path/verify` 及只读 view 命令输出单个 schema 1 JSON，`sync --jsonl` 通过统一 emitter 输出逐行事件；人类模式仍使用原文案。所有机器 stdout 写入都经过同一序列化入口，view reconcile 在 JSONL 模式下仍执行但不打印普通报告，错误继续由顶层写 stderr 并返回非零。协议中的绝对路径是本机位置，保留原生分隔符；manifest 相对路径来自跨平台产物，保持 `/`。
 
 ## 声明式 `[models]`、视图与信任分类
 
@@ -178,7 +182,7 @@ npm 的同一族坑）。`model sync` 复现快照后同样调用 reconcile，�
 ## 边界与注意事项
 
 - SDK lock 按平台保存；model lock 位于顶层，因为模型文件通常与平台无关。模型 `variant` 是用户标签，不会自动推导量化格式，也不会改变文件选择。
-- provider 身份贯穿引用、metadata/ranking/download cache、snapshot key、manifest 与 lock，已验证为 provider-specific；但顶层 `models` map 和本地 `current.json` 以用户提供的逻辑名为键。用同一逻辑名拉取另一 provider 会切换该名字的 current snapshot，并覆盖 lock 中该名字的记录。
+- 在线 provider 身份贯穿引用、metadata/ranking/download cache、snapshot key、manifest 与 lock；本地 import 则以 `provider=local` 留在 manifest/机器输出中，明确不进入 source 或 lock。但顶层 `models` map 和本地 `current.json` 以用户提供的逻辑名为键。用同一逻辑名拉取另一 provider 会切换该名字的 current snapshot，并覆盖 lock 中该名字的记录。
 - Hugging Face 非 LFS blob 可以没有远端 SHA-256；osdk 会在下载后计算并锁定，但这不等同于服务端提供的独立摘要。ModelScope 要求 API manifest 给出合法 SHA-256；Civitai 也要求所选权重提供合法 SHA-256。
 - metadata 在线请求失败时可以回退到 stale cache。自定义 endpoint 必须实现所选 provider 的真实 API；仅兼容文件 host 或替换域名并不足够。
 - GitHub backend 的自动 asset 评分是启发式；命名含糊或一个 release 含多个相似产物时应使用显式 asset 规则或可信静态 catalog。

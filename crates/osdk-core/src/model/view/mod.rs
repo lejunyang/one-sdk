@@ -170,6 +170,18 @@ impl ViewStore {
         Ok(self.dirs.model_views().join(kind.as_str()).join(profile))
     }
 
+    pub fn ensure_model_supports_view(&self, kind: ViewKind, model: &str) -> Result<()> {
+        let installed = self.models.current(model)?;
+        if kind == ViewKind::HfCache
+            && installed.manifest.provider == crate::model::ProviderId::Local
+        {
+            return Err(Error::config(
+                "local model imports cannot claim a Hugging Face cache identity; use a ComfyUI view instead",
+            ));
+        }
+        Ok(())
+    }
+
     /// Render (incrementally) the listed models. Models not pulled are skipped.
     pub fn render(
         &self,
@@ -193,6 +205,13 @@ impl ViewStore {
             let Ok(installed) = self.models.current(&entry.model) else {
                 continue;
             };
+            if kind == ViewKind::HfCache
+                && installed.manifest.provider == crate::model::ProviderId::Local
+            {
+                return Err(Error::config(
+                    "local model imports cannot claim a Hugging Face cache identity; use a ComfyUI view instead",
+                ));
+            }
 
             // Drop this model's previously-owned paths first.
             self.remove_owned(&root, &mut manifest, &entry.model)?;
