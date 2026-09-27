@@ -625,38 +625,80 @@ fn governed_subset(value: &toml::Value) -> toml::Value {
         return toml::Value::Table(subset);
     };
     for requirement in collect_requirements(value) {
-        let mut segments = requirement.key.split('.');
-        let Some(head) = segments.next() else {
+        let segments: Vec<&str> = requirement.key.split('.').collect();
+        let Some(head) = segments.first() else {
             continue;
         };
-        let Some(head_value) = table.get(head) else {
+        let Some(head_value) = table.get(*head) else {
             continue;
         };
-        match segments.next() {
-            // A whole-table reason (`syspkg`, `sources`, an unknown table)
-            // pins that table's entire content.
-            None => {
-                subset.insert(head.to_string(), head_value.clone());
-            }
-            // A key-level reason pins just that key, leaving unrelated
-            // siblings editable.
-            Some(field) => {
-                let Some(field_value) = head_value.as_table().and_then(|table| table.get(field))
-                else {
-                    continue;
-                };
-                let nested = subset
-                    .entry(head.to_string())
-                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-                if let Some(nested) = nested.as_table_mut() {
-                    // For `tools.<name>.allow_builds` this records the whole
-                    // entry: the package identity is what approval covered.
-                    nested.insert(field.to_string(), field_value.clone());
-                }
-            }
+        // A whole-table reason (`syspkg`, `sources`, an unknown table, or any
+        // single-segment key) pins that value's entire content.
+        if segments.len() == 1 {
+            subset.insert((*head).to_string(), head_value.clone());
+            continue;
         }
+
+        // Resolve exactly what the requirement covers.
+        //
+        // `tools.<name>.allow_builds` deliberately pins the whole tool entry
+        // (two levels in): the package identity is what the approval covered,
+        // not just the bool.
+        //
+        // Everything else is a dotted path to one governed leaf, and only that
+        // leaf is projected. Descending the full path -- instead of stopping
+        // two levels deep -- is the fix: the previous code copied a whole
+        // `[deps.<p>]` / `[models.<n>]` / `[skills.<n>]` entry whenever one key
+        // inside it was governed, so editing any safe sibling (`dir`,
+        // `installer`, a version bump, an unrelated env var) silently
+        // invalidated a record that was still valid.
+        let (path, leaf) = if *head == "tools" && segments.len() >= 3 {
+            let name = segments[1];
+            let Some(entry) = head_value.as_table().and_then(|t| t.get(name)) else {
+                continue;
+            };
+            (vec![*head, name], entry.clone())
+        } else {
+            let Some(leaf) = descend_tables(head_value, &segments[1..]) else {
+                continue;
+            };
+            (segments.clone(), leaf.clone())
+        };
+
+        insert_path(&mut subset, &path, leaf);
     }
     toml::Value::Table(subset)
+}
+
+/// Follow dotted key segments through nested tables, returning the leaf value.
+fn descend_tables<'a>(start: &'a toml::Value, segments: &[&str]) -> Option<&'a toml::Value> {
+    let mut current = start;
+    for segment in segments {
+        current = current.as_table()?.get(*segment)?;
+    }
+    Some(current)
+}
+
+/// Insert `value` at `path`, creating intermediate tables. If an intermediate
+/// node already exists but is not a table, the insert is skipped rather than
+/// overwriting unrelated content.
+fn insert_path(root: &mut toml::value::Table, path: &[&str], value: toml::Value) {
+    let Some((last, ancestors)) = path.split_last() else {
+        return;
+    };
+    let mut node = root;
+    for segment in ancestors {
+        let entry = node
+            .entry((*segment).to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        let Some(table) = entry.as_table_mut() else {
+            // A governed path runs through a non-table intermediate; leave the
+            // existing value untouched rather than overwrite it.
+            return;
+        };
+        node = table;
+    }
+    node.insert((*last).to_string(), value);
 }
 
 pub fn requires_trust(path: &Path) -> Result<bool> {
@@ -1434,17 +1476,15 @@ insecure = true
         assert!(!dispatch_affecting("skills.web-design.endpoint"));
     }
 
-    /// Editing a harmless declaration field must not invalidate a trust record
-    /// that was granted for a sibling endpoint key. The governed subset keeps
-    /// only the keys trust actually governs.
-    /// An entry that carries an endpoint pins that whole model entry (the same
-    /// whole-entry granularity `tools.<name>.allow_builds` uses: the reviewed
-    /// identity is the entry, not one leaf). So editing a sibling field *inside
-    /// that same entry* re-prompts, but editing a different, endpoint-free model
-    /// does not. The governed subset projects by entry, not by the whole
-    /// `[models]` table.
+    /// An endpoint is pinned leaf by leaf, not as the whole model entry: the
+    /// trust identity is exactly the governed key. Editing a harmless
+    /// declaration field -- whether a sibling field inside the endpoint-carrying
+    /// entry or a different, endpoint-free model -- must not invalidate a
+    /// record. Only changing the endpoint itself re-prompts. (The whole-entry
+    /// granularity is reserved for `tools.<name>.allow_builds`, where the
+    /// package identity is what was reviewed.)
     #[test]
-    fn an_endpoint_pins_its_own_model_entry_but_not_sibling_models() {
+    fn an_endpoint_pins_only_its_own_key_not_sibling_fields_or_models() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("osdk.toml");
         let config_dir = temp.path().join("state");
@@ -1458,20 +1498,22 @@ insecure = true
         std::fs::write(&path, body("\"a\"", "\"x\"")).unwrap();
         trust(&config_dir, &path).unwrap();
 
-        // Editing a sibling model that has no endpoint keeps the record: the
-        // governed subset does not include `models.plain` at all.
+        // Editing a different, endpoint-free model keeps the record.
         std::fs::write(&path, body("\"a\"", "\"x\", \"y\"")).unwrap();
         assert!(
             is_trusted(&config_dir, &path, None).unwrap(),
             "editing a different endpoint-free model must not invalidate trust"
         );
 
-        // Editing the reviewed entry -- even a harmless field -- re-prompts,
-        // because that entry is the reviewed unit.
+        // Editing a harmless sibling field inside the endpoint-carrying entry
+        // also keeps the record: only the endpoint is governed.
         std::fs::write(&path, body("\"a\", \"b\"", "\"x\", \"y\"")).unwrap();
-        assert!(!is_trusted(&config_dir, &path, None).unwrap());
+        assert!(
+            is_trusted(&config_dir, &path, None).unwrap(),
+            "editing a non-governed field of the reviewed model must survive"
+        );
 
-        // Changing the endpoint re-prompts as well (the direct case).
+        // Changing the endpoint re-prompts (the direct case).
         std::fs::write(
             &path,
             "[models.sd]\nsource = \"hf:a/b@main\"\nendpoint = \"https://other.example.com\"\n             \n[models.plain]\nsource = \"hf:c/d@main\"\n",
@@ -1836,6 +1878,90 @@ mode = "env"
             "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[syspkg.packages]\n\"winget:Foo\" = \"latest\"\n",
         );
         assert!(!is_trusted(&config_dir, &config, None).unwrap());
+    }
+
+    /// Trust-requiring keys live beside safe keys inside one `[deps.<p>]`,
+    /// `[models.<n>]` or `[skills.<n>]` entry (and a governed env var lives
+    /// beside harmless ones). Only the exact governed leaf belongs to the
+    /// identity: editing a safe sibling must not invalidate a record.
+    #[test]
+    fn safe_siblings_inside_a_governed_entry_do_not_invalidate_trust() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let config = repo.join("osdk.toml");
+        let write = |body: &str| std::fs::write(&config, body).unwrap();
+
+        // `[deps.pnpm]` carries a governed `index` next to a safe `dir`.
+        write("[deps.pnpm]\nindex = \"https://example.com/a\"\ndir = \"./vendor\"\n");
+        trust(&config_dir, &config).unwrap();
+        assert!(is_trusted(&config_dir, &config, None).unwrap());
+
+        // Editing the safe sibling keeps the record.
+        write("[deps.pnpm]\nindex = \"https://example.com/a\"\ndir = \"./vendor2\"\n");
+        assert!(
+            is_trusted(&config_dir, &config, None).unwrap(),
+            "changing a safe [deps] field must survive"
+        );
+        // Adding another safe sibling key likewise keeps it.
+        write(
+            "[deps.pnpm]\nindex = \"https://example.com/a\"\ndir = \"./vendor2\"\ninstaller = \"pnpm\"\n",
+        );
+        assert!(
+            is_trusted(&config_dir, &config, None).unwrap(),
+            "adding a safe [deps] field must survive"
+        );
+        // Changing the governed leaf invalidates it, even in a safer-looking
+        // direction: identity is what was approved.
+        write("[deps.pnpm]\nindex = \"https://example.com/b\"\ndir = \"./vendor2\"\n");
+        assert!(
+            !is_trusted(&config_dir, &config, None).unwrap(),
+            "changing a governed [deps] key must invalidate"
+        );
+
+        // A governed env var is pinned by name, not as the whole `env` table.
+        write("[deps.npm.env]\nNPM_CONFIG_REGISTRY = \"https://example.com/a\"\nOTHER = \"1\"\n");
+        trust(&config_dir, &config).unwrap();
+        write("[deps.npm.env]\nNPM_CONFIG_REGISTRY = \"https://example.com/a\"\nOTHER = \"2\"\n");
+        assert!(
+            is_trusted(&config_dir, &config, None).unwrap(),
+            "changing a non-redirecting env var must survive"
+        );
+        write("[deps.npm.env]\nNPM_CONFIG_REGISTRY = \"https://example.com/b\"\nOTHER = \"2\"\n");
+        assert!(
+            !is_trusted(&config_dir, &config, None).unwrap(),
+            "changing a redirecting env var must invalidate"
+        );
+
+        // `[models.<n>]` pins only its source-affecting keys; a version bump is
+        // a harmless declaration.
+        write("[models.flux]\nsource = \"hf:o/r@v1\"\nendpoint = \"https://example.com/a\"\n");
+        trust(&config_dir, &config).unwrap();
+        write("[models.flux]\nsource = \"hf:o/r@v2\"\nendpoint = \"https://example.com/a\"\n");
+        assert!(
+            is_trusted(&config_dir, &config, None).unwrap(),
+            "bumping a model version must survive"
+        );
+        write("[models.flux]\nsource = \"hf:o/r@v2\"\nendpoint = \"https://example.com/b\"\n");
+        assert!(
+            !is_trusted(&config_dir, &config, None).unwrap(),
+            "changing a model endpoint must invalidate"
+        );
+
+        // `[skills.<n>]` likewise pins only source-affecting keys.
+        write("[skills.web-design]\nsource = \"github:o/r@v1\"\nendpoint = \"https://example.com/a\"\n");
+        trust(&config_dir, &config).unwrap();
+        write("[skills.web-design]\nsource = \"github:o/r@v2\"\nendpoint = \"https://example.com/a\"\n");
+        assert!(
+            is_trusted(&config_dir, &config, None).unwrap(),
+            "bumping a skill version must survive"
+        );
+        write("[skills.web-design]\nsource = \"github:o/r@v2\"\nendpoint = \"https://example.com/b\"\n");
+        assert!(
+            !is_trusted(&config_dir, &config, None).unwrap(),
+            "changing a skill endpoint must invalidate"
+        );
     }
 
     /// A config with nothing governed has no trust record to invalidate, so it
