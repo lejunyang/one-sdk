@@ -5674,6 +5674,195 @@ fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_cod
     );
 }
 
+fn parsed_json(output: std::process::Output) -> serde_json::Value {
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "stdout is not one JSON document: {error}; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn write_minimal_model_snapshot(root: &Path) {
+    let snapshot = root.join("data/models/fixture/snapshots/snapshot-one");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let file = snapshot.join("loras/fixture.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"fixture model bytes").unwrap();
+    let cas_hash = osdk_core::store::hash_file(&file).unwrap();
+    let sha256 =
+        osdk_core::pipeline::verify::hash_file(&file, osdk_core::pipeline::HashAlgo::Sha256)
+            .unwrap();
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "name": "fixture",
+        "provider": "civitai",
+        "repository": "456",
+        "requested_revision": "123",
+        "revision": "123",
+        "endpoint": "https://civitai.com",
+        "variant": "safetensors",
+        "files": [{
+            "path": "loras/fixture.safetensors",
+            "size": 19,
+            "cas_hash": cas_hash,
+            "sha256": sha256
+        }],
+        "created_at": 1
+    });
+    std::fs::write(
+        snapshot.join(".osdk-model.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(snapshot.join(".osdk-complete"), b"").unwrap();
+    std::fs::write(
+        root.join("data/models/fixture/current.json"),
+        br#"{"snapshot":"snapshot-one"}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn model_machine_json_documents_are_parseable_and_versioned() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_minimal_model_snapshot(temporary.path());
+    let stable_link = temporary.path().join("data/models/fixture/current");
+    assert!(!osdk_core::store::dirlink::exists(&stable_link));
+
+    let list = parsed_json(run_isolated(temporary.path(), &["model", "list", "--json"]));
+    assert_eq!(list["schema_version"], 1);
+    assert_eq!(list["models"].as_array().unwrap().len(), 1);
+    assert_eq!(list["models"][0]["name"], "fixture");
+    assert_eq!(list["models"][0]["provider"], "civitai");
+    assert_eq!(list["models"][0]["stable_path_available"], false);
+    assert_eq!(
+        list["models"][0]["files"][0]["path"],
+        "loras/fixture.safetensors"
+    );
+
+    let show = parsed_json(run_isolated(
+        temporary.path(),
+        &["model", "show", "fixture", "--json"],
+    ));
+    assert_eq!(show["schema_version"], 1);
+    assert_eq!(show["model"]["revision"], "123");
+    assert_eq!(show["model"]["variant"], "safetensors");
+    assert_eq!(show["model"]["stable_path_available"], false);
+
+    let verify = parsed_json(run_isolated(
+        temporary.path(),
+        &["model", "verify", "fixture", "--json"],
+    ));
+    assert_eq!(verify["schema_version"], 1);
+    assert_eq!(verify["status"], "verified");
+    assert_eq!(verify["model"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(verify["model"]["stable_path_available"], false);
+    assert!(
+        !osdk_core::store::dirlink::exists(&stable_link),
+        "read-only JSON commands must not create the stable link"
+    );
+
+    let path = parsed_json(run_isolated(
+        temporary.path(),
+        &["model", "path", "fixture", "--stable", "--json"],
+    ));
+    assert_eq!(path["schema_version"], 1);
+    assert_eq!(path["name"], "fixture");
+    assert_eq!(path["stable"], true);
+    assert!(path["path"]
+        .as_str()
+        .unwrap()
+        .replace('\\', "/")
+        .ends_with("data/models/fixture/current"));
+    assert!(osdk_core::store::dirlink::exists(&stable_link));
+}
+#[test]
+fn model_view_machine_json_covers_empty_state_without_human_text() {
+    let temporary = tempfile::tempdir().unwrap();
+
+    let list = parsed_json(run_isolated(
+        temporary.path(),
+        &["model", "view", "list", "--json"],
+    ));
+    assert_eq!(list["schema_version"], 1);
+    assert_eq!(list["views"], serde_json::json!([]));
+
+    let path = parsed_json(run_isolated(
+        temporary.path(),
+        &["model", "view", "path", "comfyui", "--json"],
+    ));
+    assert_eq!(path["schema_version"], 1);
+    assert_eq!(path["consumer"], "comfyui");
+    assert!(path["path"]
+        .as_str()
+        .unwrap()
+        .replace('\\', "/")
+        .ends_with("data/views/comfyui/default"));
+
+    let doctor = parsed_json(run_isolated(
+        temporary.path(),
+        &["model", "view", "doctor", "comfyui", "--json"],
+    ));
+    assert_eq!(doctor["schema_version"], 1);
+    assert_eq!(doctor["status"], "healthy");
+    assert_eq!(doctor["models"], serde_json::json!([]));
+}
+
+#[test]
+fn model_sync_jsonl_is_one_versioned_event_per_line() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.first]\nsource = \"hf:owner/first@main\"\n\n[models.second]\nsource = \"ms:owner/second@master\"\n",
+    )
+    .unwrap();
+
+    let output = run_isolated(temporary.path(), &["model", "sync", "--dry-run", "--jsonl"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "machine diagnostics: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("bad JSONL line `{line}`: {error}"))
+        })
+        .collect();
+    assert_eq!(events.len(), 3, "{stdout}");
+    assert!(events.iter().all(|event| event["schema_version"] == 1));
+    assert_eq!(events[0]["event"], "model");
+    assert_eq!(events[0]["status"], "planned");
+    assert_eq!(events[0]["dry_run"], true);
+    assert_eq!(events[2]["event"], "summary");
+    assert_eq!(events[2]["changed"], 2);
+}
+
+#[test]
+fn model_machine_failure_keeps_stdout_empty_and_exits_nonzero() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_isolated(temporary.path(), &["model", "show", "missing", "--json"]);
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!output.stderr.is_empty());
+}
 fn view_list_empty(output: &std::process::Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

@@ -580,6 +580,8 @@ osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # 单个模型
 osdk model sync              # 整个项目
+osdk model show qwen25 --json
+osdk model sync --dry-run --jsonl
 ```
 
 `model use` 受管写入项目声明，默认不下载；`--sync` 会立即物化该模型。它还能在同一次

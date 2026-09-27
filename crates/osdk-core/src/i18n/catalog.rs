@@ -2915,6 +2915,24 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("List local model snapshots", "列出本地模型快照"),
     );
     m.insert(
+        "help.model.show.about",
+        ("Show one local model snapshot", "显示一个本地模型快照"),
+    );
+    m.insert(
+        "help.model.flag.json",
+        (
+            "Emit deterministic, schema-versioned JSON",
+            "输出确定且带 schema 版本的 JSON",
+        ),
+    );
+    m.insert(
+        "help.model.flag.jsonl",
+        (
+            "Emit one schema-versioned JSON event per line",
+            "每行输出一个带 schema 版本的 JSON 事件",
+        ),
+    );
+    m.insert(
         "help.model.path.about",
         ("Print a model snapshot path", "打印模型快照路径"),
     );

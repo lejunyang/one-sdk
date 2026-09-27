@@ -7,6 +7,7 @@ mod deps_cmd;
 mod global_npm_use;
 mod localize;
 mod lockfile;
+mod model_output;
 mod model_view;
 mod pkg;
 mod prompt;

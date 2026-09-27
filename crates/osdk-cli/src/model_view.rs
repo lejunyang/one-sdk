@@ -16,6 +16,7 @@ pub(crate) fn reconcile_declared_views(
     app: &crate::App,
     model: &str,
     declared: &std::collections::BTreeMap<String, crate::lockfile::LockedModelView>,
+    quiet: bool,
 ) -> anyhow::Result<()> {
     if declared.is_empty() {
         return Ok(());
@@ -46,7 +47,9 @@ pub(crate) fn reconcile_declared_views(
         state.save(&app.ctx.dirs)?;
         let entries = entries_for(&state, kind, profile);
         let reports = views.render(kind, profile, &entries)?;
-        print_render_report(model, reports.get(model));
+        if !quiet {
+            print_render_report(model, reports.get(model));
+        }
     }
     Ok(())
 }
@@ -155,20 +158,60 @@ pub fn model_view(app: &App, command: ModelViewCommand) -> anyhow::Result<()> {
             print_render_report(&model, reports.get(&model));
             println!("view root: {}", views.view_root(kind, &profile)?.display());
         }
-        ModelViewCommand::List => {
-            if state.consumers.is_empty() {
+        ModelViewCommand::List { json } => {
+            if json {
+                let mut output = Vec::new();
+                for (consumer, view_consumer) in &state.consumers {
+                    let kind = consumer.parse::<ViewKind>().ok();
+                    for (profile, specs) in &view_consumer.profiles {
+                        output.push(crate::model_output::ViewOutput {
+                            consumer: consumer.clone(),
+                            profile: profile.clone(),
+                            root: kind
+                                .map(|kind| views.view_root(kind, profile))
+                                .transpose()?
+                                .map(|root| root.display().to_string()),
+                            models: specs
+                                .iter()
+                                .map(|spec| crate::model_output::ViewModelOutput {
+                                    name: spec.model.clone(),
+                                    map: spec.map.clone(),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+                crate::model_output::write_json(&crate::model_output::ViewListOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    views: output,
+                })?;
+            } else if state.consumers.is_empty() {
                 println!("no model views configured");
-                return Ok(());
-            }
-            for (consumer, view_consumer) in &state.consumers {
-                for (profile, specs) in &view_consumer.profiles {
-                    let models: Vec<&str> = specs.iter().map(|s| s.model.as_str()).collect();
-                    println!("{consumer}/{profile}: {}", models.join(", "));
+            } else {
+                for (consumer, view_consumer) in &state.consumers {
+                    for (profile, specs) in &view_consumer.profiles {
+                        let models: Vec<&str> = specs.iter().map(|s| s.model.as_str()).collect();
+                        println!("{consumer}/{profile}: {}", models.join(", "));
+                    }
                 }
             }
         }
-        ModelViewCommand::Path { kind, profile } => {
-            println!("{}", views.view_root(kind, &profile)?.display());
+        ModelViewCommand::Path {
+            kind,
+            profile,
+            json,
+        } => {
+            let path = views.view_root(kind, &profile)?;
+            if json {
+                crate::model_output::write_json(&crate::model_output::ViewPathOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    consumer: kind,
+                    profile,
+                    path: path.display().to_string(),
+                })?;
+            } else {
+                println!("{}", path.display());
+            }
         }
         ModelViewCommand::Rebuild { kind } => {
             let kinds: Vec<ViewKind> = match kind {
@@ -215,30 +258,57 @@ pub fn model_view(app: &App, command: ModelViewCommand) -> anyhow::Result<()> {
                 }
             }
         }
-        ModelViewCommand::Doctor { kind, profile } => {
+        ModelViewCommand::Doctor {
+            kind,
+            profile,
+            json,
+        } => {
             let reports = views.render(kind, &profile, &entries_for(&state, kind, &profile))?;
-            let mut problems = 0usize;
-            for (model, report) in &reports {
-                if !report.unclassified.is_empty() {
-                    problems += report.unclassified.len();
-                    println!(
-                        "{model}: {} unclassified (not placed):",
-                        report.unclassified.len()
-                    );
-                    for file in &report.unclassified {
-                        println!("  {file}");
+            let problems = reports
+                .values()
+                .map(|report| report.unclassified.len())
+                .sum::<usize>();
+            if json {
+                crate::model_output::write_json(&crate::model_output::ViewDoctorOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    consumer: kind,
+                    profile: profile.clone(),
+                    status: if problems == 0 { "healthy" } else { "problems" },
+                    root: views.view_root(kind, &profile)?.display().to_string(),
+                    models: reports
+                        .into_iter()
+                        .map(
+                            |(name, report)| crate::model_output::ViewDoctorModelOutput {
+                                name,
+                                placed: report.placed,
+                                unclassified: report.unclassified,
+                                copies: report.copies,
+                            },
+                        )
+                        .collect(),
+                })?;
+            } else {
+                for (model, report) in &reports {
+                    if !report.unclassified.is_empty() {
+                        println!(
+                            "{model}: {} unclassified (not placed):",
+                            report.unclassified.len()
+                        );
+                        for file in &report.unclassified {
+                            println!("  {file}");
+                        }
+                    }
+                    if report.copies > 0 {
+                        println!(
+                            "{model}: {} file(s) fell back to a byte copy (different volume); \
+                             links were not possible",
+                            report.copies
+                        );
                     }
                 }
-                if report.copies > 0 {
-                    println!(
-                        "{model}: {} file(s) fell back to a byte copy (different volume); \
-                         links were not possible",
-                        report.copies
-                    );
+                if problems == 0 {
+                    println!("all rendered files classified; no problems");
                 }
-            }
-            if problems == 0 {
-                println!("all rendered files classified; no problems");
             }
         }
     }

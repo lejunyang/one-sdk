@@ -177,11 +177,36 @@ fn localize_subcommands(cmd: Command) -> Command {
                     .mut_arg("name", |a| a.help(h("help.model.sync.arg.name")))
                     .mut_arg("prune", |a| a.help(h("help.model.sync.flag.prune")))
                     .mut_arg("dry_run", |a| a.help(h("help.model.sync.flag.dry_run")))
+                    .mut_arg("jsonl", |a| a.help(h("help.model.flag.jsonl")))
             })
-            .mut_subcommand("list", |s| s.about(h("help.model.list.about")))
-            .mut_subcommand("path", |s| s.about(h("help.model.path.about")))
-            .mut_subcommand("verify", |s| s.about(h("help.model.verify.about")))
+            .mut_subcommand("list", |s| {
+                s.about(h("help.model.list.about"))
+                    .mut_arg("json", |a| a.help(h("help.model.flag.json")))
+            })
+            .mut_subcommand("show", |s| {
+                s.about(h("help.model.show.about"))
+                    .mut_arg("json", |a| a.help(h("help.model.flag.json")))
+            })
+            .mut_subcommand("path", |s| {
+                s.about(h("help.model.path.about"))
+                    .mut_arg("json", |a| a.help(h("help.model.flag.json")))
+            })
+            .mut_subcommand("verify", |s| {
+                s.about(h("help.model.verify.about"))
+                    .mut_arg("json", |a| a.help(h("help.model.flag.json")))
+            })
             .mut_subcommand("remove", |s| s.about(h("help.model.remove.about")))
+            .mut_subcommand("view", |s| {
+                s.mut_subcommand("list", |v| {
+                    v.mut_arg("json", |a| a.help(h("help.model.flag.json")))
+                })
+                .mut_subcommand("path", |v| {
+                    v.mut_arg("json", |a| a.help(h("help.model.flag.json")))
+                })
+                .mut_subcommand("doctor", |v| {
+                    v.mut_arg("json", |a| a.help(h("help.model.flag.json")))
+                })
+            })
             .mut_subcommand("env", |s| {
                 s.about(h("help.model.env.about"))
                     .mut_subcommand("enable", |e| {

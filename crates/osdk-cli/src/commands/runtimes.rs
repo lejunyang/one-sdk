@@ -399,7 +399,7 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             app.ctx.config.models.insert(name.clone(), declaration);
             println!("declared model {name} in {}", path.display());
             if sync {
-                model_sync(app, &store, Some(&name), false, false).await?;
+                model_sync(app, &store, Some(&name), false, false, false).await?;
             }
         }
         ModelCommand::Unuse {
@@ -442,40 +442,106 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
                 println!("model {name} was not declared, locked, viewed, or materialized");
             }
         }
-        ModelCommand::List => {
-            for installed in store.list()? {
+        ModelCommand::List { json } => {
+            let installed = store.list()?;
+            if json {
+                let models = installed
+                    .into_iter()
+                    .map(|model| {
+                        let stable = app
+                            .ctx
+                            .dirs
+                            .models()
+                            .join(&model.manifest.name)
+                            .join("current");
+                        crate::model_output::ModelOutput::from_installed(model, &stable)
+                    })
+                    .collect();
+                crate::model_output::write_json(&crate::model_output::ModelListOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    models,
+                })?;
+            } else {
+                for installed in installed {
+                    println!(
+                        "{}  {}:{}@{}  {}",
+                        installed.manifest.name,
+                        installed.manifest.provider,
+                        installed.manifest.repository,
+                        installed.manifest.revision,
+                        installed.path.display()
+                    );
+                }
+            }
+        }
+        ModelCommand::Show { name, json } => {
+            let installed = store.current(&name)?;
+            if json {
+                let stable = app.ctx.dirs.models().join(&name).join("current");
+                crate::model_output::write_json(&crate::model_output::ModelShowOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    model: crate::model_output::ModelOutput::from_installed(installed, &stable),
+                })?;
+            } else {
                 println!(
-                    "{}  {}:{}@{}  {}",
+                    "{}  {}:{}@{}  {} file(s)  {}",
                     installed.manifest.name,
                     installed.manifest.provider,
                     installed.manifest.repository,
                     installed.manifest.revision,
+                    installed.manifest.files.len(),
                     installed.path.display()
                 );
+                for file in &installed.manifest.files {
+                    println!("  {}  {} bytes", file.path, file.size);
+                }
             }
         }
-        ModelCommand::Path { name, stable } => {
+        ModelCommand::Path { name, stable, json } => {
             let path = if stable {
                 store.stable_path(&name)?
             } else {
                 store.current(&name)?.path
             };
-            println!("{}", path.display());
+            if json {
+                crate::model_output::write_json(&crate::model_output::ModelPathOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    name,
+                    stable,
+                    path: path.display().to_string(),
+                })?;
+            } else {
+                println!("{}", path.display());
+            }
         }
-        ModelCommand::Verify { name } => {
+        ModelCommand::Verify { name, json } => {
+            let path = store.current(&name)?.path;
             let manifest = store.verify(&name)?;
-            println!(
-                "verified {}: {} file(s), revision {}",
-                manifest.name,
-                manifest.files.len(),
-                manifest.revision
-            );
+            if json {
+                let stable = app.ctx.dirs.models().join(&name).join("current");
+                crate::model_output::write_json(&crate::model_output::ModelVerifyOutput {
+                    schema_version: crate::model_output::MODEL_OUTPUT_SCHEMA_VERSION,
+                    status: "verified",
+                    model: crate::model_output::ModelOutput::from_installed(
+                        osdk_core::model::InstalledModel { manifest, path },
+                        &stable,
+                    ),
+                })?;
+            } else {
+                println!(
+                    "verified {}: {} file(s), revision {}",
+                    manifest.name,
+                    manifest.files.len(),
+                    manifest.revision
+                );
+            }
         }
         ModelCommand::Sync {
             name,
             prune,
             dry_run,
-        } => model_sync(app, &store, name.as_deref(), prune, dry_run).await?,
+            jsonl,
+        } => model_sync(app, &store, name.as_deref(), prune, dry_run, jsonl).await?,
         ModelCommand::Remove { name } => {
             let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
             let removed = store.remove(&name)?;
@@ -582,6 +648,7 @@ pub(crate) fn persist_model_pull(
     app: &App,
     name: &str,
     installed: &osdk_core::model::InstalledModel,
+    quiet: bool,
 ) -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
@@ -597,7 +664,7 @@ pub(crate) fn persist_model_pull(
     if let Some(declaration) = applicable_model_declaration(app, name) {
         let views = crate::lockfile::locked_views_from_declaration(&declaration.views);
         crate::lockfile::set_model_views(&path, name, views.clone())?;
-        crate::model_view::reconcile_declared_views(app, name, &views)?;
+        crate::model_view::reconcile_declared_views(app, name, &views, quiet)?;
     }
     Ok(path)
 }
@@ -668,7 +735,9 @@ pub(crate) async fn model_sync(
     target: Option<&str>,
     prune: bool,
     dry_run: bool,
+    jsonl: bool,
 ) -> Result<()> {
+    let emitter = crate::model_output::ModelSyncEmitter::new(jsonl);
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     let mut locked = crate::lockfile::locked_models(&path)?;
@@ -727,7 +796,17 @@ pub(crate) async fn model_sync(
             } else {
                 "would pull"
             };
-            println!("{verb} {name} ({}) from {reason}", declaration.source);
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("model", "planned", true)
+                    .model(name)
+                    .action(if matches!(change, ModelLockState::Changed) {
+                        "relock"
+                    } else {
+                        "pull"
+                    })
+                    .reason(reason),
+                || println!("{verb} {name} ({}) from {reason}", declaration.source),
+            )?;
             // Recorded even in a dry run so the replay pass below does not also
             // report this name (a `Changed` entry still exists in `locked`).
             bootstrapped.insert(name.clone());
@@ -782,18 +861,31 @@ pub(crate) async fn model_sync(
                 .unwrap_or(ModelLockState::Missing);
             match result {
                 Ok(installed) => {
-                    let lock_path = persist_model_pull(app, &name, &installed)?;
+                    let lock_path = persist_model_pull(app, &name, &installed, emitter.jsonl())?;
                     let verb = if matches!(change, ModelLockState::Changed) {
                         "re-locked declared model"
                     } else {
                         "pulled declared model"
                     };
-                    println!(
-                        "{verb} {name} at revision {} -> {}",
-                        installed.manifest.revision,
-                        installed.path.display()
-                    );
-                    println!("updated {}", lock_path.display());
+                    emitter.emit(
+                        &crate::model_output::ModelSyncEvent::new("model", "completed", false)
+                            .model(&name)
+                            .action(if matches!(change, ModelLockState::Changed) {
+                                "relock"
+                            } else {
+                                "pull"
+                            })
+                            .revision(&installed.manifest.revision)
+                            .path(&installed.path),
+                        || {
+                            println!(
+                                "{verb} {name} at revision {} -> {}",
+                                installed.manifest.revision,
+                                installed.path.display()
+                            );
+                            println!("updated {}", lock_path.display());
+                        },
+                    )?;
                     bootstrapped.insert(name);
                     restored += 1;
                 }
@@ -816,10 +908,18 @@ pub(crate) async fn model_sync(
         }
     }
     if locked.is_empty() && configured.is_empty() && !prune {
-        println!(
-            "no models declared in {} or project configuration",
-            path.display()
-        );
+        emitter.emit(
+            &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
+                .action("sync")
+                .path(&path)
+                .changed(0),
+            || {
+                println!(
+                    "no models declared in {} or project configuration",
+                    path.display()
+                )
+            },
+        )?;
         return Ok(());
     }
     // First decide, serially, which locked models actually need fetching: an
@@ -838,18 +938,33 @@ pub(crate) async fn model_sync(
             .map(|manifest| manifest.revision == entry.revision)
             .unwrap_or(false);
         if present {
-            println!("{name} is up to date at revision {}", entry.revision);
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("model", "unchanged", false)
+                    .model(name)
+                    .action("verify")
+                    .revision(&entry.revision),
+                || println!("{name} is up to date at revision {}", entry.revision),
+            )?;
             // Views are part of what the lock declares; reconciling here makes
             // `model sync` also (re)build them on a machine that never ran
             // `model view add`.
-            crate::model_view::reconcile_declared_views(app, name, &entry.views)?;
+            crate::model_view::reconcile_declared_views(app, name, &entry.views, emitter.jsonl())?;
             continue;
         }
         if dry_run {
-            println!(
-                "would pull {name} ({}:{}@{})",
-                entry.provider, entry.repository, entry.revision
-            );
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("model", "planned", true)
+                    .model(name)
+                    .action("restore")
+                    .revision(&entry.revision)
+                    .reason("locked snapshot missing or invalid"),
+                || {
+                    println!(
+                        "would pull {name} ({}:{}@{})",
+                        entry.provider, entry.repository, entry.revision
+                    )
+                },
+            )?;
             restored += 1;
             continue;
         }
@@ -960,12 +1075,21 @@ pub(crate) async fn model_sync(
                 }
                 continue;
             }
-            crate::model_view::reconcile_declared_views(app, &name, &entry.views)?;
-            println!(
-                "restored {name} at revision {} -> {}",
-                installed.manifest.revision,
-                installed.path.display()
-            );
+            crate::model_view::reconcile_declared_views(app, &name, &entry.views, emitter.jsonl())?;
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("model", "completed", false)
+                    .model(&name)
+                    .action("restore")
+                    .revision(&installed.manifest.revision)
+                    .path(&installed.path),
+                || {
+                    println!(
+                        "restored {name} at revision {} -> {}",
+                        installed.manifest.revision,
+                        installed.path.display()
+                    )
+                },
+            )?;
             restored += 1;
         }
         if let Some(error) = first_error {
@@ -986,22 +1110,47 @@ pub(crate) async fn model_sync(
                 continue;
             }
             if dry_run {
-                println!("would remove {name} (not declared in the lock)");
+                emitter.emit(
+                    &crate::model_output::ModelSyncEvent::new("model", "planned", true)
+                        .model(&name)
+                        .action("remove")
+                        .reason("not declared in the lock"),
+                    || println!("would remove {name} (not declared in the lock)"),
+                )?;
             } else if store.remove(&name)? {
-                println!("removed {name} (not declared in the lock)");
+                emitter.emit(
+                    &crate::model_output::ModelSyncEvent::new("model", "completed", false)
+                        .model(&name)
+                        .action("remove")
+                        .reason("not declared in the lock"),
+                    || println!("removed {name} (not declared in the lock)"),
+                )?;
             }
             pruned += 1;
         }
         if pruned > 0 && !dry_run {
             let models = app.ctx.dirs.models();
             let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
-            println!("pruned {} object(s), {} freed", objects, human_bytes(bytes));
+            emitter.emit(
+                &crate::model_output::ModelSyncEvent::new("gc", "completed", false)
+                    .action("prune-cas")
+                    .changed(objects)
+                    .reason(&format!("{} freed", human_bytes(bytes))),
+                || println!("pruned {} object(s), {} freed", objects, human_bytes(bytes)),
+            )?;
         }
     }
 
-    if restored == 0 && !dry_run {
-        println!("all declared models are present");
-    }
+    emitter.emit(
+        &crate::model_output::ModelSyncEvent::new("summary", "completed", dry_run)
+            .action("sync")
+            .changed(restored),
+        || {
+            if restored == 0 && !dry_run {
+                println!("all declared models are present");
+            }
+        },
+    )?;
     Ok(())
 }
 

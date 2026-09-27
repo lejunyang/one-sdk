@@ -645,6 +645,8 @@ osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # one model
 osdk model sync              # whole project
+osdk model show qwen25 --json
+osdk model sync --dry-run --jsonl
 ```
 
 `model use` edits the project declaration and does not download by default; `--sync` immediately

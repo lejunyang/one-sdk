@@ -11,17 +11,40 @@ osdk model use NAME REFERENCE [--endpoint URL]
   [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
   [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
 osdk model unuse NAME [--keep-snapshot]
-osdk model sync [NAME] [--prune] [--dry-run]
-osdk model list
-osdk model path NAME [--stable]
-osdk model verify NAME
+osdk model sync [NAME] [--prune] [--dry-run] [--jsonl]
+osdk model list [--json]
+osdk model show NAME [--json]
+osdk model path NAME [--stable] [--json]
+osdk model verify NAME [--json]
 osdk model remove NAME
+
+osdk model view list [--json]
+osdk model view path <comfyui|hf-cache> [--profile P] [--json]
+osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 ```
 
 `use` edits the project declaration and does not download by default; `--sync` materializes that
 model immediately. `sync NAME` limits work to one model; no argument handles the project.
 `unuse` removes declaration, lock, and views and normally deletes the snapshot; `--keep-snapshot`
 retains bytes. `remove` deletes only local bytes and views while retaining project intent and lock.
+
+## Machine-readable output
+
+`model list/show/path/verify --json` and `model view list/path/doctor --json` each write one
+`schema_version: 1` JSON document to stdout. Model documents include provider, repository,
+requested and immutable revisions, endpoint, variant, file paths/sizes/digests, creation time, and
+snapshot/stable paths plus `stable_path_available` without creating a missing link. View documents include consumer, profile, root, model mappings, and, for
+`doctor`, placed/unclassified files plus cross-volume copy counts. Absolute paths retain native
+separators; manifest-relative paths remain `/`-normalized.
+
+`model sync --jsonl` writes one independent `schema_version: 1` event per line. Every event has
+`event`, `status`, and `dry_run`; events add `model`, `action`, `revision`, `path`, `reason`, and
+`changed` when applicable. `--dry-run --jsonl` remains machine-only as well.
+
+In machine mode stdout contains only JSON/JSONL. Warnings and errors go to stderr and failures keep
+a non-zero exit code. The CLI protocol schema is independent of the on-disk schemas for
+`.osdk-model.json`, `osdk.lock`, and `.osdk-views.json`.
+
 ## Provider references
 
 ```text

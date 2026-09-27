@@ -6,18 +6,21 @@
 | --- | --- |
 | `use <NAME> <REFERENCE>` | 受管写入项目声明；支持 `--endpoint`、`--include/--exclude`、`--variant`、`--view/--profile/--map`；`--sync` 立即物化 |
 | `unuse <NAME>` | 移除声明、lock 和视图，默认删除快照；`--keep-snapshot` 保留字节 |
-| `sync [NAME]` | 同步单个或全部模型；`--dry-run` 预览；全项目模式可用 `--prune` |
-| `list/path/verify` | 检查本地快照；`path --stable` 输出稳定 current 路径 |
+| `sync [NAME]` | 同步单个或全部模型；`--dry-run` 预览；全项目模式可用 `--prune`；`--jsonl` 输出逐行 schema 1 事件 |
+| `list/show/path/verify` | 检查本地快照；查询命令支持 `--json`；`path --stable` 输出稳定 current 路径 |
 | `remove <NAME>` | 仅删除本地快照和视图，保留声明与 lock |
 
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.safetensors' --view comfyui --sync
 osdk model use character-lora civitai:456@123 --view comfyui --sync
-osdk model sync qwen25 --dry-run
+osdk model sync qwen25 --dry-run --jsonl
+osdk model show qwen25 --json
+osdk model view list --json
 osdk model unuse qwen25
 ```
 
 不要手写 OSDK 受管模型声明；使用 `model use/unuse`。`install` 不会隐式下载模型。Civitai 引用必须是精确的 `civitai:<model-id>@<model-version-id>`；OSDK 不做搜索与排序。
+机器模式 stdout 只输出 schema 1 JSON/JSONL，诊断走 stderr，失败保持非零退出码；`model view list/path/doctor` 也支持 `--json`。
 provider 环境和 `model view` 的其余子命令以 `osdk model --help` 为准；声明字段见
 `reference/configuration/models.md`。

@@ -810,9 +810,23 @@ pub enum ModelCommand {
         /// Report what would change without downloading or deleting anything.
         #[arg(long)]
         dry_run: bool,
+        /// Emit one schema-versioned JSON object per line on stdout.
+        #[arg(long)]
+        jsonl: bool,
     },
     /// List locally materialized model snapshots.
-    List,
+    List {
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one locally materialized model snapshot.
+    Show {
+        name: String,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the current local snapshot path.
     Path {
         name: String,
@@ -825,9 +839,17 @@ pub enum ModelCommand {
         /// script.
         #[arg(long)]
         stable: bool,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
     },
     /// Verify all files in a local snapshot.
-    Verify { name: String },
+    Verify {
+        name: String,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove local snapshots while keeping project declaration and lock state.
     Remove { name: String },
     /// Manage provider environment exported by shell activation.
@@ -859,12 +881,19 @@ pub enum ModelViewCommand {
         map: Vec<String>,
     },
     /// List views and the models rendered into them.
-    List,
+    List {
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a view root path (stable across pulls) for a consumer config.
     Path {
         kind: osdk_core::model::view::ViewKind,
         #[arg(long, default_value = "default")]
         profile: String,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
     },
     /// Re-render views from current memberships and current snapshots.
     Rebuild {
@@ -899,6 +928,9 @@ pub enum ModelViewCommand {
         kind: osdk_core::model::view::ViewKind,
         #[arg(long, default_value = "default")]
         profile: String,
+        /// Emit a schema-versioned JSON document.
+        #[arg(long)]
+        json: bool,
     },
 }
 

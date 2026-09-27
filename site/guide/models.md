@@ -10,16 +10,37 @@ osdk model use NAME REFERENCE [--endpoint URL]
   [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
   [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
 osdk model unuse NAME [--keep-snapshot]
-osdk model sync [NAME] [--prune] [--dry-run]
-osdk model list
-osdk model path NAME [--stable]
-osdk model verify NAME
+osdk model sync [NAME] [--prune] [--dry-run] [--jsonl]
+osdk model list [--json]
+osdk model show NAME [--json]
+osdk model path NAME [--stable] [--json]
+osdk model verify NAME [--json]
 osdk model remove NAME
+
+osdk model view list [--json]
+osdk model view path <comfyui|hf-cache> [--profile P] [--json]
+osdk model view doctor <comfyui|hf-cache> [--profile P] [--json]
 ```
 
 `use` 受管写入项目声明，默认不下载；`--sync` 立即物化该模型。`sync NAME` 只处理一个
 模型，无参数时处理整个项目。`unuse` 撤销声明、lock 和视图并默认删除本地快照；
 `--keep-snapshot` 保留本地字节。`remove` 只删除本地快照和视图，保留项目声明与 lock。
+
+## 机器可读输出
+
+`model list/show/path/verify --json` 与 `model view list/path/doctor --json` 各自在 stdout
+输出一个 `schema_version: 1` JSON 文档。模型文档包含 provider、repository、请求/不可变
+revision、endpoint、variant、文件路径/大小/摘要、创建时间以及当前快照和稳定路径；view
+文档还用 `stable_path_available` 报告稳定路径是否已可用，但不会为查询创建缺失链接。view 文档包含 consumer、profile、根路径、模型与映射，doctor 还包含 placed、unclassified 和
+跨卷 copy 计数。绝对路径保留当前平台的原生分隔符，manifest 中的相对路径保持 `/`。
+
+`model sync --jsonl` 每行输出一个独立的 `schema_version: 1` 事件。固定字段为
+`event`、`status` 与 `dry_run`；事件按需增加 `model`、`action`、`revision`、`path`、
+`reason`、`changed`。`--dry-run --jsonl` 同样只输出事件，不混入人类文本。
+
+机器模式中 stdout 只承载 JSON/JSONL；警告和错误写 stderr，失败保持非零退出码。CLI
+协议 schema 与 `.osdk-model.json`、`osdk.lock`、`.osdk-views.json` 的磁盘 schema 相互独立。
+
 ## Provider 引用
 
 ```text
