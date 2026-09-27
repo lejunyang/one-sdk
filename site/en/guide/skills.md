@@ -41,12 +41,13 @@ when it hits the anonymous rate limit; it **never contacts skills.sh**, so no
 registry key is needed. `--owner` restricts to one org/user and `--limit` caps
 the result count (1–50).
 
-`sync` and `update` are a pair: `sync` reproduces the commit the lock records
-(unchanged), while `update` re-resolves a configured branch/tag (or the default
-branch when none is configured) and rewrites the lock only when it moved. A bare
-40-hex commit stored by an existing project is treated as an installation
-snapshot, so `update` follows the default branch; spell an immutable pin
-explicitly as `ref = "rev:<commit>"`. `use` installs nothing and writes no
+`sync` and `update` are counterparts: `sync` reproduces the commit, content hash,
+and install mode recorded in the lock. `update` re-resolves the lock's
+`requested_ref`, except that an explicit `[skills.<name>].ref` change wins. If the
+repository commit advances but the selected skill's content hash does not, only the
+lock commit advances; changed skill content is reinstalled. A bare 40-hex commit
+left by an older project is migrated to default-branch intent; spell an intentional
+permanent pin as `ref = "rev:<commit>"`. `use` installs nothing and writes no
 lock — it uses one skill on the fly: with no `-a` it writes the generated prompt
 to stdout (pipe it, e.g. `osdk skills use owner/repo | claude`), and with `-a <id>`
 it starts that agent's CLI interactively with the prompt. `init` scaffolds a
@@ -101,15 +102,17 @@ confirmation unless `--yes` was supplied. Shared physical directories are writte
 [skills.web-design-guidelines]
 source = "github:vercel-labs/agent-skills/skills/web-design-guidelines"
 content_hash = "b3-v2:…"                 # BLAKE3 digest of the staged content
+requested_ref = "branch:main"            # requested ref; default means repository default
 resolved_commit = "063bee94…"            # the immutable commit a floating ref resolved to
+install_mode = "copy"                    # selected placement policy
 agents = ["claude-code"]
 ```
 
 `osdk skills sync` reproduces from it: it prefers the staged content-addressed
 copy, and when that copy is gone it **re-downloads a GitHub source at the recorded
 `resolved_commit`** and recomputes `content_hash`. A mismatch fails closed — a
-moved tag or a substituted mirror cannot install. A local source whose staged copy
-is gone cannot be reproduced and is reported.
+moved tag or a substituted mirror cannot install — and placement reuses
+`install_mode`. A local source whose staged copy is gone cannot be reproduced and is reported.
 
 ## How skills land
 

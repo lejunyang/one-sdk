@@ -625,9 +625,10 @@ osdk skills remove web-design-guidelines
 只有多个实际目标目录时才询问链接或复制，单一目录直接复制。写盘前会列出所有目标目录并标明
 将被覆盖的已有路径，未传 `--yes` 时统一确认。
 
-`add` 把解析到的 commit 与内容哈希写进 `osdk.lock`；`sync` 缺本地副本时按记录的 commit 重新
-下载并核对哈希，移动的 tag 或被换的镜像会被拒绝。`skills update` 则重新解析分支/标签或默认
-分支；需要在更新时仍固定不动，使用 `ref = "rev:<commit>"`。默认目录链接（Windows junction /
+`add` 把请求 ref、解析 commit、内容哈希和选定的安装方式写进 `osdk.lock`；`sync` 缺本地副本时
+按记录的 commit 重新下载并核对哈希，同时维持复制/链接方式。`skills update` 重新解析请求的
+分支/标签或默认分支，仅当目标 skill 内容哈希变化时重装；只有仓库其他内容变化时仅推进 lock
+commit。需要在更新时仍固定不动，使用 `ref = "rev:<commit>"`。默认目录链接（Windows junction /
 Unix symlink），无链接环境或 `--copy` 时整树拷贝，且不会覆盖非 osdk 放置的真实目录。也可以在
 `osdk.toml` 里用 `[skills]` 声明，让 `osdk skills sync` 直接复现。
 

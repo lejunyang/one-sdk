@@ -697,11 +697,12 @@ destinations; one destination is copied directly. Before writing, `add` prints e
 destination, marks existing paths as overwrites, and asks for confirmation unless
 `--yes` was supplied.
 
-`add` pins the resolved commit and a content hash into `osdk.lock`; `sync`
-re-downloads a missing local copy at that exact commit and re-checks the hash, so
-a moved tag or a substituted mirror is refused. `skills update` instead
-re-resolves a branch/tag or the default branch; use `ref = "rev:<commit>"` when
-an update must keep an immutable pin. Installs use a directory link by default (a
+`add` records the requested ref, resolved commit, content hash, and chosen install
+mode in `osdk.lock`; `sync` re-downloads a missing local copy at that exact commit,
+re-checks the hash, and preserves copy/link placement. `skills update` re-resolves
+the requested branch/tag or default branch and reinstalls only when that skill's
+content hash changes; a repository-only change just advances the lock commit. Use
+`ref = "rev:<commit>"` when an update must keep an immutable pin. Installs use a directory link by default (a
 junction on Windows, a symlink on Unix) and fall back to a copy where links are
 unavailable or with `--copy`, never replacing a real directory osdk did not
 place. You can also declare skills in `osdk.toml` under `[skills]` and let

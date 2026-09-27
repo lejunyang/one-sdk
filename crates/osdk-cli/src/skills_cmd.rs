@@ -253,9 +253,13 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
             LockedSkill {
                 source: source.canonical(),
                 content_hash: package.content_hash(),
+                requested_ref: resolved_commit
+                    .as_ref()
+                    .and_then(|_| normalized_requested_ref(args.reference.as_deref())),
                 resolved_commit: resolved_commit.clone(),
                 skill: (name != &package.name).then(|| name.clone()),
                 agents: targets.iter().map(|target| target.id.to_string()).collect(),
+                install_mode: Some(mode),
             },
         ));
     }
@@ -367,9 +371,10 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
     // the bytes. A local source that has lost its staged copy cannot be replayed
     // (its origin path may be gone), so it is reported rather than guessed at.
     let scope_root = scope_root(app, global)?;
-    let mode = link_mode(app, false);
+    let fallback_mode = link_mode(app, false);
     let mut missing = Vec::new();
     for (name, entry) in &skills {
+        let mode = entry.install_mode.unwrap_or(fallback_mode);
         let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
         if !staged.exists() {
             match refetch_staged(app, name, entry).await {
@@ -383,12 +388,13 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
                 }
             }
         }
-        for agent_id in &entry.agents {
-            let Some(target) = agent_target(agent_id) else {
-                continue;
-            };
-            let agent_dir = agent_dir(target, &scope_root, global)?;
-            install::link_into(&agent_dir, name, &staged, mode)?;
+        let targets = entry
+            .agents
+            .iter()
+            .filter_map(|agent_id| agent_target(agent_id))
+            .collect::<Vec<_>>();
+        for agent_dir in agent_dirs_by_path(&targets, &scope_root, global)?.keys() {
+            install::link_into(agent_dir, name, &staged, mode)?;
         }
         println!("synced `{name}` -> {}", entry.agents.join(", "));
     }
@@ -433,7 +439,7 @@ async fn refetch_staged(app: &App, name: &str, entry: &LockedSkill) -> Result<Op
         root.join(&wanted)
     };
     let package = install::read_skill_dir(&skill_root)?;
-    let mode = link_mode(app, false);
+    let mode = entry.install_mode.unwrap_or_else(|| link_mode(app, false));
     let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
     if package.content_hash() != entry.content_hash {
         anyhow::bail!(
@@ -470,7 +476,7 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
     }
 
     let scope_root = scope_root(app, global)?;
-    let mode = link_mode(app, false);
+    let fallback_mode = link_mode(app, false);
     let mut changed = false;
     for name in &names {
         let Some(entry) = lock.skills.get(name).cloned() else {
@@ -486,19 +492,28 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             println!("`{name}`: local source, nothing to update");
             continue;
         };
-        // Re-resolve the recorded ref. Without a ref, HEAD of the default branch
-        // is the moving target; a commit-pinned entry resolves to itself.
-        // The original ref lives in the project config, not the lock, so read it
-        // from there; absent, HEAD of the default branch is the moving target.
+        // New locks carry the user's request independently from the immutable
+        // commit. Legacy locks fall back to project configuration for migration.
         let configured_reference = app
             .ctx
             .config
             .skills
             .get(name)
-            .and_then(|declaration| declaration.r#ref.as_deref());
-        let reference = match reference_for_update(configured_reference) {
+            .map(|declaration| declaration.r#ref.as_deref());
+        let requested_reference = configured_reference.unwrap_or(entry.requested_ref.as_deref());
+        let reference = match reference_for_update(requested_reference) {
             UpdateReference::Pinned(reference) => {
-                println!("`{name}`: pinned at {reference}; nothing to update");
+                let requested_ref = normalized_requested_ref(Some(reference));
+                if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
+                    if let Some(existing) = lock.skills.get_mut(name) {
+                        existing.requested_ref = requested_ref;
+                        existing.install_mode = Some(entry.install_mode.unwrap_or(fallback_mode));
+                    }
+                    changed = true;
+                    println!("`{name}`: pinned at {reference}; migrated lock metadata");
+                } else {
+                    println!("`{name}`: pinned at {reference}; nothing to update");
+                }
                 continue;
             }
             UpdateReference::Resolve(reference) => reference,
@@ -507,7 +522,21 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             .await
             .with_context(|| format!("re-resolving {owner}/{repo}"))?;
         if Some(&commit) == entry.resolved_commit.as_ref() {
-            println!("`{name}`: already at {}", &commit[..commit.len().min(12)]);
+            let requested_ref = normalized_requested_ref(requested_reference);
+            let mode = entry.install_mode.unwrap_or(fallback_mode);
+            if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
+                if let Some(existing) = lock.skills.get_mut(name) {
+                    existing.requested_ref = requested_ref;
+                    existing.install_mode = Some(mode);
+                }
+                changed = true;
+                println!(
+                    "`{name}`: already at {}, migrated lock metadata",
+                    &commit[..commit.len().min(12)]
+                );
+            } else {
+                println!("`{name}`: already at {}", &commit[..commit.len().min(12)]);
+            }
             continue;
         }
 
@@ -520,17 +549,37 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             root.join(&wanted_dir)
         };
         let package = install::read_skill_dir(&skill_root)?;
+        let content_hash = package.content_hash();
+        let requested_ref = normalized_requested_ref(requested_reference);
+        if content_hash == entry.content_hash {
+            if let Some(existing) = lock.skills.get_mut(name) {
+                existing.requested_ref = requested_ref;
+                existing.resolved_commit = Some(commit.clone());
+                existing.install_mode = Some(entry.install_mode.unwrap_or(fallback_mode));
+            }
+            changed = true;
+            println!(
+                "`{name}`: source advanced to {}, skill content unchanged",
+                &commit[..commit.len().min(12)]
+            );
+            continue;
+        }
+
+        let mode = entry.install_mode.unwrap_or(fallback_mode);
         let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
-        for agent_id in &entry.agents {
-            let Some(target) = agent_target(agent_id) else {
-                continue;
-            };
-            let agent_dir = agent_dir(target, &scope_root, global)?;
-            install::link_into(&agent_dir, name, &staged, mode)?;
+        let targets = entry
+            .agents
+            .iter()
+            .filter_map(|agent_id| agent_target(agent_id))
+            .collect::<Vec<_>>();
+        for agent_dir in agent_dirs_by_path(&targets, &scope_root, global)?.keys() {
+            install::link_into(agent_dir, name, &staged, mode)?;
         }
         if let Some(existing) = lock.skills.get_mut(name) {
+            existing.requested_ref = requested_ref;
             existing.resolved_commit = Some(commit.clone());
-            existing.content_hash = package.content_hash();
+            existing.content_hash = content_hash;
+            existing.install_mode = Some(mode);
         }
         changed = true;
         println!("`{name}`: updated to {}", &commit[..commit.len().min(12)]);
@@ -560,6 +609,7 @@ enum UpdateReference<'a> {
 /// follows the source's default branch for backward compatibility.
 fn reference_for_update(reference: Option<&str>) -> UpdateReference<'_> {
     match reference.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("default") => UpdateReference::Resolve(None),
         Some(reference) if reference.starts_with("rev:") => UpdateReference::Pinned(reference),
         Some(reference)
             if reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
@@ -569,6 +619,19 @@ fn reference_for_update(reference: Option<&str>) -> UpdateReference<'_> {
         Some(reference) => UpdateReference::Resolve(Some(reference)),
         None => UpdateReference::Resolve(None),
     }
+}
+
+fn normalized_requested_ref(reference: Option<&str>) -> Option<String> {
+    Some(
+        reference
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                !(value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            })
+            .unwrap_or("default")
+            .to_string(),
+    )
 }
 
 /// Use a skill without installing it: print its prompt, or start an agent.
@@ -1413,6 +1476,25 @@ mod tests {
         assert_eq!(
             reference_for_update(Some("release")),
             UpdateReference::Resolve(Some("release"))
+        );
+    }
+
+    #[test]
+    fn requested_refs_store_update_intent_not_legacy_snapshots() {
+        let snapshot = "02a2f2b3142ded7d73554aaee629a24966a62313";
+        assert_eq!(normalized_requested_ref(None).as_deref(), Some("default"));
+        assert_eq!(
+            normalized_requested_ref(Some("branch:main")).as_deref(),
+            Some("branch:main")
+        );
+        assert_eq!(
+            normalized_requested_ref(Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313"))
+                .as_deref(),
+            Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313")
+        );
+        assert_eq!(
+            normalized_requested_ref(Some(snapshot)).as_deref(),
+            Some("default")
         );
     }
 }

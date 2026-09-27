@@ -379,8 +379,9 @@ pub struct LockedModelView {
 /// A skill recorded in the lock so `osdk skills sync` can reproduce it.
 ///
 /// The bytes are not stored (like models and http artifacts); the `content_hash`
-/// pins the exact staged content, `resolved_commit` records the immutable commit
-/// a floating GitHub ref resolved to, and `agents` records where it was linked.
+/// pins the exact staged content, `resolved_commit` records the immutable commit,
+/// `requested_ref` preserves what a future update should re-resolve, and
+/// `install_mode` keeps sync/update from changing how the skill was placed.
 /// No `deny_unknown_fields`, matching the other lock entries, so a newer field
 /// does not make an older build reject the file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -389,6 +390,10 @@ pub struct LockedSkill {
     pub source: String,
     /// osdk's BLAKE3 content digest of the staged skill (`b3-v2:...`).
     pub content_hash: String,
+    /// Ref the user requested. `default` denotes the repository default branch.
+    /// Missing only for lock entries written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
     /// Immutable commit a GitHub source resolved to, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_commit: Option<String>,
@@ -398,6 +403,10 @@ pub struct LockedSkill {
     /// Agent ids this skill is linked into.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+    /// Placement mode selected at install time. Missing on legacy locks, which
+    /// retain the configured fallback until the next add/update migrates them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_mode: Option<osdk_core::store::link::LinkMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -690,6 +699,31 @@ mod tests {
         assert!(entry.pypi.is_none());
     }
     use super::*;
+
+    #[test]
+    fn skill_lock_fields_round_trip_and_legacy_entries_still_load() {
+        let legacy: LockedSkill = toml::from_str(
+            "source = \"github:owner/repo\"\ncontent_hash = \"b3-v2:old\"\nresolved_commit = \"deadbeef\"\nagents = [\"codex\"]\n",
+        )
+        .unwrap();
+        assert!(legacy.requested_ref.is_none());
+        assert!(legacy.install_mode.is_none());
+
+        let current = LockedSkill {
+            source: "github:owner/repo".into(),
+            content_hash: "b3-v2:new".into(),
+            requested_ref: Some("branch:main".into()),
+            resolved_commit: Some("feedface".into()),
+            skill: Some("guide".into()),
+            agents: vec!["codex".into()],
+            install_mode: Some(osdk_core::store::link::LinkMode::Copy),
+        };
+        let encoded = toml::to_string(&current).unwrap();
+        let decoded: LockedSkill = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, current);
+        assert!(encoded.contains("requested_ref = \"branch:main\""));
+        assert!(encoded.contains("install_mode = \"copy\""));
+    }
 
     fn linux() -> Platform {
         Platform {

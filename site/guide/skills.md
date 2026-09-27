@@ -36,10 +36,11 @@ osdk skills agents
 `GH_TOKEN`；**不接触 skills.sh**，因此不需要任何注册表密钥。`--owner` 限定某 org/user，
 `--limit` 限结果数（1–50）。
 
-`sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit（不变），`update` 把浮动 ref
-（分支/标签，取自 `[skills.<名>].ref`；未配置时跟随默认分支）重新解析到当前 commit，变了才
-重下并写回 lock。已有项目保存的裸 40 位 commit 只视为安装快照，`update` 会继续跟随默认分支；
-需要永久固定时明确写 `ref = "rev:<commit>"`。
+`sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit、内容哈希和安装方式；`update`
+重解析 lock 的 `requested_ref`，若项目 `[skills.<名>].ref` 明确修改则以配置为准。仓库 commit
+前进但目标 skill 内容哈希未变时只推进 lock，不重装；内容变化才重新落地。已有项目保存的裸
+40 位 commit 只视为安装快照，迁移为默认分支意图；需要永久固定时明确写
+`ref = "rev:<commit>"`。
 `use` 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可
 `osdk skills use owner/repo | claude` 管道），`-a <id>` 时用该 Agent 的 CLI 交互式启动。
 `init` 生成 `SKILL.md` 模板，帮你开始写自己的 skill。
@@ -88,13 +89,15 @@ Agent。只检测到一个时自动选中它和整组 `.agents/skills` Agent；�
 [skills.web-design-guidelines]
 source = "github:vercel-labs/agent-skills/skills/web-design-guidelines"
 content_hash = "b3-v2:…"                 # 落地内容的 BLAKE3 摘要
+requested_ref = "branch:main"            # 请求的分支/标签；default 表示默认分支
 resolved_commit = "063bee94…"            # 浮动 ref 解析到的不可变 commit
+install_mode = "copy"                    # 选定的落地策略
 agents = ["claude-code"]
 ```
 
 `osdk skills sync` 据此复现：优先用已落地的内容寻址副本，副本不在时对 GitHub 源**按记录的
 `resolved_commit` 重新下载**并重算 `content_hash`，与 lock 不符就 fail-closed 拒绝——移动过的
-tag 或被替换的镜像都装不进来。本地源丢了副本无法复现，会如实报告。
+tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`。本地源丢了副本无法复现，会如实报告。
 
 ## 落地方式
 

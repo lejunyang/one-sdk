@@ -7,8 +7,8 @@
 | `add <SOURCE>` | `-s/--skill`、`-a/--agent` 可重复；`-g`、`--copy`、`--ref`、`-l/--list`、`--no-lock` | 列出或安装来源中的 skill；无显式/默认 Agent 时先检测、再按需多选；仅多目标目录时选择链接或复制；摘要确认后写盘，`--yes` 跳过交互 |
 | `list`（`ls`） | `-g` | 从项目或用户 lock 列已安装 skill 与 Agent |
 | `remove <NAME>`（`rm`） | `-g`、`-a/--agent` 可重复 | 摘除全部或指定 Agent 链接 |
-| `sync` | `-g` | 按 lock 的 commit 与内容哈希复现 |
-| `update [SKILL...]` | `-g` | 重解析分支/标签或默认分支并更新 lock；仅显式 `rev:<commit>` 固定不动，旧版写入的裸 40 位 commit 视为安装快照 |
+| `sync` | `-g` | 按 lock 的 commit、内容哈希与安装方式精确复现 |
+| `update [SKILL...]` | `-g` | 重解析 `requested_ref`；仅目标 skill 内容哈希变化时重装，仓库其他变更只推进 lock；仅显式 `rev:<commit>` 固定不动，旧裸 commit 迁移为默认分支意图 |
 | `path <NAME>` | — | 打印内容寻址落地目录 |
 | `find [QUERY...]`（`search`） | `--owner`、`--limit 1..50` | 匿名搜索 GitHub；限流后才用 token，不访问 skills.sh |
 | `use <SOURCE>` | `-s/--skill`、`-a/--agent`、`--ref` | 不安装；打印 prompt 或交互启动 Agent |
