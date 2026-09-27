@@ -12,7 +12,7 @@
 | `registry test <REGISTRY>` | `--image`、`--platform`、`--json`；匿名探测 registry 与镜像候选 |
 | `mirrors plan <REGISTRY>` | `--runtime docker\|containerd\|buildkit` 必填；`--builder`、`--native-config`、`--containerd-main-config`、`--json` |
 | `mirrors apply <REGISTRY>` | 同 plan；`--native-config` 必填，另有 `--image`、`--platform`、`--accept-plan`、`--dry-run`、`--json` |
-| `prune` | `--runtime docker\|buildkit\|containerd`、`--scope images\|build-cache` 必填；可选 `--context` / `--builder`；执行需 `--execute --accept-preview <ID>` |
+| `prune` | `--runtime docker\|buildkit\|containerd`、`--scope images\|build-cache` 必填；预览支持 `--json`；执行需 `--execute --accept-preview <ID>` |
 
 ```bash
 osdk container doctor --json

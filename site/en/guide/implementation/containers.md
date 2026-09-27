@@ -272,6 +272,10 @@ execution-confirmation stage. The normal prompt must still be accepted, while
 global `--yes` may answer that prompt. It does not substitute for `--execute` or
 `--accept-preview`. The already validated endpoint value—not the mutable context
 name—is then passed directly to the one native prune launch.
+The CLI can serialize the preview directly with `--json`; this flag conflicts
+with execution so inherited native stdout cannot mix with the JSON document.
+Unsupported containerd requests use a typed schema-version-2 JSON result and
+then retain their nonzero exit status.
 
 ## Serialization and redaction
 

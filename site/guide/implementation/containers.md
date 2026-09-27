@@ -215,6 +215,8 @@ warning 变化，或者 ID 来自任何绑定字段不同的预览，都会在�
 对于可执行的 Docker 预览，ID 匹配后只会进入执行确认阶段：仍需接受普通确认 prompt，也可用
 全局 `--yes` 回答该提示；它不能替代 `--execute` 或 `--accept-preview`。之后传给唯一一次原生
 prune 启动的是已经验证的 endpoint 值，而不是可变 context 名称。
+CLI 可通过 `--json` 直接序列化 preview；该参数与执行冲突，避免继承的原生 stdout 混入 JSON
+文档。containerd 的不支持请求会输出类型化 schema-version-2 JSON，同时保留非零退出状态。
 
 ## 序列化与脱敏
 

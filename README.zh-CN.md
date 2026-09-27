@@ -778,6 +778,7 @@ osdk container pull ghcr.io/example/tool:1.0 \
   --address unix:///run/containerd/containerd.sock --namespace default
 osdk container prune --runtime docker --scope images
 osdk container prune --runtime buildkit --scope build-cache --builder my-builder
+osdk container prune --runtime docker --scope images --json
 ```
 
 `container doctor` 会先报告选中的 runtime，再展示同一次探测已获得的类型化事实：Docker

@@ -868,6 +868,7 @@ osdk container pull ghcr.io/example/tool:1.0 \
   --address unix:///run/containerd/containerd.sock --namespace default
 osdk container prune --runtime docker --scope images
 osdk container prune --runtime buildkit --scope build-cache --builder my-builder
+osdk container prune --runtime docker --scope images --json
 ```
 
 `container doctor` reports the selected runtime first, then the typed facts

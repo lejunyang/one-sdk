@@ -108,6 +108,7 @@ osdk container prune
   [--builder NAME]
   [--execute]
   [--accept-preview SHA256_ID]
+  [--json]
 ```
 
 只支持两个 runtime/scope 组合：
@@ -136,6 +137,10 @@ osdk container prune --runtime buildkit --scope build-cache --builder team-build
 `docker --host` 使用发现时捕获的精确原始本地 endpoint；context 名仅用于展示。Remote/SSH/TCP/TLS
 context 与 Docker Desktop 目标会被拒绝，因为直接 `--host` 无法安全复现其 context 连接行为。要应用同一份
 预览，必须同时加入两个执行 gate，再确认执行提示：
+
+预览可使用 `--json` 直接输出 schema version 2 对象。JSON 仅用于预览并与 `--execute`
+冲突，因此原生命令输出不会破坏结构化输出。containerd 不支持的预览会先输出类型化的
+schema version 2 结果，再以非零状态退出。
 
 ```bash
 osdk container prune --runtime docker --scope images \

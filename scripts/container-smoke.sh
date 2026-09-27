@@ -88,8 +88,10 @@ echo "checking read-only plans and previews"
 docker_plan="$($osdk_binary container mirrors plan docker.io --runtime docker \
     --native-config "$temporary/daemon.json" --json)"
 assert_json 'value["applicability"] == "ready"' <<<"$docker_plan"
-$osdk_binary container prune --runtime docker --scope images | grep -q '^preview id: sha256:'
-$osdk_binary container prune --runtime buildkit --scope build-cache | grep -q '^preview id: sha256:'
+docker_prune="$($osdk_binary container prune --runtime docker --scope images --json)"
+assert_json 'value["preview_id"].startswith("sha256:")' <<<"$docker_prune"
+buildkit_prune="$($osdk_binary container prune --runtime buildkit --scope build-cache --json)"
+assert_json 'value["preview_id"].startswith("sha256:")' <<<"$buildkit_prune"
 test ! -e "$temporary/daemon.json"
 
 echo "checking a pinned OCI registry and Docker pull"

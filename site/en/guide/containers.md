@@ -123,6 +123,7 @@ osdk container prune
   [--builder NAME]
   [--execute]
   [--accept-preview SHA256_ID]
+  [--json]
 ```
 
 Only two runtime/scope pairs are supported:
@@ -157,6 +158,11 @@ context name is display metadata only. Remote/SSH/TCP/TLS contexts and Docker
 Desktop targets are rejected because direct `--host` invocation cannot safely
 reproduce their context-held connection behavior. To apply that same preview, add
 both execution gates and then approve the execution prompt:
+
+Use `--json` on a preview to emit this schema-version-2 object directly. JSON is
+preview-only and conflicts with `--execute`, so native command output can never
+corrupt the structured stream. An unsupported containerd preview emits a typed
+schema-version-2 result before exiting nonzero.
 
 ```bash
 osdk container prune --runtime docker --scope images \

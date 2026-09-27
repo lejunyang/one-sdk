@@ -113,7 +113,8 @@ pub async fn run(app: &App, command: ContainerCommand) -> Result<Option<ExitStat
             builder,
             execute,
             accept_preview,
-        } => native_prune(
+            json,
+        } => native_prune_with_format(
             &runner,
             app.prompt.as_ref(),
             app.ctx.config.containers(),
@@ -123,6 +124,7 @@ pub async fn run(app: &App, command: ContainerCommand) -> Result<Option<ExitStat
             builder,
             execute,
             accept_preview.as_deref(),
+            json,
             &mut std::io::stdout(),
         ),
         ContainerCommand::Mirrors {
@@ -409,6 +411,7 @@ fn resolve_pull_runtime(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn native_prune(
     runner: &dyn CommandRunner,
     prompt: &dyn crate::prompt::Prompt,
@@ -421,6 +424,35 @@ fn native_prune(
     accepted_preview: Option<&str>,
     output: &mut dyn Write,
 ) -> Result<Option<ExitStatus>> {
+    native_prune_with_format(
+        runner,
+        prompt,
+        config,
+        runtime,
+        scope,
+        context,
+        builder,
+        execute,
+        accepted_preview,
+        false,
+        output,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_prune_with_format(
+    runner: &dyn CommandRunner,
+    prompt: &dyn crate::prompt::Prompt,
+    config: &osdk_core::config::ContainersConfig,
+    runtime: ContainerPruneRuntimeArg,
+    scope: ContainerPruneScopeArg,
+    context: Option<String>,
+    builder: Option<BuildxBuilderSelector>,
+    execute: bool,
+    accepted_preview: Option<&str>,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<Option<ExitStatus>> {
     let limits = capture_limits(config.probe_timeout_ms);
     match runtime {
         ContainerPruneRuntimeArg::Containerd => {
@@ -430,7 +462,7 @@ fn native_prune(
                 )));
             }
             let unsupported = ContainerdPrune.preview();
-            write_unsupported_prune(output, &unsupported, i18n::current())?;
+            write_unsupported_prune(output, &unsupported, i18n::current(), json)?;
             Err(anyhow!(osdk_core::t!("err.container.prune_unsupported")))
         }
         ContainerPruneRuntimeArg::Docker => {
@@ -450,7 +482,7 @@ fn native_prune(
             }
             let prune = discover_docker_prune(runner, limits, context.as_deref())?;
             let preview = prune.preview()?;
-            write_prune_preview(output, &preview, i18n::current())?;
+            write_prune_preview(output, &preview, i18n::current(), json)?;
             execute_docker_prune(
                 runner,
                 prompt,
@@ -473,7 +505,7 @@ fn native_prune(
             let selector = builder.unwrap_or_else(|| config.builder.clone());
             let prune = discover_buildx_prune(runner, limits, selector)?;
             let preview = prune.preview()?;
-            write_prune_preview(output, &preview, i18n::current())?;
+            write_prune_preview(output, &preview, i18n::current(), json)?;
             if execute {
                 return Err(anyhow!(osdk_core::t!(
                     "err.container.prune_buildkit_execute_unsupported"
@@ -603,7 +635,13 @@ fn write_prune_preview(
     output: &mut dyn Write,
     preview: &PrunePreview,
     lang: Lang,
-) -> std::io::Result<()> {
+    json: bool,
+) -> Result<()> {
+    if json {
+        serde_json::to_writer(&mut *output, preview).context("serializing native prune preview")?;
+        writeln!(output)?;
+        return Ok(());
+    }
     let owner = prune_owner_label(lang, preview.owner);
     let scope = prune_scope_label(lang, preview.scope);
     writeln!(output, "{}", trl(lang, "msg.container.prune_preview"))?;
@@ -656,9 +694,34 @@ fn write_unsupported_prune(
     output: &mut dyn Write,
     unsupported: &UnsupportedPrune,
     lang: Lang,
-) -> std::io::Result<()> {
+    json: bool,
+) -> Result<()> {
     debug_assert_eq!(unsupported.owner, NativeCacheOwner::Containerd);
-    writeln!(output, "{}", trl(lang, "msg.container.prune_unsupported"))
+    if json {
+        #[derive(Serialize)]
+        struct UnsupportedOutput<'a> {
+            schema_version: u32,
+            status: &'static str,
+            owner: NativeCacheOwner,
+            reason: &'a osdk_core::container::operations::PruneUnsupportedReason,
+        }
+        serde_json::to_writer(
+            &mut *output,
+            &UnsupportedOutput {
+                schema_version:
+                    osdk_core::container::operations::NATIVE_PRUNE_PREVIEW_SCHEMA_VERSION,
+                status: "unsupported",
+                owner: unsupported.owner,
+                reason: &unsupported.reason,
+            },
+        )
+        .context("serializing unsupported native prune preview")?;
+        writeln!(output)?;
+        Ok(())
+    } else {
+        writeln!(output, "{}", trl(lang, "msg.container.prune_unsupported"))?;
+        Ok(())
+    }
 }
 
 fn prune_owner_label(lang: Lang, owner: NativeCacheOwner) -> String {
@@ -2541,6 +2604,62 @@ mod tests {
         assert!(text.contains("sha256:"), "{text}");
         assert!(text.contains("team-context"), "{text}");
         assert!(text.contains("dangling images"), "{text}");
+    }
+
+    #[test]
+    fn prune_json_exposes_the_typed_preview_and_unsupported_result() {
+        let runner = FakeRunner::new([success(
+            r#"[{"Name":"team-context","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock"}}}]"#,
+        )]);
+        let prompt = FakePrompt::accepting();
+        let mut output = Vec::new();
+        native_prune_with_format(
+            &runner,
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Docker,
+            ContainerPruneScopeArg::Images,
+            Some("team-context".into()),
+            None,
+            false,
+            None,
+            true,
+            &mut output,
+        )
+        .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(preview["schema_version"], 2);
+        assert!(preview["preview_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:")));
+        assert_eq!(preview["owner"], "docker-engine");
+        assert_eq!(preview["scope"], "dangling-images");
+        assert_eq!(preview["target"]["kind"], "docker-context");
+        assert_eq!(preview["target"]["name"], "team-context");
+
+        let mut unsupported = Vec::new();
+        native_prune_with_format(
+            &FakeRunner::new([]),
+            &prompt,
+            &Default::default(),
+            ContainerPruneRuntimeArg::Containerd,
+            ContainerPruneScopeArg::Images,
+            None,
+            None,
+            false,
+            None,
+            true,
+            &mut unsupported,
+        )
+        .unwrap_err();
+        let unsupported: serde_json::Value = serde_json::from_slice(&unsupported).unwrap();
+        assert_eq!(unsupported["schema_version"], 2);
+        assert_eq!(unsupported["status"], "unsupported");
+        assert_eq!(unsupported["owner"], "containerd");
+        assert_eq!(
+            unsupported["reason"],
+            "no-stable-aggregate-containerd-prune"
+        );
     }
 
     #[test]

@@ -1270,6 +1270,9 @@ pub enum ContainerCommand {
         /// Accept exactly this previously displayed preview identity.
         #[arg(long, value_name = "SHA256_ID", requires = "execute")]
         accept_preview: Option<String>,
+        /// Emit the preview as deterministic, schema-versioned JSON.
+        #[arg(long, conflicts_with = "execute")]
+        json: bool,
     },
     /// Diagnose the selected native runtime and Buildx builder.
     Doctor {
@@ -1520,9 +1523,10 @@ mod tests {
                     runtime,
                     scope,
                     context,
+                    builder: _,
                     execute,
                     accept_preview,
-                    ..
+                    json,
                 },
         } = prune.command
         else {
@@ -1533,6 +1537,22 @@ mod tests {
         assert_eq!(context.as_deref(), Some("team"));
         assert!(!execute);
         assert!(accept_preview.is_none());
+        assert!(!json);
+
+        assert!(Cli::try_parse_from([
+            "osdk",
+            "container",
+            "prune",
+            "--runtime",
+            "docker",
+            "--scope",
+            "images",
+            "--execute",
+            "--accept-preview",
+            "sha256:preview",
+            "--json",
+        ])
+        .is_err());
     }
 
     #[test]
