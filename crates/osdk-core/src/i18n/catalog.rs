@@ -2403,11 +2403,11 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
              java, python, rust, go, deno, bun, and any github:owner/repo release) across Windows, \
              macOS, and Linux.\n\nHighlights: content-addressed dedup across versions, unified \
              downstream package caches, automatic fastest-mirror selection with failover, and \
-             immutable Hugging Face / ModelScope model snapshots.",
+             immutable Hugging Face / ModelScope / Civitai model snapshots.",
             "osdk 可在 Windows、macOS 与 Linux 上安装并切换多种 SDK 的版本（node、npm、pnpm、\
              yarn、java、python、rust、go、deno、bun，以及任意 github:owner/repo 发布物）。\n\n特性：跨版本\
              内容寻址去重、统一的下游包缓存、自动选择最快镜像并支持故障转移，以及不可变的 Hugging Face / \
-             ModelScope 模型快照。",
+             ModelScope / Civitai 模型快照。",
         ),
     );
 

@@ -510,6 +510,15 @@ fn global_model_env_enable_force_and_disable_round_trip() {
 }
 
 #[test]
+fn model_env_rejects_civitai_without_writing_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let output = run_isolated(temporary.path(), &["model", "env", "enable", "civitai"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no native environment adapter"));
+    assert!(!temporary.path().join("config/config.toml").exists());
+}
+
+#[test]
 fn global_custom_model_endpoint_suppresses_tokens_by_default() {
     let temporary = tempfile::tempdir().unwrap();
     let added = run_isolated(

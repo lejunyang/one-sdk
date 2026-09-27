@@ -110,30 +110,30 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 ## 模型是独立且 provider-specific 的
 
-模型引用必须带 provider：`hf:owner/repo@revision` 或 `ms:owner/repo@revision`。[`ProviderId` 与 `ModelRef`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 将 provider 作为身份的一部分；默认 revision 也不同：Hugging Face 为 `main`，ModelScope 为 `master`。[`ModelProvider`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/mod.rs) 只统一输出“已解析 revision + 文件 manifest”，并不假设两个服务具有相同 API。
+模型引用必须带 provider：仓库型来源使用 `hf:owner/repo@revision` 或 `ms:owner/repo@revision`，Civitai 使用精确的 `civitai:model-id@model-version-id`。[`ProviderId` 与 `ModelRef`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 将 provider 作为身份的一部分；[`ModelProvider`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/mod.rs) 只统一输出“已解析 revision + 文件 manifest”，不假设服务 API 相同。
 
-| 语义 | Hugging Face | ModelScope |
-| --- | --- | --- |
-| 实现 | [`huggingface.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/huggingface.rs) | [`modelscope.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/modelscope.rs) |
-| 元数据 API | `/api/models/{repo}/revision/{revision}?blobs=true` | `/api/v1/models/{repo}/repo/files?Revision=...&Recursive=true` |
-| 文件 URL | `/{repo}/resolve/{commit}/{path}` | `/api/v1/models/{repo}/repo?Revision=...&FilePath=...` |
-| 不可变 revision | 服务返回的 commit SHA | 请求 revision 加排序后的 path/size/SHA-256 manifest 的 BLAKE3 摘要 |
-| 文件摘要 | LFS 文件带 SHA-256；普通 blob 缺失时下载后计算 | API 必须为每个文件返回合法 SHA-256，否则拒绝 |
-| token | `OSDK_HF_TOKEN` → `HF_TOKEN` → `HUGGING_FACE_HUB_TOKEN`；Bearer | `OSDK_MODELSCOPE_TOKEN` → `MODELSCOPE_API_TOKEN`；Bearer + `m_session_id` cookie |
-| 默认 endpoint | `https://huggingface.co` | 优先 `https://modelscope.cn`，回退 `https://www.modelscope.ai` |
+| 语义 | Hugging Face | ModelScope | Civitai |
+| --- | --- | --- | --- |
+| 实现 | [`huggingface.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/huggingface.rs) | [`modelscope.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/modelscope.rs) | [`civitai.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/civitai.rs) |
+| 元数据 API | `/api/models/{repo}/revision/{revision}?blobs=true` | `/api/v1/models/{repo}/repo/files?Revision=...&Recursive=true` | `/api/v1/model-versions/{version-id}` |
+| 文件 URL | `/{repo}/resolve/{commit}/{path}` | `/api/v1/models/{repo}/repo?Revision=...&FilePath=...` | API 返回的 `downloadUrl`，可跳转到 CDN |
+| 不可变 revision | 服务返回的 commit SHA | 请求 revision 加排序后的 path/size/SHA-256 manifest 的 BLAKE3 摘要 | 精确 model version ID |
+| 文件选择与摘要 | LFS 文件带 SHA-256；普通 blob 缺失时下载后计算 | API 必须为每个文件返回合法 SHA-256 | 在 `Model` 权重中按 SafeTensor、primary、响应顺序选择一个；必须有 SHA-256，路径规范为 `loras/<filename>` |
+| token | `OSDK_HF_TOKEN` → `HF_TOKEN` → `HUGGING_FACE_HUB_TOKEN`；Bearer | `OSDK_MODELSCOPE_TOKEN` → `MODELSCOPE_API_TOKEN`；Bearer + `m_session_id` cookie | `OSDK_CIVITAI_TOKEN` → `CIVITAI_API_TOKEN` → `CIVITAI_TOKEN`；Bearer，跨源跳转移除 |
+| 默认 endpoint | `https://huggingface.co` | 优先 `https://modelscope.cn`，回退 `https://www.modelscope.ai` | `https://civitai.com` |
 
-因此，**ModelScope 不是把 Hugging Face base URL 换掉的镜像**。二者的元数据结构、下载 URL、认证头、默认 revision 和不可变快照推导方式都不同。provider 实现还会拒绝解析另一 provider 的 `ModelRef`。自动测速和失败切换只在同一 provider 的 endpoint 集合内进行，不会把同名 Hugging Face 仓库隐式替换成 ModelScope 仓库。
+三个 provider 的元数据结构、下载 URL、认证和不可变身份不同；实现会拒绝解析属于另一 provider 的 `ModelRef`。自动测速和失败切换只在同一 provider 的 endpoint 集合内进行。Civitai provider 只接收 ogen 等上层已经选定的精确 ID，不承担搜索、排序或 trigger word 匹配。
 
 ## 模型解析、下载与物化
 
 `osdk model sync [name]` 的实现入口在 [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)，核心流程在 [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs)：
 
 1. 解析显式 `--endpoint` 或 provider 环境变量；否则使用 provider 自己的默认/自定义来源。
-2. 在 auto 模式下，[`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) 对真实仓库先取 manifest，再对最大的可探测文件执行最多 1 MiB 的 Range 请求；结果按 provider、repo、revision 和来源配置缓存。
+2. 在 auto 模式下，[`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) 对真实目标先取 manifest，再对最小的非空文件执行最多 64 KiB 的 Range 请求；结果按 provider、repo、revision 和来源配置缓存。
 3. provider 解析远端 manifest；`--include`/`--exclude` glob 选择文件，`--variant` 只作为快照标签参与身份计算。
 4. 文件按 `settings.jobs` 并发、可续传下载到 provider/repository/revision 隔离的 cache；校验声明 size 和 SHA-256。
 5. [`ModelStore`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 再次校验文件，写入共享 CAS，在隐藏临时目录完成 snapshot 后 rename 到 `<models>/<logical-name>/snapshots/<snapshot-key>`，再以临时文件加 rename 更新 `current.json`；这些 rename 没有跨平台替换原子性或 durability 保证。随后把 `<models>/<logical-name>/current` 这个目录链接重指向新快照：快照目录名由内容哈希决定（包含文件选择），因此换 `--include` 就会换目录，外部配置里写死的路径会静默失效，而 ComfyUI、llama.cpp、vLLM 都只接受一个会被保存下来的路径。Windows 上用 junction 而非符号链接，因为符号链接需要 Developer Mode 或提权，junction 不需要；重指向时如果 `current` 位置是真实目录会显式报错，不会静默删除用户数据。链接创建失败只记 warning 不中断发布——此时快照与 `current.json` 已经落盘，为一个链接丢弃整次下载并不合理，`model path`（不带 `--stable`）仍可从 `current.json` 作答。
-6. 默认把 provider、repo、requested/resolved revision、endpoint、variant 以及每个文件的 size/SHA-256 写入 `osdk.lock` 的顶层 `[models]`；token 和短期下载 URL不落盘。
+6. 把 provider、repo、requested/resolved revision、endpoint、variant 以及每个文件的 size/SHA-256 写入 `osdk.lock` 的顶层 `[models]`；token 和短期下载 URL不落盘。
 
 `model list/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 pull 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。
 
@@ -169,6 +169,7 @@ npm 的同一族坑）。`model sync` 复现快照后同样调用 reconcile，�
 
 - Hugging Face：`HF_ENDPOINT`、`HF_HOME`、`HF_HUB_CACHE`、`HF_XET_CACHE`、`HF_ASSETS_CACHE`；osdk 离线模式还设置官方支持的 `HF_HUB_OFFLINE=1`。
 - ModelScope：`MODELSCOPE_ENDPOINT`、`MODELSCOPE_CACHE`；没有虚构 `MODELSCOPE_OFFLINE`。
+- Civitai 没有标准下游环境适配协议；`model env civitai` 会在写配置前拒绝。
 - 默认保留用户已设置的变量；`--force` 才覆盖。shell activation 会记录原值，disable/deactivate 时恢复。
 - 自定义 endpoint 默认 `forward_credentials=false`。当 osdk 管理该 endpoint 时，会清空 provider token，并把 home 指向隔离的 anonymous 目录，避免本地登录 cookie/token 泄漏。只有官方 endpoint 或用户明确 `--forward-credentials` 才允许下载请求携带凭据。token 本身从不写入 osdk 配置。
 
@@ -176,7 +177,7 @@ npm 的同一族坑）。`model sync` 复现快照后同样调用 reconcile，�
 
 - SDK lock 按平台保存；model lock 位于顶层，因为模型文件通常与平台无关。模型 `variant` 是用户标签，不会自动推导量化格式，也不会改变文件选择。
 - provider 身份贯穿引用、metadata/ranking/download cache、snapshot key、manifest 与 lock，已验证为 provider-specific；但顶层 `models` map 和本地 `current.json` 以用户提供的逻辑名为键。用同一逻辑名拉取另一 provider 会切换该名字的 current snapshot，并覆盖 lock 中该名字的记录。
-- Hugging Face 非 LFS blob 可以没有远端 SHA-256；osdk 会在下载后计算并锁定，但这不等同于服务端提供的独立摘要。ModelScope 则要求 API manifest 给出合法 SHA-256。
+- Hugging Face 非 LFS blob 可以没有远端 SHA-256；osdk 会在下载后计算并锁定，但这不等同于服务端提供的独立摘要。ModelScope 要求 API manifest 给出合法 SHA-256；Civitai 也要求所选权重提供合法 SHA-256。
 - metadata 在线请求失败时可以回退到 stale cache。自定义 endpoint 必须实现所选 provider 的真实 API；仅兼容文件 host 或替换域名并不足够。
 - GitHub backend 的自动 asset 评分是启发式；命名含糊或一个 release 含多个相似产物时应使用显式 asset 规则或可信静态 catalog。
 - Rust 是委托型 backend，toolchain 由隔离 rustup 管理，不享受普通 archive backend 的逐文件 CAS 去重。Maven、Gradle、Kotlin 当前使用内置单版本 catalog，并非完整远端版本索引。

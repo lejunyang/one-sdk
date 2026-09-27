@@ -5,6 +5,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 
 use crate::backend::Ctx;
 use crate::error::{Error, Result};
+use crate::model::provider::civitai::Civitai;
 use crate::model::provider::huggingface::HuggingFace;
 use crate::model::provider::modelscope::ModelScope;
 use crate::model::provider::{ModelProvider, RemoteModelFile};
@@ -40,6 +41,7 @@ pub fn default_sources(provider: ProviderId) -> Vec<Source> {
                 international,
             ]
         }
+        ProviderId::Civitai => vec![Source::official("official", "https://civitai.com")],
     }
 }
 
@@ -297,6 +299,7 @@ pub fn provider(provider: ProviderId, allow_auth: bool) -> Box<dyn ModelProvider
     match provider {
         ProviderId::HuggingFace => Box::new(HuggingFace::new(allow_auth)),
         ProviderId::ModelScope => Box::new(ModelScope::new(allow_auth)),
+        ProviderId::Civitai => Box::new(Civitai::new(allow_auth)),
     }
 }
 

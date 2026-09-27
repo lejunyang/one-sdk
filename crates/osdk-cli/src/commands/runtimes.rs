@@ -698,10 +698,9 @@ pub(crate) async fn model_sync(
     // describes a different identity than the declaration now asks for. This is
     // what lets `sync` pick up a `[models]` entry added or edited by hand,
     // rather than only bootstrapping when the whole model lock is empty. The
-    // comparison is over what the lock can faithfully hold -- provider,
-    // repository, requested revision, and variant -- because `include`/`exclude`
-    // are globs the lock stores only as their expanded file list; changing those
-    // to widen a selection is resolved again by `model sync`.
+    // The comparison covers provider, repository, requested revision, variant, and
+    // the original include/exclude selectors. The lock stores those selectors
+    // alongside the expanded file list, so changing either one is observable.
     //
     // The list is settled first so the downloads can run concurrently: several
     // models are large and independent, so fetching them one after another wastes
@@ -1078,6 +1077,7 @@ pub(crate) fn glob_escape(path: &str) -> String {
 pub(crate) fn model_env(app: &App, command: ModelEnvCommand) -> Result<()> {
     match command {
         ModelEnvCommand::Enable { provider, force } => {
+            reject_unsupported_model_env_provider(provider)?;
             for provider in selected_providers(provider) {
                 crate::config_edit::set_model_env(&app.ctx, provider, true, force)?;
                 println!(
@@ -1096,6 +1096,7 @@ pub(crate) fn model_env(app: &App, command: ModelEnvCommand) -> Result<()> {
             println!("{}", t!("msg.model_env_refresh"));
         }
         ModelEnvCommand::Disable { provider } => {
+            reject_unsupported_model_env_provider(provider)?;
             for provider in selected_providers(provider) {
                 crate::config_edit::set_model_env(&app.ctx, provider, false, false)?;
                 println!("{}", t!("msg.model_env_disabled", provider = provider));
@@ -1140,6 +1141,17 @@ pub(crate) fn model_env(app: &App, command: ModelEnvCommand) -> Result<()> {
     Ok(())
 }
 
+fn reject_unsupported_model_env_provider(
+    provider: Option<osdk_core::model::ProviderId>,
+) -> Result<()> {
+    if provider == Some(osdk_core::model::ProviderId::Civitai) {
+        return Err(anyhow!(
+            "Civitai has no native environment adapter; use `model use` and `model sync`"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn selected_providers(
     provider: Option<osdk_core::model::ProviderId>,
 ) -> Vec<osdk_core::model::ProviderId> {
@@ -1179,6 +1191,7 @@ pub(crate) fn provider_endpoint_env(provider: osdk_core::model::ProviderId) -> O
         osdk_core::model::ProviderId::ModelScope => std::env::var("MODELSCOPE_ENDPOINT")
             .ok()
             .or_else(|| std::env::var("MODELSCOPE_DOMAIN").ok()),
+        osdk_core::model::ProviderId::Civitai => std::env::var("CIVITAI_ENDPOINT").ok(),
     }
 }
 
@@ -1195,6 +1208,7 @@ pub(crate) fn official_model_endpoint(
                 "https://modelscope.cn" | "https://www.modelscope.ai"
             )
         }
+        osdk_core::model::ProviderId::Civitai => endpoint == "https://civitai.com",
     }
 }
 

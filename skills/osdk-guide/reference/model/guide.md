@@ -13,10 +13,11 @@
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.safetensors' --view comfyui --sync
+osdk model use character-lora civitai:456@123 --view comfyui --sync
 osdk model sync qwen25 --dry-run
 osdk model unuse qwen25
 ```
 
-不要手写 OSDK 受管模型声明；使用 `model use/unuse`。`install` 不会隐式下载模型。
+不要手写 OSDK 受管模型声明；使用 `model use/unuse`。`install` 不会隐式下载模型。Civitai 引用必须是精确的 `civitai:<model-id>@<model-version-id>`；OSDK 不做搜索与排序。
 provider 环境和 `model view` 的其余子命令以 `osdk model --help` 为准；声明字段见
 `reference/configuration/models.md`。

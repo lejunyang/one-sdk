@@ -21,8 +21,8 @@ osdk focuses on four problems:
 3. **Speed with trust:** automatically choose available sources, verify upstream
    checksums, verify signatures where a backend supports them, and optionally
    enforce GitHub Artifact Attestations.
-4. **Unified model assets:** download, verify, cache, and lock Hugging Face and
-   ModelScope snapshots.
+4. **Unified model assets:** download, verify, cache, and lock Hugging Face,
+   ModelScope, and exact Civitai LoRA-version snapshots.
 
 ## Supported platforms and tools
 
@@ -34,7 +34,7 @@ backends:
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun |
 | Package managers and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm CLI packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, public GitHub Releases through `github:owner/repo`, or exact checksum-pinned artifacts through `http:https://...{version}...` |
-| Model providers | Hugging Face, ModelScope |
+| Model providers | Hugging Face, ModelScope, Civitai LoRA versions |
 | Project inputs | `osdk.toml`, `.tool-versions`, and common ecosystem version files |
 | Shells | Bash, Zsh, Fish, PowerShell |
 

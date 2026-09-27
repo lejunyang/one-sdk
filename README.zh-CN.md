@@ -11,7 +11,7 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
 - 为团队和 CI 保存区分平台且可复用的项目锁定结果；
 - 自动选择响应更快的 SDK 镜像和依赖 Registry；
 - 在网络不可用时复用已下载的元数据与产物；
-- 像管理开发工具一样管理 Hugging Face 和 ModelScope 模型快照；
+- 像管理开发工具一样管理 Hugging Face、ModelScope 和精确 Civitai LoRA 版本快照；
 - 检查 Docker、containerd、Buildx、OCI Registry、mirror 测速/计划与原生缓存，并按需
   安全应用 mirror 配置、直接拉取镜像或确认严格限定范围的原生清理；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
@@ -570,11 +570,12 @@ Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基�
 
 ## 场景：固定模型快照
 
-从 Hugging Face 或 ModelScope 声明并物化指定文件、校验快照，并获取稳定路径：
+从 Hugging Face、ModelScope 或精确 Civitai LoRA 版本声明并物化权重、校验快照，并获取稳定路径：
 
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' --sync
+osdk model use character-lora civitai:456@123 --view comfyui --sync
 osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # 单个模型

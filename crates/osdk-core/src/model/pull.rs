@@ -253,6 +253,7 @@ mod tests {
 
     use crate::config::{Config, Settings};
     use crate::dirs::Dirs;
+    use crate::model::provider::civitai::Civitai;
     use crate::model::provider::huggingface::HuggingFace;
     use crate::model::provider::modelscope::ModelScope;
     use crate::model::provider::RemoteSnapshot;
@@ -455,6 +456,150 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rebuilt.manifest.revision, installed.manifest.revision);
+    }
+
+    #[tokio::test]
+    async fn civitai_pull_verifies_download_redirect_and_rebuilds_offline() {
+        let weights = vec![42u8; 2048];
+        let digest = crate::pipeline::verify::hash_bytes(&weights, HashAlgo::Sha256);
+        let cdn = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cdn_address = cdn.local_addr().unwrap();
+        let cdn_weights = weights.clone();
+        let cdn_server = std::thread::spawn(move || {
+            let (mut stream, _) = cdn.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /lora.safetensors HTTP/1.1"));
+            assert!(
+                !request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer"),
+                "Civitai credentials must be stripped on a cross-origin CDN redirect"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n",
+                cdn_weights.len()
+            )
+            .unwrap();
+            stream.write_all(&cdn_weights).unwrap();
+        });
+
+        let api = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api_address = api.local_addr().unwrap();
+        let server_digest = digest.clone();
+        let api_server = std::thread::spawn(move || {
+            for request_number in 0..2 {
+                let (mut stream, _) = api.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer fixture-token"));
+                if request_number == 0 {
+                    assert!(request.starts_with("GET /api/v1/model-versions/123 HTTP/1.1"));
+                    let body = format!(
+                        r#"{{"id":123,"modelId":456,"model":{{"type":"LORA"}},"files":[{{"name":"lora.safetensors","sizeKB":2,"type":"Model","primary":true,"metadata":{{"format":"SafeTensor"}},"hashes":{{"SHA256":"{server_digest}"}},"downloadUrl":"http://{api_address}/api/download/models/123"}}]}}"#
+                    );
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                } else {
+                    assert!(request.starts_with("GET /api/download/models/123 HTTP/1.1"));
+                    write!(
+                        stream,
+                        "HTTP/1.1 302 Found\r\nLocation: http://{cdn_address}/lora.safetensors\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                }
+            }
+        });
+
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(temporary.path(), false);
+        let reference = ModelRef::parse("civitai:456@123").unwrap();
+        let endpoint = format!("http://{api_address}");
+        let installed = pull(
+            &ctx,
+            &Civitai::with_token("fixture-token"),
+            "civitai-fixture",
+            &reference,
+            &endpoint,
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        api_server.join().unwrap();
+        cdn_server.join().unwrap();
+        assert_eq!(
+            installed.manifest.provider,
+            crate::model::ProviderId::Civitai
+        );
+        assert_eq!(installed.manifest.repository, "456");
+        assert_eq!(installed.manifest.requested_revision, "123");
+        assert_eq!(installed.manifest.revision, "123");
+        assert_eq!(installed.manifest.files[0].path, "loras/lora.safetensors");
+        assert_eq!(
+            crate::model::view::comfyui::classify(
+                &installed.manifest.files[0].path,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+            .category,
+            "loras"
+        );
+        assert_eq!(
+            installed.manifest.files[0].sha256.as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            std::fs::read(installed.path.join("loras/lora.safetensors")).unwrap(),
+            weights
+        );
+
+        ModelStore::new(
+            ctx.dirs.clone(),
+            ctx.cas.clone(),
+            ctx.config.settings.link_mode,
+        )
+        .remove("civitai-fixture")
+        .unwrap();
+        ctx.config.settings.offline = true;
+        let rebuilt = pull(
+            &ctx,
+            &Civitai::with_token("fixture-token"),
+            "civitai-fixture",
+            &reference,
+            &endpoint,
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rebuilt.manifest.revision, "123");
+        assert_eq!(
+            std::fs::read(rebuilt.path.join("loras/lora.safetensors")).unwrap(),
+            weights
+        );
     }
 
     struct EmptyProvider;

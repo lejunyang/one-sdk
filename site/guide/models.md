@@ -1,6 +1,6 @@
 # 模型快照
 
-osdk 把 Hugging Face 与 ModelScope 仓库作为多文件、不可变快照管理。模型文件
+osdk 把 Hugging Face、ModelScope 仓库和精确 Civitai LoRA 版本作为不可变快照管理。模型文件
 进入与 SDK 共用的 BLAKE3 CAS，但解析、manifest、当前快照和环境适配均是独立流程。
 
 ## 命令参考
@@ -30,14 +30,19 @@ hugging-face:owner/repo@revision
 ms:owner/repo@revision
 modelscope:owner/repo@revision
 model-scope:owner/repo@revision
+
+civitai:model-id@model-version-id
+civi:model-id@model-version-id
 ```
 
-省略 revision 时，Hugging Face 默认 `main`，ModelScope 默认 `master`。repository
-必须正好是 `owner/name` 两段，每段只允许 ASCII 字母、数字、`.`、`_`、`-`。
+省略 revision 时，Hugging Face 默认 `main`，ModelScope 默认 `master`。二者的 repository
+必须正好是 `owner/name` 两段，每段只允许 ASCII 字母、数字、`.`、`_`、`-`。Civitai
+必须同时给出正整数 model ID 与 model version ID；OSDK 不负责搜索或猜选版本。
 
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
 osdk model use qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
+osdk model use character-lora civitai:456@123 --view comfyui --sync
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' \
   --exclude 'original/*' --variant safetensors-fp16 --sync
@@ -45,7 +50,9 @@ osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
 
 Hugging Face 将 branch/tag 解析为不可变 commit SHA。ModelScope 文件 API 没有等价
 commit 时，osdk 以请求 revision 和排序后的文件路径、大小、SHA-256 manifest 生成
-`revision+manifest-<16 hex>` identity。远端文件路径必须是安全相对路径。
+`revision+manifest-<16 hex>` identity。Civitai 直接以 model version ID 作为不可变 revision，
+从该版本的 `Model` 文件中按 SafeTensor、primary、响应顺序选择一个权重，要求合法 SHA-256，
+并规范到快照内 `loras/<filename>`，因此 `--view comfyui` 可直接渲染。远端文件路径必须是安全相对路径。
 
 ## 下载、校验与本地布局
 
@@ -136,7 +143,7 @@ osdk model sync --prune         # 删除 lock 不再声明的本地快照
 ```text
 --endpoint
 > [models.<name>].endpoint
-> HF_ENDPOINT / MODELSCOPE_ENDPOINT / MODELSCOPE_DOMAIN
+> HF_ENDPOINT / MODELSCOPE_ENDPOINT / MODELSCOPE_DOMAIN / CIVITAI_ENDPOINT
 > source pin、测速排名和内置 endpoint
 ```
 
@@ -146,22 +153,22 @@ Token 读取顺序：
 | --- | --- |
 | Hugging Face | `OSDK_HF_TOKEN`、`HF_TOKEN`、`HUGGING_FACE_HUB_TOKEN` |
 | ModelScope | `OSDK_MODELSCOPE_TOKEN`、`MODELSCOPE_API_TOKEN` |
+| Civitai | `OSDK_CIVITAI_TOKEN`、`CIVITAI_API_TOKEN`、`CIVITAI_TOKEN` |
 
-官方端点 `https://huggingface.co`、`https://modelscope.cn`、
-`https://www.modelscope.ai` 可接收对应凭据。自定义 source 或 `--endpoint` 默认匿名，
+官方端点 `https://huggingface.co`、`https://modelscope.cn`、`https://www.modelscope.ai` 与 `https://civitai.com` 可接收对应凭据。Civitai 下载跳转到跨源 CDN 时，Bearer 会被移除。自定义 source 或 `--endpoint` 默认匿名，
 只有 `--forward-credentials` 或 source 的 `forward_credentials = true` 才转发。
 ModelScope 会同时使用 Bearer header 与 `m_session_id` cookie。
 
 模型 source 命令与 SDK 相同，但测试时必须指定仓库：
 
 ```text
-osdk source list huggingface|modelscope
-osdk source test huggingface|modelscope --model owner/repo[@revision]
-osdk source add huggingface|modelscope --id ID --download-url URL
+osdk source list huggingface|modelscope|civitai
+osdk source test huggingface|modelscope|civitai --model owner/repo[@revision]（Civitai 为 model-id@version-id）
+osdk source add huggingface|modelscope|civitai --id ID --download-url URL
   [--index-url URL] [--forward-credentials]
-osdk source remove huggingface|modelscope ID
-osdk source pin huggingface|modelscope ID
-osdk source unpin huggingface|modelscope
+osdk source remove huggingface|modelscope|civitai ID
+osdk source pin huggingface|modelscope|civitai ID
+osdk source unpin huggingface|modelscope|civitai
 ```
 
 探测会先解析目标仓库 metadata，再对一个真实文件做 64 KiB 的 Range 下载；
@@ -240,7 +247,7 @@ osdk model env disable huggingface
 osdk model env disable                      # 两个 provider
 ```
 
-`enable`/`disable` 只接受可选 provider；`--force` 只属于 `enable`，表示覆盖用户已有
+`enable`/`disable` 只管理 Hugging Face 与 ModelScope 的原生环境适配器；Civitai 没有对应下游环境协议，显式传入会报错。`--force` 只属于 `enable`，表示覆盖用户已有
 provider 变量。开关写用户全局配置，项目配置不能改变 `env`/`env_force`。已激活 shell
 在下一次 prompt 刷新，新 activation 立即应用；`deactivate` 会恢复捕获的原值。
 

@@ -1,6 +1,6 @@
 # Model Snapshots
 
-osdk manages Hugging Face and ModelScope repositories as immutable, multi-file
+osdk manages Hugging Face and ModelScope repositories plus exact Civitai LoRA versions as immutable
 snapshots. Model files enter the same BLAKE3 CAS as SDKs, while resolution,
 manifests, current-snapshot pointers, and environment adapters remain separate.
 
@@ -32,15 +32,20 @@ hugging-face:owner/repo@revision
 ms:owner/repo@revision
 modelscope:owner/repo@revision
 model-scope:owner/repo@revision
+
+civitai:model-id@model-version-id
+civi:model-id@model-version-id
 ```
 
 Without a revision, Hugging Face defaults to `main` and ModelScope to `master`.
-A repository must be exactly two `owner/name` segments, each using ASCII letters,
-digits, `.`, `_`, or `-`.
+Their repositories must be exactly two `owner/name` segments, each using ASCII letters,
+digits, `.`, `_`, or `-`. Civitai requires both positive model and model-version IDs;
+osdk does not search for or guess a version.
 
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
 osdk model use qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
+osdk model use character-lora civitai:456@123 --view comfyui --sync
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' \
   --exclude 'original/*' --variant safetensors-fp16 --sync
@@ -49,7 +54,10 @@ osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
 Hugging Face resolves a branch or tag to an immutable commit SHA. When
 ModelScope's file API has no equivalent commit, osdk derives a
 `revision+manifest-<16 hex>` identity from the requested revision and sorted
-file paths, sizes, and SHA-256 values. Remote paths must be safe relative paths.
+file paths, sizes, and SHA-256 values. Civitai uses the exact model-version ID as the
+immutable revision, selects one `Model` weight by SafeTensor, primary, then response
+order, requires SHA-256, and normalizes it to `loras/<filename>` for direct ComfyUI view
+rendering. Remote paths must be safe relative paths.
 
 ## Downloads, verification, and local layout
 
@@ -157,7 +165,7 @@ Resolution priority is:
 ```text
 --endpoint
 > [models.<name>].endpoint
-> HF_ENDPOINT / MODELSCOPE_ENDPOINT / MODELSCOPE_DOMAIN
+> HF_ENDPOINT / MODELSCOPE_ENDPOINT / MODELSCOPE_DOMAIN / CIVITAI_ENDPOINT
 > source pin, probe ranking, and built-in endpoint
 ```
 
@@ -165,9 +173,9 @@ Resolution priority is:
 | --- | --- |
 | Hugging Face | `OSDK_HF_TOKEN`, `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` |
 | ModelScope | `OSDK_MODELSCOPE_TOKEN`, `MODELSCOPE_API_TOKEN` |
+| Civitai | `OSDK_CIVITAI_TOKEN`, `CIVITAI_API_TOKEN`, `CIVITAI_TOKEN` |
 
-Official `https://huggingface.co`, `https://modelscope.cn`, and
-`https://www.modelscope.ai` endpoints may receive their provider credentials. A
+Official `https://huggingface.co`, `https://modelscope.cn`, `https://www.modelscope.ai`, and `https://civitai.com` endpoints may receive their provider credentials. Bearer credentials are removed when a Civitai download redirects to a cross-origin CDN. A
 custom source or `--endpoint` is anonymous unless `--forward-credentials` or the
 source's `forward_credentials = true` allows forwarding. ModelScope uses both a
 Bearer header and `m_session_id` cookie.
@@ -175,13 +183,13 @@ Bearer header and `m_session_id` cookie.
 Model providers use the source command surface, but testing requires a repository:
 
 ```text
-osdk source list huggingface|modelscope
-osdk source test huggingface|modelscope --model owner/repo[@revision]
-osdk source add huggingface|modelscope --id ID --download-url URL
+osdk source list huggingface|modelscope|civitai
+osdk source test huggingface|modelscope|civitai --model owner/repo[@revision] (Civitai: model-id@version-id)
+osdk source add huggingface|modelscope|civitai --id ID --download-url URL
   [--index-url URL] [--forward-credentials]
-osdk source remove huggingface|modelscope ID
-osdk source pin huggingface|modelscope ID
-osdk source unpin huggingface|modelscope
+osdk source remove huggingface|modelscope|civitai ID
+osdk source pin huggingface|modelscope|civitai ID
+osdk source unpin huggingface|modelscope|civitai
 ```
 
 The probe resolves repository metadata and then samples 64 KiB from a real
@@ -268,7 +276,7 @@ osdk model env disable huggingface
 osdk model env disable                      # both providers
 ```
 
-`enable`/`disable` accept only the optional provider. `--force` belongs only to
+`enable`/`disable` manage only the native Hugging Face and ModelScope environment adapters. Civitai has no downstream environment protocol, so passing it explicitly fails. `--force` belongs only to
 `enable` and permits overriding pre-existing provider variables. State is saved
 in user configuration; a project cannot change `env` or `env_force`. An active
 shell applies changes at the next prompt, while new activation applies them

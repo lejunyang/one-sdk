@@ -37,6 +37,8 @@ pub enum ProviderId {
     HuggingFace,
     #[serde(rename = "modelscope", alias = "model-scope", alias = "ms")]
     ModelScope,
+    #[serde(rename = "civitai", alias = "civi")]
+    Civitai,
 }
 
 impl ProviderId {
@@ -44,6 +46,7 @@ impl ProviderId {
         match self {
             Self::HuggingFace => "huggingface",
             Self::ModelScope => "modelscope",
+            Self::Civitai => "civitai",
         }
     }
 }
@@ -61,8 +64,9 @@ impl std::str::FromStr for ProviderId {
         match value.trim().to_ascii_lowercase().as_str() {
             "hf" | "huggingface" | "hugging-face" => Ok(Self::HuggingFace),
             "ms" | "modelscope" | "model-scope" => Ok(Self::ModelScope),
+            "civitai" | "civi" => Ok(Self::Civitai),
             other => Err(Error::config(format!(
-                "unknown model provider `{other}` (expected huggingface|modelscope)"
+                "unknown model provider `{other}` (expected huggingface|modelscope|civitai)"
             ))),
         }
     }
@@ -79,16 +83,28 @@ impl ModelRef {
     pub fn parse(value: &str) -> Result<Self> {
         let (provider, rest) = value.split_once(':').ok_or_else(|| {
             Error::config(format!(
-                "invalid model reference `{value}` (expected hf:owner/repo@revision)"
+                "invalid model reference `{value}` (expected hf:owner/repo@revision or civitai:model-id@model-version-id)"
             ))
         })?;
         let provider = provider.parse()?;
-        let (repository, revision) = rest
-            .rsplit_once('@')
-            .unwrap_or((rest, default_revision(provider)));
-        validate_repository(repository)?;
+        let (repository, revision) = match rest.rsplit_once('@') {
+            Some(parts) => parts,
+            None if provider == ProviderId::Civitai => {
+                return Err(Error::config(
+                    "Civitai references require both model and version ids: civitai:<model-id>@<version-id>",
+                ));
+            }
+            None => (rest, default_revision(provider)),
+        };
+        validate_repository(provider, repository)?;
         if revision.trim().is_empty() {
             return Err(Error::config("model revision cannot be empty"));
+        }
+        if provider == ProviderId::Civitai && !revision.parse::<u64>().is_ok_and(|value| value > 0)
+        {
+            return Err(Error::config(
+                "Civitai model version id must be a positive integer",
+            ));
         }
         Ok(Self {
             provider,
@@ -186,7 +202,7 @@ impl ModelStore {
         mut files: Vec<DownloadedModelFile>,
     ) -> Result<InstalledModel> {
         validate_model_name(&identity.name)?;
-        validate_repository(&identity.repository)?;
+        validate_repository(identity.provider, &identity.repository)?;
         if files.is_empty() {
             return Err(Error::other("model snapshot contains no files"));
         }
@@ -469,10 +485,19 @@ fn default_revision(provider: ProviderId) -> &'static str {
     match provider {
         ProviderId::HuggingFace => "main",
         ProviderId::ModelScope => "master",
+        ProviderId::Civitai => unreachable!("Civitai references require an explicit version id"),
     }
 }
 
-fn validate_repository(repository: &str) -> Result<()> {
+fn validate_repository(provider: ProviderId, repository: &str) -> Result<()> {
+    if provider == ProviderId::Civitai {
+        if repository.parse::<u64>().is_ok_and(|value| value > 0) {
+            return Ok(());
+        }
+        return Err(Error::config(format!(
+            "invalid Civitai model id `{repository}` (expected a positive integer)"
+        )));
+    }
     let mut parts = repository.split('/');
     let owner = parts.next().unwrap_or_default();
     let repo = parts.next().unwrap_or_default();
@@ -576,6 +601,13 @@ mod tests {
         assert_eq!(hf.revision, "abc123");
         let modelscope = ModelRef::parse("modelscope:Qwen/Qwen2.5-7B-Instruct").unwrap();
         assert_eq!(modelscope.revision, "master");
+        let civitai = ModelRef::parse("civitai:456@123").unwrap();
+        assert_eq!(civitai.provider, ProviderId::Civitai);
+        assert_eq!(civitai.repository, "456");
+        assert_eq!(civitai.revision, "123");
+        assert!(ModelRef::parse("civi:123").is_err());
+        assert!(ModelRef::parse("civitai:not-a-number@123").is_err());
+        assert!(ModelRef::parse("civitai:456@not-a-number").is_err());
         assert!(ModelRef::parse("hf:../secret").is_err());
     }
 

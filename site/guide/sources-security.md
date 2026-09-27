@@ -9,7 +9,7 @@ npm-compatible Registry 见[JavaScript 包管理器](./package-managers#registry
 ```text
 osdk source list TOOL_OR_PROVIDER
 osdk source test TOOL
-osdk source test huggingface|modelscope --model owner/repo[@revision]
+osdk source test huggingface|modelscope|civitai --model REFERENCE
 
 osdk source add TOOL_OR_PROVIDER
   --id ID
@@ -26,7 +26,7 @@ osdk source unpin TOOL_OR_PROVIDER
 | --- | --- |
 | `list TOOL_OR_PROVIDER` | 列出有效来源、类型、URL 和 pin |
 | `test TOOL` | 强制重新探测普通 backend 并输出吞吐/TTFB 排名 |
-| `test PROVIDER --model ...` | 对 Hugging Face/ModelScope 的真实仓库 metadata 与文件采样测速 |
+| `test PROVIDER --model ...` | 对 Hugging Face/ModelScope 仓库或精确 Civitai LoRA 版本的 metadata 与文件采样测速 |
 | `add ... --id ID --download-url URL` | 添加或替换同 ID 的用户级 custom source |
 | `--index-url URL` | metadata/index 与下载根不同时单独指定 |
 | `--forward-credentials` | 允许自定义模型 endpoint 接收 provider 凭据 |

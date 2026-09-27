@@ -16,7 +16,7 @@ osdk 重点解决四个问题：
 2. **减少重复占用**：让多个已安装版本复用相同文件，并集中管理各生态缓存。
 3. **兼顾速度与可信度**：自动选择可用来源，校验上游 checksum；在 backend
    支持时验证签名，并可按策略验证 GitHub Artifact Attestation。
-4. **统一模型资产**：下载、校验、缓存并锁定 Hugging Face 与 ModelScope 模型快照。
+4. **统一模型资产**：下载、校验、缓存并锁定 Hugging Face、ModelScope 与精确 Civitai LoRA 版本快照。
 
 ## 支持的平台与工具
 

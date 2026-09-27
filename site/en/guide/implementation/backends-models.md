@@ -136,30 +136,30 @@ be treated as reusable.
 
 ## Models are separate and provider-specific
 
-A model reference must include a provider: `hf:owner/repo@revision` or `ms:owner/repo@revision`. [`ProviderId` and `ModelRef`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) make provider part of identity, and even the defaults differ: `main` for Hugging Face and `master` for ModelScope. [`ModelProvider`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/mod.rs) only standardizes the output as a resolved revision plus file manifest; it does not assume compatible service APIs.
+A model reference includes its provider: repository providers use `hf:owner/repo@revision` or `ms:owner/repo@revision`, while Civitai uses exact `civitai:model-id@model-version-id`. [`ProviderId` and `ModelRef`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) make the provider part of identity. [`ModelProvider`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/mod.rs) standardizes only the resolved revision plus file manifest; it does not assume compatible service APIs.
 
-| Semantic | Hugging Face | ModelScope |
-| --- | --- | --- |
-| Implementation | [`huggingface.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/huggingface.rs) | [`modelscope.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/modelscope.rs) |
-| Metadata API | `/api/models/{repo}/revision/{revision}?blobs=true` | `/api/v1/models/{repo}/repo/files?Revision=...&Recursive=true` |
-| File URL | `/{repo}/resolve/{commit}/{path}` | `/api/v1/models/{repo}/repo?Revision=...&FilePath=...` |
-| Immutable revision | Commit SHA returned by the service | Requested revision plus a BLAKE3 digest of the sorted path/size/SHA-256 manifest |
-| File digest | LFS entries carry SHA-256; a missing regular-blob digest is computed after download | The API must return a valid SHA-256 for every file or resolution fails |
-| Token | `OSDK_HF_TOKEN` → `HF_TOKEN` → `HUGGING_FACE_HUB_TOKEN`; Bearer | `OSDK_MODELSCOPE_TOKEN` → `MODELSCOPE_API_TOKEN`; Bearer plus `m_session_id` cookie |
-| Default endpoint | `https://huggingface.co` | Prefer `https://modelscope.cn`, then `https://www.modelscope.ai` |
+| Semantic | Hugging Face | ModelScope | Civitai |
+| --- | --- | --- | --- |
+| Implementation | [`huggingface.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/huggingface.rs) | [`modelscope.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/modelscope.rs) | [`civitai.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/provider/civitai.rs) |
+| Metadata API | `/api/models/{repo}/revision/{revision}?blobs=true` | `/api/v1/models/{repo}/repo/files?Revision=...&Recursive=true` | `/api/v1/model-versions/{version-id}` |
+| File URL | `/{repo}/resolve/{commit}/{path}` | `/api/v1/models/{repo}/repo?Revision=...&FilePath=...` | API-provided `downloadUrl`, which may redirect to a CDN |
+| Immutable revision | Commit SHA returned by the service | Requested revision plus a BLAKE3 digest of the sorted path/size/SHA-256 manifest | Exact model-version ID |
+| Selection and digest | LFS entries carry SHA-256; a missing regular-blob digest is computed after download | The API must return a valid SHA-256 for every file | Select one `Model` weight by SafeTensor, primary, then response order; SHA-256 is mandatory and the path is normalized to `loras/<filename>` |
+| Token | `OSDK_HF_TOKEN` → `HF_TOKEN` → `HUGGING_FACE_HUB_TOKEN`; Bearer | `OSDK_MODELSCOPE_TOKEN` → `MODELSCOPE_API_TOKEN`; Bearer plus `m_session_id` cookie | `OSDK_CIVITAI_TOKEN` → `CIVITAI_API_TOKEN` → `CIVITAI_TOKEN`; Bearer, removed on cross-origin redirects |
+| Default endpoint | `https://huggingface.co` | Prefer `https://modelscope.cn`, then `https://www.modelscope.ai` | `https://civitai.com` |
 
-Consequently, **ModelScope is not a Hugging Face mirror implemented by swapping a base URL**. Metadata schemas, download URL construction, authentication headers, default revisions, and immutable snapshot derivation are different. Each provider implementation also rejects a `ModelRef` belonging to the other provider. Automatic ranking and failover remain inside one provider's endpoint set; osdk never silently substitutes a same-named repository from the other provider.
+The three providers have different metadata schemas, download URLs, authentication, and immutable identities; each implementation rejects another provider's `ModelRef`. Automatic ranking and failover remain inside one provider's endpoint set. The Civitai provider accepts exact IDs already selected by an upper layer such as ogen; it does not search, rank, or match trigger words.
 
 ## Model resolution, download, and materialization
 
 The CLI entry point for `osdk model sync [name]` is in [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs), with the core flow in [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs):
 
 1. resolve an explicit `--endpoint` or provider endpoint environment variable; otherwise use that provider's default and custom sources;
-2. in auto mode, [`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) fetches a real repository manifest and performs a Range request of at most 1 MiB against the largest probeable file; ranking is cached by provider, repository, revision, and source configuration;
+2. in auto mode, [`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) fetches a real repository manifest and performs a Range request of at most 64 KiB against the smallest non-empty file; ranking is cached by provider, repository, revision, and source configuration;
 3. let the provider resolve its remote manifest, then apply `--include`/`--exclude` globs; `--variant` is a snapshot identity label only;
 4. download selected files concurrently up to `settings.jobs` into a provider/repository/revision-separated cache, with resume support and size/SHA-256 verification;
 5. have [`ModelStore`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) verify again, ingest each file into the shared CAS, finish the snapshot in a hidden temporary directory, rename it to `<models>/<logical-name>/snapshots/<snapshot-key>`, and update `current.json` through another temporary-file rename; these renames have no portable replace-atomicity or durability guarantee; then repoint the `<models>/<logical-name>/current` directory link at the new snapshot. Snapshot directory names are derived from a content hash that covers the file selection, so changing `--include` produces a different directory and any path written into an external config silently stops matching -- while ComfyUI, llama.cpp and vLLM all take a path and keep it. Windows uses a junction rather than a symlink because a symlink needs Developer Mode or elevation and a junction needs neither; repointing fails loudly if a real directory occupies `current`, rather than silently deleting user data. A link failure is logged as a warning and does not fail the publish: the snapshot and `current.json` are already durable, discarding a completed download over one link would be wrong, and `model path` without `--stable` still answers from `current.json`;
-6. unless `--no-lock` is used, record provider, repository, requested/resolved revision, endpoint, variant, and every file's size/SHA-256 in top-level `[models]` in `osdk.lock`. Tokens and short-lived download URLs are never persisted.
+6. record provider, repository, requested/resolved revision, endpoint, variant, and every file's size/SHA-256 in top-level `[models]` in `osdk.lock`. Tokens and short-lived download URLs are never persisted.
 
 `model list/path/verify/remove` operate on the current logical name. Verification checks both the CAS BLAKE3 hash and SHA-256. Removal deletes all snapshots under that logical name, then runs CAS GC with SDK installs and models as roots. Offline pull still requires cached provider metadata and every selected download, after which it can rematerialize a removed snapshot.
 
@@ -204,6 +204,7 @@ or the `false` arm is removed.
 
 - Hugging Face exports `HF_ENDPOINT`, `HF_HOME`, `HF_HUB_CACHE`, `HF_XET_CACHE`, and `HF_ASSETS_CACHE`; osdk offline mode additionally exports the officially supported `HF_HUB_OFFLINE=1`.
 - ModelScope exports `MODELSCOPE_ENDPOINT` and `MODELSCOPE_CACHE`; osdk does not invent a `MODELSCOPE_OFFLINE` variable.
+- Civitai has no standard downstream environment adapter; `model env civitai` fails before writing configuration.
 - Existing user variables win by default; `--force` permits replacement. Shell activation captures original values so disable/deactivate can restore them.
 - Custom endpoints default to `forward_credentials=false`. When osdk manages such an endpoint, it clears provider token variables and uses an isolated anonymous home to prevent local login cookies or tokens from leaking. Download requests carry credentials only for recognized official endpoints or after explicit `--forward-credentials`. Tokens are never stored in osdk configuration.
 
@@ -211,7 +212,7 @@ or the `false` arm is removed.
 
 - SDK locks are platform-keyed; model locks are top-level because model files are normally platform-independent. A model `variant` is a caller-supplied label: it neither infers a quantization format nor changes file selection.
 - Provider identity is present in references, metadata/ranking/download caches, snapshot keys, manifests, and locks, so models are verified to be provider-specific. However, the top-level `models` map and local `current.json` are keyed by the caller's logical name. Pulling another provider under the same logical name switches that name's current snapshot and replaces its lock entry, although stored snapshots remain provider-distinct.
-- A non-LFS Hugging Face blob may lack a server-provided SHA-256. osdk computes and locks one after download, but that is not an independent digest supplied by the service. ModelScope requires a valid SHA-256 in its API manifest.
+- A non-LFS Hugging Face blob may lack a server-provided SHA-256. osdk computes and locks one after download, but that is not an independent digest supplied by the service. ModelScope requires a valid SHA-256 in its API manifest; Civitai likewise requires one for the selected weight.
 - Online metadata failures may fall back to stale cache. A custom endpoint must implement the selected provider's actual API; hosting compatible files or replacing only the domain is insufficient.
 - GitHub asset scoring is heuristic. Use explicit asset rules or a trusted static catalog when names are ambiguous or a release contains several similar artifacts.
 - Rust is a delegate backend: isolated rustup owns the toolchain, so it does not get ordinary archive backends' per-file CAS deduplication. Maven, Gradle, and Kotlin currently expose a built-in one-version catalog rather than a complete remote version index.

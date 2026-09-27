@@ -5,6 +5,7 @@ use crate::backend::Ctx;
 use crate::error::{Error, Result};
 use crate::model::ModelRef;
 
+pub mod civitai;
 pub mod huggingface;
 pub mod modelscope;
 

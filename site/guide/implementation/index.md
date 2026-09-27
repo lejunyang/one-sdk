@@ -33,7 +33,7 @@ CLI 与分层配置
 | [原生容器诊断与操作](./containers) | 运行时选择、匿名 OCI 校验、直接 pull 启动、原生 plan/preview 身份与 cache 所有权 |
 | [存储与缓存](./storage-cache) | SDK/模型 CAS、物化回退、下载缓存和各 manager 原生缓存 |
 | [校验与供应链边界](./verification) | checksum、Minisign、GitHub Artifact Attestation 与归档安全边界 |
-| [Backend 与模型 Provider](./backends-models) | 内置/声明式/GitHub backend，以及 Hugging Face、ModelScope 模型快照 |
+| [Backend 与模型 Provider](./backends-models) | 内置/声明式/GitHub backend，以及 Hugging Face、ModelScope 与 Civitai 模型快照 |
 | [npm 开发工具](./npm-tools) | `npm:<package>` 身份、项目/全局/隔离安装器、脚本策略、原生 lock、inventory 与冲突拒绝 |
 | [Cargo 开发工具](./cargo-tools) | `cargo:` 身份、精确 Rust 绑定、受控 provider、原生发布与 schema 4 重放 metadata |
 | [Go 开发工具](./go-tools) | `go:` command-package 身份、精确 Go 绑定、proxy 选择、隔离 provider 与 schema 4 重放 metadata |

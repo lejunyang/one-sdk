@@ -11,7 +11,7 @@ package managers, developer tools, and model snapshots. Use it to:
 - keep platform-aware project locks that teammates and CI can reuse;
 - choose responsive SDK mirrors and dependency registries automatically;
 - work from downloaded metadata and artifacts when the network is unavailable;
-- manage Hugging Face and ModelScope snapshots alongside development tools;
+- manage Hugging Face, ModelScope, and exact Civitai LoRA-version snapshots alongside development tools;
 - inspect Docker, containerd, Buildx, OCI registries, mirror benchmarks/plans,
   and native caches, then deliberately apply mirror config, pull images, or
   approve narrowly scoped native cleanup;
@@ -634,12 +634,13 @@ Guide: [Android SDK tools](site/en/guide/android.md)
 
 ## Scenario: pin a model snapshot
 
-Declare and materialize selected files from Hugging Face or ModelScope, verify the snapshot,
+Declare and materialize selected files from Hugging Face, ModelScope, or an exact Civitai LoRA version, verify the snapshot,
 and obtain its stable path:
 
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' --sync
+osdk model use character-lora civitai:456@123 --view comfyui --sync
 osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # one model
@@ -986,7 +987,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun, Zig |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, conda packages and toolchains such as CUDA through `conda:<package>`, Python CLIs through `pypi:<project>` (one virtual environment per tool, with dependencies shared between them), public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
-| Model providers | Hugging Face, ModelScope |
+| Model providers | Hugging Face, ModelScope, Civitai LoRA versions |
 | Agent skills | Install `SKILL.md` packages from GitHub (`github:owner/repo` with an optional subdir) or a local path, linked into Claude Code / Codex / Cursor / OpenCode / Gemini CLI / GitHub Copilot and more |
 | Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, built-in Docker Hub mirror benchmarking, safe native mirror apply, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
 | Project inputs | `osdk.toml`, `.tool-versions`, common ecosystem version files |

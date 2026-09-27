@@ -125,6 +125,11 @@ pub fn configured_env(
                     );
                 }
             }
+            ProviderId::Civitai => {
+                // Civitai has no standardized downstream cache/endpoint adapter.
+                // `model env` remains limited to providers whose native clients
+                // understand the variables osdk exports.
+            }
         }
     }
     environment

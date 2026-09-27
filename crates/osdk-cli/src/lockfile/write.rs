@@ -527,9 +527,8 @@ pub fn set_model_selection(
     Ok(true)
 }
 /// Record the consumer views declared for one model into an existing lock
-/// entry. Kept separate from [`merge_model`] so a bare the old direct pull path (no
-/// declaration) leaves `views` empty and existing callers/tests stay simple,
-/// while synchronization driven by `[models.<name>.views]` can persist the declaration.
+/// entry. Kept separate from [`merge_model`] so callers without a declaration leave
+/// `views` empty, while synchronization driven by `[models.<name>.views]` can persist it.
 ///
 /// This is the read/write symmetry AGENTS.md demands: the field is not
 /// write-only. `model sync` reads it back (`locked_models`) so a replay on

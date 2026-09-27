@@ -33,7 +33,7 @@ Not every backend is required to reuse this path literally. The uniform interfac
 | [Native container diagnostics and operations](./containers) | Runtime selection, anonymous OCI validation, direct pull launch, native plan/preview identity, and cache ownership |
 | [Storage and caches](./storage-cache) | SDK/model CAS, materialization fallbacks, download cache, and manager-native caches |
 | [Verification and supply-chain boundaries](./verification) | Checksums, Minisign, GitHub Artifact Attestations, and archive-safety boundaries |
-| [Backends and model providers](./backends-models) | Built-in, declarative, and GitHub backends plus Hugging Face and ModelScope snapshots |
+| [Backends and model providers](./backends-models) | Built-in, declarative, and GitHub backends plus Hugging Face, ModelScope, and Civitai snapshots |
 | [npm developer tools](./npm-tools) | `npm:<package>` identity, project/global/isolated installers, script policy, native locks, inventory, and conflict rejection |
 | [Cargo developer tools](./cargo-tools) | `cargo:` identity, exact Rust binding, controlled providers, native publication, and schema-4 replay metadata |
 | [Go developer tools](./go-tools) | `go:` command-package identity, exact Go binding, proxy selection, isolated provider execution, and schema-4 replay metadata |

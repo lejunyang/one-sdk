@@ -21,7 +21,7 @@ profile = "default"
 
 | 字段 | 语义 |
 | --- | --- |
-| `source` | 必填，`hf:owner/repo@revision` 或 `modelscope:owner/repo@revision` |
+| `source` | 必填，`hf:owner/repo@revision`、`modelscope:owner/repo@revision` 或精确 Civitai LoRA `civitai:model-id@model-version-id` |
 | `include` / `exclude` | 文件选择 glob |
 | `variant` | 格式/量化标签，参与快照身份 |
 | `when` | 平台过滤 |

@@ -11,7 +11,7 @@ Release backend. For npm-compatible registries, see
 ```text
 osdk source list TOOL_OR_PROVIDER
 osdk source test TOOL
-osdk source test huggingface|modelscope --model owner/repo[@revision]
+osdk source test huggingface|modelscope|civitai --model REFERENCE
 
 osdk source add TOOL_OR_PROVIDER
   --id ID
@@ -28,7 +28,7 @@ osdk source unpin TOOL_OR_PROVIDER
 | --- | --- |
 | `list TOOL_OR_PROVIDER` | List effective sources, types, URLs, and the pin |
 | `test TOOL_OR_PROVIDER` | Force a probe for an SDK backend and print throughput/TTFB ranking |
-| `test TOOL_OR_PROVIDER --model ...` | Probe real Hugging Face/ModelScope repository metadata and a file sample |
+| `test TOOL_OR_PROVIDER --model ...` | Probe Hugging Face/ModelScope repository or exact Civitai LoRA-version metadata and a file sample |
 | `add TOOL_OR_PROVIDER --id ID --download-url URL` | Add or replace a user-global custom source with that ID |
 | `--index-url URL` | Use a separate metadata/index endpoint |
 | `--forward-credentials` | Permit a custom model endpoint to receive provider credentials |
