@@ -629,8 +629,9 @@ osdk skills remove web-design-guidelines
 按记录的 commit 重新下载并核对哈希，同时维持复制/链接方式。`skills update` 重新解析请求的
 分支/标签或默认分支，仅当目标 skill 内容哈希变化时重装；只有仓库其他内容变化时仅推进 lock
 commit。需要在更新时仍固定不动，使用 `ref = "rev:<commit>"`。默认目录链接（Windows junction /
-Unix symlink），无链接环境或 `--copy` 时整树拷贝，且不会覆盖非 osdk 放置的真实目录。也可以在
-`osdk.toml` 里用 `[skills]` 声明，让 `osdk skills sync` 直接复现。
+Unix symlink），无链接环境或 `--copy` 时整树拷贝。用户确认安装摘要后，已有真实目录可以更新：
+osdk 先准备新树，再把旧目录改名为临时备份，激活失败时恢复。也可以在 `osdk.toml` 里用
+`[skills]` 声明，让 `osdk skills sync` 直接复现。
 
 指南：[Agent skills](site/guide/skills.md)
 

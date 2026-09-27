@@ -117,10 +117,12 @@ moved tag or a substituted mirror cannot install — and placement reuses
 ## How skills land
 
 The default is a directory link: a junction on Windows, a symlink on Unix (neither
-needs privilege). Where links are unavailable, or with `--copy`, the tree is
-copied. Either way, osdk **refuses to replace a real directory it did not place**,
-so it never deletes your own files. Override the link mode for skills alone with
-`[skills].link_mode`.
+needs privilege). Where links are unavailable, or with `--copy`, the tree is copied.
+Override the link mode for skills alone with `[skills].link_mode`. After the
+installation summary is confirmed, an existing real directory may be replaced: osdk
+prepares the new path beside the destination, renames the old directory to a temporary
+backup, and restores it if activation fails. A copied skill can therefore be updated
+by a later `add`, `update`, or `sync`.
 
 ## Security
 

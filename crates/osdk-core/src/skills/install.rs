@@ -214,36 +214,109 @@ pub fn stage(dirs: &Dirs, id: &str, package: &SkillPackage, mode: LinkMode) -> R
     Ok(staged)
 }
 
-/// Link a staged skill into one agent's skills directory as `<agent_dir>/<name>`.
+/// Install a staged skill into one agent's `<agent_dir>/<name>` path.
 ///
-/// Prefers a directory link (junction on Windows, symlink on Unix); on failure,
-/// or when `LinkMode::Copy` is requested, copies the tree. Refuses to overwrite
-/// a real directory that osdk did not place there.
+/// The replacement is prepared beside the destination before the existing path
+/// is touched. An existing link, file, or real directory is renamed to a backup,
+/// the prepared tree/link is activated with a same-directory rename, and any
+/// activation failure restores the backup. This permits confirmed copy-mode
+/// updates without exposing a half-written destination.
 pub fn link_into(agent_skills_dir: &Path, name: &str, staged: &Path, mode: LinkMode) -> Result<()> {
     super::validate_skill_name(name)?;
     std::fs::create_dir_all(agent_skills_dir).map_err(|e| Error::io(agent_skills_dir, e))?;
     let dest = agent_skills_dir.join(name);
+    let staged = dunce::canonicalize(staged).map_err(|e| Error::io(staged, e))?;
+    let canonical_parent =
+        dunce::canonicalize(agent_skills_dir).map_err(|e| Error::io(agent_skills_dir, e))?;
+    let intended_dest = canonical_parent.join(name);
 
-    // If a real (non-link) directory is already there, it is not ours to
-    // clobber -- surface it rather than deleting a user's files.
     if let Ok(meta) = dest.symlink_metadata() {
-        if !dirlink::is_link(&meta) && meta.is_dir() {
-            return Err(Error::other(format!(
-                "refusing to replace a real directory at {}",
-                dest.display()
-            )));
+        if let Ok(existing) = dunce::canonicalize(&dest) {
+            if dirlink::is_link(&meta) {
+                if mode != LinkMode::Copy && existing == staged {
+                    return Ok(());
+                }
+            } else {
+                reject_overlapping_trees(&staged, &existing)?;
+            }
+        }
+    } else {
+        reject_overlapping_trees(&staged, &intended_dest)?;
+    }
+
+    let transaction = tempfile::Builder::new()
+        .prefix(".osdk-skill-replace-")
+        .tempdir_in(agent_skills_dir)
+        .map_err(|e| Error::io(agent_skills_dir, e))?;
+    let prepared = transaction.path().join("prepared");
+    let backup = transaction.path().join("backup");
+
+    prepare_destination(&staged, &prepared, mode)?;
+    activate_prepared(&dest, &prepared, &backup)
+}
+
+fn reject_overlapping_trees(staged: &Path, destination: &Path) -> Result<()> {
+    if staged == destination || staged.starts_with(destination) || destination.starts_with(staged) {
+        return Err(Error::other(format!(
+            "refusing to install a skill from overlapping source and destination paths: {} and {}",
+            staged.display(),
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
+fn prepare_destination(staged: &Path, prepared: &Path, mode: LinkMode) -> Result<()> {
+    if mode == LinkMode::Copy {
+        return copy_tree(staged, prepared);
+    }
+    match dirlink::create(staged, prepared) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            remove_path_if_exists(prepared)?;
+            copy_tree(staged, prepared)
         }
     }
+}
 
-    if mode == LinkMode::Copy {
-        return copy_tree(staged, &dest);
+fn activate_prepared(dest: &Path, prepared: &Path, backup: &Path) -> Result<()> {
+    let had_destination = dest.symlink_metadata().is_ok();
+    if had_destination {
+        std::fs::rename(dest, backup).map_err(|e| Error::io(dest, e))?;
     }
-    match dirlink::retarget(staged, &dest) {
-        Ok(()) => Ok(()),
-        // Links can be unavailable (no privilege on Windows without dev mode,
-        // or a filesystem that lacks them). Copy is the always-works fallback,
-        // matching how the file-level link mode degrades.
-        Err(_) => copy_tree(staged, &dest),
+
+    if let Err(install_error) = std::fs::rename(prepared, dest) {
+        if had_destination {
+            if let Err(restore_error) = std::fs::rename(backup, dest) {
+                return Err(Error::other(format!(
+                    "activating skill at {} failed: {install_error}; restoring the previous directory also failed: {restore_error}",
+                    dest.display()
+                )));
+            }
+        }
+        return Err(Error::io(dest, install_error));
+    }
+
+    if had_destination {
+        // The new destination is already live. Cleanup is best-effort: reporting
+        // failure here would leave callers with the new bytes but the old lock.
+        // TempDir drop retries removal of any leftover transaction directory.
+        let _ = remove_path_if_exists(backup);
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    let Ok(meta) = path.symlink_metadata() else {
+        return Ok(());
+    };
+    if dirlink::is_link(&meta) {
+        dirlink::remove(path).map_err(|e| Error::io(path, e))
+    } else if meta.is_dir() {
+        dirlink::remove_tree_links_first(path).map_err(|e| Error::io(path, e))?;
+        std::fs::remove_dir_all(path).map_err(|e| Error::io(path, e))
+    } else {
+        std::fs::remove_file(path).map_err(|e| Error::io(path, e))
     }
 }
 
@@ -267,17 +340,7 @@ pub fn unlink_from(agent_skills_dir: &Path, name: &str) -> Result<bool> {
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
-    if dest.exists() {
-        // Replace an existing link or copy wholesale so a re-install cannot
-        // leave stale files from a previous revision behind.
-        if let Ok(meta) = dest.symlink_metadata() {
-            if dirlink::is_link(&meta) {
-                dirlink::remove(dest).map_err(|e| Error::io(dest, e))?;
-            } else {
-                std::fs::remove_dir_all(dest).map_err(|e| Error::io(dest, e))?;
-            }
-        }
-    }
+    remove_path_if_exists(dest)?;
     std::fs::create_dir_all(dest).map_err(|e| Error::io(dest, e))?;
     for entry in walkdir::WalkDir::new(src).follow_links(false) {
         let entry = entry.map_err(|e| Error::other(format!("copying skill: {e}")))?;
@@ -543,23 +606,86 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_clobber_a_real_directory() {
+    fn replaces_a_real_directory_without_leaving_stale_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(temp.path());
+        let src = temp.path().join("skill");
+        write(&src, "SKILL.md", "---\nname: mine\ndescription: d\n---\n");
+        write(&src, "new.txt", "new data");
+        let package = read_skill_dir(&src).unwrap();
+        let staged = stage(&dirs, "local:mine", &package, LinkMode::Copy).unwrap();
+
+        let agent_dir = temp.path().join(".claude").join("skills");
+        let destination = agent_dir.join("mine");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("stale.txt"), "old data").unwrap();
+
+        link_into(&agent_dir, "mine", &staged, LinkMode::Copy).unwrap();
+        assert!(destination.join("SKILL.md").is_file());
+        assert!(destination.join("new.txt").is_file());
+        assert!(!destination.join("stale.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("new.txt")).unwrap(),
+            "new data"
+        );
+        let siblings = std::fs::read_dir(&agent_dir).unwrap().count();
+        assert_eq!(siblings, 1, "successful replacement must remove its backup");
+    }
+
+    #[test]
+    fn copy_mode_converts_an_existing_link_to_a_real_directory() {
         let temp = tempfile::tempdir().unwrap();
         let dirs = dirs_in(temp.path());
         let src = temp.path().join("skill");
         write(&src, "SKILL.md", "---\nname: mine\ndescription: d\n---\n");
         let package = read_skill_dir(&src).unwrap();
         let staged = stage(&dirs, "local:mine", &package, LinkMode::Copy).unwrap();
-
         let agent_dir = temp.path().join(".claude").join("skills");
-        // A user's own real directory sits where the skill would go.
-        std::fs::create_dir_all(agent_dir.join("mine")).unwrap();
-        std::fs::write(agent_dir.join("mine").join("keep.txt"), "user data").unwrap();
 
-        let err = link_into(&agent_dir, "mine", &staged, LinkMode::Copy).unwrap_err();
-        assert!(err.to_string().contains("refusing to replace"));
-        // The user's file is untouched.
-        assert!(agent_dir.join("mine").join("keep.txt").is_file());
+        link_into(&agent_dir, "mine", &staged, LinkMode::Auto).unwrap();
+        assert!(dirlink::is_link(
+            &agent_dir.join("mine").symlink_metadata().unwrap()
+        ));
+        link_into(&agent_dir, "mine", &staged, LinkMode::Copy).unwrap();
+        assert!(!dirlink::is_link(
+            &agent_dir.join("mine").symlink_metadata().unwrap()
+        ));
+        assert!(agent_dir.join("mine/SKILL.md").is_file());
+    }
+
+    #[test]
+    fn activation_failure_restores_the_previous_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("mine");
+        let prepared = temp.path().join("missing-prepared");
+        let backup = temp.path().join("backup");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("keep.txt"), "old data").unwrap();
+
+        let error = activate_prepared(&destination, &prepared, &backup).unwrap_err();
+        assert!(error.to_string().contains("io error"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
+            "old data"
+        );
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn rejects_overlapping_source_and_destination_trees() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("skills").join("mine");
+        std::fs::create_dir_all(&destination).unwrap();
+        let error = link_into(
+            &temp.path().join("skills"),
+            "mine",
+            &destination,
+            LinkMode::Copy,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("overlapping source and destination"));
     }
 
     #[test]

@@ -102,8 +102,9 @@ tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`�
 ## 落地方式
 
 默认目录链接：Windows 用 junction、Unix 用 symlink（都无需特权）。无链接环境或显式 `--copy`
-时整树拷贝。无论哪种，都**拒绝覆盖非 osdk 放置的真实目录**，避免删掉用户自己的文件。link mode
-可用 `[skills].link_mode` 覆盖，仅对 skill 生效。
+时整树拷贝。link mode 可用 `[skills].link_mode` 覆盖，仅对 skill 生效。确认安装摘要后可以覆盖
+已有真实目录；新内容先在目标同级准备完成，旧目录改名为临时备份，再激活新目录。激活失败会
+恢复旧目录，成功后清理备份，因此复制模式安装的 skill 也能继续 `add`、`update` 或 `sync`。
 
 ## 安全
 

@@ -702,11 +702,13 @@ mode in `osdk.lock`; `sync` re-downloads a missing local copy at that exact comm
 re-checks the hash, and preserves copy/link placement. `skills update` re-resolves
 the requested branch/tag or default branch and reinstalls only when that skill's
 content hash changes; a repository-only change just advances the lock commit. Use
-`ref = "rev:<commit>"` when an update must keep an immutable pin. Installs use a directory link by default (a
-junction on Windows, a symlink on Unix) and fall back to a copy where links are
-unavailable or with `--copy`, never replacing a real directory osdk did not
-place. You can also declare skills in `osdk.toml` under `[skills]` and let
-`osdk skills sync` reproduce them.
+`ref = "rev:<commit>"` when an update must keep an immutable pin. Installs use a
+directory link by default (a junction on Windows, a symlink on Unix) and fall back
+to a copy where links are unavailable or with `--copy`. After the installation
+summary is confirmed, an existing real directory can be replaced: osdk prepares
+the new tree first, renames the old directory to a temporary backup, and restores
+it if activation fails. You can also declare skills in `osdk.toml` under `[skills]`
+and let `osdk skills sync` reproduce them.
 
 Guide: [Agent skills](site/en/guide/skills.md)
 
