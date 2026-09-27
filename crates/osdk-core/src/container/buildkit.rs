@@ -576,16 +576,19 @@ fn parse_selected_builder(
     bytes: &[u8],
     selector: &BuildxBuilderSelector,
 ) -> Option<SelectedBuilder> {
-    let matches = String::from_utf8_lossy(bytes)
+    let text = String::from_utf8_lossy(bytes);
+    let mut matches = text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .filter(|value| match selector {
             BuildxBuilderSelector::Auto => json_bool(value, "Current").unwrap_or(false),
             BuildxBuilderSelector::Named(name) => json_str(value, "Name") == Some(name),
         })
-        .filter_map(parse_builder_json)
-        .collect::<Vec<_>>();
-    (matches.len() == 1).then(|| matches.into_iter().next().unwrap())
+        .filter_map(parse_builder_json);
+    let selected = matches.next()?;
+    matches
+        .all(|candidate| candidate == selected)
+        .then_some(selected)
 }
 
 fn parse_builder_json(value: Value) -> Option<SelectedBuilder> {
@@ -615,20 +618,25 @@ fn parse_node_json(value: &Value) -> BuilderNode {
         .get("Platforms")
         .map(platform_values)
         .unwrap_or_default();
-    let raw_endpoint = json_str(value, "Endpoint").map(str::trim);
+    let raw_endpoint = json_str(value, "Endpoint")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let endpoint = raw_endpoint.and_then(parse_endpoint);
     BuilderNode {
         name: json_str(value, "Name")
             .unwrap_or_default()
             .trim()
             .to_owned(),
-        endpoint_fingerprint: endpoint
-            .as_ref()
-            .and(raw_endpoint)
-            .map(builder_endpoint_fingerprint),
+        // Docker-driver nodes use a logical context name such as `default`
+        // rather than a URL. It is still part of the observed topology and can
+        // be safely bound into a preview fingerprint even though there is no
+        // endpoint origin to expose in diagnostics.
+        endpoint_fingerprint: raw_endpoint.map(builder_endpoint_fingerprint),
         endpoint,
         status: BuilderNodeStatus::parse(json_str(value, "Status").unwrap_or_default()),
-        buildkit_version: json_str(value, "Buildkit").and_then(super::parse_vendor_version),
+        buildkit_version: ["Buildkit", "BuildKit", "Version"]
+            .into_iter()
+            .find_map(|key| json_str(value, key).and_then(super::parse_vendor_version)),
         platforms,
     }
 }
@@ -701,11 +709,9 @@ fn merge_inspect_text(builder: &mut SelectedBuilder, bytes: &[u8]) -> bool {
             }
             "Endpoint" => {
                 if let Some(node) = current_node.and_then(|index| builder.nodes.get_mut(index)) {
-                    node.endpoint = parse_endpoint(value);
-                    node.endpoint_fingerprint = node
-                        .endpoint
-                        .as_ref()
-                        .map(|_| builder_endpoint_fingerprint(value));
+                    let value = (!value.is_empty()).then_some(value);
+                    node.endpoint = value.and_then(parse_endpoint);
+                    node.endpoint_fingerprint = value.map(builder_endpoint_fingerprint);
                 }
             }
             "Status" => {
@@ -713,7 +719,7 @@ fn merge_inspect_text(builder: &mut SelectedBuilder, bytes: &[u8]) -> bool {
                     node.status = BuilderNodeStatus::parse(value);
                 }
             }
-            "BuildKit" => {
+            "BuildKit" | "BuildKit version" => {
                 if let Some(node) = current_node.and_then(|index| builder.nodes.get_mut(index)) {
                     node.buildkit_version = super::parse_vendor_version(value);
                 }
@@ -861,6 +867,35 @@ mod tests {
             .iter()
             .flatten()
             .any(|argument| argument == "--bootstrap"));
+    }
+
+    #[test]
+    fn accepts_identical_buildx_rows_and_current_version_fields() {
+        let row = r#"{"Current":true,"Driver":"docker","Name":"default","Nodes":[{"Endpoint":"default","Name":"default","Status":"running","Version":"v0.32.2","Platforms":["linux/amd64","linux/amd64/v3"]}]}"#;
+        let list = format!("{row}\n{row}\n");
+        let runner = FakeRunner::new([
+            exited(true, "github.com/docker/buildx v0.36.1 deadbeef\n", ""),
+            exited(true, &list, ""),
+            exited(
+                true,
+                "Name: default\nDriver: docker\nNodes:\nName: default\nEndpoint: default\nStatus: running\nBuildKit version: v0.32.2\nPlatforms: linux/amd64, linux/amd64/v3\n",
+                "",
+            ),
+        ]);
+
+        let discovery = BuildkitAdapter::default().inspect(&runner, CaptureLimits::default());
+
+        assert_eq!(discovery.report.status, DiagnosticStatus::Healthy);
+        let builder = discovery.selected_builder.unwrap();
+        assert_eq!(builder.name, "default");
+        assert_eq!(builder.nodes.len(), 1);
+        assert_eq!(
+            builder.nodes[0].buildkit_version,
+            Some(Version::new(0, 32, 2))
+        );
+        assert!(builder.nodes[0].endpoint.is_none());
+        assert!(builder.topology_fingerprint().unwrap().is_some());
+        assert_eq!(runner.calls.lock().unwrap().len(), 3);
     }
 
     #[test]

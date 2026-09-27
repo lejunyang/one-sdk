@@ -49,6 +49,10 @@ containerd 客户端会把未转换的 URL 当成不存在的文件路径。
 BuildKit 适配器使用 `docker buildx version`、机器可读的 `buildx ls`，再对列表中
 精确选中的结果执行 `buildx inspect`。它刻意不加 `--bootstrap`，所以检查不会启动
 构建器。诊断的最低版本分别为 Docker 19.3、containerd 1.6 和 Buildx 0.10。
+当前 Buildx 可能重复输出同一个已选 builder；osdk 只折叠类型化结果完全相同的记录，
+冲突记录仍会被拒绝。节点版本同时接受旧的 `Buildkit`、当前的 `Version` JSON 字段与
+`BuildKit version` inspect 文本。`default` 这类 Docker context 逻辑 endpoint 会进入
+拓扑身份哈希，但不会被误报为网络 origin。
 
 ## 直接启动镜像 pull
 

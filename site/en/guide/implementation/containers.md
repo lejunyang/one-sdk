@@ -60,6 +60,12 @@ The BuildKit adapter uses `docker buildx version`, machine-readable `buildx ls`,
 and `buildx inspect` for the exact selected list result. It deliberately omits
 `--bootstrap`; inspection cannot start a builder. Minimum supported versions are
 Docker 19.3, containerd 1.6, and Buildx 0.10 for diagnostics.
+Current Buildx releases may emit one selected builder row more than once; osdk
+collapses only byte-equivalent typed results and still rejects conflicting
+matches. Node versions accept both legacy `Buildkit` and current `Version` JSON
+fields plus `BuildKit version` inspect text. A logical Docker-context endpoint
+such as `default` is hashed into topology identity without being exposed as a
+network origin.
 
 ## Direct image-pull launch
 
