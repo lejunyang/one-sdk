@@ -255,6 +255,38 @@ pub fn link_into(agent_skills_dir: &Path, name: &str, staged: &Path, mode: LinkM
     activate_prepared(&dest, &prepared, &backup)
 }
 
+/// Reject a source tree that is also the install destination (or contains it).
+/// This is checked before staging so a local source cannot be deleted by the
+/// replacement it asked osdk to perform.
+pub fn validate_source_destination(source: &Path, destination: &Path) -> Result<()> {
+    let source = canonicalize_with_missing_tail(source)?;
+    let destination = canonicalize_with_missing_tail(destination)?;
+    reject_overlapping_trees(&source, &destination)
+}
+
+fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf> {
+    let mut cursor = path;
+    let mut missing = Vec::new();
+    loop {
+        match dunce::canonicalize(cursor) {
+            Ok(mut existing) => {
+                for component in missing.iter().rev() {
+                    existing.push(component);
+                }
+                return Ok(existing);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = cursor.file_name().ok_or_else(|| Error::io(path, error))?;
+                missing.push(component.to_os_string());
+                cursor = cursor.parent().ok_or_else(|| {
+                    Error::other(format!("cannot resolve path {}", path.display()))
+                })?;
+            }
+            Err(error) => return Err(Error::io(path, error)),
+        }
+    }
+}
+
 fn reject_overlapping_trees(staged: &Path, destination: &Path) -> Result<()> {
     if staged == destination || staged.starts_with(destination) || destination.starts_with(staged) {
         return Err(Error::other(format!(
@@ -630,6 +662,18 @@ mod tests {
         );
         let siblings = std::fs::read_dir(&agent_dir).unwrap().count();
         assert_eq!(siblings, 1, "successful replacement must remove its backup");
+    }
+
+    #[test]
+    fn source_destination_overlap_is_rejected_before_destination_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("skill");
+        std::fs::create_dir_all(&source).unwrap();
+        let nested_destination = source.join(".agents/skills/mine");
+        assert!(validate_source_destination(&source, &nested_destination).is_err());
+
+        let sibling_destination = temp.path().join("project/.agents/skills/mine");
+        validate_source_destination(&source, &sibling_destination).unwrap();
     }
 
     #[test]

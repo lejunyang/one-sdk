@@ -197,11 +197,17 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
     let mode = add_link_mode(app, args.copy, target_dirs.len())?;
     let packages = roots
         .iter()
-        .map(|(name, root)| Ok((name.clone(), install::read_skill_dir(root)?)))
+        .map(|(name, root)| Ok((name.clone(), root.clone(), install::read_skill_dir(root)?)))
         .collect::<Result<Vec<_>>>()?;
 
+    for (_, source_root, package) in &packages {
+        for agent_dir in target_dirs.keys() {
+            install::validate_source_destination(source_root, &agent_dir.join(&package.name))?;
+        }
+    }
+
     println!("Installation summary:");
-    for (_, package) in &packages {
+    for (_, _, package) in &packages {
         println!("  {}", package.preview());
         for (agent_dir, owners) in &target_dirs {
             let destination = agent_dir.join(&package.name);
@@ -229,7 +235,7 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
     }
 
     let mut lock_entries: Vec<(String, LockedSkill)> = Vec::new();
-    for (name, package) in &packages {
+    for (name, _, package) in &packages {
         let staged = install::stage(&app.ctx.dirs, &source.canonical(), package, mode)
             .with_context(|| format!("staging skill `{name}`"))?;
 
@@ -374,10 +380,10 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
     let fallback_mode = link_mode(app, false);
     let mut missing = Vec::new();
     for (name, entry) in &skills {
-        let mode = entry.install_mode.unwrap_or(fallback_mode);
+        let mode = install_mode_for_entry(entry, name, &scope_root, global, fallback_mode)?;
         let mut staged = install::staged_root(&app.ctx.dirs, &entry.source, &entry.content_hash);
         if !staged.exists() {
-            match refetch_staged(app, name, entry).await {
+            match refetch_staged(app, name, entry, mode).await {
                 Ok(Some(path)) => staged = path,
                 Ok(None) => {
                     missing.push(name.clone());
@@ -414,7 +420,12 @@ async fn sync(app: &mut App, global: bool) -> Result<()> {
 /// re-fetched (a local source, whose origin may no longer exist). The re-staged
 /// content hash must match what the lock recorded, or the sync fails closed: a
 /// moved ref or a substituted mirror must not quietly change what is installed.
-async fn refetch_staged(app: &App, name: &str, entry: &LockedSkill) -> Result<Option<PathBuf>> {
+async fn refetch_staged(
+    app: &App,
+    name: &str,
+    entry: &LockedSkill,
+    mode: LinkMode,
+) -> Result<Option<PathBuf>> {
     let source = SkillSource::parse(&entry.source)?;
     let SkillSource::GitHub {
         owner,
@@ -439,7 +450,6 @@ async fn refetch_staged(app: &App, name: &str, entry: &LockedSkill) -> Result<Op
         root.join(&wanted)
     };
     let package = install::read_skill_dir(&skill_root)?;
-    let mode = entry.install_mode.unwrap_or_else(|| link_mode(app, false));
     let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
     if package.content_hash() != entry.content_hash {
         anyhow::bail!(
@@ -482,6 +492,7 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         let Some(entry) = lock.skills.get(name).cloned() else {
             anyhow::bail!("skill `{name}` is not recorded in the lock");
         };
+        let mode = install_mode_for_entry(&entry, name, &scope_root, global, fallback_mode)?;
         let source = SkillSource::parse(&entry.source)?;
         let SkillSource::GitHub {
             owner,
@@ -507,7 +518,7 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
                 if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
                     if let Some(existing) = lock.skills.get_mut(name) {
                         existing.requested_ref = requested_ref;
-                        existing.install_mode = Some(entry.install_mode.unwrap_or(fallback_mode));
+                        existing.install_mode = Some(mode);
                     }
                     changed = true;
                     println!("`{name}`: pinned at {reference}; migrated lock metadata");
@@ -523,7 +534,6 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             .with_context(|| format!("re-resolving {owner}/{repo}"))?;
         if Some(&commit) == entry.resolved_commit.as_ref() {
             let requested_ref = normalized_requested_ref(requested_reference);
-            let mode = entry.install_mode.unwrap_or(fallback_mode);
             if entry.requested_ref != requested_ref || entry.install_mode.is_none() {
                 if let Some(existing) = lock.skills.get_mut(name) {
                     existing.requested_ref = requested_ref;
@@ -555,7 +565,7 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             if let Some(existing) = lock.skills.get_mut(name) {
                 existing.requested_ref = requested_ref;
                 existing.resolved_commit = Some(commit.clone());
-                existing.install_mode = Some(entry.install_mode.unwrap_or(fallback_mode));
+                existing.install_mode = Some(mode);
             }
             changed = true;
             println!(
@@ -565,7 +575,6 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
             continue;
         }
 
-        let mode = entry.install_mode.unwrap_or(fallback_mode);
         let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
         let targets = entry
             .agents
@@ -991,6 +1000,35 @@ fn agent_dirs_by_path(
     Ok(dirs)
 }
 
+fn install_mode_for_entry(
+    entry: &LockedSkill,
+    name: &str,
+    scope_root: &Path,
+    global: bool,
+    fallback: LinkMode,
+) -> Result<LinkMode> {
+    if let Some(mode) = entry.install_mode {
+        return Ok(mode);
+    }
+    let targets = entry
+        .agents
+        .iter()
+        .filter_map(|agent_id| agent_target(agent_id))
+        .collect::<Vec<_>>();
+    let mut saw_link = false;
+    for agent_dir in agent_dirs_by_path(&targets, scope_root, global)?.keys() {
+        let destination = agent_dir.join(name);
+        if let Ok(metadata) = destination.symlink_metadata() {
+            if osdk_core::store::dirlink::is_link(&metadata) {
+                saw_link = true;
+            } else {
+                return Ok(LinkMode::Copy);
+            }
+        }
+    }
+    Ok(if saw_link { LinkMode::Auto } else { fallback })
+}
+
 /// Pick link vs copy for `skills add`. Explicit flags and skill configuration
 /// win. A single physical target is copied directly; multiple targets prompt in
 /// a terminal and otherwise retain osdk's configured fallback.
@@ -1390,6 +1428,24 @@ mod tests {
             .map(|target| target.id)
             .collect::<Vec<_>>()
             == ["codex", "cursor"]));
+    }
+
+    #[test]
+    fn legacy_lock_infers_copy_from_an_existing_real_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join(".agents/skills/mine");
+        std::fs::create_dir_all(&destination).unwrap();
+        let entry = LockedSkill {
+            source: "github:owner/repo".into(),
+            content_hash: "b3-v2:test".into(),
+            resolved_commit: Some("deadbeef".into()),
+            agents: vec!["universal".into(), "codex".into()],
+            ..LockedSkill::default()
+        };
+        assert_eq!(
+            install_mode_for_entry(&entry, "mine", root.path(), false, LinkMode::Auto).unwrap(),
+            LinkMode::Copy
+        );
     }
 
     #[test]

@@ -26,4 +26,5 @@ osdk skills update name
 
 来源支持 `github:owner/repo`、`owner/repo`、GitHub URL 和本地路径。默认链接，`--copy`
 改为复制。确认安装摘要后可更新已有真实目录；osdk 先准备新树，旧目录改名备份，激活失败即
-恢复。配置见 `reference/configuration/skills.md`。
+恢复。旧 lock 缺少安装方式时按现有目录类型推断；本地源与目标重叠时在 staging 前拒绝。配置见
+`reference/configuration/skills.md`。

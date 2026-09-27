@@ -707,8 +707,10 @@ directory link by default (a junction on Windows, a symlink on Unix) and fall ba
 to a copy where links are unavailable or with `--copy`. After the installation
 summary is confirmed, an existing real directory can be replaced: osdk prepares
 the new tree first, renames the old directory to a temporary backup, and restores
-it if activation fails. You can also declare skills in `osdk.toml` under `[skills]`
-and let `osdk skills sync` reproduce them.
+it if activation fails. Legacy locks without `install_mode` infer copy from an
+existing real directory and link from an existing link. Local sources that overlap
+their destination are rejected before staging. You can also declare skills in
+`osdk.toml` under `[skills]` and let `osdk skills sync` reproduce them.
 
 Guide: [Agent skills](site/en/guide/skills.md)
 

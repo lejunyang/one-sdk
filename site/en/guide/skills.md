@@ -122,7 +122,9 @@ Override the link mode for skills alone with `[skills].link_mode`. After the
 installation summary is confirmed, an existing real directory may be replaced: osdk
 prepares the new path beside the destination, renames the old directory to a temporary
 backup, and restores it if activation fails. A copied skill can therefore be updated
-by a later `add`, `update`, or `sync`.
+by a later `add`, `update`, or `sync`. A legacy lock without `install_mode` infers
+its placement from the existing target (link versus real directory). A local source
+that overlaps its destination is rejected before staging so it cannot delete itself.
 
 ## Security
 
