@@ -7,9 +7,9 @@
 | 子命令 | 参数与语义 |
 | --- | --- |
 | `pull <IMAGE>` | `--runtime auto\|docker\|containerd`、`--platform OS/ARCH[/VARIANT]`；containerd 的 `--address` 与 `--namespace` 必须成对 |
-| `doctor` | `--runtime`、`--builder`、`--json`；诊断运行时与 Buildx |
-| `cache status` | `--runtime auto\|docker\|containerd\|buildkit`、`--builder`、`--json`；`auto` 选择唯一具有聚合缓存契约的 Docker |
-| `registry test <REGISTRY>` | `--image`、`--platform`、`--json`；匿名探测 registry 与镜像候选 |
+| `doctor` | `--runtime`、`--builder`、`--json`、`--check`；诊断运行时与 Buildx |
+| `cache status` | `--runtime auto\|docker\|containerd\|buildkit`、`--builder`、`--json`、`--check`；`auto` 选择唯一具有聚合缓存契约的 Docker |
+| `registry test <REGISTRY>` | `--image`、`--platform`、`--json`、`--check`；匿名探测 registry 与镜像候选 |
 | `mirrors plan <REGISTRY>` | `--runtime docker\|containerd\|buildkit` 必填；`--builder`、`--native-config`、`--containerd-main-config`、`--json` |
 | `mirrors apply <REGISTRY>` | 同 plan；`--native-config` 必填，另有 `--image`、`--platform`、`--accept-plan`、`--dry-run`、`--json` |
 | `prune` | `--runtime docker\|buildkit\|containerd`、`--scope images\|build-cache` 必填；预览支持 `--json`；执行需 `--execute --accept-preview <ID>` |

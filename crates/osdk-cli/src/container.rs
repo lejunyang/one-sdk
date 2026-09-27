@@ -223,6 +223,7 @@ where
             runtime,
             builder,
             json,
+            check,
         } => {
             let runtime = runtime
                 .map(RuntimeSelection::from)
@@ -237,12 +238,22 @@ where
             } else {
                 write_doctor_human(output, &report, i18n::current())?;
             }
+            if check
+                && (report.runtime.status != DiagnosticStatus::Healthy
+                    || report
+                        .builder
+                        .as_ref()
+                        .is_some_and(|builder| builder.status != DiagnosticStatus::Healthy))
+            {
+                return Err(anyhow!(osdk_core::t!("err.container.doctor_check_failed")));
+            }
         }
         ContainerCommand::Cache { command } => match command {
             ContainerCacheCommand::Status {
                 runtime,
                 builder,
                 json,
+                check,
             } => {
                 let runtime = runtime.unwrap_or_else(|| config.runtime.into());
                 let builder = builder.unwrap_or_else(|| config.builder.clone());
@@ -254,6 +265,9 @@ where
                 } else {
                     write_cache_human(output, &status, i18n::current())?;
                 }
+                if check && status.status != CacheQueryStatus::Available {
+                    return Err(anyhow!(osdk_core::t!("err.container.cache_check_failed")));
+                }
             }
         },
         ContainerCommand::Registry { command } => match command {
@@ -262,6 +276,7 @@ where
                 image,
                 platform,
                 json,
+                check,
             } => {
                 if offline {
                     return Err(anyhow!(osdk_core::t!("err.container.registry_offline")));
@@ -274,6 +289,11 @@ where
                     writeln!(output)?;
                 } else {
                     write_registry_human(output, &report, i18n::current())?;
+                }
+                if check && report.status != RegistryDiagnosticStatus::Healthy {
+                    return Err(anyhow!(osdk_core::t!(
+                        "err.container.registry_check_failed"
+                    )));
                 }
             }
         },
@@ -3160,6 +3180,7 @@ mod tests {
                     image: None,
                     platform: None,
                     json: true,
+                    check: false,
                 },
             },
             &mut output,
@@ -3525,6 +3546,7 @@ mod tests {
                 runtime: Some(ContainerRuntimeArg::Docker),
                 builder: None,
                 json: true,
+                check: false,
             },
             &mut output,
         )
@@ -3535,6 +3557,83 @@ mod tests {
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("\"selected_runtime\":\"docker\""));
+    }
+
+    #[tokio::test]
+    async fn strict_checks_emit_reports_before_returning_an_error() {
+        let mut doctor_output = Vec::new();
+        let doctor_error = run_with(
+            &FakeRunner::new([
+                CommandOutcome::NotInstalled,
+                CommandOutcome::NotInstalled,
+                CommandOutcome::NotInstalled,
+            ]),
+            || Ok(FakeTransport::available(1)),
+            &Default::default(),
+            false,
+            ContainerCommand::Doctor {
+                runtime: Some(ContainerRuntimeArg::Containerd),
+                builder: None,
+                json: true,
+                check: true,
+            },
+            &mut doctor_output,
+        )
+        .await
+        .unwrap_err();
+        assert!(doctor_error.to_string().contains("doctor check"));
+        let doctor: serde_json::Value = serde_json::from_slice(&doctor_output).unwrap();
+        assert_eq!(doctor["runtime"]["status"], "not-installed");
+
+        let mut cache_output = Vec::new();
+        let cache_error = run_with(
+            &FakeRunner::new([failure("permission denied")]),
+            || Ok(FakeTransport::available(1)),
+            &Default::default(),
+            false,
+            ContainerCommand::Cache {
+                command: ContainerCacheCommand::Status {
+                    runtime: Some(ContainerCacheRuntimeArg::Docker),
+                    builder: None,
+                    json: true,
+                    check: true,
+                },
+            },
+            &mut cache_output,
+        )
+        .await
+        .unwrap_err();
+        assert!(cache_error.to_string().contains("cache check"));
+        let cache: serde_json::Value = serde_json::from_slice(&cache_output).unwrap();
+        assert_eq!(cache["status"], "permission-denied");
+
+        let mut registry_output = Vec::new();
+        let registry_error = run_with(
+            &FakeRunner::new([]),
+            || {
+                Ok(FakeTransport::from_responses([
+                    osdk_core::container::RegistryResponse::new(503),
+                ]))
+            },
+            &Default::default(),
+            false,
+            ContainerCommand::Registry {
+                command: ContainerRegistryCommand::Test {
+                    registry: "registry.example".into(),
+                    image: None,
+                    platform: None,
+                    json: true,
+                    check: true,
+                },
+            },
+            &mut registry_output,
+        )
+        .await
+        .unwrap_err();
+        assert!(registry_error.to_string().contains("registry check"));
+        let registry: serde_json::Value = serde_json::from_slice(&registry_output).unwrap();
+        assert_eq!(registry["status"], "protocol-error");
+        assert_eq!(registry["api"]["status"], "server-error");
     }
 
     #[test]

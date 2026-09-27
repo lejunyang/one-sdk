@@ -238,6 +238,8 @@ version 1。Registry report schema version 2 包含实时耗时，因此其结�
 输出截断、结构化输出无效和命令失败都会保留为不同的类型化状态。原生 stderr 只用于
 分类，之后立即丢弃。因此状态查询可以给出有用的机器结果，而不会回显守护进程错误或
 凭据。
+Doctor、cache status 与 Registry 诊断默认即使不健康也会返回类型化报告；显式 `--check`
+模式保留 stdout 报告，然后分别仅在相关状态为 `healthy`、`available`、`healthy` 时返回零。
 
 Doctor、cache status、Registry 测试、mirror plan、mirror apply dry-run 与 prune preview
 都不会修改原生状态。Pull、经批准的 prune 和经批准的 mirror apply 是刻意限定的例外：

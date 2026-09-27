@@ -33,6 +33,8 @@ containerd 报告版本与 Registry 配置状态；Buildx 报告 driver，以及
 `--json` 输出确定的 schema version 2 对象，其中包含选中报告、自动选择期间尝试的所有
 运行时报告，以及独立的可选构建器报告。它不包含 context、builder、节点名称、containerd
 namespace 与配置路径，也不包含 endpoint path/query。字段名和枚举值不会随 `--lang` 翻译。
+将命令用作健康门禁时可加 `--check`：报告仍会完整输出，随后只有选中 runtime 和每个已检查
+builder 均为 `healthy` 才以零状态退出。
 
 ## 检查原生缓存用量
 
@@ -60,6 +62,7 @@ osdk container cache status --runtime containerd --json
 缓存 JSON 使用原生缓存 schema version 1，只包含类型化分类、数量、字节总量、可回收
 字节数、状态、所有者和已脱敏的命令证据。原生对象 ID、描述、构建器名称、命令原始
 输出、凭据和私有路径都不会进入输出。
+使用 `--check` 时会先输出报告，只有状态为 `available` 才以零状态退出。
 
 ## 使用选中的原生 runtime 拉取镜像
 
@@ -257,6 +260,7 @@ API/token/manifest body，只读取
 字节数、Registry origin 与请求数，但绝不显示 token、原始响应 header 或 response body。
 带 path prefix 的已配置 mirror 会在 `/v2/...` 前保留该 prefix；诊断 report 有意只显示
 origin。
+使用 `--check` 时会先输出报告，只有聚合 Registry 状态为 `healthy` 才以零状态退出。
 
 ## 规划原生 mirror 配置
 

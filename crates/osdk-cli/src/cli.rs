@@ -1285,6 +1285,9 @@ pub enum ContainerCommand {
         /// Emit deterministic, schema-versioned JSON.
         #[arg(long)]
         json: bool,
+        /// Exit nonzero unless every inspected component is healthy.
+        #[arg(long)]
+        check: bool,
     },
     /// Inspect caches owned by native container components.
     Cache {
@@ -1316,6 +1319,9 @@ pub enum ContainerCacheCommand {
         /// Emit deterministic, schema-versioned JSON.
         #[arg(long)]
         json: bool,
+        /// Exit nonzero unless cache status is available.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -1335,6 +1341,9 @@ pub enum ContainerRegistryCommand {
         /// Emit schema-versioned JSON; live timing fields vary between runs.
         #[arg(long)]
         json: bool,
+        /// Exit nonzero unless the aggregate Registry diagnostic is healthy.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -1450,6 +1459,7 @@ mod tests {
             "--platform",
             "linux/x86_64",
             "--json",
+            "--check",
         ])
         .unwrap();
         let Command::Container {
@@ -1461,6 +1471,7 @@ mod tests {
                             image,
                             platform,
                             json,
+                            check,
                         },
                 },
         } = cli.command
@@ -1471,6 +1482,7 @@ mod tests {
         assert_eq!(image.unwrap().to_string(), "docker.io/library/ubuntu:24.04");
         assert_eq!(platform.unwrap().to_string(), "linux/amd64");
         assert!(json);
+        assert!(check);
     }
 
     #[test]

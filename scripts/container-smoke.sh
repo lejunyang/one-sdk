@@ -74,14 +74,14 @@ assert_json() {
 }
 
 echo "checking Docker and Buildx discovery"
-docker_report="$($osdk_binary container doctor --runtime docker --json)"
+docker_report="$($osdk_binary container doctor --runtime docker --json --check)"
 assert_json 'value["runtime"]["status"] == "healthy"' <<<"$docker_report"
 assert_json 'value["builder"]["status"] == "healthy"' <<<"$docker_report"
 
 echo "checking native cache contracts"
-docker_cache="$($osdk_binary container cache status --runtime docker --json)"
+docker_cache="$($osdk_binary container cache status --runtime docker --json --check)"
 assert_json 'value["status"] == "available"' <<<"$docker_cache"
-buildkit_cache="$($osdk_binary container cache status --runtime buildkit --json)"
+buildkit_cache="$($osdk_binary container cache status --runtime buildkit --json --check)"
 assert_json 'value["status"] == "available"' <<<"$buildkit_cache"
 
 echo "checking read-only plans and previews"
@@ -96,8 +96,18 @@ test ! -e "$temporary/daemon.json"
 
 echo "checking a pinned OCI registry and Docker pull"
 registry="${smoke_image%%/*}"
-registry_report="$($osdk_binary container registry test "$registry" \
-    --image "$smoke_image" --platform linux/amd64 --json)"
+registry_ok=false
+for _attempt in 1 2 3; do
+    if registry_report="$($osdk_binary container registry test "$registry" \
+        --image "$smoke_image" --platform linux/amd64 --json --check)"; then
+        registry_ok=true
+        break
+    fi
+done
+if [[ "$registry_ok" != true ]]; then
+    echo "fail: pinned OCI registry diagnostic failed after three attempts" >&2
+    exit 1
+fi
 assert_json 'value["status"] == "healthy"' <<<"$registry_report"
 if "$temporary/native-bin/docker" image inspect "$smoke_image" >/dev/null 2>&1; then
     :
@@ -135,7 +145,7 @@ EOF
     chmod +x "$temporary/native-bin/ctr" "$temporary/native-bin/containerd"
 
     echo "checking containerd's native address contract"
-    containerd_report="$($osdk_binary container doctor --runtime containerd --json)"
+    containerd_report="$($osdk_binary container doctor --runtime containerd --json --check)"
     assert_json 'value["runtime"]["status"] == "healthy"' <<<"$containerd_report"
 else
     echo "skip: ctr/containerd pair is not installed"

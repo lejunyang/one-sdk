@@ -1077,6 +1077,24 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "err.container.doctor_check_failed",
+        (
+            "container doctor check did not report every inspected component as healthy",
+            "容器 doctor 检查未将所有已检查组件报告为健康",
+        ),
+    );
+    m.insert(
+        "err.container.cache_check_failed",
+        ("native cache check is not available", "原生缓存检查不可用"),
+    );
+    m.insert(
+        "err.container.registry_check_failed",
+        (
+            "container registry check is not healthy",
+            "容器 Registry 检查不健康",
+        ),
+    );
+    m.insert(
         "err.container.mirror_plan_not_ready",
         (
             "the generated native mirror plan is not safe for automatic application",
@@ -3165,6 +3183,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.container.flag.check",
+        (
+            "Emit the report, then exit nonzero unless the result is healthy",
+            "先输出报告；结果不健康时再以非零状态退出",
+        ),
+    );
+    m.insert(
         "help.prune.about",
         (
             "Garbage-collect unreferenced store objects",
@@ -3492,6 +3517,7 @@ mod tests {
             "help.container.cache.status.flag.runtime",
             "help.container.flag.builder",
             "help.container.flag.json",
+            "help.container.flag.check",
             "msg.container.doctor_conclusion",
             "msg.container.builder_status",
             "msg.container.doctor.mirror",
@@ -3629,6 +3655,9 @@ mod tests {
             "err.container.mirror_image_required",
             "err.container.no_verified_mirror",
             "err.container.docker_config_validation",
+            "err.container.doctor_check_failed",
+            "err.container.cache_check_failed",
+            "err.container.registry_check_failed",
             "err.container.mirror_plan_not_ready",
             "err.container.accept_plan_required",
             "err.container.accept_plan_mismatch",

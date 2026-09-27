@@ -756,10 +756,10 @@ resolve = "mirror"
 ```bash
 osdk container doctor
 osdk container doctor --runtime docker --builder my-builder
-osdk container doctor --json
+osdk container doctor --json --check
 osdk container registry test docker.io
 osdk container registry test docker.io \
-  --image ubuntu:24.04 --platform linux/amd64 --json
+  --image ubuntu:24.04 --platform linux/amd64 --json --check
 osdk container mirrors plan docker.io --runtime docker
 osdk container mirrors plan docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --json
@@ -770,7 +770,7 @@ plan_id=$(osdk container mirrors apply docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --dry-run --json | jq -r .plan_id)
 osdk --yes container mirrors apply docker.io --runtime docker \
   --native-config /etc/docker/daemon.json --accept-plan "$plan_id" --json
-osdk container cache status
+osdk container cache status --json --check
 osdk container cache status --runtime buildkit --builder my-builder
 osdk container pull ubuntu:24.04
 osdk container pull ghcr.io/example/tool:1.0 \

@@ -40,6 +40,9 @@ report, every runtime report attempted during auto selection, and the separate
 optional builder report. It omits context, builder and node names, containerd
 namespaces and config paths, and endpoint paths or queries. Field names and enum
 values remain English regardless of `--lang`.
+Add `--check` when the command is a health gate: the report is still emitted,
+then the command exits nonzero unless the selected runtime and every inspected
+builder are `healthy`.
 
 ## Inspect native cache usage
 
@@ -70,6 +73,8 @@ Cache JSON is the native-cache schema version 1. It contains only typed
 categories, counts, byte totals, reclaimable bytes, status, owner, and redacted
 command evidence. Native object IDs, descriptions, builder names, command
 output, credentials, and private paths are excluded.
+With `--check`, the report is emitted first and the command exits nonzero unless
+its status is `available`.
 
 ## Pull an image with the selected native runtime
 
@@ -302,6 +307,8 @@ It includes image names, platforms, digests, byte counts, registry origins, and
 request count, but never tokens, raw response headers, or response bodies. For a
 path-prefixed configured mirror, requests retain the prefix before `/v2/...`;
 the diagnostic report deliberately shows only its origin.
+With `--check`, the report is emitted first and the command exits nonzero unless
+the aggregate Registry status is `healthy`.
 
 ## Plan native mirror configuration
 

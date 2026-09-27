@@ -304,6 +304,10 @@ distinct typed states where the underlying contract supports them. Native
 stderr is used only for classification and is discarded afterward. A status
 query therefore produces useful machine output without echoing daemon errors or
 credentials.
+Doctor, cache status, and Registry diagnostics normally return their typed
+report even for an unhealthy state. Their explicit `--check` mode preserves that
+stdout report and then returns a nonzero CLI result unless the relevant success
+state is `healthy`, `available`, and `healthy`, respectively.
 
 Doctor, cache status, registry testing, mirror planning, mirror-apply dry-run,
 and prune preview never mutate native state. Pull, approved prune, and approved

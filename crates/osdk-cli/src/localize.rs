@@ -226,6 +226,7 @@ fn localize_subcommands(cmd: Command) -> Command {
                     .mut_arg("accept_preview", |a| {
                         a.help(h("help.container.prune.flag.accept_preview"))
                     })
+                    .mut_arg("json", |a| a.help(h("help.container.flag.json")))
             })
             .mut_subcommand("doctor", |s| {
                 s.about(h("help.container.doctor.about"))
@@ -234,6 +235,7 @@ fn localize_subcommands(cmd: Command) -> Command {
                     })
                     .mut_arg("builder", |a| a.help(h("help.container.flag.builder")))
                     .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                    .mut_arg("check", |a| a.help(h("help.container.flag.check")))
             })
             .mut_subcommand("cache", |s| {
                 s.about(h("help.container.cache.about"))
@@ -245,6 +247,7 @@ fn localize_subcommands(cmd: Command) -> Command {
                             })
                             .mut_arg("builder", |a| a.help(h("help.container.flag.builder")))
                             .mut_arg("json", |a| a.help(h("help.container.flag.json")))
+                            .mut_arg("check", |a| a.help(h("help.container.flag.check")))
                     })
             })
             .mut_subcommand("registry", |s| {
@@ -263,6 +266,7 @@ fn localize_subcommands(cmd: Command) -> Command {
                             .mut_arg("json", |a| {
                                 a.help(h("help.container.registry.test.flag.json"))
                             })
+                            .mut_arg("check", |a| a.help(h("help.container.flag.check")))
                     })
             })
             .mut_subcommand("mirrors", |s| {

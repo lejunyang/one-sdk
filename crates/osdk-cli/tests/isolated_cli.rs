@@ -5197,6 +5197,23 @@ fn native_container_help_is_localized() {
     for expected in ["窄范围原生清理", "精确 sha256 预览 ID", "Docker context"] {
         assert!(prune.contains(expected), "{prune}");
     }
+    assert!(prune.contains("带 schema 版本的 JSON"), "{prune}");
+
+    for arguments in [
+        vec!["container", "doctor", "--help"],
+        vec!["container", "cache", "status", "--help"],
+        vec!["container", "registry", "test", "--help"],
+    ] {
+        let output = run_isolated_in_with_env(
+            temporary.path(),
+            temporary.path(),
+            &arguments,
+            &[("OSDK_LANG", "zh")],
+        );
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(output.contains("结果不健康时再以非零状态退出"), "{output}");
+    }
 
     let apply = run_isolated_in_with_env(
         temporary.path(),
