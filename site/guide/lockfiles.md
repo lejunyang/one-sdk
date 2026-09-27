@@ -14,7 +14,8 @@ osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
-osdk model pull NAME REFERENCE [OPTIONS]
+osdk model use NAME REFERENCE [OPTIONS]
+osdk model sync [NAME]
 ```
 
 | 调用 | 是否读取现有 lock | 是否写 lock |
@@ -26,7 +27,8 @@ osdk model pull NAME REFERENCE [OPTIONS]
 | `outdated` | 否；重新解析配置或显式请求 | 否 |
 | `upgrade` | 否；重新解析配置或显式请求 | 是，重建 host 平台工具表（同样只记项目工具） |
 | `exec` | 否 | 否 |
-| `model pull` | 不以模型 lock 为输入 | 默认合并 `[models]`；`--no-lock` 禁止 |
+| `model use` | 否 | 写项目声明；本身不写 lock |
+| `model sync [NAME]` | 是 | 解析新增/变更声明并合并模型 lock |
 | `list`、`current`、`where` | 否 | 否 |
 
 `outdated` 的“当前”列是该 backend 所有已安装版本中的最大值；它检查重新解析出的

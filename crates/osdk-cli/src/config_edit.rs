@@ -103,6 +103,55 @@ pub fn remove_project_task(name: &str) -> Result<(PathBuf, bool)> {
     Ok((path, removed))
 }
 
+/// Write one `[models.<name>]` declaration to the nearest project config.
+pub fn set_project_model(
+    name: &str,
+    declaration: &osdk_core::config::ModelDeclaration,
+) -> Result<PathBuf> {
+    osdk_core::model::validate_model_name(name)?;
+    let cwd = std::env::current_dir()?;
+    let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
+    let mut doc = load_doc(&path)?;
+    let models = doc
+        .entry("models")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("{}: `models` is not a table", path.display()))?;
+    models.set_implicit(true);
+
+    let serialized = toml::to_string(&declaration)?;
+    let parsed: toml_edit::DocumentMut = serialized.parse()?;
+    let mut table = parsed.as_table().clone();
+    table.set_implicit(false);
+    models.insert(name, toml_edit::Item::Table(table));
+    save_doc(&path, &doc)?;
+    Ok(path)
+}
+
+/// Remove one project model declaration without touching unrelated entries.
+pub fn remove_project_model(name: &str) -> Result<(PathBuf, bool)> {
+    osdk_core::model::validate_model_name(name)?;
+    let cwd = std::env::current_dir()?;
+    let path = find_project_config(&cwd).unwrap_or_else(|| cwd.join("osdk.toml"));
+    if !path.is_file() {
+        return Ok((path, false));
+    }
+    let mut doc = load_doc(&path)?;
+    let Some(models) = doc
+        .get_mut("models")
+        .and_then(toml_edit::Item::as_table_mut)
+    else {
+        return Ok((path, false));
+    };
+    let removed = models.remove(name).is_some();
+    if models.is_empty() {
+        doc.remove("models");
+    }
+    if removed {
+        save_doc(&path, &doc)?;
+    }
+    Ok((path, removed))
+}
 /// Write a `[tools] <tool> = <spec>` pin to the user global config.
 pub fn set_global_tool(ctx: &Ctx, tool: &str, spec: &str) -> Result<()> {
     with_global_config_lock(ctx, || set_global_tool_unlocked(ctx, tool, spec))

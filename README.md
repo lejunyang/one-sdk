@@ -634,76 +634,33 @@ Guide: [Android SDK tools](site/en/guide/android.md)
 
 ## Scenario: pin a model snapshot
 
-Pull selected files from Hugging Face or ModelScope, verify the local snapshot,
-and obtain its path:
+Declare and materialize selected files from Hugging Face or ModelScope, verify the snapshot,
+and obtain its stable path:
 
 ```bash
-export HF_TOKEN=... # optional for private or gated repositories
-
-osdk model pull qwen25 \
-  hf:Qwen/Qwen2.5-7B-Instruct@main \
-  --include '*.json' --include '*.safetensors'
-osdk model pull qwen25-ms \
-  ms:Qwen/Qwen2.5-7B-Instruct@master \
-  --include '*.json' --include '*.safetensors'
+osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors' --sync
 osdk model verify qwen25
-osdk model path qwen25
-
-# A path that survives the next pull -- snapshot directories are content-hashed,
-# so feed this one to ComfyUI, llama.cpp or a script instead
 osdk model path qwen25 --stable
-
-# Pull [models] entries the lock does not yet describe or describes differently, replay the rest
-osdk model sync
-osdk model list
+osdk model sync qwen25       # one model
+osdk model sync              # whole project
 ```
-
-Render a snapshot into a ComfyUI / Hugging Face cache-shaped consumer view
-(links back to the snapshot, no copied weights, read-only) and emit the wiring
-config:
-
-```bash
-osdk model view add comfyui qwen25 --map unet/=diffusion_models
-osdk model view path comfyui                 # stable path for consumer config
-osdk model view export comfyui --to extra_model_paths.yaml   # source ComfyUI
-osdk model view list
-osdk model view doctor comfyui
-osdk model view remove comfyui --model qwen25
-```
-You can also declare models in `osdk.toml`; `osdk model pull <name>` then picks up
-the declaration, records the views in the lock, and renders them. Declaring what to
-fetch needs no trust; only an `endpoint`/custom-source key does, and model
-declarations never block ordinary tool commands:
-
-```toml
-[models.flux]
-source = "hf:black-forest-labs/FLUX.1-dev@main"
-[models.flux.views.comfyui.map]
-"unet/" = "diffusion_models"
-"vae/"  = "vae"
-```
-
-`osdk model sync` restores every locked model **and** rebuilds its views. It also
-picks up `[models]` declarations that the lock does not yet describe or describes
-differently: a new one is pulled and locked, and one whose `source` or `variant`
-changed is re-pulled and its entry rewritten, so a hand-edited `[models]` needs no
-separate `model pull`. An explicit pull reference or flag overrides the
-corresponding declaration field. Several models download concurrently, bounded by
-`sources.model_jobs` (default 2, or `--model-jobs`); this is independent of `--jobs`,
-which parallelizes files within one model.
-
 
-Enable provider endpoint and cache variables for activated shells when model
-tools should share the osdk environment:
+`model use` edits the project declaration and does not download by default; `--sync` immediately
+materializes that model. It can declare a consumer view in the same operation:
 
 ```bash
-osdk model env enable
-osdk model env list
-osdk model env disable huggingface
+osdk model use flux hf:black-forest-labs/FLUX.1-dev@main \
+  --include '*.safetensors' --view comfyui \
+  --map unet/=diffusion_models --map vae/=vae --sync
+osdk model view path comfyui
 ```
+
+`model sync` re-resolves changes to source, variant, include, or exclude, then replays immutable
+lock entries. `model unuse NAME` removes project intent, lock state, views, and normally local
+bytes; `--keep-snapshot` retains bytes. `model remove NAME` removes only local bytes and views.
 
 Guide: [Model snapshots](site/en/guide/models.md)
-
 ## Scenario: install a skill for an AI coding agent
 
 A skill is a `SKILL.md` instruction package that AI coding agents such as Claude

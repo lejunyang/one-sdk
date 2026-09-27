@@ -6,59 +6,20 @@ osdk 把 Hugging Face 与 ModelScope 仓库作为多文件、不可变快照管�
 ## 命令参考
 
 ```text
-osdk model pull NAME [REFERENCE]
-  [--endpoint URL]
-  [--forward-credentials]
-  [--include GLOB]...
-  [--exclude GLOB]...
-  [--variant LABEL]
-  [--no-lock]
-
-osdk model sync [--prune] [--dry-run]
+osdk model use NAME REFERENCE [--endpoint URL]
+  [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
+  [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
+osdk model unuse NAME [--keep-snapshot]
+osdk model sync [NAME] [--prune] [--dry-run]
 osdk model list
 osdk model path NAME [--stable]
 osdk model verify NAME
-osdk model remove NAME [--keep-lock]
-
-osdk model env enable [huggingface|modelscope] [--force]
-osdk model env disable [huggingface|modelscope]
-osdk model env list
-
-osdk model view add <comfyui|hf-cache> <name> [--profile P] [--map PREFIX=CATEGORY]...
-osdk model view list
-osdk model view path <comfyui|hf-cache> [--profile P]
-osdk model view rebuild [<comfyui|hf-cache>]
-osdk model view remove <comfyui|hf-cache> [--profile P] [--model NAME]
-osdk model view export <comfyui|hf-cache> [--profile P] [--to extra_model_paths.yaml]
-osdk model view doctor <comfyui|hf-cache> [--profile P]
+osdk model remove NAME
 ```
 
-| `pull` 参数 | 作用 |
-| --- | --- |
-| `NAME` | 本地逻辑名；只允许 ASCII 字母、数字、`.`、`_`、`-` |
-| `REFERENCE` | 可选的 `PROVIDER:owner/repo@revision`；省略时读取同名 `[models.NAME].source` |
-| `--endpoint URL` | 覆盖 provider endpoint；优先于声明、环境变量和 source 选择 |
-| `--forward-credentials` | 允许这个显式自定义 endpoint 接收 provider token |
-| `--include GLOB` | 可重复；至少匹配一个 include 时才下载 |
-| `--exclude GLOB` | 可重复；在 include 结果上继续排除 |
-| `--variant LABEL` | 记录到快照 identity、manifest 和 lock 的标签；**不会自动筛文件** |
-| `--no-lock` | 不更新最近项目位置的 `osdk.lock` |
-
-`list` 显示每个逻辑名的当前快照；`path` 输出当前路径；`verify` 校验当前快照所有
-文件；`remove` 删除该逻辑名的全部快照并立即执行 CAS GC，当前不会请求确认。
-
-`path --stable` 输出 `<data>/models/<name>/current`，这是一个指向当前快照的目录
-链接（Windows 上是 junction，其他平台是符号链接）。快照目录名里含内容哈希，改
-`--include`/`--exclude` 或换 revision 都会换目录，所以**要写进别处的路径请用
-`--stable`**：ComfyUI 的 `extra_model_paths.yaml`、llama.cpp 的 `-m`、脚本里的
-常量都属于这种情况。不带 `--stable` 时输出带哈希的真实快照路径，适合只用一次的
-场合。
-
-```bash
-osdk model path qwen25            # …/snapshots/9f1c2a…
-osdk model path qwen25 --stable   # …/qwen25/current  ← 下次 pull 后仍然有效
-```
-
+`use` 受管写入项目声明，默认不下载；`--sync` 立即物化该模型。`sync NAME` 只处理一个
+模型，无参数时处理整个项目。`unuse` 撤销声明、lock 和视图并默认删除本地快照；
+`--keep-snapshot` 保留本地字节。`remove` 只删除本地快照和视图，保留项目声明与 lock。
 ## Provider 引用
 
 ```text
@@ -75,11 +36,11 @@ model-scope:owner/repo@revision
 必须正好是 `owner/name` 两段，每段只允许 ASCII 字母、数字、`.`、`_`、`-`。
 
 ```bash
-osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
-osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
-osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
+osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model use qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
+osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' \
-  --exclude 'original/*' --variant safetensors-fp16
+  --exclude 'original/*' --variant safetensors-fp16 --sync
 ```
 
 Hugging Face 将 branch/tag 解析为不可变 commit SHA。ModelScope 文件 API 没有等价
@@ -118,7 +79,7 @@ manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 re
 
 ## Lockfile
 
-默认 `pull` 在 `osdk.lock` 顶层 `[models.<name>]` 记录：
+`model sync` 在 `osdk.lock` 顶层 `[models.<name>]` 记录：
 
 - provider、repository、请求 revision 与不可变 revision；
 - 实际 endpoint 与可选 variant；
@@ -146,45 +107,28 @@ osdk source unpin hf             # 取消固定，恢复自动选择
 
 ### 从 lock 还原
 
-`osdk model sync` 无参拉取整个项目的模型。它逐个比对当前平台适用的 `[models]` 声明与
-lock：lock 尚未描述的声明会被拉取并写入 lock；`source`（provider / 仓库 / 请求 revision）
-或 `variant` 与 lock 记录不一致的声明会重新拉取并改写对应条目；其余交给按 lock 的复现。
-因此手动往 `[models]` 里新增或修改一个模型，`sync` 会直接识别并处理，不必再单独
-`model pull`。`osdk install` 刻意不代拉模型：权重太大，不该作为装工具的副作用被下载，
-所以这是一个独立动词。
-
-`include`/`exclude` 是 glob，lock 只存展开后的文件列表，因此它们的改动不参与上面的
-比对——想借改 `include` 纳入更多文件仍然走 `model pull`（重新解析远端文件的唯一操作）。
+`osdk model sync` 无参数时处理整个项目，传入 `NAME` 时只处理一个逻辑模型。它比对当前
+平台适用的 `[models]` 声明与 lock：新增声明会被下载并写入 lock；`source`、`variant`、
+`include` 或 `exclude` 变化会重新解析并改写条目；其余按不可变 lock 复现。
 
 ```bash
-osdk model sync                 # 拉取 [models] 新增/变更的声明，其余按 lock 复现
+osdk model sync qwen25          # 只同步一个模型
+osdk model sync                 # 同步整个项目
 osdk model sync --dry-run       # 只报告会做什么
-osdk model sync --prune         # 同时删除 lock 不再声明的本地快照
-osdk model sync --prune --dry-run
+osdk model sync --prune         # 删除 lock 不再声明的本地快照
 ```
 
-还原时按 lock 里的**不可变 revision** 重建引用，而不是 `requested_revision`：复现
-一个分支名会解析到它当前所指，恰好与 lock 的目的相反。只拉 lock 列出的文件，因此
-仓库在锁定后新增的文件不会让快照静默变大；还原完成后逐文件比对大小与 SHA-256，
-不一致即失败——lock 的意义就是钉住内容。
+还原时按 lock 中的不可变 revision 和文件 SHA-256 重建，而不是重新解释浮动分支。lock 同时
+保存原始 `include`/`exclude` 与展开后的文件列表，因此选择器变化能触发重新解析。已存在且
+校验通过的快照不会重复下载；校验失败时重新获取。消费者视图也会按 lock 自动重建。
 
-`sync` 还会按 lock 里记录的 `views` 声明重建消费者视图（见下节），所以在另一台
-机器上只需 `osdk model sync`，不必重新 `model view add`。
+`--prune` 仅适用于全项目同步，且默认关闭，因为它会删除重新获取代价较高的本地权重。
 
-已存在且校验通过的快照不会重新下载：lock 带有每个文件的摘要，「这是不是 lock 描述
-的那份」可以本地回答，为此重下若干 GB 毫无意义。校验失败的快照会被重新拉取，因为
-那时本地副本已不是提交进版本库的那份。
+### `remove` 与 `unuse`
 
-`--prune` 默认关闭：它删除的是已物化的权重，重新获取代价高，所以必须显式要求，而不
-能作为 sync 的副作用发生。
-
-### remove 与 lock 保持一致
-
-`osdk model remove <name>` 同时删除本地快照与 lock 条目。此前只删快照，lock 仍声称
-拥有它，于是下一次 `sync` 会忠实地把刚删掉的东西拉回来。
-
-只想在本机删除而不改变项目声明时用 `--keep-lock`，之后 `sync` 会重新还原它。
-
+`osdk model remove <name>` 只删除本地快照和消费者视图，保留项目声明与 lock；之后
+`model sync <name>` 可恢复它。要彻底撤销项目依赖，使用 `model unuse <name>`：它会移除
+项目声明、lock、视图并默认删除快照，`--keep-snapshot` 可保留本机字节。
 ## Endpoint 与凭据
 
 解析优先级：
@@ -225,10 +169,8 @@ osdk source unpin huggingface|modelscope
 
 ## 在 `osdk.toml` 中声明模型
 
-除了先 `pull` 再入 lock，也可以直接在项目 `osdk.toml` 里声明模型。声明本身不下载
-权重；之后 `osdk model pull <name>` 会读取同名声明，或者运行 `osdk model sync`
-批量拉取 `[models]` 里 lock 尚未描述或已变更的声明。两条路径都会把不可变结果和消费者
-视图写进 lock，并立即渲染视图：
+`osdk model use` 会受管写入项目 `osdk.toml`，声明本身不下载权重。加 `--sync` 会立即只
+物化该模型，也可以随后用 `osdk model sync [name]` 处理单个或全部声明：
 
 ```toml
 [models.flux]
@@ -236,49 +178,37 @@ source   = "hf:black-forest-labs/FLUX.1-dev@main"
 include  = ["*.safetensors", "*.json"]
 exclude  = ["*.onnx"]
 variant  = "fp16"
-when     = { os = "windows" }          # 可选，与 [tools] 的 when 同构
+when     = { os = "windows" }
 
 [models.flux.views.comfyui]
-profile  = "desktop"                   # 省略时为 "default"
+profile  = "desktop"
 [models.flux.views.comfyui.map]
 "unet/" = "diffusion_models"
 "vae/"  = "vae"
-
-[models.embedder.views.hf-cache]
-# 只给 consumer 段、不写 map：用该 consumer 的默认布局
 ```
 
-字段含义与 `model pull` 参数一致：`source` / `include` / `exclude` / `variant` /
-`when` / `endpoint`，外加 `views`（consumer 名 -> 该 consumer 的 `profile` 与 `map`）。
-显式 reference、`--include`、`--exclude`、`--variant`、`--endpoint` 覆盖声明中的对应值；
-声明的 `when` 不匹配当前平台时不会参与单参 pull 或首次 sync。`map` 的
-key 是**仓库内相对路径前缀**（一律以 `/` 归一），value 是消费者类别，规则与
-`model view add --map` 完全相同。写错字段名会直接报错（`deny_unknown_fields`），
-不会被静默忽略。
+`model use` 可写入 `source`、`include`、`exclude`、`variant`、`endpoint` 以及一个 consumer
+view 的 `profile`/`map`；再次执行会替换同名声明。`when` 仍是直接配置字段。写错字段名会
+直接报错，不会被静默忽略。
 
-**信任（trust）语义**：只是声明「要什么」（`source`/`include`/`variant`/`when`/
-`views`）不需要信任项目配置，和声明一个 npm 依赖同级；只有能改变**字节来源**的
-字段才要求审核——`endpoint`、自定义 URL、`insecure` 一类。而且模型声明**从不阻断
-shim**：一个只声明了模型的项目里，`cargo --version` 这类普通工具命令照常运行；
-真正会拉取的 `osdk model sync` / `pull` 才执行完整的信任检查。带 `endpoint` 的那
-条 model 条目作为整体被钉住（与 `tools.<name>.allow_builds` 同级粒度），改它会要
-求重新信任；改另一条不带 `endpoint` 的模型不会。
-
+**信任（trust）语义**：普通声明不需要信任；只有 `endpoint` 或自定义 URL 等改变字节
+来源的字段需要审核。模型声明不阻断 shim；真正联网的 `model sync` 或
+`model use --sync` 执行完整信任检查。`model unuse` 是移除不受信任声明的逃生通道。
 ## 消费者视图（model view）
 
 快照按上游仓库布局存放（`unet/`、`vae/`、`text_encoder/` 平级），消费者要的是
-另一种形状。`osdk model view` 把已 pull 的快照**渲染成消费者形状的目录**，文件以
+另一种形状。`osdk model view` 把已物化的快照**渲染成消费者形状的目录**，文件以
 链接（同卷硬链接，跨卷退化为拷贝并明确计数）指回快照，不复制权重；视图文件设为
 只读，避免消费者就地写入污染快照与 CAS。
 
 - `add <comfyui|hf-cache> <name>`：把模型加入视图并渲染。`comfyui` 渲染成
   `<view>/<类别>/<文件>`（25 个类别目录预先建好，按 `unet/vae/text_encoder/loras`
   等目录约定归类）；`hf-cache` 渲染成 `models--org--repo/{refs,blobs,snapshots}`。
-  模型必须先 `model pull`，否则报错并提示先 pull。
+  模型必须先 `model sync`，否则报错并提示先 sync。
 - `--map PREFIX=CATEGORY`（可重复）：显式指定仓库路径前缀到类别的映射，最长前缀
   优先。**无法归类的文件不会被兜底塞进 checkpoints**，而是跳过并由 `view doctor`
   列出。
-- `path`：打印稳定的视图根，路径不随 pull/`--include` 变化——把它写进消费者配置。
+- `path`：打印稳定的视图根，路径不随 sync/`--include` 变化——把它写进消费者配置。
 - `export`：生成消费者配置片段。`comfyui` 是一段 `extra_model_paths.yaml`（唯一键、
   `base_path` 指向视图根，**不带 `is_default`**，避免悄悄改变消费者自己的模型根
   优先级）。带 `--to` 会以带标记的托管块幂等合并进源码版 ComfyUI 的 yaml；不带则
@@ -290,7 +220,7 @@ shim**：一个只声明了模型的项目里，`cargo --version` 这类普通�
   静默后者覆盖前者。
 
 ```bash
-osdk model pull flux hf:org/flux-GGUF --include 'unet/*' --include 'vae/*'
+osdk model use flux hf:org/flux-GGUF --include 'unet/*' --include 'vae/*' --sync
 osdk model view add comfyui flux
 osdk model view export comfyui --to extra_model_paths.yaml   # 源码版
 osdk model view path comfyui                                 # Desktop：贴这个路径

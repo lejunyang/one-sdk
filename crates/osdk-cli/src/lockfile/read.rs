@@ -87,7 +87,7 @@ pub fn load(path: &Path) -> Result<Lockfile> {
 /// The models a project's lock declares, as replayable references.
 ///
 /// The `[models]` section had exactly one writer and no readers outside tests:
-/// `model pull` recorded a snapshot and nothing ever consulted it again. A lock
+/// the old direct pull path recorded a snapshot and nothing ever consulted it again. A lock
 /// that cannot be read back is not a lock -- it is a log. This is the reader, and
 /// `model sync` is what acts on it.
 ///

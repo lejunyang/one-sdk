@@ -570,68 +570,32 @@ Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基�
 
 ## 场景：固定模型快照
 
-从 Hugging Face 或 ModelScope 拉取指定文件、校验本地快照，并获取快照路径：
+从 Hugging Face 或 ModelScope 声明并物化指定文件、校验快照，并获取稳定路径：
 
 ```bash
-export HF_TOKEN=... # 私有或 gated 仓库可选
-
-osdk model pull qwen25 \
-  hf:Qwen/Qwen2.5-7B-Instruct@main \
-  --include '*.json' --include '*.safetensors'
-osdk model pull qwen25-ms \
-  ms:Qwen/Qwen2.5-7B-Instruct@master \
-  --include '*.json' --include '*.safetensors'
+osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
+  --include '*.json' --include '*.safetensors' --sync
 osdk model verify qwen25
-osdk model path qwen25
-
-# 下次 pull 之后依然有效的路径：快照目录名含内容哈希，
-# 要写进 ComfyUI、llama.cpp 或脚本里的路径请用这个
 osdk model path qwen25 --stable
-
-# 拉取 [models] 中 lock 未描述或已变更的声明，其余按 lock 复现
-osdk model sync
-osdk model list
+osdk model sync qwen25       # 单个模型
+osdk model sync              # 整个项目
 ```
-
-把快照渲染成 ComfyUI / Hugging Face 缓存形状的消费者视图（链接回快照、不复制
-权重、只读），并生成或打印接入配置：
-
-```bash
-osdk model view add comfyui qwen25 --map unet/=diffusion_models
-osdk model view path comfyui                 # 稳定路径，贴进消费者配置
-osdk model view export comfyui --to extra_model_paths.yaml   # 源码版 ComfyUI
-osdk model view list
-osdk model view doctor comfyui
-osdk model view remove comfyui --model qwen25
-```
-也可以直接在 `osdk.toml` 里声明模型；`osdk model pull <name>` 会读取这份声明，把
-视图写进 lock 并立即渲染。只声明「要什么」不需要信任，只有 `endpoint`/自定义来源
-这类会改变字节来源的 key 才需要，而且模型声明不会阻断普通工具命令：
-
-```toml
-[models.flux]
-source = "hf:black-forest-labs/FLUX.1-dev@main"
-[models.flux.views.comfyui.map]
-"unet/" = "diffusion_models"
-"vae/"  = "vae"
-```
-
-`osdk model sync` 会还原 lock 声明的全部模型，**并**重建它们的视图。lock 尚无模型
-条目时，它会按当前平台适用的 `[models]` 声明完成首次拉取，并把不可变结果写入 lock。
-显式传给 `pull` 的 reference 或选项优先于声明中的对应字段。多个模型会并发下载，数量由 `sources.model_jobs`（默认 2，或 `--model-jobs`）控制；它独立于 `--jobs`（后者并行下载单个模型内部的文件）。
-
 
-需要让模型工具共享 osdk 的 endpoint 与缓存环境时，为已激活的 Shell 启用
-Provider 环境：
+`model use` 受管写入项目声明，默认不下载；`--sync` 会立即物化该模型。它还能在同一次
+操作中声明消费者视图：
 
 ```bash
-osdk model env enable
-osdk model env list
-osdk model env disable huggingface
+osdk model use flux hf:black-forest-labs/FLUX.1-dev@main \
+  --include '*.safetensors' --view comfyui \
+  --map unet/=diffusion_models --map vae/=vae --sync
+osdk model view path comfyui
 ```
+
+`model sync` 会在 source、variant、include 或 exclude 变化时重新解析，并复现不可变 lock。
+`model unuse NAME` 会移除项目声明、lock、视图和默认的本地字节；`--keep-snapshot` 可保留
+字节。`model remove NAME` 只删除本地字节和视图。
 
 指南：[模型快照](site/guide/models.md)
-
 ## 场景：给 AI 编码 Agent 装 skill
 
 skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI 编码 Agent 读取。osdk

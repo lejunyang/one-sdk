@@ -1,6 +1,6 @@
 # `[models]`
 
-声明可由 `osdk model pull <name>` 和 `osdk model sync` 物化的模型快照。
+声明由 `osdk model use` 受管写入、并由 `osdk model sync [name]` 物化的模型快照。
 
 ```toml
 [models.flux]
@@ -29,5 +29,5 @@ profile = "default"
 | `views.<kind>.profile` | 视图 profile，默认 `default` |
 | `views.<kind>.map` | 仓库相对前缀到消费者分类的映射 |
 
-显式 CLI reference/include/exclude/variant/endpoint 覆盖声明。普通模型声明不阻断工具命令；
+`model use` 的 reference/include/exclude/variant/endpoint 会写入同名声明；`sync` 会识别这些字段的变化。普通模型声明不阻断工具命令；
 只有自定义 endpoint 触发信任要求。

@@ -51,6 +51,30 @@ pub(crate) fn reconcile_declared_views(
     Ok(())
 }
 
+/// Remove a model from every persisted consumer view and its rendered files.
+pub(crate) fn remove_model_from_all_views(app: &crate::App, model: &str) -> anyhow::Result<bool> {
+    let views = view_store(app);
+    let mut state = ViewState::load(&app.ctx.dirs)?;
+    let memberships: Vec<(ViewKind, String)> = ViewKind::all()
+        .iter()
+        .flat_map(|kind| {
+            state
+                .profiles(*kind)
+                .iter()
+                .filter(|(_, entries)| entries.iter().any(|entry| entry.model == model))
+                .map(|(profile, _)| (*kind, profile.clone()))
+        })
+        .collect();
+    let mut removed = false;
+    for (kind, profile) in memberships {
+        removed |= state.remove(kind, &profile, Some(model));
+        removed |= views.remove(kind, &profile, Some(model))?;
+    }
+    if removed {
+        state.save(&app.ctx.dirs)?;
+    }
+    Ok(removed)
+}
 use crate::cli::ModelViewCommand;
 use crate::App;
 
@@ -62,7 +86,7 @@ fn view_store(app: &App) -> ViewStore {
     )
 }
 
-fn parse_mappings(raw: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+pub(crate) fn parse_mappings(raw: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for item in raw {
         let (prefix, category) = item
@@ -115,7 +139,7 @@ pub fn model_view(app: &App, command: ModelViewCommand) -> anyhow::Result<()> {
             // `add` look successful with an empty category.
             if !views.model_exists(&model)? {
                 return Err(anyhow!(
-                    "model `{model}` is not pulled; run `osdk model pull {model} …` first"
+                    "model `{model}` is not materialized; run `osdk model sync {model}` first"
                 ));
             }
             state.add(

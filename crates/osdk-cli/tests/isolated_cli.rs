@@ -616,17 +616,107 @@ fn package_cache_hook_refreshes_managed_values_and_preserves_user_overrides() {
 }
 
 #[test]
-fn model_pull_without_reference_requires_an_applicable_declaration() {
+fn model_use_writes_a_project_declaration_without_downloading() {
     let temporary = tempfile::tempdir().unwrap();
-    let output = run_isolated(temporary.path(), &["model", "pull", "fixture"]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("needs a reference or an applicable [models.fixture] declaration"),
-        "{stderr}"
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "# keep this comment\n[settings]\nyes = true\n",
+    )
+    .unwrap();
+    let output = run_isolated(
+        temporary.path(),
+        &[
+            "model",
+            "use",
+            "fixture",
+            "hf:owner/repo@main",
+            "--include",
+            "*.safetensors",
+            "--exclude",
+            "original/*",
+            "--variant",
+            "fp16",
+            "--view",
+            "comfyui",
+            "--map",
+            "weights/=loras",
+        ],
     );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = std::fs::read_to_string(temporary.path().join("osdk.toml")).unwrap();
+    assert!(config.contains("# keep this comment"), "{config}");
+    assert!(config.contains("[models.fixture]"), "{config}");
+    assert!(
+        config.contains("source = \"hf:owner/repo@main\""),
+        "{config}"
+    );
+    assert!(config.contains("include = [\"*.safetensors\"]"), "{config}");
+    assert!(config.contains("exclude = [\"original/*\"]"), "{config}");
+    assert!(config.contains("variant = \"fp16\""), "{config}");
+    assert!(
+        config.contains("[models.fixture.views.comfyui]"),
+        "{config}"
+    );
+    assert!(config.contains("\"weights/\" = \"loras\""), "{config}");
+    assert!(!temporary.path().join("osdk.lock").exists());
 }
 
+#[test]
+fn model_sync_name_limits_dry_run_to_one_declaration() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.first]\nsource = \"hf:owner/first@main\"\n\n[models.second]\nsource = \"hf:owner/second@main\"\n",
+    )
+    .unwrap();
+    let output = run_isolated(temporary.path(), &["model", "sync", "first", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("would pull first"), "{stdout}");
+    assert!(!stdout.contains("second"), "{stdout}");
+}
+
+#[test]
+fn model_unuse_removes_only_the_named_project_and_lock_entries() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[settings]\nyes = true # keep this comment\n\n[models.first]\nsource = \"hf:owner/first@main\"\n\n[models.second]\nsource = \"hf:owner/second@main\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.lock"),
+        "schema = 4\n\n[models.first]\nprovider = \"huggingface\"\nrepository = \"owner/first\"\nrequested_revision = \"main\"\nrevision = \"first-sha\"\nendpoint = \"https://huggingface.co\"\nfiles = []\n\n[models.second]\nprovider = \"huggingface\"\nrepository = \"owner/second\"\nrequested_revision = \"main\"\nrevision = \"second-sha\"\nendpoint = \"https://huggingface.co\"\nfiles = []\n",
+    )
+    .unwrap();
+    let output = run_isolated(
+        temporary.path(),
+        &["model", "unuse", "first", "--keep-snapshot"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = std::fs::read_to_string(temporary.path().join("osdk.toml")).unwrap();
+    assert!(
+        config.contains("yes = true # keep this comment"),
+        "{config}"
+    );
+    assert!(!config.contains("[models.first]"), "{config}");
+    assert!(config.contains("[models.second]"), "{config}");
+    let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
+    assert!(!lock.contains("[models.first]"), "{lock}");
+    assert!(lock.contains("[models.second]"), "{lock}");
+}
 #[test]
 fn model_sync_dry_run_bootstraps_an_empty_lock_from_declarations() {
     let temporary = tempfile::tempdir().unwrap();
@@ -726,9 +816,9 @@ fn model_sync_dry_run_relocks_a_changed_declaration() {
     );
 }
 
-// Several declared models are all collected for the (concurrent) pull pass, not
+// Several declared models are all collected for the (concurrent) download pass, not
 // just the first. Dry run keeps this cross-platform; concurrency itself is
-// bounded by `sources.model_jobs` and exercised by the pull path's own tests.
+// bounded by `sources.model_jobs` and exercised by the synchronization path's own tests.
 #[test]
 fn model_sync_dry_run_reports_every_declared_model() {
     let temporary = tempfile::tempdir().unwrap();
@@ -766,7 +856,7 @@ fn model_sync_dry_run_reports_every_declared_model() {
 // osdk-core on Windows; keep this cross-process CLI topology on Unix.
 #[cfg(not(windows))]
 #[test]
-fn huggingface_model_pull_materializes_and_locks_snapshot() {
+fn huggingface_model_sync_materializes_and_locks_snapshot() {
     let payload = br#"{"model":"fixture"}"#.to_vec();
     let digest =
         osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
@@ -823,7 +913,7 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
     let output = run_isolated_in_with_env(
         temporary.path(),
         temporary.path(),
-        &["model", "pull", "fixture"],
+        &["model", "sync", "fixture"],
         &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
     );
     assert!(
@@ -862,7 +952,7 @@ fn huggingface_model_pull_materializes_and_locks_snapshot() {
 // reading the produced files (not exit codes).
 #[cfg(not(windows))]
 #[test]
-fn declared_model_pull_records_views_in_lock_and_renders_view() {
+fn declared_model_sync_records_views_in_lock_and_renders_view() {
     let payload = br#"{"model":"fixture"}"#.to_vec();
     let digest =
         osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
@@ -965,10 +1055,10 @@ fn declared_model_pull_records_views_in_lock_and_renders_view() {
     assert!(state.contains("fixture"), "{state}");
 }
 
-// See `huggingface_model_pull_materializes_and_locks_snapshot`.
+// See `huggingface_model_sync_materializes_and_locks_snapshot`.
 #[cfg(not(windows))]
 #[test]
-fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
+fn modelscope_model_use_sync_materializes_and_locks_manifest_revision() {
     let payload = br#"{"model":"modelscope-fixture"}"#.to_vec();
     let digest =
         osdk_core::pipeline::verify::hash_bytes(&payload, osdk_core::pipeline::HashAlgo::Sha256);
@@ -1017,11 +1107,12 @@ fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
         temporary.path(),
         &[
             "model",
-            "pull",
+            "use",
             "fixture",
             "ms:owner/repo@master",
             "--endpoint",
             &endpoint,
+            "--sync",
         ],
     );
     assert!(
@@ -1041,7 +1132,7 @@ fn modelscope_model_pull_materializes_and_locks_manifest_revision() {
     assert!(lock.contains("revision = \"master+manifest-"));
 }
 
-// See `huggingface_model_pull_materializes_and_locks_snapshot`.
+// See `huggingface_model_sync_materializes_and_locks_snapshot`.
 #[cfg(not(windows))]
 #[test]
 fn model_source_test_probes_target_file_and_prints_ranking() {
@@ -1137,10 +1228,10 @@ download_url = "{endpoint}"
     assert!(String::from_utf8_lossy(&output.stdout).contains("fixture"));
 }
 
-// See `huggingface_model_pull_materializes_and_locks_snapshot`.
+// See `huggingface_model_sync_materializes_and_locks_snapshot`.
 #[cfg(not(windows))]
 #[test]
-fn model_pull_fails_over_within_provider() {
+fn model_use_sync_fails_over_within_provider() {
     let failing = TcpListener::bind("127.0.0.1:0").unwrap();
     let failing_address = failing.local_addr().unwrap();
     let failing_server = std::thread::spawn(move || {
@@ -1217,7 +1308,7 @@ priority = 1
     std::fs::write(temporary.path().join("config/config.toml"), config).unwrap();
     let output = run_isolated(
         temporary.path(),
-        &["model", "pull", "fixture", "hf:owner/repo@main"],
+        &["model", "use", "fixture", "hf:owner/repo@main", "--sync"],
     );
     assert!(
         output.status.success(),
@@ -5596,8 +5687,8 @@ fn model_view_offline_contract() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not pulled") && stderr.contains("osdk model pull ghost"),
-        "expected actionable unpulled error, got: {stderr}"
+        stderr.contains("not materialized") && stderr.contains("osdk model sync ghost"),
+        "expected actionable unmaterialized error, got: {stderr}"
     );
     // Nothing was persisted after the failed add.
     view_list_empty(&run(&["model", "view", "list"]));

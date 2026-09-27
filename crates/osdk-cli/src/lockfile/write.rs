@@ -482,6 +482,8 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
                 &manifest.endpoint,
             ),
             variant: manifest.variant.clone(),
+            include: Vec::new(),
+            exclude: Vec::new(),
             files: manifest
                 .files
                 .iter()
@@ -501,10 +503,33 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
     save(path, &lockfile)
 }
 
+/// Record the requested include/exclude selectors for one model.
+pub fn set_model_selection(
+    path: &Path,
+    name: &str,
+    include: Vec<String>,
+    exclude: Vec<String>,
+) -> Result<bool> {
+    let mut lockfile = if path.is_file() {
+        load(path)?
+    } else {
+        return Ok(false);
+    };
+    let Some(entry) = lockfile.models.get_mut(name) else {
+        return Ok(false);
+    };
+    if entry.include == include && entry.exclude == exclude {
+        return Ok(false);
+    }
+    entry.include = include;
+    entry.exclude = exclude;
+    save(path, &lockfile)?;
+    Ok(true)
+}
 /// Record the consumer views declared for one model into an existing lock
-/// entry. Kept separate from [`merge_model`] so a bare `model pull` (no
+/// entry. Kept separate from [`merge_model`] so a bare the old direct pull path (no
 /// declaration) leaves `views` empty and existing callers/tests stay simple,
-/// while a pull driven by `[models.<name>.views]` can persist the declaration.
+/// while synchronization driven by `[models.<name>.views]` can persist the declaration.
 ///
 /// This is the read/write symmetry AGENTS.md demands: the field is not
 /// write-only. `model sync` reads it back (`locked_models`) so a replay on
@@ -532,7 +557,7 @@ pub fn set_model_views(
 
 /// Build the lock form of a model's view declarations from resolved config,
 /// keyed the same way the lock stores them (consumer -> view entry). Shared by
-/// the pull path so config and lock never encode the mapping differently.
+/// the synchronization path so config and lock never encode the mapping differently.
 pub fn locked_views_from_declaration(
     declaration_views: &BTreeMap<String, osdk_core::config::ModelViewDeclaration>,
 ) -> BTreeMap<String, LockedModelView> {

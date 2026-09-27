@@ -40,7 +40,7 @@ is an invocation-only preference that retains other sources as fallbacks. Tool
 requests in that invocation must use the canonical backend ID, such as `node`
 rather than `nodejs`, or the current implementation will not apply the override.
 `--refresh-sources` forces re-probing for `install`, `use`, `upgrade`, and
-`exec`. For `model pull`, it refreshes only when no explicit endpoint or pin
+`exec`. For `model sync`, it refreshes only when no explicit endpoint or pin
 applies, selection is `auto`, and offline mode is disabled. It currently has no
 effect on `lock`, `outdated`, or `list-remote`. Model `source test` fails without
 `--model`, and `--model` is invalid for an SDK tool.
@@ -147,7 +147,7 @@ connection that stalls mid-transfer fails that request into the retry above inst
 hanging forever.
 A `.partial` file and its ETag/Last-Modified metadata are retained, so a retry
 resumes with `Range` + `If-Range`; an ignored or invalid range, changed object, or
-changed source URL restarts safely. Model pulls additionally try the remaining
+changed source URL restarts safely. Model downloads additionally try the remaining
 ranked sources after one source exhausts its attempts. Non-transient errors, or
 exhaustion of every source fallback, remain terminal. Delegated package managers
 such as npm and uv own their network behavior; these guarantees apply to downloads
@@ -159,14 +159,14 @@ failure; strict offline mode only reads existing cache.
 ```bash
 osdk --offline install bun@1.3.14
 osdk --offline install                    # may consume the current-platform lock
-osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk --offline model sync qwen
 ```
 
 `--offline` or `OSDK_OFFLINE=true` strictly prohibits network access:
 
 - metadata, SDK archives, model metadata, and every selected file must be cached;
 - automatic source probes are skipped; `source test` and `--refresh-sources` on
-  SDK-installing commands fail, `model pull` does not refresh, and commands that
+  SDK-installing commands fail, `model sync` does not refresh, and commands that
   do not support the flag continue to ignore it;
 - a cache miss fails explicitly instead of going online;
 - for backends with a generic artifact receipt, a lock's artifact URL/checksum

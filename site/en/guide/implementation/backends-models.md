@@ -152,7 +152,7 @@ Consequently, **ModelScope is not a Hugging Face mirror implemented by swapping 
 
 ## Model resolution, download, and materialization
 
-The CLI entry point for `osdk model pull <name> <reference>` is in [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs), with the core flow in [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs):
+The CLI entry point for `osdk model sync [name]` is in [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs), with the core flow in [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs):
 
 1. resolve an explicit `--endpoint` or provider endpoint environment variable; otherwise use that provider's default and custom sources;
 2. in auto mode, [`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) fetches a real repository manifest and performs a Range request of at most 1 MiB against the largest probeable file; ranking is cached by provider, repository, revision, and source configuration;
@@ -165,13 +165,13 @@ The CLI entry point for `osdk model pull <name> <reference>` is in [`commands.rs
 
 ## Declarative `[models]`, views, and trust classification
 
-Besides a command-line `pull`, models can be declared in the project's
+`model use` writes declarations in the project's
 `osdk.toml` under `[models.<name>]`, shaped by `ModelDeclaration` in
 [`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs)
 (`deny_unknown_fields`; like `tasks` it sits behind the `install` feature, so the
 shim's dependency graph does not carry it). An entry has
 `source/include/exclude/variant/when` plus
-`views: consumer -> ModelViewDeclaration{profile, map}`. On `pull <name>` the
+`views: consumer -> ModelViewDeclaration{profile, map}`. During `sync [name]`, the
 merged `Config.models` supplies it: after fetching, the views are written into
 the lock via `locked_views_from_declaration`, and
 `model_view::reconcile_declared_views` renders them immediately.

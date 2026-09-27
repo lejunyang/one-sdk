@@ -355,73 +355,92 @@ pub(crate) async fn android_licenses(app: &App, command: AndroidLicensesCommand)
     }
 }
 
-pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
+pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
     let store = osdk_core::model::ModelStore::new(
         app.ctx.dirs.clone(),
         app.ctx.cas.clone(),
         app.ctx.config.settings.link_mode,
     );
     match command {
-        ModelCommand::Pull {
+        ModelCommand::Use {
             name,
             reference,
             endpoint,
-            forward_credentials,
             include,
             exclude,
             variant,
-            no_lock,
+            view,
+            profile,
+            map,
+            sync,
         } => {
-            let declaration = applicable_model_declaration(app, &name);
-            let reference = reference
-                .or_else(|| declaration.map(|entry| entry.source.clone()))
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "model pull {name} needs a reference or an applicable [models.{name}] declaration"
-                    )
-                })?;
-            let reference = osdk_core::model::ModelRef::parse(&reference)?;
-            let options = osdk_core::model::pull::PullOptions {
-                include: if include.is_empty() {
-                    declaration
-                        .map(|entry| entry.include.clone())
-                        .unwrap_or_default()
-                } else {
-                    include
-                },
-                exclude: if exclude.is_empty() {
-                    declaration
-                        .map(|entry| entry.exclude.clone())
-                        .unwrap_or_default()
-                } else {
-                    exclude
-                },
-                variant: variant.or_else(|| declaration.and_then(|entry| entry.variant.clone())),
-            };
-            let endpoint = endpoint
-                .or_else(|| declaration.and_then(|entry| entry.endpoint.clone()))
-                .or_else(|| provider_endpoint_env(reference.provider));
-            let installed = pull_model_from_sources(
-                app,
-                &name,
-                &reference,
-                &options,
-                endpoint,
-                forward_credentials,
-            )
-            .await?;
-            if !no_lock {
-                let path = persist_model_pull(app, &name, &installed)?;
-                println!("updated {}", path.display());
+            osdk_core::model::validate_model_name(&name)?;
+            osdk_core::model::ModelRef::parse(&reference)?;
+            let mut views = std::collections::BTreeMap::new();
+            if let Some(kind) = view {
+                views.insert(
+                    kind.as_str().to_string(),
+                    osdk_core::config::ModelViewDeclaration {
+                        profile,
+                        map: crate::model_view::parse_mappings(&map)?,
+                    },
+                );
             }
-            println!(
-                "{} {}@{} -> {}",
-                installed.manifest.name,
-                installed.manifest.repository,
-                installed.manifest.revision,
-                installed.path.display()
-            );
+            let declaration = osdk_core::config::ModelDeclaration {
+                source: reference,
+                include,
+                exclude,
+                variant,
+                when: None,
+                views,
+                endpoint,
+            };
+            let path = crate::config_edit::set_project_model(&name, &declaration)?;
+            app.ctx.config.models.insert(name.clone(), declaration);
+            println!("declared model {name} in {}", path.display());
+            if sync {
+                model_sync(app, &store, Some(&name), false, false).await?;
+            }
+        }
+        ModelCommand::Unuse {
+            name,
+            keep_snapshot,
+        } => {
+            osdk_core::model::validate_model_name(&name)?;
+            let (config_path, declaration_removed) =
+                crate::config_edit::remove_project_model(&name)?;
+            let cwd = std::env::current_dir()?;
+            let lock_path = project_lock_path(app, &cwd);
+            let lock_removed = crate::lockfile::remove_model(&lock_path, &name)?;
+            let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
+            let snapshot_removed = if keep_snapshot {
+                false
+            } else {
+                store.remove(&name)?
+            };
+            if snapshot_removed {
+                let models = app.ctx.dirs.models();
+                let (objects, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
+                println!(
+                    "removed local snapshot {name}; pruned {objects} object(s), {} freed",
+                    human_bytes(bytes)
+                );
+            }
+            if declaration_removed {
+                println!(
+                    "removed model declaration {name} from {}",
+                    config_path.display()
+                );
+            }
+            if lock_removed {
+                println!("removed model lock {name} from {}", lock_path.display());
+            }
+            if views_removed {
+                println!("removed {name} from model views");
+            }
+            if !declaration_removed && !lock_removed && !views_removed && !snapshot_removed {
+                println!("model {name} was not declared, locked, viewed, or materialized");
+            }
         }
         ModelCommand::List => {
             for installed in store.list()? {
@@ -452,31 +471,27 @@ pub async fn model(app: &App, command: ModelCommand) -> Result<()> {
                 manifest.revision
             );
         }
-        ModelCommand::Sync { prune, dry_run } => model_sync(app, &store, prune, dry_run).await?,
-        ModelCommand::Remove { name, keep_lock } => {
+        ModelCommand::Sync {
+            name,
+            prune,
+            dry_run,
+        } => model_sync(app, &store, name.as_deref(), prune, dry_run).await?,
+        ModelCommand::Remove { name } => {
+            let views_removed = crate::model_view::remove_model_from_all_views(app, &name)?;
             let removed = store.remove(&name)?;
             if removed {
                 let models = app.ctx.dirs.models();
                 let (pruned, bytes) = app.ctx.cas.gc_roots(&[&app.ctx.dirs.installs, &models])?;
                 println!(
-                    "removed model {name}; pruned {} object(s), {} freed",
+                    "removed local snapshot {name}; pruned {} object(s), {} freed; project declaration and lock retained",
                     pruned,
                     human_bytes(bytes)
                 );
             } else {
-                println!("model {name} is not installed");
+                println!("model {name} is not materialized");
             }
-            // Deleting the snapshot while the lock still claims it left the two
-            // disagreeing, and the next `sync` would faithfully restore exactly
-            // what was just removed. Dropped unless the caller asks to keep it,
-            // which is the way to remove a snapshot locally without changing what
-            // the project declares.
-            if !keep_lock {
-                let cwd = std::env::current_dir()?;
-                let path = project_lock_path(app, &cwd);
-                if crate::lockfile::remove_model(&path, &name)? {
-                    println!("dropped {name} from {}", path.display());
-                }
+            if views_removed {
+                println!("removed {name} from model views; `model sync {name}` restores it");
             }
         }
         ModelCommand::Env { command } => model_env(app, command)?,
@@ -572,6 +587,14 @@ pub(crate) fn persist_model_pull(
     let path = project_lock_path(app, &cwd);
     crate::lockfile::merge_model(&path, &installed.manifest)?;
     if let Some(declaration) = applicable_model_declaration(app, name) {
+        crate::lockfile::set_model_selection(
+            &path,
+            name,
+            declaration.include.clone(),
+            declaration.exclude.clone(),
+        )?;
+    }
+    if let Some(declaration) = applicable_model_declaration(app, name) {
         let views = crate::lockfile::locked_views_from_declaration(&declaration.views);
         crate::lockfile::set_model_views(&path, name, views.clone())?;
         crate::model_view::reconcile_declared_views(app, name, &views)?;
@@ -598,11 +621,9 @@ pub(crate) enum ModelLockState {
 /// Compare a declaration against its lock entry over the fields the lock can
 /// hold verbatim.
 ///
-/// `include`/`exclude` are deliberately not compared: they are globs, and the
-/// lock stores only their expanded file list, so there is nothing to compare
-/// them against without re-resolving the remote. Widening a selection therefore
-/// stays a `model pull`, which is the one operation that re-resolves files. A
-/// `source` that cannot be parsed is treated as `Changed` so the pull below
+/// File selectors are stored alongside the expanded file list, so a change is
+/// observable without re-resolving first. A `source` that cannot be parsed is
+/// treated as `Changed` so the synchronization below
 /// surfaces the real parse error instead of being silently skipped.
 pub(crate) fn model_declaration_lock_state(
     declaration: &osdk_core::config::ModelDeclaration,
@@ -617,7 +638,9 @@ pub(crate) fn model_declaration_lock_state(
     let same = reference.provider == entry.provider
         && reference.repository == entry.repository
         && reference.revision == entry.requested_revision
-        && declaration.variant == entry.variant;
+        && declaration.variant == entry.variant
+        && declaration.include == entry.include
+        && declaration.exclude == entry.exclude;
     if same {
         ModelLockState::UpToDate
     } else {
@@ -642,20 +665,32 @@ pub(crate) fn model_declaration_lock_state(
 pub(crate) async fn model_sync(
     app: &App,
     store: &osdk_core::model::ModelStore,
+    target: Option<&str>,
     prune: bool,
     dry_run: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let path = project_lock_path(app, &cwd);
     let mut locked = crate::lockfile::locked_models(&path)?;
+    if let Some(target) = target {
+        locked.retain(|(name, _)| name == target);
+    }
     let configured: Vec<_> = app
         .ctx
         .config
         .models
         .iter()
+        .filter(|(name, _)| target.is_none_or(|target| name.as_str() == target))
         .filter(|(name, _)| applicable_model_declaration(app, name).is_some())
         .map(|(name, declaration)| (name.clone(), declaration.clone()))
         .collect();
+    if let Some(target) = target {
+        let declared = app.ctx.config.models.contains_key(target);
+        let replayable = locked.iter().any(|(name, _)| name == target);
+        if !declared && !replayable {
+            anyhow::bail!("model `{target}` is neither declared nor locked");
+        }
+    }
     let mut restored = 0usize;
     let mut bootstrapped = std::collections::BTreeSet::new();
 
@@ -666,7 +701,7 @@ pub(crate) async fn model_sync(
     // comparison is over what the lock can faithfully hold -- provider,
     // repository, requested revision, and variant -- because `include`/`exclude`
     // are globs the lock stores only as their expanded file list; changing those
-    // to widen a selection is still a `model pull`.
+    // to widen a selection is resolved again by `model sync`.
     //
     // The list is settled first so the downloads can run concurrently: several
     // models are large and independent, so fetching them one after another wastes
@@ -777,6 +812,9 @@ pub(crate) async fn model_sync(
     }
     if !dry_run && !bootstrapped.is_empty() {
         locked = crate::lockfile::locked_models(&path)?;
+        if let Some(target) = target {
+            locked.retain(|(name, _)| name == target);
+        }
     }
     if locked.is_empty() && configured.is_empty() && !prune {
         println!(
@@ -936,7 +974,7 @@ pub(crate) async fn model_sync(
         }
     }
 
-    if prune {
+    if prune && target.is_none() {
         let declared: std::collections::BTreeSet<_> = if locked.is_empty() {
             configured.iter().map(|(name, _)| name.clone()).collect()
         } else {

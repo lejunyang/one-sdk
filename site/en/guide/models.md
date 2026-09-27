@@ -7,62 +7,21 @@ manifests, current-snapshot pointers, and environment adapters remain separate.
 ## Command reference
 
 ```text
-osdk model pull NAME [REFERENCE]
-  [--endpoint URL]
-  [--forward-credentials]
-  [--include GLOB]...
-  [--exclude GLOB]...
-  [--variant LABEL]
-  [--no-lock]
-
-osdk model sync [--prune] [--dry-run]
+osdk model use NAME REFERENCE [--endpoint URL]
+  [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
+  [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
+osdk model unuse NAME [--keep-snapshot]
+osdk model sync [NAME] [--prune] [--dry-run]
 osdk model list
 osdk model path NAME [--stable]
 osdk model verify NAME
-osdk model remove NAME [--keep-lock]
-
-osdk model env enable [huggingface|modelscope] [--force]
-osdk model env disable [huggingface|modelscope]
-osdk model env list
-
-osdk model view add <comfyui|hf-cache> <name> [--profile P] [--map PREFIX=CATEGORY]...
-osdk model view list
-osdk model view path <comfyui|hf-cache> [--profile P]
-osdk model view rebuild [<comfyui|hf-cache>]
-osdk model view remove <comfyui|hf-cache> [--profile P] [--model NAME]
-osdk model view export <comfyui|hf-cache> [--profile P] [--to extra_model_paths.yaml]
-osdk model view doctor <comfyui|hf-cache> [--profile P]
+osdk model remove NAME
 ```
 
-| `pull` argument | Effect |
-| --- | --- |
-| `NAME` | Local logical name containing only ASCII letters, digits, `.`, `_`, or `-` |
-| `REFERENCE` | Optional `PROVIDER:owner/repo@revision`; when omitted, read `[models.NAME].source` |
-| `--endpoint URL` | Override the provider endpoint ahead of declaration, environment, and source selection |
-| `--forward-credentials` | Allow this explicit custom endpoint to receive the provider token |
-| `--include GLOB` | Repeatable; a file must match at least one include when includes are present |
-| `--exclude GLOB` | Repeatable; remove matches from the include result |
-| `--variant LABEL` | Record an identity/manifest/lock label; it **does not select files** |
-| `--no-lock` | Do not update `osdk.lock` at the nearest project location |
-
-`list` shows each logical name's current snapshot; `path` prints its current
-directory; `verify` checks all files. `remove` deletes every snapshot for the
-logical name and immediately runs CAS GC; it currently does not ask for
-confirmation.
-
-`path --stable` prints `<data>/models/<name>/current`, a directory link resolving
-to the current snapshot (a junction on Windows, a symlink elsewhere). Snapshot
-directory names embed a content hash, so they change whenever `--include`,
-`--exclude` or the revision changes. **Use `--stable` for any path that gets
-written down somewhere**: a ComfyUI `extra_model_paths.yaml`, a llama.cpp `-m`, a
-constant in a script. Without `--stable` you get the real hashed snapshot path,
-which is fine for one-off use.
-
-```bash
-osdk model path qwen25            # …/snapshots/9f1c2a…
-osdk model path qwen25 --stable   # …/qwen25/current  ← still valid after the next pull
-```
-
+`use` edits the project declaration and does not download by default; `--sync` materializes that
+model immediately. `sync NAME` limits work to one model; no argument handles the project.
+`unuse` removes declaration, lock, and views and normally deletes the snapshot; `--keep-snapshot`
+retains bytes. `remove` deletes only local bytes and views while retaining project intent and lock.
 ## Provider references
 
 ```text
@@ -80,11 +39,11 @@ A repository must be exactly two `owner/name` segments, each using ASCII letters
 digits, `.`, `_`, or `-`.
 
 ```bash
-osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
-osdk model pull qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
-osdk model pull qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
+osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk model use qwen25-ms ms:Qwen/Qwen2.5-7B-Instruct@master
+osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' \
-  --exclude 'original/*' --variant safetensors-fp16
+  --exclude 'original/*' --variant safetensors-fp16 --sync
 ```
 
 Hugging Face resolves a branch or tag to an immutable commit SHA. When
@@ -132,7 +91,7 @@ ModelScope repository.
 
 ## Lockfile
 
-By default, `pull` writes `[models.<name>]` at the top level of `osdk.lock` with:
+`model sync` writes `[models.<name>]` at the top level of `osdk.lock` with:
 
 - provider, repository, requested revision, and immutable revision;
 - effective endpoint and optional variant label;
@@ -165,57 +124,32 @@ osdk source unpin hf             # drop the pin and return to auto-selection
 
 ### Restoring from the lock
 
-`osdk model sync` fetches a whole project's models with no arguments. It compares
-each `[models]` declaration applicable to this platform against the lock: a
-declaration the lock does not describe is pulled and locked; one whose `source`
-(provider / repository / requested revision) or `variant` no longer matches the
-lock is re-pulled and its entry rewritten; everything else is left to the replay
-of the lock. So a `[models]` entry added or edited by hand is picked up here
-without a separate `model pull`. `osdk install` deliberately does not fetch
-models: weights are far too large to download as a side effect of installing
-tools, so this is its own verb.
-
-`include`/`exclude` are globs, and the lock stores only their expanded file list,
-so changes to them do not participate in that comparison -- widening a selection
-through `include` is still a `model pull`, the one operation that re-resolves the
-remote file list.
+`osdk model sync` handles the whole project without an argument and only one logical model when
+`NAME` is supplied. It compares applicable `[models]` declarations with the lock: new declarations
+are downloaded and locked; changes to `source`, `variant`, `include`, or `exclude` are resolved again;
+everything else is replayed from the immutable lock.
 
 ```bash
-osdk model sync                 # pull [models] entries added/changed vs the lock, replay the rest
-osdk model sync --dry-run       # report what would happen
-osdk model sync --prune         # also delete snapshots the lock no longer declares
-osdk model sync --prune --dry-run
+osdk model sync qwen25          # one model
+osdk model sync                 # whole project
+osdk model sync --dry-run       # report without applying
+osdk model sync --prune         # remove snapshots no longer declared by the lock
 ```
 
-A restore rebuilds the reference from the lock's **immutable revision**, not from
-`requested_revision`: replaying a branch name would resolve to wherever it points
-now, which is the opposite of what a lock is for. Only the files the lock names
-are fetched, so a repository that gained files after locking cannot silently grow
-the snapshot, and every file's size and SHA-256 is compared afterwards -- a
-mismatch fails, because pinning content is the point.
+Restore uses the lock's immutable revision and file SHA-256 values rather than reinterpreting a
+floating branch. The lock stores the original selectors as well as the expanded file list, so a
+selector change triggers resolution. An intact snapshot is not downloaded again; a corrupt one is.
+Consumer views are rebuilt from the lock as part of synchronization.
 
-`sync` also rebuilds consumer views from the `views` declarations recorded in the
-lock (see below), so on another machine `osdk model sync` alone is enough; you do
-not re-run `model view add`.
+`--prune` applies only to whole-project synchronization and is off by default because it deletes
+weights that may be expensive to fetch again.
 
-A snapshot that is already present and verifies is not re-downloaded: the lock
-carries each file's digest, so "is this the thing the lock describes" is
-answerable locally, and re-fetching gigabytes to answer it would be absurd. A
-snapshot that fails verification is re-pulled, since at that point the local copy
-is not what was committed.
+### `remove` and `unuse`
 
-`--prune` is off by default: it deletes materialized weights, which are expensive
-to re-fetch, so it must be asked for rather than happening as a side effect.
-
-### `remove` keeps the lock in step
-
-`osdk model remove <name>` drops the lock entry along with the local snapshot.
-Previously only the snapshot went, leaving the lock still claiming it, so the next
-`sync` would faithfully pull back exactly what had just been removed.
-
-Use `--keep-lock` to remove locally without changing what the project declares; a
-later `sync` restores it.
-
+`osdk model remove <name>` removes only the local snapshot and consumer views while retaining the
+project declaration and lock; `model sync <name>` restores it. Use `model unuse <name>` to remove
+project intent, the lock entry, and views as well. It normally deletes the snapshot;
+`--keep-snapshot` retains the local bytes.
 ## Endpoints and credentials
 
 Resolution priority is:
@@ -256,12 +190,9 @@ file. Anonymous and credential-bearing probes use different cache keys. See
 
 ## Declaring models in `osdk.toml`
 
-Instead of pulling first and locking afterwards, you can declare models directly
-in the project `osdk.toml`. Declaring does not download anything; a later
-`osdk model pull <name>` reads the matching declaration, while `osdk model sync`
-pulls every applicable declaration the lock does not yet describe or describes
-differently. Both paths record immutable results and consumer views into the lock
-and render those views immediately:
+`osdk model use` edits the project `osdk.toml` through osdk. A declaration does not download bytes;
+add `--sync` to materialize that model immediately, or later run `osdk model sync [name]` for one or
+all declarations:
 
 ```toml
 [models.flux]
@@ -269,43 +200,29 @@ source   = "hf:black-forest-labs/FLUX.1-dev@main"
 include  = ["*.safetensors", "*.json"]
 exclude  = ["*.onnx"]
 variant  = "fp16"
-when     = { os = "windows" }          # optional; same shape as [tools] `when`
+when     = { os = "windows" }
 
 [models.flux.views.comfyui]
-profile  = "desktop"                   # defaults to "default" when omitted
+profile  = "desktop"
 [models.flux.views.comfyui.map]
 "unet/" = "diffusion_models"
 "vae/"  = "vae"
-
-[models.embedder.views.hf-cache]
-# consumer table without a map: that consumer's default layout
 ```
 
-The fields mirror the `model pull` flags (`source`/`include`/`exclude`/
-`variant`/`when`/`endpoint`), plus `views` (consumer name -> that consumer's
-`profile` and `map`). An explicit reference, `--include`, `--exclude`, `--variant`,
-or `--endpoint` overrides the corresponding declaration field. A declaration whose
-`when` does not match the current platform is ignored by a name-only pull and the
-initial sync. A `map` key is a **repo-relative path prefix** (normalized to `/`) and
-its value is a consumer category, using exactly the same rules as
-`model view add --map`. A misspelled field is an error
-(`deny_unknown_fields`), never silently ignored.
+`model use` writes `source`, `include`, `exclude`, `variant`, `endpoint`, and one consumer view's
+`profile`/`map`; running it again replaces the same-name declaration. `when` remains a direct-config
+field. Unknown fields fail loudly rather than being ignored.
 
-**Trust.** Merely declaring *what* to fetch (`source`/`include`/`variant`/
-`when`/`views`) needs no trust, exactly like declaring an npm dependency; only
-keys that change the **byte source** do -- an `endpoint`, a custom URL, an
-`insecure` toggle. Model declarations **never block the shim**: ordinary tool
-commands such as `cargo --version` keep working in a project that only declares
-models, while the commands that actually fetch (`osdk model sync` / `pull`)
-enforce the full check. An entry that carries an `endpoint` is pinned as a whole
-(the same granularity as `tools.<name>.allow_builds`), so editing it re-prompts;
-editing a different, endpoint-free model does not.
+**Trust.** Ordinary declarations require no trust; only fields that change the byte source, such as
+`endpoint` or a custom URL, require review. Model declarations never block shims. Networked
+`model sync` and `model use --sync` enforce the full trust check, while `model unuse` remains the
+escape hatch for removing an untrusted declaration.
 
 ## Consumer views (model view)
 
 Snapshots are laid out like the upstream repository (`unet/`, `vae/`,
 `text_encoder/` side by side); consumers expect a different shape. `osdk model
-view` renders a pulled snapshot into the consumer's shape with links (hardlinks
+view` renders a materialized snapshot into the consumer's shape with links (hardlinks
 on the same volume, counted byte copies across volumes) back to the snapshot --
 no weights are copied -- and marks view files read-only so a consumer writing in
 place cannot corrupt the snapshot or CAS.
@@ -314,11 +231,11 @@ place cannot corrupt the snapshot or CAS.
   produces `<view>/<category>/<file>` (all 25 category dirs pre-created, files
   classified by the `unet/vae/text_encoder/loras` directory conventions);
   `hf-cache` produces `models--org--repo/{refs,blobs,snapshots}`. The model must
-  be pulled first.
+  be materialized first.
 - `--map PREFIX=CATEGORY` (repeatable) maps a repo path prefix to a category,
   longest prefix wins. Files that cannot be classified are **never dumped into
   checkpoints**; they are skipped and listed by `view doctor`.
-- `path` prints the stable view root; it does not change across pulls, so it is
+- `path` prints the stable view root; it does not change across synchronizations, so it is
   the path to write into the consumer's config.
 - `export` prints the consumer config fragment. For ComfyUI it is an
   `extra_model_paths.yaml` section with a unique key and **no `is_default`**.
@@ -331,7 +248,7 @@ place cannot corrupt the snapshot or CAS.
   than silently overwriting.
 
 ```bash
-osdk model pull flux hf:org/flux-GGUF --include 'unet/*' --include 'vae/*'
+osdk model use flux hf:org/flux-GGUF --include 'unet/*' --include 'vae/*' --sync
 osdk model view add comfyui flux
 osdk model view export comfyui --to extra_model_paths.yaml   # source edition
 osdk model view path comfyui                                 # Desktop: paste this

@@ -243,6 +243,10 @@ fn bypasses_trust_check(command: &Command) -> bool {
                 command: crate::cli::ConfigCommand::Set { .. }
                     | crate::cli::ConfigCommand::Unset { .. }
             }
+            // Removing a model declaration is the escape hatch for an untrusted entry.
+            | Command::Model {
+                command: crate::cli::ModelCommand::Unuse { .. }
+            }
             // Read-only: report existing state, act on nothing.
             | Command::List { .. }
             | Command::Current { .. }

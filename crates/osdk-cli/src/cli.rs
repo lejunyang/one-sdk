@@ -744,19 +744,15 @@ pub enum AndroidLicensesCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommand {
-    /// Resolve and download an immutable model snapshot.
-    Pull {
+    /// Declare a project model without downloading it; add --sync to materialize it now.
+    Use {
         /// Local logical name for the model.
         name: String,
         /// Provider reference, e.g. hf:Qwen/Qwen2.5-7B-Instruct@main.
-        /// Omit it to use `[models.<name>].source` from project configuration.
-        reference: Option<String>,
+        reference: String,
         /// Override the provider endpoint.
         #[arg(long)]
         endpoint: Option<String>,
-        /// Allow an explicit custom endpoint to receive provider credentials.
-        #[arg(long)]
-        forward_credentials: bool,
         /// Include files matching a glob (repeatable).
         #[arg(long)]
         include: Vec<String>,
@@ -766,11 +762,28 @@ pub enum ModelCommand {
         /// Optional format or quantization label.
         #[arg(long)]
         variant: Option<String>,
-        /// Do not update the nearest project osdk.lock.
+        /// Declare one consumer view for this model.
         #[arg(long)]
-        no_lock: bool,
+        view: Option<osdk_core::model::view::ViewKind>,
+        /// View profile used with --view.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Repo-prefix to category mapping used with --view (repeatable).
+        #[arg(long, requires = "view")]
+        map: Vec<String>,
+        /// Materialize only this model after updating osdk.toml.
+        #[arg(long)]
+        sync: bool,
     },
-    /// Materialize every declared model: pull what `[models]` adds, replay the lock.
+    /// Remove project intent, lock state, views, and normally the local snapshot.
+    Unuse {
+        /// Local logical name to stop declaring.
+        name: String,
+        /// Keep local snapshot bytes after removing project intent and lock state.
+        #[arg(long)]
+        keep_snapshot: bool,
+    },
+    /// Materialize declared models: resolve declarations, update the lock, and replay it.
     ///
     /// The no-argument way to fetch a whole project's models. Each `[models]`
     /// declaration applicable to this platform is compared against the lock: one
@@ -779,18 +792,20 @@ pub enum ModelCommand {
     /// Everything the lock already describes is then replayed, and a snapshot
     /// already present and verifying is skipped rather than re-downloaded. So a
     /// `[models]` entry added or edited by hand is picked up here without a
-    /// separate `model pull`.
+    /// separate the old direct pull path.
     ///
     /// This is the counterpart to `install` for tools, but a separate verb:
     /// `install` deliberately does not fetch models, because weights are far too
     /// large to download as a side effect of installing tools.
     Sync {
+        /// Limit synchronization to one logical model name.
+        name: Option<String>,
         /// Remove local snapshots the lock no longer declares.
         ///
         /// Off by default: pruning deletes materialized weights, which are large
         /// and slow to re-fetch, so it is opt-in rather than a side effect of
         /// syncing.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "name")]
         prune: bool,
         /// Report what would change without downloading or deleting anything.
         #[arg(long)]
@@ -813,13 +828,8 @@ pub enum ModelCommand {
     },
     /// Verify all files in a local snapshot.
     Verify { name: String },
-    /// Remove all local snapshots for a logical model name.
-    Remove {
-        name: String,
-        /// Keep the lock entry, so a later `sync` restores the snapshot.
-        #[arg(long)]
-        keep_lock: bool,
-    },
+    /// Remove local snapshots while keeping project declaration and lock state.
+    Remove { name: String },
     /// Manage provider environment exported by shell activation.
     Env {
         #[command(subcommand)]
@@ -838,7 +848,7 @@ pub enum ModelViewCommand {
     Add {
         /// Consumer shape: comfyui | hf-cache.
         kind: osdk_core::model::view::ViewKind,
-        /// Logical model name (as used with `model pull`).
+        /// Logical model name (as declared with `model use`).
         model: String,
         /// View profile; defaults to `default`.
         #[arg(long, default_value = "default")]

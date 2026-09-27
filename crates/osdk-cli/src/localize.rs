@@ -152,18 +152,31 @@ fn localize_subcommands(cmd: Command) -> Command {
     })
     .mut_subcommand("model", |c| {
         c.about(h("help.model.about"))
-            .mut_subcommand("pull", |s| {
-                s.about(h("help.model.pull.about"))
-                    .mut_arg("name", |a| a.help(h("help.model.pull.arg.name")))
-                    .mut_arg("reference", |a| a.help(h("help.model.pull.arg.reference")))
-                    .mut_arg("endpoint", |a| a.help(h("help.model.pull.flag.endpoint")))
-                    .mut_arg("forward_credentials", |a| {
-                        a.help(h("help.model.pull.flag.forward_credentials"))
+            .mut_subcommand("use", |s| {
+                s.about(h("help.model.use.about"))
+                    .mut_arg("name", |a| a.help(h("help.model.use.arg.name")))
+                    .mut_arg("reference", |a| a.help(h("help.model.use.arg.reference")))
+                    .mut_arg("endpoint", |a| a.help(h("help.model.use.flag.endpoint")))
+                    .mut_arg("include", |a| a.help(h("help.model.use.flag.include")))
+                    .mut_arg("exclude", |a| a.help(h("help.model.use.flag.exclude")))
+                    .mut_arg("variant", |a| a.help(h("help.model.use.flag.variant")))
+                    .mut_arg("view", |a| a.help(h("help.model.use.flag.view")))
+                    .mut_arg("profile", |a| a.help(h("help.model.use.flag.profile")))
+                    .mut_arg("map", |a| a.help(h("help.model.use.flag.map")))
+                    .mut_arg("sync", |a| a.help(h("help.model.use.flag.sync")))
+            })
+            .mut_subcommand("unuse", |s| {
+                s.about(h("help.model.unuse.about"))
+                    .mut_arg("name", |a| a.help(h("help.model.unuse.arg.name")))
+                    .mut_arg("keep_snapshot", |a| {
+                        a.help(h("help.model.unuse.flag.keep_snapshot"))
                     })
-                    .mut_arg("include", |a| a.help(h("help.model.pull.flag.include")))
-                    .mut_arg("exclude", |a| a.help(h("help.model.pull.flag.exclude")))
-                    .mut_arg("variant", |a| a.help(h("help.model.pull.flag.variant")))
-                    .mut_arg("no_lock", |a| a.help(h("help.model.pull.flag.no_lock")))
+            })
+            .mut_subcommand("sync", |s| {
+                s.about(h("help.model.sync.about"))
+                    .mut_arg("name", |a| a.help(h("help.model.sync.arg.name")))
+                    .mut_arg("prune", |a| a.help(h("help.model.sync.flag.prune")))
+                    .mut_arg("dry_run", |a| a.help(h("help.model.sync.flag.dry_run")))
             })
             .mut_subcommand("list", |s| s.about(h("help.model.list.about")))
             .mut_subcommand("path", |s| s.about(h("help.model.path.about")))

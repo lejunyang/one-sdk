@@ -126,7 +126,7 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 ## 模型解析、下载与物化
 
-`osdk model pull <name> <reference>` 的实现入口在 [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)，核心流程在 [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs)：
+`osdk model sync [name]` 的实现入口在 [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)，核心流程在 [`model/pull.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/pull.rs)：
 
 1. 解析显式 `--endpoint` 或 provider 环境变量；否则使用 provider 自己的默认/自定义来源。
 2. 在 auto 模式下，[`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) 对真实仓库先取 manifest，再对最大的可探测文件执行最多 1 MiB 的 Range 请求；结果按 provider、repo、revision 和来源配置缓存。
@@ -139,11 +139,11 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 ## 声明式 `[models]`、视图与信任分类
 
-除了命令行 `pull`，模型也可在项目 `osdk.toml` 的 `[models.<name>]` 声明，结构在
+`model use` 会受管写入项目 `osdk.toml` 的 `[models.<name>]` 声明，结构在
 [`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs)
 的 `ModelDeclaration`（`deny_unknown_fields`，与 `tasks` 一样在 `install` feature 之后，
 shim 的依赖图不带它）。每个声明含 `source/include/exclude/variant/when` 与
-`views: consumer -> ModelViewDeclaration{profile, map}`。`pull <name>` 时从合并后的
+`views: consumer -> ModelViewDeclaration{profile, map}`。`sync [name]` 时从合并后的
 `Config.models` 取这份声明：拉取后把视图经 `locked_views_from_declaration` 写入 lock，
 并调用 `model_view::reconcile_declared_views` 立即渲染。
 

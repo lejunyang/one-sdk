@@ -16,7 +16,8 @@ osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
-osdk model pull NAME REFERENCE [OPTIONS]
+osdk model use NAME REFERENCE [OPTIONS]
+osdk model sync [NAME]
 ```
 
 | Invocation | Reads the existing lock? | Writes the lock? |
@@ -28,7 +29,8 @@ osdk model pull NAME REFERENCE [OPTIONS]
 | `outdated` | No; re-resolves configuration or explicit requests | No |
 | `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map (project tools only, likewise) |
 | `exec` | No | No |
-| `model pull` | Does not use a model lock as input | Merges `[models]` by default; `--no-lock` disables this |
+| `model use` | No | Writes project intent; does not write the lock itself |
+| `model sync [NAME]` | Yes | Resolves added/changed declarations and merges model locks |
 | `list`, `current`, `where` | No | No |
 
 For `outdated`, the “current” column is the greatest installed version for that

@@ -2809,61 +2809,106 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
-        "help.model.pull.about",
+        "help.model.use.about",
         (
-            "Resolve and download an immutable model snapshot",
-            "解析并下载不可变模型快照",
+            "Declare a project model without downloading it",
+            "声明项目模型但不立即下载",
         ),
     );
     m.insert(
-        "help.model.pull.arg.name",
+        "help.model.use.arg.name",
         ("Local logical model name", "本地逻辑模型名称"),
     );
     m.insert(
-        "help.model.pull.arg.reference",
+        "help.model.use.arg.reference",
         (
             "Provider reference such as hf:Qwen/Qwen2.5-7B-Instruct@main",
             "模型源引用，例如 hf:Qwen/Qwen2.5-7B-Instruct@main",
         ),
     );
     m.insert(
-        "help.model.pull.flag.endpoint",
+        "help.model.use.flag.endpoint",
         ("Override the provider endpoint", "覆盖模型源 endpoint"),
     );
     m.insert(
-        "help.model.pull.flag.forward_credentials",
-        (
-            "Allow an explicit custom endpoint to receive provider credentials",
-            "允许显式自定义 endpoint 接收模型源凭据",
-        ),
-    );
-    m.insert(
-        "help.model.pull.flag.include",
+        "help.model.use.flag.include",
         (
             "Include files matching a glob (repeatable)",
             "包含匹配 glob 的文件（可重复）",
         ),
     );
     m.insert(
-        "help.model.pull.flag.exclude",
+        "help.model.use.flag.exclude",
         (
             "Exclude files matching a glob (repeatable)",
             "排除匹配 glob 的文件（可重复）",
         ),
     );
     m.insert(
-        "help.model.pull.flag.variant",
+        "help.model.use.flag.variant",
         (
             "Optional format or quantization label",
             "可选的格式或量化变体标签",
         ),
     );
     m.insert(
-        "help.model.pull.flag.no_lock",
+        "help.model.use.flag.view",
         (
-            "Do not update the nearest project osdk.lock",
-            "不更新最近的项目 osdk.lock",
+            "Declare a consumer view for this model",
+            "为此模型声明消费者视图",
         ),
+    );
+    m.insert(
+        "help.model.use.flag.profile",
+        ("View profile name", "视图配置名称"),
+    );
+    m.insert(
+        "help.model.use.flag.map",
+        (
+            "Map a repository prefix to a consumer category",
+            "将仓库路径前缀映射到消费者类别",
+        ),
+    );
+    m.insert(
+        "help.model.use.flag.sync",
+        ("Materialize this model immediately", "立即物化此模型"),
+    );
+    m.insert(
+        "help.model.unuse.about",
+        (
+            "Remove a project model declaration and managed state",
+            "移除项目模型声明及受管状态",
+        ),
+    );
+    m.insert(
+        "help.model.unuse.arg.name",
+        ("Local logical model name", "本地逻辑模型名称"),
+    );
+    m.insert(
+        "help.model.unuse.flag.keep_snapshot",
+        ("Keep the local snapshot bytes", "保留本地模型快照"),
+    );
+    m.insert(
+        "help.model.sync.about",
+        (
+            "Materialize declared models and replay the lock",
+            "物化已声明模型并复现锁文件",
+        ),
+    );
+    m.insert(
+        "help.model.sync.arg.name",
+        ("Optional logical model name", "可选的逻辑模型名称"),
+    );
+    m.insert(
+        "help.model.sync.flag.prune",
+        (
+            "Remove local snapshots not declared by the lock",
+            "删除锁文件未声明的本地快照",
+        ),
+    );
+    m.insert(
+        "help.model.sync.flag.dry_run",
+        ("Report changes without applying them", "仅报告变更而不执行"),
     );
     m.insert(
         "help.model.list.about",

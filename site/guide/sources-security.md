@@ -36,7 +36,7 @@ osdk source unpin TOOL_OR_PROVIDER
 `add`、`remove`、`pin`、`unpin` 都编辑用户 `config.toml`。`--source ID` 是一次性
 优先来源并保留其他来源作为回退；同一调用里的工具请求必须使用规范 backend ID，
 例如写 `node` 而不是 `nodejs`，否则当前实现不会应用覆盖。`--refresh-sources` 对
-`install`、`use`、`upgrade`、`exec` 强制重新探测；对 `model pull`，仅在没有显式
+`install`、`use`、`upgrade`、`exec` 强制重新探测；对 `model sync`，仅在没有显式
 endpoint 或 pin、选择策略为 `auto` 且非 offline 时刷新。当前对 `lock`、`outdated`、
 `list-remote` 不生效。
 模型 `source test` 缺少 `--model` 会失败，普通工具使用 `--model` 也会失败。
@@ -135,14 +135,14 @@ Last-Modified，重试时用 `Range` + `If-Range` 续传；服务端忽略或返
 ```bash
 osdk --offline install bun@1.3.14
 osdk --offline install                    # 可结合当前平台 lock
-osdk --offline model pull qwen hf:Qwen/Qwen2.5-7B-Instruct@main
+osdk --offline model sync qwen
 ```
 
 `--offline` 或 `OSDK_OFFLINE=true` 严格禁止网络：
 
 - metadata、SDK archive、模型 metadata 和所选文件必须已缓存；
 - 自动 source probe 被跳过；`source test` 及 SDK 安装类命令中的 `--refresh-sources`
-  会失败，`model pull` 不会刷新，本就不支持该参数的命令仍忽略它；
+  会失败，`model sync` 不会刷新，本就不支持该参数的命令仍忽略它；
 - 缺少缓存时明确报错，不会偷偷联网；
 - 对支持通用 artifact receipt 的 backend，lock 中的 artifact URL/checksum 可支持离线
   重装；pipeline 实际重装且有 checksum 时重新校验字节，已有完整 GitHub 安装仅在 receipt

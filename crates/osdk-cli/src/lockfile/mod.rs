@@ -342,6 +342,13 @@ pub struct LockedModel {
     pub endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// Original file selectors from the project declaration. They are part of
+    /// the requested snapshot identity even though `files` records the expanded
+    /// immutable result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
     pub files: Vec<LockedModelFile>,
     /// Consumer views declared for this model (research §6.3): consumer ->
     /// profile -> (repo path prefix -> category). Skip when empty so existing
@@ -969,6 +976,8 @@ version = "3.6.2"
                     revision: "abc123".into(),
                     endpoint: "https://huggingface.co".into(),
                     variant: None,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
                     files: Vec::new(),
                     views: BTreeMap::new(),
                 },
@@ -2979,6 +2988,8 @@ sha256 = "{sha256}"
             revision: "abc123".into(),
             endpoint: "https://huggingface.co".into(),
             variant: Some("safetensors".into()),
+            include: Vec::new(),
+            exclude: Vec::new(),
             files: vec![LockedModelFile {
                 path: "config.json".into(),
                 size: 10,
@@ -3035,7 +3046,7 @@ sha256 = "{sha256}"
 
     #[test]
     fn the_models_section_can_be_read_back_and_pruned() {
-        // The section had one writer and no readers outside tests: `model pull`
+        // The section had one writer and no readers outside tests: the old direct pull path
         // recorded a snapshot and nothing ever consulted it, so a committed lock
         // described a state no command could restore.
         let temporary = tempfile::tempdir().unwrap();
