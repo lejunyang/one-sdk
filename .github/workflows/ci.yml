@@ -199,3 +199,15 @@ jobs:
           exit 0
       - name: detect apt/apk/pacman/dnf inside their own distributions
         run: ./scripts/linux-distro-detection.sh
+
+  # Scripted CommandRunner fixtures cannot detect native CLI argument or output
+  # drift. Keep one real Docker/Buildx pass in CI, including a pinned image pull;
+  # the script also checks containerd when the runner exposes a usable ctr pair.
+  linux-container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - name: exercise native container contracts
+        run: ./scripts/container-smoke.sh

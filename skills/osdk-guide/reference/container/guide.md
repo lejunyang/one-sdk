@@ -31,3 +31,7 @@ osdk container prune --runtime docker --scope images
 
 Unix 上 containerd selector 使用规范的 `unix:///path/to/containerd.sock`；osdk 会在
 调用 `ctr` 时渲染成它要求的原生 `/path/to/containerd.sock` 参数。
+
+在 one-sdk 仓库验证真实宿主契约时运行 `osdk run container-smoke`。它检查 Docker、
+Buildx、Registry、plan、preview 与 pull，并在宿主提供可用 `ctr` 时检查 containerd；
+不会应用 mirror 配置或执行 prune。

@@ -295,3 +295,11 @@ selected native command without fallback; mirror apply writes only the exact
 validated config target. No path bootstraps/recreates a builder, restarts a
 daemon, scans osdk's private store, or implements a private OCI store. Registry
 testing performs only the bounded metadata and Range reads described above.
+
+The Linux `osdk run container-smoke` task complements scripted unit tests with
+the native Docker and Buildx CLIs installed on the host. It checks diagnostics,
+cache contracts, read-only mirror planning, prune previews, a digest-pinned OCI
+probe, and a Docker pull followed by an offline container start. It also checks
+containerd when a usable `ctr`/`containerd` pair is present. The harness isolates
+all osdk directories, never applies configuration or prune, and removes its
+test image when the image was not already present.

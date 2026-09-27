@@ -233,3 +233,8 @@ Doctor、cache status、Registry 测试、mirror plan、mirror apply dry-run 与
 pull/prune 都只启动一个选中的原生命令且不回退，mirror apply 只写精确验证过的配置目标。
 这里没有任何路径会启动/重建 builder、重启 daemon、扫描 osdk 私有存储或实现私有 OCI
 store。Registry 测试只执行上述有界 metadata 与 Range 读取。
+
+Linux 的 `osdk run container-smoke` 任务使用宿主真实 Docker 与 Buildx CLI 补足脚本化单测。
+它会检查诊断、缓存契约、只读 mirror plan、prune preview、固定 digest 的 OCI 探测，以及
+Docker pull 后的离线容器启动；宿主存在可用 `ctr`/`containerd` 时也检查 containerd。
+该脚本隔离全部 osdk 目录，从不应用配置或执行 prune，并在测试镜像原本不存在时将其删除。
