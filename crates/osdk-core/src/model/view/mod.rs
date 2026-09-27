@@ -433,6 +433,9 @@ mod tests {
                     revision: "abc123".into(),
                     endpoint: "https://huggingface.co".into(),
                     variant: None,
+                    kind: None,
+                    family: None,
+                    derived_from: None,
                 },
                 files,
             )

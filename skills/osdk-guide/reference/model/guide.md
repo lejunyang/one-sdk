@@ -4,7 +4,7 @@
 
 | 子命令 | 参数与语义 |
 | --- | --- |
-| `use <NAME> <REFERENCE>` | 受管写入项目声明；支持 `--endpoint`、`--include/--exclude`、`--variant`、`--view/--profile/--map`；`--sync` 立即物化 |
+| `use <NAME> <REFERENCE>` | 受管写入项目声明；支持 `--endpoint`、`--include/--exclude`、`--variant`、`--kind/--family/--derived-from`、`--view/--profile/--map`；`--sync` 立即物化 |
 | `unuse <NAME>` | 移除声明、lock 和视图，默认删除快照；`--keep-snapshot` 保留字节 |
 | `sync [NAME]` | 同步单个或全部模型；`--dry-run` 预览；全项目模式可用 `--prune`；`--jsonl` 输出逐行 schema 1 事件 |
 | `list/show/path/verify` | 检查本地快照；查询命令支持 `--json`；`path --stable` 输出稳定 current 路径 |

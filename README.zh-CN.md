@@ -575,7 +575,8 @@ Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基�
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' --sync
-osdk model use character-lora civitai:456@123 --view comfyui --sync
+osdk model use character-lora civitai:456@123 --view comfyui \
+  --kind lora --family sdxl --derived-from hf:stabilityai/stable-diffusion-xl-base-1.0@main --sync
 osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # 单个模型

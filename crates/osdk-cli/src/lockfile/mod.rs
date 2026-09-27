@@ -342,6 +342,12 @@ pub struct LockedModel {
     pub endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<osdk_core::model::ModelKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
     /// Original file selectors from the project declaration. They are part of
     /// the requested snapshot identity even though `files` records the expanded
     /// immutable result.
@@ -976,6 +982,9 @@ version = "3.6.2"
                     revision: "abc123".into(),
                     endpoint: "https://huggingface.co".into(),
                     variant: None,
+                    kind: None,
+                    family: None,
+                    derived_from: None,
                     include: Vec::new(),
                     exclude: Vec::new(),
                     files: Vec::new(),
@@ -1797,6 +1806,15 @@ lockfile = "lockfileVersion: '9.0'"
         let lock = load(&path).unwrap();
         assert!(lock.platforms["linux-x64"].tools.contains_key("node"));
         assert_eq!(lock.models["qwen"].revision, "abc123");
+        assert_eq!(
+            lock.models["qwen"].kind,
+            Some(osdk_core::model::ModelKind::Lora)
+        );
+        assert_eq!(lock.models["qwen"].family.as_deref(), Some("sdxl"));
+        assert_eq!(
+            lock.models["qwen"].derived_from.as_deref(),
+            Some("hf:stabilityai/stable-diffusion-xl-base-1.0@main")
+        );
         assert_eq!(lock.models["qwen"].files[0].sha256, "sha256");
     }
 
@@ -2969,6 +2987,9 @@ sha256 = "{sha256}"
             revision: "abc123".into(),
             endpoint: "https://huggingface.co".into(),
             variant: Some("safetensors".into()),
+            kind: Some(osdk_core::model::ModelKind::Lora),
+            family: Some("sdxl".into()),
+            derived_from: Some("hf:stabilityai/stable-diffusion-xl-base-1.0@main".into()),
             files: vec![osdk_core::model::ModelFile {
                 path: "config.json".into(),
                 size: 10,
@@ -2988,6 +3009,9 @@ sha256 = "{sha256}"
             revision: "abc123".into(),
             endpoint: "https://huggingface.co".into(),
             variant: Some("safetensors".into()),
+            kind: Some(osdk_core::model::ModelKind::Lora),
+            family: Some("sdxl".into()),
+            derived_from: Some("hf:stabilityai/stable-diffusion-xl-base-1.0@main".into()),
             include: Vec::new(),
             exclude: Vec::new(),
             files: vec![LockedModelFile {

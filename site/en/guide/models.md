@@ -9,6 +9,7 @@ manifests, current-snapshot pointers, and environment adapters remain separate.
 ```text
 osdk model use NAME REFERENCE [--endpoint URL]
   [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
+  [--kind KIND] [--family FAMILY] [--derived-from REFERENCE]
   [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
 osdk model unuse NAME [--keep-snapshot]
 osdk model sync [NAME] [--prune] [--dry-run] [--jsonl]
@@ -80,7 +81,13 @@ ModelScope's file API has no equivalent commit, osdk derives a
 file paths, sizes, and SHA-256 values. Civitai uses the exact model-version ID as the
 immutable revision, selects one `Model` weight by SafeTensor, primary, then response
 order, requires SHA-256, and normalizes it to `loras/<filename>` for direct ComfyUI view
-rendering. Remote paths must be safe relative paths.
+rendering; its effective `kind` defaults to `lora`. Remote paths must be safe relative paths.
+
+## Semantic metadata and lineage
+
+`kind` is a stable enum: `checkpoint`, `lora`, `vae`, `text-encoder`, `diffusion-model`, `controlnet`, `upscaler`, `embedding`, or `other`. `family` names an architecture/ecosystem such as `sdxl` or `flux`; `derived_from` records a caller-confirmed base model or upstream reference. osdk does not infer the latter two or match trigger words.
+
+All three fields enter snapshot identity, `.osdk-model.json`, `osdk.lock`, and `--json` output. Changing any one creates a distinct snapshot and triggers re-locking. Values must be non-empty, trimmed, and free of control characters; `family` is limited to 256 bytes and `derived_from` to 2048 bytes.
 
 ## Downloads, verification, and local layout
 
@@ -125,7 +132,7 @@ ModelScope repository.
 `model sync` writes `[models.<name>]` at the top level of `osdk.lock` with:
 
 - provider, repository, requested revision, and immutable revision;
-- effective endpoint and optional variant label;
+- effective endpoint, optional variant, and `kind/family/derived_from`;
 - each file's path, size, and SHA-256.
 
 Tokens, cookies, temporary signed download URLs, and ETags are not written. A
@@ -157,7 +164,7 @@ osdk source unpin hf             # drop the pin and return to auto-selection
 
 `osdk model sync` handles the whole project without an argument and only one logical model when
 `NAME` is supplied. It compares applicable `[models]` declarations with the lock: new declarations
-are downloaded and locked; changes to `source`, `variant`, `include`, or `exclude` are resolved again;
+are downloaded and locked; changes to `source`, `variant`, `kind`, `family`, `derived_from`, `include`, or `exclude` are resolved again;
 everything else is replayed from the immutable lock.
 
 ```bash
@@ -231,6 +238,9 @@ source   = "hf:black-forest-labs/FLUX.1-dev@main"
 include  = ["*.safetensors", "*.json"]
 exclude  = ["*.onnx"]
 variant  = "fp16"
+kind     = "diffusion-model"
+family   = "flux"
+derived_from = "hf:black-forest-labs/FLUX.1-dev@main"
 when     = { os = "windows" }
 
 [models.flux.views.comfyui]
@@ -240,7 +250,7 @@ profile  = "desktop"
 "vae/"  = "vae"
 ```
 
-`model use` writes `source`, `include`, `exclude`, `variant`, `endpoint`, and one consumer view's
+`model use` writes `source`, `include`, `exclude`, `variant`, `kind`, `family`, `derived_from`, `endpoint`, and one consumer view's
 `profile`/`map`; running it again replaces the same-name declaration. `when` remains a direct-config
 field. Unknown fields fail loudly rather than being ignored.
 

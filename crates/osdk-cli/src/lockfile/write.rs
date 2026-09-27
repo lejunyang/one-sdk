@@ -482,6 +482,9 @@ pub fn merge_model(path: &Path, manifest: &osdk_core::model::SnapshotManifest) -
                 &manifest.endpoint,
             ),
             variant: manifest.variant.clone(),
+            kind: manifest.kind,
+            family: manifest.family.clone(),
+            derived_from: manifest.derived_from.clone(),
             include: Vec::new(),
             exclude: Vec::new(),
             files: manifest

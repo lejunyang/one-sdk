@@ -1009,6 +1009,12 @@ pub struct ModelDeclaration {
     pub exclude: Vec<String>,
     /// Format/quantization label recorded into the snapshot identity.
     pub variant: Option<String>,
+    /// Semantic role of the model bytes.
+    pub kind: Option<crate::model::ModelKind>,
+    /// Architecture/ecosystem family such as `sdxl` or `flux`.
+    pub family: Option<String>,
+    /// Upstream/base-model lineage chosen by the caller.
+    pub derived_from: Option<String>,
     /// Optional platform filter (same `when` shape as tools).
     pub when: Option<crate::platform::PlatformFilter>,
     /// Consumer views: consumer (e.g. "comfyui") -> its declaration.

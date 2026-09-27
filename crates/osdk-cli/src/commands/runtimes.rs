@@ -369,6 +369,9 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
             include,
             exclude,
             variant,
+            kind,
+            family,
+            derived_from,
             view,
             profile,
             map,
@@ -376,6 +379,7 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
         } => {
             osdk_core::model::validate_model_name(&name)?;
             osdk_core::model::ModelRef::parse(&reference)?;
+            osdk_core::model::validate_model_metadata(family.as_deref(), derived_from.as_deref())?;
             let mut views = std::collections::BTreeMap::new();
             if let Some(kind) = view {
                 views.insert(
@@ -391,6 +395,9 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
                 include,
                 exclude,
                 variant,
+                kind,
+                family,
+                derived_from,
                 when: None,
                 views,
                 endpoint,
@@ -702,10 +709,15 @@ pub(crate) fn model_declaration_lock_state(
     let Ok(reference) = osdk_core::model::ModelRef::parse(&declaration.source) else {
         return ModelLockState::Changed;
     };
+    let effective_kind =
+        osdk_core::model::effective_model_kind(reference.provider, declaration.kind);
     let same = reference.provider == entry.provider
         && reference.repository == entry.repository
         && reference.revision == entry.requested_revision
         && declaration.variant == entry.variant
+        && effective_kind == entry.kind
+        && declaration.family == entry.family
+        && declaration.derived_from == entry.derived_from
         && declaration.include == entry.include
         && declaration.exclude == entry.exclude;
     if same {
@@ -782,6 +794,10 @@ pub(crate) async fn model_sync(
         if declaration.source.trim().is_empty() {
             anyhow::bail!("[models.{name}].source cannot be empty");
         }
+        osdk_core::model::validate_model_metadata(
+            declaration.family.as_deref(),
+            declaration.derived_from.as_deref(),
+        )?;
         let locked_entry = locked.iter().find(|(locked_name, _)| locked_name == name);
         let change =
             model_declaration_lock_state(declaration, locked_entry.map(|(_, entry)| entry));
@@ -831,6 +847,9 @@ pub(crate) async fn model_sync(
                     include: declaration.include.clone(),
                     exclude: declaration.exclude.clone(),
                     variant: declaration.variant.clone(),
+                    kind: declaration.kind,
+                    family: declaration.family.clone(),
+                    derived_from: declaration.derived_from.clone(),
                 };
                 let endpoint = declaration
                     .endpoint
@@ -997,6 +1016,9 @@ pub(crate) async fn model_sync(
                         .collect(),
                     exclude: Vec::new(),
                     variant: entry.variant.clone(),
+                    kind: entry.kind,
+                    family: entry.family.clone(),
+                    derived_from: entry.derived_from.clone(),
                 };
                 let sources = match osdk_core::model::source::ranked_sources(
                     &app.ctx,

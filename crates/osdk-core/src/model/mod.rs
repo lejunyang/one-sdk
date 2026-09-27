@@ -57,6 +57,65 @@ impl std::fmt::Display for ProviderId {
     }
 }
 
+/// Semantic role of model bytes. Optional for backwards compatibility and for
+/// repositories that contain several unrelated components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelKind {
+    Checkpoint,
+    Lora,
+    Vae,
+    TextEncoder,
+    DiffusionModel,
+    Controlnet,
+    Upscaler,
+    Embedding,
+    Other,
+}
+
+impl ModelKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Checkpoint => "checkpoint",
+            Self::Lora => "lora",
+            Self::Vae => "vae",
+            Self::TextEncoder => "text-encoder",
+            Self::DiffusionModel => "diffusion-model",
+            Self::Controlnet => "controlnet",
+            Self::Upscaler => "upscaler",
+            Self::Embedding => "embedding",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for ModelKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ModelKind {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "checkpoint" | "checkpoints" => Ok(Self::Checkpoint),
+            "lora" | "loras" => Ok(Self::Lora),
+            "vae" => Ok(Self::Vae),
+            "text-encoder" | "text_encoder" | "textencoder" => Ok(Self::TextEncoder),
+            "diffusion-model" | "diffusion_model" | "unet" => Ok(Self::DiffusionModel),
+            "controlnet" | "control-net" => Ok(Self::Controlnet),
+            "upscaler" | "upscale-model" => Ok(Self::Upscaler),
+            "embedding" | "embeddings" => Ok(Self::Embedding),
+            "other" => Ok(Self::Other),
+            other => Err(Error::config(format!(
+                "unknown model kind `{other}` (expected checkpoint|lora|vae|text-encoder|diffusion-model|controlnet|upscaler|embedding|other)"
+            ))),
+        }
+    }
+}
+
 impl std::str::FromStr for ProviderId {
     type Err = Error;
 
@@ -146,6 +205,12 @@ pub struct SnapshotManifest {
     pub endpoint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ModelKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
     pub files: Vec<ModelFile>,
     pub created_at: u64,
 }
@@ -159,6 +224,9 @@ pub struct SnapshotIdentity {
     pub revision: String,
     pub endpoint: String,
     pub variant: Option<String>,
+    pub kind: Option<ModelKind>,
+    pub family: Option<String>,
+    pub derived_from: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +271,7 @@ impl ModelStore {
     ) -> Result<InstalledModel> {
         validate_model_name(&identity.name)?;
         validate_repository(identity.provider, &identity.repository)?;
+        validate_model_metadata(identity.family.as_deref(), identity.derived_from.as_deref())?;
         if files.is_empty() {
             return Err(Error::other("model snapshot contains no files"));
         }
@@ -289,6 +358,9 @@ impl ModelStore {
                 revision: identity.revision,
                 endpoint: identity.endpoint,
                 variant: identity.variant,
+                kind: identity.kind,
+                family: identity.family,
+                derived_from: identity.derived_from,
                 files: model_files,
                 created_at: crate::source::now_secs(),
             };
@@ -531,6 +603,33 @@ pub fn validate_model_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn effective_model_kind(
+    provider: ProviderId,
+    declared: Option<ModelKind>,
+) -> Option<ModelKind> {
+    declared.or_else(|| (provider == ProviderId::Civitai).then_some(ModelKind::Lora))
+}
+pub fn validate_model_metadata(family: Option<&str>, derived_from: Option<&str>) -> Result<()> {
+    validate_metadata_value("family", family, 256)?;
+    validate_metadata_value("derived_from", derived_from, 2048)
+}
+
+fn validate_metadata_value(label: &str, value: Option<&str>, max_bytes: usize) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty()
+        || value != value.trim()
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        return Err(Error::config(format!(
+            "model {label} must be non-empty, trimmed, at most {max_bytes} bytes, and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
 pub fn safe_relative_path(value: &str) -> Result<PathBuf> {
     let path = Path::new(value);
     if path.as_os_str().is_empty()
@@ -548,11 +647,14 @@ fn snapshot_key(identity: &SnapshotIdentity, files: &[DownloadedModelFile]) -> S
     let mut hasher = blake3::Hasher::new();
     hasher.update(
         format!(
-            "{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
             identity.provider,
             identity.repository,
             identity.revision,
-            identity.variant.as_deref().unwrap_or_default()
+            identity.variant.as_deref().unwrap_or_default(),
+            identity.kind.map(ModelKind::as_str).unwrap_or_default(),
+            identity.family.as_deref().unwrap_or_default(),
+            identity.derived_from.as_deref().unwrap_or_default()
         )
         .as_bytes(),
     );
@@ -629,6 +731,9 @@ mod tests {
                     revision: "abc123".into(),
                     endpoint: "https://example.test".into(),
                     variant: None,
+                    kind: None,
+                    family: None,
+                    derived_from: None,
                 },
                 vec![DownloadedModelFile {
                     path: "config.json".into(),
@@ -667,6 +772,9 @@ mod tests {
                     revision: "v1".into(),
                     endpoint: "https://example.test".into(),
                     variant: None,
+                    kind: None,
+                    family: None,
+                    derived_from: None,
                 },
                 vec![DownloadedModelFile {
                     path: "weights.bin".into(),
@@ -710,6 +818,9 @@ mod tests {
             revision: revision.into(),
             endpoint: "https://example.test".into(),
             variant: None,
+            kind: None,
+            family: None,
+            derived_from: None,
         };
 
         let first_source = temporary.path().join("first.bin");
@@ -785,6 +896,9 @@ mod tests {
                     revision: "rev".into(),
                     endpoint: "https://example.test".into(),
                     variant: None,
+                    kind: None,
+                    family: None,
+                    derived_from: None,
                 },
                 vec![DownloadedModelFile {
                     path: "weights.bin".into(),
@@ -845,6 +959,9 @@ mod tests {
                     revision: "rev".into(),
                     endpoint: "https://example.test".into(),
                     variant: None,
+                    kind: None,
+                    family: None,
+                    derived_from: None,
                 },
                 vec![DownloadedModelFile {
                     path: "weights.bin".into(),
@@ -899,6 +1016,9 @@ mod tests {
             revision: "abc123".into(),
             endpoint: "https://example.test".into(),
             variant: None,
+            kind: None,
+            family: None,
+            derived_from: None,
         };
         let first_snapshot = store
             .publish(
@@ -927,5 +1047,47 @@ mod tests {
         assert_ne!(first_snapshot.path, second_snapshot.path);
         assert!(second_snapshot.path.join("second.bin").is_file());
         assert!(!second_snapshot.path.join("first.bin").exists());
+    }
+
+    #[test]
+    fn semantic_metadata_is_validated_and_part_of_snapshot_identity() {
+        assert!(validate_model_metadata(Some("sdxl"), Some("hf:org/base@main")).is_ok());
+        assert!(validate_model_metadata(Some(" sdxl"), None).is_err());
+        assert!(validate_model_metadata(None, Some("base\nmodel")).is_err());
+
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("weights.safetensors");
+        std::fs::write(&source, b"same weights").unwrap();
+        let store = store(temporary.path());
+        let file = || DownloadedModelFile {
+            path: "loras/weights.safetensors".into(),
+            source: source.clone(),
+            size: 12,
+            sha256: None,
+            etag: None,
+        };
+        let identity = SnapshotIdentity {
+            name: "fixture".into(),
+            provider: ProviderId::HuggingFace,
+            repository: "owner/repo".into(),
+            requested_revision: "main".into(),
+            revision: "abc123".into(),
+            endpoint: "https://example.test".into(),
+            variant: None,
+            kind: Some(ModelKind::Lora),
+            family: Some("sdxl".into()),
+            derived_from: Some("hf:org/base@main".into()),
+        };
+        let first = store.publish(identity.clone(), vec![file()]).unwrap();
+        let mut changed = identity;
+        changed.family = Some("flux".into());
+        let second = store.publish(changed, vec![file()]).unwrap();
+        assert_ne!(first.path, second.path);
+        assert_eq!(second.manifest.kind, Some(ModelKind::Lora));
+        assert_eq!(second.manifest.family.as_deref(), Some("flux"));
+        assert_eq!(
+            second.manifest.derived_from.as_deref(),
+            Some("hf:org/base@main")
+        );
     }
 }

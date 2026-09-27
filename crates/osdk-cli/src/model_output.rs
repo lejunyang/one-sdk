@@ -51,6 +51,12 @@ pub(crate) struct ModelOutput {
     pub endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<osdk_core::model::ModelKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
     pub files: Vec<ModelFileOutput>,
     pub created_at: u64,
     pub snapshot_path: String,
@@ -83,6 +89,9 @@ impl ModelOutput {
             revision: manifest.revision,
             endpoint: manifest.endpoint,
             variant: manifest.variant,
+            kind: manifest.kind,
+            family: manifest.family,
+            derived_from: manifest.derived_from,
             files: manifest
                 .files
                 .into_iter()

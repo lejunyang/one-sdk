@@ -2852,6 +2852,18 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.model.use.flag.kind",
+        ("Semantic role of the model bytes", "模型文件的语义类型"),
+    );
+    m.insert(
+        "help.model.use.flag.family",
+        ("Architecture or ecosystem family", "模型架构或生态家族"),
+    );
+    m.insert(
+        "help.model.use.flag.derived_from",
+        ("Upstream or base-model lineage", "上游或基础模型血缘"),
+    );
+    m.insert(
         "help.model.use.flag.view",
         (
             "Declare a consumer view for this model",

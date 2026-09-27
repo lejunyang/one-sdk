@@ -160,6 +160,11 @@ fn localize_subcommands(cmd: Command) -> Command {
                     .mut_arg("include", |a| a.help(h("help.model.use.flag.include")))
                     .mut_arg("exclude", |a| a.help(h("help.model.use.flag.exclude")))
                     .mut_arg("variant", |a| a.help(h("help.model.use.flag.variant")))
+                    .mut_arg("kind", |a| a.help(h("help.model.use.flag.kind")))
+                    .mut_arg("family", |a| a.help(h("help.model.use.flag.family")))
+                    .mut_arg("derived_from", |a| {
+                        a.help(h("help.model.use.flag.derived_from"))
+                    })
                     .mut_arg("view", |a| a.help(h("help.model.use.flag.view")))
                     .mut_arg("profile", |a| a.help(h("help.model.use.flag.profile")))
                     .mut_arg("map", |a| a.help(h("help.model.use.flag.map")))

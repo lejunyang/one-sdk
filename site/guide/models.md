@@ -8,6 +8,7 @@ osdk 把 Hugging Face、ModelScope 仓库和精确 Civitai LoRA 版本作为不�
 ```text
 osdk model use NAME REFERENCE [--endpoint URL]
   [--include GLOB]... [--exclude GLOB]... [--variant LABEL]
+  [--kind KIND] [--family FAMILY] [--derived-from REFERENCE]
   [--view <comfyui|hf-cache>] [--profile P] [--map PREFIX=CATEGORY]... [--sync]
 osdk model unuse NAME [--keep-snapshot]
 osdk model sync [NAME] [--prune] [--dry-run] [--jsonl]
@@ -73,7 +74,13 @@ Hugging Face 将 branch/tag 解析为不可变 commit SHA。ModelScope 文件 AP
 commit 时，osdk 以请求 revision 和排序后的文件路径、大小、SHA-256 manifest 生成
 `revision+manifest-<16 hex>` identity。Civitai 直接以 model version ID 作为不可变 revision，
 从该版本的 `Model` 文件中按 SafeTensor、primary、响应顺序选择一个权重，要求合法 SHA-256，
-并规范到快照内 `loras/<filename>`，因此 `--view comfyui` 可直接渲染。远端文件路径必须是安全相对路径。
+并规范到快照内 `loras/<filename>`，因此 `--view comfyui` 可直接渲染；其有效 `kind` 默认是 `lora`。远端文件路径必须是安全相对路径。
+
+## 语义元数据与血缘
+
+`kind` 是稳定枚举：`checkpoint`、`lora`、`vae`、`text-encoder`、`diffusion-model`、`controlnet`、`upscaler`、`embedding`、`other`。`family` 记录架构/生态家族（如 `sdxl`、`flux`），`derived_from` 记录调用方确认的基础模型或上游引用。OSDK 不猜测后两者，也不解析 trigger word。
+
+三字段进入快照身份、`.osdk-model.json`、`osdk.lock` 和 `--json` 输出；任一变化会产生新快照并触发 re-lock。值必须非空、去除首尾空白、无控制字符；`family` 最多 256 字节，`derived_from` 最多 2048 字节。
 
 ## 下载、校验与本地布局
 
@@ -110,7 +117,7 @@ manifest SHA-256。快照和 `current.json` 都通过同目录临时路径再 re
 `model sync` 在 `osdk.lock` 顶层 `[models.<name>]` 记录：
 
 - provider、repository、请求 revision 与不可变 revision；
-- 实际 endpoint 与可选 variant；
+- 实际 endpoint、可选 variant 与 `kind/family/derived_from`；
 - 每个文件的路径、大小与 SHA-256。
 
 token、cookie、临时签名下载 URL 和 ETag 不写入项目 lock。模型更新只合并同名
@@ -137,7 +144,7 @@ osdk source unpin hf             # 取消固定，恢复自动选择
 
 `osdk model sync` 无参数时处理整个项目，传入 `NAME` 时只处理一个逻辑模型。它比对当前
 平台适用的 `[models]` 声明与 lock：新增声明会被下载并写入 lock；`source`、`variant`、
-`include` 或 `exclude` 变化会重新解析并改写条目；其余按不可变 lock 复现。
+`kind`、`family`、`derived_from`、`include` 或 `exclude` 变化会重新解析并改写条目；其余按不可变 lock 复现。
 
 ```bash
 osdk model sync qwen25          # 只同步一个模型
@@ -206,6 +213,9 @@ source   = "hf:black-forest-labs/FLUX.1-dev@main"
 include  = ["*.safetensors", "*.json"]
 exclude  = ["*.onnx"]
 variant  = "fp16"
+kind     = "diffusion-model"
+family   = "flux"
+derived_from = "hf:black-forest-labs/FLUX.1-dev@main"
 when     = { os = "windows" }
 
 [models.flux.views.comfyui]
@@ -215,7 +225,7 @@ profile  = "desktop"
 "vae/"  = "vae"
 ```
 
-`model use` 可写入 `source`、`include`、`exclude`、`variant`、`endpoint` 以及一个 consumer
+`model use` 可写入 `source`、`include`、`exclude`、`variant`、`kind`、`family`、`derived_from`、`endpoint` 以及一个 consumer
 view 的 `profile`/`map`；再次执行会替换同名声明。`when` 仍是直接配置字段。写错字段名会
 直接报错，不会被静默忽略。
 

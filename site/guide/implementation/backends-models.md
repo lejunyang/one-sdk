@@ -130,12 +130,12 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 
 1. 解析显式 `--endpoint` 或 provider 环境变量；否则使用 provider 自己的默认/自定义来源。
 2. 在 auto 模式下，[`model/source.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/source.rs) 对真实目标先取 manifest，再对最小的非空文件执行最多 64 KiB 的 Range 请求；结果按 provider、repo、revision 和来源配置缓存。
-3. provider 解析远端 manifest；`--include`/`--exclude` glob 选择文件，`--variant` 只作为快照标签参与身份计算。
+3. provider 解析远端 manifest；`--include`/`--exclude` glob 选择文件。`variant` 与语义元数据 `kind/family/derived_from` 一起进入快照身份；Civitai 未显式声明 `kind` 时统一取 `lora`，其余 provider 不猜测。`family` 与 `derived_from` 由调用方提供并经过长度、trim 和控制字符校验。
 4. 文件按 `settings.jobs` 并发、可续传下载到 provider/repository/revision 隔离的 cache；校验声明 size 和 SHA-256。
 5. [`ModelStore`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/model/mod.rs) 再次校验文件，写入共享 CAS，在隐藏临时目录完成 snapshot 后 rename 到 `<models>/<logical-name>/snapshots/<snapshot-key>`，再以临时文件加 rename 更新 `current.json`；这些 rename 没有跨平台替换原子性或 durability 保证。随后把 `<models>/<logical-name>/current` 这个目录链接重指向新快照：快照目录名由内容哈希决定（包含文件选择），因此换 `--include` 就会换目录，外部配置里写死的路径会静默失效，而 ComfyUI、llama.cpp、vLLM 都只接受一个会被保存下来的路径。Windows 上用 junction 而非符号链接，因为符号链接需要 Developer Mode 或提权，junction 不需要；重指向时如果 `current` 位置是真实目录会显式报错，不会静默删除用户数据。链接创建失败只记 warning 不中断发布——此时快照与 `current.json` 已经落盘，为一个链接丢弃整次下载并不合理，`model path`（不带 `--stable`）仍可从 `current.json` 作答。
-6. 把 provider、repo、requested/resolved revision、endpoint、variant 以及每个文件的 size/SHA-256 写入 `osdk.lock` 的顶层 `[models]`；token 和短期下载 URL不落盘。
+6. 把 provider、repo、requested/resolved revision、endpoint、variant、`kind/family/derived_from` 以及每个文件的 size/SHA-256 写入 `osdk.lock` 的顶层 `[models]`；同样的语义元数据已写入 `.osdk-model.json`，机器 JSON 直接从 manifest 回读。token 和短期下载 URL 不落盘。
 
-`model list/show/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 pull 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。
+`model list/show/path/verify/remove` 操作当前逻辑名。`verify` 同时检查 CAS BLAKE3 hash 和 SHA-256；`remove` 删除该逻辑名的全部 snapshot，再以 SDK installs 与 models 为 root 做 CAS GC。离线 sync 仍需已有 provider metadata cache 和逐文件 download cache，之后可重新物化已删除的 snapshot。
 
 机器协议集中在 [`model_output.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/model_output.rs)，与快照、lock 和 view state 的磁盘 schema 分离。`list/show/path/verify` 及只读 view 命令输出单个 schema 1 JSON，`sync --jsonl` 通过统一 emitter 输出逐行事件；人类模式仍使用原文案。所有机器 stdout 写入都经过同一序列化入口，view reconcile 在 JSONL 模式下仍执行但不打印普通报告，错误继续由顶层写 stderr 并返回非零。协议中的绝对路径是本机位置，保留原生分隔符；manifest 相对路径来自跨平台产物，保持 `/`。
 
@@ -144,7 +144,7 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 `model use` 会受管写入项目 `osdk.toml` 的 `[models.<name>]` 声明，结构在
 [`config/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/config/mod.rs)
 的 `ModelDeclaration`（`deny_unknown_fields`，与 `tasks` 一样在 `install` feature 之后，
-shim 的依赖图不带它）。每个声明含 `source/include/exclude/variant/when` 与
+shim 的依赖图不带它）。每个声明含 `source/include/exclude/variant/kind/family/derived_from/when` 与
 `views: consumer -> ModelViewDeclaration{profile, map}`。`sync [name]` 时从合并后的
 `Config.models` 取这份声明：拉取后把视图经 `locked_views_from_declaration` 写入 lock，
 并调用 `model_view::reconcile_declared_views` 立即渲染。

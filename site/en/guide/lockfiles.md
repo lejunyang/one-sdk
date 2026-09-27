@@ -168,7 +168,10 @@ repository = "Qwen/Qwen2.5-7B-Instruct"
 requested_revision = "main"
 revision = "immutable-revision"
 endpoint = "https://huggingface.co"
-variant = "safetensors-fp16" # optional
+variant = "safetensors-fp16"
+kind = "lora"
+family = "sdxl"
+derived_from = "hf:stabilityai/stable-diffusion-xl-base-1.0@main" # optional
 
 [[models.qwen.files]]
 path = "config.json"

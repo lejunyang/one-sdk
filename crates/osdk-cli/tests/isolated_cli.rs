@@ -645,6 +645,12 @@ fn model_use_writes_a_project_declaration_without_downloading() {
             "original/*",
             "--variant",
             "fp16",
+            "--kind",
+            "lora",
+            "--family",
+            "sdxl",
+            "--derived-from",
+            "hf:stabilityai/stable-diffusion-xl-base-1.0@main",
             "--view",
             "comfyui",
             "--map",
@@ -666,6 +672,12 @@ fn model_use_writes_a_project_declaration_without_downloading() {
     assert!(config.contains("include = [\"*.safetensors\"]"), "{config}");
     assert!(config.contains("exclude = [\"original/*\"]"), "{config}");
     assert!(config.contains("variant = \"fp16\""), "{config}");
+    assert!(config.contains("kind = \"lora\""), "{config}");
+    assert!(config.contains("family = \"sdxl\""), "{config}");
+    assert!(
+        config.contains("derived_from = \"hf:stabilityai/stable-diffusion-xl-base-1.0@main\""),
+        "{config}"
+    );
     assert!(
         config.contains("[models.fixture.views.comfyui]"),
         "{config}"
@@ -725,6 +737,56 @@ fn model_unuse_removes_only_the_named_project_and_lock_entries() {
     let lock = std::fs::read_to_string(temporary.path().join("osdk.lock")).unwrap();
     assert!(!lock.contains("[models.first]"), "{lock}");
     assert!(lock.contains("[models.second]"), "{lock}");
+}
+#[test]
+fn civitai_implicit_lora_kind_is_stable_and_metadata_changes_relock() {
+    let temporary = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.fixture]\nsource = \"civitai:456@123\"\nfamily = \"sdxl\"\nderived_from = \"hf:org/base@main\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temporary.path().join("osdk.lock"),
+        "schema = 4\n\n[models.fixture]\nprovider = \"civitai\"\nrepository = \"456\"\nrequested_revision = \"123\"\nrevision = \"123\"\nendpoint = \"https://civitai.com\"\nkind = \"lora\"\nfamily = \"sdxl\"\nderived_from = \"hf:org/base@main\"\nfiles = []\n",
+    )
+    .unwrap();
+
+    let stable = run_isolated(
+        temporary.path(),
+        &["model", "sync", "fixture", "--dry-run", "--jsonl"],
+    );
+    assert!(stable.status.success());
+    let stable_events: Vec<serde_json::Value> = String::from_utf8(stable.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(stable_events
+        .iter()
+        .any(|event| event["action"] == "restore"));
+    assert!(!stable_events
+        .iter()
+        .any(|event| event["action"] == "relock"));
+
+    std::fs::write(
+        temporary.path().join("osdk.toml"),
+        "[models.fixture]\nsource = \"civitai:456@123\"\nfamily = \"flux\"\nderived_from = \"hf:org/base@main\"\n",
+    )
+    .unwrap();
+    let changed = run_isolated(
+        temporary.path(),
+        &["model", "sync", "fixture", "--dry-run", "--jsonl"],
+    );
+    assert!(changed.status.success());
+    let changed_events: Vec<serde_json::Value> = String::from_utf8(changed.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(changed_events
+        .iter()
+        .any(|event| event["action"] == "relock"));
 }
 #[test]
 fn model_sync_dry_run_bootstraps_an_empty_lock_from_declarations() {
@@ -5707,6 +5769,9 @@ fn write_minimal_model_snapshot(root: &Path) {
         "revision": "123",
         "endpoint": "https://civitai.com",
         "variant": "safetensors",
+        "kind": "lora",
+        "family": "sdxl",
+        "derived_from": "hf:stabilityai/stable-diffusion-xl-base-1.0@main",
         "files": [{
             "path": "loras/fixture.safetensors",
             "size": 19,
@@ -5753,6 +5818,12 @@ fn model_machine_json_documents_are_parseable_and_versioned() {
     assert_eq!(show["schema_version"], 1);
     assert_eq!(show["model"]["revision"], "123");
     assert_eq!(show["model"]["variant"], "safetensors");
+    assert_eq!(show["model"]["kind"], "lora");
+    assert_eq!(show["model"]["family"], "sdxl");
+    assert_eq!(
+        show["model"]["derived_from"],
+        "hf:stabilityai/stable-diffusion-xl-base-1.0@main"
+    );
     assert_eq!(show["model"]["stable_path_available"], false);
 
     let verify = parsed_json(run_isolated(

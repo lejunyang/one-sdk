@@ -640,7 +640,8 @@ and obtain its stable path:
 ```bash
 osdk model use qwen25 hf:Qwen/Qwen2.5-7B-Instruct@main \
   --include '*.json' --include '*.safetensors' --sync
-osdk model use character-lora civitai:456@123 --view comfyui --sync
+osdk model use character-lora civitai:456@123 --view comfyui \
+  --kind lora --family sdxl --derived-from hf:stabilityai/stable-diffusion-xl-base-1.0@main --sync
 osdk model verify qwen25
 osdk model path qwen25 --stable
 osdk model sync qwen25       # one model
@@ -723,7 +724,7 @@ warnings and 1/2/4/8/8-second exponential backoff; tune them with
 `osdk config set`; `sources.model_read_timeout_ms` (default 60000) fails a request that stalls
 mid-stream so it retries instead of hanging. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
 with `Range` + `If-Range`; an ignored or invalid range, changed object, or changed source URL
-causes a safe restart. Model pulls also fall through to the next ranked source after one source
+causes a safe restart. Model sync downloads also fall through to the next ranked source after one source
 exhausts its attempts. Non-transient errors, or exhaustion of every source, remain terminal.
 
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,

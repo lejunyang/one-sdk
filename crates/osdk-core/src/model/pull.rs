@@ -16,6 +16,9 @@ pub struct PullOptions {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub variant: Option<String>,
+    pub kind: Option<crate::model::ModelKind>,
+    pub family: Option<String>,
+    pub derived_from: Option<String>,
 }
 
 pub async fn pull(
@@ -68,6 +71,9 @@ pub async fn pull(
             revision: remote.revision,
             endpoint: remote.endpoint,
             variant: options.variant.clone(),
+            kind: crate::model::effective_model_kind(reference.provider, options.kind),
+            family: options.family.clone(),
+            derived_from: options.derived_from.clone(),
         },
         downloaded,
     )
@@ -558,6 +564,7 @@ mod tests {
         assert_eq!(installed.manifest.repository, "456");
         assert_eq!(installed.manifest.requested_revision, "123");
         assert_eq!(installed.manifest.revision, "123");
+        assert_eq!(installed.manifest.kind, Some(crate::model::ModelKind::Lora));
         assert_eq!(installed.manifest.files[0].path, "loras/lora.safetensors");
         assert_eq!(
             crate::model::view::comfyui::classify(

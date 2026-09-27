@@ -762,6 +762,15 @@ pub enum ModelCommand {
         /// Optional format or quantization label.
         #[arg(long)]
         variant: Option<String>,
+        /// Semantic role of the model bytes.
+        #[arg(long)]
+        kind: Option<osdk_core::model::ModelKind>,
+        /// Architecture/ecosystem family, e.g. sdxl or flux.
+        #[arg(long)]
+        family: Option<String>,
+        /// Upstream/base-model lineage chosen by the caller.
+        #[arg(long)]
+        derived_from: Option<String>,
         /// Declare one consumer view for this model.
         #[arg(long)]
         view: Option<osdk_core::model::view::ViewKind>,
