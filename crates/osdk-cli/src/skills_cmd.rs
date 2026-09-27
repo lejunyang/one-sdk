@@ -442,13 +442,10 @@ async fn refetch_staged(
         .with_context(|| format!("skill `{name}` has no recorded commit to re-fetch"))?;
     let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
     let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
-    // Pick the same skill within the repo the lock recorded.
-    let wanted = entry.skill.clone().unwrap_or_else(|| name.to_string());
-    let skill_root = if root.join(install::SKILL_MANIFEST).is_file() {
-        root
-    } else {
-        root.join(&wanted)
-    };
+    // Pick the same skill using the same conventional-container discovery as
+    // `add`; repositories commonly keep it under `skills/<name>`.
+    let wanted = entry.skill.as_deref().unwrap_or(name);
+    let skill_root = recorded_skill_root(&root, wanted)?;
     let package = install::read_skill_dir(&skill_root)?;
     let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)?;
     if package.content_hash() != entry.content_hash {
@@ -552,12 +549,8 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
 
         let tree = skills::fetch::fetch_at_commit(&app.ctx, owner, repo, &commit).await?;
         let root = skills::fetch::subtree(&tree, subdir.as_deref())?;
-        let wanted_dir = entry.skill.clone().unwrap_or_else(|| name.clone());
-        let skill_root = if root.join(install::SKILL_MANIFEST).is_file() {
-            root
-        } else {
-            root.join(&wanted_dir)
-        };
+        let wanted_dir = entry.skill.as_deref().unwrap_or(name);
+        let skill_root = recorded_skill_root(&root, wanted_dir)?;
         let package = install::read_skill_dir(&skill_root)?;
         let content_hash = package.content_hash();
         let requested_ref = normalized_requested_ref(requested_reference);
@@ -852,6 +845,18 @@ fn local_roots(path: &Path, wanted: &[String]) -> Result<Vec<(String, PathBuf)>>
         );
     }
     Ok(roots.into_iter().collect())
+}
+
+fn recorded_skill_root(root: &Path, wanted: &str) -> Result<PathBuf> {
+    let matches = local_roots(root, &[wanted.to_string()])?;
+    if matches.len() != 1 {
+        anyhow::bail!(
+            "expected exactly one skill `{wanted}` in {}, found {}",
+            root.display(),
+            matches.len()
+        );
+    }
+    Ok(matches.into_iter().next().expect("one match").1)
 }
 
 /// Which agents an install targets: explicit flags, then configured defaults,
@@ -1396,6 +1401,23 @@ mod tests {
             one: 0,
         };
         assert!(resolve_agent_ids(&[], &[], &[], &prompt).is_err());
+    }
+
+    #[test]
+    fn recorded_skill_root_uses_conventional_containers() {
+        let repository = tempfile::tempdir().unwrap();
+        let skill = repository.path().join("skills/osdk-guide");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: osdk-guide\ndescription: guide\n---\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            recorded_skill_root(repository.path(), "osdk-guide").unwrap(),
+            skill
+        );
     }
 
     #[test]
