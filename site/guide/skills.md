@@ -37,7 +37,9 @@ osdk skills agents
 `--limit` 限结果数（1–50）。
 
 `sync` 与 `update` 是一对：`sync` 复现 lock 记录的 commit（不变），`update` 把浮动 ref
-（分支/标签，取自 `[skills.<名>].ref`）重新解析到当前 commit，变了才重下并写回 lock。
+（分支/标签，取自 `[skills.<名>].ref`；未配置时跟随默认分支）重新解析到当前 commit，变了才
+重下并写回 lock。已有项目保存的裸 40 位 commit 只视为安装快照，`update` 会继续跟随默认分支；
+需要永久固定时明确写 `ref = "rev:<commit>"`。
 `use` 不安装、不写 lock，临时取用一个 skill：无 `-a` 时把生成的 prompt 打到 stdout（可
 `osdk skills use owner/repo | claude` 管道），`-a <id>` 时用该 Agent 的 CLI 交互式启动。
 `init` 生成 `SKILL.md` 模板，帮你开始写自己的 skill。

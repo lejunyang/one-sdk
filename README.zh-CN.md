@@ -620,8 +620,9 @@ osdk skills remove web-design-guidelines
 ```
 
 `add` 把解析到的 commit 与内容哈希写进 `osdk.lock`；`sync` 缺本地副本时按记录的 commit 重新
-下载并核对哈希，移动的 tag 或被换的镜像会被拒绝。默认目录链接（Windows junction / Unix
-symlink），无链接环境或 `--copy` 时整树拷贝，且不会覆盖非 osdk 放置的真实目录。也可以在
+下载并核对哈希，移动的 tag 或被换的镜像会被拒绝。`skills update` 则重新解析分支/标签或默认
+分支；需要在更新时仍固定不动，使用 `ref = "rev:<commit>"`。默认目录链接（Windows junction /
+Unix symlink），无链接环境或 `--copy` 时整树拷贝，且不会覆盖非 osdk 放置的真实目录。也可以在
 `osdk.toml` 里用 `[skills]` 声明，让 `osdk skills sync` 直接复现。
 
 指南：[Agent skills](site/guide/skills.md)

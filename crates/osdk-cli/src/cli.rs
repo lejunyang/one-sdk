@@ -1078,9 +1078,10 @@ pub enum SkillsCommand {
     /// Update installed skills to the latest resolution of their source.
     ///
     /// The counterpart to `sync`: `sync` reproduces the commit the lock records,
-    /// `update` re-resolves a floating ref (a branch/tag) to its current commit
-    /// and rewrites the lock. A skill pinned to an exact commit has nothing to
-    /// update and is left alone.
+    /// while `update` re-resolves the configured branch/tag (or the default
+    /// branch) and rewrites the lock. Use an explicit `rev:<commit>` declaration
+    /// to keep a skill immutable across `update`; a bare commit stored as the
+    /// installation snapshot is advanced instead.
     Update {
         /// Skills to update by name; omit to update all.
         skills: Vec<String>,

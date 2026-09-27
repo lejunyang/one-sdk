@@ -690,10 +690,12 @@ osdk skills remove web-design-guidelines
 
 `add` pins the resolved commit and a content hash into `osdk.lock`; `sync`
 re-downloads a missing local copy at that exact commit and re-checks the hash, so
-a moved tag or a substituted mirror is refused. Installs use a directory link by
-default (a junction on Windows, a symlink on Unix) and fall back to a copy where
-links are unavailable or with `--copy`, never replacing a real directory osdk did
-not place. You can also declare skills in `osdk.toml` under `[skills]` and let
+a moved tag or a substituted mirror is refused. `skills update` instead
+re-resolves a branch/tag or the default branch; use `ref = "rev:<commit>"` when
+an update must keep an immutable pin. Installs use a directory link by default (a
+junction on Windows, a symlink on Unix) and fall back to a copy where links are
+unavailable or with `--copy`, never replacing a real directory osdk did not
+place. You can also declare skills in `osdk.toml` under `[skills]` and let
 `osdk skills sync` reproduce them.
 
 Guide: [Agent skills](site/en/guide/skills.md)

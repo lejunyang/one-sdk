@@ -8,7 +8,7 @@
 | `list`（`ls`） | `-g` | 从项目或用户 lock 列已安装 skill 与 Agent |
 | `remove <NAME>`（`rm`） | `-g`、`-a/--agent` 可重复 | 摘除全部或指定 Agent 链接 |
 | `sync` | `-g` | 按 lock 的 commit 与内容哈希复现 |
-| `update [SKILL...]` | `-g` | 重解析浮动 ref 并更新 lock；固定 commit 不动 |
+| `update [SKILL...]` | `-g` | 重解析分支/标签或默认分支并更新 lock；仅显式 `rev:<commit>` 固定不动，旧版写入的裸 40 位 commit 视为安装快照 |
 | `path <NAME>` | — | 打印内容寻址落地目录 |
 | `find [QUERY...]`（`search`） | `--owner`、`--limit 1..50` | 匿名搜索 GitHub；限流后才用 token，不访问 skills.sh |
 | `use <SOURCE>` | `-s/--skill`、`-a/--agent`、`--ref` | 不安装；打印 prompt 或交互启动 Agent |

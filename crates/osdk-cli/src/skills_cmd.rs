@@ -456,13 +456,20 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         // is the moving target; a commit-pinned entry resolves to itself.
         // The original ref lives in the project config, not the lock, so read it
         // from there; absent, HEAD of the default branch is the moving target.
-        let reference = app
+        let configured_reference = app
             .ctx
             .config
             .skills
             .get(name)
-            .and_then(|declaration| declaration.r#ref.clone());
-        let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference.as_deref())
+            .and_then(|declaration| declaration.r#ref.as_deref());
+        let reference = match reference_for_update(configured_reference) {
+            UpdateReference::Pinned(reference) => {
+                println!("`{name}`: pinned at {reference}; nothing to update");
+                continue;
+            }
+            UpdateReference::Resolve(reference) => reference,
+        };
+        let commit = skills::fetch::resolve_commit(&app.ctx, owner, repo, reference)
             .await
             .with_context(|| format!("re-resolving {owner}/{repo}"))?;
         if Some(&commit) == entry.resolved_commit.as_ref() {
@@ -499,6 +506,35 @@ async fn update(app: &mut App, wanted: &[String], global: bool) -> Result<()> {
         lockfile::save(&lock_path, &lock)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateReference<'a> {
+    /// Re-resolve the default branch or this floating branch/tag name.
+    Resolve(Option<&'a str>),
+    /// An explicitly immutable `rev:` selector never advances.
+    Pinned(&'a str),
+}
+
+/// Interpret a declaration ref for an explicit `skills update`.
+///
+/// Existing projects can carry the commit selected at install time as a bare
+/// 40-hex declaration value. Treating that snapshot as the next update target
+/// makes `update` resolve the same commit forever. Preserve intentional immutable
+/// declarations through the unambiguous `rev:` spelling;
+/// every other selector is a moving update target, while a bare 40-hex snapshot
+/// follows the source's default branch for backward compatibility.
+fn reference_for_update(reference: Option<&str>) -> UpdateReference<'_> {
+    match reference.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(reference) if reference.starts_with("rev:") => UpdateReference::Pinned(reference),
+        Some(reference)
+            if reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            UpdateReference::Resolve(None)
+        }
+        Some(reference) => UpdateReference::Resolve(Some(reference)),
+        None => UpdateReference::Resolve(None),
+    }
 }
 
 /// Use a skill without installing it: print its prompt, or start an agent.
@@ -933,5 +969,38 @@ mod tests {
         ]);
         let plan = plan_unlinks(&["claude-code".into()], &["codex".into()], &dir_of);
         assert!(plan[0].physically_unlink);
+    }
+
+    /// A bare commit recorded in a declaration is an installation snapshot, not
+    /// a permanent pin: an explicit update must follow the source's default
+    /// branch. Users who need an immutable declaration spell it `rev:<value>`.
+    #[test]
+    fn update_reference_advances_bare_commit_snapshots() {
+        let snapshot = "02a2f2b3142ded7d73554aaee629a24966a62313";
+        assert_eq!(
+            reference_for_update(Some(snapshot)),
+            UpdateReference::Resolve(None)
+        );
+        assert_eq!(reference_for_update(None), UpdateReference::Resolve(None));
+    }
+
+    #[test]
+    fn update_reference_preserves_explicit_pins_and_floating_refs() {
+        assert_eq!(
+            reference_for_update(Some("rev:02a2f2b3142ded7d73554aaee629a24966a62313")),
+            UpdateReference::Pinned("rev:02a2f2b3142ded7d73554aaee629a24966a62313")
+        );
+        assert_eq!(
+            reference_for_update(Some("branch:main")),
+            UpdateReference::Resolve(Some("branch:main"))
+        );
+        assert_eq!(
+            reference_for_update(Some("tag:v1")),
+            UpdateReference::Resolve(Some("tag:v1"))
+        );
+        assert_eq!(
+            reference_for_update(Some("release")),
+            UpdateReference::Resolve(Some("release"))
+        );
     }
 }
