@@ -84,10 +84,14 @@ directories:
 
 Several agents share `.agents/skills` on purpose: one install serves them all, and
 `remove` counts how many agents still reference a skill. Explicit `-a` values win,
-then `[skills].default_agents`; when neither is present, an interactive terminal
-shows a numbered multi-select, while a non-interactive call fails immediately. The
-interactive default path also asks whether to link (recommended) or copy; explicit
-`--copy` and `[skills].link_mode` both take precedence over the prompt.
+then `[skills].default_agents`; otherwise osdk detects installed agents. One detection
+is selected automatically together with the `.agents/skills` group; multiple or zero
+detections open the numbered picker. `--yes` accepts detections (or all agents when
+none are detected), while other non-interactive calls fail immediately. Link/copy is
+asked only for multiple physical destinations; one destination is copied directly.
+Explicit `--copy` and `[skills].link_mode` take precedence. Before writing, the
+installation summary lists every destination, marks overwrites, and asks for
+confirmation unless `--yes` was supplied. Shared physical directories are written once.
 
 ## Immutable identity and reproduction
 

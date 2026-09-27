@@ -688,9 +688,14 @@ osdk skills sync                         # reproduce from osdk.lock (team / CI)
 osdk skills remove web-design-guidelines
 ```
 
-When an interactive terminal has neither `-a` nor `[skills].default_agents`, `add`
-shows a numbered multi-select for target agents, then asks whether to link
-(recommended) or copy. Non-interactive use must pass `-a` or configure defaults.
+Without `-a` or `[skills].default_agents`, `add` detects installed agents: one is
+selected automatically together with agents that share `.agents/skills`; multiple or
+zero detections open the agent picker. `--yes` accepts the detected set (or all agents
+when none are detected); other non-interactive calls must pass `-a` or configure
+defaults. Link/copy is asked only when the selected agents have multiple physical
+destinations; one destination is copied directly. Before writing, `add` prints every
+destination, marks existing paths as overwrites, and asks for confirmation unless
+`--yes` was supplied.
 
 `add` pins the resolved commit and a content hash into `osdk.lock`; `sync`
 re-downloads a missing local copy at that exact commit and re-checks the hash, so

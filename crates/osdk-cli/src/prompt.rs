@@ -11,6 +11,11 @@ pub trait Prompt: Send + Sync {
         false
     }
 
+    /// Whether `--yes` requested deterministic recommended defaults.
+    fn assume_yes(&self) -> bool {
+        false
+    }
+
     /// Select one or more zero-based option indexes.
     fn select_many(&self, _question: &str, _options: &[String]) -> Result<Vec<usize>> {
         Err(anyhow!("interactive selection is unavailable"))
@@ -50,6 +55,10 @@ impl Prompt for TerminalPrompt {
 
     fn is_interactive(&self) -> bool {
         io::stdin().is_terminal()
+    }
+
+    fn assume_yes(&self) -> bool {
+        self.assume_yes
     }
 
     fn select_many(&self, question: &str, options: &[String]) -> Result<Vec<usize>> {

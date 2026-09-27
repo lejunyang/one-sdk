@@ -191,27 +191,61 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
         return Ok(());
     }
 
-    let targets = resolve_agents(app, &args.agents)?;
-    let mode = add_link_mode(app, args.copy)?;
     let scope_root = scope_root(app, args.global)?;
+    let targets = resolve_agents(app, &args.agents, &scope_root)?;
+    let target_dirs = agent_dirs_by_path(&targets, &scope_root, args.global)?;
+    let mode = add_link_mode(app, args.copy, target_dirs.len())?;
+    let packages = roots
+        .iter()
+        .map(|(name, root)| Ok((name.clone(), install::read_skill_dir(root)?)))
+        .collect::<Result<Vec<_>>>()?;
+
+    println!("Installation summary:");
+    for (_, package) in &packages {
+        println!("  {}", package.preview());
+        for (agent_dir, owners) in &target_dirs {
+            let destination = agent_dir.join(&package.name);
+            let agent_ids = owners
+                .iter()
+                .map(|target| target.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let overwrites = std::fs::symlink_metadata(&destination).is_ok();
+            println!(
+                "    {} -> {}{}",
+                agent_ids,
+                destination.display(),
+                if overwrites {
+                    " (overwrites existing)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    if !app.prompt.confirm("Proceed with installation?")? {
+        println!("Installation cancelled.");
+        return Ok(());
+    }
 
     let mut lock_entries: Vec<(String, LockedSkill)> = Vec::new();
-    for (name, root) in &roots {
-        let package = install::read_skill_dir(root)?;
-        // Pre-install preview: show what will be written into an agent directory
-        // before doing it. This is the one risk surface skills add over tools.
-        println!("Installing skill: {}", package.preview());
-
-        let staged = install::stage(&app.ctx.dirs, &source.canonical(), &package, mode)
+    for (name, package) in &packages {
+        let staged = install::stage(&app.ctx.dirs, &source.canonical(), package, mode)
             .with_context(|| format!("staging skill `{name}`"))?;
 
-        let mut linked_agents = Vec::new();
-        for target in &targets {
-            let agent_dir = agent_dir(target, &scope_root, args.global)?;
-            install::link_into(&agent_dir, &package.name, &staged, mode)
-                .with_context(|| format!("linking `{}` into {}", package.name, target.id))?;
-            linked_agents.push(target.id.to_string());
-            println!("  linked into {} ({})", target.id, agent_dir.display());
+        for (agent_dir, owners) in &target_dirs {
+            install::link_into(agent_dir, &package.name, &staged, mode).with_context(|| {
+                format!(
+                    "linking `{}` into {}",
+                    package.name,
+                    owners
+                        .iter()
+                        .map(|target| target.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            println!("  installed into {}", agent_dir.display());
         }
 
         lock_entries.push((
@@ -221,7 +255,7 @@ async fn add(app: &mut App, args: AddArgs) -> Result<()> {
                 content_hash: package.content_hash(),
                 resolved_commit: resolved_commit.clone(),
                 skill: (name != &package.name).then(|| name.clone()),
-                agents: linked_agents,
+                agents: targets.iter().map(|target| target.id.to_string()).collect(),
             },
         ));
     }
@@ -749,11 +783,18 @@ fn local_roots(path: &Path, wanted: &[String]) -> Result<Vec<(String, PathBuf)>>
 }
 
 /// Which agents an install targets: explicit flags, then configured defaults,
-/// then an interactive multi-select. Non-interactive callers must be explicit.
-fn resolve_agents(app: &App, explicit: &[String]) -> Result<Vec<&'static AgentTarget>> {
+/// then detected agents or an interactive multi-select.
+fn resolve_agents(
+    app: &App,
+    explicit: &[String],
+    scope_root: &Path,
+) -> Result<Vec<&'static AgentTarget>> {
+    let home = home_dir().ok();
+    let detected = detect_installed_agent_ids(scope_root, home.as_deref());
     let ids = resolve_agent_ids(
         explicit,
         &app.ctx.config.skills_defaults.default_agents,
+        &detected,
         app.prompt.as_ref(),
     )?;
     let mut targets = Vec::new();
@@ -771,6 +812,7 @@ fn resolve_agents(app: &App, explicit: &[String]) -> Result<Vec<&'static AgentTa
 fn resolve_agent_ids(
     explicit: &[String],
     defaults: &[String],
+    detected: &[String],
     prompt: &dyn crate::prompt::Prompt,
 ) -> Result<Vec<String>> {
     if !explicit.is_empty() {
@@ -779,15 +821,38 @@ fn resolve_agent_ids(
     if !defaults.is_empty() {
         return Ok(defaults.to_vec());
     }
+
+    if detected.len() == 1 {
+        return Ok(with_universal_agents(detected.to_vec()));
+    }
+    if prompt.assume_yes() {
+        let selected = if detected.is_empty() {
+            AGENT_TARGETS
+                .iter()
+                .map(|target| target.id.to_string())
+                .collect()
+        } else {
+            detected.to_vec()
+        };
+        return Ok(with_universal_agents(selected));
+    }
     if !prompt.is_interactive() {
         anyhow::bail!(
             "no target agent in this non-interactive session: pass -a/--agent \
-             (e.g. -a claude-code) or set [skills].default_agents in osdk.toml; \
-             `osdk skills agents` lists them"
+             (e.g. -a claude-code), set [skills].default_agents in osdk.toml, \
+             or pass --yes to accept detected agents"
         );
     }
 
-    let options = AGENT_TARGETS
+    let candidates: Vec<&AgentTarget> = if detected.is_empty() {
+        AGENT_TARGETS.iter().collect()
+    } else {
+        AGENT_TARGETS
+            .iter()
+            .filter(|target| detected.iter().any(|id| id == target.id) && target.id != "universal")
+            .collect()
+    };
+    let options = candidates
         .iter()
         .map(|target| format!("{} ({})", target.name, target.id))
         .collect::<Vec<_>>();
@@ -797,7 +862,7 @@ fn resolve_agent_ids(
     )?;
     let mut ids = Vec::new();
     for index in selected {
-        let target = AGENT_TARGETS
+        let target = candidates
             .get(index)
             .with_context(|| format!("prompt returned invalid agent index {index}"))?;
         if !ids.iter().any(|id| id == target.id) {
@@ -807,17 +872,71 @@ fn resolve_agent_ids(
     if ids.is_empty() {
         anyhow::bail!("select at least one target agent");
     }
-    Ok(ids)
+    Ok(if detected.is_empty() {
+        ids
+    } else {
+        with_universal_agents(ids)
+    })
 }
 
-/// Pick link vs copy for `skills add`. Explicit flags and configuration win;
-/// otherwise a terminal user chooses, while non-interactive callers retain the
-/// configured global fallback and never block for input.
-fn add_link_mode(app: &App, copy: bool) -> Result<LinkMode> {
+fn with_universal_agents(mut ids: Vec<String>) -> Vec<String> {
+    for target in AGENT_TARGETS
+        .iter()
+        .filter(|target| target.project == ".agents/skills")
+    {
+        if !ids.iter().any(|id| id == target.id) {
+            ids.push(target.id.to_string());
+        }
+    }
+    ids
+}
+
+/// Detect agents from their dedicated project or user configuration roots.
+/// A shared `.agents/skills` directory is not an installation signal: it cannot
+/// distinguish Codex, Cursor, OpenCode, Gemini, Copilot, or Universal.
+fn detect_installed_agent_ids(scope_root: &Path, home: Option<&Path>) -> Vec<String> {
+    let mut detected = Vec::new();
+    for target in AGENT_TARGETS {
+        if target.id == "universal" {
+            continue;
+        }
+        let project_root = target.project_dir(scope_root);
+        let project_root = project_root.parent().unwrap_or(&project_root);
+        let project_signal = target.project != ".agents/skills" && project_root.is_dir();
+        let user_signal = home
+            .and_then(|home| target.global_dir(home))
+            .and_then(|skills| skills.parent().map(Path::to_path_buf))
+            .is_some_and(|root| root.is_dir());
+        if project_signal || user_signal {
+            detected.push(target.id.to_string());
+        }
+    }
+    detected
+}
+
+fn agent_dirs_by_path(
+    targets: &[&'static AgentTarget],
+    scope_root: &Path,
+    global: bool,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<&'static AgentTarget>>> {
+    let mut dirs = std::collections::BTreeMap::new();
+    for target in targets {
+        dirs.entry(agent_dir(target, scope_root, global)?)
+            .or_insert_with(Vec::new)
+            .push(*target);
+    }
+    Ok(dirs)
+}
+
+/// Pick link vs copy for `skills add`. Explicit flags and skill configuration
+/// win. A single physical target is copied directly; multiple targets prompt in
+/// a terminal and otherwise retain osdk's configured fallback.
+fn add_link_mode(app: &App, copy: bool, unique_dirs: usize) -> Result<LinkMode> {
     resolve_add_link_mode(
         copy,
         app.ctx.config.skills_defaults.link_mode.as_deref(),
         app.ctx.config.settings.link_mode,
+        unique_dirs,
         app.prompt.as_ref(),
     )
 }
@@ -826,6 +945,7 @@ fn resolve_add_link_mode(
     copy: bool,
     configured: Option<&str>,
     fallback: LinkMode,
+    unique_dirs: usize,
     prompt: &dyn crate::prompt::Prompt,
 ) -> Result<LinkMode> {
     if copy {
@@ -834,10 +954,16 @@ fn resolve_add_link_mode(
     if let Some(configured) = configured {
         return configured.parse::<LinkMode>().map_err(Into::into);
     }
+    if unique_dirs <= 1 {
+        return Ok(LinkMode::Copy);
+    }
+    if prompt.assume_yes() {
+        return Ok(LinkMode::Auto);
+    }
     if prompt.is_interactive() {
         let options = vec![
-            "Link (recommended: junction on Windows, symlink on Unix)".to_string(),
-            "Copy (independent files, uses more disk space)".to_string(),
+            "Link (recommended: one canonical copy for all agents)".to_string(),
+            "Copy (independent files in every agent directory)".to_string(),
         ];
         return Ok(
             match prompt.select_one("How should osdk install the skill?", &options, 0)? {
@@ -1049,6 +1175,7 @@ mod tests {
 
     struct SelectionPrompt {
         interactive: bool,
+        assume_yes: bool,
         many: Vec<usize>,
         one: usize,
     }
@@ -1060,6 +1187,10 @@ mod tests {
 
         fn is_interactive(&self) -> bool {
             self.interactive
+        }
+
+        fn assume_yes(&self) -> bool {
+            self.assume_yes
         }
 
         fn select_many(&self, _question: &str, _options: &[String]) -> Result<Vec<usize>> {
@@ -1076,35 +1207,82 @@ mod tests {
         }
     }
 
+    fn selection_prompt(interactive: bool) -> SelectionPrompt {
+        SelectionPrompt {
+            interactive,
+            assume_yes: false,
+            many: vec![],
+            one: 0,
+        }
+    }
+
     #[test]
     fn agent_selection_prefers_explicit_then_defaults_then_prompt() {
         let prompt = SelectionPrompt {
             interactive: true,
+            assume_yes: false,
             many: vec![1, 1, 0],
             one: 0,
         };
         assert_eq!(
-            resolve_agent_ids(&["cursor".into()], &["claude-code".into()], &prompt).unwrap(),
+            resolve_agent_ids(
+                &["cursor".into()],
+                &["claude-code".into()],
+                &["codex".into()],
+                &prompt,
+            )
+            .unwrap(),
             vec!["cursor"]
         );
         assert_eq!(
-            resolve_agent_ids(&[], &["claude-code".into()], &prompt).unwrap(),
+            resolve_agent_ids(&[], &["claude-code".into()], &["codex".into()], &prompt,).unwrap(),
             vec!["claude-code"]
         );
         assert_eq!(
-            resolve_agent_ids(&[], &[], &prompt).unwrap(),
+            resolve_agent_ids(&[], &[], &[], &prompt).unwrap(),
             vec!["codex", "claude-code"]
         );
     }
 
     #[test]
-    fn missing_agent_fails_only_when_the_session_is_non_interactive() {
-        let prompt = SelectionPrompt {
+    fn one_detected_agent_auto_selects_the_universal_group() {
+        let ids =
+            resolve_agent_ids(&[], &[], &["claude-code".into()], &selection_prompt(false)).unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-code",
+                "codex",
+                "cursor",
+                "opencode",
+                "gemini-cli",
+                "github-copilot",
+                "universal",
+            ]
+        );
+    }
+
+    #[test]
+    fn yes_selects_detected_agents_or_all_agents() {
+        let yes = SelectionPrompt {
             interactive: false,
+            assume_yes: true,
             many: vec![],
             one: 0,
         };
-        let error = resolve_agent_ids(&[], &[], &prompt).unwrap_err();
+        let detected =
+            resolve_agent_ids(&[], &[], &["claude-code".into(), "codex".into()], &yes).unwrap();
+        assert!(detected.contains(&"claude-code".to_string()));
+        assert!(detected.contains(&"universal".to_string()));
+        assert_eq!(
+            resolve_agent_ids(&[], &[], &[], &yes).unwrap().len(),
+            AGENT_TARGETS.len()
+        );
+    }
+
+    #[test]
+    fn missing_agent_fails_only_when_the_session_is_non_interactive() {
+        let error = resolve_agent_ids(&[], &[], &[], &selection_prompt(false)).unwrap_err();
         assert!(error.to_string().contains("non-interactive"));
     }
 
@@ -1112,48 +1290,95 @@ mod tests {
     fn interactive_agent_selection_rejects_invalid_prompt_indexes() {
         let prompt = SelectionPrompt {
             interactive: true,
+            assume_yes: false,
             many: vec![AGENT_TARGETS.len()],
             one: 0,
         };
-        assert!(resolve_agent_ids(&[], &[], &prompt).is_err());
+        assert!(resolve_agent_ids(&[], &[], &[], &prompt).is_err());
     }
 
     #[test]
-    fn add_link_mode_obeys_flags_config_and_interactive_choice() {
+    fn agent_detection_uses_specific_roots_not_shared_agents_dir() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".agents/skills")).unwrap();
+        std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::create_dir_all(home.path().join(".config/agents")).unwrap();
+
+        assert_eq!(
+            detect_installed_agent_ids(project.path(), Some(home.path())),
+            vec!["claude-code", "codex"]
+        );
+    }
+
+    #[test]
+    fn shared_agent_directories_are_grouped_once() {
+        let root = tempfile::tempdir().unwrap();
+        let targets = vec![
+            agent_target("codex").unwrap(),
+            agent_target("cursor").unwrap(),
+            agent_target("claude-code").unwrap(),
+        ];
+        let dirs = agent_dirs_by_path(&targets, root.path(), false).unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.values().any(|owners| owners
+            .iter()
+            .map(|target| target.id)
+            .collect::<Vec<_>>()
+            == ["codex", "cursor"]));
+    }
+
+    #[test]
+    fn add_link_mode_obeys_flags_config_unique_dirs_and_choice() {
         let link_prompt = SelectionPrompt {
             interactive: true,
+            assume_yes: false,
             many: vec![],
             one: 0,
         };
         let copy_prompt = SelectionPrompt {
             interactive: true,
+            assume_yes: false,
             many: vec![],
             one: 1,
         };
-        let noninteractive = SelectionPrompt {
+        let noninteractive = selection_prompt(false);
+        let yes = SelectionPrompt {
             interactive: false,
+            assume_yes: true,
             many: vec![],
             one: 1,
         };
 
         assert_eq!(
-            resolve_add_link_mode(true, Some("symlink"), LinkMode::Hardlink, &copy_prompt).unwrap(),
+            resolve_add_link_mode(true, Some("symlink"), LinkMode::Hardlink, 2, &copy_prompt)
+                .unwrap(),
             LinkMode::Copy
         );
         assert_eq!(
-            resolve_add_link_mode(false, Some("hardlink"), LinkMode::Auto, &copy_prompt).unwrap(),
+            resolve_add_link_mode(false, Some("hardlink"), LinkMode::Auto, 1, &copy_prompt)
+                .unwrap(),
             LinkMode::Hardlink
         );
         assert_eq!(
-            resolve_add_link_mode(false, None, LinkMode::Hardlink, &noninteractive).unwrap(),
+            resolve_add_link_mode(false, None, LinkMode::Hardlink, 1, &link_prompt).unwrap(),
+            LinkMode::Copy
+        );
+        assert_eq!(
+            resolve_add_link_mode(false, None, LinkMode::Hardlink, 2, &noninteractive).unwrap(),
             LinkMode::Hardlink
         );
         assert_eq!(
-            resolve_add_link_mode(false, None, LinkMode::Hardlink, &link_prompt).unwrap(),
+            resolve_add_link_mode(false, None, LinkMode::Hardlink, 2, &yes).unwrap(),
             LinkMode::Auto
         );
         assert_eq!(
-            resolve_add_link_mode(false, None, LinkMode::Auto, &copy_prompt).unwrap(),
+            resolve_add_link_mode(false, None, LinkMode::Hardlink, 2, &link_prompt).unwrap(),
+            LinkMode::Auto
+        );
+        assert_eq!(
+            resolve_add_link_mode(false, None, LinkMode::Auto, 2, &copy_prompt).unwrap(),
             LinkMode::Copy
         );
     }

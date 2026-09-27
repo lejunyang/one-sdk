@@ -619,8 +619,11 @@ osdk skills sync                         # 按 osdk.lock 复现（团队 / CI）
 osdk skills remove web-design-guidelines
 ```
 
-交互终端未传 `-a` 且没有 `[skills].default_agents` 时，`add` 会先显示 Agent 编号多选，
-再选择链接（推荐）或复制。非交互调用必须传 `-a` 或配置默认 Agent。
+未传 `-a` 且没有 `[skills].default_agents` 时，`add` 会检测已安装 Agent：只检测到一个时自动
+选择它及所有共用 `.agents/skills` 的 Agent，检测到多个或一个也没检测到时进入 Agent 多选。
+`--yes` 接受检测结果（未检测到时选择全部）；其他非交互调用必须传 `-a` 或配置默认 Agent。
+只有多个实际目标目录时才询问链接或复制，单一目录直接复制。写盘前会列出所有目标目录并标明
+将被覆盖的已有路径，未传 `--yes` 时统一确认。
 
 `add` 把解析到的 commit 与内容哈希写进 `osdk.lock`；`sync` 缺本地副本时按记录的 commit 重新
 下载并核对哈希，移动的 tag 或被换的镜像会被拒绝。`skills update` 则重新解析分支/标签或默认

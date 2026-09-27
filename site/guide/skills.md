@@ -73,9 +73,12 @@ osdk skills agents
 | 通用 | `universal` | `.agents/skills` | `~/.config/agents/skills` |
 
 多个 Agent 共用 `.agents/skills` 是刻意的：装一次即被它们共享，`remove` 时按「还有哪些 Agent
-引用」计数。命令行 `-a` 优先，其次使用 `[skills].default_agents`；两者都没有时，交互终端显示
-编号多选，而非交互调用立即报错。交互缺省路径还会选择链接（推荐）或复制；显式 `--copy` 与
-`[skills].link_mode` 均优先于提示。
+引用」计数。命令行 `-a` 优先，其次使用 `[skills].default_agents`；两者都没有时检测已安装
+Agent。只检测到一个时自动选中它和整组 `.agents/skills` Agent；检测到多个或没有检测到时，
+交互终端显示编号多选。`--yes` 接受检测结果（无结果时选择全部），其他非交互调用立即报错。
+仅多个实际目标目录时询问链接（推荐）或复制；单一目录直接复制。显式 `--copy` 与
+`[skills].link_mode` 均优先于提示。安装摘要会逐项列出目标目录，已有路径标记为覆盖；未传
+`--yes` 时确认后才写盘。共享物理目录只写一次。
 
 ## 不可变身份与复现
 
