@@ -786,6 +786,18 @@ osdk container prune --runtime docker --scope images --json
 Buildx driver、节点状态、BuildKit 版本、endpoint 与平台。其 schema version 2 JSON 不包含
 context、builder、节点名称、namespace、原生配置路径及可能带敏感信息的 endpoint path/query。
 
+Docker 拒绝当前用户访问时，人类可读输出会优先提示 Linux rootless Docker，并给出
+rootful 主机的 `docker` 组处理方式和“该组近似 root 权限”的警告。已有 rootless daemon 的用户
+通常只需切换到它创建的 context，再以普通用户运行 osdk：
+
+```bash
+docker context use rootless
+osdk container doctor --runtime docker
+```
+
+不要通过放宽 socket 权限或日常使用 `sudo osdk` 来规避诊断；详细安装、用户级
+`daemon.json` 路径和重启步骤见容器指南。
+
 Registry 测试只使用匿名 HTTPS，可检查 image digest、平台选择与有界 Range，并对通过
 内容校验的 mirror 排序。固定 digest 的镜像即使 upstream 不可达也能验证 mirror；可变 tag
 仍必须由 upstream 解析。每份 mirror plan 只针对一个已配置 policy（Docker Hub 也可使用

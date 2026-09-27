@@ -457,6 +457,41 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("permission denied", "权限不足"),
     );
     m.insert(
+        "msg.container.docker_permission_heading",
+        (
+            "Docker denied access to the current user. To keep osdk unprivileged:",
+            "Docker 拒绝了当前用户访问。要让 osdk 保持普通用户运行：",
+        ),
+    );
+    m.insert(
+        "msg.container.docker_permission_rootless",
+        (
+            "preferred: install/start rootless Docker, then run `docker context use rootless`",
+            "推荐：安装并启动 rootless Docker，再运行 `docker context use rootless`",
+        ),
+    );
+    m.insert(
+        "msg.container.docker_permission_group",
+        (
+            "trusted rootful host only: run `sudo usermod -aG docker \"$USER\"`, then sign out and back in",
+            "仅限可信的 rootful 主机：运行 `sudo usermod -aG docker \"$USER\"`，然后退出并重新登录",
+        ),
+    );
+    m.insert(
+        "msg.container.docker_permission_warning",
+        (
+            "warning: the docker group grants root-equivalent host access; never chmod the socket or routinely run osdk with sudo",
+            "警告：docker 组授予近似 root 的主机权限；不要 chmod socket，也不要日常使用 sudo 运行 osdk",
+        ),
+    );
+    m.insert(
+        "msg.container.docker_permission_other_platform",
+        (
+            "check the selected Docker context and endpoint permissions; do not routinely run osdk as root or Administrator",
+            "检查选中的 Docker context 与 endpoint 权限；不要日常以 root 或管理员身份运行 osdk",
+        ),
+    );
+    m.insert(
         "label.container.unsupported_version",
         ("unsupported version", "版本不受支持"),
     );
@@ -3520,6 +3555,11 @@ mod tests {
             "help.container.flag.check",
             "msg.container.doctor_conclusion",
             "msg.container.builder_status",
+            "msg.container.docker_permission_heading",
+            "msg.container.docker_permission_rootless",
+            "msg.container.docker_permission_group",
+            "msg.container.docker_permission_warning",
+            "msg.container.docker_permission_other_platform",
             "msg.container.doctor.mirror",
             "msg.container.doctor.node",
             "msg.container.doctor.details_unavailable",

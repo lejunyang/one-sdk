@@ -241,6 +241,12 @@ version 1。Registry report schema version 2 包含实时耗时，因此其结�
 Doctor、cache status 与 Registry 诊断默认即使不健康也会返回类型化报告；显式 `--check`
 模式保留 stdout 报告，然后分别仅在相关状态为 `healthy`、`available`、`healthy` 时返回零。
 
+当人类可读的选中 Docker doctor 结果或 Docker cache 状态为 `permission-denied` 时，CLI 会在
+完整诊断之后输出 Linux rootless 与 rootful `docker` 组的修复方向，并明确后者为近似 root
+权限；其他平台只提示检查 context/endpoint。该提示不进入 schema-v2 doctor 或 schema-v1
+cache JSON，因此自动化契约、脱敏边界和语言无关性均不变化。提示不会执行 `sudo`、修改组、
+更改 socket mode 或切换 context。
+
 Doctor、cache status、Registry 测试、mirror plan、mirror apply dry-run 与 prune preview
 都不会修改原生状态。Pull、经批准的 prune 和经批准的 mirror apply 是刻意限定的例外：
 pull/prune 都只启动一个选中的原生命令且不回退，mirror apply 只写精确验证过的配置目标。

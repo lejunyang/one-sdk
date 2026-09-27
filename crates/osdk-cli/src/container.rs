@@ -1390,6 +1390,43 @@ fn write_doctor_human(
         )?;
         write_diagnostic_details(output, builder, lang, "  ")?;
     }
+    if report.runtime.runtime == RuntimeKind::Docker
+        && report.runtime.status == DiagnosticStatus::PermissionDenied
+    {
+        write_docker_permission_guidance(output, lang)?;
+    }
+    Ok(())
+}
+
+fn write_docker_permission_guidance(output: &mut dyn Write, lang: Lang) -> std::io::Result<()> {
+    writeln!(
+        output,
+        "{}",
+        trl(lang, "msg.container.docker_permission_heading")
+    )?;
+    if cfg!(target_os = "linux") {
+        writeln!(
+            output,
+            "  - {}",
+            trl(lang, "msg.container.docker_permission_rootless")
+        )?;
+        writeln!(
+            output,
+            "  - {}",
+            trl(lang, "msg.container.docker_permission_group")
+        )?;
+        writeln!(
+            output,
+            "  - {}",
+            trl(lang, "msg.container.docker_permission_warning")
+        )?;
+    } else {
+        writeln!(
+            output,
+            "  - {}",
+            trl(lang, "msg.container.docker_permission_other_platform")
+        )?;
+    }
     Ok(())
 }
 
@@ -1690,6 +1727,10 @@ fn write_cache_human(
             "{}",
             trl(lang, "msg.container.cache_unsupported_hint")
         )?;
+    } else if status.runtime == RuntimeKind::Docker
+        && status.status == CacheQueryStatus::PermissionDenied
+    {
+        write_docker_permission_guidance(output, lang)?;
     }
     Ok(())
 }
@@ -4159,6 +4200,76 @@ mod tests {
             assert_eq!(output.matches(message).count(), 1, "{output}");
             assert!(!output.contains("client version"), "{output}");
             assert!(!output.contains("客户端版本"), "{output}");
+        }
+    }
+
+    #[test]
+    fn docker_permission_denial_prints_safe_bilingual_remediation_only_for_humans() {
+        let report = DoctorOutput {
+            schema_version: 2,
+            requested_runtime: RuntimeSelection::Docker,
+            selected_runtime: RuntimeKind::Docker,
+            runtime: DiagnosticReport::new(RuntimeKind::Docker, DiagnosticStatus::PermissionDenied),
+            attempted_runtimes: vec![DiagnosticReport::new(
+                RuntimeKind::Docker,
+                DiagnosticStatus::PermissionDenied,
+            )],
+            builder: None,
+        };
+
+        for (lang, heading, rootless, warning) in [
+            (
+                Lang::En,
+                "Docker denied access to the current user",
+                "docker context use rootless",
+                "docker group grants root-equivalent host access",
+            ),
+            (
+                Lang::Zh,
+                "Docker 拒绝了当前用户访问",
+                "docker context use rootless",
+                "docker 组授予近似 root 的主机权限",
+            ),
+        ] {
+            let mut output = Vec::new();
+            write_doctor_human(&mut output, &report, lang).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(heading), "{output}");
+            if cfg!(target_os = "linux") {
+                assert!(output.contains(rootless), "{output}");
+                assert!(output.contains("sudo usermod -aG docker"), "{output}");
+                assert!(output.contains(warning), "{output}");
+                assert!(output.contains("不要 chmod socket") || output.contains("never chmod"));
+            } else {
+                assert!(output.contains("Docker context"), "{output}");
+                assert!(!output.contains("usermod"), "{output}");
+            }
+        }
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("usermod"), "{json}");
+        assert!(!json.contains("root-equivalent"), "{json}");
+    }
+
+    #[test]
+    fn docker_cache_permission_denial_prints_the_same_remediation() {
+        let denied = FakeRunner::new([failure("permission denied")]);
+        let status = cache_status(
+            &denied,
+            CaptureLimits::default(),
+            ContainerCacheRuntimeArg::Docker,
+            BuildxBuilderSelector::Auto,
+        );
+        let mut output = Vec::new();
+        write_cache_human(&mut output, &status, Lang::En).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("docker native cache: permission denied"));
+        assert!(
+            output.contains("docker context use rootless") || output.contains("Docker context"),
+            "{output}"
+        );
+        if cfg!(target_os = "linux") {
+            assert!(output.contains("sudo usermod -aG docker"), "{output}");
         }
     }
 

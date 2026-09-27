@@ -44,6 +44,71 @@ Add `--check` when the command is a health gate: the report is still emitted,
 then the command exits nonzero unless the selected runtime and every inspected
 builder are `healthy`.
 
+### Linux permissions and rootless Docker
+
+When the selected Docker runtime or Docker cache returns `permission-denied`,
+human-readable doctor/cache output presents two mutually exclusive paths. JSON
+retains the stable typed status and does not embed environment-specific commands:
+
+- **Prefer rootless Docker**: the daemon, socket, configuration, and service
+  belong to the current user, and osdk remains unprivileged.
+- **Use the `docker` group only on a trusted rootful host**: run
+  `sudo usermod -aG docker "$USER"`, then fully sign out and back in. The group
+  provides root-equivalent host access through Docker; it is not a
+  least-privilege grant for a shared machine.
+
+Do not make the socket world-writable and do not turn routine commands into
+`sudo osdk`. The latter runs the whole osdk process as root and may switch to
+root's osdk config, data/cache, trust records, and Docker context/credentials.
+For rootless Docker it may target a different rootful daemon instead.
+
+If rootless Docker is not installed, use Docker's setup tool to check the host
+first. A failed check commonly requires an administrator to provide
+`newuidmap`/`newgidmap` and ranges in `/etc/subuid` and `/etc/subgid`; package
+names are distribution-specific:
+
+```bash
+dockerd-rootless-setuptool.sh check
+dockerd-rootless-setuptool.sh install
+systemctl --user enable --now docker   # with a systemd user service
+```
+
+The setup tool normally creates a `rootless` context. Clear a stale
+`DOCKER_HOST` that would override context selection, select the context, and
+verify it. If no context was created, point the current shell at the user socket
+instead:
+
+```bash
+unset DOCKER_HOST
+docker context use rootless
+docker info --format '{{json .SecurityOptions}}'
+
+# Use this instead when there is no rootless context; do not combine both:
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+```
+
+Rootless dockerd reads
+`${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json`, not
+`/etc/docker/daemon.json`. Mirror apply requires that exact path and an existing
+parent directory. osdk still leaves the restart to the user:
+
+```bash
+rootless_docker_config="${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json"
+mkdir -p "$(dirname "$rootless_docker_config")"
+osdk container mirrors plan docker.io --runtime docker \
+  --native-config "$rootless_docker_config"
+osdk container mirrors apply docker.io --runtime docker \
+  --native-config "$rootless_docker_config"
+systemctl --user restart docker
+```
+
+If `docker info` already reports `rootless`, do not join the `docker` group;
+repair the user service, context, or `DOCKER_HOST`. Rootless Docker limitations
+around privileged containers, devices, low ports, host-network semantics, and
+cgroup resource controls come from Docker and host configuration. osdk currently
+only diagnoses, pulls, inspects caches, configures mirrors, and performs bounded
+pruning; it does not broaden those privileges.
+
 ## Inspect native cache usage
 
 ```bash
@@ -421,7 +486,7 @@ complete registry diagnostic, then exits nonzero.
 | `healthy` | Client and selected daemon/builder responded | No action |
 | `degraded` | Only part of the expected typed data was available | Inspect the native service and retry |
 | `client-only` | The CLI exists but no daemon/builder was confirmed | Start or select the intended service |
-| `permission-denied` | The endpoint exists but the current user cannot inspect it | Fix native socket/context permissions |
+| `permission-denied` | The endpoint exists but the current user cannot inspect it | Prefer rootless Docker on Linux; use the `docker` group on a trusted rootful host only after accepting its root-equivalent risk |
 | `unreachable` | The selected endpoint did not respond before the bound | Check the daemon, context, socket, or network |
 | `unsupported-version` | The native CLI is older than the machine-readable contract osdk requires | Upgrade the native tool |
 | `not-installed` | The required executable could not be started | Install it or choose another runtime |

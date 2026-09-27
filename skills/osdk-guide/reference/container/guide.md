@@ -26,6 +26,19 @@ Docker apply/dry-run 还会先用 `dockerd --validate` 校验生成的 daemon JS
 写文件。无人值守 `--yes` 仍必须同时给 `--accept-plan`。`prune` 同理要求接受精确 preview
 id，避免机器状态变化后误删。配置见 `reference/configuration/containers.md`。
 
+Linux 上遇到 Docker `permission-denied` 时优先使用 rootless Docker；已有服务通常运行
+`docker context use rootless` 即可。未安装时先运行 `dockerd-rootless-setuptool.sh check` 与
+`dockerd-rootless-setuptool.sh install`，再按需启用 `systemctl --user enable --now docker`。
+若没有生成 context，可改用 `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock`，但不要同时让旧
+`DOCKER_HOST` 覆盖已选 context。rootless daemon 配置位于
+`${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json`；将它显式传给 `--native-config`，apply 后
+运行 `systemctl --user restart docker`。
+
+只有可信 rootful 主机才考虑 `sudo usermod -aG docker "$USER"`，并在完整退出、重新登录后生效；
+`docker` 组提供近似 root 的宿主权限。禁止把 Docker socket 改成全员可写。`sudo osdk` 会让
+整个进程使用 root 权限，并可能切换 osdk/Docker 的配置、信任、context 与凭据，因此不能作为
+日常权限修复；rootless 用户尤其不应这样做。
+
 当 upstream 不可达时，带 digest 的 `--image` 仍可直接对 mirror 校验相同内容；tag 不会在
 mirror 上重新解析。`mirrors apply --json` 找不到合格 mirror 时会先输出包含完整诊断的
 `no-verified-mirror` JSON，再以非零状态退出。

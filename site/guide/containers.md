@@ -36,6 +36,60 @@ namespace 与配置路径，也不包含 endpoint path/query。字段名和枚�
 将命令用作健康门禁时可加 `--check`：报告仍会完整输出，随后只有选中 runtime 和每个已检查
 builder 均为 `healthy` 才以零状态退出。
 
+### Linux 权限与 rootless Docker
+
+当选中的 Docker runtime 或 Docker cache 返回 `permission-denied` 时，人类可读的 doctor / cache
+输出会给出两条互斥的处理方向；JSON 保持稳定的类型化状态，不加入环境相关命令：
+
+- **优先使用 rootless Docker**：daemon、socket、配置和服务都归当前用户管理，osdk 继续以
+  普通用户运行。
+- **可信 rootful 主机才考虑 `docker` 组**：`sudo usermod -aG docker "$USER"` 后必须完整退出
+  并重新登录。该组可以通过 Docker 获得近似 root 的宿主权限，不适合作为共享机器上的低权限授权。
+
+不要把 socket 改成全员可写，也不要把日常命令统一改成 `sudo osdk`。后者会让整个 osdk
+进程以 root 运行，并可能改用 root 的 osdk 配置、data/cache、信任记录以及 Docker
+context/credential；对于 rootless Docker，它还可能误连另一套 rootful daemon。
+
+尚未安装 rootless Docker 时，先使用 Docker 提供的安装工具检查宿主条件。检查失败通常需要
+管理员补齐 `newuidmap`/`newgidmap` 和 `/etc/subuid`、`/etc/subgid` 范围；具体包名由发行版决定：
+
+```bash
+dockerd-rootless-setuptool.sh check
+dockerd-rootless-setuptool.sh install
+systemctl --user enable --now docker   # 使用 systemd 用户服务时
+```
+
+安装工具通常会创建 `rootless` context。清除一个可能覆盖 context 的旧 `DOCKER_HOST`，选中并
+验证它；如果安装工具没有创建 context，也可以在当前 shell 直接指定用户 socket：
+
+```bash
+unset DOCKER_HOST
+docker context use rootless
+docker info --format '{{json .SecurityOptions}}'
+
+# 没有 rootless context 时二选一，不要与另一个 context 混用：
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+```
+
+rootless dockerd 的配置不是 `/etc/docker/daemon.json`，而是
+`${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json`。Mirror apply 需要显式传入这个精确路径，
+并要求父目录已经存在；写入后 osdk 仍不会替用户重启 daemon：
+
+```bash
+rootless_docker_config="${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json"
+mkdir -p "$(dirname "$rootless_docker_config")"
+osdk container mirrors plan docker.io --runtime docker \
+  --native-config "$rootless_docker_config"
+osdk container mirrors apply docker.io --runtime docker \
+  --native-config "$rootless_docker_config"
+systemctl --user restart docker
+```
+
+若 `docker info` 已显示 `rootless`，用户不需要加入 `docker` 组；应修复 user service、context 或
+`DOCKER_HOST`。rootless Docker 对 privileged 容器、设备、低端口、host 网络语义和 cgroup
+资源控制的限制来自 Docker/宿主配置；osdk 当前只做诊断、pull、cache、mirror 与限定 prune，
+不会扩大这些权限。
+
 ## 检查原生缓存用量
 
 ```bash
@@ -353,7 +407,7 @@ Apply 不使用 sudo、不配置 remote context 或 Docker Desktop，也不自�
 | `healthy` | 客户端和所选守护进程/构建器都已响应 | 无需处理 |
 | `degraded` | 只获得了部分预期的类型化数据 | 检查原生服务后重试 |
 | `client-only` | CLI 存在，但未确认守护进程/构建器 | 启动或选择目标服务 |
-| `permission-denied` | endpoint 存在，但当前用户无法检查 | 修复原生 socket/context 权限 |
+| `permission-denied` | endpoint 存在，但当前用户无法检查 | Linux 优先选择 rootless Docker；可信 rootful 主机可在理解 root-equivalent 风险后配置 `docker` 组 |
 | `unreachable` | 所选 endpoint 未在有界时间内响应 | 检查守护进程、context、socket 或网络 |
 | `unsupported-version` | 原生 CLI 早于 osdk 所需的机器可读契约 | 升级原生工具 |
 | `not-installed` | 无法启动所需可执行文件 | 安装工具或选择其他运行时 |

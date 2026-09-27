@@ -309,6 +309,14 @@ report even for an unhealthy state. Their explicit `--check` mode preserves that
 stdout report and then returns a nonzero CLI result unless the relevant success
 state is `healthy`, `available`, and `healthy`, respectively.
 
+When the selected human-readable Docker doctor result or Docker cache status is
+`permission-denied`, the CLI follows the complete diagnostic with Linux rootless
+and rootful `docker`-group remediation and identifies the latter as
+root-equivalent. Other platforms receive a context/endpoint check instead. The
+guidance is not added to schema-v2 doctor or schema-v1 cache JSON, preserving the
+automation, redaction, and language-independent contracts. It never invokes
+`sudo`, changes group membership or socket modes, or switches contexts.
+
 Doctor, cache status, registry testing, mirror planning, mirror-apply dry-run,
 and prune preview never mutate native state. Pull, approved prune, and approved
 mirror apply are intentionally narrow exceptions. Pull and prune each launch one

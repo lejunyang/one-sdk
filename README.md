@@ -878,6 +878,20 @@ driver, node state, BuildKit versions, endpoints, and platforms. Its
 schema-version-2 JSON omits context, builder and node names, namespaces, native
 config paths, and secret-bearing endpoint paths or queries.
 
+When Docker denies the current user, human-readable output recommends Linux
+rootless Docker first, then explains the rootful `docker`-group option and warns
+that the group is root-equivalent. Users with an existing rootless daemon
+usually only need to select its context and keep running osdk unprivileged:
+
+```bash
+docker context use rootless
+osdk container doctor --runtime docker
+```
+
+Do not work around the diagnostic by loosening socket permissions or routinely
+running `sudo osdk`; the container guide covers installation, the user-level
+`daemon.json`, and restart steps.
+
 Registry tests use anonymous HTTPS only, validate image digests, platform
 selection, bounded Range support, and rank verified mirrors. A digest-pinned image can still validate mirrors when the upstream is unavailable; mutable tags remain upstream-authoritative. A mirror plan
 always targets one configured or Docker Hub built-in registry policy and one
