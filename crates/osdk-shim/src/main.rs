@@ -462,11 +462,12 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
     else {
         return Ok(());
     };
-    let requirements: Vec<_> = osdk_core::trust::trust_requirements(&project_config)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(osdk_core::trust::affects_tool_dispatch)
-        .collect();
+    let requirements: Vec<_> =
+        osdk_core::trust::trust_requirements(&project_config, &osdk_core::trust::Scope::ALL)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(osdk_core::trust::affects_tool_dispatch)
+            .collect();
     if requirements.is_empty() {
         return Ok(());
     }

@@ -139,8 +139,9 @@ impl App {
 /// meant it reported "no tasks defined" for every project on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectAccess {
-    /// Load the project config and refuse if it is untrusted. The default.
-    Gated,
+    /// Load the project config and refuse if it carries an untrusted key
+    /// relevant to one of these scopes.
+    Gated(&'static [osdk_core::trust::Scope]),
     /// Load the project config but do not enforce the gate: the command only
     /// reports what the config says and acts on nothing.
     ReadOnly,
@@ -150,9 +151,13 @@ enum ProjectAccess {
 }
 
 impl App {
-    /// Build the app: resolve dirs, load config, overlay CLI flags, build ctx.
-    pub fn init(overrides: GlobalOverrides) -> Result<App> {
-        Self::init_with_project_access(overrides, ProjectAccess::Gated)
+    /// Build the app: resolve dirs, load config, overlay CLI flags, build ctx,
+    /// gating on the scopes this command reaches.
+    pub fn init(
+        overrides: GlobalOverrides,
+        scopes: &'static [osdk_core::trust::Scope],
+    ) -> Result<App> {
+        Self::init_with_project_access(overrides, ProjectAccess::Gated(scopes))
     }
 
     /// Load the project config without enforcing the trust gate.
@@ -160,7 +165,7 @@ impl App {
     /// For commands that only *report* what the project declares: they need the
     /// project layer, because it is the thing they exist to print, while
     /// refusing them on an unreviewed config would make the directory hostile
-    /// and hide the exit route (see `bypasses_trust_check`).
+    /// and hide the exit route.
     pub fn init_read_only(overrides: GlobalOverrides) -> Result<App> {
         Self::init_with_project_access(overrides, ProjectAccess::ReadOnly)
     }
@@ -178,10 +183,10 @@ impl App {
         dirs.ensure().context("creating osdk directories")?;
 
         let cwd = std::env::current_dir().context("getting current dir")?;
-        if access == ProjectAccess::Gated {
+        if let ProjectAccess::Gated(scopes) = access {
             if let Some(project_config) = osdk_core::trust::project_config(&cwd)? {
                 let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
-                let requirements = osdk_core::trust::trust_requirements(&project_config)?;
+                let requirements = osdk_core::trust::trust_requirements(&project_config, scopes)?;
                 if !requirements.is_empty()
                     && !osdk_core::trust::is_trusted(
                         &dirs.config,
@@ -203,7 +208,7 @@ impl App {
         // `osdk run` -- gated, and therefore using the full loader -- ran those
         // very tasks. Two code paths disagreeing about whether a table exists.
         let mut config = match access {
-            ProjectAccess::Gated | ProjectAccess::ReadOnly => {
+            ProjectAccess::Gated(_) | ProjectAccess::ReadOnly => {
                 Config::load(&dirs.user_config_file(), &cwd)
             }
             ProjectAccess::Excluded => Config::load_user(&dirs.user_config_file()),

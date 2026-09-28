@@ -150,16 +150,21 @@ fn run(cli: Cli, overrides: GlobalOverrides) -> Result<Option<ExitStatus>> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        // Three cases, not two. `excludes_project_config` is about trust
-        // management, which must not read the project at all;
-        // `bypasses_trust_check` is about read-only commands, which must read it
-        // and only skip the refusal.
+        // Three cases, distinguished by what the command can do.
+        // `excludes_project_config` is about trust management, which must not
+        // read the project at all. Otherwise the command's scopes decide:
+        // none means it acts on nothing (read-only), so the project is loaded
+        // without the gate; the gate is enforced only for the scopes the
+        // command actually reaches.
         let mut app = if excludes_project_config(&cli.command) {
             App::init_without_project_config(overrides)?
-        } else if bypasses_trust_check(&cli.command) {
-            App::init_read_only(overrides)?
         } else {
-            App::init(overrides)?
+            let scopes = command_scopes(&cli.command);
+            if scopes.is_empty() {
+                App::init_read_only(overrides)?
+            } else {
+                App::init(overrides, scopes)?
+            }
         };
         dispatch(&mut app, cli.command).await
     })
@@ -207,70 +212,84 @@ fn excludes_project_config(command: &Command) -> bool {
     )
 }
 
-/// Whether a command runs before the project config is trusted.
+/// The trust scopes one command reaches.
 ///
-/// Trust exists to stop an unreviewed config from *doing* something. A command
-/// that acts on nothing has nothing to gate, and refusing it only makes the
-/// directory hostile: `osdk list` printing "project config is not trusted" tells
-/// the user a config they have not reviewed is preventing them from *looking at
-/// what is already installed*, which is both useless and alarming. Worse, it
-/// hides the exit route -- `osdk trust` wants to be read before it is run, and
-/// the commands that show you what you are about to approve were themselves
-/// refused.
+/// Trust gates only what the invocation can actually do: one scope per kind
+/// of effect. A `[syspkg]` table cannot block `osdk model path`, and
+/// `[task_config]` cannot block `osdk pkg status`, because neither command
+/// reaches those tables. The empty list means the command acts on nothing
+/// externally -- it is loaded read-only and is never refused.
 ///
-/// Three groups are exempt.
-///
-/// Trust management itself, for the obvious reason.
-///
-/// `config set` / `config unset`: the way an untrusted config is edited back
-/// into shape. Gating them would block the only exit with the very config being
-/// undone. Each addresses one named key in one named file and never acts on what
-/// the untrusted config asks for. `config get` and `config list` stay gated
-/// precisely because they *do* report that config's merged values.
-///
-/// Read-only inspection: these resolve and print state, and reach no install,
-/// build, download, subprocess or host mutation. They are also what a person
-/// runs *while deciding* whether to trust a project.
-///
-/// Everything else stays gated, which is the fail-closed direction: a new
-/// command is gated until someone deliberately lists it here, rather than
-/// slipping through because it was forgotten.
-fn bypasses_trust_check(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Trust { .. }
-            | Command::Untrust { .. }
-            | Command::Config {
-                command: crate::cli::ConfigCommand::Set { .. }
-                    | crate::cli::ConfigCommand::Unset { .. }
+/// Commands that bundle a second behavior carry both scopes. A bare
+/// `install` also materializes opt-in auto dependencies; `run` and `exec`
+/// do too unless `--no-deps` is passed. `lock` installs Node when the
+/// graph contains npm packages. The self upgrader downloads and verifies
+/// release bytes like the install path.
+fn command_scopes(command: &Command) -> &'static [osdk_core::trust::Scope] {
+    use osdk_core::trust::Scope;
+    const NONE: &[Scope] = &[];
+    const INSTALL: &[Scope] = &[Scope::Install];
+    const INSTALL_DEPS: &[Scope] = &[Scope::Install, Scope::Deps];
+    const DEPS: &[Scope] = &[Scope::Deps];
+    const RUN: &[Scope] = &[Scope::Run];
+    const RUN_DEPS: &[Scope] = &[Scope::Run, Scope::Deps];
+    const SYSTEM: &[Scope] = &[Scope::SystemPackages];
+    const CONTAINER: &[Scope] = &[Scope::Container];
+
+    match command {
+        Command::Install { tools, no_deps, .. } => {
+            if tools.is_empty() && !no_deps {
+                INSTALL_DEPS
+            } else {
+                INSTALL
             }
-            // Removing a model declaration is the escape hatch for an untrusted entry.
-            | Command::Model {
-                command: crate::cli::ModelCommand::Unuse { .. }
+        }
+        Command::Use { .. } | Command::Upgrade { .. } | Command::Lock { .. } => INSTALL,
+        Command::Exec { no_deps, .. } => {
+            if *no_deps {
+                INSTALL
+            } else {
+                INSTALL_DEPS
             }
-            // Read-only: report existing state, act on nothing.
-            | Command::List { .. }
-            | Command::Current { .. }
-            | Command::Where { .. }
-            | Command::Doctor { .. }
-            | Command::Completions { .. }
-            // `task list` / `info` / `deps` only print what the file declares;
-            // `osdk run` is what would execute it, and stays gated.
-            | Command::Task {
-                command: crate::cli::TaskCommand::List { .. }
-                    | crate::cli::TaskCommand::Info { .. }
-                    | crate::cli::TaskCommand::Deps { .. }
+        }
+        Command::Run {
+            dry_run, no_deps, ..
+        } => {
+            if *dry_run {
+                NONE
+            } else if *no_deps {
+                RUN
+            } else {
+                RUN_DEPS
             }
-            // `skills agents` / `list` / `path` / `find` only report state (find
-            // is a read-only GitHub search); `add`, `remove`, `sync`, `update`
-            // and `use` act on disk or the lock and stay gated.
-            | Command::Skills {
-                command: crate::cli::SkillsCommand::Agents
-                    | crate::cli::SkillsCommand::List { .. }
-                    | crate::cli::SkillsCommand::Path { .. }
-                    | crate::cli::SkillsCommand::Find { .. }
-            }
-    )
+        }
+        Command::Deps { .. } => DEPS,
+        Command::Pkg {
+            command: crate::cli::PkgCommand::Apply { .. },
+        } => SYSTEM,
+        Command::SelfCmd {
+            command: crate::cli::SelfCommand::Upgrade { dry_run: false, .. },
+        } => INSTALL,
+        Command::Rust {
+            command:
+                crate::cli::RustCommand::Component {
+                    command: crate::cli::RustItemCommand::Add { .. },
+                }
+                | crate::cli::RustCommand::Target {
+                    command: crate::cli::RustItemCommand::Add { .. },
+                },
+        } => INSTALL,
+        Command::Skills {
+            command:
+                crate::cli::SkillsCommand::Add { .. }
+                | crate::cli::SkillsCommand::Sync { .. }
+                | crate::cli::SkillsCommand::Update { .. }
+                | crate::cli::SkillsCommand::Use { .. },
+        } => INSTALL,
+        Command::Container { .. } => CONTAINER,
+        // Pure reporting, rendering, or changes confined to the managed dir.
+        _ => NONE,
+    }
 }
 
 async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>> {
@@ -385,171 +404,118 @@ fn init_tracing(verbose: u8) {
 mod tests {
     #[cfg(unix)]
     use super::native_exit_code;
-    use super::{bypasses_trust_check, excludes_project_config, wants_auto_deps};
-    use crate::cli::{Command, ConfigCommand, TaskCommand};
+    use super::{command_scopes, excludes_project_config, wants_auto_deps};
+    use crate::cli::{Cli, Command, TaskCommand};
+    use clap::Parser;
+    use osdk_core::trust::Scope;
 
-    #[test]
-    fn only_trust_management_and_config_writes_skip_the_trust_gate() {
-        // This list is a security boundary: anything exempted here runs with an
-        // untrusted project config present. Reading commands must stay gated,
-        // because they report that config's merged values.
-        assert!(bypasses_trust_check(&Command::Trust {
-            path: None,
-            command: None
-        }));
-        assert!(bypasses_trust_check(&Command::Untrust { path: None }));
-        assert!(bypasses_trust_check(&Command::Config {
-            command: ConfigCommand::Set {
-                key: "jobs".into(),
-                value: "4".into(),
-                global: false
-            }
-        }));
-        assert!(bypasses_trust_check(&Command::Config {
-            command: ConfigCommand::Unset {
-                key: "jobs".into(),
-                global: false
-            }
-        }));
-
-        assert!(!bypasses_trust_check(&Command::Config {
-            command: ConfigCommand::Get {
-                key: "jobs".into(),
-                global: false
-            }
-        }));
-        assert!(!bypasses_trust_check(&Command::Config {
-            command: ConfigCommand::List
-        }));
-        assert!(!bypasses_trust_check(&Command::Config {
-            command: ConfigCommand::Path
-        }));
+    /// Parse one command line exactly the way main does.
+    fn command(args: &[&str]) -> crate::cli::Command {
+        let mut argv = vec!["osdk"];
+        argv.extend_from_slice(args);
+        Cli::parse_from(argv).command
     }
 
-    /// The two exemptions are different things and must not drift back together.
-    ///
-    /// `excludes_project_config` means "do not read the project at all", and only
-    /// trust management may claim it. `bypasses_trust_check` means "read it, but
-    /// do not refuse" -- and a command in that group that also excluded the
-    /// config would be reporting on a file it never opened, which is exactly the
-    /// bug where `task list` printed "no tasks defined" for every project.
+    /// The trust scopes are exactly the effects that command has -- no more,
+    /// no less. This table is the security boundary: a command scoped too
+    /// narrowly acts under unreviewed keys; scoped too broadly cries wolf and
+    /// blocks unrelated work.
     #[test]
-    fn read_only_commands_read_the_project_config_while_trust_management_does_not() {
-        for command in [
-            Command::Trust {
-                path: None,
-                command: None,
-            },
-            Command::Untrust { path: None },
-            Command::Config {
-                command: ConfigCommand::Set {
-                    key: "jobs".into(),
-                    value: "4".into(),
-                    global: false,
-                },
-            },
-        ] {
-            assert!(
-                excludes_project_config(&command),
-                "trust management must not read the project config: {command:?}"
-            );
-        }
-
-        // Every read-only command reports on the project config, so none of them
-        // may exclude it.
-        for command in [
-            Command::List { tool: None },
-            Command::Current { tool: None },
-            Command::Doctor {
-                verify: false,
-                tool: None,
-            },
-            Command::Task {
-                command: TaskCommand::List { hidden: false },
-            },
-            Command::Task {
-                command: TaskCommand::Info {
-                    task: "build".into(),
-                },
-            },
-            Command::Task {
-                command: TaskCommand::Deps {
-                    task: "build".into(),
-                },
-            },
-        ] {
-            assert!(
-                !excludes_project_config(&command),
-                "read-only command must still load the project config it reports on: {command:?}"
+    fn commands_request_exactly_their_trust_scopes() {
+        let cases: &[(&[&str], &[Scope])] = &[
+            // Bare install also materializes opt-in deps.
+            (&["install"], &[Scope::Install, Scope::Deps]),
+            // One named tool: just that install.
+            (&["install", "node@22"], &[Scope::Install]),
+            (&["install", "--no-deps"], &[Scope::Install]),
+            (&["use", "node@22"], &[Scope::Install]),
+            (&["upgrade", "node"], &[Scope::Install]),
+            // Lock installs Node when an npm graph needs it.
+            (&["lock"], &[Scope::Install]),
+            // Exec installs its named tools and, by default, brings deps.
+            (
+                &["exec", "--tool", "node", "--", "node", "-v"],
+                &[Scope::Install, Scope::Deps],
+            ),
+            (
+                &["exec", "--no-deps", "--tool", "node", "--", "node", "-v"],
+                &[Scope::Install],
+            ),
+            // Run only reaches task_config and, by default, deps.
+            (&["run", "build"], &[Scope::Run, Scope::Deps]),
+            (&["run", "--no-deps", "build"], &[Scope::Run]),
+            (&["run", "--dry-run", "build"], &[]),
+            // Explicit deps.
+            (&["deps"], &[Scope::Deps]),
+            // Container operations only reach the container scope.
+            (&["container", "pull", "alpine:latest"], &[Scope::Container]),
+            // System packages only for pkg apply.
+            (&["pkg", "apply"], &[Scope::SystemPackages]),
+            (&["pkg", "status"], &[]),
+            (&["pkg", "plan"], &[]),
+            // The self upgrader installs verified bytes; dry run does not.
+            (&["self", "upgrade"], &[Scope::Install]),
+            (&["self", "upgrade", "--dry-run"], &[]),
+            // Rust component/target add downloads; list does not.
+            (&["rust", "component", "add", "rustfmt"], &[Scope::Install]),
+            (
+                &["rust", "target", "add", "x86_64-linux-android"],
+                &[Scope::Install],
+            ),
+            (&["rust", "component", "list"], &[]),
+            // Skills content is installed by add/sync/update/use.
+            (&["skills", "add", "github:o/r"], &[Scope::Install]),
+            (&["skills", "sync"], &[Scope::Install]),
+            (&["skills", "list"], &[]),
+            // Models, inspection, rendering and managed-dir changes need nothing.
+            (&["model", "path", "fixture"], &[]),
+            (&["list"], &[]),
+            (&["doctor"], &[]),
+            (&["hook-env"], &[]),
+            (&["activate", "bash"], &[]),
+            (&["reshim"], &[]),
+            (&["prune"], &[]),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(
+                command_scopes(&command(args)),
+                *expected,
+                "scopes mismatch for: {}",
+                args.join(" ")
             );
         }
     }
 
-    /// Read-only commands must not be refused, and acting commands must be.
-    ///
-    /// Both directions matter, and they fail in opposite ways. Gating a
-    /// read-only command makes the directory hostile for no safety at all --
-    /// `osdk list` refusing to show what is already installed, and, worse,
-    /// hiding the very commands a person would use to decide whether to trust
-    /// the project. Exempting an acting command is the real hazard: it would run
-    /// under a config nobody reviewed.
+    /// Trust management and config writes are the one group that must not
+    /// read the project config at all: an untrusted project cannot take
+    /// part in the decision to trust it or the edit that undoes it.
     #[test]
-    fn read_only_commands_are_not_gated_but_acting_ones_are() {
-        // Resolve and print state; reach no install, download, subprocess or
-        // host mutation.
-        for command in [
-            Command::List { tool: None },
-            Command::Current { tool: None },
-            Command::Where {
-                tool: "node".into(),
-                global: false,
-                bins: false,
-            },
-            Command::Doctor {
-                verify: false,
-                tool: None,
-            },
-            Command::Completions {
-                shell: clap_complete::Shell::Bash,
-            },
-            Command::Task {
-                command: TaskCommand::List { hidden: false },
-            },
-            Command::Task {
-                command: TaskCommand::Info {
-                    task: "build".into(),
-                },
-            },
-            Command::Task {
-                command: TaskCommand::Deps {
-                    task: "build".into(),
-                },
-            },
-        ] {
+    fn trust_management_and_config_writes_exclude_the_project_config() {
+        let excluded: &[&[&str]] = &[
+            &["trust"],
+            &["untrust"],
+            &["config", "set", "jobs", "4"],
+            &["config", "unset", "jobs"],
+        ];
+        for args in excluded {
             assert!(
-                bypasses_trust_check(&command),
-                "read-only command must not be refused: {command:?}"
+                excludes_project_config(&command(args)),
+                "must not read the project config: {}",
+                args.join(" ")
             );
         }
-
-        // These install, build, download, mutate the host, or run something the
-        // untrusted config chose. They stay gated.
-        for command in [
-            Command::Run {
-                task: "build".into(),
-                dry_run: false,
-                args: Vec::new(),
-                no_deps: false,
-            },
-            Command::Reshim,
-            Command::Prune { dry_run: false },
-            Command::HookEnv {
-                shell: "bash".into(),
-            },
-        ] {
+        // Reporting commands still load the project they report on.
+        let included: &[&[&str]] = &[
+            &["config", "get", "jobs"],
+            &["config", "list"],
+            &["list"],
+            &["task", "list"],
+        ];
+        for args in included {
             assert!(
-                !bypasses_trust_check(&command),
-                "command that acts must stay gated: {command:?}"
+                !excludes_project_config(&command(args)),
+                "must still read the project config: {}",
+                args.join(" ")
             );
         }
     }

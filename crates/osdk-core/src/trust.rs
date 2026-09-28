@@ -74,7 +74,7 @@ pub struct TrustRequirement {
     pub reason: TrustReason,
 }
 
-/// The capability a key grants. These are the only two things trust gates.
+/// The capability a key grants. These are the only things trust gates.
 ///
 /// Declaring *which package* to install is deliberately not here: npm installs
 /// pass `--ignore-scripts`, `http:` artifacts require a pinned sha256, and
@@ -109,6 +109,47 @@ impl TrustReason {
             Self::WeakensVerification => crate::t!("trust.reason.weakens_verification"),
         }
     }
+}
+
+/// What one command invocation can actually do.
+///
+/// Trust is enforced only for requirements relevant to at least one scope the
+/// command reaches. A config may contain `[syspkg]` entries the host can never
+/// run and `[task_config]` the current command never reads; demanding review
+/// of either from an unrelated command is what made directories hostile and
+/// taught people to approve without reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Downloads, verifies, and installs managed bytes (tools, runtimes,
+    /// skills). Settings that weaken verification are relevant here because the
+    /// download pipeline is about to run.
+    Install,
+    /// Runs the project's own dependency providers (`[deps]`).
+    Deps,
+    /// Runs project tasks. `[task_config]` decides the interpreter, so it is
+    /// relevant; tasks themselves are authorized by typing their name.
+    Run,
+    /// Installs system packages (`[syspkg]`).
+    SystemPackages,
+    /// Pulls, builds or runs container images: `[containers]` picks the
+    /// runtime, builder and registry mirrors those operations use.
+    Container,
+}
+
+impl Scope {
+    /// Every scope, for checks that ask "is there anything trust-relevant at
+    /// all". The trust identity hashes the union of these.
+    pub const ALL: [Self; 5] = [
+        Self::Install,
+        Self::Deps,
+        Self::Run,
+        Self::SystemPackages,
+        Self::Container,
+    ];
+}
+
+fn scopes_include(scopes: &[Scope], wanted: Scope) -> bool {
+    scopes.contains(&wanted)
 }
 
 /// `[settings]` keys that can neither execute code nor weaken verification.
@@ -157,60 +198,60 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
     ("java", TrustReason::WeakensVerification),
 ];
 
-/// Top-level tables that require trust as a whole, with the reason.
+/// Whole top-level tables that gate a command, with the reason and the scopes
+/// in which they are reachable.
 ///
-/// `syspkg` installs into the machine outside the managed root, may prompt for
-/// elevation, and is deliberately not covered by `osdk.lock`. `sources` and
-/// `registries` change where subprocesses fetch from.
-/// `tasks` is deliberately **absent**. Nothing in osdk ever runs a task on its
+/// `sources` and `registries` change where managed downloads and dependency
+/// providers fetch from, so both the install and deps scopes see them.
+/// `task_config` is read only by `osdk run`: it is an ambient setting whose
+/// `shell` field decides which interpreter *every* task in scope runs under,
+/// and a config that quietly sets `shell = "evil --run"` would turn every
+/// later `osdk run` into something other than what the task text says.
+///
+/// `syspkg` is deliberately **not** here: it is handled separately because,
+/// unlike the others, it is only relevant when at least one requested package
+/// actually applies to this machine. See `collect_syspkg_requirement`.
+///
+/// `tasks` is deliberately absent. Nothing in osdk ever runs a task on its
 /// own: there is no postinstall, no lifecycle hook, no automatic invocation --
 /// `[tasks]` is read by `osdk run` and `osdk task` and nowhere else. Typing
 /// `osdk run build` *is* the authorization, so demanding a trust record first
 /// asks the same question twice. That is exactly the wolf-crying this module
-/// warns about above: a gate that fires on something the user just asked for
+/// warns about: a gate that fires on something the user just asked for
 /// teaches nothing and trains people to approve without reading.
-///
-/// The contrast with `syspkg` is the whole point -- but state it accurately:
-/// `syspkg` is read only by the `osdk pkg` subcommands, and only
-/// `osdk pkg apply --yes` installs anything. What makes it different from
-/// `[tasks]` is not *when* it is read but *what one approval covers*: `osdk run
-/// build` names a single task whose text is right there, whereas `osdk pkg
-/// apply` accepts the whole package list at once, each entry able to run a
-/// distribution's install scripts as root. Review before the fact is what makes
-/// that list reviewable at all.
-///
-/// Note this table says nothing about which *commands* must enforce the gate --
-/// see [`affects_tool_dispatch`]. `syspkg` requires review before installing,
-/// not before every `cargo --version`.
-///
-/// `task_config` is different again, and does stay gated: it is not a command
-/// the user names but an ambient setting, and its `shell` field decides which
-/// interpreter *every* task in scope runs under. A config that quietly sets
-/// `shell = "evil --run"` turns every later `osdk run` into something other
-/// than what the task text says, with nothing at the call site to reveal it.
-const TRUST_REQUIRING_TABLES: &[(&str, TrustReason)] = &[
-    ("syspkg", TrustReason::ExecutesCode),
-    ("sources", TrustReason::WeakensVerification),
-    ("registries", TrustReason::WeakensVerification),
-    ("task_config", TrustReason::RedirectsExecution),
+const WHOLE_TABLE_REQUIREMENTS: &[(&str, TrustReason, &[Scope])] = &[
+    (
+        "sources",
+        TrustReason::WeakensVerification,
+        &[Scope::Install, Scope::Deps],
+    ),
+    (
+        "registries",
+        TrustReason::WeakensVerification,
+        &[Scope::Install, Scope::Deps],
+    ),
+    (
+        "task_config",
+        TrustReason::RedirectsExecution,
+        &[Scope::Run],
+    ),
+    (
+        "containers",
+        TrustReason::WeakensVerification,
+        &[Scope::Container],
+    ),
 ];
 
-/// Top-level tables inspected key by key instead of judged as a whole.
+/// Tables inspected key by key instead of judged as a whole.
 ///
 /// `tools` needs this because a single tool option (`allow_builds`) can still
 /// opt into script execution even though the surrounding table is safe.
-const INSPECTED_TABLES: &[&str] = &[
-    "tools", "aliases", "settings", "tasks", "models", "deps", "skills",
-];
+const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "deps", "skills"];
 
-/// Keys under one `[models.<name>]` entry that decide where model bytes come
-/// from (or weaken how they are checked). Everything else is a harmless
-/// declaration, like declaring `npm:prettier` (research §6.4).
-const MODEL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "url", "mirror"];
 /// Keys under one `[skills.<name>]` entry that change where the skill's bytes
 /// come from. A bare `source = "github:owner/repo"` declaration is not one of
-/// them: like declaring `npm:prettier`, saying *which* skill to install is not a
-/// gate. Only a custom `endpoint` (or an insecure/mirror override) is.
+/// them: like declaring `npm:prettier`, saying *which* skill to install is not
+/// a gate. Only a custom `endpoint` (or an insecure/mirror override) is.
 const SKILL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "mirror"];
 
 /// Keys under one `[deps.<provider>]` entry that redirect where bytes come from.
@@ -226,8 +267,8 @@ const DEPS_SOURCE_KEYS: &[&str] = &["index", "extra_index", "registry", "insecur
 /// the user did not otherwise ask to run. Same class as `tools.<name>.allow_builds`.
 const DEPS_BUILD_KEYS: &[&str] = &["allow_build_from_source"];
 
-/// Does this `[deps.<provider>.env]` variable *name* redirect where packages are
-/// fetched from?
+/// Does this `[deps.<provider>.env]` variable *name* redirect where packages
+/// are fetched from?
 ///
 /// This check exists because omitting it left a hole: `index` was gated while
 /// `env = { NPM_CONFIG_REGISTRY = "https://…" }` achieved exactly the same
@@ -265,10 +306,12 @@ const ALLOW_BUILDS_OPTION: &str = "allow_builds";
 /// It can act on `sources` and `registries`: the shim performs a registry
 /// preflight before running a package manager, so those genuinely decide where
 /// a subprocess it starts will fetch from. It cannot act on `syspkg` (read only
-/// by `osdk pkg`, and installing needs `osdk pkg apply --yes`) or on
-/// `task_config` (read only by `osdk run` / `osdk task`).
+/// by `osdk pkg`, and installing needs `osdk pkg apply --yes`), on
+/// `task_config` (read only by `osdk run` / `osdk task`), on `deps` (the shim
+/// never materializes dependencies), or on `models` (model bytes are content,
+/// never executed by osdk).
 ///
-/// Gating those two here bought no safety and cost a great deal: adding a
+/// Gating those here bought no safety and cost a great deal: adding a
 /// `[syspkg]` block to a project made `cargo --version` fail in that directory
 /// with "project config is not trusted" -- a refusal about installing system
 /// packages, raised by a command that installs nothing. And because trust is
@@ -276,9 +319,9 @@ const ALLOW_BUILDS_OPTION: &str = "allow_builds";
 /// tool again. That is the wolf-crying this module warns about, in the one place
 /// where it also breaks the build.
 ///
-/// `osdk install`, `osdk pkg` and `osdk run` still evaluate the full set: the
-/// narrowing is the shim's alone, and each of those paths reaches keys the shim
-/// never does.
+/// `osdk install`, `osdk pkg` and `osdk run` select their own requirement set
+/// by scope: the narrowing is the shim's alone, and each of those paths
+/// reaches keys the shim never does.
 pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
     // Match on the top-level table: a requirement key is either a bare table
     // name or `table.key`.
@@ -298,13 +341,20 @@ pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
     }
 }
 
-/// Collect every key in this config that requires review, in reporting order.
+/// Collect every key in this config that requires review for one of the given
+/// scopes, in reporting order.
 ///
-/// An empty result means the config is safe to load with no trust record.
-pub fn trust_requirements(path: &Path) -> Result<Vec<TrustRequirement>> {
+/// An empty result means the config is safe for this command with no trust
+/// record.
+pub fn trust_requirements(path: &Path, scopes: &[Scope]) -> Result<Vec<TrustRequirement>> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::io(path, error))?;
     let value: toml::Value = toml::from_str(&text)?;
-    Ok(collect_requirements(&value))
+    Ok(collect_requirements(&value, scopes))
+}
+
+/// Whether the config contains anything trust-relevant in any scope.
+pub fn requires_trust(path: &Path) -> Result<bool> {
+    Ok(!trust_requirements(path, &Scope::ALL)?.is_empty())
 }
 
 /// Render the requirements as indented `key -- reason` lines for a message.
@@ -321,7 +371,7 @@ pub fn describe_requirements(requirements: &[TrustRequirement]) -> String {
         .collect()
 }
 
-fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
+fn collect_requirements(value: &toml::Value, scopes: &[Scope]) -> Vec<TrustRequirement> {
     let Some(table) = value.as_table() else {
         return Vec::new();
     };
@@ -329,31 +379,110 @@ fn collect_requirements(value: &toml::Value) -> Vec<TrustRequirement> {
 
     for (key, value) in table {
         match key.as_str() {
-            "settings" => collect_settings_requirements(value, &mut found),
-            "tools" => collect_tools_requirements(value, &mut found),
-            "models" => collect_models_requirements(value, &mut found),
-            "deps" => collect_deps_requirements(value, &mut found),
-            "skills" => collect_skills_requirements(value, &mut found),
-            "aliases" => {}
-            // Declaring a task is not running one; see TRUST_REQUIRING_TABLES.
-            "tasks" => {}
+            "settings" if scopes_include(scopes, Scope::Install) => {
+                collect_settings_requirements(value, &mut found)
+            }
+            "tools" if scopes_include(scopes, Scope::Install) => {
+                collect_tools_requirements(value, &mut found)
+            }
+            "skills" if scopes_include(scopes, Scope::Install) => {
+                collect_skills_requirements(value, &mut found)
+            }
+            "deps" if scopes_include(scopes, Scope::Deps) => {
+                collect_deps_requirements(value, &mut found)
+            }
+            "syspkg" if scopes_include(scopes, Scope::SystemPackages) => {
+                collect_syspkg_requirement(value, &mut found)
+            }
+            // Whole-table requirements, when one of their scopes is present.
+            name if WHOLE_TABLE_REQUIREMENTS
+                .iter()
+                .any(|(table, _, _)| *table == name) =>
+            {
+                let Some((_, reason, table_scopes)) = WHOLE_TABLE_REQUIREMENTS
+                    .iter()
+                    .find(|(table, _, _)| *table == name)
+                else {
+                    continue;
+                };
+                if table_scopes.iter().any(|scope| scopes.contains(scope)) {
+                    found.push(TrustRequirement {
+                        key: name.to_string(),
+                        reason: *reason,
+                    });
+                }
+            }
+            "aliases" | "tasks" | "models" | "settings" | "tools" | "skills" | "deps"
+            | "syspkg" => {
+                // Reachable when the scope that inspects it is absent: the
+                // table stays unread for this command.
+            }
             other => {
                 debug_assert!(!INSPECTED_TABLES.contains(&other));
-                let reason = TRUST_REQUIRING_TABLES
-                    .iter()
-                    .find(|(name, _)| *name == other)
-                    .map(|(_, reason)| *reason)
-                    // An unrecognized top-level table is fail-closed: a table
-                    // this build cannot interpret cannot be shown harmless.
-                    .unwrap_or(TrustReason::ExecutesCode);
-                found.push(TrustRequirement {
-                    key: other.to_string(),
-                    reason,
-                });
+                // An unrecognized top-level table is fail-closed for any acting
+                // command: a table this build cannot interpret cannot be shown
+                // harmless. A command with no scopes acts on nothing, so it is
+                // not gated.
+                if !scopes.is_empty() {
+                    found.push(TrustRequirement {
+                        key: other.to_string(),
+                        reason: TrustReason::ExecutesCode,
+                    });
+                }
             }
         }
     }
     found
+}
+
+/// Whether a package manager can exist on this operating system at all.
+///
+/// A distro manager is Linux-only, winget Windows-only, brew macOS-only. An
+/// `apt:` entry with no platform filter still cannot execute on Windows, so
+/// like an explicit `os` restriction it must not gate a host that can never
+/// run it.
+fn manager_exists_on(manager: &crate::syspkg::ManagerKind, os: crate::platform::Os) -> bool {
+    use crate::platform::Os;
+    match manager {
+        crate::syspkg::ManagerKind::Winget => os == Os::Windows,
+        crate::syspkg::ManagerKind::Homebrew => os == Os::Macos,
+        crate::syspkg::ManagerKind::Distro(_) => os == Os::Linux,
+    }
+}
+
+/// Add a `syspkg` requirement only when the table actually asks this machine
+/// to install something.
+///
+/// This is the narrowing that was missing: the table used to gate every
+/// command regardless of whether a single requested package could run here.
+/// Now a `[syspkg]` demands nothing when its packages are restricted to
+/// other operating systems, name managers that cannot exist on this OS, or
+/// name managers the table excludes.
+fn collect_syspkg_requirement(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let config: crate::syspkg::SyspkgConfig = match value.clone().try_into() {
+        Ok(config) => config,
+        // A malformed `syspkg` cannot be shown harmless: fail closed.
+        Err(_) => {
+            found.push(TrustRequirement {
+                key: "syspkg".into(),
+                reason: TrustReason::ExecutesCode,
+            });
+            return;
+        }
+    };
+    let platform = crate::platform::Platform::current();
+    let (parsed, _) = config.parsed_packages();
+    let applies_here = parsed.iter().any(|(key, request)| {
+        config.allows(key.manager)
+            && manager_exists_on(&key.manager, platform.os)
+            && request.applies_to(&platform)
+    });
+    if applies_here {
+        found.push(TrustRequirement {
+            key: "syspkg".into(),
+            reason: TrustReason::ExecutesCode,
+        });
+    }
 }
 
 fn collect_settings_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
@@ -428,38 +557,6 @@ fn collect_tools_requirements(value: &toml::Value, found: &mut Vec<TrustRequirem
     }
 }
 
-/// Inspect `[models]` entries for keys that redirect or weaken the byte source.
-///
-/// Declaring what to fetch (`source`, `include`, `exclude`, `variant`, `when`)
-/// and which consumer views to render (`views`) is never a reason to ask for
-/// trust -- like declaring an npm dependency, it runs nothing. An explicit
-/// `endpoint`/custom URL/`insecure` flag is, and is reported per model so the
-/// message names the offending entry.
-fn collect_models_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
-    let Some(models) = value.as_table() else {
-        // A malformed `models` table cannot be shown harmless.
-        found.push(TrustRequirement {
-            key: "models".into(),
-            reason: TrustReason::WeakensVerification,
-        });
-        return;
-    };
-    for (name, entry) in models {
-        let Some(fields) = entry.as_table() else {
-            continue;
-        };
-        for source_key in fields
-            .keys()
-            .filter(|k| MODEL_SOURCE_KEYS.contains(&k.as_str()) || k.as_str().contains("endpoint"))
-        {
-            found.push(TrustRequirement {
-                key: format!("models.{name}.{source_key}"),
-                reason: TrustReason::WeakensVerification,
-            });
-        }
-    }
-}
-
 /// Inspect `[skills]` entries for keys that redirect the byte source.
 ///
 /// The `[skills]` table flattens two kinds of key: top-level defaults
@@ -505,8 +602,8 @@ fn collect_skills_requirements(value: &toml::Value, found: &mut Vec<TrustRequire
 /// `YARN_ENABLE_SCRIPTS=false`) by default -- so enabling `[deps.pnpm]` executes
 /// nothing the package publisher did not already ship as plain files.
 ///
-/// Two things do change it, and they are reported per entry so the message names
-/// the provider:
+/// Two things do change it, and they are reported per provider so the message
+/// names the provider:
 /// - a custom `index`/`registry` redirects where bytes come from
 ///   (`WeakensVerification`, same class as `sources`);
 /// - `allow_build_from_source` runs build and lifecycle scripts on this machine
@@ -618,13 +715,14 @@ pub fn normalized_hash(path: &Path) -> Result<String> {
 ///
 /// Driven by the same requirement list as the gate, so the two cannot drift: a
 /// key that is not a reason to ask for trust is also not a reason to
-/// invalidate it.
+/// invalidate it. The union of every scope is used because one stored record
+/// is what gets matched whatever command is later run.
 fn governed_subset(value: &toml::Value) -> toml::Value {
     let mut subset = toml::value::Table::new();
     let Some(table) = value.as_table() else {
         return toml::Value::Table(subset);
     };
-    for requirement in collect_requirements(value) {
+    for requirement in collect_requirements(value, &Scope::ALL) {
         let segments: Vec<&str> = requirement.key.split('.').collect();
         let Some(head) = segments.first() else {
             continue;
@@ -632,8 +730,9 @@ fn governed_subset(value: &toml::Value) -> toml::Value {
         let Some(head_value) = table.get(*head) else {
             continue;
         };
-        // A whole-table reason (`syspkg`, `sources`, an unknown table, or any
-        // single-segment key) pins that value's entire content.
+        // A whole-table reason (`sources`, `registries`, `task_config`,
+        // `syspkg`, or any single-segment key) pins that value's entire
+        // content.
         if segments.len() == 1 {
             subset.insert((*head).to_string(), head_value.clone());
             continue;
@@ -648,7 +747,7 @@ fn governed_subset(value: &toml::Value) -> toml::Value {
         // Everything else is a dotted path to one governed leaf, and only that
         // leaf is projected. Descending the full path -- instead of stopping
         // two levels deep -- is the fix: the previous code copied a whole
-        // `[deps.<p>]` / `[models.<n>]` / `[skills.<n>]` entry whenever one key
+        // `[deps.<p>]` / `[skills.<n>]` entry whenever one key
         // inside it was governed, so editing any safe sibling (`dir`,
         // `installer`, a version bump, an unrelated env var) silently
         // invalidated a record that was still valid.
@@ -699,10 +798,6 @@ fn insert_path(root: &mut toml::value::Table, path: &[&str], value: toml::Value)
         node = table;
     }
     node.insert((*last).to_string(), value);
-}
-
-pub fn requires_trust(path: &Path) -> Result<bool> {
-    Ok(!trust_requirements(path)?.is_empty())
 }
 
 pub fn is_trusted(
@@ -761,54 +856,38 @@ pub fn list(config_dir: &Path) -> Result<Vec<TrustRecord>> {
 
 /// What a stored trust record is currently worth.
 ///
-/// `list` and `prune` must agree on this, so it is derived once here rather than
-/// re-implemented per command: a `prune` that classified records differently from
-/// what `list` showed would delete something the user had just been told was
-/// still needed.
+/// `list` and `prune` must agree on this, so it is derived once here rather
+/// than re-implementing per command: a `prune` that classified records
+/// differently from what `list` showed would delete something the user had
+/// just been told was still needed.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordState {
-    /// The file is present and its governed keys still hash to the record.
+    /// File exists and its governed content matches the record.
     Active,
-    /// The file is present but its governed keys changed. The project is still
-    /// there; it needs reviewing and trusting again. **Never prunable** -- this is
-    /// a live project mid-edit, and dropping the record would silently turn into
-    /// "untrusted" with nothing explaining why.
+    /// File exists but governed content changed.
     Changed,
-    /// The path no longer resolves to a file, while its parent directory does
-    /// exist. The record cannot apply again unless the file comes back.
+    /// Config file is gone, parent directory still exists.
     Missing,
-    /// Neither the file nor its parent directory resolves.
-    ///
-    /// Kept apart from `Missing` because on Windows this is what an unmounted
-    /// drive looks like -- a USB disk, a network share, a WSL mount. Treating it
-    /// as prunable garbage would delete valid approvals whenever a volume happened
-    /// to be detached, and the user would only discover it later as an
-    /// unexplained "untrusted".
+    /// Neither the file nor its parent can be reached.
     Unreachable,
 }
 
 impl RecordState {
-    /// Whether dropping this record loses nothing.
-    ///
-    /// Only `Missing` qualifies. In particular `Changed` does not: the judgement
-    /// has to be "this record can never apply again", not "this record does not
-    /// apply right now".
     pub fn is_prunable(self) -> bool {
-        matches!(self, RecordState::Missing)
+        matches!(self, Self::Missing)
     }
 
-    /// Catalog key for the label shown to the user.
     pub fn label_key(self) -> &'static str {
         match self {
-            RecordState::Active => "label.trust.active",
-            RecordState::Changed => "label.trust.changed",
-            RecordState::Missing => "label.trust.missing",
-            RecordState::Unreachable => "label.trust.unreachable",
+            Self::Active => "trust.state.active",
+            Self::Changed => "trust.state.changed",
+            Self::Missing => "trust.state.missing",
+            Self::Unreachable => "trust.state.unreachable",
         }
     }
 }
 
-/// Classify one stored record against the filesystem.
 pub fn record_state(config_dir: &Path, record: &TrustRecord) -> RecordState {
     if record.path.is_file() {
         return match is_trusted(config_dir, &record.path, None) {
@@ -826,7 +905,6 @@ pub fn record_state(config_dir: &Path, record: &TrustRecord) -> RecordState {
     }
 }
 
-/// Every stored record with its current state.
 pub fn list_with_state(config_dir: &Path) -> Result<Vec<(TrustRecord, RecordState)>> {
     Ok(list(config_dir)?
         .into_iter()
@@ -837,27 +915,19 @@ pub fn list_with_state(config_dir: &Path) -> Result<Vec<(TrustRecord, RecordStat
         .collect())
 }
 
-/// Drop every record whose file can never apply again, returning what was removed.
-///
-/// Deliberately keyed on [`RecordState::is_prunable`] rather than on
-/// `is_trusted`: the latter is also false for a config that is merely mid-edit,
-/// so pruning by it would revoke approvals for projects still in use.
 pub fn prune(config_dir: &Path) -> Result<Vec<TrustRecord>> {
-    let _lock = FileLock::acquire(store_lock_path(config_dir))?;
-    let mut store = read_store(config_dir)?;
-    let mut removed = Vec::new();
-    store.configs.retain(|record| {
-        if record_state(config_dir, record).is_prunable() {
-            removed.push(record.clone());
-            false
-        } else {
-            true
-        }
-    });
-    if !removed.is_empty() {
-        write_store(config_dir, &store)?;
-    }
-    Ok(removed)
+    update_store(config_dir, |store| {
+        let mut removed = Vec::new();
+        store.configs.retain(|record| {
+            let state = record_state(config_dir, record);
+            let prunable = state.is_prunable();
+            if prunable {
+                removed.push(record.clone());
+            }
+            !prunable
+        });
+        (removed, true)
+    })
 }
 
 fn canonical_existing(path: &Path) -> Result<PathBuf> {
@@ -944,9 +1014,9 @@ fn write_store(config_dir: &Path, store: &TrustStore) -> Result<()> {
     crate::fs::sync_parent(config_dir).map_err(|error| Error::io(config_dir, error))?;
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{mpsc, Arc, Barrier};
     use std::time::Duration;
 
     use super::*;
@@ -987,7 +1057,7 @@ mod tests {
         assert_ne!(original.hash, updated.hash);
         assert!(is_trusted(&config_dir, &config, None).unwrap());
         assert_eq!(
-            std::fs::read_to_string(&legacy_temporary).unwrap(),
+            std::fs::read_to_string(legacy_temporary).unwrap(),
             "do not overwrite"
         );
         assert!(untrust(&config_dir, &config).unwrap());
@@ -1023,12 +1093,12 @@ mod tests {
             configs.push(config);
         }
 
-        let barrier = Arc::new(Barrier::new(WRITERS));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
         let handles: Vec<_> = configs
             .iter()
             .cloned()
             .map(|config| {
-                let barrier = Arc::clone(&barrier);
+                let barrier = std::sync::Arc::clone(&barrier);
                 let config_dir = config_dir.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
@@ -1061,8 +1131,8 @@ mod tests {
         std::fs::write(&config, "[settings]\nvalue = 1\n").unwrap();
 
         let lock = FileLock::acquire(store_lock_path(&config_dir)).unwrap();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let trust_config_dir = config_dir.clone();
         let trust_config = config.clone();
         let handle = std::thread::spawn(move || {
@@ -1074,7 +1144,7 @@ mod tests {
         started_rx.recv().unwrap();
         assert!(matches!(
             done_rx.recv_timeout(Duration::from_millis(250)),
-            Err(mpsc::RecvTimeoutError::Timeout)
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
         drop(lock);
         done_rx
@@ -1084,8 +1154,8 @@ mod tests {
         handle.join().unwrap();
 
         let lock = FileLock::acquire(store_lock_path(&config_dir)).unwrap();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let untrust_config_dir = config_dir.clone();
         let untrust_config = config.clone();
         let handle = std::thread::spawn(move || {
@@ -1097,7 +1167,7 @@ mod tests {
         started_rx.recv().unwrap();
         assert!(matches!(
             done_rx.recv_timeout(Duration::from_millis(250)),
-            Err(mpsc::RecvTimeoutError::Timeout)
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
         drop(lock);
         assert!(done_rx
@@ -1179,7 +1249,7 @@ mod tests {
             "[tools]\nbundler = \"npm:esbuild[allow_builds=true]@0.21\"\n",
         ] {
             std::fs::write(&path, body).unwrap();
-            let found = trust_requirements(&path).unwrap();
+            let found = trust_requirements(&path, &[Scope::Install]).unwrap();
             assert_eq!(found.len(), 1, "{body}");
             assert!(found[0].key.ends_with(".allow_builds"), "{body}");
             assert_eq!(found[0].reason, TrustReason::ExecutesCode, "{body}");
@@ -1256,7 +1326,7 @@ mod tests {
             "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nlang = \"zh\"\nverify_signatures = false\nrequire_checksums = false\n",
         )
         .unwrap();
-        let found = trust_requirements(&path).unwrap();
+        let found = trust_requirements(&path, &[Scope::Install]).unwrap();
         let keys: Vec<_> = found.iter().map(|item| item.key.as_str()).collect();
         assert_eq!(
             keys,
@@ -1274,28 +1344,41 @@ mod tests {
     }
 
     #[test]
-    fn syspkg_sources_and_registries_require_trust() {
+    fn whole_table_requirements_appear_in_their_scopes() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("osdk.toml");
 
-        std::fs::write(&path, "[syspkg.packages]\n\"winget:Foo\" = \"latest\"\n").unwrap();
-        let found = trust_requirements(&path).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "syspkg");
-        assert_eq!(found[0].reason, TrustReason::ExecutesCode);
+        std::fs::write(&path, "[sources]\nselection = \"ordered\"\n").unwrap();
+        for scope in [Scope::Install, Scope::Deps] {
+            let found = trust_requirements(&path, &[scope]).unwrap();
+            assert_eq!(found.len(), 1, "{scope:?}");
+            assert_eq!(found[0].key, "sources");
+            assert_eq!(found[0].reason, TrustReason::WeakensVerification);
+        }
+        // Unrelated scopes do not see it.
+        for scope in [Scope::Run, Scope::SystemPackages] {
+            assert!(trust_requirements(&path, &[scope]).unwrap().is_empty());
+        }
 
-        for (body, key) in [
-            ("[sources]\nselection = \"ordered\"\n", "sources"),
-            (
-                "[registries.npm]\nurls = [\"https://registry.npmjs.org/\"]\n",
-                "registries",
-            ),
-        ] {
-            std::fs::write(&path, body).unwrap();
-            let found = trust_requirements(&path).unwrap();
-            assert_eq!(found.len(), 1, "{body}");
-            assert_eq!(found[0].key, key);
-            assert_eq!(found[0].reason, TrustReason::WeakensVerification, "{body}");
+        std::fs::write(
+            &path,
+            "[registries.npm]\nurls = [\"https://registry.npmjs.org/\"]\n",
+        )
+        .unwrap();
+        for scope in [Scope::Install, Scope::Deps] {
+            let found = trust_requirements(&path, &[scope]).unwrap();
+            assert_eq!(found.len(), 1, "{scope:?}");
+            assert_eq!(found[0].key, "registries");
+            assert_eq!(found[0].reason, TrustReason::WeakensVerification);
+        }
+
+        std::fs::write(&path, "[task_config]\nshell = \"evil --run\"\n").unwrap();
+        let found = trust_requirements(&path, &[Scope::Run]).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "task_config");
+        assert_eq!(found[0].reason, TrustReason::RedirectsExecution);
+        for scope in [Scope::Install, Scope::Deps, Scope::SystemPackages] {
+            assert!(trust_requirements(&path, &[scope]).unwrap().is_empty());
         }
     }
 
@@ -1333,9 +1416,9 @@ mod tests {
         }
 
         // Never reached by the shim. `syspkg` is read only by `osdk pkg` (and
-        // only `apply --yes` installs); `task_config` only by `osdk run` /
-        // `osdk task`. Those commands evaluate the full requirement set
-        // themselves, which is where the review belongs.
+        // only `apply --yes` installs); `task_config` only by `osdk run`.
+        // Those commands evaluate the full requirement set themselves, which
+        // is where the review belongs.
         for key in ["syspkg", "task_config"] {
             assert!(
                 !dispatch_affecting(key),
@@ -1348,76 +1431,61 @@ mod tests {
         assert!(dispatch_affecting("something_new_from_the_future"));
     }
 
-    /// Declaring a model is like declaring a dependency: it runs nothing and
-    /// fetches nothing on its own, so `source`/`include`/`variant`/`when`/`views`
-    /// must not demand trust (research §6.4). Only keys that actually choose the
-    /// byte source (`endpoint`, a custom URL, an `insecure` toggle) do, and they
-    /// are reported per model rather than gating the whole table.
+    /// Models are content, never executed by osdk and never run as scripts:
+    /// no key inside `[models.<name>]` -- not `endpoint`, not `insecure`, not
+    /// a custom URL -- demands trust from any command. Downloads verify
+    /// against pinned digests, so a redirected endpoint cannot turn a
+    /// content fetch into code execution.
     #[test]
-    fn declaring_a_model_is_safe_but_an_endpoint_override_requires_trust() {
+    fn model_config_never_requires_trust_in_any_scope() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("osdk.toml");
 
-        // A full declaration with no source-redirecting key needs no trust.
-        let full = concat!(
-            "[models.sd]\n",
-            "source = \"hf:runwayml/stable-diffusion-v1-5@main\"\n",
-            "include = [\"*.safetensors\"]\n",
-            "variant = \"fp16\"\n",
-            "[models.sd.views.comfyui.map]\n",
-            "unet = \"diffusion_models\"\n",
-            "vae = \"vae\"\n",
-        );
-        std::fs::write(&path, full).unwrap();
-        assert!(
-            !requires_trust(&path).unwrap(),
-            "a model declaration with no endpoint must need no trust"
-        );
-
-        // An endpoint override is the one thing that does.
-        std::fs::write(
-            &path,
+        for body in [
+            concat!(
+                "[models.sd]\n",
+                "source = \"hf:runwayml/stable-diffusion-v1-5@main\"\n",
+                "include = [\"*.safetensors\"]\n",
+                "variant = \"fp16\"\n",
+            ),
             concat!(
                 "[models.sd]\n",
                 "source = \"hf:runwayml/stable-diffusion-v1-5@main\"\n",
                 "endpoint = \"https://mirror.example.com\"\n",
             ),
-        )
-        .unwrap();
-        let found = trust_requirements(&path).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "models.sd.endpoint");
-        assert_eq!(found[0].reason, TrustReason::WeakensVerification);
-
-        // insecure is reported under its own key, not the whole table.
-        std::fs::write(
-            &path,
-            "[models.sd]
-source = \"hf:o/r@main\"
-insecure = true
-",
-        )
-        .unwrap();
-        let found = trust_requirements(&path).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "models.sd.insecure");
+            "[models.sd]\nsource = \"hf:o/r@main\"\ninsecure = true\n",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            for scope in Scope::ALL {
+                assert!(
+                    trust_requirements(&path, &[scope]).unwrap().is_empty(),
+                    "model config must not gate {scope:?}: {body}"
+                );
+            }
+            assert!(!requires_trust(&path).unwrap());
+        }
     }
 
-    /// Even when a model *does* require trust (an endpoint override), that
-    /// requirement must never block the shim: the shim cannot reach model
-    /// sources, and gating it would make `cargo --version` fail in a project
-    /// that merely declares models. The `install`/`sync` paths still see it.
+    /// Model keys stay out of the trust identity: however a model entry is
+    /// edited, the hash does not move and a record never invalidates.
     #[test]
-    fn model_requirements_never_affect_tool_dispatch() {
-        let dispatch_affecting = |key: &str| {
-            affects_tool_dispatch(&TrustRequirement {
-                key: key.to_string(),
-                reason: TrustReason::WeakensVerification,
-            })
-        };
-        assert!(!dispatch_affecting("models"));
-        assert!(!dispatch_affecting("models.sd.endpoint"));
-        assert!(!dispatch_affecting("models.sd.insecure"));
+    fn model_edits_never_change_the_trust_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+
+        std::fs::write(
+            &path,
+            "[models.sd]\nsource = \"hf:a/b@main\"\nendpoint = \"https://m.example.com\"\n",
+        )
+        .unwrap();
+        let before = normalized_hash(&path).unwrap();
+
+        std::fs::write(
+            &path,
+            "[models.sd]\nsource = \"hf:a/b@other\"\nendpoint = \"https://other.example.com\"\n\n[models.another]\nsource = \"ms:x/y@z\"\n",
+        )
+        .unwrap();
+        assert_eq!(before, normalized_hash(&path).unwrap());
     }
 
     /// A skill declaration is harmless; only an endpoint override needs trust,
@@ -1455,7 +1523,7 @@ insecure = true
             ),
         )
         .unwrap();
-        let found = trust_requirements(&path).unwrap();
+        let found = trust_requirements(&path, &[Scope::Install]).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "skills.web-design.endpoint");
         assert_eq!(found[0].reason, TrustReason::WeakensVerification);
@@ -1476,56 +1544,10 @@ insecure = true
         assert!(!dispatch_affecting("skills.web-design.endpoint"));
     }
 
-    /// An endpoint is pinned leaf by leaf, not as the whole model entry: the
-    /// trust identity is exactly the governed key. Editing a harmless
-    /// declaration field -- whether a sibling field inside the endpoint-carrying
-    /// entry or a different, endpoint-free model -- must not invalidate a
-    /// record. Only changing the endpoint itself re-prompts. (The whole-entry
-    /// granularity is reserved for `tools.<name>.allow_builds`, where the
-    /// package identity is what was reviewed.)
-    #[test]
-    fn an_endpoint_pins_only_its_own_key_not_sibling_fields_or_models() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("osdk.toml");
-        let config_dir = temp.path().join("state");
-
-        let body = |sd_include: &str, other_include: &str| {
-            format!(
-                "[models.sd]\nsource = \"hf:a/b@main\"\nendpoint = \"https://m.example.com\"\ninclude = [{sd_include}]\n\n                 [models.plain]\nsource = \"hf:c/d@main\"\ninclude = [{other_include}]\n"
-            )
-        };
-
-        std::fs::write(&path, body("\"a\"", "\"x\"")).unwrap();
-        trust(&config_dir, &path).unwrap();
-
-        // Editing a different, endpoint-free model keeps the record.
-        std::fs::write(&path, body("\"a\"", "\"x\", \"y\"")).unwrap();
-        assert!(
-            is_trusted(&config_dir, &path, None).unwrap(),
-            "editing a different endpoint-free model must not invalidate trust"
-        );
-
-        // Editing a harmless sibling field inside the endpoint-carrying entry
-        // also keeps the record: only the endpoint is governed.
-        std::fs::write(&path, body("\"a\", \"b\"", "\"x\", \"y\"")).unwrap();
-        assert!(
-            is_trusted(&config_dir, &path, None).unwrap(),
-            "editing a non-governed field of the reviewed model must survive"
-        );
-
-        // Changing the endpoint re-prompts (the direct case).
-        std::fs::write(
-            &path,
-            "[models.sd]\nsource = \"hf:a/b@main\"\nendpoint = \"https://other.example.com\"\n             \n[models.plain]\nsource = \"hf:c/d@main\"\n",
-        )
-        .unwrap();
-        assert!(!is_trusted(&config_dir, &path, None).unwrap());
-    }
-
     /// Enabling a built-in deps provider must need no trust: osdk passes
     /// `--ignore-scripts` (or yarn berry's env equivalent) by default, so nothing
     /// the publisher did not ship as plain files runs. This is the same judgement
-    /// `TrustReason`'s own docs make about declaring a package.
+    /// `TrustReason`'s docs make about declaring a package.
     #[test]
     fn enabling_a_builtin_deps_provider_needs_no_trust() {
         let temp = tempfile::tempdir().unwrap();
@@ -1562,7 +1584,7 @@ insecure = true
                 "deps.pnpm.index",
             ),
             (
-                "[deps.npm]\nextra_index = \"https://other.example.com/\"\n",
+                "[deps.npm]\nextra_index = \"https://other.example.com\"\n",
                 "deps.npm.extra_index",
             ),
             (
@@ -1572,7 +1594,7 @@ insecure = true
             ("[deps.npm]\ninsecure = true\n", "deps.npm.insecure"),
         ] {
             std::fs::write(&path, body).unwrap();
-            let found = trust_requirements(&path).unwrap();
+            let found = trust_requirements(&path, &[Scope::Deps]).unwrap();
             assert_eq!(found.len(), 1, "{body}");
             assert_eq!(found[0].key, key, "{body}");
             assert_eq!(
@@ -1583,7 +1605,7 @@ insecure = true
         }
 
         std::fs::write(&path, "[deps.pnpm]\nallow_build_from_source = true\n").unwrap();
-        let found = trust_requirements(&path).unwrap();
+        let found = trust_requirements(&path, &[Scope::Deps]).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "deps.pnpm.allow_build_from_source");
         assert_eq!(found[0].reason, TrustReason::ExecutesCode);
@@ -1614,10 +1636,10 @@ insecure = true
         ] {
             std::fs::write(
                 &path,
-                format!("[deps.pnpm.env]\n\"{variable}\" = \"https://r.example.com/\"\n"),
+                format!("[deps.pnpm.env]\n\"{variable}\" = \"https://r.example.com\"\n"),
             )
             .unwrap();
-            let found = trust_requirements(&path).unwrap();
+            let found = trust_requirements(&path, &[Scope::Deps]).unwrap();
             assert_eq!(found.len(), 1, "{variable}");
             assert_eq!(found[0].key, key, "{variable}");
             assert_eq!(
@@ -1694,7 +1716,7 @@ insecure = true
             ),
         )
         .unwrap();
-        let found = trust_requirements(&path).unwrap();
+        let found = trust_requirements(&path, &[Scope::Deps]).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "deps.codegen.run");
         assert_eq!(found[0].reason, TrustReason::ExecutesCode);
@@ -1718,6 +1740,82 @@ insecure = true
         assert!(!dispatch_affecting("deps.pnpm.allow_build_from_source"));
     }
 
+    /// `[syspkg]` gates only a command that can install the packages, and only
+    /// when some requested package actually applies to this machine.
+    #[test]
+    fn syspkg_gates_only_when_a_package_applies_to_this_machine() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("osdk.toml");
+        let host_os = crate::platform::Os::current().config_token();
+        let other_os = if host_os == "windows" {
+            "linux"
+        } else {
+            "windows"
+        };
+        // A package whose manager is native to this host.
+        let host_package = if host_os == "windows" {
+            "winget:Foo"
+        } else {
+            "apt:build-essential"
+        };
+
+        // It targets a different OS: nothing to install here.
+        std::fs::write(
+            &path,
+            format!(
+                "[syspkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{other_os}\" }}\n"
+            ),
+        )
+        .unwrap();
+        assert!(trust_requirements(&path, &[Scope::SystemPackages])
+            .unwrap()
+            .is_empty());
+        assert!(!requires_trust(&path).unwrap());
+
+        // A package that does apply gates the command.
+        std::fs::write(
+            &path,
+            format!(
+                "[syspkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+            ),
+        )
+        .unwrap();
+        let found = trust_requirements(&path, &[Scope::SystemPackages]).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "syspkg");
+        assert_eq!(found[0].reason, TrustReason::ExecutesCode);
+
+        // An apt entry can never apply on a non-Linux host even when its
+        // filter says so: the manager does not exist there.
+        if host_os != "linux" {
+            std::fs::write(
+                &path,
+                format!("[syspkg.packages]\n\"apt:build-essential\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"),
+            )
+            .unwrap();
+            assert!(trust_requirements(&path, &[Scope::SystemPackages])
+                .unwrap()
+                .is_empty());
+        }
+
+        // A manager excluded by the allowlist does not count.
+        let excluded_manager = if host_os == "windows" {
+            "apt"
+        } else {
+            "winget"
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "[syspkg]\nmanagers = [\"{excluded_manager}\"]\n[syspkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+            ),
+        )
+        .unwrap();
+        assert!(trust_requirements(&path, &[Scope::SystemPackages])
+            .unwrap()
+            .is_empty());
+    }
+
     /// An unknown top-level table, and an unknown `[settings]` key, must both
     /// fail closed. A build that cannot interpret a key cannot clear it.
     #[test]
@@ -1726,25 +1824,17 @@ insecure = true
         let path = temp.path().join("osdk.toml");
 
         std::fs::write(&path, "[future_capability]\nvalue = 1\n").unwrap();
-        let found = trust_requirements(&path).unwrap();
+        let found = trust_requirements(&path, &Scope::ALL).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "future_capability");
         assert_eq!(found[0].reason, TrustReason::ExecutesCode);
 
         std::fs::write(&path, "[settings]\nfuture_switch = true\n").unwrap();
-        let found = trust_requirements(&path).unwrap();
+        let found = trust_requirements(&path, &[Scope::Install]).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "settings.future_switch");
     }
 
-    /// Every `Settings` field must appear on exactly one of the two lists.
-    ///
-    /// Without this, adding a field is silently classified by the fallback.
-    /// That fallback is fail-closed so a new field cannot become a hole, but an
-    /// unclassified field also cannot explain itself in the refusal, and a
-    /// field that *is* safe would needlessly demand approval forever. The field
-    /// names come from serializing a default `Settings`, so this test tracks the
-    /// struct rather than a hand-copied list that would drift.
     /// Declaring a task must not demand a trust record.
     ///
     /// Nothing runs a task implicitly -- no postinstall, no lifecycle hook --
@@ -1766,7 +1856,7 @@ depends = ["build"]
         )
         .unwrap();
         assert_eq!(
-            collect_requirements(&value),
+            collect_requirements(&value, &Scope::ALL),
             Vec::new(),
             "a config that only declares tasks must load without a trust record"
         );
@@ -1779,7 +1869,7 @@ depends = ["build"]
     #[test]
     fn task_config_still_requires_trust_because_it_picks_the_interpreter() {
         let value: toml::Value = toml::from_str("[task_config]\nshell = \"evil --run\"\n").unwrap();
-        let found = collect_requirements(&value);
+        let found = collect_requirements(&value, &[Scope::Run]);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].key, "task_config");
         // Not ExecutesCode: nothing here runs during install, and saying so
@@ -1800,7 +1890,7 @@ mode = "env"
 "#,
         )
         .unwrap();
-        let keys: Vec<String> = collect_requirements(&value)
+        let keys: Vec<String> = collect_requirements(&value, &Scope::ALL)
             .into_iter()
             .map(|requirement| requirement.key)
             .collect();
@@ -1810,6 +1900,7 @@ mode = "env"
             "tasks must neither add nor remove"
         );
     }
+
     #[test]
     fn settings_allowlist_covers_every_field() {
         let settings = crate::config::Settings::default();
@@ -1874,16 +1965,23 @@ mode = "env"
         // also invalidate it.
         write("[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n");
         assert!(is_trusted(&config_dir, &config, None).unwrap());
-        write(
-            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[syspkg.packages]\n\"winget:Foo\" = \"latest\"\n",
-        );
+        // A Linux-applicable package. On non-Linux hosts use winget, which is
+        // applicable everywhere by default.
+        let applicable_package = if cfg!(target_os = "linux") {
+            "\"apt:gcc\" = \"latest\""
+        } else {
+            "\"winget:Foo\" = \"latest\""
+        };
+        write(&format!(
+            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[syspkg.packages]\n{applicable_package}\n"
+        ));
         assert!(!is_trusted(&config_dir, &config, None).unwrap());
     }
 
-    /// Trust-requiring keys live beside safe keys inside one `[deps.<p>]`,
-    /// `[models.<n>]` or `[skills.<n>]` entry (and a governed env var lives
-    /// beside harmless ones). Only the exact governed leaf belongs to the
-    /// identity: editing a safe sibling must not invalidate a record.
+    /// Trust-requiring keys live beside safe keys inside one `[deps.<p>]` or
+    /// `[skills.<n>]` entry (and a governed env var lives beside harmless
+    /// ones). Only the exact governed leaf belongs to the identity: editing a
+    /// safe sibling must not invalidate a record.
     #[test]
     fn safe_siblings_inside_a_governed_entry_do_not_invalidate_trust() {
         let temp = tempfile::tempdir().unwrap();
@@ -1934,22 +2032,7 @@ mode = "env"
             "changing a redirecting env var must invalidate"
         );
 
-        // `[models.<n>]` pins only its source-affecting keys; a version bump is
-        // a harmless declaration.
-        write("[models.flux]\nsource = \"hf:o/r@v1\"\nendpoint = \"https://example.com/a\"\n");
-        trust(&config_dir, &config).unwrap();
-        write("[models.flux]\nsource = \"hf:o/r@v2\"\nendpoint = \"https://example.com/a\"\n");
-        assert!(
-            is_trusted(&config_dir, &config, None).unwrap(),
-            "bumping a model version must survive"
-        );
-        write("[models.flux]\nsource = \"hf:o/r@v2\"\nendpoint = \"https://example.com/b\"\n");
-        assert!(
-            !is_trusted(&config_dir, &config, None).unwrap(),
-            "changing a model endpoint must invalidate"
-        );
-
-        // `[skills.<n>]` likewise pins only source-affecting keys.
+        // `[skills.<n>]` pins only source-affecting keys.
         write("[skills.web-design]\nsource = \"github:o/r@v1\"\nendpoint = \"https://example.com/a\"\n");
         trust(&config_dir, &config).unwrap();
         write("[skills.web-design]\nsource = \"github:o/r@v2\"\nendpoint = \"https://example.com/a\"\n");
@@ -2005,7 +2088,6 @@ mode = "env"
             trust(&config_dir, &directory.join("osdk.toml")).unwrap();
         }
 
-        // Still exactly as approved.
         // Same path, different governed content.
         std::fs::write(
             changed.join("osdk.toml"),
@@ -2056,13 +2138,11 @@ mode = "env"
             .map(|record| record.path.to_string_lossy().into_owned())
             .collect();
         assert_eq!(after.len(), 2, "{after:?}");
-        assert!(
-            after.iter().any(|path| path.contains("active")),
-            "{after:?}"
-        );
+        assert!(after.iter().any(|path| path.contains("active")));
         assert!(
             after.iter().any(|path| path.contains("changed")),
-            "a changed config must keep its record: {after:?}"
+            "a changed config must keep its record: {}",
+            after.join(",")
         );
 
         // Pruning again is a no-op rather than an error.
@@ -2097,5 +2177,81 @@ mode = "env"
             "an unreachable path must not be pruned"
         );
         assert_eq!(list(&config_dir).unwrap().len(), 1);
+    }
+
+    /// The core scope contract: a config carrying one requirement of every
+    /// class is read selectively. Each scope sees only the keys it can act on.
+    #[test]
+    fn requirements_are_isolated_by_scope() {
+        let body = r#"
+[settings]
+verify_signatures = false
+
+[tools]
+node = "20"
+
+[tools.npm-tool]
+version = "npm:thing@1"
+allow_builds = true
+
+[deps.npm]
+index = "https://example.com"
+
+[task_config]
+shell = "evil"
+
+[syspkg.packages]
+"apt:gcc" = "latest"
+
+[containers]
+runtime = "docker"
+"#;
+        let value: toml::Value = toml::from_str(body).unwrap();
+
+        let install_keys: Vec<String> = collect_requirements(&value, &[Scope::Install])
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        assert_eq!(
+            install_keys,
+            vec![
+                "settings.verify_signatures".to_string(),
+                "tools.npm-tool.allow_builds".to_string(),
+            ]
+        );
+
+        let deps_keys: Vec<String> = collect_requirements(&value, &[Scope::Deps])
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        assert_eq!(deps_keys, vec!["deps.npm.index".to_string()]);
+
+        let run_keys: Vec<String> = collect_requirements(&value, &[Scope::Run])
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        assert_eq!(run_keys, vec!["task_config".to_string()]);
+
+        // SystemPackages on a non-Linux host finds no applicable package; the
+        // apt entry only applies on Linux.
+        let system_keys: Vec<String> = collect_requirements(&value, &[Scope::SystemPackages])
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        if cfg!(target_os = "linux") {
+            assert_eq!(system_keys, vec!["syspkg".to_string()]);
+        } else {
+            assert!(system_keys.is_empty());
+        }
+
+        // Container scope sees only the containers table.
+        let container_keys: Vec<String> = collect_requirements(&value, &[Scope::Container])
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        assert_eq!(container_keys, vec!["containers".to_string()]);
+
+        // A command with no scopes is never gated on anything.
+        assert!(collect_requirements(&value, &[]).is_empty());
     }
 }

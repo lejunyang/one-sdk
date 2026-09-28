@@ -1800,7 +1800,7 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
     )
     .unwrap();
 
-    let rejected = run_isolated_in(temp.path(), &project, &["--yes", "config", "list"]);
+    let rejected = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("is not trusted"));
 
@@ -1810,7 +1810,7 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
         "{}",
         String::from_utf8_lossy(&trusted.stderr)
     );
-    let accepted = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    let accepted = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(accepted.status.success());
 
     // Bumping a tool version is not a governed change: `[tools]` grants no
@@ -1822,7 +1822,7 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
         "[tools]\nnode = \"22\"\n[sources]\nselection = \"ordered\"\n",
     )
     .unwrap();
-    let bumped = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    let bumped = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(
         bumped.status.success(),
         "bumping a tool version must not invalidate trust: {}",
@@ -1836,7 +1836,7 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
         "[tools]\nnode = \"22\"\n[sources]\nselection = \"auto\"\n",
     )
     .unwrap();
-    let changed = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    let changed = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(!changed.status.success());
     let message = String::from_utf8_lossy(&changed.stderr);
     assert!(message.contains("is not trusted"), "{message}");
@@ -1853,51 +1853,47 @@ fn trust_is_content_bound_and_untrust_blocks_dangerous_project_config() {
 
     let removed = run_isolated_in(temp.path(), &project, &["untrust"]);
     assert!(removed.status.success());
-    let rejected_again = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    let rejected_again = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(!rejected_again.status.success());
 }
 
-/// Declaring `[models]` (what to fetch + which views to render) runs nothing,
-/// so a source-only declaration must not demand trust -- the same way
-/// declaring an npm dependency does not. An `endpoint` override does, because it
-/// chooses where the bytes come from. This goes through the real CLI config
-/// gate, and `affects_tool_dispatch("models..") == false` is what keeps the
-/// shim from blocking an unrelated `cargo --version` in such a project (the
-/// shim-side predicate is unit-tested in trust.rs).
+/// Model configuration gates no command whatever it contains: models are
+/// content, never executed by osdk, and downloads verify against pinned
+/// digests. Even an `endpoint`/`insecure` override is not a trust surface.
+/// A command with a scope (`deps`) must still pass in a config whose only
+/// content is an endpoint-carrying model.
 #[test]
-fn source_only_models_declaration_needs_no_trust_but_endpoint_does() {
+fn model_config_never_requires_trust_even_with_an_endpoint() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     let config = project.join("osdk.toml");
 
-    // Source + include + a view mapping: no byte-source override, no trust.
+    // Source + include + a view mapping: no gate.
     std::fs::write(
         &config,
         "[models.sd]\nsource = \"hf:runwayml/stable-diffusion-v1-5@main\"\n         include = [\"*.safetensors\"]\n         [models.sd.views.comfyui.map]\nunet = \"diffusion_models\"\n",
     )
     .unwrap();
-    let accepted = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    let accepted = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(
         accepted.status.success(),
-        "a source-only [models] declaration must need no trust: {}",
+        "a [models] declaration must need no trust: {}",
         String::from_utf8_lossy(&accepted.stderr)
     );
 
-    // Adding an endpoint to the same entry makes it trust-requiring.
+    // Endpoint on the same entry changes nothing.
     std::fs::write(
         &config,
         "[models.sd]\nsource = \"hf:runwayml/stable-diffusion-v1-5@main\"\n         endpoint = \"https://mirror.example.com\"\n",
     )
     .unwrap();
-    let rejected = run_isolated_in(temp.path(), &project, &["config", "list"]);
+    let still_accepted = run_isolated_in(temp.path(), &project, &["deps"]);
     assert!(
-        !rejected.status.success(),
-        "an endpoint override must require trust"
+        still_accepted.status.success(),
+        "an endpoint override on a model must not require trust: {}",
+        String::from_utf8_lossy(&still_accepted.stderr)
     );
-    let message = String::from_utf8_lossy(&rejected.stderr);
-    assert!(message.contains("is not trusted"), "{message}");
-    assert!(message.contains("models.sd.endpoint"), "{message}");
 }
 
 #[test]
@@ -7275,7 +7271,7 @@ fn declaring_task_roots_requires_the_same_approval_as_other_runner_defaults() {
     )
     .unwrap();
 
-    let output = run_isolated_in(root, &project, &["run", "--dry-run", "//apps/api:build"]);
+    let output = run_isolated_in(root, &project, &["run", "//apps/api:build"]);
     assert!(
         !output.status.success(),
         "running from an untrusted config that declares roots must be refused: {output:?}"
@@ -7286,7 +7282,10 @@ fn declaring_task_roots_requires_the_same_approval_as_other_runner_defaults() {
         "the refusal must name the gated table: {stderr}"
     );
 
-    // Approved, it runs.
+    // Approved, the config is usable: a real run no longer hits the gate.
+    // Dry-run is used to observe it because this harness clears PATH, so the
+    // task could not actually launch `sh` -- what matters here is that the
+    // trusted config resolves the rooted task.
     let output = run_isolated_in(
         root,
         &project,
