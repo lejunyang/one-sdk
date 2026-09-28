@@ -22,6 +22,8 @@ jobs:
       - run: cargo fmt --all --check
       - name: live smoke harness
         run: ./scripts/test-live-smoke.sh
+      - name: release contract checker scripts
+        run: ./scripts/test-release-contract-checks.sh
 
   msrv:
     runs-on: ubuntu-latest

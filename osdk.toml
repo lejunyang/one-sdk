@@ -153,6 +153,11 @@ description = "Release musl binaries are fully static ELF files"
 run = "./scripts/check-musl-static.sh"
 when = { os = "linux" }
 
+[tasks.release-contract-checks]
+description = "Failure branches of the release glibc/musl contract checkers"
+run = "./scripts/test-release-contract-checks.sh"
+when = { os = "linux" }
+
 [tasks.comfyui-view-e2e]
 description = "ComfyUI model-view end-to-end (real CLI + headless source-tree ComfyUI)"
 # Drives pull -> declarative [models] render -> extra_model_paths.yaml export ->
