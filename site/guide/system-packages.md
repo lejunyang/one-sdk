@@ -91,11 +91,13 @@ no_elevate = false
 对应仓库路径，brew 还要再分 formula 和 cask——所以 osdk 不做跨管理器的名称映射，
 要求你写明是哪一个。
 
-::: warning `[syspkg]` 需要先信任
-这个表能导致在你机器上安装软件，属于会影响执行的项目配置，因此纳入 osdk 既有的信任
-流程。未信任时任何 `pkg` 子命令都会拒绝执行并提示你先 `osdk trust`。
+::: warning `pkg apply` 需要先信任
+只有 `osdk pkg apply` 会真正安装软件，所以只有它要求先 `osdk trust`；
+`pkg status`/`plan`/`doctor` 只读，未信任也照常可用。而且只在有包**在本机适用**
+时才检查：所有条目都通过 `os` 限定为别的系统，或其管理器在本机不存在（如
+Windows 上的 apt）时，这台机器上不会有任何门。
 
-**范围仅限 `pkg` 子命令。** 声明 `[syspkg]` 不会影响该目录下别的工具：`cargo`、
+**范围只到 `pkg apply`。** 声明 `[syspkg]` 不影响该目录下别的工具：`cargo`、
 `node` 等经由 shim 分派的命令照常可用。shim 只对它自己会走到的配置把关（`sources`、
 `registries` 之类决定子进程从哪拉取的键），拦下一个它根本执行不到的 `[syspkg]`
 不会带来任何安全收益，却会让整个目录不可用——而信任绑定的是文件哈希，此后每次编辑

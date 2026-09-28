@@ -53,7 +53,7 @@ Go 原生候选在同一边界中校验精确受管 Go 版本/平台与有界构
 
 ## 信任边界
 
-CLI 初始化和 shim 都在加载项目配置前检查信任。只有 `[tools]` 与 `[aliases]` 的项目文件无需显式信任；出现 settings、sources、registries 等可影响执行或网络的顶层键时，配置必须被信任。信任身份是规范化文件路径加规范化 TOML 内容的 BLAKE3，因此内容修改或仓库移动会使记录失效；`OSDK_TRUSTED_CONFIG_PATHS` 可按规范化路径授权文件或目录。实现见 [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs)。
+CLI 初始化在加载项目配置前按**命令作用域**检查信任，shim 则在同一要求全集上只筛自己走得到的键。作用域：安装类命令检查 `settings` 的校验开关、`sources`、`registries`、`tools.allow_builds`；`run` 检查 `task_config`；`pkg apply` 只检查在本机适用的 `syspkg` 条目；`container` 操作检查 `[containers]`；`models` 不检查。信任身份是规范化文件路径加**受管键**规范化 TOML 内容的 BLAKE3，因此受管内容修改或仓库移动会使记录失效，改别的键不会；`OSDK_TRUSTED_CONFIG_PATHS` 可按规范化路径授权文件或目录。实现见 [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs)。
 
 ## `osdk.lock` 的读取语义
 

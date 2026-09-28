@@ -193,16 +193,12 @@ declarations are rebuilt on another machine by `sync` alone -- no second
 `model view add`.
 
 Trust lives in [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs):
-`models` is in `INSPECTED_TABLES` and `collect_models_requirements` inspects it
-key by key -- only keys that decide the byte source (`endpoint`/`insecure`/a
-custom URL) raise `WeakensVerification`; a plain declaration raises nothing.
-An entry carrying a governed key is folded into the normalized hash **as a whole
-entry** (the same granularity as `tools.<name>.allow_builds`), so editing that
-entry re-prompts while editing a different model does not.
-`affects_tool_dispatch` returns `false` for every `models..` key: the shim never
-reads model declarations, so they cannot break ordinary tool commands in a
-project. Both behaviours are pinned by tests that go red when the classification
-or the `false` arm is removed.
+**model configuration belongs to no scope -- no key requires trust, including
+`endpoint`.** Model bytes are content and osdk never executes them; downloads
+still verify against pinned digests, so a redirected endpoint cannot turn a
+content fetch into code execution. Model keys never enter the normalized hash,
+so editing model entries neither re-prompts nor invalidates a record.
+`affects_tool_dispatch` returns `false` for every `models..` key.
 
 ## Provider environment persistence
 

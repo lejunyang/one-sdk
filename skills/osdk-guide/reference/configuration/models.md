@@ -35,5 +35,5 @@ profile = "default"
 | `views.<kind>.profile` | 视图 profile，默认 `default` |
 | `views.<kind>.map` | 仓库相对前缀到消费者分类的映射 |
 
-`model use` 的 reference/include/exclude/variant/kind/family/derived_from/endpoint 会写入同名声明；`sync` 会识别这些字段的变化。普通模型声明不阻断工具命令；
-只有自定义 endpoint 触发信任要求。`model import` 不属于 `[models]`：本地路径不可跨机器恢复，因此只创建本机快照，不写配置或 lock。
+`model use` 的 reference/include/exclude/variant/kind/family/derived_from/endpoint 会写入同名声明；`sync` 会识别这些字段的变化。模型配置不触发
+任何信任要求：模型字节是内容，osdk 不执行它们，下载仍按锁定摘要校验。`model import` 不属于 `[models]`：本地路径不可跨机器恢复，因此只创建本机快照，不写配置或 lock。

@@ -62,7 +62,7 @@ version/platform and bounded build-critical runtime identity; see
 
 ## Trust boundary
 
-Both CLI initialization and the shim check trust before loading project configuration. A project file containing only `[tools]` and `[aliases]` needs no explicit trust. Top-level settings, sources, registries, or any other execution/network-affecting section require trust. Identity is the canonical file path plus a BLAKE3 hash of normalized TOML, so editing the content or moving the repository invalidates the record. `OSDK_TRUSTED_CONFIG_PATHS` can authorize canonical files or directories. See [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs).
+CLI initialization checks trust by **command scope** before loading the project configuration; the shim filters the same full requirement set down to the keys it reaches itself. Scopes: install commands check the verification switches in `settings`, `sources`, `registries`, and `tools.allow_builds`; `run` checks `task_config`; `pkg apply` checks only the `syspkg` entries that apply on this machine; container operations check `[containers]`; `models` are never checked. Identity is the canonical file path plus a BLAKE3 hash of the normalized TOML of the governed keys, so editing governed content or moving the repository invalidates the record while other edits do not. `OSDK_TRUSTED_CONFIG_PATHS` can authorize canonical files or directories. See [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs).
 
 ## `osdk.lock` read semantics
 

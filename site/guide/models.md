@@ -247,9 +247,8 @@ profile  = "desktop"
 view 的 `profile`/`map`；再次执行会替换同名声明。`when` 仍是直接配置字段。写错字段名会
 直接报错，不会被静默忽略。
 
-**信任（trust）语义**：普通声明不需要信任；只有 `endpoint` 或自定义 URL 等改变字节
-来源的字段需要审核。模型声明不阻断 shim；真正联网的 `model sync` 或
-`model use --sync` 执行完整信任检查。`model unuse` 是移除不受信任声明的逃生通道。
+**信任（trust）语义**：模型配置在任何命令里都不要求信任，包括写了 `endpoint`
+的条目。模型字节是内容，osdk 从不执行它们，下载仍按锁定摘要校验。
 ## 消费者视图（model view）
 
 快照按上游仓库布局存放（`unet/`、`vae/`、`text_encoder/` 平级），消费者要的是

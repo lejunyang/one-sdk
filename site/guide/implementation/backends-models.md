@@ -161,13 +161,10 @@ npm 的同一族坑）。`model sync` 复现快照后同样调用 reconcile，�
 机器上靠 `sync` 就能重建，不必重跑 `model view add`。
 
 信任分类在 [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs)：
-`models` 加入 `INSPECTED_TABLES`，由 `collect_models_requirements` 逐 key 检查——
-只有决定字节来源的 key（`endpoint`/`insecure`/自定义 URL）报 `WeakensVerification`，
-单纯声明不报。含受管 key 的**整条 model 条目**被纳入 normalized hash（与
-`tools.<name>.allow_builds` 同级粒度），所以改那条目会重新提示，改别的模型不会。
-`affects_tool_dispatch` 对任何 `models..` key 返回 `false`：shim 不读模型声明，模型
-声明因此不会让一个项目里的普通工具命令失效。这两条都由「移除分类/移除 false 分支
-后必须变红」的测试守住。
+**模型配置不属于任何作用域，任何键都不触发信任，包括 `endpoint`。** 模型字节是
+内容，osdk 不执行它们，下载仍按锁定摘要校验，换端点无法把内容拉取变成代码
+执行。模型键也不进 normalized hash，所以怎么改模型条目都不会重新提示或使记录
+失效。`affects_tool_dispatch` 对任何 `models..` key 返回 `false`。
 
 ## Provider 环境持久化
 

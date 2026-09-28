@@ -522,17 +522,43 @@ discovery.
 
 ### Which keys require trust
 
-The gate is evaluated **per key**, and only two things qualify: running
-**arbitrary code** on this machine, or **weakening verification** of what gets
-installed and where it is fetched from.
+Judgement is still per key, but the gate opens according to the **command's
+scopes**: a command is blocked only by keys it can actually reach and make
+effective. Trust means "an unreviewed config must not do anything", so a
+command that does nothing receives no gate.
 
-| Requires trust | Why |
+The four scopes and the keys they check:
+
+| Scope | Commands that reach it | Keys checked |
+| --- | --- | --- |
+| Install | `install`, `use`, `upgrade`, `lock`, `self upgrade` | verification switches and catalogs in `settings`, `sources`, `registries`, `tools.allow_builds` |
+| Deps | bare `install`, `run`/`exec` by default, explicit `deps` | `sources`, `registries`, index/registry/build/`run` inside `[deps]` |
+| Run tasks | `run` (not `--dry-run`) | `task_config`: its `shell` picks the interpreter for every task |
+| System packages | `pkg apply` | `[syspkg]` entries that actually **apply on this machine** |
+| Container | any `container` operation | runtime/builder/registries in `[containers]` |
+
+Governed keys and their reasons:
+
+| Key | Why |
 | --- | --- |
-| `[syspkg]` | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
 | `[sources]`, `[registries]` | Change where subprocesses download from |
 | `settings.verify_signatures`, `settings.require_checksums`, `settings.attestations` | Disable or downgrade artifact verification |
 | `settings.python`, `settings.java` | Both carry `catalog_url`, which decides which runtime bytes get installed |
-| `allow_builds`, when explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
+| `allow_builds`, explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
+| index/registry/`run`/build switches under `[deps.<p>]` | Redirect dependency bytes or run an arbitrary command |
+| `[syspkg]` (`pkg apply` only) | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
+
+Two narrowings worth stating:
+
+- **`[syspkg]` gates only `pkg apply`, and only when an entry applies here.** A
+  config whose packages all carry `os = "linux"` blocks no command on a Mac, and
+  an entry whose manager cannot exist on this OS (such as an `apt:` entry on
+  Windows) is ignored too -- a package that can never execute here needs no
+  review. `pkg status`/`plan`/`doctor` are read-only anyway and are not gated.
+- **`[models]` requires trust for no command**, including entries carrying an
+  `endpoint`. Model bytes are content and osdk never executes them; downloads
+  still verify against pinned digests, so a redirected endpoint cannot turn a
+  content fetch into code execution.
 
 **Declaring which tools or packages to install never requires trust on its own.**
 That covers `[tools]` and `[aliases]`, including their `npm:`, `github:`, `http:`,
@@ -542,57 +568,35 @@ outright, and `go:` builds run with `CGO_ENABLED=0`. This is the same act as
 adding a line to `package.json` -- adding a package or changing a version never
 asks for re-approval.
 
-`settings.node` (a single `corepack` bool) and `settings.npm` (a single
-`default_installer` choice between npm and pnpm, and only as the lowest-priority
-fallback) do not require trust either. `corepack enable` runs the corepack shipped
-inside that Node install and only writes shims into the install directory -- the
-bytes arrived with Node itself. Corepack does download a package manager later, but
-that happens at run time, triggered by `packageManager` in `package.json`, which
-trust has never governed; gating the bool would not prevent it.
+`settings.node` (a single `corepack` bool) and the npm choice in `settings`
+(a lowest-priority fallback between npm and pnpm) do not require trust either.
 
-Two things fail closed: an **unknown top-level section** and an **unregistered
-`settings` key** both require trust. A key this build cannot interpret is not
-cleared just because it is unrecognized.
+Two things fail closed: an **unknown top-level section** for acting commands and
+an **unregistered `settings` key** both require trust. A key this build cannot
+interpret is not cleared just because it is unrecognized.
 
-A refusal lists each offending key and its reason, rather than only reporting
-that the file is untrusted:
-
-```text
-error: project config is not trusted: /path/to/osdk.toml
-these keys need review because they affect what runs on this machine:
-  settings.verify_signatures -- weakens verification of installed artifacts, or redirects where they are downloaded from
-  syspkg -- can run arbitrary code on this machine during install
-```
-
-### What the gate covers: commands that act
-
-Trust exists to stop an unreviewed config from *doing* something, so a command
-that does nothing has nothing to gate. These keep working while a project is
-untrusted:
+### What the gate covers: command scopes decide
 
 - **Read-only inspection**: `list`, `current`, `where`, `doctor`, `completions`,
-  and `task list` / `task info` / `task deps`. They report state and reach no
-  install, download or subprocess. They are also exactly what you run *while
-  deciding* whether to trust a project -- refusing them hides both the evidence
-  and the way out.
+  `config get`/`config list`, and `task list` / `task info` / `task deps`. They
+  only report or display state and reach no install, download or execution, so
+  they keep working even when the config carries governed keys. They are also
+  exactly what you run *while deciding* whether to trust a project -- refusing
+  them hides both the evidence and the way out.
 - **Trust management itself**: `trust`, `untrust`.
 - **`config set` / `config unset`**: the way an untrusted config is edited back
-  into shape. Gating them would block the only exit with the very config being
-  undone. Each addresses one named key in one named file and never acts on what
-  the untrusted config asks for. `config get` and `config list` stay gated
-  because they *do* report that config's merged values.
+  into shape; gating them would block the only exit with the very config being
+  undone.
+- Every other command is gated according to the scopes above. A command may
+  carry several: bare `install` reaches both Install and Deps, as do `run` and
+  `exec` by default; `--no-deps` removes the Deps scope, and `--dry-run` leaves
+  run with no scope at all.
 
 **Tools dispatched through the shim are a separate line.** `cargo`, `node` and
-the rest are started by the shim, which gates only the keys it can act on itself
--- `sources`, `registries` and the like, which decide where a subprocess it
-starts will fetch from. A table the shim never reads, such as `[syspkg]` or
-`[task_config]`, does not stop you from using tools in that directory. The cost
-of doing otherwise is the whole directory becoming unusable, and since trust is
-bound to the file's hash, every later edit of `osdk.toml` would lock it again.
-
-Everything else stays gated. That is the fail-closed direction: a new command is
-gated until someone deliberately exempts it, rather than slipping through
-because it was forgotten.
+the rest are started by the shim, which gates only the keys it can act on
+itself -- `sources`, `registries` and the like, which decide where a subprocess
+it starts will fetch from. A table the shim never reads, such as `[syspkg]` or
+`[task_config]`, does not stop you from using tools in that directory.
 
 ### Trust identity and record states
 
@@ -640,4 +644,5 @@ configuration, so an untrusted project cannot influence its own approval.
 Otherwise the exit would be blocked by the very config being undone -- `unset`
 could not remove the key causing the refusal. Both address one named key in one
 named file and never act on what the untrusted config asks for. `config get` and
-`config list` stay behind the check, because they do report its merged values.
+`config list` are not gated either: they only display the config's merged
+values and do nothing.

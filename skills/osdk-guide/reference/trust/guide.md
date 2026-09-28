@@ -1,6 +1,7 @@
 # `osdk trust`
 
-按配置文件规范路径与内容摘要记录信任，允许项目配置影响执行或字节来源。
+按配置文件规范路径与受管内容摘要记录信任。门是按命令作用域开的：每个命令只会
+被它实际能碰到的受管键挡住。
 
 ```bash
 osdk trust [PATH]
@@ -15,6 +16,6 @@ osdk trust prune [--dry-run]
 | `trust prune --dry-run` | 预览文件已不存在且父目录可读的陈旧记录 |
 | `trust prune` | 删除上述陈旧记录 |
 
-配置内容变化后旧摘要不再授权新内容，需要重新审阅并 trust。不可访问路径不会被 prune，
-因为它可能只是未挂载磁盘。仅 `[tools]`、`[aliases]` 等安全声明不需信任；具体原因见
-`reference/configuration/overview.md`。
+作用域：安装类命令看校验设置/`sources`/`registries`，`run` 看 `task_config`，
+`pkg apply` 只看在本机适用的 `syspkg` 条目；`models` 不要求信任。受管内容变化后
+旧摘要不再授权新内容。不可访问路径不会被 prune，因为它可能只是未挂载磁盘。

@@ -9,20 +9,22 @@ osdk 读取两类 TOML，字段形状相同：
 
 ## 顶层段
 
-| 段 | 参考 | 信任 |
+门按命令作用域开启，不是按整份文件。各段在哪个作用域被检查：
+
+| 段 | 参考 | 何时检查 |
 | --- | --- | --- |
-| `[settings]` | [settings.md](settings.md) | 通常不需要 |
-| `[tools]` | [tools.md](tools.md) | 仅声明工具不需要 |
-| `[aliases]` | [aliases.md](aliases.md) | 不需要 |
-| `[sources]` | [sources.md](sources.md) | 改写来源时需要 |
-| `[registries]` | [registries.md](registries.md) | 需要 |
-| `[containers]` | [containers.md](containers.md) | 镜像改写时需要 |
-| `[syspkg]` | [syspkg.md](syspkg.md) | 需要 |
-| `[tasks]` | [tasks.md](tasks.md) | 运行时需要 |
-| `[task_config]` | [task-config.md](task-config.md) | 需要 |
-| `[deps]` | [deps.md](deps.md) | 视字段而定 |
-| `[models]` | [models.md](models.md) | 自定义 endpoint 需要 |
-| `[skills]` | [skills.md](skills.md) | 自定义 endpoint 需要 |
+| `[settings]` | [settings.md](settings.md) | 安装作用域，仅校验类字段 |
+| `[tools]` | [tools.md](tools.md) | 安装作用域，仅 `allow_builds` |
+| `[aliases]` | [aliases.md](aliases.md) | 不检查 |
+| `[sources]` | [sources.md](sources.md) | 安装、依赖作用域 |
+| `[registries]` | [registries.md](registries.md) | 安装、依赖作用域 |
+| `[containers]` | [containers.md](containers.md) | container 作用域 |
+| `[syspkg]` | [syspkg.md](syspkg.md) | 仅 `pkg apply`，且有条目在本机适用 |
+| `[tasks]` | [tasks.md](tasks.md) | 不检查（键入 run 即授权） |
+| `[task_config]` | [task-config.md](task-config.md) | run 作用域 |
+| `[deps]` | [deps.md](deps.md) | 依赖作用域，视字段而定 |
+| `[models]` | [models.md](models.md) | 不检查 |
+| `[skills]` | [skills.md](skills.md) | 安装作用域，仅自定义 endpoint |
 
 `osdk.lock` 是解析后的不可变结果，不是手写配置。用 `lock`、`install`、`model sync`
 和 `skills sync` 维护它。不要手写 osdk 的 data/config 管控目录；源和设置优先通过

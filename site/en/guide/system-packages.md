@@ -100,14 +100,16 @@ winget's `PackageIdentifier` is case-sensitive and mirrors a repository path,
 and brew additionally separates a formula from a cask — so osdk does not map
 names between managers and asks you to say which one you mean.
 
-::: warning `[syspkg]` must be trusted first
-This table can cause software to be installed on your machine, which makes it
-execution-affecting project configuration, so it goes through osdk's existing
-trust flow. Until the project is trusted, every `pkg` subcommand refuses and
-tells you to run `osdk trust`.
+::: warning `pkg apply` must be trusted first
+Only `osdk pkg apply` actually installs software, so only it asks for
+`osdk trust`; `pkg status`/`plan`/`doctor` are read-only and keep working
+without trust. The check also requires a package that **applies on this
+machine**: when every entry is restricted to other operating systems, or its
+manager cannot exist on this OS (an `apt:` entry on Windows), no gate exists
+here.
 
-**That scope is the `pkg` subcommands only.** Declaring `[syspkg]` does not
-affect other tools in the directory: `cargo`, `node` and anything else dispatched
+**That scope reaches only `pkg apply`.** Declaring `[syspkg]` does not affect
+other tools in the directory: `cargo`, `node` and anything else dispatched
 through the shim keep working. The shim gates only the configuration it can act
 on itself -- keys like `sources` and `registries`, which decide where a
 subprocess it starts will fetch from. Refusing a `[syspkg]` table the shim never

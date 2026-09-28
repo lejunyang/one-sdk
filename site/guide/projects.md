@@ -473,63 +473,71 @@ osdk untrust [PATH]
 
 ### 哪些键需要信任
 
-判据是按**键**判定的，只有两类命中：会在本机**执行任意代码**，或会**削弱对产物的
-校验、改变下载来源**。
+判据仍然按**键**，但门是**按命令的作用域**开的：一个命令只会被它实际能碰到、
+能让其生效的键挡住。信任的本质是「未经审阅的配置不得做事」，所以从不做事的命令
+那里什么也收不到。
 
-| 需要信任 | 原因 |
+四类作用域及其检查的键：
+
+| 作用域 | 到达它的命令 | 检查的键 |
+| --- | --- | --- |
+| 安装 | `install`、`use`、`upgrade`、`lock`、`self upgrade` | `settings` 的校验开关与 catalog、`sources`、`registries`、`tools.allow_builds` |
+| 依赖 | bare `install`、`run`/`exec`（默认）、显式 `deps` | `sources`、`registries`、`[deps]` 内的 index/registry/build/自定义 `run` |
+| 运行任务 | `run`（非 `--dry-run`） | `task_config`：其 `shell` 决定每个任务由谁解释 |
+| 系统包 | `pkg apply` | `[syspkg]` 中**在本机适用**的条目 |
+| 容器 | 任何 `container` 操作 | `[containers]` 的 runtime/builder/registries |
+
+受管键与各自的原因：
+
+| 键 | 原因 |
 | --- | --- |
-| `[syspkg]` | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
 | `[sources]`、`[registries]` | 改变子进程的下载目的地 |
 | `settings` 的 `verify_signatures`、`require_checksums`、`attestations` | 关掉或降级对产物的校验 |
 | `settings` 的 `python`、`java` | 二者的 `catalog_url` 决定安装哪份运行时字节 |
 | `[tools]` 中显式打开的 `allow_builds` | 唯一让 npm 生命周期脚本得以运行的开关 |
+| `[deps.<p>]` 的 index/registry/自定义 `run`/build 开关 | 重定向依赖来源或执行任意命令 |
+| `[syspkg]`（仅 `pkg apply`） | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
+
+两个值得注意的收紧：
+
+- **`[syspkg]` 只挡 `pkg apply`，且只在有适用条目时。** 一个所有包都声明为
+  `os = "linux"` 的配置，在 Mac 上不挡任何命令；管理器在本机不存在的条目（如
+  Windows 上的 `apt:` 条目）同样不挡——在这里永远不会执行的包不需要审阅。
+  `pkg status`/`plan`/`doctor` 本来就只读，同样不要求信任。
+- **`[models]` 在任何命令里都不要求信任，** 包括写了 `endpoint` 的条目。模型
+  字节是内容，osdk 从不执行它们；下载仍按锁定摘要校验，换端点无法把内容拉取
+  变成代码执行。
 
 **声明安装哪些工具或包本身不需要信任**，`[tools]`、`[aliases]` 都不需要，其中的
 `npm:`、`github:`、`http:`、`go:`、`cargo:`、`pypi:`、`conda:` 条目也不需要：npm 安装默认
 传 `--ignore-scripts`，`http:` 制品缺 `sha256` 直接拒绝，`go:` 以 `CGO_ENABLED=0` 构建。
 这和在 `package.json` 里加一行依赖是同一件事——新增包、升降版本都不会要求重新信任。
 
-`settings.node`（只有 `corepack` 一个 bool）和 `settings.npm`（只有 `default_installer`，
-在 npm 与 pnpm 间二选一，且是最低优先级兜底）同样不需要信任。`corepack enable` 跑的是
-该 Node 安装包自带的 corepack，只往安装目录写 shim，字节在装 Node 时就已落盘；corepack
-真正下载包管理器发生在日后运行时，由 `package.json` 的 `packageManager` 触发，而那个
-字段从不在信任管辖内——拦这个 bool 拦不住它。
+`settings.node`（只有 `corepack` 一个 bool）和 `settings` 的 npm 选择（
+`default_installer`，在 npm 与 pnpm 间二选一，且是最低优先级兜底）同样不需要信任。
 
-两处 fail-closed：**未知的顶层 section** 和**未登记的 `settings` 键**都判为需要信任。
-本 build 无法解释的键，不会因为不认识而放行。
+两处 fail-closed：**未知的顶层 section**（对会动手的命令）和**未登记的 `settings`
+键**都判为需要信任。本 build 无法解释的键，不会因为不认识而放行。
 
-被拒绝时 osdk 会逐条列出命中的键及各自原因，而不是只说"未受信任"：
+被拒绝时 osdk 会逐条列出命中的键及各自原因，而不是只说"未受信任"。
 
-```text
-error: project config is not trusted: /path/to/osdk.toml
-these keys need review because they affect what runs on this machine:
-  settings.verify_signatures -- weakens verification of installed artifacts, or redirects where they are downloaded from
-  syspkg -- can run arbitrary code on this machine during install
-```
+### 拦截范围：命令作用域决定一切
 
-### 拦截范围：只挡会动手的命令
-
-信任要挡的是「未经审阅的配置去做事」，所以不做事的命令没有什么可挡。下面这些
-在未信任时照常可用：
-
-- **只读查看**：`list`、`current`、`where`、`doctor`、`completions`，以及
-  `task list` / `task info` / `task deps`。它们只汇报状态，不安装、不下载、不起
-  子进程。这也正是你**决定要不要信任之前**会用的命令——把它们挡住，等于把判断
-  依据和出口一起藏起来。
-- **信任管理本身**：`trust`、`untrust`。
-- **`config set` / `config unset`**：这是把一份未信任配置改回正常的手段，挡住它
-  就等于用那份配置本身堵死了唯一出口。两者都只针对指定文件里的指定键，不会按未
-  信任配置的要求行事。`config get` / `config list` 仍受管，因为它们确实会输出那
-  份配置合并后的值。
+- **只读查看**：`list`、`current`、`where`、`doctor`、`completions`、`config get`/
+  `config list`，以及 `task list` / `task info` / `task deps`。它们只汇报、展示状态，
+  不安装、不下载、不执行任何东西，所以即使配置含受管键也不被拒绝。这也正是你
+  **决定要不要信任之前**会用的命令——把它们挡住，等于把判断依据和出口一起藏起来。
+- **信任管理本身**：`trust`、`untrust`，不读取项目配置。
+- **`config set` / `config unset`**：把一份未信任配置改回正常的手段，挡住它就
+  等于用那份配置本身堵死了唯一出口。
+- 其余命令按上表的作用域把关。一个命令可以带多个作用域：bare `install` 同时
+  到达「安装」与「依赖」，`run`/`exec` 默认同时到达各自作用域与「依赖」；
+  `--no-deps` 摘掉依赖作用域，`--dry-run` 让 run 一个作用域都不剩。
 
 **经 shim 分派的工具是另一条线。** `cargo`、`node` 这类命令由 shim 启动，而
 shim 只对它自己会走到的键把关（`sources`、`registries` 之类决定子进程从哪拉取
 的）。像 `[syspkg]`、`[task_config]` 这种 shim 永远读不到的表，不会影响你在该目
-录下正常使用工具——否则代价是整个目录不可用，而信任绑定的是文件哈希，此后每次
-编辑 `osdk.toml` 都要重新解锁一次。
-
-其余命令一律受管。这是 fail-closed 的方向：新增一个命令默认受管，要豁免必须显式
-登记，而不是因为被遗漏而溜过去。
+录下正常使用工具。
 
 ### 信任身份与失效
 
@@ -568,5 +576,5 @@ trust store。`trust`/`untrust` 自身只加载用户配置，防止未信任项
 
 `osdk config set` 和 `osdk config unset` 同样在信任检查之前执行。否则出口会被它自己
 要撤销的那份配置堵死——`unset` 将无法删掉正导致拒绝的那个键。这两个命令只针对指定
-文件里的指定键，不会执行未受信任配置的任何内容。`config get` 和 `config list` 仍受
-限制，因为它们确实会读出并展示那份配置的合并结果。
+文件里的指定键，不会执行未受信任配置的任何内容。`config get` 和 `config list` 同样
+不被拒绝：它们只展示那份配置的合并结果，不做任何事。

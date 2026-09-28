@@ -709,8 +709,10 @@ osdk --require-checksums install github:sharkdp/fd
 osdk --attestations required install github:cli/cli@latest
 ```
 
-会在本机执行代码，或会削弱产物校验、改变下载来源的项目配置，需要先审阅并显式信任。
-仅声明安装哪些工具或包不在此列——被拒绝时，osdk 会逐条列出具体是哪些键以及各自原因：
+每个命令只按它实际能做的事请求审阅：`install`/`use`/`upgrade` 看校验设置与
+下载来源，`osdk run` 看 `task_config`，`pkg apply` 只看在本机适用的
+`syspkg` 条目——model 配置在任何情况下都不要求信任。仅声明安装哪些工具或包
+不在此列；被拒绝时，osdk 会逐条列出具体是哪些键以及各自原因：
 
 ```bash
 osdk --yes trust ./osdk.toml

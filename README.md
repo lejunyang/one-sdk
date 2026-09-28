@@ -795,10 +795,12 @@ osdk --require-checksums install github:sharkdp/fd
 osdk --attestations required install github:cli/cli@latest
 ```
 
-Review and explicitly trust project configuration that can run code on this
-machine, or that weakens artifact verification or redirects where downloads come
-from. Declaring which tools or packages to install is not in that category -- when
-a config is refused, osdk lists exactly which keys need review and why:
+Each command asks for review only on what it can do: `install`/`use`/`upgrade`
+cover verification settings and download sources, `osdk run` covers `task_config`,
+and `pkg apply` covers the `syspkg` entries that apply on this machine -- model
+configuration is never gated. Declaring which tools or packages to install is not
+in that category, and when a config is refused osdk lists exactly which keys need
+review and why:
 
 ```bash
 osdk --yes trust ./osdk.toml

@@ -272,10 +272,9 @@ profile  = "desktop"
 `profile`/`map`; running it again replaces the same-name declaration. `when` remains a direct-config
 field. Unknown fields fail loudly rather than being ignored.
 
-**Trust.** Ordinary declarations require no trust; only fields that change the byte source, such as
-`endpoint` or a custom URL, require review. Model declarations never block shims. Networked
-`model sync` and `model use --sync` enforce the full trust check, while `model unuse` remains the
-escape hatch for removing an untrusted declaration.
+**Trust.** Model configuration requires trust for no command, including entries with
+an `endpoint`. Model bytes are content and osdk never executes them; downloads
+still verify against pinned digests.
 
 ## Consumer views (model view)
 
