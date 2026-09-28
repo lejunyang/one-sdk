@@ -403,6 +403,11 @@ pub async fn model(app: &mut App, command: ModelCommand) -> Result<()> {
                 endpoint,
             };
             let path = crate::config_edit::set_project_model(&name, &declaration)?;
+            // The file this command just wrote is itself a reason to require
+            // trust (the source/endpoint keys redirect where bytes come from),
+            // so re-pin it the way `osdk use` does: otherwise the next command
+            // rejects the declaration the user just asked for.
+            osdk_core::trust::trust(&app.ctx.dirs.config, &path)?;
             app.ctx.config.models.insert(name.clone(), declaration);
             println!("declared model {name} in {}", path.display());
             if sync {
