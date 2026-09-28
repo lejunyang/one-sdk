@@ -120,9 +120,9 @@ inventory 会先于完成标记发布，因此中断的收尾过程不会被误�
 | 不可变 revision | 服务返回的 commit SHA | 请求 revision 加排序后的 path/size/SHA-256 manifest 的 BLAKE3 摘要 | 精确 model version ID |
 | 文件选择与摘要 | LFS 文件带 SHA-256；普通 blob 缺失时下载后计算 | API 必须为每个文件返回合法 SHA-256 | 在 `Model` 权重中按 SafeTensor、primary、响应顺序选择一个；必须有 SHA-256，路径规范为 `loras/<filename>` |
 | token | `OSDK_HF_TOKEN` → `HF_TOKEN` → `HUGGING_FACE_HUB_TOKEN`；Bearer | `OSDK_MODELSCOPE_TOKEN` → `MODELSCOPE_API_TOKEN`；Bearer + `m_session_id` cookie | `OSDK_CIVITAI_TOKEN` → `CIVITAI_API_TOKEN` → `CIVITAI_TOKEN`；Bearer，跨源跳转移除 |
-| 默认 endpoint | `https://huggingface.co` | 优先 `https://modelscope.cn`，回退 `https://www.modelscope.ai` | `https://civitai.com` |
+| 默认 endpoint | `https://huggingface.co` | 优先 `https://modelscope.cn`，回退 `https://www.modelscope.ai` | `https://civitai.com` 与 `https://civitai.red` 两个官方入口 |
 
-三个 provider 的元数据结构、下载 URL、认证和不可变身份不同；实现会拒绝解析属于另一 provider 的 `ModelRef`。自动测速和失败切换只在同一 provider 的 endpoint 集合内进行。Civitai provider 只接收 ogen 等上层已经选定的精确 ID，不承担搜索、排序或 trigger word 匹配。
+三个 provider 的元数据结构、下载 URL、认证和不可变身份不同；实现会拒绝解析属于另一 provider 的 `ModelRef`。自动测速和失败切换只在同一 provider 的 endpoint 集合内进行。Civitai 将 `.com`（SFW 入口）与 `.red`（完整目录入口）都视为可携带凭据的官方 source，保留旧 `official` ID 并新增 `official-red`；两者写 lock 时统一归一到 `.com`，但只有目标版本实际可见的入口才会通过探测。Civitai provider 只接收 ogen 等上层已经选定的精确 ID，不承担搜索、排序或 trigger word 匹配。
 
 ## 模型解析、下载与物化
 

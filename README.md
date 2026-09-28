@@ -661,6 +661,8 @@ osdk model use flux hf:black-forest-labs/FLUX.1-dev@main \
 osdk model view path comfyui
 ```
 
+Civitai's `civitai.com` and `civitai.red` front doors are both built-in official sources. Auto mode probes both for the exact requested version, keeps the existing `official` source id for `.com`, and exposes `official-red` for an explicit pin or `--source` override.
+
 `model sync` re-resolves changes to source, variant, semantic metadata, include, or exclude, then replays immutable
 lock entries. `model import NAME PATH` snapshots a local file or directory into CAS without creating a
 project declaration or lock entry; local imports are machine-specific and must be re-imported from their

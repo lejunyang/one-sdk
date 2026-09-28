@@ -41,7 +41,15 @@ pub fn default_sources(provider: ProviderId) -> Vec<Source> {
                 international,
             ]
         }
-        ProviderId::Civitai => vec![Source::official("official", "https://civitai.com")],
+        ProviderId::Civitai => {
+            // Civitai operates two official front doors over the same account and
+            // model database. Preserve the historical `official` id for .com so
+            // existing pins remain valid; auto mode probes both for the requested
+            // exact version and can fall back when one catalog view cannot serve it.
+            let mut red = Source::official("official-red", "https://civitai.red");
+            red.priority = 10;
+            vec![Source::official("official", "https://civitai.com"), red]
+        }
         ProviderId::Local => Vec::new(),
     }
 }
@@ -415,6 +423,30 @@ mod tests {
             canonical_provider_endpoint(ProviderId::HuggingFace, &mirror.download_url),
             "https://huggingface.co",
             "the built-in mirror must fold to upstream in the lock"
+        );
+    }
+
+    #[test]
+    fn civitai_front_doors_are_official_and_share_lock_identity() {
+        let sources = default_sources(ProviderId::Civitai);
+        assert_eq!(sources.len(), 2);
+        let com = sources
+            .iter()
+            .find(|source| source.id == "official")
+            .expect("the historical .com source id must remain available");
+        let red = sources
+            .iter()
+            .find(|source| source.id == "official-red")
+            .expect("the .red front door must be built in");
+        assert!(matches!(com.kind, crate::source::SourceKind::Official));
+        assert!(matches!(red.kind, crate::source::SourceKind::Official));
+        assert!(com.forward_credentials);
+        assert!(red.forward_credentials);
+        assert!(red.priority > com.priority);
+        assert_eq!(
+            canonical_provider_endpoint(ProviderId::Civitai, "https://civitai.red/"),
+            "https://civitai.com",
+            "either official front door must lock to one provider identity"
         );
     }
 

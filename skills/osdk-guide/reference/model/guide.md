@@ -22,7 +22,7 @@ osdk model view list --json
 osdk model unuse qwen25
 ```
 
-不要手写 OSDK 受管模型声明；使用 `model use/unuse`。`model import` 只创建当前机器的本地快照，不写声明或 lock，并拒绝链接/reparse point 与特殊文件。`install` 不会隐式下载模型。Civitai 引用必须是精确的 `civitai:<model-id>@<model-version-id>`；OSDK 不做搜索与排序。
+不要手写 OSDK 受管模型声明；使用 `model use/unuse`。`model import` 只创建当前机器的本地快照，不写声明或 lock，并拒绝链接/reparse point 与特殊文件。`install` 不会隐式下载模型。Civitai 引用必须是精确的 `civitai:<model-id>@<model-version-id>`；OSDK 不做搜索与排序。Civitai 内置 `.com`（`official`）和 `.red`（`official-red`）两个官方入口，auto 模式按精确版本探测，亦可用 `source pin civitai <id>` 固定。
 机器模式 stdout 只输出 schema 1 JSON/JSONL，诊断走 stderr，失败保持非零退出码；`model view list/path/doctor` 也支持 `--json`。
 provider 环境和 `model view` 的其余子命令以 `osdk model --help` 为准；声明字段见
 `reference/configuration/models.md`。

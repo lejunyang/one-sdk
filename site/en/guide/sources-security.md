@@ -103,7 +103,8 @@ enabled = true
 
 The effective list is built-ins minus `disable`, plus `custom`. A custom source
 with the same ID overrides a built-in, `enabled=false` entries are filtered, and
-smaller `priority` values come first. Project source settings require
+smaller `priority` values come first. Civitai includes two official sources:
+`official` (`civitai.com`) and `official-red` (`civitai.red`). `source pin` can fix either one, while auto mode ranks them for the exact requested version. Project source settings require
 [explicit trust](./projects#project-configuration-trust).
 
 `headers` is explicit source configuration and is separate from

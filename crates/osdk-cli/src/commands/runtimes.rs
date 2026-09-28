@@ -1452,18 +1452,16 @@ pub(crate) fn official_model_endpoint(
     provider: osdk_core::model::ProviderId,
     endpoint: &str,
 ) -> bool {
-    let endpoint = endpoint.trim().trim_end_matches('/').to_ascii_lowercase();
-    match provider {
-        osdk_core::model::ProviderId::HuggingFace => endpoint == "https://huggingface.co",
-        osdk_core::model::ProviderId::ModelScope => {
-            matches!(
-                endpoint.as_str(),
-                "https://modelscope.cn" | "https://www.modelscope.ai"
-            )
-        }
-        osdk_core::model::ProviderId::Civitai => endpoint == "https://civitai.com",
-        osdk_core::model::ProviderId::Local => false,
-    }
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    osdk_core::model::source::default_sources(provider)
+        .iter()
+        .any(|source| {
+            matches!(source.kind, osdk_core::source::SourceKind::Official)
+                && source
+                    .download_url
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(endpoint)
+        })
 }
 
 pub async fn rust(app: &mut App, command: RustCommand) -> Result<()> {

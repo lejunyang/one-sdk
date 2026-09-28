@@ -223,7 +223,7 @@ Resolution priority is:
 | ModelScope | `OSDK_MODELSCOPE_TOKEN`, `MODELSCOPE_API_TOKEN` |
 | Civitai | `OSDK_CIVITAI_TOKEN`, `CIVITAI_API_TOKEN`, `CIVITAI_TOKEN` |
 
-Official `https://huggingface.co`, `https://modelscope.cn`, `https://www.modelscope.ai`, and `https://civitai.com` endpoints may receive their provider credentials. Bearer credentials are removed when a Civitai download redirects to a cross-origin CDN. A
+Official `https://huggingface.co`, `https://modelscope.cn`, `https://www.modelscope.ai`, and both Civitai front doors, `https://civitai.com` (`official`) and `https://civitai.red` (`official-red`), may receive their provider credentials. Civitai auto mode probes both for the exact version and uses the working or faster endpoint; both normalize to the provider's `.com` lock identity. When the API-provided download URL belongs to `.com` or `.red`, the initial download request may carry the Bearer credential; it is removed after a redirect to any other origin. A
 custom source or `--endpoint` is anonymous unless `--forward-credentials` or the
 source's `forward_credentials = true` allows forwarding. ModelScope uses both a
 Bearer header and `m_session_id` cookie.

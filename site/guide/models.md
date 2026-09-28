@@ -201,7 +201,7 @@ Token 读取顺序：
 | ModelScope | `OSDK_MODELSCOPE_TOKEN`、`MODELSCOPE_API_TOKEN` |
 | Civitai | `OSDK_CIVITAI_TOKEN`、`CIVITAI_API_TOKEN`、`CIVITAI_TOKEN` |
 
-官方端点 `https://huggingface.co`、`https://modelscope.cn`、`https://www.modelscope.ai` 与 `https://civitai.com` 可接收对应凭据。Civitai 下载跳转到跨源 CDN 时，Bearer 会被移除。自定义 source 或 `--endpoint` 默认匿名，
+官方端点 `https://huggingface.co`、`https://modelscope.cn`、`https://www.modelscope.ai`，以及 Civitai 的两个官方内容入口 `https://civitai.com`（`official`）和 `https://civitai.red`（`official-red`）可接收对应凭据。Civitai auto 模式会针对精确版本探测两个入口并择优/回退；两者统一归一为 Civitai provider 的 `.com` lock 身份。API 返回的下载 URL 若属于 `.com` 或 `.red`，初始下载请求可携带 Bearer；跳转到其他 origin 时移除。自定义 source 或 `--endpoint` 默认匿名，
 只有 `--forward-credentials` 或 source 的 `forward_credentials = true` 才转发。
 ModelScope 会同时使用 Bearer header 与 `m_session_id` cookie。
 

@@ -596,6 +596,8 @@ osdk model use flux hf:black-forest-labs/FLUX.1-dev@main \
 osdk model view path comfyui
 ```
 
+Civitai 的 `civitai.com` 与 `civitai.red` 都是内置官方来源。auto 模式会针对请求的精确版本探测两者；`.com` 保留兼容旧配置的 `official` source ID，`.red` 使用 `official-red`，也可显式 pin 或通过 `--source` 选择。
+
 `model sync` 会在 source、variant、语义元数据、include 或 exclude 变化时重新解析，并复现不可变 lock。
 `model import NAME PATH` 把本地文件或目录内容寻址写入 CAS，但不创建项目声明或 lock；本地导入只在
 当前机器可用，需要从原始字节重新导入。`model unuse NAME` 会移除项目声明、lock、视图和默认的

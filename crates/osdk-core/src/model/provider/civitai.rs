@@ -143,7 +143,7 @@ impl ModelProvider for Civitai {
         let sha256 = normalized_sha256(&selected.hashes.sha256, &selected.name)?;
         let size = size_bytes(selected.size_kb, &selected.name)?;
         let download_url = validate_download_url(&selected.download_url)?;
-        let file_headers = if same_origin(endpoint, &download_url) {
+        let file_headers = if trusted_download_origin(endpoint, &download_url) {
             headers
         } else {
             Vec::new()
@@ -217,16 +217,29 @@ fn validate_download_url(value: &str) -> Result<String> {
     Ok(url.into())
 }
 
-fn same_origin(endpoint: &str, download_url: &str) -> bool {
+fn trusted_download_origin(endpoint: &str, download_url: &str) -> bool {
     let Ok(endpoint) = reqwest::Url::parse(endpoint) else {
         return false;
     };
     let Ok(download) = reqwest::Url::parse(download_url) else {
         return false;
     };
-    endpoint.scheme() == download.scheme()
-        && endpoint.host_str() == download.host_str()
-        && endpoint.port_or_known_default() == download.port_or_known_default()
+    same_origin(&endpoint, &download)
+        || (is_official_civitai_origin(&endpoint) && is_official_civitai_origin(&download))
+}
+
+fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn is_official_civitai_origin(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("civitai.com") || host.eq_ignore_ascii_case("civitai.red")
+        })
 }
 
 fn normalized_sha256(value: &str, name: &str) -> Result<String> {
@@ -410,18 +423,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_hash_and_keeps_credentials_on_the_official_origin_only() {
+    fn rejects_missing_hash_and_limits_credentials_to_trusted_origins() {
         assert!(normalized_sha256("short", "model.safetensors").is_err());
         assert!(is_lora_type("LORA"));
         assert!(is_lora_type("LyCORIS"));
         assert!(!is_lora_type("Checkpoint"));
-        assert!(same_origin(
+        assert!(trusted_download_origin(
             "https://civitai.com",
             "https://civitai.com/api/download/models/123"
         ));
-        assert!(!same_origin(
+        assert!(trusted_download_origin(
             "https://civitai.com",
+            "https://civitai.red/api/download/models/123"
+        ));
+        assert!(trusted_download_origin(
+            "https://civitai.red",
+            "https://civitai.com/api/download/models/123"
+        ));
+        assert!(!trusted_download_origin(
+            "https://civitai.red",
             "https://download.example/model.safetensors"
+        ));
+        assert!(!trusted_download_origin(
+            "https://mirror.example",
+            "https://civitai.red/api/download/models/123"
         ));
     }
 }

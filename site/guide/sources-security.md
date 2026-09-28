@@ -91,7 +91,8 @@ enabled = true
 ```
 
 有效列表等于“内置来源减去 `disable`，再加 `custom`”。custom 的同名 ID 覆盖内置
-来源，`enabled=false` 被过滤，较小 `priority` 排在前面。项目中的 source 设置需要
+来源，`enabled=false` 被过滤，较小 `priority` 排在前面。Civitai 内置 `official`（`civitai.com`）与
+`official-red`（`civitai.red`）两个官方 source；可用 `source pin` 固定其中一个，auto 模式则按精确版本的实际可达性与速度选择。项目中的 source 设置需要
 [显式信任](./projects#项目配置信任)。
 
 `headers` 是显式 source 配置，与 `forward_credentials` 不同。osdk 自己发起的 metadata

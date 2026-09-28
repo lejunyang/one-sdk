@@ -146,9 +146,9 @@ A model reference includes its provider: repository providers use `hf:owner/repo
 | Immutable revision | Commit SHA returned by the service | Requested revision plus a BLAKE3 digest of the sorted path/size/SHA-256 manifest | Exact model-version ID |
 | Selection and digest | LFS entries carry SHA-256; a missing regular-blob digest is computed after download | The API must return a valid SHA-256 for every file | Select one `Model` weight by SafeTensor, primary, then response order; SHA-256 is mandatory and the path is normalized to `loras/<filename>` |
 | Token | `OSDK_HF_TOKEN` → `HF_TOKEN` → `HUGGING_FACE_HUB_TOKEN`; Bearer | `OSDK_MODELSCOPE_TOKEN` → `MODELSCOPE_API_TOKEN`; Bearer plus `m_session_id` cookie | `OSDK_CIVITAI_TOKEN` → `CIVITAI_API_TOKEN` → `CIVITAI_TOKEN`; Bearer, removed on cross-origin redirects |
-| Default endpoint | `https://huggingface.co` | Prefer `https://modelscope.cn`, then `https://www.modelscope.ai` | `https://civitai.com` |
+| Default endpoint | `https://huggingface.co` | Prefer `https://modelscope.cn`, then `https://www.modelscope.ai` | Both official front doors: `https://civitai.com` and `https://civitai.red` |
 
-The three providers have different metadata schemas, download URLs, authentication, and immutable identities; each implementation rejects another provider's `ModelRef`. Automatic ranking and failover remain inside one provider's endpoint set. The Civitai provider accepts exact IDs already selected by an upper layer such as ogen; it does not search, rank, or match trigger words.
+The three providers have different metadata schemas, download URLs, authentication, and immutable identities; each implementation rejects another provider's `ModelRef`. Automatic ranking and failover remain inside one provider's endpoint set. Civitai treats `.com` (the SFW front door) and `.red` (the full-catalog front door) as credential-bearing official sources, preserves the historical `official` id, and adds `official-red`; both canonicalize to `.com` in the lock, while probing still requires the requested exact version to be available through that front door. The Civitai provider accepts exact IDs already selected by an upper layer such as ogen; it does not search, rank, or match trigger words.
 
 ## Model resolution, download, and materialization
 
