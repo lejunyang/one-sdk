@@ -47,10 +47,10 @@ pub async fn install(
     let (requests, trusted_replay) = if use_lock {
         match requests_from_lock(app)? {
             Some(requests) => (requests, true),
-            None => (gather_requests(app, tools)?, false),
+            None => (gather_install_requests(app, tools)?, false),
         }
     } else {
-        (gather_requests(app, tools)?, false)
+        (gather_install_requests(app, tools)?, false)
     };
     install_requests(app, requests, opts, trusted_replay, force).await?;
     Ok(())
@@ -1133,16 +1133,15 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
     Ok(())
 }
 
-/// Tool requests to write into a project lock when the command named none.
+/// Tool requests belonging to the current project rather than the user-global
+/// defaults.
 ///
 /// `osdk.lock` sits next to a project's own config and is committed with it, so
 /// it must describe that project -- not whatever the machine that ran `lock`
 /// happened to have pinned globally. `gather_requests` deliberately reads the
-/// *merged* configuration, because `install` / `exec` / `outdated` all want the
-/// global layer to apply; feeding that same merged set to the lock writer put
-/// every global pin into the project file. A project pinning one tool produced
-/// a lock naming fourteen, and a global `java = "26"` was written into a project
-/// that pins `21`.
+/// *merged* configuration because commands such as `exec` and `outdated` need
+/// global defaults. Callers that materialize or record a project filter that
+/// merged set through this function.
 ///
 /// The provenance needed to tell the layers apart is already recorded in
 /// `tool_origins`, which shell activation has been consulting all along. Only
@@ -1158,6 +1157,41 @@ pub(crate) fn project_scoped_requests(app: &App, requests: Vec<ToolRequest>) -> 
         .into_iter()
         .filter(|request| project_owns_request(app, request))
         .collect()
+}
+
+/// Gather requests for `install`, keeping global defaults only when no project
+/// context exists.
+///
+/// Tool installations are shared in the user-level osdk store, so a project
+/// request still reuses an identical version already present there. What is
+/// excluded here is an unrelated request contributed only by user config: a
+/// project install must not enumerate every global pin just to report it already
+/// installed.
+pub(crate) fn gather_install_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolRequest>> {
+    let explicit = !tools.is_empty();
+    let requests = gather_requests(app, tools)?;
+    if explicit {
+        return Ok(requests);
+    }
+    let cwd = std::env::current_dir()?;
+    Ok(scope_bare_install_requests(app, requests, &cwd))
+}
+
+pub(crate) fn scope_bare_install_requests(
+    app: &App,
+    requests: Vec<ToolRequest>,
+    cwd: &std::path::Path,
+) -> Vec<ToolRequest> {
+    let has_project_context = app.ctx.config.project_config_path.is_some()
+        || crate::lockfile::find(cwd).is_some()
+        || requests
+            .iter()
+            .any(|request| project_owns_request(app, request));
+    if has_project_context {
+        project_scoped_requests(app, requests)
+    } else {
+        requests
+    }
 }
 
 /// Whether the project -- rather than the user-global config -- asked for this

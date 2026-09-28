@@ -2094,6 +2094,45 @@ fn lock_records_project_tools_and_leaves_global_pins_out() {
 }
 
 #[test]
+fn bare_project_install_does_not_enumerate_unrelated_global_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    std::fs::write(
+        temp.path().join("config/config.toml"),
+        "[tools]\npython = \"3.14.7\"\n",
+    )
+    .unwrap();
+    // A project config establishes project scope without declaring any tools.
+    std::fs::write(project.join("osdk.toml"), "[settings]\njobs = 1\n").unwrap();
+
+    // Make the global pin a genuine installed version. Before the scope fix,
+    // the project install succeeds but prints this unrelated global tool as
+    // already installed; after the fix the request never reaches installation.
+    let installed = temp.path().join("installs/python/3.14.7");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "install", "--no-deps"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("nothing to install"), "{stdout}");
+    assert!(
+        !stdout.contains("python@3.14.7"),
+        "global-only tool leaked into project install: {stdout}"
+    );
+}
+
+#[test]
 fn lock_still_records_a_global_tool_when_it_is_named_explicitly() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");

@@ -140,6 +140,43 @@ mod command_flow_tests {
         )
     }
 
+    /// A project install materializes only project declarations, while a bare
+    /// install outside any project retains user-global defaults. Both cases use
+    /// the same merged config, so the origin filter is the behavior under test.
+    #[test]
+    fn bare_install_scopes_global_defaults_to_non_project_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(&user_config, "[tools]\ngo = \"1.26.5\"\n").unwrap();
+        std::fs::write(project.join("osdk.toml"), "[tools]\npython = \"3.14\"\n").unwrap();
+
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let requests = vec![
+            ToolRequest::parse("go@1.26.5").unwrap(),
+            ToolRequest::parse("python@3.14").unwrap(),
+        ];
+        let scoped = scope_bare_install_requests(&app, requests, &project);
+        assert_eq!(
+            scoped
+                .iter()
+                .map(|request| request.backend.as_str())
+                .collect::<Vec<_>>(),
+            ["python"]
+        );
+
+        let config = osdk_core::config::Config::load(&user_config, &outside).unwrap();
+        let app = app_with_config(&temporary, config);
+        let requests = vec![ToolRequest::parse("go@1.26.5").unwrap()];
+        let unscoped = scope_bare_install_requests(&app, requests, &outside);
+        assert_eq!(unscoped.len(), 1);
+        assert_eq!(unscoped[0].backend, "go");
+    }
+
     /// A named operand without `@` must inherit the project's pin.
     ///
     /// This is what `osdk exec -t java -- ...` does. Before the fix the absent

@@ -27,3 +27,7 @@ osdk install                       # 按 osdk.toml / osdk.lock
 
 `install` 安装开发工具；项目自身依赖使用 `osdk deps`。模型不会作为裸 `install` 的副作用
 下载，使用 `osdk model sync`。
+
+项目内的裸 `install` 优先复现当前平台 lock；没有可用平台条目而回退到配置时，只处理
+项目声明，不枚举用户全局配置中无关的固定版本。项目外的裸 `install` 才应用全局配置。
+工具文件仍在用户级安装池中共享，因此项目请求的同一版本已存在时会直接复用并提示已安装。

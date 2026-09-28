@@ -23,7 +23,7 @@ osdk model sync [NAME]
 
 | Invocation | Reads the existing lock? | Writes the lock? |
 | --- | --- | --- |
-| `install` with no tools and no `-o` | Yes; if a current-host platform section exists, use all tools in it | No |
+| `install` with no tools and no `-o` | Yes; if a current-host platform section exists, use all tools in it; otherwise use project declarations in a project, or global config outside one | No |
 | `install TOOL...` | No | No |
 | `install -o KEY=VALUE`, even without a tool | No | No |
 | `lock` | Loads the old file only to preserve other platforms and models | Yes; rebuilds the target platform's tool map (only tools the project itself declares -- see below) |
@@ -56,10 +56,17 @@ project itself declares:
 | Named explicitly on the command line (`osdk lock java`) | Yes; an explicit instruction overrides the filter above |
 
 The provenance comes from the configuration layer's own origin records -- the same
-data shell activation consults. Global pins still apply to `install`, `exec` and
-`outdated`; the only thing excluded is *being written into a project lock*, and
-`upgrade` still installs every configured tool, it just stops recording the global
-ones.
+data shell activation consults. When a bare project `install` falls back from the
+lock to configuration, it also materializes only project declarations instead of
+walking unrelated global pins just to report them as already installed. A bare
+`install` outside a project still applies user-global configuration. `exec` and
+`outdated` may still use global defaults, and `upgrade` still installs every
+configured tool; it merely stops recording global entries in the project lock.
+
+This limits the **request set**, not storage. Tool binaries still live in osdk's
+user-level install pool. If the exact version requested by a project is already
+there, osdk reuses it and reports it as installed instead of copying it into the
+project.
 
 This rule corrects a silent behavior: a project pinning one tool used to produce a
 lock naming more than a dozen, and a global `java = "26"` was written into a
