@@ -488,6 +488,12 @@ Program lookup searches the installer's own directories first and then all of
 them. The second pass is required because npm ships with node and lives in
 node's bin directory rather than its own.
 
+`RunPlan` separately carries a platform-neutral canonical program name. Execution
+still searches candidates such as `bun.exe` / `bun` and `cargo.exe` / `cargo`, but
+diagnostics, freshness hashes and the `run` field in `osdk.lock` use only canonical
+names such as `bun` and `cargo`. Otherwise candidate ordering can make even a lock
+generated on macOS contain `.exe` and create meaningless cross-platform diffs.
+
 ## Recording happens only after success
 
 `record` runs only after the command returns successfully, and that ordering is

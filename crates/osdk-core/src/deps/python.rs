@@ -209,6 +209,7 @@ pub fn plan(
 
     Ok(RunPlan {
         tool: "pypi:uv".into(),
+        program: "uv".into(),
         program_candidates: vec!["uv.exe".to_string(), "uv".to_string()],
         args,
         env,

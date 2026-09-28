@@ -999,11 +999,7 @@ fn command_line(plan: &RunPlan) -> String {
     for (key, value) in &plan.env {
         parts.push(format!("{key}={value}"));
     }
-    let program = plan
-        .program_candidates
-        .first()
-        .cloned()
-        .unwrap_or_else(|| plan.tool.to_string());
+    let program = plan.program.clone();
     // Prelude steps are part of *what runs*, so they belong in the string that
     // gets hashed. Leaving them out would hash "create the environment, then
     // sync" and "sync into whatever is already there" identically.
@@ -1060,7 +1056,44 @@ fn report_undeclared(cwd: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::auto_options;
+    use super::{auto_options, command_line};
+    use osdk_core::deps::{
+        node, DetectedProject, Ecosystem, InstallerChoice, InstallerOrigin, ProviderConfig,
+    };
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    /// Windows launcher suffixes are execution details and must never enter the
+    /// command identity persisted in a cross-platform project lock.
+    #[test]
+    fn dependency_command_identity_is_platform_neutral() {
+        let project = DetectedProject {
+            provider: "bun".into(),
+            ecosystem: Ecosystem::Node,
+            root: PathBuf::from("project"),
+            manifest: PathBuf::from("project/package.json"),
+            native_lock: Some(PathBuf::from("project/bun.lock")),
+            declared_manager: None,
+        };
+        let choice = InstallerChoice {
+            provider: "bun".into(),
+            origin: InstallerOrigin::Default,
+            version: Some("1.4.0".into()),
+        };
+        let plan = node::plan(
+            &project,
+            &choice,
+            &ProviderConfig::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(plan.program_candidates[0], "bun.exe");
+        assert_eq!(
+            command_line(&plan),
+            "bun install --frozen-lockfile --ignore-scripts"
+        );
+    }
 
     /// The automatic path must never trigger the deep verification scan.
     ///

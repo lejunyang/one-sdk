@@ -230,6 +230,7 @@ pub fn plan_custom(project: &DetectedProject, config: &ProviderConfig) -> Result
 
     Ok(RunPlan {
         tool: std::borrow::Cow::Owned(project.provider.to_string()),
+        program: program.to_string(),
         // Resolved from PATH, which by then has the bin directories of whatever
         // `depends` brought in. A custom step usually calls a tool another
         // provider installed.
@@ -315,6 +316,13 @@ impl DeclaredManager {
 pub struct RunPlan {
     /// Backend id whose bin directory provides the program.
     pub tool: std::borrow::Cow<'static, str>,
+    /// Platform-neutral program name used in diagnostics, freshness state and
+    /// `osdk.lock`.
+    ///
+    /// This is deliberately separate from `program_candidates`: `.exe` and
+    /// `.cmd` are execution details for one host, while the recorded command is
+    /// committed and read on other platforms.
+    pub program: String,
     /// Program file name to look for inside that bin directory, best first.
     pub program_candidates: Vec<String>,
     pub args: Vec<String>,

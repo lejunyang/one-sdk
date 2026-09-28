@@ -212,6 +212,7 @@ pub fn plan(
 
     Ok(RunPlan {
         tool: tool.into(),
+        program: project.provider.to_string(),
         program_candidates,
         args,
         env,
