@@ -178,7 +178,7 @@ pub async fn probe_all(ctx: &Ctx, reference: &ModelRef, sources: &[Source]) -> V
         let reference = reference.clone();
         let source = source.clone();
         handles.push(tokio::spawn(async move {
-            probe_one(ctx, reference, source.clone(), timeout)
+            probe_one(ctx, reference, source.clone(), timeout, timeout)
                 .await
                 .unwrap_or_else(|_| ProbeResult::failed(&source.id))
         }));
@@ -219,14 +219,18 @@ async fn probe_one(
     probe: ProbeContext,
     reference: ModelRef,
     source: Source,
-    timeout: Duration,
+    metadata_timeout: Duration,
+    throughput_timeout: Duration,
 ) -> Result<ProbeResult> {
     let provider = provider(reference.provider, source.forward_credentials);
     let ctx = probe.as_ctx();
     // Metadata and sample transfer have independent budgets. Sharing one budget
     // made two individually healthy 1-second phases fail a 1.5-second probe.
+    // They can also have different sizes: the throughput budget is deliberately
+    // tight so a slow body is not mistaken for an unreachable source, while the
+    // metadata budget must absorb connection and fixture scheduling latency.
     let snapshot = tokio::time::timeout(
-        timeout,
+        metadata_timeout,
         provider.resolve(&ctx, &reference, &source.download_url),
     )
     .await
@@ -236,7 +240,7 @@ async fn probe_one(
     let headers = header_map(&file.headers)?;
     let start = Instant::now();
     let response = tokio::time::timeout(
-        timeout,
+        metadata_timeout,
         probe
             .client
             .get(&file.url)
@@ -251,7 +255,7 @@ async fn probe_one(
     .map_err(|error| Error::network(&file.url, error))?;
     let ttfb = start.elapsed();
     let body_start = Instant::now();
-    let downloaded = tokio::time::timeout(timeout, read_probe_sample(response)).await;
+    let downloaded = tokio::time::timeout(throughput_timeout, read_probe_sample(response)).await;
     // Receiving a successful response already proves reachability. If the sample
     // cannot complete within the throughput budget, keep the source usable with
     // unknown throughput instead of misclassifying it as unreachable.
@@ -622,6 +626,11 @@ mod tests {
             probe,
             ModelRef::parse("hf:owner/repo@main").unwrap(),
             source,
+            // Generous metadata/header budget; the 150 ms slow body must fit
+            // inside the tight throughput budget for this test to mean
+            // anything. Sharing one 50 ms budget made metadata time out under
+            // scheduling load.
+            Duration::from_secs(5),
             Duration::from_millis(50),
         )
         .await
