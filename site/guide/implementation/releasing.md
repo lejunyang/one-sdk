@@ -24,16 +24,20 @@ crates.io index 与仓库 lockfile 校验可发布依赖。只有 crate
 这样不会在 crates.io 发布失败时留下一个看似完整的 GitHub Release。
 
 两个 GNU/Linux 归档按各自架构在 `ubuntu:20.04` 容器里原生构建，因此明确以 glibc 2.31
-为最低版本，不会继承滚动 GitHub runner 当时恰好安装的 libc。打包前还会对两个 ELF 运行
-`glibc-baseline` 任务：读取其导入的符号版本，任何一个超过 `GLIBC_2.31` 都会拒绝发布。
-流水线会先用不可能满足的 `0.0` 上限运行同一检查并要求它失败，避免解析器失效后真实检查
-仍给出虚假的绿色结果。
+为最低版本，不会继承滚动 GitHub runner 当时恰好安装的 libc。打包前会先用 `--version`
+冒烟刚构建出的两个二进制——这是唯一能证明它们在目标平台上确实启动的环节；随后对两个
+ELF 运行 `glibc-baseline` 检查（它也作为同名任务供本地调用）：读取其导入的符号版本，
+任何一个超过 `GLIBC_2.31` 都会拒绝发布。检查脚本由流水线用 bash 直接运行，而不是经
+`osdk run`：后者会构建完整托管环境、要求项目声明的每个工具都已安装，而这里只需要脚本
+和 readelf。流水线会先用不可能满足的 `0.0` 上限运行同一检查并要求它失败，避免解析器
+失效后真实检查仍给出虚假的绿色结果。
 
 两个 Linux musl 目标同样在对应的 x64、arm64 runner 上原生构建：C 构建脚本使用
 `musl-gcc`，rustc 则用 self-contained link 生成 static PIE；若让 rustc 最终也通过
-`musl-gcc` 链接，Debian/Ubuntu 上反而会生成带 interpreter 的产物。`musl-static` 任务会
-拒绝任一程序带 ELF interpreter 或动态 `NEEDED` 条目。它也有负向对照：先要求检查器拒绝
-runner 上动态链接的 `/bin/sh` 副本，再相信发布产物的绿色结果。
+`musl-gcc` 链接，Debian/Ubuntu 上反而会生成带 interpreter 的产物。`musl-static`
+检查（也作为同名任务存在）会拒绝任一程序带 ELF interpreter 或动态 `NEEDED` 条目。
+它也有负向对照：先要求检查器拒绝 runner 上动态链接的 `/bin/sh` 副本，再相信发布产物的
+绿色结果。
 
 用户安装主命令时使用：
 

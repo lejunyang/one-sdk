@@ -69,7 +69,6 @@ jobs:
     container: ubuntu:20.04
     env:
       OSDK_RELEASE_BIN_DIR: target/${{ matrix.target }}/release
-      OSDK_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
     steps:
       - name: Install build prerequisites
         run: >-
@@ -107,15 +106,23 @@ jobs:
       - name: Verify the glibc compatibility contract
         shell: bash
         run: |
+          # The one point that proves the freshly linked binaries actually
+          # start on this target before they are packaged and published.
+          "$OSDK_RELEASE_BIN_DIR/osdk" --version
+          "$OSDK_RELEASE_BIN_DIR/osdk-shim" --version
           failure_log="$RUNNER_TEMP/glibc-baseline-negative-control.log"
+          # The checker scripts are invoked directly on purpose. Going through
+          # `osdk run` would build the full managed environment and require
+          # every tool the project declares (including ones this job did not
+          # install); this contract only needs the script and readelf.
           if OSDK_GLIBC_BASELINE=0.0 \
-            "$OSDK_RELEASE_BIN_DIR/osdk" run glibc-baseline \
+            bash ./scripts/check-glibc-baseline.sh \
               >"$failure_log" 2>&1; then
             echo "The glibc checker accepted an intentionally impossible baseline." >&2
             exit 1
           fi
           grep -F 'exceeding the supported GLIBC_0.0 baseline' "$failure_log"
-          "$OSDK_RELEASE_BIN_DIR/osdk" run glibc-baseline
+          bash ./scripts/check-glibc-baseline.sh
       - name: Package Unix binaries
         shell: bash
         run: |
@@ -202,21 +209,22 @@ jobs:
         shell: bash
         env:
           OSDK_RELEASE_BIN_DIR: target/${{ matrix.target }}/release
-          OSDK_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
         run: |
+          "$OSDK_RELEASE_BIN_DIR/osdk" --version
+          "$OSDK_RELEASE_BIN_DIR/osdk-shim" --version
           failure_dir="$RUNNER_TEMP/dynamic-negative-control"
           failure_log="$RUNNER_TEMP/musl-static-negative-control.log"
           mkdir -p "$failure_dir"
           cp /bin/sh "$failure_dir/osdk"
           cp /bin/sh "$failure_dir/osdk-shim"
           if OSDK_RELEASE_BIN_DIR="$failure_dir" \
-            "$OSDK_RELEASE_BIN_DIR/osdk" run musl-static \
+            bash ./scripts/check-musl-static.sh \
               >"$failure_log" 2>&1; then
             echo "The musl checker accepted intentionally dynamic binaries." >&2
             exit 1
           fi
           grep -F 'is not a static musl binary' "$failure_log"
-          "$OSDK_RELEASE_BIN_DIR/osdk" run musl-static
+          bash ./scripts/check-musl-static.sh
       - name: Package Unix binaries
         if: ${{ matrix.archive == 'tar' }}
         shell: bash

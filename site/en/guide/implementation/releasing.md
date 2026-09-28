@@ -32,19 +32,25 @@ therefore cannot leave behind a GitHub Release that appears complete.
 The two GNU/Linux archives are built natively by architecture inside an
 `ubuntu:20.04` container. This makes glibc 2.31 the declared minimum instead of
 inheriting whichever libc happens to be on the rolling GitHub runner. Packaging
-also runs the `glibc-baseline` task over both ELFs; it reads their imported
-symbol versions and rejects anything above `GLIBC_2.31`. The workflow first
-runs the same checker with an impossible `0.0` ceiling and requires that probe
-to fail, so a broken parser cannot turn the real green result into false
-evidence.
+first smoke-tests both freshly built binaries with `--version` -- the one point
+that proves they actually start on the target -- then runs the `glibc-baseline`
+check (also available locally as the task of the same name) over both ELFs; it
+reads their imported symbol versions and rejects anything above `GLIBC_2.31`.
+The workflow runs the checker script directly via bash rather than through
+`osdk run`: the latter builds the full managed environment and requires every
+tool the project declares to be installed, while this contract only needs the
+script and readelf. The workflow first runs the same checker with an impossible
+`0.0` ceiling and requires that probe to fail, so a broken parser cannot turn
+the real green result into false evidence.
 
 The two Linux musl targets are built natively on their matching x64 and arm64
 runners. C build scripts use `musl-gcc`, while rustc's self-contained link
 produces a static PIE; using `musl-gcc` as rustc's final linker would instead
-emit an interpreter on Debian and Ubuntu. The `musl-static` task rejects an
-interpreter or any dynamic `NEEDED` entry in either executable. It too has a
-negative control: the checker must reject copies of the runner's dynamic
-`/bin/sh` before its result for the release binaries is trusted.
+emit an interpreter on Debian and Ubuntu. The `musl-static` check (also a task
+of the same name) rejects an interpreter or any dynamic `NEEDED` entry in
+either executable. It too has a negative control: the checker must reject
+copies of the runner's dynamic `/bin/sh` before its result for the release
+binaries is trusted.
 
 Install the primary commands from crates.io with:
 
