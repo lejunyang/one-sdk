@@ -1,0 +1,181 @@
+name: Setup osdk
+description: Install osdk, restore its shared caches, and materialize a locked project toolchain and dependencies.
+author: osdk contributors
+
+branding:
+  icon: package
+  color: green
+
+inputs:
+  version:
+    description: osdk release version. Defaults to the action's semver tag, or latest for a branch/SHA checkout.
+    required: false
+  repository:
+    description: GitHub owner/repository that publishes osdk release assets.
+    required: false
+    default: lejunyang/one-sdk
+  download-base-url:
+    description: GitHub or trusted mirror base URL used for release downloads.
+    required: false
+    default: https://github.com
+  target:
+    description: Override the detected osdk release target triple.
+    required: false
+  working-directory:
+    description: Project directory containing osdk.toml and osdk.lock.
+    required: false
+    default: .
+  cache:
+    description: Restore and save osdk's tool store and downstream package caches.
+    required: false
+    default: "true"
+  cache-key:
+    description: Extra cache partition. Pass an expression such as hashFiles('custom.lock') for additional inputs.
+    required: false
+    default: default
+  install-tools:
+    description: Run osdk install --no-deps after restoring the cache.
+    required: false
+    default: "true"
+  install-deps:
+    description: Run osdk deps after installing project tools.
+    required: false
+    default: "true"
+  frozen:
+    description: Require native dependency lockfiles and frozen installs.
+    required: false
+    default: "true"
+  allow-deps-tool-install:
+    description: Allow osdk deps to acquire a missing package manager instead of requiring it from osdk install.
+    required: false
+    default: "false"
+  jobs:
+    description: Maximum concurrent osdk downloads and installs.
+    required: false
+  source-mode:
+    description: Mirror policy passed to osdk (auto or env).
+    required: false
+    default: auto
+  offline:
+    description: Run project materialization without network access after cache restore.
+    required: false
+    default: "false"
+  require-checksums:
+    description: Reject project tool artifacts without a verifiable checksum.
+    required: false
+    default: "false"
+  attestations:
+    description: GitHub artifact attestation policy (off, if-available, or required).
+    required: false
+    default: if-available
+
+outputs:
+  osdk-version:
+    description: The installed osdk version.
+    value: ${{ steps.install-unix.outputs.version || steps.install-windows.outputs.version }}
+  cache-hit:
+    description: Whether the primary osdk cache key matched exactly.
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install osdk
+      id: install-unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        OSDK_ACTION_VERSION: ${{ inputs.version }}
+        OSDK_ACTION_REF: ${{ github.action_ref }}
+        OSDK_ACTION_REPOSITORY: ${{ inputs.repository }}
+        OSDK_ACTION_DOWNLOAD_BASE_URL: ${{ inputs.download-base-url }}
+        OSDK_ACTION_TARGET: ${{ inputs.target }}
+        OSDK_ACTION_CACHE: ${{ inputs.cache }}
+        OSDK_ACTION_INSTALL_TOOLS: ${{ inputs.install-tools }}
+        OSDK_ACTION_INSTALL_DEPS: ${{ inputs.install-deps }}
+        OSDK_ACTION_FROZEN: ${{ inputs.frozen }}
+        OSDK_ACTION_ALLOW_DEPS_TOOL_INSTALL: ${{ inputs.allow-deps-tool-install }}
+        OSDK_ACTION_OFFLINE: ${{ inputs.offline }}
+        OSDK_ACTION_REQUIRE_CHECKSUMS: ${{ inputs.require-checksums }}
+        OSDK_ACTION_SOURCE_MODE: ${{ inputs.source-mode }}
+        OSDK_ACTION_ATTESTATIONS: ${{ inputs.attestations }}
+      run: "$GITHUB_ACTION_PATH/action/setup.sh"
+
+    - name: Install osdk
+      id: install-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        OSDK_ACTION_VERSION: ${{ inputs.version }}
+        OSDK_ACTION_REF: ${{ github.action_ref }}
+        OSDK_ACTION_REPOSITORY: ${{ inputs.repository }}
+        OSDK_ACTION_DOWNLOAD_BASE_URL: ${{ inputs.download-base-url }}
+        OSDK_ACTION_TARGET: ${{ inputs.target }}
+        OSDK_ACTION_CACHE: ${{ inputs.cache }}
+        OSDK_ACTION_INSTALL_TOOLS: ${{ inputs.install-tools }}
+        OSDK_ACTION_INSTALL_DEPS: ${{ inputs.install-deps }}
+        OSDK_ACTION_FROZEN: ${{ inputs.frozen }}
+        OSDK_ACTION_ALLOW_DEPS_TOOL_INSTALL: ${{ inputs.allow-deps-tool-install }}
+        OSDK_ACTION_OFFLINE: ${{ inputs.offline }}
+        OSDK_ACTION_REQUIRE_CHECKSUMS: ${{ inputs.require-checksums }}
+        OSDK_ACTION_SOURCE_MODE: ${{ inputs.source-mode }}
+        OSDK_ACTION_ATTESTATIONS: ${{ inputs.attestations }}
+      run: '& "$env:GITHUB_ACTION_PATH/action/setup.ps1"'
+
+    # v4.3.0, pinned rather than following a mutable major tag. v4 uses the
+    # current cache service without requiring the newer runner needed by v5+.
+    - name: Restore osdk caches
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |
+          ${{ runner.temp }}/osdk/data
+          ${{ runner.temp }}/osdk/cache
+        key: osdk-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.install-unix.outputs.version || steps.install-windows.outputs.version }}-${{ inputs.cache-key }}-${{ hashFiles('**/osdk.lock', '**/osdk.toml', '**/.osdk.toml', '**/.tool-versions', '**/rust-toolchain', '**/rust-toolchain.toml', '**/package.json', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/bun.lock', '**/bun.lockb', '**/pyproject.toml', '**/uv.lock', '**/requirements*.txt', '**/go.mod', '**/go.sum', '**/Cargo.toml', '**/Cargo.lock', '**/deno.json', '**/deno.jsonc', '**/deno.lock') }}
+        restore-keys: |
+          osdk-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.install-unix.outputs.version || steps.install-windows.outputs.version }}-${{ inputs.cache-key }}-
+
+    - name: Materialize project environment
+      if: runner.os != 'Windows' && (inputs.install-tools == 'true' || inputs.install-deps == 'true')
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        OSDK_ACTION_INSTALL_TOOLS: ${{ inputs.install-tools }}
+        OSDK_ACTION_INSTALL_DEPS: ${{ inputs.install-deps }}
+        OSDK_ACTION_FROZEN: ${{ inputs.frozen }}
+        OSDK_ACTION_ALLOW_DEPS_TOOL_INSTALL: ${{ inputs.allow-deps-tool-install }}
+        OSDK_ACTION_JOBS: ${{ inputs.jobs }}
+        OSDK_ACTION_SOURCE_MODE: ${{ inputs.source-mode }}
+        OSDK_ACTION_OFFLINE: ${{ inputs.offline }}
+        OSDK_ACTION_REQUIRE_CHECKSUMS: ${{ inputs.require-checksums }}
+        OSDK_ACTION_ATTESTATIONS: ${{ inputs.attestations }}
+      run: "$GITHUB_ACTION_PATH/action/materialize.sh"
+
+    - name: Materialize project environment
+      if: runner.os == 'Windows' && (inputs.install-tools == 'true' || inputs.install-deps == 'true')
+      shell: pwsh
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        OSDK_ACTION_INSTALL_TOOLS: ${{ inputs.install-tools }}
+        OSDK_ACTION_INSTALL_DEPS: ${{ inputs.install-deps }}
+        OSDK_ACTION_FROZEN: ${{ inputs.frozen }}
+        OSDK_ACTION_ALLOW_DEPS_TOOL_INSTALL: ${{ inputs.allow-deps-tool-install }}
+        OSDK_ACTION_JOBS: ${{ inputs.jobs }}
+        OSDK_ACTION_SOURCE_MODE: ${{ inputs.source-mode }}
+        OSDK_ACTION_OFFLINE: ${{ inputs.offline }}
+        OSDK_ACTION_REQUIRE_CHECKSUMS: ${{ inputs.require-checksums }}
+        OSDK_ACTION_ATTESTATIONS: ${{ inputs.attestations }}
+      run: '& "$env:GITHUB_ACTION_PATH/action/materialize.ps1"'
+
+    - name: Export project tool environment
+      if: runner.os != 'Windows'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: "$GITHUB_ACTION_PATH/action/export-env.sh"
+
+    - name: Export project tool environment
+      if: runner.os == 'Windows'
+      shell: pwsh
+      working-directory: ${{ inputs.working-directory }}
+      run: '& "$env:GITHUB_ACTION_PATH/action/export-env.ps1"'

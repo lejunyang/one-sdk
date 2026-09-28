@@ -105,6 +105,21 @@ measurement and `osdk source pin self <id>` fixes the choice.
 See [Installation](site/en/guide/installation.md) for PATH setup, installer
 options, source builds, and verification.
 
+### GitHub Actions
+
+The repository also ships a composite setup action. It installs a verified osdk
+release, restores the shared tool/package caches, materializes locked tools and
+application dependencies, and exports the selected environment to later steps:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: lejunyang/one-sdk@main
+```
+
+Pin the action to a release tag or full commit SHA in production. See
+[GitHub Actions](site/en/guide/github-actions.md) for CI-safe defaults, inputs,
+cache keys, monorepo setup, and strict offline/checksum modes.
+
 ## Quick start
 
 ```bash

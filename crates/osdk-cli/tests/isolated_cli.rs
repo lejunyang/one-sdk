@@ -40,6 +40,74 @@ fn platform_key() -> &'static str {
     }
 }
 
+#[test]
+fn github_action_metadata_is_valid_and_uses_a_pinned_cache_action() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let raw = std::fs::read_to_string(repository.join("action.yml")).unwrap();
+    let metadata: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+    assert_eq!(metadata["runs"]["using"].as_str(), Some("composite"));
+    assert_eq!(
+        metadata["inputs"]["frozen"]["default"].as_str(),
+        Some("true")
+    );
+    assert_eq!(
+        metadata["inputs"]["allow-deps-tool-install"]["default"].as_str(),
+        Some("false")
+    );
+
+    let steps = metadata["runs"]["steps"].as_sequence().unwrap();
+    let cache_step = steps
+        .iter()
+        .find(|step| step["uses"].as_str().is_some())
+        .expect("composite action must contain a cache step");
+    let cache = cache_step["uses"].as_str().unwrap();
+    assert_eq!(
+        cache,
+        "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830"
+    );
+    let cache_key = cache_step["with"]["key"].as_str().unwrap();
+    assert!(cache_key.contains("runner.os"));
+    assert!(cache_key.contains("runner.arch"));
+    assert!(cache_key.contains("outputs.version"));
+    for lock in ["**/osdk.lock", "**/Cargo.lock", "**/pnpm-lock.yaml"] {
+        assert!(cache_key.contains(lock), "cache key does not cover {lock}");
+    }
+    let cache_paths = cache_step["with"]["path"].as_str().unwrap();
+    assert!(cache_paths.contains("/osdk/data"));
+    assert!(cache_paths.contains("/osdk/cache"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn github_action_unix_helpers_complete_the_ci_contract() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let status = Command::new("bash")
+        .arg(repository.join("scripts/test-github-action.sh"))
+        .current_dir(&repository)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(windows)]
+#[test]
+fn github_action_windows_helpers_complete_the_ci_contract() {
+    // The Windows GNU suite runs under Wine on Linux. It validates the Windows
+    // Rust paths, but a Windows child process cannot launch the Linux host's
+    // `pwsh`; the native Windows CI job runs this PowerShell contract instead.
+    if std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let status = Command::new("pwsh")
+        .args(["-NoProfile", "-File"])
+        .arg(repository.join("scripts/test-github-action.ps1"))
+        .current_dir(&repository)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 fn run_isolated(root: &Path, args: &[&str]) -> Output {
     run_isolated_in(root, root, args)
 }

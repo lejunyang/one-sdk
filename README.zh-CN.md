@@ -97,6 +97,19 @@ ABI。更新源与工具下载一样会做测速，因此 GitHub 镜像更快时
 PATH 设置、安装器参数、源码构建和校验方式见
 [安装指南](site/guide/installation.md)。
 
+### GitHub Actions
+
+仓库也提供 composite setup Action：安装并校验 osdk Release，恢复共享工具/包缓存，
+按 lock 初始化项目工具与应用依赖，并把选中的环境导出给后续 step：
+
+```yaml
+- uses: actions/checkout@v4
+- uses: lejunyang/one-sdk@main
+```
+
+生产 workflow 请固定到 Release tag 或完整 commit SHA。CI 安全默认值、全部参数、缓存 key、
+monorepo 与严格离线/checksum 用法见 [GitHub Actions](site/guide/github-actions.md)。
+
 ## 快速开始
 
 ```bash

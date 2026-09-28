@@ -22,6 +22,9 @@ description: >-
 4. 执行会改系统、删除数据或改下载来源的命令前，读取对应 reference 的安全边界。
 5. 在 one-sdk 仓库开发 CI 时，以 `osdk task list` 为检查清单，不从 workflow 手抄命令。
 
+GitHub Actions 中安装 osdk、恢复缓存并初始化项目环境时，读取
+[GitHub Actions](reference/github-actions/guide.md)。
+
 ## 先记住的边界
 
 - 使用 `osdk run <name>` 执行任务；不存在裸 `osdk <name>`。

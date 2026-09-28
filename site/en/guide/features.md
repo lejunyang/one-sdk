@@ -10,6 +10,7 @@ current implementation boundaries.
 | Guide | What it covers |
 | --- | --- |
 | [Getting Started](./getting-started) | Global options, install/switch/query/remove workflows, and version aliases |
+| [GitHub Actions](./github-actions) | Install osdk, restore shared caches, materialize locked tools and dependencies, and export the project environment in CI |
 | [Projects and Configuration](./projects) | Project discovery, native version files, the complete configuration schema, merge rules, and trust |
 | [Project tasks](./tasks) | Declare project commands under `[tasks]` and run them with `osdk run`, with dependencies, parallel steps, and platform variants |
 | [Reproducible Lockfiles](./lockfiles) | How `lock`, `install`, `outdated`, and `upgrade` interact, including stale states |
@@ -30,6 +31,7 @@ After [installing osdk](./installation), continue with the guide that matches
 your goal:
 
 - To define a repository's tool versions, read [Projects and Configuration](./projects) and [Reproducible Lockfiles](./lockfiles).
+- To reproduce the repository in CI with cache reuse, read [GitHub Actions](./github-actions).
 - To manage a language toolchain, read [Runtimes and Ecosystem Tools](./runtimes).
 - To pin npm, pnpm, or Yarn, read [JavaScript Package Managers](./package-managers).
 - To install Prettier, TypeScript, or a scoped npm CLI package, read [npm Developer Tools](./npm-tools).

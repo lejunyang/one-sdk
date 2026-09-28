@@ -29,6 +29,7 @@ const zhSidebar: DefaultTheme.Sidebar = [
     items: [
       { text: '功能总览', link: '/guide/features' },
       { text: '开始使用与通用命令', link: '/guide/getting-started' },
+      { text: 'GitHub Actions', link: '/guide/github-actions' },
       { text: '项目配置与信任', link: '/guide/projects' },
       { text: '项目任务', link: '/guide/tasks' },
             { text: '锁文件与环境复现', link: '/guide/lockfiles' },
@@ -88,6 +89,7 @@ const enSidebar: DefaultTheme.Sidebar = [
     items: [
       { text: 'Feature Overview', link: '/en/guide/features' },
       { text: 'Getting Started and Commands', link: '/en/guide/getting-started' },
+      { text: 'GitHub Actions', link: '/en/guide/github-actions' },
       { text: 'Projects, Configuration, and Trust', link: '/en/guide/projects' },
       { text: 'Project Tasks', link: '/en/guide/tasks' },
       { text: 'Lockfiles and Reproducibility', link: '/en/guide/lockfiles' },
