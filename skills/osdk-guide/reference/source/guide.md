@@ -28,3 +28,5 @@ osdk source unpin node
 probe 只对候选排序，不保证目标版本一定存在。osdk 直接下载归档、裸二进制或自升级
 产物时，会对每个候选依次执行下载、checksum/attestation 校验、解包和必需文件检查；
 任一步失败都会清理该候选并继续后备源。`--offline` 不会换源，但仍校验并解包缓存产物。
+Zig 与 Gradle index 中的绝对产物 URL 会按发布相对路径重映射到排序后的 download URL；
+Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项。

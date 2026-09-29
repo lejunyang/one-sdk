@@ -62,6 +62,18 @@ struct IndexArtifact {
 }
 
 impl ZigBackend {
+    fn merge_index(
+        combined: &mut BTreeMap<String, IndexEntry>,
+        index: BTreeMap<String, IndexEntry>,
+    ) {
+        // Sources are ranked best-first. Preserve the first definition of a
+        // version, while admitting releases absent from a healthy but stale
+        // mirror index.
+        for (version, entry) in index {
+            combined.entry(version).or_insert(entry);
+        }
+    }
+
     /// The index's platform key for the running host, e.g. `x86_64-windows`.
     ///
     /// Zig names these with LLVM triple CPU tokens, which is what
@@ -145,24 +157,66 @@ impl ZigBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn fetch_index(ctx: &Ctx) -> Result<BTreeMap<String, IndexEntry>> {
-        let sources = crate::source::select::ranked_source_list(ctx, &ZigBackend).await?;
+    async fn fetch_index_from_sources(
+        ctx: &Ctx,
+        sources: &[Source],
+    ) -> Result<BTreeMap<String, IndexEntry>> {
         let mut last_err = None;
-        for source in &sources {
+        let mut combined = BTreeMap::new();
+        for source in sources {
             let Some(index_url) = source.index_url.clone() else {
                 continue;
             };
-            match crate::http::get_cached_json::<BTreeMap<String, IndexEntry>>(ctx, &index_url)
-                .await
+            match crate::http::get_cached_source_json::<BTreeMap<String, IndexEntry>>(
+                ctx, source, &index_url,
+            )
+            .await
             {
-                Ok(index) => return Ok(index),
+                Ok(index) => Self::merge_index(&mut combined, index),
                 Err(error) => {
                     tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.index_fetch_failover", &[("err", &error.to_string())]));
                     last_err = Some(error);
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| Error::other("no reachable source provides the zig index")))
+        if combined.is_empty() {
+            Err(last_err
+                .unwrap_or_else(|| Error::other("no reachable source provides the zig index")))
+        } else {
+            Ok(combined)
+        }
+    }
+
+    #[cfg(feature = "install")]
+    async fn fetch_index(ctx: &Ctx) -> Result<BTreeMap<String, IndexEntry>> {
+        let sources = crate::source::select::ranked_source_list(ctx, &ZigBackend).await?;
+        Self::fetch_index_from_sources(ctx, &sources).await
+    }
+
+    fn artifact_urls(sources: &[Source], artifact: &IndexArtifact) -> Vec<String> {
+        let relative = artifact
+            .tarball
+            .strip_prefix("https://ziglang.org/download")
+            .or_else(|| {
+                sources.iter().find_map(|source| {
+                    artifact
+                        .tarball
+                        .strip_prefix(source.download_url.trim_end_matches('/'))
+                })
+            })
+            .map(|path| path.trim_start_matches('/'));
+        let mut urls = relative
+            .map(|path| {
+                sources
+                    .iter()
+                    .map(|source| crate::http::join_url(&source.download_url, path))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !urls.contains(&artifact.tarball) {
+            urls.push(artifact.tarball.clone());
+        }
+        urls
     }
 }
 
@@ -228,7 +282,8 @@ impl Backend for ZigBackend {
             plan
         } else {
             let key = Self::platform_key(ctx).ok_or_else(|| Self::unsupported_platform(ctx))?;
-            let index = Self::fetch_index(ctx).await?;
+            let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+            let index = Self::fetch_index_from_sources(ctx, &sources).await?;
             let artifact = Self::versions_from_index(&index, &key)
                 .into_iter()
                 .find(|(version, _)| version == &tv.version)
@@ -242,7 +297,7 @@ impl Backend for ZigBackend {
             InstallPlan {
                 tool: self.id().to_string(),
                 version: tv.version.clone(),
-                urls: vec![artifact.tarball.clone()],
+                urls: Self::artifact_urls(&sources, &artifact),
                 kind: ArchiveKind::from_name(&file_name)?,
                 file_name,
                 checksum: Some(Checksum {
@@ -437,6 +492,45 @@ mod tests {
             checksum.hex,
             "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e"
         );
+    }
+
+    #[test]
+    fn absolute_index_tarballs_are_rebased_across_ranked_sources() {
+        let artifact = IndexArtifact {
+            tarball: "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz".into(),
+            shasum: "00".repeat(32),
+        };
+        let sources = vec![
+            Source::mirror("mirror", "https://mirror.example/zig/", 0),
+            Source::official("ziglang", "https://ziglang.org/download/"),
+        ];
+        assert_eq!(
+            ZigBackend::artifact_urls(&sources, &artifact),
+            [
+                "https://mirror.example/zig/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+                "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+            ]
+        );
+    }
+
+    #[test]
+    fn later_indexes_fill_versions_missing_from_a_stale_preferred_index() {
+        let mut preferred = index();
+        preferred.remove("0.9.1");
+        let fallback = index();
+        let preferred_checksum = match &preferred["0.16.0"].platforms["x86_64-linux"] {
+            PlatformValue::Artifact(artifact) => artifact.shasum.clone(),
+            PlatformValue::Other(_) => unreachable!(),
+        };
+
+        ZigBackend::merge_index(&mut preferred, fallback);
+
+        assert!(preferred.contains_key("0.9.1"));
+        let merged_checksum = match &preferred["0.16.0"].platforms["x86_64-linux"] {
+            PlatformValue::Artifact(artifact) => &artifact.shasum,
+            PlatformValue::Other(_) => unreachable!(),
+        };
+        assert_eq!(merged_checksum, &preferred_checksum);
     }
 
     #[test]

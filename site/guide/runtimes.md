@@ -192,7 +192,9 @@ osdk install kotlin@2.4.10
 
 Maven 与 Kotlin 的上游没有同类的可机读索引，仍是固定集合：Maven 仅 `3.9.16`
 （SHA-512）、Kotlin 仅 `2.4.10`（SHA-256），请求其他版本会失败。三者都拥有独立安装
-目录和 shim；Kotlin 的 GitHub 下载还提供代理候选。
+目录和 shim；Kotlin 的 GitHub 下载还提供代理候选。Maven/Kotlin 使用排序后的有效
+source URL；Gradle 会逐源读取 index，并把 index 中的绝对 distribution URL 重映射到
+每个排序 source，因此 index 可读但该源缺少目标 zip 时仍会回退。
 
 ::: tip 与 Gradle Wrapper 的关系
 项目里已有 `gradle/wrapper/gradle-wrapper.properties` 时，**wrapper 仍是权威来源** ——
@@ -316,7 +318,9 @@ osdk exec --tool zig -- zig version
 
 版本来自 `ziglang.org/download/index.json`，该索引把每个发布的归档 URL 与 SHA-256
 放在一起，因此每次安装都经过校验、也可被锁定。Zig 的 GitHub release 只提供源码和
-bootstrap 归档，所以通用 `github:` backend 无法安装它。
+bootstrap 归档，所以通用 `github:` backend 无法安装它。index 中虽然写的是绝对
+tarball URL，osdk 仍会按相对发布路径把它重映射到每个排序 source；镜像 index 正常但
+目标归档缺失、损坏或无法解包时会继续后备源。
 
 `master` 是滚动 nightly 而非发布版本，按预发布处理：`zig@latest` 只会选中带 tag 的
 版本；需要 nightly 时在允许预发布的[策略](./sources-security)下显式执行

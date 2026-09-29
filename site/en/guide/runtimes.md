@@ -208,7 +208,10 @@ refused rather than installed unverified.
 Maven and Kotlin have no comparable machine-readable index upstream, so they stay
 a fixed catalog: Maven `3.9.16` with SHA-512 and Kotlin `2.4.10` with SHA-256;
 other versions fail. All three have their own installation directory and shims;
-Kotlin also has a GitHub proxy download candidate.
+Kotlin also has a GitHub proxy download candidate. Maven and Kotlin use the
+ranked effective source URLs. Gradle tries each source index and rebases the
+index's absolute distribution URL across all ranked download roots, so a source
+with a readable index but a missing target zip can still fall through.
 
 ::: tip Relationship to the Gradle wrapper
 When a project has `gradle/wrapper/gradle-wrapper.properties`, **the wrapper
@@ -349,7 +352,10 @@ osdk exec --tool zig -- zig version
 Versions come from `ziglang.org/download/index.json`, which lists every release
 with its archive URL and SHA-256 together, so each install is checksum-verified
 and can be locked. Zig's GitHub releases carry only source and bootstrap
-archives, so the generic `github:` backend cannot install it.
+archives, so the generic `github:` backend cannot install it. Although the index
+contains absolute tarball URLs, osdk rebases their relative release path across
+the ranked source download roots. A mirror whose index works but whose target
+archive is missing, corrupt, or not extractable therefore falls through.
 
 `master` is a rolling nightly, not a release. It is treated as a prerelease, so
 `zig@latest` always selects a tagged version; request it explicitly with

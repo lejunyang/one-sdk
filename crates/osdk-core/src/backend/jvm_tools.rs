@@ -21,7 +21,7 @@ const GRADLE_VERSION_INDEX: &str = "https://services.gradle.org/versions/all";
 /// 只建模影响「选哪个版本」与「完整性校验」的字段；该端点每条约二十个字段，其余在此
 /// 用不到。
 #[cfg(feature = "install")]
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct GradleRelease {
     version: String,
     #[serde(rename = "downloadUrl")]
@@ -76,6 +76,19 @@ struct Release {
 }
 
 impl JvmToolBackend {
+    fn merge_gradle_releases(combined: &mut Vec<GradleRelease>, releases: Vec<GradleRelease>) {
+        // Keep the best-ranked definition of duplicate versions, while
+        // admitting releases missing from a stale mirror.
+        for release in releases {
+            if !combined
+                .iter()
+                .any(|known| known.version == release.version)
+            {
+                combined.push(release);
+            }
+        }
+    }
+
     fn release(self) -> Release {
         match self {
             Self::Maven => Release {
@@ -107,13 +120,63 @@ impl JvmToolBackend {
     /// 走 `http::get_cached_json`，与其他基于索引的 backend 一致，因此
     /// `list_remote_versions` 与 `install` 在同一次命令里不会各请求一遍。
     #[cfg(feature = "install")]
+    async fn gradle_releases_from_sources(
+        ctx: &Ctx,
+        sources: &[Source],
+    ) -> Result<Vec<GradleRelease>> {
+        let mut last_error = None;
+        let mut combined = Vec::new();
+        for source in sources {
+            let Some(index_url) = source.index_url.as_deref() else {
+                continue;
+            };
+            match crate::http::get_cached_source_json::<Vec<GradleRelease>>(ctx, source, index_url)
+                .await
+            {
+                Ok(releases) => Self::merge_gradle_releases(&mut combined, releases),
+                Err(error) => {
+                    tracing::warn!(
+                        source = %source.id,
+                        "{}",
+                        crate::i18n::trf(
+                            "log.index_fetch_failover",
+                            &[("err", &error.to_string())]
+                        )
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        if combined.is_empty() {
+            Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+                tool: Self::Gradle.id().into(),
+                tried: sources.len(),
+            }))
+        } else {
+            Ok(combined)
+        }
+    }
+
+    #[cfg(feature = "install")]
     async fn gradle_releases(ctx: &Ctx) -> Result<Vec<GradleRelease>> {
-        let index_url = crate::source::select::ranked_source_list(ctx, &Self::Gradle)
-            .await?
-            .into_iter()
-            .find_map(|source| source.index_url)
-            .unwrap_or_else(|| GRADLE_VERSION_INDEX.to_string());
-        crate::http::get_cached_json(ctx, &index_url).await
+        let sources = crate::source::select::ranked_source_list(ctx, &Self::Gradle).await?;
+        Self::gradle_releases_from_sources(ctx, &sources).await
+    }
+
+    fn gradle_download_urls(sources: &[Source], release: &GradleRelease) -> Vec<String> {
+        let file_name = release
+            .download_url
+            .rsplit('/')
+            .next()
+            .unwrap_or("gradle-bin.zip");
+        let mut urls = sources
+            .iter()
+            .map(|source| crate::http::join_url(&source.download_url, file_name))
+            .collect::<Vec<_>>();
+        if !urls.contains(&release.download_url) {
+            urls.push(release.download_url.clone());
+        }
+        urls
     }
 
     /// 按索引里的记录安装一个 Gradle 版本。
@@ -126,7 +189,8 @@ impl JvmToolBackend {
         if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
             return run_plan(ctx, &plan).await;
         }
-        let releases = Self::gradle_releases(ctx).await?;
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let releases = Self::gradle_releases_from_sources(ctx, &sources).await?;
         let release = releases
             .iter()
             .find(|release| release.version == tv.version)
@@ -155,7 +219,7 @@ impl JvmToolBackend {
         let plan = InstallPlan {
             tool: self.id().into(),
             version: tv.version.clone(),
-            urls: vec![release.download_url.clone()],
+            urls: Self::gradle_download_urls(&sources, release),
             kind: ArchiveKind::from_name(&file_name)?,
             file_name,
             checksum: Some(Checksum {
@@ -262,8 +326,8 @@ impl Backend for JvmToolBackend {
         }
 
         let release = self.release();
-        let urls = self
-            .default_sources()
+        let urls = crate::source::select::ranked_source_list(ctx, self)
+            .await?
             .into_iter()
             .map(|source| source.download_url)
             .collect();
@@ -355,6 +419,57 @@ mod tests {
             .bin_names(&dummy_ctx(), &ToolVersion::new("gradle", "9.3.1"))
             .unwrap()
             .contains(&"gradle".to_string()));
+    }
+
+    #[test]
+    fn gradle_index_url_is_rebased_across_ranked_download_sources() {
+        let release = GradleRelease {
+            version: "9.7.0".into(),
+            download_url: "https://services.gradle.org/distributions/gradle-9.7.0-bin.zip".into(),
+            checksum: Some("00".repeat(32)),
+            snapshot: false,
+            nightly: false,
+            rc_for: String::new(),
+            milestone_for: String::new(),
+            broken: false,
+        };
+        let sources = vec![
+            Source::mirror("mirror", "https://mirror.example/gradle/", 0),
+            Source::official("official", "https://services.gradle.org/distributions/"),
+        ];
+        assert_eq!(
+            JvmToolBackend::gradle_download_urls(&sources, &release),
+            [
+                "https://mirror.example/gradle/gradle-9.7.0-bin.zip",
+                "https://services.gradle.org/distributions/gradle-9.7.0-bin.zip",
+            ]
+        );
+    }
+
+    #[test]
+    fn later_gradle_indexes_fill_versions_missing_from_a_stale_preferred_index() {
+        let release = |version: &str, checksum: &str| GradleRelease {
+            version: version.into(),
+            download_url: format!(
+                "https://services.gradle.org/distributions/gradle-{version}-bin.zip"
+            ),
+            checksum: Some(checksum.into()),
+            snapshot: false,
+            nightly: false,
+            rc_for: String::new(),
+            milestone_for: String::new(),
+            broken: false,
+        };
+        let mut combined = vec![release("9.7.0", "preferred")];
+
+        JvmToolBackend::merge_gradle_releases(
+            &mut combined,
+            vec![release("9.7.0", "fallback"), release("9.6.0", "older")],
+        );
+
+        assert_eq!(combined.len(), 2);
+        assert_eq!(combined[0].checksum.as_deref(), Some("preferred"));
+        assert_eq!(combined[1].version, "9.6.0");
     }
 
     /// Gradle 的候选版本必须来自上游索引，而不是一个写死的版本。
