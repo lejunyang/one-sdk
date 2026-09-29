@@ -112,6 +112,8 @@ tag 或被替换的镜像都装不进来；落地时继续使用 `install_mode`�
 
 - **下载 fail-closed**：GitHub tarball 走 osdk 既有下载栈，受归档大小 / 条目数上限约束；skill
   文件数（默认 1000）与总体积（默认 25 MiB）也有上限，超限报错而不是把整仓库塞进来。
+- **完整候选回退**：HTTP 200 仍不算成功；tarball 必须能安全解包，否则 osdk 会清理该
+  候选并继续下一个 GitHub 下载入口。
 - **安装前预览**：首次安装会打印 skill 的 `name`、`description`、文件数、体积，以及是否含脚本类
   文件，让你在写进 Agent 目录前看清「这份 skill 会让 Agent 读到什么」。
 - **osdk 不执行 skill**：搬运与链接由 osdk 做，执行发生在下游 Agent 里。

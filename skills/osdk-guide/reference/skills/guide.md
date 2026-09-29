@@ -28,3 +28,6 @@ osdk skills update name
 改为复制。确认安装摘要后可更新已有真实目录；osdk 先准备新树，旧目录改名备份，激活失败即
 恢复。旧 lock 缺少安装方式时按现有目录类型推断；本地源与目标重叠时在 staging 前拒绝。配置见
 `reference/configuration/skills.md`。
+
+GitHub tarball 必须成功下载并安全解包后才算候选成功；HTTP 200 错页或损坏归档会被清理，
+随后尝试下一个 GitHub 下载入口。

@@ -132,6 +132,9 @@ that overlaps its destination is rejected before staging so it cannot delete its
   stack, bounded by archive size and entry-count limits; a skill's file count
   (default 1000) and total size (default 25 MiB) are capped too, so an oversized or
   hostile repo fails loudly instead of being staged whole.
+- **Complete-candidate failover:** HTTP 200 alone does not accept a GitHub source;
+  its tarball must unpack safely, otherwise osdk removes that candidate and tries
+  the next GitHub download route.
 - **Pre-install preview:** the first install prints the skill's `name`,
   `description`, file count, size, and whether it contains script-like files, so you
   see what an agent will read before it is written into the agent directory.

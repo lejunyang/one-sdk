@@ -92,41 +92,58 @@ pub async fn fetch_at_commit(ctx: &Ctx, owner: &str, repo: &str, commit: &str) -
         let _ = std::fs::remove_dir_all(&scratch);
     }
     std::fs::create_dir_all(&scratch).map_err(|e| Error::io(&scratch, e))?;
-    let archive = scratch.join("source.tar.gz");
-
     // codeload uses `github.com/<o>/<r>/tar.gz/...`, but the canonical download
     // host is github.com while the tarball is actually served by codeload; the
     // proxy candidates already rewrite the github.com host, and the official
     // candidate must target codeload where the tarball truly lives.
+    fetch_archive_candidates(
+        ctx,
+        &candidates
+            .iter()
+            .map(|url| to_codeload(url))
+            .collect::<Vec<_>>(),
+        &scratch,
+        &format!("{owner}/{repo}"),
+    )
+    .await
+}
+
+async fn fetch_archive_candidates(
+    ctx: &Ctx,
+    candidates: &[String],
+    scratch: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let archive = scratch.join("source.tar.gz");
+    let extracted = scratch.join("tree");
     let mut last_err: Option<Error> = None;
-    let mut downloaded = false;
-    for url in candidates.iter().map(|u| to_codeload(u)) {
-        match pipeline::download::download(
-            &ctx.client,
-            &url,
-            &archive,
-            &format!("{owner}/{repo}"),
-            ctx.show_progress,
-        )
-        .await
-        {
+    for url in candidates {
+        let _ = std::fs::remove_file(&archive);
+        let _ = std::fs::remove_dir_all(&extracted);
+        let result = async {
+            pipeline::download::download(&ctx.client, url, &archive, label, ctx.show_progress)
+                .await?;
+            extract::extract(&archive, &extracted, ArchiveKind::TarGz, true)
+        }
+        .await;
+        match result {
             Ok(()) => {
-                downloaded = true;
-                break;
+                let _ = std::fs::remove_file(&archive);
+                return Ok(extracted);
             }
-            Err(e) => last_err = Some(e),
+            Err(error) => {
+                tracing::warn!(
+                    url,
+                    "{}",
+                    crate::i18n::trf("log.download_failover", &[("err", &error.to_string())])
+                );
+                last_err = Some(error);
+            }
         }
     }
-    if !downloaded {
-        return Err(last_err.unwrap_or_else(|| {
-            Error::other(format!("could not download {owner}/{repo}@{commit}"))
-        }));
-    }
-
-    let extracted = scratch.join("tree");
-    extract::extract(&archive, &extracted, ArchiveKind::TarGz, true)?;
     let _ = std::fs::remove_file(&archive);
-    Ok(extracted)
+    let _ = std::fs::remove_dir_all(&extracted);
+    Err(last_err.unwrap_or_else(|| Error::other(format!("could not download {label}"))))
 }
 
 /// Resolve a source directory inside the extracted repo, applying an optional
@@ -184,6 +201,87 @@ fn normalize_ref(reference: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn test_ctx(root: &Path) -> Ctx {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        Ctx {
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            dirs,
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config::default(),
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
+
+    fn tarball(contents: &[u8]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "repo-commit/SKILL.md", contents)
+            .unwrap();
+        archive.finish().unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_archive_falls_through_to_the_next_skill_source() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let good = tarball(b"# skill");
+        let server = std::thread::spawn(move || {
+            for body in [b"not a tarball".to_vec(), good] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let temporary = tempfile::tempdir().unwrap();
+        let scratch = temporary.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let urls = [
+            format!("http://{address}/bad"),
+            format!("http://{address}/good"),
+        ];
+
+        let root =
+            fetch_archive_candidates(&test_ctx(temporary.path()), &urls, &scratch, "owner/repo")
+                .await
+                .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("SKILL.md")).unwrap(),
+            "# skill"
+        );
+    }
 
     #[test]
     fn normalizes_selectors_to_bare_refs() {
