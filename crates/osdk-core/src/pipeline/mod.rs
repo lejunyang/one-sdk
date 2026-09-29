@@ -73,6 +73,60 @@ pub struct PipelineCtx<'a> {
     pub require_checksums: bool,
 }
 
+struct ArtifactVerification {
+    evidence: Vec<VerificationEvidence>,
+    authenticated_checksum: Option<Checksum>,
+}
+
+struct ArtifactVerifier<'a> {
+    client: &'a reqwest::Client,
+    dirs: &'a Dirs,
+    offline: bool,
+    require_checksums: bool,
+    attestation: Option<&'a GithubAttestation>,
+}
+
+async fn verify_artifact(
+    path: &Path,
+    display_name: &str,
+    expected_checksum: Option<&Checksum>,
+    verifier: &ArtifactVerifier<'_>,
+) -> Result<ArtifactVerification> {
+    if let Some(checksum) = expected_checksum {
+        verify::verify_file(path, &checksum.hex, checksum.algo, display_name)?;
+    }
+
+    let evidence = if let Some(attestation) = verifier.attestation {
+        crate::verification::verify_github_attestation(
+            verifier.client,
+            verifier.dirs,
+            verifier.offline,
+            path,
+            attestation,
+        )
+        .await?
+        .into_iter()
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let authenticated_checksum = evidence
+        .first()
+        .map(|item| parse_checksum(item.digest()))
+        .transpose()?;
+    if verifier.require_checksums && expected_checksum.is_none() && authenticated_checksum.is_none()
+    {
+        return Err(Error::other(format!(
+            "checksum required but unavailable for {display_name}"
+        )));
+    }
+
+    Ok(ArtifactVerification {
+        evidence,
+        authenticated_checksum,
+    })
+}
+
 pub fn locked_install_plan(
     tool: &str,
     version: &ToolVersion,
@@ -204,7 +258,9 @@ async fn run_with_attestation_inner_at(
         let _ = std::fs::remove_dir_all(&install_dir);
     }
 
-    // 1. Download to the shared downloads cache, trying candidate URLs in order.
+    // 1. Acquire a complete, verified, extractable candidate. A source is not
+    // usable merely because its probe and HTTP request succeeded: mirrors can
+    // lag, serve an error page with status 200, or contain a corrupt artifact.
     let label = format!("{}@{}", plan.tool, plan.version);
     if ctx.offline && !archive_path.exists() {
         return Err(Error::other(format!(
@@ -212,103 +268,114 @@ async fn run_with_attestation_inner_at(
             plan.tool, plan.version
         )));
     }
-    let mut selected_url =
-        read_cached_source_url(&archive_path).or_else(|| plan.urls.first().cloned());
-    if !archive_path.exists() {
-        let mut last_err: Option<Error> = None;
-        let mut downloaded = false;
-        for (i, url) in plan.urls.iter().enumerate() {
-            match download::download(ctx.client, url, &archive_path, &label, ctx.show_progress)
-                .await
-            {
-                Ok(()) => {
-                    downloaded = true;
-                    selected_url = Some(url.clone());
-                    write_cached_source_url(&archive_path, url);
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        url = %url,
-                        attempt = i + 1,
-                        total = plan.urls.len(),
-                        "{}",
-                        crate::i18n::trf("log.download_failover", &[("err", &e.to_string())])
-                    );
-                    last_err = Some(e);
-                }
-            }
-        }
-        if !downloaded {
-            return Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
-                tool: plan.tool.clone(),
-                tried: plan.urls.len(),
-            }));
-        }
-    }
-
-    // 2. Verify checksum if provided now or persisted from an earlier online
-    // install. This keeps offline reinstalls verifiable even when checksum
-    // discovery itself requires the network.
+    // A checksum discovered during an earlier online install remains the
+    // integrity contract for an offline reinstall and for later source retries,
+    // even when checksum discovery itself requires the network.
     let persisted_checksum = if plan.checksum.is_none() {
         read_cached_checksum(&archive_path)
     } else {
         None
     };
     let verified_checksum = plan.checksum.as_ref().or(persisted_checksum.as_ref());
-    if let Some(cs) = verified_checksum {
-        verify::verify_file(&archive_path, &cs.hex, cs.algo, &plan.file_name)?;
-        write_cached_checksum(&archive_path, cs);
+    let scratch = locator
+        .map(|locator| locator.scratch_root().join(std::process::id().to_string()))
+        .unwrap_or_else(|| scratch_path(ctx.dirs, &plan.tool, &plan.version));
+
+    let cached_url = read_cached_source_url(&archive_path)
+        .or_else(|| plan.urls.first().cloned())
+        .unwrap_or_default();
+    let mut selected: Option<(String, ArtifactVerification)> = None;
+    let mut last_err: Option<Error> = None;
+
+    if archive_path.exists() {
+        match prepare_archive_candidate(
+            plan,
+            ctx,
+            attestation,
+            &archive_path,
+            &scratch,
+            verified_checksum,
+        )
+        .await
+        {
+            Ok(verification) => selected = Some((cached_url, verification)),
+            Err(error) if ctx.offline => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    url = %cached_url,
+                    error = %error,
+                    "cached artifact failed validation; retrying candidate sources"
+                );
+                discard_cached_artifact(&archive_path);
+                let _ = std::fs::remove_dir_all(&scratch);
+                last_err = Some(error);
+            }
+        }
+    }
+
+    if selected.is_none() {
+        for (index, url) in plan.urls.iter().enumerate() {
+            discard_cached_artifact(&archive_path);
+            let result = async {
+                download::download(ctx.client, url, &archive_path, &label, ctx.show_progress)
+                    .await?;
+                prepare_archive_candidate(
+                    plan,
+                    ctx,
+                    attestation,
+                    &archive_path,
+                    &scratch,
+                    verified_checksum,
+                )
+                .await
+            }
+            .await;
+            match result {
+                Ok(verification) => {
+                    selected = Some((url.clone(), verification));
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        url = %url,
+                        attempt = index + 1,
+                        total = plan.urls.len(),
+                        "{}",
+                        crate::i18n::trf(
+                            "log.download_failover",
+                            &[("err", &error.to_string())]
+                        )
+                    );
+                    discard_cached_artifact(&archive_path);
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    last_err = Some(error);
+                }
+            }
+        }
+    }
+
+    let (selected_url, verification) = selected.ok_or_else(|| {
+        last_err.unwrap_or_else(|| Error::NoUsableSource {
+            tool: plan.tool.clone(),
+            tried: plan.urls.len(),
+        })
+    })?;
+    write_cached_source_url(&archive_path, &selected_url);
+    if let Some(checksum) = verified_checksum {
+        write_cached_checksum(&archive_path, checksum);
         tracing::info!(file = %plan.file_name, "{}", crate::i18n::tr("log.checksum_verified"));
+    } else if let Some(checksum) = verification.authenticated_checksum.as_ref() {
+        write_cached_checksum(&archive_path, checksum);
     } else {
         tracing::debug!(file = %plan.file_name, "no checksum available; skipping verification");
     }
 
-    let evidence = if let Some(attestation) = attestation {
-        crate::verification::verify_github_attestation(
-            ctx.client,
-            ctx.dirs,
-            ctx.offline,
-            &archive_path,
-            attestation,
-        )
-        .await?
-        .into_iter()
-        .collect()
-    } else {
-        Vec::new()
-    };
-    let authenticated_checksum = evidence
-        .first()
-        .map(|item| parse_checksum(item.digest()))
-        .transpose()?;
-    if ctx.require_checksums && verified_checksum.is_none() && authenticated_checksum.is_none() {
-        return Err(Error::other(format!(
-            "checksum required but unavailable for {}@{} ({})",
-            plan.tool, plan.version, plan.file_name
-        )));
-    }
-    if verified_checksum.is_none() {
-        if let Some(checksum) = authenticated_checksum.as_ref() {
-            write_cached_checksum(&archive_path, checksum);
-        }
-    }
-
-    // 3. Extract into a scratch dir under the cache tmp.
-    let scratch = locator
-        .map(|locator| locator.scratch_root().join(std::process::id().to_string()))
-        .unwrap_or_else(|| scratch_path(ctx.dirs, &plan.tool, &plan.version));
-    if scratch.exists() {
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-    create_dir_all(&scratch)?;
-    extract::extract(&archive_path, &scratch, plan.kind, plan.strip_root)?;
     let materialize_root = match plan.subdir.as_deref() {
         Some(subdir) => safe_subdir(&scratch, subdir)?,
         None => scratch.clone(),
     };
 
-    // 4. Ingest into CAS + materialize into the install dir.
+    // 2. Ingest into CAS + materialize into the install dir.
     let report = ctx.cas.ingest_tree(
         &materialize_root,
         &install_dir,
@@ -318,16 +385,19 @@ async fn run_with_attestation_inner_at(
     )?;
     let _ = std::fs::remove_dir_all(&scratch);
 
-    // 5. Finalize.
+    // 3. Finalize.
     write_artifact_receipt(
         &install_dir,
         &ArtifactReceipt {
-            url: selected_url.unwrap_or_default(),
+            url: selected_url,
             file_name: plan.file_name.clone(),
-            checksum: verified_checksum
-                .map(format_checksum)
-                .or_else(|| authenticated_checksum.as_ref().map(format_checksum)),
-            evidence,
+            checksum: verified_checksum.map(format_checksum).or_else(|| {
+                verification
+                    .authenticated_checksum
+                    .as_ref()
+                    .map(format_checksum)
+            }),
+            evidence: verification.evidence,
         },
     )?;
     if mark_complete {
@@ -344,6 +414,43 @@ async fn run_with_attestation_inner_at(
     );
 
     Ok(install_dir)
+}
+
+async fn prepare_archive_candidate(
+    plan: &InstallPlan,
+    ctx: &PipelineCtx<'_>,
+    attestation: Option<&GithubAttestation>,
+    archive_path: &Path,
+    scratch: &Path,
+    expected_checksum: Option<&Checksum>,
+) -> Result<ArtifactVerification> {
+    let verification = verify_artifact(
+        archive_path,
+        &format!("{}@{} ({})", plan.tool, plan.version, plan.file_name),
+        expected_checksum,
+        &ArtifactVerifier {
+            client: ctx.client,
+            dirs: ctx.dirs,
+            offline: ctx.offline,
+            require_checksums: ctx.require_checksums,
+            attestation,
+        },
+    )
+    .await?;
+    if scratch.exists() {
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+    create_dir_all(scratch)?;
+    extract::extract(archive_path, scratch, plan.kind, plan.strip_root)?;
+    if let Some(subdir) = plan.subdir.as_deref() {
+        safe_subdir(scratch, subdir)?;
+    }
+    Ok(verification)
+}
+
+fn discard_cached_artifact(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(source_url_cache_path(path));
 }
 
 fn scratch_path(dirs: &Dirs, tool: &str, version: &str) -> PathBuf {
@@ -607,83 +714,99 @@ async fn install_single_binary_inner_at(
             "offline artifact cache miss for {tool}@{version}"
         )));
     }
-    if !offline {
-        let _ = std::fs::remove_file(&cached);
-    }
-    let mut last_err: Option<Error> = None;
-    let mut ok = false;
-    let mut selected_url = read_cached_source_url(&cached).or_else(|| urls.first().cloned());
-    if cached.exists() {
-        ok = true;
-    } else {
-        for (i, url) in urls.iter().enumerate() {
-            match download::download(
-                client,
-                url,
-                &cached,
-                &format!("{tool}@{version}"),
-                show_progress,
-            )
-            .await
-            {
-                Ok(()) => {
-                    ok = true;
-                    selected_url = Some(url.clone());
-                    write_cached_source_url(&cached, url);
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        url = %url,
-                        attempt = i + 1,
-                        total = urls.len(),
-                        "{}",
-                        crate::i18n::trf("log.binary_download_failed", &[("err", &e.to_string())])
-                    );
-                    last_err = Some(e);
-                }
-            }
-        }
-    }
-    if !ok {
-        return Err(last_err.unwrap_or_else(|| Error::NoUsableSource {
-            tool: tool.to_string(),
-            tried: urls.len(),
-        }));
-    }
-
     let persisted_checksum = if checksum.is_none() {
         read_cached_checksum(&cached)
     } else {
         None
     };
     let verified_checksum = checksum.or(persisted_checksum.as_ref());
-    if let Some(cs) = verified_checksum {
-        verify::verify_file(&cached, &cs.hex, cs.algo, download_name)?;
-        write_cached_checksum(&cached, cs);
-        tracing::info!(file = %download_name, "{}", crate::i18n::tr("log.checksum_verified"));
-    }
-    let evidence = if let Some(attestation) = attestation {
-        crate::verification::verify_github_attestation(client, dirs, offline, &cached, attestation)
-            .await?
-            .into_iter()
-            .collect()
+
+    let mut last_err: Option<Error> = None;
+    let mut selected: Option<(String, ArtifactVerification)> = None;
+    if offline {
+        let url = read_cached_source_url(&cached)
+            .or_else(|| urls.first().cloned())
+            .unwrap_or_default();
+        let verification = verify_artifact(
+            &cached,
+            &format!("{tool}@{version} ({download_name})"),
+            verified_checksum,
+            &ArtifactVerifier {
+                client,
+                dirs,
+                offline: true,
+                require_checksums,
+                attestation,
+            },
+        )
+        .await?;
+        selected = Some((url, verification));
     } else {
-        Vec::new()
-    };
-    let authenticated_checksum = evidence
-        .first()
-        .map(|item| parse_checksum(item.digest()))
-        .transpose()?;
-    if require_checksums && verified_checksum.is_none() && authenticated_checksum.is_none() {
-        return Err(Error::other(format!(
-            "checksum required but unavailable for {tool}@{version} ({download_name})"
-        )));
-    }
-    if verified_checksum.is_none() {
-        if let Some(checksum) = authenticated_checksum.as_ref() {
-            write_cached_checksum(&cached, checksum);
+        // Bare binaries have no extraction step that can refresh the cache as a
+        // side effect, so preserve the existing online behavior of fetching a
+        // fresh candidate on every incomplete install.
+        discard_cached_artifact(&cached);
+        for (index, url) in urls.iter().enumerate() {
+            discard_cached_artifact(&cached);
+            let result = async {
+                download::download(
+                    client,
+                    url,
+                    &cached,
+                    &format!("{tool}@{version}"),
+                    show_progress,
+                )
+                .await?;
+                verify_artifact(
+                    &cached,
+                    &format!("{tool}@{version} ({download_name})"),
+                    verified_checksum,
+                    &ArtifactVerifier {
+                        client,
+                        dirs,
+                        offline: false,
+                        require_checksums,
+                        attestation,
+                    },
+                )
+                .await
+            }
+            .await;
+            match result {
+                Ok(verification) => {
+                    selected = Some((url.clone(), verification));
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        url = %url,
+                        attempt = index + 1,
+                        total = urls.len(),
+                        "{}",
+                        crate::i18n::trf(
+                            "log.binary_download_failed",
+                            &[("err", &error.to_string())]
+                        )
+                    );
+                    discard_cached_artifact(&cached);
+                    last_err = Some(error);
+                }
+            }
         }
+    }
+
+    let (selected_url, verification) = selected.ok_or_else(|| {
+        last_err.unwrap_or_else(|| Error::NoUsableSource {
+            tool: tool.to_string(),
+            tried: urls.len(),
+        })
+    })?;
+    write_cached_source_url(&cached, &selected_url);
+    if let Some(checksum) = verified_checksum {
+        write_cached_checksum(&cached, checksum);
+        tracing::info!(file = %download_name, "{}", crate::i18n::tr("log.checksum_verified"));
+    } else if let Some(checksum) = verification.authenticated_checksum.as_ref() {
+        write_cached_checksum(&cached, checksum);
     }
 
     let exe_suffix = os.exe_suffix();
@@ -698,12 +821,15 @@ async fn install_single_binary_inner_at(
     write_artifact_receipt(
         &install_dir,
         &ArtifactReceipt {
-            url: selected_url.unwrap_or_default(),
+            url: selected_url,
             file_name: download_name.to_string(),
-            checksum: verified_checksum
-                .map(format_checksum)
-                .or_else(|| authenticated_checksum.as_ref().map(format_checksum)),
-            evidence,
+            checksum: verified_checksum.map(format_checksum).or_else(|| {
+                verification
+                    .authenticated_checksum
+                    .as_ref()
+                    .map(format_checksum)
+            }),
+            evidence: verification.evidence,
         },
     )?;
     if mark_complete {
@@ -889,6 +1015,205 @@ fn read_cached_checksum(archive: &std::path::Path) -> Option<Checksum> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn tar_gz_bytes(contents: &[u8]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "package/bin/tool", contents)
+            .unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn serve_candidate_bodies(bodies: Vec<Vec<u8>>) -> (Vec<String>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let urls = (0..bodies.len())
+            .map(|index| format!("http://{address}/candidate-{index}"))
+            .collect();
+        let server = std::thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (urls, server)
+    }
+
+    fn test_dirs(temp: &tempfile::TempDir) -> Dirs {
+        Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn archive_falls_back_when_a_source_serves_the_wrong_checksum() {
+        let good = tar_gz_bytes(b"verified");
+        let temp = tempfile::tempdir().unwrap();
+        let expected_path = temp.path().join("expected.tgz");
+        std::fs::write(&expected_path, &good).unwrap();
+        let checksum = verify::hash_file(&expected_path, HashAlgo::Sha256).unwrap();
+        let (urls, server) = serve_candidate_bodies(vec![b"wrong bytes".to_vec(), good]);
+        let successful_url = urls[1].clone();
+        let dirs = test_dirs(&temp);
+        dirs.ensure().unwrap();
+        let cas = Cas::new(dirs.store.clone());
+        let client = reqwest::Client::new();
+        let plan = InstallPlan {
+            tool: "checksum-fallback".into(),
+            version: "1.0.0".into(),
+            urls,
+            file_name: "tool.tgz".into(),
+            kind: ArchiveKind::TarGz,
+            checksum: Some(Checksum {
+                algo: HashAlgo::Sha256,
+                hex: checksum,
+            }),
+            strip_root: true,
+            subdir: None,
+        };
+        let ctx = PipelineCtx {
+            client: &client,
+            dirs: &dirs,
+            cas: &cas,
+            link_mode: LinkMode::Copy,
+            show_progress: false,
+            offline: false,
+            require_checksums: true,
+        };
+
+        let install = run(&plan, &ctx).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(
+            artifact_receipt(&dirs, "checksum-fallback", "1.0.0")
+                .unwrap()
+                .url,
+            successful_url
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_falls_back_when_a_source_serves_an_invalid_archive() {
+        let (urls, server) =
+            serve_candidate_bodies(vec![b"not an archive".to_vec(), tar_gz_bytes(b"extracted")]);
+        let successful_url = urls[1].clone();
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = test_dirs(&temp);
+        dirs.ensure().unwrap();
+        let cas = Cas::new(dirs.store.clone());
+        let client = reqwest::Client::new();
+        let plan = InstallPlan {
+            tool: "extract-fallback".into(),
+            version: "1.0.0".into(),
+            urls,
+            file_name: "tool.tgz".into(),
+            kind: ArchiveKind::TarGz,
+            checksum: None,
+            strip_root: true,
+            subdir: None,
+        };
+        let ctx = PipelineCtx {
+            client: &client,
+            dirs: &dirs,
+            cas: &cas,
+            link_mode: LinkMode::Copy,
+            show_progress: false,
+            offline: false,
+            require_checksums: false,
+        };
+
+        let install = run(&plan, &ctx).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            std::fs::read(install.join("bin/tool")).unwrap(),
+            b"extracted"
+        );
+        assert_eq!(
+            artifact_receipt(&dirs, "extract-fallback", "1.0.0")
+                .unwrap()
+                .url,
+            successful_url
+        );
+    }
+
+    #[tokio::test]
+    async fn single_binary_falls_back_when_a_source_serves_the_wrong_checksum() {
+        let good = b"verified executable".to_vec();
+        let temp = tempfile::tempdir().unwrap();
+        let expected_path = temp.path().join("expected.bin");
+        std::fs::write(&expected_path, &good).unwrap();
+        let checksum = Checksum {
+            algo: HashAlgo::Sha256,
+            hex: verify::hash_file(&expected_path, HashAlgo::Sha256).unwrap(),
+        };
+        let (urls, server) = serve_candidate_bodies(vec![b"wrong bytes".to_vec(), good]);
+        let successful_url = urls[1].clone();
+        let dirs = test_dirs(&temp);
+        dirs.ensure().unwrap();
+
+        install_single_binary(
+            &reqwest::Client::new(),
+            &dirs,
+            "binary-fallback",
+            "1.0.0",
+            &urls,
+            "tool",
+            "tool.bin",
+            crate::platform::Os::Linux,
+            Some(&checksum),
+            false,
+            false,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            std::fs::read(
+                dirs.install_path("binary-fallback", "1.0.0")
+                    .join("bin/tool")
+            )
+            .unwrap(),
+            b"verified executable"
+        );
+        assert_eq!(
+            artifact_receipt(&dirs, "binary-fallback", "1.0.0")
+                .unwrap()
+                .url,
+            successful_url
+        );
+    }
 
     #[test]
     fn scratch_paths_sanitize_namespaced_tool_ids() {

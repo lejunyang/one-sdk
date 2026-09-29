@@ -32,6 +32,7 @@ env_force = false
 - `mode = "auto"`：环境镜像与内置候选一起探测排序。
 - `mode = "env"`：只遵循环境镜像；缺失或不可用即失败。
 - `pin` 是优先尝试，不是禁用其他回退源。
+- probe 成功只影响排序；osdk 直连产物在校验、解包或必需文件检查失败时仍会换下一个源。
 - `forward_credentials` 只对明确允许的自定义端点转发 provider 凭据。
 - 特殊 key：`self` 管 osdk 自升级，`go-modules` 管 `GOPROXY`。
 

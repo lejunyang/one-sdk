@@ -148,12 +148,18 @@ connection that stalls mid-transfer fails that request into the retry above inst
 hanging forever.
 A `.partial` file and its ETag/Last-Modified metadata are retained, so a retry
 resumes with `Range` + `If-Range`; an ignored or invalid range, changed object, or
-changed source URL restarts safely. Model downloads additionally try the remaining
-ranked sources after one source exhausts its attempts. Non-transient errors, or
-exhaustion of every source fallback, remain terminal. Delegated package managers
-such as npm and uv own their network behavior; these guarantees apply to downloads
-osdk performs directly. Online metadata access may use stale cache after a request
-failure; strict offline mode only reads existing cache.
+changed source URL restarts safely. A source probe only ranks candidates; it does
+not prove that an exact version exists, and even HTTP 200 can be a mirror error
+page. For archives, standalone binaries, and self-update assets handled directly
+by osdk, download, checksum/attestation verification, extraction, and required-file
+checks are one candidate attempt. Failure at any stage discards that candidate and
+tries the next ranked source; the receipt records only the URL that passed the full
+attempt. Model downloads likewise try the remaining ranked sources after one source
+exhausts its attempts. Exhausting every source remains terminal. Delegated package
+managers such as npm and uv own their network behavior; their guarantees are
+described in the installer-specific sections below. Online metadata access may use
+stale cache after a request failure; strict offline mode only reads existing cache,
+while still re-verifying and unpacking the cached artifact.
 
 ## Offline mode
 

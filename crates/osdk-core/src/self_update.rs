@@ -259,21 +259,40 @@ pub async fn stage_release(ctx: &Ctx, target: &ReleaseTarget) -> Result<StagedRe
         .tempdir_in(ctx.dirs.tmp())
         .map_err(|error| Error::io(ctx.dirs.tmp(), error))?;
     let archive = staging.path().join(&target.asset);
+    let unpacked = staging.path().join("unpacked");
+
+    let checksum = published_checksum(ctx, target).await;
+    if checksum.is_none() && ctx.config.settings.require_checksums {
+        return Err(Error::other(format!(
+            "checksum required but unavailable for osdk@{} ({})",
+            target.version, target.asset
+        )));
+    }
+    if checksum.is_none() {
+        tracing::warn!(file = %target.asset, "{}", crate::i18n::tr("log.self_checksum_missing"));
+    }
+    let kind = ArchiveKind::from_name(&target.asset)?;
 
     let mut last_error: Option<Error> = None;
-    let mut downloaded = false;
+    let mut programs = None;
     for url in &target.urls {
-        match pipeline::download::download(
-            &ctx.client,
-            url,
-            &archive,
-            &format!("osdk@{}", target.version),
-            ctx.show_progress,
-        )
-        .await
-        {
-            Ok(()) => {
-                downloaded = true;
+        let _ = std::fs::remove_file(&archive);
+        let _ = std::fs::remove_dir_all(&unpacked);
+        let result = async {
+            pipeline::download::download(
+                &ctx.client,
+                url,
+                &archive,
+                &format!("osdk@{}", target.version),
+                ctx.show_progress,
+            )
+            .await?;
+            prepare_release_candidate(ctx, target, &archive, &unpacked, kind, checksum.as_ref())
+        }
+        .await;
+        match result {
+            Ok(candidate_programs) => {
+                programs = Some(candidate_programs);
                 break;
             }
             Err(error) => {
@@ -286,33 +305,33 @@ pub async fn stage_release(ctx: &Ctx, target: &ReleaseTarget) -> Result<StagedRe
             }
         }
     }
-    if !downloaded {
-        return Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+    let programs = programs.ok_or_else(|| {
+        last_error.unwrap_or_else(|| Error::NoUsableSource {
             tool: SOURCE_ID.into(),
             tried: target.urls.len(),
-        }));
-    }
+        })
+    })?;
 
-    let checksum = published_checksum(ctx, target).await;
-    if let Some(checksum) = &checksum {
-        pipeline::verify::verify_file(&archive, &checksum.hex, checksum.algo, &target.asset)?;
-        tracing::info!(file = %target.asset, "{}", crate::i18n::tr("log.checksum_verified"));
-    } else if ctx.config.settings.require_checksums {
-        return Err(Error::other(format!(
-            "checksum required but unavailable for osdk@{} ({})",
-            target.version, target.asset
-        )));
-    } else {
-        tracing::warn!(file = %target.asset, "{}", crate::i18n::tr("log.self_checksum_missing"));
-    }
+    Ok(StagedRelease {
+        version: target.version.clone(),
+        checksum_verified: checksum.is_some(),
+        programs,
+        _staging: staging,
+    })
+}
 
-    let unpacked = staging.path().join("unpacked");
-    pipeline::extract::extract(
-        &archive,
-        &unpacked,
-        ArchiveKind::from_name(&target.asset)?,
-        true,
-    )?;
+fn prepare_release_candidate(
+    ctx: &Ctx,
+    target: &ReleaseTarget,
+    archive: &Path,
+    unpacked: &Path,
+    kind: ArchiveKind,
+    checksum: Option<&pipeline::Checksum>,
+) -> Result<Vec<(String, PathBuf)>> {
+    if let Some(checksum) = checksum {
+        pipeline::verify::verify_file(archive, &checksum.hex, checksum.algo, &target.asset)?;
+    }
+    pipeline::extract::extract(archive, unpacked, kind, true)?;
 
     let exe_suffix = ctx.platform.os.exe_suffix();
     let mut programs = Vec::new();
@@ -327,13 +346,10 @@ pub async fn stage_release(ctx: &Ctx, target: &ReleaseTarget) -> Result<StagedRe
         }
         programs.push((name, path));
     }
-
-    Ok(StagedRelease {
-        version: target.version.clone(),
-        checksum_verified: checksum.is_some(),
-        programs,
-        _staging: staging,
-    })
+    if checksum.is_some() {
+        tracing::info!(file = %target.asset, "{}", crate::i18n::tr("log.checksum_verified"));
+    }
+    Ok(programs)
 }
 
 /// A verified, unpacked release waiting to replace the installed programs.
@@ -473,6 +489,82 @@ async fn published_checksum(ctx: &Ctx, target: &ReleaseTarget) -> Option<pipelin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn serve_bodies(bodies: Vec<Vec<u8>>) -> (Vec<String>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let urls = (0..bodies.len())
+            .map(|index| format!("http://{address}/candidate-{index}"))
+            .collect();
+        let server = std::thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (urls, server)
+    }
+
+    fn release_archive(contents: &[u8]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for binary in BINARIES {
+            let name = format!("release/{binary}{}", std::env::consts::EXE_SUFFIX);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, name, contents).unwrap();
+        }
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn stage_release_falls_back_after_a_mirror_serves_wrong_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let good = release_archive(b"new release");
+        let expected = temporary.path().join("expected.tar.gz");
+        std::fs::write(&expected, &good).unwrap();
+        let digest = pipeline::verify::hash_file(&expected, pipeline::HashAlgo::Sha256).unwrap();
+        let asset = "osdk-test.tar.gz".to_string();
+        let (urls, asset_server) = serve_bodies(vec![b"wrong bytes".to_vec(), good]);
+        let (checksum_urls, checksum_server) =
+            serve_bodies(vec![format!("{digest}  {asset}\n").into_bytes()]);
+        let target = ReleaseTarget {
+            version: "9.9.9".into(),
+            asset,
+            urls,
+            checksum_urls,
+        };
+
+        let staged = stage_release(&test_ctx(temporary.path()), &target)
+            .await
+            .unwrap();
+        asset_server.join().unwrap();
+        checksum_server.join().unwrap();
+        assert!(staged.checksum_verified());
+        for (_, program) in &staged.programs {
+            assert_eq!(std::fs::read(program).unwrap(), b"new release");
+        }
+    }
 
     fn platform(os: Os, arch: Arch) -> Platform {
         Platform {

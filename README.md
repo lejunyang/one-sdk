@@ -760,8 +760,11 @@ warnings and 1/2/4/8/8-second exponential backoff; tune them with
 `osdk config set`; `sources.model_read_timeout_ms` (default 60000) fails a request that stalls
 mid-stream so it retries instead of hanging. Both paths retain a `.partial` file plus ETag/Last-Modified metadata and resume
 with `Range` + `If-Range`; an ignored or invalid range, changed object, or changed source URL
-causes a safe restart. Model sync downloads also fall through to the next ranked source after one source
-exhausts its attempts. Non-transient errors, or exhaustion of every source, remain terminal.
+causes a safe restart. A successful probe or HTTP 200 is not enough to select a tool source:
+archives, standalone binaries, and self-update assets fall through to the next ranked source when
+checksum/attestation verification fails, an archive cannot be unpacked, or its required payload is
+missing. The receipt records the source whose artifact actually passed. Model sync likewise falls
+through after one source exhausts its attempts; exhaustion of every source remains terminal.
 
 A mirror already set in your environment (`RUSTUP_DIST_SERVER`, `GOPROXY`,
 `npm_config_registry`, and the like) is validated and then raced against osdk's

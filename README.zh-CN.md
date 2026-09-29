@@ -677,8 +677,10 @@ osdk --source official install go@1.22
 `sources.model_download_retry_base_ms`；`sources.model_read_timeout_ms`（默认 60000）会让中途
 断流的请求超时失败并转入重试，而不是永久挂起。两类下载都保留 `.partial` 文件及 ETag /
 Last-Modified，通过 `Range` + `If-Range` 断点续传；服务端忽略或返回错误 Range、对象
-变化、来源 URL 改变时会安全重头下载。模型在某个来源耗尽尝试后还会继续下一个排序
-来源；不可重试错误或所有来源都耗尽后才终止。
+变化、来源 URL 改变时会安全重头下载。探测成功或 HTTP 200 并不代表工具源已经可用：
+归档、裸二进制和自升级产物只有在 checksum/attestation 校验通过、归档能解包且必需文件
+存在后才会被选中；任一步失败都会继续下一个排序来源，receipt 记录真正通过验证的来源。
+模型在某个来源耗尽尝试后同样会继续下一个排序来源；所有来源都耗尽后才终止。
 
 环境变量里已经设置的镜像（`RUSTUP_DIST_SERVER`、`GOPROXY`、`npm_config_registry`
 等）会先经过校验，再与 osdk 内置镜像一起参与测速竞争，因此过期或不可用的值不会

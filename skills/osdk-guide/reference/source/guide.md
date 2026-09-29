@@ -24,3 +24,7 @@ osdk source unpin node
 特殊源名：`self`（自升级）和 `go-modules`（GOPROXY）。只有明确设置
 `--forward-credentials` 才向自定义端点发送 provider 凭据。持久格式见
 `reference/configuration/sources.md`；项目里的来源改写需要 trust。
+
+probe 只对候选排序，不保证目标版本一定存在。osdk 直接下载归档、裸二进制或自升级
+产物时，会对每个候选依次执行下载、checksum/attestation 校验、解包和必需文件检查；
+任一步失败都会清理该候选并继续后备源。`--offline` 不会换源，但仍校验并解包缓存产物。
