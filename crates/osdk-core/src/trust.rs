@@ -1798,7 +1798,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[sys.pkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{other_os}\" }}\n"
+                "[sys.pkg]\n\"{host_package}\" = {{ version = \"latest\", os = \"{other_os}\" }}\n"
             ),
         )
         .unwrap();
@@ -1811,7 +1811,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[sys.pkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+                "[sys.pkg]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
             ),
         )
         .unwrap();
@@ -1825,7 +1825,7 @@ mod tests {
         if host_os != "linux" {
             std::fs::write(
                 &path,
-                format!("[sys.pkg.packages]\n\"apt:build-essential\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"),
+                format!("[sys.pkg]\n\"apt:build-essential\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"),
             )
             .unwrap();
             assert!(trust_requirements(&path, &[Scope::SystemPackages])
@@ -1842,7 +1842,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[sys.pkg]\nmanagers = [\"{excluded_manager}\"]\n[sys.pkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+                "[sys.pkg]\nmanagers = [\"{excluded_manager}\"]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
             ),
         )
         .unwrap();
@@ -2008,7 +2008,7 @@ mode = "env"
             "\"winget:Foo\" = \"latest\""
         };
         write(&format!(
-            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[sys.pkg.packages]\n{applicable_package}\n"
+            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[sys.pkg]\n{applicable_package}\n"
         ));
         assert!(!is_trusted(&config_dir, &config, None).unwrap());
     }
@@ -2235,7 +2235,7 @@ index = "https://example.com"
 [task]
 shell = "evil"
 
-[sys.pkg.packages]
+[sys.pkg]
 "apt:gcc" = "latest"
 
 [container]

@@ -1,4 +1,4 @@
-//! Installing the packages `[sys.pkg.packages]` asks for.
+//! Installing the packages `[sys.pkg]` asks for.
 //!
 //! # Why `--no-upgrade` is mandatory
 //!
@@ -142,7 +142,7 @@ pub enum SkipReason {
     AlreadySatisfied,
     /// Present at another version.
     ///
-    /// Deliberately not installed. The version in `[sys.pkg.packages]` is a wish
+    /// Deliberately not installed. The version in `[sys.pkg]` is a wish
     /// for install time, not a lock, and reinstalling to force convergence would
     /// change a host the user did not ask to change.
     VersionDiffersButPresent,

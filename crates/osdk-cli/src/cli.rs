@@ -1229,7 +1229,7 @@ pub enum PkgCommand {
         json: bool,
     },
 
-    /// Report the host against `[sys.pkg.packages]`.
+    /// Report the host against package entries in `[sys.pkg]`.
     ///
     /// Read-only: it queries what is installed and compares, installing nothing.
     Status {
@@ -1253,7 +1253,7 @@ pub enum PkgCommand {
         detailed_exitcode: bool,
     },
 
-    /// Install the packages `[sys.pkg.packages]` asks for and the host lacks.
+    /// Install the packages `[sys.pkg]` asks for and the host lacks.
     ///
     /// The only package command that changes the system. Packages already
     /// present are left exactly as they are -- including at another version,

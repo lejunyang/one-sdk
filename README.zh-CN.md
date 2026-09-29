@@ -745,7 +745,7 @@ osdk trust prune                 # 清理配置文件已不存在的记录
 
 `[tasks]`、`[models]`、`[skills]` 等条目集合保留复数；单例设置和命名空间使用
 `[task]`、`[container]`、`[alias.tools]`、`[sys.pkg]`。旧版 `[task_config]`、
-`[containers]`、`[aliases]`、`[syspkg]` 暂时仍可读取；先运行
+`[containers]`、`[aliases]`、`[syspkg]` 与临时的 `[sys.pkg.packages]` 仍可读取；先运行
 `osdk config migrate --dry-run` 预览，再用 `osdk config migrate` 改写。
 
 指南：[下载源、离线与安全](site/guide/sources-security.md)

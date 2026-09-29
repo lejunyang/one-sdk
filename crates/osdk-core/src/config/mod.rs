@@ -793,7 +793,7 @@ impl StructuredToolConfig {
     ///
     /// Returns the filter plus the options with `when` removed. An unrecognized
     /// token is an error rather than a filter that matches nothing, for the same
-    /// reason as in `[sys.pkg.packages]`: silently never matching would remove the
+    /// reason as in `[sys.pkg]`: silently never matching would remove the
     /// tool on every machine, and the symptom ("the tool is missing") points
     /// nowhere near the misspelled line.
     pub fn split_platform_filter(
@@ -2055,7 +2055,7 @@ work = "20"
 runtime = "docker"
 [task]
 dir = "workspace"
-[sys.pkg.packages]
+[sys.pkg]
 "apt:gcc" = "latest"
 "#,
         )

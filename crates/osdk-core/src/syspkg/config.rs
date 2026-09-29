@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use super::report::ManagerKind;
 use crate::platform::{Platform, PlatformFilter};
 
-/// A package requested in `[sys.pkg.packages]`.
+/// A package requested directly in `[sys.pkg]`.
 ///
 /// The version is a **wish, not a lock**: the semantics are "ask for this when
 /// installing", never "hold the host at this version". A machine-wide package
@@ -130,7 +130,7 @@ impl<'de> Deserialize<'de> for PackageRequest {
     }
 }
 
-/// A `manager:package-id` key from `[sys.pkg.packages]`.
+/// A `manager:package-id` key from `[sys.pkg]`.
 ///
 /// The manager prefix is mandatory. Package ids are not portable -- winget's
 /// `PackageIdentifier` is case-sensitive and mirrors a repository path, while
@@ -180,7 +180,7 @@ impl PackageKey {
     }
 }
 
-/// Why a `[sys.pkg.packages]` key could not be understood.
+/// Why a package key in `[sys.pkg]` could not be understood.
 ///
 /// Each case is reported rather than skipped. A key osdk cannot parse is a
 /// package the user believes is managed, and silently ignoring it would mean
@@ -216,8 +216,7 @@ impl std::fmt::Display for KeyError {
 /// `Default` is written out rather than derived because `mirrors` defaults to
 /// `true`: a derived `bool` would be `false`, which would disable acceleration
 /// for every project that does not mention it, while still reporting success.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyspkgConfig {
     /// Managers allowed to participate. Empty means every manager osdk knows.
     ///
@@ -235,6 +234,86 @@ pub struct SyspkgConfig {
     pub mirrors: bool,
     /// Requested packages, keyed by `manager:package-id`.
     pub packages: BTreeMap<String, PackageRequest>,
+}
+
+/// Persist the canonical flat `[sys.pkg]` shape.
+///
+/// Package keys are guaranteed to contain a manager prefix (`apt:`, `brew:`,
+/// and so on), so they cannot collide with the three reserved policy keys.
+impl Serialize for SyspkgConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(3 + self.packages.len()))?;
+        map.serialize_entry("managers", &self.managers)?;
+        map.serialize_entry("no_elevate", &self.no_elevate)?;
+        map.serialize_entry("mirrors", &self.mirrors)?;
+        for (package, request) in &self.packages {
+            map.serialize_entry(package, request)?;
+        }
+        map.end()
+    }
+}
+
+/// Read both the canonical flat shape and the temporary nested
+/// `[sys.pkg.packages]` / `[syspkg.packages]` compatibility shape.
+///
+/// The two forms may not coexist in one table. Merging them would invent a
+/// precedence rule and let an overlooked legacy entry survive migration.
+impl<'de> Deserialize<'de> for SyspkgConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut table = BTreeMap::<String, toml::Value>::deserialize(deserializer)?;
+
+        let managers =
+            take_config_value::<Vec<String>, D::Error>(&mut table, "managers")?.unwrap_or_default();
+        let no_elevate =
+            take_config_value::<bool, D::Error>(&mut table, "no_elevate")?.unwrap_or(false);
+        let mirrors = take_config_value::<bool, D::Error>(&mut table, "mirrors")?.unwrap_or(true);
+        let nested = take_config_value::<BTreeMap<String, PackageRequest>, D::Error>(
+            &mut table, "packages",
+        )?;
+
+        if nested.is_some() && !table.is_empty() {
+            return Err(serde::de::Error::custom(
+                "`[sys.pkg]` cannot combine flat package keys with the legacy `packages` table; \
+                 run `osdk config migrate` after keeping only one form",
+            ));
+        }
+
+        let packages = match nested {
+            Some(packages) => packages,
+            None => table
+                .into_iter()
+                .map(|(package, value)| {
+                    value
+                        .try_into::<PackageRequest>()
+                        .map(|request| (package, request))
+                        .map_err(serde::de::Error::custom)
+                })
+                .collect::<Result<_, _>>()?,
+        };
+
+        Ok(Self {
+            managers,
+            no_elevate,
+            mirrors,
+            packages,
+        })
+    }
+}
+
+fn take_config_value<T, E>(
+    table: &mut BTreeMap<String, toml::Value>,
+    key: &str,
+) -> Result<Option<T>, E>
+where
+    T: for<'de> Deserialize<'de>,
+    E: serde::de::Error,
+{
+    table
+        .remove(key)
+        .map(|value| value.try_into().map_err(E::custom))
+        .transpose()
 }
 
 impl Default for SyspkgConfig {
@@ -396,6 +475,75 @@ mod tests {
 
         assert_eq!(parsed.len(), 1, "the valid key must survive");
         assert_eq!(errors.len(), 1, "and the bad one must still be reported");
+    }
+
+    #[test]
+    fn flat_package_entries_share_sys_pkg_with_policy_keys() {
+        let config: SyspkgConfig = toml::from_str(
+            r#"
+managers = ["apt"]
+no_elevate = true
+mirrors = false
+"apt:gcc" = "latest"
+"dnf:gcc" = { version = "14", os = "linux" }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.managers, vec!["apt"]);
+        assert!(config.no_elevate);
+        assert!(!config.mirrors);
+        assert_eq!(config.packages.len(), 2);
+        assert_eq!(config.packages["apt:gcc"].version, "latest");
+        assert_eq!(config.packages["dnf:gcc"].version, "14");
+    }
+
+    #[test]
+    fn temporary_nested_packages_remain_readable_but_cannot_mix_with_flat_entries() {
+        let nested: SyspkgConfig = toml::from_str(
+            r#"
+mirrors = false
+[packages]
+"apt:gcc" = "latest"
+"#,
+        )
+        .unwrap();
+        assert!(!nested.mirrors);
+        assert!(nested.packages.contains_key("apt:gcc"));
+
+        let error = toml::from_str::<SyspkgConfig>(
+            r#"
+"apt:gcc" = "latest"
+[packages]
+"dnf:gcc" = "latest"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("cannot combine flat package keys"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn serialization_emits_only_the_flat_shape() {
+        let config = SyspkgConfig {
+            packages: BTreeMap::from([(
+                "apt:gcc".to_owned(),
+                PackageRequest {
+                    version: "latest".to_owned(),
+                    platform: PlatformFilter::default(),
+                },
+            )]),
+            ..SyspkgConfig::default()
+        };
+
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(rendered.contains("[\"apt:gcc\"]"), "{rendered}");
+        assert!(rendered.contains("version = \"latest\""), "{rendered}");
+        assert!(!rendered.contains("[packages]"), "{rendered}");
+        assert!(!rendered.contains("packages ="), "{rendered}");
     }
 
     /// `os` and `arch` both filter, in either the single-token or list spelling,

@@ -368,7 +368,7 @@ fn remove_version_alias_unlocked(ctx: &Ctx, tool: &str, name: &str) -> Result<bo
     Ok(removed)
 }
 
-/// One legacy-to-canonical table move performed by `config migrate`.
+/// One legacy-to-canonical layout change performed by `config migrate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigMigration {
     pub from: &'static str,
@@ -390,6 +390,10 @@ const CONFIG_MIGRATIONS: &[ConfigMigration] = &[
     },
     ConfigMigration {
         from: "syspkg",
+        to: "sys.pkg",
+    },
+    ConfigMigration {
+        from: "sys.pkg.packages",
         to: "sys.pkg",
     },
 ];
@@ -427,6 +431,7 @@ fn migrate_config_layout(doc: &mut toml_edit::DocumentMut) -> Result<Vec<ConfigM
     ensure_top_level_migration(doc, "task_config", "task")?;
     ensure_nested_migration(doc, "aliases", "alias", "tools")?;
     ensure_nested_migration(doc, "syspkg", "sys", "pkg")?;
+    ensure_system_packages_can_flatten(doc)?;
 
     let mut applied = Vec::new();
     if migrate_top_level_section(doc, "containers", "container")? {
@@ -441,7 +446,117 @@ fn migrate_config_layout(doc: &mut toml_edit::DocumentMut) -> Result<Vec<ConfigM
     if migrate_nested_section(doc, "syspkg", "sys", "pkg")? {
         applied.push(CONFIG_MIGRATIONS[3]);
     }
+    if flatten_system_packages(doc)? {
+        applied.push(CONFIG_MIGRATIONS[4]);
+    }
     Ok(applied)
+}
+
+fn ensure_system_packages_can_flatten(doc: &toml_edit::DocumentMut) -> Result<()> {
+    if let Some(table) = table_at(doc.as_table(), &["sys", "pkg"])? {
+        ensure_package_table_can_flatten(table, "sys.pkg")?;
+    }
+    if let Some(table) = table_at(doc.as_table(), &["syspkg"])? {
+        ensure_package_table_can_flatten(table, "syspkg")?;
+    }
+    Ok(())
+}
+
+fn table_at<'a>(root: &'a toml_edit::Table, path: &[&str]) -> Result<Option<&'a toml_edit::Table>> {
+    let mut table = root;
+    for segment in path {
+        let Some(item) = table.get(segment) else {
+            return Ok(None);
+        };
+        table = item
+            .as_table()
+            .with_context(|| format!("`{}` is not a table in config", path.join(".")))?;
+    }
+    Ok(Some(table))
+}
+
+fn ensure_package_table_can_flatten(table: &toml_edit::Table, name: &str) -> Result<()> {
+    let Some(packages) = table.get("packages") else {
+        return Ok(());
+    };
+    let packages = packages
+        .as_table()
+        .with_context(|| format!("`{name}.packages` is not a table in config"))?;
+    for package in packages.iter().map(|(key, _)| key) {
+        if table.contains_key(package) {
+            anyhow::bail!(
+                "configuration declares package `{package}` in both flat `[{name}]` and legacy \
+                 `[{name}.packages]`; keep one before migrating"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn flatten_system_packages(doc: &mut toml_edit::DocumentMut) -> Result<bool> {
+    let Some(system) = doc.get_mut("sys").and_then(toml_edit::Item::as_table_mut) else {
+        return Ok(false);
+    };
+    let Some(pkg) = system
+        .get_mut("pkg")
+        .and_then(toml_edit::Item::as_table_mut)
+    else {
+        return Ok(false);
+    };
+    let Some(packages) = pkg.remove("packages") else {
+        return Ok(false);
+    };
+    let mut packages = packages
+        .into_table()
+        .map_err(|_| anyhow::anyhow!("`sys.pkg.packages` is not a table in config"))?;
+    let table_decor = format!(
+        "{}{}",
+        packages
+            .decor()
+            .prefix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default(),
+        packages
+            .decor()
+            .suffix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default()
+    );
+    let keys = packages
+        .iter()
+        .map(|(package, _)| package.to_string())
+        .collect::<Vec<_>>();
+    if keys.is_empty() && !table_decor.is_empty() {
+        let existing = pkg
+            .decor()
+            .suffix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default()
+            .to_string();
+        pkg.decor_mut()
+            .set_suffix(format!("{existing}{table_decor}"));
+    }
+    for (index, package) in keys.into_iter().enumerate() {
+        let mut key_decor = packages
+            .key(&package)
+            .map(|key| key.leaf_decor().clone())
+            .unwrap_or_default();
+        if index == 0 && !table_decor.is_empty() {
+            let key_prefix = key_decor
+                .prefix()
+                .and_then(toml_edit::RawString::as_str)
+                .unwrap_or_default();
+            key_decor.set_prefix(format!("{table_decor}{key_prefix}"));
+        }
+        let request = packages
+            .remove(&package)
+            .expect("package key was collected from this table");
+        pkg.insert(&package, request);
+        if let Some(mut key) = pkg.key_mut(&package) {
+            *key.leaf_decor_mut() = key_decor;
+        }
+    }
+    Ok(true)
 }
 
 fn migrate_top_level_section(
@@ -1279,7 +1394,8 @@ managers = ["apt"]
         assert!(migrated.contains("[task]"), "{migrated}");
         assert!(migrated.contains("[alias.tools.node]"), "{migrated}");
         assert!(migrated.contains("[sys.pkg]"), "{migrated}");
-        assert!(migrated.contains("[sys.pkg.packages]"), "{migrated}");
+        assert!(migrated.contains("\"apt:gcc\" = \"latest\""), "{migrated}");
+        assert!(!migrated.contains("[sys.pkg.packages]"), "{migrated}");
         for legacy in ["[containers]", "[task_config]", "[aliases", "[syspkg"] {
             assert!(
                 !migrated.contains(legacy),
@@ -1313,6 +1429,42 @@ managers = ["apt"]
             before,
             "a later conflict must not leave an earlier migration applied in memory"
         );
+
+        let source =
+            "[sys.pkg]\n\"apt:gcc\" = \"latest\"\n[sys.pkg.packages]\n\"apt:gcc\" = \"14\"\n";
+        let mut doc: toml_edit::DocumentMut = source.parse().unwrap();
+        let before = doc.to_string();
+        assert!(migrate_config_layout(&mut doc).is_err());
+        assert_eq!(doc.to_string(), before);
+    }
+
+    #[test]
+    fn config_migration_flattens_the_temporary_canonical_packages_table() {
+        let mut doc: toml_edit::DocumentMut = r#"[sys.pkg]
+mirrors = false
+
+# keep the nested-table explanation
+[sys.pkg.packages]
+# keep the package explanation
+"apt:gcc" = "latest"
+"#
+        .parse()
+        .unwrap();
+
+        let migrations = migrate_config_layout(&mut doc).unwrap();
+        assert_eq!(migrations, vec![CONFIG_MIGRATIONS[4]]);
+        let migrated = doc.to_string();
+        assert!(migrated.contains("[sys.pkg]"), "{migrated}");
+        assert!(!migrated.contains("[sys.pkg.packages]"), "{migrated}");
+        assert!(
+            migrated.contains("# keep the nested-table explanation"),
+            "{migrated}"
+        );
+        assert!(
+            migrated.contains("# keep the package explanation"),
+            "{migrated}"
+        );
+        assert!(migrated.contains("\"apt:gcc\" = \"latest\""), "{migrated}");
     }
 
     #[test]

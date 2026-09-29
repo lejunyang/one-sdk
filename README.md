@@ -837,7 +837,7 @@ osdk trust prune                 # drop records whose config file is gone
 Configuration collections such as `[tasks]`, `[models]`, and `[skills]` stay
 plural. Singleton settings and namespaces use `[task]`, `[container]`,
 `[alias.tools]`, and `[sys.pkg]`. Older `[task_config]`, `[containers]`,
-`[aliases]`, and `[syspkg]` files remain readable temporarily; use
+`[aliases]`, `[syspkg]`, and the temporary `[sys.pkg.packages]` form remain readable; use
 `osdk config migrate --dry-run` and then `osdk config migrate` to rewrite them.
 
 Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)

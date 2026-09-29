@@ -187,7 +187,6 @@ cat > osdk.toml <<'TOML'
 [sys.pkg]
 managers = [\"$expect_present\"]
 
-[sys.pkg.packages]
 \"$expect_present:$known_present\" = \"latest\"
 \"$expect_present:definitely-not-a-real-package-osdk\" = \"latest\"
 TOML
@@ -245,7 +244,6 @@ cat > osdk.toml <<'TOML'
 [sys.pkg]
 managers = [\"$expect_present\"]
 
-[sys.pkg.packages]
 \"$expect_present:$installable\" = \"latest\"
 TOML
 osdk --yes trust >/dev/null 2>&1
@@ -283,7 +281,6 @@ cat > osdk.toml <<'TOML'
 [sys.pkg]
 managers = [\"pacman\"]
 
-[sys.pkg.packages]
 \"pacman:$installable\" = \"latest\"
 TOML
 osdk --yes trust >/dev/null 2>&1

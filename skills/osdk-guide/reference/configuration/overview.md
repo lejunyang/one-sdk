@@ -35,16 +35,24 @@ osdk 读取两类 TOML，字段形状相同：
 和 `skills sync` 维护它。不要手写 osdk 的 data/config 管控目录；源和设置优先通过
 `osdk source` / `osdk config` 修改。
 
-旧版 `[aliases]`、`[containers]`、`[task_config]`、`[syspkg]` 暂时仍可读取；新旧同类段
+旧版 `[aliases]`、`[containers]`、`[task_config]`、`[syspkg]` 与临时的
+`[sys.pkg.packages]` 暂时仍可读取；新旧同类段
 不能同时出现。用 `osdk config migrate --dry-run` 预览，再运行 `osdk config migrate`
 迁移项目配置；加 `--global` 迁移用户配置。命令保留注释和无关段，之后所有 osdk 写操作
 只生成新布局。
 
-平台过滤在 `[tools]`、`[tasks]`、`[models]`、`[skills]` 和 `[sys.pkg.packages]`
-复用同一词汇：
+平台过滤在 `[tools]`、`[tasks]`、`[models]`、`[skills]` 和 `[sys.pkg]` 的包条目中
+复用同一组 OS/arch token。前四者放在 `when` 下：
 
 ```toml
 when = { os = ["linux", "macos"], arch = "arm64" }
+```
+
+系统包对象直接使用 `os` / `arch` 字段：
+
+```toml
+[sys.pkg]
+"apt:gcc" = { version = "latest", os = "linux", arch = ["x86_64", "arm64"] }
 ```
 
 OS token：`windows`、`macos`（也接受 `darwin`）、`linux`；arch token：

@@ -74,17 +74,15 @@ values are the same in every display language, and two runs are byte-identical.
 Declare them in the project's `osdk.toml`, keyed by `manager:package-id`:
 
 `[sys]` is the namespace for host-level settings that may grow later, and `pkg`
-corresponds to the `osdk pkg` subsystem. `[sys.pkg]` already owns policy fields
-such as `managers`, `no_elevate`, and `mirrors`, so package declarations live in
-`[sys.pkg.packages]`. The `packages` level separates policy from dynamic package
-IDs; it is not accidental repetition.
+corresponds to the `osdk pkg` subsystem. Package keys must carry a `<manager>:`
+prefix, so they cannot collide with the reserved `managers`, `no_elevate`, and
+`mirrors` policy keys; policy and package declarations can share `[sys.pkg]`.
 
 ```toml
 [sys.pkg]
 managers = ["winget"]     # only winget may participate; empty means no restriction
 no_elevate = false
 
-[sys.pkg.packages]
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
 "winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
@@ -125,20 +123,19 @@ again.
 :::
 
 ::: tip A version is a wish, not a lock
-The version in `[sys.pkg.packages]` means "ask for this when installing", not
+The version in a `[sys.pkg]` package entry means "ask for this when installing", not
 "hold the host at this version". A system package manager updates on its own
 schedule, and `osdk.lock` deliberately does **not** cover system packages. A
 package present at a different version is reported honestly and **left alone** —
 reinstalling it would change something you did not ask to change.
 :::
 
-### Linux packages belong in `[sys.pkg.packages]` too
+### Linux packages belong in `[sys.pkg]` too
 
 ```toml
 [sys.pkg]
 managers = ["apt"]
 
-[sys.pkg.packages]
 "apt:libssl-dev" = "latest"
 "apk:build-base" = "latest"
 "pacman:base-devel" = "latest"
@@ -232,7 +229,7 @@ plainly, so you do not assume `osdk pkg apply` gives the same guarantees as
 ## Linux package managers: installed for you, but only what is missing
 
 On Linux, `osdk pkg doctor` additionally reports apt, apk, pacman and dnf, and
-`pkg apply` installs the packages from `[sys.pkg.packages]` that the host lacks.
+`pkg apply` installs the packages from `[sys.pkg]` that the host lacks.
 
 ```text
 Linux package managers
@@ -261,7 +258,7 @@ It never upgrades and never removes. Three constraints set that boundary:
    ability — worth a glance before installing.
 
 ::: warning A package present at another version is left alone
-The version in `[sys.pkg.packages]` is a wish for install time, **not a lock**.
+The version in a `[sys.pkg]` package entry is a wish for install time, **not a lock**.
 When the host has a different one, osdk reports `version differs` and skips it
 rather than reinstalling to force convergence on a machine you did not ask it to
 change.

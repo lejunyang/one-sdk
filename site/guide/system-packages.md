@@ -69,15 +69,14 @@ Nothing to fix.
 在项目的 `osdk.toml` 里声明，键名格式是 `管理器:包 ID`：
 
 `[sys]` 是以后可扩展其他宿主设置的命名空间，`pkg` 对应 `osdk pkg` 子系统。
-`[sys.pkg]` 已有 `managers`、`no_elevate`、`mirrors` 等策略字段，所以包清单放在
-`[sys.pkg.packages]`；这层 `packages` 是为了把策略与动态包 ID 分开，并非重复命名。
+包键必须带 `<manager>:` 前缀，因此不会与 `managers`、`no_elevate`、`mirrors`
+这些保留策略字段冲突；策略与包声明可以直接共处一个 `[sys.pkg]` 表。
 
 ```toml
 [sys.pkg]
 managers = ["winget"]     # 只允许 winget 参与；留空表示不限制
 no_elevate = false
 
-[sys.pkg.packages]
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
 "winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
@@ -109,18 +108,17 @@ Windows 上的 apt）时，这台机器上不会有任何门。
 :::
 
 ::: tip 版本是「期望」，不是「锁定」
-`[sys.pkg.packages]` 里的版本含义是「安装时按这个要求」，不是「把宿主固定在这个版本」。
+`[sys.pkg]` 包条目里的版本含义是「安装时按这个要求」，不是「把宿主固定在这个版本」。
 系统包管理器按自己的节奏更新，`osdk.lock` 也**不覆盖系统包**。已装但版本不同的包，
 osdk 会如实报告、**但不会重装**——那会改动你没要求改的东西。
 :::
 
-### Linux 包也能写进 `[sys.pkg.packages]`
+### Linux 包也能写进 `[sys.pkg]`
 
 ```toml
 [sys.pkg]
 managers = ["apt"]
 
-[sys.pkg.packages]
 "apt:libssl-dev" = "latest"
 "apk:build-base" = "latest"
 "pacman:base-devel" = "latest"
@@ -203,7 +201,7 @@ osdk 对自己下载的 SDK 做哈希与签名校验，但系统包的字节 osd
 ## Linux 的包管理器：代为安装，但只装缺的
 
 在 Linux 上，`osdk pkg doctor` 会额外报告 apt / apk / pacman / dnf，`pkg apply` 也会
-代为安装 `[sys.pkg.packages]` 里缺失的包。
+代为安装 `[sys.pkg]` 里缺失的包。
 
 ```text
 Linux package managers
@@ -220,7 +218,7 @@ Linux package managers
 3. **失败恢复能力差异极大。** dnf 有原子的 `history undo`；pacman 只能从 cache 手工降级；apt 只有日志、没有 undo。**跨发行版的统一抽象无法承诺一致的恢复语义**，所以 doctor 会把每家的回滚能力如实列出——装之前值得看一眼。
 
 ::: warning 已装但版本不同的包不会被重装
-`[sys.pkg.packages]` 里的版本是**安装时的期望，不是锁**。宿主上已有其他版本时
+`[sys.pkg]` 包条目里的版本是**安装时的期望，不是锁**。宿主上已有其他版本时
 osdk 会如实报告 `version differs` 并跳过，而不是为了对齐而改动一台你没要求改的机器。
 :::
 

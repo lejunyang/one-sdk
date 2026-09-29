@@ -42,7 +42,6 @@ python = "3.12"
 # Left unrestricted on purpose: one entry per package manager below, filtered by
 # `os`, so whichever manager the host actually has is the one that applies.
 
-[sys.pkg.packages]
 # Package names verified against each distro's own index; osdk deliberately does
 # no cross-manager name mapping, so each has to be spelled its own way.
 

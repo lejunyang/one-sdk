@@ -1,9 +1,9 @@
 # `[sys.pkg]`
 
-`[sys]` 是宿主系统配置的命名空间，`pkg` 是其中的系统包子系统。它自己的
-`managers`、`no_elevate`、`mirrors` 是策略字段，实际包声明因此继续放在
-`[sys.pkg.packages]`，不会与这些设置争夺键空间。声明不会安装；`osdk pkg status`
-只读，只有 `osdk pkg apply` 会修改系统。
+`[sys]` 是宿主系统配置的命名空间，`pkg` 是其中的系统包子系统。包键必须带
+`<manager>:` 前缀，因此不会与 `managers`、`no_elevate`、`mirrors` 等保留策略字段
+冲突；策略和包声明直接共处 `[sys.pkg]`。声明不会安装；`osdk pkg status` 只读，
+只有 `osdk pkg apply` 会修改系统。
 
 ```toml
 [sys.pkg]
@@ -11,7 +11,6 @@ managers = ["apt", "brew"]       # 可选；空/省略表示允许所有已知 m
 no_elevate = false
 mirrors = true
 
-[sys.pkg.packages]
 "apt:build-essential" = "latest"
 "dnf:gcc" = { version = "latest", os = "linux" }
 "pacman:gcc" = { version = "latest", arch = ["x86_64", "arm64"] }

@@ -88,7 +88,8 @@ osdk config migrate --global    # 改写用户 config.toml
 ```
 
 迁移关系是 `[aliases]` → `[alias.tools]`、`[containers]` → `[container]`、
-`[task_config]` → `[task]`、`[syspkg]` → `[sys.pkg]`。命令保留注释及其他段；如果一组
+`[task_config]` → `[task]`、`[syspkg]` → `[sys.pkg]`，以及把临时的
+`[sys.pkg.packages]` 条目扁平到 `[sys.pkg]`。命令保留注释及其他段；如果一组
 新旧写法同时存在，它会拒绝猜测合并顺序并保持文件不变。osdk 的写命令只生成新布局。
 
 ## 项目版本发现

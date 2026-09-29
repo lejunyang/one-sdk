@@ -2625,6 +2625,7 @@ source = "hf:owner/repo@main"
         "[task_config] -> [task]",
         "[aliases] -> [alias.tools]",
         "[syspkg] -> [sys.pkg]",
+        "[sys.pkg.packages] -> [sys.pkg]",
     ] {
         assert!(preview_stdout.contains(migration), "{preview_stdout}");
     }
@@ -2641,7 +2642,8 @@ source = "hf:owner/repo@main"
     assert!(migrated.contains("[container]"), "{migrated}");
     assert!(migrated.contains("[task]"), "{migrated}");
     assert!(migrated.contains("[alias.tools.node]"), "{migrated}");
-    assert!(migrated.contains("[sys.pkg.packages]"), "{migrated}");
+    assert!(migrated.contains("\"apt:gcc\" = {"), "{migrated}");
+    assert!(!migrated.contains("[sys.pkg.packages]"), "{migrated}");
     assert!(migrated.contains("[tasks]"), "{migrated}");
     assert!(migrated.contains("[models.demo]"), "{migrated}");
     assert!(!migrated.contains("[containers]"), "{migrated}");

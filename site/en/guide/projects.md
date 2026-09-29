@@ -99,7 +99,8 @@ osdk config migrate --global    # rewrite the user config.toml
 ```
 
 The moves are `[aliases]` → `[alias.tools]`, `[containers]` → `[container]`,
-`[task_config]` → `[task]`, and `[syspkg]` → `[sys.pkg]`. The command preserves
+`[task_config]` → `[task]`, `[syspkg]` → `[sys.pkg]`, and flattening temporary
+`[sys.pkg.packages]` entries into `[sys.pkg]`. The command preserves
 comments and unrelated sections. If both forms of one section exist, it refuses
 to guess a merge order and leaves the file unchanged. osdk's writing commands
 emit only the new layout.

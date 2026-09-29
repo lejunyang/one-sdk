@@ -1,6 +1,6 @@
 # `osdk pkg`
 
-查看宿主系统包管理器并兑现 `[sys.pkg.packages]`。除 `apply` 与 `mirrors apply` 外均只读。
+查看宿主系统包管理器并兑现 `[sys.pkg]` 中的包条目。除 `apply` 与 `mirrors apply` 外均只读。
 
 | 子命令 | 参数 | 语义 |
 | --- | --- | --- |

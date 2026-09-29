@@ -230,7 +230,7 @@ impl Libc {
 /// A platform restriction written as a `when` table on a config entry.
 ///
 /// The semantics are **filter, not assertion**: an entry whose `when` does not
-/// match the host is treated as absent, exactly as `[sys.pkg.packages]`'s `os`
+/// match the host is treated as absent, exactly as a `[sys.pkg]` package's `os`
 /// already behaved. It can only ever narrow where something applies, never cause
 /// something to be installed that otherwise would not be, which is why it needs
 /// no trust.

@@ -110,7 +110,7 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
     }
 }
 
-/// Compare `[sys.pkg.packages]` against the host.
+/// Compare package entries in `[sys.pkg]` against the host.
 ///
 /// The installed set is read once and reused for every request, so a report is
 /// one query rather than one per package.
@@ -355,7 +355,7 @@ fn write_status(output: &mut dyn Write, report: &syspkg::StatusReport) -> Result
     if report.packages.is_empty() && report.invalid_keys.is_empty() {
         writeln!(
             output,
-            "No system packages are configured. Add them under [sys.pkg.packages]."
+            "No system packages are configured. Add them under [sys.pkg]."
         )?;
         return Ok(());
     }
