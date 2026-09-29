@@ -59,7 +59,9 @@ osdk metadata/source probe，并按 origin 约束；受管 npm/pnpm 子进程当
 
 ## 失败语义与 caveat
 
-- 下载 failover 只针对 artifact 获取；一个候选下载成功后，后续 checksum、attestation、解包或物化失败不会换源重新执行整条安装。
+- 每个 source 候选都要完成下载、checksum/attestation、解包和必要目录验证后才会被接受；
+  这些阶段失败会清理本次候选并继续下一源。CAS ingest、最终物化或发布发生在候选已经通过
+  内容验证之后，这些与 source 无关的失败不会再换源重跑。
 - pipeline 会在下一次尝试开始时清除陈旧安装目录和 scratch，并在成功物化后删除 scratch；解压或物化失败可能暂时留下 scratch。下载 `.partial` 会保留以便安全续传。
 - checksum 是可选策略，除非 backend 本身提供、attestation 提供认证 digest，或配置启用 `require_checksums`。各 backend 的真实保证不同。
 - `ensure_post_install` 可能有额外副作用。全新 Node 安装若 Corepack 后处理失败会删除安装树；在已安装快路径上，`ensure_post_install` 仍可能失败而现有完成标记继续保留。

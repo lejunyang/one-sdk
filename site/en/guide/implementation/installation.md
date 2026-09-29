@@ -83,7 +83,12 @@ An artifact-cache hit during an actual pipeline run or reinstall still runs the 
 
 ## Failure semantics and caveats
 
-- Download failover covers artifact retrieval only. After one candidate downloads successfully, checksum, attestation, extraction, or materialization failure does not rerun the whole installation against another source.
+- Each source candidate must complete download, checksum/attestation,
+  extraction, and required-directory validation before it is accepted. Failure
+  in those stages cleans up that attempt and advances to the next source. CAS
+  ingestion, final materialization, and publication happen after a candidate
+  has passed content validation; failures in those source-independent stages do
+  not retry another source.
 - The pipeline removes stale install trees and scratch at the start of the next attempt and removes scratch after successful materialization; failed extraction or materialization may leave scratch temporarily. It keeps `.partial` downloads for validated resume.
 - Checksums are policy-dependent unless the backend supplies one, attestation supplies an authenticated digest, or `require_checksums` is enabled. Guarantees therefore differ by backend.
 - `ensure_post_install` may have additional side effects. On a fresh Node install, Corepack failure removes the installation tree; on the already-installed fast path, `ensure_post_install` may fail while the existing completion marker remains.
