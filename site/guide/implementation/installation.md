@@ -19,6 +19,12 @@ Go command package 使用同样的依赖 barrier：一个显式或配置的受�
 4. 否则调用 backend 的 `install`；
 5. 所有安装完成后生成 shim，并按 backend 名排序结果。
 
+裸项目 `install` 若命中当前平台 lock，只复现而不改写它；若没有可用平台区段、实际从项目
+配置解析，则在整批安装和 shim 生成成功后用精确结果重建该平台工具表。显式
+`install TOOL...` 是一次性共享安装，不写项目 lock。项目级 `use` 则把 `[tools]` 与对应
+lock upsert 放进同一个项目元数据事务；lock 失败会恢复配置，但已经完成的不可变共享安装
+仍可供后续重试复用。
+
 这意味着除上述 runtime 前置依赖外，不同工具可以并发；固定 backend 的同一 `tool@version` 写入与动态 backend 的同一完整安装身份写入，仍分别由 pipeline 或 backend 文件锁串行化。若批次中任一安装失败，`try_collect` 返回错误，未进入最终 shim 生成阶段。显式 `install`/`exec` 的隔离 npm 兼容路径不走下面的归档 CAS pipeline，而使用受管 npm 子进程、隔离的安装根以及 osdk 自有的共享 npm cache/store；项目感知或全局 `use` 还可在规划阶段选择 npm 或 pnpm，见 [npm 开发工具实现](./npm-tools)。Cargo 开发工具也绕过 archive CAS pipeline；其原生 lifecycle 在 sibling stage 整个期间持有身份锁，只在符合条件时优先使用受控 `cargo-binstall`，仅对退出码 94 回退到 `cargo install`，最后原子发布已校验 binary，详见 [Cargo 开发工具实现](./cargo-tools)。Go 开发工具复用该原生事务，并以 staged `GOBIN` 调用一次精确受管 `go install`，详见 [Go 开发工具实现](./go-tools)。
 
 ## Backend 生成计划

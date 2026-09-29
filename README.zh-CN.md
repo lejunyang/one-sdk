@@ -137,13 +137,13 @@ Shell 激活也支持 zsh、fish 和 PowerShell。需要完整命令说明时，
 
 ## 场景：让项目工具链可复现
 
-在仓库中固定工具、解析版本，再安装当前平台对应的锁定结果：
+在仓库中固定工具。每次项目级 `use` 都会安装工具并同时更新 `osdk.toml` 与当前平台的
+`osdk.lock`；其他开发者或 CI 再用 `install` 复现：
 
 ```bash
 osdk use node@20
 osdk use python@3.12
 osdk use go@1.22
-osdk lock
 osdk install
 ```
 
@@ -155,7 +155,8 @@ osdk upgrade
 osdk exec --tool node@20 -- node --version
 ```
 
-`osdk lock` 只把项目自己声明的工具写进 `osdk.lock`，用户全局配置里的固定版本不会进去，
+手工编辑 `[tools]` 后，或只想解析而不安装时，再运行 `osdk lock`。它只把项目自己声明的
+工具写进 `osdk.lock`，用户全局配置里的固定版本不会进去，
 因此这份 lock 可以放心提交、在别人机器上复现。要连全局工具一起锁，就把它写进项目配置，
 或者用 `osdk lock <tool>` 点名。
 

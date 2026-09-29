@@ -59,7 +59,11 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 
 无显式工具且无额外选项的 `osdk install` 会优先读取最近的 `osdk.lock`。[`locked_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) 按当前平台恢复已保存版本字符串、公开 options 和锁定 artifact 信息；没有当前平台区段时才回退到常规项目解析。大多数 backend 保存精确版本；Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 则仍是 channel 名，后续 rustup 安装可能得到更新 toolchain。锁文件按平台保存独立结果，允许同一项目并存 Linux、macOS 和 Windows 解析。
 
-锁定的是解析结果和 artifact 身份，不是“已经可信”的声明。重新安装会重新执行当前可用或策略要求的 checksum/attestation 验证；若锁记录没有 digest/evidence 且 `require_checksums=false`，pipeline 仍可能在没有加密完整性验证的情况下安装。若显式传工具或 `-o`，不会使用 lockfile 快路径。
+回退到项目配置且安装成功时，`install` 会把该次精确解析写回当前平台区段；命中既有 lock
+的复现路径不改写。项目级 `use` 安装后直接 upsert 目标工具及其注入 runtime，并在 lock
+写入失败时回滚 `[tools]` 编辑。显式 `install TOOL...` 不改变项目声明，因此也不写 lock。
+
+锁定的是解析结果和 artifact 身份，不是“已经可信”的声明。重新安装会重新执行当前可用或策略要求的 checksum/attestation 验证；若锁记录没有 digest/evidence 且 `require_checksums=false`，pipeline 仍可能在没有加密完整性验证的情况下安装。若显式传工具或 `-o`，不会使用 lockfile 读取快路径；后者在裸项目安装成功后仍会写入新结果。
 
 ## 可验证的不变量
 

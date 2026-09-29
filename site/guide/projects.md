@@ -123,7 +123,9 @@ default = "maintenance"
 ```
 
 `osdk use node@20` 会修改最近的项目配置；没有项目配置时在当前目录创建
-`osdk.toml`。`osdk use --global node@20` 修改用户配置。
+`osdk.toml`，并把实际安装结果及注入的 runtime 依赖写入同目录 `osdk.lock`。两份文件作为
+一个元数据事务更新，lock 写入失败会恢复配置。`osdk use --global node@20` 修改用户配置，
+不触碰当前项目 lock。
 对于 `npm:<package>`，本地 `use` 会先查找最近的 `package.json`；下一节说明其项目感知
 行为。
 每个 `cargo:<crate-or-https-url>` 条目都必须对应一个精确、显式请求或配置的 `rust`

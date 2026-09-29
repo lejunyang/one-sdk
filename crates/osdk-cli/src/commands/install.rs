@@ -52,7 +52,16 @@ pub async fn install(
     } else {
         (gather_install_requests(app, tools)?, false)
     };
-    install_requests(app, requests, opts, trusted_replay, force).await?;
+    let cwd = std::env::current_dir()?;
+    let update_project_lock =
+        !explicit && !trusted_replay && has_project_context(app, &requests, &cwd);
+    let installed = install_requests(app, requests, opts, trusted_replay, force).await?;
+    if update_project_lock && !installed.is_empty() {
+        let path = project_lock_path(app, &cwd);
+        let target_platform = crate::lockfile::platform_for_resolved(app.ctx.platform, &installed);
+        crate::lockfile::merge_resolved(&path, target_platform, &app.ctx.dirs, &installed)?;
+        println!("updated {}", path.display());
+    }
     Ok(())
 }
 
@@ -1182,16 +1191,27 @@ pub(crate) fn scope_bare_install_requests(
     requests: Vec<ToolRequest>,
     cwd: &std::path::Path,
 ) -> Vec<ToolRequest> {
-    let has_project_context = app.ctx.config.project_config_path.is_some()
-        || crate::lockfile::find(cwd).is_some()
-        || requests
-            .iter()
-            .any(|request| project_owns_request(app, request));
-    if has_project_context {
+    if has_project_context(app, &requests, cwd) {
         project_scoped_requests(app, requests)
     } else {
         requests
     }
+}
+
+/// Whether a dependency materialization belongs to a project rather than the
+/// user-global defaults. A config or existing lock establishes the scope even
+/// when it currently declares no tools; resolver evidence such as
+/// `package.json` is represented by a request with no global origin.
+pub(crate) fn has_project_context(
+    app: &App,
+    requests: &[ToolRequest],
+    cwd: &std::path::Path,
+) -> bool {
+    app.ctx.config.project_config_path.is_some()
+        || crate::lockfile::find(cwd).is_some()
+        || requests
+            .iter()
+            .any(|request| project_owns_request(app, request))
 }
 
 /// Whether the project -- rather than the user-global config -- asked for this

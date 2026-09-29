@@ -21,9 +21,11 @@ osdk model sync [NAME]
 
 | 调用 | 是否读取现有 lock | 是否写 lock |
 | --- | --- | --- |
-| 无工具且无 `-o` 的 `install` | 是；有当前 host 平台区段就使用其中全部工具；否则项目内只用项目声明、项目外使用全局配置 | 否 |
+| 无工具且无 `-o` 的 `install` | 是；有当前 host 平台区段就使用其中全部工具；否则项目内只用项目声明、项目外使用全局配置 | 命中 lock 时否；项目内回退到配置并成功安装后写当前平台精确结果 |
 | `install TOOL...` | 否 | 否 |
-| `install -o KEY=VALUE`，即使没写工具 | 否 | 否 |
+| `install -o KEY=VALUE`，即使没写工具 | 否 | 项目内按配置成功安装后写当前平台结果；项目外否 |
+| 项目级 `use TOOL...` | 否 | 是；更新该工具和注入的受管 runtime，失败时回滚配置 |
+| `use --global TOOL...` | 否 | 不写项目 lock；全局 npm/Go 工具按各自语义维护用户 lock |
 | `lock` | 仅为保留其他平台/模型而载入旧文件 | 是，重建目标平台的工具表（仅项目自己声明的工具，见下） |
 | `outdated` | 否；重新解析配置或显式请求 | 否 |
 | `upgrade` | 否；重新解析配置或显式请求 | 是，重建 host 平台工具表（同样只记项目工具） |
@@ -65,11 +67,14 @@ lock，而全局的 `java = "26"` 会被写进一个明确钉着 `21` 的项目�
 ## 建议工作流
 
 ```bash
-# 根据项目声明解析，不安装
-osdk lock
+# 安装并选择工具，同时更新项目配置和当前平台 lock
+osdk use node@20
 
 # 使用当前平台 lock 中的解析结果和 artifact
 osdk install
+
+# 手工改过 [tools] 后，只解析并刷新 lock，不安装
+osdk lock
 
 # 查看当前声明重新解析后是否有尚未安装的目标
 osdk outdated
@@ -78,8 +83,9 @@ osdk outdated
 osdk upgrade
 ```
 
-显式 `osdk install node@20` 始终服从显式请求而不读 lock。要暂时给无参数安装增加
-backend 选项，也会绕过 lock；建议先用相同选项重新 `lock`。
+显式 `osdk install node@20` 始终服从显式请求而不读写 lock，因为它不修改项目 `[tools]`；
+需要项目选择时使用 `use`。给无参数安装增加 backend 选项也会绕过 lock 读取快路径，但项目
+内成功安装后会把实际选项和精确结果写入 lock。
 
 ## 查找和写入位置
 

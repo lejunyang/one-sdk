@@ -79,7 +79,7 @@ pub struct GlobalArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Install one or more tools (from args, or from resolved config).
+    /// Install tools; a project config fallback records its exact resolution.
     #[command(alias = "i")]
     Install {
         /// e.g. `node@20`, `go@1.22`, `python@3.12`. Empty = install from config.
@@ -198,7 +198,7 @@ pub enum Command {
         filter: Option<String>,
     },
 
-    /// Install a tool if needed and make it active.
+    /// Install a tool, make it active, and update the project lock.
     #[command(alias = "u")]
     Use {
         /// Tool and version, e.g. `node@20`, `npm:prettier@3`, or `go:golang.org/x/tools/gopls@0.20.0`.

@@ -147,14 +147,14 @@ Activation also supports zsh, fish, and PowerShell. Run `osdk --help` or
 
 ## Scenario: make a project toolchain reproducible
 
-Pin tools in the repository, resolve them, and install the matching lock for
-the current platform:
+Pin tools in the repository. Each project `use` installs the tool and updates
+both `osdk.toml` and the current-platform `osdk.lock`; a teammate or CI can then
+replay it with `install`:
 
 ```bash
 osdk use node@20
 osdk use python@3.12
 osdk use go@1.22
-osdk lock
 osdk install
 ```
 
@@ -167,7 +167,8 @@ osdk upgrade
 osdk exec --tool node@20 -- node --version
 ```
 
-`osdk lock` writes only the tools the project itself declares into `osdk.lock`;
+Use `osdk lock` after editing `[tools]` by hand, or to resolve without installing.
+It writes only the tools the project itself declares into `osdk.lock`;
 pins that live in your user-global configuration stay out, so the lock is safe to
 commit and reproduces on someone else's machine. To lock a global tool too,
 declare it in the project configuration or name it with `osdk lock <tool>`.

@@ -23,9 +23,11 @@ osdk model sync [NAME]
 
 | Invocation | Reads the existing lock? | Writes the lock? |
 | --- | --- | --- |
-| `install` with no tools and no `-o` | Yes; if a current-host platform section exists, use all tools in it; otherwise use project declarations in a project, or global config outside one | No |
+| `install` with no tools and no `-o` | Yes; if a current-host platform section exists, use all tools in it; otherwise use project declarations in a project, or global config outside one | No on lock replay; after a successful project-config fallback, record the exact current-platform result |
 | `install TOOL...` | No | No |
-| `install -o KEY=VALUE`, even without a tool | No | No |
+| `install -o KEY=VALUE`, even without a tool | No | After a successful project-config install, record the current-platform result; no write outside a project |
+| Project `use TOOL...` | No | Yes; update that tool and injected managed runtimes, rolling configuration back on failure |
+| `use --global TOOL...` | No | Never writes the project lock; global npm/Go tools maintain the user lock according to their own semantics |
 | `lock` | Loads the old file only to preserve other platforms and models | Yes; rebuilds the target platform's tool map (only tools the project itself declares -- see below) |
 | `outdated` | No; re-resolves configuration or explicit requests | No |
 | `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map (project tools only, likewise) |
@@ -77,11 +79,14 @@ line.
 ## Recommended workflow
 
 ```bash
-# Resolve project declarations without installing
-osdk lock
+# Install and select a tool, updating project config and the platform lock
+osdk use node@20
 
 # Use the resolutions and artifacts from the current-platform lock
 osdk install
+
+# After editing [tools] by hand, resolve and refresh the lock without installing
+osdk lock
 
 # Re-resolve current declarations and report targets not yet installed
 osdk outdated
@@ -90,9 +95,11 @@ osdk outdated
 osdk upgrade
 ```
 
-Explicit `osdk install node@20` always follows the explicit request and ignores
-the lock. Adding any backend option to a no-argument install also bypasses the
-lock; prefer regenerating it with the same options first.
+Explicit `osdk install node@20` always follows the explicit request and neither
+reads nor writes the lock, because it does not change project `[tools]`; use
+`use` for a project selection. Adding backend options to a no-argument install
+also bypasses the read fast path, but a successful project install records the
+actual options and exact result in the lock.
 
 ## Discovery and write locations
 

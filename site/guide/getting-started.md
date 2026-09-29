@@ -68,7 +68,7 @@ osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 
 | 命令 | 行为 |
 | --- | --- |
-| `install` | 安装一个或多个工具并生成 shim；无工具且无 `-o` 时优先消费当前平台 lock |
+| `install` | 安装一个或多个工具并生成 shim；裸项目安装优先消费当前平台 lock，缺失时从配置解析并写回精确 lock |
 | `lock` | 解析请求并写入按平台分区的 `osdk.lock`，不安装；Rust 浮动 channel 仍保存为 channel 名 |
 | `outdated` | 重新解析配置或显式请求，报告目标精确版本尚未安装的工具；不读取 lock |
 | `upgrade` | 重新解析、安装，并刷新 lock；不以旧 lock 为输入 |
@@ -83,6 +83,9 @@ osdk lock node@20 -o arch=arm64
 osdk outdated node@20 python@3.12
 osdk upgrade
 ```
+
+显式 `install TOOL...` 只做一次性共享安装，不修改项目 `[tools]` 或 lock。要把工具加入项目，
+使用 `osdk use TOOL@VERSION`；它会安装工具，并原子更新项目配置与当前平台 lock。
 
 更精确的读写矩阵、跨平台区段和陈旧 lock 行为见[可复现锁文件](./lockfiles)。
 Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 不会被锁成具体发行版本；需要

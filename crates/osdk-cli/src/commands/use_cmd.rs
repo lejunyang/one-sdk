@@ -105,46 +105,75 @@ pub(crate) async fn use_legacy_cmd(
                 &structured_tool_config(&persisted_version, &persisted_options),
             )?;
         }
+        if req.backend.starts_with("go:") {
+            crate::lockfile::upsert_resolved_many_with_scope(
+                &app.ctx.dirs.user_lock_file(),
+                app.ctx.platform,
+                &app.ctx.dirs,
+                &installed,
+                crate::lockfile::LockScope::Global,
+            )?;
+        }
         println!(
             "{}",
             t!("msg.pinned_global", tool = persist_target.key, ver = spec)
         );
     } else {
-        let path = if persisted_options.is_empty() {
-            crate::config_edit::set_project_tool(&persist_target.key, &persisted_version)?
-        } else {
-            crate::config_edit::set_project_tool_config(
-                &persist_target.key,
-                &structured_tool_config(&persisted_version, &persisted_options),
-            )?
-        };
+        let cwd = std::env::current_dir()?;
+        let config_path = app
+            .ctx
+            .config
+            .project_config_path
+            .clone()
+            .unwrap_or_else(|| cwd.join("osdk.toml"));
+        let project_root = config_path
+            .parent()
+            .ok_or_else(|| anyhow!("project config has no parent: {}", config_path.display()))?;
+        let lock_path = project_root.join(crate::lockfile::LOCKFILE_NAME);
+        let metadata_rollback = ProjectMetadataRollback::begin_tool_selection(
+            &app.ctx.dirs,
+            project_root,
+            &config_path,
+            &lock_path,
+        )?;
+        let result: Result<()> = (|| {
+            let path = if persisted_options.is_empty() {
+                crate::config_edit::set_project_tool(&persist_target.key, &persisted_version)?
+            } else {
+                crate::config_edit::set_project_tool_config(
+                    &persist_target.key,
+                    &structured_tool_config(&persisted_version, &persisted_options),
+                )?
+            };
+            if path != config_path {
+                anyhow::bail!(
+                    "project config changed during use: expected {}, got {}",
+                    config_path.display(),
+                    path.display()
+                );
+            }
+            crate::lockfile::upsert_resolved_many_with_scope(
+                &lock_path,
+                app.ctx.platform,
+                &app.ctx.dirs,
+                &installed,
+                crate::lockfile::LockScope::Project,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(metadata_rollback.rollback(error));
+        }
+        metadata_rollback.commit();
         println!(
             "{}",
             t!(
                 "msg.pinned_project",
                 tool = persist_target.key,
                 ver = spec,
-                path = path.display()
+                path = config_path.display()
             )
         );
-    }
-    if req.backend.starts_with("go:") {
-        let lock_path = if global {
-            app.ctx.dirs.user_lock_file()
-        } else {
-            project_lock_path(app, &std::env::current_dir()?)
-        };
-        crate::lockfile::upsert_resolved_many_with_scope(
-            &lock_path,
-            app.ctx.platform,
-            &app.ctx.dirs,
-            &installed,
-            if global {
-                crate::lockfile::LockScope::Global
-            } else {
-                crate::lockfile::LockScope::Project
-            },
-        )?;
     }
     Ok(())
 }
@@ -286,7 +315,7 @@ pub(crate) async fn use_project_npm(
     // process may have changed the manifest or incumbent native lock while
     // Node/package resolution was running.
     let config_path = project_config_path(app, &project.root);
-    let metadata_rollback = ProjectNpmMetadataRollback::begin(
+    let metadata_rollback = ProjectMetadataRollback::begin_npm(
         &app.ctx.dirs,
         &project.root,
         &project.package_json,
@@ -467,10 +496,11 @@ pub(crate) fn validate_installed_project_native_lock(
     Ok(())
 }
 
-/// Roll back user-authored manifests and osdk publication metadata. Package
-/// manager materialization is intentionally outside this bounded snapshot;
-/// activation never exposes it unless a validated curated generation commits.
-pub(crate) struct ProjectNpmMetadataRollback {
+/// Roll back user-authored manifests and osdk publication metadata. Tool and
+/// package-manager materialization is intentionally outside this bounded
+/// snapshot; activation never exposes project npm output unless a validated
+/// curated generation commits, and immutable shared installs remain reusable.
+pub(crate) struct ProjectMetadataRollback {
     _lock: osdk_core::lock::FileLock,
     snapshots: Vec<ProjectFileSnapshot>,
 }
@@ -480,12 +510,45 @@ pub(crate) struct ProjectFileSnapshot {
     bytes: Option<Vec<u8>>,
 }
 
-impl ProjectNpmMetadataRollback {
-    fn begin(
+impl ProjectMetadataRollback {
+    fn begin_npm(
         dirs: &osdk_core::dirs::Dirs,
         project_root: &std::path::Path,
         package_json: &std::path::Path,
         config_path: &std::path::Path,
+    ) -> Result<Self> {
+        Self::begin(
+            dirs,
+            project_root,
+            vec![
+                package_json.to_path_buf(),
+                project_root.join("pnpm-lock.yaml"),
+                project_root.join("package-lock.json"),
+                project_root.join("npm-shrinkwrap.json"),
+                project_root.join(crate::lockfile::LOCKFILE_NAME),
+                config_path.to_path_buf(),
+                osdk_core::backend::npm_package::project_bin_current_path(project_root),
+            ],
+        )
+    }
+
+    fn begin_tool_selection(
+        dirs: &osdk_core::dirs::Dirs,
+        project_root: &std::path::Path,
+        config_path: &std::path::Path,
+        lock_path: &std::path::Path,
+    ) -> Result<Self> {
+        Self::begin(
+            dirs,
+            project_root,
+            vec![config_path.to_path_buf(), lock_path.to_path_buf()],
+        )
+    }
+
+    fn begin(
+        dirs: &osdk_core::dirs::Dirs,
+        project_root: &std::path::Path,
+        mut paths: Vec<std::path::PathBuf>,
     ) -> Result<Self> {
         let canonical_root = dunce::canonicalize(project_root)
             .with_context(|| format!("canonicalizing {}", project_root.display()))?;
@@ -495,18 +558,9 @@ impl ProjectNpmMetadataRollback {
         );
         let lock = osdk_core::lock::FileLock::acquire(
             dirs.data
-                .join("locks/project-npm")
+                .join("locks/project-metadata")
                 .join(format!("{project_key}.lock")),
         )?;
-        let mut paths = vec![
-            package_json.to_path_buf(),
-            project_root.join("pnpm-lock.yaml"),
-            project_root.join("package-lock.json"),
-            project_root.join("npm-shrinkwrap.json"),
-            project_root.join(crate::lockfile::LOCKFILE_NAME),
-            config_path.to_path_buf(),
-            osdk_core::backend::npm_package::project_bin_current_path(project_root),
-        ];
         paths.sort();
         paths.dedup();
         let snapshots = paths

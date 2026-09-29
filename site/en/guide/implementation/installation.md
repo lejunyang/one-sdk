@@ -22,6 +22,15 @@ exact result is bound into each Go-tool identity.
 4. otherwise call the backend's `install`;
 5. after all installs finish, generate shims and sort results by backend name.
 
+A bare project `install` that finds a current-platform lock only replays it. If
+that section is absent and the command actually resolves project configuration,
+it rebuilds the platform tool table from the exact results after the whole batch
+and shim generation succeed. Explicit `install TOOL...` remains a one-shot
+shared install and writes no project lock. Project `use` publishes `[tools]` and
+the corresponding lock upsert as one project-metadata transaction: lock failure
+restores configuration, while the already completed immutable shared install is
+left available for a retry.
+
 Except for that Node dependency barrier, different tools may run concurrently.
 Pipeline or backend locks serialize fixed-backend writes to one `tool@version`
 and dynamic writes to one complete install identity. If any member of a batch fails, `try_collect` returns the error

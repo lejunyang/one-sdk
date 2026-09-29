@@ -69,7 +69,7 @@ osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 
 | Command | Behavior |
 | --- | --- |
-| `install` | Install tools and generate shims; with no tool and no `-o`, consume the current-platform lock section when present |
+| `install` | Install tools and generate shims; a bare project install consumes the current-platform lock when present, otherwise resolves configuration and records an exact lock |
 | `lock` | Resolve requests and write a platform-partitioned `osdk.lock`; do not install; floating Rust channels remain channel names |
 | `outdated` | Re-resolve configuration or explicit requests and report targets not installed; never read the lock |
 | `upgrade` | Re-resolve, install, and refresh the lock; never use the old lock as resolution input |
@@ -85,6 +85,11 @@ osdk lock node@20 -o arch=arm64
 osdk outdated node@20 python@3.12
 osdk upgrade
 ```
+
+Explicit `install TOOL...` is a one-shot shared installation and changes neither
+project `[tools]` nor the lock. Use `osdk use TOOL@VERSION` to add a project
+selection; it installs the tool and atomically updates project configuration and
+the current-platform lock.
 
 See [Reproducible Lockfiles](./lockfiles) for the exact read/write matrix.
 Floating Rust channels such as `stable`, `beta`, and `nightly` are not frozen to

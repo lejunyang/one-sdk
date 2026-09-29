@@ -63,7 +63,14 @@ Some backends override the default. Node handles target architecture and npm ran
 
 `osdk install` with neither explicit tools nor extra options first reads the nearest `osdk.lock`. [`locked_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) restores saved version strings, public options, and locked artifact data for the current platform; normal project resolution is used when that platform section is absent. Most backends save an exact version. Floating Rust values such as `stable`, `beta`, and `nightly` remain channel names, so a later rustup install may obtain a newer toolchain. Platform-specific sections let Linux, macOS, and Windows resolutions coexist.
 
-The lock records a resolution and artifact identity, not a claim that existing bytes are trusted. Reinstallation reruns any available or policy-required checksum/attestation checks. If the lock has no digest/evidence and `require_checksums=false`, installation may still proceed without cryptographic integrity verification. Supplying tools or `-o` bypasses this lockfile fast path.
+After a successful fallback to project configuration, `install` records that
+exact resolution in the current-platform section; replaying an existing lock
+does not rewrite it. Project `use` upserts the selected tool and injected
+runtimes after installation, rolling its `[tools]` edit back if the lock cannot
+be written. Explicit `install TOOL...` changes no project declaration and
+therefore writes no lock.
+
+The lock records a resolution and artifact identity, not a claim that existing bytes are trusted. Reinstallation reruns any available or policy-required checksum/attestation checks. If the lock has no digest/evidence and `require_checksums=false`, installation may still proceed without cryptographic integrity verification. Supplying tools or `-o` bypasses the lockfile read fast path; the latter still records new results after a successful bare project install.
 
 ## Verifiable invariants
 

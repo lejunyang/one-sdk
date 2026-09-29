@@ -2606,19 +2606,128 @@ fn upgrade_updates_lock_for_an_already_installed_exact_version() {
 }
 
 #[test]
+fn project_use_updates_config_and_lock_for_an_already_installed_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let install = temp.path().join("installs/node/1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "use", "node@1.0.0"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
+    assert!(config.contains("node = \"1.0.0\""), "{config}");
+    let lockfile = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(lockfile.contains(&format!("[platforms.{}.tools.node]", platform_key())));
+    assert!(lockfile.contains("request = \"1.0.0\""), "{lockfile}");
+    assert!(lockfile.contains("version = \"1.0.0\""), "{lockfile}");
+}
+
+#[test]
+fn project_use_places_a_new_lock_beside_its_new_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("nested/project");
+    std::fs::create_dir_all(&project).unwrap();
+    let ancestor_lock = temp.path().join("osdk.lock");
+    let ancestor_before = b"schema = 4\n";
+    std::fs::write(&ancestor_lock, ancestor_before).unwrap();
+    let install = temp.path().join("installs/node/1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "use", "node@1.0.0"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(project.join("osdk.toml").is_file());
+    assert!(project.join("osdk.lock").is_file());
+    assert_eq!(std::fs::read(ancestor_lock).unwrap(), ancestor_before);
+}
+
+#[test]
+fn project_use_rolls_back_config_when_lock_update_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config_path = project.join("osdk.toml");
+    let config_before = b"[tools]\npython = \"3.14.7\"\n";
+    std::fs::write(&config_path, config_before).unwrap();
+    let lock_path = project.join("osdk.lock");
+    let lock_before = b"this is not a lockfile\n";
+    std::fs::write(&lock_path, lock_before).unwrap();
+    let install = temp.path().join("installs/node/1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "use", "node@1.0.0"]);
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
+}
+
+#[test]
+fn bare_project_install_writes_lock_after_resolving_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\nnode = \"1.0.0\"\n").unwrap();
+    let install = temp.path().join("installs/node/1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lockfile = std::fs::read_to_string(project.join("osdk.lock")).unwrap();
+    assert!(lockfile.contains(&format!("[platforms.{}.tools.node]", platform_key())));
+    assert!(lockfile.contains("version = \"1.0.0\""), "{lockfile}");
+}
+
+#[test]
+fn explicit_install_remains_one_shot_and_does_not_create_a_project_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\n").unwrap();
+    let install = temp.path().join("installs/node/1.0.0");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::write(install.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "install", "node@1.0.0"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!project.join("osdk.lock").exists());
+}
+
+#[test]
 fn install_without_arguments_consumes_matching_platform_lock() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("osdk.toml"), "[tools]\nnode = \"2.0.0\"\n").unwrap();
-    std::fs::write(
-        project.join("osdk.lock"),
-        format!(
-            "schema = 1\n\n[platforms.{}.tools.node]\nrequest = \"1.0.0\"\nversion = \"1.0.0\"\n",
-            platform_key()
-        ),
-    )
-    .unwrap();
+    let lock_path = project.join("osdk.lock");
+    let lock_before = format!(
+        "schema = 1\n\n[platforms.{}.tools.node]\nrequest = \"1.0.0\"\nversion = \"1.0.0\"\n",
+        platform_key()
+    );
+    std::fs::write(&lock_path, &lock_before).unwrap();
     let install = temp.path().join("installs/node/1.0.0");
     std::fs::create_dir_all(&install).unwrap();
     std::fs::write(install.join(".osdk-complete"), b"").unwrap();
@@ -2630,6 +2739,7 @@ fn install_without_arguments_consumes_matching_platform_lock() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!temp.path().join("installs/node/2.0.0").exists());
+    assert_eq!(std::fs::read_to_string(lock_path).unwrap(), lock_before);
 }
 
 #[cfg(unix)]

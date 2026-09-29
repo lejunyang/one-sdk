@@ -134,7 +134,11 @@ default = "maintenance"
 ```
 
 `osdk use node@20` updates the nearest project file or creates `osdk.toml` in
-the current directory. `osdk use --global node@20` updates user configuration.
+the current directory, then records the installed result and injected runtime
+dependencies in the sibling `osdk.lock`. Both files form one metadata
+transaction: a failed lock update restores the configuration. `osdk use
+--global node@20` updates user configuration without touching the current
+project lock.
 For `npm:<package>`, local `use` first looks for the nearest `package.json`; the
 next section describes its project-aware behavior.
 Every `cargo:<crate-or-https-url>` entry requires one exact explicit or configured
