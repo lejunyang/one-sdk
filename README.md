@@ -234,7 +234,9 @@ Embedded Lua handles branches, loops, and captured subprocess output without
 long prefixes: `run("cargo", "test")` streams a command while
 `exec("git", "status", "--short")` captures it. Helpers such as `join`, `mkdir`, `copy`, and `glob` avoid platform-specific
 filesystem commands; `json.decode` and `toml.decode` handle data files. The explicit
-`osdk.*` forms remain available.
+`osdk.*` forms remain available. For editor and linter support, put longer Lua
+in a `.lua` file and reference it with `file = "scripts/task.lua"`; osdk uses the
+same embedded runtime, so no system Lua installation or shebang is needed.
 
 ## Scenario: install a tool from a direct HTTPS artifact
 

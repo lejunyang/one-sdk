@@ -214,6 +214,8 @@ osdk run ci --dry-run
 `run("cargo", "test")` 流式执行，`exec("git", "status", "--short")` 捕获输出；
 `join`、`mkdir`、`copy`、`glob` 等函数避免依赖平台专属文件命令，`json.decode` /
 `toml.decode` 直接处理数据文件，同时保留完整的 `osdk.*` 写法。
+较长的 Lua 可以放进 `.lua` 文件并用 `file = "scripts/task.lua"` 引用；osdk 仍使用同一个内嵌运行时，
+不要求系统安装 Lua，也不要求 shebang。
 
 ## 场景：从直接 HTTPS 制品安装工具
 

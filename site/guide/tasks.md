@@ -117,6 +117,17 @@ file = "scripts/release.ps1"
 `file` 相对**声明它的那个配置文件**解析，不是相对最终的合并根目录——否则全局
 配置里的相对路径会指向当前项目，而不是它自己所在的位置。
 
+`.lua` 文件是特例：osdk 不把它交给操作系统启动，而是使用与 `lua = """..."""`
+完全相同的内嵌 Lua 运行时。它因此不需要系统安装 Lua、shebang 或执行位，并继承相同的
+任务目录、环境、参数、host API 与超时语义：
+
+```toml
+[tasks.generate]
+file = "scripts/generate.lua"
+```
+
+默认 `osdk-tasks/` / `.osdk-tasks/` 目录里发现的 `.lua` 文件也采用这一行为。
+
 ### 脚本头里的元数据
 
 脚本用注释声明自己的描述和依赖，不必回到 TOML：
@@ -314,7 +325,7 @@ JSON 的 `null` 会解码成 `json.null`；创建空数组时用 `json.array({})
 
 Lua 由 `mlua` 从源码编译并静态链接，运行时零依赖，但**构建 osdk 时**需要一个
 C 编译器。它位于默认开启的 `scripts` feature 之后；关掉该 feature 的构建里，
-带 `lua` 的任务会报错提示改用 `run`。
+内联 Lua 和 `.lua` 文件任务都会报错并提示改用其他脚本格式或启用该 feature。
 
 体积代价：osdk 约 +335 KB，而 `osdk-shim` **一字节未变**——shim 只负责分派
 已安装的工具，从不执行任务，整个引擎不在它的依赖图里。

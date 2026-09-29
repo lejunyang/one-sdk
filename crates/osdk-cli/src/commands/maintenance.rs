@@ -451,6 +451,10 @@ pub fn run_task(
                         let first = source.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                         println!("  lua ({lines} lines): {}", first.trim());
                     }
+                    #[cfg(feature = "scripts")]
+                    runner::PlannedStep::LuaFile { path } => {
+                        println!("  lua file: {}", path.display());
+                    }
                     runner::PlannedStep::Parallel { tasks } => {
                         println!("  || {}", tasks.join(", "));
                     }

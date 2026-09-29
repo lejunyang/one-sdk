@@ -90,9 +90,12 @@ pub enum PlannedStep {
         argv: Vec<String>,
         ignore_error: bool,
     },
-    /// Evaluate embedded Lua.
+    /// Evaluate Lua from an inline declaration or a `.lua` task file.
     #[cfg(feature = "scripts")]
     Lua { source: String },
+    /// Read and evaluate a `.lua` task file with the embedded interpreter.
+    #[cfg(feature = "scripts")]
+    LuaFile { path: PathBuf },
 }
 
 /// The interpreter used when neither the task nor `[task_config]` names one.
@@ -205,14 +208,28 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             .ok_or_else(|| Error::other(format!("unknown task `{name}`")))?;
         let shell = shell_for(def, set)?;
         let mut commands = Vec::new();
-        // A file task becomes an argv step, never a shell string: the path may
-        // contain spaces (it very often does on Windows), and pasting it into a
-        // command line would need per-shell quoting to survive.
+        // Lua files use the embedded interpreter and therefore inherit exactly
+        // the same host API, arguments, environment, and timeout as inline Lua.
+        // Other files become argv steps, never shell strings: their paths often
+        // contain spaces, especially on Windows.
         if let Some(file) = def.file.as_ref().filter(|path| !path.trim().is_empty()) {
-            commands.push(PlannedStep::Argv {
-                argv: crate::tasks::files::launch_argv(Path::new(file)),
-                ignore_error: false,
-            });
+            let path = Path::new(file);
+            if crate::tasks::files::is_lua(path) {
+                #[cfg(feature = "scripts")]
+                commands.push(PlannedStep::LuaFile {
+                    path: path.to_path_buf(),
+                });
+                #[cfg(not(feature = "scripts"))]
+                return Err(Error::config(format!(
+                    "task `{name}`: Lua file tasks need the `scripts` feature, which this build \
+                     does not have; use another script format, or a build with scripting enabled"
+                )));
+            } else {
+                commands.push(PlannedStep::Argv {
+                    argv: crate::tasks::files::launch_argv(path),
+                    ignore_error: false,
+                });
+            }
         }
         #[cfg(feature = "scripts")]
         if let Some(source) = def.lua.as_ref().filter(|s| !s.trim().is_empty()) {
@@ -351,6 +368,13 @@ pub trait Spawner {
     #[cfg(feature = "scripts")]
     fn run_lua(&mut self, _task: &str, _source: &str, _dir: &Path) -> Result<i32> {
         Err(Error::other("this spawner cannot evaluate Lua"))
+    }
+
+    /// Evaluate a Lua task file using the same runtime as inline source.
+    #[cfg(feature = "scripts")]
+    fn run_lua_file(&mut self, task: &str, path: &Path, dir: &Path) -> Result<i32> {
+        let source = std::fs::read_to_string(path).map_err(|error| Error::io(path, error))?;
+        self.run_lua(task, &source, dir)
     }
 
     /// Set the wall-clock limit applying to subsequent calls.
@@ -596,6 +620,14 @@ fn run_post_steps(
                 }
                 code
             }
+            #[cfg(feature = "scripts")]
+            PlannedStep::LuaFile { path } => {
+                let code = spawner.run_lua_file(&task.name, path, &dir)?;
+                if code != 0 {
+                    outcome.tolerated_failures.push(path.display().to_string());
+                }
+                code
+            }
             PlannedStep::Parallel { tasks } => {
                 let mut worst = 0;
                 for name in tasks {
@@ -627,6 +659,10 @@ fn run_post_steps(
                             #[cfg(feature = "scripts")]
                             PlannedStep::Lua { source } => {
                                 spawner.run_lua(&sub.name, source, &sub_dir)?
+                            }
+                            #[cfg(feature = "scripts")]
+                            PlannedStep::LuaFile { path } => {
+                                spawner.run_lua_file(&sub.name, path, &sub_dir)?
                             }
                             PlannedStep::Parallel { .. } => continue,
                         };
@@ -689,7 +725,7 @@ fn apply_arguments(
                     // A script reads arguments from `osdk.args` / `osdk.argv`
                     // rather than having them appended to a command line.
                     #[cfg(feature = "scripts")]
-                    PlannedStep::Lua { .. } => continue,
+                    PlannedStep::Lua { .. } | PlannedStep::LuaFile { .. } => continue,
                     // An argv step keeps each leftover as its own entry, so
                     // spaces and metacharacters survive intact.
                     PlannedStep::Argv { argv, .. } => {
@@ -844,6 +880,22 @@ pub fn execute_full(
                         return Ok(outcomes);
                     }
                 }
+                #[cfg(feature = "scripts")]
+                PlannedStep::LuaFile { path } => {
+                    let code = match spawner.run_lua_file(&task.name, path, &dir) {
+                        Ok(code) => code,
+                        Err(error) => {
+                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            return Err(error);
+                        }
+                    };
+                    if code != 0 {
+                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+                        outcome.code = code;
+                        outcomes.push(outcome);
+                        return Ok(outcomes);
+                    }
+                }
                 PlannedStep::Argv { argv, ignore_error } => {
                     let code = match spawner.run_argv(&task.name, argv, &dir) {
                         Ok(code) => code,
@@ -926,6 +978,10 @@ pub fn execute_full(
                                 PlannedStep::Lua { source } => {
                                     spawner.run_lua(&sub.name, source, &sub_dir)?
                                 }
+                                #[cfg(feature = "scripts")]
+                                PlannedStep::LuaFile { path } => {
+                                    spawner.run_lua_file(&sub.name, path, &sub_dir)?
+                                }
                                 PlannedStep::Parallel { .. } => continue,
                             };
                             if code != 0 {
@@ -992,7 +1048,7 @@ mod tests {
                 PlannedStep::Command { command, .. } => Some(command.clone()),
                 PlannedStep::Argv { argv, .. } => Some(argv.join(" ")),
                 #[cfg(feature = "scripts")]
-                PlannedStep::Lua { .. } => None,
+                PlannedStep::Lua { .. } | PlannedStep::LuaFile { .. } => None,
                 PlannedStep::Parallel { .. } => None,
             })
             .collect()
@@ -2055,6 +2111,55 @@ shell = "pwsh -Command"
             and osdk.argv[1] == 'one argument' \
             and osdk.argv[2] == 'second' and 0 or 1";
         assert_eq!(spawner.run_lua("demo", source, temp.path()).unwrap(), 0);
+    }
+
+    #[cfg(feature = "scripts")]
+    #[test]
+    fn a_lua_file_uses_the_embedded_runtime_and_receives_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("generate.lua");
+        std::fs::write(
+            &script,
+            "write(join(dir, 'result.txt'), argv[1]); return 0\n",
+        )
+        .unwrap();
+
+        let mut set = TaskSet::default();
+        set.apply(BTreeMap::from([(
+            "generate".into(),
+            crate::tasks::TaskEntry::Full(Box::new(TaskDef {
+                file: Some(script.to_string_lossy().into_owned()),
+                ..TaskDef::default()
+            })),
+        )]))
+        .unwrap();
+        let built = plan(&set, "generate").unwrap();
+        assert!(matches!(
+            built.steps[0].commands[0],
+            PlannedStep::LuaFile { .. }
+        ));
+
+        let values = crate::tasks::args::Values {
+            named: BTreeMap::new(),
+            rest: vec!["from argv".into()],
+        };
+        let mut spawner = ProcessSpawner {
+            env: TaskEnv::default(),
+            defs: set.tasks.clone(),
+            base_path: std::env::var("PATH").unwrap_or_default(),
+            timeout: None,
+            project_root: temp.path().to_path_buf(),
+            arg_env: values.env_vars(),
+            arg_values: values.clone(),
+        };
+        let outcomes =
+            execute_full(&built, temp.path(), &mut spawner, &mut None, &values, false).unwrap();
+
+        assert_eq!(outcomes[0].code, 0);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("result.txt")).unwrap(),
+            "from argv"
+        );
     }
 
     #[test]

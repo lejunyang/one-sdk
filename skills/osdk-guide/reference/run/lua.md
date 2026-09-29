@@ -30,6 +30,16 @@ end
 """
 ```
 
+较长脚本可保存在独立文件中，语义和可用 API 与内联 Lua 相同：
+
+```toml
+[tasks.prepare]
+file = "scripts/prepare.lua"
+```
+
+osdk 按 `.lua` 扩展名选择内嵌解释器，不依赖系统 Lua、shebang 或执行位；默认任务目录中
+自动发现的 `.lua` 文件也一样。
+
 `lua` 与 `run` / `file` 互斥。它仍可配 `depends`、`wait_for`、`run_post`、`env`、
 `dir`、`when`、`timeout`、参数声明和 freshness。
 
@@ -167,8 +177,9 @@ osdk 进程本身的 cwd/环境工作，不会自动采用任务的 `dir` 与注
 使用本页 host API。`os.getenv` 是例外：它已重定向到与 `env()` 相同的数据源。
 
 Lua 运行时位于默认开启的 Cargo `scripts` feature 后；关闭该 feature 的 osdk 会拒绝
-带 `lua` 的任务并提示改用 `run`。Lua 静态链接，运行 osdk 无需系统 Lua；构建 osdk
-需要 C 编译器。`osdk-shim` 不启用该 feature，因此不携带 Lua 引擎。
+内联 Lua 和 `.lua` 文件任务，并提示改用其他脚本格式或启用该 feature。Lua 静态链接，
+运行 osdk 无需系统 Lua；构建 osdk 需要 C 编译器。`osdk-shim` 不启用该 feature，
+因此不携带 Lua 引擎。
 
 这不是安全沙箱：同一份已信任配置本来就能通过普通 `run` 执行任意命令。host API 的
 目标是提供一致的 cwd/env/argv/timeout 和跨平台语义，不是限制脚本权限。

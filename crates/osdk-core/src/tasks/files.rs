@@ -34,6 +34,16 @@ pub const DEFAULT_TASK_DIRS: &[&str] = &["osdk-tasks", ".osdk-tasks"];
 /// cannot launch it, because the runner special-cases it: see [`launch_argv`].
 pub const WINDOWS_EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "ps1", "vbs"];
 
+/// Whether `path` is a Lua task file handled by osdk's embedded interpreter.
+///
+/// This is based on the file format rather than the host: a checked-in task
+/// must keep the same meaning when the project moves between Unix and Windows.
+pub(crate) fn is_lua(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
+}
+
 /// One discovered script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileTask {
@@ -91,7 +101,9 @@ fn windows_can_execute(path: &Path, first_line: Option<&str>) -> bool {
         .is_some_and(|ext| WINDOWS_EXECUTABLE_EXTENSIONS.contains(&ext.as_str()));
     // A shebang is enough: the runner reads it and launches the interpreter
     // itself, which is how an extensionless `build` script still works.
-    has_known_extension || first_line.is_some_and(|line| line.starts_with("#!"))
+    // Lua files are not launched by Windows. osdk evaluates them itself, so
+    // they are portable without an installed interpreter or a shebang.
+    is_lua(path) || has_known_extension || first_line.is_some_and(|line| line.starts_with("#!"))
 }
 
 /// Parse `#OSDK key=value` header lines.
@@ -456,10 +468,15 @@ mod tests {
         let plain = write(root, "osdk-tasks/plain", "echo no shebang\n");
         let shebang = write(root, "osdk-tasks/withbang", "#!/bin/sh\necho hi\n");
         let batch = write(root, "osdk-tasks/script.bat", "@echo off\n");
+        let lua = write(root, "osdk-tasks/generate.lua", "return 0\n");
 
         assert!(!windows_can_execute(&plain, Some("echo no shebang")));
         assert!(windows_can_execute(&shebang, Some("#!/bin/sh")));
         assert!(windows_can_execute(&batch, Some("@echo off")));
+        assert!(
+            windows_can_execute(&lua, Some("return 0")),
+            "osdk evaluates Lua files itself, so Windows does not need an executable extension"
+        );
     }
 
     /// An invisible task must still be discovered, so the listing can explain

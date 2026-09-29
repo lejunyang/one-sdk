@@ -19,6 +19,9 @@ run = [                                         # 2. 多步骤
 [tasks.release]
 file = "scripts/release.ps1"                    # 3. 脚本文件
 
+[tasks.generate-file]
+file = "scripts/generate.lua"                   # 4. 文件 Lua（内嵌解释器）
+
 [tasks.generate]
 lua = """                                       # 4. 内嵌 Lua
 mkdir(join(root, "dist"))
@@ -32,7 +35,7 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | --- | --- |
 | `run` | 字符串或步骤数组；串行、失败即停 |
 | `run_windows` | Windows 专属的 `run` 替换 |
-| `file` | 脚本路径，相对声明它的配置文件 |
+| `file` | 脚本路径，相对声明它的配置文件；`.lua` 使用内嵌 Lua 运行时 |
 | `lua` | 内嵌 Lua 5.4 |
 | `run_post` | 正文开始执行后总会跑的收尾步骤，包括正文失败 |
 | `description` | `task list` 展示文本 |
@@ -88,8 +91,9 @@ osdk-tasks/test/units.ps1    -> test:units
 osdk-tasks/test/_default.ps1 -> test
 ```
 
-文件名去扩展名成为任务名，目录用 `:` 分隔，`_default` 代表目录本身。Windows 选择同词干
-的 `.ps1` / `.bat` / `.cmd` 等可执行变体；Unix 可用 shebang 文件。文件头支持：
+文件名去扩展名成为任务名，目录用 `:` 分隔，`_default` 代表目录本身。`.lua` 在所有平台
+都由 osdk 内嵌解释器执行，不需要系统 Lua、shebang 或执行位；Windows 选择同词干的
+`.ps1` / `.bat` / `.cmd` 等可执行变体；Unix 可用 shebang 文件。文件头支持：
 
 ```text
 #OSDK description="Build artifacts"

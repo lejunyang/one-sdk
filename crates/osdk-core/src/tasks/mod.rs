@@ -303,7 +303,8 @@ pub struct TaskDef {
     /// write it would invite disagreement with what is actually on disk.
     #[serde(skip)]
     pub windows_invisible: bool,
-    /// A script file to execute, the third tier.
+    /// A script file to execute, the third tier. Files ending in `.lua` are
+    /// evaluated by the same embedded interpreter as [`TaskDef::lua`].
     ///
     /// Relative to the config file. Use it when a `run` string has outgrown
     /// TOML -- past roughly twenty lines the editor stops highlighting it and
@@ -495,6 +496,17 @@ impl TaskDef {
         }
 
         if has_file {
+            #[cfg(not(feature = "scripts"))]
+            if self
+                .file
+                .as_deref()
+                .is_some_and(|file| crate::tasks::files::is_lua(Path::new(file)))
+            {
+                return Err(Error::config(format!(
+                    "task `{name}`: Lua file tasks need the `scripts` feature, which this build \
+                     does not have; use another script format, or a build with scripting enabled"
+                )));
+            }
             self.spec.validate(name)?;
             if let Some(text) = &self.timeout {
                 if crate::tasks::tree::parse_duration(text).is_none() {
@@ -1158,6 +1170,21 @@ run = "y"
             .unwrap_err()
             .to_string();
         assert!(error.contains("needs `run`"), "{error}");
+    }
+
+    #[cfg(not(feature = "scripts"))]
+    #[test]
+    fn lua_file_tasks_are_rejected_when_the_runtime_is_not_built() {
+        let mut set = TaskSet::default();
+        let error = set
+            .apply(parse("[generate]\nfile = \"scripts/generate.lua\"\n"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("Lua file tasks need the `scripts` feature"),
+            "{error}"
+        );
     }
 
     #[test]

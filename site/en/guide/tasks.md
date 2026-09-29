@@ -125,6 +125,19 @@ file = "scripts/release.ps1"
 root -- otherwise a relative path in a global config would point into whichever
 project happens to be current rather than at its own directory.
 
+A `.lua` file is special: osdk evaluates it with exactly the same embedded Lua
+runtime as `lua = """..."""` instead of asking the operating system to launch it.
+It therefore needs no system Lua installation, shebang, or executable bit, and
+inherits the same task directory, environment, arguments, host API, and timeout:
+
+```toml
+[tasks.generate]
+file = "scripts/generate.lua"
+```
+
+`.lua` files discovered in the default `osdk-tasks/` / `.osdk-tasks/`
+directories use the same behavior.
+
 ### Metadata in the script header
 
 A script declares its own description and dependencies in comments, without
@@ -347,8 +360,9 @@ host API offers is **convenience with correct semantics**, not isolation.
 
 Lua is compiled from source and statically linked by `mlua`, so there is no
 runtime dependency — but building osdk needs a C compiler. It sits behind the
-`scripts` feature, which is on by default; in a build with it disabled, a task
-using `lua` reports an error telling you to use `run` instead.
+`scripts` feature, which is on by default; in a build with it disabled, inline
+Lua and `.lua` file tasks report an error telling you to use another script
+format or enable the feature.
 
 Size: about +335 KB on osdk, and **not a single byte** on `osdk-shim` — the shim
 only dispatches already-installed tools and never evaluates a task, so the
