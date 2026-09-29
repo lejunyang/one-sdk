@@ -453,6 +453,7 @@ fn collect_requirements(value: &toml::Value, scopes: &[Scope]) -> Vec<TrustRequi
 /// `apt:` entry with no platform filter still cannot execute on Windows, so
 /// like an explicit `os` restriction it must not gate a host that can never
 /// run it.
+#[cfg(feature = "install")]
 fn manager_exists_on(manager: &crate::syspkg::ManagerKind, os: crate::platform::Os) -> bool {
     use crate::platform::Os;
     match manager {
@@ -470,6 +471,7 @@ fn manager_exists_on(manager: &crate::syspkg::ManagerKind, os: crate::platform::
 /// Now `[sys.pkg]` demands nothing when its packages are restricted to
 /// other operating systems, name managers that cannot exist on this OS, or
 /// name managers the table excludes.
+#[cfg(feature = "install")]
 fn collect_system_requirement(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
     let Some(system) = value.as_table() else {
         found.push(TrustRequirement {
@@ -489,6 +491,7 @@ fn collect_system_requirement(value: &toml::Value, found: &mut Vec<TrustRequirem
     }
 }
 
+#[cfg(feature = "install")]
 fn collect_syspkg_requirement(
     value: &toml::Value,
     requirement_key: &str,
@@ -518,6 +521,29 @@ fn collect_syspkg_requirement(
             reason: TrustReason::ExecutesCode,
         });
     }
+}
+
+// The shim does not link the system-package implementation. Keep the generic
+// trust scanner fail-closed if a no-install caller nevertheless asks it to
+// inspect that scope, without pulling package-manager code into the shim.
+#[cfg(not(feature = "install"))]
+fn collect_system_requirement(_value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    found.push(TrustRequirement {
+        key: "sys".into(),
+        reason: TrustReason::ExecutesCode,
+    });
+}
+
+#[cfg(not(feature = "install"))]
+fn collect_syspkg_requirement(
+    _value: &toml::Value,
+    requirement_key: &str,
+    found: &mut Vec<TrustRequirement>,
+) {
+    found.push(TrustRequirement {
+        key: requirement_key.into(),
+        reason: TrustReason::ExecutesCode,
+    });
 }
 
 fn collect_settings_requirements(value: &toml::Value, found: &mut Vec<TrustRequirement>) {

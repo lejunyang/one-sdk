@@ -76,6 +76,7 @@ struct Release {
 }
 
 impl JvmToolBackend {
+    #[cfg(feature = "install")]
     fn merge_gradle_releases(combined: &mut Vec<GradleRelease>, releases: Vec<GradleRelease>) {
         // Keep the best-ranked definition of duplicate versions, while
         // admitting releases missing from a stale mirror.
@@ -163,6 +164,7 @@ impl JvmToolBackend {
         Self::gradle_releases_from_sources(ctx, &sources).await
     }
 
+    #[cfg(feature = "install")]
     fn gradle_download_urls(sources: &[Source], release: &GradleRelease) -> Vec<String> {
         let file_name = release
             .download_url
