@@ -1,0 +1,4 @@
+[tasks.github-action-smoke]
+description = "Composite GitHub Action helper and environment contract"
+run = "../../scripts/test-github-action.sh"
+run_windows = "pwsh -NoProfile -File ../../scripts/test-github-action.ps1"

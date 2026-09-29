@@ -81,8 +81,13 @@ python = "3.12"
 # would report "installed" while the task still skips. That script already skips
 # cleanly with a message when neither runtime is present.
 
-[tasks]
+[task_config]
+# Keep the Action smoke project independent from this repository's full tool
+# set, while still exposing its check through the root `osdk task list`.
+roots = [".github/action-smoke"]
+
 # --- the everyday loop -------------------------------------------------------
+[tasks]
 fmt = "cargo fmt --all"
 build = "cargo build --workspace"
 

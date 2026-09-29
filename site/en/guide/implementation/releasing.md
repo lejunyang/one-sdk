@@ -6,6 +6,14 @@ marker. Ordinary pushes do not publish. Update `[workspace.package].version`
 before releasing; the prepare job refuses to continue if the corresponding
 `v<version>` tag already exists.
 
+The same tag publishes the root composite Action:
+`uses: lejunyang/one-sdk@vX.Y.Z` reads `action.yml` from that revision. The final
+GitHub Release job creates the tag; it is an output of the pipeline, not an
+input. Creating and pushing it by hand first makes the prepare job fail. The
+Action's own CI uses `uses: ./` to read the current checkout and bootstraps it
+with an already published osdk binary, so Action changes are covered on all
+three platforms before a new tag exists.
+
 ## What one release publishes
 
 The workflow first builds both programs for Linux x64/arm64, macOS

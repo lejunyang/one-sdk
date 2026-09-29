@@ -5,6 +5,12 @@
 先更新 `[workspace.package].version`；如果对应的 `v<version>` tag 已存在，prepare job 会拒绝
 继续。
 
+这个 tag 也同时是根目录 composite Action 的发布版本：`uses: lejunyang/one-sdk@vX.Y.Z`
+读取的就是该 tag 下的 `action.yml`。tag 由最后的 GitHub Release job 自动创建，不是发布前的
+输入；先手工 `git tag`/push 会让 prepare job 失败。Action 自己的 CI 使用 `uses: ./` 读取
+当前 checkout，并用一个已经发布的 osdk 二进制做 bootstrap，所以 Action 改动可以在创建新
+tag 之前先经过三平台验证。
+
 ## 一次发布会生成什么
 
 流水线先并行构建 Linux x64/arm64、macOS Intel/Apple Silicon 和 Windows x64 的三个

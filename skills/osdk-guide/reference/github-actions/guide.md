@@ -13,6 +13,12 @@ steps:
 恢复 osdk 的 data/cache、执行 `osdk install --no-deps` 和
 `osdk deps --frozen --no-install-tools`，再把项目工具环境导出给后续 step。
 
+Release tag 是 `one-sdk` 仓库自己的 `vX.Y.Z` Git tag，同时固定 `action.yml` 和 Release
+产物。仓库的 `publish.yml` 在发布成功后自动创建它；不要预先手工创建同名 tag。仓库内测试
+未发布改动时使用 `uses: ./`，并运行 `osdk run github-action-smoke`；这会读取当前 checkout，
+不需要先发布 tag。`v0.0.4` 早于 Action 加入仓库，远程使用需等包含 Action 的后续 tag，
+或临时固定到包含 `action.yml` 的完整 commit SHA。
+
 常用输入：`version`、`working-directory`、`cache`、`cache-key`、`install-tools`、
 `install-deps`、`frozen`、`allow-deps-tool-install`、`jobs`、`source-mode`、`offline`、
 `require-checksums`、`attestations`。完整语义和缓存边界见站点的 GitHub Actions 指南。

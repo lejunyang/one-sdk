@@ -79,6 +79,35 @@ jobs:
         shell: pwsh
         run: ./scripts/test-installers.ps1
 
+  # Exercise the checked-out composite Action itself rather than resolving a
+  # released copy of action.yml. v0.0.4 is only the bootstrap CLI binary: that
+  # tag predates the Action, while `uses: ./` supplies the Action implementation
+  # from the pull request or commit under test.
+  github-action:
+    name: GitHub Action (${{ matrix.os }})
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up osdk through the checked-out Action
+        id: setup-osdk
+        uses: ./
+        with:
+          version: v0.0.4
+          working-directory: .github/action-smoke
+          cache-key: action-self-test-v1
+          install-tools: false
+          install-deps: false
+      - name: Verify exported osdk and Action helper contracts
+        working-directory: .github/action-smoke
+        run: osdk run github-action-smoke
+
   # Keep the interactive terminal contract visible on both macOS architectures.
   # This uses native GitHub-hosted macOS machines rather than emulation.
   macos-terminal:
