@@ -235,6 +235,10 @@ toolchain。运行时导出 `RUSTUP_HOME=<data>/rustup` 和 `CARGO_HOME=<data>/c
 Lock 也会原样保存这些浮动 channel，因此以后重装 `stable`、`beta` 或 `nightly` 可能
 得到更新 toolchain；需要不可变结果时请写明确版本或带日期的 toolchain。
 
+source probe 只用通用 stable manifest 排序，不代表镜像已经同步请求的精确 toolchain、
+component 或 target。所有会下载的 rustup 操作都会按排序逐个运行完整命令；某个源返回
+404、下载失败或 rustup 拒绝其内容时会继续下一个源，直到命令真正成功。
+
 ### 暴露的命令与 `cargo install`
 
 安装和 `osdk reshim` 时，osdk 会为活动工具链 `bin` 与隔离 `CARGO_HOME/bin` 里的**全部**
@@ -259,7 +263,7 @@ osdk 只驱动数据目录下的隔离 rustup，不接管已经安装在系统 `
   `RUSTUP_DIST_SERVER`、`RUSTUP_UPDATE_ROOT` 等环境变量。
 - 会下载的受管操作（`osdk install rust`、`osdk rust component add`、
   `osdk rust target add`）共用同一套源选择，因此固定的源对补装 component、target
-  同样生效。
+  同样生效；pin 只把该源排到第一位，目标在该源不可用时仍会回退。
 - 受管 rustup 始终使用 osdk 选定的源：shell 中已经导出的 `RUSTUP_DIST_SERVER`、
   `RUSTUP_UPDATE_ROOT` 不会影响受管操作，避免外部镜像覆盖 osdk 的选择。若要临时改用
   其他源，请使用 `--source <源>`，而不是导出环境变量。

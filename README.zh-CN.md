@@ -464,6 +464,8 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 osdk rust check --repair
 ```
 
+Rust 的 source probe 只负责排序；安装 toolchain、component 或 target 时，rustup 会按序尝试全部候选源。首选镜像缺少精确版本或下载失败时会自动回退。
+
 ### Zig
 
 ```bash

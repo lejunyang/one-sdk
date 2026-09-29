@@ -92,6 +92,55 @@ impl RustBackend {
         process::output(&rustup.display().to_string(), args, &env, cwd)
     }
 
+    /// Run a rustup operation that may download distribution artifacts, trying
+    /// every ranked dist server until the complete rustup command succeeds.
+    ///
+    /// The generic source probe intentionally measures a stable-channel
+    /// manifest. A mirror can pass that probe while lacking an exact historical
+    /// toolchain, component, or target, so the command itself is the only
+    /// authoritative target-level check.
+    pub fn run_rustup_with_source_fallback(
+        ctx: &Ctx,
+        args: &[&str],
+        cwd: Option<&std::path::Path>,
+        sources: &[Source],
+    ) -> Result<std::process::Output> {
+        if sources.is_empty() {
+            return Self::run_rustup(ctx, args, cwd, None);
+        }
+
+        let mut last_error = None;
+        for (index, source) in sources.iter().enumerate() {
+            tracing::info!(
+                source = %source.id,
+                dist = %source.download_url,
+                "{}",
+                crate::i18n::tr("log.rustup_dist_server")
+            );
+            match Self::run_rustup(ctx, args, cwd, Some(source)) {
+                Ok(output) => return Ok(output),
+                Err(error) => {
+                    tracing::warn!(
+                        source = %source.id,
+                        attempt = index + 1,
+                        total = sources.len(),
+                        "{}",
+                        crate::i18n::trf(
+                            "log.download_failover",
+                            &[("err", &error.to_string())]
+                        )
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: "rust".to_string(),
+            tried: sources.len(),
+        }))
+    }
+
     pub fn reconcile_markers(ctx: &Ctx) -> Result<(usize, usize)> {
         let toolchains = ctx.dirs.rustup_home().join("toolchains");
         let marker_root = ctx.dirs.installs.join("rust");
@@ -341,12 +390,7 @@ impl Backend for RustBackend {
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let rustup = Self::ensure_rustup(ctx, &sources).await?;
-        let source = sources.first();
-        let env = Self::rustup_env(ctx, source);
-        if let Some(s) = source {
-            tracing::info!(source = %s.id, dist = %s.download_url, "{}", crate::i18n::tr("log.rustup_dist_server"));
-        }
+        Self::ensure_rustup(ctx, &sources).await?;
         let toolchain_bin = Self::toolchain_dir(ctx, &tv.version).join("bin");
         let rustc = toolchain_bin.join(format!("rustc{}", ctx.platform.os.exe_suffix()));
         if ctx.config.settings.offline && !rustc.exists() {
@@ -387,7 +431,8 @@ impl Backend for RustBackend {
         // non-fatal for us: we generate our own shims to the toolchain bin dir.
         // So we tolerate a nonzero exit iff the toolchain dir materialized.
         if !rustc.exists() {
-            let run_res = process::run(&rustup.display().to_string(), &arg_refs, &env, None);
+            let run_res =
+                Self::run_rustup_with_source_fallback(ctx, &arg_refs, None, &sources).map(drop);
             if let Err(e) = run_res {
                 if !rustc.exists() {
                     return Err(e);
@@ -546,6 +591,63 @@ impl RustBackend {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn downloading_command_falls_back_across_ranked_dist_servers() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let rustup = dirs.cargo_home().join("bin/rustup");
+        let log = temp.path().join("sources.log");
+        std::fs::create_dir_all(rustup.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rustup,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s\\n' \"$RUSTUP_DIST_SERVER\" \"$RUSTUP_UPDATE_ROOT\" >> '{}'\nif [ \"$RUSTUP_DIST_SERVER\" = 'https://missing.invalid' ]; then printf 'target missing\\n' >&2; exit 1; fi\nprintf 'installed\\n'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform::current(),
+            config: crate::config::Config::default(),
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            show_progress: false,
+        };
+        let sources = vec![
+            Source::mirror("missing", "https://missing.invalid", 0)
+                .with_index("https://missing.invalid/rustup"),
+            Source::official("working", "https://working.invalid")
+                .with_index("https://working.invalid/rustup"),
+        ];
+
+        let output = RustBackend::run_rustup_with_source_fallback(
+            &ctx,
+            &["target", "add", "wasm32-wasip2"],
+            None,
+            &sources,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "installed\n");
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap(),
+            "https://missing.invalid|https://missing.invalid/rustup\nhttps://working.invalid|https://working.invalid/rustup\n"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn uninstall_delegates_to_isolated_rustup() {

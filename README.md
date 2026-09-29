@@ -516,6 +516,8 @@ osdk rust target add x86_64-pc-windows-gnu --toolchain stable
 osdk rust check --repair
 ```
 
+The Rust source probe only ranks candidates. Toolchain, component, and target installs run rustup against each candidate in order, so a preferred mirror that lacks the exact target falls back automatically.
+
 ### Zig
 
 ```bash

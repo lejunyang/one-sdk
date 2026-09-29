@@ -45,7 +45,7 @@ packages remain outside this osdk-owned install identity.
 | `maven` (`mvn`) | Built-in single-release record | Fixed SHA-512 | Current catalog contains one version |
 | `gradle` | Built-in single-release record | Fixed SHA-256 | Current catalog contains one version |
 | `kotlin` (`kotlinc`) | Built-in single GitHub release, with proxy candidate | Fixed SHA-256 | Current catalog contains one version |
-| `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then delegated to isolated rustup | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
+| `rust` (`rustup`) | rustup channel/version; official, rsproxy, and TUNA | SHA-256 for rustup-init, then isolated rustup runs against each ranked source until the complete command succeeds | Toolchains bypass archive CAS; supports `profile`, `components`, and `targets`; exports isolated `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument plus `@deno/<platform>` | npm SRI | Platform package; exports `DENO_DIR` |
 | `bun` | `bun` packument plus `@oven/bun-<platform>` | npm SRI | Platform package; exports `BUN_INSTALL_CACHE_DIR` |
 | `zig` | `ziglang.org/download/index.json` | SHA-256 from the index entry | Platform key uses LLVM CPU tokens; the archive name is read from the index rather than assembled, because the layout changed during 0.14; `master` is exposed as a prerelease; exports `ZIG_GLOBAL_CACHE_DIR` |

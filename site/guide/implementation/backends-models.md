@@ -42,7 +42,7 @@ npm 包不属于该 osdk 自有安装身份。
 | `maven` (`mvn`) | 内置单版本 release | 固定 SHA-512 | 当前 catalog 只包含一个版本 |
 | `gradle` | 内置单版本 release | 固定 SHA-256 | 当前 catalog 只包含一个版本 |
 | `kotlin` (`kotlinc`) | 内置单版本 GitHub release，可经代理 | 固定 SHA-256 | 当前 catalog 只包含一个版本 |
-| `rust` (`rustup`) | rustup channel/version；官方、rsproxy、TUNA | rustup-init SHA-256；随后委托隔离 rustup | toolchain 不走归档 CAS；支持 `profile`、`components`、`targets`，设置隔离的 `RUSTUP_HOME`/`CARGO_HOME` |
+| `rust` (`rustup`) | rustup channel/version；官方、rsproxy、TUNA | rustup-init SHA-256；随后对每个排序源运行隔离 rustup，完整命令成功才选中 | toolchain 不走归档 CAS；支持 `profile`、`components`、`targets`，设置隔离的 `RUSTUP_HOME`/`CARGO_HOME` |
 | `deno` | `deno` packument + `@deno/<platform>` | npm SRI | 平台包；设置 `DENO_DIR` |
 | `bun` | `bun` packument + `@oven/bun-<platform>` | npm SRI | 平台包；设置 `BUN_INSTALL_CACHE_DIR` |
 | `zig` | `ziglang.org/download/index.json` | 来自索引条目的 SHA-256 | 平台键使用 LLVM CPU token；归档名从索引读取而非拼接（0.14 期间命名布局发生过变化）；`master` 暴露为预发布；设置 `ZIG_GLOBAL_CACHE_DIR` |

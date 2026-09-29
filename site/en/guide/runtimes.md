@@ -256,6 +256,12 @@ The lock preserves those floating channel names too, so reinstalling `stable`,
 `beta`, or `nightly` later may yield a newer toolchain. Use an explicit or dated
 toolchain when the result must be immutable.
 
+The source probe ranks candidates using a generic stable manifest; it does not
+prove that a mirror has synchronized the requested exact toolchain, component,
+or target. Every downloading rustup operation runs the complete command against
+each ranked source in turn. A 404, transfer failure, or rustup rejection falls
+through until the command itself succeeds.
+
 ### Exposed commands and `cargo install`
 
 On install and on `osdk reshim`, osdk generates shims for **every** executable in
@@ -289,7 +295,8 @@ over a rustup already installed on `PATH`:
 - Every managed operation that downloads (`osdk install rust`,
   `osdk rust component add`, `osdk rust target add`) shares one source
   selection, so a pinned source also applies when you add a component or target
-  later.
+  later. A pin only puts that source first; an unavailable target still falls
+  through to the remaining candidates.
 - The managed rustup always uses the source osdk selected: a `RUSTUP_DIST_SERVER`
   or `RUSTUP_UPDATE_ROOT` already exported in your shell does not affect managed
   operations, so an external mirror cannot override osdk's choice. To use a

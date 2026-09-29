@@ -24,3 +24,7 @@ osdk rust check --repair
 
 持久 Rust 版本、components、targets、profile 写在 `[tools].rust`，见
 `reference/configuration/tools.md`。`targets` 只声明宿主额外需要安装的交叉目标。
+
+Rust source probe 使用通用 stable manifest，只负责排序。安装 toolchain 或执行
+`component/target add` 时，osdk 会依次用每个候选源运行完整 rustup 命令；目标版本在
+首选镜像缺失或下载失败时自动回退。pin 仍是“优先尝试”，不是“禁止回退”。

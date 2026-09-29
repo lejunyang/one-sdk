@@ -1479,25 +1479,14 @@ pub async fn rust(app: &mut App, command: RustCommand) -> Result<()> {
     }
 }
 
-/// The source `rust` operations should drive, honoring `--source` and the
-/// configured pin. Adding a component or target downloads from the dist server,
-/// so it must use the same selection the install path uses instead of whatever
-/// the ambient environment happens to hold.
-pub(crate) async fn selected_rust_source(
-    app: &mut App,
-) -> Result<Option<osdk_core::source::Source>> {
+/// The ranked sources a downloading `rust` operation should try, honoring
+/// `--source` and the configured pin. A successful generic probe does not prove
+/// that the selected mirror carries this exact component or target, so callers
+/// retain the remaining candidates as target-level fallbacks.
+pub(crate) async fn selected_rust_sources(app: &mut App) -> Result<Vec<osdk_core::source::Source>> {
     apply_source_override(app, "rust");
     let backend = app.registry.get("rust")?;
-    match osdk_core::source::select::active_source(&app.ctx, backend.as_ref()).await {
-        Ok(source) => Ok(Some(source)),
-        // Selection needs no network when a pin resolves, but probing can fail
-        // offline. rustup still has its own default host, so a failed selection
-        // must not block a local operation.
-        Err(error) => {
-            tracing::debug!(%error, "falling back to rustup's default dist server");
-            Ok(None)
-        }
-    }
+    Ok(osdk_core::source::select::ranked_source_list(&app.ctx, backend.as_ref()).await?)
 }
 
 pub(crate) async fn rust_item(app: &mut App, kind: &str, command: RustItemCommand) -> Result<()> {
@@ -1512,21 +1501,18 @@ pub(crate) async fn rust_item(app: &mut App, kind: &str, command: RustItemComman
     }
     args.extend(["--toolchain", &toolchain]);
     // Only `add` downloads; the others are local and must not pay for a probe.
-    let source = if operation == "add" {
-        selected_rust_source(app).await?
+    let sources = if operation == "add" {
+        selected_rust_sources(app).await?
     } else {
-        None
+        Vec::new()
     };
-    if let Some(source) = &source {
-        tracing::info!(
-            source = %source.id,
-            dist = %source.download_url,
-            "{}",
-            osdk_core::i18n::tr("log.rustup_dist_server")
-        );
-    }
-    let output =
-        osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &args, None, source.as_ref())?;
+    let output = if operation == "add" {
+        osdk_core::backend::rust::RustBackend::run_rustup_with_source_fallback(
+            &app.ctx, &args, None, &sources,
+        )?
+    } else {
+        osdk_core::backend::rust::RustBackend::run_rustup(&app.ctx, &args, None, None)?
+    };
     print!("{}", String::from_utf8_lossy(&output.stdout));
     Ok(())
 }
