@@ -27,10 +27,11 @@ steps:
 job 会把已存在的 tag 当成版本未递增并拒绝继续。具体发布步骤见[发布流水线](./implementation/releasing)。
 
 仓库自身的 CI 使用 `uses: ./` 测试 checkout 中尚未发布的 Action，因此不需要先创建 tag，
-也不会误测上一个 tag 中的 `action.yml`。它显式选择一个已发布版本作为 bootstrap CLI，
-然后通过 `osdk run github-action-smoke` 在 Linux、macOS、Windows 验证当前 Action 的安装、
-缓存接线、环境导出和 helper 契约。`v0.0.4` 早于 `action.yml` 加入仓库，不能作为远程
-Action 引用；在包含 Action 的下一个 Release 发布前，应使用 `main` 或完整 commit SHA。
+也不会误测上一个 tag 中的 `action.yml`。本地引用没有 semver `action_ref`，且 CI 不传
+`version`，所以它会用最新 Release 作为 bootstrap CLI；然后通过
+`osdk run github-action-smoke` 在 Linux、macOS、Windows 验证当前 Action 的安装、缓存接线、
+环境导出和 helper 契约。`v0.0.4` 早于 `action.yml` 加入仓库，不能作为远程 Action 引用；
+在包含 Action 的下一个 Release 发布前，应使用 `main` 或完整 commit SHA。
 
 默认依次执行：
 

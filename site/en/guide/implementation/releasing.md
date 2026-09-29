@@ -11,8 +11,9 @@ The same tag publishes the root composite Action:
 GitHub Release job creates the tag; it is an output of the pipeline, not an
 input. Creating and pushing it by hand first makes the prepare job fail. The
 Action's own CI uses `uses: ./` to read the current checkout and bootstraps it
-with an already published osdk binary, so Action changes are covered on all
-three platforms before a new tag exists.
+from the latest release because a local reference has no semver `action_ref`
+and the job omits `version`. Action changes are therefore covered on all three
+platforms before a new tag exists.
 
 ## What one release publishes
 

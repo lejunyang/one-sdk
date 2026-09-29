@@ -8,7 +8,7 @@ branding:
 
 inputs:
   version:
-    description: osdk release version. Defaults to the action's semver tag, or latest for a branch/SHA checkout.
+    description: osdk release version. Defaults to the action's semver tag, or latest for a branch, SHA, or local checkout.
     required: false
   repository:
     description: GitHub owner/repository that publishes osdk release assets.

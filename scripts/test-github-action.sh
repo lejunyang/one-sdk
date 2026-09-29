@@ -75,6 +75,12 @@ grep -Fq -- '--version v9.8.7' "$OSDK_ACTION_TEST_INSTALLER_LOG"
 grep -Fq -- '--repository example/osdk' "$OSDK_ACTION_TEST_INSTALLER_LOG"
 grep -Fq -- '--target x86_64-unknown-linux-musl' "$OSDK_ACTION_TEST_INSTALLER_LOG"
 
+# A local `uses: ./` has no semver action ref. Omitting `version` must follow
+# the latest Release rather than inheriting an unrelated branch or SHA string.
+export OSDK_ACTION_REF=
+"$repo_root/action/setup.sh"
+grep -Fq -- '--version latest' "$OSDK_ACTION_TEST_INSTALLER_LOG"
+
 export OSDK_BIN_DIR="$RUNNER_TEMP/osdk/bin"
 export OSDK_DATA_DIR="$RUNNER_TEMP/osdk/data"
 export OSDK_CACHE_DIR="$RUNNER_TEMP/osdk/cache"

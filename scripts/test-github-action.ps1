@@ -85,6 +85,15 @@ Add-Content -LiteralPath $env:OSDK_ACTION_TEST_LOG -Value ($arguments -join " ")
         }
     }
 
+    # A local `uses: ./` has no semver action ref. Omitting `version` must
+    # follow the latest Release instead of treating an empty ref as a version.
+    $env:OSDK_ACTION_REF = ""
+    & (Join-Path $repoRoot "action/setup.ps1")
+    $installerLog = Get-Content -Raw -LiteralPath $env:OSDK_ACTION_TEST_INSTALLER_LOG
+    if (-not $installerLog.Contains("version=latest")) {
+        throw "local Action setup did not request latest: $installerLog"
+    }
+
     $env:OSDK_ACTION_INSTALL_TOOLS = "true"
     $env:OSDK_ACTION_INSTALL_DEPS = "true"
     $env:OSDK_ACTION_FROZEN = "true"

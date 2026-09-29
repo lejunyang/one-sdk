@@ -80,9 +80,10 @@ jobs:
         run: ./scripts/test-installers.ps1
 
   # Exercise the checked-out composite Action itself rather than resolving a
-  # released copy of action.yml. v0.0.4 is only the bootstrap CLI binary: that
-  # tag predates the Action, while `uses: ./` supplies the Action implementation
-  # from the pull request or commit under test.
+  # released copy of action.yml. A local Action has no semver action_ref, so the
+  # omitted version deliberately installs the latest released CLI while
+  # `uses: ./` supplies the Action implementation from the pull request or
+  # commit under test.
   github-action:
     name: GitHub Action (${{ matrix.os }})
     timeout-minutes: 15
@@ -99,7 +100,6 @@ jobs:
         id: setup-osdk
         uses: ./
         with:
-          version: v0.0.4
           working-directory: .github/action-smoke
           cache-key: action-self-test-v1
           install-tools: false

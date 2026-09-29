@@ -33,12 +33,13 @@ tag as an unbumped version and refuses to continue. See the
 
 The repository's own CI uses `uses: ./` to exercise the unpublished Action from
 the checkout, so it neither needs a tag first nor accidentally tests the prior
-tag's `action.yml`. It selects an existing release as the bootstrap CLI, then
-runs `osdk run github-action-smoke` on Linux, macOS, and Windows to verify the
-current Action's installation, cache wiring, environment export, and helper
-contracts. `v0.0.4` predates the addition of `action.yml` and cannot be used as
-a remote Action reference; use `main` or a full commit SHA until the next
-release containing the Action is published.
+tag's `action.yml`. A local reference has no semver `action_ref`, and CI omits
+`version`, so it uses the latest release as the bootstrap CLI. It then runs
+`osdk run github-action-smoke` on Linux, macOS, and Windows to verify the current
+Action's installation, cache wiring, environment export, and helper contracts.
+`v0.0.4` predates the addition of `action.yml` and cannot be used as a remote
+Action reference; use `main` or a full commit SHA until the next release
+containing the Action is published.
 
 The default setup performs these steps:
 

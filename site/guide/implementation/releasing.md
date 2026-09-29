@@ -8,8 +8,8 @@
 这个 tag 也同时是根目录 composite Action 的发布版本：`uses: lejunyang/one-sdk@vX.Y.Z`
 读取的就是该 tag 下的 `action.yml`。tag 由最后的 GitHub Release job 自动创建，不是发布前的
 输入；先手工 `git tag`/push 会让 prepare job 失败。Action 自己的 CI 使用 `uses: ./` 读取
-当前 checkout，并用一个已经发布的 osdk 二进制做 bootstrap，所以 Action 改动可以在创建新
-tag 之前先经过三平台验证。
+当前 checkout；本地引用没有 semver `action_ref`，因此省略 `version` 时会用最新 Release
+做 bootstrap。这样 Action 改动可以在创建新 tag 之前先经过三平台验证。
 
 ## 一次发布会生成什么
 
