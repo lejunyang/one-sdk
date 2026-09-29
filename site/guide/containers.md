@@ -15,7 +15,7 @@ osdk container doctor --runtime docker --builder team-builder
 osdk container doctor --json
 ```
 
-默认运行时来自生效的 `[containers].runtime` 配置。选择 `auto` 时，osdk 依次
+默认运行时来自生效的 `container.runtime` 配置。选择 `auto` 时，osdk 依次
 探测 Docker 和 containerd，再按诊断状态选择：健康、降级、仅客户端、权限不足、
 不可达、版本不受支持、未安装。状态相同时优先 Docker。选择依据是实际探测状态，
 而不是仅检查二进制文件是否存在。
@@ -137,7 +137,7 @@ osdk container pull ghcr.io/example/tool:1.0 \
   --address unix:///run/containerd/containerd.sock --namespace default
 ```
 
-Runtime 和 platform 默认来自生效的 `[containers]` 配置。使用 `--runtime auto` 时，osdk
+Runtime 和 platform 默认来自生效的 `[container]` 配置。使用 `--runtime auto` 时，osdk
 对 Docker 和 containerd 执行一次有界只读解析并确定地选中一个所有者，然后只启动一次
 原生前台 pull。原生命令一旦启动便不会回退到另一个 runtime，因此认证、网络或拉取失败
 都会由实际运行的所有者报告。
@@ -216,13 +216,13 @@ ID 同样会被拒绝。此时应重新生成并审阅预览。绑定字段不�
 ## 配置与优先级
 
 ```toml
-[containers]
+[container]
 runtime = "auto"
 builder = "auto"
 platform = "runtime"
 probe_timeout_ms = 1500
 
-[containers.registries."docker.io"]
+[container.registries."docker.io"]
 mirrors = [
   "https://mirror-one.example/",
   "https://mirror-two.example/",
@@ -239,9 +239,9 @@ stdout 和 stderr 各 64 KiB 的上限。
 Registry key 是可带端口的规范 host name，不是 URL。Mirror 值必须是 HTTPS URL，不能
 包含 credentials、query 或 fragment；加载时补尾部 `/`，去重但保留首次出现的配置顺序。
 每个 Registry 最多配置 8 个 mirror。
-项目级 `[containers]` 需要显式信任，并整段替换低优先级配置。没有显式 Docker Hub policy
+项目级 `[container]` 需要显式信任，并整段替换低优先级配置。没有显式 Docker Hub policy
 时，osdk 使用 `https://mirror.gcr.io/` 与 `https://docker.m.daocloud.io/` 两个内置候选；
-一旦配置 `[containers.registries."docker.io"]`，包括空 `mirrors` 在内，都会完整覆盖内置值。
+一旦配置 `[container.registries."docker.io"]`，包括空 `mirrors` 在内，都会完整覆盖内置值。
 
 `anonymous_only=true` 是 policy 默认值。Registry 测试无论该设置为何都保持匿名。原生
 Docker/containerd/BuildKit 配置无法保证 runtime 永远不附加自己的凭据，因此
@@ -286,7 +286,7 @@ Tag selector 不会走这条降级路径：必须先由 upstream 将其固定为
 
 `--image` 接受 tag 或 digest；digest selector 必须与返回的 manifest 字节一致。对于 image
 index，`--platform` 必须唯一选中一个 child，并校验 descriptor digest 和 size。CLI 参数
-覆盖显式 `[containers].platform`；两处都未提供平台时，遇到 index 会报告
+覆盖显式 `container.platform`；两处都未提供平台时，遇到 index 会报告
 `platform-not-found`。验证 image manifest 后，osdk 会对最小 layer 发送最多 16 KiB 的有界
 Range 请求并校验精确 `Content-Range`；若 sample 已包含整个小 layer，还会验证 layer
 digest。该命令不会拉取或保存完整 image。
@@ -327,11 +327,11 @@ osdk container mirrors plan REGISTRY
   [--json]
 ```
 
-位置参数 Registry 必须存在匹配的 `[containers.registries.<registry>]` policy；Docker Hub
+位置参数 Registry 必须存在匹配的 `[container.registries.<registry>]` policy；Docker Hub
 可直接使用内置 policy。
 `--runtime` 必填，没有 `auto`；每次调用只规划该 Registry 与该原生控制面，不会把其他
 已配置 Registry 合并进 plan。`--builder` 只允许配合 `--runtime buildkit`；BuildKit 未提供
-该参数时使用生效的 `[containers].builder`。
+该参数时使用生效的 `container.builder`。
 
 `--native-config` 指向精确的有界输入/目标：Docker daemon JSON、containerd 的
 `<config_path>/<registry>/hosts.toml`，或所选 BuildKit builder 的 `buildkitd.toml`。省略时，

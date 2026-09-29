@@ -193,7 +193,7 @@ fn wants_auto_deps(command: &Command) -> bool {
 
 /// Whether a command must not read the project configuration at all.
 ///
-/// Trust management and the `config set`/`unset` escape hatch: letting an
+/// Trust management and the `config set`/`unset`/`migrate` escape hatch: letting an
 /// untrusted project take part in the decision to trust it, or in the edit that
 /// brings it back into shape, would defeat the point of the gate.
 ///
@@ -208,6 +208,7 @@ fn excludes_project_config(command: &Command) -> bool {
             | Command::Config {
                 command: crate::cli::ConfigCommand::Set { .. }
                     | crate::cli::ConfigCommand::Unset { .. }
+                    | crate::cli::ConfigCommand::Migrate { .. }
             }
     )
 }
@@ -215,8 +216,8 @@ fn excludes_project_config(command: &Command) -> bool {
 /// The trust scopes one command reaches.
 ///
 /// Trust gates only what the invocation can actually do: one scope per kind
-/// of effect. A `[syspkg]` table cannot block `osdk model path`, and
-/// `[task_config]` cannot block `osdk pkg status`, because neither command
+/// of effect. A `[sys.pkg]` table cannot block `osdk model path`, and
+/// `[task]` cannot block `osdk pkg status`, because neither command
 /// reaches those tables. The empty list means the command acts on nothing
 /// externally -- it is loaded read-only and is never refused.
 ///
@@ -441,7 +442,7 @@ mod tests {
                 &["exec", "--no-deps", "--tool", "node", "--", "node", "-v"],
                 &[Scope::Install],
             ),
-            // Run only reaches task_config and, by default, deps.
+            // Run only reaches task settings and, by default, deps.
             (&["run", "build"], &[Scope::Run, Scope::Deps]),
             (&["run", "--no-deps", "build"], &[Scope::Run]),
             (&["run", "--dry-run", "build"], &[]),
@@ -486,7 +487,7 @@ mod tests {
         }
     }
 
-    /// Trust management and config writes are the one group that must not
+    /// Trust management and config writes/migrations are the one group that must not
     /// read the project config at all: an untrusted project cannot take
     /// part in the decision to trust it or the edit that undoes it.
     #[test]
@@ -496,6 +497,7 @@ mod tests {
             &["untrust"],
             &["config", "set", "jobs", "4"],
             &["config", "unset", "jobs"],
+            &["config", "migrate", "--dry-run"],
         ];
         for args in excluded {
             assert!(

@@ -618,6 +618,15 @@ pub enum ConfigCommand {
         #[arg(short, long)]
         global: bool,
     },
+    /// Rewrite legacy section names to the canonical configuration layout.
+    Migrate {
+        /// Show the section moves without writing the file.
+        #[arg(long)]
+        dry_run: bool,
+        /// Migrate the user-global config instead of the nearest project config.
+        #[arg(short, long)]
+        global: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1220,7 +1229,7 @@ pub enum PkgCommand {
         json: bool,
     },
 
-    /// Report the host against `[syspkg.packages]`.
+    /// Report the host against `[sys.pkg.packages]`.
     ///
     /// Read-only: it queries what is installed and compares, installing nothing.
     Status {
@@ -1244,7 +1253,7 @@ pub enum PkgCommand {
         detailed_exitcode: bool,
     },
 
-    /// Install the packages `[syspkg.packages]` asks for and the host lacks.
+    /// Install the packages `[sys.pkg.packages]` asks for and the host lacks.
     ///
     /// The only package command that changes the system. Packages already
     /// present are left exactly as they are -- including at another version,
@@ -1531,6 +1540,20 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[test]
+    fn parses_config_migration_scope_and_preview() {
+        let cli =
+            Cli::try_parse_from(["osdk", "config", "migrate", "--dry-run", "--global"]).unwrap();
+        let Command::Config {
+            command: ConfigCommand::Migrate { dry_run, global },
+        } = cli.command
+        else {
+            panic!("expected config migrate");
+        };
+        assert!(dry_run);
+        assert!(global);
+    }
 
     #[test]
     fn parses_container_registry_test_arguments() {

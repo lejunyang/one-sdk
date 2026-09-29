@@ -934,9 +934,9 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                     println!("  {k} = {v}");
                 }
             }
-            if !app.ctx.config.aliases.is_empty() {
-                println!("aliases:");
-                for (tool, aliases) in &app.ctx.config.aliases {
+            if !app.ctx.config.tool_aliases.is_empty() {
+                println!("alias.tools:");
+                for (tool, aliases) in &app.ctx.config.tool_aliases {
                     for (name, version) in aliases {
                         println!("  {tool} {name} = {version}");
                     }
@@ -992,6 +992,22 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
                 }
             }
         }
+        ConfigCommand::Migrate { dry_run, global } => {
+            let scope = setting_scope(global);
+            let (path, migrations) = crate::config_edit::migrate_config(&app.ctx, scope, dry_run)?;
+            if migrations.is_empty() {
+                println!(
+                    "configuration already uses the canonical layout: {}",
+                    path.display()
+                );
+            } else {
+                let action = if dry_run { "would migrate" } else { "migrated" };
+                println!("{action} configuration: {}", path.display());
+                for migration in migrations {
+                    println!("  [{}] -> [{}]", migration.from, migration.to);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1007,7 +1023,7 @@ pub(crate) fn setting_scope(global: bool) -> crate::config_edit::SettingScope {
 /// Offer to trust a project config that the user just made trust-required.
 ///
 /// Writing a setting into a project `osdk.toml` takes it past the
-/// `[tools]`/`[aliases]` whitelist, so every later command in that directory
+/// `[tools]`/`[alias.tools]` whitelist, so every later command in that directory
 /// would be refused until it is trusted. Asking at the point of writing keeps
 /// the gate meaningful -- it exists to catch configs that arrived with someone
 /// else's repository, not the line the user just typed -- while not leaving

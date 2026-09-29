@@ -1108,7 +1108,7 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
             let mut aliases = app
                 .ctx
                 .config
-                .aliases
+                .tool_aliases
                 .get(backend.id())
                 .cloned()
                 .unwrap_or_default();
@@ -1120,13 +1120,13 @@ pub fn alias(app: &App, command: AliasCommand) -> Result<()> {
         AliasCommand::List { tool } => {
             if let Some(tool) = tool {
                 let backend = app.registry.get(&tool)?;
-                if let Some(aliases) = app.ctx.config.aliases.get(backend.id()) {
+                if let Some(aliases) = app.ctx.config.tool_aliases.get(backend.id()) {
                     for (name, version) in aliases {
                         println!("{} {} = {}", backend.id(), name, version);
                     }
                 }
             } else {
-                for (tool, aliases) in &app.ctx.config.aliases {
+                for (tool, aliases) in &app.ctx.config.tool_aliases {
                     for (name, version) in aliases {
                         println!("{tool} {name} = {version}");
                     }

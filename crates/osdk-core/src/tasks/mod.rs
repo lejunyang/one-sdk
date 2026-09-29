@@ -629,10 +629,10 @@ impl TaskDef {
     }
 }
 
-/// Runner-wide defaults, `[task_config]`.
+/// Runner-wide defaults, `[task]`.
 ///
 /// Replaced as a unit by a higher-precedence layer, matching `[registries]` and
-/// `[containers]`: a project that states its runner defaults means that set,
+/// `[container]`: a project that states its runner defaults means that set,
 /// not that set merged into whatever the user's global config happened to hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

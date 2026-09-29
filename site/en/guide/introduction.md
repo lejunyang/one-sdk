@@ -53,7 +53,7 @@ replaces the entire lower-precedence settings value, so omitted keys return to
 built-in defaults. The top-level source selection, probe timeout, and TTL are
 also replaced as a group; source entries merge by tool, but a same-tool entry is
 replaced wholesale. `[registries]` replaces the lower section as a unit.
-`[tools]` and `[aliases]` merge by key. See [Projects and Configuration](./projects)
+`[tools]` and `[alias.tools]` merge by key. See [Projects and Configuration](./projects)
 for the complete schema and exact rules.
 
 osdk also reads `.tool-versions` and native files such as `.nvmrc`,

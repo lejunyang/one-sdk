@@ -21,4 +21,4 @@ osdk task rm lint
 ```
 
 `task list/info/deps` 是只读查询；执行使用 `osdk run <name>`。配置字段见
-`reference/configuration/tasks.md` 和 `reference/configuration/task-config.md`。
+`reference/configuration/tasks.md` 和 `reference/configuration/task.md`。

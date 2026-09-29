@@ -1,6 +1,6 @@
 # `osdk pkg`
 
-查看宿主系统包管理器并兑现 `[syspkg.packages]`。除 `apply` 与 `mirrors apply` 外均只读。
+查看宿主系统包管理器并兑现 `[sys.pkg.packages]`。除 `apply` 与 `mirrors apply` 外均只读。
 
 | 子命令 | 参数 | 语义 |
 | --- | --- | --- |
@@ -20,4 +20,4 @@ osdk pkg mirrors test --manager winget
 ```
 
 首次无人值守镜像 apply 要传刚生成的 plan fingerprint；fingerprint 绑定当时的源状态。
-声明格式与平台过滤见 `reference/configuration/syspkg.md`。容器运行时不放进 syspkg。
+声明格式与平台过滤见 `reference/configuration/sys.md`。容器运行时不放进 `sys.pkg`。

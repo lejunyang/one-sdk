@@ -125,6 +125,11 @@ fn localize_subcommands(cmd: Command) -> Command {
         c.about(h("help.config.about"))
             .mut_subcommand("path", |s| s.about(h("help.config.path.about")))
             .mut_subcommand("list", |s| s.about(h("help.config.list.about")))
+            .mut_subcommand("migrate", |s| {
+                s.about(h("help.config.migrate.about"))
+                    .mut_arg("dry_run", |a| a.help(h("help.config.migrate.flag.dry_run")))
+                    .mut_arg("global", |a| a.help(h("help.config.migrate.flag.global")))
+            })
     })
     .mut_subcommand("trust", |c| {
         c.about(h("help.trust.about"))

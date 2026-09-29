@@ -110,7 +110,7 @@ pub async fn run(app: &App, command: PkgCommand) -> Result<()> {
     }
 }
 
-/// Compare `[syspkg.packages]` against the host.
+/// Compare `[sys.pkg.packages]` against the host.
 ///
 /// The installed set is read once and reused for every request, so a report is
 /// one query rather than one per package.
@@ -355,7 +355,7 @@ fn write_status(output: &mut dyn Write, report: &syspkg::StatusReport) -> Result
     if report.packages.is_empty() && report.invalid_keys.is_empty() {
         writeln!(
             output,
-            "No system packages are configured. Add them under [syspkg.packages]."
+            "No system packages are configured. Add them under [sys.pkg.packages]."
         )?;
         return Ok(());
     }
@@ -425,7 +425,7 @@ fn skip_label(reason: syspkg::SkipReason) -> &'static str {
         }
         syspkg::SkipReason::NotApplicable => "not for this platform",
         syspkg::SkipReason::ManagerUnavailable => "its manager could not be queried",
-        syspkg::SkipReason::ManagerNotAllowed => "its manager is excluded by [syspkg] managers",
+        syspkg::SkipReason::ManagerNotAllowed => "its manager is excluded by [sys.pkg] managers",
         // Not a limitation of osdk: Arch documents that installing one package
         // is a partial upgrade and unsupported. The command is printed so it can
         // be run deliberately, after reading the news as upstream asks.

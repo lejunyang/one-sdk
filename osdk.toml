@@ -21,7 +21,7 @@ python = "3.12"
 "cargo:jscpd" = "5.3.2"
 
 # System packages the Wine cross-test needs. Declaring them here does not install
-# anything: `[syspkg]` is a declaration, `osdk pkg status` is read-only, and only
+# anything: `[sys.pkg]` is a declaration, `osdk pkg status` is read-only, and only
 # an explicit `osdk pkg apply --yes` installs. So a contributor gets
 #
 #   osdk pkg status     # is mingw missing?
@@ -38,11 +38,11 @@ python = "3.12"
 # Same crate and toolchain with mingw as the linker succeeds, so the difference is
 # the linker, not the setup. zig stays what the README already recommends it for:
 # users cross-compiling C, which does not go through rustc's linker protocol.
-[syspkg]
+[sys.pkg]
 # Left unrestricted on purpose: one entry per package manager below, filtered by
 # `os`, so whichever manager the host actually has is the one that applies.
 
-[syspkg.packages]
+[sys.pkg.packages]
 # Package names verified against each distro's own index; osdk deliberately does
 # no cross-manager name mapping, so each has to be spelled its own way.
 
@@ -81,7 +81,7 @@ python = "3.12"
 # would report "installed" while the task still skips. That script already skips
 # cleanly with a message when neither runtime is present.
 
-[task_config]
+[task]
 # Keep the Action smoke project independent from this repository's full tool
 # set, while still exposing its check through the root `osdk task list`.
 roots = [".github/action-smoke"]

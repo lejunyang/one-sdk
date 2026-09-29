@@ -100,5 +100,5 @@ osdk-tasks/test/_default.ps1 -> test
 #OSDK depends=fetch,lint
 ```
 
-解析在第一行非注释内容处停止。用 `[task_config].includes` 替换默认搜索目录；也可在
+解析在第一行非注释内容处停止。用 `task.includes` 替换默认搜索目录；也可在
 任务对象中用 `file = "scripts/release.ps1"` 显式指向脚本。

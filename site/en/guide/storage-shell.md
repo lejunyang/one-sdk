@@ -257,7 +257,7 @@ osdk registry test [MANAGER]
 | `doctor --verify` | Everything above, then re-hashes every installed file and names what no longer matches |
 | `doctor --verify --tool` | The same check limited to one tool; a full pass reads every byte and takes minutes |
 | `config path` | Config directory, user file, and current project configuration |
-| `config list` | Selected effective settings/directories, registry, model environment, tools, and aliases |
+| `config list` | Selected effective settings/directories, registry, model environment, tools, and alias.tools |
 | `source list` | Sources and pin for one backend/provider; `doctor` does not list mirrors |
 | `registry test` | Anonymous npm-compatible registry probe and selection plan |
 | `container doctor` | Read-only Docker/containerd selection plus a separate Buildx report |

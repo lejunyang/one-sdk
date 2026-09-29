@@ -173,10 +173,17 @@ osdk alias unset node maintenance
 ```
 
 The CLI always edits user-global aliases. A project may define
-`[aliases.<tool>]` manually and override a global name. Alias chains are allowed;
+`[alias.tools.<tool>]` manually and override a global name. Alias chains are allowed;
 cycles are rejected. Names cannot be empty, contain whitespace or `@`, or use
 `latest`, `current`, `stable`, `system`, `lts`, `lts/*`, `lts-latest`, or any
 `lts/` or `lts-` prefix. Tool aliases are canonicalized before storage.
+
+This kind of alias replaces a **version request** only. It is expanded by
+install/use/uninstall, activation, shim selection, and global npm-tool version
+resolution; it neither renames an executable nor duplicates an installation.
+`[alias]` is a category namespace reserved for future capabilities such as
+`alias.shell`; only `alias.tools` exists today, and unknown categories fail
+explicitly.
 
 ## Tool name aliases
 

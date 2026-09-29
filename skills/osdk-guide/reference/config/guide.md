@@ -9,6 +9,7 @@
 | `get <KEY>` | `-g, --global` | 读取项目有效值或用户全局值 |
 | `set <KEY> <VALUE>` | `-g, --global` | 写项目配置或用户配置；列表值用逗号分隔 |
 | `unset <KEY>` | `-g, --global` | 删除显式值并恢复下层/默认值 |
+| `migrate` | `--dry-run`、`-g, --global` | 将旧配置段名迁移到规范布局；默认处理当前项目 |
 
 ```bash
 osdk config path
@@ -17,6 +18,9 @@ osdk config set jobs 6
 osdk config set shims.exclude "apkanalyzer,lint"
 osdk config get attestations -g
 osdk config unset offline
+osdk config migrate --dry-run
+osdk config migrate
+osdk config migrate --global
 ```
 
 可写 key：`jobs`、`offline`、`yes`、`verify_signatures`、`require_checksums`、
@@ -29,3 +33,7 @@ osdk config unset offline
 
 配置分层与全部 TOML 段从 `reference/configuration/overview.md` 进入；`config set`
 不是任意 TOML 编辑器，复杂声明使用对应配置 reference。
+
+`migrate` 只移动四组旧布局：`[aliases]` → `[alias.tools]`、`[containers]` →
+`[container]`、`[task_config]` → `[task]`、`[syspkg]` → `[sys.pkg]`。它保留注释和
+其他配置；如果同一组的新旧写法同时存在，会拒绝猜测合并顺序并保持文件不变。

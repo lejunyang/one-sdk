@@ -448,9 +448,9 @@ manifest 存在但不是常规文件、或解析失败，一律报错而不是�
 所以两个方向都有测试：该命中的命中，不该命中的不命中。
 
 `deps` 的 trust 要求**不影响工具分派**。`affects_tool_dispatch` 里
-`deps` 与 `syspkg`、`task_config`、`models` 同列返回 `false`。
+`deps` 与 `sys`、`task`、`models` 同列返回 `false`。
 否则一个只是声明了 provider 的项目会连 `cargo --version` 都跑不了——
-`[syspkg]` 踩过的正是这个坑。
+`[sys.pkg]` 踩过的正是这个坑。
 
 ## auto 前置：只判新鲜度，绝不深扫
 

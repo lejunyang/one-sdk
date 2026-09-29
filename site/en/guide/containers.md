@@ -17,7 +17,7 @@ osdk container doctor --runtime docker --builder team-builder
 osdk container doctor --json
 ```
 
-The default runtime comes from effective `[containers].runtime` configuration.
+The default runtime comes from effective `container.runtime` configuration.
 With `auto`, osdk probes Docker first and containerd second, then chooses by
 diagnosed state: healthy, degraded, client-only, permission-denied,
 unreachable, unsupported-version, then not-installed. Docker wins equal-status
@@ -160,7 +160,7 @@ osdk container pull ghcr.io/example/tool:1.0 \
   --address unix:///run/containerd/containerd.sock --namespace default
 ```
 
-Runtime and platform default to the effective `[containers]` configuration.
+Runtime and platform default to the effective `[container]` configuration.
 With `--runtime auto`, osdk performs one bounded, read-only resolution across
 Docker and containerd and deterministically selects one owner. It then launches
 exactly one native foreground pull. Once that command starts there is no
@@ -254,13 +254,13 @@ is the only available execution handle and cannot be pinned atomically.
 ## Configuration and precedence
 
 ```toml
-[containers]
+[container]
 runtime = "auto"
 builder = "auto"
 platform = "runtime"
 probe_timeout_ms = 1500
 
-[containers.registries."docker.io"]
+[container.registries."docker.io"]
 mirrors = [
   "https://mirror-one.example/",
   "https://mirror-two.example/",
@@ -278,7 +278,7 @@ Registry keys are canonical host names with an optional port, not URLs. Mirror
 values must be HTTPS URLs without credentials, query strings, or fragments.
 They are normalized with a trailing slash and deduplicated while preserving the
 first configured order. Each registry accepts at most eight mirrors.
-Project-level `[containers]` configuration requires
+Project-level `[container]` configuration requires
 explicit trust and replaces the lower-precedence section as a unit. Without an
 explicit Docker Hub policy, osdk supplies `https://mirror.gcr.io/` and
 `https://docker.m.daocloud.io/`. Any explicit Docker Hub block, including an
@@ -336,7 +336,7 @@ the upstream must first freeze it to a digest.
 `--image` accepts tags and digests. A digest selector must match the returned
 manifest bytes. For an image index, `--platform` selects exactly one child and
 verifies its descriptor digest and size. The CLI value overrides an explicit
-`[containers].platform`; when neither supplies a platform, an index reports
+`container.platform`; when neither supplies a platform, an index reports
 `platform-not-found`. After validating an image manifest, osdk sends a bounded
 Range request for up to 16 KiB from its smallest layer and validates the exact
 `Content-Range`; when the complete layer fits in the sample, it also verifies
@@ -386,13 +386,13 @@ osdk container mirrors plan REGISTRY
   [--json]
 ```
 
-The positional registry must have a matching `[containers.registries.<registry>]`
+The positional registry must have a matching `[container.registries.<registry>]`
 policy, except that Docker Hub can use the built-in policy. `--runtime` is
 required—there is no `auto` mode—and one invocation plans
 exactly that registry for exactly that native control plane. Other configured
 registries are not folded into the plan. `--builder` is valid only with
 `--runtime buildkit`; when omitted there, it uses effective
-`[containers].builder`.
+`container.builder`.
 
 `--native-config` identifies the exact bounded input/target: Docker's daemon
 JSON, containerd's `<config_path>/<registry>/hosts.toml`, or the selected

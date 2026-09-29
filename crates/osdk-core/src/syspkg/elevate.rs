@@ -44,7 +44,7 @@ pub enum Elevation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RefusalReason {
-    /// `[syspkg] no_elevate = true`.
+    /// `[sys.pkg] no_elevate = true`.
     ForbiddenByConfiguration,
     /// No TTY and no passwordless sudo, so a prompt would hang.
     WouldPromptWithoutATerminal,
@@ -208,7 +208,7 @@ impl Elevation {
     pub const fn refusal_advice(reason: RefusalReason) -> &'static str {
         match reason {
             RefusalReason::ForbiddenByConfiguration => {
-                "elevation is disabled by `[syspkg] no_elevate`; run this yourself"
+                "elevation is disabled by `[sys.pkg] no_elevate`; run this yourself"
             }
             RefusalReason::WouldPromptWithoutATerminal => {
                 "sudo would prompt for a password and there is no terminal to type it into; \

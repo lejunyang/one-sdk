@@ -184,10 +184,10 @@ for case_line in "${cases[@]}"; do
             sh -c "$prelude
 mkdir -p /tmp/proj && cd /tmp/proj
 cat > osdk.toml <<'TOML'
-[syspkg]
+[sys.pkg]
 managers = [\"$expect_present\"]
 
-[syspkg.packages]
+[sys.pkg.packages]
 \"$expect_present:$known_present\" = \"latest\"
 \"$expect_present:definitely-not-a-real-package-osdk\" = \"latest\"
 TOML
@@ -242,10 +242,10 @@ osdk pkg status --json" 2>&1
                 sh -c "$prelude
 mkdir -p /tmp/proj && cd /tmp/proj
 cat > osdk.toml <<'TOML'
-[syspkg]
+[sys.pkg]
 managers = [\"$expect_present\"]
 
-[syspkg.packages]
+[sys.pkg.packages]
 \"$expect_present:$installable\" = \"latest\"
 TOML
 osdk --yes trust >/dev/null 2>&1
@@ -280,10 +280,10 @@ $package_query && echo 'PACKAGE-PRESENT' || echo 'PACKAGE-ABSENT'" 2>&1
                 sh -c "$prelude
 mkdir -p /tmp/proj && cd /tmp/proj
 cat > osdk.toml <<'TOML'
-[syspkg]
+[sys.pkg]
 managers = [\"pacman\"]
 
-[syspkg.packages]
+[sys.pkg.packages]
 \"pacman:$installable\" = \"latest\"
 TOML
 osdk --yes trust >/dev/null 2>&1

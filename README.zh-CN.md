@@ -732,8 +732,8 @@ osdk --attestations required install github:cli/cli@latest
 ```
 
 每个命令只按它实际能做的事请求审阅：`install`/`use`/`upgrade` 看校验设置与
-下载来源，`osdk run` 看 `task_config`，`pkg apply` 只看在本机适用的
-`syspkg` 条目——model 配置在任何情况下都不要求信任。仅声明安装哪些工具或包
+下载来源，`osdk run` 看 `[task]`，`pkg apply` 只看在本机适用的
+`[sys.pkg]` 条目——model 配置在任何情况下都不要求信任。仅声明安装哪些工具或包
 不在此列；被拒绝时，osdk 会逐条列出具体是哪些键以及各自原因：
 
 ```bash
@@ -742,6 +742,11 @@ osdk trust list
 osdk untrust ./osdk.toml
 osdk trust prune                 # 清理配置文件已不存在的记录
 ```
+
+`[tasks]`、`[models]`、`[skills]` 等条目集合保留复数；单例设置和命名空间使用
+`[task]`、`[container]`、`[alias.tools]`、`[sys.pkg]`。旧版 `[task_config]`、
+`[containers]`、`[aliases]`、`[syspkg]` 暂时仍可读取；先运行
+`osdk config migrate --dry-run` 预览，再用 `osdk config migrate` 改写。
 
 指南：[下载源、离线与安全](site/guide/sources-security.md)
 
@@ -753,7 +758,7 @@ Docker Hub 开箱内置两个由运营方公开说明的 pull-through cache：`m
 会完整覆盖这些内置候选：
 
 ```toml
-[containers.registries."docker.io"]
+[container.registries."docker.io"]
 mirrors = ["https://mirror.example/"]
 anonymous_only = true
 resolve = "mirror"

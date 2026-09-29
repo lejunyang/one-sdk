@@ -142,7 +142,7 @@ file = "scripts/generate.lua"
 ### 改用别的目录
 
 ```toml
-[task_config]
+[task]
 includes = ["tools/tasks"]
 ```
 
@@ -591,7 +591,7 @@ shell = "pwsh -Command"
 或者给整个配置作用域设默认值：
 
 ```toml
-[task_config]
+[task]
 shell = "pwsh -Command"
 ```
 
@@ -676,10 +676,10 @@ error: task `linuxonly` is not available on this platform (os=linux)
 对同一件事问两遍——而一个总在你已经明确要求的事情上弹出的确认，只会训练人
 不读就点同意。
 
-对比 `syspkg` 就清楚了：它在 `osdk install` 期间动作，而用户并没有逐个包地
+对比 `sys.pkg` 就清楚了：它在 `osdk pkg apply` 期间动作，而用户并没有逐个包地
 要求过，所以必须事先审阅；任务则永远是因为有人点名才运行。
 
-**`task_config` 仍然需要信任**，因为它不是你点名的命令，而是一个环境设置：
+**`[task]` 仍然需要信任**，因为它不是你点名的命令，而是一个环境设置：
 
 ```
 $ osdk task list          # 只是打印声明，不需要信任
@@ -689,7 +689,7 @@ test
 $ osdk run test           # 真正要用那个解释器，于是被拦住
 error: project config is not trusted: /path/to/osdk.toml
 these keys need review because they affect what runs on this machine:
-  task_config -- 决定用什么解释器执行任务，任务的实际行为可能与写出来的不一致
+  task -- 决定用什么解释器执行任务，任务的实际行为可能与写出来的不一致
 ```
 
 注意被拦住的是 `osdk run`，不是 `osdk task list`。后者只报告文件里写了什么、
@@ -702,12 +702,12 @@ these keys need review because they affect what runs on this machine:
 
 ## monorepo：子项目的任务
 
-`[task_config].roots` 显式声明哪些目录是子项目，它们的任务会以
+`task.roots` 显式声明哪些目录是子项目，它们的任务会以
 `//<路径>:<任务名>` 的形式进入同一个任务表：
 
 ```toml
 # 仓库根的 osdk.toml
-[task_config]
+[task]
 roots = ["apps/*", "packages/*"]
 
 [tasks.hello]
@@ -765,16 +765,16 @@ error: config error: task dependency cycle: //apps/web:build -> //packages/ui:bu
 
 两端都报出来，这样你知道该删哪条边。
 
-### 子项目不能声明 `[task_config]`
+### 子项目不能声明 `[task]`
 
-子项目只贡献**任务定义**。`[task_config]` 是作用域级的设置，其中 `shell` 决定每个
+子项目只贡献**任务定义**。`[task]` 是作用域级的设置，其中 `shell` 决定每个
 任务用什么解释器——这个权力留给声明 `roots` 的那份配置，也就是你实际审阅并
 `osdk trust` 过的那份。
 
 ```
 $ osdk task list
-error: config error: apps/api/osdk.toml: a sub-project cannot declare `[task_config]`;
-runner defaults such as `shell` belong to the config that declares `[task_config].roots`
+error: config error: apps/api/osdk.toml: a sub-project cannot declare `[task]`;
+runner defaults such as `shell` belong to the config that declares `task.roots`
 ```
 
 是**报错**而不是忽略：一个写下去却没有任何效果、也不给任何提示的设置，比报错更糟
@@ -782,7 +782,7 @@ runner defaults such as `shell` belong to the config that declares `[task_config
 
 ### 声明 roots 之后，`osdk run` 需要信任
 
-`roots` 就写在 `[task_config]` 里，而这张表本来就在信任门禁内（上一节）。所以一旦
+`roots` 就写在 `[task]` 里，而这张表本来就在信任门禁内（上一节）。所以一旦
 声明了子项目，`osdk run` 会要求先 `osdk trust`——这不是为 monorepo 新加的一道门，
 而是它自动继承了已有的那道。`osdk task list` 仍然照常可用，因为它只报告不执行。
 

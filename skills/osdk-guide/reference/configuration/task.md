@@ -1,10 +1,10 @@
-# `[task_config]`
+# `[task]`
 
-配置所有项目任务的 runner 默认值与发现范围。子项目不能声明自己的 `[task_config]`；
+配置所有项目任务的 runner 默认值与发现范围。子项目不能声明自己的 `[task]`；
 只采用根配置的值。
 
 ```toml
-[task_config]
+[task]
 shell = "pwsh -Command"
 dir = "."
 roots = ["apps/*", "packages/*"]

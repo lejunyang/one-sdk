@@ -16,6 +16,7 @@ osdk config list
 osdk config get KEY [-g]
 osdk config set KEY VALUE [-g]
 osdk config unset KEY [-g]
+osdk config migrate [--dry-run] [-g]
 ```
 
 `config path` prints the config directory, user file, and discovered project
@@ -79,6 +80,30 @@ succeeds but trust is withheld, and the output says what is still needed. Writin
 safe key such as `jobs` or `lang` prompts for nothing.
 :::
 
+### Section names and legacy migration
+
+Plural top-level sections are collections of named entries: `[tools]`,
+`[tasks]`, `[models]`, `[skills]`, `[sources]`, and `[registries]`. Singular
+sections are one subsystem's settings or namespace: `[task]` holds shared runner
+settings, `[container]` holds container settings, `[alias.tools]` holds tool
+version aliases inside the alias domain, and `[sys.pkg]` is the package-manager
+subsystem inside the system domain. Thus `osdk task` operates on one entry in
+`[tasks]`; the collection does not become singular merely to mirror the command.
+
+Four legacy layouts remain readable temporarily and can be migrated together:
+
+```bash
+osdk config migrate --dry-run   # preview the current project
+osdk config migrate             # rewrite the current project
+osdk config migrate --global    # rewrite the user config.toml
+```
+
+The moves are `[aliases]` → `[alias.tools]`, `[containers]` → `[container]`,
+`[task_config]` → `[task]`, and `[syspkg]` → `[sys.pkg]`. The command preserves
+comments and unrelated sections. If both forms of one section exist, it refuses
+to guess a merge order and leaves the file unchanged. osdk's writing commands
+emit only the new layout.
+
 ## Project version discovery
 
 Active-version sources use this type-first priority. Within each type, osdk
@@ -128,7 +153,7 @@ pnpm = "10.15.0"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 "go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
 
-[aliases.node]
+[alias.tools.node]
 maintenance = "20"
 default = "maintenance"
 ```
@@ -379,7 +404,7 @@ urls = [
 ]
 probe_timeout_ms = 1500
 
-[containers]
+[container]
 runtime = "auto"              # auto|docker|containerd
 builder = "auto"              # auto or a validated Buildx builder name
 platform = "runtime"          # runtime or OS/ARCH[/VARIANT]
@@ -414,7 +439,7 @@ strip-components = "1"
 bin = "bin/acme"
 rename = "acme"
 
-[aliases.node]
+[alias.tools.node]
 default = "20"
 ```
 
@@ -473,9 +498,9 @@ File layers do not use one universal field-by-field merge:
 | `[sources.<tool>]` | Merge by tool key; the higher layer replaces the entire same-tool value (`pin`, `disable`, `custom`, and so on) |
 | Model `env` / `env_force` | Project files cannot change them; user-global values are retained to prevent a repository from silently changing credential environment |
 | `[registries]` | Replace the whole section; project npm URLs are not combined with user URLs |
-| `[containers]` | Replace the whole section; omitted runtime, builder, platform, timeout, and registry-policy fields use built-in defaults |
+| `[container]` | Replace the whole section; omitted runtime, builder, platform, timeout, and registry-policy fields use built-in defaults |
 | `[tools]` | Merge by backend key; higher same-name key wins |
-| `[aliases.<tool>]` | Merge by tool and alias key; higher same-name alias wins |
+| `[alias.tools.<tool>]` | Merge by tool and alias key; higher same-name alias wins |
 | `.tool-versions` | Fill only tool keys still missing after `[tools]` is merged |
 
 For example, if user configuration sets `verify_signatures = false` and a
@@ -506,9 +531,9 @@ non-default combination in the higher layer when you need to preserve it.
 | `OSDK_PYTHON_CATALOG_SHA256` | `settings.python.catalog_sha256` |
 | `OSDK_JAVA_CATALOG_URL` | `settings.java.catalog_url` |
 | `OSDK_SELECTION` | `sources.selection`; an unknown value currently falls back to `auto` |
-| `OSDK_CONTAINER_RUNTIME` | `containers.runtime`; `auto|docker|containerd` |
-| `OSDK_CONTAINER_BUILDER` | `containers.builder`; `auto` or a validated Buildx builder name |
-| `OSDK_CONTAINER_PLATFORM` | `containers.platform`; `runtime` or `OS/ARCH[/VARIANT]` |
+| `OSDK_CONTAINER_RUNTIME` | `container.runtime`; `auto|docker|containerd` |
+| `OSDK_CONTAINER_BUILDER` | `container.builder`; `auto` or a validated Buildx builder name |
+| `OSDK_CONTAINER_PLATFORM` | `container.platform`; `runtime` or `OS/ARCH[/VARIANT]` |
 | `OSDK_LANG` | Output language, ahead of configuration and locale |
 
 Directory variables are listed under [Directory layout and overrides](./storage-shell#directory-layout-and-overrides).
@@ -537,9 +562,9 @@ The four scopes and the keys they check:
 | --- | --- | --- |
 | Install | `install`, `use`, `upgrade`, `lock`, `self upgrade` | verification switches and catalogs in `settings`, `sources`, `registries`, `tools.allow_builds` |
 | Deps | bare `install`, `run`/`exec` by default, explicit `deps` | `sources`, `registries`, index/registry/build/`run` inside `[deps]` |
-| Run tasks | `run` (not `--dry-run`) | `task_config`: its `shell` picks the interpreter for every task |
-| System packages | `pkg apply` | `[syspkg]` entries that actually **apply on this machine** |
-| Container | any `container` operation | runtime/builder/registries in `[containers]` |
+| Run tasks | `run` (not `--dry-run`) | `[task]`: its `shell` picks the interpreter for every task |
+| System packages | `pkg apply` | `[sys.pkg]` entries that actually **apply on this machine** |
+| Container | any `container` operation | runtime/builder/registries in `[container]` |
 
 Governed keys and their reasons:
 
@@ -550,11 +575,11 @@ Governed keys and their reasons:
 | `settings.python`, `settings.java` | Both carry `catalog_url`, which decides which runtime bytes get installed |
 | `allow_builds`, explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
 | index/registry/`run`/build switches under `[deps.<p>]` | Redirect dependency bytes or run an arbitrary command |
-| `[syspkg]` (`pkg apply` only) | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
+| `[sys.pkg]` (`pkg apply` only) | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
 
 Two narrowings worth stating:
 
-- **`[syspkg]` gates only `pkg apply`, and only when an entry applies here.** A
+- **`[sys.pkg]` gates only `pkg apply`, and only when an entry applies here.** A
   config whose packages all carry `os = "linux"` blocks no command on a Mac, and
   an entry whose manager cannot exist on this OS (such as an `apt:` entry on
   Windows) is ignored too -- a package that can never execute here needs no
@@ -565,7 +590,7 @@ Two narrowings worth stating:
   content fetch into code execution.
 
 **Declaring which tools or packages to install never requires trust on its own.**
-That covers `[tools]` and `[aliases]`, including their `npm:`, `github:`, `http:`,
+That covers `[tools]` and `[alias.tools]`, including their `npm:`, `github:`, `http:`,
 `go:`, `cargo:`, `pypi:` and `conda:` entries: npm installs pass
 `--ignore-scripts` by default, an `http:` artifact without a `sha256` is refused
 outright, and `go:` builds run with `CGO_ENABLED=0`. This is the same act as
@@ -588,7 +613,7 @@ interpret is not cleared just because it is unrecognized.
   exactly what you run *while deciding* whether to trust a project -- refusing
   them hides both the evidence and the way out.
 - **Trust management itself**: `trust`, `untrust`.
-- **`config set` / `config unset`**: the way an untrusted config is edited back
+- **`config set` / `config unset` / `config migrate`**: the way an untrusted config is edited back
   into shape; gating them would block the only exit with the very config being
   undone.
 - Every other command is gated according to the scopes above. A command may
@@ -599,8 +624,8 @@ interpret is not cleared just because it is unrecognized.
 **Tools dispatched through the shim are a separate line.** `cargo`, `node` and
 the rest are started by the shim, which gates only the keys it can act on
 itself -- `sources`, `registries` and the like, which decide where a subprocess
-it starts will fetch from. A table the shim never reads, such as `[syspkg]` or
-`[task_config]`, does not stop you from using tools in that directory.
+it starts will fetch from. A table the shim never reads, such as `[sys.pkg]` or
+`[task]`, does not stop you from using tools in that directory.
 
 ### Trust identity and record states
 

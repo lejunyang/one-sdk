@@ -2744,6 +2744,27 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ("Inspect or edit configuration", "查看或编辑配置"),
     );
     m.insert(
+        "help.config.migrate.about",
+        (
+            "Rewrite legacy section names to the canonical configuration layout",
+            "将旧配置段名迁移到规范布局",
+        ),
+    );
+    m.insert(
+        "help.config.migrate.flag.dry_run",
+        (
+            "Show section moves without writing",
+            "只显示迁移计划，不写文件",
+        ),
+    );
+    m.insert(
+        "help.config.migrate.flag.global",
+        (
+            "Migrate the user configuration instead of the current project",
+            "迁移用户配置，而不是当前项目配置",
+        ),
+    );
+    m.insert(
         "help.trust.about",
         (
             "Trust a project's execution-affecting configuration",

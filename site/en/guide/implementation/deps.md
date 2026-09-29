@@ -550,9 +550,9 @@ needless approval prompt, or a feature quietly switched off. So both directions
 are tested: names that should match, and names that should not.
 
 A `deps` trust requirement **must not affect tool dispatch**. In
-`affects_tool_dispatch`, `deps` returns `false` alongside `syspkg`,
-`task_config`, and `models`. Otherwise a project that merely declares a provider
-could not run `cargo --version` -- exactly the `[syspkg]` accident.
+`affects_tool_dispatch`, `deps` returns `false` alongside `sys`, `task`, and
+`models`. Otherwise a project that merely declares a provider
+could not run `cargo --version` -- exactly the `[sys.pkg]` accident.
 
 ## The auto gate: freshness only, never a deep scan
 

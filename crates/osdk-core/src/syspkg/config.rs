@@ -1,4 +1,4 @@
-//! Declarative configuration for system packages: `[syspkg]`.
+//! Declarative configuration for system packages: `[sys.pkg]`.
 //!
 //! Kept in its own top-level table rather than inside `[tools]`, following the
 //! decision mise reached and documented: host packages "are deliberately
@@ -12,7 +12,7 @@
 //! This table can cause software to be installed on the user's machine, so it is
 //! execution-affecting project configuration. No special wiring is needed:
 //! `trust::requires_trust` already treats every top-level key other than
-//! `tools` and `aliases` as requiring trust, so `[syspkg]` is covered by
+//! `tools` and `alias` as requiring trust, so `[sys.pkg]` is covered by
 //! construction rather than by a rule that could drift.
 
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use super::report::ManagerKind;
 use crate::platform::{Platform, PlatformFilter};
 
-/// A package requested in `[syspkg.packages]`.
+/// A package requested in `[sys.pkg.packages]`.
 ///
 /// The version is a **wish, not a lock**: the semantics are "ask for this when
 /// installing", never "hold the host at this version". A machine-wide package
@@ -130,7 +130,7 @@ impl<'de> Deserialize<'de> for PackageRequest {
     }
 }
 
-/// A `manager:package-id` key from `[syspkg.packages]`.
+/// A `manager:package-id` key from `[sys.pkg.packages]`.
 ///
 /// The manager prefix is mandatory. Package ids are not portable -- winget's
 /// `PackageIdentifier` is case-sensitive and mirrors a repository path, while
@@ -180,7 +180,7 @@ impl PackageKey {
     }
 }
 
-/// Why a `[syspkg.packages]` key could not be understood.
+/// Why a `[sys.pkg.packages]` key could not be understood.
 ///
 /// Each case is reported rather than skipped. A key osdk cannot parse is a
 /// package the user believes is managed, and silently ignoring it would mean
@@ -211,7 +211,7 @@ impl std::fmt::Display for KeyError {
     }
 }
 
-/// The `[syspkg]` table.
+/// The `[sys.pkg]` table.
 ///
 /// `Default` is written out rather than derived because `mirrors` defaults to
 /// `true`: a derived `bool` would be `false`, which would disable acceleration

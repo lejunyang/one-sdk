@@ -821,8 +821,8 @@ osdk --attestations required install github:cli/cli@latest
 ```
 
 Each command asks for review only on what it can do: `install`/`use`/`upgrade`
-cover verification settings and download sources, `osdk run` covers `task_config`,
-and `pkg apply` covers the `syspkg` entries that apply on this machine -- model
+cover verification settings and download sources, `osdk run` covers `[task]`, and
+`pkg apply` covers the `[sys.pkg]` entries that apply on this machine -- model
 configuration is never gated. Declaring which tools or packages to install is not
 in that category, and when a config is refused osdk lists exactly which keys need
 review and why:
@@ -833,6 +833,12 @@ osdk trust list
 osdk untrust ./osdk.toml
 osdk trust prune                 # drop records whose config file is gone
 ```
+
+Configuration collections such as `[tasks]`, `[models]`, and `[skills]` stay
+plural. Singleton settings and namespaces use `[task]`, `[container]`,
+`[alias.tools]`, and `[sys.pkg]`. Older `[task_config]`, `[containers]`,
+`[aliases]`, and `[syspkg]` files remain readable temporarily; use
+`osdk config migrate --dry-run` and then `osdk config migrate` to rewrite them.
 
 Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
 
@@ -846,7 +852,7 @@ latency. An explicit policy in trusted user or project configuration fully
 replaces those built-ins:
 
 ```toml
-[containers.registries."docker.io"]
+[container.registries."docker.io"]
 mirrors = ["https://mirror.example/"]
 anonymous_only = true
 resolve = "mirror"

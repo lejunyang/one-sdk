@@ -111,13 +111,13 @@ GitHub Actions 中安装 osdk、恢复缓存并初始化项目环境时，读取
 | --- | --- |
 | `[settings]` | [reference/configuration/settings.md](reference/configuration/settings.md) |
 | `[tools]` | [reference/configuration/tools.md](reference/configuration/tools.md) |
-| `[aliases]` | [reference/configuration/aliases.md](reference/configuration/aliases.md) |
+| `[alias.tools]` | [reference/configuration/alias.md](reference/configuration/alias.md) |
 | `[sources]` | [reference/configuration/sources.md](reference/configuration/sources.md) |
 | `[registries]` | [reference/configuration/registries.md](reference/configuration/registries.md) |
-| `[containers]` | [reference/configuration/containers.md](reference/configuration/containers.md) |
-| `[syspkg]` | [reference/configuration/syspkg.md](reference/configuration/syspkg.md) |
+| `[container]` | [reference/configuration/container.md](reference/configuration/container.md) |
+| `[sys.pkg]` | [reference/configuration/sys.md](reference/configuration/sys.md) |
 | `[tasks]` | [reference/configuration/tasks.md](reference/configuration/tasks.md)；Lua 另见 [reference/run/lua.md](reference/run/lua.md) |
-| `[task_config]` | [reference/configuration/task-config.md](reference/configuration/task-config.md) |
+| `[task]` | [reference/configuration/task.md](reference/configuration/task.md) |
 | `[deps]` | [reference/configuration/deps.md](reference/configuration/deps.md) |
 | `[models]` | [reference/configuration/models.md](reference/configuration/models.md) |
 | `[skills]` | [reference/configuration/skills.md](reference/configuration/skills.md) |

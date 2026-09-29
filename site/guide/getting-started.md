@@ -163,11 +163,16 @@ osdk use node@default
 osdk alias unset node maintenance
 ```
 
-CLI 始终在用户全局配置中编辑别名；项目也可手写 `[aliases.<tool>]` 并覆盖同名
+CLI 始终在用户全局配置中编辑别名；项目也可手写 `[alias.tools.<tool>]` 并覆盖同名
 全局别名。别名可以链式引用，但循环会被拒绝。名称不能留空、包含空白或 `@`，
 也不能使用 `latest`、`current`、`stable`、`system`、`lts`、`lts/*`、
 `lts-latest` 以及任何 `lts/`、`lts-` 前缀。工具别名会规范化后保存，例如
 `nodejs` 保存为 `node`。
+
+这类别名只替换**版本请求**：`install`、`use`、`uninstall`、激活、shim 选择与全局
+npm 工具解析版本时都会展开它；它不会给可执行文件改名，也不会复制一份安装。
+`[alias]` 作为类别命名空间是为将来的 `alias.shell` 等能力预留的，目前只实现
+`alias.tools`，写入未知类别会明确报错。
 
 ## 工具名别名
 

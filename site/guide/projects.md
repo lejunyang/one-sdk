@@ -16,6 +16,7 @@ osdk config list
 osdk config get KEY [-g]
 osdk config set KEY VALUE [-g]
 osdk config unset KEY [-g]
+osdk config migrate [--dry-run] [-g]
 ```
 
 `config path` 显示配置目录、用户配置文件和当前发现的项目配置。`config list` 显示
@@ -70,6 +71,26 @@ Python 与 npm 各自的探测超时是 `[registries.python]` / `[registries.npm
 信任，并提示还需要做什么。写入 `jobs`、`lang` 这类安全键不会触发询问。
 :::
 
+### 配置段命名与旧格式迁移
+
+复数顶层段表示具名条目的集合：`[tools]`、`[tasks]`、`[models]`、`[skills]`、
+`[sources]`、`[registries]`。单数顶层段表示一个子系统的设置或命名空间：`[task]`
+保存共享 runner 设置，`[container]` 保存容器设置，`[alias.tools]` 是别名域下的工具版本
+别名，`[sys.pkg]` 是系统域下的包管理器设置。于是 `osdk task` 操作 `[tasks]` 中的一个
+任务，而不是要求集合表也改成单数。
+
+旧版四组写法暂时仍可读取，并可一次迁移：
+
+```bash
+osdk config migrate --dry-run   # 预览当前项目
+osdk config migrate             # 改写当前项目
+osdk config migrate --global    # 改写用户 config.toml
+```
+
+迁移关系是 `[aliases]` → `[alias.tools]`、`[containers]` → `[container]`、
+`[task_config]` → `[task]`、`[syspkg]` → `[sys.pkg]`。命令保留注释及其他段；如果一组
+新旧写法同时存在，它会拒绝猜测合并顺序并保持文件不变。osdk 的写命令只生成新布局。
+
 ## 项目版本发现
 
 活动版本的来源类型优先级如下；每一类内部再从当前目录向祖先查找：
@@ -117,7 +138,7 @@ pnpm = "10.15.0"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 "go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
 
-[aliases.node]
+[alias.tools.node]
 maintenance = "20"
 default = "maintenance"
 ```
@@ -341,7 +362,7 @@ urls = [
 ]
 probe_timeout_ms = 1500
 
-[containers]
+[container]
 runtime = "auto"              # auto|docker|containerd
 builder = "auto"              # auto 或经过验证的 Buildx 构建器名称
 platform = "runtime"          # runtime 或 OS/ARCH[/VARIANT]
@@ -375,7 +396,7 @@ strip-components = "1"
 bin = "bin/acme"
 rename = "acme"
 
-[aliases.node]
+[alias.tools.node]
 default = "20"
 ```
 
@@ -424,9 +445,9 @@ CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
 | `[sources.<tool>]` | 按工具键合并；同一工具的 `pin`、`disable`、`custom` 等整项由高优先级层替换 |
 | 模型 `env`/`env_force` | 项目配置不能改变；始终保留用户全局值，避免项目静默改写 shell 凭据环境 |
 | `[registries]` | 整段替换；项目 `[registries.npm]` 不与用户 URL 列表合并 |
-| `[containers]` | 整段替换；省略的运行时、构建器、平台、超时和 Registry 策略字段使用内置默认值 |
+| `[container]` | 整段替换；省略的运行时、构建器、平台、超时和 Registry 策略字段使用内置默认值 |
 | `[tools]` | 按工具键合并；高优先级同名键覆盖 |
-| `[aliases.<tool>]` | 按工具和别名键合并；高优先级同名别名覆盖 |
+| `[alias.tools.<tool>]` | 按工具和别名键合并；高优先级同名别名覆盖 |
 | `.tool-versions` | 只填补合并后 `[tools]` 中缺失的工具 |
 
 例如，用户配置启用了 `verify_signatures = false`，而项目仅写：
@@ -456,9 +477,9 @@ jobs = 2
 | `OSDK_PYTHON_CATALOG_SHA256` | `settings.python.catalog_sha256` |
 | `OSDK_JAVA_CATALOG_URL` | `settings.java.catalog_url` |
 | `OSDK_SELECTION` | `sources.selection`；未知值当前回退为 `auto` |
-| `OSDK_CONTAINER_RUNTIME` | `containers.runtime`；`auto|docker|containerd` |
-| `OSDK_CONTAINER_BUILDER` | `containers.builder`；`auto` 或经过验证的 Buildx 构建器名称 |
-| `OSDK_CONTAINER_PLATFORM` | `containers.platform`；`runtime` 或 `OS/ARCH[/VARIANT]` |
+| `OSDK_CONTAINER_RUNTIME` | `container.runtime`；`auto|docker|containerd` |
+| `OSDK_CONTAINER_BUILDER` | `container.builder`；`auto` 或经过验证的 Buildx 构建器名称 |
+| `OSDK_CONTAINER_PLATFORM` | `container.platform`；`runtime` 或 `OS/ARCH[/VARIANT]` |
 | `OSDK_LANG` | 输出语言，优先于配置与 locale |
 
 目录变量见[存储、Shell 与扩展](./storage-shell#目录布局与覆盖)。
@@ -485,9 +506,9 @@ osdk untrust [PATH]
 | --- | --- | --- |
 | 安装 | `install`、`use`、`upgrade`、`lock`、`self upgrade` | `settings` 的校验开关与 catalog、`sources`、`registries`、`tools.allow_builds` |
 | 依赖 | bare `install`、`run`/`exec`（默认）、显式 `deps` | `sources`、`registries`、`[deps]` 内的 index/registry/build/自定义 `run` |
-| 运行任务 | `run`（非 `--dry-run`） | `task_config`：其 `shell` 决定每个任务由谁解释 |
-| 系统包 | `pkg apply` | `[syspkg]` 中**在本机适用**的条目 |
-| 容器 | 任何 `container` 操作 | `[containers]` 的 runtime/builder/registries |
+| 运行任务 | `run`（非 `--dry-run`） | `[task]`：其 `shell` 决定每个任务由谁解释 |
+| 系统包 | `pkg apply` | `[sys.pkg]` 中**在本机适用**的条目 |
+| 容器 | 任何 `container` 操作 | `[container]` 的 runtime/builder/registries |
 
 受管键与各自的原因：
 
@@ -498,11 +519,11 @@ osdk untrust [PATH]
 | `settings` 的 `python`、`java` | 二者的 `catalog_url` 决定安装哪份运行时字节 |
 | `[tools]` 中显式打开的 `allow_builds` | 唯一让 npm 生命周期脚本得以运行的开关 |
 | `[deps.<p>]` 的 index/registry/自定义 `run`/build 开关 | 重定向依赖来源或执行任意命令 |
-| `[syspkg]`（仅 `pkg apply`） | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
+| `[sys.pkg]`（仅 `pkg apply`） | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
 
 两个值得注意的收紧：
 
-- **`[syspkg]` 只挡 `pkg apply`，且只在有适用条目时。** 一个所有包都声明为
+- **`[sys.pkg]` 只挡 `pkg apply`，且只在有适用条目时。** 一个所有包都声明为
   `os = "linux"` 的配置，在 Mac 上不挡任何命令；管理器在本机不存在的条目（如
   Windows 上的 `apt:` 条目）同样不挡——在这里永远不会执行的包不需要审阅。
   `pkg status`/`plan`/`doctor` 本来就只读，同样不要求信任。
@@ -510,7 +531,7 @@ osdk untrust [PATH]
   字节是内容，osdk 从不执行它们；下载仍按锁定摘要校验，换端点无法把内容拉取
   变成代码执行。
 
-**声明安装哪些工具或包本身不需要信任**，`[tools]`、`[aliases]` 都不需要，其中的
+**声明安装哪些工具或包本身不需要信任**，`[tools]`、`[alias.tools]` 都不需要，其中的
 `npm:`、`github:`、`http:`、`go:`、`cargo:`、`pypi:`、`conda:` 条目也不需要：npm 安装默认
 传 `--ignore-scripts`，`http:` 制品缺 `sha256` 直接拒绝，`go:` 以 `CGO_ENABLED=0` 构建。
 这和在 `package.json` 里加一行依赖是同一件事——新增包、升降版本都不会要求重新信任。
@@ -530,7 +551,7 @@ osdk untrust [PATH]
   不安装、不下载、不执行任何东西，所以即使配置含受管键也不被拒绝。这也正是你
   **决定要不要信任之前**会用的命令——把它们挡住，等于把判断依据和出口一起藏起来。
 - **信任管理本身**：`trust`、`untrust`，不读取项目配置。
-- **`config set` / `config unset`**：把一份未信任配置改回正常的手段，挡住它就
+- **`config set` / `config unset` / `config migrate`**：把一份未信任配置改回正常的手段，挡住它就
   等于用那份配置本身堵死了唯一出口。
 - 其余命令按上表的作用域把关。一个命令可以带多个作用域：bare `install` 同时
   到达「安装」与「依赖」，`run`/`exec` 默认同时到达各自作用域与「依赖」；
@@ -538,7 +559,7 @@ osdk untrust [PATH]
 
 **经 shim 分派的工具是另一条线。** `cargo`、`node` 这类命令由 shim 启动，而
 shim 只对它自己会走到的键把关（`sources`、`registries` 之类决定子进程从哪拉取
-的）。像 `[syspkg]`、`[task_config]` 这种 shim 永远读不到的表，不会影响你在该目
+的）。像 `[sys.pkg]`、`[task]` 这种 shim 永远读不到的表，不会影响你在该目
 录下正常使用工具。
 
 ### 信任身份与失效

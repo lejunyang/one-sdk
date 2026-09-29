@@ -44,7 +44,7 @@ osdk 原生运行在 Windows、macOS 和 Linux，当前内置以下后端：
 覆盖粒度不是所有字段逐项合并：高优先级文件只要出现 `[settings]`，就整段替换
 低优先级设置，未写字段回到内置默认值；`[sources]` 的顶层选择、探测超时和 TTL
 同样整段替换，但 `sources.<tool>` 按工具键合并；`[registries.npm]` 整段替换。
-`[tools]` 与 `[aliases]` 则按键合并。完整字段和精确规则见
+`[tools]` 与 `[alias.tools]` 则按键合并。完整字段和精确规则见
 [项目与配置](./projects)。
 
 osdk 还会读取 `.tool-versions` 以及 `.nvmrc`、`.python-version`、

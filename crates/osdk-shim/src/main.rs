@@ -450,7 +450,7 @@ fn routed_launcher<'a>(tool_name: &'a str, backend: &str) -> (&'a str, Option<&'
 ///
 /// Only those keys. The shim runs on every command invocation, so anything it
 /// refuses becomes unusable in that directory -- and a refusal the shim cannot
-/// act on is pure cost. Adding a `[syspkg]` block used to make `cargo --version`
+/// act on is pure cost. Adding a `[sys.pkg]` block used to make `cargo --version`
 /// fail here with "project config is not trusted", a message about installing
 /// system packages produced by a command that installs nothing; trust is bound
 /// to the file hash, so every later edit re-locked every tool again.

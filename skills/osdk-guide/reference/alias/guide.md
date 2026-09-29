@@ -15,5 +15,5 @@ osdk alias list node
 osdk alias unset node default
 ```
 
-持久配置是 `[aliases]`，见 `reference/configuration/aliases.md`。别名可链式展开但禁止环；
+持久配置是 `[alias.tools]`，见 `reference/configuration/alias.md`。别名可链式展开但禁止环；
 它只改变解析，不创建额外安装副本。

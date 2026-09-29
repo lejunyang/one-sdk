@@ -1,4 +1,4 @@
-//! Installing the packages `[syspkg.packages]` asks for.
+//! Installing the packages `[sys.pkg.packages]` asks for.
 //!
 //! # Why `--no-upgrade` is mandatory
 //!
@@ -142,7 +142,7 @@ pub enum SkipReason {
     AlreadySatisfied,
     /// Present at another version.
     ///
-    /// Deliberately not installed. The version in `[syspkg.packages]` is a wish
+    /// Deliberately not installed. The version in `[sys.pkg.packages]` is a wish
     /// for install time, not a lock, and reinstalling to force convergence would
     /// change a host the user did not ask to change.
     VersionDiffersButPresent,
@@ -150,7 +150,7 @@ pub enum SkipReason {
     NotApplicable,
     /// The manager could not be queried, so its packages cannot be planned.
     ManagerUnavailable,
-    /// The manager is excluded by `[syspkg] managers`.
+    /// The manager is excluded by `[sys.pkg] managers`.
     ManagerNotAllowed,
     /// Installing a single package on Arch is a partial upgrade.
     ///

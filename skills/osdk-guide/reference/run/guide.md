@@ -26,4 +26,4 @@ osdk run //packages/ui:build
 
 任务正文可用 shell、argv、脚本文件或 Lua。字段全集见
 `reference/configuration/tasks.md`，runner 默认见
-`reference/configuration/task-config.md`，完整 Lua 指引见本目录的 [lua.md](lua.md)。
+`reference/configuration/task.md`，完整 Lua 指引见本目录的 [lua.md](lua.md)。

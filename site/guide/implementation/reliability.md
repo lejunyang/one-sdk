@@ -67,7 +67,7 @@ runtime 身份；详见 [Go 开发工具实现](./go-tools)。
 
 `osdk.lock` 按平台独立保存解析版本和制品身份，写入采用同目录 `tmp-<pid>` + rename；信任存储和 JSON current pointer 采用类似方式。它们提供临时写入再发布的边界，但没有 fsync/durability、跨平台替换原子性或跨进程 read-modify-write 锁保证，因此并发 writer 可能发生 last-writer-wins、临时名冲突或目标已存在错误。调用方不应把 rename 等同于多进程事务隔离。锁文件实现见 [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs)，项目配置信任见 [`trust.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/trust.rs)。
 
-项目配置的信任身份由 canonical path 与受管键规范化 TOML 的 BLAKE3 共同定义。门按命令作用域开启：`install` 一类命令看 `settings`/`sources` 等键，`run` 看 `task_config`，`pkg apply` 只看在本机适用的 `syspkg` 条目，而 `models` 不要求信任。信任管理只加载用户级配置，避免项目配置影响“是否信任自身”的判断。移动文件或改变受管 TOML 内容会使原记录失效；`OSDK_TRUSTED_CONFIG_PATHS` 则按 canonical 路径前缀信任，范围更宽，应谨慎设置。
+项目配置的信任身份由 canonical path 与受管键规范化 TOML 的 BLAKE3 共同定义。门按命令作用域开启：`install` 一类命令看 `settings`/`sources` 等键，`run` 看 `[task]`，`pkg apply` 只看在本机适用的 `[sys.pkg]` 条目，而 `models` 不要求信任。信任管理只加载用户级配置，避免项目配置影响“是否信任自身”的判断。移动文件或改变受管 TOML 内容会使原记录失效；`OSDK_TRUSTED_CONFIG_PATHS` 则按 canonical 路径前缀信任，范围更宽，应谨慎设置。
 
 ## 关键测试
 

@@ -154,7 +154,7 @@ Parsing stops at the first non-comment line, so the header has to be at the top
 ### Using a different directory
 
 ```toml
-[task_config]
+[task]
 includes = ["tools/tasks"]
 ```
 
@@ -653,7 +653,7 @@ shell = "pwsh -Command"
 Or set a default for the whole config scope:
 
 ```toml
-[task_config]
+[task]
 shell = "pwsh -Command"
 ```
 
@@ -744,11 +744,11 @@ is read by `osdk run` and `osdk task` and nowhere else. Typing `osdk run build`
 twice, and a gate that fires on something you just asked for only teaches people
 to approve without reading.
 
-The contrast with `syspkg` makes the rule clear: it acts during `osdk install`,
+The contrast with `sys.pkg` makes the rule clear: it acts during `osdk pkg apply`,
 which you did not request per package, so review has to happen beforehand. A
 task only ever runs because someone named it.
 
-**`task_config` does still require trust**, because it is not a command you name
+**`[task]` does still require trust**, because it is not a command you name
 but an ambient setting:
 
 ```
@@ -759,7 +759,7 @@ test
 $ osdk run test           # actually uses that interpreter, so it is refused
 error: project config is not trusted: /path/to/osdk.toml
 these keys need review because they affect what runs on this machine:
-  task_config -- decides which interpreter runs your tasks, so a task may not run what it says
+  task -- decides which interpreter runs your tasks, so a task may not run what it says
 ```
 
 Note which command is refused: `osdk run`, not `osdk task list`. Listing only
@@ -774,12 +774,12 @@ to reveal it. Review it, then `osdk trust`.
 
 ## Monorepos: tasks in sub-projects
 
-`[task_config].roots` declares which directories are sub-projects. Their tasks join
+`task.roots` declares which directories are sub-projects. Their tasks join
 the same table under `//<path>:<name>`:
 
 ```toml
 # osdk.toml at the repository root
-[task_config]
+[task]
 roots = ["apps/*", "packages/*"]
 
 [tasks.hello]
@@ -842,17 +842,17 @@ error: config error: task dependency cycle: //apps/web:build -> //packages/ui:bu
 
 Both ends are named, so you can see which edge to remove.
 
-### A sub-project cannot declare `[task_config]`
+### A sub-project cannot declare `[task]`
 
-A sub-project contributes task **definitions** only. `[task_config]` holds
+A sub-project contributes task **definitions** only. `[task]` holds
 scope-wide settings, and `shell` among them decides which interpreter every task runs
 under. That power stays with the config that declares `roots` -- the one you actually
 reviewed and ran `osdk trust` on.
 
 ```
 $ osdk task list
-error: config error: apps/api/osdk.toml: a sub-project cannot declare `[task_config]`;
-runner defaults such as `shell` belong to the config that declares `[task_config].roots`
+error: config error: apps/api/osdk.toml: a sub-project cannot declare `[task]`;
+runner defaults such as `shell` belong to the config that declares `task.roots`
 ```
 
 An **error**, not a silent omission: a setting that is written down, has no effect and
@@ -860,7 +860,7 @@ draws no complaint is worse than an error, because its author believes it worked
 
 ### Declaring roots means `osdk run` needs trust
 
-`roots` lives in `[task_config]`, and that table is already behind the trust gate
+`roots` lives in `[task]`, and that table is already behind the trust gate
 (previous section). So declaring sub-projects makes `osdk run` ask for `osdk trust`
 first -- not a new gate added for monorepos, but the existing one inherited
 automatically. `osdk task list` keeps working, because it reports without executing.

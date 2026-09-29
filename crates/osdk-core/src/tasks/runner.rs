@@ -98,7 +98,7 @@ pub enum PlannedStep {
     LuaFile { path: PathBuf },
 }
 
-/// The interpreter used when neither the task nor `[task_config]` names one.
+/// The interpreter used when neither the task nor `[task]` names one.
 ///
 /// `cmd /c` on Windows rather than `sh -c`: requiring `sh` would mean requiring
 /// Git for Windows or Cygwin, which contradicts osdk's "installs and works"

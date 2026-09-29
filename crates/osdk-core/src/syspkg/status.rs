@@ -1,4 +1,4 @@
-//! Reporting the host against `[syspkg.packages]`, without installing anything.
+//! Reporting the host against `[sys.pkg.packages]`, without installing anything.
 //!
 //! # Why `winget export --include-versions` rather than `winget list`
 //!
@@ -35,7 +35,7 @@ pub enum PackageState {
     Satisfied,
     /// Installed, but at a version other than the one requested.
     ///
-    /// Reported, never "corrected": the version in `[syspkg.packages]` is a wish
+    /// Reported, never "corrected": the version in `[sys.pkg.packages]` is a wish
     /// for install time, and a machine-wide manager is entitled to have moved on.
     VersionDiffers,
     /// Not installed.

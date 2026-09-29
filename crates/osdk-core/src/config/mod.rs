@@ -33,8 +33,9 @@ pub struct Config {
     pub global_tool_configs: BTreeMap<String, ToolConfigEntry>,
     /// Origin of each winning entry in [`Config::tools`].
     pub tool_origins: BTreeMap<String, ToolConfigOrigin>,
-    /// User-defined version aliases: tool -> alias -> version spec.
-    pub aliases: BTreeMap<String, BTreeMap<String, String>>,
+    /// User-defined tool version aliases from `[alias.tools]`:
+    /// tool -> alias -> version spec.
+    pub tool_aliases: BTreeMap<String, BTreeMap<String, String>>,
     /// Path of the nearest discovered project config, if any.
     pub project_config_path: Option<PathBuf>,
     /// Project tasks, merged and platform-filtered.
@@ -355,13 +356,13 @@ pub struct SourcesConfig {
     #[serde(skip)]
     pub registries: RegistriesConfig,
     /// Native-container configuration is persisted under the separate
-    /// top-level `[containers]` table. It lives here internally so adding it
+    /// top-level `[container]` table. It lives here internally so adding it
     /// does not break callers that construct [`Config`] directly.
     #[doc(hidden)]
     #[serde(skip)]
     pub containers: ContainersConfig,
-    /// System-package configuration, persisted under the separate top-level
-    /// `[syspkg]` table. It lives here internally so adding it does not break
+    /// System-package configuration, persisted under `[sys.pkg]`. It lives
+    /// here internally so adding it does not break
     /// callers that construct [`Config`] directly.
     #[doc(hidden)]
     #[serde(skip)]
@@ -792,7 +793,7 @@ impl StructuredToolConfig {
     ///
     /// Returns the filter plus the options with `when` removed. An unrecognized
     /// token is an error rather than a filter that matches nothing, for the same
-    /// reason as in `[syspkg.packages]`: silently never matching would remove the
+    /// reason as in `[sys.pkg.packages]`: silently never matching would remove the
     /// tool on every machine, and the symptom ("the tool is missing") points
     /// nowhere near the misspelled line.
     pub fn split_platform_filter(
@@ -1114,6 +1115,26 @@ struct SkillsFile {
     #[serde(flatten)]
     entries: BTreeMap<String, SkillDeclaration>,
 }
+
+/// The `[alias]` namespace. Tool version aliases are one category; keeping the
+/// category explicit leaves room for future shell aliases without making their
+/// value shape collide with tool names.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AliasFile {
+    tools: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// Host-level configuration. `[sys.pkg]` owns package-manager policy and
+/// declarations; future system configuration can live beside `pkg` without
+/// overloading a concatenated top-level name such as `syspkg`.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SystemFile {
+    pkg: Option<crate::syspkg::SyspkgConfig>,
+}
+
 /// On-disk config file shape (a subset that users edit).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1121,11 +1142,18 @@ struct ConfigFile {
     settings: Option<Settings>,
     sources: Option<SourcesConfig>,
     registries: Option<RegistriesConfig>,
+    container: Option<ContainersConfig>,
+    /// Compatibility with the pre-migration `[containers]` spelling.
     containers: Option<ContainersConfig>,
+    #[cfg(feature = "install")]
+    sys: Option<SystemFile>,
+    /// Compatibility with the pre-migration `[syspkg]` spelling.
     #[cfg(feature = "install")]
     syspkg: Option<crate::syspkg::SyspkgConfig>,
     tools: BTreeMap<String, ToolConfigEntry>,
-    aliases: BTreeMap<String, BTreeMap<String, String>>,
+    alias: Option<AliasFile>,
+    /// Compatibility with the pre-migration `[aliases]` spelling.
+    aliases: Option<BTreeMap<String, BTreeMap<String, String>>>,
     #[cfg(feature = "install")]
     tasks: BTreeMap<String, crate::tasks::TaskEntry>,
     #[cfg(feature = "install")]
@@ -1136,7 +1164,73 @@ struct ConfigFile {
     #[cfg(feature = "install")]
     deps: Option<DepsConfig>,
     #[cfg(feature = "install")]
+    task: Option<crate::tasks::TaskConfig>,
+    /// Compatibility with the pre-migration `[task_config]` spelling.
+    #[cfg(feature = "install")]
     task_config: Option<crate::tasks::TaskConfig>,
+}
+
+impl ConfigFile {
+    /// Fold temporary compatibility spellings into the canonical layout.
+    ///
+    /// Both forms in one file are rejected rather than merged: there is no
+    /// honest precedence rule for two peer spellings, and accepting both would
+    /// let a stale legacy block keep changing behavior after migration.
+    fn normalize_legacy_layout(&mut self) -> Result<()> {
+        merge_legacy_section(
+            &mut self.container,
+            self.containers.take(),
+            "container",
+            "containers",
+        )?;
+
+        if let Some(legacy) = self.aliases.take() {
+            if self.alias.is_some() {
+                return Err(config_layout_conflict("alias.tools", "aliases"));
+            }
+            self.alias = Some(AliasFile { tools: legacy });
+        }
+
+        #[cfg(feature = "install")]
+        {
+            merge_legacy_section(
+                &mut self.task,
+                self.task_config.take(),
+                "task",
+                "task_config",
+            )?;
+            if let Some(legacy) = self.syspkg.take() {
+                if self.sys.as_ref().is_some_and(|system| system.pkg.is_some()) {
+                    return Err(config_layout_conflict("sys.pkg", "syspkg"));
+                }
+                self.sys.get_or_insert_with(SystemFile::default).pkg = Some(legacy);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn merge_legacy_section<T>(
+    canonical: &mut Option<T>,
+    legacy: Option<T>,
+    canonical_name: &str,
+    legacy_name: &str,
+) -> Result<()> {
+    let Some(legacy) = legacy else {
+        return Ok(());
+    };
+    if canonical.is_some() {
+        return Err(config_layout_conflict(canonical_name, legacy_name));
+    }
+    *canonical = Some(legacy);
+    Ok(())
+}
+
+fn config_layout_conflict(canonical: &str, legacy: &str) -> Error {
+    Error::config(format!(
+        "configuration declares both canonical `[{canonical}]` and legacy `[{legacy}]`; run \
+         `osdk config migrate` after keeping only one"
+    ))
 }
 
 /// An empty configuration: built-in defaults, nothing declared.
@@ -1155,7 +1249,7 @@ impl Default for Config {
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
-            aliases: BTreeMap::new(),
+            tool_aliases: Default::default(),
             #[cfg(feature = "install")]
             tasks: crate::tasks::TaskSet::default(),
             #[cfg(feature = "install")]
@@ -1227,12 +1321,12 @@ impl Config {
             // Registry sections replace the lower-precedence layer as a unit.
             self.sources.registries = registries;
         }
-        if let Some(containers) = file.containers {
+        if let Some(containers) = file.container {
             // Container sections replace the lower-precedence layer as a unit.
             self.sources.containers = containers;
         }
         #[cfg(feature = "install")]
-        if let Some(syspkg) = file.syspkg {
+        if let Some(syspkg) = file.sys.and_then(|system| system.pkg) {
             // Replaced as a unit for the same reason: a project that lists its
             // managers means exactly that list, not that list added to whatever
             // a broader layer happened to allow.
@@ -1240,7 +1334,7 @@ impl Config {
         }
         #[cfg(feature = "install")]
         if let Some(deps) = file.deps {
-            // Replaced as a unit, like `[registries]` and `[syspkg]`: a project
+            // Replaced as a unit, like `[registries]` and `[sys.pkg]`: a project
             // that lists its providers means exactly that list, not that list
             // added to whatever a broader layer happened to enable.
             self.deps = deps;
@@ -1270,19 +1364,19 @@ impl Config {
             }
         }
         self.apply_tool_configs(&file.tools)?;
-        for (tool, aliases) in file.aliases {
-            self.aliases.entry(tool).or_default().extend(aliases);
+        for (tool, aliases) in file.alias.map(|alias| alias.tools).unwrap_or_default() {
+            self.tool_aliases.entry(tool).or_default().extend(aliases);
         }
         #[cfg(feature = "install")]
         {
-            // Same-name tasks replace whole; `[task_config]` replaces as a unit,
+            // Same-name tasks replace whole; `[task]` replaces as a unit,
             // matching `[registries]`. See `tasks::TaskSet::apply`.
             let includes = file
-                .task_config
+                .task
                 .as_ref()
                 .map(|config| config.includes.clone())
                 .unwrap_or_default();
-            if let Some(config) = file.task_config {
+            if let Some(config) = file.task {
                 self.tasks.apply_config(config);
             }
             let base = origin.and_then(Path::parent);
@@ -1295,8 +1389,8 @@ impl Config {
             }
             self.tasks.apply_from(file.tasks, base)?;
 
-            // Sub-projects named by `[task_config].roots`. After the layer's own
-            // `[task_config]`, because that is what states the roots.
+            // Sub-projects named by `[task].roots`. After the layer's own
+            // `[task]`, because that is what states the roots.
             if let Some(base) = base {
                 self.apply_rooted_tasks(base)?;
             }
@@ -1304,7 +1398,7 @@ impl Config {
         Ok(())
     }
 
-    /// Merge the tasks of every sub-project `[task_config].roots` names.
+    /// Merge the tasks of every sub-project `[task].roots` names.
     ///
     /// Each sub-project's tasks enter the shared set as `//<relative>:<name>`, the
     /// same addressing `[deps].roots` uses for providers. Three properties are
@@ -1326,7 +1420,7 @@ impl Config {
             return Ok(());
         }
         let roots = self.tasks.config.roots.clone();
-        for expanded in crate::deps::expand_roots(config_root, &roots, "[task_config].roots")? {
+        for expanded in crate::deps::expand_roots(config_root, &roots, "[task].roots")? {
             let Some(path) = PROJECT_CONFIG_NAMES
                 .iter()
                 .map(|name| expanded.directory.join(name))
@@ -1342,11 +1436,11 @@ impl Config {
 
             // A sub-project contributes task *definitions* and nothing else.
             //
-            // `[task_config]` holds ambient defaults, and `shell` among them decides
+            // `[task]` holds ambient defaults, and `shell` among them decides
             // which interpreter every task in scope runs under -- a
             // `shell = "evil --run"` makes every later `osdk run` do something other
             // than what the task text says, with nothing at the call site to reveal
-            // it. That is why the root's `[task_config]` sits in
+            // it. That is why the root's `[task]` sits in
             // `TRUST_REQUIRING_TABLES` as `RedirectsExecution`.
             //
             // The alternative was to route sub-configs through that same gate. It was
@@ -1358,11 +1452,11 @@ impl Config {
             // Rejected rather than ignored. A silently ineffective setting is worse
             // than an error: the user wrote it, sees no complaint, and concludes it
             // took effect.
-            if file.task_config.is_some() {
+            if file.task.is_some() {
                 return Err(Error::config(format!(
-                    "{}: a sub-project cannot declare `[task_config]`; runner defaults \
+                    "{}: a sub-project cannot declare `[task]`; runner defaults \
                      such as `shell` belong to the config that declares \
-                     `[task_config].roots`",
+                     `task.roots`",
                     path.display()
                 )));
             }
@@ -1513,7 +1607,7 @@ impl Config {
     }
 
     pub fn expand_alias(&self, tool: &str, spec: &str) -> Result<String> {
-        let Some(aliases) = self.aliases.get(tool) else {
+        let Some(aliases) = self.tool_aliases.get(tool) else {
             return Ok(spec.to_string());
         };
         expand_alias(aliases, spec)
@@ -1598,11 +1692,12 @@ fn truthy(s: &str) -> bool {
 fn read_config_file(path: &Path) -> Result<ConfigFile> {
     let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
     let mut file: ConfigFile = toml::from_str(&text).map_err(sanitize_config_parse_error)?;
+    file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
         normalize_registry_urls(&mut registries.npm.urls)?;
         normalize_python_index_urls(&mut registries.python.urls)?;
     }
-    if let Some(containers) = &mut file.containers {
+    if let Some(containers) = &mut file.container {
         validate_containers_config(containers)?;
     }
     Ok(file)
@@ -1947,6 +2042,88 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn canonical_and_legacy_domain_layouts_load_identically() {
+        let temporary = tempfile::tempdir().unwrap();
+        let canonical = temporary.path().join("canonical.toml");
+        let legacy = temporary.path().join("legacy.toml");
+        std::fs::write(
+            &canonical,
+            r#"
+[alias.tools.node]
+work = "20"
+[container]
+runtime = "docker"
+[task]
+dir = "workspace"
+[sys.pkg.packages]
+"apt:gcc" = "latest"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &legacy,
+            r#"
+[aliases.node]
+work = "20"
+[containers]
+runtime = "docker"
+[task_config]
+dir = "workspace"
+[syspkg.packages]
+"apt:gcc" = "latest"
+"#,
+        )
+        .unwrap();
+
+        let canonical = read_config_file(&canonical).unwrap();
+        let legacy = read_config_file(&legacy).unwrap();
+        for file in [canonical, legacy] {
+            assert_eq!(
+                file.alias.unwrap().tools["node"]["work"],
+                "20",
+                "tool aliases must survive layout normalization"
+            );
+            assert_eq!(file.container.unwrap().runtime, ContainerRuntime::Docker);
+            assert_eq!(file.task.unwrap().dir.as_deref(), Some("workspace"));
+            assert!(file
+                .sys
+                .unwrap()
+                .pkg
+                .unwrap()
+                .packages
+                .contains_key("apt:gcc"));
+        }
+    }
+
+    #[test]
+    fn canonical_and_legacy_spellings_cannot_compete_in_one_file() {
+        let cases = [
+            ("[container]\n[containers]\n", "container", "containers"),
+            ("[task]\n[task_config]\n", "task", "task_config"),
+            ("[alias.tools]\n[aliases]\n", "alias.tools", "aliases"),
+            ("[sys.pkg]\n[syspkg]\n", "sys.pkg", "syspkg"),
+        ];
+        for (contents, canonical, legacy) in cases {
+            let temporary = tempfile::tempdir().unwrap();
+            let path = temporary.path().join("osdk.toml");
+            std::fs::write(&path, contents).unwrap();
+            let error = read_config_file(&path).unwrap_err().to_string();
+            assert!(error.contains(canonical), "{contents}: {error}");
+            assert!(error.contains(legacy), "{contents}: {error}");
+        }
+    }
+
+    #[test]
+    fn unimplemented_alias_categories_are_rejected_instead_of_ignored() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("osdk.toml");
+        std::fs::write(&path, "[alias.shell]\nll = \"ls -la\"\n").unwrap();
+
+        let error = read_config_file(&path).unwrap_err().to_string();
+        assert!(error.contains("unknown field `shell`"), "{error}");
+    }
+
+    #[test]
     fn env_overrides_beat_file() {
         let mut cfg = Config {
             settings: Settings::default(),
@@ -1956,7 +2133,7 @@ mod tests {
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
-            aliases: BTreeMap::new(),
+            tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
             ..Default::default()
@@ -1988,13 +2165,13 @@ mod tests {
         std::fs::write(
             &config_file,
             r#"
-[containers]
+[container]
 runtime = "containerd"
 builder = "remote-builder_1"
 platform = "linux/arm64/v8"
 probe_timeout_ms = 750
 
-[containers.registries."docker.io"]
+[container.registries."docker.io"]
 mirrors = ["https://mirror.example/cache", "https://mirror.example/cache/"]
 anonymous_only = false
 resolve = "mirror"
@@ -2037,13 +2214,13 @@ resolve = "mirror"
         std::fs::write(
             &user_config,
             r#"
-[containers]
+[container]
 runtime = "docker"
 builder = "global-builder"
 platform = "linux/amd64"
 probe_timeout_ms = 900
 
-[containers.registries."docker.io"]
+[container.registries."docker.io"]
 mirrors = ["https://global.example"]
 anonymous_only = false
 resolve = "mirror"
@@ -2053,10 +2230,10 @@ resolve = "mirror"
         std::fs::write(
             project.join("osdk.toml"),
             r#"
-[containers]
+[container]
 runtime = "containerd"
 
-[containers.registries."ghcr.io"]
+[container.registries."ghcr.io"]
 mirrors = ["https://project.example"]
 "#,
         )
@@ -2087,7 +2264,7 @@ mirrors = ["https://project.example"]
     fn project_container_config_requires_trust() {
         let temporary = tempfile::tempdir().unwrap();
         let project_config = temporary.path().join("osdk.toml");
-        std::fs::write(&project_config, "[containers]\nruntime = \"auto\"\n").unwrap();
+        std::fs::write(&project_config, "[container]\nruntime = \"auto\"\n").unwrap();
 
         assert!(crate::trust::requires_trust(&project_config).unwrap());
     }
@@ -2102,7 +2279,7 @@ mirrors = ["https://project.example"]
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
-            aliases: BTreeMap::new(),
+            tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
             ..Default::default()
@@ -2149,7 +2326,7 @@ mirrors = ["https://project.example"]
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
-            aliases: BTreeMap::new(),
+            tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
             ..Default::default()
@@ -2170,19 +2347,19 @@ mirrors = ["https://project.example"]
         let temporary = tempfile::tempdir().unwrap();
         let config_file = temporary.path().join("config.toml");
         let invalid = [
-            "[containers]\nruntime = \"podman\"\n",
-            "[containers]\nbuilder = \"name with spaces\"\n",
-            "[containers]\nplatform = \"linux\"\n",
-            "[containers]\nplatform = \"Linux/amd64\"\n",
-            "[containers]\nplatform = \"linux/amd64/v8/extra\"\n",
-            "[containers]\nprobe_timeout_ms = 0\n",
-            "[containers]\nunknown = true\n",
-            "[containers.registries.\"docker.io\"]\nresolve = \"fastest\"\n",
-            "[containers.registries.\"docker.io\"]\nmirrors = [\"http://127.0.0.1:5000\"]\n",
-            "[containers.registries.\"docker.io\"]\nmirrors = [\"https://user:secret@example.test\"]\n",
-            "[containers.registries.\"docker.io\"]\nmirrors = [\"https://example.test?token=secret\"]\n",
-            "[containers.registries.\"docker.io\"]\nmirrors = [\"https://example.test#fragment\"]\n",
-            "[containers.registries.\"https://docker.io/path\"]\nmirrors = [\"https://example.test\"]\n",
+            "[container]\nruntime = \"podman\"\n",
+            "[container]\nbuilder = \"name with spaces\"\n",
+            "[container]\nplatform = \"linux\"\n",
+            "[container]\nplatform = \"Linux/amd64\"\n",
+            "[container]\nplatform = \"linux/amd64/v8/extra\"\n",
+            "[container]\nprobe_timeout_ms = 0\n",
+            "[container]\nunknown = true\n",
+            "[container.registries.\"docker.io\"]\nresolve = \"fastest\"\n",
+            "[container.registries.\"docker.io\"]\nmirrors = [\"http://127.0.0.1:5000\"]\n",
+            "[container.registries.\"docker.io\"]\nmirrors = [\"https://user:secret@example.test\"]\n",
+            "[container.registries.\"docker.io\"]\nmirrors = [\"https://example.test?token=secret\"]\n",
+            "[container.registries.\"docker.io\"]\nmirrors = [\"https://example.test#fragment\"]\n",
+            "[container.registries.\"https://docker.io/path\"]\nmirrors = [\"https://example.test\"]\n",
         ];
 
         for contents in invalid {
@@ -2199,7 +2376,7 @@ mirrors = ["https://project.example"]
             .join(", ");
         std::fs::write(
             &config_file,
-            format!("[containers.registries.\"docker.io\"]\nmirrors = [{mirrors}]\n"),
+            format!("[container.registries.\"docker.io\"]\nmirrors = [{mirrors}]\n"),
         )
         .unwrap();
         let error = Config::load_user(&config_file).unwrap_err();
@@ -2213,9 +2390,9 @@ mirrors = ["https://project.example"]
         std::fs::write(
             &config_file,
             r#"
-[containers.registries."EXAMPLE.COM."]
-[containers.registries."Registry.Example:5443"]
-[containers.registries."[2001:DB8::1]:5000"]
+[container.registries."EXAMPLE.COM."]
+[container.registries."Registry.Example:5443"]
+[container.registries."[2001:DB8::1]:5000"]
 "#,
         )
         .unwrap();
@@ -2234,8 +2411,8 @@ mirrors = ["https://project.example"]
         std::fs::write(
             &config_file,
             r#"
-[containers.registries."docker.io"]
-[containers.registries."DOCKER.IO."]
+[container.registries."docker.io"]
+[container.registries."DOCKER.IO."]
 "#,
         )
         .unwrap();
@@ -2257,11 +2434,7 @@ mirrors = ["https://project.example"]
         for (field, secret) in cases {
             let temporary = tempfile::tempdir().unwrap();
             let config_file = temporary.path().join("config.toml");
-            std::fs::write(
-                &config_file,
-                format!("[containers]\n{field} = {secret:?}\n"),
-            )
-            .unwrap();
+            std::fs::write(&config_file, format!("[container]\n{field} = {secret:?}\n")).unwrap();
             let error = Config::load_user(&config_file).unwrap_err();
             assert!(!error.to_string().contains(secret));
             assert!(!format!("{error:?}").contains(secret));
@@ -2269,11 +2442,11 @@ mirrors = ["https://project.example"]
 
         for (contents, secret) in [
             (
-                "[containers.registries.\"user:registry-secret-7d9@example.test\"]\n",
+                "[container.registries.\"user:registry-secret-7d9@example.test\"]\n",
                 "registry-secret-7d9",
             ),
             (
-                "[containers.registries.\"docker.io\"]\nmirrors = [\"https://user:mirror-secret-7d9@example.test\"]\n",
+                "[container.registries.\"docker.io\"]\nmirrors = [\"https://user:mirror-secret-7d9@example.test\"]\n",
                 "mirror-secret-7d9",
             ),
         ] {
@@ -2294,7 +2467,7 @@ mirrors = ["https://project.example"]
         );
         let temporary = tempfile::tempdir().unwrap();
         let config_file = temporary.path().join("config.toml");
-        std::fs::write(&config_file, "[containers]\nruntime = \"docker\"\n").unwrap();
+        std::fs::write(&config_file, "[container]\nruntime = \"docker\"\n").unwrap();
         assert_eq!(
             Config::load_user(&config_file)
                 .unwrap()

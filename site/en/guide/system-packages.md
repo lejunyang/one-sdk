@@ -73,12 +73,18 @@ values are the same in every display language, and two runs are byte-identical.
 
 Declare them in the project's `osdk.toml`, keyed by `manager:package-id`:
 
+`[sys]` is the namespace for host-level settings that may grow later, and `pkg`
+corresponds to the `osdk pkg` subsystem. `[sys.pkg]` already owns policy fields
+such as `managers`, `no_elevate`, and `mirrors`, so package declarations live in
+`[sys.pkg.packages]`. The `packages` level separates policy from dynamic package
+IDs; it is not accidental repetition.
+
 ```toml
-[syspkg]
+[sys.pkg]
 managers = ["winget"]     # only winget may participate; empty means no restriction
 no_elevate = false
 
-[syspkg.packages]
+[sys.pkg.packages]
 "winget:BurntSushi.ripgrep.MSVC" = "latest"
 "winget:Microsoft.PowerToys" = "0.101.0"
 "winget:Some.MacOnlyTool" = { version = "latest", os = "macos" }
@@ -108,31 +114,31 @@ machine**: when every entry is restricted to other operating systems, or its
 manager cannot exist on this OS (an `apt:` entry on Windows), no gate exists
 here.
 
-**That scope reaches only `pkg apply`.** Declaring `[syspkg]` does not affect
+**That scope reaches only `pkg apply`.** Declaring `[sys.pkg]` does not affect
 other tools in the directory: `cargo`, `node` and anything else dispatched
 through the shim keep working. The shim gates only the configuration it can act
 on itself -- keys like `sources` and `registries`, which decide where a
-subprocess it starts will fetch from. Refusing a `[syspkg]` table the shim never
+subprocess it starts will fetch from. Refusing a `[sys.pkg]` table the shim never
 reads would buy no safety while making the whole directory unusable, and since
 trust is bound to the file's hash, every later edit of `osdk.toml` would lock it
 again.
 :::
 
 ::: tip A version is a wish, not a lock
-The version in `[syspkg.packages]` means "ask for this when installing", not
+The version in `[sys.pkg.packages]` means "ask for this when installing", not
 "hold the host at this version". A system package manager updates on its own
 schedule, and `osdk.lock` deliberately does **not** cover system packages. A
 package present at a different version is reported honestly and **left alone** —
 reinstalling it would change something you did not ask to change.
 :::
 
-### Linux packages belong in `[syspkg.packages]` too
+### Linux packages belong in `[sys.pkg.packages]` too
 
 ```toml
-[syspkg]
+[sys.pkg]
 managers = ["apt"]
 
-[syspkg.packages]
+[sys.pkg.packages]
 "apt:libssl-dev" = "latest"
 "apk:build-base" = "latest"
 "pacman:base-devel" = "latest"
@@ -226,7 +232,7 @@ plainly, so you do not assume `osdk pkg apply` gives the same guarantees as
 ## Linux package managers: installed for you, but only what is missing
 
 On Linux, `osdk pkg doctor` additionally reports apt, apk, pacman and dnf, and
-`pkg apply` installs the packages from `[syspkg.packages]` that the host lacks.
+`pkg apply` installs the packages from `[sys.pkg.packages]` that the host lacks.
 
 ```text
 Linux package managers
@@ -255,7 +261,7 @@ It never upgrades and never removes. Three constraints set that boundary:
    ability — worth a glance before installing.
 
 ::: warning A package present at another version is left alone
-The version in `[syspkg.packages]` is a wish for install time, **not a lock**.
+The version in `[sys.pkg.packages]` is a wish for install time, **not a lock**.
 When the host has a different one, osdk reports `version differs` and skips it
 rather than reinstalling to force convergence on a machine you did not ask it to
 change.

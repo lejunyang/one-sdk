@@ -1744,7 +1744,7 @@ fn safe_project_pins_do_not_require_trust() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        "[tools]\nnode = \"20\"\n[aliases.node]\ndefault = \"20\"\n",
+        "[tools]\nnode = \"20\"\n[alias.tools.node]\ndefault = \"20\"\n",
     )
     .unwrap();
 
@@ -2549,7 +2549,7 @@ fn version_aliases_chain_canonicalize_and_unset() {
     }
 
     let config = std::fs::read_to_string(temp.path().join("config/config.toml")).unwrap();
-    assert!(config.contains("[aliases.node]"));
+    assert!(config.contains("[alias.tools.node]"));
     assert!(config.contains("default = \"20.0.0\""));
     assert!(config.contains("maintenance = \"default\""));
 
@@ -2569,6 +2569,91 @@ fn version_aliases_chain_canonicalize_and_unset() {
     assert!(unset.status.success());
     let config = std::fs::read_to_string(temp.path().join("config/config.toml")).unwrap();
     assert!(!config.contains("maintenance"));
+}
+
+#[test]
+fn editing_a_legacy_tool_alias_migrates_it_to_the_canonical_namespace() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join("config.toml");
+    std::fs::write(&path, "[aliases.node]\nold = \"20\"\n").unwrap();
+
+    let output = run_isolated(temp.path(), &["alias", "set", "node", "current-work", "22"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(path).unwrap();
+    assert!(config.contains("[alias.tools.node]"), "{config}");
+    assert!(config.contains("old = \"20\""), "{config}");
+    assert!(config.contains("current-work = \"22\""), "{config}");
+    assert!(!config.contains("[aliases"), "{config}");
+}
+
+#[test]
+fn config_migrate_previews_then_rewrites_only_legacy_domain_sections() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("osdk.toml");
+    let legacy = r#"# retained
+[containers]
+runtime = "auto"
+[task_config]
+dir = "."
+[aliases.node]
+work = "20"
+[syspkg.packages]
+"apt:gcc" = { version = "latest", os = "windows" }
+[tasks]
+build = "echo build"
+[models.demo]
+source = "hf:owner/repo@main"
+"#;
+    std::fs::write(&path, legacy).unwrap();
+
+    let preview = run_isolated(temp.path(), &["config", "migrate", "--dry-run"]);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let preview_stdout = String::from_utf8(preview.stdout).unwrap();
+    for migration in [
+        "[containers] -> [container]",
+        "[task_config] -> [task]",
+        "[aliases] -> [alias.tools]",
+        "[syspkg] -> [sys.pkg]",
+    ] {
+        assert!(preview_stdout.contains(migration), "{preview_stdout}");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+
+    let applied = run_isolated(temp.path(), &["config", "migrate"]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let migrated = std::fs::read_to_string(&path).unwrap();
+    assert!(migrated.starts_with("# retained\n"), "{migrated}");
+    assert!(migrated.contains("[container]"), "{migrated}");
+    assert!(migrated.contains("[task]"), "{migrated}");
+    assert!(migrated.contains("[alias.tools.node]"), "{migrated}");
+    assert!(migrated.contains("[sys.pkg.packages]"), "{migrated}");
+    assert!(migrated.contains("[tasks]"), "{migrated}");
+    assert!(migrated.contains("[models.demo]"), "{migrated}");
+    assert!(!migrated.contains("[containers]"), "{migrated}");
+    assert!(!migrated.contains("[task_config]"), "{migrated}");
+    assert!(!migrated.contains("[aliases"), "{migrated}");
+    assert!(!migrated.contains("[syspkg"), "{migrated}");
+
+    let second = run_isolated(temp.path(), &["config", "migrate"]);
+    assert!(second.status.success());
+    assert!(String::from_utf8(second.stdout)
+        .unwrap()
+        .contains("already uses the canonical layout"));
 }
 
 #[test]
@@ -6716,7 +6801,7 @@ fn deps_discovery_is_fail_closed() {
 /// Declaring a provider must be free: gating it would mean re-approving a config
 /// for every ordinary line, which teaches nothing and trains the user to click
 /// through the prompts that do matter. Redirecting the registry must not be free.
-/// And neither may block tool dispatch -- the `[syspkg]` accident was exactly a
+/// And neither may block tool dispatch -- the `[sys.pkg]` accident was exactly a
 /// trust requirement leaking into `cargo --version`.
 #[test]
 fn deps_trust_gates_the_registry_but_not_the_declaration() {
@@ -7388,7 +7473,7 @@ fn depends_orders_providers_and_refuses_a_cycle() {
 /// Each result is addressable as `//<path>:<provider>` and reports which pattern
 /// produced it, because a repo with four `npm` packages would otherwise print
 /// `npm` four times with no way to tell the lines apart.
-/// `[task_config].roots` brings sub-project tasks in under `//<path>:<name>`.
+/// `[task].roots` brings sub-project tasks in under `//<path>:<name>`.
 ///
 /// The addressing is the same one `[deps].roots` uses for providers, and
 /// deliberately so: one syntax for "a thing in a sub-project", not two.
@@ -7401,7 +7486,7 @@ fn task_roots_expose_sub_project_tasks_under_a_rooted_name() {
     std::fs::create_dir_all(project.join("packages/ui")).unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\", \"packages/*\"]\n\n[tasks.hello]\nrun = \"echo root\"\n",
+        "[task]\nroots = [\"apps/*\", \"packages/*\"]\n\n[tasks.hello]\nrun = \"echo root\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -7425,7 +7510,7 @@ fn task_roots_expose_sub_project_tasks_under_a_rooted_name() {
     // Same-named tasks in different sub-projects stay distinct, which is the point
     // of the prefix: without it the second `build` would replace the first.
     //
-    // Trusting first, because `roots` lives in `[task_config]` -- already gated as
+    // Trusting first, because `roots` lives in `[task]` -- already gated as
     // `RedirectsExecution` -- so `osdk run` refuses until the config is approved.
     // That is the gate working, not an obstacle: declaring roots inherited the
     // existing protection instead of needing a new one. `task list` is exempt as a
@@ -7460,10 +7545,10 @@ fn task_roots_expose_sub_project_tasks_under_a_rooted_name() {
     assert!(planned.contains("ui-built"), "{planned}");
 }
 
-/// Declaring `roots` inherits the existing `[task_config]` trust gate.
+/// Declaring `roots` inherits the existing `[task]` trust gate.
 ///
 /// Worth pinning because it is the reason this feature needed no new trust surface.
-/// `roots` lives in `[task_config]`, which is in `TRUST_REQUIRING_TABLES` as
+/// `roots` lives in `[task]`, which is in `TRUST_REQUIRING_TABLES` as
 /// `RedirectsExecution`, so `osdk run` refuses an unapproved config that declares
 /// sub-projects -- for free, and for the same reason the table was gated to begin
 /// with.
@@ -7477,11 +7562,7 @@ fn declaring_task_roots_requires_the_same_approval_as_other_runner_defaults() {
     let root = temp.path();
     let project = root.join("repo");
     std::fs::create_dir_all(project.join("apps/api")).unwrap();
-    std::fs::write(
-        project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\"]\n",
-    )
-    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[task]\nroots = [\"apps/*\"]\n").unwrap();
     std::fs::write(
         project.join("apps/api/osdk.toml"),
         "[tasks.build]\nrun = \"echo built\"\n",
@@ -7495,7 +7576,7 @@ fn declaring_task_roots_requires_the_same_approval_as_other_runner_defaults() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("task_config"),
+        stderr.contains("task"),
         "the refusal must name the gated table: {stderr}"
     );
 
@@ -7532,11 +7613,7 @@ fn tasks_are_never_discovered_outside_the_declared_roots() {
         )
         .unwrap();
     }
-    std::fs::write(
-        project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\"]\n",
-    )
-    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[task]\nroots = [\"apps/*\"]\n").unwrap();
 
     let output = run_isolated_in(root, &project, &["task", "list"]);
     assert!(output.status.success(), "{output:?}");
@@ -7564,7 +7641,7 @@ fn task_depends_crosses_roots_only_when_written_with_a_prefix() {
     std::fs::create_dir_all(project.join("packages/ui")).unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\", \"packages/*\"]\n",
+        "[task]\nroots = [\"apps/*\", \"packages/*\"]\n",
     )
     .unwrap();
     // `prep` exists in both sub-projects, which is what makes the local-resolution
@@ -7627,7 +7704,7 @@ fn a_cycle_across_roots_is_detected() {
     std::fs::create_dir_all(project.join("packages/ui")).unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\", \"packages/*\"]\n",
+        "[task]\nroots = [\"apps/*\", \"packages/*\"]\n",
     )
     .unwrap();
     std::fs::write(
@@ -7683,7 +7760,7 @@ fn a_partial_root_pattern_matches_only_the_named_directories() {
     }
     std::fs::write(
         project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/api-*\"]\n",
+        "[task]\nroots = [\"apps/api-*\"]\n",
     )
     .unwrap();
 
@@ -7699,12 +7776,12 @@ fn a_partial_root_pattern_matches_only_the_named_directories() {
     );
 }
 
-/// A sub-project may not declare `[task_config]`.
+/// A sub-project may not declare `[task]`.
 ///
 /// This is the security-relevant assertion of this batch. `shell` decides which
 /// interpreter every task in scope runs under, so a sub-config setting it would make
 /// every later `osdk run` do something other than what the task text says, with
-/// nothing at the call site to reveal it. The root's `[task_config]` is gated by
+/// nothing at the call site to reveal it. The root's `[task]` is gated by
 /// trust (`RedirectsExecution`) for exactly this reason; a sub-project's is refused
 /// outright instead, because gating it would mean one approval per package.
 ///
@@ -7720,23 +7797,23 @@ fn a_sub_project_cannot_redirect_the_interpreter() {
     std::fs::create_dir_all(project.join("apps/api")).unwrap();
     std::fs::write(
         project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\"]\n\n[tasks.hello]\nrun = \"echo root\"\n",
+        "[task]\nroots = [\"apps/*\"]\n\n[tasks.hello]\nrun = \"echo root\"\n",
     )
     .unwrap();
     std::fs::write(
         project.join("apps/api/osdk.toml"),
-        "[task_config]\nshell = \"cmd /c echo HIJACKED &&\"\n\n[tasks.build]\nrun = \"echo built\"\n",
+        "[task]\nshell = \"cmd /c echo HIJACKED &&\"\n\n[tasks.build]\nrun = \"echo built\"\n",
     )
     .unwrap();
 
     let output = run_isolated_in(root, &project, &["task", "list"]);
     assert!(
         !output.status.success(),
-        "a sub-project declaring [task_config] must be refused: {output:?}"
+        "a sub-project declaring [task] must be refused: {output:?}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("task_config"),
+        stderr.contains("task"),
         "the error must name the offending table: {stderr}"
     );
     // The offending file, not the monorepo root: blaming the wrong file sends the
@@ -7754,11 +7831,7 @@ fn an_unknown_rooted_task_is_reported() {
     let root = temp.path();
     let project = root.join("repo");
     std::fs::create_dir_all(project.join("apps/api")).unwrap();
-    std::fs::write(
-        project.join("osdk.toml"),
-        "[task_config]\nroots = [\"apps/*\"]\n",
-    )
-    .unwrap();
+    std::fs::write(project.join("osdk.toml"), "[task]\nroots = [\"apps/*\"]\n").unwrap();
     std::fs::write(
         project.join("apps/api/osdk.toml"),
         "[tasks.build]\nrun = \"echo built\"\n",

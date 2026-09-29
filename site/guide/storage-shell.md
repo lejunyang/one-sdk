@@ -233,7 +233,7 @@ osdk registry test [MANAGER]
 | `doctor --verify` | 以上全部，并重新哈希每个已安装文件，指出不再匹配的部分 |
 | `doctor --verify --tool` | 同样的检查但只针对单个工具；完整校验会读取每个字节，耗时数分钟 |
 | `config path` | 配置目录、用户配置文件、当前项目配置 |
-| `config list` | 部分最终设置与目录、registry、模型环境、tools、aliases |
+| `config list` | 部分最终设置与目录、registry、模型环境、tools、alias.tools |
 | `source list` | 某 backend/provider 的来源与 pin；`doctor` 不列镜像 |
 | `registry test` | npm-compatible Registry 的匿名探测与选择计划 |
 | `container doctor` | Docker/containerd 只读选择，以及独立的 Buildx 报告 |

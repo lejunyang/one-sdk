@@ -23,7 +23,7 @@ pub enum ManagerKind {
     Homebrew,
     /// A Linux distribution's own package manager.
     ///
-    /// Carried in the same enum so `[syspkg.packages]` can name one, but these
+    /// Carried in the same enum so `[sys.pkg.packages]` can name one, but these
     /// are not interchangeable with the two above: they own `/usr`, they need
     /// root, and their failure-recovery guarantees differ from each other. Use
     /// [`Self::is_distro`] wherever a code path assumes it can drive a manager

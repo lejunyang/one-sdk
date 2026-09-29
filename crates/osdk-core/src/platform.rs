@@ -85,7 +85,7 @@ impl Os {
 
     /// The token this OS is written as in configuration and lock platform keys.
     ///
-    /// Deliberately the single source for both. `syspkg`'s `os` filter, the
+    /// Deliberately the single source for both. `[sys.pkg]`'s `os` filter, the
     /// `[tools]` platform filters and `osdk.lock`'s `platforms.<os>-<arch>` keys
     /// previously each spelled these out separately, so renaming one would have
     /// silently mismatched the others instead of failing to compile.
@@ -230,7 +230,7 @@ impl Libc {
 /// A platform restriction written as a `when` table on a config entry.
 ///
 /// The semantics are **filter, not assertion**: an entry whose `when` does not
-/// match the host is treated as absent, exactly as `[syspkg.packages]`'s `os`
+/// match the host is treated as absent, exactly as `[sys.pkg.packages]`'s `os`
 /// already behaved. It can only ever narrow where something applies, never cause
 /// something to be installed that otherwise would not be, which is why it needs
 /// no trust.

@@ -320,19 +320,27 @@ pub fn set_version_alias(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Re
 fn set_version_alias_unlocked(ctx: &Ctx, tool: &str, name: &str, version: &str) -> Result<()> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
-    let aliases = doc
-        .entry("aliases")
+    migrate_nested_section(&mut doc, "aliases", "alias", "tools")?;
+    let alias = doc
+        .entry("alias")
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let aliases = aliases
+    let alias = alias
         .as_table_mut()
-        .context("`aliases` is not a table in config")?;
-    aliases.set_implicit(true);
-    let tool_aliases = aliases
+        .context("`alias` is not a table in config")?;
+    alias.set_implicit(true);
+    let tools = alias
+        .entry("tools")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let tools = tools
+        .as_table_mut()
+        .context("`alias.tools` is not a table in config")?;
+    tools.set_implicit(true);
+    let tool_aliases = tools
         .entry(tool)
         .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
     let tool_aliases = tool_aliases
         .as_table_mut()
-        .context("`aliases.<tool>` is not a table")?;
+        .context("`alias.tools.<tool>` is not a table")?;
     tool_aliases.insert(name, toml_edit::value(version));
     save_doc(&path, &doc)
 }
@@ -344,17 +352,181 @@ pub fn remove_version_alias(ctx: &Ctx, tool: &str, name: &str) -> Result<bool> {
 fn remove_version_alias_unlocked(ctx: &Ctx, tool: &str, name: &str) -> Result<bool> {
     let path = ctx.dirs.user_config_file();
     let mut doc = load_doc(&path)?;
+    let migrated = migrate_nested_section(&mut doc, "aliases", "alias", "tools")?;
     let removed = doc
-        .get_mut("aliases")
+        .get_mut("alias")
         .and_then(toml_edit::Item::as_table_mut)
-        .and_then(|aliases| aliases.get_mut(tool))
+        .and_then(|alias| alias.get_mut("tools"))
+        .and_then(toml_edit::Item::as_table_mut)
+        .and_then(|tools| tools.get_mut(tool))
         .and_then(toml_edit::Item::as_table_mut)
         .map(|aliases| aliases.remove(name).is_some())
         .unwrap_or(false);
-    if removed {
+    if removed || migrated {
         save_doc(&path, &doc)?;
     }
     Ok(removed)
+}
+
+/// One legacy-to-canonical table move performed by `config migrate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigMigration {
+    pub from: &'static str,
+    pub to: &'static str,
+}
+
+const CONFIG_MIGRATIONS: &[ConfigMigration] = &[
+    ConfigMigration {
+        from: "containers",
+        to: "container",
+    },
+    ConfigMigration {
+        from: "task_config",
+        to: "task",
+    },
+    ConfigMigration {
+        from: "aliases",
+        to: "alias.tools",
+    },
+    ConfigMigration {
+        from: "syspkg",
+        to: "sys.pkg",
+    },
+];
+
+/// Rewrite temporary legacy config sections while preserving unrelated
+/// formatting and comments. A dry run returns the same plan without writing.
+pub fn migrate_config(
+    ctx: &Ctx,
+    scope: SettingScope,
+    dry_run: bool,
+) -> Result<(PathBuf, Vec<ConfigMigration>)> {
+    let path = setting_scope_path(ctx, scope)?;
+    let migrate = || -> Result<(PathBuf, Vec<ConfigMigration>)> {
+        if !path.is_file() {
+            anyhow::bail!("no config file found at {}", path.display());
+        }
+        let mut doc = load_doc(&path)?;
+        let migrations = migrate_config_layout(&mut doc)?;
+        if !dry_run && !migrations.is_empty() {
+            save_doc(&path, &doc)?;
+        }
+        Ok((path.clone(), migrations))
+    };
+    match scope {
+        SettingScope::Global => with_global_config_lock(ctx, migrate),
+        SettingScope::Project => migrate(),
+    }
+}
+
+fn migrate_config_layout(doc: &mut toml_edit::DocumentMut) -> Result<Vec<ConfigMigration>> {
+    // Validate the entire move set before touching the document. The caller
+    // does not save on error, but keeping this helper transactional also makes
+    // it safe to compose with another in-memory edit.
+    ensure_top_level_migration(doc, "containers", "container")?;
+    ensure_top_level_migration(doc, "task_config", "task")?;
+    ensure_nested_migration(doc, "aliases", "alias", "tools")?;
+    ensure_nested_migration(doc, "syspkg", "sys", "pkg")?;
+
+    let mut applied = Vec::new();
+    if migrate_top_level_section(doc, "containers", "container")? {
+        applied.push(CONFIG_MIGRATIONS[0]);
+    }
+    if migrate_top_level_section(doc, "task_config", "task")? {
+        applied.push(CONFIG_MIGRATIONS[1]);
+    }
+    if migrate_nested_section(doc, "aliases", "alias", "tools")? {
+        applied.push(CONFIG_MIGRATIONS[2]);
+    }
+    if migrate_nested_section(doc, "syspkg", "sys", "pkg")? {
+        applied.push(CONFIG_MIGRATIONS[3]);
+    }
+    Ok(applied)
+}
+
+fn migrate_top_level_section(
+    doc: &mut toml_edit::DocumentMut,
+    legacy: &str,
+    canonical: &str,
+) -> Result<bool> {
+    if !doc.contains_key(legacy) {
+        return Ok(false);
+    }
+    ensure_top_level_migration(doc, legacy, canonical)?;
+    let section = doc
+        .remove(legacy)
+        .expect("legacy section was checked above");
+    doc.insert(canonical, section);
+    Ok(true)
+}
+
+fn ensure_top_level_migration(
+    doc: &toml_edit::DocumentMut,
+    legacy: &str,
+    canonical: &str,
+) -> Result<()> {
+    if let Some(section) = doc.get(legacy) {
+        section
+            .as_table()
+            .with_context(|| format!("`{legacy}` is not a table in config"))?;
+    }
+    if doc.contains_key(legacy) && doc.contains_key(canonical) {
+        anyhow::bail!(
+            "configuration declares both canonical `[{canonical}]` and legacy `[{legacy}]`; \
+             keep one before migrating"
+        );
+    }
+    Ok(())
+}
+
+fn migrate_nested_section(
+    doc: &mut toml_edit::DocumentMut,
+    legacy: &str,
+    parent: &str,
+    child: &str,
+) -> Result<bool> {
+    if !doc.contains_key(legacy) {
+        return Ok(false);
+    }
+    ensure_nested_migration(doc, legacy, parent, child)?;
+
+    let section = doc
+        .remove(legacy)
+        .expect("legacy section was checked above");
+    let parent_table = doc
+        .entry(parent)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("`{parent}` is not a table in config"))?;
+    parent_table.set_implicit(true);
+    parent_table.insert(child, section);
+    Ok(true)
+}
+
+fn ensure_nested_migration(
+    doc: &toml_edit::DocumentMut,
+    legacy: &str,
+    parent: &str,
+    child: &str,
+) -> Result<()> {
+    if !doc.contains_key(legacy) {
+        return Ok(());
+    }
+    doc.get(legacy)
+        .and_then(toml_edit::Item::as_table)
+        .with_context(|| format!("`{legacy}` is not a table in config"))?;
+    if let Some(parent_item) = doc.get(parent) {
+        let parent_table = parent_item
+            .as_table()
+            .with_context(|| format!("`{parent}` is not a table in config"))?;
+        if parent_table.contains_key(child) {
+            anyhow::bail!(
+                "configuration declares both canonical `[{parent}.{child}]` and legacy \
+                 `[{legacy}]`; keep one before migrating"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Add a custom source to a tool's `[[sources.<tool>.custom]]` array.
@@ -1074,6 +1246,73 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value))
                 .collect::<BTreeMap<_, _>>(),
         }
+    }
+
+    #[test]
+    fn config_migration_moves_every_legacy_domain_without_reformatting_others() {
+        let mut doc: toml_edit::DocumentMut = r#"# keep this comment
+[settings]
+jobs = 3
+
+[containers]
+runtime = "docker"
+
+[task_config]
+dir = "workspace"
+
+[aliases.node]
+work = "20"
+
+[syspkg]
+managers = ["apt"]
+[syspkg.packages]
+"apt:gcc" = "latest"
+"#
+        .parse()
+        .unwrap();
+
+        let migrations = migrate_config_layout(&mut doc).unwrap();
+        assert_eq!(migrations, CONFIG_MIGRATIONS);
+        let migrated = doc.to_string();
+        assert!(migrated.starts_with("# keep this comment\n[settings]\njobs = 3"));
+        assert!(migrated.contains("[container]"), "{migrated}");
+        assert!(migrated.contains("[task]"), "{migrated}");
+        assert!(migrated.contains("[alias.tools.node]"), "{migrated}");
+        assert!(migrated.contains("[sys.pkg]"), "{migrated}");
+        assert!(migrated.contains("[sys.pkg.packages]"), "{migrated}");
+        for legacy in ["[containers]", "[task_config]", "[aliases", "[syspkg"] {
+            assert!(
+                !migrated.contains(legacy),
+                "legacy {legacy} remained: {migrated}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_migration_refuses_ambiguous_dual_layouts() {
+        for source in [
+            "[container]\n[containers]\n",
+            "[task]\n[task_config]\n",
+            "[alias.tools]\n[aliases]\n",
+            "[sys.pkg]\n[syspkg]\n",
+        ] {
+            let mut doc: toml_edit::DocumentMut = source.parse().unwrap();
+            let before = doc.to_string();
+            assert!(migrate_config_layout(&mut doc).is_err(), "{source}");
+            // The caller never saves a failed migration. Keeping the document
+            // unchanged as well makes the helper safe to reuse in writers.
+            assert_eq!(doc.to_string(), before, "{source}");
+        }
+
+        let source = "[containers]\nruntime = \"docker\"\n[alias.tools]\n[aliases]\n";
+        let mut doc: toml_edit::DocumentMut = source.parse().unwrap();
+        let before = doc.to_string();
+        assert!(migrate_config_layout(&mut doc).is_err());
+        assert_eq!(
+            doc.to_string(),
+            before,
+            "a later conflict must not leave an earlier migration applied in memory"
+        );
     }
 
     #[test]

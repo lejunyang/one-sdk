@@ -16,6 +16,6 @@ osdk trust prune [--dry-run]
 | `trust prune --dry-run` | 预览文件已不存在且父目录可读的陈旧记录 |
 | `trust prune` | 删除上述陈旧记录 |
 
-作用域：安装类命令看校验设置/`sources`/`registries`，`run` 看 `task_config`，
-`pkg apply` 只看在本机适用的 `syspkg` 条目；`models` 不要求信任。受管内容变化后
+作用域：安装类命令看校验设置/`sources`/`registries`，`run` 看 `[task]`，
+`pkg apply` 只看在本机适用的 `[sys.pkg]` 条目；`models` 不要求信任。受管内容变化后
 旧摘要不再授权新内容。不可访问路径不会被 prune，因为它可能只是未挂载磁盘。

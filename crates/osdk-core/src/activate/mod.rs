@@ -900,7 +900,7 @@ mod tests {
                 global_tools: BTreeMap::new(),
                 global_tool_configs: BTreeMap::new(),
                 tool_origins: BTreeMap::new(),
-                aliases: BTreeMap::new(),
+                tool_aliases: Default::default(),
                 project_config_path: None,
                 excluded_tools: Default::default(),
                 ..Default::default()

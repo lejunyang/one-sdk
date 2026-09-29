@@ -24,7 +24,7 @@ osdk container prune --runtime docker --scope images
 `mirrors plan` 不写入；`mirrors apply --dry-run` 会测速并给出绑定当前输入的 plan id。
 Docker apply/dry-run 还会先用 `dockerd --validate` 校验生成的 daemon JSON；校验失败不会
 写文件。无人值守 `--yes` 仍必须同时给 `--accept-plan`。`prune` 同理要求接受精确 preview
-id，避免机器状态变化后误删。配置见 `reference/configuration/containers.md`。
+id，避免机器状态变化后误删。配置见 `reference/configuration/container.md`。
 
 Linux 上遇到 Docker `permission-denied` 时优先使用 rootless Docker；已有服务通常运行
 `docker context use rootless` 即可。未安装时先运行 `dockerd-rootless-setuptool.sh check` 与

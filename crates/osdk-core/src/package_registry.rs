@@ -2616,7 +2616,7 @@ npmRegistries:
             global_tools: Default::default(),
             global_tool_configs: Default::default(),
             tool_origins: Default::default(),
-            aliases: Default::default(),
+            tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
             ..Default::default()

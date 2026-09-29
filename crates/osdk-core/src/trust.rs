@@ -90,7 +90,7 @@ pub enum TrustReason {
     ///
     /// Distinct from [`Self::ExecutesCode`], which is about code running at a
     /// moment the user did not choose. This one is about a command the user
-    /// *did* choose being routed somewhere else: `task_config.shell` picks the
+    /// *did* choose being routed somewhere else: `task.shell` picks the
     /// interpreter for every task, so the text of a task stops determining what
     /// actually runs. Reusing the install-time wording here would have stated
     /// something plainly untrue -- tasks never run during install.
@@ -114,8 +114,8 @@ impl TrustReason {
 /// What one command invocation can actually do.
 ///
 /// Trust is enforced only for requirements relevant to at least one scope the
-/// command reaches. A config may contain `[syspkg]` entries the host can never
-/// run and `[task_config]` the current command never reads; demanding review
+/// command reaches. A config may contain `[sys.pkg]` entries the host can never
+/// run and `[task]` settings the current command never reads; demanding review
 /// of either from an unrelated command is what made directories hostile and
 /// taught people to approve without reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,12 +126,12 @@ pub enum Scope {
     Install,
     /// Runs the project's own dependency providers (`[deps]`).
     Deps,
-    /// Runs project tasks. `[task_config]` decides the interpreter, so it is
+    /// Runs project tasks. `[task]` decides the interpreter, so it is
     /// relevant; tasks themselves are authorized by typing their name.
     Run,
-    /// Installs system packages (`[syspkg]`).
+    /// Installs system packages (`[sys.pkg]`).
     SystemPackages,
-    /// Pulls, builds or runs container images: `[containers]` picks the
+    /// Pulls, builds or runs container images: `[container]` picks the
     /// runtime, builder and registry mirrors those operations use.
     Container,
 }
@@ -203,12 +203,12 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
 ///
 /// `sources` and `registries` change where managed downloads and dependency
 /// providers fetch from, so both the install and deps scopes see them.
-/// `task_config` is read only by `osdk run`: it is an ambient setting whose
+/// `[task]` is read only by `osdk run`: it is an ambient setting whose
 /// `shell` field decides which interpreter *every* task in scope runs under,
 /// and a config that quietly sets `shell = "evil --run"` would turn every
 /// later `osdk run` into something other than what the task text says.
 ///
-/// `syspkg` is deliberately **not** here: it is handled separately because,
+/// `[sys.pkg]` is deliberately **not** here: it is handled separately because,
 /// unlike the others, it is only relevant when at least one requested package
 /// actually applies to this machine. See `collect_syspkg_requirement`.
 ///
@@ -230,10 +230,17 @@ const WHOLE_TABLE_REQUIREMENTS: &[(&str, TrustReason, &[Scope])] = &[
         TrustReason::WeakensVerification,
         &[Scope::Install, Scope::Deps],
     ),
+    ("task", TrustReason::RedirectsExecution, &[Scope::Run]),
+    // Temporary compatibility spellings, removed after user configs migrate.
     (
         "task_config",
         TrustReason::RedirectsExecution,
         &[Scope::Run],
+    ),
+    (
+        "container",
+        TrustReason::WeakensVerification,
+        &[Scope::Container],
     ),
     (
         "containers",
@@ -246,7 +253,9 @@ const WHOLE_TABLE_REQUIREMENTS: &[(&str, TrustReason, &[Scope])] = &[
 ///
 /// `tools` needs this because a single tool option (`allow_builds`) can still
 /// opt into script execution even though the surrounding table is safe.
-const INSPECTED_TABLES: &[&str] = &["tools", "aliases", "settings", "tasks", "deps", "skills"];
+const INSPECTED_TABLES: &[&str] = &[
+    "tools", "alias", "aliases", "settings", "tasks", "deps", "skills", "sys", "syspkg",
+];
 
 /// Keys under one `[skills.<name>]` entry that change where the skill's bytes
 /// come from. A bare `source = "github:owner/repo"` declaration is not one of
@@ -305,14 +314,14 @@ const ALLOW_BUILDS_OPTION: &str = "allow_builds";
 ///
 /// It can act on `sources` and `registries`: the shim performs a registry
 /// preflight before running a package manager, so those genuinely decide where
-/// a subprocess it starts will fetch from. It cannot act on `syspkg` (read only
+/// a subprocess it starts will fetch from. It cannot act on `sys.pkg` (read only
 /// by `osdk pkg`, and installing needs `osdk pkg apply --yes`), on
-/// `task_config` (read only by `osdk run` / `osdk task`), on `deps` (the shim
+/// `task` (read only by `osdk run` / `osdk task`), on `deps` (the shim
 /// never materializes dependencies), or on `models` (model bytes are content,
 /// never executed by osdk).
 ///
 /// Gating those here bought no safety and cost a great deal: adding a
-/// `[syspkg]` block to a project made `cargo --version` fail in that directory
+/// legacy `[syspkg]` block to a project made `cargo --version` fail in that directory
 /// with "project config is not trusted" -- a refusal about installing system
 /// packages, raised by a command that installs nothing. And because trust is
 /// bound to the file's hash, every later edit of `osdk.toml` re-locked every
@@ -331,7 +340,7 @@ pub fn affects_tool_dispatch(requirement: &TrustRequirement) -> bool {
         .map_or(requirement.key.as_str(), |(table, _)| table);
     match table {
         // Never reached by the shim.
-        "syspkg" | "task_config" | "models" | "deps" | "skills" => false,
+        "sys" | "syspkg" | "task" | "task_config" | "models" | "deps" | "skills" => false,
         // Everything else is treated as dispatch-affecting. Fail-closed on
         // purpose: `settings`, `tools`, `sources`, `registries` and any table a
         // future build does not recognize all stay gated, so adding a new
@@ -391,8 +400,11 @@ fn collect_requirements(value: &toml::Value, scopes: &[Scope]) -> Vec<TrustRequi
             "deps" if scopes_include(scopes, Scope::Deps) => {
                 collect_deps_requirements(value, &mut found)
             }
+            "sys" if scopes_include(scopes, Scope::SystemPackages) => {
+                collect_system_requirement(value, &mut found)
+            }
             "syspkg" if scopes_include(scopes, Scope::SystemPackages) => {
-                collect_syspkg_requirement(value, &mut found)
+                collect_syspkg_requirement(value, "syspkg", &mut found)
             }
             // Whole-table requirements, when one of their scopes is present.
             name if WHOLE_TABLE_REQUIREMENTS
@@ -412,8 +424,8 @@ fn collect_requirements(value: &toml::Value, scopes: &[Scope]) -> Vec<TrustRequi
                     });
                 }
             }
-            "aliases" | "tasks" | "models" | "settings" | "tools" | "skills" | "deps"
-            | "syspkg" => {
+            "alias" | "aliases" | "tasks" | "models" | "settings" | "tools" | "skills" | "deps"
+            | "sys" | "syspkg" => {
                 // Reachable when the scope that inspects it is absent: the
                 // table stays unread for this command.
             }
@@ -450,21 +462,44 @@ fn manager_exists_on(manager: &crate::syspkg::ManagerKind, os: crate::platform::
     }
 }
 
-/// Add a `syspkg` requirement only when the table actually asks this machine
+/// Add a system-package requirement only when the table actually asks this machine
 /// to install something.
 ///
 /// This is the narrowing that was missing: the table used to gate every
 /// command regardless of whether a single requested package could run here.
-/// Now a `[syspkg]` demands nothing when its packages are restricted to
+/// Now `[sys.pkg]` demands nothing when its packages are restricted to
 /// other operating systems, name managers that cannot exist on this OS, or
 /// name managers the table excludes.
-fn collect_syspkg_requirement(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+fn collect_system_requirement(value: &toml::Value, found: &mut Vec<TrustRequirement>) {
+    let Some(system) = value.as_table() else {
+        found.push(TrustRequirement {
+            key: "sys".into(),
+            reason: TrustReason::ExecutesCode,
+        });
+        return;
+    };
+    for key in system.keys().filter(|key| key.as_str() != "pkg") {
+        found.push(TrustRequirement {
+            key: format!("sys.{key}"),
+            reason: TrustReason::ExecutesCode,
+        });
+    }
+    if let Some(pkg) = system.get("pkg") {
+        collect_syspkg_requirement(pkg, "sys.pkg", found);
+    }
+}
+
+fn collect_syspkg_requirement(
+    value: &toml::Value,
+    requirement_key: &str,
+    found: &mut Vec<TrustRequirement>,
+) {
     let config: crate::syspkg::SyspkgConfig = match value.clone().try_into() {
         Ok(config) => config,
-        // A malformed `syspkg` cannot be shown harmless: fail closed.
+        // Malformed package configuration cannot be shown harmless: fail closed.
         Err(_) => {
             found.push(TrustRequirement {
-                key: "syspkg".into(),
+                key: requirement_key.into(),
                 reason: TrustReason::ExecutesCode,
             });
             return;
@@ -479,7 +514,7 @@ fn collect_syspkg_requirement(value: &toml::Value, found: &mut Vec<TrustRequirem
     });
     if applies_here {
         found.push(TrustRequirement {
-            key: "syspkg".into(),
+            key: requirement_key.into(),
             reason: TrustReason::ExecutesCode,
         });
     }
@@ -730,8 +765,8 @@ fn governed_subset(value: &toml::Value) -> toml::Value {
         let Some(head_value) = table.get(*head) else {
             continue;
         };
-        // A whole-table reason (`sources`, `registries`, `task_config`,
-        // `syspkg`, or any single-segment key) pins that value's entire
+        // A whole-table reason (`sources`, `registries`, `task`, `sys.pkg`, or
+        // any single-segment key) pins that value's entire
         // content.
         if segments.len() == 1 {
             subset.insert((*head).to_string(), head_value.clone());
@@ -1208,7 +1243,7 @@ mod tests {
         let path = temp.path().join("osdk.toml");
         std::fs::write(
             &path,
-            "[tools]\nnode = \"20\"\n[aliases.node]\ndefault = \"20\"\n",
+            "[tools]\nnode = \"20\"\n[alias.tools.node]\ndefault = \"20\"\n",
         )
         .unwrap();
         assert!(!requires_trust(&path).unwrap());
@@ -1372,10 +1407,10 @@ mod tests {
             assert_eq!(found[0].reason, TrustReason::WeakensVerification);
         }
 
-        std::fs::write(&path, "[task_config]\nshell = \"evil --run\"\n").unwrap();
+        std::fs::write(&path, "[task]\nshell = \"evil --run\"\n").unwrap();
         let found = trust_requirements(&path, &[Scope::Run]).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "task_config");
+        assert_eq!(found[0].key, "task");
         assert_eq!(found[0].reason, TrustReason::RedirectsExecution);
         for scope in [Scope::Install, Scope::Deps, Scope::SystemPackages] {
             assert!(trust_requirements(&path, &[scope]).unwrap().is_empty());
@@ -1415,11 +1450,11 @@ mod tests {
             assert!(dispatch_affecting(key), "{key} must still gate the shim");
         }
 
-        // Never reached by the shim. `syspkg` is read only by `osdk pkg` (and
-        // only `apply --yes` installs); `task_config` only by `osdk run`.
+        // Never reached by the shim. `sys.pkg` is read only by `osdk pkg` (and
+        // only `apply --yes` installs); `task` only by `osdk run`.
         // Those commands evaluate the full requirement set themselves, which
         // is where the review belongs.
-        for key in ["syspkg", "task_config"] {
+        for key in ["sys.pkg", "task"] {
             assert!(
                 !dispatch_affecting(key),
                 "{key} must not block an unrelated tool invocation"
@@ -1740,10 +1775,10 @@ mod tests {
         assert!(!dispatch_affecting("deps.pnpm.allow_build_from_source"));
     }
 
-    /// `[syspkg]` gates only a command that can install the packages, and only
+    /// `[sys.pkg]` gates only a command that can install the packages, and only
     /// when some requested package actually applies to this machine.
     #[test]
-    fn syspkg_gates_only_when_a_package_applies_to_this_machine() {
+    fn system_packages_gate_only_when_a_package_applies_to_this_machine() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("osdk.toml");
         let host_os = crate::platform::Os::current().config_token();
@@ -1763,7 +1798,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[syspkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{other_os}\" }}\n"
+                "[sys.pkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{other_os}\" }}\n"
             ),
         )
         .unwrap();
@@ -1776,13 +1811,13 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[syspkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+                "[sys.pkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
             ),
         )
         .unwrap();
         let found = trust_requirements(&path, &[Scope::SystemPackages]).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "syspkg");
+        assert_eq!(found[0].key, "sys.pkg");
         assert_eq!(found[0].reason, TrustReason::ExecutesCode);
 
         // An apt entry can never apply on a non-Linux host even when its
@@ -1790,7 +1825,7 @@ mod tests {
         if host_os != "linux" {
             std::fs::write(
                 &path,
-                format!("[syspkg.packages]\n\"apt:build-essential\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"),
+                format!("[sys.pkg.packages]\n\"apt:build-essential\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"),
             )
             .unwrap();
             assert!(trust_requirements(&path, &[Scope::SystemPackages])
@@ -1807,7 +1842,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "[syspkg]\nmanagers = [\"{excluded_manager}\"]\n[syspkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+                "[sys.pkg]\nmanagers = [\"{excluded_manager}\"]\n[sys.pkg.packages]\n\"{host_package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
             ),
         )
         .unwrap();
@@ -1862,16 +1897,16 @@ depends = ["build"]
         );
     }
 
-    /// `task_config` is an ambient setting, not a command the user names.
+    /// `[task]` holds ambient settings, not a command the user names.
     ///
     /// Its `shell` decides the interpreter for every task in scope, so a config
     /// can redirect what `osdk run` executes without changing any task's text.
     #[test]
-    fn task_config_still_requires_trust_because_it_picks_the_interpreter() {
-        let value: toml::Value = toml::from_str("[task_config]\nshell = \"evil --run\"\n").unwrap();
+    fn task_settings_still_require_trust_because_they_pick_the_interpreter() {
+        let value: toml::Value = toml::from_str("[task]\nshell = \"evil --run\"\n").unwrap();
         let found = collect_requirements(&value, &[Scope::Run]);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].key, "task_config");
+        assert_eq!(found[0].key, "task");
         // Not ExecutesCode: nothing here runs during install, and saying so
         // would be false.
         assert_eq!(found[0].reason, TrustReason::RedirectsExecution);
@@ -1945,8 +1980,8 @@ mode = "env"
         for body in [
             "[tools]\nnode = \"22\"\n\n[settings]\njobs = 4\nverify_signatures = false\n",
             "[tools]\nnode = \"22\"\nformatter = \"npm:prettier@3\"\n\n[settings]\njobs = 4\nverify_signatures = false\n",
-            "[tools]\nnode = \"22\"\nformatter = \"npm:prettier@3\"\n[aliases.node]\ndefault = \"22\"\n\n[settings]\njobs = 12\nverify_signatures = false\n",
-            "# a comment\n[settings]\nverify_signatures = false\njobs = 12\n[tools]\nnode = '22'\nformatter = \"npm:prettier@3\"\n[aliases.node]\ndefault = \"22\"\n",
+            "[tools]\nnode = \"22\"\nformatter = \"npm:prettier@3\"\n[alias.tools.node]\ndefault = \"22\"\n\n[settings]\njobs = 12\nverify_signatures = false\n",
+            "# a comment\n[settings]\nverify_signatures = false\njobs = 12\n[tools]\nnode = '22'\nformatter = \"npm:prettier@3\"\n[alias.tools.node]\ndefault = \"22\"\n",
         ] {
             write(body);
             assert!(
@@ -1973,7 +2008,7 @@ mode = "env"
             "\"winget:Foo\" = \"latest\""
         };
         write(&format!(
-            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[syspkg.packages]\n{applicable_package}\n"
+            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[sys.pkg.packages]\n{applicable_package}\n"
         ));
         assert!(!is_trusted(&config_dir, &config, None).unwrap());
     }
@@ -2057,7 +2092,7 @@ mode = "env"
         let before = normalized_hash(&path).unwrap();
         std::fs::write(
             &path,
-            "[tools]\nnode = \"24\"\nformatter = \"npm:prettier@3\"\ncli = \"github:cli/cli@2\"\n[aliases.node]\ndefault = \"24\"\n",
+            "[tools]\nnode = \"24\"\nformatter = \"npm:prettier@3\"\ncli = \"github:cli/cli@2\"\n[alias.tools.node]\ndefault = \"24\"\n",
         )
         .unwrap();
         assert!(!requires_trust(&path).unwrap());
@@ -2197,13 +2232,13 @@ allow_builds = true
 [deps.npm]
 index = "https://example.com"
 
-[task_config]
+[task]
 shell = "evil"
 
-[syspkg.packages]
+[sys.pkg.packages]
 "apt:gcc" = "latest"
 
-[containers]
+[container]
 runtime = "docker"
 "#;
         let value: toml::Value = toml::from_str(body).unwrap();
@@ -2230,7 +2265,7 @@ runtime = "docker"
             .into_iter()
             .map(|requirement| requirement.key)
             .collect();
-        assert_eq!(run_keys, vec!["task_config".to_string()]);
+        assert_eq!(run_keys, vec!["task".to_string()]);
 
         // SystemPackages on a non-Linux host finds no applicable package; the
         // apt entry only applies on Linux.
@@ -2239,19 +2274,61 @@ runtime = "docker"
             .map(|requirement| requirement.key)
             .collect();
         if cfg!(target_os = "linux") {
-            assert_eq!(system_keys, vec!["syspkg".to_string()]);
+            assert_eq!(system_keys, vec!["sys.pkg".to_string()]);
         } else {
             assert!(system_keys.is_empty());
         }
 
-        // Container scope sees only the containers table.
+        // Container scope sees only the container table.
         let container_keys: Vec<String> = collect_requirements(&value, &[Scope::Container])
             .into_iter()
             .map(|requirement| requirement.key)
             .collect();
-        assert_eq!(container_keys, vec!["containers".to_string()]);
+        assert_eq!(container_keys, vec!["container".to_string()]);
 
         // A command with no scopes is never gated on anything.
         assert!(collect_requirements(&value, &[]).is_empty());
+    }
+
+    #[test]
+    fn legacy_section_names_keep_their_original_trust_scopes_during_migration() {
+        let cases = [
+            (
+                "[task_config]\nshell = \"evil\"\n",
+                Scope::Run,
+                "task_config",
+                TrustReason::RedirectsExecution,
+            ),
+            (
+                "[containers]\nruntime = \"docker\"\n",
+                Scope::Container,
+                "containers",
+                TrustReason::WeakensVerification,
+            ),
+        ];
+        for (source, scope, key, reason) in cases {
+            let value: toml::Value = toml::from_str(source).unwrap();
+            let found = collect_requirements(&value, &[scope]);
+            assert_eq!(found.len(), 1, "{source}: {found:?}");
+            assert_eq!(found[0].key, key);
+            assert_eq!(found[0].reason, reason);
+        }
+
+        let host_os = crate::platform::Os::current().config_token();
+        let package = if host_os == "windows" {
+            "winget:Foo"
+        } else {
+            "apt:gcc"
+        };
+        let source = format!(
+            "[syspkg.packages]\n\"{package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
+        );
+        let value: toml::Value = toml::from_str(&source).unwrap();
+        let found = collect_requirements(&value, &[Scope::SystemPackages]);
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].key, "syspkg");
+
+        let aliases: toml::Value = toml::from_str("[aliases.node]\nwork = \"20\"\n").unwrap();
+        assert!(collect_requirements(&aliases, &Scope::ALL).is_empty());
     }
 }

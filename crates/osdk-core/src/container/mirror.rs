@@ -25,7 +25,7 @@ use crate::config::{ContainerRegistryConfig, ContainerResolve};
 
 /// Operator-documented public pull-through caches that osdk can benchmark for
 /// Docker Hub when the user has not supplied an explicit policy. An explicit
-/// `[containers.registries."docker.io"]` table always replaces this list.
+/// `[container.registries."docker.io"]` table always replaces this list.
 pub const BUILTIN_DOCKER_HUB_MIRRORS: [&str; 2] =
     ["https://mirror.gcr.io/", "https://docker.m.daocloud.io/"];
 

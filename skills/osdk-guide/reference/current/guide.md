@@ -14,5 +14,5 @@ osdk current
 osdk current node
 ```
 
-相关配置：项目/全局 `[tools]`、`.tool-versions` 与 `[aliases]`。需要看安装目录和命令
+相关配置：项目/全局 `[tools]`、`.tool-versions` 与 `[alias.tools]`。需要看安装目录和命令
 归属时用 `osdk where <tool> --bins`。
