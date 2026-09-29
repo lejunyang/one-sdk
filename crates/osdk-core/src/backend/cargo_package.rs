@@ -78,21 +78,15 @@ struct CratesResponse {
     versions: Vec<CratesVersion>,
 }
 
-#[derive(Debug)]
-struct CargoRegistrySelection {
-    source: Source,
-    metadata: CratesResponse,
-}
-
-fn version_infos(metadata: CratesResponse) -> Vec<VersionInfo> {
+fn version_infos(metadata: &CratesResponse) -> Vec<VersionInfo> {
     let mut versions = metadata
         .versions
-        .into_iter()
+        .iter()
         .filter(|version| !version.yanked)
         .map(|version| VersionInfo {
             stable: semver::Version::parse(&version.vers)
                 .is_ok_and(|version| version.pre.is_empty()),
-            version: version.vers,
+            version: version.vers.clone(),
             lts: None,
         })
         .collect::<Vec<_>>();
@@ -191,11 +185,104 @@ fn registry_index(source: &Source) -> Result<String> {
     Ok(index)
 }
 
+fn registry_config_url(source: &Source) -> Result<String> {
+    let index = registry_index(source)?;
+    let base = index
+        .strip_prefix("sparse+")
+        .expect("registry_index validated the sparse prefix");
+    Ok(crate::http::join_url(base, "config.json"))
+}
+
+fn crate_download_url(
+    config: &RegistryConfig,
+    package: &str,
+    release: &CratesVersion,
+) -> Result<String> {
+    let lower = package.to_ascii_lowercase();
+    let sparse_path = sparse_index_crate_path(&lower);
+    let prefix = sparse_path
+        .rsplit_once('/')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or_default();
+    let mut url = config.dl.clone();
+    let templated = [
+        "{crate}",
+        "{version}",
+        "{prefix}",
+        "{lowerprefix}",
+        "{sha256-checksum}",
+    ]
+    .iter()
+    .any(|marker| url.contains(marker));
+    if templated {
+        url = url
+            .replace("{crate}", package)
+            .replace("{version}", &release.vers)
+            .replace("{prefix}", prefix)
+            .replace("{lowerprefix}", prefix)
+            .replace(
+                "{sha256-checksum}",
+                release.cksum.as_deref().unwrap_or_default(),
+            );
+    } else {
+        url = format!(
+            "{}/{}/{}/download",
+            url.trim_end_matches('/'),
+            package,
+            release.vers
+        );
+    }
+    let parsed = reqwest::Url::parse(&url)
+        .map_err(|error| Error::config(format!("invalid Cargo crate download URL: {error}")))?;
+    let loopback_http = cfg!(test)
+        && parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback());
+    if (parsed.scheme() != "https" && !loopback_http)
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(Error::config(
+            "Cargo crate download URL must use HTTPS without credentials",
+        ));
+    }
+    Ok(url)
+}
+
+async fn preflight_crate_artifact(
+    ctx: &Ctx,
+    source: &Source,
+    package: &str,
+    release: &CratesVersion,
+) -> Result<()> {
+    // Legacy/private sparse fixtures may omit the checksum field. Cargo itself
+    // remains authoritative for those registries; when the standard checksum is
+    // present, validate the concrete download route before committing to it.
+    if release.cksum.as_deref().is_none_or(str::is_empty) {
+        return Ok(());
+    }
+    let config_url = registry_config_url(source)?;
+    let config: RegistryConfig =
+        crate::http::get_cached_source_json(ctx, source, &config_url).await?;
+    let url = crate_download_url(&config, package, release)?;
+    crate::http::probe_source_artifact(&ctx.client, source, &url, CARGO_METADATA_TIMEOUT).await
+}
+
 #[derive(Debug, Deserialize)]
 struct CratesVersion {
     vers: String,
     #[serde(default)]
     yanked: bool,
+    #[serde(default)]
+    cksum: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryConfig {
+    dl: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,7 +502,7 @@ impl CargoPackageBackend {
         }
     }
 
-    async fn registry_selection(&self, ctx: &Ctx, package: &str) -> Result<CargoRegistrySelection> {
+    async fn registry_selection(&self, ctx: &Ctx, package: &str) -> Result<CratesResponse> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let tried = sources.len();
         let mut last_error = None;
@@ -427,12 +514,7 @@ impl CargoPackageBackend {
                 }
                 let url = crate_metadata_url(source, package)?;
                 match fetch_live_crate_metadata(ctx, source, &url).await {
-                    Ok(metadata) => {
-                        return Ok(CargoRegistrySelection {
-                            source: source.clone(),
-                            metadata,
-                        });
-                    }
+                    Ok(metadata) => return Ok(metadata),
                     Err(error) => last_error = Some(error),
                 }
             }
@@ -453,7 +535,7 @@ impl CargoPackageBackend {
                         url,
                         "using stale cached Cargo registry metadata after all live sources failed"
                     );
-                    return Ok(CargoRegistrySelection { source, metadata });
+                    return Ok(metadata);
                 }
                 Err(_) if !ctx.config.settings.offline => {}
                 Err(_) => {
@@ -463,6 +545,126 @@ impl CargoPackageBackend {
                 }
             }
         }
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: self.id.clone(),
+            tried,
+        }))
+    }
+
+    async fn registry_selection_for_spec(
+        &self,
+        ctx: &Ctx,
+        package: &str,
+        spec: &VersionSpec,
+    ) -> Result<(String, Source)> {
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let tried = sources.len();
+        let mut last_error = None;
+        let mut live_sources = std::collections::BTreeSet::new();
+        let mut any_live_metadata = false;
+
+        if !ctx.config.settings.offline {
+            for source in &sources {
+                let url = match crate_metadata_url(source, package) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        last_error = Some(error);
+                        continue;
+                    }
+                };
+                let metadata = match fetch_live_crate_metadata(ctx, source, &url).await {
+                    Ok(metadata) => {
+                        live_sources.insert(source.id.clone());
+                        any_live_metadata = true;
+                        metadata
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                        continue;
+                    }
+                };
+                let Some(version) = crate::version::select_version(spec, &version_infos(&metadata))
+                    .map(|version| version.version.clone())
+                else {
+                    continue;
+                };
+                let release = metadata
+                    .versions
+                    .iter()
+                    .find(|release| release.vers == version && !release.yanked)
+                    .expect("selected Cargo version came from this metadata");
+                match preflight_crate_artifact(ctx, source, package, release).await {
+                    Ok(()) => return Ok((version, source.clone())),
+                    Err(error) => {
+                        tracing::warn!(
+                            source = %source.id,
+                            version,
+                            error = %error,
+                            "Cargo source has metadata but cannot serve the selected crate artifact"
+                        );
+                        last_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        // Fresh metadata is authoritative for yanks and removals. Falling back
+        // to an older cached copy after any live index answered could resurrect
+        // a release that the registry deliberately withdrew.
+        if any_live_metadata {
+            return Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+                tool: self.id.clone(),
+                tried,
+            }));
+        }
+
+        for source in sources {
+            if live_sources.contains(&source.id) {
+                continue;
+            }
+            let url = match crate_metadata_url(&source, package) {
+                Ok(url) => url,
+                Err(error) => {
+                    if ctx.config.settings.offline {
+                        last_error = Some(error);
+                    }
+                    continue;
+                }
+            };
+            let metadata = match read_source_cached_crate_metadata(ctx, &source, &url) {
+                Ok(metadata) => metadata,
+                Err(_) if !ctx.config.settings.offline => continue,
+                Err(_) => {
+                    last_error = Some(Error::other(format!(
+                        "offline Cargo metadata cache miss for {url}"
+                    )));
+                    continue;
+                }
+            };
+            let Some(version) = crate::version::select_version(spec, &version_infos(&metadata))
+                .map(|version| version.version.clone())
+            else {
+                continue;
+            };
+            if !ctx.config.settings.offline {
+                let release = metadata
+                    .versions
+                    .iter()
+                    .find(|release| release.vers == version && !release.yanked)
+                    .expect("selected Cargo version came from this metadata");
+                if let Err(error) = preflight_crate_artifact(ctx, &source, package, release).await {
+                    last_error = Some(error);
+                    continue;
+                }
+            }
+            tracing::warn!(
+                source = %source.id,
+                url,
+                "using stale cached Cargo registry metadata after live candidates failed"
+            );
+            return Ok((version, source));
+        }
+
         Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
             tool: self.id.clone(),
             tried,
@@ -1012,8 +1214,8 @@ impl Backend for CargoPackageBackend {
         let CargoSource::Registry { package } = &self.source else {
             return Ok(Vec::new());
         };
-        let selection = self.registry_selection(ctx, package).await?;
-        Ok(version_infos(selection.metadata))
+        let metadata = self.registry_selection(ctx, package).await?;
+        Ok(version_infos(&metadata))
     }
 
     #[cfg(feature = "install")]
@@ -1039,33 +1241,34 @@ impl Backend for CargoPackageBackend {
                         Some(crate::source::select::active_source(ctx, self).await?),
                     ),
                     VersionSpec::Exact(version) => {
-                        let selection = self.registry_selection(ctx, package).await?;
-                        let versions = version_infos(selection.metadata);
-                        let exact = crate::version::select_version(
-                            &VersionSpec::Exact(version.clone()),
-                            &versions,
-                        )
-                        .ok_or_else(|| Error::VersionResolve {
+                        let (exact, source) = self
+                            .registry_selection_for_spec(
+                                ctx,
+                                package,
+                                &VersionSpec::Exact(version.clone()),
+                            )
+                            .await
+                            .map_err(|error| Error::VersionResolve {
                             tool: self.id.clone(),
                             spec: req.spec.to_string(),
-                            hint: Some("exact Cargo registry release is missing or yanked".into()),
-                        })?
-                        .version
-                        .clone();
-                        (exact, Some(selection.source))
+                            hint: Some(format!(
+                                "exact Cargo registry release is missing or yanked, or its artifact is unavailable: {error}"
+                            )),
+                        })?;
+                        (exact, Some(source))
                     }
                     VersionSpec::Latest | VersionSpec::Prefix(_) => {
-                        let selection = self.registry_selection(ctx, package).await?;
-                        let versions = version_infos(selection.metadata);
-                        let version = crate::version::select_version(&req.spec, &versions)
-                            .ok_or_else(|| Error::VersionResolve {
+                        let (version, source) = self
+                            .registry_selection_for_spec(ctx, package, &req.spec)
+                            .await
+                            .map_err(|error| Error::VersionResolve {
                                 tool: self.id.clone(),
                                 spec: req.spec.to_string(),
-                                hint: Some("no matching non-yanked crates.io release found".into()),
-                            })?
-                            .version
-                            .clone();
-                        (version, Some(selection.source))
+                                hint: Some(format!(
+                                    "no matching downloadable non-yanked Cargo registry release found: {error}"
+                                )),
+                            })?;
+                        (version, Some(source))
                     }
                     _ => {
                         return Err(Error::VersionResolve {
@@ -1331,6 +1534,15 @@ mod tests {
 
     impl MetadataServer {
         fn start(responses: Vec<(&'static str, &'static str, &'static str)>) -> Self {
+            Self::start_owned(
+                responses
+                    .into_iter()
+                    .map(|(path, status, body)| (path.into(), status.into(), body.into()))
+                    .collect(),
+            )
+        }
+
+        fn start_owned(responses: Vec<(String, String, String)>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1369,8 +1581,8 @@ mod tests {
                         server_requests.lock().unwrap().push(path.clone());
                         let (status, body) = responses
                             .iter()
-                            .find(|(expected, _, _)| *expected == path)
-                            .map(|(_, status, body)| (*status, *body))
+                            .find(|(expected, _, _)| expected == &path)
+                            .map(|(_, status, body)| (status.as_str(), body.as_str()))
                             .unwrap_or(("404 Not Found", ""));
                         write!(
                                 stream,
@@ -1639,7 +1851,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            version_infos(metadata)
+            version_infos(&metadata)
                 .into_iter()
                 .map(|version| version.version)
                 .collect::<Vec<_>>(),
@@ -1726,6 +1938,57 @@ mod tests {
                 "/fallback/ri/pg/ripgrep",
                 "/preferred/ri/pg/ripgrep",
                 "/fallback/ri/pg/ripgrep",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_resolution_rejects_metadata_only_source_when_artifact_is_missing() {
+        let artifact_server = MetadataServer::start(vec![
+            ("/preferred/ripgrep/14.1.1/download", "404 Not Found", ""),
+            ("/fallback/ripgrep/14.1.1/download", "200 OK", "crate bytes"),
+        ]);
+        let checksum = "11".repeat(32);
+        let metadata = format!(
+            "{{\"name\":\"ripgrep\",\"vers\":\"14.1.1\",\"yanked\":false,\"cksum\":\"{checksum}\"}}\n"
+        );
+        let server = MetadataServer::start_owned(vec![
+            (
+                "/preferred/ri/pg/ripgrep".into(),
+                "200 OK".into(),
+                metadata.clone(),
+            ),
+            (
+                "/preferred/config.json".into(),
+                "200 OK".into(),
+                format!("{{\"dl\":\"{}/preferred\"}}", artifact_server.base_url),
+            ),
+            ("/fallback/ri/pg/ripgrep".into(), "200 OK".into(), metadata),
+            (
+                "/fallback/config.json".into(),
+                "200 OK".into(),
+                format!("{{\"dl\":\"{}/fallback\"}}", artifact_server.base_url),
+            ),
+        ]);
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = context(temporary.path(), false);
+        let backend = CargoPackageBackend::from_id("cargo:ripgrep").unwrap();
+        configure_registry_sources(&mut ctx, &backend, &server.base_url);
+
+        let resolved = backend
+            .resolve_version(&ctx, &ToolRequest::parse("cargo:ripgrep@14.1.1").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolved.options[LOCKED_CARGO_INDEX_OPTION],
+            format!("sparse+{}/fallback/", server.base_url)
+        );
+        assert_eq!(
+            artifact_server.requests(),
+            [
+                "/preferred/ripgrep/14.1.1/download",
+                "/fallback/ripgrep/14.1.1/download",
             ]
         );
     }

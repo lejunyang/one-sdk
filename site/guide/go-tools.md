@@ -88,8 +88,10 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 自定义 Go proxy 必须是规范的 HTTPS origin 或 path，不得包含凭据、query、fragment 或末尾
 斜杠。存在 custom source 且未 pin 时只使用这些 candidate，避免把私有 module path 探测到
 公开默认 proxy。自定义 source header 会被拒绝，因为后续原生 `go install` 无法维持 osdk
-的逐请求凭据转发边界。选中的 proxy 会作为唯一 `GOPROXY` 条目传入，因此 provider 启动后
-不会暗中改试另一个来源。
+的逐请求凭据转发边界。全新解析会把选中的 proxy 放在首位，再把其余排序候选用 `|` 连接
+成一次 `GOPROXY`；Go 会在任意下载错误后换下一个 proxy，而 osdk 不需要重复执行可能带
+副作用的安装命令。lock 重放仍只使用记录的单一 proxy，避免把未记录的 source graph
+伪装成可复现输入。
 
 以上都属于 `go:<module>` 这类**包安装**路径。直接运行受管 `go`（`go build` /
 `go test`）拉取依赖是另一条通道：`[sources.go]` 只决定 Go 工具链归档的下载来源，

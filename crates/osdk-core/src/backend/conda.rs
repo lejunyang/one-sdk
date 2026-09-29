@@ -764,14 +764,16 @@ impl CondaBackend {
             .collect())
     }
 
-    /// Choose the base URL to fetch repodata from.
+    /// Order the base URLs used to fetch repodata.
     ///
     /// A pin (or any non-`Auto` selection) is a deliberate user choice and is
     /// always honoured, even when it costs the sharded index. Otherwise the
-    /// first source known to serve shards wins, because that difference is
-    /// worth far more than the latency the probe measured.
+    /// first source known to serve shards moves to the front, because that
+    /// difference is worth far more than the latency the probe measured. The
+    /// remaining sources stay available when that preferred metadata path does
+    /// not contain the requested package or cannot complete a solve.
     #[cfg(feature = "install")]
-    fn metadata_base(&self, ctx: &Ctx, sources: &[Source]) -> String {
+    fn metadata_bases(&self, ctx: &Ctx, sources: &[Source]) -> Vec<String> {
         // The pin is recorded against this backend's full id (`conda:clang`),
         // not the bare namespace, so it has to be looked up by `self.id()`.
         let user_chose = !matches!(ctx.config.sources.selection, crate::source::Selection::Auto)
@@ -779,18 +781,27 @@ impl CondaBackend {
                 .config
                 .tool_sources(self.id())
                 .is_some_and(|tool| tool.pin.is_some());
+        Self::ordered_metadata_bases(sources, user_chose)
+    }
+
+    #[cfg(feature = "install")]
+    fn ordered_metadata_bases(sources: &[Source], user_chose: bool) -> Vec<String> {
+        let mut bases = sources
+            .iter()
+            .map(|source| source.download_url.trim_end_matches('/').to_string())
+            .collect::<Vec<_>>();
         if !user_chose {
-            if let Some(sharded) = sources
-                .iter()
-                .find(|source| serves_sharded_repodata(&source.download_url))
-            {
-                return sharded.download_url.trim_end_matches('/').to_string();
+            if let Some(index) = bases.iter().position(|base| serves_sharded_repodata(base)) {
+                let sharded = bases.remove(index);
+                bases.insert(0, sharded);
             }
         }
-        sources
-            .first()
-            .map(|source| source.download_url.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| UPSTREAM_BASE.to_string())
+        if bases.is_empty() {
+            bases.push(UPSTREAM_BASE.to_string());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        bases.retain(|base| seen.insert(base.clone()));
+        bases
     }
 
     /// metadata from.
@@ -810,9 +821,9 @@ impl CondaBackend {
     /// The gateway caches under osdk's own cache dir rather than `~/.conda`,
     /// so this never disturbs a conda installation the user also runs.
     #[cfg(feature = "install")]
-    async fn gateway(
-        &self,
+    fn gateway_for_base(
         ctx: &Ctx,
+        base: &str,
     ) -> Result<(
         rattler_repodata_gateway::Gateway,
         rattler_conda_types::ChannelConfig,
@@ -820,8 +831,6 @@ impl CondaBackend {
         use rattler_conda_types::ChannelConfig;
         use rattler_repodata_gateway::Gateway;
 
-        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let base = self.metadata_base(ctx, &sources);
         let alias = url::Url::parse(&format!("{base}/")).map_err(|error| {
             Error::config(format!("invalid conda channel base `{base}`: {error}"))
         })?;
@@ -835,6 +844,29 @@ impl CondaBackend {
             .with_channel_config(rattler_repodata_gateway::ChannelConfig::default())
             .finish();
         Ok((gateway, channel_config))
+    }
+
+    #[cfg(feature = "install")]
+    fn artifact_urls(sources: &[Source], original: &url::Url) -> Vec<String> {
+        let original = original.as_str();
+        let relative = sources
+            .iter()
+            .map(|source| source.download_url.trim_end_matches('/'))
+            .chain(std::iter::once(UPSTREAM_BASE.trim_end_matches('/')))
+            .find_map(|base| original.strip_prefix(base))
+            .map(|path| path.trim_start_matches('/'));
+        let mut urls = relative
+            .map(|path| {
+                sources
+                    .iter()
+                    .map(|source| crate::http::join_url(&source.download_url, path))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !urls.iter().any(|url| url == original) {
+            urls.push(original.to_string());
+        }
+        urls
     }
 
     /// Download and unpack every solved package into one prefix.
@@ -856,6 +888,7 @@ impl CondaBackend {
         records: &[rattler_conda_types::RepoDataRecord],
         prefix: &std::path::Path,
     ) -> Result<()> {
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let scratch = prefix.join(".osdk-download");
         std::fs::create_dir_all(&scratch).map_err(|error| Error::io(&scratch, error))?;
         // Ownership of the requested package's own files, captured mid-loop.
@@ -873,33 +906,18 @@ impl CondaBackend {
             })?;
             let file_name = file_name.as_str();
             let archive = scratch.join(file_name);
-
-            crate::pipeline::download::download(
-                &ctx.client,
-                record.url.as_str(),
-                &archive,
-                file_name,
-                ctx.show_progress,
-            )
-            .await?;
-
-            match record.package_record.sha256 {
-                Some(digest) => crate::pipeline::verify::verify_file(
-                    &archive,
-                    &hex::encode(digest),
-                    crate::pipeline::HashAlgo::Sha256,
-                    file_name,
-                )?,
+            let digest = record.package_record.sha256.ok_or_else(|| {
                 // Refuse rather than install unverified bytes: every
                 // conda-forge record carries a sha256, so a missing one means
                 // something is wrong with the channel, not with this code.
-                None => {
-                    return Err(Error::other(format!(
-                        "conda package `{file_name}` has no sha256 in repodata; refusing to \
-                         install unverified bytes"
-                    )));
-                }
-            }
+                Error::other(format!(
+                    "conda package `{file_name}` has no sha256 in repodata; refusing to \
+                     install unverified bytes"
+                ))
+            })?;
+            let urls = Self::artifact_urls(&sources, &record.url);
+            download_verified_conda_artifact(ctx, &urls, &archive, file_name, &hex::encode(digest))
+                .await?;
 
             let target = prefix.to_path_buf();
             let archive_for_task = archive.clone();
@@ -957,8 +975,6 @@ impl CondaBackend {
         use rattler_conda_types::{MatchSpec, ParseStrictness};
         use rattler_solve::{resolvo::Solver, SolverImpl as _, SolverTask};
 
-        let (gateway, channel_config) = self.gateway(ctx).await?;
-        let channels = self.resolved_channels(&tv.options, &channel_config)?;
         let platforms = Self::query_platforms(ctx)?;
 
         // Pin the exact version the user asked for, and let the solver choose
@@ -985,16 +1001,6 @@ impl CondaBackend {
             specs.push(spec);
         }
 
-        // Recursive: the whole closure is needed, not just the root match. Every
-        // spec has to be queried, not just the main one -- repodata that lacks
-        // candidates for a `with` package would make the solve fail with a
-        // "no candidates" error that looks like the package does not exist.
-        let available = gateway
-            .query(channels, platforms, specs.clone())
-            .recursive(true)
-            .await
-            .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))?;
-
         let virtual_packages = rattler_virtual_packages::VirtualPackage::detect(
             &rattler_virtual_packages::VirtualPackageOverrides::default(),
             Some(&ctx.dirs.cache.join("conda").join("virtual-packages")),
@@ -1002,22 +1008,58 @@ impl CondaBackend {
         .map_err(|error| Error::other(format!("could not detect virtual packages: {error}")))?
         .into_iter()
         .map(rattler_conda_types::GenericVirtualPackage::from)
-        .collect();
+        .collect::<Vec<_>>();
 
-        let task = SolverTask {
-            virtual_packages,
-            specs,
-            // Strict priority is what makes `channels = ["nvidia", ...]`
-            // meaningful: nvidia's candidates are exhausted before falling
-            // back, so an explicitly preferred channel actually wins.
-            channel_priority: rattler_solve::ChannelPriority::Strict,
-            ..SolverTask::from_iter(&available)
-        };
-
-        let solved = Solver
-            .solve(task)
-            .map_err(|error| Error::other(format!("conda dependency solve failed: {error}")))?;
-        Ok(solved.records)
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let bases = self.metadata_bases(ctx, &sources);
+        let mut last_error = None;
+        for (index, base) in bases.iter().enumerate() {
+            let result = async {
+                let (gateway, channel_config) = Self::gateway_for_base(ctx, base)?;
+                let channels = self.resolved_channels(&tv.options, &channel_config)?;
+                // Recursive: the whole closure is needed, not just the root
+                // match. Every spec has to be queried, not only the main one.
+                let available = gateway
+                    .query(channels, platforms.clone(), specs.clone())
+                    .recursive(true)
+                    .await
+                    .map_err(|error| {
+                        Error::other(format!("conda repodata query failed: {error}"))
+                    })?;
+                let task = SolverTask {
+                    virtual_packages: virtual_packages.clone(),
+                    specs: specs.clone(),
+                    // Strict priority is what makes `channels = ["nvidia", ...]`
+                    // meaningful inside one source root.
+                    channel_priority: rattler_solve::ChannelPriority::Strict,
+                    ..SolverTask::from_iter(&available)
+                };
+                Solver
+                    .solve(task)
+                    .map(|solved| solved.records)
+                    .map_err(|error| {
+                        Error::other(format!("conda dependency solve failed: {error}"))
+                    })
+            }
+            .await;
+            match result {
+                Ok(records) => return Ok(records),
+                Err(error) => {
+                    tracing::warn!(
+                        source = %base,
+                        attempt = index + 1,
+                        total = bases.len(),
+                        error = %error,
+                        "conda metadata source failed; trying the next source"
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: self.id.clone(),
+            tried: bases.len(),
+        }))
     }
 
     /// Resolve the configured channels against a channel config.
@@ -1064,6 +1106,58 @@ impl CondaBackend {
     }
 }
 
+#[cfg(feature = "install")]
+async fn download_verified_conda_artifact(
+    ctx: &Ctx,
+    urls: &[String],
+    archive: &Path,
+    file_name: &str,
+    expected_sha256: &str,
+) -> Result<()> {
+    let mut last_error = None;
+    for (index, url) in urls.iter().enumerate() {
+        let _ = std::fs::remove_file(archive);
+        let result = async {
+            crate::pipeline::download::download(
+                &ctx.client,
+                url,
+                archive,
+                file_name,
+                ctx.show_progress,
+            )
+            .await?;
+            crate::pipeline::verify::verify_file(
+                archive,
+                expected_sha256,
+                crate::pipeline::HashAlgo::Sha256,
+                file_name,
+            )
+        }
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    url = %url,
+                    attempt = index + 1,
+                    total = urls.len(),
+                    "{}",
+                    crate::i18n::trf(
+                        "log.download_failover",
+                        &[("err", &error.to_string())]
+                    )
+                );
+                let _ = std::fs::remove_file(archive);
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+        tool: "conda".into(),
+        tried: urls.len(),
+    }))
+}
+
 #[async_trait]
 impl Backend for CondaBackend {
     fn id(&self) -> &str {
@@ -1094,8 +1188,6 @@ impl Backend for CondaBackend {
         use rattler_conda_types::{MatchSpec, PackageName, ParseStrictness};
         use std::str::FromStr as _;
 
-        let (gateway, channel_config) = self.gateway(ctx).await?;
-        let channels = self.resolved_channels(&BTreeMap::new(), &channel_config)?;
         let platforms = Self::query_platforms(ctx)?;
 
         let name = PackageName::from_str(&self.package)
@@ -1103,42 +1195,67 @@ impl Backend for CondaBackend {
         let spec = MatchSpec::from_str(name.as_normalized(), ParseStrictness::Lenient)
             .map_err(|error| Error::config(format!("invalid conda match spec: {error}")))?;
 
-        // Listing deliberately does not recurse: the user asked which versions
-        // of this package exist, not what its dependencies would drag in.
-        let records = gateway
-            .query(channels, platforms, [spec])
-            .recursive(false)
-            .await
-            .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))?;
-
-        // Sorting and prerelease detection both use conda's own version
-        // ordering. Conda versions are not semver (`1.0.1rc1`, `2024.06.1`,
-        // epochs such as `1!1.2`), so parsing them as semver would order them
-        // wrongly and mislabel release candidates as stable.
-        let mut versions: Vec<rattler_conda_types::Version> = Vec::new();
-        for repo in records.iter() {
-            for record in repo.iter() {
-                let version = record.package_record.version.version().clone();
-                if !versions.contains(&version) {
-                    versions.push(version);
+        let sources = crate::source::select::ranked_source_list(ctx, self).await?;
+        let bases = self.metadata_bases(ctx, &sources);
+        let mut last_error = None;
+        for (index, base) in bases.iter().enumerate() {
+            let result = async {
+                let (gateway, channel_config) = Self::gateway_for_base(ctx, base)?;
+                let channels = self.resolved_channels(&BTreeMap::new(), &channel_config)?;
+                // Listing deliberately does not recurse: the user asked which
+                // versions exist, not what their dependencies would drag in.
+                gateway
+                    .query(channels, platforms.clone(), [spec.clone()])
+                    .recursive(false)
+                    .await
+                    .map_err(|error| Error::other(format!("conda repodata query failed: {error}")))
+            }
+            .await;
+            match result {
+                Ok(records) => {
+                    // Sorting and prerelease detection use conda's own ordering.
+                    let mut versions: Vec<rattler_conda_types::Version> = Vec::new();
+                    for repo in records.iter() {
+                        for record in repo.iter() {
+                            let version = record.package_record.version.version().clone();
+                            if !versions.contains(&version) {
+                                versions.push(version);
+                            }
+                        }
+                    }
+                    if versions.is_empty() {
+                        last_error = Some(Error::other(format!(
+                            "no conda package `{}` found at {base}",
+                            self.package
+                        )));
+                        continue;
+                    }
+                    versions.sort();
+                    return Ok(versions
+                        .into_iter()
+                        .map(|version| VersionInfo {
+                            stable: is_stable_version(&version),
+                            version: version.to_string(),
+                            lts: None,
+                        })
+                        .collect());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        source = %base,
+                        attempt = index + 1,
+                        total = bases.len(),
+                        error = %error,
+                        "conda metadata source failed; trying the next source"
+                    );
+                    last_error = Some(error);
                 }
             }
         }
-        if versions.is_empty() {
-            return Err(Error::other(format!(
-                "no conda package `{}` found in the configured channels",
-                self.package
-            )));
-        }
-        versions.sort();
-        Ok(versions
-            .into_iter()
-            .map(|version| VersionInfo {
-                stable: is_stable_version(&version),
-                version: version.to_string(),
-                lts: None,
-            })
-            .collect())
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: self.id.clone(),
+            tried: bases.len(),
+        }))
     }
 
     #[cfg(feature = "install")]
@@ -1325,6 +1442,130 @@ impl Backend for CondaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    fn test_ctx(root: &Path) -> Ctx {
+        let dirs = Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(root.join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(root.join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(root.join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        Ctx {
+            cas: Arc::new(crate::store::Cas::new(dirs.store.clone())),
+            dirs,
+            platform: Platform::current(),
+            config: crate::config::Config::default(),
+            client: reqwest::Client::new(),
+            show_progress: false,
+        }
+    }
+
+    fn serve_bodies(bodies: Vec<Vec<u8>>) -> (Vec<String>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let urls = (0..bodies.len())
+            .map(|index| format!("http://{address}/candidate-{index}"))
+            .collect();
+        let server = std::thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (urls, server)
+    }
+
+    #[test]
+    fn metadata_order_prefers_shards_but_retains_every_fallback() {
+        let sources = vec![
+            Source::mirror("mirror", "https://mirror.example/anaconda/cloud", 0),
+            Source::official("anaconda", UPSTREAM_BASE),
+            Source::mirror("other", "https://other.example/anaconda/cloud", 20),
+        ];
+        assert_eq!(
+            CondaBackend::ordered_metadata_bases(&sources, false),
+            [
+                UPSTREAM_BASE,
+                "https://mirror.example/anaconda/cloud",
+                "https://other.example/anaconda/cloud",
+            ]
+        );
+        assert_eq!(
+            CondaBackend::ordered_metadata_bases(&sources, true),
+            [
+                "https://mirror.example/anaconda/cloud",
+                UPSTREAM_BASE,
+                "https://other.example/anaconda/cloud",
+            ]
+        );
+    }
+
+    #[test]
+    fn conda_artifact_urls_are_rebased_across_ranked_sources() {
+        let sources = vec![
+            Source::mirror("mirror", "https://mirror.example/anaconda/cloud", 0),
+            Source::official("anaconda", UPSTREAM_BASE),
+        ];
+        let original = url::Url::parse(
+            "https://conda.anaconda.org/conda-forge/linux-64/clang-23.1.1-h1.conda",
+        )
+        .unwrap();
+        assert_eq!(
+            CondaBackend::artifact_urls(&sources, &original),
+            [
+                "https://mirror.example/anaconda/cloud/conda-forge/linux-64/clang-23.1.1-h1.conda",
+                "https://conda.anaconda.org/conda-forge/linux-64/clang-23.1.1-h1.conda",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn conda_package_download_falls_back_after_checksum_mismatch() {
+        let good = b"verified conda package".to_vec();
+        let temporary = tempfile::tempdir().unwrap();
+        let expected = temporary.path().join("expected.conda");
+        std::fs::write(&expected, &good).unwrap();
+        let checksum =
+            crate::pipeline::verify::hash_file(&expected, crate::pipeline::HashAlgo::Sha256)
+                .unwrap();
+        let (urls, server) = serve_bodies(vec![b"wrong bytes".to_vec(), good]);
+        let archive = temporary.path().join("downloaded.conda");
+
+        download_verified_conda_artifact(
+            &test_ctx(temporary.path()),
+            &urls,
+            &archive,
+            "downloaded.conda",
+            &checksum,
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(std::fs::read(archive).unwrap(), b"verified conda package");
+    }
 
     #[test]
     fn parses_a_package_id() {

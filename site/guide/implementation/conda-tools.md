@@ -23,12 +23,14 @@
 
 rattler 自带 HTTP 入口，但它需要额外的 `reqwest_middleware` 依赖，而 osdk 已经
 有断点续传、重试和进度显示。因此下载走 `pipeline::download` + `verify_file`，
-rattler 只负责 `fs::extract` 解包。
+rattler 只负责 `fs::extract` 解包。求解结果里的绝对包 URL 会先还原成 channel 下的
+相对路径，再映射到所有排序 source；每个候选都完成下载与 SHA-256 校验后才算成功。
 
 摘要来源只能是 `repodata.json`：anaconda.org 的文件元数据 API 里 `sha256` 字段
 是空的。**缺摘要即拒装**，不存在"没有校验就先装上"的分支。
 
-解包放在 `spawn_blocking` 里执行，解完立即删归档。
+解包放在 `spawn_blocking` 里执行，解完立即删归档。checksum 不匹配的缓存文件也会先
+删除再试下一源，避免后一个 source 因目标文件已存在而错误复用坏字节。
 
 ## 元数据为什么优先上游而不是最近的镜像
 
@@ -39,8 +41,10 @@ rattler 会回落到整个 subdir 的 `repodata.json`（win-64 是 268 MB，zst 
 35 MB）。
 
 实测差距见用户指南里的表格：1.8 s / 1.6 MB 对 27.6 s / 445.9 MB。所以代码里
-有一个 `serves_sharded_repodata()` 正列表和独立的 `metadata_base()`，默认走分片
-源；只有用户显式 pin 或把 selection 调成非 `Auto` 时才尊重其选择。
+有一个 `serves_sharded_repodata()` 正列表和独立的 `metadata_bases()`，默认把分片
+源移到首位；只有用户显式 pin 或把 selection 调成非 `Auto` 时才保留用户给出的首项。
+无论哪种顺序，其余 source 都保留：repodata query、目标包缺失或 SAT 求解失败时会用
+全新的 channel alias 在下一 base 重试。
 
 SJTU 被刻意排除：`mirror.sjtu.edu.cn` 拒绝连接，`mirrors.sjtug.sjtu.edu.cn` 对
 anaconda 路径 404，留着只会白等一次探测超时。

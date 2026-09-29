@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION};
 
 use crate::backend::Ctx;
@@ -457,6 +458,37 @@ pub(crate) async fn get_source_response(
     url: &str,
 ) -> Result<reqwest::Response> {
     send_source_get(client, source, url).await
+}
+
+/// Confirm that a source can start serving one concrete artifact.
+///
+/// Generic source probes rank endpoints but cannot prove that a lagging mirror
+/// contains the requested package version. This bounded GET checks the actual
+/// artifact path and stops after the first non-empty body chunk, leaving the
+/// delegated package manager to download and authenticate the complete object.
+pub(crate) async fn probe_source_artifact(
+    client: &reqwest::Client,
+    source: &Source,
+    url: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let probe = async {
+        let response = send_source_get(client, source, url)
+            .await?
+            .error_for_status()
+            .map_err(|error| Error::network(url, error))?;
+        let mut stream = response.bytes_stream();
+        match stream.next().await {
+            Some(Ok(chunk)) if !chunk.is_empty() => Ok(()),
+            Some(Ok(_)) | None => Err(Error::other(format!(
+                "artifact source returned an empty response: {url}"
+            ))),
+            Some(Err(error)) => Err(Error::network(url, error)),
+        }
+    };
+    tokio::time::timeout(timeout, probe)
+        .await
+        .map_err(|_| Error::other(format!("artifact probe timed out: {url}")))?
 }
 
 async fn send_get_with_redirect_headers(

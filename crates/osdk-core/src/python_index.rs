@@ -423,6 +423,21 @@ pub fn version_from_filename(filename: &str) -> Option<String> {
 /// one. An empty candidate list means "no mirror configured", which is a
 /// pass-through rather than an implicit switch to upstream.
 pub async fn plan(candidates: &[String], timeout_ms: u64) -> IndexPlan {
+    plan_for_probe_project(candidates, timeout_ms, PROBE_PROJECT).await
+}
+
+/// Rank indexes by probing the package that the caller will actually install.
+/// A generic `pip` page can be healthy while a partial mirror lacks another
+/// project entirely, so dynamic `pypi:` installs use this target-aware form.
+pub async fn plan_for_project(candidates: &[String], timeout_ms: u64, project: &str) -> IndexPlan {
+    plan_for_probe_project(candidates, timeout_ms, project).await
+}
+
+async fn plan_for_probe_project(
+    candidates: &[String],
+    timeout_ms: u64,
+    project: &str,
+) -> IndexPlan {
     if candidates.is_empty() {
         return IndexPlan::PassThrough {
             reason: "no Python index mirrors configured".to_string(),
@@ -442,7 +457,7 @@ pub async fn plan(candidates: &[String], timeout_ms: u64) -> IndexPlan {
     ) {
         return IndexPlan::PassThrough { reason };
     }
-    let probes = probe_all(candidates, timeout_ms).await;
+    let probes = probe_all(candidates, timeout_ms, project).await;
     // Preserve configured order among equally fast candidates by using the
     // probe order as the tie-break, and require a latency to have been recorded.
     let best = probes
@@ -458,7 +473,7 @@ pub async fn plan(candidates: &[String], timeout_ms: u64) -> IndexPlan {
     }
 }
 
-async fn probe_all(candidates: &[String], timeout_ms: u64) -> Vec<IndexProbe> {
+async fn probe_all(candidates: &[String], timeout_ms: u64, project: &str) -> Vec<IndexProbe> {
     let timeout = Duration::from_millis(timeout_ms.max(1));
     let client = match reqwest::Client::builder()
         .user_agent(concat!("osdk/", env!("CARGO_PKG_VERSION"), " index-probe"))
@@ -480,7 +495,7 @@ async fn probe_all(candidates: &[String], timeout_ms: u64) -> Vec<IndexProbe> {
     };
     let futures = candidates.iter().cloned().map(|url| {
         let client = client.clone();
-        async move { probe_one(&client, url, timeout).await }
+        async move { probe_one(&client, url, project, timeout).await }
     });
     futures_util::future::join_all(futures).await
 }
@@ -525,9 +540,14 @@ fn validate_index_probe_redirect(
     Ok(())
 }
 
-async fn probe_one(client: &reqwest::Client, base: String, timeout: Duration) -> IndexProbe {
+async fn probe_one(
+    client: &reqwest::Client,
+    base: String,
+    project: &str,
+    timeout: Duration,
+) -> IndexProbe {
     let started = Instant::now();
-    let endpoint = format!("{}/{PROBE_PROJECT}/", base.trim_end_matches('/').to_owned());
+    let endpoint = format!("{}/{project}/", base.trim_end_matches('/').to_owned());
     let result = tokio::time::timeout(timeout, async {
         let response = client
             .get(&endpoint)
@@ -654,6 +674,41 @@ fn probe_error(error: reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn serve_once(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_string();
+        let body = body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            String::from_utf8(request)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+        (format!("http://{address}/simple/"), server)
+    }
+
     /// With nothing configured, the built-in mirrors must actually be candidates,
     /// and upstream must remain reachable as the last one.
     ///
@@ -832,6 +887,25 @@ mod tests {
         // Unavailable must not leak a usable URL: silently continuing with a
         // broken mirror is what fail-closed is meant to prevent.
         assert_eq!(outcome.selected_url(), None);
+    }
+
+    #[tokio::test]
+    async fn project_plan_probes_the_requested_project_not_the_generic_sentinel() {
+        let (missing, missing_server) = serve_once("404 Not Found", "");
+        let (available, available_server) =
+            serve_once("200 OK", "<a href=\"tool-1.0.whl\">tool</a>");
+
+        let plan = plan_for_project(&[missing, available.clone()], 2_000, "tool").await;
+
+        assert_eq!(plan.selected_url(), Some(available.as_str()));
+        assert!(missing_server
+            .join()
+            .unwrap()
+            .starts_with("GET /simple/tool/ "));
+        assert!(available_server
+            .join()
+            .unwrap()
+            .starts_with("GET /simple/tool/ "));
     }
 
     #[test]

@@ -155,11 +155,19 @@ by osdk, download, checksum/attestation verification, extraction, and required-f
 checks are one candidate attempt. Failure at any stage discards that candidate and
 tries the next ranked source; the receipt records only the URL that passed the full
 attempt. Model downloads likewise try the remaining ranked sources after one source
-exhausts its attempts. Exhausting every source remains terminal. Delegated package
-managers such as npm and uv own their network behavior; their guarantees are
-described in the installer-specific sections below. Online metadata access may use
-stale cache after a request failure; strict offline mode only reads existing cache,
-while still re-verifying and unpacking the cached artifact.
+exhausts its attempts. Exhausting every source remains terminal.
+
+Delegated installers cannot all be handled by blindly rerunning a failed command,
+because an install script may already have produced side effects. osdk therefore
+fails over at safe, ecosystem-specific boundaries: Rust reruns the complete rustup
+download operation per source; Cargo checks the exact crate version's `config.json`
+download endpoint before committing to a sparse index; `pypi:` probes the requested
+project page rather than a fixed `pip` page and passes the selected index to uv/pip;
+and `go:` supplies one native `GOPROXY` chain joined with `|`. Ordinary project
+npm/uv/pip commands still execute once and are not blindly replayed after a possible
+lifecycle script. Online metadata access may use stale cache after a request failure;
+strict offline mode only reads existing cache, while still re-verifying and unpacking
+the cached artifact.
 
 ## Offline mode
 

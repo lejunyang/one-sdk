@@ -177,10 +177,12 @@ upstream would send lookups somewhere they did not choose and defeat an
 internal-only setup.
 
 osdk ranks the candidates with a fresh anonymous probe and picks the fastest
-healthy one. A probe checks more than HTTP 200: it validates the response *shape*
-(PEP 503 anchors or a PEP 691 `files` array), so a captive portal answering 200
-with a welcome page cannot rank as a healthy mirror.
-`osdk registry test python` probes exactly the candidate set that installs use.
+healthy one. `osdk registry test python` uses the long-lived `pip` project as a
+generic health check, while an actual `pypi:<project>` install probes the requested
+project page so a reachable but partially synchronized mirror cannot win. Both
+probes validate the response *shape* (PEP 503 anchors or a PEP 691 `files` array),
+not only HTTP 200, so a captive portal cannot rank as healthy. The selected URL is
+then passed to uv/pip as its default index rather than being used only for timing.
 
 ::: danger A mirror only ever replaces the default index
 A mirror is a complete copy of PyPI and therefore carries upstream's package

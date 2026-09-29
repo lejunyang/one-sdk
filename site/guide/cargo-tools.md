@@ -79,6 +79,12 @@ osdk source add cargo:ripgrep --id corp \
 Cargo backend 会在探测时拒绝缺失或非规范的 sparse HTTPS `index_url`；Cargo 元数据解析
 不会再读取 crates.io Web API，也不会从 `download_url` 推断另一套 Registry。
 
+通用 probe 和 crate 分片 metadata 都成功后，osdk 还会读取该 sparse index 的
+`config.json`，按其中的 `dl` 规则构造所选精确版本的 `.crate` 地址，并确认该地址能开始
+返回内容。只有这一目标级预检也成功的 source 才会写入安装身份并交给 Cargo；镜像只有
+index、缺少 crate 文件时会在执行构建脚本之前换到下一个 source。真正的依赖解析与完整
+checksum 校验仍由 Cargo 完成，Cargo 命令失败后不会被 osdk 盲目重跑。
+
 ## 从 HTTPS Git 仓库安装
 
 把仓库 URL 写成 `cargo:` 的 subject：

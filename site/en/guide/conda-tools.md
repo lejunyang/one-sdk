@@ -88,7 +88,9 @@ from Beijing running `osdk lsr conda:clang`:
 
 The mirrors are genuinely faster per byte (4.5 vs 3.4 MB/s), but 1.3x cannot pay
 for 278x the bytes. They remain in the list as failover for when upstream is
-unreachable, which is the case where they actually help.
+unreachable: a repodata request or dependency solve tries the next base, and
+each solved package URL is rebased across the ranked sources with per-candidate
+download and SHA-256 verification.
 
 If you explicitly `osdk source pin` a mirror, osdk respects that choice and
 downloads the full repodata from it.

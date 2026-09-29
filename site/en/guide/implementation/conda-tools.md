@@ -30,14 +30,17 @@ rattler has its own HTTP entry point, but it needs an extra
 `reqwest_middleware` dependency while osdk already has resumable transfers,
 retries and progress reporting. Downloads therefore go through
 `pipeline::download` plus `verify_file`, and rattler is used only for
-`fs::extract`.
+`fs::extract`. Absolute package URLs from the solve are reduced to their
+channel-relative path and mapped across all ranked source roots; each candidate
+must finish both download and SHA-256 verification before it is accepted.
 
 Digests can only come from `repodata.json`: the anaconda.org file metadata API
 returns an empty `sha256` field. A package without a digest is **refused rather
 than installed unverified** -- there is no "install now, verify never" branch.
 
 Extraction runs inside `spawn_blocking`, and each archive is deleted as soon as
-it is unpacked.
+it is unpacked. A checksum-mismatched cache entry is also removed before trying
+the next source, so later candidates cannot accidentally reuse bad bytes.
 
 ## Why metadata prefers upstream over the nearest mirror
 
@@ -50,9 +53,10 @@ win-64, 35 MB zstd-compressed.
 
 The measured gap is in the user guide: 1.8 s / 1.6 MB versus 27.6 s / 445.9 MB.
 The code therefore keeps a `serves_sharded_repodata()` allowlist and a separate
-`metadata_base()`, defaulting to a sharded source and honouring the user's
-choice only when they pinned one explicitly or set selection to something other
-than `Auto`.
+`metadata_bases()`. Auto mode moves a sharded source to the front; an explicit
+pin or non-`Auto` selection keeps the user's first candidate. Either way, every
+remaining source is retained, and a repodata query, missing target, or SAT solve
+failure retries with a fresh channel alias at the next base.
 
 SJTU is deliberately excluded: `mirror.sjtu.edu.cn` refuses connections and
 `mirrors.sjtug.sjtu.edu.cn` 404s for anaconda paths, so listing it would only

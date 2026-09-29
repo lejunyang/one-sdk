@@ -43,7 +43,7 @@ would always be invalid. See
 5. When stale, all sources are probed concurrently, each bounded by `probe_timeout_ms`, reading at most about 1 MiB.
 6. Successful probes are sorted by the composite score `throughput - ttfb_ms` in descending order. Failed probes are appended, so real downloads can still use them as final fallbacks.
 
-Each backend owns metadata lookup and artifact URL construction, so a source must actually implement that backend's expected layout. The shared pipeline downloads in URL order; one URL gets up to three transient-error attempts before failover. A successful probe is not an integrity result: checksum or attestation verification remains a separate post-download step. See [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) and [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs).
+Each backend owns metadata lookup and artifact URL construction, so a source must actually implement that backend's expected layout. The shared pipeline performs a complete candidate attempt in URL order; one URL gets up to three transient-error attempts, then a download, checksum/attestation, extraction, or required-subdirectory failure moves to the next URL. A successful probe proves neither target-artifact availability nor integrity. Zig and Gradle merge ranked indexes and rebase their absolute artifact URLs; Conda queries and solves per source base, then verifies each candidate package URL against repodata SHA-256. See [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) and [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs).
 
 Explicit `Source.headers` applies to metadata requests and source probes made by
 osdk and is independent of `forward_credentials`. Headers are attached only when
@@ -58,7 +58,13 @@ running in their isolated prefix.
 Go command tools add one stricter boundary: if custom sources exist, only those
 custom candidates (plus an explicitly pinned candidate) are ranked, so a private
 module path is not sent to public default proxies. Custom headers are rejected
-because `go install` cannot enforce osdk's per-request forwarding policy.
+because `go install` cannot enforce osdk's per-request forwarding policy. A fresh
+resolution joins the preferred and remaining candidates with `|` as one GOPROXY,
+letting Go perform download failover inside one provider invocation; lock replay
+restores only its recorded primary proxy. Cargo Registry selection instead reads
+the sparse `config.json` and probes the exact `.crate` URL before fixing source
+identity, avoiding a rerun after build scripts may have started. `pypi:` probes
+the requested project page and injects the winner as uv/pip's default index.
 
 ## Project registry preflight
 

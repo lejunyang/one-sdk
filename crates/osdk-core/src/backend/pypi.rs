@@ -289,6 +289,7 @@ impl PypiBackend {
         choice: &InstallerChoice,
         interpreter: &Path,
         venv: &Path,
+        index: Option<&str>,
     ) -> Result<()> {
         // A user-supplied pip.conf must not be able to redirect the index, so
         // the pip path always runs against a config file osdk controls.
@@ -301,13 +302,6 @@ impl PypiBackend {
                 .map_err(|error| Error::io(path, error))?;
         }
 
-        let index = ctx
-            .config
-            .registries()
-            .python
-            .urls
-            .first()
-            .map(String::as_str);
         // Reuse the same directory the shell hook redirects to, so an install
         // performed by osdk and one performed in an activated shell share a cache
         // rather than filling two.
@@ -358,15 +352,20 @@ impl PypiBackend {
     /// installing from a lagging mirror is how a version that "exists" turns out
     /// to be unavailable moments later.
     #[cfg(feature = "install")]
-    async fn resolved_index(&self, ctx: &Ctx) -> Result<String> {
+    async fn resolved_index(&self, ctx: &Ctx) -> Result<Option<String>> {
         let configured = &ctx.config.registries().python;
         let candidates = crate::python_index::effective_candidates(&configured.urls);
-        match crate::python_index::plan(&candidates, configured.probe_timeout_ms).await {
-            crate::python_index::IndexPlan::Selected { url, .. } => Ok(url),
-            // No mirror configured: upstream is the default index.
-            crate::python_index::IndexPlan::PassThrough { .. } => {
-                Ok(crate::python_index::PYPI.to_string())
-            }
+        match crate::python_index::plan_for_project(
+            &candidates,
+            configured.probe_timeout_ms,
+            &self.project,
+        )
+        .await
+        {
+            crate::python_index::IndexPlan::Selected { url, .. } => Ok(Some(url)),
+            // Credentials or native configuration require pass-through; an
+            // explicit public endpoint here would override that decision.
+            crate::python_index::IndexPlan::PassThrough { .. } => Ok(None),
             // Configured mirrors all failed. Falling back to upstream here would
             // silently ignore the configuration, so this fails closed.
             crate::python_index::IndexPlan::Unavailable { probes } => {
@@ -1000,7 +999,10 @@ impl Backend for PypiBackend {
 
     #[cfg(feature = "install")]
     async fn list_remote_versions(&self, ctx: &Ctx) -> Result<Vec<VersionInfo>> {
-        let index = self.resolved_index(ctx).await?;
+        let index = self
+            .resolved_index(ctx)
+            .await?
+            .unwrap_or_else(|| crate::python_index::PYPI.to_string());
         let versions = crate::python_index::list_versions(
             &ctx.client,
             &index,
@@ -1086,6 +1088,14 @@ impl Backend for PypiBackend {
             // the person running the command, not only a log file.
             eprintln!("osdk: {notice}");
         }
+        // Resolve the network endpoint before touching the destination. A
+        // transient source failure must not remove an otherwise recoverable
+        // environment before the installer has even started.
+        let index = if ctx.config.settings.offline {
+            ctx.config.registries().python.urls.first().cloned()
+        } else {
+            self.resolved_index(ctx).await?
+        };
 
         // A dynamic install lives at `install_path/<install_id>`, not at
         // `install_path` itself. Writing to the latter produced an environment
@@ -1120,7 +1130,8 @@ impl Backend for PypiBackend {
             std::fs::create_dir_all(parent).map_err(|error| Error::io(parent, error))?;
         }
 
-        let result = self.build_environment(ctx, tv, &choice, &interpreter, &root);
+        let result =
+            self.build_environment(ctx, tv, &choice, &interpreter, &root, index.as_deref());
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&root);
             return result;

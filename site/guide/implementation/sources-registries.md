@@ -38,7 +38,7 @@ osdk 有两套独立的网络选择机制，不能混为一谈：
 5. 缓存过期时并发探测所有 source，每个探测受 `probe_timeout_ms` 限制，最多读取约 1 MiB；
 6. 成功结果按 `throughput - ttfb_ms` 的组合分数降序排列；失败项追加到尾部，仍保留为真实下载的最后 fallback。
 
-版本 metadata 查询和 artifact URL 构造由各 backend 完成，所以不同 source 必须真正兼容对应 backend。共享 pipeline 随后按 URL 顺序下载；每个 URL 内的瞬时失败最多重试三次，失败后才切下一个 URL。probe 成功不是 artifact 完整性证明，checksum/attestation 在下载后独立执行。实现见 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) 与 [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs)。
+版本 metadata 查询和 artifact URL 构造由各 backend 完成，所以不同 source 必须真正兼容对应 backend。共享 pipeline 随后按 URL 顺序执行完整候选尝试；每个 URL 内的瞬时失败最多重试三次，下载、checksum/attestation、解包或约定 subdir 任一步失败才切下一个 URL。probe 成功不是目标 artifact 可用性或完整性证明。Zig/Gradle 会合并排序 source 的 index 并重映射其中的绝对 artifact URL；Conda 会逐 source base 查询/求解，并按 repodata SHA-256 验证每个候选包 URL。实现见 [`source/select.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/source/select.rs) 与 [`pipeline/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/pipeline/mod.rs)。
 
 显式 `Source.headers` 用于 osdk 自己发起的 metadata 请求与 source probe，并独立于
 `forward_credentials`。只有初始 URL 与配置的 index/download URL 同 origin 时才附加；
@@ -49,7 +49,11 @@ metadata/probe cache identity，不明文写入 cache。受管的 npm/pnpm 子�
 认证或私有原生配置透传。
 Go command 工具有更严格的边界：存在 custom source 时只对这些 custom candidate（以及
 显式 pin 的 candidate）排序，避免把私有 module path 发往公开默认 proxy。自定义 header
-会被拒绝，因为 `go install` 无法执行 osdk 的逐请求转发策略。
+会被拒绝，因为 `go install` 无法执行 osdk 的逐请求转发策略。全新解析会把首选及其余
+候选组成 `|` 分隔的 GOPROXY，让 Go 自己在一次 provider 运行中处理下载回退；lock 重放
+只恢复记录的首选 proxy。Cargo Registry 则在确定 source 身份前读取 sparse `config.json`
+并探测精确 `.crate` URL，避免在 build script 可能启动后重跑。`pypi:` 的选择探测实际
+project 页面，并把结果注入 uv/pip 的 default index。
 
 ## 项目 registry 启动前预检
 

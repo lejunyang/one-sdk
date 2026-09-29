@@ -37,6 +37,7 @@ const PROVIDER_OUTPUT_LIMIT: usize = 1024 * 1024;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 pub const LOCKED_GO_PROXY_OPTION: &str = "__osdk_go_proxy";
 pub const LOCKED_GO_MODULE_OPTION: &str = "__osdk_go_module";
+const GO_PROXY_FALLBACKS_OPTION: &str = "__osdk_go_proxy_fallbacks";
 static NEXT_METADATA_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +144,33 @@ impl GoPackageBackend {
             .unwrap_or("https://proxy.golang.org");
         validate_go_proxy(proxy)?;
         Ok(proxy)
+    }
+
+    fn proxy_chain<'a>(&self, options: &'a BTreeMap<String, String>) -> Result<&'a str> {
+        let selected = self.proxy(options)?;
+        let Some(chain) = options.get(GO_PROXY_FALLBACKS_OPTION) else {
+            return Ok(selected);
+        };
+        let proxies = chain.split('|').collect::<Vec<_>>();
+        if proxies.first().copied() != Some(selected) || proxies.is_empty() {
+            return Err(Error::config(
+                "Go proxy fallback list must begin with the selected proxy",
+            ));
+        }
+        for proxy in proxies {
+            validate_go_proxy(proxy)?;
+        }
+        Ok(chain)
+    }
+
+    fn proxy_fallbacks(selected: &str, sources: &[Source]) -> String {
+        let mut proxies = vec![selected.to_string()];
+        for source in sources {
+            if !proxies.contains(&source.download_url) {
+                proxies.push(source.download_url.clone());
+            }
+        }
+        proxies.join("|")
     }
 
     fn module_root<'a>(&'a self, options: &'a BTreeMap<String, String>) -> Result<&'a str> {
@@ -517,7 +545,7 @@ impl GoPackageBackend {
             (OsString::from("GONOPROXY"), OsString::from("none")),
             (
                 OsString::from("GOPROXY"),
-                OsString::from(self.proxy(&tv.options)?),
+                OsString::from(self.proxy_chain(&tv.options)?),
             ),
             (
                 OsString::from("PATH"),
@@ -811,6 +839,15 @@ impl Backend for GoPackageBackend {
             }
         };
         validate_go_proxy(&source)?;
+        let fallback_chain =
+            if !ctx.config.settings.offline && !Self::has_locked_resolution(&options) {
+                Some(Self::proxy_fallbacks(
+                    &source,
+                    &self.ranked_proxy_sources(ctx).await?,
+                ))
+            } else {
+                None
+            };
         let mut resolved = ToolVersion::new(&self.id, version);
         resolved.options = options;
         resolved
@@ -819,6 +856,11 @@ impl Backend for GoPackageBackend {
         resolved
             .options
             .insert(LOCKED_GO_MODULE_OPTION.into(), module_root);
+        if let Some(fallbacks) = fallback_chain {
+            resolved
+                .options
+                .insert(GO_PROXY_FALLBACKS_OPTION.into(), fallbacks);
+        }
         resolved
             .options
             .insert(LOCKED_NATIVE_REPLAY_OPTION.into(), "version-only".into());
@@ -1869,6 +1911,35 @@ mod tests {
                 "`{value}` should be explained as a policy or list, got: {message}"
             );
         }
+    }
+
+    #[test]
+    fn selected_go_proxy_stays_first_in_native_fallback_chain() {
+        let sources = vec![
+            Source::mirror("preferred", "https://proxy.example", 0),
+            Source::official("upstream", "https://proxy.golang.org"),
+            Source::mirror("duplicate", "https://proxy.example", 20),
+        ];
+        let chain = GoPackageBackend::proxy_fallbacks("https://selected.example", &sources);
+        assert_eq!(
+            chain,
+            "https://selected.example|https://proxy.example|https://proxy.golang.org"
+        );
+
+        let backend = GoPackageBackend::from_id("go:example.com/acme/tool").unwrap();
+        let mut options = BTreeMap::from([
+            (
+                LOCKED_GO_PROXY_OPTION.into(),
+                "https://selected.example".into(),
+            ),
+            (GO_PROXY_FALLBACKS_OPTION.into(), chain.clone()),
+        ]);
+        assert_eq!(backend.proxy_chain(&options).unwrap(), chain);
+        options.insert(
+            GO_PROXY_FALLBACKS_OPTION.into(),
+            "https://other.example|https://selected.example".into(),
+        );
+        assert!(backend.proxy_chain(&options).is_err());
     }
 
     #[test]

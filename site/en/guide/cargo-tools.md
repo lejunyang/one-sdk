@@ -88,6 +88,15 @@ The Cargo backend rejects a missing or non-canonical sparse HTTPS `index_url`
 during probing. Cargo metadata resolution no longer reads crates.io's Web API or
 infers a second registry from `download_url`.
 
+After the generic probe and crate-shard metadata both succeed, osdk also reads
+that sparse index's `config.json`, constructs the selected exact version's
+`.crate` URL from its `dl` rule, and confirms that the endpoint starts returning
+content. Only a source that passes this target-level preflight is recorded in the
+install identity and handed to Cargo. A mirror with an index but no crate file
+therefore falls through before any build script runs. Cargo still owns dependency
+resolution and full checksum verification, and osdk does not blindly replay a
+failed Cargo command.
+
 ## Install from an HTTPS Git repository
 
 Use the repository URL as the `cargo:` subject:

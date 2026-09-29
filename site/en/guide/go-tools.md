@@ -100,8 +100,11 @@ query strings, fragments, or trailing slashes. When custom sources are present
 without a pin, only those candidates are used, preventing private module paths
 from being probed against public defaults. Custom source headers are rejected
 because the later native `go install` process cannot preserve osdk's per-request
-credential-forwarding boundary. The selected proxy is passed as the only
-`GOPROXY` entry, so a started provider does not silently retry another source.
+credential-forwarding boundary. A fresh resolution places the selected proxy
+first, then joins the remaining ranked candidates with `|` into one `GOPROXY`.
+Go can therefore change proxy after any download error without osdk rerunning a
+possibly side-effecting install command. Lock replay still uses only its recorded
+proxy, rather than pretending an unrecorded source graph is reproducible input.
 
 All of the above concerns the `go:<module>` **package install** path. Running a
 managed `go` directly (`go build` / `go test`) fetches dependencies over a

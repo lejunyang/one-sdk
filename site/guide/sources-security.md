@@ -130,9 +130,15 @@ Last-Modified，重试时用 `Range` + `If-Range` 续传；服务端忽略或返
 存在；HTTP 200 也可能是镜像错误页。因此 osdk 直接处理的归档、裸二进制和自升级产物会
 把下载、checksum/attestation 校验、解包及必需文件检查视为同一个候选尝试，任一步失败
 都会清理该候选并继续下一个排序来源；receipt 只记录真正通过完整验证的 URL。模型在某个
-来源耗尽尝试后也会继续剩余排序来源；所有来源都耗尽后才终止。npm、uv 等受委托包管理器
-自行负责其网络行为；对应保证见下文各安装器说明。HTTP metadata 在线请求失败后可使用
-stale 缓存；严格 offline 只读已有缓存，缓存产物仍会重新校验和解包。
+来源耗尽尝试后也会继续剩余排序来源；所有来源都耗尽后才终止。
+
+委托型安装器不能统一用“命令失败就重跑”处理，因为安装脚本可能已经产生副作用。osdk
+改在安全边界内做目标级验证：Rust 对每个 source 重跑完整 rustup 下载命令；Cargo 在锁定
+sparse index 前检查该 crate 精确版本的 `config.json` 下载端点；`pypi:` 用实际项目页而非
+固定 `pip` 页探测，并把选中 index 作为 uv/pip 的默认 index；`go:` 把排序候选以 `|`
+组成一次原生 `GOPROXY` 回退链。普通项目里的 npm/uv/pip 等命令仍只执行一次，不会在
+可能已运行 lifecycle script 后盲目重放。HTTP metadata 在线请求失败后可使用 stale 缓存；
+严格 offline 只读已有缓存，缓存产物仍会重新校验和解包。
 
 ## 离线模式
 

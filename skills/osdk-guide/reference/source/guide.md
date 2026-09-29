@@ -30,3 +30,8 @@ probe 只对候选排序，不保证目标版本一定存在。osdk 直接下载
 任一步失败都会清理该候选并继续后备源。`--offline` 不会换源，但仍校验并解包缓存产物。
 Zig 与 Gradle index 中的绝对产物 URL 会按发布相对路径重映射到排序后的 download URL；
 Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项。
+
+委托型安装不会一概在命令失败后重跑：Cargo 会在选定 sparse index 前探测精确 crate
+制品，`pypi:` 会探测实际项目页并把结果传给 uv/pip，`go:` 的全新解析会生成以 `|`
+连接的原生 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
+仍只运行一次。
