@@ -67,6 +67,22 @@ struct PackageLinks {
 }
 
 impl JavaBackend {
+    fn source_catalog_url(source: &Source) -> String {
+        source
+            .index_url
+            .clone()
+            .unwrap_or_else(|| source.download_url.clone())
+    }
+
+    fn distributions_url(source: &Source) -> String {
+        let packages = Self::source_catalog_url(source);
+        let root = packages
+            .trim_end_matches('/')
+            .strip_suffix("/packages")
+            .unwrap_or(packages.trim_end_matches('/'));
+        format!("{root}/distributions")
+    }
+
     fn os_token(os: Os) -> &'static str {
         match os {
             Os::Linux => "linux",
@@ -164,9 +180,9 @@ impl Backend for JavaBackend {
         ]
     }
 
-    fn probe_url(&self, _ctx: &Ctx, _source: &Source) -> Option<String> {
+    fn probe_url(&self, _ctx: &Ctx, source: &Source) -> Option<String> {
         // A tiny metadata endpoint for probing.
-        Some("https://api.foojay.io/disco/v3.0/distributions".to_string())
+        Some(Self::distributions_url(source))
     }
 
     #[cfg(feature = "install")]
@@ -240,41 +256,9 @@ impl Backend for JavaBackend {
             .map(String::as_str)
             .unwrap_or_else(|| tv.version.strip_prefix("jre-").unwrap_or(&tv.version));
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let base_index = ctx
-            .config
-            .settings
-            .java
-            .catalog_url
-            .clone()
-            .or_else(|| sources.first().map(|source| source.download_url.clone()))
-            .unwrap_or_else(|| "https://api.foojay.io/disco/v3.0/packages".to_string());
-
-        // Query the exact package for this version.
-        let url = Self::packages_url(
-            ctx,
-            &base_index,
-            &distribution,
-            &package_type,
-            Some(java_version),
-        );
-        let resp: DiscoResponse<Package> = http::get_cached_json(ctx, &url).await?;
-        let pkg = resp
-            .result
-            .into_iter()
-            .find(|p| {
-                !p.links.pkg_download_redirect.is_empty()
-                    && (p.package_type.is_empty() || p.package_type == package_type)
-                    && (ctx.platform.os != Os::Linux
-                        || p.lib_c_type.is_empty()
-                        || p.lib_c_type == Self::libc_token(ctx))
-            })
-            .ok_or_else(|| Error::VersionResolve {
-                tool: self.id().to_string(),
-                spec: java_version.into(),
-                hint: Some(format!(
-                    "no {distribution} {package_type} package for this platform"
-                )),
-            })?;
+        let (base_index, source, pkg) = self
+            .package_for_version(ctx, &sources, &distribution, &package_type, java_version)
+            .await?;
 
         let file_name = if pkg.filename.is_empty() {
             format!(
@@ -307,7 +291,9 @@ impl Backend for JavaBackend {
         urls.push(redirect);
 
         // Fetch the per-id detail to get the vendor-published sha256 checksum.
-        let checksum = self.fetch_checksum(ctx, &base_index, &pkg.id).await;
+        let checksum = self
+            .fetch_checksum(ctx, &sources, &base_index, source.as_ref(), &pkg.id)
+            .await;
 
         let plan = InstallPlan {
             tool: self.id().to_string(),
@@ -377,6 +363,74 @@ impl Backend for JavaBackend {
 }
 
 impl JavaBackend {
+    fn catalog_endpoints<'a>(
+        ctx: &Ctx,
+        sources: &'a [Source],
+    ) -> Vec<(String, Option<&'a Source>)> {
+        if let Some(url) = ctx.config.settings.java.catalog_url.as_ref() {
+            return vec![(url.clone(), None)];
+        }
+        let mut endpoints = sources
+            .iter()
+            .map(|source| (Self::source_catalog_url(source), Some(source)))
+            .collect::<Vec<_>>();
+        if endpoints.is_empty() {
+            endpoints.push(("https://api.foojay.io/disco/v3.0/packages".into(), None));
+        }
+        endpoints
+    }
+
+    async fn fetch_packages<T: serde::de::DeserializeOwned>(
+        ctx: &Ctx,
+        source: Option<&Source>,
+        url: &str,
+    ) -> Result<DiscoResponse<T>> {
+        match source {
+            Some(source) => http::get_cached_source_json(ctx, source, url).await,
+            None => http::get_cached_json(ctx, url).await,
+        }
+    }
+
+    async fn package_for_version(
+        &self,
+        ctx: &Ctx,
+        sources: &[Source],
+        distribution: &str,
+        package_type: &str,
+        version: &str,
+    ) -> Result<(String, Option<Source>, Package)> {
+        let mut last_error = None;
+        for (base, source) in Self::catalog_endpoints(ctx, sources) {
+            let url = Self::packages_url(ctx, &base, distribution, package_type, Some(version));
+            match Self::fetch_packages::<Package>(ctx, source, &url).await {
+                Ok(response) => {
+                    if let Some(package) = response.result.into_iter().find(|package| {
+                        !package.links.pkg_download_redirect.is_empty()
+                            && (package.package_type.is_empty()
+                                || package.package_type == package_type)
+                            && (ctx.platform.os != Os::Linux
+                                || package.lib_c_type.is_empty()
+                                || package.lib_c_type == Self::libc_token(ctx))
+                    }) {
+                        return Ok((base, source.cloned(), package));
+                    }
+                    last_error = Some(Error::VersionResolve {
+                        tool: self.id().to_string(),
+                        spec: version.into(),
+                        hint: Some(format!(
+                            "no {distribution} {package_type} package for this platform at {base}"
+                        )),
+                    });
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: self.id().into(),
+            tried: sources.len(),
+        }))
+    }
+
     async fn list_for_distribution(
         &self,
         ctx: &Ctx,
@@ -384,43 +438,44 @@ impl JavaBackend {
         package_type: &str,
     ) -> Result<Vec<VersionInfo>> {
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let base_index = ctx
-            .config
-            .settings
-            .java
-            .catalog_url
-            .clone()
-            .or_else(|| sources.first().map(|source| source.download_url.clone()))
-            .unwrap_or_else(|| "https://api.foojay.io/disco/v3.0/packages".to_string());
-        let url = Self::packages_url(ctx, &base_index, distribution, package_type, None);
-        let response = http::get_cached_json::<DiscoResponse<Package>>(ctx, &url).await;
         let mut response_error = None;
 
         use std::collections::BTreeSet;
         let mut set: BTreeSet<String> = BTreeSet::new();
-        match response {
-            Ok(response) => {
-                for package in response.result {
-                    if !package.package_type.is_empty() && package.package_type != package_type {
-                        continue;
-                    }
-                    if ctx.platform.os == Os::Linux
-                        && !package.lib_c_type.is_empty()
-                        && package.lib_c_type != Self::libc_token(ctx)
-                    {
-                        continue;
-                    }
-                    let version = if !package.java_version.is_empty() {
-                        package.java_version
-                    } else {
-                        package.distribution_version
-                    };
-                    if !version.is_empty() {
-                        set.insert(version);
+        for (base, source) in Self::catalog_endpoints(ctx, &sources) {
+            let url = Self::packages_url(ctx, &base, distribution, package_type, None);
+            match Self::fetch_packages::<Package>(ctx, source, &url).await {
+                Ok(response) => {
+                    for package in response.result {
+                        if !package.package_type.is_empty() && package.package_type != package_type
+                        {
+                            continue;
+                        }
+                        if ctx.platform.os == Os::Linux
+                            && !package.lib_c_type.is_empty()
+                            && package.lib_c_type != Self::libc_token(ctx)
+                        {
+                            continue;
+                        }
+                        let version = if !package.java_version.is_empty() {
+                            package.java_version
+                        } else {
+                            package.distribution_version
+                        };
+                        if !version.is_empty() {
+                            set.insert(version);
+                        }
                     }
                 }
+                Err(error) => {
+                    tracing::warn!(
+                        source = %source.map(|source| source.id.as_str()).unwrap_or("catalog-url"),
+                        error = %error,
+                        "Java catalog source failed; trying the next source"
+                    );
+                    response_error = Some(error);
+                }
             }
-            Err(error) => response_error = Some(error),
         }
         if distribution == DEFAULT_DISTRIBUTION {
             set.extend(BUILTIN_TEMURIN_LTS.iter().map(|value| (*value).to_string()));
@@ -450,30 +505,45 @@ impl JavaBackend {
     async fn fetch_checksum(
         &self,
         ctx: &Ctx,
+        sources: &[Source],
         base_index: &str,
+        source: Option<&Source>,
         id: &str,
     ) -> Option<crate::pipeline::Checksum> {
         if id.is_empty() {
             return None;
         }
-        // base_index is ".../disco/v3.0/packages"; the ids endpoint is a sibling.
-        let base = base_index.trim_end_matches('/');
-        let root = base.strip_suffix("/packages").unwrap_or(base);
-        let url = format!("{}/ids/{}", root, id);
-        let resp: DiscoResponse<Package> = http::get_cached_json(ctx, &url).await.ok()?;
-        let pkg = resp.result.into_iter().next()?;
-        if pkg.checksum.is_empty() {
-            return None;
+        let mut endpoints = vec![(base_index.to_string(), source.cloned())];
+        for (base, source) in Self::catalog_endpoints(ctx, sources) {
+            if !endpoints.iter().any(|(known, _)| known == &base) {
+                endpoints.push((base, source.cloned()));
+            }
         }
-        // foojay currently publishes sha256; guard in case that changes.
-        if !pkg.checksum_type.is_empty() && !pkg.checksum_type.eq_ignore_ascii_case("sha256") {
-            tracing::debug!(kind = %pkg.checksum_type, "unsupported java checksum type; skipping");
-            return None;
+        for (base, source) in endpoints {
+            // base is ".../disco/v3.0/packages"; ids is a sibling endpoint.
+            let base = base.trim_end_matches('/');
+            let root = base.strip_suffix("/packages").unwrap_or(base);
+            let url = format!("{root}/ids/{id}");
+            let Ok(resp) = Self::fetch_packages::<Package>(ctx, source.as_ref(), &url).await else {
+                continue;
+            };
+            let Some(pkg) = resp.result.into_iter().next() else {
+                continue;
+            };
+            if pkg.checksum.is_empty() {
+                continue;
+            }
+            // foojay currently publishes sha256; guard in case that changes.
+            if !pkg.checksum_type.is_empty() && !pkg.checksum_type.eq_ignore_ascii_case("sha256") {
+                tracing::debug!(kind = %pkg.checksum_type, "unsupported java checksum type; skipping");
+                continue;
+            }
+            return Some(crate::pipeline::Checksum {
+                algo: crate::pipeline::HashAlgo::Sha256,
+                hex: pkg.checksum,
+            });
         }
-        Some(crate::pipeline::Checksum {
-            algo: crate::pipeline::HashAlgo::Sha256,
-            hex: pkg.checksum,
-        })
+        None
     }
 }
 
@@ -515,6 +585,8 @@ fn split_distribution(spec: &VersionSpec) -> (String, VersionSpec) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Arc;
 
     use super::*;
@@ -638,6 +710,55 @@ mod tests {
         assert!(url.contains("package_type=jre"));
         assert!(url.contains("version=21"));
         assert_eq!(JavaBackend::libc_token(&ctx), "glibc");
+    }
+
+    #[tokio::test]
+    async fn exact_package_lookup_falls_through_a_stale_catalog() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let body = if request.starts_with("GET /preferred?") {
+                    r#"{"result":[]}"#
+                } else {
+                    r#"{"result":[{"id":"jdk-21","java_version":"21.0.12+8","filename":"jdk.tar.gz","package_type":"jdk","lib_c_type":"glibc","links":{"pkg_download_redirect":"https://download.example/jdk.tar.gz"}}]}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = offline_ctx(temporary.path());
+        ctx.config.settings.offline = false;
+        let sources = vec![
+            Source::mirror("preferred", &format!("http://{address}/preferred"), 0),
+            Source::mirror("fallback", &format!("http://{address}/fallback"), 10),
+        ];
+
+        let (base, source, package) = JavaBackend
+            .package_for_version(&ctx, &sources, "temurin", "jdk", "21.0.12+8")
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(base, format!("http://{address}/fallback"));
+        assert_eq!(source.unwrap().id, "fallback");
+        assert_eq!(package.id, "jdk-21");
     }
 
     #[tokio::test]

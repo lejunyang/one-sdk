@@ -35,3 +35,7 @@ Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项�
 制品，`pypi:` 会探测实际项目页并把结果传给 uv/pip，`go:` 的全新解析会生成以 `|`
 连接的原生 `GOPROXY` 回退链。普通项目依赖命令可能已经执行 lifecycle script，因此
 仍只运行一次。
+
+Node 会合并所有可达版本 index；经典 CPython 会合并同一 release tag 的
+`SHA256SUMS`；Java 会逐个查询 Foojay-compatible source 及其 checksum detail。这样
+“通用探测正常但目标版本 metadata 缺失”也会继续后备源。

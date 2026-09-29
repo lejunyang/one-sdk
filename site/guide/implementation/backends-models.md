@@ -32,13 +32,13 @@ npm 包不属于该 osdk 自有安装身份。
 
 | Backend | 解析与获取方式 | 完整性与安装语义 | 重要特性或限制 |
 | --- | --- | --- | --- |
-| `node` (`nodejs`) | Node index；官方、npmmirror、TUNA、USTC 归档 | `SHASUMS256.txt`；共享归档流水线 | 可选 `arch` 与 `corepack`；Corepack 是安装后动作 |
+| `node` (`nodejs`) | 合并官方、npmmirror、TUNA、USTC 的可达 Node index | `SHASUMS256.txt`；共享归档流水线逐源验证 | 可选 `arch` 与 `corepack`；Corepack 是安装后动作 |
 | `npm` | `npm` registry packument/tarball | npm SRI，强制校验；生成 `npm`/`npx` launcher | 独立于 Node 版本安装，但运行时仍需要活动 Node |
 | `pnpm` | 完整 `pnpm` JavaScript distribution | npm SRI；osdk 生成 Node launcher | 自动加入受管 Node；按 major 设置 pnpm store 变量 |
 | `yarn` | 1.x 用 `yarn`，2+ 用 `@yarnpkg/cli-dist` | npm SRI；生成 Node launcher | 原生管理 Classic 与 Berry，不委托 Corepack |
 | `go` (`golang`) | go.dev JSON index；镜像可复用官方 index | index 中的 SHA-256；归档流水线 | 激活时设置 `GOROOT` |
-| `python` (`py`, `cpython`) | 内置 PBS release index、Astral、GitHub proxy | 每个 release 的 `SHA256SUMS` | 支持 CPython、PyPy、GraalPy、Pyodide 与 variant；历史版本可用 `tag` 固定 |
-| `java` (`jdk`, `openjdk`) | Foojay Disco API，Temurin 为默认 distribution | vendor checksum；JDK/JRE 归档 | `distribution`、`package-type=jdk\|jre`；激活时设置 `JAVA_HOME` |
+| `python` (`py`, `cpython`) | 内置 PBS release index；按 source 合并同一 tag 的 `SHA256SUMS` | 每个 release 的 SHA-256；逐源归档回退 | 支持 CPython、PyPy、GraalPy、Pyodide 与 variant；历史版本可用 `tag` 固定 |
+| `java` (`jdk`, `openjdk`) | 逐个查询 Foojay-compatible source，Temurin 为默认 distribution | 逐源 checksum detail；JDK/JRE 归档 | `distribution`、`package-type=jdk\|jre`；激活时设置 `JAVA_HOME` |
 | `maven` (`mvn`) | 内置单版本 release；有效 source 按探测结果排序 | 固定 SHA-512；逐 source 验证回退 | 当前 catalog 只包含一个版本 |
 | `gradle` | 排序后的 Gradle 版本 index；绝对 distribution URL 重映射到各 source | index SHA-256；逐 source 验证回退 | 支持 index 中的正式版与显式预览版 |
 | `kotlin` (`kotlinc`) | 内置单版本 GitHub release；有效 source 按探测结果排序 | 固定 SHA-256；逐 source 验证回退 | 当前 catalog 只包含一个版本 |

@@ -70,6 +70,10 @@ osdk lock node@20 -o arch=arm64
 `arch` 可用于生成其他架构的 lock 区段，但 osdk 没有只下载模式；实际安装会拒绝
 不能在当前 host 执行的 Node artifact。
 
+Node 版本列表会合并所有可达 source 的 index，并保留排序靠前来源对重复版本的 LTS
+标记；因此一个响应正常但同步落后的镜像不会隐藏后续 source 已发布的版本。下载阶段再
+按同一顺序逐个校验 `SHASUMS256.txt` 对应的归档。
+
 Node 也提供全局包迁移：
 
 ```text
@@ -130,6 +134,9 @@ catalog_sha256 = "0123456789abcdef..."
 checksum 全部有效才更新 last-good；刷新失败会尝试 last-good，再回退内置 catalog。
 预发布策略见[预发布版本](./sources-security#预发布版本)。
 
+经典 CPython 的同一 release tag 会合并所有可达 source 的 `SHA256SUMS`，排序靠前来源
+的同名条目优先；因此首个镜像缺少某个平台的归档时，后续来源仍可补齐并进入下载回退。
+
 查找解释器：
 
 ```text
@@ -175,6 +182,10 @@ Temurin 版本带 build 号（如 `21.0.12+8`），PSU 还会有第四段（如 
 [settings.java]
 catalog_url = "https://mirror.example/disco/v3.0/packages"
 ```
+
+未设置这个单一显式 catalog 时，Java 会按 source 排序逐个查询 Foojay-compatible
+endpoint；某个 endpoint 可访问但没有请求的 distribution/JDK/JRE 组合时继续后备源。
+对应的 checksum detail 也按相同顺序回退，最终 vendor 归档仍由通用校验下载管线处理。
 
 ## JVM 工具
 

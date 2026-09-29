@@ -358,6 +358,14 @@ impl Backend for PythonBackend {
 }
 
 impl PythonBackend {
+    fn merge_catalog_assets(merged: &mut Vec<Asset>, assets: Vec<Asset>) {
+        for asset in assets {
+            if !merged.iter().any(|known| known.name == asset.name) {
+                merged.push(asset);
+            }
+        }
+    }
+
     /// Fetch the catalog for a specific historical tag by reading its
     /// SHA256SUMS (each dated release has its own).
     async fn fetch_catalog_for_tag(&self, ctx: &Ctx, tag: &str) -> Result<Catalog> {
@@ -365,36 +373,52 @@ impl PythonBackend {
             .dirs
             .remote_cache()
             .join(format!("python-{tag}-catalog.json"));
-        if let Some(catalog) = read_catalog(&cache_file) {
-            return Ok(catalog);
+        if ctx.config.settings.offline {
+            if let Some(catalog) = read_catalog(&cache_file) {
+                return Ok(catalog);
+            }
         }
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         let mut last_err: Option<Error> = None;
+        let mut assets = Vec::new();
         for source in &sources {
             let prefix = http::join_url(&source.download_url, tag);
             let url = http::join_url(&prefix, "SHA256SUMS");
-            match http::get_cached_text(ctx, &url).await {
+            match http::get_cached_source_text(ctx, source, &url).await {
                 Ok(body) => {
-                    let assets = parse_sha256sums(&body);
-                    if !assets.is_empty() {
-                        let catalog = Catalog {
-                            tag: tag.to_string(),
-                            assets,
-                        };
-                        if let Some(parent) = cache_file.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if let Ok(bytes) = serde_json::to_vec_pretty(&catalog) {
-                            let _ = std::fs::write(&cache_file, bytes);
-                        }
-                        return Ok(catalog);
+                    let source_assets = parse_sha256sums(&body);
+                    if source_assets.is_empty() {
+                        last_err = Some(Error::other("empty SHA256SUMS"));
+                    } else {
+                        // Ranked sources win duplicate names, while a stale
+                        // mirror can no longer hide an artifact that a later
+                        // source already publishes.
+                        Self::merge_catalog_assets(&mut assets, source_assets);
                     }
-                    last_err = Some(Error::other("empty SHA256SUMS"));
                 }
                 Err(e) => last_err = Some(e),
             }
         }
-        Err(last_err.unwrap_or_else(|| Error::other(format!("no SHA256SUMS for tag {tag}"))))
+        if assets.is_empty() {
+            if let Some(catalog) = read_catalog(&cache_file) {
+                tracing::warn!(tag, "using legacy cached Python release catalog");
+                return Ok(catalog);
+            }
+            return Err(
+                last_err.unwrap_or_else(|| Error::other(format!("no SHA256SUMS for tag {tag}")))
+            );
+        }
+        let catalog = Catalog {
+            tag: tag.to_string(),
+            assets,
+        };
+        if let Some(parent) = cache_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&catalog) {
+            let _ = std::fs::write(&cache_file, bytes);
+        }
+        Ok(catalog)
     }
 }
 
@@ -597,6 +621,31 @@ not-a-hash  garbage-line
         assert_eq!(assets.len(), 2);
         assert_eq!(assets[0].sha256.len(), 64);
         assert!(assets[1].name.contains("3.12.14"));
+    }
+
+    #[test]
+    fn later_checksum_manifests_fill_assets_missing_from_a_stale_mirror() {
+        let mut merged = vec![Asset {
+            name: "cpython-3.12.14-linux.tar.gz".into(),
+            sha256: "preferred".into(),
+        }];
+        PythonBackend::merge_catalog_assets(
+            &mut merged,
+            vec![
+                Asset {
+                    name: "cpython-3.12.14-linux.tar.gz".into(),
+                    sha256: "fallback".into(),
+                },
+                Asset {
+                    name: "cpython-3.12.14-windows.zip".into(),
+                    sha256: "windows".into(),
+                },
+            ],
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].sha256, "preferred");
+        assert_eq!(merged[1].sha256, "windows");
     }
 
     #[test]

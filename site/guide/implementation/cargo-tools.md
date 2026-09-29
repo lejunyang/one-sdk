@@ -32,8 +32,10 @@ sparse index 按 crate 名长度计算分片路径，并读取逐行 JSON 记录
 URL，因此健康判定与真正的版本解析不会分叉。响应与缓存 metadata 上限均为 8 MiB。
 解析会移除 yanked release，再排序和去重；
 `latest`/前缀请求选择最高稳定匹配，精确请求则可以选择一个未 yanked 的预发布版本。
-所选 index 作为私有解析 metadata 保存，之后传给 provider。Git selector 不需要远端
-版本列表请求，会按原文保留。
+对标准的、带 `cksum` 的 sparse 记录，osdk 还会读取该 index 的 `config.json`，按
+`dl` 规则构造精确 `.crate` URL，并确认响应能够开始传输；metadata 可读但目标制品
+不可下载时继续下一 source。所选 index 作为私有解析 metadata 保存，之后传给 provider。
+Git selector 不需要远端版本列表请求，会按原文保留。
 
 解析前，CLI 编排会检测任意 `cargo:` 请求，并要求且只允许一个受管 `rust` 请求。
 显式 Rust 请求优先；否则注入常规 active/configured Rust 选择。该选择必须解析成精确
@@ -87,6 +89,10 @@ osdk 发布其输出。只有退出码 94 表示“没有兼容 binary artifact�
 provider 的迟到写入与 fallback 争用。其他退出码、spawn 错误、
 权限错误、超时或 capture 失败都是终止错误，不会尝试第二个 provider。Git 来源及需要
 source build 的选项会直接走 `cargo install`。
+
+source 回退刻意发生在 provider 启动前。Cargo build script 可能有外部副作用，不能把
+任意非零退出都当成镜像故障后重新执行；精确制品预检把最常见的 index 正常、crate
+下载 404/连接失败拦在这一边界之前。
 
 对于 Registry crate，`cargo install` 会收到精确的 `=<version>`。当 index 不是 crates.io
 官方 sparse index 时，backend 还会只在 stage 私有 `CARGO_HOME/config.toml` 写入

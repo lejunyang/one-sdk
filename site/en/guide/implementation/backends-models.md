@@ -35,13 +35,13 @@ packages remain outside this osdk-owned install identity.
 
 | Backend | Resolution and acquisition | Integrity and installation semantics | Notable behavior or limitation |
 | --- | --- | --- | --- |
-| `node` (`nodejs`) | Node index; official, npmmirror, TUNA, and USTC archives | `SHASUMS256.txt`; shared archive pipeline | Optional `arch` and `corepack`; Corepack is a post-install action |
+| `node` (`nodejs`) | Merged reachable Node indexes from official, npmmirror, TUNA, and USTC | `SHASUMS256.txt`; shared pipeline verifies each source | Optional `arch` and `corepack`; Corepack is a post-install action |
 | `npm` | `npm` registry packument/tarball | npm SRI, always required; generates `npm`/`npx` launchers | Installed independently of Node, but needs an active Node at runtime |
 | `pnpm` | Complete `pnpm` JavaScript distribution | npm SRI; osdk-generated Node launcher | Adds managed Node automatically; store variable depends on major version |
 | `yarn` | `yarn` for 1.x, `@yarnpkg/cli-dist` for 2+ | npm SRI; generates Node launchers | Manages Classic and Berry directly instead of delegating to Corepack |
 | `go` (`golang`) | go.dev JSON index; mirrors may reuse the official index | Per-file SHA-256; archive pipeline | Exports `GOROOT` |
-| `python` (`py`, `cpython`) | Built-in PBS release index, Astral, and GitHub proxy | Per-release `SHA256SUMS` | CPython, PyPy, GraalPy, Pyodide, and variants; historical releases can pin `tag` |
-| `java` (`jdk`, `openjdk`) | Foojay Disco API, defaulting to Temurin | Vendor checksum; archive pipeline | `distribution`, `package-type=jdk\|jre`; exports `JAVA_HOME` |
+| `python` (`py`, `cpython`) | Built-in PBS release index; merges a tag's `SHA256SUMS` across sources | Per-release SHA-256; per-source archive fallback | CPython, PyPy, GraalPy, Pyodide, and variants; historical releases can pin `tag` |
+| `java` (`jdk`, `openjdk`) | Queries Foojay-compatible sources in order, defaulting to Temurin | Per-source checksum detail; JDK/JRE archive | `distribution`, `package-type=jdk\|jre`; exports `JAVA_HOME` |
 | `maven` (`mvn`) | Built-in single-release record; effective sources ranked by probes | Fixed SHA-512; verified per-source fallback | Current catalog contains one version |
 | `gradle` | Ranked Gradle version indexes; absolute distribution URLs rebased across sources | Index SHA-256; verified per-source fallback | Supports finished releases and explicitly requested previews from the index |
 | `kotlin` (`kotlinc`) | Built-in single GitHub release; effective sources ranked by probes | Fixed SHA-256; verified per-source fallback | Current catalog contains one version |

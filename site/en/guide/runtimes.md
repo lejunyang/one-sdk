@@ -76,6 +76,11 @@ provides coordinated npm/npx routing. The runtime environment supplies shared
 download-only cross-architecture mode; actual installation rejects a Node
 artifact that cannot execute on the host.
 
+Node merges version indexes from every reachable source while retaining the
+higher-ranked source's LTS metadata for duplicates. A responsive but stale
+mirror therefore cannot hide a release present on a later source; the archive
+download then verifies each `SHASUMS256.txt` candidate in the same order.
+
 Node also supports global-package migration:
 
 ```text
@@ -139,6 +144,11 @@ catalog_sha256 = "0123456789abcdef..."
 checksum on every artifact can replace last-good. Refresh failure tries
 last-good and then the embedded catalog. See [Pre-releases](./sources-security#pre-releases).
 
+For classic CPython, osdk merges `SHA256SUMS` from every reachable source for the
+same release tag, preserving the higher-ranked entry for duplicate filenames.
+A first mirror missing one platform artifact can therefore be completed by a
+later source and enter normal verified download failover.
+
 Interpreter discovery uses:
 
 ```text
@@ -188,6 +198,11 @@ or static mirror with:
 [settings.java]
 catalog_url = "https://mirror.example/disco/v3.0/packages"
 ```
+
+Unless that single explicit catalog is set, Java queries each ranked
+Foojay-compatible source. A reachable endpoint that lacks the requested
+distribution/JDK/JRE combination falls through, and checksum detail lookup uses
+the same order before the vendor archive enters the shared verified pipeline.
 
 ## JVM tools
 

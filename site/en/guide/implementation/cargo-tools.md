@@ -45,8 +45,12 @@ sharded crate URL, so health ranking cannot diverge from actual version
 resolution. Responses and cached metadata are bounded to 8 MiB. Yanked releases are removed, versions are
 sorted and deduplicated, and `latest`/prefix requests choose the highest stable
 match. An exact request can select a non-yanked prerelease. The selected index
-is carried as private resolution metadata and later passed to the provider. Git
-selectors require no remote version-list request and are retained verbatim.
+For a standard sparse record carrying `cksum`, osdk also reads that index's
+`config.json`, expands its `dl` rule into the exact `.crate` URL, and confirms
+that the response starts transferring. A source whose metadata works but whose
+target artifact does not falls through. The selected index is carried as private
+resolution metadata and later passed to the provider. Git selectors require no
+remote version-list request and are retained verbatim.
 
 Before resolution, CLI orchestration detects any `cargo:` request and requires
 exactly one managed `rust` request. An explicit Rust request wins; otherwise the
@@ -113,6 +117,11 @@ provider writes on Windows. Any other
 exit code, spawn error, permission error, timeout, or capture failure is
 terminal; no second provider is tried. Git sources and source-build options go
 directly to `cargo install`.
+
+Source failover deliberately happens before provider launch. Cargo build scripts
+may have external side effects, so an arbitrary non-zero exit cannot safely be
+treated as a mirror failure and replayed. The exact-artifact preflight catches
+the common healthy-index/broken-crate route before crossing that boundary.
 
 `cargo install` receives an exact `=<version>` for registry crates. When the
 index is not the official crates.io sparse index, the backend also writes a

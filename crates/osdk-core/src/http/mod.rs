@@ -119,6 +119,28 @@ pub async fn get_cached_text(ctx: &Ctx, url: &str) -> Result<String> {
     }
 }
 
+/// Fetch text with source-scoped headers and cache identity.
+pub async fn get_cached_source_text(ctx: &Ctx, source: &Source, url: &str) -> Result<String> {
+    let cache_file = source_metadata_cache_path(ctx, source, url)?;
+    let (bytes, fresh) = get_cached_bytes(ctx, url, false, Some(source)).await?;
+    match String::from_utf8(bytes) {
+        Ok(text) => {
+            if fresh {
+                write_metadata_cache(&cache_file, text.as_bytes());
+            }
+            Ok(text)
+        }
+        Err(error) if fresh => {
+            let stale = std::fs::read(&cache_file)
+                .map_err(|_| Error::other(format!("invalid UTF-8 from {url}: {error}")))?;
+            String::from_utf8(stale).map_err(|stale_error| {
+                Error::other(format!("invalid cached UTF-8 for {url}: {stale_error}"))
+            })
+        }
+        Err(error) => Err(Error::other(format!("invalid UTF-8 from {url}: {error}"))),
+    }
+}
+
 /// Fetch JSON from the GitHub API with the recommended headers, honoring a
 /// `GITHUB_TOKEN`/`GH_TOKEN` env var to raise the rate limit when present.
 /// GitHub returns 403 for API requests missing an `Accept`/`X-GitHub-Api-Version`

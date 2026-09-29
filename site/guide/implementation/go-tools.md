@@ -50,7 +50,7 @@ GOMODCACHE         = <cache>/pkg/go-mod
 GOCACHE            = <cache>/pkg/go-build
 GOENV              = off
 GOTOOLCHAIN         = local
-GOPROXY             = <唯一选中的 proxy>
+GOPROXY             = <首选 proxy>|<其余排序 proxy>...
 GONOPROXY           = none
 GONOSUMDB           = <发现的 module root>
 GOSUMDB             = off
@@ -59,10 +59,12 @@ TMPDIR, TEMP, TMP   = <stage>/tmp
 GIT_TERMINAL_PROMPT = 0
 ```
 
-命令为 `go install [-tags TAGS] <command-path>@v<exact-version>`。provider 启动后只允许访问
-该 proxy，不附加 `direct` 或 fallback 列表。关闭 checksum database 可避免独立网络/凭据边界，
-因此完整性委托给所选 proxy。`CGO_ENABLED=1` 会被拒绝，直到 osdk 能选择 C compiler/linker
-并把其身份纳入绑定。
+命令为 `go install [-tags TAGS] <command-path>@v<exact-version>`。全新解析会把选中 proxy
+放在首位，并用 `|` 追加同一次解析允许的其余候选；Go 因而可在任意下载错误后切换，而
+osdk 仍只启动一次 provider，也不会附加 `direct`。lock 重放没有完整 source graph，故只
+恢复记录的 proxy。关闭 checksum database 可避免独立网络/凭据边界，因此完整性委托给
+这组已选择 proxy。`CGO_ENABLED=1` 会被拒绝，直到 osdk 能选择 C compiler/linker 并把其
+身份纳入绑定。
 
 Module/build cache 只在 osdk cache 根中共享；私有 home、GOPATH 与临时数据留在 stage 中，
 发布前会删除。这些依赖 cache 都不会进入 osdk archive CAS。

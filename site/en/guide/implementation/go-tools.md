@@ -64,7 +64,7 @@ GOMODCACHE         = <cache>/pkg/go-mod
 GOCACHE            = <cache>/pkg/go-build
 GOENV              = off
 GOTOOLCHAIN         = local
-GOPROXY             = <one selected proxy>
+GOPROXY             = <selected proxy>|<remaining ranked proxies>...
 GONOPROXY           = none
 GONOSUMDB           = <discovered module root>
 GOSUMDB             = off
@@ -73,12 +73,14 @@ TMPDIR, TEMP, TMP   = <stage>/tmp
 GIT_TERMINAL_PROMPT = 0
 ```
 
-The command is `go install [-tags TAGS] <command-path>@v<exact-version>`. The
-proxy is the only allowed network source after provider launch; `direct` and
-fallback lists are not appended. Disabling the checksum database avoids an
-independent network/credential boundary, so integrity is delegated to that
-selected proxy. `CGO_ENABLED=1` is rejected until a C compiler/linker can be
-selected and bound into the identity.
+The command is `go install [-tags TAGS] <command-path>@v<exact-version>`. A fresh
+resolution puts the selected proxy first and appends the other allowed candidates
+with `|`, so Go can switch on any download error while osdk still starts the
+provider only once; `direct` is not appended. Lock replay has no complete source
+graph and therefore restores only the recorded proxy. Disabling the checksum
+database avoids an independent network/credential boundary, so integrity is
+delegated to this selected proxy set. `CGO_ENABLED=1` is rejected until a C
+compiler/linker can be selected and bound into the identity.
 
 Module and build caches are shared only inside osdk's cache root. Private home,
 GOPATH, and temporary data remain in the stage and are removed before

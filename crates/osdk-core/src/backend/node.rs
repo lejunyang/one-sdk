@@ -49,6 +49,31 @@ impl<'de> Deserialize<'de> for LtsField {
 }
 
 impl NodeBackend {
+    fn merge_releases(
+        merged: &mut BTreeMap<String, Option<String>>,
+        releases: Vec<NodeRelease>,
+        platform_token: &str,
+    ) {
+        for release in releases {
+            if !(release.files.is_empty()
+                || release.files.iter().any(|file| file == platform_token))
+            {
+                continue;
+            }
+            let version = release.version.trim_start_matches('v').to_string();
+            if version.is_empty() {
+                continue;
+            }
+            let lts = match release.lts {
+                LtsField::Named(name) => Some(name.to_lowercase()),
+                LtsField::No => None,
+            };
+            // Sources are ranked best-first, so duplicate versions retain the
+            // preferred source's metadata.
+            merged.entry(version).or_insert(lts);
+        }
+    }
+
     /// The node file token for the current platform, e.g. `linux-x64`,
     /// `osx-arm64-tar`, `win-x64-zip`.
     fn target_arch(ctx: &Ctx, options: &BTreeMap<String, String>) -> Result<Arch> {
@@ -213,7 +238,11 @@ impl Backend for NodeBackend {
                 .index_url
                 .clone()
                 .unwrap_or_else(|| http::join_url(&source.download_url, "index.json"));
-            let releases: Vec<NodeRelease> = match http::get_cached_json(ctx, &index_url).await {
+            let releases: Vec<NodeRelease> = match http::get_cached_source_json(
+                ctx, source, &index_url,
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(source = %source.id, "{}", crate::i18n::trf("log.index_fetch_failover", &[("err", &e.to_string())]));
@@ -222,60 +251,7 @@ impl Backend for NodeBackend {
                 }
             };
             any_ok = true;
-            for r in releases {
-                if !(r.files.is_empty() || r.files.iter().any(|f| f == &token)) {
-                    continue;
-                }
-                let version = r.version.trim_start_matches('v').to_string();
-                if version.is_empty() {
-                    continue;
-                }
-                let lts = match r.lts {
-                    LtsField::Named(s) => Some(s.to_lowercase()),
-                    LtsField::No => None,
-                };
-                merged.entry(version).or_insert(lts);
-            }
-            // The fastest reachable source usually suffices; only consult more
-            // sources if it produced nothing. Stop once we have a populated set.
-            if !merged.is_empty() {
-                // Peek: does a later source add anything? We keep it cheap by
-                // continuing only when the primary is a known-laggy mirror is
-                // hard to detect, so we merge just the primary + official.
-                if source.kind == crate::source::SourceKind::Official {
-                    break;
-                }
-                // also fold in the official source (if present) for freshness
-                if let Some(official) = sources
-                    .iter()
-                    .find(|s| s.kind == crate::source::SourceKind::Official)
-                {
-                    if official.id != source.id {
-                        if let Some(idx) = &official.index_url {
-                            if let Ok(rel) =
-                                http::get_cached_json::<Vec<NodeRelease>>(ctx, idx).await
-                            {
-                                for r in rel {
-                                    if !(r.files.is_empty() || r.files.iter().any(|f| f == &token))
-                                    {
-                                        continue;
-                                    }
-                                    let v = r.version.trim_start_matches('v').to_string();
-                                    if v.is_empty() {
-                                        continue;
-                                    }
-                                    let lts = match r.lts {
-                                        LtsField::Named(s) => Some(s.to_lowercase()),
-                                        LtsField::No => None,
-                                    };
-                                    merged.entry(v).or_insert(lts);
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
-            }
+            Self::merge_releases(&mut merged, releases, &token);
         }
 
         if !any_ok {
@@ -547,6 +523,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("cross-architecture"));
+    }
+
+    #[test]
+    fn later_indexes_fill_releases_missing_from_a_stale_mirror() {
+        let release = |version: &str, lts: LtsField| NodeRelease {
+            version: version.into(),
+            files: vec!["linux-x64".into()],
+            lts,
+        };
+        let mut merged = BTreeMap::new();
+        NodeBackend::merge_releases(
+            &mut merged,
+            vec![release("v20.0.0", LtsField::Named("Iron".into()))],
+            "linux-x64",
+        );
+        NodeBackend::merge_releases(
+            &mut merged,
+            vec![
+                release("v20.0.0", LtsField::Named("different".into())),
+                release("v22.0.0", LtsField::No),
+            ],
+            "linux-x64",
+        );
+
+        assert_eq!(merged.get("20.0.0"), Some(&Some("iron".into())));
+        assert!(merged.contains_key("22.0.0"));
     }
 
     #[test]
