@@ -146,6 +146,11 @@ npmjs 官方 Registry。它们经过通用 [`ranked_source_list`](https://github
 3. 默认 `auto` 并发探测，吞吐优先、TTFB 为次要因子；
 4. 探测结果按 `cache_ttl` 复用，`--refresh-sources` 强制刷新。
 
+未锁定安装在每个 source 前清空并重建 synthetic project。`osdk lock` 的 graph-only
+解析同样逐源执行；每次先删掉上次的 `package-lock.json`，且命令固定带
+`--package-lock-only --ignore-scripts`，因此失败产物不会冒充成功，也不会执行 package
+lifecycle script。已有 lock 的 frozen replay 不换源、不重复运行。
+
 source probe cache 使用 schema 2，并保存候选集合的 BLAKE3 指纹。指纹覆盖顺序、ID、
 kind、index/download URL、priority、enabled、credential-forwarding 和 header 名；header
 值只写摘要。因此改变候选不会沿用旧排名，凭据也不会明文写入 cache。离线模式可用

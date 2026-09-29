@@ -1038,36 +1038,58 @@ impl NpmPackageBackend {
         ));
         let _lock = crate::lock::FileLock::acquire(lock_path)?;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
-        let source = sources.first().ok_or_else(|| Error::NoUsableSource {
-            tool: self.id().to_string(),
-            tried: 0,
-        })?;
         let project_dir = self.project_dir_for(ctx, tv)?;
         let build_policy = Self::build_policy(tv)?;
-        Self::write_project_manifest(
-            &project_dir,
-            Some((&self.package, &tv.version)),
-            &build_policy,
-        )?;
-        Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
         let node_bin_dir = managed_node(ctx, tv)?.0;
-        native_npm::resolve_lock_only(&NativeNpmInstall {
-            project_dir: &project_dir,
-            node_bin_dir: &node_bin_dir,
-            cache_dir: Self::npm_cache_dir(ctx),
-            registry: Some(source.download_url.clone()),
-            scripts: ScriptPolicy::Deny,
-            offline: ctx.config.settings.offline,
-        })?;
         let lockfile_path = project_dir.join(NPM_LOCKFILE_NAME);
-        if !lockfile_path.is_file() {
-            return Err(Error::other(crate::t!(
-                "err.npm_lock_graph_not_produced",
-                package = self.package,
-                version = tv.version
-            )));
+        let mut last_error = None;
+        for (index, source) in sources.iter().enumerate() {
+            // `--package-lock-only --ignore-scripts` has no package lifecycle
+            // side effects, so it is safe to rebuild this synthetic input and
+            // retry another registry. A stale lock from the previous attempt
+            // must never be mistaken for success.
+            let _ = std::fs::remove_file(&lockfile_path);
+            Self::write_project_manifest(
+                &project_dir,
+                Some((&self.package, &tv.version)),
+                &build_policy,
+            )?;
+            Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
+            let result = native_npm::resolve_lock_only(&NativeNpmInstall {
+                project_dir: &project_dir,
+                node_bin_dir: &node_bin_dir,
+                cache_dir: Self::npm_cache_dir(ctx),
+                registry: Some(source.download_url.clone()),
+                scripts: ScriptPolicy::Deny,
+                offline: ctx.config.settings.offline,
+            });
+            match result {
+                Ok(()) if lockfile_path.is_file() => return Ok(lockfile_path),
+                Ok(()) => {
+                    last_error = Some(Error::other(crate::t!(
+                        "err.npm_lock_graph_not_produced",
+                        package = self.package,
+                        version = tv.version
+                    )));
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tracing::warn!(
+                source = %source.id,
+                attempt = index + 1,
+                total = sources.len(),
+                "{}",
+                crate::i18n::trf(
+                    "log.download_failover",
+                    &[("err", &last_error.as_ref().expect("set above").to_string())]
+                )
+            );
         }
-        Ok(lockfile_path)
+        let _ = std::fs::remove_file(&lockfile_path);
+        Err(last_error.unwrap_or_else(|| Error::NoUsableSource {
+            tool: self.id().to_string(),
+            tried: sources.len(),
+        }))
     }
 
     fn write_project_npmrc(project_dir: &Path, url: Option<&str>) -> Result<()> {
@@ -3184,6 +3206,54 @@ scope = "project"
 
         NpmPackageBackend::write_project_npmrc(temporary.path(), None).unwrap();
         assert!(!npmrc.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lock_only_resolution_retries_each_registry_without_running_scripts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = offline_test_ctx(temporary.path());
+        ctx.config.settings.offline = false;
+        ctx.config.sources.selection = crate::source::Selection::Ordered;
+        let backend = NpmPackageBackend::from_id("npm:prettier").unwrap();
+        ctx.config.sources.per_tool.insert(
+            backend.id().into(),
+            crate::config::ToolSources {
+                disable: vec!["npmmirror".into(), "npm".into()],
+                custom: vec![
+                    Source::mirror("bad", "https://bad.example/", 0),
+                    Source::mirror("good", "https://good.example/", 10),
+                ],
+                ..Default::default()
+            },
+        );
+        let version = npm_test_version(&backend, "3.6.2");
+        let node_bin = write_node_fixture(&ctx, TEST_NODE_VERSION)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let npm = node_bin.join("npm");
+        let log = temporary.path().join("npm-lock-sources.log");
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *bad.example*) exit 7 ;; esac\nprintf '%s\\n' '{{\"lockfileVersion\":3,\"packages\":{{}}}}' > package-lock.json\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let lockfile = backend.prepare_lock_graph(&ctx, &version).await.unwrap();
+
+        assert!(lockfile.is_file());
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert_eq!(calls.lines().count(), 2, "{calls}");
+        assert!(calls.lines().next().unwrap().contains("bad.example"));
+        assert!(calls.lines().nth(1).unwrap().contains("good.example"));
+        assert!(calls.lines().all(|line| line.contains("--ignore-scripts")));
     }
 
     #[cfg(unix)]

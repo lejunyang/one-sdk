@@ -301,6 +301,13 @@ configuration inside the osdk-controlled prefix and currently reject native
 private/authenticated/scoped registry pass-through; configure an anonymously
 reachable `[registries.npm]` endpoint for that scope.
 
+An unlocked isolated install rebuilds a clean synthetic project for every ranked
+source. `osdk lock` does the same for graph generation, rewriting the manifest
+and `.npmrc` and deleting any previous `package-lock.json` before each attempt.
+That graph-only phase always uses `--package-lock-only --ignore-scripts`, so this
+failover cannot replay lifecycle scripts. Replaying an existing native lock still
+runs only once.
+
 All npm-backed tools—across project, global, package, version, and scope—share
 these osdk-owned paths:
 

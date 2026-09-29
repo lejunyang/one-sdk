@@ -39,3 +39,6 @@ Maven/Kotlin 也使用有效 source 列表，而不是固定只用内置首项�
 Node 会合并所有可达版本 index；经典 CPython 会合并同一 release tag 的
 `SHA256SUMS`；Java 会逐个查询 Foojay-compatible source 及其 checksum detail。这样
 “通用探测正常但目标版本 metadata 缺失”也会继续后备源。
+
+`npm:<package>` 的未锁定安装和 `osdk lock` graph-only 阶段会逐 source 重建隔离项目；
+后者固定禁用脚本，所以可安全回退。已有原生 lock 的 frozen 重放不会切换来源。

@@ -190,6 +190,13 @@ common [`ranked_source_list`](https://github.com/lejunyang/one-sdk/blob/main/cra
    time to first byte as the secondary factor;
 4. results are reused for `cache_ttl`, while `--refresh-sources` forces a probe.
 
+Unlocked installation rebuilds the synthetic project before each source.
+Graph-only resolution for `osdk lock` now does the same: it removes the previous
+`package-lock.json` before every attempt and always passes
+`--package-lock-only --ignore-scripts`. A failed attempt therefore cannot look
+successful or execute package lifecycle scripts. Frozen replay of an existing
+lock remains single-shot.
+
 The source-probe cache uses schema 2 and stores a BLAKE3 fingerprint of the
 candidate set. The fingerprint covers order, ID, kind, index/download URLs,
 priority, enabled state, credential forwarding, and header names; header values

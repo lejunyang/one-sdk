@@ -252,6 +252,11 @@ activation、shim 分发、`where`、`uninstall` 与 `reshim` 都从活动请求
 拒绝原生私有、认证或 scope Registry 的透传。该作用域请配置可匿名访问的
 `[registries.npm]` endpoint。
 
+未锁定的隔离安装会为每个排序 source 重建干净的 synthetic project；`osdk lock` 生成
+依赖图时也逐 source 重建 manifest 和 `.npmrc`，并在每次尝试前删除旧
+`package-lock.json`。graph-only 阶段固定 `--package-lock-only --ignore-scripts`，因此这类
+回退不会重复执行 lifecycle script。已有原生 lock 的重放仍只执行一次。
+
 所有 npm 驱动的工具会跨项目、全局作用域、包和版本共享以下 osdk 自有路径：
 
 ```text
