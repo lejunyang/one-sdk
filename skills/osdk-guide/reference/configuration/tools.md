@@ -12,11 +12,14 @@ java = { version = "21", distribution = "zulu", package-type = "jdk" }
 "npm:prettier" = "3"
 "go:golang.org/x/tools/gopls" = { version = "0.20.0", tags = "tools" }
 zig = { version = "0.15", when = { os = ["linux", "macos"] } }
+"cargo:cargo-release" = { version = "0.25", lazy = true }
 ```
 
 对象字段：
 
 - `version`：必填字符串。
+- `lazy`：可选布尔值；为 `true` 时裸 `osdk install` 默认跳过，
+  `osdk install --include-lazy` 或显式点名仍会安装。
 - `when`：可选 `{ os = ..., arch = ... }`。
 - 其余字段：backend 专属选项，等价于命令行 `-o KEY=VALUE`。
 

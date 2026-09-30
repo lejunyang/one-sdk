@@ -97,6 +97,12 @@ pub enum Command {
         /// copy over a tool that updated itself in place.
         #[arg(long)]
         force: bool,
+        /// Include `[tools]` entries marked `lazy = true` in a bare install.
+        ///
+        /// Explicit operands are always installed, so this flag only changes
+        /// the no-argument project/config installation batch.
+        #[arg(long = "include-lazy")]
+        include_lazy: bool,
         /// Skip materializing declared `[deps]` for this command.
         ///
         /// A bare `osdk install` brings declared application dependencies up to

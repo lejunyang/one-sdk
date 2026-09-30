@@ -30,6 +30,7 @@ pub async fn install(
     tools: Vec<String>,
     opts: Vec<String>,
     force: bool,
+    include_lazy: bool,
 ) -> Result<()> {
     let explicit = !tools.is_empty();
     // A bare tool name that no backend owns is worth explaining before anything
@@ -44,17 +45,29 @@ pub async fn install(
     // from the lock, so requiring it must not make a committed lock file
     // impossible to install from.
     let use_lock = !explicit && opts_are_only_consent(&opts);
-    let (requests, trusted_replay) = if use_lock {
+    let (mut requests, trusted_replay, supplemented_lock) = if use_lock {
         match requests_from_lock(app)? {
-            Some(requests) => (requests, true),
-            None => (gather_install_requests(app, tools)?, false),
+            Some(mut requests) => {
+                let supplemented = include_lazy
+                    && supplement_locked_requests_with_lazy(
+                        app,
+                        &mut requests,
+                        gather_install_requests(app, Vec::new())?,
+                    )?;
+                (requests, true, supplemented)
+            }
+            None => (gather_install_requests(app, tools)?, false, false),
         }
     } else {
-        (gather_install_requests(app, tools)?, false)
+        (gather_install_requests(app, tools)?, false, false)
     };
+    if !explicit {
+        requests = select_default_install_requests(app, requests, include_lazy);
+    }
     let cwd = std::env::current_dir()?;
-    let update_project_lock =
-        !explicit && !trusted_replay && has_project_context(app, &requests, &cwd);
+    let update_project_lock = !explicit
+        && (!trusted_replay || supplemented_lock)
+        && has_project_context(app, &requests, &cwd);
     let installed = install_requests(app, requests, opts, trusted_replay, force).await?;
     if update_project_lock && !installed.is_empty() {
         let path = project_lock_path(app, &cwd);
@@ -63,6 +76,79 @@ pub async fn install(
         println!("updated {}", path.display());
     }
     Ok(())
+}
+
+/// Add lazy declarations omitted by an earlier default install to a lock replay.
+///
+/// A first bare install can create a lock containing only eager tools. A later
+/// `--include-lazy` must still be able to install the omitted entries without
+/// discarding exact versions already present in that lock. Existing locked
+/// backends win; only missing lazy backends are appended from configuration.
+pub(crate) fn supplement_locked_requests_with_lazy(
+    app: &App,
+    locked: &mut Vec<ToolRequest>,
+    configured: Vec<ToolRequest>,
+) -> Result<bool> {
+    let mut supplemented = false;
+    for request in configured
+        .into_iter()
+        .filter(|request| configured_request_is_lazy(app, request))
+    {
+        if locked
+            .iter()
+            .any(|existing| existing.backend == request.backend)
+        {
+            continue;
+        }
+        reject_public_internal_options(&request.options)?;
+        locked.push(request);
+        supplemented = true;
+    }
+    Ok(supplemented)
+}
+
+/// Apply the no-argument install policy to an already resolved request list.
+/// Explicit operands bypass this helper entirely.
+pub(crate) fn select_default_install_requests(
+    app: &App,
+    requests: Vec<ToolRequest>,
+    include_lazy: bool,
+) -> Vec<ToolRequest> {
+    if include_lazy {
+        return requests;
+    }
+    requests
+        .into_iter()
+        .filter(|request| !configured_request_is_lazy(app, request))
+        .collect()
+}
+
+/// Whether the active config entry that produced `request` is lazy.
+///
+/// Static tools normally use their backend id as the config key. Dynamic tools
+/// can instead be declared through an arbitrary key whose value is the real
+/// request (`formatter = "npm:prettier@3"`), so the fallback matches the parsed
+/// backend rather than assuming the two keys are identical.
+pub(crate) fn configured_request_is_lazy(app: &App, request: &ToolRequest) -> bool {
+    if app
+        .ctx
+        .config
+        .tool_configs
+        .get(&request.backend)
+        .is_some_and(osdk_core::config::ToolConfigEntry::is_lazy)
+    {
+        return true;
+    }
+    app.ctx.config.tool_configs.iter().any(|(key, entry)| {
+        entry.is_lazy()
+            && app
+                .ctx
+                .config
+                .tools
+                .get(key)
+                .and_then(|value| ToolRequest::parse(value).ok())
+                .is_some_and(|configured| configured.backend == request.backend)
+    })
 }
 
 pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {

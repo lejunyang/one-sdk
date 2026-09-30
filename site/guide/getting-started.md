@@ -60,7 +60,7 @@ CLI 布尔开关用于开启本次行为，不能用同一个开关把配置中�
 ## 安装、锁定、检查和升级
 
 ```text
-osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...] [--include-lazy]
 osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
@@ -68,7 +68,7 @@ osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 
 | 命令 | 行为 |
 | --- | --- |
-| `install` | 安装一个或多个工具并生成 shim；裸项目安装优先消费当前平台 lock，缺失时从配置解析并写回精确 lock |
+| `install` | 安装一个或多个工具并生成 shim；裸项目安装优先消费当前平台 lock，缺失时从配置解析并写回精确 lock；除非带 `--include-lazy`，否则跳过 lazy 条目 |
 | `lock` | 解析请求并写入按平台分区的 `osdk.lock`，不安装；Rust 浮动 channel 仍保存为 channel 名 |
 | `outdated` | 重新解析配置或显式请求，报告目标精确版本尚未安装的工具；不读取 lock |
 | `upgrade` | 重新解析、安装，并刷新 lock；不以旧 lock 为输入 |
@@ -78,6 +78,7 @@ osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 
 ```bash
 osdk --jobs 4 install node@20 go@1.22 python@3.12
+osdk install --include-lazy
 osdk install rust@stable -o profile=minimal -o components=clippy,rustfmt
 osdk lock node@20 -o arch=arm64
 osdk outdated node@20 python@3.12
@@ -86,6 +87,10 @@ osdk upgrade
 
 显式 `install TOOL...` 只做一次性共享安装，不修改项目 `[tools]` 或 lock。要把工具加入项目，
 使用 `osdk use TOOL@VERSION`；它会安装工具，并原子更新项目配置与当前平台 lock。
+
+结构化 `[tools]` 条目可设置 `lazy = true`，使裸安装默认跳过它；
+`--include-lazy` 会把所有这类条目纳入安装。显式点名工具已经表达安装意图，因此不需要该
+开关。被纳入工具所需的 runtime 依赖即使自身标为 lazy，也仍会安装。
 
 更精确的读写矩阵、跨平台区段和陈旧 lock 行为见[可复现锁文件](./lockfiles)。
 Rust 的 `stable`、`beta`、`nightly` 等浮动 channel 不会被锁成具体发行版本；需要

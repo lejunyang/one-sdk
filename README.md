@@ -158,6 +158,11 @@ osdk use go@1.22
 osdk install
 ```
 
+Tools needed only by occasional workflows can be declared with `lazy = true`.
+A bare `osdk install` skips them; use `osdk install --include-lazy` when you want
+the complete configured toolset. Explicit operands such as `osdk install
+cargo:release-tool` are always installed.
+
 Check for newer matching versions or run a command without changing project
 pins:
 

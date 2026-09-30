@@ -147,6 +147,10 @@ osdk use go@1.22
 osdk install
 ```
 
+只在偶尔执行的工作流中使用的工具可以声明为 `lazy = true`。裸 `osdk install` 会跳过
+它们；需要完整安装配置工具集时使用 `osdk install --include-lazy`。显式点名的
+`osdk install cargo:release-tool` 始终会安装。
+
 检查符合约束的新版本，或者临时运行命令而不修改项目固定版本：
 
 ```bash

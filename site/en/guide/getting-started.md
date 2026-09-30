@@ -61,7 +61,7 @@ verification with `OSDK_VERIFY_SIGNATURES=false` or configuration.
 ## Install, lock, check, and upgrade
 
 ```text
-osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...] [--include-lazy]
 osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 osdk outdated [TOOL[@VERSION] ...]
 osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
@@ -69,7 +69,7 @@ osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
 
 | Command | Behavior |
 | --- | --- |
-| `install` | Install tools and generate shims; a bare project install consumes the current-platform lock when present, otherwise resolves configuration and records an exact lock |
+| `install` | Install tools and generate shims; a bare project install consumes the current-platform lock when present, otherwise resolves configuration and records an exact lock; lazy entries are skipped unless `--include-lazy` is present |
 | `lock` | Resolve requests and write a platform-partitioned `osdk.lock`; do not install; floating Rust channels remain channel names |
 | `outdated` | Re-resolve configuration or explicit requests and report targets not installed; never read the lock |
 | `upgrade` | Re-resolve, install, and refresh the lock; never use the old lock as resolution input |
@@ -80,6 +80,7 @@ backend-specific options with unrelated tools.
 
 ```bash
 osdk --jobs 4 install node@20 go@1.22 python@3.12
+osdk install --include-lazy
 osdk install rust@stable -o profile=minimal -o components=clippy,rustfmt
 osdk lock node@20 -o arch=arm64
 osdk outdated node@20 python@3.12
@@ -90,6 +91,12 @@ Explicit `install TOOL...` is a one-shot shared installation and changes neither
 project `[tools]` nor the lock. Use `osdk use TOOL@VERSION` to add a project
 selection; it installs the tool and atomically updates project configuration and
 the current-platform lock.
+
+A structured `[tools]` entry with `lazy = true` stays out of a no-argument
+install by default. `--include-lazy` includes all such entries. The flag is not
+needed for explicit operands: naming a tool is already an explicit request to
+install it. Runtime dependencies of an included tool are installed even when
+their own declaration is lazy.
 
 See [Reproducible Lockfiles](./lockfiles) for the exact read/write matrix.
 Floating Rust channels such as `stable`, `beta`, and `nightly` are not frozen to

@@ -138,6 +138,7 @@ pnpm = "10.15.0"
 "npm:prettier" = "3"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 "go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
+"cargo:cargo-release" = { version = "0.25", lazy = true }
 
 [alias.tools.node]
 maintenance = "20"
@@ -377,6 +378,7 @@ pnpm = "10.15.0"
 
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
+lazy = true                    # 裸 install 默认跳过，除非带 --include-lazy
 installer = "npm"             # auto|npm|pnpm；隐式默认值为 auto
 allow_builds = ["@scope/native-tool", "esbuild"]
 
@@ -405,7 +407,8 @@ Registry URL 会去重并补尾部 `/`。只允许带 host 的 HTTP(S) URL；cre
 query 和 fragment 都会被拒绝。来源的选择语义见[下载源与供应链安全](./sources-security)，
 Registry 的选择语义见[JavaScript 包管理器](./package-managers)。
 结构化工具对象要求 `version`，其他 option 可以是字符串、布尔值或字符串数组；数组
-传给 backend 时会转成逗号分隔值。`installer` 选择 npm 工具安装器。`allow_builds` 控制
+传给 backend 时会转成逗号分隔值。`lazy` 是 osdk 元数据而非 backend option：裸
+`install` 会跳过它，除非带 `--include-lazy`；显式点名仍会安装。`installer` 选择 npm 工具安装器。`allow_builds` 控制
 隔离与全局安装；项目感知的 `use` 始终禁用 lifecycle scripts。完整安全边界见
 [npm 开发工具](./npm-tools#构建脚本策略)。
 `http:` 条目要求精确语义化版本，并为严格 HTTPS `{version}` 模板提供 SHA-256；

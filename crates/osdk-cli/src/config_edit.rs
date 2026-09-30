@@ -1355,6 +1355,7 @@ mod tests {
     ) -> StructuredToolConfig {
         StructuredToolConfig {
             version: version.to_string(),
+            lazy: false,
             when: None,
             options: options
                 .into_iter()

@@ -153,6 +153,7 @@ pnpm = "10.15.0"
 "npm:prettier" = "3"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 "go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
+"cargo:cargo-release" = { version = "0.25", lazy = true }
 
 [alias.tools.node]
 maintenance = "20"
@@ -419,6 +420,7 @@ pnpm = "10.15.0"
 
 [tools."npm:@scope/native-tool"]
 version = "1.2.3"
+lazy = true                    # skipped by bare install unless --include-lazy
 installer = "npm"             # auto|npm|pnpm; auto is the implicit default
 allow_builds = ["@scope/native-tool", "esbuild"]
 
@@ -450,7 +452,9 @@ rejected. See [Sources and Supply-chain Security](./sources-security) and
 [JavaScript Package Managers](./package-managers) for runtime selection.
 Structured tool objects require `version`; other options may be strings,
 booleans, or string arrays. Arrays become comma-separated values when passed to
-the backend. `installer` selects the npm tool installer. `allow_builds` controls
+the backend. `lazy` is osdk metadata rather than a backend option: a bare
+`install` skips the entry unless `--include-lazy` is present, while an explicit
+operand still installs it. `installer` selects the npm tool installer. `allow_builds` controls
 isolated and global installs; project-aware `use` always disables lifecycle
 scripts. See [npm Developer Tools](./npm-tools#build-script-policy) for the
 complete security boundary.

@@ -177,6 +177,58 @@ mod command_flow_tests {
         assert_eq!(unscoped[0].backend, "go");
     }
 
+    #[test]
+    fn lazy_metadata_matches_static_and_indirect_dynamic_requests() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            project.join("osdk.toml"),
+            r#"
+[tools]
+node = { version = "20", lazy = true }
+formatter = { version = "npm:prettier@3", lazy = true, installer = "pnpm" }
+python = "3.14"
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+
+        let node = ToolRequest::parse("node@20").unwrap();
+        let prettier = ToolRequest::parse("npm:prettier@3").unwrap();
+        let python = ToolRequest::parse("python@3.14").unwrap();
+        assert!(configured_request_is_lazy(&app, &node));
+        assert!(configured_request_is_lazy(&app, &prettier));
+        assert!(!configured_request_is_lazy(&app, &python));
+
+        let requests = vec![node, prettier, python];
+        let ordinary = select_default_install_requests(&app, requests.clone(), false);
+        assert_eq!(
+            ordinary
+                .iter()
+                .map(|request| request.backend.as_str())
+                .collect::<Vec<_>>(),
+            ["python"]
+        );
+        assert_eq!(
+            select_default_install_requests(&app, requests, true).len(),
+            3
+        );
+
+        let mut locked = vec![ToolRequest::parse("node@20.11.1").unwrap()];
+        let configured = vec![
+            ToolRequest::parse("node@20").unwrap(),
+            ToolRequest::parse("npm:prettier@3").unwrap(),
+            ToolRequest::parse("python@3.14").unwrap(),
+        ];
+        assert!(supplement_locked_requests_with_lazy(&app, &mut locked, configured).unwrap());
+        assert_eq!(locked.len(), 2);
+        assert_eq!(locked[0].spec, VersionSpec::Exact("20.11.1".into()));
+        assert_eq!(locked[1].backend, "npm:prettier");
+    }
+
     /// A named operand without `@` must inherit the project's pin.
     ///
     /// This is what `osdk exec -t java -- ...` does. Before the fix the absent

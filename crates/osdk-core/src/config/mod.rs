@@ -702,6 +702,7 @@ impl ToolConfigEntry {
     ) -> Self {
         Self::Structured(StructuredToolConfig {
             version: version.into(),
+            lazy: false,
             when: None,
             options,
         })
@@ -728,6 +729,14 @@ impl ToolConfigEntry {
         }
     }
 
+    /// Whether a bare `osdk install` should leave this declaration alone.
+    ///
+    /// Explicit operands can still request the tool; `lazy` only changes the
+    /// default project batch.
+    pub fn is_lazy(&self) -> bool {
+        matches!(self, Self::Structured(config) if config.lazy)
+    }
+
     pub fn to_cli_option_strings(&self) -> Vec<String> {
         match self {
             Self::Legacy(_) => Vec::new(),
@@ -748,6 +757,10 @@ impl ToolConfigEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StructuredToolConfig {
     pub version: String,
+    /// Omit this entry from a bare `osdk install` unless `--include-lazy` is
+    /// present. This is selection metadata, not a backend option.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lazy: bool,
     /// Platform restriction for this entry. `None` means "every platform".
     ///
     /// A typed field rather than one of the flattened `options`, so that it is
@@ -830,6 +843,7 @@ impl ToolConfigEntry {
                     filter,
                     Self::Structured(StructuredToolConfig {
                         version: config.version.clone(),
+                        lazy: config.lazy,
                         // The filter has been extracted; the stripped entry
                         // must not carry it again or a second split would
                         // re-apply it.
@@ -2507,7 +2521,7 @@ mirrors = ["https://project.example"]
             r#"
 [tools]
 node = "20"
-npm = { version = "11.5.2", allow_builds = ["esbuild", "sharp"], engine = "node", frozen = true }
+npm = { version = "11.5.2", lazy = true, allow_builds = ["esbuild", "sharp"], engine = "node", frozen = true }
 "@scope/tool" = { version = "1.2.3", allow_builds = ["pkg-a"] }
 "#,
         )
@@ -2517,6 +2531,8 @@ npm = { version = "11.5.2", allow_builds = ["esbuild", "sharp"], engine = "node"
         let tools = &config.tool_configs;
         assert_eq!(tools["node"].version(), "20");
         assert_eq!(tools["npm"].version(), "11.5.2");
+        assert!(!tools["node"].is_lazy());
+        assert!(tools["npm"].is_lazy());
         assert_eq!(
             tools["@scope/tool"]
                 .structured_config()
@@ -2548,6 +2564,10 @@ npm = { version = "11.5.2", allow_builds = ["esbuild", "sharp"], engine = "node"
         assert_eq!(
             tools["npm"].to_request_options().get("allow_builds"),
             Some(&"esbuild,sharp".to_string())
+        );
+        assert!(
+            !tools["npm"].to_request_options().contains_key("lazy"),
+            "lazy is install selection metadata, not a backend option"
         );
     }
 

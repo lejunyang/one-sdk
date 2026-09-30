@@ -1615,6 +1615,7 @@ pub(crate) fn persist_global_config(
         &request.backend,
         &osdk_core::config::StructuredToolConfig {
             version: spec.into(),
+            lazy: false,
             when: None,
             options,
         },

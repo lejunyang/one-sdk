@@ -44,6 +44,9 @@ fn localize_subcommands(cmd: Command) -> Command {
         c.about(h("help.install.about"))
             .long_about(h("help.install.long"))
             .mut_arg("tools", |a| a.help(h("help.install.arg.tools")))
+            .mut_arg("include_lazy", |a| {
+                a.help(h("help.install.flag.include_lazy"))
+            })
             .mut_arg("opts", |a| a.help(h("help.opt")))
     })
     .mut_subcommand("lock", |c| {

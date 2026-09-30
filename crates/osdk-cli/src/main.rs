@@ -300,8 +300,12 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
 
     let result = match command {
         Command::Install {
-            tools, opts, force, ..
-        } => commands::install(app, tools, opts, force).await,
+            tools,
+            opts,
+            force,
+            include_lazy,
+            ..
+        } => commands::install(app, tools, opts, force, include_lazy).await,
         Command::Lock { tools, opts } => commands::lock(app, tools, opts).await,
         Command::Outdated { tools } => commands::outdated(app, tools).await,
         Command::Upgrade { tools, opts } => commands::upgrade(app, tools, opts).await,
@@ -535,6 +539,7 @@ mod tests {
             tools,
             opts: Vec::new(),
             force: false,
+            include_lazy: false,
             no_deps,
         }
     }
@@ -589,6 +594,31 @@ mod tests {
             vec!["node@22".into(), "python@3.12".into()],
             false
         )));
+    }
+
+    #[test]
+    fn include_lazy_is_scoped_to_the_install_command() {
+        let Command::Install {
+            tools,
+            include_lazy,
+            ..
+        } = command(&["install", "--include-lazy"])
+        else {
+            panic!("expected install command");
+        };
+        assert!(tools.is_empty());
+        assert!(include_lazy);
+
+        let Command::Install {
+            tools,
+            include_lazy,
+            ..
+        } = command(&["install", "node", "--include-lazy"])
+        else {
+            panic!("expected install command");
+        };
+        assert_eq!(tools, ["node"]);
+        assert!(include_lazy);
     }
 
     /// Valve 3 (the half of it that is structural): `--dry-run` has no effects.

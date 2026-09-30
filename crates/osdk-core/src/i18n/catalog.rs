@@ -2556,6 +2556,13 @@ pub fn build() -> HashMap<&'static str, (&'static str, &'static str)> {
         ),
     );
     m.insert(
+        "help.install.flag.include_lazy",
+        (
+            "Include configured tools marked `lazy = true` in a no-argument install",
+            "无参数安装时也包含标记为 `lazy = true` 的工具",
+        ),
+    );
+    m.insert(
         "help.opt",
         (
             "Backend-specific option as key=value (repeatable), e.g. `-o profile=minimal` (rust), \
