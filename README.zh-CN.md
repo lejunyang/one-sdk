@@ -191,6 +191,9 @@ osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 依赖按拓扑顺序执行，工具版本由 osdk 注入——无需先激活 shell。
 
 ```toml
+[tools]
+"cargo:cargo-nextest" = { version = "0.9", lazy = true }
+
 [tasks]
 build = "cargo build --release"
 
@@ -198,9 +201,11 @@ build = "cargo build --release"
 run = [
   "cargo fmt --check",
   { cmd = "cargo clippy -- -D warnings", ignore_error = true },
-  { tasks = ["test", "doc"] },
+  "cargo nextest run",
+  { tasks = ["doc"] },
 ]
 depends = ["build"]
+tools = ["cargo:cargo-nextest"]
 ```
 
 ```bash
@@ -213,6 +218,10 @@ osdk run ci --dry-run
 打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。不要用 shell 的
 `&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
 [项目任务](site/guide/tasks.md)。
+
+`tools` 点名 `[tools]` 中的键。任何任务命令开始前，osdk 会检查完整任务图并自动安装
+缺少的工具，包括 `lazy = true` 的条目。osdk 不会解析 shell 命令来猜依赖：别名、脚本
+和条件命令会让这种推断不可靠。
 
 需要分支、循环或读取子进程输出时可用内嵌 Lua；常用能力无需长前缀：
 `run("cargo", "test")` 流式执行，`exec("git", "status", "--short")` 捕获输出；

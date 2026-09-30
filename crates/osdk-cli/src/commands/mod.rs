@@ -229,6 +229,84 @@ python = "3.14"
         assert_eq!(locked[1].backend, "npm:prettier");
     }
 
+    #[test]
+    fn task_tool_requirements_include_lazy_entries_and_only_install_missing_versions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            project.join("osdk.toml"),
+            r#"
+[tools]
+node = { version = "20.11.1", lazy = true }
+python = "3.12.1"
+
+[tasks.prepare]
+run = "prepare"
+tools = ["python"]
+
+[tasks.build]
+run = "build"
+depends = ["prepare"]
+tools = ["node"]
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let plan = osdk_core::tasks::runner::plan(&app.ctx.config.tasks, "build").unwrap();
+
+        let requests = task_tool_requests(&app, &plan).unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.backend.as_str())
+                .collect::<Vec<_>>(),
+            ["node", "python"]
+        );
+        assert!(
+            app.ctx.config.tool_configs["node"].is_lazy(),
+            "task requirements must not filter lazy declarations"
+        );
+        assert_eq!(
+            missing_task_tool_requests(&app, requests.clone())
+                .unwrap()
+                .len(),
+            2
+        );
+
+        for (tool, version) in [("node", "20.11.1"), ("python", "3.12.1")] {
+            let root = app.ctx.dirs.install_path(tool, version);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        }
+        assert!(missing_task_tool_requests(&app, requests)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn task_tool_requirements_fail_before_execution_when_the_config_key_is_unknown() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let user_config = temporary.path().join("config.toml");
+        std::fs::write(
+            project.join("osdk.toml"),
+            "[tasks.build]\nrun = \"build\"\ntools = [\"missing\"]\n",
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load(&user_config, &project).unwrap();
+        let app = app_with_config(&temporary, config);
+        let plan = osdk_core::tasks::runner::plan(&app.ctx.config.tasks, "build").unwrap();
+
+        let error = task_tool_requests(&app, &plan).unwrap_err().to_string();
+        assert!(error.contains("task `build`"), "{error}");
+        assert!(error.contains("tool `missing`"), "{error}");
+        assert!(error.contains("not declared in `[tools]`"), "{error}");
+    }
+
     /// A named operand without `@` must inherit the project's pin.
     ///
     /// This is what `osdk exec -t java -- ...` does. Before the fix the absent

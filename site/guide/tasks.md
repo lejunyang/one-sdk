@@ -93,6 +93,29 @@ error: task dependency cycle: a -> b -> a
 
 `depends` 里的名字写错同样在执行前报错，不会跑到一半才发现。
 
+## 工具依赖
+
+任务不会从 shell 文本里推断工具。请显式声明它需要的 `[tools]` 键：
+
+```toml
+[tools]
+node = "24"
+"npm:eslint" = { version = "9", lazy = true }
+
+[tasks.lint]
+run = "eslint ."
+tools = ["node", "npm:eslint"]
+```
+
+所选任务图中的任何命令开始前，`osdk run` 会先校验全部引用，只安装尚未就绪的工具。
+通过 `depends`、并行 `{ tasks = [...] }` 步骤和 `run_post` 到达的任务也包含在内。
+任务的显式依赖会包含 `lazy = true` 的工具，但不会改变之后裸 `osdk install` 的行为。
+
+每一项必须是当前 `[tools]` 配置中的键，不能临时写成 `tool@version` 请求。当前平台
+lock 中已有该工具时使用其中的精确重放请求，否则从配置版本和 option 解析。未知或被平台过滤的键会在
+安装或任务执行前报错。`--no-deps` 只关闭 `[deps]` 自动兑现，不会忽略任务自己的
+`tools` 依赖。
+
 ## 第三档：脚本文件
 
 一段脚本写到二十行上下，编辑器就不再高亮它、linter 也看不见它，TOML 的转义
@@ -603,6 +626,8 @@ osdk 在启动任务前**主动注入**该项目的环境，和 `osdk hook-env` 
 
 因此任务里看到的工具版本就是项目声明的版本，**无论从哪个目录、哪种 shell
 调用**，也不要求用户先 `osdk activate`。
+已安装工具会直接从本地选择，不发网络请求；缺失工具只有在任务显式列出其 `[tools]`
+键时才会安装。osdk 不会解析命令或脚本来猜测依赖。
 
 osdk 同时设置两个变量：
 
@@ -628,6 +653,7 @@ env = { RUST_BACKTRACE = "1" }
 [tasks.release]
 description = "打包发布产物"      # 出现在 osdk task list
 alias = ["rel"]                   # osdk run rel
+tools = ["cargo:cargo-release"]   # 按需从 [tools] 安装
 dir = "packaging"                 # 相对配置文件所在目录
 hide = true                       # 默认不出现在列表里
 quiet = true                      # 抑制 osdk 自身输出，不影响任务输出
@@ -677,7 +703,9 @@ error: task `linuxonly` is not available on this platform (os=linux)
 不读就点同意。
 
 对比 `sys.pkg` 就清楚了：它在 `osdk pkg apply` 期间动作，而用户并没有逐个包地
-要求过，所以必须事先审阅；任务则永远是因为有人点名才运行。
+要求过，所以必须事先审阅；任务则永远是因为有人点名才运行。`tools` 列表同样只是声明；
+如果所需工具缺失，`osdk run` 会在获取它之前应用正常的 install 信任作用域，因此来源覆盖
+和 `allow_builds` 不会在未经审阅时生效；通过受管 shim 执行时仍保留 shim 原有的信任检查。
 
 **`[task]` 仍然需要信任**，因为它不是你点名的命令，而是一个环境设置：
 

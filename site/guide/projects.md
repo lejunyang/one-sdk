@@ -508,7 +508,7 @@ osdk untrust [PATH]
 
 | 作用域 | 到达它的命令 | 检查的键 |
 | --- | --- | --- |
-| 安装 | `install`、`use`、`upgrade`、`lock`、`self upgrade` | `settings` 的校验开关与 catalog、`sources`、`registries`、`tools.allow_builds` |
+| 安装 | `install`、`use`、`upgrade`、`lock`、`self upgrade`；以及所选 task 需要获取缺失 `tools` 时的 `run` | `settings` 的校验开关与 catalog、`sources`、`registries`、`tools.allow_builds` |
 | 依赖 | bare `install`、`run`/`exec`（默认）、显式 `deps` | `sources`、`registries`、`[deps]` 内的 index/registry/build/自定义 `run` |
 | 运行任务 | `run`（非 `--dry-run`） | `[task]`：其 `shell` 决定每个任务由谁解释 |
 | 系统包 | `pkg apply` | `[sys.pkg]` 中**在本机适用**的条目 |

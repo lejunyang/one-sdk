@@ -127,6 +127,34 @@ impl App {
         // Ownership is derived from the same tree, so it goes stale together.
         *self.shim_owners.borrow_mut() = None;
     }
+
+    /// Enforce an additional trust scope after the command has inspected its
+    /// concrete plan.
+    ///
+    /// Task tool dependencies use this only when at least one requested tool is
+    /// missing. Keeping the check late avoids making an unrelated `[sources]`
+    /// override block tasks that install nothing, while still applying the
+    /// normal install gate before any download or install begins.
+    pub fn ensure_project_trusted(&self, scopes: &[osdk_core::trust::Scope]) -> Result<()> {
+        let Some(project_config) = self.ctx.config.project_config_path.as_ref() else {
+            return Ok(());
+        };
+        let requirements = osdk_core::trust::trust_requirements(project_config, scopes)?;
+        if requirements.is_empty()
+            || osdk_core::trust::is_trusted(
+                &self.ctx.dirs.config,
+                project_config,
+                std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS").as_ref(),
+            )?
+        {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(osdk_core::t!(
+            "err.untrusted_config",
+            path = project_config.display(),
+            requirements = osdk_core::trust::describe_requirements(&requirements)
+        )))
+    }
 }
 
 /// How much of the project configuration a command may see, and whether the

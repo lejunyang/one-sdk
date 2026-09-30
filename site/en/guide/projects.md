@@ -565,7 +565,7 @@ The four scopes and the keys they check:
 
 | Scope | Commands that reach it | Keys checked |
 | --- | --- | --- |
-| Install | `install`, `use`, `upgrade`, `lock`, `self upgrade` | verification switches and catalogs in `settings`, `sources`, `registries`, `tools.allow_builds` |
+| Install | `install`, `use`, `upgrade`, `lock`, `self upgrade`; also `run` when a selected task must acquire a missing `tools` requirement | verification switches and catalogs in `settings`, `sources`, `registries`, `tools.allow_builds` |
 | Deps | bare `install`, `run`/`exec` by default, explicit `deps` | `sources`, `registries`, index/registry/build/`run` inside `[deps]` |
 | Run tasks | `run` (not `--dry-run`) | `[task]`: its `shell` picks the interpreter for every task |
 | System packages | `pkg apply` | `[sys.pkg]` entries that actually **apply on this machine** |

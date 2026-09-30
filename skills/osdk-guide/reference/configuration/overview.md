@@ -25,7 +25,7 @@ osdk 读取两类 TOML，字段形状相同：
 | `[registries]` | [registries.md](registries.md) | 安装、依赖作用域 |
 | `[container]` | [container.md](container.md) | container 作用域 |
 | `[sys.pkg]` | [sys.md](sys.md) | 仅 `pkg apply`，且有条目在本机适用 |
-| `[tasks]` | [tasks.md](tasks.md) | 不检查（键入 run 即授权） |
+| `[tasks]` | [tasks.md](tasks.md) | 正文不检查；缺失的 `tools` 需要安装时追加安装作用域 |
 | `[task]` | [task.md](task.md) | run 作用域 |
 | `[deps]` | [deps.md](deps.md) | 依赖作用域，视字段而定 |
 | `[models]` | [models.md](models.md) | 不检查 |

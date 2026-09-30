@@ -41,6 +41,7 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 | `description` | `task list` 展示文本 |
 | `alias` | 任务别名数组 |
 | `depends` | 前置任务，会加入执行图 |
+| `tools` | 依赖的 `[tools]` 键；运行前自动安装缺失项，包括 lazy 工具 |
 | `wait_for` | 只排序已在执行图里的任务，不主动加入 |
 | `env` | 子进程与 Lua host API 的任务环境 |
 | `dir` | 工作目录，相对声明配置 |
@@ -55,6 +56,12 @@ write(join(root, "dist", "version.txt"), "1.0\n")
 `argv` 步骤里的 `{{name}}` 与 `{{args}}` 按 argv 边界展开；不要把不可信参数插进 shell
 字符串。Lua 完整 API、短名、exec capture、fs/path/JSON/TOML 见
 `reference/run/lua.md`。
+
+`tools` 只接受已在当前 `[tools]` 中声明的键，不接受临时 `tool@version`。当前平台 lock
+有对应项时优先使用其精确重放请求，否则解析配置版本和 option。`osdk run`
+会在任务图开始前校验全部引用并只安装缺失项；`depends`、并行 task 步骤与 `run_post`
+引用到的任务都会参与。该显式依赖会安装 `lazy = true` 的工具。`--no-deps` 只跳过
+`[deps]`，不跳过这里的工具依赖；命令文本不会被自动解析来猜工具。
 
 ## 参数声明
 

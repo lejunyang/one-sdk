@@ -98,6 +98,34 @@ error: task dependency cycle: a -> b -> a
 A misspelled name in `depends` is caught the same way, rather than surfacing
 halfway through a pipeline that already had effects.
 
+## Tool dependencies
+
+Tasks do not infer tools from shell text. Declare the `[tools]` keys they need:
+
+```toml
+[tools]
+node = "24"
+"npm:eslint" = { version = "9", lazy = true }
+
+[tasks.lint]
+run = "eslint ."
+tools = ["node", "npm:eslint"]
+```
+
+Before any command in the selected task graph starts, `osdk run` validates all
+of these references and installs only the missing tools. Dependencies reached
+through `depends`, parallel `{ tasks = [...] }` steps, and `run_post` are included.
+A task requirement is explicit enough to include a `lazy = true` tool; it does
+not change the behavior of a later bare `osdk install`.
+
+Every item must be a key from the active `[tools]` configuration, not an ad-hoc
+`tool@version` request. The current-platform lock supplies its exact replay
+request when present; otherwise osdk resolves the configured version and options.
+An unknown or
+platform-excluded key fails before installation or task execution begins.
+`--no-deps` only disables automatic `[deps]` materialization; it does not ignore
+the task's own `tools` requirements.
+
 ## The third tier: script files
 
 Somewhere around twenty lines a script outgrows a TOML string: the editor stops
@@ -666,6 +694,9 @@ plus package-cache and model-provider variables.
 
 So a task sees the tool versions the project declared **whatever directory or
 shell it was invoked from**, and without the user having run `osdk activate`.
+Tools already installed are selected without a network request. Missing tools
+are installed only when the task explicitly lists their `[tools]` keys; osdk
+does not parse commands or scripts to guess dependencies.
 
 osdk also sets two variables:
 
@@ -691,6 +722,7 @@ env = { RUST_BACKTRACE = "1" }
 [tasks.release]
 description = "Package release artifacts"   # shown by osdk task list
 alias = ["rel"]                             # osdk run rel
+tools = ["cargo:cargo-release"]             # installed on demand from [tools]
 dir = "packaging"                           # relative to the config file
 hide = true                                 # hidden from the listing
 quiet = true                                # silence osdk's own output
@@ -746,7 +778,11 @@ to approve without reading.
 
 The contrast with `sys.pkg` makes the rule clear: it acts during `osdk pkg apply`,
 which you did not request per package, so review has to happen beforehand. A
-task only ever runs because someone named it.
+task only ever runs because someone named it. A `tools` list is likewise only a
+declaration. If a required tool is missing, `osdk run` applies the normal install
+trust scope immediately before acquiring it, so source overrides and
+`allow_builds` are never acted on without review. Execution through a managed
+shim retains the shim's existing trust checks as well.
 
 **`[task]` does still require trust**, because it is not a command you name
 but an ambient setting:

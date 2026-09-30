@@ -357,7 +357,7 @@ pub(crate) fn task_config_root(app: &App) -> std::path::PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()))
 }
 
-pub fn run_task(
+pub async fn run_task(
     app: &mut App,
     task: String,
     dry_run: bool,
@@ -380,6 +380,7 @@ pub fn run_task(
     let values = osdk_core::tasks::args::parse(&resolved, &spec, &args)?;
 
     let config_root = task_config_root(app);
+    let tool_requests = task_tool_requests(app, &plan)?;
 
     if dry_run {
         // Showing the freshness verdict is the point of --dry-run for an
@@ -407,6 +408,9 @@ pub fn run_task(
                     println!("{}:  (up to date, would be skipped)", planned.name);
                     continue;
                 }
+            }
+            if !planned.tools.is_empty() {
+                println!("  tools: {}", planned.tools.join(", "));
             }
             for step in &planned.commands {
                 match step {
@@ -463,6 +467,8 @@ pub fn run_task(
         }
         return Ok(None);
     }
+
+    ensure_task_tools(app, tool_requests).await?;
 
     let cwd = std::env::current_dir()?;
     let env = task_environment(app, &cwd)?;
@@ -526,6 +532,153 @@ pub fn run_task(
         std::process::exit(failed.code);
     }
     Ok(None)
+}
+
+/// Resolve every explicit tool dependency in a task plan before any install or
+/// task command starts.
+///
+/// Names refer to active `[tools]` keys. Requiring declarations instead of
+/// guessing from shell text keeps aliases, backend options, platform filters,
+/// and version selection unambiguous.
+pub(crate) fn task_tool_requests(
+    app: &App,
+    plan: &osdk_core::tasks::runner::Plan,
+) -> Result<Vec<ToolRequest>> {
+    let mut requested_by = std::collections::BTreeMap::<String, String>::new();
+    for task in &plan.steps {
+        for tool in &task.tools {
+            requested_by
+                .entry(tool.clone())
+                .or_insert_with(|| task.name.clone());
+        }
+    }
+
+    let mut by_backend = std::collections::BTreeMap::<String, (String, ToolRequest)>::new();
+    for (tool, task) in requested_by {
+        if let Some(restriction) = app.ctx.config.excluded_tools.get(&tool) {
+            anyhow::bail!(
+                "task `{task}` requires tool `{tool}`, but it is not available on this platform ({restriction})"
+            );
+        }
+        let entry = app.ctx.config.tool_configs.get(&tool).ok_or_else(|| {
+            anyhow!("task `{task}` requires tool `{tool}`, but it is not declared in `[tools]`")
+        })?;
+
+        let request = if let Ok(backend) = app.registry.get(&tool) {
+            ToolRequest {
+                backend: backend.id().to_string(),
+                spec: VersionSpec::parse(entry.version()),
+                options: entry.to_request_options(),
+            }
+        } else {
+            let mut request = ToolRequest::parse(entry.version()).map_err(|error| {
+                anyhow!(
+                    "task `{task}` requires tool `{tool}`, whose `[tools]` value is invalid: {error}"
+                )
+            })?;
+            app.registry.get(&request.backend).map_err(|error| {
+                anyhow!(
+                    "task `{task}` requires tool `{tool}`, whose `[tools]` value names an unavailable backend: {error}"
+                )
+            })?;
+            request.options.extend(entry.to_request_options());
+            request
+        };
+        reject_public_internal_options(&request.options)?;
+
+        if let Some((other_tool, existing)) = by_backend.get(&request.backend) {
+            if existing.spec.to_string() != request.spec.to_string()
+                || existing.options != request.options
+            {
+                anyhow::bail!(
+                    "task tool keys `{other_tool}` and `{tool}` select conflicting requests for `{}`",
+                    request.backend
+                );
+            }
+            continue;
+        }
+        by_backend.insert(request.backend.clone(), (tool, request));
+    }
+    let mut requests = by_backend
+        .into_values()
+        .map(|(_, request)| request)
+        .collect::<Vec<_>>();
+    let locked = app
+        .ctx
+        .config
+        .project_config_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(|root| root.join(crate::lockfile::LOCKFILE_NAME))
+        .filter(|path| path.is_file())
+        .map(|path| crate::lockfile::locked_requests(&path, app.ctx.platform))
+        .transpose()?
+        .flatten();
+    if let Some(locked) = locked {
+        for request in &mut requests {
+            if let Some(exact) = locked
+                .iter()
+                .find(|candidate| candidate.backend == request.backend)
+            {
+                *request = exact.clone();
+            }
+        }
+    }
+    Ok(requests)
+}
+
+/// Validate the selected graph's tool references before automatic `[deps]`
+/// materialization can make any changes.
+pub(crate) fn preflight_task_tool_references(app: &App, task: &str) -> Result<()> {
+    let plan = osdk_core::tasks::runner::plan(&app.ctx.config.tasks, task)?;
+    task_tool_requests(app, &plan).map(|_| ())
+}
+
+/// Return only task tool requests that are not already ready on disk.
+pub(crate) fn missing_task_tool_requests(
+    app: &App,
+    requests: Vec<ToolRequest>,
+) -> Result<Vec<ToolRequest>> {
+    let mut missing = Vec::new();
+    for request in requests {
+        if matches!(request.spec, VersionSpec::System) {
+            continue;
+        }
+        let backend = app.registry.get(&request.backend)?;
+        let effective = expand_request_alias(app, backend.as_ref(), &request)?;
+        let ready = if request.backend.contains(':') {
+            installed_dynamic_match(app, backend.as_ref(), &effective).is_some()
+        } else {
+            let installed = backend.list_installed(&app.ctx)?;
+            select_installed_version(&request.backend, &effective.spec, installed).is_ok()
+        };
+        if !ready {
+            missing.push(request);
+        }
+    }
+    Ok(missing)
+}
+
+async fn ensure_task_tools(app: &mut App, requests: Vec<ToolRequest>) -> Result<()> {
+    let missing = missing_task_tool_requests(app, requests)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    app.ensure_project_trusted(&[osdk_core::trust::Scope::Install])?;
+    println!(
+        "installing task tools: {}",
+        missing
+            .iter()
+            .map(|request| request.backend.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // Requests loaded from the lock may carry validated internal replay
+    // metadata. Config fallbacks were explicitly checked above before they
+    // joined this batch, so treating the combined set as trusted replay does
+    // not admit user-authored internal options.
+    install_requests(app, missing, Vec::new(), true, false).await?;
+    Ok(())
 }
 
 pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {

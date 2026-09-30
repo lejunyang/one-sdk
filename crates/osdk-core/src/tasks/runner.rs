@@ -50,6 +50,8 @@ pub struct Plan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedTask {
     pub name: String,
+    /// Explicit `[tools]` keys required before this task runs.
+    pub tools: Vec<String>,
     pub dir: Option<String>,
     pub commands: Vec<PlannedStep>,
     /// Wall-clock limit for each command in this task.
@@ -289,6 +291,7 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             // serving a stale result after the task itself was rewritten.
             definition: toml::to_string(def).unwrap_or_default(),
             name,
+            tools: def.tools.clone(),
             dir: def.dir.clone().or_else(|| set.config.dir.clone()),
             commands,
         });
@@ -1282,6 +1285,27 @@ depends = ["prep"]
         )
         .unwrap();
         assert_eq!(spawner.ran, vec!["do-prep", "do-build --flag"]);
+    }
+
+    #[test]
+    fn plan_keeps_tool_requirements_on_each_scheduled_task() {
+        let set = set_from(
+            r#"
+[prep]
+run = "do-prep"
+tools = ["python"]
+
+[build]
+run = "do-build"
+depends = ["prep"]
+tools = ["rust", "cargo:cargo-nextest"]
+"#,
+        );
+        let built = plan(&set, "build").unwrap();
+        assert_eq!(built.steps[0].name, "prep");
+        assert_eq!(built.steps[0].tools, ["python"]);
+        assert_eq!(built.steps[1].name, "build");
+        assert_eq!(built.steps[1].tools, ["rust", "cargo:cargo-nextest"]);
     }
 
     /// A template naming `{{args}}` consumes the leftovers, so nothing is

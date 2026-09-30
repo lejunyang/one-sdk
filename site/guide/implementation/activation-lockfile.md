@@ -73,6 +73,12 @@ digest 与精确受管 runtime 身份。
 
 读取时完整解析 TOML，并接受已有 lock schema 1 到 3 以及当前 lock schema 4；其他版本会被拒绝。随后只读取当前平台键；若文件存在但没有该平台区段，返回“没有锁定请求”，调用方回退到普通配置解析。带通用 artifact 子表的非 npm 工具会被转换成保存版本字符串的请求，并注入 artifact URL、文件名、可选 checksum 与 subdir 等内部选项；npm 工具明确不能带通用 artifact receipt。lock schema 3 或 4 的 npm 工具恢复公开选项以及 package、installer、scope、可选精确 Node 版本和原生 lock 身份；主 lock 中没有 graph payload 或路径。lock schema 2 仍是兼容读取格式：其 npm 条目指向 `osdk.lock.d/npm/<sha256>.yaml`，sidecar 通过大小、symlink、UTF-8 与 SHA-256 校验后，完整 graph 才作为内部 option 注入。这个旧 lock schema 2 graph sidecar 与 `.osdk-install.json` schema 1 无关。含 npm 条目的 lock schema 1 不会被消费，必须重新生成。大多数 backend 的字符串是精确版本，但 Rust 浮动 channel 仍会由 rustup 在安装时解释。锁中的原始 `request` 只用于记录，不参与这次版本选择。对带通用 artifact receipt 的 backend，全新或强制重装会在锁中存在 checksum 时校验它；若没有 digest/evidence 且 `require_checksums=false`，仍可能不做加密完整性校验。普通 CLI 会在进入 pipeline 前直接复用已带完成标记的安装，不重新校验 checksum；动态 npm/GitHub/Cargo/Go 复用还要求精确匹配 `.osdk-install.json` 身份。只有实际进入 pipeline 的调用才可能在其完成快路径重验请求的 attestation。锁中 evidence 是审计数据，不是验证输入。顶层模型记录由 `model sync` 写入，但当前无参数 `osdk install` 只消费平台工具记录，不会据此恢复模型。npm metadata、安装身份 schema 1 与旧 lock schema 2 sidecar 的兼容边界见 [npm 开发工具实现](./npm-tools)。
 
+task 的 `tools` 依赖若在当前平台 lock 中存在匹配 backend，会复用其中的精确请求和内部
+重放 metadata；没有 lock 条目时才回退到当前 `[tools]` 声明。runner 会先校验完整任务图
+中的全部键，再以纯本地 inventory 检查就绪状态；只有确实缺失时才追加 install 信任作用域。
+安装仍走普通批处理管线，因此 runtime 依赖、校验、identity 检查和 shim 生成没有第二套
+task 专用实现。
+
 平台键是 `os-arch`，Linux musl 额外带 `-musl`。`osdk lock` 对 Node 的 `arch` 选项使用目标架构键；普通 `upgrade` 使用当前 host 平台键。
 
 ## `osdk.lock` 的写入语义

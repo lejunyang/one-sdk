@@ -3265,6 +3265,123 @@ fn http_artifact_lock_restarts_and_reinstalls_offline() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn task_installs_a_missing_declared_lazy_tool_before_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let backend = "http:https://downloads.example.test/task-tool-{version}";
+    let bytes = b"#!/bin/sh\nprintf 'task-tool-ready\\n'\n";
+    let digest =
+        osdk_core::pipeline::verify::hash_bytes(bytes, osdk_core::pipeline::HashAlgo::Sha256);
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[sources]\nselection = \"ordered\"\n\n[tools.{backend:?}]\nversion = \"1.2.3\"\nlazy = true\nsha256 = {digest:?}\nkind = \"file\"\nrename = \"fixture-task-tool\"\n\n[tasks.check]\nrun = [{{ argv = [\"fixture-task-tool\"] }}]\ntools = [{backend:?}]\n"
+        ),
+    )
+    .unwrap();
+
+    let mut version = osdk_core::version::ToolVersion::new(backend, "1.2.3");
+    version.options = std::collections::BTreeMap::from([
+        ("sha256".into(), digest.clone()),
+        ("kind".into(), "file".into()),
+        ("rename".into(), "fixture-task-tool".into()),
+    ]);
+    let dirs = osdk_core::dirs::Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_STORE_DIR" => Some(temp.path().join("store").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let locator = osdk_core::backend::http::HttpBackend::install_locator_for(
+        &dirs,
+        osdk_core::platform::Platform::current(),
+        backend,
+        &version,
+    )
+    .unwrap();
+    let cached =
+        osdk_core::pipeline::dynamic_artifact_cache_path(&dirs, &locator, "task-tool-1.2.3")
+            .unwrap();
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, bytes).unwrap();
+    let trusted = project.to_string_lossy().into_owned();
+
+    let default_install = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["--offline", "install", "--no-deps"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        default_install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&default_install.stderr)
+    );
+    assert!(
+        !locator.install_root().exists(),
+        "a bare install must leave the lazy tool absent"
+    );
+
+    let preview = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "--dry-run", "check"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(
+        !locator.install_root().exists(),
+        "a dry run must not install its task tools"
+    );
+    assert!(
+        String::from_utf8_lossy(&preview.stdout).contains("tools: http:"),
+        "{}",
+        String::from_utf8_lossy(&preview.stdout)
+    );
+
+    let untrusted = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "check"],
+    );
+    assert!(!untrusted.status.success());
+    assert!(
+        String::from_utf8_lossy(&untrusted.stderr).contains("project config is not trusted"),
+        "{}",
+        String::from_utf8_lossy(&untrusted.stderr)
+    );
+    assert!(
+        !locator.install_root().exists(),
+        "the late install trust gate must run before acquiring the task tool"
+    );
+
+    let run = run_isolated_in_with_env(
+        temp.path(),
+        &project,
+        &["--offline", "run", "--no-deps", "check"],
+        &[("OSDK_TRUSTED_CONFIG_PATHS", &trusted)],
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(locator.install_root().join(".osdk-complete").is_file());
+    let stdout = String::from_utf8(run.stdout).unwrap();
+    assert!(stdout.contains("installing task tools:"), "{stdout}");
+    assert!(stdout.contains("task-tool-ready"), "{stdout}");
+}
+
 #[test]
 fn locked_evidence_is_not_trusted_without_cached_bundle() {
     let temp = tempfile::tempdir().unwrap();

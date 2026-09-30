@@ -362,6 +362,13 @@ pub struct TaskDef {
     /// in no guaranteed order relative to one another.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends: Vec<String>,
+    /// Keys from `[tools]` that must be ready before this task executes.
+    ///
+    /// These are explicit configuration references, not command names inferred
+    /// from shell text. A referenced tool is installed on demand even when its
+    /// declaration has `lazy = true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
     /// Tasks to wait for **only if they are already in the plan**.
     ///
     /// The difference from `depends` is what happens when the named task is not
@@ -492,6 +499,11 @@ impl TaskDef {
                 "task `{name}`: sets `{}`; a task is written in one tier, and guessing which \
                  was meant would be worse than asking",
                 declared.join("` and `")
+            )));
+        }
+        if let Some(tool) = self.tools.iter().find(|tool| tool.trim().is_empty()) {
+            return Err(Error::config(format!(
+                "task `{name}`: `tools` contains an empty tool name: {tool:?}"
             )));
         }
 
@@ -1026,6 +1038,25 @@ run_windows = "nmake"
         let def = &set.tasks["build"];
         assert_eq!(def.steps_for(false), vec![RunStep::Simple("make".into())]);
         assert_eq!(def.steps_for(true), vec![RunStep::Simple("nmake".into())]);
+    }
+
+    #[test]
+    fn task_tools_are_explicit_config_keys_and_reject_empty_names() {
+        let set = set_from(
+            r#"
+[build]
+run = "cargo build"
+tools = ["rust", "cargo:cargo-nextest"]
+"#,
+        );
+        assert_eq!(set.tasks["build"].tools, ["rust", "cargo:cargo-nextest"]);
+
+        let mut invalid = TaskSet::default();
+        let error = invalid
+            .apply(parse("[build]\nrun = \"cargo build\"\ntools = [\"\"]\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("empty tool name"), "{error}");
     }
 
     #[test]

@@ -294,6 +294,9 @@ fn command_scopes(command: &Command) -> &'static [osdk_core::trust::Scope] {
 }
 
 async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>> {
+    if let Command::Run { task, .. } = &command {
+        commands::preflight_task_tool_references(app, task)?;
+    }
     if wants_auto_deps(&command) {
         deps_cmd::materialize_auto(app).await?;
     }
@@ -315,7 +318,7 @@ async fn dispatch(app: &mut App, command: Command) -> Result<Option<ExitStatus>>
             dry_run,
             args,
             ..
-        } => return commands::run_task(app, task, dry_run, args),
+        } => return commands::run_task(app, task, dry_run, args).await,
         Command::Task { command } => commands::task(app, command),
         Command::Completions { shell } => commands::completions(shell),
         Command::Alias { command } => commands::alias(app, command),
@@ -446,7 +449,9 @@ mod tests {
                 &["exec", "--no-deps", "--tool", "node", "--", "node", "-v"],
                 &[Scope::Install],
             ),
-            // Run only reaches task settings and, by default, deps.
+            // Run checks its own runner settings and, by default, deps. If the
+            // selected task later needs a missing tool, that install scope is
+            // checked immediately before acquisition.
             (&["run", "build"], &[Scope::Run, Scope::Deps]),
             (&["run", "--no-deps", "build"], &[Scope::Run]),
             (&["run", "--dry-run", "build"], &[]),
