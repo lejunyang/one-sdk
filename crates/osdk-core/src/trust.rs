@@ -1082,6 +1082,19 @@ mod tests {
 
     use super::*;
 
+    /// A package whose manager can exist on the current host.
+    ///
+    /// Keep this exhaustive over [`crate::platform::Os`]: treating every
+    /// non-Windows host as Linux made the trust tests pass on Linux and
+    /// Windows while feeding macOS an inapplicable `apt:` package.
+    fn native_system_package() -> &'static str {
+        match crate::platform::Os::current() {
+            crate::platform::Os::Linux => "apt:gcc",
+            crate::platform::Os::Macos => "brew:git",
+            crate::platform::Os::Windows => "winget:Foo",
+        }
+    }
+
     #[test]
     fn normalized_content_and_canonical_path_define_identity() {
         let temp = tempfile::tempdir().unwrap();
@@ -1808,17 +1821,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("osdk.toml");
         let host_os = crate::platform::Os::current().config_token();
-        let other_os = if host_os == "windows" {
-            "linux"
-        } else {
-            "windows"
+        let other_os = match crate::platform::Os::current() {
+            crate::platform::Os::Windows => "linux",
+            crate::platform::Os::Linux | crate::platform::Os::Macos => "windows",
         };
-        // A package whose manager is native to this host.
-        let host_package = if host_os == "windows" {
-            "winget:Foo"
-        } else {
-            "apt:build-essential"
-        };
+        let host_package = native_system_package();
 
         // It targets a different OS: nothing to install here.
         std::fs::write(
@@ -2026,15 +2033,9 @@ mode = "env"
         // also invalidate it.
         write("[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n");
         assert!(is_trusted(&config_dir, &config, None).unwrap());
-        // A Linux-applicable package. On non-Linux hosts use winget, which is
-        // applicable everywhere by default.
-        let applicable_package = if cfg!(target_os = "linux") {
-            "\"apt:gcc\" = \"latest\""
-        } else {
-            "\"winget:Foo\" = \"latest\""
-        };
+        let applicable_package = native_system_package();
         write(&format!(
-            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[sys.pkg]\n{applicable_package}\n"
+            "[tools]\nnode = \"20\"\n\n[settings]\njobs = 4\nverify_signatures = false\n\n[sys.pkg]\n\"{applicable_package}\" = \"latest\"\n"
         ));
         assert!(!is_trusted(&config_dir, &config, None).unwrap());
     }
@@ -2341,11 +2342,7 @@ runtime = "docker"
         }
 
         let host_os = crate::platform::Os::current().config_token();
-        let package = if host_os == "windows" {
-            "winget:Foo"
-        } else {
-            "apt:gcc"
-        };
+        let package = native_system_package();
         let source = format!(
             "[syspkg.packages]\n\"{package}\" = {{ version = \"latest\", os = \"{host_os}\" }}\n"
         );
