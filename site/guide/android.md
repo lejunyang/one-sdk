@@ -191,10 +191,13 @@ Android 清单只为每个归档提供 **SHA-1**，不提供更强摘要。这�
 
 ## 共享命令名
 
-有两个包族会提供同名的 R8 启动器：`build-tools` 与 `cmdline-tools` 都带
-`d8`、`r8`、`retrace`、`resourceshrinker`。两个族都装时，这些名字由
-`build-tools` 提供的那份接管——它才是构建实际调用的副本；`cmdline-tools`
-独有的 `sdkmanager`、`avdmanager`、`lint` 等则照常生成。
+有两组 Android SDK 内部的同名命令会按明确用途消歧：
+
+- `build-tools` 与 `cmdline-tools` 都带 `d8`、`r8`、`retrace`、`resourceshrinker`，这些
+  R8 启动器由 `build-tools` 接管——它才是构建实际调用的副本；`cmdline-tools` 独有的
+  `sdkmanager`、`avdmanager`、`lint` 等照常生成。
+- `build-tools` 与 NDK 都带 `lld`，该名字由 NDK 接管，因为 NDK 提供完整的 Clang/lld
+  链接工具链；Build Tools 里的同名启动器不会遮蔽它。
 
 其余同名情况仍按冲突处理并报错，需要你自行取舍。
 

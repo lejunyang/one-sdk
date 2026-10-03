@@ -445,6 +445,21 @@ tools = ["node"]
     }
 
     #[test]
+    fn android_lld_resolves_to_ndk_instead_of_conflicting() {
+        // Both packages publish `lld`, but the NDK copy is the linker toolchain;
+        // without two owners this bug remains invisible.
+        let both = std::collections::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "android-ndk".to_string(),
+        ]);
+        assert!(!is_real_shim_conflict("lld", &both));
+        assert_eq!(
+            osdk_core::shim::precedence_winner("lld", &both),
+            Some("android-ndk")
+        );
+    }
+
+    #[test]
     fn names_owned_by_one_android_family_have_no_precedence_winner() {
         // `sdkmanager` and `aapt2` are single-owner; they must stay ordinary.
         let cmdline = std::collections::BTreeSet::from(["android-cmdline-tools".to_string()]);

@@ -223,11 +223,15 @@ is still decided dynamically by [source selection](./sources-security).
 
 ## Shared command names
 
-Two families ship the same R8 launchers: `build-tools` and `cmdline-tools` both
-provide `d8`, `r8`, `retrace` and `resourceshrinker`. With both installed, those
-names resolve to the `build-tools` copy, which is the one a build invokes.
-Everything unique to `cmdline-tools` -- `sdkmanager`, `avdmanager`, `lint` and
-the rest -- is still generated as usual.
+Two groups of duplicate names inside the Android SDK have explicit owners:
+
+- `build-tools` and `cmdline-tools` both provide `d8`, `r8`, `retrace` and
+  `resourceshrinker`. These R8 launchers resolve to `build-tools`, the copy an
+  Android build invokes; commands unique to `cmdline-tools`, including
+  `sdkmanager`, `avdmanager`, and `lint`, are still generated normally.
+- `build-tools` and the NDK both provide `lld`. The NDK owns that name because it
+  supplies the complete Clang/lld linker toolchain; the Build Tools launcher does
+  not shadow it.
 
 Any other duplicate name is still reported as a conflict for you to resolve.
 

@@ -16,6 +16,7 @@ osdk android licenses export --sdk-root <DIR>
 - `export` 把接受记录写进目标 SDK root 的 `licenses/`，供 Gradle/Google 工具复用。
 - osdk 不会代替用户接受协议；安装时显式用 `-o accept-licenses=true` 或指定 id。
 - 宽松版本前缀默认只在 stable channel 中解析；`channel=beta/dev/canary` 才会把对应非稳定渠道纳入候选。当前清单中 `android-emulator@37` 因此选择 stable 37.2.12，而不是 dev 37.3.2。
+- Android 内部同名 shim 有明确归属：R8 的 `d8/r8/retrace/resourceshrinker` 归 `android-build-tools`，`lld` 归 `android-ndk`；出现其他 owner 仍按冲突报错。
 
 ## sdk-root
 

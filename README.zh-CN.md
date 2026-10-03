@@ -524,7 +524,8 @@ osdk android licenses export --sdk-root /path/to/sdk
 osdk 不会替你接受协议：未传接受选项时，安装会在下载任何内容之前停止。
 可用包族为 `android-ndk`、`android-platform-tools`、`android-build-tools`、
 `android-cmdline-tools`、`android-cmake`、`android-platforms`、
-`android-emulator`、`android-sources`、`android-system-images`。
+`android-emulator`、`android-sources`、`android-system-images`。包族命令重名时，
+R8 启动器归 `android-build-tools`，`lld` 归 `android-ndk`；其他重复命令仍会报错。
 
 `android-platforms` 与 `android-sources` 的版本形如 `android-37.2`，`latest` 取最新的
 稳定 API 级别。预览版需要按名字显式指定：Google 把 `android-37.2-beta3`、

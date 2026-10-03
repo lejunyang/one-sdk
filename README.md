@@ -583,7 +583,9 @@ osdk never accepts a license on your behalf: without one of the accept options
 the install stops before downloading anything. Available families are
 `android-ndk`, `android-platform-tools`, `android-build-tools`,
 `android-cmdline-tools`, `android-cmake`, `android-platforms`,
-`android-emulator`, `android-sources` and `android-system-images`.
+`android-emulator`, `android-sources` and `android-system-images`. When package
+families overlap, the shared R8 launchers resolve to `android-build-tools` and
+`lld` resolves to `android-ndk`; other duplicate executable names remain errors.
 
 `android-platforms` and `android-sources` spell their revisions `android-37.2`,
 and `latest` picks the newest stable API level. Previews have to be asked for by

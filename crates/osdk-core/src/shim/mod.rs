@@ -63,12 +63,11 @@ pub fn routed_bin_names(
 /// The curated owner for an executable name that several tools of one
 /// ecosystem ship, or `None` when no rule applies.
 ///
-/// Two Android SDK families legitimately ship the same R8 launchers: the
-/// `build-tools` copy is the one a build invokes, while `cmdline-tools` bundles
-/// them alongside `sdkmanager`. Without a rule this is an unresolvable
-/// conflict, which would refuse every shim of whichever family was installed
-/// second -- including `sdkmanager` and `avdmanager`, which nothing else
-/// provides.
+/// Android SDK families legitimately share two kinds of launcher. `build-tools`
+/// owns the R8 launchers also bundled by `cmdline-tools`; the NDK owns the real
+/// linker driver when `build-tools` also publishes an `lld` launcher. Without
+/// these rules, installing the second family refuses the whole shim generation
+/// batch, including every unrelated single-owner command.
 ///
 /// Shim generation and shim routing must agree, otherwise the generated shim
 /// would dispatch to a different copy than the one it was written for, so both
@@ -76,6 +75,7 @@ pub fn routed_bin_names(
 pub fn precedence_winner<'a>(name: &str, owner_ids: &'a BTreeSet<String>) -> Option<&'a str> {
     const ANDROID_R8_TOOLS: &[&str] = &["d8", "r8", "retrace", "resourceshrinker"];
     const ANDROID_R8_PRECEDENCE: &[&str] = &["android-build-tools", "android-cmdline-tools"];
+    const ANDROID_LLD_PRECEDENCE: &[&str] = &["android-ndk", "android-build-tools"];
 
     // This resolves contention, so a sole owner leaves nothing to decide.
     // Returning a winner there would also imply an opinion about a name no
@@ -92,18 +92,22 @@ pub fn precedence_winner<'a>(name: &str, owner_ids: &'a BTreeSet<String>) -> Opt
             return owner_ids.get(manager).map(String::as_str);
         }
     }
-    if !ANDROID_R8_TOOLS.contains(&name) {
+    let precedence = if ANDROID_R8_TOOLS.contains(&name) {
+        ANDROID_R8_PRECEDENCE
+    } else if name == "lld" {
+        ANDROID_LLD_PRECEDENCE
+    } else {
         return None;
-    }
+    };
     // Only decide when every claimant is one of the known Android families;
     // an unexpected third owner is a real conflict the user must resolve.
     if !owner_ids
         .iter()
-        .all(|owner_id| ANDROID_R8_PRECEDENCE.contains(&owner_id.as_str()))
+        .all(|owner_id| precedence.contains(&owner_id.as_str()))
     {
         return None;
     }
-    ANDROID_R8_PRECEDENCE.iter().find_map(|preferred| {
+    precedence.iter().find_map(|preferred| {
         owner_ids
             .iter()
             .find(|owner_id| owner_id.as_str() == *preferred)
@@ -1537,6 +1541,19 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn shared_android_lld_launcher_resolves_to_ndk() {
+        let both =
+            super::BTreeSet::from(["android-build-tools".to_string(), "android-ndk".to_string()]);
+        assert_eq!(super::precedence_winner("lld", &both), Some("android-ndk"));
+        let with_outsider = super::BTreeSet::from([
+            "android-build-tools".to_string(),
+            "android-ndk".to_string(),
+            "http:lld-lookalike".to_string(),
+        ]);
+        assert_eq!(super::precedence_winner("lld", &with_outsider), None);
     }
 
     #[test]
