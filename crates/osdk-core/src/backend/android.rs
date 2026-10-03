@@ -39,7 +39,7 @@ use crate::error::{Error, Result};
 use crate::http;
 use crate::pipeline::{self, ArchiveKind, InstallPlan, PipelineCtx};
 use crate::source::Source;
-use crate::version::{ToolVersion, VersionInfo};
+use crate::version::{ToolRequest, ToolVersion, VersionInfo, VersionSpec};
 
 /// Tool id prefix for Android SDK packages.
 pub const ID_PREFIX: &str = "android-";
@@ -237,6 +237,39 @@ impl AndroidBackend {
             stable: package.channel == Channel::Stable && !package.is_preview(),
             lts: None,
         }
+    }
+
+    fn select_version<'a>(
+        req: &ToolRequest,
+        packages: impl IntoIterator<Item = &'a RemotePackage>,
+        prerelease: crate::config::PrereleasePolicy,
+    ) -> Option<VersionInfo> {
+        let allowed = req
+            .options
+            .get(CHANNEL_OPTION)
+            .and_then(|value| match value.trim() {
+                "stable" => Some(Channel::Stable),
+                "beta" => Some(Channel::Beta),
+                "dev" => Some(Channel::Dev),
+                "canary" => Some(Channel::Canary),
+                _ => None,
+            })
+            .unwrap_or(Channel::Stable);
+        let candidates = packages
+            .into_iter()
+            .filter(|package| !package.obsolete && package.channel <= allowed)
+            .map(Self::version_info)
+            .collect::<Vec<_>>();
+        let prerelease = if allowed > Channel::Stable {
+            // Naming a non-stable Android channel is the explicit opt-in. Its
+            // packages often have ordinary numeric revisions (the emulator's
+            // 37.3.2 dev release is one), so the generic semver-based
+            // `if-explicit` check cannot infer that intent from the version.
+            crate::config::PrereleasePolicy::Allow
+        } else {
+            prerelease
+        };
+        crate::version::select_version_with_prerelease(&req.spec, &candidates, prerelease).cloned()
     }
 
     /// Reconstruct the acceptance the caller passed through install options.
@@ -1005,6 +1038,39 @@ impl Backend for AndroidBackend {
     }
 
     #[cfg(feature = "install")]
+    async fn resolve_version(&self, ctx: &Ctx, req: &ToolRequest) -> Result<ToolVersion> {
+        if let VersionSpec::Exact(version) = &req.spec {
+            let mut resolved = ToolVersion::new(self.id(), version);
+            resolved.options = req.options.clone();
+            return Ok(resolved);
+        }
+
+        let manifest = self.manifest(ctx).await?;
+        let packages = manifest.family(self.family);
+        if packages.is_empty() {
+            return Err(Error::other(format!(
+                "the Android repository lists no `{}` packages",
+                self.family
+            )));
+        }
+        let chosen = Self::select_version(req, packages, ctx.config.settings.prerelease)
+            .ok_or_else(|| Error::VersionResolve {
+                tool: self.id().to_string(),
+                spec: req.spec.to_string(),
+                hint: Some(format!(
+                    "no matching version found on or below the {} Android channel",
+                    req.options
+                        .get(CHANNEL_OPTION)
+                        .map(String::as_str)
+                        .unwrap_or("stable")
+                )),
+            })?;
+        let mut resolved = ToolVersion::new(self.id(), chosen.version);
+        resolved.options = req.options.clone();
+        Ok(resolved)
+    }
+
+    #[cfg(feature = "install")]
     async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         // A locked plan pins the exact artifact, but it must never stand in for
@@ -1614,26 +1680,25 @@ mod tests {
         let mut dev = stable.clone();
         dev.revision = "37.3.2".into();
         dev.channel = Channel::Dev;
-        let candidates = vec![
-            AndroidBackend::version_info(&stable),
-            AndroidBackend::version_info(&dev),
-        ];
+        let packages = [&stable, &dev];
+        let mut request = ToolRequest::parse("android-emulator@37").unwrap();
 
-        assert!(
-            candidates[0].stable,
-            "channel-0 emulator must remain stable"
-        );
-        assert!(
-            !candidates[1].stable,
-            "a dev-channel emulator has no prerelease text, so the channel flag is the only guard"
-        );
-        let selected = crate::version::select_version_with_prerelease(
-            &crate::version::VersionSpec::Prefix("37".into()),
-            &candidates,
+        let selected = AndroidBackend::select_version(
+            &request,
+            packages,
             crate::config::PrereleasePolicy::IfExplicit,
         )
         .unwrap();
         assert_eq!(selected.version, "37.2.12");
+
+        request.options.insert(CHANNEL_OPTION.into(), "dev".into());
+        let selected = AndroidBackend::select_version(
+            &request,
+            packages,
+            crate::config::PrereleasePolicy::IfExplicit,
+        )
+        .unwrap();
+        assert_eq!(selected.version, "37.3.2");
     }
 
     #[test]
