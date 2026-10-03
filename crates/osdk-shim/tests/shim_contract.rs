@@ -4,7 +4,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::{
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -360,6 +360,54 @@ struct ProbeServer {
 
 #[cfg(unix)]
 impl ProbeServer {
+    fn handle_connection(
+        mut stream: TcpStream,
+        status: &'static str,
+        requests: &AtomicUsize,
+        request_headers: &Mutex<Vec<String>>,
+    ) {
+        // A socket accepted from this nonblocking listener can inherit that
+        // mode on macOS. Restore blocking I/O before applying a bounded read
+        // timeout, otherwise the first read can race the client write and a
+        // transient WouldBlock gets mistaken for a failed registry.
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let Ok(length) = stream.read(&mut buffer) else {
+                return;
+            };
+            if length == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..length]);
+            if request.len() >= 32 * 1024 {
+                return;
+            }
+        }
+        request_headers
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(&request).into_owned());
+        requests.fetch_add(1, Ordering::SeqCst);
+        let body = if status.starts_with("200") {
+            r#"{"name":"npm","version":"11.0.0"}"#
+        } else {
+            ""
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        // A probe may time out or be cancelled after sending its request. That
+        // connection is finished, but the mock server must remain available to
+        // the other concurrent or subsequent probes.
+        let _ = stream.write_all(response.as_bytes());
+    }
+
     fn start(status: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -373,27 +421,17 @@ impl ProbeServer {
         let thread = thread::spawn(move || {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(2)))
-                            .unwrap();
-                        let mut request = [0_u8; 4096];
-                        let length = stream.read(&mut request).unwrap_or(0);
-                        thread_request_headers
-                            .lock()
-                            .unwrap()
-                            .push(String::from_utf8_lossy(&request[..length]).into_owned());
-                        thread_requests.fetch_add(1, Ordering::SeqCst);
-                        let body = if status.starts_with("200") {
-                            r#"{"name":"npm","version":"11.0.0"}"#
-                        } else {
-                            ""
-                        };
-                        let response = format!(
-                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        stream.write_all(response.as_bytes()).unwrap();
+                    Ok((stream, _)) => {
+                        let requests = thread_requests.clone();
+                        let request_headers = thread_request_headers.clone();
+                        thread::spawn(move || {
+                            Self::handle_connection(
+                                stream,
+                                status,
+                                requests.as_ref(),
+                                request_headers.as_ref(),
+                            );
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -447,6 +485,66 @@ impl Drop for ProbeServer {
             thread.join().unwrap();
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_server_restores_blocking_io_before_reading_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let (server, _) = listener.accept().unwrap();
+    // Reproduce the mode an accepted socket can inherit from ProbeServer's
+    // nonblocking listener on macOS.
+    server.set_nonblocking(true).unwrap();
+    let requests = AtomicUsize::new(0);
+    let request_headers = Mutex::new(Vec::new());
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            ProbeServer::handle_connection(server, "200 OK", &requests, &request_headers);
+        });
+        thread::sleep(Duration::from_millis(25));
+        client
+            .write_all(b"GET /-/ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    });
+
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert!(request_headers.lock().unwrap()[0].starts_with("GET /-/ping HTTP/1.1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_server_serves_a_request_while_an_earlier_connection_is_idle() {
+    let server = ProbeServer::start("200 OK");
+    let address = server
+        .url()
+        .strip_prefix("http://")
+        .and_then(|url| url.strip_suffix('/'))
+        .unwrap();
+    let idle = TcpStream::connect(address).unwrap();
+    thread::sleep(Duration::from_millis(25));
+
+    let mut probe = TcpStream::connect(address).unwrap();
+    probe
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    probe
+        .write_all(b"GET /-/ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    probe.read_to_string(&mut response).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_eq!(server.wait_for_requests(1), 1);
+    drop(idle);
 }
 
 #[cfg(unix)]
