@@ -147,9 +147,12 @@ Activation also supports zsh, fish, and PowerShell. Run `osdk --help` or
 
 ## Scenario: make a project toolchain reproducible
 
-Pin tools in the repository. Each project `use` installs the tool and updates
+Pin tools in the repository. A normal project `use` installs the tool and updates
 both `osdk.toml` and the current-platform `osdk.lock`; a teammate or CI can then
-replay it with `install`:
+replay it with `install`. If an existing structured tool is excluded on the
+current platform by `when`, `use tool@VERSION` updates only its version while
+preserving `when`, `lazy`, and backend options; it neither installs the tool nor
+writes a lock entry for the wrong platform:
 
 ```bash
 osdk use node@20

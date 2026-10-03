@@ -22,6 +22,11 @@ osdk uninstall|rm TOOL@VERSION
 `-o/--opt` 可重复，必须写成 `KEY=VALUE`。它会应用到本次调用中的每个工具；
 一次命令混合不同 backend 时，不要传只适用于其中一个 backend 的选项。
 
+已有结构化工具若被 `when` 排除在当前平台之外，`osdk use TOOL@VERSION` 只更新它的
+`version`，并保留 `when`、`lazy` 与 backend 选项；它不会绕过平台条件执行安装，也不会
+为当前平台生成该工具的 lock 条目。此时不能同时修改 `-o/--opt`，backend 选项应在匹配的
+平台上更新并验证。
+
 内联选项块写成 `tool[key=value,...]@selector`，选项块在 `@` 之前。**在 PowerShell 下要给
 整个操作数加引号**：它把参数内未加引号的逗号当数组分隔符，会把一个表达式拆成两个参数。
 

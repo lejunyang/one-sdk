@@ -173,6 +173,26 @@ pub fn set_project_tool(tool: &str, spec: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Update the version of an existing project tool without replacing any
+/// structured selection metadata (`when`, `lazy`) or backend options.
+///
+/// Returns `false` when the nearest project config has no such key, so callers
+/// cannot accidentally turn a filtered user-global declaration into a new
+/// unfiltered project declaration.
+pub fn update_existing_project_tool_version(path: &Path, tool: &str, spec: &str) -> Result<bool> {
+    let mut doc = load_doc(path)?;
+    let exists = doc
+        .get("tools")
+        .and_then(toml_edit::Item::as_table)
+        .is_some_and(|tools| tools.contains_key(tool));
+    if !exists {
+        return Ok(false);
+    }
+    set_tool_version_in_doc(&mut doc, tool, spec)?;
+    save_doc(path, &doc)?;
+    Ok(true)
+}
+
 /// Write a structured `[tools] <tool> = { version = ..., ... }` entry to the
 /// user global config.
 #[allow(dead_code)]

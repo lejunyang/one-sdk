@@ -137,8 +137,10 @@ Shell 激活也支持 zsh、fish 和 PowerShell。需要完整命令说明时，
 
 ## 场景：让项目工具链可复现
 
-在仓库中固定工具。每次项目级 `use` 都会安装工具并同时更新 `osdk.toml` 与当前平台的
-`osdk.lock`；其他开发者或 CI 再用 `install` 复现：
+在仓库中固定工具。普通项目级 `use` 会安装工具并同时更新 `osdk.toml` 与当前平台的
+`osdk.lock`；其他开发者或 CI 再用 `install` 复现。如果已有结构化工具被 `when`
+排除在当前平台之外，`use tool@VERSION` 只更新它的版本，并保留 `when`、`lazy` 与
+backend 选项；它不会在错误的平台安装工具，也不会为该平台写 lock：
 
 ```bash
 osdk use node@20

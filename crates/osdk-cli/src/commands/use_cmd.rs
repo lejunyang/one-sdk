@@ -3,6 +3,9 @@
 use super::*;
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
+    if !global && update_platform_excluded_selection(app, &tool, &opts)? {
+        return Ok(());
+    }
     // Same ambiguity as `install`: pinning a bare name that no backend owns would
     // write a spec nothing can resolve.
     report_bare_tool_name(app, &tool).await?;
@@ -61,6 +64,42 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
         }
     }
     use_legacy_cmd(app, req, requested_spec, global, configured_key).await
+}
+
+fn update_platform_excluded_selection(app: &App, tool: &str, opts: &[String]) -> Result<bool> {
+    let parsed = ToolRequest::parse(tool).map_err(|error| anyhow!("{error}"))?;
+    if !app.ctx.config.excluded_tools.contains_key(&parsed.backend) {
+        return Ok(false);
+    }
+    let Some(spec) = requested_spec_literal(tool) else {
+        return Ok(false);
+    };
+    if !opts.is_empty() {
+        anyhow::bail!(
+            "cannot change backend options for `{}` while it is excluded on this platform; run `osdk use` on a matching platform",
+            parsed.backend
+        );
+    }
+    let Some(config_path) = app.ctx.config.project_config_path.as_ref() else {
+        return Ok(false);
+    };
+    if !crate::config_edit::update_existing_project_tool_version(
+        config_path,
+        &parsed.backend,
+        &spec,
+    )? {
+        return Ok(false);
+    }
+    println!(
+        "{}",
+        t!(
+            "msg.pinned_project",
+            tool = parsed.backend,
+            ver = spec,
+            path = config_path.display()
+        )
+    );
+    Ok(true)
 }
 
 pub(crate) async fn use_legacy_cmd(

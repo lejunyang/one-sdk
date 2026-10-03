@@ -24,6 +24,12 @@ osdk uninstall|rm TOOL@VERSION
 the invocation; do not pass an option specific to one backend in a mixed-backend
 command.
 
+When an existing structured tool is excluded from the current platform by
+`when`, `osdk use TOOL@VERSION` updates only its `version` and preserves `when`,
+`lazy`, and backend options. It does not bypass the platform condition to install
+the tool or write a lock entry for the current platform. `-o/--opt` cannot be
+changed in this case; update and verify backend options on a matching platform.
+
 An inline option block is written `tool[key=value,...]@selector`, with the block
 before the `@`. **Quote the whole operand on PowerShell**: it treats an unquoted
 comma inside an argument as an array separator and splits one expression into two.

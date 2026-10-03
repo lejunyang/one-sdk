@@ -2716,6 +2716,47 @@ fn project_use_updates_config_and_lock_for_an_already_installed_tool() {
 }
 
 #[test]
+fn project_use_can_update_a_platform_excluded_tool_without_installing_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let excluded_os = if cfg!(windows) { "linux" } else { "windows" };
+    std::fs::write(
+        project.join("osdk.toml"),
+        format!(
+            "[tools]\n\"conda:nasm\" = {{ version = \"2.16.3\", lazy = true, with = \"m2-diffutils\", when = {{ os = [\"{excluded_os}\"] }} }}\n"
+        ),
+    )
+    .unwrap();
+
+    let output = run_isolated_in(
+        temp.path(),
+        &project,
+        &["--offline", "use", "conda:nasm@2.16"],
+    );
+    assert!(
+        output.status.success(),
+        "a version-only update must not try to install a tool excluded on this platform: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = std::fs::read_to_string(project.join("osdk.toml")).unwrap();
+    let parsed: toml::Value = config.parse().unwrap();
+    let tool = &parsed["tools"]["conda:nasm"];
+    assert_eq!(tool["version"].as_str(), Some("2.16"));
+    assert_eq!(tool["lazy"].as_bool(), Some(true));
+    assert_eq!(tool["with"].as_str(), Some("m2-diffutils"));
+    assert_eq!(tool["when"]["os"][0].as_str(), Some(excluded_os));
+    assert!(
+        !project.join("osdk.lock").exists(),
+        "a platform-excluded declaration has no current-platform artifact to lock"
+    );
+    assert!(
+        !temp.path().join("installs/conda_nasm").exists(),
+        "the update must not bypass the platform filter and install the tool"
+    );
+}
+
+#[test]
 fn project_use_places_a_new_lock_beside_its_new_config() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("nested/project");
