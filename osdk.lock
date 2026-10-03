@@ -1,5 +1,26 @@
 schema = 4
 
+[platforms.macos-arm64.tools."cargo:jscpd"]
+request = "5.3.2"
+version = "5.3.2"
+
+[platforms.macos-arm64.tools."cargo:jscpd".options]
+locked = "true"
+
+[platforms.macos-arm64.tools."cargo:jscpd".native]
+runtime = "rust"
+runtime_version = "1.98.0"
+replay = "version-only"
+source = "sparse+https://rsproxy.cn/index/"
+
+[platforms.macos-arm64.tools.rust]
+request = "1.98.0"
+version = "1.98.0"
+
+[platforms.macos-arm64.tools.rust.options]
+components = "rustfmt,clippy"
+targets = "x86_64-pc-windows-gnu,x86_64-unknown-linux-musl"
+
 [platforms.windows-x64.tools."cargo:jscpd"]
 request = "5.3.2"
 version = "5.3.2"
