@@ -438,6 +438,22 @@ async fn plan_for_probe_project(
     timeout_ms: u64,
     project: &str,
 ) -> IndexPlan {
+    let home = home_directory();
+    let credential_reason = credential_configuration(
+        |name| std::env::var(name).ok(),
+        &std::env::vars().map(|(name, _)| name).collect::<Vec<_>>(),
+        home.as_deref(),
+    );
+    plan_for_probe_project_with_credentials(candidates, timeout_ms, project, credential_reason)
+        .await
+}
+
+async fn plan_for_probe_project_with_credentials(
+    candidates: &[String],
+    timeout_ms: u64,
+    project: &str,
+    credential_reason: Option<String>,
+) -> IndexPlan {
     if candidates.is_empty() {
         return IndexPlan::PassThrough {
             reason: "no Python index mirrors configured".to_string(),
@@ -449,12 +465,7 @@ async fn plan_for_probe_project(
     // dependency-confusion shape this module is built to avoid. See
     // `credential_configuration` for why this is a refusal to interfere rather
     // than a missing capability.
-    let home = home_directory();
-    if let Some(reason) = credential_configuration(
-        |name| std::env::var(name).ok(),
-        &std::env::vars().map(|(name, _)| name).collect::<Vec<_>>(),
-        home.as_deref(),
-    ) {
+    if let Some(reason) = credential_reason {
         return IndexPlan::PassThrough { reason };
     }
     let probes = probe_all(candidates, timeout_ms, project).await;
@@ -780,6 +791,25 @@ mod tests {
     /// `UV_INDEX_URL` starts with the same prefix as the credential family, so a
     /// prefix-only check would classify every mirror setup as authenticated and
     /// silently disable mirror selection for everyone.
+    #[tokio::test]
+    async fn configured_credentials_skip_project_probes() {
+        let reason = "index credentials are configured by environment variable PIP_INDEX_URL";
+        let plan = plan_for_probe_project_with_credentials(
+            &["http://127.0.0.1:1/simple/".into()],
+            2_000,
+            "tool",
+            Some(reason.into()),
+        )
+        .await;
+        assert_eq!(
+            plan,
+            IndexPlan::PassThrough {
+                reason: reason.into()
+            },
+            "configured credentials must bypass public-mirror probing instead of leaking project lookups"
+        );
+    }
+
     #[test]
     fn a_mirror_configuration_is_not_treated_as_credentials() {
         for name in ["UV_INDEX_URL", "UV_INDEX", "UV_DEFAULT_INDEX"] {
@@ -895,7 +925,13 @@ mod tests {
         let (available, available_server) =
             serve_once("200 OK", "<a href=\"tool-1.0.whl\">tool</a>");
 
-        let plan = plan_for_project(&[missing, available.clone()], 2_000, "tool").await;
+        let plan = plan_for_probe_project_with_credentials(
+            &[missing, available.clone()],
+            2_000,
+            "tool",
+            None,
+        )
+        .await;
 
         assert_eq!(plan.selected_url(), Some(available.as_str()));
         assert!(missing_server
