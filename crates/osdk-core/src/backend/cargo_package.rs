@@ -1372,10 +1372,22 @@ impl Backend for CargoPackageBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
     ) -> Result<Option<InstallIdentity>> {
-        if !tv
+        // A registry install is deterministic only when both halves of its
+        // replay identity are present. Runtime-only requests occur after the
+        // CLI has bound the managed Rust dependency but before a project lock
+        // has supplied the selected registry. Treating those as locked made us
+        // compute a synthetic crates.io identity instead of discovering the
+        // complete install selected from another registry (for example
+        // rsproxy), so `install` printed "already installed" and `exec`
+        // immediately reported that no selected install existed.
+        let has_runtime = tv
             .options
-            .contains_key(LOCKED_NATIVE_RUNTIME_VERSION_OPTION)
-        {
+            .contains_key(LOCKED_NATIVE_RUNTIME_VERSION_OPTION);
+        let has_source = match &self.source {
+            CargoSource::Registry { .. } => tv.options.contains_key(LOCKED_CARGO_INDEX_OPTION),
+            CargoSource::Git { .. } => true,
+        };
+        if !has_runtime || !has_source {
             return Ok(None);
         }
         self.lifecycle(ctx, tv)
@@ -2424,11 +2436,27 @@ mod tests {
 
         let mut unlocked = installed.clone();
         unlocked.options.remove(LOCKED_CARGO_INDEX_OPTION);
+        assert!(
+            backend
+                .dynamic_install_identity(&ctx, &unlocked)
+                .unwrap()
+                .is_none(),
+            "runtime metadata without the selected registry is not a complete replay identity; \
+             treating it as locked computes the wrong install root instead of discovering the \
+             matching installed registry identity"
+        );
         assert_eq!(
             backend.bin_names(&ctx, &unlocked).unwrap(),
             vec!["rg".to_string()]
         );
 
+        assert!(
+            backend
+                .dynamic_install_identity(&ctx, &installed)
+                .unwrap()
+                .is_some(),
+            "runtime plus registry metadata must remain a deterministic replay identity"
+        );
         let mut locked_other = unlocked;
         locked_other.options.insert(
             LOCKED_CARGO_INDEX_OPTION.into(),
