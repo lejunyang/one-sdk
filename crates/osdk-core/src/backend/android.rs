@@ -223,6 +223,22 @@ impl AndroidBackend {
             .unwrap_or(Channel::Stable)
     }
 
+    fn version_info(package: &RemotePackage) -> VersionInfo {
+        VersionInfo {
+            version: package.version(),
+            // Both signals matter. Platform-family previews are sometimes
+            // published on channel-0, so their type details/version text must
+            // still mark them unstable. Conversely, packages such as the
+            // emulator have no preview-looking version text or API details at
+            // all; their channel is the only signal. Ignoring it made a broad
+            // `android-emulator@37` select 37.3.2 from the dev channel and fail
+            // only later in `install`, despite 37.2.12 being the newest stable
+            // match.
+            stable: package.channel == Channel::Stable && !package.is_preview(),
+            lts: None,
+        }
+    }
+
     /// Reconstruct the acceptance the caller passed through install options.
     fn acceptance(tv: &ToolVersion) -> Acceptance {
         let accept_all = tv
@@ -984,18 +1000,7 @@ impl Backend for AndroidBackend {
         Ok(packages
             .into_iter()
             .filter(|package| !package.obsolete)
-            .map(|package| VersionInfo {
-                version: package.version(),
-                // Not `channel == Stable`: Google publishes the platform
-                // families' previews on `channel-0`, so that test reported
-                // `android-37.2-beta3` and `android-CANARY` as stable and
-                // `latest` resolved to a preview under the default
-                // `prerelease = if-explicit` policy. `is_preview` consults the
-                // `<type-details>` codename and the version's own pre-release
-                // tag as well. See `RemotePackage::is_preview`.
-                stable: !package.is_preview(),
-                lts: None,
-            })
+            .map(Self::version_info)
             .collect())
     }
 
@@ -1599,6 +1604,36 @@ mod tests {
         assert!(acceptance.covers("android-sdk-license"));
         assert!(acceptance.covers("android-sdk-preview-license"));
         assert!(!acceptance.covers("some-other-license"));
+    }
+
+    #[test]
+    fn a_broad_emulator_version_prefers_the_stable_channel() {
+        let mut stable = gated_package("emulator", Some("android-sdk-preview-license"));
+        stable.revision = "37.2.12".into();
+        stable.channel = Channel::Stable;
+        let mut dev = stable.clone();
+        dev.revision = "37.3.2".into();
+        dev.channel = Channel::Dev;
+        let candidates = vec![
+            AndroidBackend::version_info(&stable),
+            AndroidBackend::version_info(&dev),
+        ];
+
+        assert!(
+            candidates[0].stable,
+            "channel-0 emulator must remain stable"
+        );
+        assert!(
+            !candidates[1].stable,
+            "a dev-channel emulator has no prerelease text, so the channel flag is the only guard"
+        );
+        let selected = crate::version::select_version_with_prerelease(
+            &crate::version::VersionSpec::Prefix("37".into()),
+            &candidates,
+            crate::config::PrereleasePolicy::IfExplicit,
+        )
+        .unwrap();
+        assert_eq!(selected.version, "37.2.12");
     }
 
     #[test]
