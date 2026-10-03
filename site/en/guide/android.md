@@ -91,9 +91,8 @@ in five ways: `emulators` is versioned side-by-side as `emulators;<build-id>`,
 declares `emulator` itself as a dependency, ships a 273 MB Windows archive rather
 than 421 MB, names its files `emulator_windows_x64-*` instead of
 `emulator-windows_x64-*`, and exists only on the preview channel. It is an
-incremental component layered on the singular package, so the version numbers do
-not even compare: `emulators;latest` was 37.1.2 while stable `emulator` was
-37.1.11.
+incremental component layered on the singular package, so their version numbers
+are not directly comparable.
 
 
 ## License agreements
@@ -175,12 +174,20 @@ the usual behaviour of bypassing the lock.
 
 ## Channels
 
-The manifest sorts packages into stable, beta, dev and canary channels. osdk
-installs from stable only unless you opt in:
+The manifest sorts packages into stable, beta, dev and canary channels. By
+default osdk resolves only among stable candidates, including broad prefixes such
+as `@37`; a numerically newer revision on a higher channel is not selected
+implicitly. In the current Emulator manifest, `android-emulator@37` resolves to
+stable 37.2.12, while dev 37.3.2 participates only after an explicit
+`channel=dev` opt-in:
 
 ```bash
-osdk install android-ndk@30.0.16138531 -o channel=beta
+osdk use android-emulator@37 -o accept-license=android-sdk-preview-license
+osdk install android-emulator@37 -o channel=dev -o accept-license=android-sdk-preview-license
 ```
+
+A non-stable channel must be selected explicitly. `channel=beta/dev/canary`
+allows that channel plus every more stable one.
 
 Channel and license are independent. Some packages sit on the stable channel yet
 still carry the preview agreement, and those still require accepting

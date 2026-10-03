@@ -15,6 +15,7 @@ osdk android licenses export --sdk-root <DIR>
 - `status` 查看已记录接受项。
 - `export` 把接受记录写进目标 SDK root 的 `licenses/`，供 Gradle/Google 工具复用。
 - osdk 不会代替用户接受协议；安装时显式用 `-o accept-licenses=true` 或指定 id。
+- 宽松版本前缀默认只在 stable channel 中解析；`channel=beta/dev/canary` 才会把对应非稳定渠道纳入候选。当前清单中 `android-emulator@37` 因此选择 stable 37.2.12，而不是 dev 37.3.2。
 
 ## sdk-root
 

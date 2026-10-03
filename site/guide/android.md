@@ -81,8 +81,7 @@ sysroot。
 按线上清单实测，两者有五处不同：`emulators` 以 `emulators;<build-id>` 形式
 side-by-side 版本化、把 `emulator` 本身声明为依赖、Windows 包体积为 273 MB 而非
 421 MB、文件名是 `emulator_windows_x64-*` 而非 `emulator-windows_x64-*`、且只存在
-于预览渠道。它是叠加在单数包之上的增量组件，因此版本号之间甚至无法直接比较：
-`emulators;latest` 为 37.1.2，而 stable 的 `emulator` 已是 37.1.11。
+于预览渠道。它是叠加在单数包之上的增量组件，因此版本号之间甚至无法直接比较。
 
 
 ## 许可协议
@@ -153,12 +152,17 @@ osdk install                            # 之后照常，接受已记录在本�
 
 ## 渠道
 
-清单把包分在 stable / beta / dev / canary 四个渠道。osdk 默认只安装 stable，
-非 stable 需显式选择渠道：
+清单把包分在 stable / beta / dev / canary 四个渠道。osdk 默认只从 stable 候选中
+解析版本，包括 `@37` 这类宽松前缀；更高渠道中即使存在数值更大的普通版本号，也不会
+被隐式选中。以 Emulator 当前清单为例，`android-emulator@37` 解析到 stable 的
+37.2.12，而 dev 的 37.3.2 只有显式传 `channel=dev` 才参与选择：
 
 ```bash
-osdk install android-ndk@30.0.16138531 -o channel=beta
+osdk use android-emulator@37 -o accept-license=android-sdk-preview-license
+osdk install android-emulator@37 -o channel=dev -o accept-license=android-sdk-preview-license
 ```
+
+非 stable 渠道需显式选择；`channel=beta/dev/canary` 允许该渠道及比它更稳定的候选。
 
 注意渠道与协议是两件独立的事：某些包位于 stable 渠道，但仍使用预览版协议，
 这类包依然需要接受 `android-sdk-preview-license`。
