@@ -2226,6 +2226,107 @@ fn lock_still_records_a_global_tool_when_it_is_named_explicitly() {
         "explicit operand was filtered out of the lock: {lockfile}"
     );
 }
+
+#[test]
+fn missing_platform_package_manager_lock_inherits_manager_and_runtime_versions() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\npnpm = \"9\"\n").unwrap();
+    let other_platform = if platform_key() == "macos-arm64" {
+        "linux-x64"
+    } else {
+        "macos-arm64"
+    };
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            r#"schema = 4
+
+[platforms.{other_platform}.tools.node]
+request = "latest"
+version = "22.23.3"
+
+[platforms.{other_platform}.tools.pnpm]
+request = "9"
+version = "9.15.9"
+"#,
+        ),
+    )
+    .unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "lock"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lock: toml::Value = std::fs::read_to_string(project.join("osdk.lock"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let tools = &lock["platforms"][platform_key()]["tools"];
+    assert_eq!(tools["pnpm"]["request"].as_str(), Some("9"));
+    assert_eq!(tools["pnpm"]["version"].as_str(), Some("9.15.9"));
+    assert_eq!(tools["node"]["request"].as_str(), Some("latest"));
+    assert_eq!(tools["node"]["version"].as_str(), Some("22.23.3"));
+}
+
+#[test]
+fn missing_current_platform_lock_inherits_version_but_resolves_local_artifact() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("osdk.toml"), "[tools]\npython = \"3.14\"\n").unwrap();
+    let other_platform = if platform_key() == "macos-arm64" {
+        "linux-x64"
+    } else {
+        "macos-arm64"
+    };
+    std::fs::write(
+        project.join("osdk.lock"),
+        format!(
+            r#"schema = 4
+
+[platforms.{other_platform}.tools.python]
+request = "3.14"
+version = "3.14.7"
+
+[platforms.{other_platform}.tools.python.artifact]
+url = "https://example.test/python-other-platform.tar.gz"
+file_name = "python-other-platform.tar.gz"
+checksum = "sha256:{}"
+"#,
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let installed = temp.path().join("installs/python/3.14.7");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join(".osdk-complete"), b"").unwrap();
+
+    let output = run_isolated_in(temp.path(), &project, &["--offline", "install"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lock: toml::Value = std::fs::read_to_string(project.join("osdk.lock"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let current = &lock["platforms"][platform_key()]["tools"]["python"];
+    assert_eq!(current["request"].as_str(), Some("3.14"));
+    assert_eq!(current["version"].as_str(), Some("3.14.7"));
+    assert!(current.get("artifact").is_none());
+    assert_eq!(
+        lock["platforms"][other_platform]["tools"]["python"]["artifact"]["file_name"].as_str(),
+        Some("python-other-platform.tar.gz")
+    );
+}
+
 #[test]
 fn lock_resolves_static_python_versions_offline() {
     let temp = tempfile::tempdir().unwrap();

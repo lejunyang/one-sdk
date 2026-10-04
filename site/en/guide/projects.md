@@ -163,7 +163,10 @@ default = "maintenance"
 `osdk use node@20` updates the nearest project file or creates `osdk.toml` in
 the current directory, then records the installed result and injected runtime
 dependencies in the sibling `osdk.lock`. Both files form one metadata
-transaction: a failed lock update restores the configuration. `osdk use
+transaction: a failed lock update restores the configuration. When the current
+platform has no lock section, no-argument `install`/`lock` inherit a version only
+when all compatible existing platform locks agree, then resolve the current
+platform's artifact and checksum again. `osdk use
 --global node@20` updates user configuration without touching the current
 project lock.
 For `npm:<package>`, local `use` first looks for the nearest `package.json`; the

@@ -147,7 +147,9 @@ default = "maintenance"
 
 `osdk use node@20` 会修改最近的项目配置；没有项目配置时在当前目录创建
 `osdk.toml`，并把实际安装结果及注入的 runtime 依赖写入同目录 `osdk.lock`。两份文件作为
-一个元数据事务更新，lock 写入失败会恢复配置。`osdk use --global node@20` 修改用户配置，
+一个元数据事务更新，lock 写入失败会恢复配置。当前平台尚无 lock 区段时，无参数
+`install`/`lock` 会继承其他平台一致且仍满足声明的版本，但重新解析当前平台的 artifact 与
+checksum。`osdk use --global node@20` 修改用户配置，
 不触碰当前项目 lock。
 对于 `npm:<package>`，本地 `use` 会先查找最近的 `package.json`；下一节说明其项目感知
 行为。

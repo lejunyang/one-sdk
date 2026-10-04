@@ -734,6 +734,100 @@ mod tests {
     }
 
     #[test]
+    fn missing_platform_inherits_only_consistent_requested_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        std::fs::write(
+            &path,
+            r#"schema = 4
+
+[platforms.macos-arm64.tools.pnpm]
+request = "9"
+version = "9.15.9"
+
+[platforms.linux-x64.tools.pnpm]
+request = "9"
+version = "9.15.9"
+
+[platforms.macos-arm64.tools.node]
+request = "22"
+version = "22.23.3"
+"#,
+        )
+        .unwrap();
+        let wanted = [ToolRequest::parse("pnpm@9").unwrap()];
+        let inherited = locked_versions_from_other_platforms(
+            &path,
+            Platform {
+                os: Os::Windows,
+                arch: Arch::X64,
+                libc: Libc::None,
+            },
+            &wanted,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            inherited,
+            BTreeMap::from([("pnpm".into(), "9.15.9".into())])
+        );
+    }
+
+    #[test]
+    fn cross_platform_version_inheritance_is_disabled_by_current_platform_or_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(LOCKFILE_NAME);
+        let windows = Platform {
+            os: Os::Windows,
+            arch: Arch::X64,
+            libc: Libc::None,
+        };
+        let wanted = [ToolRequest::parse("pnpm@9").unwrap()];
+        std::fs::write(
+            &path,
+            r#"schema = 4
+
+[platforms.macos-arm64.tools.pnpm]
+request = "9"
+version = "9.15.9"
+
+[platforms.windows-x64.tools.node]
+request = "22"
+version = "22.23.3"
+"#,
+        )
+        .unwrap();
+        assert!(
+            locked_versions_from_other_platforms(&path, windows, &wanted)
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::write(
+            &path,
+            r#"schema = 4
+
+[platforms.macos-arm64.tools.pnpm]
+request = "9"
+version = "9.15.9"
+
+[platforms.linux-x64.tools.pnpm]
+request = "9"
+version = "9.14.4"
+"#,
+        )
+        .unwrap();
+        let error = locked_versions_from_other_platforms(&path, windows, &wanted).unwrap_err();
+        assert!(error.to_string().contains("other platform locks disagree"));
+
+        let upgraded = [ToolRequest::parse("pnpm@10").unwrap()];
+        let inherited = locked_versions_from_other_platforms(&path, windows, &upgraded)
+            .unwrap()
+            .unwrap();
+        assert!(inherited.is_empty());
+    }
+
+    #[test]
     fn merge_preserves_other_platforms() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(LOCKFILE_NAME);

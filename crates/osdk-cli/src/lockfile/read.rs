@@ -111,6 +111,56 @@ pub fn locked_models(path: &Path) -> Result<Vec<(String, LockedModel)>> {
     Ok(models)
 }
 
+pub fn locked_versions_from_other_platforms(
+    path: &Path,
+    platform: Platform,
+    requests: &[ToolRequest],
+) -> Result<Option<BTreeMap<String, String>>> {
+    let lockfile = load(path)?;
+    let current = platform_key(platform);
+    if lockfile.platforms.contains_key(&current) {
+        return Ok(None);
+    }
+
+    let requested = requests
+        .iter()
+        .map(|request| (request.backend.as_str(), &request.spec))
+        .collect::<BTreeMap<_, _>>();
+    let mut versions: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for (key, platform_lock) in &lockfile.platforms {
+        if key == &current {
+            continue;
+        }
+        for (backend, locked) in &platform_lock.tools {
+            let Some(spec) = requested.get(backend.as_str()) else {
+                continue;
+            };
+            if !spec.matches_version(&locked.version) {
+                continue;
+            }
+            validate_locked_tool_identity(backend, locked)?;
+            versions
+                .entry(backend.clone())
+                .or_default()
+                .insert(locked.version.clone());
+        }
+    }
+
+    let versions = versions
+        .into_iter()
+        .map(|(backend, versions)| {
+            if versions.len() != 1 {
+                anyhow::bail!(
+                    "cannot inherit `{backend}` for platform `{current}` because other platform locks disagree: {}",
+                    versions.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            Ok((backend, versions.into_iter().next().unwrap()))
+        })
+        .collect::<Result<_>>()?;
+    Ok(Some(versions))
+}
+
 pub fn locked_requests(path: &Path, platform: Platform) -> Result<Option<Vec<ToolRequest>>> {
     let lockfile = load(path)?;
     if lockfile.schema == 1 {

@@ -82,6 +82,20 @@ impl VersionSpec {
             .ok_or_else(|| Error::config("empty semver range"))?;
         Ok(VersionSpec::Range(s.trim().to_string()))
     }
+
+    /// Whether one concrete published version satisfies this selector.
+    ///
+    /// This deliberately reuses the ordinary selector instead of duplicating
+    /// prefix/range semantics in lockfile code. LTS selectors need catalogue
+    /// metadata and therefore cannot be proven compatible from a version string
+    /// alone.
+    pub fn matches_version(&self, version: &str) -> bool {
+        if matches!(self, VersionSpec::Lts(_) | VersionSpec::System) {
+            return false;
+        }
+        let candidate = VersionInfo::stable(version);
+        select_version(self, std::slice::from_ref(&candidate)).is_some()
+    }
 }
 
 fn npm_range_requirements(input: &str) -> Result<Vec<semver::VersionReq>> {
@@ -372,6 +386,17 @@ impl VersionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_matches_one_concrete_version() {
+        assert!(VersionSpec::parse("9").matches_version("9.15.9"));
+        assert!(VersionSpec::parse("9.15").matches_version("9.15.9"));
+        assert!(VersionSpec::parse("9.15.9").matches_version("9.15.9"));
+        assert!(VersionSpec::parse("21.0.12").matches_version("21.0.12.1+1"));
+        assert!(!VersionSpec::parse("10").matches_version("9.15.9"));
+        assert!(!VersionSpec::parse("lts").matches_version("22.23.3"));
+        assert!(!VersionSpec::System.matches_version("9.15.9"));
+    }
 
     #[test]
     fn parse_specs() {

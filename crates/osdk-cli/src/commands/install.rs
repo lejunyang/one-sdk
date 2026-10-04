@@ -45,7 +45,7 @@ pub async fn install(
     // from the lock, so requiring it must not make a committed lock file
     // impossible to install from.
     let use_lock = !explicit && opts_are_only_consent(&opts);
-    let (mut requests, trusted_replay, supplemented_lock) = if use_lock {
+    let (mut requests, trusted_replay, supplemented_lock, inherit_cross_platform) = if use_lock {
         match requests_from_lock(app)? {
             Some(mut requests) => {
                 let supplemented = include_lazy
@@ -54,12 +54,12 @@ pub async fn install(
                         &mut requests,
                         gather_install_requests(app, Vec::new())?,
                     )?;
-                (requests, true, supplemented)
+                (requests, true, supplemented, false)
             }
-            None => (gather_install_requests(app, tools)?, false, false),
+            None => (gather_install_requests(app, tools)?, false, false, true),
         }
     } else {
-        (gather_install_requests(app, tools)?, false, false)
+        (gather_install_requests(app, tools)?, false, false, false)
     };
     if !explicit {
         requests = select_default_install_requests(app, requests, include_lazy);
@@ -68,7 +68,15 @@ pub async fn install(
     let update_project_lock = !explicit
         && (!trusted_replay || supplemented_lock)
         && has_project_context(app, &requests, &cwd);
-    let installed = install_requests(app, requests, opts, trusted_replay, force).await?;
+    let installed = install_requests_with_inheritance(
+        app,
+        requests,
+        opts,
+        trusted_replay,
+        force,
+        inherit_cross_platform,
+    )
+    .await?;
     if update_project_lock && !installed.is_empty() {
         let path = project_lock_path(app, &cwd);
         let target_platform = crate::lockfile::platform_for_resolved(app.ctx.platform, &installed);
@@ -162,7 +170,7 @@ pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Resul
     } else {
         project_scoped_requests(app, requests)
     };
-    let mut resolved = resolve_requests(app, requests, opts).await?;
+    let mut resolved = resolve_requests_with_inheritance(app, requests, opts, !explicit).await?;
     // A reproducible npm tool lock includes npm's exact transitive graph.
     // Ensure managed Node is present first, then ask each npm package backend
     // to generate its lockfile-only graph before serializing osdk.lock.
@@ -562,10 +570,21 @@ pub(crate) fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
 
 pub(crate) async fn install_requests(
     app: &mut App,
+    requests: Vec<ToolRequest>,
+    opts: Vec<String>,
+    trusted_replay: bool,
+    force: bool,
+) -> Result<Vec<(ToolRequest, ToolVersion)>> {
+    install_requests_with_inheritance(app, requests, opts, trusted_replay, force, false).await
+}
+
+pub(crate) async fn install_requests_with_inheritance(
+    app: &mut App,
     mut requests: Vec<ToolRequest>,
     opts: Vec<String>,
     trusted_replay: bool,
     force: bool,
+    inherit_cross_platform: bool,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
     for request in &mut requests {
@@ -577,6 +596,11 @@ pub(crate) async fn install_requests(
         }
     }
     let mut requests = inject_managed_dependencies(app, requests)?;
+    let inherited_specs = if inherit_cross_platform {
+        inherit_versions_from_other_platforms(app, &mut requests)?
+    } else {
+        Default::default()
+    };
     if requests.is_empty() {
         println!("{}", t!("msg.nothing_to_install"));
         return Ok(Vec::new());
@@ -659,6 +683,7 @@ pub(crate) async fn install_requests(
         resolved.push((request, version));
     }
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
+    restore_inherited_request_specs(&mut resolved, inherited_specs)?;
     Ok(resolved)
 }
 
@@ -936,8 +961,17 @@ pub(crate) fn mark_isolated_npm_scope(requests: &mut [ToolRequest]) {
 
 pub(crate) async fn resolve_requests(
     app: &mut App,
+    requests: Vec<ToolRequest>,
+    opts: Vec<String>,
+) -> Result<Vec<(ToolRequest, ToolVersion)>> {
+    resolve_requests_with_inheritance(app, requests, opts, false).await
+}
+
+pub(crate) async fn resolve_requests_with_inheritance(
+    app: &mut App,
     mut requests: Vec<ToolRequest>,
     opts: Vec<String>,
+    inherit_cross_platform: bool,
 ) -> Result<Vec<(ToolRequest, ToolVersion)>> {
     let parsed_opts = parse_opts(&opts)?;
     for request in &mut requests {
@@ -946,7 +980,12 @@ pub(crate) async fn resolve_requests(
             request.options.insert(key.clone(), value.clone());
         }
     }
-    let requests = inject_managed_dependencies(app, requests)?;
+    let mut requests = inject_managed_dependencies(app, requests)?;
+    let inherited_specs = if inherit_cross_platform {
+        inherit_versions_from_other_platforms(app, &mut requests)?
+    } else {
+        Default::default()
+    };
     let (rust_requests, remaining_requests) =
         partition_runtime_dependency(requests, "rust", "cargo:");
     let (go_requests, remaining_requests) =
@@ -970,7 +1009,65 @@ pub(crate) async fn resolve_requests(
     bind_resolved_rust_version(&mut resolved)?;
     bind_resolved_go_version(&mut resolved)?;
     resolved.sort_by(|a, b| a.0.backend.cmp(&b.0.backend));
+    restore_inherited_request_specs(&mut resolved, inherited_specs)?;
     Ok(resolved)
+}
+
+pub(crate) fn inherit_versions_from_other_platforms(
+    app: &App,
+    requests: &mut [ToolRequest],
+) -> Result<std::collections::BTreeMap<String, VersionSpec>> {
+    let cwd = std::env::current_dir()?;
+    let Some(path) = crate::lockfile::find(&cwd) else {
+        return Ok(Default::default());
+    };
+    let Some(inherited) =
+        crate::lockfile::locked_versions_from_other_platforms(&path, app.ctx.platform, requests)?
+    else {
+        return Ok(Default::default());
+    };
+    Ok(apply_inherited_versions(requests, &inherited))
+}
+
+pub(crate) fn apply_inherited_versions(
+    requests: &mut [ToolRequest],
+    inherited: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, VersionSpec> {
+    let mut original = std::collections::BTreeMap::new();
+    for request in requests {
+        let Some(version) = inherited.get(&request.backend) else {
+            continue;
+        };
+        if request.spec.matches_version(version) {
+            original.insert(request.backend.clone(), request.spec.clone());
+            request.spec = VersionSpec::Exact(version.clone());
+        }
+    }
+    original
+}
+
+pub(crate) fn restore_inherited_request_specs(
+    resolved: &mut [(ToolRequest, ToolVersion)],
+    original: std::collections::BTreeMap<String, VersionSpec>,
+) -> Result<()> {
+    for (request, version) in resolved {
+        if let Some(spec) = original.get(&request.backend) {
+            let inherited = match &request.spec {
+                VersionSpec::Exact(inherited) => inherited,
+                _ => unreachable!("cross-platform inheritance always uses an exact request"),
+            };
+            if version.version != *inherited {
+                anyhow::bail!(
+                    "cross-platform lock selected {}@{inherited}, but this platform resolved {}@{}",
+                    request.backend,
+                    request.backend,
+                    version.version
+                );
+            }
+            request.spec = spec.clone();
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn requests_from_lock(app: &App) -> Result<Option<Vec<ToolRequest>>> {

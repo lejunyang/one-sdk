@@ -1777,6 +1777,49 @@ tools = ["node"]
 mod tests {
     use super::*;
 
+    #[test]
+    fn cross_platform_versions_pin_resolution_without_changing_recorded_requests() {
+        let mut requests = vec![
+            ToolRequest::parse("pnpm@9").unwrap(),
+            ToolRequest::parse("node@22").unwrap(),
+            ToolRequest::parse("npm@10").unwrap(),
+        ];
+        let inherited = std::collections::BTreeMap::from([
+            ("pnpm".into(), "9.15.9".into()),
+            ("node".into(), "22.23.3".into()),
+            ("npm".into(), "11.7.0".into()),
+        ]);
+
+        let original = apply_inherited_versions(&mut requests, &inherited);
+        assert_eq!(requests[0].spec, VersionSpec::Exact("9.15.9".into()));
+        assert_eq!(requests[1].spec, VersionSpec::Exact("22.23.3".into()));
+        assert_eq!(requests[2].spec, VersionSpec::Prefix("10".into()));
+        assert!(!original.contains_key("npm"));
+
+        let mut resolved = vec![
+            (requests[0].clone(), ToolVersion::new("pnpm", "9.15.9")),
+            (requests[1].clone(), ToolVersion::new("node", "22.23.3")),
+            (requests[2].clone(), ToolVersion::new("npm", "10.9.2")),
+        ];
+        restore_inherited_request_specs(&mut resolved, original).unwrap();
+        assert_eq!(resolved[0].0.spec, VersionSpec::Prefix("9".into()));
+        assert_eq!(resolved[1].0.spec, VersionSpec::Prefix("22".into()));
+        assert_eq!(resolved[2].0.spec, VersionSpec::Prefix("10".into()));
+
+        let mut drifted = vec![(
+            ToolRequest::parse("pnpm@9.15.9").unwrap(),
+            ToolVersion::new("pnpm", "9.15.8"),
+        )];
+        let error = restore_inherited_request_specs(
+            &mut drifted,
+            std::collections::BTreeMap::from([("pnpm".into(), VersionSpec::Prefix("9".into()))]),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("this platform resolved pnpm@9.15.8"));
+    }
+
     /// A shell-split operand is reported as such, and nothing else is.
     ///
     /// The three cases must stay distinguishable. PowerShell splits an unquoted
