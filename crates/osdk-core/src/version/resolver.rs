@@ -106,7 +106,7 @@ pub fn resolve_package_manager(start_dir: &Path) -> Result<Option<PackageManager
             let path = directory.join(name);
             if path.is_file() {
                 if let Some((manager, version)) = read_project_package_manager(&path) {
-                    return parse_package_manager(&manager, &version, path).map(Some);
+                    return configured_package_manager(&manager, &version, path).map(Some);
                 }
             }
         }
@@ -150,13 +150,25 @@ fn parse_package_manager_declaration(
     parse_package_manager_declaration_parts(manager, version, source)
 }
 
-fn parse_package_manager(
+fn configured_package_manager(
     manager: &str,
     version: &str,
     source: PathBuf,
 ) -> Result<PackageManagerRequest, String> {
-    let request = parse_package_manager_declaration_parts(manager, version, source)?;
-    validate_supported_package_manager(request)
+    let manager = manager.trim();
+    let version = version.trim();
+    validate_package_manager_name(manager, &source)?;
+    if version.is_empty() {
+        return Err(crate::t!(
+            "err.package_manager_version_missing",
+            path = source.display()
+        ));
+    }
+    Ok(PackageManagerRequest {
+        manager: manager.to_ascii_lowercase(),
+        version: version.to_string(),
+        source,
+    })
 }
 
 fn validate_supported_package_manager(
@@ -173,13 +185,7 @@ fn validate_supported_package_manager(
     }
 }
 
-fn parse_package_manager_declaration_parts(
-    manager: &str,
-    version: &str,
-    source: PathBuf,
-) -> Result<PackageManagerRequest, String> {
-    let manager = manager.trim();
-    let version = version.trim();
+fn validate_package_manager_name(manager: &str, source: &Path) -> Result<(), String> {
     if manager.is_empty()
         || manager.contains(char::is_whitespace)
         || manager.contains(['/', '\\', '#', '+'])
@@ -190,6 +196,17 @@ fn parse_package_manager_declaration_parts(
             manager = manager
         ));
     }
+    Ok(())
+}
+
+fn parse_package_manager_declaration_parts(
+    manager: &str,
+    version: &str,
+    source: PathBuf,
+) -> Result<PackageManagerRequest, String> {
+    let manager = manager.trim();
+    let version = version.trim();
+    validate_package_manager_name(manager, &source)?;
     if version.contains(['#', '+', '/', '\\']) || semver::Version::parse(version).is_err() {
         return Err(crate::t!(
             "err.package_manager_version_not_exact",
@@ -511,6 +528,33 @@ mod tests {
         assert_eq!(selected.manager, "bun");
         assert_eq!(selected.version, "1.2.3");
         assert_eq!(selected.source, package);
+    }
+
+    #[test]
+    fn project_package_manager_uses_normal_tool_version_selectors() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("osdk.toml"), "[tools]\npnpm = \"9\"\n").unwrap();
+
+        let selected = resolve_package_manager(temp.path()).unwrap().unwrap();
+        assert_eq!(selected.manager, "pnpm");
+        assert_eq!(selected.version, "9");
+
+        std::fs::write(
+            temp.path().join("osdk.toml"),
+            "[tools]\nnpm = { version = \"11.5\" }\n",
+        )
+        .unwrap();
+        let selected = resolve_package_manager(temp.path()).unwrap().unwrap();
+        assert_eq!(selected.manager, "npm");
+        assert_eq!(selected.version, "11.5");
+
+        std::fs::remove_file(temp.path().join("osdk.toml")).unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@9"}"#,
+        )
+        .unwrap();
+        assert!(resolve_package_manager(temp.path()).is_err());
     }
 
     #[test]

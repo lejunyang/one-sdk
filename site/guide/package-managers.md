@@ -58,11 +58,11 @@ Node 的 Corepack 也可能在 Node 安装目录中提供 `npm`/`npx`、`pnpm`/`
 命令：项目或全局配置选中了独立 manager 时，对应 shim 始终路由到独立 backend；没有
 独立选择时，才使用当前 Node 安装中实际存在的 Corepack launcher。
 
-## `packageManager` 自动发现
+## 包管理器版本发现
 
-osdk 自动发现 npm、pnpm 或 Yarn 的精确版本，优先级为：
+osdk 按以下优先级发现 npm、pnpm 或 Yarn：
 
-1. 最近祖先项目配置 `[tools]` 中的 `npm`、`pnpm`、`yarn`；
+1. 最近祖先项目配置 `[tools]` 中的 `npm`、`pnpm`、`yarn`；这里使用普通工具版本语义，`9`、`9.15` 分别选择最新稳定的 `9.x`、`9.15.x`，解析出的精确版本写入 `osdk.lock`；
 2. 最近祖先 `package.json#packageManager`；
 3. 同一 `package.json#devEngines.packageManager`（对象或数组第一项）。
 
@@ -73,10 +73,10 @@ osdk 自动发现 npm、pnpm 或 Yarn 的精确版本，优先级为：
 }
 ```
 
-只支持 `npm|pnpm|yarn@精确 semver`。缺少版本、Bun/Deno、URL、路径，以及带
-`#`、`+` hash/build suffix 的值都会失败。`packageManager` 优先于
+`package.json` 的两种声明只支持 `npm|pnpm|yarn@精确 semver`。缺少版本、Bun/Deno、URL、路径，以及带
+`#`、`+` hash/build suffix 的值都会失败；这一精确限制不适用于 `[tools]`。`packageManager` 优先于
 `devEngines.packageManager`。无参数 `install`/`lock`/`upgrade` 会自动加入 manager
-和 Node；`current` 也会报告对应 `package.json` 来源。
+和 Node；`current` 也会报告对应来源。
 
 ## Registry 预检
 

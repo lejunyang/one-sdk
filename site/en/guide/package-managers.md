@@ -65,11 +65,11 @@ independent manager, its shims always route to that backend; without an
 independent selection, osdk uses an existing Corepack launcher from the active
 Node installation.
 
-## `packageManager` discovery
+## Package-manager version discovery
 
-osdk discovers exact npm, pnpm, or Yarn versions in this order:
+osdk discovers npm, pnpm, or Yarn in this order:
 
-1. npm/pnpm/Yarn in `[tools]` from the nearest ancestor project configuration;
+1. npm/pnpm/Yarn in `[tools]` from the nearest ancestor project configuration; these use normal tool-version semantics, so `9` and `9.15` select the newest stable `9.x` and `9.15.x`, with the resolved exact version recorded in `osdk.lock`;
 2. the nearest ancestor `package.json#packageManager`;
 3. `devEngines.packageManager` in that `package.json` (an object or first array entry).
 
@@ -80,11 +80,12 @@ osdk discovers exact npm, pnpm, or Yarn versions in this order:
 }
 ```
 
-Only exact `npm|pnpm|yarn@semver` values are supported. Missing versions,
-Bun/Deno, URLs, paths, and values with a `#`, hash, or `+` build suffix fail.
+The two `package.json` declarations support only exact `npm|pnpm|yarn@semver`
+values. Missing versions, Bun/Deno, URLs, paths, and values with a `#`, hash, or
+`+` build suffix fail; this exact-version restriction does not apply to `[tools]`.
 `packageManager` wins over `devEngines.packageManager`. No-argument
 `install`/`lock`/`upgrade` automatically add the manager and Node; `current`
-reports the corresponding `package.json` source.
+reports the corresponding source.
 
 ## Registry preflight
 

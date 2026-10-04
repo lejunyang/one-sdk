@@ -149,7 +149,7 @@ node = "20"
 python = "3.12"
 go = "1.22"
 rust = "1.91.1"
-pnpm = "10.15.0"
+pnpm = "10"
 "npm:prettier" = "3"
 "cargo:ripgrep" = { version = "14.1", features = ["pcre2"], locked = true }
 "go:golang.org/x/tools/gopls" = { version = "0.20", tags = ["netgo"] }
@@ -415,7 +415,7 @@ probe_timeout_ms = 1500
 [tools]
 node = "20"
 python = "3.12"
-pnpm = "10.15.0"
+pnpm = "10"
 "npm:prettier" = "3"
 
 [tools."npm:@scope/native-tool"]

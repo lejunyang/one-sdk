@@ -256,13 +256,14 @@ osdk install \
 
 ## 场景：使用包管理器并自动选择可用 Registry
 
-可以独立安装 npm、pnpm 或 Yarn，也可以让 `package.json#packageManager` 中的
-精确版本自动加入项目工具链；显式选择的 manager 优先于 Node 随附的 Corepack launcher：
+可以独立安装 npm、pnpm 或 Yarn；只关心主版本或次版本时可用前缀选择最新兼容版本，
+也可以让 `package.json#packageManager` 中的精确版本自动加入项目工具链。显式选择的
+manager 优先于 Node 随附的 Corepack launcher：
 
 ```bash
-osdk install npm@11.5.2
-osdk install pnpm@9.15.0
-osdk install yarn@4.9.1
+osdk install npm@11
+osdk install pnpm@9
+osdk install yarn@4
 ```
 
 在包管理器进程启动前，osdk 可以为 npm、pnpm、Yarn、Bun 和 Deno 选择健康的

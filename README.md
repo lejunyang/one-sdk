@@ -285,14 +285,15 @@ Guide: [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
 
 ## Scenario: use package managers with an available registry
 
-Install npm, pnpm, or Yarn independently, or let an exact
-`package.json#packageManager` selection join the project toolchain. An explicitly
-selected manager takes precedence over Node's bundled Corepack launcher:
+Install npm, pnpm, or Yarn independently, using a major/minor prefix when you
+want the newest compatible release, or let an exact `package.json#packageManager`
+selection join the project toolchain. An explicitly selected manager takes
+precedence over Node's bundled Corepack launcher:
 
 ```bash
-osdk install npm@11.5.2
-osdk install pnpm@9.15.0
-osdk install yarn@4.9.1
+osdk install npm@11
+osdk install pnpm@9
+osdk install yarn@4
 ```
 
 Before a package-manager process starts, osdk can select a healthy configured
