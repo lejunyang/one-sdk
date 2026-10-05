@@ -43,6 +43,28 @@ case ${args[0]:-} in
   exec)
     printf '1.0.0\n'
     ;;
+  use)
+    if [[ ${args[1]:-} != --global || ${args[2]:-} != npm:prettier@3.6.2 ]]; then
+      printf 'unexpected fake global use: %s\n' "${args[*]}" >&2
+      exit 2
+    fi
+    mkdir -p \
+      "$OSDK_INSTALL_DIR/node/26.10.0" \
+      "$OSDK_INSTALL_DIR/npm/12.2.0" \
+      "$OSDK_INSTALL_DIR/npm-global/prettier/3.6.2/fixture" \
+      "$OSDK_DATA_DIR/shims"
+    : > "$OSDK_INSTALL_DIR/node/26.10.0/.osdk-complete"
+    : > "$OSDK_INSTALL_DIR/npm/12.2.0/.osdk-complete"
+    : > "$OSDK_INSTALL_DIR/npm-global/prettier/3.6.2/fixture/.osdk-complete"
+    cat > "$OSDK_DATA_DIR/shims/prettier" <<'SHIM'
+#!/usr/bin/env bash
+printf '3.6.2\n'
+SHIM
+    chmod +x "$OSDK_DATA_DIR/shims/prettier"
+    ;;
+  where)
+    printf '%s\n' "$OSDK_INSTALL_DIR/npm-global/prettier/3.6.2/fixture"
+    ;;
   list)
     tool=${args[1]}
     printf '%s:\n' "$tool"
@@ -51,11 +73,18 @@ case ${args[0]:-} in
     fi
     ;;
   uninstall)
-    spec=${args[1]}
-    tool=${spec%@*}
-    version=${spec##*@}
-    printf '%s@%s\n' "$tool" "$version" >> "$state_dir/uninstalled.log"
-    rm -rf "$OSDK_INSTALL_DIR/$tool/$version"
+    if [[ ${args[1]:-} == --global ]]; then
+      spec=${args[2]}
+      printf '%s\n' "global:$spec" >> "$state_dir/uninstalled.log"
+      rm -rf "$OSDK_INSTALL_DIR/npm-global/prettier/3.6.2"
+      rm -f "$OSDK_DATA_DIR/shims/prettier"
+    else
+      spec=${args[1]}
+      tool=${spec%@*}
+      version=${spec##*@}
+      printf '%s@%s\n' "$tool" "$version" >> "$state_dir/uninstalled.log"
+      rm -rf "$OSDK_INSTALL_DIR/$tool/$version"
+    fi
     ;;
   *)
     printf 'unexpected fake osdk invocation: %s\n' "${args[*]}" >&2
@@ -64,6 +93,7 @@ case ${args[0]:-} in
 esac
 EOF
 chmod +x "$fake_osdk"
+cp "$fake_osdk" "$test_root/osdk-shim"
 
 export OSDK_TEST_STATE="$test_root"
 export LIVE_SMOKE_ROOT="$test_root/smoke"
@@ -84,6 +114,17 @@ bash "$repo_root/scripts/live-smoke/run.sh" pnpm "$fake_osdk" >/dev/null
 for expected in node@20.0.0 node@22.0.0 pnpm@1.0.0; do
   grep -Fxq "$expected" "$test_root/uninstalled.log" || {
     printf 'pnpm live smoke did not clean %s\n' "$expected" >&2
+    exit 1
+  }
+done
+
+: > "$test_root/uninstalled.log"
+rm -rf "$LIVE_SMOKE_ROOT"
+bash "$repo_root/scripts/live-smoke/run.sh" npm-global "$fake_osdk" >/dev/null
+
+for expected in 'global:npm:prettier@3.6.2' node@26.10.0 npm@12.2.0; do
+  grep -Fxq "$expected" "$test_root/uninstalled.log" || {
+    printf 'npm-global live smoke did not clean %s\n' "$expected" >&2
     exit 1
   }
 done

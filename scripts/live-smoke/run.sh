@@ -91,22 +91,22 @@ cleanup_global_install_on_exit() {
     printf '\nGlobal install smoke failed; attempting isolated cleanup.\n'
     timeout --foreground "$command_timeout" \
       "$osdk_binary" --quiet --yes uninstall --global "$request"
-    node_output=$(timeout --foreground "$command_timeout" \
-      "$osdk_binary" list node 2>&1)
-    node_status=$?
-    printf '%s\n' "$node_output"
-    if [[ $node_status -eq 0 ]]; then
-      node_version=
-      while IFS= read -r line; do
-        if [[ "$line" == "  "* ]]; then
-          node_version=${line#"  "}
-        fi
-      done <<< "$node_output"
-      if [[ -n "$node_version" ]]; then
-        timeout --foreground "$command_timeout" \
-          "$osdk_binary" --quiet --yes uninstall "node@$node_version"
+    for cleanup_tool in "${cleanup_tools[@]}"; do
+      list_output=$(timeout --foreground "$command_timeout" \
+        "$osdk_binary" list "$cleanup_tool" 2>&1)
+      list_status=$?
+      printf '%s\n' "$list_output"
+      if [[ $list_status -eq 0 ]]; then
+        while IFS= read -r line; do
+          if [[ "$line" == "  "* ]]; then
+            installed_version=${line#"  "}
+            timeout --foreground "$command_timeout" \
+              "$osdk_binary" --quiet --yes uninstall \
+              "$cleanup_tool@$installed_version"
+          fi
+        done <<< "$list_output"
       fi
-    fi
+    done
   fi
   exit "$status"
 }
@@ -179,7 +179,7 @@ case "$backend" in
       fi
     done
     request=npm:prettier@3.6.2
-    cleanup_tools=(node)
+    cleanup_tools=(npm node)
     global_install=1
     ;;
   *)
