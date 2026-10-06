@@ -300,7 +300,6 @@ pub fn compute_env_delta(
         // osdk-owned install inventory to validate or expose here.
         if dynamic_request.as_ref().is_some_and(|request| {
             request.backend.starts_with("npm:")
-                && project_npm_bin.is_some()
                 && crate::shim::configured_npm_scope(ctx, request)
                     .is_ok_and(|scope| scope == Some(crate::npm_tools::ToolScope::Project))
         }) {
