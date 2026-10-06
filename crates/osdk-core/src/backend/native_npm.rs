@@ -110,9 +110,12 @@ fn npm_env(request: &NativeNpmInstall<'_>) -> Result<BTreeMap<String, String>> {
         .map_err(|error| Error::io(&request.cache_dir, error))?;
     let config_dir = request.cache_dir.join("config");
     std::fs::create_dir_all(&config_dir).map_err(|error| Error::io(&config_dir, error))?;
-    let user_config = config_dir.join("npmrc");
-    if !user_config.exists() {
-        std::fs::write(&user_config, b"").map_err(|error| Error::io(&user_config, error))?;
+    let user_config = config_dir.join("user.npmrc");
+    let global_config = config_dir.join("global.npmrc");
+    for config in [&user_config, &global_config] {
+        if !config.exists() {
+            std::fs::write(config, b"").map_err(|error| Error::io(config, error))?;
+        }
     }
 
     let mut env = BTreeMap::new();
@@ -132,7 +135,7 @@ fn npm_env(request: &NativeNpmInstall<'_>) -> Result<BTreeMap<String, String>> {
     );
     env.insert(
         "NPM_CONFIG_GLOBALCONFIG".to_string(),
-        user_config.display().to_string(),
+        global_config.display().to_string(),
     );
     env.insert(
         "NPM_CONFIG_UPDATE_NOTIFIER".to_string(),
@@ -399,10 +402,11 @@ mod tests {
         let spec = request(temporary.path(), temporary.path(), cache.clone());
         let env = npm_env(&spec).unwrap();
         assert_eq!(env["NPM_CONFIG_CACHE"], cache.display().to_string());
-        // A user-level npmrc must not be consulted, so both config layers
-        // point at an osdk-owned empty file.
-        assert_eq!(env["NPM_CONFIG_USERCONFIG"], env["NPM_CONFIG_GLOBALCONFIG"]);
-        assert!(cache.join("config/npmrc").is_file());
+        // npm rejects user and global config when both variables name the same
+        // file, so isolate the two layers in distinct osdk-owned empty files.
+        assert_ne!(env["NPM_CONFIG_USERCONFIG"], env["NPM_CONFIG_GLOBALCONFIG"]);
+        assert!(cache.join("config/user.npmrc").is_file());
+        assert!(cache.join("config/global.npmrc").is_file());
         assert!(env["PATH"].starts_with(&temporary.path().display().to_string()));
     }
 
