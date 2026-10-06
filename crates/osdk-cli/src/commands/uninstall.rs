@@ -76,6 +76,11 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     if tv.options.is_empty() {
         tv.options = req.options.clone();
     }
+    let global_selections = if !global && req.backend.contains(':') {
+        matching_global_selections(app, &req, &version)?
+    } else {
+        Vec::new()
+    };
     let question = t!("prompt.uninstall", tool = tv);
     if !app.prompt.confirm(&question)? {
         println!("{}", t!("msg.cancelled"));
@@ -86,7 +91,11 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
     } else {
         backend.uninstall(&app.ctx, &tv).await?;
         app.invalidate_dynamic_scan();
-        reconcile_managed_shims(app)?;
+        if !global_selections.is_empty() {
+            remove_matching_global_selections(app, &req.backend, &version, &global_selections)?;
+        }
+        let refreshed = refreshed_global_npm_app(app)?;
+        reconcile_managed_shims(&refreshed)?;
     }
     println!("{}", t!("msg.uninstalled", tool = tv));
     // Reclaim now-unreferenced store objects.
@@ -103,6 +112,104 @@ pub async fn uninstall(app: &App, tool: String, global: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn matching_global_selections(
+    app: &App,
+    request: &ToolRequest,
+    version: &str,
+) -> Result<Vec<(String, osdk_core::config::ToolConfigEntry)>> {
+    let config = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+    let installed = app
+        .registry
+        .get(&request.backend)?
+        .list_installed(&app.ctx)?;
+    let locked = if app.ctx.dirs.user_lock_file().is_file() {
+        crate::lockfile::locked_requests(&app.ctx.dirs.user_lock_file(), app.ctx.platform)?
+            .unwrap_or_default()
+            .into_iter()
+            .find(|locked| locked.backend == request.backend)
+            .map(|locked| locked.spec)
+    } else {
+        None
+    };
+    global_selections_for_version(
+        &config,
+        &request.backend,
+        version,
+        &installed,
+        locked.as_ref(),
+    )
+}
+
+pub(crate) fn global_selections_for_version(
+    config: &osdk_core::config::Config,
+    backend: &str,
+    version: &str,
+    installed: &[String],
+    locked: Option<&VersionSpec>,
+) -> Result<Vec<(String, osdk_core::config::ToolConfigEntry)>> {
+    let selections = config
+        .global_tool_configs
+        .iter()
+        .filter_map(|(key, entry)| {
+            let spec = if key == backend {
+                Some(VersionSpec::parse(
+                    &config
+                        .expand_alias(backend, entry.version())
+                        .unwrap_or_else(|_| entry.version().to_string()),
+                ))
+            } else {
+                ToolRequest::parse(entry.version())
+                    .ok()
+                    .filter(|candidate| candidate.backend == backend)
+                    .map(|candidate| candidate.spec)
+            }?;
+            let selects = match spec {
+                VersionSpec::Exact(selected) => selected == version,
+                _ => match locked {
+                    Some(VersionSpec::Exact(selected)) => selected == version,
+                    Some(_) => false,
+                    None => select_installed_version(backend, &spec, installed.to_vec())
+                        .is_ok_and(|selected| selected == version),
+                },
+            };
+            selects.then(|| (key.clone(), entry.clone()))
+        })
+        .collect::<Vec<_>>();
+    Ok(selections)
+}
+
+fn remove_matching_global_selections(
+    app: &App,
+    backend: &str,
+    version: &str,
+    expected: &[(String, osdk_core::config::ToolConfigEntry)],
+) -> Result<()> {
+    crate::global_npm_use::with_global_npm_state_lock(&app.ctx.dirs, || {
+        let current = osdk_core::config::Config::load_user(&app.ctx.dirs.user_config_file())?;
+        let mut removed = false;
+        for (key, entry) in expected {
+            if current.global_tool_configs.get(key) == Some(entry) {
+                removed |= crate::config_edit::remove_global_tool_unlocked(&app.ctx, key)?;
+            }
+        }
+        if removed {
+            let lock_path = app.ctx.dirs.user_lock_file();
+            if lock_path.is_file()
+                && crate::lockfile::locked_requests(&lock_path, app.ctx.platform)?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .any(|request| {
+                        request.backend == backend
+                            && request.spec == VersionSpec::Exact(version.to_string())
+                    })
+            {
+                crate::lockfile::remove_tool(&lock_path, app.ctx.platform, backend)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn npm_scope_hint(request: &ToolRequest, global: bool) -> ToolVersion {

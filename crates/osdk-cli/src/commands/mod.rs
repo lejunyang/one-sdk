@@ -178,6 +178,59 @@ mod command_flow_tests {
     }
 
     #[test]
+    fn dynamic_uninstall_only_matches_global_selections_for_the_removed_version() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[tools]
+"github:owner/tool" = "latest"
+"tool.alias" = "github:owner/tool@1.2.3"
+"tool.other" = "github:owner/tool@2.0.0"
+python = "3.14"
+"#,
+        )
+        .unwrap();
+        let config = osdk_core::config::Config::load_user(&config_path).unwrap();
+        let installed = vec!["1.2.3".to_string(), "2.0.0".to_string()];
+
+        let locked = VersionSpec::Exact("1.2.3".to_string());
+        let selected = global_selections_for_version(
+            &config,
+            "github:owner/tool",
+            "1.2.3",
+            &installed,
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["github:owner/tool", "tool.alias"]
+        );
+
+        let locked = VersionSpec::Exact("2.0.0".to_string());
+        let selected = global_selections_for_version(
+            &config,
+            "github:owner/tool",
+            "1.2.3",
+            &installed,
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["tool.alias"]
+        );
+    }
+
+    #[test]
     fn lazy_metadata_matches_static_and_indirect_dynamic_requests() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");
