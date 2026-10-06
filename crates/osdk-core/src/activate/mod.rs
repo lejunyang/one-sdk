@@ -360,7 +360,13 @@ pub fn compute_env_delta(
         };
         let version = match version {
             Some(v) => v,
-            None => continue,
+            None => {
+                return Err(crate::error::Error::other(crate::t!(
+                    "err.no_installed_match",
+                    tool = backend.id(),
+                    spec = spec
+                )))
+            }
         };
         let mut tv = ToolVersion::new(backend.id(), &version);
         let dynamic_install = if let Some(request) = dynamic_request.as_ref() {
@@ -908,6 +914,26 @@ mod tests {
             client: reqwest::Client::new(),
             show_progress: false,
         }
+    }
+
+    #[test]
+    fn configured_missing_runtime_fails_instead_of_falling_back_to_system_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let ctx = test_ctx(temporary.path(), &[("python", "3.14.7")]);
+
+        let error = match compute_env_delta(&ctx, &Registry::new(), &project) {
+            Ok(_) => panic!("missing configured Python must fail activation"),
+            Err(error) => error,
+        };
+        let message = error.localized();
+        assert!(message.contains("python"), "{message}");
+        assert!(message.contains("3.14.7"), "{message}");
+
+        let empty = test_ctx(temporary.path(), &[]);
+        let delta = compute_env_delta(&empty, &Registry::new(), &project).unwrap();
+        assert!(delta.path_prepend.is_empty());
     }
 
     #[test]
