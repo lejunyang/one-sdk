@@ -117,7 +117,12 @@ channel is preserved; a bare tool stores the exact resolved version.
 `uninstall` normally expects an exact version. A prefix selects the last
 string-sorted installed match; other non-exact requests are rejected. Bare
 `rust` is the exception and removes `stable`. It asks for confirmation, so pass
-`--yes` in automation. Newly unreferenced CAS objects are collected afterward.
+`--yes` in automation. When a regular dynamic tool is removed, osdk also removes
+any user-global pin and user lock entry that still select that version; project
+configuration and project locks are unchanged. Newly unreferenced CAS objects
+are collected afterward. Shell activation fails explicitly when a configured
+runtime is not installed instead of silently using a same-named command from the
+system PATH.
 
 ## Inspect local and remote versions
 

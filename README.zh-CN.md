@@ -132,8 +132,9 @@ node --version
 python --version
 ```
 
-Shell 激活也支持 zsh、fish 和 PowerShell。需要完整命令说明时，运行
-`osdk --help` 或 `osdk <command> --help`。
+Shell 激活也支持 zsh、fish 和 PowerShell。已配置的运行时若尚未安装，激活会明确失败，
+不会静默回退到系统可执行文件。需要完整命令说明时，运行 `osdk --help` 或
+`osdk <command> --help`。
 
 ## 场景：让项目工具链可复现
 

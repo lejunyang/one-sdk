@@ -142,8 +142,10 @@ node --version
 python --version
 ```
 
-Activation also supports zsh, fish, and PowerShell. Run `osdk --help` or
-`osdk <command> --help` whenever you need the full command reference.
+Activation also supports zsh, fish, and PowerShell. If a configured runtime is
+not installed, activation fails explicitly instead of silently falling back to a
+system executable. Run `osdk --help` or `osdk <command> --help` whenever you need
+the full command reference.
 
 ## Scenario: make a project toolchain reproducible
 
