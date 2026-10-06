@@ -228,7 +228,7 @@ pub fn bin_names_in_dirs(dirs: &[PathBuf]) -> Vec<String> {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for entry in rd.flatten() {
                 let path = entry.path();
-                if is_executable(&path) {
+                if !looks_like_library(&path) && is_executable(&path) {
                     if let Some(stem) = exe_stem(&path) {
                         names.insert(stem);
                     }
@@ -246,6 +246,19 @@ fn is_executable(path: &std::path::Path) -> bool {
         && std::fs::metadata(path)
             .map(|m| m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
+}
+
+fn looks_like_library(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".so")
+        || lower.contains(".so.")
+        || lower.ends_with(".dylib")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".a")
+        || lower.ends_with(".lib")
 }
 
 #[cfg(windows)]
@@ -348,6 +361,29 @@ mod tests {
         let tv = MockBackend.resolve_version(&ctx, &req).await.unwrap();
         assert_eq!(tv.version, "1.2.3");
         assert_eq!(tv.options.get("tag").map(|s| s.as_str()), Some("20240224"));
+    }
+
+    #[test]
+    fn executable_library_names_are_not_published_as_commands() {
+        for library in [
+            "libpypy3.11-c.so",
+            "libpython3.14.so.1.0",
+            "libpython3.14.dylib",
+            "python314.dll",
+            "libpython3.14.a",
+            "python314.lib",
+        ] {
+            assert!(
+                looks_like_library(std::path::Path::new(library)),
+                "{library}"
+            );
+        }
+        for command in ["python3.11", "pip3.11", "uv", "tool.debug"] {
+            assert!(
+                !looks_like_library(std::path::Path::new(command)),
+                "{command}"
+            );
+        }
     }
 
     #[test]
