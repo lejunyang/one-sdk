@@ -126,6 +126,9 @@ impl Manifest {
     pub fn verify(&self, install_dir: &Path) -> Result<Vec<Drift>> {
         let mut drift = Vec::new();
         for entry in &self.files {
+            if is_python_runtime_cache(&self.tool, &entry.path) {
+                continue;
+            }
             // The manifest stores forward slashes; rebuild the path component
             // by component so it stays inside the install dir on Windows too.
             let mut path = install_dir.to_path_buf();
@@ -197,6 +200,12 @@ impl Manifest {
     }
 }
 
+fn is_python_runtime_cache(tool: &str, path: &str) -> bool {
+    tool == "python"
+        && path.ends_with(".pyc")
+        && path.split('/').any(|component| component == "__pycache__")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +227,38 @@ mod tests {
             });
         }
         (dir, manifest)
+    }
+
+    #[test]
+    fn python_bytecode_cache_drift_is_ignored_but_source_drift_is_not() {
+        let (dir, mut manifest) = install_with(&[
+            (
+                "lib/python3.14/__pycache__/site.cpython-314.pyc",
+                b"initial",
+            ),
+            ("lib/python3.14/site.py", b"source"),
+        ]);
+        manifest.tool = "python".into();
+        std::fs::write(
+            dir.path()
+                .join("lib/python3.14/__pycache__/site.cpython-314.pyc"),
+            b"runtime-regenerated",
+        )
+        .unwrap();
+        assert!(manifest.verify(dir.path()).unwrap().is_empty());
+
+        std::fs::write(dir.path().join("lib/python3.14/site.py"), b"tampered").unwrap();
+        let drift = manifest.verify(dir.path()).unwrap();
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0].path, "lib/python3.14/site.py");
+    }
+
+    #[test]
+    fn bytecode_named_files_remain_strict_for_non_python_tools() {
+        let (dir, manifest) = install_with(&[("lib/__pycache__/tool.pyc", b"initial")]);
+        std::fs::write(dir.path().join("lib/__pycache__/tool.pyc"), b"tampered").unwrap();
+        let drift = manifest.verify(dir.path()).unwrap();
+        assert_eq!(drift.len(), 1, "{drift:?}");
     }
 
     #[test]
