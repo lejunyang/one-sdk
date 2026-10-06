@@ -661,6 +661,7 @@ pub(crate) fn configured_npm_scope(ctx: &Ctx, request: &ToolRequest) -> Result<O
 
 /// Generate a shim named `name` in the shims dir pointing at `osdk_shim_bin`.
 pub fn generate_shim(dirs: &Dirs, name: &str, osdk_shim_bin: &Path) -> Result<()> {
+    let _lock = crate::lock::FileLock::acquire(dirs.data.join("locks/shims.lock"))?;
     let shims = dirs.shims();
     create_dir_all(&shims)?;
     generate_shim_in(&shims, name, osdk_shim_bin)
@@ -932,6 +933,43 @@ pub fn find_shim_binary(dirs: &Dirs) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn concurrent_generation_of_one_shim_is_serialized() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some(temporary.path().join("data").display().to_string()),
+            "OSDK_CACHE_DIR" => Some(temporary.path().join("cache").display().to_string()),
+            "OSDK_CONFIG_DIR" => Some(temporary.path().join("config").display().to_string()),
+            "OSDK_STORE_DIR" => Some(temporary.path().join("store").display().to_string()),
+            "OSDK_INSTALL_DIR" => Some(temporary.path().join("installs").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        dirs.ensure().unwrap();
+        let shim_binary = temporary.path().join(if cfg!(windows) {
+            "osdk-shim.exe"
+        } else {
+            "osdk-shim"
+        });
+        std::fs::write(&shim_binary, b"shim").unwrap();
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let dirs = &dirs;
+                let shim_binary = &shim_binary;
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        super::generate_shim(dirs, "fixture", shim_binary).unwrap();
+                    }
+                });
+            }
+        });
+
+        assert!(dirs.shims().join("fixture").is_file());
+        #[cfg(windows)]
+        assert!(dirs.shims().join("fixture.cmd").is_file());
+    }
+
     #[test]
     fn a_dependency_command_is_withheld_but_reachable_by_name() {
         // Regression: filtering the closure out of the install manifest made
