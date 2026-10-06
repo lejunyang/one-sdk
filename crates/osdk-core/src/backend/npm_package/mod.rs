@@ -779,10 +779,6 @@ impl NpmPackageBackend {
         ctx.dirs.store.join(NPM_DIR)
     }
 
-    fn package_spec(&self, tv: &ToolVersion) -> String {
-        format!("{}@{}", self.package, tv.version)
-    }
-
     fn build_policy(tv: &ToolVersion) -> Result<BuildPolicy> {
         let Some(raw) = tv.options.get("allow_builds") else {
             return Ok(BuildPolicy::Deny);
@@ -1397,7 +1393,6 @@ impl Backend for NpmPackageBackend {
             let resolution = unlocked_resolution
                 .as_ref()
                 .expect("unlocked npm resolution is prepared before mutating the install root");
-            let package_spec = self.package_spec(tv);
             let mut last_error = None;
             for source in &resolution.sources {
                 if install_root.exists() {
@@ -1405,11 +1400,12 @@ impl Backend for NpmPackageBackend {
                 }
                 std::fs::create_dir_all(&install_root)
                     .map_err(|error| Error::io(&install_root, error))?;
-                Self::write_project_manifest(&project_dir, None, &build_policy)?;
+                Self::write_project_manifest(
+                    &project_dir,
+                    Some((&self.package, &tv.version)),
+                    &build_policy,
+                )?;
                 Self::write_project_npmrc(&project_dir, Some(&source.download_url))?;
-                // The package spec is already pinned into the synthetic
-                // manifest, so npm installs from it rather than by argument.
-                let _ = &package_spec;
                 let request = NativeNpmInstall {
                     project_dir: &project_dir,
                     node_bin_dir: &node_bin_dir,
@@ -1642,6 +1638,21 @@ pub(crate) use validate::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_manifest_records_the_requested_root_dependency() {
+        let temporary = tempfile::tempdir().unwrap();
+        NpmPackageBackend::write_project_manifest(
+            temporary.path(),
+            Some(("cowsay", "1.6.0")),
+            &BuildPolicy::Deny,
+        )
+        .unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path().join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["dependencies"]["cowsay"], "1.6.0");
+    }
 
     #[test]
     fn parses_scoped_and_unscoped_names() {
