@@ -142,7 +142,7 @@ captured output stream. The stage supplies the complete child environment:
 ```text
 HOME, USERPROFILE        = <stage>/home
 CARGO_HOME               = <stage>/cargo-home
-CARGO_TARGET_DIR         = <stage>/target
+CARGO_TARGET_DIR         = <stage>/target (or private cache scratch for encoded paths)
 CARGO_INSTALL_ROOT       = <stage>
 RUSTUP_HOME              = osdk's managed rustup home
 RUSTC                    = <exact-toolchain>/bin/rustc[.exe]
@@ -258,3 +258,10 @@ The key implementation files are
 [`native_tool.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/native_tool.rs),
 [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs),
 and [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs).
+
+For percent-encoded Git selector directories, native Cargo compilation uses a
+unique temporary build directory under the osdk cache. LLVM can treat percent
+signs in an output path as temporary-name placeholders, so build outputs must
+not inherit the encoded selector. Cargo still installs binaries into the
+locked lifecycle stage; the private build directory is removed on success or
+failure, without changing selectors, install identities, or linker flags.

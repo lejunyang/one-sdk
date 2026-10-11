@@ -230,3 +230,7 @@ floating Git ref into an immutable commit.
 
 For parsing, provider selection, identity validation, publication, and lock
 schema details, see [Cargo developer tool implementation](./implementation/cargo-tools).
+
+Git selectors with encoded directory names use separate private build scratch
+under the osdk cache, cleaned after success or failure. No linker override is
+needed for these selectors.

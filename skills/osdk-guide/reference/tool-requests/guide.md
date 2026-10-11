@@ -61,3 +61,6 @@ java = { version = "21", distribution = "zulu", package-type = "jdk" }
 不要把 lock 内部的 replay metadata 当作公开 `-o` 选项；未知或私有选项会被拒绝。
 
 `install` / `use` / `lock` 的动态请求先合并重复 `-o key=value` 再验证必需选项，例如 HTTP 的 `sha256`；相同键由 `-o` 覆盖内联选项。
+
+Cargo Git selector 的编码路径会使用独立私有构建目录；无需为此传入链接器覆盖选项，
+selector 和安装身份保持不变。
