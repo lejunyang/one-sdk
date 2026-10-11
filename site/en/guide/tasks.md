@@ -63,6 +63,11 @@ tolerated is not the same as unnoticed.
 
 ### Run in parallel
 
+Grouped tasks keep their own dependencies, nested groups, timeouts, freshness,
+and teardown. Shared prerequisites run once before the group. Independent
+branches run concurrently (at most eight workers per group); overlapping nested
+graphs run in order so the same task is not executed twice.
+
 ```toml
 [tasks.check]
 run = [
