@@ -5259,6 +5259,7 @@ printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
                 ("OSDK_TEST_LOCK_CONTENTS", lock_contents),
                 ("OSDK_TEST_BIN", bin_value.as_str()),
                 (registry_key, "https://registry.example.test/"),
+                ("OSDK_SOURCE_MODE", "env"),
             ],
         );
         assert!(
@@ -5391,6 +5392,7 @@ printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
             ("OSDK_TEST_LOCK", lock_value.as_str()),
             ("OSDK_TEST_LOCK_CONTENTS", r#"{"lockfileVersion":3}"#),
             ("npm_config_registry", "https://registry.example.test/"),
+            ("OSDK_SOURCE_MODE", "env"),
             ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
         ],
     );
@@ -6049,7 +6051,14 @@ fn registry_test_without_manager_checks_every_supported_mode() {
     let temporary = tempfile::tempdir().unwrap();
     let (healthy, server) = registry_fixture(6, true);
     write_registry_config(temporary.path(), &[&healthy]);
-    let output = run_isolated(temporary.path(), &["registry", "test"]);
+    // A synthetic credential makes Python explicitly pass through without
+    // accessing a real index. Node modes still exercise all six local probes.
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["registry", "test"],
+        &[("UV_INDEX_FIXTURE_USERNAME", "fixture-user")],
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -6064,6 +6073,7 @@ fn registry_test_without_manager_checks_every_supported_mode() {
         "yarn-berry:",
         "bun:",
         "deno:",
+        "python:",
     ] {
         assert!(stdout.contains(manager), "missing {manager} in {stdout}");
     }
