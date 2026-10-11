@@ -173,17 +173,24 @@ impl Backend for GoBackend {
 
     fn bin_paths(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<PathBuf>> {
         // Archive contains `go/bin`, and we strip the `go/` root, so bin is at
-        // <install>/bin.
-        Ok(vec![ctx
-            .dirs
-            .install_path(self.id(), &tv.version)
-            .join("bin")])
+        // <install>/bin. The redirected GOBIN (see exec_env) is added too so the
+        // native binaries from `go install x@v` land on PATH like cargo's.
+        Ok(vec![
+            ctx.dirs.install_path(self.id(), &tv.version).join("bin"),
+            ctx.dirs.go_global_bin(),
+        ])
     }
 
     fn exec_env(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
         let mut env = BTreeMap::new();
         let root = ctx.dirs.install_path(self.id(), &tv.version);
         env.insert("GOROOT".to_string(), root.display().to_string());
+        // Redirect GOBIN so `go install` writes native binaries into osdk
+        // space; bin_paths puts this dir on PATH so they work without a reshim.
+        env.insert(
+            "GOBIN".to_string(),
+            ctx.dirs.go_global_bin().display().to_string(),
+        );
         // `default_sources` above only governs where the Go *toolchain archive*
         // comes from. Module downloads are a separate channel the go command
         // drives itself through GOPROXY, so mirroring the archive did nothing
@@ -401,5 +408,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["official", "aliyun", "google-cn"]
         );
+    }
+
+    #[test]
+    fn redirects_gobin_and_exposes_it_on_bin_paths() {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some("/tmp/osdk-go-test/data".into()),
+            "OSDK_CACHE_DIR" => Some("/tmp/osdk-go-test/cache".into()),
+            "OSDK_CONFIG_DIR" => Some("/tmp/osdk-go-test/config".into()),
+            _ => None,
+        })
+        .unwrap();
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform {
+                os: crate::platform::Os::Linux,
+                arch: crate::platform::Arch::X64,
+                libc: crate::platform::Libc::Glibc,
+            },
+            config: crate::config::Config::default(),
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store)),
+            show_progress: false,
+        };
+        let tv = ToolVersion::new(GoBackend.id(), "1.26.5");
+        let env = GoBackend.exec_env(&ctx, &tv).unwrap();
+        assert_eq!(
+            PathBuf::from(env.get("GOBIN").unwrap().clone()),
+            ctx.dirs.go_global_bin()
+        );
+        let paths = GoBackend.bin_paths(&ctx, &tv).unwrap();
+        assert!(paths.contains(&ctx.dirs.go_global_bin()));
     }
 }

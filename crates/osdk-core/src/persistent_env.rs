@@ -67,7 +67,10 @@ pub fn forced_var_names(tool: &str) -> &'static [&'static str] {
         "node" => &["npm_config_prefix"],
         "npm" => &["npm_config_prefix"],
         "pnpm" => &["PNPM_HOME"],
-        "go" => &["GOROOT", "GOPROXY"],
+        "yarn" => &["YARN_GLOBAL_FOLDER"],
+        "bun" => &["BUN_INSTALL"],
+        "deno" => &["DENO_INSTALL_ROOT"],
+        "go" => &["GOROOT", "GOPROXY", "GOBIN"],
         "rust" => &["RUSTUP_HOME", "CARGO_HOME"],
         "java" => &["JAVA_HOME"],
         _ => &[],
@@ -88,8 +91,9 @@ pub fn managed_var_names(tool: &str) -> &'static [&'static str] {
         "go" => &["GOMODCACHE", "GOCACHE"],
         "java" => &["GRADLE_USER_HOME"],
         "python" => &["PIP_CACHE_DIR", "UV_CACHE_DIR"],
-        // Yarn 2+ uses YARN_GLOBAL_FOLDER; Yarn classic YARN_CACHE_FOLDER.
-        "yarn" => &["YARN_GLOBAL_FOLDER", "YARN_CACHE_FOLDER"],
+        // YARN_GLOBAL_FOLDER is a forced location variable now; only classic's
+        // disposable YARN_CACHE_FOLDER stays in the cache layer.
+        "yarn" => &["YARN_CACHE_FOLDER"],
         "zig" => &["ZIG_GLOBAL_CACHE_DIR"],
         _ => &[],
     }

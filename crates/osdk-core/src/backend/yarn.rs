@@ -146,13 +146,25 @@ impl Backend for YarnBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        let mapping = cache_mapping(&tv.version);
-        let force = ctx.config.settings.effective_override_env(self.id());
-        Ok(crate::cache::manager_exec_env(
-            &ctx.dirs.cache,
-            &[mapping],
-            force,
-        ))
+        let mut env = std::collections::BTreeMap::new();
+        // Redirect the global folder for both classic (`yarn global add`) and
+        // berry so global bins stay under osdk control at
+        // <folder>/node_modules/.bin, instead of escaping into yarn's own dir.
+        env.insert(
+            "YARN_GLOBAL_FOLDER".to_string(),
+            ctx.dirs.yarn_global_folder().display().to_string(),
+        );
+        // Classic honors a disposable YARN_CACHE_FOLDER; berry drives its cache
+        // through project/.yarn configuration, not this variable.
+        if yarn_major(&tv.version) < 2 {
+            let force = ctx.config.settings.effective_override_env(self.id());
+            env.extend(crate::cache::manager_exec_env(
+                &ctx.dirs.cache,
+                &[("YARN_CACHE_FOLDER", "yarn-classic")],
+                force,
+            ));
+        }
+        Ok(env)
     }
 
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {
@@ -167,14 +179,6 @@ fn yarn_major(version: &str) -> u64 {
         .next()
         .and_then(|part| part.parse().ok())
         .unwrap_or(1)
-}
-
-fn cache_mapping(version: &str) -> (&'static str, &'static str) {
-    if yarn_major(version) >= 2 {
-        ("YARN_GLOBAL_FOLDER", "yarn")
-    } else {
-        ("YARN_CACHE_FOLDER", "yarn-classic")
-    }
 }
 
 #[cfg(unix)]
@@ -210,10 +214,46 @@ mod tests {
         assert_eq!(YarnBackend::npm_package("4.10.3"), "@yarnpkg/cli-dist");
         // malformed -> classic default
         assert_eq!(YarnBackend::npm_package("weird"), "yarn");
+    }
+
+    #[test]
+    fn redirects_global_folder_for_classic_and_berry() {
+        let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
+            "OSDK_DATA_DIR" => Some("/tmp/osdk-yarn-test/data".into()),
+            "OSDK_CACHE_DIR" => Some("/tmp/osdk-yarn-test/cache".into()),
+            "OSDK_CONFIG_DIR" => Some("/tmp/osdk-yarn-test/config".into()),
+            _ => None,
+        })
+        .unwrap();
+        let ctx = Ctx {
+            dirs: dirs.clone(),
+            platform: crate::platform::Platform {
+                os: crate::platform::Os::Linux,
+                arch: crate::platform::Arch::X64,
+                libc: crate::platform::Libc::Glibc,
+            },
+            config: crate::config::Config::default(),
+            client: reqwest::Client::new(),
+            cas: std::sync::Arc::new(crate::store::Cas::new(dirs.store)),
+            show_progress: false,
+        };
+
+        // Classic (1.x): global folder redirected and a disposable cache set.
+        let classic = ToolVersion::new(YarnBackend.id(), "1.22.22");
+        let env = YarnBackend.exec_env(&ctx, &classic).unwrap();
         assert_eq!(
-            cache_mapping("1.22.22"),
-            ("YARN_CACHE_FOLDER", "yarn-classic")
+            std::path::PathBuf::from(env.get("YARN_GLOBAL_FOLDER").unwrap().clone()),
+            ctx.dirs.yarn_global_folder()
         );
-        assert_eq!(cache_mapping("4.10.3"), ("YARN_GLOBAL_FOLDER", "yarn"));
+        assert!(env.contains_key("YARN_CACHE_FOLDER"));
+
+        // Berry (4.x): global folder redirected, no YARN_CACHE_FOLDER.
+        let berry = ToolVersion::new(YarnBackend.id(), "4.10.3");
+        let envb = YarnBackend.exec_env(&ctx, &berry).unwrap();
+        assert_eq!(
+            std::path::PathBuf::from(envb.get("YARN_GLOBAL_FOLDER").unwrap().clone()),
+            ctx.dirs.yarn_global_folder()
+        );
+        assert!(!envb.contains_key("YARN_CACHE_FOLDER"));
     }
 }

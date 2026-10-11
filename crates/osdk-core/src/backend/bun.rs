@@ -138,11 +138,15 @@ impl Backend for BunBackend {
         _tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
         let force = ctx.config.settings.effective_override_env(self.id());
-        Ok(crate::cache::manager_exec_env(
-            &ctx.dirs.cache,
-            CACHE_ENV,
-            force,
-        ))
+        let mut env = crate::cache::manager_exec_env(&ctx.dirs.cache, CACHE_ENV, force);
+        // Redirect the bun install home so `bun add -g` writes global bins to
+        // BUN_INSTALL/bin under osdk control. The bun executable is launched by
+        // absolute path, so this only locates global packages, not bun itself.
+        env.insert(
+            "BUN_INSTALL".to_string(),
+            ctx.dirs.bun_global_home().display().to_string(),
+        );
+        Ok(env)
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
@@ -226,6 +230,21 @@ mod tests {
             (key == "BUN_INSTALL_CACHE_DIR").then(|| "/custom/bun-cache".into())
         });
         assert!(!user.contains_key("BUN_INSTALL_CACHE_DIR"));
+    }
+
+    #[test]
+    fn redirects_global_install_home() {
+        let ctx = ctx(Platform {
+            os: Os::Linux,
+            arch: Arch::X64,
+            libc: Libc::Glibc,
+        });
+        let tv = ToolVersion::new(BunBackend.id(), "1.0.0");
+        let env = BunBackend.exec_env(&ctx, &tv).unwrap();
+        assert_eq!(
+            PathBuf::from(env.get("BUN_INSTALL").unwrap().clone()),
+            ctx.dirs.bun_global_home()
+        );
     }
 
     #[test]

@@ -137,11 +137,15 @@ impl Backend for DenoBackend {
         _tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
         let force = ctx.config.settings.effective_override_env(self.id());
-        Ok(crate::cache::manager_exec_env(
-            &ctx.dirs.cache,
-            CACHE_ENV,
-            force,
-        ))
+        let mut env = crate::cache::manager_exec_env(&ctx.dirs.cache, CACHE_ENV, force);
+        // Redirect the deno install root so bins from `deno install` land under
+        // DENO_INSTALL_ROOT/bin in osdk-controlled space; DENO_DIR stays a
+        // disposable cache.
+        env.insert(
+            "DENO_INSTALL_ROOT".to_string(),
+            ctx.dirs.deno_global_root().display().to_string(),
+        );
+        Ok(env)
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
@@ -222,6 +226,21 @@ mod tests {
             (key == "DENO_DIR").then(|| "/custom/deno".into())
         });
         assert!(!user.contains_key("DENO_DIR"));
+    }
+
+    #[test]
+    fn redirects_global_install_root() {
+        let ctx = ctx(Platform {
+            os: Os::Linux,
+            arch: Arch::X64,
+            libc: Libc::Glibc,
+        });
+        let tv = ToolVersion::new(DenoBackend.id(), "1.0.0");
+        let env = DenoBackend.exec_env(&ctx, &tv).unwrap();
+        assert_eq!(
+            PathBuf::from(env.get("DENO_INSTALL_ROOT").unwrap().clone()),
+            ctx.dirs.deno_global_root()
+        );
     }
 
     fn ctx(platform: Platform) -> Ctx {
