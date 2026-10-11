@@ -2062,7 +2062,7 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
             "1.22.22",
             "bin/yarn",
             "${YARN_CACHE_FOLDER-unset}|${YARN_GLOBAL_FOLDER-unset}|${YARN_ENABLE_GLOBAL_CACHE-unset}",
-            "yarn-classic|unset|unset",
+            "yarn-classic|yarn|unset",
             "YARN_CACHE_FOLDER",
         ),
         (
@@ -2071,7 +2071,7 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
             "bin/yarn",
             "${YARN_CACHE_FOLDER-unset}|${YARN_GLOBAL_FOLDER-unset}|${YARN_ENABLE_GLOBAL_CACHE-unset}",
             "unset|yarn|unset",
-            "YARN_GLOBAL_FOLDER",
+            "YARN_ENABLE_GLOBAL_CACHE",
         ),
     ];
 
@@ -2111,8 +2111,11 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
             .map(|(i, part)| {
                 if part == "unset" {
                     part.to_string()
-                } else if manager == "pnpm" && i == 0 {
-                    // PNPM_HOME is redirected to the controlled global home.
+                } else if (manager == "pnpm" && i == 0)
+                    || (manager == "yarn" && i == 1)
+                {
+                    // PNPM_HOME / YARN_GLOBAL_FOLDER are redirected to the
+                    // controlled global home.
                     temporary
                         .path()
                         .join("data/global")
@@ -2146,30 +2149,36 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
             String::from_utf8_lossy(&output.stdout)
         );
 
-        if manager == "pnpm" {
-            // PNPM_HOME is a forced location variable: a pre-existing user
-            // value is overridden by the controlled global home so direct
-            // `pnpm add -g` lands under osdk rather than the user's old setup.
+        let forced_global = match manager {
+            // PNPM_HOME / YARN_GLOBAL_FOLDER are forced location variables: a
+            // pre-existing user value is overridden by the controlled global
+            // home so a direct global install lands under osdk rather than the
+            // user's old setup.
+            "pnpm" => Some(("PNPM_HOME", "pnpm")),
+            "yarn" => Some(("YARN_GLOBAL_FOLDER", "yarn")),
+            _ => None,
+        };
+        if let Some((forced_key, global_dir)) = forced_global {
             let output = isolated_command(temporary.path(), &project)
                 .arg(manager)
                 .arg("--version")
-                .env("PNPM_HOME", "/custom/pnpm-home")
+                .env(forced_key, "/custom/forced-home")
                 .output()
                 .unwrap();
             assert!(output.status.success());
             let stdout = String::from_utf8_lossy(&output.stdout);
             let managed_home = temporary
                 .path()
-                .join("data/global/pnpm")
+                .join(format!("data/global/{global_dir}"))
                 .display()
                 .to_string();
             assert!(
                 stdout.contains(&managed_home),
-                "did not use managed PNPM_HOME: {stdout}"
+                "did not use managed {forced_key}: {stdout}"
             );
             assert!(
-                !stdout.contains("/custom/pnpm-home"),
-                "kept pre-existing PNPM_HOME: {stdout}"
+                !stdout.contains("/custom/forced-home"),
+                "kept pre-existing {forced_key}: {stdout}"
             );
         }
     }

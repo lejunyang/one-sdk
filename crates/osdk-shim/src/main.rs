@@ -401,6 +401,8 @@ fn real_main() -> i32 {
         }
     }
 
+    // Decide global-bin ownership before tool_name is moved into the env below.
+    let global_owner = global_owner_for_tool(&tool_name);
     exec_env.insert("OSDK_SHIM_ACTIVE".into(), tool_name);
     let routed_args;
     let exec_args = if let Some(subcommand) = alias_subcommand {
@@ -411,7 +413,21 @@ fn real_main() -> i32 {
     } else {
         forward_args
     };
-    exec(&exe, exec_args, &exec_env)
+    match global_owner {
+        // Package managers that persist global bins: run to completion, then
+        // sync their redirected global bin shims so no manual reshim is needed.
+        Some(owner) => run_and_sync_global(
+            &ctx,
+            &registry,
+            &dynamic_report,
+            &cwd,
+            owner,
+            &exe,
+            exec_args,
+            &exec_env,
+        ),
+        None => exec(&exe, exec_args, &exec_env),
+    }
 }
 
 fn manifest_bound_node_bin_paths(
@@ -1071,6 +1087,89 @@ fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String,
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("osdk-shim: failed to run {}: {e}", exe.display());
+            126
+        }
+    }
+}
+
+/// Map the invoked command to the package-manager owner whose redirected global
+/// bin dir should be reconciled after the process exits. Only package managers
+/// that persist global bins are listed; npx/bunx/dlx run ephemerally.
+fn global_owner_for_tool(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "npm" => Some("npm"),
+        "pnpm" => Some("pnpm"),
+        "yarn" | "yarnpkg" => Some("yarn"),
+        "bun" => Some("bun"),
+        "deno" => Some("deno"),
+        _ => None,
+    }
+}
+
+/// Run a package manager to completion, then reconcile its redirected global
+/// bin shims so a global install/uninstall takes effect without a manual reshim.
+/// Returns the child's exit code.
+#[allow(clippy::too_many_arguments)]
+fn run_and_sync_global(
+    ctx: &osdk_core::backend::Ctx,
+    registry: &Registry,
+    dynamic_report: &ScanReport,
+    cwd: &std::path::Path,
+    owner: &str,
+    exe: &PathBuf,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+) -> i32 {
+    #[cfg(unix)]
+    let code = run_child_status(exe, args, env);
+    #[cfg(not(unix))]
+    // The Windows exec already spawns and waits (there is no process replacement).
+    let code = exec(exe, args, env);
+    reconcile_after_run(ctx, registry, dynamic_report, cwd, owner);
+    code
+}
+
+/// Reconcile one owner's global bin shims after its process exited. A vanished
+/// name is kept when it is still a managed tool's bin; sync errors are warnings
+/// and never change the command's exit code.
+fn reconcile_after_run(
+    ctx: &osdk_core::backend::Ctx,
+    registry: &Registry,
+    dynamic_report: &ScanReport,
+    cwd: &std::path::Path,
+    owner: &str,
+) {
+    let is_protected =
+        |name: &str| owning_backend(registry, ctx, cwd, name, Some(dynamic_report)).is_some();
+    match osdk_core::shim::sync_owner_global_shims(ctx, owner, is_protected) {
+        Ok(outcome) => {
+            for name in outcome.added {
+                eprintln!("osdk: global command `{name}` is now available");
+            }
+            for name in outcome.removed {
+                eprintln!("osdk: global command `{name}` removed");
+            }
+        }
+        Err(error) => eprintln!("osdk-shim: failed to sync global bins: {error}"),
+    }
+}
+
+#[cfg(unix)]
+/// Spawn and wait (instead of replacing the process) so the global bins can be
+/// reconciled once the package manager exits.
+fn run_child_status(
+    exe: &PathBuf,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    match Command::new(exe).args(args).envs(env).status() {
+        Ok(status) => status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(1),
+        Err(error) => {
+            eprintln!("osdk-shim: failed to run {}: {error}", exe.display());
             126
         }
     }
