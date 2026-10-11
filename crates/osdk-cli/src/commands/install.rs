@@ -164,6 +164,10 @@ pub(crate) fn configured_request_is_lazy(app: &App, request: &ToolRequest) -> bo
 }
 
 pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let tools = tools
+        .into_iter()
+        .map(|tool| bind_explicit_operand_options(&tool, &opts))
+        .collect::<Result<Vec<_>>>()?;
     let explicit = !tools.is_empty();
     let requests = gather_requests(app, tools)?;
     // Without operands the lock describes the project, so global pins are
@@ -981,7 +985,7 @@ pub(crate) async fn resolve_requests_with_inheritance(
     for request in &mut requests {
         reject_public_internal_options(&request.options)?;
         for (key, value) in &parsed_opts {
-            request.options.insert(key.clone(), value.clone());
+            merge_operand_option(&request.backend, &mut request.options, key, value)?;
         }
     }
     let mut requests = inject_managed_dependencies(app, requests)?;
