@@ -562,3 +562,5 @@ the local plugin definition has since changed.
 
 Fish activation and deactivation treat absent optional saved variables as a
 successful no-op, including repeated activation or deactivation from scripts.
+
+Fresh native Go/Cargo, npm, HTTP, GitHub and Conda installs also record integrity manifests before publication. Older installs without a baseline must be reinstalled; verification never invents a baseline from potentially modified files.

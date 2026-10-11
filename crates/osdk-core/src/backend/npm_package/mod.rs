@@ -1230,6 +1230,7 @@ impl NpmPackageBackend {
         )?;
         let manifest = manifest.normalize()?;
         manifest.write_atomic(install_root)?;
+        crate::store::manifest::Manifest::record_tree(install_root, self.id(), &tv.version)?;
         std::fs::write(install_root.join(".osdk-complete"), b"")
             .map_err(|error| Error::io(install_root.join(".osdk-complete"), error))?;
         Ok(manifest)
@@ -1483,6 +1484,7 @@ impl Backend for NpmPackageBackend {
             }
         };
         manifest.write_atomic(&install_root)?;
+        crate::store::manifest::Manifest::record_tree(&install_root, self.id(), &tv.version)?;
         std::fs::write(install_root.join(".osdk-complete"), b"")
             .map_err(|error| Error::io(install_root.join(".osdk-complete"), error))?;
         Ok(())
@@ -3531,6 +3533,9 @@ scope = "project"
         );
         assert!(DynamicToolManifest::manifest_path(&staging).is_file());
         assert!(staging.join(".osdk-complete").is_file());
+        let integrity = crate::store::manifest::Manifest::load(&staging).unwrap();
+        assert!(!integrity.files.is_empty());
+        assert!(integrity.verify(&staging).unwrap().is_empty());
         assert_eq!(
             load_npm_receipt(&staging).unwrap(),
             NpmInstallReceipt {
