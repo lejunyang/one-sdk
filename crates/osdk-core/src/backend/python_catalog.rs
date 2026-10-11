@@ -450,7 +450,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::{Config, PythonSettings, Settings, SourcesConfig};
+    use crate::config::{Config, Settings, SourcesConfig};
     use crate::dirs::Dirs;
     use crate::platform::{Libc, Platform};
     use crate::store::Cas;

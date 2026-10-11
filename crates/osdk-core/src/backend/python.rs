@@ -575,7 +575,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::{Config, PrereleasePolicy, PythonSettings, Settings, SourcesConfig};
+    use crate::config::{Config, PrereleasePolicy, Settings, SourcesConfig};
     use crate::dirs::Dirs;
     use crate::platform::{Arch, Libc, Platform};
     use crate::store::Cas;
