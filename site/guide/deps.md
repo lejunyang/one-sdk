@@ -119,6 +119,8 @@ lock」，**不**校验 lock 与 `pyproject.toml` 是否一致——实测：loc
 osdk 还会传 `UV_PYTHON_DOWNLOADS=never`，确保用的是 osdk 选定的解释器，
 而不是 uv 自己悄悄下载的另一个。
 
+原生启动器按宿主平台选择：Unix 使用无扩展名启动器，Windows 可以使用 `.exe`、`.cmd` 或 `.bat`。Unix 不会误选安装包附带的 Windows 启动器。
+
 ## installer 如何选定
 
 优先级从高到低，越靠上的越不会被下层覆盖：
