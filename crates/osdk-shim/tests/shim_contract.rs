@@ -2107,9 +2107,18 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
         );
         let expected = expected_suffix
             .split('|')
-            .map(|part| {
+            .enumerate()
+            .map(|(i, part)| {
                 if part == "unset" {
                     part.to_string()
+                } else if manager == "pnpm" && i == 0 {
+                    // PNPM_HOME is redirected to the controlled global home.
+                    temporary
+                        .path()
+                        .join("data/global")
+                        .join(part)
+                        .display()
+                        .to_string()
                 } else {
                     temporary
                         .path()
@@ -2138,6 +2147,9 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
         );
 
         if manager == "pnpm" {
+            // PNPM_HOME is a forced location variable: a pre-existing user
+            // value is overridden by the controlled global home so direct
+            // `pnpm add -g` lands under osdk rather than the user's old setup.
             let output = isolated_command(temporary.path(), &project)
                 .arg(manager)
                 .arg("--version")
@@ -2145,7 +2157,20 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
                 .output()
                 .unwrap();
             assert!(output.status.success());
-            assert!(String::from_utf8_lossy(&output.stdout).contains("/custom/pnpm-home"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let managed_home = temporary
+                .path()
+                .join("data/global/pnpm")
+                .display()
+                .to_string();
+            assert!(
+                stdout.contains(&managed_home),
+                "did not use managed PNPM_HOME: {stdout}"
+            );
+            assert!(
+                !stdout.contains("/custom/pnpm-home"),
+                "kept pre-existing PNPM_HOME: {stdout}"
+            );
         }
     }
 }
