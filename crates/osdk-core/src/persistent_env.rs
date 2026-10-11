@@ -59,20 +59,34 @@ pub fn get(name: &str) -> Option<PersistentVar> {
     None
 }
 
-/// Environment variable names osdk manages for a tool and that a pre-existing
-/// persistent value could conflict with. The list mirrors what each backend's
-/// `exec_env` emits; a name added to one must be added to the other.
+/// Location variables a backend sets unconditionally in `exec_env` (like
+/// `JAVA_HOME`), so a pre-existing persistent value is always replaced while
+/// the tool is active. Mirrors the unconditional inserts in each backend.
+pub fn forced_var_names(tool: &str) -> &'static [&'static str] {
+    match tool {
+        "node" => &["npm_config_prefix"],
+        "npm" => &["npm_config_prefix"],
+        "pnpm" => &["PNPM_HOME"],
+        "go" => &["GOROOT", "GOPROXY"],
+        "rust" => &["RUSTUP_HOME", "CARGO_HOME"],
+        "java" => &["JAVA_HOME"],
+        _ => &[],
+    }
+}
+
+/// Cache/redirect variables a backend injects through the cache layer, which
+/// honor an explicit user value unless the override switch is on. Mirrors the
+/// mappings in each backend's `exec_env`.
 pub fn managed_var_names(tool: &str) -> &'static [&'static str] {
     match tool {
         "node" => &["npm_config_cache"],
         "npm" => &["npm_config_cache"],
         // pnpm 11 uses pnpm_config_store_dir; older versions npm_config_store_dir.
-        "pnpm" => &["PNPM_HOME", "pnpm_config_store_dir", "npm_config_store_dir"],
+        "pnpm" => &["pnpm_config_store_dir", "npm_config_store_dir"],
         "bun" => &["BUN_INSTALL_CACHE_DIR"],
         "deno" => &["DENO_DIR"],
-        "go" => &["GOROOT", "GOMODCACHE", "GOCACHE", "GOPROXY"],
-        "rust" => &["RUSTUP_HOME", "CARGO_HOME"],
-        "java" => &["JAVA_HOME", "GRADLE_USER_HOME"],
+        "go" => &["GOMODCACHE", "GOCACHE"],
+        "java" => &["GRADLE_USER_HOME"],
         "python" => &["PIP_CACHE_DIR", "UV_CACHE_DIR"],
         // Yarn 2+ uses YARN_GLOBAL_FOLDER; Yarn classic YARN_CACHE_FOLDER.
         "yarn" => &["YARN_GLOBAL_FOLDER", "YARN_CACHE_FOLDER"],
@@ -82,29 +96,37 @@ pub fn managed_var_names(tool: &str) -> &'static [&'static str] {
 }
 
 /// Inspect the persistent environment for a tool about to be installed and
-/// build one warning per managed variable that already exists.
+/// build one warning per relevant variable that already exists.
 ///
-/// The wording depends on the override switch: with override on, the existing
-/// value will be replaced while the tool is active; without it, osdk keeps the
-/// value (explicit choice wins) and that can point the tool at the wrong
-/// directory, so the warning explains how to remove it or turn override on.
+/// Forced location variables are always replaced, so the warning only says so.
+/// Cache variables honor the override switch: with it on the value is replaced;
+/// without it osdk keeps the value (explicit choice wins), which can point the
+/// tool at the wrong directory, so the warning explains how to remove it or
+/// turn override on.
 pub fn install_warnings(settings: &crate::config::Settings, tool: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     let overriding = settings.effective_override_env(tool);
+
+    for name in forced_var_names(tool) {
+        let Some(found) = get(name) else { continue };
+        warnings.push(format!(
+            "persistent {} `{name}` already exists (`{}`); osdk will point this tool at its own directory while active",
+            scope_label(found.scope),
+            found.value
+        ));
+    }
+
     for name in managed_var_names(tool) {
         let Some(found) = get(name) else { continue };
-        let scope = match found.scope {
-            PersistentScope::User => "user",
-            PersistentScope::Machine => "machine",
-        };
+        let scope = scope_label(found.scope);
         let line = if overriding {
             format!(
-                "persistent {scope}-level `{name}` already exists (`{}`); osdk will override it while this tool is active",
+                "persistent {scope} `{name}` already exists (`{}`); osdk will override it while this tool is active",
                 found.value
             )
         } else {
             format!(
-                "persistent {scope}-level `{name}` already exists (`{}`); osdk keeps this value, which can point the managed tool at the wrong directory\n  \
+                "persistent {scope} `{name}` already exists (`{}`); osdk keeps this value, which can point the managed tool at the wrong directory\n  \
                  remove the variable, or run `osdk config set {tool}.override_env true` to override it (`osdk config set override_tools_env true` for every tool)",
                 found.value
             )
@@ -114,14 +136,20 @@ pub fn install_warnings(settings: &crate::config::Settings, tool: &str) -> Vec<S
     warnings
 }
 
+fn scope_label(scope: PersistentScope) -> &'static str {
+    match scope {
+        PersistentScope::User => "user-level",
+        PersistentScope::Machine => "machine-level",
+    }
+}
+
 /// Decode a registry string value's bytes (UTF-16LE, possibly with trailing
 /// nulls) into a Rust string. Kept as a pure function so the byte handling is
 /// testable without touching registry.
 #[cfg(windows)]
 fn decode_sz(bytes: &[u8]) -> String {
-    let words: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+    let words: Vec<u16> = (0..bytes.len() / 2)
+        .map(|i| u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]))
         .collect();
     String::from_utf16_lossy(&words)
         .trim_end_matches('\0')

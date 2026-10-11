@@ -174,6 +174,12 @@ fn real_main() -> i32 {
     ) {
         Some(b) => b,
         None => {
+            // A package installed directly with `npm i -g` / `pnpm add -g` is
+            // not a registered tool version; resolve it from the redirected
+            // global bin dir and run it under the owning package manager.
+            if let Some(command) = global_command_for_name(&registry, &ctx, &tool_name) {
+                return exec_global_command(&ctx, &registry, &tools, &command, forward_args);
+            }
             if let Some((request, version)) =
                 configured_dynamic_request_for_bin(&registry, &ctx, &tool_name, &dynamic_report)
             {
@@ -368,6 +374,13 @@ fn real_main() -> i32 {
             managed_bin_paths(&ctx, &*node_backend, &node),
         );
         prepend_env_path(&mut exec_env, bin_dirs);
+        if backend.id() == "pnpm" {
+            // pnpm 11 self-checks that its global bin dir ($PNPM_HOME/bin) is on
+            // PATH before a global install. Put it there so a redirected
+            // `pnpm add -g` is accepted; the user's shell still resolves these
+            // commands through the shims dir, which activation keeps ahead.
+            prepend_env_path(&mut exec_env, vec![ctx.dirs.pnpm_global_home().join("bin")]);
+        }
     } else {
         prepend_env_path(&mut exec_env, bin_dirs);
     }
@@ -742,7 +755,11 @@ fn dynamic_backend_for_bin(
         return registry.get(&matching_configured[0]).ok();
     }
     if owner_ids.len() == 1 {
-        return registry.get(owner_ids.iter().next()?).ok();
+        // The sole installed candidate is not selected, so it cannot run: the
+        // launcher would only fail with "no version selected". Do not claim the
+        // name then, so another source (such as a same-named `npm i -g` command)
+        // can handle it through the caller's global-command fallback.
+        return None;
     }
     let conflicting = if matching_configured.is_empty() {
         owner_ids.into_iter().collect::<Vec<_>>()
@@ -893,6 +910,114 @@ fn find_exe(bin_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// A command resolved from a redirected npm/pnpm global bin directory.
+struct GlobalCommand {
+    owner: std::sync::Arc<dyn osdk_core::backend::Backend>,
+    launcher: PathBuf,
+    bin_dir: PathBuf,
+}
+
+/// Find a package installed directly with `npm i -g` / `pnpm add -g`, by name,
+/// scanning the redirected global bin directories.
+fn global_command_for_name(
+    registry: &Registry,
+    ctx: &osdk_core::backend::Ctx,
+    name: &str,
+) -> Option<GlobalCommand> {
+    for source in osdk_core::shim::global_bin_sources(ctx) {
+        if !source.names.iter().any(|candidate| candidate == name) {
+            continue;
+        }
+        let Some(launcher) = find_exe(std::slice::from_ref(&source.bin_dir), name) else {
+            continue;
+        };
+        let Ok(owner) = registry.get(source.owner) else {
+            continue;
+        };
+        return Some(GlobalCommand {
+            owner,
+            launcher,
+            bin_dir: source.bin_dir,
+        });
+    }
+    None
+}
+
+/// Run a redirected global command under the owning package manager's
+/// environment: its managed version's exec_env (controlled prefix/home), node
+/// on PATH, and the global bin directory.
+fn exec_global_command(
+    ctx: &osdk_core::backend::Ctx,
+    registry: &Registry,
+    tools: &std::collections::BTreeMap<String, String>,
+    command: &GlobalCommand,
+    forward_args: &[String],
+) -> i32 {
+    let owner = command.owner.as_ref();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Resolve the package manager's current version; exec_env needs it (pnpm's
+    // store-dir variable name depends on the version).
+    let owner_version = osdk_core::version::resolver::resolve_active(
+        owner.id(),
+        &cwd,
+        tools,
+        owner.idiomatic_files(),
+    )
+    .and_then(|active| {
+        let spec = ctx
+            .config
+            .expand_alias(owner.id(), &active.spec)
+            .unwrap_or_else(|_| active.spec.clone());
+        resolve_installed(ctx, owner, &spec, active.is_range)
+    })
+    .or_else(|| owner.list_installed(ctx).ok()?.into_iter().last());
+    let Some(owner_version) = owner_version else {
+        eprintln!(
+            "osdk-shim: {} must be installed to run this global command",
+            owner.id()
+        );
+        return 1;
+    };
+    let owner_tv = ToolVersion::new(owner.id(), &owner_version);
+
+    let mut exec_env = match owner.exec_env(ctx, &owner_tv) {
+        Ok(env) => env,
+        Err(error) => {
+            eprintln!("osdk-shim: {error}");
+            return 1;
+        }
+    };
+
+    // Global commands are node programs; prepend node, then the package
+    // manager's bins, then the global bin dir so it is on PATH (the user's own
+    // shell still resolves these names through the shims dir, which activation
+    // keeps ahead).
+    if let Ok(node_backend) = registry.get("node") {
+        let node_version = osdk_core::version::resolver::resolve_active(
+            "node",
+            &cwd,
+            tools,
+            &[".nvmrc", ".node-version"],
+        )
+        .and_then(|active| {
+            resolve_installed(ctx, node_backend.as_ref(), &active.spec, active.is_range)
+        })
+        .or_else(|| node_backend.list_installed(ctx).ok()?.into_iter().last());
+        if let Some(node_version) = node_version {
+            let node_tv = ToolVersion::new("node", &node_version);
+            prepend_env_path(
+                &mut exec_env,
+                managed_bin_paths(ctx, node_backend.as_ref(), &node_tv),
+            );
+        }
+    }
+    prepend_env_path(&mut exec_env, managed_bin_paths(ctx, owner, &owner_tv));
+    prepend_env_path(&mut exec_env, vec![command.bin_dir.clone()]);
+
+    exec(&command.launcher, forward_args, &exec_env)
 }
 
 #[cfg(windows)]

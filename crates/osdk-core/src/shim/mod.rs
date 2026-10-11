@@ -338,6 +338,59 @@ fn installed_matching(spec: &str, is_range: bool, installed: &[String]) -> Optio
 /// Scan all persisted dynamic-tool manifests under the installs tree.
 ///
 /// Fail-closed: use this where the result decides what gets executed.
+/// A redirected package-manager global bin directory that osdk re-shims, so a
+/// direct `npm i -g` / `pnpm add -g` yields osdk-managed command shims instead
+/// of escaping into the package manager's own prefix.
+pub struct GlobalBinSource {
+    /// Package-manager backend that owns these commands ("npm" or "pnpm").
+    pub owner: &'static str,
+    /// Directory holding the native global launchers.
+    pub bin_dir: std::path::PathBuf,
+    /// Command names (launcher stems) currently exported.
+    pub names: Vec<String>,
+}
+
+/// Scan the redirected npm/pnpm global bin directories. Missing or empty
+/// directories are skipped; this never fails so a reshim cannot be blocked by
+/// an absent global dir.
+pub fn global_bin_sources(ctx: &Ctx) -> Vec<GlobalBinSource> {
+    let mut sources = Vec::new();
+
+    // npm places global bins at the prefix root on Windows and under bin/ on Unix.
+    let npm_prefix = ctx.dirs.npm_global_prefix();
+    #[cfg(windows)]
+    let npm_bin_dir = npm_prefix;
+    #[cfg(not(windows))]
+    let npm_bin_dir = npm_prefix.join("bin");
+    push_global_bin_source(&mut sources, "npm", npm_bin_dir);
+
+    // pnpm 11 places global bins under bin/; pnpm 9 scattered them at the home
+    // root, so scan both (names dedupe because both are owned by pnpm).
+    let pnpm_home = ctx.dirs.pnpm_global_home();
+    push_global_bin_source(&mut sources, "pnpm", pnpm_home.join("bin"));
+    push_global_bin_source(&mut sources, "pnpm", pnpm_home);
+
+    sources
+}
+
+fn push_global_bin_source(
+    out: &mut Vec<GlobalBinSource>,
+    owner: &'static str,
+    bin_dir: std::path::PathBuf,
+) {
+    if !bin_dir.is_dir() {
+        return;
+    }
+    let names = crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir));
+    if !names.is_empty() {
+        out.push(GlobalBinSource {
+            owner,
+            bin_dir,
+            names,
+        });
+    }
+}
+
 pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
     inventory::scan_installs(&ctx.dirs.installs, &ScanOptions::default())
 }

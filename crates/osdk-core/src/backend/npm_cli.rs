@@ -99,11 +99,16 @@ impl Backend for NpmBackend {
         _tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
         let force = ctx.config.settings.effective_override_env(self.id());
-        Ok(crate::cache::manager_exec_env(
-            &ctx.dirs.cache,
-            &[("npm_config_cache", "npm")],
-            force,
-        ))
+        let mut env =
+            crate::cache::manager_exec_env(&ctx.dirs.cache, &[("npm_config_cache", "npm")], force);
+        // Redirect native global installs to the controlled prefix regardless
+        // of an ambient npm_config_prefix: this is a location, not a cache, and
+        // it is what makes a direct `npm i -g` land under osdk.
+        env.insert(
+            "npm_config_prefix".into(),
+            ctx.dirs.npm_global_prefix().display().to_string(),
+        );
+        Ok(env)
     }
 
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {

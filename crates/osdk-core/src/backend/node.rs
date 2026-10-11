@@ -431,11 +431,16 @@ impl Backend for NodeBackend {
 
     fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
         let force = ctx.config.settings.effective_override_env(self.id());
-        Ok(crate::cache::manager_exec_env(
-            &ctx.dirs.cache,
-            &[("npm_config_cache", "npm")],
-            force,
-        ))
+        let mut env =
+            crate::cache::manager_exec_env(&ctx.dirs.cache, &[("npm_config_cache", "npm")], force);
+        // Node bundles npm. When no standalone npm is selected the shim routes
+        // `npm` here, so redirect global installs as well or they silently land
+        // inside the Node directory (npm's default prefix).
+        env.insert(
+            "npm_config_prefix".into(),
+            ctx.dirs.npm_global_prefix().display().to_string(),
+        );
+        Ok(env)
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {

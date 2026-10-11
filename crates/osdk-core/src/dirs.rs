@@ -314,6 +314,25 @@ impl Dirs {
         self.data.join("cargo")
     }
 
+    /// Root for native package-manager global installs that osdk redirects and
+    /// then re-shims, so a direct `npm i -g` / `pnpm add -g` stays under osdk
+    /// control instead of writing into the package manager's own prefix.
+    pub fn global_packages(&self) -> PathBuf {
+        self.data.join("global")
+    }
+
+    /// Redirected npm global prefix. npm places global bins here directly on
+    /// Windows and under `bin/` on Unix.
+    pub fn npm_global_prefix(&self) -> PathBuf {
+        self.global_packages().join("npm")
+    }
+
+    /// Redirected pnpm home. pnpm 11 places global bins under `bin/`; pnpm 9
+    /// scattered them at the root.
+    pub fn pnpm_global_home(&self) -> PathBuf {
+        self.global_packages().join("pnpm")
+    }
+
     pub fn downloads(&self) -> PathBuf {
         self.cache.join("downloads")
     }

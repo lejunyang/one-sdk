@@ -43,9 +43,32 @@ pub fn reshim(app: &App) -> Result<()> {
             total += generate_shims_for(app, backend.as_ref(), &tv)?;
         }
     }
+    total += generate_shims_for_global_bins(app)?;
     reconcile_managed_shims(app)?;
     println!("{}", t!("msg.reshimmed", count = total));
     Ok(())
+}
+
+/// Generate shims for commands installed directly with `npm i -g` /
+/// `pnpm add -g`, which osdk redirects into controlled global bin dirs.
+/// Names shared with a registered tool version dedupe here (the shim file is
+/// the same launcher; routing is decided at execution time).
+pub(crate) fn generate_shims_for_global_bins(app: &App) -> Result<usize> {
+    let Some(shim_bin) = osdk_core::shim::find_shim_binary(&app.ctx.dirs) else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    let mut seen = std::collections::BTreeSet::new();
+    for source in osdk_core::shim::global_bin_sources(&app.ctx) {
+        for name in source.names {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            osdk_core::shim::generate_shim(&app.ctx.dirs, &name, &shim_bin)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub(crate) fn reconcile_managed_shims(app: &App) -> Result<()> {
@@ -484,6 +507,16 @@ pub(crate) fn installed_shim_owners(
                     .or_default()
                     .insert(backend.id().to_string());
             }
+        }
+    }
+    // Commands installed directly with `npm i -g` / `pnpm add -g` are owned by
+    // the package manager, so reconciliation keeps the shims generated for them.
+    for source in osdk_core::shim::global_bin_sources(&app.ctx) {
+        for name in source.names {
+            owners
+                .entry(name)
+                .or_default()
+                .insert(source.owner.to_string());
         }
     }
     Ok(app.cache_shim_owners(owners))

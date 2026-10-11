@@ -98,13 +98,19 @@ impl Backend for PnpmBackend {
         ctx: &Ctx,
         tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        let mapping = cache_mapping(&tv.version);
+        let (store_var, _) = cache_mapping(&tv.version);
         let force = ctx.config.settings.effective_override_env(self.id());
-        Ok(crate::cache::manager_exec_env(
-            &ctx.dirs.cache,
-            &[("PNPM_HOME", "pnpm"), mapping],
-            force,
-        ))
+        let mut env =
+            crate::cache::manager_exec_env(&ctx.dirs.cache, &[(store_var, "pnpm-store")], force);
+        // PNPM_HOME is the global-package location, not a cache: point it
+        // unconditionally at the controlled home so a direct `pnpm add -g`
+        // lands under osdk. This also replaces a stale PNPM_HOME left by a
+        // standalone pnpm, which is what made pnpm 11 reject its global bin.
+        env.insert(
+            "PNPM_HOME".into(),
+            ctx.dirs.pnpm_global_home().display().to_string(),
+        );
+        Ok(env)
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
