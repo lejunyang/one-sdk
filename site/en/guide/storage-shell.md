@@ -557,3 +557,6 @@ pipeline. After `osdk lock` records an artifact receipt, a later no-argument
 before rendering the current plugin templates. A cached artifact can therefore
 be reinstalled offline even if the version/checksum endpoint is unavailable or
 the local plugin definition has since changed.
+
+Fish activation and deactivation treat absent optional saved variables as a
+successful no-op, including repeated activation or deactivation from scripts.

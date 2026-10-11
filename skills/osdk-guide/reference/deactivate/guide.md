@@ -12,3 +12,5 @@ osdk deactivate powershell | Invoke-Expression
 当前父 shell。它恢复 activate 捕获的原 PATH、变量和 PowerShell prompt。
 
 没有专属配置；与 `activate` 成对使用。
+
+Fish 撤销允许保存变量已清理的状态；重复撤销仍应成功返回。

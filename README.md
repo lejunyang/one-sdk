@@ -142,7 +142,8 @@ node --version
 python --version
 ```
 
-Activation also supports zsh, fish, and PowerShell. If a configured runtime is
+Activation also supports zsh, fish, and PowerShell. Fish activation and
+deactivation return success when optional saved variables are already absent. If a configured runtime is
 not installed, activation fails explicitly instead of silently falling back to a
 system executable. Run `osdk --help` or `osdk <command> --help` whenever you need
 the full command reference.

@@ -132,7 +132,7 @@ node --version
 python --version
 ```
 
-Shell 激活也支持 zsh、fish 和 PowerShell。已配置的运行时若尚未安装，激活会明确失败，
+Shell 激活也支持 zsh、fish 和 PowerShell。Fish 激活和撤销在可选保存变量已不存在时仍成功返回。已配置的运行时若尚未安装，激活会明确失败，
 不会静默回退到系统可执行文件。需要完整命令说明时，运行 `osdk --help` 或
 `osdk <command> --help`。
 
