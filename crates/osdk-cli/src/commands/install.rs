@@ -32,6 +32,10 @@ pub async fn install(
     force: bool,
     include_lazy: bool,
 ) -> Result<()> {
+    let tools = tools
+        .into_iter()
+        .map(|tool| bind_explicit_operand_options(&tool, &opts))
+        .collect::<Result<Vec<_>>>()?;
     let explicit = !tools.is_empty();
     // A bare tool name that no backend owns is worth explaining before anything
     // else happens: the operand is almost always a real package that simply needs
@@ -592,7 +596,7 @@ pub(crate) async fn install_requests_with_inheritance(
             reject_public_internal_options(&request.options)?;
         }
         for (key, value) in &parsed_opts {
-            request.options.insert(key.clone(), value.clone());
+            merge_operand_option(&request.backend, &mut request.options, key, value)?;
         }
     }
     let mut requests = inject_managed_dependencies(app, requests)?;
@@ -1086,6 +1090,54 @@ pub(crate) fn project_lock_path(app: &App, cwd: &std::path::Path) -> std::path::
         .and_then(|path| path.parent())
         .map(|directory| directory.join(crate::lockfile::LOCKFILE_NAME))
         .unwrap_or_else(|| crate::lockfile::default_path(cwd))
+}
+
+/// Bind CLI options before validating required dynamic options.
+pub(crate) fn bind_explicit_operand_options(tool: &str, opts: &[String]) -> Result<String> {
+    if opts.is_empty() {
+        return Ok(tool.to_string());
+    }
+    // Required dynamic options must be present before ToolRequest validates the
+    // expression. Keep fixed tools and configured aliases on their existing path.
+    let mut parts = osdk_core::tool::ToolSpecParts::parse(tool)?;
+    let id = osdk_core::tool::ToolId::parse(&parts.id)?;
+    if !id.is_dynamic() {
+        return Ok(tool.to_string());
+    }
+    for (key, value) in parse_opts(opts)? {
+        merge_operand_option(&parts.id, &mut parts.options, &key, &value)?;
+    }
+    reject_public_internal_options(&parts.options)?;
+    let options = osdk_core::tool::canonicalize_dynamic_options(&id, &parts.options)?;
+    let bound = osdk_core::tool::ToolSpec {
+        id,
+        options,
+        selector: parts.selector,
+    }
+    .to_string();
+    ToolRequest::parse(&bound)?;
+    Ok(bound)
+}
+
+fn merge_operand_option(
+    backend: &str,
+    options: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let id = osdk_core::tool::ToolId::parse(backend)?;
+    if let Some(schema) = id.schema() {
+        if let Some(definition) = schema.options.definition(key) {
+            options.retain(|name, _| {
+                schema
+                    .options
+                    .definition(name)
+                    .is_none_or(|existing| existing.canonical_name != definition.canonical_name)
+            });
+        }
+    }
+    options.insert(key.to_string(), value.to_string());
+    Ok(())
 }
 
 /// Parse repeated `key=value` option strings into pairs.
@@ -1833,7 +1885,7 @@ pub(crate) fn apply_use_options(
         );
     }
     for (key, value) in parse_opts(opts)? {
-        request.options.insert(key, value);
+        merge_operand_option(&request.backend, &mut request.options, &key, &value)?;
     }
     reject_public_internal_options(&request.options)?;
     Ok(())

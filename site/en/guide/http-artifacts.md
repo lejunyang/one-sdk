@@ -190,3 +190,5 @@ Artifact Attestations.
 
 For the parser, identity, redirect, cache, extraction, and publication details,
 read [HTTP artifact backend internals](./implementation/http-artifacts).
+
+For `install` and `use`, required artifact options may also be supplied with repeated `-o key=value` flags. They are combined with inline options before validation; flags override the same inline key.

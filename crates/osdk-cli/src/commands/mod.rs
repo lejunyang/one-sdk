@@ -1148,6 +1148,34 @@ tools = ["node"]
     }
 
     #[test]
+    fn explicit_http_options_are_bound_before_required_option_validation() {
+        let tool = "http:https://example.test/tool-{version}.zip@1.2.3";
+        assert!(ToolRequest::parse(tool).is_err());
+        let checksum = "a".repeat(64);
+        let bound =
+            bind_explicit_operand_options(tool, &[format!("sha256={checksum}"), "bin=tool".into()])
+                .unwrap();
+        let mut request = ToolRequest::parse(&bound).unwrap();
+        assert_eq!(request.options["sha256"], checksum);
+        assert_eq!(request.spec, VersionSpec::Exact("1.2.3".into()));
+        apply_use_options(
+            &osdk_core::config::Config::default(),
+            &mut request,
+            false,
+            &["bin=tool".into()],
+            None,
+        )
+        .unwrap();
+        osdk_core::backend::dynamic::validate_options(&request.backend, &request.options).unwrap();
+        assert!(bind_explicit_operand_options(tool, &["sha256=invalid".into()]).is_err());
+        assert!(bind_explicit_operand_options(tool, &["__osdk_locked_artifact=x".into()]).is_err());
+        assert_eq!(
+            bind_explicit_operand_options("rust@stable", &["components=clippy".into()]).unwrap(),
+            "rust@stable"
+        );
+    }
+
+    #[test]
     fn consent_only_opts_still_allow_lockfile_replay() {
         // Consent is absent from the lock by design, so demanding it must not
         // make a committed lock file unusable.

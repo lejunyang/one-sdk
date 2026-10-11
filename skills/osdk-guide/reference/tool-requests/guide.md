@@ -59,3 +59,5 @@ java = { version = "21", distribution = "zulu", package-type = "jdk" }
 ```
 
 不要把 lock 内部的 replay metadata 当作公开 `-o` 选项；未知或私有选项会被拒绝。
+
+`install` / `use` 的动态请求先合并重复 `-o key=value` 再验证必需选项，例如 HTTP 的 `sha256`；相同键由 `-o` 覆盖内联选项。

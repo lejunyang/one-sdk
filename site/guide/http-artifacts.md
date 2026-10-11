@@ -160,3 +160,5 @@ ZIP symlink 也会被拒绝；发布前还会再次扫描物化后的安装，�
 
 解析、身份、redirect、缓存、解压和发布的实现细节见
 [HTTP 制品 backend 实现](./implementation/http-artifacts)。
+
+`install` 和 `use` 也支持通过重复的 `-o key=value` 提供制品必需选项。验证前先合并内联选项与命令行选项；相同键以命令行选项为准。
