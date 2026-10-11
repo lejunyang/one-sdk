@@ -656,6 +656,21 @@ pub(crate) async fn install_requests_with_inheritance(
         println!("{}", t!("msg.nothing_to_install"));
         return Ok(Vec::new());
     }
+    // Warn once per distinct runtime tool about persistent env vars that
+    // already exist (typically a standalone install left behind). Only tool
+    // installs (no namespace prefix) are checked: namespaced packages such as
+    // `npm:<pkg>` ride on a runtime whose own install already warned.
+    let mut warned_tools = std::collections::BTreeSet::new();
+    for req in &requests {
+        if req.backend.contains(':') || !warned_tools.insert(req.backend.clone()) {
+            continue;
+        }
+        for warning in
+            osdk_core::persistent_env::install_warnings(&app.ctx.config.settings, &req.backend)
+        {
+            eprintln!("warning: {warning}");
+        }
+    }
     for req in &mut requests {
         apply_source_override(app, &req.backend);
     }

@@ -118,6 +118,9 @@ windows-sys = { version = "0.59", features = [
     # which is precisely the case timeouts exist for.
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # RegOpenKeyExW/RegQueryValueExW: read persistent User/Machine environment
+    # variables at install time to warn about pre-existing tool configuration.
+    "Win32_System_Registry",
 ] }
 libc = "0.2"
 # Embedded Lua for the fourth tier of task scripting. `vendored` builds the

@@ -976,11 +976,36 @@ pub(crate) fn setting_display(s: &osdk_core::config::Settings, key: &str) -> Opt
         "shims.include" => s.shims.include.join(", "),
         "shims.exclude" => s.shims.exclude.join(", "),
         "shims.expose" => s.shims.expose.join(", "),
-        // Per-tool lists: `shims.<tool>.<field>`. Read back the same shape
-        // `config set` accepts, so a value that was just written is visible
-        // under the key the user typed rather than only inside the TOML.
-        other => return tool_shim_display(s, other),
+        "override_tools_env" => s.override_tools_env.to_string(),
+        // Per-tool keys read back the same shape `config set` accepts, so a value
+        // just written is visible under the key the user typed rather than only
+        // inside the TOML.
+        other => {
+            if let Some(rendered) = tool_shim_display(s, other) {
+                return Some(rendered);
+            }
+            return tool_override_display(s, other);
+        }
     })
+}
+
+/// Render `<tool>.override_env`, or None if the key is not that shape.
+pub(crate) fn tool_override_display(s: &osdk_core::config::Settings, key: &str) -> Option<String> {
+    // The shims. prefix belongs to tool_shim_display, never to a tool id here.
+    if key.starts_with("shims.") {
+        return None;
+    }
+    let (tool, field) = key.rsplit_once('.')?;
+    if field != "override_env" || tool.is_empty() {
+        return None;
+    }
+    Some(
+        s.tools
+            .get(tool)
+            .map(|entry| entry.override_env)
+            .unwrap_or(false)
+            .to_string(),
+    )
 }
 
 /// Render `shims.<tool>.{include,exclude,expose}`, or `None` if not that shape.

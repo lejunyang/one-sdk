@@ -1589,6 +1589,44 @@ mirrors = false
     }
 
     #[test]
+    fn every_declared_setting_is_renderable_by_config_get() {
+        // setting_display backs `config get`. SETTINGS drives `config set` and
+        // the known-keys list; a key it contains that setting_display cannot
+        // render is writable but reports "unknown setting" on read.
+        let settings = osdk_core::config::Settings::default();
+        for setting in SETTINGS {
+            // Registry/sources keys render through their own display functions,
+            // not setting_display.
+            if setting.key.starts_with("registries.") || setting.key.starts_with("sources.") {
+                continue;
+            }
+            assert!(
+                crate::commands::maintenance::setting_display(&settings, setting.key).is_some(),
+                "`config get {}` renders nothing",
+                setting.key
+            );
+        }
+    }
+
+    #[test]
+    fn per_tool_override_env_is_readable_through_config_get() {
+        use crate::commands::maintenance::{setting_display, tool_override_display};
+        let mut settings = osdk_core::config::Settings::default();
+        // An unset per-tool switch reads back as false.
+        assert_eq!(
+            setting_display(&settings, "pnpm.override_env"),
+            Some("false".to_string())
+        );
+        settings.tool_entry("pnpm").override_env = true;
+        assert_eq!(
+            setting_display(&settings, "pnpm.override_env"),
+            Some("true".to_string())
+        );
+        // A shims. key must not be mistaken for a tool override.
+        assert_eq!(tool_override_display(&settings, "shims.pnpm.include"), None);
+    }
+
+    #[test]
     fn every_accepted_value_can_be_loaded_back() {
         // The original table hand-copied each enum's variants and got three of
         // them wrong, so `set` accepted a word, wrote it, and every later

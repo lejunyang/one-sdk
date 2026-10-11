@@ -49,6 +49,7 @@ pub mod model;
 pub mod npm;
 pub mod npm_tools;
 pub mod package_registry;
+pub mod persistent_env;
 pub mod pipeline;
 pub mod platform;
 pub mod process;

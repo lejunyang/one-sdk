@@ -23,7 +23,7 @@ use crate::cli::{
 
 mod install;
 mod list;
-mod maintenance;
+pub(crate) mod maintenance;
 mod registry;
 mod runtimes;
 mod shims;
