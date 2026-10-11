@@ -182,8 +182,12 @@ PowerShell 参数为 `-Version`、`-InstallDir`、`-Repository`、`-BaseUrl`、
 ```bash
 git clone https://github.com/lejunyang/one-sdk.git
 cd one-sdk
-cargo build --locked --release
+cargo build --locked --release -p osdk-cli
+cargo build --locked --release -p osdk-shim
 ```
+
+必须分两次调用 Cargo。同时构建两个 workspace 成员会统一 feature，把 CLI 的安装代码
+带入 shim；shim 的 release 构建断言会拒绝这种组合。
 
 构建结果位于：
 

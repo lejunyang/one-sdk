@@ -185,8 +185,13 @@ Rust 1.91.1 or newer is required; the repository pins Rust 1.98.0 by default:
 ```bash
 git clone https://github.com/lejunyang/one-sdk.git
 cd one-sdk
-cargo build --locked --release
+cargo build --locked --release -p osdk-cli
+cargo build --locked --release -p osdk-shim
 ```
+
+Run these as two separate Cargo invocations. Building both workspace members
+together unifies their features and enables the CLI's installation code in the
+shim; the shim's release-build assertion rejects that combination.
 
 The binaries are written to:
 
