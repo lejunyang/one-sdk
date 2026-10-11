@@ -250,6 +250,9 @@ Returning nil or true succeeds, a number becomes the exit code, and
 `return false` counts as failure. Raising an error fails the task with that
 message.
 
+Task code executes as a Lua chunk. A single call such as `write("out", "ok")`
+does not implicitly return its result; use an explicit `return` for an exit code.
+
 ### Available API
 
 | | |
