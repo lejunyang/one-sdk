@@ -224,6 +224,9 @@ osdk run ci --dry-run
 `&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
 [项目任务](site/guide/tasks.md)。
 
+用 `[task].roots` 声明子项目，通过 `osdk run //path:task` 调用；任务的工作目录
+默认是它所属的子项目目录。
+
 `tools` 点名 `[tools]` 中的键。任何任务命令开始前，osdk 会检查完整任务图并自动安装
 缺少的工具，包括 `lazy = true` 的条目。osdk 不会解析 shell 命令来猜依赖：别名、脚本
 和条件命令会让这种推断不可靠。

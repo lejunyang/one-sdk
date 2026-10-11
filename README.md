@@ -248,6 +248,9 @@ together and waits for all. Do not reach for the shell's `&` -- it means
 something different in cmd, PowerShell 7, and PowerShell 5.1. See
 [Project tasks](site/en/guide/tasks.md).
 
+Declare sub-projects with `[task].roots` and invoke their tasks as
+`osdk run //path:task`; each runs relative to its own project directory.
+
 `tools` names keys declared in `[tools]`. Before any task command starts, osdk
 checks the complete task graph and installs missing requirements, including
 entries marked `lazy = true`. It deliberately does not infer tools by parsing

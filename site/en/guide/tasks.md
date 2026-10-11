@@ -810,6 +810,11 @@ to reveal it. Review it, then `osdk trust`.
 
 ## Monorepos: tasks in sub-projects
 
+A sub-project task runs in its declaring directory by default. Its relative
+`dir` (including an inherited `[task].dir`) is resolved from that directory;
+an absolute `dir` is used unchanged. This also applies when invoked from the
+monorepo root with `//path:task`.
+
 `task.roots` declares which directories are sub-projects. Their tasks join
 the same table under `//<path>:<name>`:
 

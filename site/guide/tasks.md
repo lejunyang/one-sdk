@@ -730,6 +730,9 @@ these keys need review because they affect what runs on this machine:
 
 ## monorepo：子项目的任务
 
+子项目任务默认在声明它的目录执行。相对 `dir`（包括继承的 `[task].dir`）以该目录
+为基准，绝对 `dir` 保持不变。从 monorepo 根通过 `//path:task` 调用时也遵循此规则。
+
 `task.roots` 显式声明哪些目录是子项目，它们的任务会以
 `//<路径>:<任务名>` 的形式进入同一个任务表：
 
