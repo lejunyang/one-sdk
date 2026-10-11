@@ -177,7 +177,27 @@ fn npm_env(request: &NativeNpmInstall<'_>) -> Result<BTreeMap<String, String>> {
             )
         }),
     );
+    if let Some(value) = std::env::var_os("NODE_EXTRA_CA_CERTS").filter(|value| !value.is_empty()) {
+        let cwd = std::env::current_dir().map_err(|error| Error::io(".", error))?;
+        env.insert(
+            "NODE_EXTRA_CA_CERTS".into(),
+            additional_ca_path(Path::new(&value), &cwd)?,
+        );
+    }
     Ok(env)
+}
+
+// npm runs inside a staged project, so resolve relative CA paths before changing
+// cwd. This extends Node's trust roots without enabling ambient npmrc or auth.
+fn additional_ca_path(path: &Path, cwd: &Path) -> Result<String> {
+    let path = cwd.join(path);
+    let resolved = dunce::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+    if !resolved.is_file() {
+        return Err(Error::other(
+            "NODE_EXTRA_CA_CERTS must name a certificate file",
+        ));
+    }
+    Ok(resolved.to_string_lossy().into_owned())
 }
 
 fn path_with_node_first(node_bin_dir: &Path) -> Result<String> {
@@ -408,6 +428,29 @@ mod tests {
         assert!(cache.join("config/user.npmrc").is_file());
         assert!(cache.join("config/global.npmrc").is_file());
         assert!(env["PATH"].starts_with(&temporary.path().display().to_string()));
+        if let Some(value) =
+            std::env::var_os("NODE_EXTRA_CA_CERTS").filter(|value| !value.is_empty())
+        {
+            assert_eq!(
+                env["NODE_EXTRA_CA_CERTS"],
+                additional_ca_path(Path::new(&value), &std::env::current_dir().unwrap()).unwrap()
+            );
+        } else {
+            assert!(!env.contains_key("NODE_EXTRA_CA_CERTS"));
+        }
+    }
+
+    #[test]
+    fn native_npm_preserves_relative_additional_ca_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let cert = temp.path().join("roots.pem");
+        std::fs::write(&cert, b"public CA fixture").unwrap();
+        assert_eq!(
+            additional_ca_path(Path::new("roots.pem"), temp.path()).unwrap(),
+            dunce::canonicalize(cert).unwrap().display().to_string()
+        );
+        assert!(additional_ca_path(Path::new("missing.pem"), temp.path()).is_err());
+        assert!(additional_ca_path(Path::new("."), temp.path()).is_err());
     }
 
     #[test]

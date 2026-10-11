@@ -202,3 +202,6 @@ lock 还会保留公开构建选项、Registry crate 所选的规范且无凭据
 
 解析、provider 选择、身份校验、发布和 lock schema 的实现细节见
 [Cargo 开发工具实现](./implementation/cargo-tools)。
+
+Git selector 对应的目录需要编码时，构建使用 osdk cache 下的独立私有临时目录，
+成功或失败后均清理；不需要为这些 selector 额外指定链接器。

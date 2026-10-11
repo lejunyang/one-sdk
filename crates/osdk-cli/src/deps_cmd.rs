@@ -702,8 +702,8 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
 
 /// Locate the installer program among the resolved bin directories.
 ///
-/// Candidates are tried in order because Windows needs `pnpm.cmd` where Unix
-/// needs `pnpm`; the provider supplies both and the first that exists wins. The
+/// Candidates are tried in order on Windows. Unix must skip Windows launchers:
+/// distributions such as Yarn Classic ship both `yarn.cmd` and `yarn`. The
 /// installer's own directories are searched first, then all of them, because npm
 /// ships inside node's bin directory rather than its own.
 fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
@@ -720,6 +720,13 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
         .filter(|tool| tool.role == ToolRole::Installer || tool.id == plan.tool);
     for tool in installer_first.chain(tools.iter()) {
         for candidate in &plan.program_candidates {
+            if !cfg!(windows)
+                && [".exe", ".cmd", ".bat"]
+                    .iter()
+                    .any(|suffix| candidate.ends_with(suffix))
+            {
+                continue;
+            }
             for dir in &tool.bin_dirs {
                 let path = dir.join(candidate);
                 if path.is_file() {
@@ -1056,7 +1063,7 @@ fn report_undeclared(cwd: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_options, command_line};
+    use super::{auto_options, command_line, resolve_program, ReadyTool, ToolRole};
     use osdk_core::deps::{
         node, DetectedProject, Ecosystem, InstallerChoice, InstallerOrigin, ProviderConfig,
     };
@@ -1093,6 +1100,50 @@ mod tests {
             command_line(&plan),
             "bun install --frozen-lockfile --ignore-scripts"
         );
+    }
+
+    #[test]
+    fn dependency_program_selection_uses_host_launchers() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = DetectedProject {
+            provider: "yarn".into(),
+            ecosystem: Ecosystem::Node,
+            root: temp.path().to_path_buf(),
+            manifest: temp.path().join("package.json"),
+            native_lock: None,
+            declared_manager: None,
+        };
+        let choice = InstallerChoice {
+            provider: "yarn".into(),
+            origin: InstallerOrigin::Default,
+            version: Some("1.22.22".into()),
+        };
+        let plan = node::plan(
+            &project,
+            &choice,
+            &ProviderConfig::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        for name in ["yarn", "yarn.cmd"] {
+            std::fs::write(temp.path().join(name), "fixture").unwrap();
+        }
+        let tools = vec![ReadyTool {
+            id: "yarn".into(),
+            version: "1.22.22".into(),
+            role: ToolRole::Installer,
+            bin_dirs: vec![temp.path().to_path_buf()],
+        }];
+        let expected = if cfg!(windows) { "yarn.cmd" } else { "yarn" };
+        assert_eq!(
+            resolve_program(&plan, &tools),
+            Some(temp.path().join(expected))
+        );
+        #[cfg(not(windows))]
+        {
+            std::fs::remove_file(temp.path().join("yarn")).unwrap();
+            assert_eq!(resolve_program(&plan, &tools), None);
+        }
     }
 
     /// The automatic path must never trigger the deep verification scan.

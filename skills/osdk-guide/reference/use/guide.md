@@ -26,3 +26,5 @@ osdk use npm:prettier@3 -o installer=pnpm
 `npm:` 工具还会按项目语义更新最近的 `package.json` 和原生 package-manager lock。全局
 `use` 不写项目 lock；依赖原生安装图的全局 npm/Go 工具继续使用用户 lock。相关配置见
 `reference/configuration/tools.md`；请求语法见 `reference/tool-requests/guide.md`。
+
+隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他认证和 TLS 覆盖设置仍受原有隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。

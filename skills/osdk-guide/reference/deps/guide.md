@@ -35,3 +35,5 @@ osdk deps //apps/api:uv
 
 成功安装后写入 `osdk.lock` 的 `run` 使用跨平台规范命令名（如 `bun`、`cargo`），
 不会记录仅供 Windows 查找可执行文件使用的 `.exe` / `.cmd` 后缀。
+
+原生启动器按宿主平台选择；Unix 不会执行安装包内的 `.exe`、`.cmd` 或 `.bat` 启动器。

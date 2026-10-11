@@ -258,6 +258,11 @@ pub(crate) fn finalize_artifact_install(locator: &InstallLocator) -> Result<()> 
             ));
         }
         manifest.write_atomic(root)?;
+        crate::store::manifest::Manifest::record_tree(
+            root,
+            &locator.identity().tool,
+            &locator.identity().version,
+        )?;
         std::fs::write(root.join(".osdk-complete"), b"")
             .map_err(|error| Error::io(root.join(".osdk-complete"), error))
     })();

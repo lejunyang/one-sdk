@@ -81,6 +81,10 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 
 ## Proxy 选择
 
+原生 `go install` 保留 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`（含小写形式），
+以便沿用 osdk 元数据请求的网络路径。这些传输设置不会替换选中的 `GOPROXY`
+模块来源，也不会取消构建环境隔离。
+
 内置候选为 `https://proxy.golang.org` 与 `https://goproxy.cn`。它们遵循通用的 `auto`、
 `ordered` 和 pin 来源策略；auto 会先探测并缓存排序，再解析 metadata。精确版本仍通过
 选中 proxy 的 `.info` endpoint 验证。

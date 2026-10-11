@@ -5259,6 +5259,7 @@ printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
                 ("OSDK_TEST_LOCK_CONTENTS", lock_contents),
                 ("OSDK_TEST_BIN", bin_value.as_str()),
                 (registry_key, "https://registry.example.test/"),
+                ("OSDK_SOURCE_MODE", "env"),
             ],
         );
         assert!(
@@ -5391,6 +5392,7 @@ printf '%s' "$OSDK_TEST_LOCK_CONTENTS" > "$OSDK_TEST_LOCK"
             ("OSDK_TEST_LOCK", lock_value.as_str()),
             ("OSDK_TEST_LOCK_CONTENTS", r#"{"lockfileVersion":3}"#),
             ("npm_config_registry", "https://registry.example.test/"),
+            ("OSDK_SOURCE_MODE", "env"),
             ("OSDK_TRUSTED_CONFIG_PATHS", project.to_str().unwrap()),
         ],
     );
@@ -5628,7 +5630,6 @@ printf 'lockfileVersion: 9.0\n' > "$OSDK_TEST_NEW_LOCK"
 #[cfg(unix)]
 #[test]
 fn exec_registry_fallback_injects_only_the_manager_variable_and_runs_once() {
-    let temporary = tempfile::tempdir().unwrap();
     let cases = [
         ("npm", "10.0.0", "npm", "install", 0usize),
         ("pnpm", "10.0.0", "pnpm", "add", 1usize),
@@ -5637,15 +5638,18 @@ fn exec_registry_fallback_injects_only_the_manager_variable_and_runs_once() {
         ("bun", "1.2.3", "bun", "install", 4usize),
         ("deno", "2.4.0", "deno", "add", 5usize),
     ];
-    let (unavailable, failing_server) = registry_fixture(cases.len(), false);
-    let (healthy, healthy_server) = registry_fixture(cases.len(), true);
-    write_registry_config(temporary.path(), &[&unavailable, &healthy]);
     let script = r#"#!/bin/sh
 printf 'call\n' >> "$OSDK_TEST_MARKER"
 printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_registry-unset}" "${YARN_REGISTRY-unset}" "${YARN_NPM_REGISTRY_SERVER-unset}" "${BUN_CONFIG_REGISTRY-unset}" "${NPM_CONFIG_REGISTRY-unset}"
 "#;
 
     for (manager, version, alias, subcommand, selected_index) in cases {
+        // Each scenario owns its probes; slow earlier scenarios must not exhaust
+        // a later scenario's server idle deadline under parallel CI load.
+        let temporary = tempfile::tempdir().unwrap();
+        let (unavailable, failing_server) = registry_fixture(1, false);
+        let (healthy, healthy_server) = registry_fixture(1, true);
+        write_registry_config(temporary.path(), &[&unavailable, &healthy]);
         write_fake_registry_manager(temporary.path(), manager, version, alias, script);
         let marker = temporary.path().join(format!("{manager}-{version}.calls"));
         let marker_value = marker.display().to_string();
@@ -5687,9 +5691,9 @@ printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_regis
                 assert_eq!(value, "unset", "{manager}@{version}");
             }
         }
+        failing_server.join().unwrap();
+        healthy_server.join().unwrap();
     }
-    failing_server.join().unwrap();
-    healthy_server.join().unwrap();
 }
 
 #[cfg(unix)]
@@ -6049,7 +6053,14 @@ fn registry_test_without_manager_checks_every_supported_mode() {
     let temporary = tempfile::tempdir().unwrap();
     let (healthy, server) = registry_fixture(6, true);
     write_registry_config(temporary.path(), &[&healthy]);
-    let output = run_isolated(temporary.path(), &["registry", "test"]);
+    // A synthetic credential makes Python explicitly pass through without
+    // accessing a real index. Node modes still exercise all six local probes.
+    let output = run_isolated_in_with_env(
+        temporary.path(),
+        temporary.path(),
+        &["registry", "test"],
+        &[("UV_INDEX_FIXTURE_USERNAME", "fixture-user")],
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -6064,6 +6075,7 @@ fn registry_test_without_manager_checks_every_supported_mode() {
         "yarn-berry:",
         "bun:",
         "deno:",
+        "python:",
     ] {
         assert!(stdout.contains(manager), "missing {manager} in {stdout}");
     }
@@ -8510,4 +8522,79 @@ fn a_broken_manifest_inside_a_root_fails_closed() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("package.json"), "{stderr}");
+}
+
+#[test]
+fn doctor_verifies_all_dynamic_identity_roots() {
+    use osdk_core::{
+        dirs::{Dirs, InstallLocator},
+        inventory::DynamicToolManifest,
+        store::manifest::{FileEntry, Manifest},
+        tool::{InstallIdentity, InstallScope},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let dirs = Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let mut roots = Vec::new();
+    for variant in ["3.12.0", "3.13.0"] {
+        let identity = InstallIdentity::new(
+            "pypi:cowsay",
+            "6.1",
+            osdk_core::platform::Platform::current().to_string(),
+            InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            vec![osdk_core::tool::InstallDependency {
+                kind: osdk_core::tool::InstallDependencyKind::Runtime,
+                id: "python".into(),
+                version: variant.into(),
+                identity: None,
+            }],
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = InstallLocator::new(&dirs, identity.clone()).unwrap();
+        let root = locator.install_root();
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("payload.py"), b"original").unwrap();
+        DynamicToolManifest::from_identity(identity)
+            .unwrap()
+            .write_atomic(root)
+            .unwrap();
+        let mut manifest = Manifest::new("pypi:cowsay", "6.1", "native");
+        manifest.files.push(FileEntry {
+            path: "payload.py".into(),
+            hash: Some(osdk_core::store::hash_file(&root.join("payload.py")).unwrap()),
+            mode: 0,
+            symlink: None,
+        });
+        manifest.save(root).unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        roots.push(root.to_path_buf());
+    }
+    let verify = || {
+        let output = run_isolated(
+            temp.path(),
+            &["doctor", "--verify", "--tool", "pypi:cowsay"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert!(verify().contains("checked 2 install(s), 0 changed"));
+    std::fs::write(roots[1].join("payload.py"), b"tampered").unwrap();
+    let report = verify();
+    assert!(
+        report.contains("checked 2 install(s), 1 changed"),
+        "{report}"
+    );
+    assert!(report.contains("payload.py: contents changed"), "{report}");
 }

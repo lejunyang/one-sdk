@@ -132,7 +132,7 @@ node --version
 python --version
 ```
 
-Shell 激活也支持 zsh、fish 和 PowerShell。已配置的运行时若尚未安装，激活会明确失败，
+Shell 激活也支持 zsh、fish 和 PowerShell。Fish 激活和撤销在可选保存变量已不存在时仍成功返回。已配置的运行时若尚未安装，激活会明确失败，
 不会静默回退到系统可执行文件。需要完整命令说明时，运行 `osdk --help` 或
 `osdk <command> --help`。
 
@@ -223,6 +223,9 @@ osdk run ci --dry-run
 打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。不要用 shell 的
 `&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
 [项目任务](site/guide/tasks.md)。
+
+用 `[task].roots` 声明子项目，通过 `osdk run //path:task` 调用；任务的工作目录
+默认是它所属的子项目目录。
 
 `tools` 点名 `[tools]` 中的键。任何任务命令开始前，osdk 会检查完整任务图并自动安装
 缺少的工具，包括 `lazy = true` 的条目。osdk 不会解析 shell 命令来猜依赖：别名、脚本
@@ -433,6 +436,8 @@ gopls version
 `go`，module/build cache 留在 osdk cache 根中。紧凑的 schema 4 lock 记录 proxy、module
 root 与精确 Go runtime，不记录传递 module graph；因此可离线复用精确匹配的完整安装，
 但不能进行全新离线构建。
+
+Go 工具安装保留 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`（含小写形式）。
 
 指南：[Go 开发工具](site/guide/go-tools.md)
 
@@ -907,6 +912,8 @@ osdk install --force node@20.11.1
 备份只恢复一半都会留下这种痕迹。普通 `install` 把已存在的安装视为已完成，不会修复它；`--force`
 会用锁定的版本覆盖重装。校验会读取每个文件，因此需显式开启——普通 `doctor` 仍然很快，执行路径上
 也不做任何哈希。
+
+动态工具按每个安装身份的实际目录校验。新安装的 PyPI 工具会记录完整性基线；旧安装需用 `--force` 重装后建立基线。Python 字节码缓存不参与校验。
 
 指南：[存储、缓存与 Shell 集成](site/guide/storage-shell.md)
 

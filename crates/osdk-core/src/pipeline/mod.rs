@@ -504,7 +504,26 @@ fn safe_subdir(root: &std::path::Path, subdir: &std::path::Path) -> Result<PathB
 /// marker check, and doing it here would throw the install away even if the
 /// download that follows fails.
 pub fn clear_complete_marker(dirs: &Dirs, tool: &str, version: &str) -> Result<()> {
-    let marker = dirs.install_path(tool, version).join(COMPLETE_MARKER);
+    clear_complete_marker_at(&dirs.install_path(tool, version))
+}
+
+/// Invalidate only the resolved dynamic identity while holding its install lock.
+/// Its parent is a version directory, not the directory containing the marker.
+pub async fn clear_dynamic_complete_marker(
+    dirs: &Dirs,
+    identity: crate::tool::InstallIdentity,
+) -> Result<()> {
+    let locator = crate::dirs::InstallLocator::new(dirs, identity)?;
+    tokio::task::spawn_blocking(move || {
+        let _lock = crate::lock::FileLock::acquire(locator.lock_path())?;
+        clear_complete_marker_at(locator.install_root())
+    })
+    .await
+    .map_err(|error| Error::other(format!("dynamic reinstall preparation failed: {error}")))?
+}
+
+fn clear_complete_marker_at(root: &Path) -> Result<()> {
+    let marker = root.join(COMPLETE_MARKER);
     match std::fs::remove_file(&marker) {
         Ok(()) => Ok(()),
         // Nothing installed, or already cleared: the caller's goal is met.
@@ -1582,4 +1601,40 @@ mod tests {
         symlink(&outside, install.join(ARTIFACT_RECEIPT_FILE)).unwrap();
         assert!(artifact_receipt_at(&install).is_none());
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn force_reinstall_clears_only_selected_dynamic_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let dirs = Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let mut installs = Vec::new();
+    for version in ["1.0.0", "2.0.0"] {
+        let identity = crate::tool::InstallIdentity::new(
+            "go:example.com/tool",
+            version,
+            crate::platform::Platform::current().to_string(),
+            crate::tool::InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            vec![],
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = crate::dirs::InstallLocator::new(&dirs, identity.clone()).unwrap();
+        std::fs::create_dir_all(locator.install_root()).unwrap();
+        std::fs::write(locator.install_root().join(COMPLETE_MARKER), b"").unwrap();
+        installs.push((identity, locator.install_root().to_path_buf()));
+    }
+    clear_dynamic_complete_marker(&dirs, installs[0].0.clone())
+        .await
+        .unwrap();
+    assert!(!installs[0].1.join(COMPLETE_MARKER).exists());
+    assert!(installs[1].1.join(COMPLETE_MARKER).is_file());
+    assert!(installs[0].1.is_dir());
 }

@@ -59,6 +59,51 @@ impl Manifest {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    /// Record an in-place native install without moving its files into CAS.
+    /// Virtual environments contain absolute paths and cannot be relocated.
+    pub fn record_tree(install_dir: &Path, tool: &str, version: &str) -> Result<()> {
+        let mut manifest = Self::new(tool, version, "native");
+        for entry in walkdir::WalkDir::new(install_dir).follow_links(false) {
+            let entry = entry.map_err(|error| Error::other(error.to_string()))?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(install_dir)
+                .map_err(|error| Error::other(error.to_string()))?;
+            if relative.as_os_str().is_empty()
+                || relative == Path::new(MANIFEST_FILE)
+                || relative == Path::new(".osdk-complete")
+            {
+                continue;
+            }
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if is_python_runtime_cache(tool, &name) {
+                continue;
+            }
+            let symlink = if entry.file_type().is_symlink() {
+                Some(
+                    std::fs::read_link(path)
+                        .map_err(|error| Error::io(path, error))?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                None
+            };
+            let hash = if entry.file_type().is_file() {
+                Some(crate::store::hash_file(path)?)
+            } else {
+                None
+            };
+            manifest.files.push(FileEntry {
+                path: name,
+                hash,
+                mode: 0,
+                symlink,
+            });
+        }
+        manifest.save(install_dir)
+    }
+
     pub fn save(&self, install_dir: &Path) -> Result<()> {
         let p = Self::manifest_path(install_dir);
         let bytes = serde_json::to_vec_pretty(self)?;
@@ -201,7 +246,7 @@ impl Manifest {
 }
 
 fn is_python_runtime_cache(tool: &str, path: &str) -> bool {
-    tool == "python"
+    (tool == "python" || tool.starts_with("pypi:"))
         && path.ends_with(".pyc")
         && path.split('/').any(|component| component == "__pycache__")
 }

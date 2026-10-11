@@ -3,6 +3,7 @@
 use super::*;
 
 pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String>) -> Result<()> {
+    let tool = bind_explicit_operand_options(&tool, &opts)?;
     if !global && update_platform_excluded_selection(app, &tool, &opts)? {
         return Ok(());
     }

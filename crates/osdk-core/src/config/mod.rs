@@ -1479,7 +1479,23 @@ impl Config {
             let prefixed = file
                 .tasks
                 .into_iter()
-                .map(|(name, entry)| (format!("{prefix}{name}"), qualify_entry(entry, &prefix)))
+                .map(|(name, entry)| {
+                    let mut def = qualify_entry(entry, &prefix).into_def();
+                    // A rooted task belongs to the directory that declared it,
+                    // including when it inherits the root's default `dir`.
+                    // Leaving a relative path here resolves it against the
+                    // monorepo root later and breaks otherwise valid scripts.
+                    let dir = def.dir.as_deref().or(self.tasks.config.dir.as_deref());
+                    def.dir = Some(
+                        crate::tasks::runner::resolve_dir(&expanded.directory, dir)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                    (
+                        format!("{prefix}{name}"),
+                        crate::tasks::TaskEntry::Full(Box::new(def)),
+                    )
+                })
                 .collect();
             // The base is the sub-project's own directory, so its `file = "x.sh"`
             // resolves against itself rather than against the monorepo root.

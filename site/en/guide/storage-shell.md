@@ -319,6 +319,8 @@ Name the tool you actually suspect to keep it usable:
 osdk doctor --verify --tool node
 ```
 
+`doctor --verify` checks each dynamic install identity separately. New PyPI installations record file hashes without relocating the virtual environment. Reinstall older installations with `--force` to establish their baseline; bytecode caches are excluded.
+
 That same check took under a second. `--tool` requires `--verify`, and an
 unknown name is rejected rather than silently checking nothing.
 
@@ -557,3 +559,10 @@ pipeline. After `osdk lock` records an artifact receipt, a later no-argument
 before rendering the current plugin templates. A cached artifact can therefore
 be reinstalled offline even if the version/checksum endpoint is unavailable or
 the local plugin definition has since changed.
+
+Fish activation and deactivation treat absent optional saved variables as a
+successful no-op, including repeated activation or deactivation from scripts.
+
+Fresh native Go/Cargo, npm, HTTP, GitHub and Conda installs also record integrity manifests before publication. Older installs without a baseline must be reinstalled; verification never invents a baseline from potentially modified files.
+
+`install --force` invalidates the completion marker of the exact resolved dynamic install identity under its lock, so native Go/Cargo installs rebuild instead of silently reusing the previous payload.

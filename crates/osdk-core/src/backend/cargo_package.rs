@@ -2,7 +2,7 @@
 //!
 //! Registry packages and HTTPS Git repositories are addressed by the dynamic
 //! `cargo:` namespace. Provider commands receive absolute managed tool paths
-//! and a private environment, write only to a lifecycle-owned stage, and are
+//! and a private environment, write to owned staging/build scratch, and are
 //! published through [`NativeToolLifecycle`].
 
 use std::collections::BTreeMap;
@@ -999,7 +999,28 @@ impl CargoPackageBackend {
         }
 
         let (toolchain_bin, cargo, rustc) = self.toolchain_bins(ctx, &tv.options)?;
-        let env = self.command_env(ctx, tv, stage.path(), &toolchain_bin, &rustc)?;
+        let mut env = self.command_env(ctx, tv, stage.path(), &toolchain_bin, &rustc)?;
+        // LLVM's output-file temporary-name template treats every percent sign
+        // in the full output path as a placeholder. Git selector directories
+        // contain percent escapes, so compile in private scratch outside that
+        // encoded stage while Cargo still installs binaries into the stage.
+        // Keep the guard alive through the provider and clean it on both paths.
+        let build_scratch = if stage.path().to_string_lossy().contains('%') {
+            Some(
+                tempfile::Builder::new()
+                    .prefix("osdk-cargo-build-")
+                    .tempdir_in(&ctx.dirs.cache)
+                    .map_err(|error| Error::io(&ctx.dirs.cache, error))?,
+            )
+        } else {
+            None
+        };
+        if let Some(scratch) = &build_scratch {
+            env.insert(
+                OsString::from("CARGO_TARGET_DIR"),
+                scratch.path().as_os_str().to_owned(),
+            );
+        }
         match self.run_provider(
             runner,
             &cargo,
@@ -2272,6 +2293,37 @@ mod tests {
         let lifecycle = backend.lifecycle(&ctx, &version).unwrap();
         let receipt = native_tool::load_receipt(lifecycle.install_root()).unwrap();
         assert_eq!(receipt.provider, NativeToolProvider::CargoBinstall);
+    }
+
+    #[tokio::test]
+    async fn git_selector_build_directory_avoids_encoded_stage_and_is_cleaned() {
+        for exit_code in [0, 1] {
+            let temp = tempfile::tempdir().unwrap();
+            let ctx = context(temp.path(), false);
+            managed_rust(&ctx, "1.91.1");
+            let backend =
+                CargoPackageBackend::from_id("cargo:https://github.com/acme/tool.git").unwrap();
+            let mut selected = version(&backend, "1.91.1");
+            selected.version = "tag:v1.2.3".into();
+            let runner = FixtureRunner::new([exit_code]);
+            let result = backend.install_with_runner(&ctx, &selected, &runner).await;
+            assert_eq!(result.is_ok(), exit_code == 0);
+            let calls = runner.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let stage = calls[0].working_directory().unwrap();
+            assert!(stage.to_string_lossy().contains('%'));
+            let target =
+                PathBuf::from(&calls[0].environment()[std::ffi::OsStr::new("CARGO_TARGET_DIR")]);
+            assert!(
+                !target.starts_with(stage),
+                "LLVM treats percent signs in output paths as temporary-name placeholders"
+            );
+            assert!(!target.to_string_lossy().contains('%'));
+            assert!(
+                !target.exists(),
+                "build scratch must be cleaned on success and failure"
+            );
+        }
     }
 
     #[tokio::test]

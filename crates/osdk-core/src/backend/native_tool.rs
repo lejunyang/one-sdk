@@ -1567,6 +1567,11 @@ impl NativeToolStage {
         let mut manifest = DynamicToolManifest::from_identity(self.locator.identity().clone())?;
         manifest.bins = manifest_bins;
         manifest.write_atomic(stage_root)?;
+        crate::store::manifest::Manifest::record_tree(
+            stage_root,
+            &self.locator.identity().tool,
+            &self.locator.identity().version,
+        )?;
         std::fs::write(stage_root.join(".osdk-complete"), b"")
             .map_err(|error| Error::io(stage_root.join(".osdk-complete"), error))?;
 

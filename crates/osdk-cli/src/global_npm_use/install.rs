@@ -756,6 +756,34 @@ pub(crate) fn global_registry_ctx(app: &App) -> Result<osdk_core::backend::Ctx> 
     })
 }
 
+// An additional CA extends Node's trust store; it does not select a registry,
+// carry credentials, or disable verification. The isolated child preserves it.
+fn isolated_registry_env<F>(key: &str, getenv: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if key == "NODE_EXTRA_CA_CERTS" {
+        None
+    } else {
+        getenv(key)
+    }
+}
+
+fn extra_ca_path(value: Option<String>, cwd: &Path) -> Result<Option<String>> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            let path = cwd.join(value);
+            let path = dunce::canonicalize(&path)
+                .context("cannot resolve NODE_EXTRA_CA_CERTS for isolated npm")?;
+            if !path.is_file() {
+                return Err(anyhow!("NODE_EXTRA_CA_CERTS must name a certificate file"));
+            }
+            Ok(path.to_string_lossy().into_owned())
+        })
+        .transpose()
+}
+
 pub(crate) async fn plan_isolated_global_registry(
     app: &App,
     cwd: &Path,
@@ -763,6 +791,11 @@ pub(crate) async fn plan_isolated_global_registry(
     executable_alias: &str,
     logical_args: &[String],
 ) -> Result<Option<String>> {
+    // Resolve before switching to a staged cwd; never silently drop the CA.
+    extra_ca_path(
+        std::env::var("NODE_EXTRA_CA_CERTS").ok(),
+        &std::env::current_dir()?,
+    )?;
     let context = global_registry_ctx(app)?;
     match package_registry::plan(
         &context,
@@ -770,7 +803,7 @@ pub(crate) async fn plan_isolated_global_registry(
         manager,
         executable_alias,
         logical_args,
-        |key| std::env::var(key).ok(),
+        |key| isolated_registry_env(key, |name| std::env::var(name).ok()),
     )
     .await?
     {
@@ -968,6 +1001,12 @@ pub(crate) fn isolated_native_env(
         if let Ok(value) = std::env::var(key) {
             env.insert(key.into(), value);
         }
+    }
+    if let Some(path) = extra_ca_path(
+        std::env::var("NODE_EXTRA_CA_CERTS").ok(),
+        &std::env::current_dir()?,
+    )? {
+        env.insert("NODE_EXTRA_CA_CERTS".into(), path);
     }
     Ok(env)
 }
@@ -1704,4 +1743,36 @@ pub(crate) fn unavailable_registry_error(
         .collect::<Vec<_>>()
         .join(", ");
     anyhow!("no usable {manager} registry; manager was not started: {details}")
+}
+
+#[cfg(test)]
+mod extra_ca_tests {
+    use super::*;
+
+    #[test]
+    fn additional_ca_is_supported_without_hiding_auth_or_tls_overrides() {
+        let read = |_: &str| Some("configured".to_string());
+        assert_eq!(isolated_registry_env("NODE_EXTRA_CA_CERTS", read), None);
+        for key in [
+            "NODE_TLS_REJECT_UNAUTHORIZED",
+            "NPM_CONFIG_STRICT_SSL",
+            "NPM_CONFIG_CAFILE",
+            "NPM_TOKEN",
+            "NPM_CONFIG__AUTHTOKEN",
+        ] {
+            assert_eq!(
+                isolated_registry_env(key, read).as_deref(),
+                Some("configured")
+            );
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let cert = temp.path().join("roots.pem");
+        std::fs::write(&cert, b"public certificate fixture").unwrap();
+        assert_eq!(
+            extra_ca_path(Some("roots.pem".into()), temp.path()).unwrap(),
+            Some(dunce::canonicalize(cert).unwrap().display().to_string())
+        );
+        assert!(extra_ca_path(Some("missing.pem".into()), temp.path()).is_err());
+        assert!(extra_ca_path(Some(".".into()), temp.path()).is_err());
+    }
 }

@@ -891,6 +891,7 @@ fn finalize_pypi_install(
             .dedup_by(|left, right| left.name == right.name);
 
         manifest.write_atomic(root)?;
+        crate::store::manifest::Manifest::record_tree(root, backend.id(), &tv.version)?;
         // Written last: it is what marks the install usable, so it must not
         // appear before the inventory it depends on.
         std::fs::write(root.join(".osdk-complete"), b"")
@@ -1816,6 +1817,26 @@ mod tests {
         // With uv required, this is an error rather than a silent downgrade.
         let error = choose_installer(Some(&fake), true).unwrap_err();
         assert!(error.to_string().contains("could not be started"));
+    }
+
+    #[cfg(feature = "install")]
+    #[test]
+    fn finalization_records_integrity_and_detects_changed_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = context(temp.path());
+        let backend = PypiBackend::from_id("pypi:ruff").unwrap();
+        let tv = ToolVersion::new(backend.id(), "0.6.9");
+        let root = backend.install_root(&ctx, &tv).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let payload = root.join("payload.py");
+        std::fs::write(&payload, b"original").unwrap();
+        finalize_pypi_install(&backend, &ctx, &tv, &root).unwrap();
+        let manifest = crate::store::manifest::Manifest::load(&root).unwrap();
+        assert!(manifest.verify(&root).unwrap().is_empty());
+        std::fs::write(&payload, b"modified").unwrap();
+        let drift = manifest.verify(&root).unwrap();
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].path, "payload.py");
     }
 
     #[test]

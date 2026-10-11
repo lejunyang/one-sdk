@@ -32,6 +32,10 @@ pub async fn install(
     force: bool,
     include_lazy: bool,
 ) -> Result<()> {
+    let tools = tools
+        .into_iter()
+        .map(|tool| bind_explicit_operand_options(&tool, &opts))
+        .collect::<Result<Vec<_>>>()?;
     let explicit = !tools.is_empty();
     // A bare tool name that no backend owns is worth explaining before anything
     // else happens: the operand is almost always a real package that simply needs
@@ -160,6 +164,10 @@ pub(crate) fn configured_request_is_lazy(app: &App, request: &ToolRequest) -> bo
 }
 
 pub async fn lock(app: &mut App, tools: Vec<String>, opts: Vec<String>) -> Result<()> {
+    let tools = tools
+        .into_iter()
+        .map(|tool| bind_explicit_operand_options(&tool, &opts))
+        .collect::<Result<Vec<_>>>()?;
     let explicit = !tools.is_empty();
     let requests = gather_requests(app, tools)?;
     // Without operands the lock describes the project, so global pins are
@@ -343,6 +351,49 @@ pub(crate) fn resolve_managed_launcher_alias(
     program: &str,
     args: &[String],
 ) -> Result<(std::path::PathBuf, Vec<String>)> {
+    // Inventory names need not match target filenames (for example prettier ->
+    // prettier.cjs). Select the validated, published command, not an arbitrary
+    // sibling from the target's directory. Explicit paths remain caller-owned.
+    if !program.contains(['/', '\\']) {
+        let dynamic = resolved
+            .iter()
+            .filter(|(_, version)| version.backend.contains(':'));
+        let mut selected = None;
+        let report = if resolved
+            .iter()
+            .any(|(_, version)| version.backend.contains(':'))
+        {
+            Some(osdk_core::shim::scan_dynamic_installs(&app.ctx)?)
+        } else {
+            None
+        };
+        for (request, version) in dynamic {
+            let install = osdk_core::shim::validated_dynamic_install(
+                &app.ctx,
+                report.as_ref().expect("dynamic scan"),
+                request,
+                &version.version,
+            )?;
+            if let Some(path) = install.executable(program) {
+                if !osdk_core::shim::shim_is_enabled_for(
+                    &app.ctx.config.settings.shims,
+                    &version.backend,
+                    program,
+                    install.owns(program),
+                ) {
+                    continue;
+                }
+                if selected.replace(path).is_some() {
+                    return Err(anyhow!(
+                        "multiple requested tools publish `{program}`; select one tool"
+                    ));
+                }
+            }
+        }
+        if let Some(path) = selected {
+            return Ok((path, args.to_vec()));
+        }
+    }
     let alias = executable_basename(program);
     let (backend_id, canonical, subcommand) = match alias.as_str() {
         "pnpx" => ("pnpm", "pnpm", "dlx"),
@@ -592,7 +643,7 @@ pub(crate) async fn install_requests_with_inheritance(
             reject_public_internal_options(&request.options)?;
         }
         for (key, value) in &parsed_opts {
-            request.options.insert(key.clone(), value.clone());
+            merge_operand_option(&request.backend, &mut request.options, key, value)?;
         }
     }
     let mut requests = inject_managed_dependencies(app, requests)?;
@@ -977,7 +1028,7 @@ pub(crate) async fn resolve_requests_with_inheritance(
     for request in &mut requests {
         reject_public_internal_options(&request.options)?;
         for (key, value) in &parsed_opts {
-            request.options.insert(key.clone(), value.clone());
+            merge_operand_option(&request.backend, &mut request.options, key, value)?;
         }
     }
     let mut requests = inject_managed_dependencies(app, requests)?;
@@ -1086,6 +1137,54 @@ pub(crate) fn project_lock_path(app: &App, cwd: &std::path::Path) -> std::path::
         .and_then(|path| path.parent())
         .map(|directory| directory.join(crate::lockfile::LOCKFILE_NAME))
         .unwrap_or_else(|| crate::lockfile::default_path(cwd))
+}
+
+/// Bind CLI options before validating required dynamic options.
+pub(crate) fn bind_explicit_operand_options(tool: &str, opts: &[String]) -> Result<String> {
+    if opts.is_empty() {
+        return Ok(tool.to_string());
+    }
+    // Required dynamic options must be present before ToolRequest validates the
+    // expression. Keep fixed tools and configured aliases on their existing path.
+    let mut parts = osdk_core::tool::ToolSpecParts::parse(tool)?;
+    let id = osdk_core::tool::ToolId::parse(&parts.id)?;
+    if !id.is_dynamic() {
+        return Ok(tool.to_string());
+    }
+    for (key, value) in parse_opts(opts)? {
+        merge_operand_option(&parts.id, &mut parts.options, &key, &value)?;
+    }
+    reject_public_internal_options(&parts.options)?;
+    let options = osdk_core::tool::canonicalize_dynamic_options(&id, &parts.options)?;
+    let bound = osdk_core::tool::ToolSpec {
+        id,
+        options,
+        selector: parts.selector,
+    }
+    .to_string();
+    ToolRequest::parse(&bound)?;
+    Ok(bound)
+}
+
+fn merge_operand_option(
+    backend: &str,
+    options: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let id = osdk_core::tool::ToolId::parse(backend)?;
+    if let Some(schema) = id.schema() {
+        if let Some(definition) = schema.options.definition(key) {
+            options.retain(|name, _| {
+                schema
+                    .options
+                    .definition(name)
+                    .is_none_or(|existing| existing.canonical_name != definition.canonical_name)
+            });
+        }
+    }
+    options.insert(key.to_string(), value.to_string());
+    Ok(())
 }
 
 /// Parse repeated `key=value` option strings into pairs.
@@ -1242,7 +1341,15 @@ pub(crate) async fn install_one_without_shims(
             // looking at the bytes, so clearing it is what turns this
             // into a real reinstall rather than a no-op that prints
             // success without repairing anything.
-            osdk_core::pipeline::clear_complete_marker(&app.ctx.dirs, backend.id(), &tv.version)?;
+            if let Some(identity) = backend.dynamic_install_identity(&app.ctx, &tv)? {
+                osdk_core::pipeline::clear_dynamic_complete_marker(&app.ctx.dirs, identity).await?;
+            } else {
+                osdk_core::pipeline::clear_complete_marker(
+                    &app.ctx.dirs,
+                    backend.id(),
+                    &tv.version,
+                )?;
+            }
         }
         println!("{}", t!("msg.installing", tool = tv));
         let ictx = InstallCtx { ctx: &app.ctx };
@@ -1833,7 +1940,7 @@ pub(crate) fn apply_use_options(
         );
     }
     for (key, value) in parse_opts(opts)? {
-        request.options.insert(key, value);
+        merge_operand_option(&request.backend, &mut request.options, &key, &value)?;
     }
     reject_public_internal_options(&request.options)?;
     Ok(())

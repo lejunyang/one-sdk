@@ -63,6 +63,11 @@ export WINEARCH=win64
 export WINEPREFIX="$test_root/wineprefix"
 export WINEDEBUG=-all
 export WINEDLLOVERRIDES='mscoree,mshtml='
+# Wine translates Windows Unicode paths through the host locale. In a minimal
+# container's C locale even CreateDirectoryW fails for Chinese directory names,
+# before any osdk code runs. Use the UTF-8 locale shipped by Linux libc.
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER="$wine_root/bin/wine"
 mkdir -p \
   "$HOME" \
@@ -82,9 +87,14 @@ elif [[ -f "$toolchain_cargo_home/config" ]]; then
 fi
 
 cat > "$test_root/wine-ready.c" <<'EOF'
-int main(void) { return 0; }
+#include <windows.h>
+int main(void) {
+  const wchar_t *directory = L"osdk-unicode-\u7a0b\u5e8f";
+  if (!CreateDirectoryW(directory, NULL)) return 1;
+  return RemoveDirectoryW(directory) ? 0 : 2;
+}
 EOF
 x86_64-w64-mingw32-gcc "$test_root/wine-ready.c" -o "$test_root/wine-ready.exe"
-"$wine_root/bin/wine" "$test_root/wine-ready.exe"
+(cd "$test_root" && "$wine_root/bin/wine" "$test_root/wine-ready.exe")
 
 "$toolchain_cargo" test --locked --workspace --target "$target"

@@ -74,6 +74,9 @@ pub struct PlannedTask {
     /// the root itself are `true`; entries present purely to be referenced are
     /// `false`.
     pub standalone: bool,
+    /// Ordered dependency closure, excluding this task.
+    pub prerequisites: Vec<String>,
+    pub has_ordering_constraint: bool,
 }
 
 /// A single resolved step.
@@ -241,7 +244,12 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         }
         for step in def.steps_for(windows) {
             match step {
-                RunStep::Parallel { tasks } => commands.push(PlannedStep::Parallel { tasks }),
+                RunStep::Parallel { tasks } => commands.push(PlannedStep::Parallel {
+                    tasks: tasks
+                        .into_iter()
+                        .map(|name| set.resolve(&name).unwrap_or(&name).to_string())
+                        .collect(),
+                }),
                 RunStep::Argv { argv, ignore_error } => {
                     commands.push(PlannedStep::Argv { argv, ignore_error })
                 }
@@ -261,7 +269,12 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
         let mut post = Vec::new();
         for step in def.post_steps() {
             match step {
-                RunStep::Parallel { tasks } => post.push(PlannedStep::Parallel { tasks }),
+                RunStep::Parallel { tasks } => post.push(PlannedStep::Parallel {
+                    tasks: tasks
+                        .into_iter()
+                        .map(|name| set.resolve(&name).unwrap_or(&name).to_string())
+                        .collect(),
+                }),
                 RunStep::Argv { argv, ignore_error } => {
                     post.push(PlannedStep::Argv { argv, ignore_error })
                 }
@@ -276,7 +289,14 @@ pub fn plan(set: &TaskSet, root: &str) -> Result<Plan> {
             }
         }
 
+        let prerequisites = set
+            .execution_order(&name)?
+            .into_iter()
+            .filter(|dependency| dependency != &name)
+            .collect();
         steps.push(PlannedTask {
+            prerequisites,
+            has_ordering_constraint: !def.wait_for.is_empty(),
             timeout: def
                 .timeout
                 .as_deref()
@@ -361,6 +381,11 @@ pub struct TaskOutcome {
 
 /// How to launch tasks. Split out so tests can observe without spawning.
 pub trait Spawner {
+    /// Independent execution context for task groups; test spawners may stay serial.
+    fn fork(&self) -> Option<Box<dyn Spawner + Send>> {
+        None
+    }
+
     /// Run one command, returning its exit code.
     fn run(&mut self, task: &str, shell: &[String], command: &str, dir: &Path) -> Result<i32>;
 
@@ -388,6 +413,7 @@ pub trait Spawner {
 }
 
 /// Runs commands as real child processes.
+#[derive(Clone)]
 pub struct ProcessSpawner {
     /// Environment computed the way `hook-env` would, injected into every child.
     pub env: TaskEnv,
@@ -412,6 +438,10 @@ pub struct ProcessSpawner {
 }
 
 impl Spawner for ProcessSpawner {
+    fn fork(&self) -> Option<Box<dyn Spawner + Send>> {
+        Some(Box::new(self.clone()))
+    }
+
     fn set_timeout(&mut self, limit: Option<std::time::Duration>) {
         self.timeout = limit;
     }
@@ -561,11 +591,9 @@ pub struct Skipped {
 
 /// Execute a plan, stopping at the first intolerable failure.
 ///
-/// Parallel steps are executed by running their tasks in sequence here; the
-/// concurrency itself is the caller's to add once it owns a thread pool. What
-/// matters at this layer is that the *semantics* are already right: the step
-/// waits for all of its tasks and surfaces the first failure, which is exactly
-/// what a shell `&` cannot do.
+/// Independent task groups use forked execution contexts when supported by the
+/// spawner, and wait for every worker before surfacing failure. Shared graphs
+/// and ordering constraints keep deterministic serial execution.
 pub fn execute(
     plan: &Plan,
     config_root: &Path,
@@ -586,6 +614,8 @@ fn run_post_steps(
     config_root: &Path,
     spawner: &mut dyn Spawner,
     outcome: &mut TaskOutcome,
+    state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
+    memo: &mut ExecutionMemo,
 ) -> Result<i32> {
     if task.post.is_empty() {
         return Ok(0);
@@ -594,6 +624,7 @@ fn run_post_steps(
     let mut first_failure = 0;
 
     for step in &task.post {
+        spawner.set_timeout(task.timeout);
         let code = match step {
             PlannedStep::Command {
                 shell,
@@ -632,49 +663,7 @@ fn run_post_steps(
                 code
             }
             PlannedStep::Parallel { tasks } => {
-                let mut worst = 0;
-                for name in tasks {
-                    let Some(sub) = plan.steps.iter().find(|candidate| &candidate.name == name)
-                    else {
-                        continue;
-                    };
-                    let sub_dir = resolve_dir(config_root, sub.dir.as_deref());
-                    for sub_step in &sub.commands {
-                        let code = match sub_step {
-                            PlannedStep::Command {
-                                shell,
-                                command,
-                                ignore_error,
-                            } => {
-                                let code = spawner.run(&sub.name, shell, command, &sub_dir)?;
-                                if code != 0 && *ignore_error {
-                                    continue;
-                                }
-                                code
-                            }
-                            PlannedStep::Argv { argv, ignore_error } => {
-                                let code = spawner.run_argv(&sub.name, argv, &sub_dir)?;
-                                if code != 0 && *ignore_error {
-                                    continue;
-                                }
-                                code
-                            }
-                            #[cfg(feature = "scripts")]
-                            PlannedStep::Lua { source } => {
-                                spawner.run_lua(&sub.name, source, &sub_dir)?
-                            }
-                            #[cfg(feature = "scripts")]
-                            PlannedStep::LuaFile { path } => {
-                                spawner.run_lua_file(&sub.name, path, &sub_dir)?
-                            }
-                            PlannedStep::Parallel { .. } => continue,
-                        };
-                        if code != 0 && worst == 0 {
-                            worst = code;
-                        }
-                    }
-                }
-                worst
+                execute_group(tasks, plan, config_root, spawner, state, memo)?
             }
         };
         // Every teardown step gets its turn even after one fails: stopping
@@ -813,6 +802,224 @@ pub fn execute_full(
     values: &crate::tasks::args::Values,
     has_spec: bool,
 ) -> Result<Vec<TaskOutcome>> {
+    execute_full_inner(
+        plan,
+        config_root,
+        spawner,
+        state,
+        values,
+        has_spec,
+        &mut ExecutionMemo::default(),
+    )
+}
+
+#[derive(Clone, Default)]
+struct ExecutionMemo {
+    completed: BTreeMap<String, i32>,
+    running: std::collections::BTreeSet<String>,
+}
+
+// Resolve prerequisites once before launching independent branches. Overlapping
+// nested task graphs stay serial so a task cannot be executed by two workers.
+fn execute_group(
+    tasks: &[String],
+    plan: &Plan,
+    root: &Path,
+    spawner: &mut dyn Spawner,
+    state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
+    memo: &mut ExecutionMemo,
+) -> Result<i32> {
+    let mut ordered_tasks = tasks.to_vec();
+    let has_ordering_constraint = plan.steps.iter().any(|task| task.has_ordering_constraint);
+    if has_ordering_constraint {
+        ordered_tasks.sort_by_key(|name| plan.steps.iter().position(|task| &task.name == name));
+    }
+    let tasks = &ordered_tasks;
+    for name in tasks {
+        let task = plan
+            .steps
+            .iter()
+            .find(|task| &task.name == name)
+            .ok_or_else(|| Error::config(format!("unknown grouped task `{name}`")))?;
+        for dependency in &task.prerequisites {
+            execute_group_task(dependency, plan, root, spawner, state, memo)?;
+        }
+    }
+    fn reachable(
+        name: &str,
+        plan: &Plan,
+        memo: &ExecutionMemo,
+        names: &mut std::collections::BTreeSet<String>,
+    ) {
+        if memo.completed.contains_key(name) || !names.insert(name.to_string()) {
+            return;
+        }
+        if let Some(task) = plan.steps.iter().find(|task| task.name == name) {
+            for dependency in &task.prerequisites {
+                reachable(dependency, plan, memo, names);
+            }
+            for step in task.commands.iter().chain(&task.post) {
+                if let PlannedStep::Parallel { tasks } = step {
+                    for child in tasks {
+                        reachable(child, plan, memo, names);
+                    }
+                }
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut branches = Vec::new();
+    let mut independent = tasks.len() > 1 && !has_ordering_constraint;
+    for name in tasks {
+        let mut names = std::collections::BTreeSet::new();
+        reachable(name, plan, memo, &mut names);
+        if !seen.is_disjoint(&names) {
+            independent = false;
+        }
+        seen.extend(names.iter().cloned());
+        branches.push(names);
+    }
+    let forks: Option<Vec<_>> = if independent {
+        tasks.iter().map(|_| spawner.fork()).collect()
+    } else {
+        None
+    };
+    let Some(forks) = forks else {
+        let mut first = 0;
+        for name in tasks {
+            let code = execute_group_task(name, plan, root, spawner, state, memo)?;
+            if first == 0 && code != 0 {
+                first = code;
+            }
+        }
+        return Ok(first);
+    };
+    let mut first = 0;
+    let mut first_error = None;
+    let mut jobs = tasks.iter().zip(branches).zip(forks);
+    loop {
+        let batch: Vec<_> = jobs.by_ref().take(8).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .into_iter()
+                .map(|((name, names), mut fork)| {
+                    let mut local_memo = memo.clone();
+                    let mut local_state = state.as_deref().cloned();
+                    scope.spawn(move || {
+                        let result = execute_group_task(
+                            name,
+                            plan,
+                            root,
+                            fork.as_mut(),
+                            &mut local_state.as_mut(),
+                            &mut local_memo,
+                        );
+                        (result, names, local_memo, local_state)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            let (result, names, local_memo, local_state) =
+                result.map_err(|_| Error::other("task worker panicked"))?;
+            for name in names {
+                if let Some(code) = local_memo.completed.get(&name) {
+                    memo.completed.insert(name.clone(), *code);
+                }
+                if let (Some(target), Some(source)) = (state.as_deref_mut(), local_state.as_ref()) {
+                    if let Some(record) = source.tasks.get(&name) {
+                        target.tasks.insert(name, record.clone());
+                    }
+                }
+            }
+            match result {
+                Ok(code) if first == 0 => first = code,
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                _ => {}
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(first),
+    }
+}
+
+fn execute_group_task(
+    name: &str,
+    plan: &Plan,
+    config_root: &Path,
+    spawner: &mut dyn Spawner,
+    state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
+    memo: &mut ExecutionMemo,
+) -> Result<i32> {
+    if let Some(code) = memo.completed.get(name) {
+        return Ok(*code);
+    }
+    let target = plan
+        .steps
+        .iter()
+        .find(|task| task.name == name)
+        .ok_or_else(|| {
+            Error::config(format!("task `{name}` is missing from its execution plan"))
+        })?;
+    let mut subplan = plan.clone();
+    for task in &mut subplan.steps {
+        task.standalone = false;
+    }
+    let mut selected = Vec::new();
+    for name in target
+        .prerequisites
+        .iter()
+        .chain(std::iter::once(&target.name))
+    {
+        let mut task = plan
+            .steps
+            .iter()
+            .find(|task| &task.name == name)
+            .ok_or_else(|| {
+                Error::config(format!("task `{name}` is missing from its execution plan"))
+            })?
+            .clone();
+        task.standalone = true;
+        selected.push(task);
+    }
+    subplan
+        .steps
+        .retain(|task| !selected.iter().any(|item| item.name == task.name));
+    selected.extend(subplan.steps);
+    subplan.steps = selected;
+    let outcomes = execute_full_inner(
+        &subplan,
+        config_root,
+        spawner,
+        state,
+        &crate::tasks::args::Values::default(),
+        false,
+        memo,
+    )?;
+    Ok(outcomes
+        .iter()
+        .find(|outcome| outcome.code != 0)
+        .map_or(0, |outcome| outcome.code))
+}
+
+fn execute_full_inner(
+    plan: &Plan,
+    config_root: &Path,
+    spawner: &mut dyn Spawner,
+    state: &mut Option<&mut crate::tasks::freshness::FreshnessState>,
+    values: &crate::tasks::args::Values,
+    has_spec: bool,
+    memo: &mut ExecutionMemo,
+) -> Result<Vec<TaskOutcome>> {
     use crate::tasks::freshness;
 
     // Arguments belong to the task the user named, which is the last standalone
@@ -828,10 +1035,24 @@ pub fn execute_full(
     for task in &plan.steps {
         // Present only so a parallel step can find its commands; running it here
         // as well would execute it twice.
-        if !task.standalone {
+        if !task.standalone || memo.completed.get(&task.name) == Some(&0) {
             continue;
         }
 
+        if !memo.running.insert(task.name.clone()) {
+            return Err(Error::config(format!(
+                "task reference cycle at `{}`",
+                task.name
+            )));
+        }
+        if let Some(code) = memo.completed.get(&task.name).copied() {
+            return Ok(vec![TaskOutcome {
+                name: task.name.clone(),
+                code,
+                tolerated_failures: Vec::new(),
+                skipped: false,
+            }]);
+        }
         if let Some(state) = state.as_deref() {
             let inputs = freshness::Inputs {
                 root: config_root,
@@ -842,6 +1063,8 @@ pub fn execute_full(
                 definition: &task.definition,
             };
             if !freshness::decide(&inputs, state)?.should_run() {
+                memo.completed.insert(task.name.clone(), 0);
+                memo.running.remove(&task.name);
                 outcomes.push(TaskOutcome {
                     name: task.name.clone(),
                     code: 0,
@@ -866,19 +1089,38 @@ pub fn execute_full(
             skipped: false,
         };
         for step in &steps {
+            spawner.set_timeout(task.timeout);
             match step {
                 #[cfg(feature = "scripts")]
                 PlannedStep::Lua { source } => {
                     let code = match spawner.run_lua(&task.name, source, &dir) {
                         Ok(code) => code,
                         Err(error) => {
-                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            let _ = run_post_steps(
+                                task,
+                                plan,
+                                config_root,
+                                spawner,
+                                &mut outcome,
+                                state,
+                                memo,
+                            );
                             return Err(error);
                         }
                     };
                     if code != 0 {
-                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+                        run_post_steps(
+                            task,
+                            plan,
+                            config_root,
+                            spawner,
+                            &mut outcome,
+                            state,
+                            memo,
+                        )?;
                         outcome.code = code;
+                        memo.completed.insert(task.name.clone(), outcome.code);
+                        memo.running.remove(&task.name);
                         outcomes.push(outcome);
                         return Ok(outcomes);
                     }
@@ -888,13 +1130,31 @@ pub fn execute_full(
                     let code = match spawner.run_lua_file(&task.name, path, &dir) {
                         Ok(code) => code,
                         Err(error) => {
-                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            let _ = run_post_steps(
+                                task,
+                                plan,
+                                config_root,
+                                spawner,
+                                &mut outcome,
+                                state,
+                                memo,
+                            );
                             return Err(error);
                         }
                     };
                     if code != 0 {
-                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+                        run_post_steps(
+                            task,
+                            plan,
+                            config_root,
+                            spawner,
+                            &mut outcome,
+                            state,
+                            memo,
+                        )?;
                         outcome.code = code;
+                        memo.completed.insert(task.name.clone(), outcome.code);
+                        memo.running.remove(&task.name);
                         outcomes.push(outcome);
                         return Ok(outcomes);
                     }
@@ -903,7 +1163,15 @@ pub fn execute_full(
                     let code = match spawner.run_argv(&task.name, argv, &dir) {
                         Ok(code) => code,
                         Err(error) => {
-                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            let _ = run_post_steps(
+                                task,
+                                plan,
+                                config_root,
+                                spawner,
+                                &mut outcome,
+                                state,
+                                memo,
+                            );
                             return Err(error);
                         }
                     };
@@ -915,8 +1183,18 @@ pub fn execute_full(
                         // The task body failed, but it *did* start, so teardown
                         // owes its work -- that is the whole reason `run_post`
                         // exists rather than a last line of `run`.
-                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+                        run_post_steps(
+                            task,
+                            plan,
+                            config_root,
+                            spawner,
+                            &mut outcome,
+                            state,
+                            memo,
+                        )?;
                         outcome.code = code;
+                        memo.completed.insert(task.name.clone(), outcome.code);
+                        memo.running.remove(&task.name);
                         outcomes.push(outcome);
                         return Ok(outcomes);
                     }
@@ -934,7 +1212,15 @@ pub fn execute_full(
                         // the cleanup precisely when the runaway left the most
                         // behind.
                         Err(error) => {
-                            let _ = run_post_steps(task, plan, config_root, spawner, &mut outcome);
+                            let _ = run_post_steps(
+                                task,
+                                plan,
+                                config_root,
+                                spawner,
+                                &mut outcome,
+                                state,
+                                memo,
+                            );
                             return Err(error);
                         }
                     };
@@ -943,57 +1229,54 @@ pub fn execute_full(
                             outcome.tolerated_failures.push(command.clone());
                             continue;
                         }
-                        run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+                        run_post_steps(
+                            task,
+                            plan,
+                            config_root,
+                            spawner,
+                            &mut outcome,
+                            state,
+                            memo,
+                        )?;
                         outcome.code = code;
+                        memo.completed.insert(task.name.clone(), outcome.code);
+                        memo.running.remove(&task.name);
                         outcomes.push(outcome);
                         return Ok(outcomes);
                     }
                 }
                 PlannedStep::Parallel { tasks } => {
-                    // Each referenced task has already been planned; run its own
-                    // commands and collect the first failure.
-                    for name in tasks {
-                        let Some(sub) = plan.steps.iter().find(|t| &t.name == name) else {
-                            continue;
-                        };
-                        let sub_dir = resolve_dir(config_root, sub.dir.as_deref());
-                        for sub_step in &sub.commands {
-                            let code = match sub_step {
-                                PlannedStep::Command {
-                                    shell,
-                                    command,
-                                    ignore_error,
-                                } => {
-                                    let code = spawner.run(&sub.name, shell, command, &sub_dir)?;
-                                    if code != 0 && *ignore_error {
-                                        continue;
-                                    }
-                                    code
-                                }
-                                PlannedStep::Argv { argv, ignore_error } => {
-                                    let code = spawner.run_argv(&sub.name, argv, &sub_dir)?;
-                                    if code != 0 && *ignore_error {
-                                        continue;
-                                    }
-                                    code
-                                }
-                                #[cfg(feature = "scripts")]
-                                PlannedStep::Lua { source } => {
-                                    spawner.run_lua(&sub.name, source, &sub_dir)?
-                                }
-                                #[cfg(feature = "scripts")]
-                                PlannedStep::LuaFile { path } => {
-                                    spawner.run_lua_file(&sub.name, path, &sub_dir)?
-                                }
-                                PlannedStep::Parallel { .. } => continue,
-                            };
-                            if code != 0 {
-                                run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
-                                outcome.code = code;
-                                outcomes.push(outcome);
-                                return Ok(outcomes);
+                    let first_failure =
+                        match execute_group(tasks, plan, config_root, spawner, state, memo) {
+                            Ok(code) => code,
+                            Err(error) => {
+                                let _ = run_post_steps(
+                                    task,
+                                    plan,
+                                    config_root,
+                                    spawner,
+                                    &mut outcome,
+                                    state,
+                                    memo,
+                                );
+                                return Err(error);
                             }
-                        }
+                        };
+                    if first_failure != 0 {
+                        run_post_steps(
+                            task,
+                            plan,
+                            config_root,
+                            spawner,
+                            &mut outcome,
+                            state,
+                            memo,
+                        )?;
+                        outcome.code = first_failure;
+                        memo.completed.insert(task.name.clone(), outcome.code);
+                        memo.running.remove(&task.name);
+                        outcomes.push(outcome);
+                        return Ok(outcomes);
                     }
                 }
             }
@@ -1001,9 +1284,12 @@ pub fn execute_full(
         // The body succeeded; teardown still runs, and its failure becomes the
         // task's failure -- a clean test run whose cleanup broke has not left
         // the machine in the state it promised.
-        let post_code = run_post_steps(task, plan, config_root, spawner, &mut outcome)?;
+        let post_code =
+            run_post_steps(task, plan, config_root, spawner, &mut outcome, state, memo)?;
         if post_code != 0 {
             outcome.code = post_code;
+            memo.completed.insert(task.name.clone(), outcome.code);
+            memo.running.remove(&task.name);
             outcomes.push(outcome);
             return Ok(outcomes);
         }
@@ -1023,6 +1309,8 @@ pub fn execute_full(
                 freshness::record(&inputs, state)?;
             }
         }
+        memo.completed.insert(task.name.clone(), outcome.code);
+        memo.running.remove(&task.name);
         outcomes.push(outcome);
     }
     Ok(outcomes)
@@ -1100,6 +1388,32 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&path, contents).unwrap();
+    }
+
+    #[test]
+    fn grouped_tasks_run_shared_dependencies_once_and_keep_nested_lifecycle() {
+        let set = set_from(
+            r#"
+prepare = "prepare"
+nested = "nested"
+[left]
+depends = ["prepare"]
+run = "left"
+run_post = "left-post"
+[right]
+depends = ["prepare"]
+run = ["right", { tasks = ["nested"] }]
+[all]
+run = [{ tasks = ["left", "right"] }]
+"#,
+        );
+        let built = plan(&set, "all").unwrap();
+        let mut spawner = RecordingSpawner::default();
+        execute(&built, Path::new("."), &mut spawner).unwrap();
+        assert_eq!(
+            spawner.ran,
+            ["prepare", "left", "left-post", "right", "nested"]
+        );
     }
 
     /// Separator the RecordingSpawner joins argv entries with, so tests can

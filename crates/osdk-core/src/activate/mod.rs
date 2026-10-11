@@ -205,17 +205,17 @@ if set -q OSDK_MANAGED_ENV
     if test "$$_osdk_present" = 1
       set -gx $_osdk_key "$$_osdk_original"
     else
-      set -e $_osdk_key
+      set -e $_osdk_key; or true
     end
-    set -e $_osdk_original $_osdk_present $_osdk_original"_SET"
+    set -e $_osdk_original $_osdk_present $_osdk_original"_SET"; or true
   end
-  set -e _osdk_key _osdk_original _osdk_present
+  set -e _osdk_key _osdk_original _osdk_present; or true
 end
 if set -q OSDK_ORIGINAL_PATH_SET
   set -gx PATH $OSDK_ORIGINAL_PATH
 end
 functions -e _osdk_hook
-set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET
+set -e OSDK_MANAGED_ENV OSDK_ORIGINAL_PATH OSDK_ORIGINAL_PATH_SET; or true
 "#
         .to_string(),
         Shell::Powershell => r#"# osdk shell deactivation (powershell)
@@ -679,7 +679,7 @@ pub fn render_hook_env(shell: Shell, delta: &EnvDelta) -> String {
         .collect::<Vec<_>>()
         .join(",");
     match shell {
-        Shell::Fish if managed.is_empty() => out.push_str("set -e OSDK_MANAGED_ENV\n"),
+        Shell::Fish if managed.is_empty() => out.push_str("set -e OSDK_MANAGED_ENV; or true\n"),
         Shell::Fish => out.push_str(&format!(
             "set -gx OSDK_MANAGED_ENV {}\n",
             shell_quote(shell, &managed)
@@ -803,13 +803,16 @@ fn windows_path_to_posix(path: &str) -> String {
     format!("/{drive}{rest}")
 }
 
+// Fish reports a missing optional erase as failure, and later `set` assignments
+// preserve that status. Treat absent capture/restore variables as successful
+// no-ops so sourcing a valid hook (or repeating deactivation) returns success.
 fn render_capture_var(shell: Shell, key: &str, out: &mut String) {
     let original = format!("OSDK_ORIG_{key}");
     let present = format!("{original}_PRESENT");
     let set = format!("{original}_SET");
     match shell {
         Shell::Fish => out.push_str(&format!(
-            "if not set -q {set}\n  if set -q {key}\n    set -gx {original} \"${key}\"\n    set -gx {present} 1\n  else\n    set -e {original}\n    set -gx {present} 0\n  end\n  set -gx {set} 1\nend\n"
+            "if not set -q {set}\n  if set -q {key}\n    set -gx {original} \"${key}\"\n    set -gx {present} 1\n  else\n    set -e {original}; or true\n    set -gx {present} 0\n  end\n  set -gx {set} 1\nend\n"
         )),
         Shell::Powershell => out.push_str(&format!(
             "if (-not (Test-Path Env:{set})) {{ if (Test-Path Env:{key}) {{ $env:{original} = $env:{key}; $env:{present} = '1' }} else {{ Remove-Item Env:{original} -ErrorAction SilentlyContinue; $env:{present} = '0' }}; $env:{set} = '1' }}\n"
@@ -826,7 +829,7 @@ fn render_restore_var(shell: Shell, key: &str, out: &mut String) {
     let set = format!("{original}_SET");
     match shell {
         Shell::Fish => out.push_str(&format!(
-            "if set -q {set}\n  if test \"${present}\" = 1\n    set -gx {key} \"${original}\"\n  else\n    set -e {key}\n  end\n  set -e {original} {present} {set}\nend\n"
+            "if set -q {set}\n  if test \"${present}\" = 1\n    set -gx {key} \"${original}\"\n  else\n    set -e {key}; or true\n  end\n  set -e {original} {present} {set}; or true\nend\n"
         )),
         Shell::Powershell => out.push_str(&format!(
             "if (Test-Path Env:{set}) {{ if ($env:{present} -eq '1') {{ $env:{key} = $env:{original} }} else {{ Remove-Item Env:{key} -ErrorAction SilentlyContinue }}; Remove-Item Env:{original},Env:{present},Env:{set} -ErrorAction SilentlyContinue }}\n"
@@ -933,6 +936,41 @@ mod tests {
         let empty = test_ctx(temporary.path(), &[]);
         let delta = compute_env_delta(&empty, &Registry::new(), &project).unwrap();
         assert!(delta.path_prepend.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "requires a native fish shell; set OSDK_TEST_FISH and run explicitly"]
+    fn fish_hook_and_deactivation_return_success() {
+        let fish = std::env::var_os("OSDK_TEST_FISH").unwrap_or_else(|| "fish".into());
+        let temporary = tempfile::tempdir().unwrap();
+        for set_vars in [
+            BTreeMap::new(),
+            BTreeMap::from([("OSDK_TEST_VALUE".into(), "managed".into())]),
+        ] {
+            let delta = EnvDelta {
+                path_prepend: vec![],
+                set_vars,
+                unset_vars: vec![],
+            };
+            let hook = render_hook_env(Shell::Fish, &delta);
+            let deactivate = deactivation_script(Shell::Fish);
+            let program = format!("function apply_hook\n{hook}\nend\napply_hook; or exit 31\napply_hook; or exit 32\nfunction undo_hook\n{deactivate}\nend\nundo_hook; or exit 33\nundo_hook; or exit 34\necho FISH_RUNTIME_OK\n");
+            let output = std::process::Command::new(&fish)
+                .args(["--no-config", "-c", &program])
+                .env_clear()
+                .env("HOME", temporary.path())
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .expect("failed to start the requested fish shell");
+            assert!(
+                output.status.success(),
+                "fish failed: {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("FISH_RUNTIME_OK"));
+        }
     }
 
     #[test]

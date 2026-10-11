@@ -1148,6 +1148,34 @@ tools = ["node"]
     }
 
     #[test]
+    fn explicit_http_options_are_bound_before_required_option_validation() {
+        let tool = "http:https://example.test/tool-{version}.zip@1.2.3";
+        assert!(ToolRequest::parse(tool).is_err());
+        let checksum = "a".repeat(64);
+        let bound =
+            bind_explicit_operand_options(tool, &[format!("sha256={checksum}"), "bin=tool".into()])
+                .unwrap();
+        let mut request = ToolRequest::parse(&bound).unwrap();
+        assert_eq!(request.options["sha256"], checksum);
+        assert_eq!(request.spec, VersionSpec::Exact("1.2.3".into()));
+        apply_use_options(
+            &osdk_core::config::Config::default(),
+            &mut request,
+            false,
+            &["bin=tool".into()],
+            None,
+        )
+        .unwrap();
+        osdk_core::backend::dynamic::validate_options(&request.backend, &request.options).unwrap();
+        assert!(bind_explicit_operand_options(tool, &["sha256=invalid".into()]).is_err());
+        assert!(bind_explicit_operand_options(tool, &["__osdk_locked_artifact=x".into()]).is_err());
+        assert_eq!(
+            bind_explicit_operand_options("rust@stable", &["components=clippy".into()]).unwrap(),
+            "rust@stable"
+        );
+    }
+
+    #[test]
     fn consent_only_opts_still_allow_lockfile_replay() {
         // Consent is absent from the lock by design, so demanding it must not
         // make a committed lock file unusable.
@@ -1478,6 +1506,53 @@ tools = ["node"]
             ..Default::default()
         }];
         manifest.write_atomic(&root).unwrap();
+    }
+
+    #[test]
+    fn exec_dynamic_alias_uses_manifest_target_and_preserves_explicit_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let id = "github:example/tool";
+        write_dynamic_install(&app, id, "1.2.3", "published", &Default::default());
+        let report = osdk_core::shim::scan_dynamic_installs(&app.ctx).unwrap();
+        let root = &report.installs[0].install_root;
+        let path = root.join("bin/actual-file");
+        std::fs::rename(root.join("bin/published"), &path).unwrap();
+        let mut manifest = report.installs[0].manifest.clone();
+        manifest.bins[0].path = "bin/actual-file".into();
+        manifest.write_atomic(root).unwrap();
+        let version = ToolVersion::new(id, "1.2.3");
+        let resolved = vec![(exact_request_for_version(&version), version)];
+        let args = vec!["--version".into()];
+        let (actual, forwarded) =
+            resolve_managed_launcher_alias(&app, &resolved, "published", &args).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(actual).unwrap(),
+            std::fs::canonicalize(path).unwrap()
+        );
+        assert_eq!(forwarded, args);
+        for explicit in ["./published", "dir/published", "dir\\published"] {
+            assert_eq!(
+                resolve_managed_launcher_alias(&app, &resolved, explicit, &[])
+                    .unwrap()
+                    .0,
+                std::path::PathBuf::from(explicit)
+            );
+        }
+        assert_eq!(
+            resolve_managed_launcher_alias(&app, &resolved, "undeclared", &[])
+                .unwrap()
+                .0,
+            std::path::PathBuf::from("undeclared")
+        );
+        let mut doubled = resolved.clone();
+        doubled.extend(resolved);
+        assert!(resolve_managed_launcher_alias(&app, &doubled, "published", &[]).is_err());
     }
 
     #[test]

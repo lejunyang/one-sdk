@@ -87,7 +87,10 @@ pub fn eval(source: &str, context: &ScriptContext) -> Result<i32> {
 
     let chunk = lua.load(source).set_name(format!("task {}", context.name));
     let value: Value = chunk
-        .eval()
+        // `eval` first tries to prepend `return`, which turns a one-line
+        // statement such as write(...) into an unintended returned string.
+        // Tasks are Lua chunks: only an explicit return supplies an exit code.
+        .call(())
         .map_err(|error| Error::other(format!("task `{}`: {error}", context.name)))?;
 
     Ok(match value {
@@ -980,6 +983,19 @@ mod tests {
     #[test]
     fn a_script_that_returns_nothing_succeeds() {
         assert_eq!(eval("local x = 1 + 1", &context()).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_single_call_statement_does_not_implicitly_return_its_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = context();
+        ctx.dir = temp.path().to_path_buf();
+        assert_eq!(eval("write('result', 'written')", &ctx).unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("result")).unwrap(),
+            "written"
+        );
+        assert!(eval("return write('result', 'explicit')", &ctx).is_err());
     }
 
     #[test]

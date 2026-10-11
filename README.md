@@ -142,7 +142,8 @@ node --version
 python --version
 ```
 
-Activation also supports zsh, fish, and PowerShell. If a configured runtime is
+Activation also supports zsh, fish, and PowerShell. Fish activation and
+deactivation return success when optional saved variables are already absent. If a configured runtime is
 not installed, activation fails explicitly instead of silently falling back to a
 system executable. Run `osdk --help` or `osdk <command> --help` whenever you need
 the full command reference.
@@ -247,6 +248,9 @@ tolerates one and continues (printing a warning); `{ tasks = [...] }` runs them
 together and waits for all. Do not reach for the shell's `&` -- it means
 something different in cmd, PowerShell 7, and PowerShell 5.1. See
 [Project tasks](site/en/guide/tasks.md).
+
+Declare sub-projects with `[task].roots` and invoke their tasks as
+`osdk run //path:task`; each runs relative to its own project directory.
 
 `tools` names keys declared in `[tools]`. Before any task command starts, osdk
 checks the complete task graph and installs missing requirements, including
@@ -490,6 +494,8 @@ staged `GOBIN`, and keeps module/build caches under its cache root. The compact
 schema-4 lock records the proxy, module root, and exact Go runtime—not the
 transitive module graph—so an exact completed install can be reused offline,
 but a cold offline build cannot.
+
+Go tool installs honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (including lowercase forms).
 
 Guide: [Go developer tools](site/en/guide/go-tools.md)
 
@@ -1033,6 +1039,8 @@ half-restored backup leaves behind. A plain `install` treats an existing install
 as done and will not repair it; `--force` reinstalls the pinned version over it.
 Verification reads every file, so it is opt-in — plain `doctor` stays fast and
 nothing on the execution path hashes anything.
+
+Dynamic installs are checked at each identity-specific root. Newly installed PyPI tools record an integrity baseline; reinstall older PyPI installs with `--force` to create one. Python bytecode caches are excluded.
 
 Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
 

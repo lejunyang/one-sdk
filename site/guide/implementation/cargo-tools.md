@@ -111,7 +111,7 @@ provider 通过 `CommandSpec::clear_env` 执行，不经过 shell；stdin 为空
 ```text
 HOME, USERPROFILE        = <stage>/home
 CARGO_HOME               = <stage>/cargo-home
-CARGO_TARGET_DIR         = <stage>/target
+CARGO_TARGET_DIR         = <stage>/target（编码路径使用 cache 下的私有临时目录）
 CARGO_INSTALL_ROOT       = <stage>
 RUSTUP_HOME              = osdk 受管 rustup home
 RUSTC                    = <exact-toolchain>/bin/rustc[.exe]
@@ -211,3 +211,8 @@ runtime 绑定，因此其中任何 `cargo:` 条目都会被拒绝，必须重�
 [`native_tool.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/native_tool.rs)、
 [`commands.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)
 与 [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs)。
+
+Git selector 的目录含百分号编码时，原生 Cargo 编译使用 osdk cache 下的唯一临时构建目录。
+LLVM 会把输出路径中的百分号当作临时文件名占位符，因此构建输出不应继承编码后的 selector。
+Cargo 仍将二进制安装到持锁的 lifecycle stage；临时构建目录在成功或失败后均清理，
+不改变 selector、安装身份或链接器参数。

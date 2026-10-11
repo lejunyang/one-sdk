@@ -15,3 +15,5 @@ fish、PowerShell。命令只打印代码，不直接修改 profile。
 激活会保留用户原 PATH/变量，`deactivate` 可恢复。任务子进程带 `OSDK_TASK`，shell hook
 会主动避让，避免覆盖任务注入的环境。相关配置为 `[tools]`、`[settings.shims]`、模型
 provider 的 `[sources.<provider>].env/env_force`。
+
+Fish 中可选保存变量不存在不构成失败；成功激活的片段应返回零状态。

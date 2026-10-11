@@ -63,6 +63,11 @@ tolerated is not the same as unnoticed.
 
 ### Run in parallel
 
+Grouped tasks keep their own dependencies, nested groups, timeouts, freshness,
+and teardown. Shared prerequisites run once before the group. Independent
+branches run concurrently (at most eight workers per group); overlapping nested
+graphs run in order so the same task is not executed twice.
+
 ```toml
 [tasks.check]
 run = [
@@ -249,6 +254,9 @@ one you meant.
 Returning nil or true succeeds, a number becomes the exit code, and
 `return false` counts as failure. Raising an error fails the task with that
 message.
+
+Task code executes as a Lua chunk. A single call such as `write("out", "ok")`
+does not implicitly return its result; use an explicit `return` for an exit code.
 
 ### Available API
 
@@ -809,6 +817,11 @@ into something other than what the task text says, with nothing at the call site
 to reveal it. Review it, then `osdk trust`.
 
 ## Monorepos: tasks in sub-projects
+
+A sub-project task runs in its declaring directory by default. Its relative
+`dir` (including an inherited `[task].dir`) is resolved from that directory;
+an absolute `dir` is used unchanged. This also applies when invoked from the
+monorepo root with `//path:task`.
 
 `task.roots` declares which directories are sub-projects. Their tasks join
 the same table under `//<path>:<name>`:

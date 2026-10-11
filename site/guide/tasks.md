@@ -60,6 +60,10 @@ run = [
 
 ### 并行执行
 
+组内任务仍执行自己的依赖、嵌套任务组、新鲜度检查、超时和收尾。共享前置任务只执行
+一次。独立分支并发执行（每组最多八个 worker）；嵌套图有重叠时按顺序执行，避免重复
+执行同一任务。
+
 ```toml
 [tasks.check]
 run = [
@@ -222,6 +226,9 @@ return 0
 
 脚本返回 nil 或 true 表示成功，返回数字作为退出码，`return false` 记为失败。
 抛错则任务失败并带上错误信息。
+
+任务代码按 Lua 语句块执行。单独调用 `write("out", "ok")` 不会隐式返回其结果；
+只有显式 `return` 才设置任务返回值。
 
 ### 可用的 API
 
@@ -729,6 +736,9 @@ these keys need review because they affect what runs on this machine:
 而调用处看不出任何异样。审阅之后 `osdk trust` 即可。
 
 ## monorepo：子项目的任务
+
+子项目任务默认在声明它的目录执行。相对 `dir`（包括继承的 `[task].dir`）以该目录
+为基准，绝对 `dir` 保持不变。从 monorepo 根通过 `//path:task` 调用时也遵循此规则。
 
 `task.roots` 显式声明哪些目录是子项目，它们的任务会以
 `//<路径>:<任务名>` 的形式进入同一个任务表：

@@ -132,6 +132,8 @@ everywhere else: application dependencies in the project, tools in isolated
 directories. osdk also passes `UV_PYTHON_DOWNLOADS=never`, so the interpreter is
 the one osdk resolved rather than one uv fetched on its own.
 
+Native launcher selection follows the host platform: Unix hosts execute extensionless launchers; Windows may use `.exe`, `.cmd`, or `.bat`. A bundled Windows launcher is never selected on Unix.
+
 ## How the installer is chosen
 
 Highest priority first; nothing lower can take a project away from something

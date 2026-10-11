@@ -1405,7 +1405,12 @@ fn write_dynamic_inventory(locator: &InstallLocator) -> Result<()> {
     manifest
         .bins
         .dedup_by(|left, right| left.name == right.name);
-    manifest.write_atomic(&install_root)
+    manifest.write_atomic(&install_root)?;
+    crate::store::manifest::Manifest::record_tree(
+        &install_root,
+        &manifest.identity.tool,
+        &manifest.identity.version,
+    )
 }
 
 fn finalize_dynamic_install(locator: &InstallLocator) -> Result<()> {
