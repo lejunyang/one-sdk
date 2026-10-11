@@ -216,7 +216,9 @@ env = { CARGO_TARGET_DIR = "target/size-check" }
 description = "Build the documentation site (dead links fail the build)"
 tools = ["bun"]
 dir = "site"
-run = "bun run build"
+# Keep VitePress under the declared Bun runtime; its node shebang must not
+# require an unrelated, selected Node installation.
+run = "bun --bun run build"
 
 [tasks.dupcheck]
 run = "jscpd --config .jscpd.json crates"
