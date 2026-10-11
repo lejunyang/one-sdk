@@ -171,17 +171,69 @@ Registry。
 | 工具 | 环境变量 | osdk 路径与含义 |
 | --- | --- | --- |
 | npm | `npm_config_cache` | `<cache>/pkg/npm`，npm cacache |
-| pnpm ≤10 | `PNPM_HOME`、`npm_config_store_dir` | `<cache>/pkg/pnpm` 与 `<cache>/pkg/pnpm-store` |
-| pnpm ≥11 | `PNPM_HOME`、`pnpm_config_store_dir` | 同上，仅 store 变量名不同 |
+| pnpm ≤10 | `npm_config_store_dir` | `<cache>/pkg/pnpm-store`，pnpm content-addressable store |
+| pnpm ≥11 | `pnpm_config_store_dir` | 同上，仅 store 变量名不同 |
 | Yarn 1 | `YARN_CACHE_FOLDER` | `<cache>/pkg/yarn-classic` |
-| Yarn 2+ | `YARN_GLOBAL_FOLDER` | `<cache>/pkg/yarn` |
+| Yarn 2+ | — | Berry 的 cache 由项目 `.yarn` 配置决定，osdk 不通过环境变量重定向它 |
 | Bun | `BUN_INSTALL_CACHE_DIR` | `<cache>/pkg/bun` |
 | Deno | `DENO_DIR` | `<cache>/pkg/deno`，还含编译产物和部分运行时状态 |
 
-Yarn 2/3 默认仍以项目 `.yarn/cache` 为 active cache，但默认 mirror 会使用
-`${YARN_GLOBAL_FOLDER}/cache`；Yarn 4 默认启用 global cache。osdk 不强制改
+`PNPM_HOME`、`YARN_GLOBAL_FOLDER`、`BUN_INSTALL` 与 `DENO_INSTALL_ROOT` 不是缓存变量：
+它们定位的是全局安装根，见下面[全局安装自动纳管](#全局安装自动纳管)。
+
+Berry（Yarn 2+）的 cache 完全由项目 `.yarn` 配置决定，osdk 不强制改
 `enableGlobalCache` 或 `cacheFolder`。
 
-这些变量通过当前 backend 的 shim/`exec` 和 shell hook 注入，并默认保留用户已有值。
+这些缓存变量通过当前 backend 的 shim/`exec` 和 shell hook 注入，并默认保留用户已有值。
 `osdk cache clean` 只删除 osdk 下载归档，**不会**删除上述原生缓存。完整存储边界见
 [存储、Shell 与扩展](./storage-shell)。
+
+## 全局安装自动纳管
+
+即使不经过 `osdk use --global`，而是在激活的 shell 里直接运行各包管理器自带的全局
+安装命令，osdk 也会把全局安装位置重定向到受控目录，并在**命令退出后自动对账**，让
+新装或卸载的命令立即生效——不需要再手动 `osdk reshim`：
+
+```bash
+npm i -g @anthropic-ai/claude-code
+pnpm add -g cowsay
+yarn global add typescript     # Yarn 1；Berry 没有 global，用 yarn dlx
+bun add -g prettier
+deno install -A -n mytool jsr:@scope/mytool
+# 命令退出即生效，直接输入命令名即可
+```
+
+| 工具 | 重定向变量 | 全局 bin 目录 | 纳管方式 |
+| --- | --- | --- | --- |
+| npm | `npm_config_prefix` | `data/global/npm`（bin 在其根 / `bin`） | shim |
+| pnpm | `PNPM_HOME` | `data/global/pnpm/bin`（兼容散根） | shim |
+| Yarn | `YARN_GLOBAL_FOLDER` | `data/global/yarn/node_modules/.bin` | shim |
+| Bun | `BUN_INSTALL` | `data/global/bun/bin` | shim |
+| Deno | `DENO_INSTALL_ROOT` | `data/global/deno/bin` | shim |
+
+这些工具的全局产物是**需要运行时宿主的 launcher/脚本**（例如 pnpm 生成的 `.CMD`、
+Deno 的 shell 包装），osdk 在统一的 shims 目录为每个命令生成自己的 shim；shim 会在
+对应包管理器的受控环境下执行它。命令进程退出后，osdk 按该工具全局 bin 目录的内容
+做一次对账：出现的新命令补 shim，消失的命令（卸载、手动删除都一样）在确认没有其他
+全局来源或受管工具占用后移除。对账只看目录的实际内容，不解析命令行，因此与各工具
+不断变化的安装/卸载语法、别名和参数解耦。目录未变化时通过 mtime 缓存快速跳过。
+
+包管理器（如 Bun）可能仍按自己的习惯提示"把全局 bin 目录加入 PATH"；这一步 osdk
+已经通过 shim 完成，可以忽略该提示。
+
+如果你此前在系统里独立装过这些工具并跑过它们的 `setup`，残留的持久变量（如
+`PNPM_HOME`、`BUN_INSTALL`）可能与受控值冲突；安装时 osdk 会对此告警，按提示清除
+变量，或设置对应工具的 `[settings.<tool>] override_env = true`（顶层
+`override_tools_env = true` 则对所有工具生效）让 osdk 强制覆盖。
+
+### 自包含原生工具：Go 与 Cargo
+
+`go install` 与 `cargo install` 的产物是自包含的原生二进制，不需要运行时宿主，因此
+osdk 不为它们生成 shim，而是把输出目录直接放到 PATH：
+
+| 工具 | 重定向变量 | 输出目录 |
+| --- | --- | --- |
+| Go | `GOBIN` | `data/global/go/bin` |
+| Cargo | —（`CARGO_HOME` 已受控） | `data/cargo/bin` |
+
+详见 [Go 工具](./go-tools) 与 [Cargo 工具](./cargo-tools)。

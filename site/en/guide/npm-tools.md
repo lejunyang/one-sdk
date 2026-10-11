@@ -191,18 +191,23 @@ failure.
 
 ## Direct `npm i -g` / `pnpm add -g` are managed too
 
-Even without `osdk use --global`, running the package manager's own global install command in an activated shell redirects it into a controlled directory instead of the tool's native global location:
+Even without `osdk use --global`, running the package manager's own global install
+command in an activated shell redirects it into a controlled directory (npm's
+`npm_config_prefix` points at `data/global/npm`, pnpm's `PNPM_HOME` at
+`data/global/pnpm`) and **reconciles automatically after the command exits**: newly
+installed commands get shims immediately and removed commands are cleaned up -- no
+manual `osdk reshim` required.
 
 ```bash
 npm i -g @anthropic-ai/claude-code
 pnpm add -g cowsay
-osdk reshim          # generate shims for the newly installed global commands
+# Effective as soon as the command exits; just type the command name
 ```
 
-- npm's `npm_config_prefix` and pnpm's `PNPM_HOME` point at global roots under the osdk data directory (`data/global/npm`, `data/global/pnpm`); pnpm also prepends `PNPM_HOME/bin` to PATH so its global-directory self-check passes.
-- After installing, run `osdk reshim`: osdk scans these global bin directories and generates shims for the new commands. You can then type the command name directly; the shim runs it under the package manager's controlled environment.
-
-If you previously installed pnpm standalone and ran `pnpm setup`, leftover persistent variables such as `PNPM_HOME` may conflict with the managed values. osdk warns about them at install time: clear the variables as suggested, or set `[settings.pnpm] override_env = true` (or the top-level `override_tools_env = true` for every tool) to let osdk force its values.
+The unified global-install coverage (including Yarn, Bun, Deno, and self-contained
+native tools such as Go/Cargo) is described under
+[JavaScript package managers → Automatic global-install management](./package-managers#automatic-global-install-management),
+along with the handling of leftover persistent variables.
 
 ## Package and version syntax
 

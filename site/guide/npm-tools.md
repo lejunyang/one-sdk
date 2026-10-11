@@ -161,18 +161,17 @@ lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依
 
 ## 直接运行 `npm i -g` / `pnpm add -g` 也受纳管
 
-即使不经过 `osdk use --global`，而是在激活的 shell 里直接执行包管理器自带的全局安装命令，osdk 也会把它们重定向到受控目录，而不会写到工具的原生全局位置：
+即使不经过 `osdk use --global`，而是在激活的 shell 里直接执行包管理器自带的全局安装命令，osdk 也会把它们重定向到受控目录（npm 的 `npm_config_prefix` 指向 `data/global/npm`、pnpm 的 `PNPM_HOME` 指向 `data/global/pnpm`），并在**命令退出后自动对账**：新装的命令立即得到 shim、卸载的命令自动清理，不需要再手动 `osdk reshim`。
 
 ```bash
 npm i -g @anthropic-ai/claude-code
 pnpm add -g cowsay
-osdk reshim          # 为新装的全局命令生成 shim
+# 退出即生效，直接输入命令名即可
 ```
 
-- npm 的 `npm_config_prefix`、pnpm 的 `PNPM_HOME` 被指向 osdk 数据目录下的全局根（`data/global/npm`、`data/global/pnpm`），pnpm 还会把 `PNPM_HOME/bin` 加入 PATH 以通过其全局目录自检；
-- 安装后运行 `osdk reshim`，osdk 扫描这些全局 bin 目录并为新命令生成 shim；之后直接输入命令名即可，shim 会在对应包管理器的受控环境下执行它。
-
-如果你此前在系统里独立装过 pnpm 并跑过 `pnpm setup`，残留的 `PNPM_HOME` 等持久变量可能与受控值冲突；安装时 osdk 会对此告警，按提示清除变量，或设置 `[settings.pnpm] override_env = true`（顶层 `override_tools_env = true` 则对所有工具生效）让 osdk 强制覆盖。
+统一的全局安装纳管（含 Yarn、Bun、Deno，以及 Go/Cargo 这类自包含原生工具）见
+[JavaScript 包管理器 → 全局安装自动纳管](./package-managers#全局安装自动纳管)；残留
+持久变量的处理也在该节说明。
 
 ## 包名与版本语法
 

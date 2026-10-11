@@ -317,8 +317,10 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 
 全局 npm 与 pnpm 都会在 osdk 控制的前缀中调用各自真正的 global-add，不修改环境中
 的 Node 安装。即使直接运行 `npm i -g` / `pnpm add -g`（不经 `osdk use --global`），
-osdk 也会把全局前缀（`npm_config_prefix` / `PNPM_HOME`）重定向到受控目录；随后执行
-`osdk reshim` 即可为这些全局命令生成 shim，直接输入命令名就能在受控环境下运行。
+osdk 也会把全局前缀（`npm_config_prefix` / `PNPM_HOME`）重定向到受控目录，并在命令
+退出后自动对账：新装的全局命令立即得到 shim、卸载的命令自动清理，无需手动
+`osdk reshim`，直接输入命令名就能在受控环境下运行。Yarn、Bun、Deno 的全局安装同样
+自动纳管；Go/Cargo 这类自包含原生工具则把输出目录直接放到 PATH。
 若系统里残留旧的 pnpm/node 持久环境变量，安装时 osdk 会告警提示清除，或用
 `[settings.<tool>] override_env = true`（顶层 `override_tools_env = true` 则对所有工具
 生效）让 osdk 强制覆盖这些变量。

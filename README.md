@@ -360,9 +360,12 @@ Global npm and pnpm choices each run that manager's real global-add operation
 inside an osdk-controlled prefix, leaving the ambient Node installation
 untouched. Even running `npm i -g` / `pnpm add -g` directly (without
 `osdk use --global`) redirects the global prefix (`npm_config_prefix` /
-`PNPM_HOME`) to a controlled directory; run `osdk reshim` afterwards to
-generate shims for those global commands, so typing the command name runs it
-in the controlled environment. If leftover persistent pnpm/node environment
+`PNPM_HOME`) to a controlled directory and reconciles automatically after the
+command exits: newly installed global commands get shims immediately and removed
+commands are cleaned up, with no manual `osdk reshim` -- typing the command name
+runs it in the controlled environment. Yarn, Bun, and Deno global installs are
+managed the same way; self-contained native tools such as Go/Cargo place their
+output directory directly on PATH. If leftover persistent pnpm/node environment
 variables remain on the system, osdk warns at install time and suggests
 clearing them, or you can set `[settings.<tool>] override_env = true` (or the
 top-level `override_tools_env = true` for every tool) to let osdk force its

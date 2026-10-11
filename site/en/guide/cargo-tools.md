@@ -185,6 +185,22 @@ Only validated binaries are published from the stage into the fingerprinted
 osdk install root. Cargo source and build directories are temporary provider
 workspace and are removed before publication.
 
+## Direct `cargo install` is managed too
+
+Beyond using the `cargo:<crate>` namespace to let osdk lock a tool, running the native
+`cargo install <crate>` directly in an activated shell is also managed: `CARGO_HOME`
+already points at the osdk data directory, and the compiled self-contained binaries land
+in `data/cargo/bin`, which is already on Rust's PATH, so they are usable as soon as the
+command exits, with no shim or reshim needed:
+
+```bash
+cargo install ripgrep
+rg --version
+```
+
+Cargo's artifacts are self-contained native binaries, so placing the directory on PATH is
+enough; this matches Go's `go install` redirected via `GOBIN` (see [Go tools](./go-tools)).
+
 ## Lifecycle commands
 
 Cargo tools use the normal managed-tool lifecycle:

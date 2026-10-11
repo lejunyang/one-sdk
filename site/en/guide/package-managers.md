@@ -186,18 +186,78 @@ cross-manager tarball CAS.
 | Tool | Environment | osdk path and meaning |
 | --- | --- | --- |
 | npm | `npm_config_cache` | `<cache>/pkg/npm`, npm cacache |
-| pnpm <=10 | `PNPM_HOME`, `npm_config_store_dir` | `<cache>/pkg/pnpm` and `<cache>/pkg/pnpm-store` |
-| pnpm >=11 | `PNPM_HOME`, `pnpm_config_store_dir` | Same paths; only the store variable changes |
+| pnpm <=10 | `npm_config_store_dir` | `<cache>/pkg/pnpm-store`, pnpm content-addressable store |
+| pnpm >=11 | `pnpm_config_store_dir` | Same path; only the store variable changes |
 | Yarn 1 | `YARN_CACHE_FOLDER` | `<cache>/pkg/yarn-classic` |
-| Yarn 2+ | `YARN_GLOBAL_FOLDER` | `<cache>/pkg/yarn` |
+| Yarn 2+ | — | Berry's cache is driven by project `.yarn` config; osdk does not redirect it via an environment variable |
 | Bun | `BUN_INSTALL_CACHE_DIR` | `<cache>/pkg/bun` |
 | Deno | `DENO_DIR` | `<cache>/pkg/deno`; also compiled artifacts and some runtime state |
 
-Yarn 2/3 still defaults to project `.yarn/cache` as its active cache, while the
-default mirror uses `${YARN_GLOBAL_FOLDER}/cache`. Yarn 4 enables global cache
-by default. osdk does not force `enableGlobalCache` or `cacheFolder`.
+`PNPM_HOME`, `YARN_GLOBAL_FOLDER`, `BUN_INSTALL`, and `DENO_INSTALL_ROOT` are not cache
+variables: they locate the global install root, covered below under
+[Automatic global-install management](#automatic-global-install-management).
 
-Shims, `exec`, and shell hooks apply these variables when the relevant backend
+Berry (Yarn 2+) cache is entirely a matter of project `.yarn` configuration; osdk does
+not force `enableGlobalCache` or `cacheFolder`.
+
+Shims, `exec`, and shell hooks apply these cache variables when the relevant backend
 is active and preserve an existing user value by default. `osdk cache clean`
 removes only osdk's downloaded SDK archives, not these native caches. See
 [Storage, Shell, and Extensions](./storage-shell) for the complete boundary.
+
+## Automatic global-install management
+
+Even without `osdk use --global`, when you run a package manager's own global-install
+command inside an activated shell, osdk redirects the global location into a controlled
+directory and **reconciles automatically after the command exits**, so newly installed or
+removed commands take effect immediately -- no manual `osdk reshim` required:
+
+```bash
+npm i -g @anthropic-ai/claude-code
+pnpm add -g cowsay
+yarn global add typescript     # Yarn 1; Berry has no global, use yarn dlx
+bun add -g prettier
+deno install -A -n mytool jsr:@scope/mytool
+# Effective as soon as the command exits; just type the command name
+```
+
+| Tool | Redirect variable | Global bin directory | Management |
+| --- | --- | --- | --- |
+| npm | `npm_config_prefix` | `data/global/npm` (bins at its root / `bin`) | shim |
+| pnpm | `PNPM_HOME` | `data/global/pnpm/bin` (loose-root compatible) | shim |
+| Yarn | `YARN_GLOBAL_FOLDER` | `data/global/yarn/node_modules/.bin` | shim |
+| Bun | `BUN_INSTALL` | `data/global/bun/bin` | shim |
+| Deno | `DENO_INSTALL_ROOT` | `data/global/deno/bin` | shim |
+
+These tools' global artifacts are **launchers/scripts that need a runtime host** (the
+`.CMD` files pnpm writes, Deno's shell wrappers, and so on), so osdk generates its own
+shim for each command in one shared shims directory; the shim runs it within the relevant
+package manager's controlled environment. After the command exits, osdk reconciles the
+tool's global bin directory: it adds shims for newly present commands and, after checking
+no other global source or managed tool still owns it, removes shims for commands that have
+disappeared (via uninstall or manual deletion alike). Reconciliation looks only at the
+directory's actual contents, never parsing the command line, so it is independent of each
+tool's evolving install/uninstall syntax, aliases, and flags. Unchanged directories are
+skipped quickly via an mtime cache.
+
+A package manager (Bun, for example) may still print its usual hint to "add the global bin
+folder to PATH"; osdk already does this through the shim, so that hint can be ignored.
+
+If you previously installed these tools on the system yourself and ran their `setup`,
+leftover persistent variables (such as `PNPM_HOME` or `BUN_INSTALL`) may conflict with the
+controlled values; osdk warns about this at install time. Follow the hint to remove the
+variable, or set that tool's `[settings.<tool>] override_env = true` (the top-level
+`override_tools_env = true` applies it to every tool) to let osdk override it.
+
+### Self-contained native tools: Go and Cargo
+
+The artifacts of `go install` and `cargo install` are self-contained native binaries that
+need no runtime host, so osdk does not shim them; instead their output directory is placed
+directly on PATH:
+
+| Tool | Redirect variable | Output directory |
+| --- | --- | --- |
+| Go | `GOBIN` | `data/global/go/bin` |
+| Cargo | — (`CARGO_HOME` is already managed) | `data/cargo/bin` |
+
+See [Go tools](./go-tools) and [Cargo tools](./cargo-tools).

@@ -163,6 +163,21 @@ toolchain。选择非 crates.io index 时，stage 私有 Cargo 配置还会用 s
 只有通过校验的 binary 才会从 stage 发布到 osdk 的指纹化安装根。Cargo source 和
 构建目录只是临时 provider workspace，会在发布前删除。
 
+## 直接运行 `cargo install` 也受纳管
+
+除了用 `cargo:<crate>` 命名空间让 osdk 锁定工具，在激活的 shell 里直接运行原生
+`cargo install <crate>` 同样受控：`CARGO_HOME` 本就指向 osdk 数据目录，编译出的自包含
+二进制落入 `data/cargo/bin`，而该目录已在 Rust 的 PATH 中，命令退出后即可直接使用，
+不需要 shim 或 reshim：
+
+```bash
+cargo install ripgrep
+rg --version
+```
+
+Cargo 的产物是自包含原生二进制，直接放 PATH 即可；这与 Go 的 `go install` 经
+`GOBIN` 重定向（见 [Go 工具](./go-tools)）一致。
+
 ## 生命周期命令
 
 Cargo 工具使用常规受管工具生命周期：
