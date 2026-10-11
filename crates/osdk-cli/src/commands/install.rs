@@ -1298,7 +1298,15 @@ pub(crate) async fn install_one_without_shims(
             // looking at the bytes, so clearing it is what turns this
             // into a real reinstall rather than a no-op that prints
             // success without repairing anything.
-            osdk_core::pipeline::clear_complete_marker(&app.ctx.dirs, backend.id(), &tv.version)?;
+            if let Some(identity) = backend.dynamic_install_identity(&app.ctx, &tv)? {
+                osdk_core::pipeline::clear_dynamic_complete_marker(&app.ctx.dirs, identity).await?;
+            } else {
+                osdk_core::pipeline::clear_complete_marker(
+                    &app.ctx.dirs,
+                    backend.id(),
+                    &tv.version,
+                )?;
+            }
         }
         println!("{}", t!("msg.installing", tool = tv));
         let ictx = InstallCtx { ctx: &app.ctx };

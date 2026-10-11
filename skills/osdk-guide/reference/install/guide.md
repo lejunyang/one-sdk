@@ -43,3 +43,5 @@ osdk install --include-lazy        # 连同 lazy 工具一起安装
 结构化工具条目的 `lazy = true` 只影响裸安装的默认批次；显式 operand 和被其他已纳入
 工具需要的 runtime 依赖不会被跳过。已有 lock 缺少 lazy 条目时，`--include-lazy` 会从
 当前配置补齐它们，同时保留 lock 中已有的精确请求。
+
+`install --force` 会在持有安装锁时清除精确解析出的动态安装身份的完成标记，使 Go/Cargo 原生工具真正重建，而不是静默复用旧产物。
