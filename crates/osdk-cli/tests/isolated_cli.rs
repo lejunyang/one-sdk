@@ -5630,7 +5630,6 @@ printf 'lockfileVersion: 9.0\n' > "$OSDK_TEST_NEW_LOCK"
 #[cfg(unix)]
 #[test]
 fn exec_registry_fallback_injects_only_the_manager_variable_and_runs_once() {
-    let temporary = tempfile::tempdir().unwrap();
     let cases = [
         ("npm", "10.0.0", "npm", "install", 0usize),
         ("pnpm", "10.0.0", "pnpm", "add", 1usize),
@@ -5639,15 +5638,18 @@ fn exec_registry_fallback_injects_only_the_manager_variable_and_runs_once() {
         ("bun", "1.2.3", "bun", "install", 4usize),
         ("deno", "2.4.0", "deno", "add", 5usize),
     ];
-    let (unavailable, failing_server) = registry_fixture(cases.len(), false);
-    let (healthy, healthy_server) = registry_fixture(cases.len(), true);
-    write_registry_config(temporary.path(), &[&unavailable, &healthy]);
     let script = r#"#!/bin/sh
 printf 'call\n' >> "$OSDK_TEST_MARKER"
 printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_registry-unset}" "${YARN_REGISTRY-unset}" "${YARN_NPM_REGISTRY_SERVER-unset}" "${BUN_CONFIG_REGISTRY-unset}" "${NPM_CONFIG_REGISTRY-unset}"
 "#;
 
     for (manager, version, alias, subcommand, selected_index) in cases {
+        // Each scenario owns its probes; slow earlier scenarios must not exhaust
+        // a later scenario's server idle deadline under parallel CI load.
+        let temporary = tempfile::tempdir().unwrap();
+        let (unavailable, failing_server) = registry_fixture(1, false);
+        let (healthy, healthy_server) = registry_fixture(1, true);
+        write_registry_config(temporary.path(), &[&unavailable, &healthy]);
         write_fake_registry_manager(temporary.path(), manager, version, alias, script);
         let marker = temporary.path().join(format!("{manager}-{version}.calls"));
         let marker_value = marker.display().to_string();
@@ -5689,9 +5691,9 @@ printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_regis
                 assert_eq!(value, "unset", "{manager}@{version}");
             }
         }
+        failing_server.join().unwrap();
+        healthy_server.join().unwrap();
     }
-    failing_server.join().unwrap();
-    healthy_server.join().unwrap();
 }
 
 #[cfg(unix)]
