@@ -25,6 +25,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "fail: python3 is required to validate container JSON contracts" >&2
     exit 1
 fi
+# Resolve a possible osdk shim before changing the selected project and HOME.
+native_python="$(python3 -c 'import sys; print(sys.executable)')"
 
 mkdir -p "$temporary/native-bin" "$temporary/home" "$temporary/data" \
     "$temporary/cache" "$temporary/config"
@@ -70,7 +72,7 @@ cd "$temporary"
 
 assert_json() {
     local expression="$1"
-    python3 -c "import json, sys; value = json.load(sys.stdin); assert $expression, value"
+    "$native_python" -c "import json, sys; value = json.load(sys.stdin); assert $expression, value"
 }
 
 echo "checking Docker and Buildx discovery"
