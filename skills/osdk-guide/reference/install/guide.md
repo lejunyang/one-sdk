@@ -45,3 +45,5 @@ osdk install --include-lazy        # 连同 lazy 工具一起安装
 当前配置补齐它们，同时保留 lock 中已有的精确请求。
 
 `install --force` 会在持有安装锁时清除精确解析出的动态安装身份的完成标记，使 Go/Cargo 原生工具真正重建，而不是静默复用旧产物。
+
+项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径；其他环境 npm 配置仍保持隔离。

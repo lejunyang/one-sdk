@@ -293,3 +293,5 @@ lifecycle 操作，`osdk.lock` schema 4 保存与 schema 3 兼容的 npm 选项�
 [npm 工具实现](./implementation/npm-tools)。
 
 隔离的全局 npm/pnpm 安装会保留 `NODE_EXTRA_CA_CERTS`，并将相对文件路径解析为绝对路径。附加信任根不会关闭 TLS 校验，也不会导入用户 npmrc。其他认证和 TLS 覆盖设置仍受原有隔离检查约束；registry 探测仍必须通过可信 HTTPS 连接。
+
+项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径；其他环境 npm 配置仍保持隔离。
