@@ -8523,3 +8523,78 @@ fn a_broken_manifest_inside_a_root_fails_closed() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("package.json"), "{stderr}");
 }
+
+#[test]
+fn doctor_verifies_all_dynamic_identity_roots() {
+    use osdk_core::{
+        dirs::{Dirs, InstallLocator},
+        inventory::DynamicToolManifest,
+        store::manifest::{FileEntry, Manifest},
+        tool::{InstallIdentity, InstallScope},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let dirs = Dirs::resolve_from(|key| match key {
+        "OSDK_DATA_DIR" => Some(temp.path().join("data").display().to_string()),
+        "OSDK_CACHE_DIR" => Some(temp.path().join("cache").display().to_string()),
+        "OSDK_CONFIG_DIR" => Some(temp.path().join("config").display().to_string()),
+        "OSDK_INSTALL_DIR" => Some(temp.path().join("installs").display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let mut roots = Vec::new();
+    for variant in ["3.12.0", "3.13.0"] {
+        let identity = InstallIdentity::new(
+            "pypi:cowsay",
+            "6.1",
+            osdk_core::platform::Platform::current().to_string(),
+            InstallScope::Isolated,
+            &std::collections::BTreeMap::new(),
+            vec![osdk_core::tool::InstallDependency {
+                kind: osdk_core::tool::InstallDependencyKind::Runtime,
+                id: "python".into(),
+                version: variant.into(),
+                identity: None,
+            }],
+            std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let locator = InstallLocator::new(&dirs, identity.clone()).unwrap();
+        let root = locator.install_root();
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("payload.py"), b"original").unwrap();
+        DynamicToolManifest::from_identity(identity)
+            .unwrap()
+            .write_atomic(root)
+            .unwrap();
+        let mut manifest = Manifest::new("pypi:cowsay", "6.1", "native");
+        manifest.files.push(FileEntry {
+            path: "payload.py".into(),
+            hash: Some(osdk_core::store::hash_file(&root.join("payload.py")).unwrap()),
+            mode: 0,
+            symlink: None,
+        });
+        manifest.save(root).unwrap();
+        std::fs::write(root.join(".osdk-complete"), b"").unwrap();
+        roots.push(root.to_path_buf());
+    }
+    let verify = || {
+        let output = run_isolated(
+            temp.path(),
+            &["doctor", "--verify", "--tool", "pypi:cowsay"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert!(verify().contains("checked 2 install(s), 0 changed"));
+    std::fs::write(roots[1].join("payload.py"), b"tampered").unwrap();
+    let report = verify();
+    assert!(
+        report.contains("checked 2 install(s), 1 changed"),
+        "{report}"
+    );
+    assert!(report.contains("payload.py: contents changed"), "{report}");
+}

@@ -285,6 +285,8 @@ osdk doctor --verify
 osdk doctor --verify --tool node
 ```
 
+`doctor --verify` 分别校验每个动态安装身份。新 PyPI 安装会原地记录文件哈希，不移动虚拟环境。旧安装需通过 `--force` 重装建立基线；字节码缓存不参与校验。
+
 同样的检查用时不到 1 秒。`--tool` 必须与 `--verify` 一起使用，未知的名字会被拒绝，而不是
 静默地什么都不检查。
 

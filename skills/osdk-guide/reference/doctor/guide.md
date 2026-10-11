@@ -18,3 +18,5 @@ osdk doctor --verify --tool node
 
 若 verify 报告漂移，用 `osdk install <tool> --force` 重建，不要只 reshim。代理诊断会
 对凭据脱敏。实际 link mode 来自 `[settings].link_mode` 与当前文件系统能力。
+
+动态工具按实际安装身份目录分别验证，包括同版本的多份安装。新 PyPI 安装原地记录完整性基线；旧安装若没有清单，必须 `install --force` 重装，不能把 checked 0 当作通过。字节码缓存不参与校验。

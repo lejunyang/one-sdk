@@ -319,6 +319,8 @@ Name the tool you actually suspect to keep it usable:
 osdk doctor --verify --tool node
 ```
 
+`doctor --verify` checks each dynamic install identity separately. New PyPI installations record file hashes without relocating the virtual environment. Reinstall older installations with `--force` to establish their baseline; bytecode caches are excluded.
+
 That same check took under a second. `--tool` requires `--verify`, and an
 unknown name is rejected rather than silently checking nothing.
 

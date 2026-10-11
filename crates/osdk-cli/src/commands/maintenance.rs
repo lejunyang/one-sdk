@@ -1420,9 +1420,43 @@ pub(crate) fn doctor_verify(app: &App, only: Option<&str>) -> Result<()> {
         Some(tool) => vec![app.registry.get(tool)?],
         None => all_display_backends(app)?,
     };
+    let dynamic = if backends
+        .iter()
+        .any(|backend| osdk_core::tool::ToolId::parse(backend.id()).is_ok_and(|id| id.is_dynamic()))
+    {
+        osdk_core::inventory::scan_installs(
+            &app.ctx.dirs.installs,
+            &osdk_core::inventory::ScanOptions::default(),
+        )?
+    } else {
+        osdk_core::inventory::ScanReport::default()
+    };
     for backend in backends {
-        for version in backend.list_installed(&app.ctx)? {
-            let root = app.ctx.dirs.install_path(backend.id(), &version);
+        let roots = if osdk_core::tool::ToolId::parse(backend.id())?.is_dynamic() {
+            dynamic
+                .installs
+                .iter()
+                .filter(|install| install.manifest.identity.tool == backend.id())
+                .filter(|install| install.install_root.join(".osdk-complete").is_file())
+                .map(|install| {
+                    install.revalidate()?;
+                    Ok((
+                        install.manifest.identity.version.clone(),
+                        install.install_root.clone(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            backend
+                .list_installed(&app.ctx)?
+                .into_iter()
+                .map(|version| {
+                    let root = app.ctx.dirs.install_path(backend.id(), &version);
+                    (version, root)
+                })
+                .collect()
+        };
+        for (version, root) in roots {
             let label = format!("{}@{}", backend.id(), version);
             // An install predating the manifest, or one whose manifest was
             // itself removed, cannot be checked. Say so instead of passing it.

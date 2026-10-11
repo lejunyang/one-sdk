@@ -1040,6 +1040,8 @@ as done and will not repair it; `--force` reinstalls the pinned version over it.
 Verification reads every file, so it is opt-in — plain `doctor` stays fast and
 nothing on the execution path hashes anything.
 
+Dynamic installs are checked at each identity-specific root. Newly installed PyPI tools record an integrity baseline; reinstall older PyPI installs with `--force` to create one. Python bytecode caches are excluded.
+
 Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
 
 ## Scenario: diagnose an environment or switch language
