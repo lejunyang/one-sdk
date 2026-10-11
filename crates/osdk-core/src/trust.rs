@@ -170,13 +170,15 @@ fn scopes_include(scopes: &[Scope], wanted: Scope) -> bool {
 /// the lowest-priority fallback, so it cannot override a project that declares
 /// its own installer. See `corepack_and_installer_choice_are_safe` for why the
 /// obvious reading of "runs corepack" does not make this a gate.
+// Fixed top-level `[settings]` fields that never need trust. Per-tool sections
+// (`[settings.<tool>]`) are classified separately by
+// `collect_tool_section_requirements`.
 const SAFE_SETTINGS_KEYS: &[&str] = &[
     "jobs",
     "lang",
     "link_mode",
-    "node",
-    "npm",
     "offline",
+    "override_tools_env",
     "prerelease",
     "shims",
     "yes",
@@ -191,12 +193,11 @@ const TRUST_REQUIRING_SETTINGS: &[(&str, TrustReason)] = &[
     ("verify_signatures", TrustReason::WeakensVerification),
     ("require_checksums", TrustReason::WeakensVerification),
     ("attestations", TrustReason::WeakensVerification),
-    // Both carry `catalog_url`, a free-form URL that decides which interpreter
-    // or runtime bytes get installed, and `python` also carries the
-    // `catalog_sha256` that would otherwise pin them.
-    ("python", TrustReason::WeakensVerification),
-    ("java", TrustReason::WeakensVerification),
 ];
+// Python/Java `catalog_url` fields now live inside per-tool sections
+// (`[settings.python]` / `[settings.java]`) and are classified by
+// `collect_tool_section_requirements`, which also lets a section that only sets
+// `override_env` stay safe.
 
 /// Whole top-level tables that gate a command, with the reason and the scopes
 /// in which they are reachable.
@@ -555,20 +556,52 @@ fn collect_settings_requirements(value: &toml::Value, found: &mut Vec<TrustRequi
         });
         return;
     };
-    for key in settings.keys() {
+    for (key, entry) in settings.iter() {
         if SAFE_SETTINGS_KEYS.contains(&key.as_str()) {
             continue;
         }
-        let reason = TRUST_REQUIRING_SETTINGS
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, reason)| *reason)
-            // Unlisted means unclassified, which is treated as dangerous.
-            .unwrap_or(TrustReason::WeakensVerification);
+        if let Some((_, reason)) = TRUST_REQUIRING_SETTINGS.iter().find(|(name, _)| name == key) {
+            found.push(TrustRequirement {
+                key: format!("settings.{key}"),
+                reason: *reason,
+            });
+            continue;
+        }
+        // Anything not fixed is a per-tool section `[settings.<tool>]`.
+        collect_tool_section_requirements(key, entry, found);
+    }
+}
+
+/// Classify a `[settings.<tool>]` section. `override_env` and each tool's own
+/// field are safe except the free-form catalog URL/hash on python and java,
+/// which decide which interpreter/runtime bytes get installed.
+fn collect_tool_section_requirements(
+    tool: &str,
+    entry: &toml::Value,
+    found: &mut Vec<TrustRequirement>,
+) {
+    let Some(table) = entry.as_table() else {
+        // A tool section must be a table; a scalar/array is unclassified, so
+        // fail closed. This also catches a misspelled fixed field that the
+        // `flatten` map swallowed as a tool entry.
         found.push(TrustRequirement {
-            key: format!("settings.{key}"),
-            reason,
+            key: format!("settings.{tool}"),
+            reason: TrustReason::WeakensVerification,
         });
+        return;
+    };
+    let trust_requiring_fields: &[&str] = match tool {
+        "python" => &["catalog_url", "catalog_sha256"],
+        "java" => &["catalog_url"],
+        _ => &[],
+    };
+    for field in table.keys() {
+        if trust_requiring_fields.contains(&field.as_str()) {
+            found.push(TrustRequirement {
+                key: format!("settings.{tool}.{field}"),
+                reason: TrustReason::WeakensVerification,
+            });
+        }
     }
 }
 
@@ -1990,6 +2023,37 @@ mode = "env"
             unclassified.is_empty(),
             "these `Settings` fields are not classified for trust: {unclassified:?}. \
              Add each to SAFE_SETTINGS_KEYS or TRUST_REQUIRING_SETTINGS."
+        );
+    }
+
+    #[test]
+    fn per_tool_settings_sections_are_classified_by_their_fields() {
+        let body = r#"
+[settings.pnpm]
+override_env = true
+
+[settings.node]
+corepack = true
+
+[settings.python]
+catalog_url = "http://example.test/py.json"
+
+[settings.java]
+catalog_url = "http://example.test/java.json"
+"#;
+        let value: toml::Value = toml::from_str(body).unwrap();
+        let keys: Vec<String> = collect_requirements(&value, &Scope::ALL)
+            .into_iter()
+            .map(|requirement| requirement.key)
+            .collect();
+        // pnpm/node sections (and a python section that would only set
+        // override_env) are safe; only the free-form catalog URLs gate trust.
+        assert_eq!(
+            keys,
+            vec![
+                "settings.java.catalog_url".to_string(),
+                "settings.python.catalog_url".to_string()
+            ]
         );
     }
 
