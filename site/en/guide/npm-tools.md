@@ -189,6 +189,21 @@ user-lock entries plus shims that no other installed tool owns. These metadata
 changes and the install removal are serialized and rolled back together on a
 failure.
 
+## Direct `npm i -g` / `pnpm add -g` are managed too
+
+Even without `osdk use --global`, running the package manager's own global install command in an activated shell redirects it into a controlled directory instead of the tool's native global location:
+
+```bash
+npm i -g @anthropic-ai/claude-code
+pnpm add -g cowsay
+osdk reshim          # generate shims for the newly installed global commands
+```
+
+- npm's `npm_config_prefix` and pnpm's `PNPM_HOME` point at global roots under the osdk data directory (`data/global/npm`, `data/global/pnpm`); pnpm also prepends `PNPM_HOME/bin` to PATH so its global-directory self-check passes.
+- After installing, run `osdk reshim`: osdk scans these global bin directories and generates shims for the new commands. You can then type the command name directly; the shim runs it under the package manager's controlled environment.
+
+If you previously installed pnpm standalone and ran `pnpm setup`, leftover persistent variables such as `PNPM_HOME` may conflict with the managed values. osdk warns about them at install time: clear the variables as suggested, or set `[settings.pnpm] override_env = true` (or the top-level `override_tools_env = true` for every tool) to let osdk force its values.
+
 ## Package and version syntax
 
 ```text

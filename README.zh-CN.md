@@ -316,7 +316,12 @@ osdk uninstall --global 'npm:@antfu/ni@0.21.12'
 传递依赖图。
 
 全局 npm 与 pnpm 都会在 osdk 控制的前缀中调用各自真正的 global-add，不修改环境中
-的 Node 安装。
+的 Node 安装。即使直接运行 `npm i -g` / `pnpm add -g`（不经 `osdk use --global`），
+osdk 也会把全局前缀（`npm_config_prefix` / `PNPM_HOME`）重定向到受控目录；随后执行
+`osdk reshim` 即可为这些全局命令生成 shim，直接输入命令名就能在受控环境下运行。
+若系统里残留旧的 pnpm/node 持久环境变量，安装时 osdk 会告警提示清除，或用
+`[settings.<tool>] override_env = true`（顶层 `override_tools_env = true` 则对所有工具
+生效）让 osdk 强制覆盖这些变量。
 `where --global` 与 `uninstall --global` 会显式操作配置精确匹配的用户级 npm 安装；不带
 该标志时继续保持原有项目/隔离行为。卸载只删除选中的身份根，同一包版本的其他身份仍然
 保留。全局卸载还会同步删除对应的用户配置、锁条目，以及不再有其他 owner 的 shim。

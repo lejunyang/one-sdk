@@ -47,3 +47,7 @@ osdk install --include-lazy        # 连同 lazy 工具一起安装
 `install --force` 会在持有安装锁时清除精确解析出的动态安装身份的完成标记，使 Go/Cargo 原生工具真正重建，而不是静默复用旧产物。
 
 项目隔离的原生 npm 安装同样保留 NODE_EXTRA_CA_CERTS，并在切换到临时项目目录之前解析其文件路径；其他环境 npm 配置仍保持隔离。
+
+## 已存在的环境变量告警
+
+安装工具时，osdk 会检查该工具相关的环境变量是否已**持久**设置在用户/系统环境里（Windows 上读注册表 User/Machine 级，不看当前 shell 的临时 `Process` 变量；其他平台只看持久配置）。若已存在，会打印 warning，说明该变量会被 osdk 受管值覆盖，建议你清除它；或用 `[settings.<tool>] override_env = true`（顶层 `override_tools_env = true` 则对所有工具生效）显式让 osdk 忽略并覆盖这些已存在的可重定向变量。

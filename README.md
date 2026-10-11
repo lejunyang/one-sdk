@@ -358,7 +358,15 @@ latter does not replace the transitive dependency graph.
 
 Global npm and pnpm choices each run that manager's real global-add operation
 inside an osdk-controlled prefix, leaving the ambient Node installation
-untouched. `where --global` and `uninstall --global` explicitly target the
+untouched. Even running `npm i -g` / `pnpm add -g` directly (without
+`osdk use --global`) redirects the global prefix (`npm_config_prefix` /
+`PNPM_HOME`) to a controlled directory; run `osdk reshim` afterwards to
+generate shims for those global commands, so typing the command name runs it
+in the controlled environment. If leftover persistent pnpm/node environment
+variables remain on the system, osdk warns at install time and suggests
+clearing them, or you can set `[settings.<tool>] override_env = true` (or the
+top-level `override_tools_env = true` for every tool) to let osdk force its
+values. `where --global` and `uninstall --global` explicitly target the
 user-wide npm installation whose exact configured identity matches. Without
 that flag, the existing project/isolated behavior is preserved; uninstall
 removes only the
