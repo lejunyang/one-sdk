@@ -87,15 +87,15 @@ impl PythonRequest {
 
 pub async fn load(ctx: &Ctx) -> Result<Catalog> {
     let builtin = parse_catalog(BUILTIN, "embedded python catalog")?;
-    let settings = &ctx.config.settings.python;
-    let Some(source) = settings.catalog_url.as_deref() else {
+    let Some(source) = ctx.config.settings.python_catalog_url() else {
         return Ok(builtin);
     };
-    let Some(expected) = settings.catalog_sha256.as_deref() else {
+    let Some(expected) = ctx.config.settings.python_catalog_sha256() else {
         return Err(Error::config(
-            "settings.python.catalog_sha256 is required with catalog_url",
+            "settings.python catalog_sha256 is required with catalog_url",
         ));
     };
+    let (source, expected) = (source.as_str(), expected.as_str());
     let digest = expected.trim().to_ascii_lowercase();
     let cache = ctx
         .dirs
@@ -502,14 +502,12 @@ mod tests {
         })
         .unwrap();
         dirs.ensure().unwrap();
-        let settings = Settings {
+        let mut settings = Settings {
             offline: true,
-            python: PythonSettings {
-                catalog_url: Some(catalog_path.display().to_string()),
-                catalog_sha256: Some(digest.into()),
-            },
             ..Default::default()
         };
+        settings.set_python_catalog_url(Some(catalog_path.display().to_string()));
+        settings.set_python_catalog_sha256(Some(digest.into()));
         Ctx {
             cas: Arc::new(Cas::new(dirs.store.clone())),
             dirs,

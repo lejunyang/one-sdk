@@ -50,7 +50,7 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
             &cwd,
             requested_installer,
             osdk_core::npm_tools::ToolScope::Project,
-            app.ctx.config.settings.npm.default_installer,
+            app.ctx.config.settings.npm_default_installer(),
         )?;
         if let Some(project) = plan.project {
             return use_project_npm(
@@ -375,7 +375,7 @@ pub(crate) async fn use_project_npm(
         &project.root,
         requested_installer,
         osdk_core::npm_tools::ToolScope::Project,
-        app.ctx.config.settings.npm.default_installer,
+        app.ctx.config.settings.npm_default_installer(),
     )?
     .installer;
     let section = project_dependency_section(&project.package_json, &package)?;

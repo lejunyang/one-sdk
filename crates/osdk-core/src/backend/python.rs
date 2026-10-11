@@ -135,7 +135,7 @@ impl Backend for PythonBackend {
         if parsed.implementation == "cpython"
             && parsed.variant == "default"
             && !parsed.explicit_prerelease
-            && ctx.config.settings.python.catalog_url.is_none()
+            && ctx.config.settings.python_catalog_url().is_none()
             && !matches!(
                 ctx.config.settings.prerelease,
                 crate::config::PrereleasePolicy::Allow
@@ -717,14 +717,15 @@ not-a-hash  garbage-line
                 libc: Libc::Glibc,
             },
             config: Config {
-                settings: Settings {
-                    offline: true,
-                    prerelease: PrereleasePolicy::Allow,
-                    python: PythonSettings {
-                        catalog_url: Some(catalog_path.display().to_string()),
-                        catalog_sha256: Some(digest.into()),
-                    },
-                    ..Default::default()
+                settings: {
+                    let mut settings = Settings {
+                        offline: true,
+                        prerelease: PrereleasePolicy::Allow,
+                        ..Default::default()
+                    };
+                    settings.set_python_catalog_url(Some(catalog_path.display().to_string()));
+                    settings.set_python_catalog_sha256(Some(digest.into()));
+                    settings
                 },
                 sources: SourcesConfig::default(),
                 tools: Default::default(),

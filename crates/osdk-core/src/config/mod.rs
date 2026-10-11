@@ -76,7 +76,7 @@ pub enum ToolConfigOrigin {
     ToolVersions(PathBuf),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct Settings {
     /// How store blobs are materialized into install dirs.
@@ -96,18 +96,21 @@ pub struct Settings {
     /// Output language override (`en`/`zh`). None = auto-detect from locale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
-    /// Node-specific installation behavior.
-    pub node: NodeSettings,
-    /// Installer selection for `npm:` tools.
-    pub npm: NpmSettings,
-    /// Python catalog refresh and verification.
-    pub python: PythonSettings,
-    /// Java runtime metadata endpoint.
-    pub java: JavaSettings,
     /// Pre-release resolution policy shared by supporting backends.
     pub prerelease: PrereleasePolicy,
     /// Which tools get a shim.
     pub shims: ShimSettings,
+    /// Global master switch: force osdk-managed values over pre-existing tool
+    /// environment variables for EVERY tool. A per-tool
+    /// `[settings.<tool>] override_env = true` is ORed with this.
+    pub override_tools_env: bool,
+    /// Per-tool settings, persisted flat as `[settings.<tool>]`. Each entry
+    /// carries common fields every tool has (`override_env`) plus that tool's
+    /// own fields. Deserialized by hand so tool-specific fields keep type
+    /// safety and unknown-field rejection (`deny_unknown_fields` is otherwise
+    /// incompatible with `flatten`; see `DepsConfig`).
+    #[serde(flatten)]
+    pub tools: BTreeMap<String, ToolSettings>,
 }
 
 /// Which of an installed tool's executables get a shim.
@@ -173,15 +176,15 @@ pub struct ToolShimSettings {
     pub expose: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct NodeSettings {
     /// Run the installed Node's own `corepack enable` after installation.
     pub corepack: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct NpmSettings {
     /// Installer used for `npm:` tools when nothing else decides.
     ///
@@ -238,8 +241,8 @@ impl std::str::FromStr for NpmDefaultInstaller {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct PythonSettings {
     /// Optional JSON catalog URL or local path.
     pub catalog_url: Option<String>,
@@ -247,8 +250,8 @@ pub struct PythonSettings {
     pub catalog_sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct JavaSettings {
     /// Foojay-compatible `/packages` endpoint or static mirror.
     pub catalog_url: Option<String>,
@@ -299,12 +302,10 @@ impl Default for Settings {
             attestations: AttestationPolicy::Off,
             offline: false,
             lang: None,
-            node: NodeSettings::default(),
-            npm: NpmSettings::default(),
-            python: PythonSettings::default(),
-            java: JavaSettings::default(),
             prerelease: PrereleasePolicy::default(),
             shims: ShimSettings::default(),
+            override_tools_env: false,
+            tools: BTreeMap::new(),
         }
     }
 }
@@ -314,6 +315,376 @@ fn default_jobs() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(8)
+}
+
+// ---------------------------------------------------------------------------
+// Per-tool settings: persisted flat as `[settings.<tool>]`
+// ---------------------------------------------------------------------------
+
+/// Common plus tool-specific settings for one tool, persisted flat as
+/// `[settings.<tool>]`.
+///
+/// Common fields apply to every tool; `specific` carries the fields only one
+/// tool defines. A tool without specific settings may still set the common
+/// fields, but any extra key is rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSettings {
+    /// Force osdk-managed values over this tool's pre-existing environment
+    /// variables. ORed with the global [`Settings::override_tools_env`].
+    pub override_env: bool,
+    /// This tool's own fields.
+    pub specific: ToolSpecific,
+}
+
+impl Default for ToolSettings {
+    fn default() -> Self {
+        Self {
+            override_env: false,
+            specific: ToolSpecific::None,
+        }
+    }
+}
+
+/// Tool-specific fields. Variants mirror the per-tool setting structs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolSpecific {
+    /// Tool has no specific fields (or none were set).
+    #[default]
+    None,
+    Node(NodeSettings),
+    Npm(NpmSettings),
+    Python(PythonSettings),
+    Java(JavaSettings),
+}
+
+impl ToolSettings {
+    /// `corepack` for a Node tool.
+    pub fn corepack(&self) -> bool {
+        match &self.specific {
+            ToolSpecific::Node(node) => node.corepack,
+            _ => false,
+        }
+    }
+
+    /// `default_installer` for the npm tool.
+    pub fn default_installer(&self) -> NpmDefaultInstaller {
+        match &self.specific {
+            ToolSpecific::Npm(npm) => npm.default_installer,
+            _ => NpmDefaultInstaller::default(),
+        }
+    }
+
+    /// Python catalog URL.
+    pub fn python_catalog_url(&self) -> Option<&str> {
+        match &self.specific {
+            ToolSpecific::Python(python) => python.catalog_url.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Python catalog SHA-256.
+    pub fn python_catalog_sha256(&self) -> Option<&str> {
+        match &self.specific {
+            ToolSpecific::Python(python) => python.catalog_sha256.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Java catalog URL.
+    pub fn java_catalog_url(&self) -> Option<&str> {
+        match &self.specific {
+            ToolSpecific::Java(java) => java.catalog_url.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl Settings {
+    /// Whether osdk forces its managed environment over pre-existing variables
+    /// for `tool`: the global switch OR the tool's own switch.
+    pub fn effective_override_env(&self, tool: &str) -> bool {
+        self.override_tools_env
+            || self
+                .tools
+                .get(tool)
+                .map(|settings| settings.override_env)
+                .unwrap_or(false)
+    }
+
+    /// Mutable entry for `tool`, created with defaults when absent.
+    pub fn tool_entry(&mut self, tool: &str) -> &mut ToolSettings {
+        self.tools.entry(tool.to_string()).or_default()
+    }
+
+    fn specific_mut(
+        &mut self,
+        tool: &str,
+        make: impl FnOnce() -> ToolSpecific,
+    ) -> &mut ToolSpecific {
+        let entry = self.tool_entry(tool);
+        if matches!(entry.specific, ToolSpecific::None) {
+            entry.specific = make();
+        }
+        &mut entry.specific
+    }
+
+    /// The Node-specific settings (defaults when absent).
+    pub fn node_settings(&self) -> NodeSettings {
+        match self.tools.get("node").map(|t| &t.specific) {
+            Some(ToolSpecific::Node(node)) => node.clone(),
+            _ => NodeSettings::default(),
+        }
+    }
+
+    /// The npm-specific settings (defaults when absent).
+    pub fn npm_settings(&self) -> NpmSettings {
+        match self.tools.get("npm").map(|t| &t.specific) {
+            Some(ToolSpecific::Npm(npm)) => npm.clone(),
+            _ => NpmSettings::default(),
+        }
+    }
+
+    /// The Python-specific settings (defaults when absent).
+    pub fn python_settings(&self) -> PythonSettings {
+        match self.tools.get("python").map(|t| &t.specific) {
+            Some(ToolSpecific::Python(python)) => python.clone(),
+            _ => PythonSettings::default(),
+        }
+    }
+
+    /// The Java-specific settings (defaults when absent).
+    pub fn java_settings(&self) -> JavaSettings {
+        match self.tools.get("java").map(|t| &t.specific) {
+            Some(ToolSpecific::Java(java)) => java.clone(),
+            _ => JavaSettings::default(),
+        }
+    }
+
+    /// Whether the installed Node runs its own `corepack enable`.
+    pub fn node_corepack(&self) -> bool {
+        self.tools
+            .get("node")
+            .map(ToolSettings::corepack)
+            .unwrap_or(false)
+    }
+
+    /// Installer used for `npm:` tools when nothing else decides.
+    pub fn npm_default_installer(&self) -> NpmDefaultInstaller {
+        self.tools
+            .get("npm")
+            .map(ToolSettings::default_installer)
+            .unwrap_or_default()
+    }
+
+    /// Python catalog URL.
+    pub fn python_catalog_url(&self) -> Option<String> {
+        self.tools
+            .get("python")
+            .and_then(|t| t.python_catalog_url().map(str::to_string))
+    }
+
+    /// Python catalog SHA-256.
+    pub fn python_catalog_sha256(&self) -> Option<String> {
+        self.tools
+            .get("python")
+            .and_then(|t| t.python_catalog_sha256().map(str::to_string))
+    }
+
+    /// Java catalog URL.
+    pub fn java_catalog_url(&self) -> Option<String> {
+        self.tools
+            .get("java")
+            .and_then(|t| t.java_catalog_url().map(str::to_string))
+    }
+
+    /// Set whether the installed Node runs its own `corepack enable`.
+    pub fn set_node_corepack(&mut self, value: bool) {
+        let specific = self.specific_mut("node", || ToolSpecific::Node(NodeSettings::default()));
+        if let ToolSpecific::Node(node) = specific {
+            node.corepack = value;
+        }
+    }
+
+    /// Set the fallback installer for `npm:` tools.
+    pub fn set_npm_default_installer(&mut self, value: NpmDefaultInstaller) {
+        let specific = self.specific_mut("npm", || ToolSpecific::Npm(NpmSettings::default()));
+        if let ToolSpecific::Npm(npm) = specific {
+            npm.default_installer = value;
+        }
+    }
+
+    /// Set the Python catalog URL.
+    pub fn set_python_catalog_url(&mut self, value: Option<String>) {
+        let specific =
+            self.specific_mut("python", || ToolSpecific::Python(PythonSettings::default()));
+        if let ToolSpecific::Python(python) = specific {
+            python.catalog_url = value;
+        }
+    }
+
+    /// Set the Python catalog SHA-256.
+    pub fn set_python_catalog_sha256(&mut self, value: Option<String>) {
+        let specific =
+            self.specific_mut("python", || ToolSpecific::Python(PythonSettings::default()));
+        if let ToolSpecific::Python(python) = specific {
+            python.catalog_sha256 = value;
+        }
+    }
+
+    /// Set the Java catalog URL.
+    pub fn set_java_catalog_url(&mut self, value: Option<String>) {
+        let specific = self.specific_mut("java", || ToolSpecific::Java(JavaSettings::default()));
+        if let ToolSpecific::Java(java) = specific {
+            java.catalog_url = value;
+        }
+    }
+}
+
+/// Intermediate `[settings.<tool>]` shape: common fields captured explicitly,
+/// every tool-specific key left in a flatten table for typed re-parsing.
+#[derive(Deserialize)]
+struct RawToolSettings {
+    #[serde(default)]
+    override_env: bool,
+    #[serde(flatten)]
+    rest: toml::Table,
+}
+
+/// Parse one `[settings.<tool>]` value, dispatching specific fields to the
+/// struct for that tool.
+fn parse_tool_settings(tool: &str, value: toml::Value) -> Result<ToolSettings> {
+    let RawToolSettings { override_env, rest } = RawToolSettings::deserialize(value)?;
+    let specific = match tool {
+        "node" => ToolSpecific::Node(NodeSettings::deserialize(toml::Value::Table(rest))?),
+        "npm" => ToolSpecific::Npm(NpmSettings::deserialize(toml::Value::Table(rest))?),
+        "python" => ToolSpecific::Python(PythonSettings::deserialize(toml::Value::Table(rest))?),
+        "java" => ToolSpecific::Java(JavaSettings::deserialize(toml::Value::Table(rest))?),
+        _ => {
+            if rest.is_empty() {
+                ToolSpecific::None
+            } else {
+                let keys = rest.keys().cloned().collect::<Vec<_>>().join("`, `");
+                return Err(Error::config(format!(
+                    "unknown field(s) `{keys}` for tool `{tool}`; tools without specific settings accept only `override_env`"
+                )));
+            }
+        }
+    };
+    Ok(ToolSettings {
+        override_env,
+        specific,
+    })
+}
+
+/// Deserialize [`Settings`] by hand, mirroring `ToolConfigEntry`: capture the
+/// whole table first so field-level errors (a typo in a tool-specific key)
+/// surface with their real cause instead of an opaque "did not match".
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let mut table = toml::Table::deserialize(deserializer)?;
+        let defaults = Settings::default();
+
+        fn take_or<T, E>(
+            table: &mut toml::Table,
+            key: &str,
+            default: T,
+        ) -> std::result::Result<T, E>
+        where
+            T: serde::de::DeserializeOwned,
+            E: serde::de::Error,
+        {
+            match table.remove(key) {
+                Some(value) => T::deserialize(value).map_err(E::custom),
+                None => Ok(default),
+            }
+        }
+
+        let link_mode = take_or(&mut table, "link_mode", defaults.link_mode)?;
+        let jobs = take_or(&mut table, "jobs", defaults.jobs)?;
+        let yes = take_or(&mut table, "yes", defaults.yes)?;
+        let verify_signatures =
+            take_or(&mut table, "verify_signatures", defaults.verify_signatures)?;
+        let require_checksums =
+            take_or(&mut table, "require_checksums", defaults.require_checksums)?;
+        let attestations = take_or(&mut table, "attestations", defaults.attestations)?;
+        let offline = take_or(&mut table, "offline", defaults.offline)?;
+        let lang = take_or(&mut table, "lang", defaults.lang)?;
+        let prerelease = take_or(&mut table, "prerelease", defaults.prerelease)?;
+        let shims = take_or(&mut table, "shims", defaults.shims)?;
+        let override_tools_env = take_or(
+            &mut table,
+            "override_tools_env",
+            defaults.override_tools_env,
+        )?;
+
+        let mut tools = BTreeMap::new();
+        for (tool, value) in table {
+            let parsed = parse_tool_settings(&tool, value).map_err(D::Error::custom)?;
+            tools.insert(tool, parsed);
+        }
+
+        Ok(Settings {
+            link_mode,
+            jobs,
+            yes,
+            verify_signatures,
+            require_checksums,
+            attestations,
+            offline,
+            lang,
+            prerelease,
+            shims,
+            override_tools_env,
+            tools,
+        })
+    }
+}
+
+/// Serialize [`ToolSettings`] as a flat map: common fields plus the specific
+/// struct's fields. A flatten helper keeps field ownership with the structs.
+impl Serialize for ToolSettings {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Empty {}
+
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum SpecificRef<'a> {
+            Empty(Empty),
+            Node(&'a NodeSettings),
+            Npm(&'a NpmSettings),
+            Python(&'a PythonSettings),
+            Java(&'a JavaSettings),
+        }
+
+        #[derive(Serialize)]
+        struct Helper<'a> {
+            override_env: bool,
+            #[serde(flatten)]
+            specific: SpecificRef<'a>,
+        }
+
+        let specific = match &self.specific {
+            ToolSpecific::None => SpecificRef::Empty(Empty {}),
+            ToolSpecific::Node(node) => SpecificRef::Node(node),
+            ToolSpecific::Npm(npm) => SpecificRef::Npm(npm),
+            ToolSpecific::Python(python) => SpecificRef::Python(python),
+            ToolSpecific::Java(java) => SpecificRef::Java(java),
+        };
+        Helper {
+            override_env: self.override_env,
+            specific,
+        }
+        .serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1576,17 +1947,22 @@ impl Config {
         }
         if let Some(v) = getenv("OSDK_NPM_DEFAULT_INSTALLER") {
             if let Ok(installer) = v.parse() {
-                self.settings.npm.default_installer = installer;
+                self.settings.set_npm_default_installer(installer);
             }
         }
         if let Some(v) = getenv("OSDK_PYTHON_CATALOG_URL") {
-            self.settings.python.catalog_url = Some(v);
+            self.settings.set_python_catalog_url(Some(v));
         }
         if let Some(v) = getenv("OSDK_PYTHON_CATALOG_SHA256") {
-            self.settings.python.catalog_sha256 = Some(v);
+            self.settings.set_python_catalog_sha256(Some(v));
         }
         if let Some(v) = getenv("OSDK_JAVA_CATALOG_URL") {
-            self.settings.java.catalog_url = Some(v);
+            self.settings.set_java_catalog_url(Some(v));
+        }
+        if let Some(v) = getenv("OSDK_OVERRIDE_TOOLS_ENV") {
+            if truthy(&v) {
+                self.settings.override_tools_env = true;
+            }
         }
         if let Some(v) = getenv("OSDK_SELECTION") {
             self.sources.selection = match v.to_ascii_lowercase().as_str() {
@@ -2151,6 +2527,129 @@ dir = "workspace"
 
         let error = read_config_file(&path).unwrap_err().to_string();
         assert!(error.contains("unknown field `shell`"), "{error}");
+    }
+
+    /// Parse `[settings.<tool>]` sections straight from TOML.
+    fn parse_settings(text: &str) -> Settings {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn per_tool_sections_parse_common_and_specific_fields() {
+        let settings = parse_settings(
+            r#"
+[node]
+override_env = true
+corepack = true
+
+[pnpm]
+override_env = true
+
+[npm]
+default_installer = "pnpm"
+"#,
+        );
+        assert!(settings.node_corepack());
+        assert_eq!(settings.npm_default_installer(), NpmDefaultInstaller::Pnpm);
+        assert!(settings.effective_override_env("node"));
+        assert!(settings.effective_override_env("pnpm"));
+        // A tool with no section is not overridden.
+        assert!(!settings.effective_override_env("go"));
+    }
+
+    #[test]
+    fn global_override_covers_every_tool() {
+        let settings = parse_settings(
+            r#"
+override_tools_env = true
+"#,
+        );
+        assert!(settings.override_tools_env);
+        // Even tools with no section and no specific fields.
+        assert!(settings.effective_override_env("node"));
+        assert!(settings.effective_override_env("pnpm"));
+        assert!(settings.effective_override_env("anything"));
+    }
+
+    #[test]
+    fn per_tool_override_does_not_leak_between_tools() {
+        let settings = parse_settings(
+            r#"
+[pnpm]
+override_env = true
+"#,
+        );
+        assert!(settings.effective_override_env("pnpm"));
+        assert!(!settings.effective_override_env("node"));
+        assert!(!settings.effective_override_env("npm"));
+    }
+
+    #[test]
+    fn legacy_tool_specific_sections_still_parse() {
+        let settings = parse_settings(
+            r#"
+[node]
+corepack = true
+
+[python]
+catalog_url = "https://example.com/python.json"
+catalog_sha256 = "abc123"
+
+[java]
+catalog_url = "https://example.com/java"
+"#,
+        );
+        assert!(settings.node_corepack());
+        assert_eq!(
+            settings.python_catalog_url().as_deref(),
+            Some("https://example.com/python.json")
+        );
+        assert_eq!(settings.python_catalog_sha256().as_deref(), Some("abc123"));
+        assert_eq!(
+            settings.java_catalog_url().as_deref(),
+            Some("https://example.com/java")
+        );
+    }
+
+    #[test]
+    fn unknown_tool_specific_fields_are_rejected() {
+        // Typo in a field the tool does define: deny_unknown_fields on the
+        // specific struct must catch it.
+        let error = toml::from_str::<Settings>("[node]\ncorepak = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("corepak"), "{error}");
+
+        // A field on a tool with no specific settings is not silently accepted.
+        let error = toml::from_str::<Settings>("[pnpm]\nglobal_dir = \"x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("global_dir"), "{error}");
+        assert!(error.contains("pnpm"), "{error}");
+    }
+
+    #[test]
+    fn settings_round_trip_through_toml() {
+        let mut settings = Settings::default();
+        settings.set_node_corepack(true);
+        settings.tool_entry("node").override_env = true;
+        settings.tool_entry("pnpm").override_env = true;
+        settings.set_npm_default_installer(NpmDefaultInstaller::Pnpm);
+        settings.set_python_catalog_url(Some("https://example.com/p.json".to_string()));
+        settings.set_python_catalog_sha256(Some("deadbeef".to_string()));
+
+        let encoded = toml::to_string(&settings).unwrap();
+        let decoded: Settings = toml::from_str(&encoded).unwrap();
+        assert_eq!(settings, decoded, "round-trip must preserve every field");
+        // Spot-check the decoded values.
+        assert!(decoded.node_corepack());
+        assert!(decoded.effective_override_env("node"));
+        assert!(decoded.effective_override_env("pnpm"));
+        assert_eq!(decoded.npm_default_installer(), NpmDefaultInstaller::Pnpm);
+        assert_eq!(
+            decoded.python_catalog_url().as_deref(),
+            Some("https://example.com/p.json")
+        );
     }
 
     #[test]

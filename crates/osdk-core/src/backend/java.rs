@@ -367,8 +367,8 @@ impl JavaBackend {
         ctx: &Ctx,
         sources: &'a [Source],
     ) -> Vec<(String, Option<&'a Source>)> {
-        if let Some(url) = ctx.config.settings.java.catalog_url.as_ref() {
-            return vec![(url.clone(), None)];
+        if let Some(url) = ctx.config.settings.java_catalog_url() {
+            return vec![(url, None)];
         }
         let mut endpoints = sources
             .iter()

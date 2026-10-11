@@ -1052,7 +1052,7 @@ pub fn config(app: &App, command: ConfigCommand) -> Result<()> {
             );
             println!(
                 "python_catalog = {}",
-                s.python.catalog_url.as_deref().unwrap_or("built-in")
+                s.python_catalog_url().as_deref().unwrap_or("built-in")
             );
             println!("selection    = {:?}", app.ctx.config.sources.selection);
             let npm_registries = &app.ctx.config.registries().npm;

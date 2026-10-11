@@ -116,7 +116,7 @@ impl NodeBackend {
             Some(value) => Err(crate::error::Error::config(format!(
                 "invalid Node corepack option `{value}` (expected true|false)"
             ))),
-            None => Ok(ctx.config.settings.node.corepack),
+            None => Ok(ctx.config.settings.node_corepack()),
         }
     }
 
@@ -289,7 +289,7 @@ impl Backend for NodeBackend {
                     )))
                 }
             },
-            None => ctx.config.settings.node.corepack,
+            None => ctx.config.settings.node_corepack(),
         };
         if let VersionSpec::Exact(version) = &req.spec {
             let mut resolved = ToolVersion::new(self.id(), version);
@@ -508,7 +508,7 @@ mod tests {
     async fn resolution_records_effective_arch_and_corepack() {
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = test_ctx(temp.path());
-        ctx.config.settings.node.corepack = true;
+        ctx.config.settings.set_node_corepack(true);
         let request = ToolRequest::parse("node@20.11.1").unwrap();
         let resolved = NodeBackend.resolve_version(&ctx, &request).await.unwrap();
         assert_eq!(resolved.options["arch"], "x64");

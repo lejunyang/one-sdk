@@ -970,6 +970,11 @@ pub const SETTINGS: &[SettingSpec] = &[
         path: &["settings", "shims", "exclude"],
         kind: SettingKind::List,
     },
+    SettingSpec {
+        key: "override_tools_env",
+        path: &["settings", "override_tools_env"],
+        kind: SettingKind::Bool,
+    },
     // Registry candidates live in the top-level `[registries]` table rather
     // than under `[settings]`, because they configure delegated package
     // managers instead of osdk's own downloads.
@@ -1086,9 +1091,27 @@ pub fn resolve_setting(key: &str) -> Result<ResolvedSetting> {
             }
         }
     }
+    // Per-tool override switch: `<tool>.override_env`, e.g. `pnpm.override_env`.
+    // The `shims.` prefix is handled above and excluded here so a shim-list key
+    // can't be mistaken for a tool named `shims.<...>`.
+    if !key.starts_with("shims.") {
+        if let Some((tool, field)) = key.rsplit_once('.') {
+            if field == "override_env" && !tool.is_empty() {
+                return Ok(ResolvedSetting {
+                    key: key.to_string(),
+                    path: vec![
+                        "settings".to_string(),
+                        tool.to_string(),
+                        "override_env".to_string(),
+                    ],
+                    kind: SettingKind::Bool,
+                });
+            }
+        }
+    }
     let known: Vec<&str> = SETTINGS.iter().map(|setting| setting.key).collect();
     anyhow::bail!(
-        "unknown setting `{key}`\n  known: {}\n  per-tool shim lists: shims.<tool>.{{include|exclude|expose}}",
+        "unknown setting `{key}`\n  known: {}\n  per-tool shim lists: shims.<tool>.{{include|exclude|expose}}\n  per-tool override: <tool>.override_env",
         known.join(", ")
     )
 }
@@ -1586,8 +1609,11 @@ mirrors = false
             ("link_mode", "symlink"),
             ("jobs", "4"),
             ("offline", "true"),
+            ("override_tools_env", "true"),
             ("lang", "en"),
             ("shims.include", "conda:clang:xmllint"),
+            ("pnpm.override_env", "true"),
+            ("node.override_env", "false"),
             // Registry lists live outside `[settings]`, and the in-memory
             // field is `#[serde(skip)]` with its own load path, so "the writer
             // and the loader agree" is a real question here rather than a
@@ -1636,6 +1662,41 @@ mirrors = false
                 "`{key} = {bad}` must be rejected before it reaches the file"
             );
         }
+    }
+
+    #[test]
+    fn per_tool_override_env_routes_under_settings_and_loads() {
+        // Static global switch.
+        let global = resolve_setting("override_tools_env").unwrap();
+        assert_eq!(global.path, vec!["settings", "override_tools_env"]);
+        assert!(matches!(global.kind, SettingKind::Bool));
+
+        // Dynamic per-tool switch routes to `[settings.<tool>] override_env`.
+        let per_tool = resolve_setting("pnpm.override_env").unwrap();
+        assert_eq!(per_tool.path, vec!["settings", "pnpm", "override_env"]);
+        assert!(matches!(per_tool.kind, SettingKind::Bool));
+
+        // Build the document the writer produces, then load it the way the CLI
+        // does on the next command, and confirm the effective switch flips for
+        // only that tool.
+        let item = setting_value(&per_tool, "true").unwrap();
+        let mut doc = toml_edit::DocumentMut::new();
+        let mut table = doc.as_table_mut();
+        let (last, parents) = per_tool.path.split_last().unwrap();
+        for parent in parents {
+            let entry = table
+                .entry(parent)
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+            table = entry.as_table_mut().unwrap();
+        }
+        table.insert(last, item);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("config.toml");
+        std::fs::write(&path, doc.to_string()).unwrap();
+        let loaded = osdk_core::config::Config::load_user(&path).unwrap();
+        assert!(loaded.settings.effective_override_env("pnpm"));
+        assert!(!loaded.settings.effective_override_env("node"));
     }
 
     #[test]

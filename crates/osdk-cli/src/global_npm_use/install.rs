@@ -19,7 +19,7 @@ pub async fn install(
         &cwd,
         requested_installer,
         ToolScope::Global,
-        app.ctx.config.settings.npm.default_installer,
+        app.ctx.config.settings.npm_default_installer(),
     )?;
     let backend = NpmPackageBackend::from_id(&request.backend)
         .ok_or_else(|| anyhow!("invalid npm package backend `{}`", request.backend))?;
