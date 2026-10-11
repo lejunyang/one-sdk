@@ -494,6 +494,8 @@ schema-4 lock records the proxy, module root, and exact Go runtime—not the
 transitive module graph—so an exact completed install can be reused offline,
 but a cold offline build cannot.
 
+Go tool installs honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (including lowercase forms).
+
 Guide: [Go developer tools](site/en/guide/go-tools.md)
 
 ## Scenario: work in each language ecosystem

@@ -21,6 +21,9 @@ osdk source pin node tuna
 osdk source unpin node
 ```
 
+`go:` 的原生安装继承 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 及其小写形式；
+这些传输代理不改变已选择的 `GOPROXY` 模块来源。
+
 特殊源名：`self`（自升级）和 `go-modules`（GOPROXY）。只有明确设置
 `--forward-credentials` 才向自定义端点发送 provider 凭据。持久格式见
 `reference/configuration/sources.md`；项目里的来源改写需要 trust。

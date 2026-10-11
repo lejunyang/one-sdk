@@ -89,6 +89,12 @@ osdk use 'go:example.com/acme/tool[tags=netgo,env=CGO_ENABLED=0]@1.2.3'
 
 ## Proxy selection
 
+Native `go install` honors `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`,
+including their lowercase forms, so it can use the same network route as osdk
+metadata requests. These transport settings do not replace the selected
+`GOPROXY` module source or the isolated build environment.
+
+
 The built-in candidates are `https://proxy.golang.org` and
 `https://goproxy.cn`. The normal `auto`, `ordered`, and pinned source policies
 apply; auto mode probes candidates and caches the ranking before metadata

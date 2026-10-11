@@ -572,6 +572,17 @@ impl GoPackageBackend {
                 "PATHEXT",
             ]));
         }
+        // Metadata requests honor the caller's transport proxy. The isolated
+        // Go provider must preserve that same route instead of attempting a
+        // direct connection after successful metadata resolution.
+        env.extend(crate::process::inherited_env_allowlist(&[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+        ]));
         Ok(env)
     }
 
@@ -2171,6 +2182,21 @@ mod tests {
                 crate::cache::downstream_root(&ctx.dirs.cache).join("go-mod")
             );
             assert!(!call.environment().contains_key(OsStr::new("GOFLAGS")));
+            // The provider must use the same explicit transport as metadata
+            // resolution even though its build environment is cleared.
+            for name in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "no_proxy",
+            ] {
+                assert!(
+                    call.environment().get(OsStr::new(name)).cloned() == std::env::var_os(name),
+                    "transport environment was not preserved: {name}"
+                );
+            }
         }
 
         let offline = context(temporary.path(), true);
