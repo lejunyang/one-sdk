@@ -353,3 +353,7 @@ activation safety checks, see [npm tool implementation](./implementation/npm-too
 Isolated global npm/pnpm installs preserve `NODE_EXTRA_CA_CERTS` as an absolute file path. The additional trust roots do not disable TLS verification or import user npmrc files. Other custom authentication and TLS overrides remain subject to the existing isolation checks; registry probes still require trusted HTTPS connections.
 
 Project-isolated native npm installs also preserve NODE_EXTRA_CA_CERTS, resolving it before changing to the staging directory. Other ambient npm configuration remains isolated.
+
+`osdk exec --tool npm:... -- <command>` resolves the published command name from
+the selected install inventory, even when its target has a different filename
+(such as `prettier.cjs`). Explicit executable paths remain unchanged.

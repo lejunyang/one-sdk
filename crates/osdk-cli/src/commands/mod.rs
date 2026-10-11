@@ -1509,6 +1509,53 @@ tools = ["node"]
     }
 
     #[test]
+    fn exec_dynamic_alias_uses_manifest_target_and_preserves_explicit_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config =
+            osdk_core::config::Config::load(&temporary.path().join("config.toml"), &project)
+                .unwrap();
+        let app = app_with_config(&temporary, config);
+        let id = "github:example/tool";
+        write_dynamic_install(&app, id, "1.2.3", "published", &Default::default());
+        let report = osdk_core::shim::scan_dynamic_installs(&app.ctx).unwrap();
+        let root = &report.installs[0].install_root;
+        let path = root.join("bin/actual-file");
+        std::fs::rename(root.join("bin/published"), &path).unwrap();
+        let mut manifest = report.installs[0].manifest.clone();
+        manifest.bins[0].path = "bin/actual-file".into();
+        manifest.write_atomic(root).unwrap();
+        let version = ToolVersion::new(id, "1.2.3");
+        let resolved = vec![(exact_request_for_version(&version), version)];
+        let args = vec!["--version".into()];
+        let (actual, forwarded) =
+            resolve_managed_launcher_alias(&app, &resolved, "published", &args).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(actual).unwrap(),
+            std::fs::canonicalize(path).unwrap()
+        );
+        assert_eq!(forwarded, args);
+        for explicit in ["./published", "dir/published", "dir\\published"] {
+            assert_eq!(
+                resolve_managed_launcher_alias(&app, &resolved, explicit, &[])
+                    .unwrap()
+                    .0,
+                std::path::PathBuf::from(explicit)
+            );
+        }
+        assert_eq!(
+            resolve_managed_launcher_alias(&app, &resolved, "undeclared", &[])
+                .unwrap()
+                .0,
+            std::path::PathBuf::from("undeclared")
+        );
+        let mut doubled = resolved.clone();
+        doubled.extend(resolved);
+        assert!(resolve_managed_launcher_alias(&app, &doubled, "published", &[]).is_err());
+    }
+
+    #[test]
     fn managed_dynamic_paths_require_matching_request_identity() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");

@@ -351,6 +351,49 @@ pub(crate) fn resolve_managed_launcher_alias(
     program: &str,
     args: &[String],
 ) -> Result<(std::path::PathBuf, Vec<String>)> {
+    // Inventory names need not match target filenames (for example prettier ->
+    // prettier.cjs). Select the validated, published command, not an arbitrary
+    // sibling from the target's directory. Explicit paths remain caller-owned.
+    if !program.contains(['/', '\\']) {
+        let dynamic = resolved
+            .iter()
+            .filter(|(_, version)| version.backend.contains(':'));
+        let mut selected = None;
+        let report = if resolved
+            .iter()
+            .any(|(_, version)| version.backend.contains(':'))
+        {
+            Some(osdk_core::shim::scan_dynamic_installs(&app.ctx)?)
+        } else {
+            None
+        };
+        for (request, version) in dynamic {
+            let install = osdk_core::shim::validated_dynamic_install(
+                &app.ctx,
+                report.as_ref().expect("dynamic scan"),
+                request,
+                &version.version,
+            )?;
+            if let Some(path) = install.executable(program) {
+                if !osdk_core::shim::shim_is_enabled_for(
+                    &app.ctx.config.settings.shims,
+                    &version.backend,
+                    program,
+                    install.owns(program),
+                ) {
+                    continue;
+                }
+                if selected.replace(path).is_some() {
+                    return Err(anyhow!(
+                        "multiple requested tools publish `{program}`; select one tool"
+                    ));
+                }
+            }
+        }
+        if let Some(path) = selected {
+            return Ok((path, args.to_vec()));
+        }
+    }
     let alias = executable_basename(program);
     let (backend_id, canonical, subcommand) = match alias.as_str() {
         "pnpx" => ("pnpm", "pnpm", "dlx"),
