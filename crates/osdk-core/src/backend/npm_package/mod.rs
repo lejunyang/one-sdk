@@ -1523,12 +1523,14 @@ impl Backend for NpmPackageBackend {
     }
 
     fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
+        let force = ctx.config.settings.effective_override_env(self.id());
         let mut env = crate::cache::manager_exec_env(
             &ctx.dirs.cache,
             &[
                 ("npm_config_cache", "npm"),
                 ("npm_config_store_dir", "npm-store"),
             ],
+            force,
         );
         env.insert(
             "npm_config_cache".into(),

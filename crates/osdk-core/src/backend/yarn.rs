@@ -147,7 +147,12 @@ impl Backend for YarnBackend {
         tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
         let mapping = cache_mapping(&tv.version);
-        Ok(crate::cache::manager_exec_env(&ctx.dirs.cache, &[mapping]))
+        let force = ctx.config.settings.effective_override_env(self.id());
+        Ok(crate::cache::manager_exec_env(
+            &ctx.dirs.cache,
+            &[mapping],
+            force,
+        ))
     }
 
     fn bin_names(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<String>> {

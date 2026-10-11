@@ -430,9 +430,11 @@ impl Backend for NodeBackend {
     }
 
     fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
+        let force = ctx.config.settings.effective_override_env(self.id());
         Ok(crate::cache::manager_exec_env(
             &ctx.dirs.cache,
             &[("npm_config_cache", "npm")],
+            force,
         ))
     }
 
@@ -559,18 +561,24 @@ mod tests {
         // user-provided npm_config_cache, and Windows environment names are
         // case-insensitive, so an ambient NPM_CONFIG_CACHE would otherwise make
         // this assertion depend on the developer's shell.
-        let env =
-            crate::cache::manager_env(&ctx.dirs.cache, &[("npm_config_cache", "npm")], |_| None);
+        let env = crate::cache::manager_env(
+            &ctx.dirs.cache,
+            &[("npm_config_cache", "npm")],
+            false,
+            |_| None,
+        );
         assert_eq!(
             PathBuf::from(env.get("npm_config_cache").unwrap()),
             ctx.dirs.cache.join("pkg/npm")
         );
 
         // An npm_config_cache that osdk does not own stays untouched.
-        let preserved =
-            crate::cache::manager_env(&ctx.dirs.cache, &[("npm_config_cache", "npm")], |key| {
-                (key == "npm_config_cache").then(|| "/user/cache".to_string())
-            });
+        let preserved = crate::cache::manager_env(
+            &ctx.dirs.cache,
+            &[("npm_config_cache", "npm")],
+            false,
+            |key| (key == "npm_config_cache").then(|| "/user/cache".to_string()),
+        );
         assert!(!preserved.contains_key("npm_config_cache"));
     }
 

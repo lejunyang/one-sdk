@@ -335,9 +335,11 @@ impl Backend for ZigBackend {
     /// `ZIG_GLOBAL_CACHE_DIR` is exported only to keep build artifacts inside
     /// osdk's cache instead of the user's home directory.
     fn exec_env(&self, ctx: &Ctx, _tv: &ToolVersion) -> Result<BTreeMap<String, String>> {
+        let force = ctx.config.settings.effective_override_env(self.id());
         Ok(crate::cache::manager_exec_env(
             &ctx.dirs.cache,
             &[("ZIG_GLOBAL_CACHE_DIR", "zig")],
+            force,
         ))
     }
 

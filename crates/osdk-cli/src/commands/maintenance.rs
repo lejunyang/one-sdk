@@ -294,7 +294,11 @@ pub fn hook_env(app: &App, shell: String) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, &cwd)?;
     // Layer 2: downstream package caches (only vars the user hasn't set).
-    let cache_vars = osdk_core::cache::cache_env(&app.ctx.dirs.cache, |k| std::env::var(k).ok());
+    let cache_vars = osdk_core::cache::cache_env(
+        &app.ctx.dirs.cache,
+        &|tool| app.ctx.config.settings.effective_override_env(tool),
+        |k| std::env::var(k).ok(),
+    );
     delta.set_vars.extend(cache_vars);
     // Layer 3: globally-enabled model provider adapters.
     let model_vars = osdk_core::model::env::configured_env(&app.ctx, |key| std::env::var(key).ok());
@@ -321,7 +325,11 @@ pub(crate) fn task_environment(
     cwd: &std::path::Path,
 ) -> Result<osdk_core::tasks::runner::TaskEnv> {
     let mut delta = osdk_core::activate::compute_env_delta(&app.ctx, &app.registry, cwd)?;
-    let cache_vars = osdk_core::cache::cache_env(&app.ctx.dirs.cache, |k| std::env::var(k).ok());
+    let cache_vars = osdk_core::cache::cache_env(
+        &app.ctx.dirs.cache,
+        &|tool| app.ctx.config.settings.effective_override_env(tool),
+        |k| std::env::var(k).ok(),
+    );
     delta.set_vars.extend(cache_vars);
     let model_vars = osdk_core::model::env::configured_env(&app.ctx, |key| std::env::var(key).ok());
     delta.set_vars.extend(model_vars);

@@ -99,9 +99,11 @@ impl Backend for PnpmBackend {
         tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
         let mapping = cache_mapping(&tv.version);
+        let force = ctx.config.settings.effective_override_env(self.id());
         Ok(crate::cache::manager_exec_env(
             &ctx.dirs.cache,
             &[("PNPM_HOME", "pnpm"), mapping],
+            force,
         ))
     }
 

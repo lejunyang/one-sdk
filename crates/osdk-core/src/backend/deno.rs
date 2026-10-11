@@ -136,7 +136,12 @@ impl Backend for DenoBackend {
         ctx: &Ctx,
         _tv: &ToolVersion,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        Ok(crate::cache::manager_exec_env(&ctx.dirs.cache, CACHE_ENV))
+        let force = ctx.config.settings.effective_override_env(self.id());
+        Ok(crate::cache::manager_exec_env(
+            &ctx.dirs.cache,
+            CACHE_ENV,
+            force,
+        ))
     }
 
     fn bin_names(&self, ctx: &Ctx, tv: &ToolVersion) -> Result<Vec<String>> {
@@ -207,13 +212,13 @@ mod tests {
             arch: Arch::X64,
             libc: Libc::Glibc,
         });
-        let managed = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, |_| None);
+        let managed = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, false, |_| None);
         assert_eq!(
             PathBuf::from(managed.get("DENO_DIR").unwrap()),
             ctx.dirs.cache.join("pkg/deno")
         );
 
-        let user = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, |key| {
+        let user = crate::cache::manager_env(&ctx.dirs.cache, CACHE_ENV, false, |key| {
             (key == "DENO_DIR").then(|| "/custom/deno".into())
         });
         assert!(!user.contains_key("DENO_DIR"));
