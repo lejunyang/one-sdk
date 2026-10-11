@@ -333,6 +333,31 @@ impl Dirs {
         self.global_packages().join("pnpm")
     }
 
+    /// Redirected yarn classic global folder. Global bins live under
+    /// `<folder>/node_modules/.bin`.
+    pub fn yarn_global_folder(&self) -> PathBuf {
+        self.global_packages().join("yarn")
+    }
+
+    /// Redirected bun install home (`BUN_INSTALL`). `bun add -g` places bins
+    /// under `bin/` and package content under `global/`.
+    pub fn bun_global_home(&self) -> PathBuf {
+        self.global_packages().join("bun")
+    }
+
+    /// Redirected deno install root (`DENO_INSTALL_ROOT`). `deno install`
+    /// places bins under `bin/`.
+    pub fn deno_global_root(&self) -> PathBuf {
+        self.global_packages().join("deno")
+    }
+
+    /// Redirected go bin dir (`GOBIN`) where `go install` writes native
+    /// binaries; it is added to PATH directly like cargo's bin dir rather than
+    /// re-shimmed.
+    pub fn go_global_bin(&self) -> PathBuf {
+        self.global_packages().join("go").join("bin")
+    }
+
     pub fn downloads(&self) -> PathBuf {
         self.cache.join("downloads")
     }

@@ -350,26 +350,53 @@ pub struct GlobalBinSource {
     pub names: Vec<String>,
 }
 
-/// Scan the redirected npm/pnpm global bin directories. Missing or empty
-/// directories are skipped; this never fails so a reshim cannot be blocked by
-/// an absent global dir.
-pub fn global_bin_sources(ctx: &Ctx) -> Vec<GlobalBinSource> {
-    let mut sources = Vec::new();
+/// Every `(owner, bin dir)` pair for redirected package-manager global
+/// installs, listed whether or not the directory currently exists or is
+/// non-empty. Enumerating the *expected* dirs unconditionally lets the post-run
+/// sync detect a directory that an uninstall just emptied, where a scan that
+/// only keeps non-empty dirs would see nothing.
+fn global_bin_dirs(ctx: &Ctx) -> Vec<(&'static str, std::path::PathBuf)> {
+    let mut dirs = Vec::new();
 
     // npm places global bins at the prefix root on Windows and under bin/ on Unix.
     let npm_prefix = ctx.dirs.npm_global_prefix();
     #[cfg(windows)]
-    let npm_bin_dir = npm_prefix;
+    dirs.push(("npm", npm_prefix));
     #[cfg(not(windows))]
-    let npm_bin_dir = npm_prefix.join("bin");
-    push_global_bin_source(&mut sources, "npm", npm_bin_dir);
+    dirs.push(("npm", npm_prefix.join("bin")));
 
     // pnpm 11 places global bins under bin/; pnpm 9 scattered them at the home
-    // root, so scan both (names dedupe because both are owned by pnpm).
+    // root, so watch both (names dedupe because both are owned by pnpm).
     let pnpm_home = ctx.dirs.pnpm_global_home();
-    push_global_bin_source(&mut sources, "pnpm", pnpm_home.join("bin"));
-    push_global_bin_source(&mut sources, "pnpm", pnpm_home);
+    dirs.push(("pnpm", pnpm_home.join("bin")));
+    dirs.push(("pnpm", pnpm_home));
 
+    // yarn classic places global bins under <global folder>/node_modules/.bin.
+    dirs.push((
+        "yarn",
+        ctx.dirs
+            .yarn_global_folder()
+            .join("node_modules")
+            .join("bin"),
+    ));
+
+    // bun places global bins under BUN_INSTALL/bin.
+    dirs.push(("bun", ctx.dirs.bun_global_home().join("bin")));
+
+    // deno places globally installed bins under DENO_INSTALL_ROOT/bin.
+    dirs.push(("deno", ctx.dirs.deno_global_root().join("bin")));
+
+    dirs
+}
+
+/// Scan the redirected global bin directories for every package manager.
+/// Missing or empty directories are skipped; this never fails so a reshim
+/// cannot be blocked by an absent global dir.
+pub fn global_bin_sources(ctx: &Ctx) -> Vec<GlobalBinSource> {
+    let mut sources = Vec::new();
+    for (owner, bin_dir) in global_bin_dirs(ctx) {
+        push_global_bin_source(&mut sources, owner, bin_dir);
+    }
     sources
 }
 
@@ -389,6 +416,146 @@ fn push_global_bin_source(
             names,
         });
     }
+}
+
+/// Shims added or removed while reconciling one package manager's global bins.
+#[derive(Debug, Default, Clone)]
+pub struct GlobalSyncOutcome {
+    /// Shims created for newly exported global commands.
+    pub added: Vec<String>,
+    /// Stale shims removed because their command disappeared.
+    pub removed: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct GlobalSyncState {
+    #[serde(rename = "owner", default)]
+    owners: BTreeMap<String, OwnerSyncState>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct OwnerSyncState {
+    /// Aggregated latest modification time of the owner's bin dirs, as seconds
+    /// and nanoseconds since the UNIX epoch.
+    #[serde(default)]
+    mtime_sec: i64,
+    #[serde(default)]
+    mtime_nsec: u32,
+    /// Command names exported at the last sync.
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+/// Reconcile the shims directory against one package manager's redirected
+/// global bin dirs, intended to run right after the package manager process
+/// exits. The bin dirs' aggregated modification time is compared to the value
+/// cached from the previous run: when nothing changed this returns without any
+/// directory enumeration. When it changed, current names are read and diffed
+/// against the last sync -- new names get a shim; vanished names are removed
+/// unless `is_protected` reports they are still provided by a managed tool.
+///
+/// A failure here never undoes the command that just ran; callers should treat
+/// it as a warning rather than a hard error.
+pub fn sync_owner_global_shims(
+    ctx: &Ctx,
+    owner: &str,
+    is_protected: impl Fn(&str) -> bool,
+) -> Result<GlobalSyncOutcome> {
+    // This owner's expected bin dirs, whether or not they currently exist, so
+    // an uninstall that emptied a dir is still observed.
+    let bin_dirs: Vec<std::path::PathBuf> = global_bin_dirs(ctx)
+        .into_iter()
+        .filter(|(candidate, _)| *candidate == owner)
+        .map(|(_, dir)| dir)
+        .collect();
+
+    let mut latest: Option<std::time::SystemTime> = None;
+    let mut current = BTreeSet::new();
+    for dir in &bin_dirs {
+        if let Ok(metadata) = std::fs::metadata(dir) {
+            if let Ok(modified) = metadata.modified() {
+                latest = Some(match latest {
+                    Some(prev) => prev.max(modified),
+                    None => modified,
+                });
+            }
+        }
+        for name in crate::backend::bin_names_in_dirs(std::slice::from_ref(dir)) {
+            current.insert(name);
+        }
+    }
+
+    let state_path = ctx.dirs.global_packages().join(".sync-state.toml");
+    let mut state = read_sync_state(&state_path);
+    let (mtime_sec, mtime_nsec) =
+        match latest.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()) {
+            Some(duration) => (duration.as_secs() as i64, duration.subsec_nanos()),
+            None => (0, 0),
+        };
+    let previous = state.owners.get(owner).cloned().unwrap_or_default();
+
+    // Fast path: bin dir mtime unchanged since the last sync.
+    if previous.mtime_sec == mtime_sec && previous.mtime_nsec == mtime_nsec {
+        return Ok(GlobalSyncOutcome::default());
+    }
+
+    let previous_names: BTreeSet<String> = previous.names.iter().cloned().collect();
+    let mut outcome = GlobalSyncOutcome::default();
+
+    // A name another package manager still exports must keep its shared shim.
+    let mut all_global_names = BTreeSet::new();
+    for source in global_bin_sources(ctx) {
+        all_global_names.extend(source.names);
+    }
+
+    let shim_bin = find_shim_binary(&ctx.dirs);
+    for name in &current {
+        if !previous_names.contains(name) {
+            if let Some(shim_bin) = shim_bin.as_ref() {
+                generate_shim(&ctx.dirs, name, shim_bin)?;
+                outcome.added.push(name.clone());
+            }
+        }
+    }
+    for name in previous_names
+        .iter()
+        .filter(|name| !current.contains(*name))
+    {
+        if all_global_names.contains(name) || is_protected(name) {
+            continue;
+        }
+        if remove_managed_shim(&ctx.dirs, name)? {
+            outcome.removed.push(name.clone());
+        }
+    }
+
+    state.owners.insert(
+        owner.to_string(),
+        OwnerSyncState {
+            mtime_sec,
+            mtime_nsec,
+            names: current.into_iter().collect(),
+        },
+    );
+    write_sync_state(&state_path, &state)?;
+
+    Ok(outcome)
+}
+
+fn read_sync_state(path: &Path) -> GlobalSyncState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_sync_state(path: &Path, state: &GlobalSyncState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(state)
+        .map_err(|error| Error::config(format!("cannot serialize global sync state: {error}")))?;
+    std::fs::write(path, text).map_err(|error| Error::io(path, error))
 }
 
 pub fn scan_dynamic_installs(ctx: &Ctx) -> Result<ScanReport> {
@@ -1597,6 +1764,86 @@ mod tests {
             show_progress: false,
         }
     }
+
+    fn global_shim_present(shims: &std::path::Path, name: &str) -> bool {
+        std::fs::read_dir(shims).unwrap().flatten().any(|entry| {
+            let file = entry.file_name().to_string_lossy().to_string();
+            file == name || file.starts_with(&format!("{name}."))
+        })
+    }
+
+    fn never_protected(_: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn global_bin_sync_adds_skips_removes_and_protects() {
+        let temporary = tempfile::tempdir().unwrap();
+        let ctx = jdk_test_ctx(temporary.path(), &[]);
+
+        // find_shim_binary needs a launcher copy under data/bin.
+        let shim_suffix = if cfg!(windows) { ".exe" } else { "" };
+        let bin_launcher_dir = ctx.dirs.data.join("bin");
+        std::fs::create_dir_all(&bin_launcher_dir).unwrap();
+        let shim_launcher = bin_launcher_dir.join(format!("osdk-shim{shim_suffix}"));
+        // Copy a real executable (the test runner) so Windows' extension-less
+        // launcher is a valid PE that remove_managed_shim recognizes; a plain
+        // "x" fixture would not be recognized and would linger on uninstall.
+        std::fs::copy(std::env::current_exe().unwrap(), &shim_launcher).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim_launcher, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        // pnpm global bins land under <home>/bin.
+        let pnpm_bin = ctx.dirs.pnpm_global_home().join("bin");
+        std::fs::create_dir_all(&pnpm_bin).unwrap();
+        let launcher_name = if cfg!(windows) {
+            "tool-a.cmd"
+        } else {
+            "tool-a"
+        };
+        let launcher = pnpm_bin.join(launcher_name);
+        let make_launcher = |path: &std::path::Path| {
+            std::fs::write(path, b"x").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        };
+        make_launcher(&launcher);
+
+        // First sync: the new command gets a shim.
+        let first = sync_owner_global_shims(&ctx, "pnpm", never_protected).unwrap();
+        assert_eq!(first.added, vec!["tool-a".to_string()]);
+        assert!(first.removed.is_empty());
+        let shims = ctx.dirs.shims();
+        assert!(global_shim_present(&shims, "tool-a"));
+
+        // Second sync with no change hits the mtime fast path.
+        let second = sync_owner_global_shims(&ctx, "pnpm", never_protected).unwrap();
+        assert!(second.added.is_empty() && second.removed.is_empty());
+
+        // Uninstall: removing the launcher updates the dir mtime; sync removes.
+        std::fs::remove_file(&launcher).unwrap();
+        let third = sync_owner_global_shims(&ctx, "pnpm", never_protected).unwrap();
+        assert_eq!(third.removed, vec!["tool-a".to_string()]);
+        assert!(!global_shim_present(&shims, "tool-a"));
+
+        // Reinstall, then uninstall again but with the name reported protected
+        // (e.g. a managed tool still owns it): the shim must be kept.
+        make_launcher(&launcher);
+        let fourth = sync_owner_global_shims(&ctx, "pnpm", never_protected).unwrap();
+        assert_eq!(fourth.added, vec!["tool-a".to_string()]);
+        std::fs::remove_file(&launcher).unwrap();
+        let fifth = sync_owner_global_shims(&ctx, "pnpm", |name| name == "tool-a").unwrap();
+        assert!(fifth.removed.is_empty());
+        assert!(global_shim_present(&shims, "tool-a"));
+    }
+
     // Generation and routing must agree on the owner of a shared launcher.
     // If they diverge, the shim dispatches to a copy other than the one it
     // was generated for, which is invisible until a build misbehaves.
