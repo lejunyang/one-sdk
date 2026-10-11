@@ -560,7 +560,10 @@ fn collect_settings_requirements(value: &toml::Value, found: &mut Vec<TrustRequi
         if SAFE_SETTINGS_KEYS.contains(&key.as_str()) {
             continue;
         }
-        if let Some((_, reason)) = TRUST_REQUIRING_SETTINGS.iter().find(|(name, _)| name == key) {
+        if let Some((_, reason)) = TRUST_REQUIRING_SETTINGS
+            .iter()
+            .find(|(name, _)| name == key)
+        {
             found.push(TrustRequirement {
                 key: format!("settings.{key}"),
                 reason: *reason,
