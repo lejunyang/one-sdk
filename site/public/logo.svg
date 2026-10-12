@@ -1,19 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="osdk">
+  <title>osdk</title>
   <defs>
-    <linearGradient id="bg" x1="38" y1="30" x2="220" y2="226" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#4a9b80"/>
-      <stop offset="1" stop-color="#22443a"/>
+    <linearGradient id="osdk-bg" x1="24" y1="16" x2="232" y2="240" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2f8f74"/>
+      <stop offset="1" stop-color="#173f35"/>
     </linearGradient>
-    <linearGradient id="mark" x1="72" y1="64" x2="185" y2="194" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#fff8e8"/>
-      <stop offset="1" stop-color="#f2bd73"/>
+    <linearGradient id="osdk-front" x1="40" y1="100" x2="168" y2="212" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffaf0"/>
+      <stop offset="1" stop-color="#f6e2bb"/>
     </linearGradient>
   </defs>
-  <rect width="256" height="256" rx="64" fill="url(#bg)"/>
-  <path
-    fill="url(#mark)"
-    fill-rule="evenodd"
-    d="M128 48c44.18 0 80 35.82 80 80s-35.82 80-80 80-80-35.82-80-80 35.82-80 80-80Zm0 35c-24.85 0-45 20.15-45 45s20.15 45 45 45 45-20.15 45-45-20.15-45-45-45Z"
-  />
-  <path fill="#fff8e8" d="M120 63h16v49h-16zM120 144h16v49h-16zM63 120h49v16H63zM144 120h49v16h-49z"/>
+  <!-- Tile -->
+  <rect width="256" height="256" rx="60" fill="url(#osdk-bg)"/>
+  <!-- Stacked SDK layers: one manager over many toolchains -->
+  <rect x="100" y="40" width="116" height="88" rx="18" fill="#f2bd73" opacity="0.5"/>
+  <rect x="72" y="70" width="120" height="96" rx="19" fill="#f2bd73" opacity="0.82"/>
+  <rect x="40" y="100" width="128" height="112" rx="20" fill="url(#osdk-front)"/>
+  <!-- Prompt on the front layer -->
+  <path d="M68 136 L94 156 L68 176" fill="none" stroke="#1f6f5c" stroke-width="14"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="106" y="169" width="40" height="14" rx="7" fill="#1f6f5c"/>
 </svg>
