@@ -18,8 +18,8 @@ package managers, developer tools, and model snapshots. Use it to:
 - inspect storage, caches, active versions, and environment health in English or
   Chinese.
 
-Start with the [getting-started guide](site/en/guide/getting-started.md), or see
-the [complete feature overview](site/en/guide/features.md).
+Start with the [quick start](site/en/guide/start/quick-start.md), or browse the
+[user guide](site/en/guide/index.md), grouped by feature.
 
 ## Install
 
@@ -102,7 +102,7 @@ speed-probed just like tool downloads, so a GitHub mirror is
 used automatically when it is faster; `osdk source test self` shows the
 measurement and `osdk source pin self <id>` fixes the choice.
 
-See [Installation](site/en/guide/installation.md) for PATH setup, installer
+See [Installation](site/en/guide/start/installation.md) for PATH setup, installer
 options, source builds, and verification.
 
 ### GitHub Actions
@@ -117,7 +117,7 @@ application dependencies, and exports the selected environment to later steps:
 ```
 
 Pin the action to a release tag or full commit SHA in production. See
-[GitHub Actions](site/en/guide/github-actions.md) for CI-safe defaults, inputs,
+[GitHub Actions](site/en/guide/project/github-actions.md) for CI-safe defaults, inputs,
 cache keys, monorepo setup, and strict offline/checksum modes.
 
 ## Quick start
@@ -210,8 +210,8 @@ Reuse, activation, shims, `where`, `uninstall`, and `reshim` all select the exac
 configured identity. Older `.osdk-tool.json` manifests are detected only as
 legacy state and are never reused or executed.
 
-Guides: [Project toolchains](site/en/guide/projects.md) ·
-[Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
+Guides: [Project toolchains](site/en/guide/config/files.md) ·
+[Lockfiles and repeatable environments](site/en/guide/project/lockfiles.md)
 
 ## Scenario: replace a Makefile with project tasks
 
@@ -247,7 +247,7 @@ Array entries run in order and stop at the first failure; `ignore_error`
 tolerates one and continues (printing a warning); `{ tasks = [...] }` runs them
 together and waits for all. Do not reach for the shell's `&` -- it means
 something different in cmd, PowerShell 7, and PowerShell 5.1. See
-[Project tasks](site/en/guide/tasks.md).
+[Project tasks](site/en/guide/project/tasks.md).
 
 Declare sub-projects with `[task].roots` and invoke their tasks as
 `osdk run //path:task`; each runs relative to its own project directory.
@@ -290,7 +290,7 @@ only `.exe`-named outputs. After an online install and `osdk lock`,
 `osdk --offline install` can replay the locked URL, filename, and checksum from
 the exact identity-scoped cache; the lock does not embed the artifact bytes.
 
-Guide: [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
+Guide: [Direct HTTPS artifacts](site/en/guide/tools/http-artifacts.md)
 
 ## Scenario: use package managers with an available registry
 
@@ -316,7 +316,7 @@ osdk registry test pnpm
 Explicit registry flags, environment variables, private registries, and native
 package-manager configuration remain under your control.
 
-Guide: [Package managers and registry selection](site/en/guide/package-managers.md)
+Guide: [Package managers and registry selection](site/en/guide/tools/package-managers.md)
 
 ## Scenario: add an npm-published developer tool
 
@@ -378,7 +378,7 @@ remain installed. A global uninstall also removes its user config, lock entry,
 and now-unowned shims. Project-managed npm dependencies and their curated
 `.osdk/npm-bin` generation remain separate from these osdk-owned roots.
 
-Guide: [npm developer tools](site/en/guide/npm-tools.md)
+Guide: [npm developer tools](site/en/guide/tools/npm.md)
 
 ## Scenario: install a project's own application dependencies
 
@@ -452,7 +452,7 @@ osdk deps --no-install-tools
 With no `[deps]` section, `osdk deps` only reports what it found and which
 providers could manage it. It installs nothing.
 
-Guide: [application dependencies](site/en/guide/deps.md)
+Guide: [application dependencies](site/en/guide/project/deps.md)
 
 ## Scenario: install a Rust CLI from Cargo
 
@@ -482,7 +482,7 @@ for a cold offline build. Registry versions are recorded as `version-only`, full
 Git revisions as `immutable-revision`, and Git HEAD/tags/branches as
 `floating-ref`.
 
-Guide: [Cargo developer tools](site/en/guide/cargo-tools.md)
+Guide: [Cargo developer tools](site/en/guide/tools/cargo.md)
 
 ## Scenario: install a Go command package
 
@@ -508,7 +508,7 @@ but a cold offline build cannot.
 
 Go tool installs honor `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (including lowercase forms).
 
-Guide: [Go developer tools](site/en/guide/go-tools.md)
+Guide: [Go developer tools](site/en/guide/tools/go.md)
 
 ## Scenario: work in each language ecosystem
 
@@ -579,7 +579,7 @@ osdk exec --tool zig -- zig cc -target aarch64-linux-musl -o hello hello.c
 osdk exec --tool zig -- zig cc -target x86_64-windows-gnu -o hello.exe hello.c
 ```
 
-Guide: [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
+Guide: [Runtime and ecosystem workflows](site/en/guide/runtimes/overview.md)
 
 ## Scenario: manage the Android SDK
 
@@ -694,7 +694,7 @@ environment has no `JAVA_HOME` of your own (a stale value osdk's activation
 exported is recomputed for the current directory, so one project's JDK cannot
 drive another's build). Install one with `osdk install java`.
 
-Guide: [Android SDK tools](site/en/guide/android.md)
+Guide: [Android SDK tools](site/en/guide/runtimes/android.md)
 
 ## Scenario: pin a model snapshot
 
@@ -733,7 +733,7 @@ project declaration or lock entry; local imports are machine-specific and must b
 original bytes. `model unuse NAME` removes project intent, lock state, views, and normally local bytes;
 `--keep-snapshot` retains bytes. `model remove NAME` removes only local bytes and views.
 
-Guide: [Model snapshots](site/en/guide/models.md)
+Guide: [Model snapshots](site/en/guide/ai/models.md)
 ## Scenario: install a skill for an AI coding agent
 
 A skill is a `SKILL.md` instruction package that AI coding agents such as Claude
@@ -778,7 +778,7 @@ existing real directory and link from an existing link. Local sources that overl
 their destination are rejected before staging. You can also declare skills in
 `osdk.toml` under `[skills]` and let `osdk skills sync` reproduce them.
 
-Guide: [Agent skills](site/en/guide/skills.md)
+Guide: [Agent skills](site/en/guide/ai/skills.md)
 
 ## Scenario: control sources, offline use, and trust
 
@@ -884,7 +884,10 @@ plural. Singleton settings and namespaces use `[task]`, `[container]`,
 `[aliases]`, `[syspkg]`, and the temporary `[sys.pkg.packages]` form remain readable; use
 `osdk config migrate --dry-run` and then `osdk config migrate` to rewrite them.
 
-Guide: [Sources, offline use, and security](site/en/guide/sources-security.md)
+Guides: [Download sources and mirrors](site/en/guide/sources/mirrors.md) ·
+[Offline mode](site/en/guide/sources/offline.md) ·
+[Integrity and attestation](site/en/guide/sources/integrity.md) ·
+[Project configuration trust](site/en/guide/config/trust.md)
 
 ## Scenario: inspect and operate native container runtimes
 
@@ -993,7 +996,7 @@ non-executing request reports typed unsupported, while selectors and execution
 flags are rejected. The command never expands into system-wide cleanup of
 containers, volumes, networks, or implementation-private stores.
 
-Guide: [Container runtimes, registries, and native operations](site/en/guide/containers.md)
+Guide: [Container runtimes, registries, and native operations](site/en/guide/system/containers.md)
 
 ## Scenario: see what package managers the host has
 
@@ -1020,7 +1023,7 @@ administrator rights and an explicit `--accept-plan` fingerprint. A mirror that
 cannot be installed (older than what is present) is refused up front, and a
 failure part-way through rolls itself back.
 
-Guide: [System Package Managers](site/en/guide/system-packages.md)
+Guide: [System Package Managers](site/en/guide/system/packages.md)
 
 ## Scenario: inspect caches and reclaim storage
 
@@ -1035,7 +1038,7 @@ osdk --yes prune
 `cache clean` removes downloaded archives. `prune` reclaims unreferenced shared
 content; `prune --dry-run` does not delete anything.
 
-Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
+Guide: [Caches and cleanup](site/en/guide/maintenance/cache.md)
 
 ## Scenario: a tool updated itself and no longer matches
 
@@ -1053,7 +1056,7 @@ nothing on the execution path hashes anything.
 
 Dynamic installs are checked at each identity-specific root. Newly installed PyPI tools record an integrity baseline; reinstall older PyPI installs with `--force` to create one. Python bytecode caches are excluded.
 
-Guide: [Storage, caches, and shell integration](site/en/guide/storage-shell.md)
+Guide: [Diagnostics and install verification](site/en/guide/maintenance/diagnostics.md)
 
 ## Scenario: diagnose an environment or switch language
 
@@ -1080,7 +1083,9 @@ session preference.
 toggle; when those disagree it says so and names the variable to set, instead of
 letting a browser-working, osdk-timing-out setup go unexplained.
 
-Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
+Guides: [Diagnostics](site/en/guide/maintenance/diagnostics.md) ·
+[Environment variables](site/en/guide/config/environment.md) ·
+[Shell activation and completions](site/en/guide/basics/shell.md)
 
 ## Support matrix
 
@@ -1090,6 +1095,7 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 | Runtimes | Node.js, Python, Java JDK/JRE, Go, Rust, Deno, Bun, Zig |
 | Package and JVM tools | npm, pnpm, Yarn, Maven, Gradle, Kotlin |
 | Other developer tools | npm packages through `npm:<package>`, registry crates or HTTPS Git repositories through `cargo:...`, Go command packages through `go:<module-or-command-path>`, conda packages and toolchains such as CUDA through `conda:<package>`, Python CLIs through `pypi:<project>` (one virtual environment per tool, with dependencies shared between them), public GitHub Releases through `github:owner/repo`, and exact checksum-pinned HTTPS artifacts through `http:https://...{version}...` |
+| Android SDK | NDK, platform-tools, build-tools, cmdline-tools, platforms, emulator, and system images |
 | Model providers | Hugging Face, ModelScope, Civitai LoRA versions |
 | Agent skills | Install `SKILL.md` packages from GitHub (`github:owner/repo` with an optional subdir) or a local path, linked into Claude Code / Codex / Cursor / OpenCode / Gemini CLI / GitHub Copilot and more |
 | Native container operations | Docker Engine, containerd, Docker Buildx, anonymous OCI registry tests, built-in Docker Hub mirror benchmarking, safe native mirror apply, direct native image pulls, native cache status, Docker local-endpoint pruning, and BuildKit prune previews |
@@ -1099,23 +1105,50 @@ Guide: [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage
 
 ## Documentation
 
-- [Feature overview](site/en/guide/features.md)
-- [Getting started](site/en/guide/getting-started.md)
-- [Project toolchains](site/en/guide/projects.md)
-- [Lockfiles and repeatable environments](site/en/guide/lockfiles.md)
-- [Runtime and ecosystem workflows](site/en/guide/runtimes.md)
-- [Package managers and registry selection](site/en/guide/package-managers.md)
-- [npm developer tools](site/en/guide/npm-tools.md)
-- [application dependencies](site/en/guide/deps.md)
-- [Cargo developer tools](site/en/guide/cargo-tools.md)
-- [Go developer tools](site/en/guide/go-tools.md)
-- [Direct HTTPS artifacts](site/en/guide/http-artifacts.md)
-- [Model snapshots](site/en/guide/models.md)
-- [Agent skills](site/en/guide/skills.md)
-- [Sources, offline use, and security](site/en/guide/sources-security.md)
-- [Container runtimes, registries, and native operations](site/en/guide/containers.md)
-- [Storage, shell integration, diagnostics, and i18n](site/en/guide/storage-shell.md)
-- [Implementation docs](site/en/guide/implementation/index.md)
+Getting started and configuration:
+
+- [User guide index](site/en/guide/index.md)
+- [Installation](site/en/guide/start/installation.md) ·
+  [Quick start](site/en/guide/start/quick-start.md)
+- [Configuration files](site/en/guide/config/files.md) ·
+  [Environment variables](site/en/guide/config/environment.md) ·
+  [Global options](site/en/guide/config/cli-options.md) ·
+  [Directories and storage](site/en/guide/config/storage.md) ·
+  [Project configuration trust](site/en/guide/config/trust.md)
+
+Using osdk:
+
+- Basics: [Install, switch, and inspect](site/en/guide/basics/commands.md) ·
+  [Shell activation](site/en/guide/basics/shell.md) ·
+  [PATH control](site/en/guide/basics/path-control.md)
+- Projects: [Toolchains](site/en/guide/project/discovery.md) ·
+  [Lockfiles](site/en/guide/project/lockfiles.md) ·
+  [Tasks](site/en/guide/project/tasks.md) ·
+  [Application dependencies](site/en/guide/project/deps.md) ·
+  [GitHub Actions](site/en/guide/project/github-actions.md)
+- Runtimes: [Overview](site/en/guide/runtimes/overview.md) ·
+  [Node.js](site/en/guide/runtimes/node.md) · [Python](site/en/guide/runtimes/python.md) ·
+  [Java](site/en/guide/runtimes/java.md) · [Go](site/en/guide/runtimes/go.md) ·
+  [Rust](site/en/guide/runtimes/rust.md) · [Zig](site/en/guide/runtimes/zig.md) ·
+  [Android SDK](site/en/guide/runtimes/android.md)
+- Tools: [Package managers](site/en/guide/tools/package-managers.md) ·
+  [npm](site/en/guide/tools/npm.md) · [Cargo](site/en/guide/tools/cargo.md) ·
+  [Go](site/en/guide/tools/go.md) · [Python](site/en/guide/tools/python.md) ·
+  [Conda](site/en/guide/tools/conda.md) ·
+  [GitHub Releases](site/en/guide/tools/github-releases.md) ·
+  [HTTPS artifacts](site/en/guide/tools/http-artifacts.md) ·
+  [Declarative backends](site/en/guide/tools/declarative-backends.md)
+- Models and AI: [Model snapshots](site/en/guide/ai/models.md) ·
+  [Agent skills](site/en/guide/ai/skills.md)
+- Sources and security: [Mirrors](site/en/guide/sources/mirrors.md) ·
+  [Offline and pre-releases](site/en/guide/sources/offline.md) ·
+  [Integrity](site/en/guide/sources/integrity.md)
+- System: [Container runtimes](site/en/guide/system/containers.md) ·
+  [System package managers](site/en/guide/system/packages.md)
+- Maintenance: [Caches](site/en/guide/maintenance/cache.md) ·
+  [Diagnostics](site/en/guide/maintenance/diagnostics.md)
+
+How it works: [Internals](site/en/internals/index.md)
 
 Contributions are welcome through
 [issues](https://github.com/lejunyang/one-sdk/issues) and pull requests.

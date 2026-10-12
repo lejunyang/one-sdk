@@ -10,37 +10,49 @@ hero:
     alt: osdk logo
   actions:
     - theme: brand
-      text: Get Started
-      link: /en/guide/installation
+      text: Install
+      link: /en/guide/start/installation
     - theme: alt
-      text: Explore Features
-      link: /en/guide/features
+      text: User Guide
+      link: /en/guide/
     - theme: alt
       text: Internals
-      link: /en/guide/implementation/
+      link: /en/internals/
     - theme: alt
       text: GitHub
       link: https://github.com/lejunyang/one-sdk
 
 features:
   - icon: ◈
-    title: One CLI, Many SDKs
-    details: Manage Node.js, Python, Java, Go, Rust, package managers, `npm:<package>` developer tools, and GitHub Release tools with one command model.
-  - icon: ⧉
-    title: Cross-Version Deduplication
-    details: Installed versions can reuse identical files to reduce duplicate disk use; the implementation guide covers the storage strategy.
-  - icon: ⇄
-    title: Automatic Fastest Mirrors
-    details: Probe official sources and authoritative mirrors, select by speed, and fail over when metadata or artifact downloads fail.
+    title: One command model for every runtime
+    details: Node.js, Python, Java, Go, Rust, Zig, the Android SDK, and tools published on npm, Cargo, Go, PyPI, Conda, or GitHub Releases all use the same install / use / exec.
+    link: /en/guide/runtimes/overview
+    linkText: Runtimes overview
   - icon: ⌁
-    title: Reproducible Projects
-    details: Generate a platform-aware osdk.lock with exact versions and backend-specific reproduction data; schema 3 records npm tool scope and native-lock identity.
+    title: Reproducible projects
+    details: osdk.toml declares tools and tasks, a platform-partitioned osdk.lock records exact versions and artifact identity, and one install reproduces it for the team and CI.
+    link: /en/guide/project/lockfiles
+    linkText: Lockfiles
+  - icon: ⇄
+    title: Fastest mirror, automatically
+    details: Probes official sources and authoritative mirrors, ranks them by measured speed, and fails over when an artifact does not verify.
+    link: /en/guide/sources/mirrors
+    linkText: Sources and mirrors
   - icon: ✓
-    title: Integrity and Provenance
-    details: Verify upstream checksums, enforce strict checksum policies, and validate GitHub Artifact Attestations with Sigstore.
+    title: Integrity and provenance
+    details: Verifies upstream checksums and signatures, can require GitHub Artifact Attestations, and asks you to approve security-relevant project configuration.
+    link: /en/guide/sources/integrity
+    linkText: Integrity and signatures
+  - icon: ⧉
+    title: Deduplicated, reinstallable offline
+    details: Verified files go into a content-addressed store shared across versions; after one online install, --offline reinstalls from cache.
+    link: /en/guide/config/storage
+    linkText: Directories and storage
   - icon: ⬡
-    title: Offline Reinstall and Shared Caches
-    details: Reuse metadata, artifacts, and native package caches; cold offline npm reinstalls also need installer-owned native locks and warmed caches.
+    title: Models, skills, and the system
+    details: Lock Hugging Face, ModelScope, and Civitai model snapshots, install skills for AI agents, and diagnose container runtimes and system package managers.
+    link: /en/guide/ai/models
+    linkText: Model snapshots
 ---
 
 ## Start in three steps
@@ -57,4 +69,4 @@ osdk use -g node@20
 node --version
 ```
 
-[Read the complete installation guide →](/en/guide/installation)
+[Read the complete installation guide →](/en/guide/start/installation)

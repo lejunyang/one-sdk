@@ -1,0 +1,355 @@
+# 可复现锁文件
+
+除 Rust 浮动 channel 外，`osdk.lock` 保存解析后的精确版本和已选择 artifact，使
+同一平台可以不重新查询上游版本目录而重建环境。Rust 的 `stable`、`beta`、
+`nightly` 等 lock 只保存 rustup channel 名，未来重装可能得到更新 toolchain；需要
+不可变重建时请使用明确版本或带日期的 Rust toolchain。Lock 是可复现输入和审计
+记录，不是跳过校验的信任凭据。
+
+## 命令与 lock 的交互
+
+```text
+osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk outdated [TOOL[@VERSION] ...]
+osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
+osdk model use NAME REFERENCE [OPTIONS]
+osdk model import NAME PATH [OPTIONS]
+osdk model sync [NAME]
+```
+
+| 调用 | 是否读取现有 lock | 是否写 lock |
+| --- | --- | --- |
+| 无工具且无 `-o` 的 `install` | 是；有当前 host 平台区段就使用其中全部工具；否则项目内只用项目声明、项目外使用全局配置 | 命中 lock 时否；项目内回退到配置并成功安装后写当前平台精确结果 |
+| `install TOOL...` | 否 | 否 |
+| `install -o KEY=VALUE`，即使没写工具 | 否 | 项目内按配置成功安装后写当前平台结果；项目外否 |
+| 项目级 `use TOOL...` | 否 | 是；更新该工具和注入的受管 runtime，失败时回滚配置 |
+| `use --global TOOL...` | 否 | 不写项目 lock；全局 npm/Go 工具按各自语义维护用户 lock |
+| `lock` | 仅为保留其他平台/模型而载入旧文件 | 是，重建目标平台的工具表（仅项目自己声明的工具，见下） |
+| `outdated` | 否；重新解析配置或显式请求 | 否 |
+| `upgrade` | 否；重新解析配置或显式请求 | 是，重建 host 平台工具表（同样只记项目工具） |
+| `exec` | 否 | 否 |
+| `model use` | 否 | 写项目声明；本身不写 lock |
+| `model import NAME PATH` | 是，仅用于拒绝同名冲突 | 否；本地路径不可跨机器恢复 |
+| `model sync [NAME]` | 是 | 解析新增/变更声明并合并模型 lock |
+| `list`、`current`、`where` | 否 | 否 |
+
+`outdated` 的“当前”列是该 backend 所有已安装版本中的最大值；它检查重新解析出的
+精确目标是否已安装，并不表示目录当前激活版本。`upgrade` 安装新的解析结果后刷新 lock。
+
+## 项目 lock 只记项目自己的工具
+
+`osdk.lock` 与项目配置同目录、随项目一起提交，因此它描述的是**这个项目**，而不是
+执行 `lock` 的那台机器恰好在全局配置里钉了什么。不带工具操作数时，`lock` 与
+`upgrade` 只把项目自己声明的工具写入 lock：
+
+| 工具来源 | 是否进入项目 lock |
+| --- | --- |
+| 项目 `osdk.toml` / `.osdk.toml` | 是 |
+| 项目 `.tool-versions` | 是 |
+| 项目证据推导（`package.json` 的 `packageManager`、发现的 Node 范围） | 是 |
+| 用户全局 `config.toml` | **否** |
+| 命令行显式点名（`osdk lock java`） | 是，显式指令优先于上述过滤 |
+
+判据取自配置层的来源记录，与 shell 激活使用的是同一份数据。项目里的裸
+`install` 从 lock 回退到配置时也只物化项目声明，不会为了报告「已安装」而遍历无关的
+全局钉版；在项目外执行裸 `install` 仍会应用用户全局配置。`exec` 与 `outdated` 仍可使用
+全局默认，`upgrade` 也照旧安装全部已配置工具，只是不再把全局条目记进项目 lock。
+
+这里限制的是**请求集合**，不是安装存储。工具二进制仍放在用户级 osdk 安装池中；项目
+请求的同一版本如果已经安装，会直接复用并报告已安装，不会在项目目录复制一份。
+
+这条规则修正的是一个静默行为：此前只钉了一个工具的项目会得到一份列出十几个工具的
+lock，而全局的 `java = "26"` 会被写进一个明确钉着 `21` 的项目，且不产生任何提示。
+需要连同全局工具一起锁定时，把它们显式写进项目配置，或在命令行点名。
+
+## 建议工作流
+
+```bash
+# 安装并选择工具，同时更新项目配置和当前平台 lock
+osdk use node@20
+
+# 使用当前平台 lock 中的解析结果和 artifact
+osdk install
+
+# 手工改过 [tools] 后，只解析并刷新 lock，不安装
+osdk lock
+
+# 查看当前声明重新解析后是否有尚未安装的目标
+osdk outdated
+
+# 安装重新解析的目标并刷新 lock
+osdk upgrade
+```
+
+显式 `osdk install node@20` 始终服从显式请求而不读写 lock，因为它不修改项目 `[tools]`；
+需要项目选择时使用 `use`。给无参数安装增加 backend 选项也会绕过 lock 读取快路径，但项目
+内成功安装后会把实际选项和精确结果写入 lock。
+
+## 查找和写入位置
+
+- 读取时，从当前目录向祖先查找最近的 `osdk.lock`。
+- 写入时，如果已发现项目配置，则写到该配置同目录。
+- 没有项目配置时，复用最近祖先的 lock；仍没有才在当前目录创建。
+
+在特殊嵌套布局中，最近可读 lock 与项目配置决定的写入位置可能不同。建议把
+`osdk.toml` 与 `osdk.lock` 放在同一项目根目录。
+
+## Schema 4
+
+```toml
+schema = 4
+
+[platforms.linux-x64.tools.node]
+request = "20"
+version = "20.20.0"
+
+[platforms.linux-x64.tools.node.options]
+arch = "x64"
+corepack = "false"
+
+[platforms.linux-x64.tools.node.artifact]
+url = "https://example/node.tar.gz"
+file_name = "node.tar.gz"
+checksum = "sha256:..."       # 可省略
+subdir = "dist"               # 可省略
+
+[[platforms.linux-x64.tools.node.artifact.evidence]]
+# 已验证供应链证据；具体字段由证据类型决定
+
+[platforms.linux-x64.tools."npm:prettier"]
+request = "3"
+version = "3.6.2"
+
+[platforms.linux-x64.tools."npm:prettier".npm]
+package = "prettier"
+installer = "npm"
+scope = "project"
+node_version = "20.20.0" # 可省略
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "npm"
+format = "package-lock-v3"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep"]
+request = "14"
+version = "14.1.1"
+options = { locked = "true" }
+
+[platforms.linux-x64.tools."cargo:ripgrep".native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "version-only"
+source = "sparse+https://index.crates.io/"
+
+[platforms.linux-x64.tools.go]
+request = "1.24"
+version = "1.24.6"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls"]
+request = "0.20"
+version = "0.20.0"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls".native]
+runtime = "go"
+runtime_version = "1.24.6"
+replay = "version-only"
+source = "https://proxy.golang.org"
+module = "golang.org/x/tools/gopls"
+
+[models.qwen]
+provider = "huggingface"
+repository = "Qwen/Qwen2.5-7B-Instruct"
+requested_revision = "main"
+revision = "immutable-revision"
+endpoint = "https://huggingface.co"
+variant = "safetensors-fp16"
+kind = "lora"
+family = "sdxl"
+derived_from = "hf:stabilityai/stable-diffusion-xl-base-1.0@main" # 可省略
+
+[[models.qwen.files]]
+path = "config.json"
+size = 123
+sha256 = "..."
+
+# 可选：该模型要渲染的消费者视图（来自 osdk.toml 的 [models.<name>.views]）
+[models.qwen.views.comfyui]
+profile = "default"
+[models.qwen.views.comfyui.map]
+"unet/" = "diffusion_models"
+```
+
+`provider = "local"` 不允许写入或读取为可恢复模型；`model import` 的本机快照必须从原始字节重新导入。
+
+`views` 段只在非空时写出，记录的是 consumer -> profile 与「仓库相对前缀 ->
+类别」映射；**不记录**视图的本机绝对路径和实际链接方式（那是机器相关的）。
+`osdk model sync` 会读它重建视图，所以这是个有读有写的字段。`views` 是 schema 4
+上的可选新字段，旧版 osdk 读到会忽略它而不报错，因此 schema 版本不提升。
+
+平台键为 `linux-*`、`macos-*`、`windows-*`，架构为 `x64|arm64|x86|arm`；
+musl Linux 追加 `-musl`。更新一个平台会保留其他平台和顶层模型记录。内部
+`__osdk_*` 选项不写入公开 `options`；支持通用 receipt 的非 npm backend 会单独保存
+artifact 身份。
+schema 4 保留 schema 3 的 npm metadata 模型，并要求每个 `npm:<package>` 都有 `npm`
+子表；主 lock 只保存基础 npm 元数据：
+`package`、`installer`、`scope`、可选的精确 `node_version`，以及可选的
+`native_lock.kind`、`native_lock.format`、`native_lock.sha256`。它不再保存 graph
+payload，也不保存 graph/path 字段。npm 工具条目不能写通用 `artifact` 子表。
+native lock 内容继续保留在 installer 自己管理的目录中；`osdk.lock` 只记录元数据与
+可选摘要。
+
+不含 npm 工具的 schema 1 lock 仍可读取，并在下一次成功写入时安全升级。含任意
+`npm:*` 条目的 schema 1 lock（包括旧 inline graph）不能消费或迁移；必须重新生成，
+避免把没有可验证依赖图的旧记录误标成当前 schema。
+
+schema 2 的 npm sidecar 仍可读取：读取时会继续校验 sidecar，并把内容作为冻结输入。
+只有在后续成功写回 `osdk.lock` 时，osdk 才会把条目迁移成当前 metadata-only
+格式；原有 `osdk.lock.d/` sidecar 不会被自动删除。
+
+schema 4 为 Cargo 与 Go module 工具新增类型化 `native` metadata。Cargo 条目要求同一
+平台表中存在匹配的精确 `rust` 条目。Registry 版本使用 `version-only`，完整的
+`rev:<40 位小写十六进制>` Git selector 使用 `immutable-revision`，Git HEAD、tag 和
+branch 使用 `floating-ref`。这些标签只说明 selector 强度，不包含完整 dependency/source
+graph。因此，身份匹配的完整 Cargo 安装可离线复用，但不支持全新离线安装或修复。
+schema 1 到 3 无法表达这种原生 runtime 绑定，会拒绝其中的 `cargo:` 条目；请重新生成
+schema 4。详见 [Cargo 开发工具](../tools/cargo)。
+Registry Cargo 条目还会在 `native.source` 中保留精确选择的规范、无凭据 sparse HTTPS
+index；Git Cargo 条目不能携带该字段。
+
+Go module 条目要求同一平台表中存在匹配的精确 `go` 条目。它们使用 `version-only`，
+在 `native.source` 中保留选中的规范无凭据 proxy，并在 `native.module` 中保留发现的
+module root。这是紧凑解析 metadata，不是复制的 `go.sum` 或传递 module graph，因此只支持
+离线复用已完整安装且身份精确匹配的工具。schema 1 到 3 会拒绝 `go:` 条目。详见
+[Go 开发工具](../tools/go)。
+
+Node 的 `lock -o arch=...` 会写入目标架构区段；osdk 没有跨架构“只下载”模式，
+随后在不匹配 host 上安装会拒绝。当前 `upgrade -o arch=...` 始终写 host 平台区段，
+不要用它生成跨架构 lock。
+
+## 制品 URL 记录上游，镜像只在运行时替换
+
+lock 会被提交并在别人的机器上复现，因此其中的 URL 是「取什么」的承诺，而不是「本机
+当时哪个主机最快」的记录。这两者曾是同一个字符串：pipeline 记录实际下载成功的那个
+候选，而在国内网络下那通常是镜像。于是这里生成的 lock 会写成
+`https://golang.google.cn/dl/...`（go）和
+`https://gh-proxy.com/https://github.com/...`（java），任何复现它的人都被推着走本机的
+镜像——包括根本访问不到这些镜像的人。
+
+现在写入时把 URL 规范化回上游：
+
+| 记录到的 URL | 写进 lock 的 URL |
+| --- | --- |
+| `https://golang.google.cn/dl/go1.26.5...` | `https://go.dev/dl/go1.26.5...` |
+| `https://mirrors.aliyun.com/golang/...` | `https://go.dev/dl/...` |
+| `https://gh-proxy.com/https://github.com/...` | `https://github.com/...` |
+| 自定义源，如 `https://nexus.internal/...` | **原样保留** |
+
+映射不是硬编码清单，而是由各 backend 自己的 `default_sources` 推导：只有 backend
+声明它镜像了某个上游，那个镜像才会被改写。因此自定义源会原样保留——osdk 无法知道它
+对应哪个上游，硬猜等于在提交进版本库的文件里写下虚假来源。checksum 不改：镜像提供
+相同字节，若某个镜像不是，那正是 checksum 存在的意义。
+
+模型的 `endpoint` 同理。模型的身份是 provider + repository + 不可变 revision，且每个
+文件的 SHA-256 都已入锁，主机不属于身份的一部分。`--endpoint`、`HF_ENDPOINT`、
+`MODELSCOPE_ENDPOINT` 曾直接流进 `[models.<name>].endpoint`；现在只有 provider 内置的
+端点会被折叠成官方端点（ModelScope 的 `modelscope.cn` 与 `www.modelscope.ai` 收敛到
+同一个），自定义端点原样保留。
+
+## conda 条目记录求解出的闭包
+
+`conda:ninja = "1.13.2"` 指定的不是一个制品，而是一次**求解**：结果是一组包的闭包
+（ninja 五个，编译器十几个），每个包各有自己的 URL 与摘要。同一版本一周后重新求解，
+或换一组 channel 求解，都会合法地得到不同的 build。因此只写 `version = "1.13.2"`
+的 lock 承诺远少于它看上去的那样——它固定的是一个请求，不是一个环境。
+
+`[platforms.<key>.tools."conda:<pkg>".conda]` 记录：
+
+| 字段 | 含义 |
+| --- | --- |
+| `closure` | 对闭包内各包 URL 与 SHA-256 求出的 `blake3:<64 位十六进制>` 摘要 |
+| `packages` | 该次求解得到的包数量 |
+
+```toml
+[platforms.windows-x64.tools."conda:ninja".conda]
+closure = "blake3:ed5710780df41d797269921935040e454aff71805c05446a7e319b8ce48e62e5"
+packages = 5
+```
+
+`closure` 就是 backend 用来决定「一次求解应落在哪个 prefix」的那个摘要，包内顺序经过
+排序，因此求解器的迭代顺序不会改变它。这使它恰好能回答「是否同一个环境」：replay 求解
+出不同闭包时摘要不同，差异会显现而不是被静默吞掉。`packages` 不与摘要重复——摘要不同
+只能说明「不一样」，而 `5 -> 11` 说明闭包变大了，通常意味着 channel 集合或 `with`
+列表变了。
+
+`channels` 与 `with` 属于安装身份，出现在同条目的 `options` 中。
+
+未安装时不写这一节：`lock` 允许在安装前运行，而编造一个从未观测到的摘要比留空更糟。
+
+## 陈旧的项目 lock
+
+osdk 当前不比较 `osdk.toml` 与 `osdk.lock` 的修改时间或内容。只要最近 lock 存在
+当前平台区段，无参数 `install` 就完全使用该区段，即使项目配置已改变；区段存在但
+工具表为空时也不会回退配置。当前平台区段不存在时才回退到配置发现。
+
+因此，修改项目版本后应显式运行：
+
+```bash
+osdk lock       # 只刷新精确解析
+# 或
+osdk upgrade    # 安装重新解析的版本并刷新 lock
+```
+
+损坏的 TOML 或不支持的 schema 会直接报错，不会静默回退配置。主 lock 当前限制为
+16 MiB；schema 2 npm sidecar 在兼容读取时仍按 16 MiB 上限校验。写入 schema 4 时只会
+原子替换主 lock，不会为 npm graph 再生成 sidecar。
+
+## npm 元数据与兼容边界
+
+对 `npm:<package>`，schema 4 主 lock 保留与 schema 3 兼容的 npm 元数据，而不是完整
+依赖图。它会
+保存包名、选定 installer、作用域、可选的精确 Node 版本，以及可选 native lock 的 owner/
+format/SHA-256。native lock 的实际 payload 和路径继续由 installer 自己管理，不会写回
+`osdk.lock`。
+
+无参数 `osdk install` 从 lock 恢复 npm 工具时，会先验证 package 与 backend
+一致、`installer` 与 `scope` 合法、可选 `node_version` 与同平台 Node 条目一致，以及可选
+`native_lock` 的 owner/format/SHA-256 是否自洽。若 lock 来自较旧的 schema 2，读取时仍会
+按旧规则校验 sidecar，并把它作为兼容输入；但下一次成功写入会改写成 metadata-only 的
+schema 4 主 lock。
+
+对于 schema 2 兼容读取，缺少或损坏 sidecar、超过大小限制，都会明确失败；详情见
+[npm 开发工具](../tools/npm)。
+
+## 锁定 artifact 的重装校验边界
+
+对支持通用 artifact receipt 的非 npm backend，lock 可记录实际 URL、文件名、checksum、
+archive 子目录和 attestation evidence。无参数安装会恢复其 backend 选项与 artifact
+身份；npm 工具改用上文的 metadata-only npm 子表，不使用通用 artifact receipt。
+对 Rust 浮动 channel，这个结果仍是 channel 名而非不可变版本。
+
+当安装目录缺失或不完整、pipeline 实际执行重装时，lock 中存在的 checksum 会对下载或
+缓存字节重新计算并比较；启用 attestation 时，lock evidence 只是审计记录，仍需缓存或
+在线取得的证明 bundle。若 lock 没有 digest/evidence 且 `require_checksums=false`，安装仍
+可能在没有加密完整性校验的情况下继续。普通 `install` 遇到已有 `.osdk-complete` 的版本
+会更早复用该安装，只运行 backend 的 post-install 检查，不重新 hash artifact。详情见
+[下载源与供应链安全](../sources/integrity)。
+
+本地链接的 Rust toolchain 无法作为可复现 artifact，`osdk lock` 会明确拒绝。
+
+## 不要混淆三种“陈旧”
+
+| 状态 | 当前处理方式 |
+| --- | --- |
+| 项目 `osdk.lock` 内容落后 | 没有自动 freshness 检测；运行 `lock` 或 `upgrade` 刷新 |
+| `<installs>/<tool>/.locks/<version>.lock` 文件残留 | 这是 OS 级排他锁的路径；进程结束会释放锁，空文件存在不表示仍被占用，不按时间删除 |
+| 安装目录没有 `.osdk-complete` | 视为上次失败的部分安装；拿到对象锁后删除并重新构建 |
+
+模型快照也使用按 snapshot 区分的 OS 排他锁。`trust list` 所显示的 `changed` /
+`missing` / `unreachable` 是配置路径或内容不再匹配，与以上 lock 状态无关。

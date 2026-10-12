@@ -16,8 +16,8 @@ osdk 为 Windows、macOS 和 Linux 项目提供一个统一管理语言运行时
   安全应用 mirror 配置、直接拉取镜像或确认严格限定范围的原生清理；
 - 使用中文或英文查看存储、缓存、生效版本和环境诊断。
 
-从[快速上手](site/guide/getting-started.md)开始，或查看
-[完整功能概览](site/guide/features.md)。
+从[快速上手](site/guide/start/quick-start.md)开始，或浏览按功能分组的
+[使用指南](site/guide/index.md)。
 
 ## 安装
 
@@ -95,7 +95,7 @@ ABI。更新源与工具下载一样会做测速，因此 GitHub 镜像更快时
 `osdk source pin self <id>` 可以固定选择。
 
 PATH 设置、安装器参数、源码构建和校验方式见
-[安装指南](site/guide/installation.md)。
+[安装指南](site/guide/start/installation.md)。
 
 ### GitHub Actions
 
@@ -108,7 +108,7 @@ PATH 设置、安装器参数、源码构建和校验方式见
 ```
 
 生产 workflow 请固定到 Release tag 或完整 commit SHA。CI 安全默认值、全部参数、缓存 key、
-monorepo 与严格离线/checksum 用法见 [GitHub Actions](site/guide/github-actions.md)。
+monorepo 与严格离线/checksum 用法见 [GitHub Actions](site/guide/project/github-actions.md)。
 
 ## 快速开始
 
@@ -187,8 +187,8 @@ osdk 用 `.osdk-install.json` schema 1 记录该身份，并把每个
 复用、activation、shim、`where`、`uninstall` 与 `reshim` 都只选择配置精确匹配的身份。旧
 `.osdk-tool.json` 只用于识别遗留状态，绝不会被复用或执行。
 
-指南：[项目工具链](site/guide/projects.md) ·
-[锁文件与环境复现](site/guide/lockfiles.md)
+指南：[项目工具链](site/guide/config/files.md) ·
+[锁文件与环境复现](site/guide/project/lockfiles.md)
 
 ## 场景：用项目任务替代 Makefile
 
@@ -222,7 +222,7 @@ osdk run ci --dry-run
 数组里的命令依次执行、失败即停；`ignore_error` 表示容忍失败并继续（但会
 打印警告）；`{ tasks = [...] }` 并行执行并等待全部完成。不要用 shell 的
 `&`——它在 cmd、PowerShell 7 与 5.1 下含义各不相同。详见
-[项目任务](site/guide/tasks.md)。
+[项目任务](site/guide/project/tasks.md)。
 
 用 `[task].roots` 声明子项目，通过 `osdk run //path:task` 调用；任务的工作目录
 默认是它所属的子项目目录。
@@ -258,7 +258,7 @@ osdk install \
 `.exe` 命名的输出。联网安装并执行 `osdk lock` 后，`osdk --offline install` 可以从精确
 身份对应的缓存重放锁定 URL、文件名和 checksum；lock 本身不包含制品字节。
 
-指南：[直接 HTTPS 制品](site/guide/http-artifacts.md)
+指南：[直接 HTTPS 制品](site/guide/tools/http-artifacts.md)
 
 ## 场景：使用包管理器并自动选择可用 Registry
 
@@ -282,7 +282,7 @@ osdk registry test pnpm
 
 显式 Registry 参数、环境变量、私有 Registry 和包管理器原生配置始终由你控制。
 
-指南：[包管理器与 Registry 选择](site/guide/package-managers.md)
+指南：[包管理器与 Registry 选择](site/guide/tools/package-managers.md)
 
 ## 场景：添加 npm 发布的开发工具
 
@@ -330,7 +330,7 @@ osdk 也会把全局前缀（`npm_config_prefix` / `PNPM_HOME`）重定向到受
 项目自身包管理器维护的 npm 依赖及其 `.osdk/npm-bin` 筛选 generation 与这些 osdk 自有
 安装根保持独立。
 
-指南：[npm 开发工具](site/guide/npm-tools.md)
+指南：[npm 开发工具](site/guide/tools/npm.md)
 
 ## 场景：安装项目自己的应用依赖
 
@@ -397,7 +397,7 @@ osdk deps --no-install-tools
 没有 `[deps]` 段时，`osdk deps` 只报告它找到了什么、可以用哪些 provider，不会动手
 安装。
 
-指南：[应用依赖](site/guide/deps.md)
+指南：[应用依赖](site/guide/project/deps.md)
 
 ## 场景：从 Cargo 安装 Rust CLI
 
@@ -424,7 +424,7 @@ osdk use \
 全新离线构建所需的完整 source graph。Registry 版本记录为 `version-only`，完整 Git
 revision 记录为 `immutable-revision`，Git HEAD/tag/branch 则记录为 `floating-ref`。
 
-指南：[Cargo 开发工具](site/guide/cargo-tools.md)
+指南：[Cargo 开发工具](site/guide/tools/cargo.md)
 
 ## 场景：安装 Go command package
 
@@ -446,7 +446,7 @@ root 与精确 Go runtime，不记录传递 module graph；因此可离线复用
 
 Go 工具安装保留 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`（含小写形式）。
 
-指南：[Go 开发工具](site/guide/go-tools.md)
+指南：[Go 开发工具](site/guide/tools/go.md)
 
 ## 场景：使用各语言生态
 
@@ -515,7 +515,7 @@ osdk exec --tool zig -- zig cc -target aarch64-linux-musl -o hello hello.c
 osdk exec --tool zig -- zig cc -target x86_64-windows-gnu -o hello.exe hello.c
 ```
 
-指南：[运行时与生态工作流](site/guide/runtimes.md)
+指南：[运行时与生态工作流](site/guide/runtimes/overview.md)
 
 ## 场景：管理 Android SDK
 
@@ -616,7 +616,7 @@ Android 包本身不含 JDK，因此 `sdkmanager`、`avdmanager`、`d8` 等基�
 会在你未自行设置 `JAVA_HOME` 时使用 osdk 管理的 `java`（由 osdk 激活导出的旧值会按当前
 目录重算，不会让一个项目的 JDK 驱动另一个项目）。用 `osdk install java` 装一个即可。
 
-指南：[Android SDK 工具](site/guide/android.md)
+指南：[Android SDK 工具](site/guide/runtimes/android.md)
 
 ## 场景：固定模型快照
 
@@ -653,7 +653,7 @@ Civitai 的 `civitai.com` 与 `civitai.red` 都是内置官方来源。auto 模�
 当前机器可用，需要从原始字节重新导入。`model unuse NAME` 会移除项目声明、lock、视图和默认的
 本地字节；`--keep-snapshot` 可保留字节。`model remove NAME` 只删除本地字节和视图。
 
-指南：[模型快照](site/guide/models.md)
+指南：[模型快照](site/guide/ai/models.md)
 ## 场景：给 AI 编码 Agent 装 skill
 
 skill 是带 `SKILL.md` 的指令包，供 Claude Code、Codex、Cursor 等 AI 编码 Agent 读取。osdk
@@ -686,7 +686,7 @@ osdk 先准备新树，再把旧目录改名为临时备份，激活失败时恢
 时会根据已有真实目录/链接保持原落地方式；本地源与目标重叠会在 staging 前拒绝。也可以在
 `osdk.toml` 里用 `[skills]` 声明，让 `osdk skills sync` 直接复现。
 
-指南：[Agent skills](site/guide/skills.md)
+指南：[Agent skills](site/guide/ai/skills.md)
 
 ## 场景：控制下载源、离线与安全策略
 
@@ -780,7 +780,10 @@ osdk trust prune                 # 清理配置文件已不存在的记录
 `[containers]`、`[aliases]`、`[syspkg]` 与临时的 `[sys.pkg.packages]` 仍可读取；先运行
 `osdk config migrate --dry-run` 预览，再用 `osdk config migrate` 改写。
 
-指南：[下载源、离线与安全](site/guide/sources-security.md)
+指南：[下载源与镜像](site/guide/sources/mirrors.md) ·
+[离线与预发布](site/guide/sources/offline.md) ·
+[完整性与 Attestation](site/guide/sources/integrity.md) ·
+[项目配置信任](site/guide/config/trust.md)
 
 ## 场景：检查并操作原生容器运行时
 
@@ -870,7 +873,7 @@ context TLS 材料、可通过本地 Unix socket 或 Windows named pipe 直接�
 不带 selector、也不请求执行时返回类型化“不支持”，传入 selector 或执行参数则会被拒绝。
 该命令绝不会扩展为清理全部 system、container、volume、network 或实现私有存储。
 
-指南：[容器运行时、Registry 与原生操作](site/guide/containers.md)
+指南：[容器运行时、Registry 与原生操作](site/guide/system/containers.md)
 
 ## 场景：查看宿主自带的包管理器
 
@@ -891,7 +894,7 @@ osdk pkg mirrors apply --dry-run
 `mirrors apply` 是其中唯一会改机器状态的命令：需要管理员，且必须带上
 `--accept-plan` 指纹确认。装不上的镜像（比本机旧）会被提前拒绝，执行中失败会自动回滚。
 
-指南：[系统包管理器](site/guide/system-packages.md)
+指南：[系统包管理器](site/guide/system/packages.md)
 
 ## 场景：检查缓存并回收空间
 
@@ -906,7 +909,7 @@ osdk --yes prune
 `cache clean` 删除已下载的归档；`prune` 回收不再引用的共享内容；
 `prune --dry-run` 不会删除任何数据。
 
-指南：[存储、缓存与 Shell 集成](site/guide/storage-shell.md)
+指南：[缓存与清理](site/guide/maintenance/cache.md)
 
 ## 场景：某个工具自己更新过，已与安装时不一致
 
@@ -922,7 +925,7 @@ osdk install --force node@20.11.1
 
 动态工具按每个安装身份的实际目录校验。新安装的 PyPI 工具会记录完整性基线；旧安装需用 `--force` 重装后建立基线。Python 字节码缓存不参与校验。
 
-指南：[存储、缓存与 Shell 集成](site/guide/storage-shell.md)
+指南：[诊断与安装校验](site/guide/maintenance/diagnostics.md)
 
 ## 场景：诊断环境或切换语言
 
@@ -945,7 +948,9 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 
 `osdk doctor` 还会报告代理状态。osdk 只从 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 读取代理，不读 Windows 的「系统代理」开关；两者不一致时它会明确指出并给出要设置的变量，而不是让「浏览器能上、osdk 超时」这种情况无从解释。
 
-指南：[存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
+指南：[诊断](site/guide/maintenance/diagnostics.md) ·
+[环境变量](site/guide/config/environment.md) ·
+[Shell 激活与补全](site/guide/basics/shell.md)
 
 ## 支持范围
 
@@ -955,7 +960,8 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 | 运行时 | Node.js、Python、Java JDK/JRE、Go、Rust、Deno、Bun、Zig |
 | 包管理器与 JVM 工具 | npm、pnpm、Yarn、Maven、Gradle、Kotlin |
 | 其他开发工具 | 通过 `npm:<package>` 安装 npm 包、通过 `cargo:...` 安装 Registry crate 或 HTTPS Git 仓库、通过 `go:<module-or-command-path>` 安装 Go command package、通过 `conda:<package>` 安装 conda 包与 CUDA 等工具链、通过 `pypi:<project>` 安装 Python CLI（每个工具一个虚拟环境，依赖在环境间共享）、通过 `github:owner/repo` 安装公开 GitHub Release，或通过 `http:https://...{version}...` 安装精确 checksum 锁定的 HTTPS 制品 |
-| 模型平台 | Hugging Face、ModelScope |
+| Android SDK | NDK、platform-tools、build-tools、cmdline-tools、platforms、emulator 与系统镜像 |
+| 模型平台 | Hugging Face、ModelScope、Civitai LoRA 版本 |
 | Agent skills | 从 GitHub（`github:owner/repo` 含子目录）或本地路径安装 `SKILL.md` 包，链接进 Claude Code / Codex / Cursor / OpenCode / Gemini CLI / GitHub Copilot 等 Agent |
 | 原生容器操作 | Docker Engine、containerd、Docker Buildx、匿名 OCI Registry 测试、内置 Docker Hub mirror 测速、安全原生 mirror apply、直接原生镜像拉取、原生缓存状态、本地 endpoint Docker 清理，以及 BuildKit 清理预览 |
 | 项目输入 | `osdk.toml`、`.tool-versions`、常见生态版本文件 |
@@ -964,23 +970,41 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 
 ## 文档
 
-- [功能概览](site/guide/features.md)
-- [快速上手](site/guide/getting-started.md)
-- [项目工具链](site/guide/projects.md)
-- [锁文件与环境复现](site/guide/lockfiles.md)
-- [运行时与生态工作流](site/guide/runtimes.md)
-- [包管理器与 Registry 选择](site/guide/package-managers.md)
-- [npm 开发工具](site/guide/npm-tools.md)
-- [应用依赖](site/guide/deps.md)
-- [Cargo 开发工具](site/guide/cargo-tools.md)
-- [Go 开发工具](site/guide/go-tools.md)
-- [直接 HTTPS 制品](site/guide/http-artifacts.md)
-- [模型快照](site/guide/models.md)
-- [Agent skills](site/guide/skills.md)
-- [下载源、离线与安全](site/guide/sources-security.md)
-- [容器运行时、Registry 与原生操作](site/guide/containers.md)
-- [存储、Shell 集成、诊断与多语言](site/guide/storage-shell.md)
-- [实现文档](site/guide/implementation/index.md)
+开始与配置：
+
+- [使用指南目录](site/guide/index.md)
+- [安装](site/guide/start/installation.md) · [快速上手](site/guide/start/quick-start.md)
+- [配置文件](site/guide/config/files.md) · [环境变量](site/guide/config/environment.md) ·
+  [命令行全局参数](site/guide/config/cli-options.md) ·
+  [目录与存储](site/guide/config/storage.md) · [项目配置信任](site/guide/config/trust.md)
+
+使用：
+
+- 基本使用：[安装、切换与查询](site/guide/basics/commands.md) ·
+  [Shell 激活与补全](site/guide/basics/shell.md) ·
+  [控制哪些命令进 PATH](site/guide/basics/path-control.md)
+- 项目：[项目工具链](site/guide/project/discovery.md) · [锁文件](site/guide/project/lockfiles.md) ·
+  [项目任务](site/guide/project/tasks.md) · [应用依赖](site/guide/project/deps.md) ·
+  [GitHub Actions](site/guide/project/github-actions.md)
+- 运行时：[总览](site/guide/runtimes/overview.md) · [Node.js](site/guide/runtimes/node.md) ·
+  [Python](site/guide/runtimes/python.md) · [Java](site/guide/runtimes/java.md) ·
+  [Go](site/guide/runtimes/go.md) · [Rust](site/guide/runtimes/rust.md) ·
+  [Zig](site/guide/runtimes/zig.md) · [Android SDK](site/guide/runtimes/android.md)
+- 工具：[包管理器](site/guide/tools/package-managers.md) · [npm](site/guide/tools/npm.md) ·
+  [Cargo](site/guide/tools/cargo.md) · [Go](site/guide/tools/go.md) ·
+  [Python](site/guide/tools/python.md) · [Conda](site/guide/tools/conda.md) ·
+  [GitHub Release](site/guide/tools/github-releases.md) ·
+  [HTTPS 制品](site/guide/tools/http-artifacts.md) ·
+  [声明式 Backend](site/guide/tools/declarative-backends.md)
+- 模型与 AI：[模型快照](site/guide/ai/models.md) · [Agent skills](site/guide/ai/skills.md)
+- 下载源与安全：[下载源与镜像](site/guide/sources/mirrors.md) ·
+  [离线与预发布](site/guide/sources/offline.md) · [完整性](site/guide/sources/integrity.md)
+- 系统集成：[容器运行时](site/guide/system/containers.md) ·
+  [系统包管理器](site/guide/system/packages.md)
+- 维护：[缓存与清理](site/guide/maintenance/cache.md) ·
+  [诊断与安装校验](site/guide/maintenance/diagnostics.md)
+
+实现原理：[实现文档](site/internals/index.md)
 
 欢迎通过 [issues](https://github.com/lejunyang/one-sdk/issues) 和 Pull Request
 参与贡献。

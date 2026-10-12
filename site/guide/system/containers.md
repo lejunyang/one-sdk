@@ -1,0 +1,435 @@
+# 容器运行时、Registry 与原生操作
+
+osdk 可以在不修改配置或存储的前提下检查 Docker Engine、containerd 和
+Docker Buildx；也可以匿名测试 OCI Registry、测速并排序 mirror、生成只读原生 mirror
+plan，或在确认后安全写入一个可执行计划。它还可以把镜像拉取交给一个选中的原生 runtime，
+并在批准前预览严格限定范围的原生清理。osdk 不接管 OCI 存储。
+
+## 诊断运行时与构建器
+
+```bash
+osdk container doctor
+osdk container doctor --runtime docker
+osdk container doctor --runtime containerd
+osdk container doctor --runtime docker --builder team-builder
+osdk container doctor --json
+```
+
+默认运行时来自生效的 `container.runtime` 配置。选择 `auto` 时，osdk 依次
+探测 Docker 和 containerd，再按诊断状态选择：健康、降级、仅客户端、权限不足、
+不可达、版本不受支持、未安装。状态相同时优先 Docker。选择依据是实际探测状态，
+而不是仅检查二进制文件是否存在。
+
+Buildx 会单独报告，因为构建器并不是选中的运行时。自动模式和显式 Docker 诊断会
+检查配置或当前 Buildx 构建器。显式 containerd 诊断默认跳过 Buildx，只有提供
+`--builder NAME` 时才检查。构建器检查从不使用 `--bootstrap`，因此不会启动已停止的
+构建器。
+
+人类可读输出首先给出选中的运行时和状态，随后展示同一次探测已取得的类型化事实。
+Docker 报告版本、context 类型、daemon 平台、rootless/Desktop 状态和有序 mirror origin；
+containerd 报告版本与 Registry 配置状态；Buildx 报告 driver，以及仅以序号标识的节点
+状态、版本、脱敏 endpoint origin 和平台。
+
+`--json` 输出确定的 schema version 2 对象，其中包含选中报告、自动选择期间尝试的所有
+运行时报告，以及独立的可选构建器报告。它不包含 context、builder、节点名称、containerd
+namespace 与配置路径，也不包含 endpoint path/query。字段名和枚举值不会随 `--lang` 翻译。
+将命令用作健康门禁时可加 `--check`：报告仍会完整输出，随后只有选中 runtime 和每个已检查
+builder 均为 `healthy` 才以零状态退出。
+
+### Linux 权限与 rootless Docker
+
+当选中的 Docker runtime 或 Docker cache 返回 `permission-denied` 时，人类可读的 doctor / cache
+输出会给出两条互斥的处理方向；JSON 保持稳定的类型化状态，不加入环境相关命令：
+
+- **优先使用 rootless Docker**：daemon、socket、配置和服务都归当前用户管理，osdk 继续以
+  普通用户运行。
+- **可信 rootful 主机才考虑 `docker` 组**：`sudo usermod -aG docker "$USER"` 后必须完整退出
+  并重新登录。该组可以通过 Docker 获得近似 root 的宿主权限，不适合作为共享机器上的低权限授权。
+
+不要把 socket 改成全员可写，也不要把日常命令统一改成 `sudo osdk`。后者会让整个 osdk
+进程以 root 运行，并可能改用 root 的 osdk 配置、data/cache、信任记录以及 Docker
+context/credential；对于 rootless Docker，它还可能误连另一套 rootful daemon。
+
+尚未安装 rootless Docker 时，先使用 Docker 提供的安装工具检查宿主条件。检查失败通常需要
+管理员补齐 `newuidmap`/`newgidmap` 和 `/etc/subuid`、`/etc/subgid` 范围；具体包名由发行版决定：
+
+```bash
+dockerd-rootless-setuptool.sh check
+dockerd-rootless-setuptool.sh install
+systemctl --user enable --now docker   # 使用 systemd 用户服务时
+```
+
+安装工具通常会创建 `rootless` context。清除一个可能覆盖 context 的旧 `DOCKER_HOST`，选中并
+验证它；如果安装工具没有创建 context，也可以在当前 shell 直接指定用户 socket：
+
+```bash
+unset DOCKER_HOST
+docker context use rootless
+docker info --format '{{json .SecurityOptions}}'
+
+# 没有 rootless context 时二选一，不要与另一个 context 混用：
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+```
+
+rootless dockerd 的配置不是 `/etc/docker/daemon.json`，而是
+`${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json`。Mirror apply 需要显式传入这个精确路径，
+并要求父目录已经存在；写入后 osdk 仍不会替用户重启 daemon：
+
+```bash
+rootless_docker_config="${XDG_CONFIG_HOME:-$HOME/.config}/docker/daemon.json"
+mkdir -p "$(dirname "$rootless_docker_config")"
+osdk container mirrors plan docker.io --runtime docker \
+  --native-config "$rootless_docker_config"
+osdk container mirrors apply docker.io --runtime docker \
+  --native-config "$rootless_docker_config"
+systemctl --user restart docker
+```
+
+若 `docker info` 已显示 `rootless`，用户不需要加入 `docker` 组；应修复 user service、context 或
+`DOCKER_HOST`。rootless Docker 对 privileged 容器、设备、低端口、host 网络语义和 cgroup
+资源控制的限制来自 Docker/宿主配置；osdk 当前只做诊断、pull、cache、mirror 与限定 prune，
+不会扩大这些权限。
+
+## 检查原生缓存用量
+
+```bash
+osdk container cache status
+osdk container cache status --runtime docker
+osdk container cache status --runtime buildkit
+osdk container cache status --runtime buildkit --builder team-builder
+osdk container cache status --runtime containerd --json
+```
+
+`docker` 使用 Docker 的聚合 `system df` 接口。`buildkit` 使用选中的 Buildx
+构建器及其正式 JSON `du` 接口，因此要求 Buildx 0.28 或更高版本。`containerd`
+返回结构化的 `unsupported` 结果：containerd 没有与上述接口等价的单一稳定聚合
+缓存状态契约。osdk 不会通过扫描 containerd 的私有 content、snapshot 或 metadata
+存储来模拟一个结果。
+`--builder NAME` 与 doctor 一样会覆盖缓存状态命令的配置构建器；它只影响 BuildKit
+查询，对其他运行时会被忽略。
+
+`auto` 会选择 Docker，因为它是运行时候选中唯一具有受支持聚合缓存契约的一项。这样会保留
+`permission-denied` 等可操作的 Docker 状态，而不是用 containerd 必然返回的 `unsupported`
+覆盖它。要专门查看构建缓存，请使用 `--runtime buildkit`；需要 containerd 的类型化不支持
+结果时再显式选择 `containerd`。
+
+缓存 JSON 使用原生缓存 schema version 1，只包含类型化分类、数量、字节总量、可回收
+字节数、状态、所有者和已脱敏的命令证据。原生对象 ID、描述、构建器名称、命令原始
+输出、凭据和私有路径都不会进入输出。
+使用 `--check` 时会先输出报告，只有状态为 `available` 才以零状态退出。
+
+## 使用选中的原生 runtime 拉取镜像
+
+```text
+osdk container pull IMAGE
+  [--runtime auto|docker|containerd]
+  [--platform OS/ARCH[/VARIANT]]
+  [--address ADDRESS --namespace NAMESPACE]
+```
+
+```bash
+# 使用生效的容器 runtime 和 platform。
+osdk container pull ubuntu:24.04
+
+# 同时固定所有者与请求的镜像平台。
+osdk container pull ghcr.io/example/tool:1.0 \
+  --runtime containerd --platform linux/amd64 \
+  --address unix:///run/containerd/containerd.sock --namespace default
+```
+
+Runtime 和 platform 默认来自生效的 `[container]` 配置。使用 `--runtime auto` 时，osdk
+对 Docker 和 containerd 执行一次有界只读解析并确定地选中一个所有者，然后只启动一次
+原生前台 pull。原生命令一旦启动便不会回退到另一个 runtime，因此认证、网络或拉取失败
+都会由实际运行的所有者报告。
+
+`--offline` 会在解析 runtime 或启动原生命令前拒绝 pull。
+
+显式选择 `--runtime containerd` 时必须同时提供 `--address` 与 `--namespace`；这两个 selector
+始终要求成对出现。使用 `--runtime auto` 时，只有 containerd 胜出才要求二者，Docker 无需
+它们即可继续。在 Unix 上，osdk 接受规范的 `unix:///path/to/containerd.sock` endpoint，
+并在调用 `ctr` 时渲染成它要求的原生 `/path/to/containerd.sock` 参数；报告仍按类型化 URL
+分类和脱敏。
+
+原生子进程继承 stdio，osdk 会等待它结束。Docker 收到直接的 `docker image pull`；
+containerd 收到直接的 `ctr --address ADDRESS --namespace NAMESPACE images pull`。osdk 返回
+子进程的直接退出码；Unix 上若子进程由信号终止，则规范化为 `128 + signal`。osdk 不会自行
+下载镜像 layer、创建 OCI content store，也不会在 runtime 之间复制镜像。
+
+## 预览并执行限定范围的原生清理
+
+```text
+osdk container prune
+  --runtime docker|buildkit|containerd
+  --scope images|build-cache
+  [--context NAME]
+  [--builder NAME]
+  [--execute]
+  [--accept-preview SHA256_ID]
+  [--json]
+```
+
+只支持两个 runtime/scope 组合：
+
+| Runtime 与 scope | 精确目标 | 清理边界 |
+| --- | --- | --- |
+| `--runtime docker --scope images` | osdk 发现的 Docker context；`--context NAME` 用于选择发现目标并供展示 | 仅 dangling image；执行要求可通过本地 Unix socket 或 Windows named pipe 直接寻址，且不依赖 context TLS 材料 |
+| `--runtime buildkit --scope build-cache` | 来自 `--builder`、生效配置或当前选择的 Buildx builder | 仅预览该 builder 的未使用 build cache |
+
+虽然通用语法仍要求 `--scope`，但 containerd 没有任何可接受的 scope 组合。任一 scope 下，
+不带 selector、也不带执行参数的请求都会返回类型化“不支持”；containerd 与 `--context`、
+`--builder`、`--execute` 或 `--accept-preview` 的组合都会被拒绝。Docker build cache、
+BuildKit image 等交叉组合同样会被拒绝。命令没有 `all` 或 `system` scope，也不会清理
+container、volume、network、osdk CAS 或 runtime 的实现私有存储。`--context` 只适用于
+Docker，`--builder` 只适用于 BuildKit。
+
+默认调用只执行有界只读发现并打印预览。审阅时应确认精确目标与 warning：
+
+```bash
+osdk container prune --runtime docker --scope images --context desktop-linux
+osdk container prune --runtime buildkit --scope build-cache --builder team-builder
+```
+
+预览会给出确定的 `sha256:` ID，并绑定操作所有者、scope、精确 context 或 builder、warning，
+以及 Docker endpoint 或 Buildx driver/node endpoint 拓扑的敏感信息安全指纹。Docker 执行通过
+`docker --host` 使用发现时捕获的精确原始本地 endpoint；context 名仅用于展示。Remote/SSH/TCP/TLS
+context 与 Docker Desktop 目标会被拒绝，因为直接 `--host` 无法安全复现其 context 连接行为。要应用同一份
+预览，必须同时加入两个执行 gate，再确认执行提示：
+
+预览可使用 `--json` 直接输出 schema version 2 对象。JSON 仅用于预览并与 `--execute`
+冲突，因此原生命令输出不会破坏结构化输出。containerd 不支持的预览会先输出类型化的
+schema version 2 结果，再以非零状态退出。
+
+```bash
+osdk container prune --runtime docker --scope images \
+  --context desktop-linux --execute \
+  --accept-preview sha256:PREVIEW_ID
+
+```
+
+只有 `--execute` 不够，只有 preview ID 而没有 `--execute` 也不够。若某个 ID 所属预览的
+owner、scope、target、endpoint/拓扑指纹或 warning 与当前预览不同，该预览即已语义陈旧并会被拒绝；其他不匹配
+ID 同样会被拒绝。此时应重新生成并审阅预览。绑定字段不变时会得到相同的确定 ID。全局
+`--yes` 只回答最终执行提示，不能替代上述任一执行 gate。
+确认后 Docker 直接使用已捕获的 endpoint 值，不再根据 context 名查询目标。BuildKit 不支持
+执行，因为唯一可用的执行句柄是可变 builder 名称，无法原子固定。
+
+## 配置与优先级
+
+```toml
+[container]
+runtime = "auto"
+builder = "auto"
+platform = "runtime"
+probe_timeout_ms = 1500
+
+[container.registries."docker.io"]
+mirrors = [
+  "https://mirror-one.example/",
+  "https://mirror-two.example/",
+]
+anonymous_only = true
+resolve = "mirror"         # upstream（默认）|mirror
+```
+
+`--runtime` 和 `--builder` 会在本次命令中覆盖生效配置。非敏感选择器也可以通过
+`OSDK_CONTAINER_RUNTIME`、`OSDK_CONTAINER_BUILDER` 和
+`OSDK_CONTAINER_PLATFORM` 设置。每个捕获式探测使用 `probe_timeout_ms`，同时固定
+stdout 和 stderr 各 64 KiB 的上限。
+
+Registry key 是可带端口的规范 host name，不是 URL。Mirror 值必须是 HTTPS URL，不能
+包含 credentials、query 或 fragment；加载时补尾部 `/`，去重但保留首次出现的配置顺序。
+每个 Registry 最多配置 8 个 mirror。
+项目级 `[container]` 需要显式信任，并整段替换低优先级配置。没有显式 Docker Hub policy
+时，osdk 使用 `https://mirror.gcr.io/` 与 `https://docker.m.daocloud.io/` 两个内置候选；
+一旦配置 `[container.registries."docker.io"]`，包括空 `mirrors` 在内，都会完整覆盖内置值。
+
+`anonymous_only=true` 是 policy 默认值。Registry 测试无论该设置为何都保持匿名。原生
+Docker/containerd/BuildKit 配置无法保证 runtime 永远不附加自己的凭据，因此
+`anonymous_only=true` 的 plan 会报告 `anonymous-only-not-enforced` warning。
+`resolve=upstream` 表示在 runtime 能表达时由 origin 解析 tag；`resolve=mirror` 允许 mirror
+解析 tag。
+
+## 测试 OCI Registry 与 mirror
+
+```text
+osdk container registry test REGISTRY
+  [--image IMAGE]
+  [--platform OS/ARCH[/VARIANT]]
+  [--json]
+```
+
+```bash
+# 测试 upstream API，并测试 Docker Hub 的内置候选。
+osdk container registry test docker.io
+
+# 校验 tag 或 digest、选择 image index 平台，并测试 Range。
+osdk container registry test docker.io \
+  --image ubuntu:24.04 --platform linux/amd64
+
+osdk container registry test ghcr.io \
+  --image ghcr.io/example/tool@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --platform linux/arm64 --json
+```
+
+`REGISTRY` 是可带端口的 host。命令始终测试其规范 HTTPS upstream；`docker.io` 的传输
+host 是 `registry-1.docker.io`。Docker Hub 在没有显式 policy 时加入两个内置候选；其他
+Registry 没有匹配 policy 时只测试 upstream。有 policy 时，按配置顺序测试 mirror。未指定
+image 时，对 upstream 与每个 mirror 调用 `/v2/`。指定 `--image` 时，其 registry 必须与
+`REGISTRY` 一致；osdk 先解析并验证 upstream manifest，再让每个 mirror 按该不可变 digest
+返回内容，不会在 mirror 上重新解析可变 tag；随后对相同 layer 执行 Range 采样，并只把
+Manifest 等价且 Range 返回有效字节的 mirror 按总耗时列入推荐顺序。API-only 模式的排序
+只代表连通性延迟，自动应用始终要求 image benchmark。
+
+Digest selector 本身就是不可变内容身份。因此 upstream API 不可达时，osdk 仍可从各 mirror
+获取该精确 digest、校验字节、选择请求平台并采样 layer，全程不允许 mirror 解析 tag。
+Tag selector 不会走这条降级路径：必须先由 upstream 将其固定为 digest。
+
+`--image` 接受 tag 或 digest；digest selector 必须与返回的 manifest 字节一致。对于 image
+index，`--platform` 必须唯一选中一个 child，并校验 descriptor digest 和 size。CLI 参数
+覆盖显式 `container.platform`；两处都未提供平台时，遇到 index 会报告
+`platform-not-found`。验证 image manifest 后，osdk 会对最小 layer 发送最多 16 KiB 的有界
+Range 请求并校验精确 `Content-Range`；若 sample 已包含整个小 layer，还会验证 layer
+digest。该命令不会拉取或保存完整 image。
+
+诊断保持匿名：不读取原生 credential store、cookie、client certificate 或环境中的
+Registry 凭据，并禁用 proxy。`401 Bearer` challenge 只有在 realm 为 HTTPS 且同 origin 时
+才可获取匿名 pull token；另外仅允许经审计的 Docker Hub
+`registry-1.docker.io -> auth.docker.io` 与 DaoCloud
+`docker.m.daocloud.io -> m.daocloud.io` 匿名 token 路径。challenge 如果带 scope，必须恰好等于
+`repository:<repository>:pull`。Token 绑定签发 origin，upstream token 绝不会发送给
+mirror。Redirect 只会在 HTTPS、同 origin 且仍在 request/redirect budget 内时手动跟随。
+
+单次请求 timeout 是 `min(probe_timeout_ms, 60s)`，总 deadline 是
+`min(单次 timeout × 48, 5 分钟)`；默认 1500 ms 对应每次 1.5 秒、总计 72 秒。一次诊断
+默认最多 48 个请求、硬上限 64 个请求，每条请求链最多 3 次 redirect，并限制
+API/token/manifest body，只读取
+最多 16 KiB 的 layer sample。`--offline` 会在构造网络 transport 前拒绝该命令。
+`resolve` 与 `anonymous_only` 不会放宽匿名边界。Tag 仍以上游为权威；显式提供的 digest
+则是上述有界降级路径的权威内容身份。
+
+人类输出支持中英文并以结论开头。`--json` 输出 Registry report schema version 2，包含
+类型化 API、manifest、blob-range、每个 mirror 的微秒耗时/排名和推荐顺序；实时耗时会变化，
+其余字段结构与排序规则稳定。`recommended_mirror_order` 使用原始 mirror 数组的 0-based
+索引，单项 `recommended_rank` 则是面向用户的 1-based 名次。报告会显示 image、platform、digest、
+字节数、Registry origin 与请求数，但绝不显示 token、原始响应 header 或 response body。
+带 path prefix 的已配置 mirror 会在 `/v2/...` 前保留该 prefix；诊断 report 有意只显示
+origin。
+使用 `--check` 时会先输出报告，只有聚合 Registry 状态为 `healthy` 才以零状态退出。
+
+## 规划原生 mirror 配置
+
+```text
+osdk container mirrors plan REGISTRY
+  --runtime docker|containerd|buildkit
+  [--builder NAME]
+  [--native-config PATH]
+  [--containerd-main-config PATH]
+  [--json]
+```
+
+位置参数 Registry 必须存在匹配的 `[container.registries.<registry>]` policy；Docker Hub
+可直接使用内置 policy。
+`--runtime` 必填，没有 `auto`；每次调用只规划该 Registry 与该原生控制面，不会把其他
+已配置 Registry 合并进 plan。`--builder` 只允许配合 `--runtime buildkit`；BuildKit 未提供
+该参数时使用生效的 `container.builder`。
+
+`--native-config` 指向精确的有界输入/目标：Docker daemon JSON、containerd 的
+`<config_path>/<registry>/hosts.toml`，或所选 BuildKit builder 的 `buildkitd.toml`。省略时，
+本来可在本机执行的 plan 会降级为 `manual-only`，且没有生成 candidate。containerd 的
+`--containerd-main-config` 只在发现的配置还没有有效 Registry `config_path` 时可用，用来
+指定需要补该 path 的主配置 TOML；已经存在 `config_path` 时传入该参数会报错。
+
+```bash
+osdk container mirrors plan ghcr.io --runtime containerd \
+  --native-config /etc/containerd/certs.d/ghcr.io/hosts.toml --json
+
+osdk container mirrors plan docker.io --runtime buildkit \
+  --builder team-builder --native-config ./buildkitd.toml --json
+```
+
+不同 runtime 的边界不会被抹平：
+
+| Runtime | Plan 边界 | 带 path prefix 的 mirror |
+| --- | --- | --- |
+| Docker | 只支持 `docker.io`。本地/rootless target 在 `resolve=mirror` 且指定 daemon JSON 时可为 `ready`；Moby 无法分离 origin resolution 与 mirror transfer，所以 `resolve=upstream` 为 `manual-only`。所描述的变更需要重启 daemon 才生效。 | 拒绝，因为 Moby `registry-mirrors` 只接受 origin URL。 |
+| containerd | 在 `hosts.toml` 中按精确 Registry namespace 规划。`resolve=upstream` 给 mirror `pull` capability，`resolve=mirror` 给 `pull, resolve`；永不添加 `push`。in-memory candidate 保留其他无关 host/TLS 条目。 | 完整保留为 host table URL，并作为 containerd 在其后追加 `/v2/...` 的 base prefix；因此 osdk 不会推断 `override_path`。 |
+| BuildKit | Docker driver 为 `unsupported`，因为它使用 Engine policy。本地 `docker-container` builder 在 `resolve=mirror` 且指定 TOML 时可为 `ready`，并报告 `recreate-builder`。Kubernetes、remote、cloud 和 upstream-resolution 场景为 `manual-only`。 | 在不序列化的 candidate TOML 中去掉 `https://`，写成 `host[:port]/path` 并保留 path。 |
+
+人类输出先打印确定的 `sha256:` `plan_id`，再显示 applicability、change/candidate 数量、
+activation requirement 和 warning。`--json` 输出 mirror-plan schema version 1。ID 绑定规范
+target、policy、input/candidate fingerprint、语义变更、privilege、activation、validation
+step 与 warning；这些语义变化会得到不同 ID。
+
+Plan JSON 是操作 metadata，不是匿名报告。它会序列化规范绝对原生配置路径、所选 Buildx
+builder 名和 containerd namespace/config path。对于 mirror，只输出脱敏 origin 与
+`has_path_prefix`；精确 prefix 会替换为脱敏标记。分享前应先审阅。精确 prefix 本身永不
+序列化：policy fingerprint 始终绑定它；存在 candidate 时，其隐藏 bytes 与 candidate
+fingerprint 也会绑定它。JSON 保存 input state、size、SHA-256 fingerprint 与 candidate
+size/format/fingerprint，但不包含现有原生配置内容或生成的 candidate bytes。
+
+`mirrors plan` 只执行有界 no-follow 读取和原生发现，不会写文件、提权、重启 daemon 或
+重建 builder。
+
+## 测速并应用 mirror
+
+```text
+osdk container mirrors apply REGISTRY --runtime docker|containerd|buildkit
+  --native-config PATH [--builder NAME]
+  [--containerd-main-config PATH]
+  [--image IMAGE] [--platform OS/ARCH[/VARIANT]]
+  [--dry-run] [--accept-plan SHA256] [--json]
+```
+
+Docker Hub 默认使用 `library/alpine:latest` 做内容等价与有界 Range 测速；平台优先采用显式
+`--platform`，其次采用生效配置，均未设置时才默认 `linux/amd64`。
+其他 Registry 必须显式提供 `--image`。只要显式配置了 policy，就只测试该 policy 中的候选，
+并保留该 policy 的 `resolve` 信任语义；测速只负责筛掉失败源并重排通过者，不会擅自把
+`resolve=upstream` 提升为 `resolve=mirror`。
+交互式调用会展示测速结果与本次 plan，确认一次后直接应用，不需要手工复制 plan ID。
+
+无人值守调用采用两步握手：先运行 `--dry-run --json` 取得本次 `plan_id`，再带全局
+`--yes --accept-plan <plan_id>` 重新测速和规划；ID 与新的 runtime identity、policy、input 和
+candidate 任一项不一致都会拒绝。写入仅接受 `ready` 且恰好包含一个 candidate 的计划；
+它获取 osdk apply lock，再以 no-follow 方式重新捕获输入 fingerprint，解析候选 JSON/TOML；
+Docker 还会对生成的 daemon JSON 执行 `dockerd --validate`。随后在目标同目录创建权限受限的
+备份，再写入并 flush/sync 临时文件，最后原子替换且保留原文件权限；成功输出包含备份路径。
+该原生校验在 `mirrors apply --dry-run` 中也会运行；`dockerd` 缺失或拒绝配置时不会写入文件。
+
+Apply 不使用 sudo、不配置 remote context 或 Docker Desktop，也不自动执行 `restart-daemon`
+或 `recreate-builder`；成功信息会明确列出仍需用户完成的激活动作。`--dry-run` 不提示且不写入。
+若没有 mirror 通过，人类输出会先展示诊断再报错；`--json` 会输出 schema version 1 的
+`no-verified-mirror` envelope，内含完整 Registry 诊断，然后以非零状态退出。
+
+## 状态处理建议
+
+| 状态 | 含义 | 常见处理 |
+| --- | --- | --- |
+| `healthy` | 客户端和所选守护进程/构建器都已响应 | 无需处理 |
+| `degraded` | 只获得了部分预期的类型化数据 | 检查原生服务后重试 |
+| `client-only` | CLI 存在，但未确认守护进程/构建器 | 启动或选择目标服务 |
+| `permission-denied` | endpoint 存在，但当前用户无法检查 | Linux 优先选择 rootless Docker；可信 rootful 主机可在理解 root-equivalent 风险后配置 `docker` 组 |
+| `unreachable` | 所选 endpoint 未在有界时间内响应 | 检查守护进程、context、socket 或网络 |
+| `unsupported-version` | 原生 CLI 早于 osdk 所需的机器可读契约 | 升级原生工具 |
+| `not-installed` | 无法启动所需可执行文件 | 安装工具或选择其他运行时 |
+
+缓存状态使用一组更具体的状态：
+
+| 缓存状态 | 含义 |
+| --- | --- |
+| `available` | 已成功解析聚合记录和字节总量 |
+| `not-installed` | 缺少所需的 Docker 或 Buildx 可执行文件 |
+| `permission-denied` | 原生缓存接口拒绝当前用户访问 |
+| `unreachable` | 原生服务报告连接失败 |
+| `timed-out` | 有界缓存查询超过 `probe_timeout_ms` |
+| `unsupported` | 不存在安全的聚合接口；containerd 当前返回此状态 |
+| `unsupported-version` | 原生 CLI 过旧，不支持所需机器格式 |
+| `output-truncated` | 达到固定的捕获上限 |
+| `invalid-output` | 成功输出不符合类型化聚合 schema |
+| `command-failed` | 原生命令失败，且无法归入更具体的状态 |
+
+Doctor、cache status、registry test、mirror plan、mirror apply dry-run 与 prune preview 均为只读。
+`container pull`、经批准的 `container prune` 与经批准的 `mirrors apply` 是直接原生修改路径。
+Mirror apply 只写指定配置文件，且三条路径都不会自动提权、启动或重建 builder、重启 daemon，
+也不会检查实现私有的存储目录。
+Registry 测试只执行上文所述有界 metadata 与 Range 读取。选择、启动、plan、preview 与
+披露边界见[原生容器诊断与操作实现](../../internals/containers)。

@@ -2,138 +2,223 @@ import { defineConfig, type DefaultTheme } from 'vitepress'
 
 const github = 'https://github.com/lejunyang/one-sdk'
 
+type Item = DefaultTheme.SidebarItem
+
+/** One guide group, with every link prefixed by the locale's guide root. */
+function group(text: string, root: string, items: [string, string][], collapsed = false): Item {
+  return {
+    text,
+    collapsed,
+    items: items.map(([label, path]) => ({ text: label, link: `${root}${path}` }))
+  }
+}
+
+// ---------------------------------------------------------------- 中文
+
+const zhGuide = '/guide/'
+const zhGuideSidebar: Item[] = [
+  group('开始', zhGuide, [
+    ['项目介绍', 'start/introduction'],
+    ['安装', 'start/installation'],
+    ['快速上手', 'start/quick-start']
+  ]),
+  group('配置', zhGuide, [
+    ['配置文件', 'config/files'],
+    ['环境变量', 'config/environment'],
+    ['命令行全局参数', 'config/cli-options'],
+    ['目录与存储', 'config/storage'],
+    ['项目配置信任', 'config/trust']
+  ]),
+  group('基本使用', zhGuide, [
+    ['安装、切换与查询', 'basics/commands'],
+    ['Shell 激活与补全', 'basics/shell'],
+    ['控制哪些命令进 PATH', 'basics/path-control']
+  ]),
+  group('项目工作流', zhGuide, [
+    ['项目工具链', 'project/discovery'],
+    ['可复现锁文件', 'project/lockfiles'],
+    ['项目任务', 'project/tasks'],
+    ['应用依赖', 'project/deps'],
+    ['GitHub Actions', 'project/github-actions']
+  ]),
+  group('语言与运行时', zhGuide, [
+    ['运行时总览', 'runtimes/overview'],
+    ['Node.js', 'runtimes/node'],
+    ['Python', 'runtimes/python'],
+    ['Java 与 JVM 工具', 'runtimes/java'],
+    ['Go', 'runtimes/go'],
+    ['Rust', 'runtimes/rust'],
+    ['Zig', 'runtimes/zig'],
+    ['Android SDK', 'runtimes/android']
+  ], true),
+  group('包管理器与开发工具', zhGuide, [
+    ['包管理器', 'tools/package-managers'],
+    ['npm 工具', 'tools/npm'],
+    ['Cargo 工具', 'tools/cargo'],
+    ['Go 工具', 'tools/go'],
+    ['Python 工具', 'tools/python'],
+    ['Conda 工具', 'tools/conda'],
+    ['GitHub Release 工具', 'tools/github-releases'],
+    ['直接 HTTPS 制品', 'tools/http-artifacts'],
+    ['声明式 Backend', 'tools/declarative-backends']
+  ], true),
+  group('模型与 AI', zhGuide, [
+    ['模型快照', 'ai/models'],
+    ['Agent skills', 'ai/skills']
+  ], true),
+  group('下载源与安全', zhGuide, [
+    ['下载源与镜像', 'sources/mirrors'],
+    ['离线与预发布', 'sources/offline'],
+    ['完整性、签名与 Attestation', 'sources/integrity']
+  ], true),
+  group('系统集成', zhGuide, [
+    ['容器运行时', 'system/containers'],
+    ['系统包管理器', 'system/packages']
+  ], true),
+  group('维护', zhGuide, [
+    ['缓存与清理', 'maintenance/cache'],
+    ['诊断与安装校验', 'maintenance/diagnostics']
+  ], true)
+]
+
+const zhInternals = '/internals/'
+const zhInternalsSidebar: Item[] = [
+  group('概览', zhInternals, [['实现总览', '']]),
+  group('核心流程', zhInternals, [
+    ['项目发现与版本解析', 'resolution'],
+    ['安装管线与并发', 'installation'],
+    ['Shim、激活与锁文件', 'activation-lockfile'],
+    ['内容存储与原生缓存', 'storage-cache'],
+    ['完整性与来源验证', 'verification'],
+    ['可靠性与跨平台', 'reliability']
+  ]),
+  group('来源与 Registry', zhInternals, [
+    ['SDK 来源与依赖 Registry', 'sources-registries'],
+    ['HTTP 制品 backend', 'http-artifacts']
+  ]),
+  group('Backend 实现', zhInternals, [
+    ['Backend 与模型快照', 'backends-models'],
+    ['npm 开发工具实现', 'npm-tools'],
+    ['Cargo 开发工具实现', 'cargo-tools'],
+    ['Go 开发工具实现', 'go-tools'],
+    ['Conda 开发工具实现', 'conda-tools'],
+    ['应用依赖实现', 'deps']
+  ]),
+  group('系统集成', zhInternals, [
+    ['原生容器诊断与操作', 'containers'],
+    ['系统包管理器的检查机制', 'system-packages']
+  ]),
+  group('工程', zhInternals, [['发布流水线', 'releasing']])
+]
+
+// ---------------------------------------------------------------- English
+
+const enGuide = '/en/guide/'
+const enGuideSidebar: Item[] = [
+  group('Getting Started', enGuide, [
+    ['Introduction', 'start/introduction'],
+    ['Installation', 'start/installation'],
+    ['Quick Start', 'start/quick-start']
+  ]),
+  group('Configuration', enGuide, [
+    ['Configuration Files', 'config/files'],
+    ['Environment Variables', 'config/environment'],
+    ['Global Command-line Options', 'config/cli-options'],
+    ['Directories and Storage', 'config/storage'],
+    ['Project Configuration Trust', 'config/trust']
+  ]),
+  group('Basics', enGuide, [
+    ['Install, Switch, and Inspect', 'basics/commands'],
+    ['Shell Activation and Completions', 'basics/shell'],
+    ['Choosing Which Commands Reach PATH', 'basics/path-control']
+  ]),
+  group('Project Workflows', enGuide, [
+    ['Project Toolchains', 'project/discovery'],
+    ['Reproducible Lockfiles', 'project/lockfiles'],
+    ['Project Tasks', 'project/tasks'],
+    ['Application Dependencies', 'project/deps'],
+    ['GitHub Actions', 'project/github-actions']
+  ]),
+  group('Languages and Runtimes', enGuide, [
+    ['Runtimes Overview', 'runtimes/overview'],
+    ['Node.js', 'runtimes/node'],
+    ['Python', 'runtimes/python'],
+    ['Java and JVM Tools', 'runtimes/java'],
+    ['Go', 'runtimes/go'],
+    ['Rust', 'runtimes/rust'],
+    ['Zig', 'runtimes/zig'],
+    ['Android SDK', 'runtimes/android']
+  ], true),
+  group('Package Managers and Tools', enGuide, [
+    ['Package Managers', 'tools/package-managers'],
+    ['npm Tools', 'tools/npm'],
+    ['Cargo Tools', 'tools/cargo'],
+    ['Go Tools', 'tools/go'],
+    ['Python Tools', 'tools/python'],
+    ['Conda Tools', 'tools/conda'],
+    ['GitHub Release Tools', 'tools/github-releases'],
+    ['Direct HTTPS Artifacts', 'tools/http-artifacts'],
+    ['Declarative Backends', 'tools/declarative-backends']
+  ], true),
+  group('Models and AI', enGuide, [
+    ['Model Snapshots', 'ai/models'],
+    ['Agent Skills', 'ai/skills']
+  ], true),
+  group('Sources and Security', enGuide, [
+    ['Download Sources and Mirrors', 'sources/mirrors'],
+    ['Offline Mode and Pre-releases', 'sources/offline'],
+    ['Integrity, Signatures, and Attestation', 'sources/integrity']
+  ], true),
+  group('System Integration', enGuide, [
+    ['Container Runtimes', 'system/containers'],
+    ['System Package Managers', 'system/packages']
+  ], true),
+  group('Maintenance', enGuide, [
+    ['Caches and Cleanup', 'maintenance/cache'],
+    ['Diagnostics and Install Verification', 'maintenance/diagnostics']
+  ], true)
+]
+
+const enInternals = '/en/internals/'
+const enInternalsSidebar: Item[] = [
+  group('Overview', enInternals, [['Implementation Overview', '']]),
+  group('Core Flow', enInternals, [
+    ['Project Discovery and Resolution', 'resolution'],
+    ['Install Pipeline and Concurrency', 'installation'],
+    ['Shims, Activation, and Lockfiles', 'activation-lockfile'],
+    ['Content Store and Native Caches', 'storage-cache'],
+    ['Integrity and Provenance', 'verification'],
+    ['Reliability and Portability', 'reliability']
+  ]),
+  group('Sources and Registries', enInternals, [
+    ['SDK Sources and Registries', 'sources-registries'],
+    ['HTTP Artifact Backend', 'http-artifacts']
+  ]),
+  group('Backend Implementations', enInternals, [
+    ['Backends and Model Snapshots', 'backends-models'],
+    ['npm Developer Tool Implementation', 'npm-tools'],
+    ['Cargo Developer Tool Implementation', 'cargo-tools'],
+    ['Go Developer Tool Implementation', 'go-tools'],
+    ['Conda Developer Tool Implementation', 'conda-tools'],
+    ['Application Dependency Implementation', 'deps']
+  ]),
+  group('System Integration', enInternals, [
+    ['Native Container Diagnostics and Operations', 'containers'],
+    ['How System Package Managers Are Inspected', 'system-packages']
+  ]),
+  group('Engineering', enInternals, [['Release Pipeline', 'releasing']])
+]
+
 const zhNav: DefaultTheme.NavItem[] = [
-  { text: '介绍', link: '/guide/introduction' },
-  { text: '安装', link: '/guide/installation' },
-  { text: '使用指南', link: '/guide/features' },
-  { text: '实现方式', link: '/guide/implementation/' }
+  { text: '使用指南', link: '/guide/', activeMatch: '^/guide/' },
+  { text: '实现原理', link: '/internals/', activeMatch: '^/internals/' },
+  { text: '更新日志', link: `${github}/releases` }
 ]
 
 const enNav: DefaultTheme.NavItem[] = [
-  { text: 'Introduction', link: '/en/guide/introduction' },
-  { text: 'Installation', link: '/en/guide/installation' },
-  { text: 'Guides', link: '/en/guide/features' },
-  { text: 'Internals', link: '/en/guide/implementation/' }
-]
-
-const zhSidebar: DefaultTheme.Sidebar = [
-  {
-    text: '开始使用',
-    items: [
-      { text: '项目介绍', link: '/guide/introduction' },
-      { text: '安装', link: '/guide/installation' }
-    ]
-  },
-  {
-    text: '使用指南',
-    items: [
-      { text: '功能总览', link: '/guide/features' },
-      { text: '开始使用与通用命令', link: '/guide/getting-started' },
-      { text: 'GitHub Actions', link: '/guide/github-actions' },
-      { text: '项目配置与信任', link: '/guide/projects' },
-      { text: '项目任务', link: '/guide/tasks' },
-            { text: '锁文件与环境复现', link: '/guide/lockfiles' },
-      { text: '语言与运行时', link: '/guide/runtimes' },
-      { text: 'Android SDK 工具', link: '/guide/android' },
-      { text: 'JavaScript 包管理器', link: '/guide/package-managers' },
-      { text: 'npm 开发工具', link: '/guide/npm-tools' },
-              { text: '应用依赖', link: '/guide/deps' },
-      { text: 'Cargo 开发工具', link: '/guide/cargo-tools' },
-      { text: 'Go 开发工具', link: '/guide/go-tools' },
-      { text: 'Conda 开发工具', link: '/guide/conda-tools' },
-      { text: 'Python 开发工具', link: '/guide/python-tools' },
-      { text: '直接 HTTPS 制品', link: '/guide/http-artifacts' },
-      { text: '模型快照', link: '/guide/models' },
-      { text: 'Agent skills', link: '/guide/skills' },
-      { text: '来源、离线与安全', link: '/guide/sources-security' },
-      { text: '容器运行时、Registry 与原生操作', link: '/guide/containers' },
-      { text: '系统包管理器', link: '/guide/system-packages' },
-      { text: '存储、Shell 与诊断', link: '/guide/storage-shell' }
-    ]
-  },
-  {
-    text: '实现方式',
-    items: [
-      { text: '实现总览', link: '/guide/implementation/' },
-      { text: '项目发现与版本解析', link: '/guide/implementation/resolution' },
-      { text: '安装管线与并发', link: '/guide/implementation/installation' },
-      { text: 'Shim、激活与锁文件', link: '/guide/implementation/activation-lockfile' },
-      { text: 'SDK 来源与依赖 Registry', link: '/guide/implementation/sources-registries' },
-      { text: 'HTTP 制品 backend', link: '/guide/implementation/http-artifacts' },
-      { text: '原生容器诊断与操作', link: '/guide/implementation/containers' },
-      { text: '系统包管理器的检查机制', link: '/guide/implementation/system-packages' },
-      { text: '内容存储与原生缓存', link: '/guide/implementation/storage-cache' },
-      { text: '完整性与来源验证', link: '/guide/implementation/verification' },
-      { text: 'Backend 与模型快照', link: '/guide/implementation/backends-models' },
-      { text: 'npm 开发工具实现', link: '/guide/implementation/npm-tools' },
-              { text: '应用依赖实现', link: '/guide/implementation/deps' },
-      { text: 'Cargo 开发工具实现', link: '/guide/implementation/cargo-tools' },
-      { text: 'Go 开发工具实现', link: '/guide/implementation/go-tools' },
-      { text: 'Conda 开发工具实现', link: '/guide/implementation/conda-tools' },
-      { text: '发布流水线', link: '/guide/implementation/releasing' },
-      { text: '可靠性与跨平台', link: '/guide/implementation/reliability' }
-    ]
-  }
-]
-
-const enSidebar: DefaultTheme.Sidebar = [
-  {
-    text: 'Getting Started',
-    items: [
-      { text: 'Introduction', link: '/en/guide/introduction' },
-      { text: 'Installation', link: '/en/guide/installation' }
-    ]
-  },
-  {
-    text: 'Guide',
-    items: [
-      { text: 'Feature Overview', link: '/en/guide/features' },
-      { text: 'Getting Started and Commands', link: '/en/guide/getting-started' },
-      { text: 'GitHub Actions', link: '/en/guide/github-actions' },
-      { text: 'Projects, Configuration, and Trust', link: '/en/guide/projects' },
-      { text: 'Project Tasks', link: '/en/guide/tasks' },
-      { text: 'Lockfiles and Reproducibility', link: '/en/guide/lockfiles' },
-      { text: 'Languages and Runtimes', link: '/en/guide/runtimes' },
-      { text: 'Android SDK Tools', link: '/en/guide/android' },
-      { text: 'JavaScript Package Managers', link: '/en/guide/package-managers' },
-      { text: 'npm Developer Tools', link: '/en/guide/npm-tools' },
-              { text: 'Application Dependencies', link: '/en/guide/deps' },
-      { text: 'Cargo Developer Tools', link: '/en/guide/cargo-tools' },
-      { text: 'Go Developer Tools', link: '/en/guide/go-tools' },
-      { text: 'Conda Developer Tools', link: '/en/guide/conda-tools' },
-      { text: 'Python Developer Tools', link: '/en/guide/python-tools' },
-      { text: 'Direct HTTPS Artifacts', link: '/en/guide/http-artifacts' },
-      { text: 'Model Snapshots', link: '/en/guide/models' },
-      { text: 'Agent Skills', link: '/en/guide/skills' },
-      { text: 'Sources, Offline, and Security', link: '/en/guide/sources-security' },
-      { text: 'Container Runtimes, Registries, and Native Operations', link: '/en/guide/containers' },
-      { text: 'System Package Managers', link: '/en/guide/system-packages' },
-      { text: 'Storage, Shell, and Diagnostics', link: '/en/guide/storage-shell' }
-    ]
-  },
-  {
-    text: 'Internals',
-    items: [
-      { text: 'Implementation Overview', link: '/en/guide/implementation/' },
-      { text: 'Project Discovery and Resolution', link: '/en/guide/implementation/resolution' },
-      { text: 'Install Pipeline and Concurrency', link: '/en/guide/implementation/installation' },
-      { text: 'Shims, Activation, and Lockfiles', link: '/en/guide/implementation/activation-lockfile' },
-      { text: 'SDK Sources and Registries', link: '/en/guide/implementation/sources-registries' },
-      { text: 'HTTP Artifact Backend', link: '/en/guide/implementation/http-artifacts' },
-      { text: 'Native Container Diagnostics and Operations', link: '/en/guide/implementation/containers' },
-      { text: 'How System Package Managers Are Inspected', link: '/en/guide/implementation/system-packages' },
-      { text: 'Content Store and Native Caches', link: '/en/guide/implementation/storage-cache' },
-      { text: 'Integrity and Provenance', link: '/en/guide/implementation/verification' },
-      { text: 'Backends and Model Snapshots', link: '/en/guide/implementation/backends-models' },
-      { text: 'npm Developer Tool Implementation', link: '/en/guide/implementation/npm-tools' },
-              { text: 'Application Dependency Implementation', link: '/en/guide/implementation/deps' },
-      { text: 'Cargo Developer Tool Implementation', link: '/en/guide/implementation/cargo-tools' },
-      { text: 'Go Developer Tool Implementation', link: '/en/guide/implementation/go-tools' },
-      { text: 'Conda Developer Tool Implementation', link: '/en/guide/implementation/conda-tools' },
-      { text: 'Release Pipeline', link: '/en/guide/implementation/releasing' },
-      { text: 'Reliability and Portability', link: '/en/guide/implementation/reliability' }
-    ]
-  }
+  { text: 'Guide', link: '/en/guide/', activeMatch: '^/en/guide/' },
+  { text: 'Internals', link: '/en/internals/', activeMatch: '^/en/internals/' },
+  { text: 'Releases', link: `${github}/releases` }
 ]
 
 export default defineConfig({
@@ -144,7 +229,7 @@ export default defineConfig({
     hostname: 'https://lejunyang.github.io/one-sdk/'
   },
   head: [
-    ['meta', { name: 'theme-color', content: '#356859' }],
+    ['meta', { name: 'theme-color', content: '#1f6f5c' }],
     ['link', { rel: 'icon', href: '/one-sdk/logo.svg', type: 'image/svg+xml' }]
   ],
   markdown: {
@@ -159,7 +244,10 @@ export default defineConfig({
       description: '一个跨平台、一站式、多语言 SDK 版本管理器',
       themeConfig: {
         nav: zhNav,
-        sidebar: zhSidebar,
+        sidebar: {
+          '/guide/': zhGuideSidebar,
+          '/internals/': zhInternalsSidebar
+        },
         editLink: {
           pattern: `${github}/edit/main/site/:path`,
           text: '在 GitHub 上编辑此页'
@@ -194,7 +282,10 @@ export default defineConfig({
       description: 'One cross-platform manager for all your language SDKs',
       themeConfig: {
         nav: enNav,
-        sidebar: enSidebar,
+        sidebar: {
+          '/en/guide/': enGuideSidebar,
+          '/en/internals/': enInternalsSidebar
+        },
         editLink: {
           pattern: `${github}/edit/main/site/:path`,
           text: 'Edit this page on GitHub'

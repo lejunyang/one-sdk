@@ -1,0 +1,412 @@
+# Reproducible Lockfiles
+
+Except for floating Rust channels, `osdk.lock` records resolved exact versions
+and selected artifacts so the same platform can rebuild an environment without
+querying upstream version indexes again. Rust locks for `stable`, `beta`, and
+`nightly` preserve only the rustup channel name and may install a newer
+toolchain later; use an explicit or dated Rust toolchain for immutable
+reproduction. The lock is a reproducibility input and audit record, not
+permission to skip verification.
+
+## How commands interact with the lock
+
+```text
+osdk lock [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk install|i [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk outdated [TOOL[@VERSION] ...]
+osdk upgrade [TOOL[@VERSION] ...] [-o|--opt KEY=VALUE ...]
+osdk exec (-t|--tool TOOL[@VERSION])... -- COMMAND [ARG ...]
+osdk model use NAME REFERENCE [OPTIONS]
+osdk model import NAME PATH [OPTIONS]
+osdk model sync [NAME]
+```
+
+| Invocation | Reads the existing lock? | Writes the lock? |
+| --- | --- | --- |
+| `install` with no tools and no `-o` | Yes; if a current-host platform section exists, use all tools in it; otherwise use project declarations in a project, or global config outside one | No on lock replay; after a successful project-config fallback, record the exact current-platform result |
+| `install TOOL...` | No | No |
+| `install -o KEY=VALUE`, even without a tool | No | After a successful project-config install, record the current-platform result; no write outside a project |
+| Project `use TOOL...` | No | Yes; update that tool and injected managed runtimes, rolling configuration back on failure |
+| `use --global TOOL...` | No | Never writes the project lock; global npm/Go tools maintain the user lock according to their own semantics |
+| `lock` | Loads the old file only to preserve other platforms and models | Yes; rebuilds the target platform's tool map (only tools the project itself declares -- see below) |
+| `outdated` | No; re-resolves configuration or explicit requests | No |
+| `upgrade` | No; re-resolves configuration or explicit requests | Yes; rebuilds the host platform's tool map (project tools only, likewise) |
+| `exec` | No | No |
+| `model use` | No | Writes project intent; does not write the lock itself |
+| `model import NAME PATH` | Yes, only to reject a same-name conflict | No; local paths are not portable |
+| `model sync [NAME]` | Yes | Resolves added/changed declarations and merges model locks |
+| `list`, `current`, `where` | No | No |
+
+For `outdated`, the “current” column is the greatest installed version for that
+backend. It checks whether the newly resolved exact target is installed; it does
+not mean the directory's active version. `upgrade` installs the new resolution
+and then refreshes the lock.
+
+## A project lock records the project's own tools only
+
+`osdk.lock` sits beside the project configuration and is committed with it, so it
+describes **that project** -- not whatever the machine that ran `lock` happened to
+pin globally. Without tool operands, `lock` and `upgrade` write only the tools the
+project itself declares:
+
+| Where the tool comes from | Enters the project lock? |
+| --- | --- |
+| Project `osdk.toml` / `.osdk.toml` | Yes |
+| Project `.tool-versions` | Yes |
+| Derived from project evidence (`packageManager` in `package.json`, a discovered Node range) | Yes |
+| User-global `config.toml` | **No** |
+| Named explicitly on the command line (`osdk lock java`) | Yes; an explicit instruction overrides the filter above |
+
+The provenance comes from the configuration layer's own origin records -- the same
+data shell activation consults. When a bare project `install` falls back from the
+lock to configuration, it also materializes only project declarations instead of
+walking unrelated global pins just to report them as already installed. A bare
+`install` outside a project still applies user-global configuration. `exec` and
+`outdated` may still use global defaults, and `upgrade` still installs every
+configured tool; it merely stops recording global entries in the project lock.
+
+This limits the **request set**, not storage. Tool binaries still live in osdk's
+user-level install pool. If the exact version requested by a project is already
+there, osdk reuses it and reports it as installed instead of copying it into the
+project.
+
+This rule corrects a silent behavior: a project pinning one tool used to produce a
+lock naming more than a dozen, and a global `java = "26"` was written into a
+project that explicitly pins `21`, with no warning either time. To lock global
+tools too, declare them in the project configuration or name them on the command
+line.
+
+## Recommended workflow
+
+```bash
+# Install and select a tool, updating project config and the platform lock
+osdk use node@20
+
+# Use the resolutions and artifacts from the current-platform lock
+osdk install
+
+# After editing [tools] by hand, resolve and refresh the lock without installing
+osdk lock
+
+# Re-resolve current declarations and report targets not yet installed
+osdk outdated
+
+# Install re-resolved targets and refresh the lock
+osdk upgrade
+```
+
+Explicit `osdk install node@20` always follows the explicit request and neither
+reads nor writes the lock, because it does not change project `[tools]`; use
+`use` for a project selection. Adding backend options to a no-argument install
+also bypasses the read fast path, but a successful project install records the
+actual options and exact result in the lock.
+
+## Discovery and write locations
+
+- For reads, osdk walks upward from the current directory and uses the nearest `osdk.lock`.
+- For writes, a discovered project configuration determines the sibling lock path.
+- Without project configuration, osdk reuses the nearest ancestor lock; if none exists, it creates one in the current directory.
+
+In unusual nested layouts, the nearest readable lock and the project-determined
+write path can differ. Keep `osdk.toml` and `osdk.lock` together at the project
+root.
+
+## Schema 4
+
+```toml
+schema = 4
+
+[platforms.linux-x64.tools.node]
+request = "20"
+version = "20.20.0"
+
+[platforms.linux-x64.tools.node.options]
+arch = "x64"
+corepack = "false"
+
+[platforms.linux-x64.tools.node.artifact]
+url = "https://example/node.tar.gz"
+file_name = "node.tar.gz"
+checksum = "sha256:..."       # optional
+subdir = "dist"               # optional
+
+[[platforms.linux-x64.tools.node.artifact.evidence]]
+# Verified supply-chain evidence; fields depend on the evidence type
+
+[platforms.linux-x64.tools."npm:prettier"]
+request = "3"
+version = "3.6.2"
+
+[platforms.linux-x64.tools."npm:prettier".npm]
+package = "prettier"
+installer = "npm"
+scope = "project"
+node_version = "20.20.0"     # optional
+
+[platforms.linux-x64.tools."npm:prettier".npm.native_lock]
+kind = "npm"
+format = "package-lock-v3"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[platforms.linux-x64.tools.rust]
+request = "1.91.1"
+version = "1.91.1"
+
+[platforms.linux-x64.tools."cargo:ripgrep"]
+request = "14"
+version = "14.1.1"
+options = { locked = "true" }
+
+[platforms.linux-x64.tools."cargo:ripgrep".native]
+runtime = "rust"
+runtime_version = "1.91.1"
+replay = "version-only"
+source = "sparse+https://index.crates.io/"
+
+[platforms.linux-x64.tools.go]
+request = "1.24"
+version = "1.24.6"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls"]
+request = "0.20"
+version = "0.20.0"
+
+[platforms.linux-x64.tools."go:golang.org/x/tools/gopls".native]
+runtime = "go"
+runtime_version = "1.24.6"
+replay = "version-only"
+source = "https://proxy.golang.org"
+module = "golang.org/x/tools/gopls"
+
+[models.qwen]
+provider = "huggingface"
+repository = "Qwen/Qwen2.5-7B-Instruct"
+requested_revision = "main"
+revision = "immutable-revision"
+endpoint = "https://huggingface.co"
+variant = "safetensors-fp16"
+kind = "lora"
+family = "sdxl"
+derived_from = "hf:stabilityai/stable-diffusion-xl-base-1.0@main" # optional
+
+[[models.qwen.files]]
+path = "config.json"
+size = 123
+sha256 = "..."
+
+# Optional: consumer views to render for this model
+# (from [models.<name>.views] in osdk.toml)
+[models.qwen.views.comfyui]
+profile = "default"
+[models.qwen.views.comfyui.map]
+"unet/" = "diffusion_models"
+```
+
+A model with `provider = "local"` cannot be written to or replayed from the lock. A `model import` snapshot must be re-imported from its original bytes.
+
+The `views` table is written only when non-empty and records consumer ->
+profile plus a repo-relative-prefix -> category map; it never records the
+machine-local view path or the link mode actually used. `osdk model sync` reads
+it back to rebuild views, so the field has both a write and a read path. It is
+an optional addition on schema 4: an older osdk ignores the unknown field
+instead of failing, so the schema version is not bumped.
+
+Platform keys use `linux-*`, `macos-*`, or `windows-*` plus
+`x64|arm64|x86|arm`; musl Linux adds `-musl`. Updating one platform preserves
+other platform sections and top-level model entries. Internal `__osdk_*`
+options are omitted from public `options`; non-npm backends that support generic
+receipts store artifact identity separately.
+Schema 4 retains the schema-3 npm metadata model and requires an `npm` table for
+every `npm:<package>`. The main lock stores
+only basic npm metadata: `package`, `installer`, `scope`, an optional exact
+`node_version`, and optional `native_lock.kind`, `native_lock.format`, and
+`native_lock.sha256`. It no longer stores a graph payload or any graph/path
+field. An npm tool entry cannot carry a generic `artifact` table. Native lock
+content stays in the installer-owned directory; `osdk.lock` keeps only metadata
+and an optional digest.
+
+A schema 1 lock without npm tools remains readable and safely upgrades on its
+next successful write. A schema 1 lock containing any `npm:*` entry, including
+the old inline graph form, cannot be consumed or migrated and must be regenerated;
+this prevents old records without a verifiable dependency graph from being
+mislabeled as the current schema.
+
+Schema 2 npm sidecars remain readable. Reads still validate the sidecar and use
+it as frozen input. Only a later successful write rewrites the entry into the
+current metadata-only form; the existing `osdk.lock.d/` sidecar is not deleted
+automatically.
+
+Schema 4 adds typed `native` metadata for Cargo and Go-module tools. A Cargo
+entry requires a matching exact `rust` entry in the same platform table.
+Registry versions use `version-only`; full `rev:<40 lowercase hex>` Git
+selectors use `immutable-revision`; Git HEAD, tags, and branches use
+`floating-ref`. These labels state selector strength and do not embed the
+complete dependency/source graph. Consequently, a matching complete Cargo
+install can be reused offline, but a cold offline install or repair is not
+supported. Schemas 1 through 3 cannot represent this native runtime binding and
+reject `cargo:` entries; regenerate them as schema 4. See
+[Cargo Developer Tools](../tools/cargo).
+Registry Cargo entries additionally retain the exact selected canonical,
+credential-free sparse HTTPS index in `native.source`; Git Cargo entries cannot
+carry that field.
+
+Go-module entries require a matching exact `go` entry. They use
+`version-only`, retain the selected canonical credential-free proxy in
+`native.source`, and retain the discovered module root in `native.module`. This
+is compact resolution metadata, not a copied `go.sum` or transitive module
+graph, so only an already complete exact install can be reused offline. Schemas
+1 through 3 reject `go:` entries. See [Go Developer Tools](../tools/go).
+
+For Node, `lock -o arch=...` writes the target-architecture section. osdk has no
+cross-architecture download-only mode, and installation rejects an artifact that
+cannot run on the host. `upgrade -o arch=...` currently still writes the host
+platform section, so do not use it to generate a cross-architecture lock.
+
+## Artifact URLs record the upstream; mirrors apply at run time
+
+A lock is committed and replayed on other machines, so a URL in it is a promise
+about *what* to fetch, not a record of which host this machine happened to be
+fastest to. Those were the same string: the pipeline records whichever candidate
+actually downloaded, and on a mirrored network that is a mirror. A lock produced
+here therefore named `https://golang.google.cn/dl/...` for go and
+`https://gh-proxy.com/https://github.com/...` for java, and anyone replaying it
+was pushed through this machine's mirrors -- including people who cannot reach
+them.
+
+URLs are now normalized back to the upstream on write:
+
+| URL as recorded | URL written to the lock |
+| --- | --- |
+| `https://golang.google.cn/dl/go1.26.5...` | `https://go.dev/dl/go1.26.5...` |
+| `https://mirrors.aliyun.com/golang/...` | `https://go.dev/dl/...` |
+| `https://gh-proxy.com/https://github.com/...` | `https://github.com/...` |
+| A custom source, e.g. `https://nexus.internal/...` | **left unchanged** |
+
+The mapping is not a hardcoded list: it is derived from the backends' own
+`default_sources`, so a mirror is only rewritten to the upstream that the same
+backend declares it mirrors. A custom source is therefore left exactly as
+recorded -- osdk has no upstream to claim it corresponds to, and inventing one
+would write a false origin into a committed file. The checksum is untouched:
+mirrors serve the same bytes, and if one does not, that is what the checksum is
+for.
+
+The same applies to a model's `endpoint`. A model is identified by provider,
+repository and immutable revision, and every file's SHA-256 is already locked, so
+the host is not part of the identity. `--endpoint`, `HF_ENDPOINT` and
+`MODELSCOPE_ENDPOINT` used to flow straight into `[models.<name>].endpoint`; now
+only a provider's built-in endpoints collapse to its official one (ModelScope's
+`modelscope.cn` and `www.modelscope.ai` converge), and a custom endpoint is left
+as-is.
+
+## A conda entry records the solved closure
+
+`conda:ninja = "1.13.2"` does not name an artifact: it names a *solve*, whose
+result is a closure of packages -- five for ninja, a dozen for a compiler -- each
+with its own URL and digest. The same version resolved a week later, or against a
+different channel set, legitimately produces different builds. A lock carrying
+only `version = "1.13.2"` therefore promises far less than it appears to: it pins
+a request, not an environment.
+
+`[platforms.<key>.tools."conda:<pkg>".conda]` records:
+
+| Field | Meaning |
+| --- | --- |
+| `closure` | `blake3:<64 hex>` digest over each package's URL and SHA-256 |
+| `packages` | How many packages the solve produced |
+
+```toml
+[platforms.windows-x64.tools."conda:ninja".conda]
+closure = "blake3:ed5710780df41d797269921935040e454aff71805c05446a7e319b8ce48e62e5"
+packages = 5
+```
+
+`closure` is the digest the backend already computes to decide *which prefix a
+solve belongs in*, taken over a sorted package list so solver iteration order
+cannot change it. That makes it exactly the value that answers "is this the same
+environment": if a replay solves to a different closure, its digest differs and
+the divergence becomes visible instead of silent. `packages` is not redundant with
+the digest -- a differing digest alone says only "not the same", while `5 -> 11`
+says the closure grew, usually a changed channel set or `with` list.
+
+`channels` and `with` are part of the install identity and appear in the same
+entry's `options`.
+
+The section is omitted when nothing is installed: `lock` may legitimately run
+before install, and inventing a digest that was never observed would be worse than
+recording none.
+
+## Stale project locks
+
+osdk currently does not compare `osdk.toml` and `osdk.lock` timestamps or
+content. If the nearest lock contains a current-platform section, no-argument
+`install` uses that section completely even after project configuration changes.
+An existing but empty tool map also does not fall back. Only a missing current-
+platform section falls back to project discovery.
+
+After changing project requests, run one of:
+
+```bash
+osdk lock       # refresh exact resolution only
+# or
+osdk upgrade    # install re-resolved versions and refresh the lock
+```
+
+Malformed TOML and unsupported schemas fail explicitly instead of silently
+falling back to configuration. The main lock is currently limited to 16 MiB;
+schema 2 npm sidecars still use the same 16 MiB validation bound when read for
+compatibility. Schema 4 writes only atomically replace the main lock and do not
+generate a new npm graph sidecar.
+
+## npm metadata and compatibility boundaries
+
+For `npm:<package>`, the schema 4 main lock retains schema-3-compatible npm
+metadata rather than a
+complete dependency graph. It preserves the package name, selected installer,
+scope, an optional exact Node version, and optional native-lock owner/format/
+SHA-256 metadata. The native lock payload and filesystem path remain owned by
+the installer and are not written back into `osdk.lock`.
+
+When argument-free `osdk install` restores an npm tool from the lock, it first
+checks package/backend identity, validates `installer` and `scope`, ensures any
+recorded `node_version` matches the same-platform Node entry, and validates any
+recorded `native_lock` owner/format/SHA-256. If the lock comes from older
+schema 2 data, reads still validate the sidecar under the old rules and use it
+as a compatibility input; the next successful write rewrites the main lock to
+schema 4 metadata only.
+
+For schema 2 compatibility reads, a missing, corrupt, oversized, or symlinked
+sidecar still fails explicitly. See [npm Developer Tools](../tools/npm) for
+details.
+
+## Verification boundaries for locked reinstalls
+
+A lock can preserve the actual URL, filename, checksum, archive subdirectory,
+and attestation evidence for non-npm backends that support generic artifact
+receipts. No-argument installation restores their saved resolution, backend
+options, and artifact identity. npm tools use the metadata-only npm table
+described above, not a generic artifact receipt. For a floating Rust channel,
+that resolution remains a channel name rather than an immutable release.
+
+When an installation is missing or incomplete and the pipeline actually runs, a
+checksum present in the lock is recomputed against downloaded or cached bytes.
+With attestations enabled, lock evidence remains audit data; a cached or live
+proof bundle is still required. If the lock has no digest/evidence and
+`require_checksums=false`, installation may proceed without cryptographic
+integrity verification. A normal `install` reuses an existing `.osdk-complete`
+version earlier and runs only backend post-install checks, without rehashing its
+artifact. See [Sources and Supply-chain Security](../sources/integrity).
+
+A locally linked Rust toolchain has no reproducible artifact, so `osdk lock`
+rejects it explicitly.
+
+## Do not confuse three kinds of “stale”
+
+| State | Current behavior |
+| --- | --- |
+| Project `osdk.lock` is behind configuration | No freshness detection; run `lock` or `upgrade` |
+| `<installs>/<tool>/.locks/<version>.lock` file remains | This is an OS-level exclusion-lock path; process exit releases the lock, and an empty file does not mean it remains held |
+| Installation directory lacks `.osdk-complete` | Treat as a partial failed installation; delete and rebuild it after acquiring the object lock |
+
+Model snapshots use per-snapshot OS locks too. A `changed`, `missing` or
+`unreachable` entry from `trust list` instead means a configuration path or
+content hash no longer matches.

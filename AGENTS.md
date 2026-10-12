@@ -3,9 +3,9 @@
 - 每完成并验证一个独立任务或功能后，先创建专门的 Git 提交，再开始下一个任务。
 - 多个已完成的功能如果能安全拆分，就不要合并到同一个提交里。
 - 每个提交只聚焦一处行为变更，并包含它的测试和直接相关的文档。
-- 任何面向用户的能力变更，都要检查 `README.md`、`README.zh-CN.md`、`site/guide/`、`site/en/guide/`、`site/.vitepress/config.mts` 和 `skills/`；在同一个提交里更新所有受影响的文档，使两份 README、两种站点语言、导航结构，以及 `skills/` 里的 osdk 使用指引始终与实现保持一致。
+- 任何面向用户的能力变更，都要检查 `README.md`、`README.zh-CN.md`、`site/guide/`、`site/en/guide/`、`site/internals/`、`site/en/internals/`、`site/.vitepress/config.mts` 和 `skills/`；在同一个提交里更新所有受影响的文档，使两份 README、两种站点语言、导航结构，以及 `skills/` 里的 osdk 使用指引始终与实现保持一致。
 - `README.md` 和 `README.zh-CN.md` 应保持为面向使用场景的入口，只讲产品功能和用法。不要在任何一份 README 里写内部架构、实现算法或设计取舍，这些内容应放进 VitePress 中对应的实现说明章节。
-- VitePress 的用户指南页和实现说明页必须中英文成对存在。新增、删除或重命名页面时，同步更新两种语言的侧边栏，并运行 VitePress 生产构建，让失效链接在校验阶段暴露出来。
+- VitePress 的用户指南页和实现说明页必须中英文成对存在。用户指南在 `site/guide/<分类>/`（开始、配置、基本使用、项目、运行时、工具、模型与 AI、下载源与安全、系统集成、维护），实现说明在 `site/internals/`，两者是两套独立侧边栏；新页面放进最贴切的分类目录，不要在 `guide/` 根下平铺。新增、删除或重命名页面时，同步更新两种语言的侧边栏；移走的旧 URL 要在 `site/.vitepress/redirects.json` 登记新位置，并运行 VitePress 生产构建，让失效链接在校验阶段暴露出来。
 
 - **`skills/` 是给外部 AI Agent 读的 osdk 使用指引，不是 osdk 自己加载的东西。** 它与 `crates/osdk-core/src/backend/registry.rs` 从 `<config>/plugins`、`<data>/plugins` 加载的声明式 backend 是两回事，别混。`skills/osdk-guide/SKILL.md` 是入口；每个一级命令在 `skills/osdk-guide/reference/<command>/guide.md` 有独立 reference，配置字段按顶层段拆在 `reference/configuration/`，Lua 单独在 `reference/run/lua.md`。这些 reference 以「与实现一致」为第一要求：命令对齐 `crates/osdk-cli/src/cli.rs` 的 `enum Command`，配置字段对齐 `crates/osdk-core/src/config/mod.rs` 的 `ConfigFile` 及各子结构。新增 / 改名 / 删除一级命令、子命令、全局参数，或增删 `osdk.toml` 段与字段时，在同一个提交里更新对应分区——它们与两份 README、两种语言 site 文档同属「面向用户能力变更」要一起更新的清单，任一侧独有就是下一次「文档与实现悄悄分叉」的来源。
 

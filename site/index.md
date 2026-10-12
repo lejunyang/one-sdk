@@ -10,37 +10,49 @@ hero:
     alt: osdk 标志
   actions:
     - theme: brand
-      text: 开始使用
-      link: /guide/installation
+      text: 安装
+      link: /guide/start/installation
     - theme: alt
-      text: 了解功能
-      link: /guide/features
+      text: 使用指南
+      link: /guide/
     - theme: alt
-      text: 实现方式
-      link: /guide/implementation/
+      text: 实现原理
+      link: /internals/
     - theme: alt
       text: GitHub
       link: https://github.com/lejunyang/one-sdk
 
 features:
   - icon: ◈
-    title: 一个命令，多种 SDK
-    details: 用一致的命令管理 Node.js、Python、Java、Go、Rust、包管理器、`npm:<package>` 开发工具和 GitHub Release 工具。
-  - icon: ⧉
-    title: 跨版本内容去重
-    details: 多个已安装版本可复用相同文件，减少重复磁盘占用；具体存储方式见实现说明。
+    title: 一套命令，所有运行时
+    details: Node.js、Python、Java、Go、Rust、Zig、Android SDK，以及 npm、Cargo、Go、PyPI、Conda、GitHub Release 发布的工具，都用同样的 install / use / exec。
+    link: /guide/runtimes/overview
+    linkText: 运行时总览
+  - icon: ⌁
+    title: 可复现的项目
+    details: osdk.toml 声明工具与任务，按平台分区的 osdk.lock 记录精确版本与制品身份，团队和 CI 一条 install 复现。
+    link: /guide/project/lockfiles
+    linkText: 锁文件
   - icon: ⇄
     title: 自动选择最快镜像
-    details: 探测官方源和权威镜像，按速度选择并在元数据或下载失败时自动切换。
-  - icon: ⌁
-    title: 可复现的项目环境
-    details: 生成按平台分区的 osdk.lock，保存精确版本和各 backend 的复现信息；schema 3 为 npm 工具记录作用域与原生 lock 身份。
+    details: 探测官方源与权威镜像，按实测速度排序，制品校验失败时自动切换下一个来源。
+    link: /guide/sources/mirrors
+    linkText: 下载源与镜像
   - icon: ✓
     title: 完整性与来源验证
-    details: 支持上游校验和、严格校验策略，以及 GitHub Artifact Attestations 的 Sigstore 验证。
+    details: 校验上游 checksum 与签名，可按策略要求 GitHub Artifact Attestation；项目里的安全相关配置需要先审批。
+    link: /guide/sources/integrity
+    linkText: 完整性与签名
+  - icon: ⧉
+    title: 内容去重与离线重装
+    details: 已校验文件写入内容寻址存储并跨版本复用；联网装过一次后，可用 --offline 从缓存重装。
+    link: /guide/config/storage
+    linkText: 目录与存储
   - icon: ⬡
-    title: 离线重装与共享缓存
-    details: 复用元数据、制品和原生包缓存；npm 工具的冷离线重装还需要安装器保留的原生 lock 和已预热缓存。
+    title: 模型、Skill 与系统集成
+    details: 锁定 Hugging Face、ModelScope、Civitai 模型快照，为 AI Agent 安装 skill，诊断容器运行时与系统包管理器。
+    link: /guide/ai/models
+    linkText: 模型快照
 ---
 
 ## 三步开始
@@ -58,4 +70,4 @@ osdk use -g node@20
 node --version
 ```
 
-[查看完整安装说明 →](/guide/installation)
+[查看完整安装说明 →](/guide/start/installation)

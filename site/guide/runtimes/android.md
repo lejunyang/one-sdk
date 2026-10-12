@@ -1,0 +1,580 @@
+# Android SDK 工具
+
+本页覆盖通过 osdk 管理 Android SDK 包：NDK、platform-tools（`adb`、`fastboot`）、
+build-tools、cmdline-tools、CMake、platforms 等。
+
+osdk 直接解析 Google 官方仓库清单并从 Google 服务器下载，不代理、不转存归档文件，
+定位与 Android Studio 内置的 SDK Manager 相同。
+
+## 工具名
+
+每个包族对应一个 backend，形如 `android-<族名>`：
+
+| 工具名 | 提供的可执行文件 | 说明 |
+| --- | --- | --- |
+| `android-platform-tools` | `adb`、`fastboot` | 单包族，版本即修订号 |
+| `android-ndk` | clang/lld 工具链 | side-by-side 布局 |
+| `android-build-tools` | `aapt2`、`d8`、`apksigner`、`zipalign` | — |
+| `android-cmdline-tools` | `avdmanager`、`lint`、`retrace` | — |
+| `android-cmake` | `cmake` | NDK 构建用 |
+| `android-platforms` | `android.jar` | 版本形如 `android-37.2`；无可执行文件 |
+| `android-emulator` | `emulator` | — |
+| `android-sources` | — | 源码，无可执行文件 |
+| `android-system-images` | — | 模拟器磁盘镜像，无可执行文件 |
+
+```bash
+osdk list-remote android-platform-tools
+osdk install android-platform-tools@37.0.1 -o accept-licenses=true
+osdk exec -t android-platform-tools@37.0.1 -- adb version
+```
+
+已被 side-by-side 布局取代的 `ndk-bundle` 未纳入，以免与 `android-ndk` 混淆。
+
+## NDK 不是通用交叉编译器
+
+`android-ndk` 自带完整的 Clang，看起来像是可以面向任意目标的工具链。它不是：它提供的是
+**只面向 Android** 的编译器 + sysroot。如果需要面向 Linux 服务器、裸机 MCU 或
+WebAssembly 构建，应安装对应目标的工具链。
+
+这个区别很容易被忽略，因为该编译器确实接受其他目标，甚至能为它们编译代码。以
+`android-ndk@29.0.14206865`（Clang 21）实测，NDK 注册了 aarch64、arm、riscv32/64、
+wasm32/64、x86 和 x86-64 的后端，但只自带五个 sysroot：
+
+```text
+aarch64-linux-android   arm-linux-androideabi   i686-linux-android
+riscv64-linux-android   x86_64-linux-android
+```
+
+不包含任何 libc 头文件的翻译单元，对任意目标都能编译通过——这正是让边界看起来比
+实际更远的原因：
+
+```bash
+# int main(void){ return 0; }
+clang --target=x86_64-unknown-linux-gnu -c bare.c    # exit 0
+clang --target=arm-none-eabi            -c bare.c    # exit 0
+```
+
+只要引入一个 libc 头文件，同样的目标立即失败，且失败发生在编译阶段而不是链接阶段：
+
+```bash
+# #include <stdio.h>
+clang --target=x86_64-unknown-linux-gnu -c libc.c
+# fatal error: 'stdio.h' file not found        (exit 1)
+```
+
+对 `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`、
+`x86_64-unknown-linux-musl`、`wasm32-wasi`、`arm-none-eabi` 实测，全部以这种方式
+失败；而 `aarch64-linux-android24` 可以一直走到链接出可执行文件。所以限制来自
+自带 sysroot 的集合，而不是编译器的目标支持：头文件、libc 和运行时只有 Android 那一份。
+
+要用 osdk 管理其他 C/C++ 工具链，最省事的路径是
+[Zig](./zig#用-zig-做-c-c-交叉编译)：`zig cc` 自带 musl、多个 glibc 版本、
+mingw-w64 和 wasi-libc，只需 `osdk install zig` 就能覆盖上表中的目标，无需额外
+sysroot。
+
+如果需要特定厂商的工具链，按普通工具安装即可——通过 `github:`、`http:` 或声明式
+插件——并用插件的 `[env]` 表导出 `CC`、`SYSROOT` 等变量，因为仅让编译器出现在 `PATH`
+上，CMake 或 Autoconf 依然找不到它。参见
+[声明式 Backend](../tools/declarative-backends)。
+
+复数形式的 `emulators` 也未纳入，且它并不是 `android-emulator` 的另一种写法。
+按线上清单实测，两者有五处不同：`emulators` 以 `emulators;<build-id>` 形式
+side-by-side 版本化、把 `emulator` 本身声明为依赖、Windows 包体积为 273 MB 而非
+421 MB、文件名是 `emulator_windows_x64-*` 而非 `emulator-windows_x64-*`、且只存在
+于预览渠道。它是叠加在单数包之上的增量组件，因此版本号之间甚至无法直接比较。
+
+## 许可协议
+
+绝大多数 Android 包必须先接受许可协议。osdk 默认**不会**替你接受，需显式传参：
+
+| 选项 | 作用 |
+| --- | --- |
+| `accept-licenses=true` | 接受本次请求涉及的全部协议 |
+| `accept-license=<id>` | 只接受指定协议，可用逗号分隔多个 |
+
+```bash
+# 接受全部
+osdk install android-ndk@29.0.14206865 -o accept-licenses=true
+
+# 只接受指定协议
+osdk install android-ndk@29.0.14206865 -o accept-license=android-sdk-license
+```
+
+按 id 接受**不会**扩散到其他协议：接受了 `android-sdk-license` 不等于接受
+`android-sdk-preview-license`，因此预览版包仍会被拦下。
+
+未接受时安装会失败，并直接给出可用命令，不会下载任何字节。
+
+### 查看与导出
+
+```text
+osdk android licenses show TOOL[@VERSION] [--digest-only]
+osdk android licenses status
+osdk android licenses export --sdk-root DIR
+```
+
+```bash
+# 查看协议全文与当前是否已接受
+osdk android licenses show android-ndk@29.0.14206865
+
+# 只看 id 与摘要
+osdk android licenses show android-ndk@29.0.14206865 --digest-only
+
+# 已接受哪些协议
+osdk android licenses status
+
+# 导出给 Gradle 复用
+osdk android licenses export --sdk-root /path/to/sdk
+```
+
+接受记录写在 `<installs>/android-sdk/licenses/<协议 id>`，内容是协议全文的 SHA-1，
+与官方工具及 Gradle / AGP 的格式一致。导出后把该目录交给 Gradle 即可避免重复提示。
+
+摘要始终从**当前**清单实时计算。社区与 CI 配方中流传的固定哈希是旧版协议文本的
+快照，Google 修订措辞后即失效；osdk 不硬编码这些值。因此协议文本更新后，旧的接受
+记录会被视为未接受并重新要求确认——这与官方工具行为一致。
+
+### 锁文件与团队协作
+
+许可接受**不会**写入 `osdk.lock`。锁文件会提交并在其他机器上回放，把接受记录进去等于替
+队友同意 Google 的协议，因此它只记录制品与校验和，接受由每台机器各自给出：
+
+```bash
+# 已提交 osdk.lock 的仓库，队友首次安装
+osdk install                            # 被拦下，并提示需要接受
+osdk install -o accept-licenses=true    # 显式同意后，安装锁定的制品
+osdk install                            # 之后照常，接受已记录在本机
+```
+
+仅传接受选项时锁文件照常生效（接受不是制品选择项）；一旦混入 `channel` 等真正影响
+选型的选项，就回到"绕过锁文件"的既有行为。
+
+## 渠道
+
+清单把包分在 stable / beta / dev / canary 四个渠道。osdk 默认只从 stable 候选中
+解析版本，包括 `@37` 这类宽松前缀；更高渠道中即使存在数值更大的普通版本号，也不会
+被隐式选中。以 Emulator 当前清单为例，`android-emulator@37` 解析到 stable 的
+37.2.12，而 dev 的 37.3.2 只有显式传 `channel=dev` 才参与选择：
+
+```bash
+osdk use android-emulator@37 -o accept-license=android-sdk-preview-license
+osdk install android-emulator@37 -o channel=dev -o accept-license=android-sdk-preview-license
+```
+
+非 stable 渠道需显式选择；`channel=beta/dev/canary` 允许该渠道及比它更稳定的候选。
+
+注意渠道与协议是两件独立的事：某些包位于 stable 渠道，但仍使用预览版协议，
+这类包依然需要接受 `android-sdk-preview-license`。
+
+## 校验强度
+
+Android 清单只为每个归档提供 **SHA-1**，不提供更强摘要。这弱于 osdk 其他下载源，
+是该源的显式例外：
+
+- osdk 始终按清单声明的 SHA-1 校验，不会跳过校验安装；
+- 其他 backend 的校验强度不受影响，仍要求 SHA-256 或更强；
+- 该弱点在代码中显式标注，不会被误当作强摘要使用。
+
+## 下载源
+
+默认从 Google 官方仓库下载，并附带一个可用的公共镜像：
+
+| 源 | 地址 |
+| --- | --- |
+| `google`（官方） | `https://dl.google.com/android/repository/` |
+| `tencent`（镜像） | `https://mirrors.cloud.tencent.com/AndroidSDK/` |
+
+镜像清单与官方逐字节一致（SHA-256 相同），因此清单内嵌的 SHA-1 在镜像场景同样有效。
+实测官方直连吞吐反而更高，故镜像排在其后；实际顺序仍由
+[下载源选优](../tools/github-releases)动态决定。
+
+## 共享命令名
+
+有两组 Android SDK 内部的同名命令会按明确用途消歧：
+
+- `build-tools` 与 `cmdline-tools` 都带 `d8`、`r8`、`retrace`、`resourceshrinker`，这些
+  R8 启动器由 `build-tools` 接管——它才是构建实际调用的副本；`cmdline-tools` 独有的
+  `sdkmanager`、`avdmanager`、`lint` 等照常生成。
+- `build-tools` 与 NDK 都带 `lld`，该名字由 NDK 接管，因为 NDK 提供完整的 Clang/lld
+  链接工具链；Build Tools 里的同名启动器不会遮蔽它。
+
+其余同名情况仍按冲突处理并报错，需要你自行取舍。
+
+## 挑选要生成的 shim
+
+默认给工具暴露的每个可执行文件都生成 shim。个别 SDK 确实很大——一个 NDK 就有
+172 个可执行文件（每个 API level 一个 clang 包装器）——但那是它真实的形状，
+默认隐藏会破坏"按 API level 选编译器"的正常用法，所以收窄是可选项。
+
+在配置里按需排除或限定：
+
+```toml
+[settings.shims]
+exclude = ["apkanalyzer", "*-clang"]
+```
+
+`include` 非空时只生成匹配的名字，`exclude` 最后生效，因此可以先放宽再修剪：
+
+```toml
+[settings.shims]
+include = ["*"]
+exclude = ["d8"]
+```
+
+::: warning 全局 `include` 影响所有工具
+`include` 是**对全体工具生效的白名单**。只想收窄 NDK 却写了
+`include = ["clang"]`，`cargo`、`go`、`node` 会一并失去 shim。要收窄单个工具，用下面
+的按工具形式。
+:::
+
+模式支持 `*` 与 `?`，忽略大小写。**推荐把设置限定到单个工具**，这样白名单语义不会外
+溢到别的工具：
+
+```toml
+[settings.shims.tools."android-ndk"]
+include = ["clang", "clang++", "llvm-strip"]   # 只影响 NDK 自己的命令
+```
+
+也可以在全局列表里加 backend 前缀来收窄某一个工具（对 `exclude` 是等价写法，因为
+排除本身只作用于匹配项）：
+
+```toml
+[settings.shims]
+exclude = ["android-ndk:*"]
+```
+
+三个列表——`include`、`exclude`、`expose`——都可以按工具设置，未写的字段继承全局。
+完整语义见[控制哪些命令进 PATH](../basics/path-control)。
+
+排除只是不生成 shim，工具本身仍然装着，激活 shell 后依旧在 PATH 上，
+`osdk exec` 也照常可用。改完执行 `osdk reshim` 生效，用
+`osdk config list` 可以查看当前取值。
+
+两个族共享的命令名（见上）由排除后仍在场的那一方接管：若排除了
+`android-build-tools`，`d8` 就转由 cmdline-tools 提供。
+
+## Java 运行时
+
+Google 的 Android 包**不含 JDK**：`sdkmanager`、`avdmanager`、`d8`、`lint`
+等是包在 jar 外面的启动脚本（仅 `cmdline-tools` 就有 125 个 jar），包里没有
+`java`，缺少 JDK 时会直接退出。
+
+osdk 会自动补上：运行这类工具时，若环境里还没有 `JAVA_HOME`，就使用 osdk
+管理的 JDK——优先当前目录选定的版本，否则取最新的一个已安装版本。
+
+```powershell
+osdk install java
+osdk install android-cmdline-tools -o accept-licenses=true
+sdkmanager --version   # 无需先激活，也无需手动设 JAVA_HOME
+```
+
+**你自己设置**的 `JAVA_HOME` 一律不动，因此可以用系统 JDK 覆盖。但由 osdk 的
+shell 激活导出的那个不算你的选择：它是上一次提示符刷新时、按当时所在目录算出来
+的快照，因此会针对当前目录重新计算，不会让一个项目的 JDK 悄悄驱动另一个项目的
+构建。两者靠激活自己维护的 `OSDK_MANAGED_ENV` 区分——列在其中的变量是 osdk 的
+输出，其余是你的。
+
+未安装任何托管 JDK 时，工具仍会报它自己的缺少 JDK 错误，此时装一个 `java` 即可。
+
+`maven`、`gradle`、`kotlin` 同理。
+
+## 环境变量
+
+| 工具 | 导出变量 |
+| --- | --- |
+| `android-ndk` | `ANDROID_NDK_ROOT`、`ANDROID_NDK_HOME` |
+| `android-emulator`、`android-cmdline-tools` | `ANDROID_SDK_ROOT`、`ANDROID_HOME`、`ANDROID_AVD_HOME` |
+| 其他 Android 包 | `ANDROID_SDK_ROOT`、`ANDROID_HOME` |
+
+两者都指向存放许可记录的共享 SDK 根目录，而非单个包目录，以便 Gradle 等工具复用
+接受记录。
+
+`ANDROID_AVD_HOME` 只对带 AVD 相关工具的两个包导出：`emulator` 按名字启动设备，
+`cmdline-tools` 里的 `avdmanager` 负责列出与删除。osdk 把 AVD 放在
+`<data>/avd`，而针对 emulator 37.1.11 与 cmdline-tools 23.0 实测，两者只搜
+`$ANDROID_AVD_HOME`、`$ANDROID_SDK_HOME\avd`、`$HOME\.android\avd` 三处（失败时
+emulator 会自己打印这份顺序），`<data>/avd` 不在其中。因此不导出该名字时，
+`osdk android avd list` 列得出设备，`emulator -avd <名字>` 却报
+`Unknown AVD name`，而 `-list-avds` 反而列出 `~/.android/avd` 下与 osdk 无关的
+设备——症状看起来像名字写错，实际是目录没被搜索。
+
+若你自己设了 `ANDROID_AVD_HOME` 且指向别处，osdk 尊重该显式选择，但会给出一条
+warning，因为此时 osdk 创建的设备在那个目录里同样找不到。
+
+两个名字都导出，是因为生态对此没有统一，且这种分歧并非纯历史遗留：Google 当前的
+`android` CLI 只读 `ANDROID_HOME`，完全忽略 `ANDROID_SDK_ROOT`——与 Google 当年
+宣布的迁移方向相反；而模拟器和 JVM 系工具偏好 `ANDROID_SDK_ROOT`。针对
+`android` 1.0.15985488 实测：仅设 `ANDROID_SDK_ROOT` 时，`android info` 报告的是
+系统默认的 `%LOCALAPPDATA%\Android\Sdk` 而不是 osdk 的根目录——受管工具悄悄读了
+一个非受管 SDK。它自带的 `--sdk` 参数优先级高于两者。
+
+## 系统镜像与依赖解析
+
+模拟器系统镜像发布在主清单之外，按厂商分布在各个子站点中。osdk 会把它们合并为
+一个包族，因此一条命令即可列出全部：
+
+```bash
+# 五个子站点共 263 个版本：default、google_apis、
+# google_apis_playstore、android-tv、android-wear
+osdk list-remote android-system-images
+
+osdk install "android-system-images@android-35;google_apis;x86_64" \
+  -o accept-licenses=true
+```
+
+子站点清单只在该包族需要时才拉取。为每次 `osdk install adb` 都额外发起六个请求，
+去换一份别处都不会读的列表，并不值得。
+
+子站点清单中的 archive URL 是相对该清单自身目录的，而两个子站点可能发布同名文件
+——`x86_64-35_r09.zip` 就在多个厂商目录下都存在。osdk 在解析时会把每个 URL 改写为
+相对仓库根，因此不会从错误厂商的目录下载。
+
+### 依赖
+
+主清单中只有三个预览包声明依赖，而这里恰恰相反：`google_apis` 清单中的 56 条依赖
+声明全部指向 `emulator`，多数还带最低修订号。osdk 会解析这个闭包并补装缺失的部分，
+因此安装镜像即可得到可用的模拟器。
+
+以下两条规则源于真实数据的形态：
+
+- **许可门覆盖依赖。** 子站点引用了主清单从未提及的八份协议，包括
+  `intel-android-sysimage-license` 和 `android-googletv-license`。同意镜像自身的
+  协议，不能等同于同意一份从未向你展示过的厂商协议。
+- **依赖按 stable 渠道解析。** `emulator` 发布了两条记录，而预览构建的修订号更高。
+  若按「最新」选取，就会为用户根本没点名的包装上预览版，随后安装又会被自身的渠道
+  校验拒绝。
+
+若某条依赖指向 osdk 未策展的包族，则跳过并告警，而不是让安装失败：清单里的一条边
+不足以成为拒绝一个本可正常安装的包的理由。
+
+### 目录布局
+
+Google 的工具要求共用一个 SDK 目录，而 osdk 把每个包装进各自的版本化目录。两者
+可以同时成立：数据仍留在 osdk 放置的位置，再用目录链接把它发布到 Android 工具期望
+的路径上——`system-images/android-35/google_apis/x86_64`、`platform-tools`、
+`emulator` 等。全程不复制，因此 3.5 GB 的镜像只存一份。
+
+Windows 上这个链接是 NTFS junction 而不是符号链接，因为 symlink 需要开发者模式或
+提权，junction 两者都不需要，而 Android 工具只会穿越它。Linux 和 macOS 上就是普通
+符号链接。
+
+差异只集中在两处，且都已在真实 Linux 上验证：
+
+- **判定"这是不是链接"**：junction 不会被 `is_symlink()` 报出来，所以 Windows 还要
+  额外查 reparse-point 属性；其他平台 `is_symlink()` 就够。
+- **删除链接**：`remove_dir` 能解除 junction，但 unix 上符号链接必须用
+  `remove_file`——那里 `rmdir` 会以 `ENOTDIR` 失败。osdk 先试前者、失败再退到后者，
+  因此一条代码路径覆盖两种平台。
+
+卸载与清理逻辑依赖的其余行为在两边完全一致：指向目录的链接可与真实目录区分；删掉
+目标后链接仍在但无法解析（这正是发现悬空条目的依据）；往已被占用的路径建链接会失败
+而不是覆盖（unix 上是 `EEXIST`）；向上剪空目录会停在第一个非空目录。
+
+如果目标路径上已存在一个真实目录——通常是 Google 自带 `sdkmanager` 装出来的包
+——osdk 会原样保留并告警。接管该路径就意味着删除 osdk 从未拥有的数据。
+
+### 在 Linux 和 macOS 上验证桥接
+
+`scripts/android-sdk-root-smoke.sh` 会在一个临时 `OSDK_*` 根目录里跑完整流程——
+安装、建链、卸载、清理——不会碰你自己的安装：
+
+```bash
+cargo build --release
+./scripts/android-sdk-root-smoke.sh
+```
+
+每条断言输出一行，首个失败即以非零码退出。想测别处的二进制就设 `OSDK_BIN`。
+
+有一点需要明确说明：这个脚本已在 Linux 上做过语法检查、其逻辑也已用 Windows 二进制
+镜像跑过一遍，但尚未在 unix 主机上端到端真跑。若它失败，请先怀疑脚本而不是桥接本身。
+
+### `platforms` 与 `sources` 的版本写法
+
+这两个族的寻址形式是 `platforms;android-37.2`，因此版本本身带 `android-` 前缀——它
+是命名空间，不是版本段。有两点值得知道，因为都是首次安装它们时暴露出来的 bug：
+
+- `latest` 解析到最新的**稳定** API 级别。`android-CANARY`、`android-UpsideDownCake`
+  这类代号是尚未分配编号的未来版本，因此排在所有数字版本**之下**而不是之上。需要它
+  就按名字显式指定。
+- **是不是预览版，`<channelRef>` 说明不了。** Google 把 `android-37.2-beta3`、
+  `android-CANARY` 发布在 `channel-0`（稳定通道）上，且 license 与成品平台相同。
+  osdk 因此改读 `<type-details>` 里的 `<codename>` 与 `<beta-api-level>` —— 这才是
+  真正标记它们的字段，于是默认的 `prerelease = if-explicit` 策略能把它们挡在
+  `latest` 之外。
+- `android-36` 与 `android-36.1` 是**两个不同的 API 级别**，而名字本身看不出来。
+  `osdk list-remote` 会标出每个候选声明的 API 级别；`=` 用于逐字符锁定、不做任何回退：
+
+  ```bash
+  osdk list-remote android-platforms
+  # android-36-ext19 (API 36x)   <- ExtensionLevel 19 的 side-by-side 扩展包
+  # android-36 (API 36)
+  # android-36.1 (API 36.1)
+
+  osdk install "android-platforms@=android-36"   # 恰好 API 36
+  ```
+
+  裸数字 selector（如 `36`、`36.0`）在这里匹配不到任何东西：该家族的标识符都带
+  `android-` 命名空间，而且 Google 根本没有发布过 `android-36.0`。
+- 扩展级别（`android-35-ext15`）排在自身级别与下一级之间；beta（`android-37.2-beta1`）
+  排在对应正式版之下。
+
+布局原样保留该版本号：`platforms/android-37.2/android.jar`，这正是 Gradle 和 Google
+自带工具查找的位置。
+
+#### 名字不等于 API 级别，用 `=` 锁定
+
+包名里的数字并不总是它的 API 级别，这一点在固定 `compileSdk` 时会咬人：
+
+| 包名 | 实际 API 级别 |
+| --- | --- |
+| `android-36` | 36 |
+| `android-36.1` | 36.1 |
+| `android-36-ext19` | 36x（ExtensionLevel 19 的 side-by-side 扩展） |
+
+写 `android-platforms = "android-36"` 是**前缀**请求，语义上允许命中同前缀的更新包。
+现在精确标识符优先，因此它会命中真正叫 `android-36` 的那一个；但如果项目要表达的是
+「就要这一个，不接受任何回退」，请用 `=` 前缀逐字锁定：
+
+```toml
+[tools]
+android-platforms = "=android-36"
+```
+
+`=` 对所有工具族通用（见[版本解析机制](../../internals/resolution)），它要求候选列表
+里存在逐字相同的版本，否则直接解析失败而不降级匹配。`osdk list-remote
+android-platforms` 会在每一行标出解析出的 API 级别，可以先核对再落 pin。
+
+#### 预览版不靠渠道识别
+
+Google 把 platform 族的预览版**发布在稳定渠道上**：`platforms;android-37.2-beta3`、
+`platforms;android-CANARY` 及其 system image 的 `channelRef` 都是 `channel-0`，和已经
+定稿的 `platforms;android-36` 完全一样。因此 osdk 不用渠道判断预览，而是同时看
+`<type-details>` 里的 `codename` / `beta-api-level`、渠道，以及版本尾部的预发布标签
+（`-rcN`、`-betaN` 等）。
+
+这直接影响 `latest`：在默认的 `prerelease = if-explicit` 策略下，只按渠道判断会让
+`android-system-images` 的 `latest` 落到 `android-37.2-beta3` 这样 2.4 GB 的预览镜像上。
+需要预览版时按名字显式指定，或用 `=` 锁定。
+
+### 模拟器的 SDK 根校验
+
+模拟器判定一个目录是否为可用 SDK 根，只看它有没有 `platform-tools` 子目录，别无
+其他。它先查 `ANDROID_HOME`，再查 `ANDROID_SDK_ROOT`，然后从自身位置逐级上推，
+凡缺少该子目录的候选一律否决，最终报 `FATAL | Broken AVD system path`。
+
+因此只含 `emulator` 与 `system-images` 的根目录仍然无效。创建 AVD 前请先安装
+platform-tools：
+
+```bash
+osdk install android-platform-tools -o accept-licenses=true
+```
+
+当共用根目录尚不合法时，osdk 会在安装阶段告警——因为模拟器自身的报错只会指出根
+目录，而不会说明缺了什么。
+
+### 镜像源
+
+镜像体积很大，用镜像站看起来很有吸引力，但实测吞吐并非如此：腾讯源提供的包与
+Google 逐字节一致，速度为 4.38 MB/s，而直连为 5.54 MB/s，加速比 0.79 倍。既有的
+源优先级本就会选择更快的一侧，因此没有为镜像单独添加处理。
+
+有一点值得记住：镜像站不同步 beta 镜像。找不到 `x86_64-ps16k-37.2_r04.zip` 反映的
+是这一缺口，而不是镜像站坏了——它的主清单与子站点清单哈希均与 Google 完全一致。
+
+## 虚拟设备
+
+`osdk android avd` 负责创建、列出和删除 AVD：
+
+```bash
+osdk android avd create pixel-35 --image "android-35;google_apis;x86_64"
+osdk android avd create small --image "android-35;google_apis;x86_64" \
+  --data-size 4G --sdcard-size 256M
+osdk android avd list
+osdk android avd delete pixel-35
+```
+
+`list` 会报告每个设备的系统镜像是否仍然存在——镜像被卸载后，AVD 看上去依然完好，
+直到模拟器在它上面挂掉。
+
+### 为什么不用 avdmanager
+
+`avdmanager` 无法驱动 osdk 管理的 SDK 根目录。基于 cmdline-tools 23.0.0 实测：
+
+- 它通过规范化自身 jar 路径并向上三级来定位 SDK。osdk 把 `cmdline-tools/latest`
+  暴露为指向版本化安装目录的目录链接，于是这次上溯**穿过**链接，落在真实根目录
+  之上一层。随后每个包都被报成处于 "inconsistent location"。
+- `ANDROID_SDK_ROOT` 与 `ANDROID_HOME` 都无法覆盖这一行为，而 `create avd` 直接
+  拒绝 `--sdk_root`——它的全局参数只有 `-s` 和 `-v`。
+- 即便它成功，写出的 `image.sysdir.1` 也是**相对路径**
+  （`system-images\android-35\google_apis\x86_64\`），只会相对它自己推导出的根
+  解析，而那在这里是错误的目录。
+
+也就是说，没有任何参数或环境变量能让它认同这套布局。osdk 直接写出它本该写的两个
+文件——`config.ini` 和 `<name>.ini` 指针文件——硬件默认值取自 avdmanager 自己
+生成的一份 `config.ini`，只是把镜像路径换成绝对路径。
+
+### 路径必须是绝对的，且不含 `%`
+
+模拟器会对 `image.sysdir.1` 做 `%VAR%` 环境变量展开。osdk 的版本化安装目录名是
+百分号编码的，直接传入会得到：
+
+```text
+WARNING | Environment variable 61 is not set
+WARNING | ...~v1~6E72692D35676F6C5F7073783636%34\ is not a valid directory.
+FATAL   | Broken AVD system path.
+```
+
+——每个十六进制对都被展开成空。因此该值写的是 SDK 根下的桥接路径，它既是绝对路径
+又不含 `%`。`create` 会拒绝含 `%` 的路径，而不是写出一份稍后才在模拟器内部失败的
+配置。
+
+### 这些链接是什么，以及包被卸载后会怎样
+
+osdk 把每个族装进各自的版本化目录（`installs/android-ndk/27.3.13750724/`），但
+Google 的工具不询问任何管理器装了什么——它们遍历一套固定布局，要求
+`platform-tools/`、`emulator/`、`ndk/<版本>/` 和
+`system-images/<api>/<tag>/<abi>/` 是**同一个根目录下的兄弟目录**，否则模拟器会报
+`Broken AVD system path`。
+
+为了既不放弃按族版本化、也不重复存储数 GB，osdk 把真实目录链接进这些工具期望的
+布局：Windows 上用 **junction**（symlink 需要开发者模式或提权，junction 两者都不
+需要，而这些工具只会穿越它），其他平台用符号链接。载荷只存一份，SDK 根目录是它的
+一个视图。
+
+`osdk uninstall` 会**先删链接、再删载荷**，并顺带清掉因此变空的骨架目录。顺序很
+关键：先删载荷会让链接变成悬空，而悬空的 junction 对模拟器、`avdmanager`、Gradle
+的 `sdk.dir` 所做的存在性检查<b>依然回答"在"</b>——于是包看起来装着，却在更深处失败，
+报出的错还指向 SDK 而不是那次卸载。
+
+不是 osdk 创建的真实目录，两条路径都不会删，只会报告出来——它要么是 `sdkmanager`
+自己的副本，要么是你的数据。
+
+对于旧版 osdk 留下的、或包被 osdk 之外的手段删掉而留下的链接：
+
+```bash
+osdk android sdk-root show     # 报告悬空链接，不做任何改动
+osdk android sdk-root repair   # 删除它们，并补齐缺失的部分
+```
+
+## Google 工具读取的包索引
+
+Google 的工具并不询问某个管理器装了什么：它们遍历 SDK 根目录，解析每个包目录里的
+`package.xml`。否则即使目录布局正确，osdk 装的包对它们也是不可见的——`avdmanager`
+会答 `Package path is not valid` 且列不出任何东西，而 `sdkmanager` 却能正常显示
+同一个包，因为 sdkmanager 认 `source.properties`，avdmanager 不认。
+
+osdk 在安装时写出该文件。其中所有内容都来自归档内自带的 `source.properties`，
+缺失的字段一律省略而非填默认值：错误的 api level 或 abi 会让 avdmanager 提供一个
+根本启动不了的 AVD。只发出两种 schema 形态——工具用 `genericDetailsType`，系统
+镜像用 `sysImgDetailsType`，后者携带 AVD 匹配所依据的 api level、tag、vendor
+和 abi。
+
+对于早先版本 osdk 装下的包：
+
+```bash
+osdk android sdk-root show     # 哪些已桥接、哪些已建索引
+osdk android sdk-root repair   # 重写索引，并重新检查链接
+```
+
+`repair` 刻意做成离线可用：索引所需的一切都已在磁盘上，为了拿回一个小 XML 文件而
+重新下载数 GB 是荒谬的做法。
