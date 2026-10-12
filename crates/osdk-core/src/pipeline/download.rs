@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use once_cell::sync::Lazy;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -37,6 +38,50 @@ impl RetryPolicy {
             .saturating_mul(1u32 << shift)
             .min(self.max_delay)
     }
+}
+
+/// The one place every download bar is drawn.
+///
+/// A standalone `ProgressBar` owns a private stderr draw target that only knows
+/// about its own single line, so it redraws by clearing whatever line the cursor
+/// is on. With several downloads in flight (model files, concurrent installs)
+/// every bar then repaints the same last line in turn: the earlier bars freeze
+/// and the bottom line flickers between files. Routing all bars through one
+/// shared `MultiProgress` gives each its own row.
+static PROGRESS: Lazy<MultiProgress> = Lazy::new(MultiProgress::new);
+
+/// Shared progress area. Print through [`suspend`] while bars may be visible so
+/// the message does not land in the middle of a bar.
+pub fn progress() -> &'static MultiProgress {
+    &PROGRESS
+}
+
+/// Run `f` (typically an `eprintln!` or log call) with the progress bars
+/// temporarily cleared, then redraw them below the output.
+pub fn suspend<R>(f: impl FnOnce() -> R) -> R {
+    PROGRESS.suspend(f)
+}
+
+fn new_download_bar(
+    multi: &MultiProgress,
+    total: Option<u64>,
+    label: &str,
+    position: u64,
+) -> ProgressBar {
+    let pb = match total {
+        Some(t) => ProgressBar::new(t),
+        None => ProgressBar::new_spinner(),
+    };
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("=>-"),
+    );
+    pb.set_message(label.to_string());
+    pb.set_position(position);
+    multi.add(pb)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,7 +160,9 @@ pub async fn download_with_headers_and_policy(
                     let delay = policy.delay_after(attempt);
                     let partial_bytes = partial_length(dest);
                     if policy.visible {
-                        tracing::warn!(url = %url, attempt, next_attempt = attempt + 1, max_attempts, delay_ms = delay.as_millis(), partial_bytes, error = %error, "model download interrupted; retrying with resume when supported");
+                        suspend(
+                            || tracing::warn!(url = %url, attempt, next_attempt = attempt + 1, max_attempts, delay_ms = delay.as_millis(), partial_bytes, error = %error, "model download interrupted; retrying with resume when supported"),
+                        );
                     } else {
                         tracing::debug!(url = %url, attempt, next_attempt = attempt + 1, max_attempts, delay_ms = delay.as_millis(), partial_bytes, error = %error, "transient download error; retrying");
                     }
@@ -255,24 +302,7 @@ async fn download_once(
     };
     write_partial_metadata(&metadata_path, &response_metadata)?;
 
-    let pb = if show_progress {
-        let pb = match total {
-            Some(t) => ProgressBar::new(t),
-            None => ProgressBar::new_spinner(),
-        };
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("=>-"),
-        );
-        pb.set_message(label.to_string());
-        pb.set_position(downloaded_before);
-        Some(pb)
-    } else {
-        None
-    };
+    let pb = show_progress.then(|| new_download_bar(progress(), total, label, downloaded_before));
 
     let mut options = tokio::fs::OpenOptions::new();
     options.create(true).write(true);
@@ -346,6 +376,138 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    /// Minimal terminal emulator: applies indicatif's cursor movements and line
+    /// clears to a grid so a test can read what the user would actually see.
+    #[derive(Debug, Default)]
+    struct Screen {
+        rows: Vec<String>,
+        row: usize,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct FakeTerm(std::sync::Arc<std::sync::Mutex<Screen>>);
+
+    impl FakeTerm {
+        fn visible_lines(&self) -> Vec<String> {
+            let screen = self.0.lock().unwrap();
+            screen
+                .rows
+                .iter()
+                .map(|row| row.trim_end().to_string())
+                .filter(|row| !row.is_empty())
+                .collect()
+        }
+        fn with<R>(&self, f: impl FnOnce(&mut Screen) -> R) -> R {
+            let mut screen = self.0.lock().unwrap();
+            let row = screen.row;
+            if screen.rows.len() <= row {
+                screen.rows.resize(row + 1, String::new());
+            }
+            f(&mut screen)
+        }
+    }
+
+    impl indicatif::TermLike for FakeTerm {
+        fn width(&self) -> u16 {
+            160
+        }
+        fn height(&self) -> u16 {
+            40
+        }
+        fn move_cursor_up(&self, n: usize) -> std::io::Result<()> {
+            self.with(|s| s.row = s.row.saturating_sub(n));
+            Ok(())
+        }
+        fn move_cursor_down(&self, n: usize) -> std::io::Result<()> {
+            self.with(|s| s.row += n);
+            Ok(())
+        }
+        fn move_cursor_right(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn move_cursor_left(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn write_line(&self, line: &str) -> std::io::Result<()> {
+            self.with(|s| {
+                let row = s.row;
+                s.rows[row].push_str(line);
+                s.row += 1;
+            });
+            Ok(())
+        }
+        fn write_str(&self, text: &str) -> std::io::Result<()> {
+            self.with(|s| {
+                let row = s.row;
+                s.rows[row].push_str(text);
+            });
+            Ok(())
+        }
+        fn clear_line(&self) -> std::io::Result<()> {
+            self.with(|s| {
+                let row = s.row;
+                s.rows[row].clear();
+            });
+            Ok(())
+        }
+        fn flush(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn drive(bars: &[ProgressBar]) {
+        for step in 1..=5u64 {
+            for bar in bars {
+                bar.set_position(step * 10);
+            }
+        }
+    }
+
+    /// Regression: concurrent model-file downloads all repainted the last line,
+    /// so only one bar ever moved and it flickered between files. The first
+    /// half proves the emulator can see that collision (standalone bars each
+    /// own a draw target); the second half is what downloads now do.
+    #[test]
+    fn concurrent_download_bars_each_keep_their_own_row() {
+        let term = FakeTerm::default();
+        let standalone: Vec<_> = ["repo:a.safetensors", "repo:b.safetensors"]
+            .iter()
+            .map(|label| {
+                let bar = ProgressBar::with_draw_target(
+                    Some(100),
+                    indicatif::ProgressDrawTarget::term_like(Box::new(term.clone())),
+                );
+                bar.set_message(label.to_string());
+                bar
+            })
+            .collect();
+        drive(&standalone);
+        let collided = term.visible_lines();
+        assert_eq!(
+            collided.len(),
+            1,
+            "standalone bars should collide on one row: {collided:?}"
+        );
+
+        let term = FakeTerm::default();
+        let multi = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::term_like(
+            Box::new(term.clone()),
+        ));
+        let bars: Vec<_> = ["repo:a.safetensors", "repo:b.safetensors"]
+            .iter()
+            .map(|label| new_download_bar(&multi, Some(100), label, 0))
+            .collect();
+        drive(&bars);
+        let lines = term.visible_lines();
+        assert_eq!(lines.len(), 2, "one row per download: {lines:?}");
+        assert!(lines[0].starts_with("repo:a.safetensors"), "{lines:?}");
+        assert!(lines[1].starts_with("repo:b.safetensors"), "{lines:?}");
+        assert!(
+            lines.iter().all(|line| line.contains("50 B/100 B")),
+            "{lines:?}"
+        );
+    }
 
     #[tokio::test]
     async fn resumes_interrupted_download_with_if_range() {

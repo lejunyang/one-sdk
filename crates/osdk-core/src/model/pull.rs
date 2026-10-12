@@ -108,10 +108,12 @@ async fn download_file(
             Some(lock) => lock,
             None => {
                 if ctx.show_progress {
-                    eprintln!(
-                        "waiting: another osdk process is downloading {} ({})",
-                        reference.repository, file.path
-                    );
+                    download::suspend(|| {
+                        eprintln!(
+                            "waiting: another osdk process is downloading {} ({})",
+                            reference.repository, file.path
+                        )
+                    });
                 }
                 crate::lock::FileLock::acquire(&lock_path)?
             }
