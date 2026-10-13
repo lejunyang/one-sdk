@@ -174,6 +174,7 @@ fn scopes_include(scopes: &[Scope], wanted: Scope) -> bool {
 // (`[settings.<tool>]`) are classified separately by
 // `collect_tool_section_requirements`.
 const SAFE_SETTINGS_KEYS: &[&str] = &[
+    "download_cache",
     "jobs",
     "lang",
     "link_mode",

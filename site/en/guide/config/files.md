@@ -320,3 +320,5 @@ jobs = 2
 the project creates a new default `Settings` value and changes `jobs`, so
 `verify_signatures` returns to its built-in default `true`. Declare the full
 non-default combination in the higher layer when you need to preserve it.
+
+`[settings.download_cache]` has `max_size_bytes` (default 2147483648; 0 retains none; `"unlimited"` disables size limit) and `max_age_secs` (default 604800; 0 disables expiry). `OSDK_DOWNLOAD_CACHE_MAX_SIZE` overrides size. See [Caches and Cleanup](../maintenance/cache).

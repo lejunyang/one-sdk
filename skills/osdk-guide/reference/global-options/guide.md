@@ -28,3 +28,5 @@ osdk [全局参数] <一级命令> [命令参数]
 优先级为：CLI 参数 → 环境变量 → 项目配置 → 用户配置 → 内置默认。`--yes`
 只确认普通交互；`pkg mirrors apply`、`container mirrors apply`、`container prune`
 等绑定状态的操作仍要求命令自己的 plan/preview 指纹。
+
+`--download-cache-max-size BYTES|2GiB|unlimited` / `OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖本次保留预算；0 成功即删，不禁用下载中暂存。

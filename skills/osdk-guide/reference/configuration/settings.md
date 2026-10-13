@@ -60,3 +60,7 @@ expose = ["make"]
 | `override_env` | bool | false | 强制以 osdk 受管值覆盖该工具已存在的可重定向环境变量；与顶层 `override_tools_env` 取 OR |
 
 默认（false）时，osdk 尊重你已经设置的工具缓存/数据目录变量（如 `npm_config_cache`、`PIP_CACHE_DIR`、`GOMODCACHE`、pnpm 的 store 变量等）；打开后这些变量也被强制指向 osdk 受管目录。工具的定位类变量（如 `npm_config_prefix`、`PNPM_HOME`、`JAVA_HOME`、`CARGO_HOME`）始终由 osdk 无条件设置，不受此开关影响。
+
+## `[settings.download_cache]`
+
+`max_size_bytes` 默认 2147483648；0 在成功提交后不保留副本，`"unlimited"` 不限容量；支持整数 GiB/MiB/KiB 和 GB/MB/KB。`max_age_secs` 默认 604800，0 禁用过期。对应 config key 是 `download_cache.max_size_bytes` 和 `download_cache.max_age_secs`；容量可用 `OSDK_DOWNLOAD_CACHE_MAX_SIZE` / `--download-cache-max-size` 覆盖。预算只管登记的下载副本，不能阻止大模型下载，不清 CAS/安装/原生 store。失败 partial 前 10 分钟受保护。没有后台清理定时器。详见 [cache](../cache/guide.md)。

@@ -113,3 +113,5 @@ by hand:
 | `OSDK_TASK`, `OSDK_TASK_NAME` | The process is a task started by `osdk run`, and its name; shell hooks skip re-activation when they see `OSDK_TASK` |
 | `OSDK_SHIM_ACTIVE` | The tool currently running through a shim, used to refuse a shim re-entering itself |
 | `OSDK_MANAGED_ENV`, `OSDK_ORIG_<NAME>`, `OSDK_ORIGINAL_PATH` | Variables taken over during activation and their original values, restored by `deactivate` |
+
+`[settings.download_cache]` has `max_size_bytes` (default 2147483648; 0 retains none; `"unlimited"` disables size limit) and `max_age_secs` (default 604800; 0 disables expiry). `OSDK_DOWNLOAD_CACHE_MAX_SIZE` overrides size. See [Caches and Cleanup](../maintenance/cache).

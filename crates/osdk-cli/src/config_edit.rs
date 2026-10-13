@@ -858,6 +858,9 @@ pub enum SettingKind {
     Bool,
     /// A positive integer; zero would stall the work it bounds.
     PositiveInt,
+    /// Nonnegative byte/time limit; zero disables it.
+    NonNegativeInt,
+    CacheLimit,
     /// One of a fixed set of words.
     Enum(&'static [&'static str]),
     /// Validated by the setting type's own parser.
@@ -910,6 +913,16 @@ impl ParsedSetting {
 /// `use`, source pins through `source pin`, and aliases through `alias`, each
 /// of which validates far more than a scalar assignment could.
 pub const SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        key: "download_cache.max_size_bytes",
+        path: &["settings", "download_cache", "max_size_bytes"],
+        kind: SettingKind::CacheLimit,
+    },
+    SettingSpec {
+        key: "download_cache.max_age_secs",
+        path: &["settings", "download_cache", "max_age_secs"],
+        kind: SettingKind::NonNegativeInt,
+    },
     SettingSpec {
         key: "jobs",
         path: &["settings", "jobs"],
@@ -1130,6 +1143,22 @@ fn setting_value(setting: &ResolvedSetting, value: &str) -> Result<toml_edit::It
                 "false" | "0" | "no" | "off" => false,
                 _ => anyhow::bail!("`{}` expects a boolean, got `{value}`", setting.key),
             };
+            toml_edit::value(parsed)
+        }
+        SettingKind::CacheLimit => {
+            let limit: osdk_core::config::DownloadCacheLimit = value.parse()?;
+            match limit.bytes() {
+                Some(bytes) => toml_edit::value(
+                    i64::try_from(bytes).context("cache limit exceeds TOML integer range")?,
+                ),
+                None => toml_edit::value("unlimited"),
+            }
+        }
+        SettingKind::NonNegativeInt => {
+            let parsed: i64 = value.parse().context("expected a nonnegative integer")?;
+            if parsed < 0 {
+                anyhow::bail!("expected a nonnegative integer");
+            }
             toml_edit::value(parsed)
         }
         SettingKind::PositiveInt => {

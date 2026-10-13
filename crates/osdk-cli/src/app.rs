@@ -23,6 +23,7 @@ pub struct GlobalOverrides {
     pub refresh_sources: bool,
     pub source_mode: Option<osdk_core::source::SourceMode>,
     pub offline: bool,
+    pub download_cache_max_size: Option<osdk_core::config::DownloadCacheLimit>,
     pub require_checksums: bool,
     pub attestations: Option<osdk_core::config::AttestationPolicy>,
     pub prerelease: Option<osdk_core::config::PrereleasePolicy>,
@@ -259,6 +260,9 @@ impl App {
         }
         if overrides.offline {
             config.settings.offline = true;
+        }
+        if let Some(limit) = overrides.download_cache_max_size {
+            config.settings.download_cache.max_size_bytes = limit;
         }
         if overrides.require_checksums {
             config.settings.require_checksums = true;

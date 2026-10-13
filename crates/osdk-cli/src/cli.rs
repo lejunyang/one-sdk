@@ -60,6 +60,15 @@ pub struct GlobalArgs {
     #[arg(long, global = true, env = "OSDK_OFFLINE")]
     pub offline: bool,
 
+    /// Retained download-cache bytes (0 keeps none; unlimited removes the size limit).
+    #[arg(
+        long,
+        global = true,
+        env = "OSDK_DOWNLOAD_CACHE_MAX_SIZE",
+        value_name = "BYTES|unlimited"
+    )]
+    pub download_cache_max_size: Option<osdk_core::config::DownloadCacheLimit>,
+
     /// Reject artifacts that have no verifiable checksum.
     #[arg(long, global = true, env = "OSDK_REQUIRE_CHECKSUMS")]
     pub require_checksums: bool,
@@ -1201,6 +1210,18 @@ pub enum RustToolchainCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
+    /// Report download-cache usage and its effective retention policy.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reclaim registered download copies by policy; active/recent entries are protected.
+    Trim {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the shared cache directories.
     Dir,
     /// Print the downstream package-manager cache redirections.

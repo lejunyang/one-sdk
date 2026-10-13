@@ -311,7 +311,7 @@ impl Backend for JvmToolBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         if matches!(self, Self::Gradle) {
             return self.install_gradle(ctx, tv).await;

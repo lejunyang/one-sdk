@@ -125,8 +125,45 @@ pub trait Backend: Send + Sync {
     }
 
     #[cfg(feature = "install")]
-    /// Install a concrete version.
-    async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
+    /// Install a concrete version under a download-cache lease. Cleanup runs
+    /// only after the backend's entire transaction, including post-processing.
+    async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+        let session = crate::cache::downloads::Session::begin(ctx.ctx).await?;
+        let result = self.install_inner(ctx, tv).await;
+        if result.is_ok() {
+            let identity = self.dynamic_install_identity(ctx.ctx, tv)?;
+            let locator = identity
+                .map(|identity| crate::dirs::InstallLocator::new(&ctx.ctx.dirs, identity))
+                .transpose()?;
+            let root = locator
+                .as_ref()
+                .map(|locator| locator.install_root().to_path_buf())
+                .unwrap_or_else(|| ctx.ctx.dirs.install_path(self.id(), &tv.version));
+            let paths = crate::pipeline::artifact_receipt_at(&root)
+                .map(|receipt| match locator.as_ref() {
+                    Some(locator) => crate::pipeline::dynamic_artifact_cache_path(
+                        &ctx.ctx.dirs,
+                        locator,
+                        &receipt.file_name,
+                    ),
+                    None => crate::pipeline::artifact_cache_path(
+                        &ctx.ctx.dirs,
+                        self.id(),
+                        &tv.version,
+                        &receipt.file_name,
+                    ),
+                })
+                .transpose()?
+                .into_iter()
+                .collect::<Vec<_>>();
+            session.finish(ctx.ctx, &paths);
+        }
+        result
+    }
+
+    #[cfg(feature = "install")]
+    /// Backend-specific install transaction; call `install` to apply policy.
+    async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()>;
 
     /// Take the tool versions this backend installed on its own behalf during
     /// the most recent [`Backend::install`], clearing the record.
@@ -318,7 +355,7 @@ mod tests {
         async fn list_remote_versions(&self, _ctx: &Ctx) -> Result<Vec<VersionInfo>> {
             Ok(vec![VersionInfo::stable("1.2.3")])
         }
-        async fn install(&self, _ctx: &InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
+        async fn install_inner(&self, _ctx: &InstallCtx<'_>, _tv: &ToolVersion) -> Result<()> {
             Ok(())
         }
         fn bin_paths(&self, _ctx: &Ctx, _tv: &ToolVersion) -> Result<Vec<PathBuf>> {

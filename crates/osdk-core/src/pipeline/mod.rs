@@ -224,6 +224,8 @@ async fn run_with_attestation_inner_at(
         Some(locator) => artifact_cache_path_for_locator(ctx.dirs, locator, &plan.file_name)?,
         None => artifact_cache_path(ctx.dirs, &plan.tool, &plan.version, &plan.file_name)?,
     };
+    let _cache_lease = crate::cache::downloads::Lease::acquire(ctx.dirs)?;
+    crate::cache::downloads::record(ctx.dirs, &archive_path, false)?;
 
     // Fixed backends acquire the traditional tool/version lock here. Dynamic
     // callers hold their locator lock across backend-specific post-processing
@@ -708,6 +710,8 @@ async fn install_single_binary_inner_at(
         Some(locator) => artifact_cache_path_for_locator(dirs, locator, download_name)?,
         None => artifact_cache_path(dirs, tool, version, download_name)?,
     };
+    let _cache_lease = crate::cache::downloads::Lease::acquire(dirs)?;
+    crate::cache::downloads::record(dirs, &cached, false)?;
     if install_dir.join(COMPLETE_MARKER).exists() {
         if let Some(attestation) = attestation {
             let evidence = crate::verification::verify_github_attestation(

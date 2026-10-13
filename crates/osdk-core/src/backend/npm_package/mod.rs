@@ -1307,7 +1307,7 @@ impl Backend for NpmPackageBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         self.validate_compact_lock_metadata(ctx, tv)?;
         let locator = self.install_locator(ctx, tv, ToolScope::Project)?;

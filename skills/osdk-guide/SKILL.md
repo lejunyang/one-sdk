@@ -29,6 +29,7 @@ GitHub Actions 中安装 osdk、恢复缓存并初始化项目环境时，读取
 
 - 使用 `osdk run <name>` 执行任务；不存在裸 `osdk <name>`。
 - 使用 `install` 安装工具，使用 `deps` 安装项目自身依赖，使用 `model sync` 下载模型。
+- 下载副本默认保留上限 2 GiB；`max_size_bytes=0` 成功即删，不阻止大文件下载。用 `cache status/trim` 管理；CAS 与原生 store 不属于该预算。
 - 动态工具使用 `npm:`、`cargo:`、`go:`、`conda:`、`pypi:`、`github:`、`http:` 前缀。
 - CLI → 环境变量 → 项目配置 → 用户配置 → 内置默认，优先级依次降低。
 - 需要执行代码或改变字节来源的项目配置先用 `osdk trust`；安全声明不会无故要求信任。

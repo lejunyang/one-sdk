@@ -26,3 +26,5 @@ osdk [GLOBAL OPTIONS] <COMMAND> [COMMAND OPTIONS]
 
 CLI 布尔开关用于开启本次行为，不能用同一个开关把配置中的 `true` 关回 `false`。
 例如关闭签名验证只能通过 `OSDK_VERIFY_SIGNATURES=false` 或配置文件完成。
+
+`--download-cache-max-size BYTES|2GiB|unlimited`（环境变量 `OSDK_DOWNLOAD_CACHE_MAX_SIZE`）仅覆盖本次下载副本保留容量；`0` 成功即删，不限制可下载文件大小。配置见[缓存与清理](../maintenance/cache)。

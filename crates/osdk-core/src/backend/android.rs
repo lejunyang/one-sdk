@@ -1071,7 +1071,7 @@ impl Backend for AndroidBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         // A locked plan pins the exact artifact, but it must never stand in for
         // consent: lock files are committed and replayed on other machines, and

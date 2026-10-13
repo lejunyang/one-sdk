@@ -1264,7 +1264,7 @@ impl Backend for CondaBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ctx.ctx;
         let records = self.solve(ctx, tv).await?;
 

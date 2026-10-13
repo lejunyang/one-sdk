@@ -29,8 +29,15 @@ pub async fn pull(
     endpoint: &str,
     options: &PullOptions,
 ) -> Result<InstalledModel> {
-    let remote = provider.resolve(ctx, reference, endpoint).await?;
+    let session = crate::cache::downloads::Session::begin(ctx).await?;
     let selector = FileSelector::new(&options.include, &options.exclude)?;
+    if ctx.config.settings.offline {
+        if let Some(installed) = replay_offline(ctx, name, reference, options, &selector)? {
+            session.finish(ctx, &[]);
+            return Ok(installed);
+        }
+    }
+    let remote = provider.resolve(ctx, reference, endpoint).await?;
     let files: Vec<_> = remote
         .files
         .into_iter()
@@ -41,7 +48,43 @@ pub async fn pull(
             "model file selection for {reference} matched no files"
         )));
     }
+    let mut seen = std::collections::BTreeSet::new();
+    for file in &files {
+        let relative = crate::model::safe_relative_path(&file.path)?;
+        let key: PathBuf = relative.components().collect();
+        #[cfg(windows)]
+        let key = PathBuf::from(key.to_string_lossy().to_lowercase());
+        if !seen.insert(key) {
+            return Err(Error::other("model provider returned duplicate file paths"));
+        }
+    }
 
+    // Acquire every exact-file lock in canonical order and keep them through
+    // publish. Releasing after HTTP alone allowed another pull's failed
+    // validation to unlink a source while this transaction was ingesting it.
+    let mut lock_paths = files
+        .iter()
+        .map(|file| {
+            let relative = crate::model::safe_relative_path(&file.path)?;
+            Ok(download_lock_path(&download_path(
+                ctx,
+                reference,
+                &remote.revision,
+                &relative,
+            )))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut file_locks = Vec::with_capacity(lock_paths.len());
+    for path in lock_paths {
+        crate::cache::downloads::safe_path(&ctx.dirs.cache, &path)?;
+        file_locks.push(
+            tokio::task::spawn_blocking(move || crate::lock::FileLock::acquire(path))
+                .await
+                .map_err(|error| Error::other(format!("model file lock failed: {error}")))??,
+        );
+    }
     let jobs = ctx.config.settings.jobs.max(1);
     let revision = remote.revision.clone();
     // A client with a read (no-progress) timeout, so a connection that dies
@@ -62,7 +105,11 @@ pub async fn pull(
         ctx.cas.clone(),
         ctx.config.settings.link_mode,
     );
-    store.publish(
+    let paths = downloaded
+        .iter()
+        .map(|file| file.source.clone())
+        .collect::<Vec<_>>();
+    let installed = store.publish(
         SnapshotIdentity {
             name: name.to_string(),
             provider: reference.provider,
@@ -76,7 +123,10 @@ pub async fn pull(
             derived_from: options.derived_from.clone(),
         },
         downloaded,
-    )
+    )?;
+    drop(file_locks);
+    session.finish(ctx, &paths);
+    Ok(installed)
 }
 
 async fn download_file(
@@ -88,38 +138,15 @@ async fn download_file(
 ) -> Result<DownloadedModelFile> {
     let relative = crate::model::safe_relative_path(&file.path)?;
     let destination = download_path(ctx, reference, revision, &relative);
+    crate::cache::downloads::record(&ctx.dirs, &destination, false)?;
     if ctx.config.settings.offline && !destination.is_file() {
         return Err(Error::other(format!(
-            "offline model file cache miss for {} ({})",
-            reference, file.path
+            "offline model file cache miss for {} ({}): {}; no matching snapshot manifest/CAS replay was available; retain downloads with a positive download_cache.max_size_bytes for cache-based offline pulls",
+            reference, file.path, destination.display()
         )));
     }
     if !ctx.config.settings.offline {
-        // Cross-process guard on this exact file: `download_path` is keyed only by
-        // provider/repository/revision/relative-path, so two osdk processes pulling
-        // the same file resolve to the same `.partial` and would clobber each
-        // other's progress (bug 007 saw ~7 GB reset to zero this way). In-process
-        // concurrency never collides here -- distinct files and distinct models map
-        // to distinct paths -- so this only ever contends across processes. Try
-        // first, and if another process holds it, say so and then wait rather than
-        // fail: the waiter resumes or, more often, finds the file already complete.
-        let lock_path = download_lock_path(&destination);
-        let _lock = match crate::lock::FileLock::try_acquire(&lock_path)? {
-            Some(lock) => lock,
-            None => {
-                if ctx.show_progress {
-                    download::suspend(|| {
-                        eprintln!(
-                            "waiting: another osdk process is downloading {} ({})",
-                            reference.repository, file.path
-                        )
-                    });
-                }
-                crate::lock::FileLock::acquire(&lock_path)?
-            }
-        };
-        // Another holder may have finished the download while we waited; the
-        // download call itself also short-circuits when `destination` exists.
+        // pull holds the exact-file locks through validation and publication.
         let headers = header_map(&file.headers)?;
         download::download_with_headers_and_policy(
             client,
@@ -177,6 +204,186 @@ async fn download_file(
         sha256,
         etag: file.etag,
     })
+}
+
+/// Replay only recorded snapshots: an arbitrary SHA-256 from a remote index
+/// cannot identify a BLAKE3 CAS object. Never scan blobs looking for a match.
+fn replay_offline(
+    ctx: &Ctx,
+    name: &str,
+    reference: &ModelRef,
+    options: &PullOptions,
+    selector: &FileSelector,
+) -> Result<Option<InstalledModel>> {
+    let root = ctx.dirs.models();
+    if !root.exists() {
+        return Ok(None);
+    }
+    let mut snapshots = Vec::new();
+    for item in walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .max_depth(4)
+    {
+        let item =
+            item.map_err(|error| Error::other(format!("offline model manifest scan: {error}")))?;
+        if !item.file_type().is_file() || item.file_name() != super::MODEL_MANIFEST_FILE {
+            continue;
+        }
+        let relative = item.path().strip_prefix(&root).unwrap();
+        let parts: Vec<_> = relative.components().collect();
+        if parts.len() != 4 || parts[1].as_os_str() != "snapshots" {
+            continue;
+        }
+        let snapshot = parts[2].as_os_str().to_string_lossy();
+        if snapshot.len() != 24 || !snapshot.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let bytes = crate::inventory::read_stable_regular_file(item.path(), 16 * 1024 * 1024)
+            .map_err(|error| Error::io(item.path(), error))?;
+        let manifest: super::SnapshotManifest =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                Error::other(format!(
+                    "invalid offline model manifest {}: {error}",
+                    item.path().display()
+                ))
+            })?;
+        if manifest.provider != reference.provider
+            || manifest.repository != reference.repository
+            || (manifest.requested_revision != reference.revision
+                && manifest.revision != reference.revision)
+            || manifest.variant != options.variant
+        {
+            continue;
+        }
+        if manifest.schema != 1 || manifest.files.is_empty() {
+            return Err(Error::other("unsupported or empty offline model manifest"));
+        }
+        // Cross-check the CAS manifest rather than accepting detached hashes.
+        let parent = item.path().parent().unwrap();
+        let cas_path = crate::store::manifest::Manifest::manifest_path(parent);
+        let bytes = crate::inventory::read_stable_regular_file(&cas_path, 16 * 1024 * 1024)
+            .map_err(|error| {
+                Error::other(format!(
+                    "offline model CAS manifest missing/invalid at {}: {error}",
+                    cas_path.display()
+                ))
+            })?;
+        let cas_manifest: crate::store::manifest::Manifest = serde_json::from_slice(&bytes)?;
+        if manifest.name != parts[0].as_os_str().to_string_lossy()
+            || cas_manifest.tool != format!("model:{}", manifest.name)
+            || cas_manifest.version != snapshot
+        {
+            return Err(Error::other(
+                "offline model manifest identity does not match snapshot path",
+            ));
+        }
+        for file in &manifest.files {
+            crate::model::safe_relative_path(&file.path)?;
+            if file.cas_hash.len() != 64
+                || !file.cas_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !cas_manifest.files.iter().any(|entry| {
+                    entry.path == file.path
+                        && entry.hash.as_deref() == Some(&file.cas_hash)
+                        && entry.symlink.is_none()
+                })
+            {
+                return Err(Error::other(format!(
+                    "offline model manifests disagree for {}",
+                    file.path
+                )));
+            }
+        }
+        let current_path = parent
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(super::CURRENT_FILE);
+        let current = crate::inventory::read_stable_regular_file(&current_path, 4096)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<super::CurrentSnapshot>(&bytes).ok())
+            .is_some_and(|current| current.snapshot == snapshot);
+        snapshots.push((manifest, current));
+    }
+    // An alias may have several recorded revisions. Prefer the named model,
+    // then the newest recorded snapshot; no attempt to resolve an alias online.
+    snapshots.sort_by(|(a, a_current), (b, b_current)| {
+        (b.name == name)
+            .cmp(&(a.name == name))
+            .then(b_current.cmp(a_current))
+            .then(b.created_at.cmp(&a.created_at))
+            .then(a.revision.cmp(&b.revision))
+    });
+    let Some((manifest, _)) = snapshots.into_iter().find(|(manifest, _)| {
+        manifest
+            .files
+            .iter()
+            .any(|file| selector.matches(&file.path))
+    }) else {
+        return Ok(None);
+    };
+    let mut files = Vec::new();
+    for file in manifest
+        .files
+        .iter()
+        .filter(|file| selector.matches(&file.path))
+    {
+        let source = ctx.cas.object_path(&file.cas_hash);
+        crate::cache::downloads::safe_path(&ctx.dirs.store, &source)?;
+        let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+            Error::other(format!(
+                "offline model CAS blob missing for {}: {} ({error})",
+                file.path,
+                source.display()
+            ))
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != file.size {
+            return Err(Error::other(format!(
+                "invalid offline model CAS blob for {}: {}",
+                file.path,
+                source.display()
+            )));
+        }
+        let actual = crate::store::hash_file(&source)?;
+        if actual != file.cas_hash {
+            return Err(Error::other(format!(
+                "offline model CAS checksum mismatch for {}: expected {}, got {actual}",
+                file.path, file.cas_hash
+            )));
+        }
+        if let Some(expected) = &file.sha256 {
+            crate::pipeline::verify::verify_file(&source, expected, HashAlgo::Sha256, &file.path)?;
+        }
+        files.push(DownloadedModelFile {
+            path: file.path.clone(),
+            source,
+            size: file.size,
+            sha256: file.sha256.clone(),
+            etag: file.etag.clone(),
+        });
+    }
+    let store = ModelStore::new(
+        ctx.dirs.clone(),
+        ctx.cas.clone(),
+        ctx.config.settings.link_mode,
+    );
+    store
+        .publish(
+            SnapshotIdentity {
+                name: name.to_string(),
+                provider: manifest.provider,
+                repository: manifest.repository,
+                requested_revision: reference.revision.clone(),
+                revision: manifest.revision,
+                endpoint: manifest.endpoint,
+                variant: options.variant.clone(),
+                kind: crate::model::effective_model_kind(reference.provider, options.kind),
+                family: options.family.clone(),
+                derived_from: options.derived_from.clone(),
+            },
+            files,
+        )
+        .map(Some)
 }
 
 fn download_path(ctx: &Ctx, reference: &ModelRef, revision: &str, path: &Path) -> PathBuf {
@@ -690,7 +897,7 @@ mod tests {
         assert!(error.to_string().contains("matched no files"));
     }
 
-    fn test_ctx(root: &Path, offline: bool) -> Ctx {
+    pub(super) fn test_ctx(root: &Path, offline: bool) -> Ctx {
         let dirs = Dirs::resolve_from(|key| match key {
             "OSDK_DATA_DIR" => Some(root.join("data").display().to_string()),
             "OSDK_CACHE_DIR" => Some(root.join("cache").display().to_string()),
@@ -723,5 +930,379 @@ mod tests {
             cas: Arc::new(Cas::new(dirs.store.clone())),
             show_progress: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::config::DownloadCacheLimit;
+    use crate::model::provider::RemoteSnapshot;
+    use async_trait::async_trait;
+
+    struct FixtureProvider;
+    #[async_trait]
+    impl ModelProvider for FixtureProvider {
+        async fn resolve(&self, ctx: &Ctx, _: &ModelRef, endpoint: &str) -> Result<RemoteSnapshot> {
+            assert!(
+                !ctx.config.settings.offline,
+                "offline replay must never resolve remotely"
+            );
+            let bytes = b"model bytes";
+            Ok(RemoteSnapshot {
+                revision: "exact-revision".into(),
+                endpoint: "https://invalid.example".into(),
+                files: vec![RemoteModelFile {
+                    path: "model.gguf".into(),
+                    size: Some(bytes.len() as u64),
+                    sha256: Some(crate::pipeline::verify::hash_bytes(bytes, HashAlgo::Sha256)),
+                    etag: None,
+                    url: format!("{endpoint}/model.gguf"),
+                    headers: vec![],
+                }],
+            })
+        }
+    }
+
+    fn fixture() -> (tempfile::TempDir, Ctx, ModelRef, PathBuf) {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut ctx = super::tests::test_ctx(temporary.path(), false);
+        ctx.config.settings.download_cache.max_size_bytes = DownloadCacheLimit::Bytes(0);
+        let reference = ModelRef::parse("hf:owner/repo@main").unwrap();
+        let cache = download_path(&ctx, &reference, "exact-revision", Path::new("model.gguf"));
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"model bytes").unwrap();
+        (temporary, ctx, reference, cache)
+    }
+
+    #[tokio::test]
+    async fn zero_retention_preserves_verified_cas_and_rebuilds_offline_without_download_metadata()
+    {
+        let (_temporary, mut ctx, reference, cache) = fixture();
+        let installed = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!cache.exists());
+        let hash = installed.manifest.files[0].cas_hash.clone();
+        assert!(ctx.cas.object_path(&hash).is_file());
+        std::fs::remove_dir_all(ctx.dirs.remote_cache()).unwrap();
+        std::fs::remove_file(installed.path.join("model.gguf")).unwrap();
+        ctx.config.settings.offline = true;
+        let rebuilt = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(rebuilt.path.join("model.gguf")).unwrap(),
+            b"model bytes"
+        );
+        assert!(rebuilt.path.join(".osdk-complete").is_file());
+        assert!(!cache.exists());
+        let clone = pull(
+            &ctx,
+            &FixtureProvider,
+            "other-name",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(clone.path.join("model.gguf")).unwrap(),
+            b"model bytes"
+        );
+        std::fs::remove_file(ctx.cas.object_path(&hash)).unwrap();
+        let error = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("CAS blob missing"), "{error}");
+        assert!(error.to_string().contains("model.gguf"));
+        assert_eq!(
+            std::fs::read(rebuilt.path.join("model.gguf")).unwrap(),
+            b"model bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_publish_keeps_download_for_retry_then_success_removes_oversized_copy() {
+        let (_temporary, mut ctx, reference, cache) = fixture();
+        let error = pull(
+            &ctx,
+            &FixtureProvider,
+            "../invalid",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("model name"));
+        assert!(cache.is_file());
+        ctx.config.settings.download_cache.max_size_bytes = DownloadCacheLimit::Bytes(1);
+        let installed = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!cache.exists());
+        assert_eq!(
+            std::fs::read(installed.path.join("model.gguf")).unwrap(),
+            b"model bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_missing_replay_metadata_and_corrupt_blobs_fail_closed() {
+        let (_temporary, mut ctx, reference, _cache) = fixture();
+        let installed = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        ctx.config.settings.offline = true;
+        let object = ctx.cas.object_path(&installed.manifest.files[0].cas_hash);
+        std::fs::write(&object, b"wrong bytes").unwrap();
+        let error = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+        assert!(
+            object.exists(),
+            "offline verification must not delete a CAS blob"
+        );
+        let cas_manifest = installed.path.join(crate::store::manifest::MANIFEST_FILE);
+        std::fs::remove_file(&cas_manifest).unwrap();
+        let error = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("CAS manifest missing/invalid"),
+            "{error}"
+        );
+        assert!(object.exists());
+    }
+
+    #[tokio::test]
+    async fn real_http_download_larger_than_budget_commits_and_discards_only_the_copy() {
+        use std::io::{Read, Write};
+        let (_temporary, mut ctx, reference, cache) = fixture();
+        std::fs::remove_file(&cache).unwrap();
+        ctx.config.settings.download_cache.max_size_bytes = DownloadCacheLimit::Bytes(1);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nmodel bytes").unwrap();
+        });
+        let installed = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            &endpoint,
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            std::fs::read(installed.path.join("model.gguf")).unwrap(),
+            b"model bytes"
+        );
+        assert!(ctx
+            .cas
+            .object_path(&installed.manifest.files[0].cas_hash)
+            .exists());
+        assert!(!cache.exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_zero_retention_pulls_keep_shared_sources_until_both_publish() {
+        let (_temporary, ctx, reference, cache) = fixture();
+        let options = PullOptions::default();
+        let (first, second) = tokio::join!(
+            pull(
+                &ctx,
+                &FixtureProvider,
+                "first",
+                &reference,
+                "https://invalid.example",
+                &options
+            ),
+            pull(
+                &ctx,
+                &FixtureProvider,
+                "second",
+                &reference,
+                "https://invalid.example",
+                &options
+            )
+        );
+        for installed in [first.unwrap(), second.unwrap()] {
+            assert_eq!(
+                std::fs::read(installed.path.join("model.gguf")).unwrap(),
+                b"model bytes"
+            );
+        }
+        assert!(!cache.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_offline_repair_restores_original_snapshot_metadata_and_missing_file_state() {
+        let (_temporary, mut ctx, reference, _cache) = fixture();
+        let installed = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        let root = installed.path.parent().unwrap().parent().unwrap();
+        let current_path = root.join(super::super::CURRENT_FILE);
+        let current = std::fs::read(&current_path).unwrap();
+        let manifest_path = installed.path.join(super::super::MODEL_MANIFEST_FILE);
+        let mut manifest = installed.manifest.clone();
+        manifest.created_at = 123;
+        let original = serde_json::to_vec_pretty(&manifest).unwrap();
+        std::fs::write(&manifest_path, &original).unwrap();
+        std::fs::remove_file(installed.path.join("model.gguf")).unwrap();
+        std::fs::remove_file(&current_path).unwrap();
+        std::fs::create_dir(&current_path).unwrap();
+        ctx.config.settings.offline = true;
+        assert!(pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default()
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), original);
+        assert!(!installed.path.join("model.gguf").exists());
+        assert_eq!(
+            std::fs::read(ctx.cas.object_path(&manifest.files[0].cas_hash)).unwrap(),
+            b"model bytes"
+        );
+        std::fs::remove_dir(&current_path).unwrap();
+        std::fs::write(&current_path, current).unwrap();
+        let repaired = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(repaired.path.join("model.gguf")).unwrap(),
+            b"model bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_repair_preserves_untracked_and_modified_snapshot_data() {
+        let (_temporary, mut ctx, reference, _cache) = fixture();
+        let installed = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap();
+        let extra = installed.path.join("my-unique-model.bin");
+        std::fs::write(&extra, b"user data").unwrap();
+        std::fs::remove_file(installed.path.join("model.gguf")).unwrap();
+        ctx.config.settings.offline = true;
+        let error = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("untracked"), "{error}");
+        assert_eq!(std::fs::read(&extra).unwrap(), b"user data");
+        std::fs::remove_file(&extra).unwrap();
+        std::fs::write(installed.path.join("model.gguf"), b"user edited").unwrap();
+        let error = pull(
+            &ctx,
+            &FixtureProvider,
+            "fixture",
+            &reference,
+            "https://invalid.example",
+            &PullOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("modified"), "{error}");
+        assert_eq!(
+            std::fs::read(installed.path.join("model.gguf")).unwrap(),
+            b"user edited"
+        );
     }
 }

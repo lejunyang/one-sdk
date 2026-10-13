@@ -12,7 +12,7 @@ osdk --offline model sync qwen
 
 `--offline` or `OSDK_OFFLINE=true` strictly prohibits network access:
 
-- metadata, SDK archives, model metadata, and every selected file must be cached;
+- SDK reinstallation needs cached archives; models can replay recorded files from intact snapshot manifests and verified CAS. Without those records, model metadata and download files must be cached;
 - automatic source probes are skipped; `source test` and `--refresh-sources` on
   SDK-installing commands fail, `model sync` does not refresh, and commands that
   do not support the flag continue to ignore it;
@@ -66,3 +66,5 @@ request and the exact resolved version.
 Cargo registry resolution has its own fixed rule: yanked releases are always
 removed, `latest` and numeric prefixes select stable releases, and only an exact
 Cargo selector can select an explicit non-yanked prerelease.
+
+Download copies default to a 2 GiB retention budget; `0` retains none after success. See [Caches and Cleanup](../maintenance/cache).

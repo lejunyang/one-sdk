@@ -848,7 +848,7 @@ impl Backend for GithubBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         crate::backend::dynamic::validate_options(self.id(), &tv.options)?;
         let rules = Self::rules(&tv.options)?;

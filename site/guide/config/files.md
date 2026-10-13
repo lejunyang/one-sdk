@@ -288,3 +288,5 @@ jobs = 2
 项目层会创建一整套默认 `Settings` 再设 `jobs = 2`，因此最终
 `verify_signatures` 回到默认 `true`。若希望保留非默认组合，应在高优先级的
 `[settings]` 中完整声明。
+
+`[settings.download_cache]` 使用 `max_size_bytes`（默认 2147483648；0 不保留；`"unlimited"` 不限）与 `max_age_secs`（默认 604800；0 不过期）。`OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖容量。详见[缓存与清理](../maintenance/cache)。

@@ -838,6 +838,39 @@ pub fn task(app: &mut App, command: crate::cli::TaskCommand) -> Result<()> {
 pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
     use crate::cli::CacheCommand;
     match command {
+        CacheCommand::Status { json } => {
+            let mut report = osdk_core::cache::downloads::collect(
+                &app.ctx.dirs,
+                &app.ctx.config.settings.download_cache,
+                true,
+            )?;
+            report.over_limit = report
+                .max_size_bytes
+                .is_some_and(|limit| report.managed_bytes > limit);
+            print_download_cache_report(&report, json, true)?;
+        }
+        CacheCommand::Trim {
+            dry_run: true,
+            json,
+        } => {
+            let report = osdk_core::cache::downloads::collect(
+                &app.ctx.dirs,
+                &app.ctx.config.settings.download_cache,
+                true,
+            )?;
+            print_download_cache_report(&report, json, true)?;
+        }
+        CacheCommand::Trim {
+            dry_run: false,
+            json,
+        } => {
+            let report = osdk_core::cache::downloads::collect(
+                &app.ctx.dirs,
+                &app.ctx.config.settings.download_cache,
+                false,
+            )?;
+            print_download_cache_report(&report, json, false)?;
+        }
         CacheCommand::Dir => {
             println!("cache_dir     = {}", app.ctx.dirs.cache.display());
             println!("downloads     = {}", app.ctx.dirs.downloads().display());
@@ -857,12 +890,7 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
                 println!("{}", t!("msg.cancelled"));
                 return Ok(());
             }
-            let downloads = app.ctx.dirs.downloads();
-            if downloads.exists() {
-                std::fs::remove_dir_all(&downloads)
-                    .with_context(|| format!("removing {}", downloads.display()))?;
-                std::fs::create_dir_all(&downloads).ok();
-            }
+            osdk_core::cache::downloads::clean(&app.ctx.dirs)?;
             // The Python installer caches are osdk-managed now, so leaving them
             // out would make `cache clean` quietly incomplete: osdk would be
             // the reason they exist while offering no way to reclaim them.
@@ -875,6 +903,10 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
             for name in ["uv", "pip"] {
                 let directory = downstream.join(name);
                 if directory.exists() {
+                    osdk_core::cache::downloads::validate_disposable_directory(
+                        &app.ctx.dirs,
+                        &directory,
+                    )?;
                     std::fs::remove_dir_all(&directory)
                         .with_context(|| format!("removing {}", directory.display()))?;
                 }
@@ -895,6 +927,56 @@ pub fn cache(app: &App, command: crate::cli::CacheCommand) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn print_download_cache_report(
+    report: &osdk_core::cache::downloads::Report,
+    json: bool,
+    preview: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        println!(
+            "download copies: {} logical bytes; unregistered: {} bytes",
+            report.managed_bytes, report.unmanaged_bytes
+        );
+        println!(
+            "completed: {} bytes; retries: {} bytes ({} bytes recently protected)",
+            report.completed_bytes, report.retry_bytes, report.protected_retry_bytes
+        );
+        let limit = report
+            .max_size_bytes
+            .map_or_else(|| "unlimited".to_string(), |value| value.to_string());
+        println!(
+            "policy: max_size_bytes={limit}, max_age_secs={}",
+            report.max_age_secs
+        );
+        println!(
+            "{} {} entries ({} logical bytes); busy={}, over_limit={}, unsafe={}",
+            if preview { "would remove" } else { "removed" },
+            if preview {
+                report.selected_entries
+            } else {
+                report.removed_entries
+            },
+            report.selected_bytes,
+            report.busy,
+            report.over_limit,
+            report.skipped_unsafe
+        );
+        let allocated = report
+            .allocated_bytes
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        let reclaimable = report
+            .reclaimable_bytes_upper_bound
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        println!("allocated bytes: {allocated}; reclaimable upper estimate: {reclaimable} (hardlink/reflink sharing may reduce this)");
+        println!(
+            "CAS, installed SDKs/models, remote metadata and native package caches are excluded."
+        );
     }
     Ok(())
 }
@@ -966,6 +1048,8 @@ pub(crate) fn setting_display(s: &osdk_core::config::Settings, key: &str) -> Opt
     Some(match key {
         "jobs" => s.jobs.to_string(),
         "offline" => s.offline.to_string(),
+        "download_cache.max_size_bytes" => s.download_cache.max_size_bytes.to_string(),
+        "download_cache.max_age_secs" => s.download_cache.max_age_secs.to_string(),
         "yes" => s.yes.to_string(),
         "verify_signatures" => s.verify_signatures.to_string(),
         "require_checksums" => s.require_checksums.to_string(),
