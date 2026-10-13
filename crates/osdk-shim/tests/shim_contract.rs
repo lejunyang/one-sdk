@@ -2111,9 +2111,7 @@ fn direct_shims_use_versioned_manager_native_caches_and_preserve_overrides() {
             .map(|(i, part)| {
                 if part == "unset" {
                     part.to_string()
-                } else if (manager == "pnpm" && i == 0)
-                    || (manager == "yarn" && i == 1)
-                {
+                } else if (manager == "pnpm" && i == 0) || (manager == "yarn" && i == 1) {
                     // PNPM_HOME / YARN_GLOBAL_FOLDER are redirected to the
                     // controlled global home.
                     temporary
