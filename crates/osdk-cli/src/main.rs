@@ -73,6 +73,7 @@ fn main_inner() {
         refresh_sources: cli.global.refresh_sources,
         source_mode: cli.global.source_mode,
         offline: cli.global.offline,
+        download_cache_max_size: cli.global.download_cache_max_size,
         require_checksums: cli.global.require_checksums,
         attestations: cli.global.attestations,
         prerelease: cli.global.prerelease,

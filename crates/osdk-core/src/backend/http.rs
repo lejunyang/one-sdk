@@ -252,7 +252,7 @@ impl Backend for HttpBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         crate::backend::dynamic::validate_options(self.id(), &tv.options)?;
         if !matches!(VersionSpec::parse(&tv.version), VersionSpec::Exact(ref exact) if exact == &tv.version)
@@ -682,6 +682,8 @@ async fn prepare_cached_artifact(
     checksum: &Checksum,
     cached: &Path,
 ) -> Result<()> {
+    let _cache_lease = crate::cache::downloads::Lease::acquire(&ctx.dirs)?;
+    crate::cache::downloads::record(&ctx.dirs, cached, false)?;
     if cached.exists() {
         let validation = validate_cached_artifact(cached).and_then(|()| {
             pipeline::verify::verify_file(cached, &checksum.hex, checksum.algo, file_name)
@@ -1202,7 +1204,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut ctx = test_ctx(temp.path());
         ctx.config.settings.offline = true;
-        let cached = temp.path().join("cached-tool");
+        let cached = ctx.dirs.downloads().join("cached-tool");
         let bytes = b"fixture";
         std::fs::write(&cached, bytes).unwrap();
         let checksum = Checksum {

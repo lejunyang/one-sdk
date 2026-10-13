@@ -725,7 +725,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn install(
+        async fn install_inner(
             &self,
             _ctx: &crate::backend::InstallCtx<'_>,
             _tv: &ToolVersion,

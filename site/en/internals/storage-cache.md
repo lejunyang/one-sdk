@@ -68,16 +68,15 @@ osdk metadata.
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) and backend `exec_env` methods only redirect each manager's native cache to a separate child of `<cache>/pkg`, including npm, the pnpm store, Yarn, Bun, and Deno. Variables are injected only when the user has not set them, except that a value managed by a previous osdk hook can be refreshed. Sharing a parent directory does not unify content protocols: there is no cross-manager package CAS or cross-manager blob deduplication.
 
-## `cache clean` removes downloads only
+## Download policy and cleanup
 
-After confirmation, `clean` in [`commands::cache`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs#L1126) removes only the complete `<cache>/downloads` tree and then best-effort recreates that directory. It does not clean:
+See [Caches and Cleanup](../guide/maintenance/cache). `cache/downloads.rs` records exact consumed download paths, last use and successful commit status. The shared lease at `<cache>/download-policy-v1/active.lock` is never deleted with downloads. Exclusive trim only unlinks regular files and fixed sidecars after boundary checks. The backend `install` wrapper includes post-processing; model leases cover resolve, concurrent downloads and publication. Existing per-model-file locks still serialize identical downloads.
 
-- the `<data>/store` CAS;
-- `<data>/installs` or `<data>/models`;
-- downstream manager/client caches under `<cache>/pkg`;
-- metadata in `<cache>/remote`, probe results in `<cache>/sources`, or `<cache>/tmp`.
+Policy never invokes CAS GC or removes store blobs, installations, native manager stores or metadata. Cache-root/download symlinks and reparse points, and overlap with persistent roots, are rejected. Processes running this version coordinate; older versions and external writers do not follow this new lock protocol. Model `ingest_preserve` copies the original into CAS; default snapshots hardlink CAS, commonly giving two physical entities at three paths. Copy/cross-volume materialization can create more copies; logical path sizes cannot measure hardlink/reflink physical usage.
 
-“Cache clean” therefore does not mean “clear all caches.” Non-interactive execution requires confirmation through `--yes`, `OSDK_YES=true`, or `settings.yes = true`; refusal leaves data untouched.
+Offline model replay scans canonical snapshot paths, cross-checks both manifests and identity/path/hash/size, then verifies CAS BLAKE3 and available SHA-256. CAS sources are never registered as downloads. Missing materialization is rebuilt in a sibling stage after rejecting extra/edited data. The old tree stays in a unique rollback location until replacement and the current record commit; failure restores it (or reports the retained location if rollback itself fails). Original unique content and blobs are preserved. Only recorded file sets can be replayed; removal/GC does not permanently pin orphan content for offline reinstall.
+
+Explicit `cache clean` keeps its existing download + uv/pip scope. Its download portion now performs coordinated per-file unlink and preserves links/lock files. `cache prune` still delegates only to uv.
 
 ## GC, removal, and the concurrency caveat
 

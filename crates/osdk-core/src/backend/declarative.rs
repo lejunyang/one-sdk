@@ -656,7 +656,7 @@ impl Backend for DeclarativeBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         validate_version(&tv.version)?;
         let archive = self.resolve_archive(ctx.platform, &tv.version)?;

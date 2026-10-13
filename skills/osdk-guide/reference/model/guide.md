@@ -26,3 +26,6 @@ osdk model unuse qwen25
 机器模式 stdout 只输出 schema 1 JSON/JSONL，诊断走 stderr，失败保持非零退出码；`model view list/path/doctor` 也支持 `--json`。
 provider 环境和 `model view` 的其余子命令以 `osdk model --help` 为准；声明字段见
 `reference/configuration/models.md`。
+下载副本受 `[settings.download_cache]` 预算管理；0 成功即删。离线先从规范快照的完整 model/CAS manifest 验证 CAS 内容并重建已记录文件，无需下载副本或远端 metadata。未记录文件、缺失/损坏 manifest 或 blob 不能靠联网回退。离线 alias 只知道最近记录版本；卸载/GC 后若唯一实体已失去，不能冷恢复。
+
+离线修复只补缺失文件；额外/修改过的数据保持原样并报错。快照替换或 current 写入失败会回滚旧树，若回滚自身失败则错误提供旧树保留位置。

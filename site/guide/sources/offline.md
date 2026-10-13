@@ -12,7 +12,7 @@ osdk --offline model sync qwen
 
 `--offline` 或 `OSDK_OFFLINE=true` 严格禁止网络：
 
-- metadata、SDK archive、模型 metadata 和所选文件必须已缓存；
+- SDK 重装需要已缓存的归档；模型可从完整快照 manifest 和经验证的 CAS 重建所记录文件，缺少这种记录时仍需模型 metadata 和下载缓存；
 - 自动 source probe 被跳过；`source test` 及 SDK 安装类命令中的 `--refresh-sources`
   会失败，`model sync` 不会刷新，本就不支持该参数的命令仍忽略它；
 - 缺少缓存时明确报错，不会偷偷联网；
@@ -56,3 +56,5 @@ osdk --prerelease never install bun@canary
 `list-remote` 当前仍只显示稳定版本。lock 会同时保存原始请求与精确解析版本。
 Cargo Registry 解析使用自己的固定规则：始终排除 yanked release，`latest` 与数字前缀
 只选择稳定版本，只有精确 Cargo selector 可以选择明确的未 yanked 预发布版本。
+
+下载副本默认受 2 GiB 保留预算约束，`0` 成功即删；参见[缓存与清理](../maintenance/cache)。

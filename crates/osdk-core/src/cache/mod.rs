@@ -15,6 +15,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod downloads;
+
 /// The shared downstream-cache root, `<cache>/pkg`.
 pub fn downstream_root(cache_dir: &Path) -> PathBuf {
     cache_dir.join("pkg")

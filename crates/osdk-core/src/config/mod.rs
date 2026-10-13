@@ -93,6 +93,8 @@ pub struct Settings {
     pub attestations: AttestationPolicy,
     /// Never make network requests; use cached metadata and archives only.
     pub offline: bool,
+    /// Retention for osdk-owned download copies, excluding CAS/native stores.
+    pub download_cache: DownloadCacheSettings,
     /// Output language override (`en`/`zh`). None = auto-detect from locale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
@@ -301,12 +303,108 @@ impl Default for Settings {
             require_checksums: false,
             attestations: AttestationPolicy::Off,
             offline: false,
+            download_cache: DownloadCacheSettings::default(),
             lang: None,
             prerelease: PrereleasePolicy::default(),
             shims: ShimSettings::default(),
             override_tools_env: false,
             tools: BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DownloadCacheSettings {
+    /// Retained logical bytes; zero retains no completed download copies.
+    pub max_size_bytes: DownloadCacheLimit,
+    /// Time since last install/pull access; zero disables expiry.
+    pub max_age_secs: u64,
+}
+
+impl Default for DownloadCacheSettings {
+    fn default() -> Self {
+        Self {
+            max_size_bytes: DownloadCacheLimit::Bytes(2 * 1024 * 1024 * 1024),
+            max_age_secs: 7 * 24 * 3600,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum DownloadCacheLimit {
+    Bytes(u64),
+    Unlimited(UnlimitedCache),
+}
+
+impl<'de> Deserialize<'de> for DownloadCacheLimit {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bytes(u64),
+            Text(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Bytes(bytes) => Ok(Self::Bytes(bytes)),
+            Raw::Text(text) => text.parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UnlimitedCache {
+    #[serde(rename = "unlimited")]
+    Unlimited,
+}
+
+impl DownloadCacheLimit {
+    pub fn bytes(self) -> Option<u64> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Unlimited(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DownloadCacheLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes(bytes) => write!(f, "{bytes}"),
+            Self::Unlimited(_) => f.write_str("unlimited"),
+        }
+    }
+}
+
+impl std::str::FromStr for DownloadCacheLimit {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self> {
+        if value == "unlimited" {
+            return Ok(Self::Unlimited(UnlimitedCache::Unlimited));
+        }
+        for (suffix, multiplier) in [
+            ("GiB", 1u64 << 30),
+            ("MiB", 1 << 20),
+            ("KiB", 1 << 10),
+            ("GB", 1_000_000_000),
+            ("MB", 1_000_000),
+            ("KB", 1000),
+        ] {
+            if let Some(number) = value.strip_suffix(suffix) {
+                let bytes = number
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|number| number.checked_mul(multiplier))
+                    .ok_or_else(|| Error::config("invalid or overflowing download cache size"))?;
+                return Ok(Self::Bytes(bytes));
+            }
+        }
+        value.parse().map(Self::Bytes).map_err(|_| {
+            Error::config("download cache size must be nonnegative bytes or unlimited")
+        })
     }
 }
 
@@ -613,6 +711,7 @@ impl<'de> Deserialize<'de> for Settings {
             take_or(&mut table, "require_checksums", defaults.require_checksums)?;
         let attestations = take_or(&mut table, "attestations", defaults.attestations)?;
         let offline = take_or(&mut table, "offline", defaults.offline)?;
+        let download_cache = take_or(&mut table, "download_cache", defaults.download_cache)?;
         let lang = take_or(&mut table, "lang", defaults.lang)?;
         let prerelease = take_or(&mut table, "prerelease", defaults.prerelease)?;
         let shims = take_or(&mut table, "shims", defaults.shims)?;
@@ -636,6 +735,7 @@ impl<'de> Deserialize<'de> for Settings {
             require_checksums,
             attestations,
             offline,
+            download_cache,
             lang,
             prerelease,
             shims,
@@ -1939,6 +2039,11 @@ impl Config {
         }
         if let Some(v) = getenv("OSDK_OFFLINE") {
             self.settings.offline = truthy(&v);
+        }
+        if let Some(v) = getenv("OSDK_DOWNLOAD_CACHE_MAX_SIZE") {
+            if let Ok(limit) = v.parse() {
+                self.settings.download_cache.max_size_bytes = limit;
+            }
         }
         if let Some(v) = getenv("OSDK_PRERELEASE") {
             if let Ok(policy) = v.parse() {
@@ -3807,5 +3912,49 @@ source = "hf:o/r@main"
         .unwrap();
         let error = Config::load_user(&bad).unwrap_err();
         assert!(error.localized().contains("sorce"), "{}", error.localized());
+    }
+}
+
+#[cfg(test)]
+mod download_cache_tests {
+    use super::*;
+
+    #[test]
+    fn retention_defaults_zero_units_unlimited_and_layering_are_explicit() {
+        let settings: Settings = toml::from_str("").unwrap();
+        assert_eq!(
+            settings.download_cache.max_size_bytes.bytes(),
+            Some(2147483648)
+        );
+        assert_eq!(settings.download_cache.max_age_secs, 604800);
+        for (text, expected) in [
+            ("0", Some(0)),
+            ("\"2GiB\"", Some(2147483648)),
+            ("\"2GB\"", Some(2000000000)),
+            ("\"unlimited\"", None),
+        ] {
+            let config: ConfigFile = toml::from_str(&format!(
+                "[settings.download_cache]\nmax_size_bytes={text}\nmax_age_secs=0\n"
+            ))
+            .unwrap();
+            let policy = config.settings.unwrap().download_cache;
+            assert_eq!(policy.max_size_bytes.bytes(), expected);
+            assert_eq!(policy.max_age_secs, 0);
+        }
+        for value in ["-1", "\"bogus\"", "\"18446744073709551615GiB\""] {
+            assert!(toml::from_str::<ConfigFile>(&format!(
+                "[settings.download_cache]\nmax_size_bytes={value}\n"
+            ))
+            .is_err());
+        }
+        assert!(
+            toml::from_str::<ConfigFile>("[settings.download_cache]\nmax_szie_bytes=0\n").is_err()
+        );
+        let mut config = Config::default();
+        config.apply_env(|key| (key == "OSDK_DOWNLOAD_CACHE_MAX_SIZE").then(|| "3MiB".to_string()));
+        assert_eq!(
+            config.settings.download_cache.max_size_bytes.bytes(),
+            Some(3 * 1024 * 1024)
+        );
     }
 }

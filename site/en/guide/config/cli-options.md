@@ -27,3 +27,5 @@ osdk [GLOBAL OPTIONS] <COMMAND> [COMMAND OPTIONS]
 CLI boolean flags enable a behavior for that invocation; the same flag cannot
 turn a configured `true` back to `false`. For example, disable signature
 verification with `OSDK_VERIFY_SIGNATURES=false` or configuration.
+
+`--download-cache-max-size BYTES|2GiB|unlimited` (`OSDK_DOWNLOAD_CACHE_MAX_SIZE`) overrides retained download-copy capacity for this invocation. `0` removes copies after success and never limits downloadable file size. See [Caches and Cleanup](../maintenance/cache).

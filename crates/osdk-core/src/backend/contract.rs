@@ -17,6 +17,7 @@ use crate::version::{ToolRequest, ToolVersion, VersionInfo};
 
 struct ContractBackend {
     id: &'static str,
+    fail_after_pipeline: bool,
 }
 
 #[async_trait]
@@ -37,7 +38,7 @@ impl Backend for ContractBackend {
         Ok(vec![VersionInfo::stable("1.0.0")])
     }
 
-    async fn install(&self, install: &InstallCtx<'_>, version: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, install: &InstallCtx<'_>, version: &ToolVersion) -> Result<()> {
         let plan = pipeline::locked_install_plan(self.id(), version, true)?
             .expect("contract uses a locked artifact");
         let context = PipelineCtx {
@@ -50,6 +51,11 @@ impl Backend for ContractBackend {
             require_checksums: true,
         };
         pipeline::run(&plan, &context).await?;
+        if self.fail_after_pipeline {
+            std::fs::remove_dir_all(install.ctx.dirs.install_path(self.id(), &version.version))
+                .unwrap();
+            return Err(crate::Error::other("fixture post-install rollback"));
+        }
         Ok(())
     }
 
@@ -185,7 +191,10 @@ async fn all_builtin_backend_ids_satisfy_the_lifecycle_contract() {
     for id in expected.into_iter().chain(["github:example/tool"]) {
         let temporary = tempfile::tempdir().unwrap();
         let ctx = context(temporary.path());
-        let backend = ContractBackend { id };
+        let backend = ContractBackend {
+            id,
+            fail_after_pipeline: false,
+        };
         let request = ToolRequest::parse(&format!("{id}@1.0.0")).unwrap();
         let mut resolved = backend.resolve_version(&ctx, &request).await.unwrap();
         assert_eq!(resolved.version, "1.0.0");
@@ -331,4 +340,64 @@ fn contract_archive_shape_is_supported() {
         hex: "0".repeat(64),
     };
     assert_eq!(checksum.hex.len(), 64);
+}
+
+#[tokio::test]
+async fn zero_retention_waits_for_backend_postprocessing_and_rollback() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut ctx = context(temporary.path());
+    ctx.config.settings.download_cache.max_size_bytes = crate::config::DownloadCacheLimit::Bytes(0);
+    let id = "cache-contract";
+    let archive = pipeline::artifact_cache_path(&ctx.dirs, id, "1.0.0", "contract.tgz").unwrap();
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    fixture_archive(&archive);
+    let checksum = pipeline::verify::hash_file(&archive, HashAlgo::Sha256).unwrap();
+    let mut version = ToolVersion::new(id, "1.0.0");
+    version.options.extend(std::collections::BTreeMap::from([
+        (
+            pipeline::LOCKED_ARTIFACT_URL_OPTION.into(),
+            "https://invalid.example/never".into(),
+        ),
+        (
+            pipeline::LOCKED_ARTIFACT_FILE_OPTION.into(),
+            "contract.tgz".into(),
+        ),
+        (
+            pipeline::LOCKED_ARTIFACT_CHECKSUM_OPTION.into(),
+            format!("sha256:{checksum}"),
+        ),
+    ]));
+    let backend = ContractBackend {
+        id,
+        fail_after_pipeline: true,
+    };
+    assert!(backend
+        .install(&InstallCtx { ctx: &ctx }, &version)
+        .await
+        .is_err());
+    assert!(archive.exists());
+    assert!(!ctx
+        .dirs
+        .install_path(id, "1.0.0")
+        .join(".osdk-complete")
+        .exists());
+    let backend = ContractBackend {
+        id,
+        fail_after_pipeline: false,
+    };
+    backend
+        .install(&InstallCtx { ctx: &ctx }, &version)
+        .await
+        .unwrap();
+    assert!(!archive.exists());
+    assert!(ctx
+        .dirs
+        .install_path(id, "1.0.0")
+        .join("bin/contract-tool")
+        .is_file());
+    assert!(ctx
+        .dirs
+        .install_path(id, "1.0.0")
+        .join(".osdk-complete")
+        .is_file());
 }

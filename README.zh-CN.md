@@ -909,6 +909,9 @@ osdk --yes prune
 `cache clean` 删除已下载的归档；`prune` 回收不再引用的共享内容；
 `prune --dry-run` 不会删除任何数据。
 
+
+下载副本默认最多保留 2 GiB；更大的模型仍可安装，成功后清掉超预算下载副本。运行 `osdk config set --global download_cache.max_size_bytes 0` 可成功即删。使用 `osdk cache status --json` 查看、`osdk cache trim --dry-run` 预览和 `osdk cache trim` 回收。本地内容和快照记录完整时，下载副本已删也可离线重建模型。
+
 指南：[缓存与清理](site/guide/maintenance/cache.md)
 
 ## 场景：某个工具自己更新过，已与安装时不一致

@@ -295,6 +295,9 @@ async fn download_once(
     let total = resp
         .content_length()
         .map(|remaining| remaining.saturating_add(downloaded_before));
+    if let (Some(remaining), Some(parent)) = (resp.content_length(), dest.parent()) {
+        crate::cache::downloads::check_free_space(parent, remaining)?;
+    }
     let response_metadata = PartialMetadata {
         url: url.to_string(),
         etag: header_string(&resp, ETAG),

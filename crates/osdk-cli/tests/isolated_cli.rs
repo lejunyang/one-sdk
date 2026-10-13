@@ -8620,3 +8620,96 @@ fn doctor_verifies_all_dynamic_identity_roots() {
     );
     assert!(report.contains("payload.py: contents changed"), "{report}");
 }
+
+#[test]
+fn download_cache_policy_cli_config_and_dry_run_preserve_legacy_files() {
+    let temp = tempfile::tempdir().unwrap();
+    for (key, value) in [
+        ("download_cache.max_size_bytes", "2GiB"),
+        ("download_cache.max_age_secs", "0"),
+    ] {
+        let output = run_isolated(temp.path(), &["config", "set", "--global", key, value]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = run_isolated(
+        temp.path(),
+        &["config", "get", "download_cache.max_size_bytes"],
+    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("2147483648"));
+    let legacy = temp.path().join("cache/downloads/legacy.gguf");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"legacy bytes").unwrap();
+    for command in [
+        vec![
+            "--download-cache-max-size",
+            "0",
+            "cache",
+            "status",
+            "--json",
+        ],
+        vec![
+            "--download-cache-max-size",
+            "0",
+            "cache",
+            "trim",
+            "--dry-run",
+            "--json",
+        ],
+        vec!["--download-cache-max-size", "0", "cache", "trim", "--json"],
+    ] {
+        let output = run_isolated(temp.path(), &command);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["schema"], 1);
+        assert_eq!(report["max_size_bytes"], 0);
+        assert_eq!(report["unmanaged_bytes"], 12);
+        assert_eq!(report["removed_entries"], 0);
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy bytes");
+    }
+    let output = run_isolated(
+        temp.path(),
+        &[
+            "--download-cache-max-size",
+            "unlimited",
+            "cache",
+            "status",
+            "--json",
+        ],
+    );
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["max_size_bytes"].is_null());
+    let output = run_isolated(
+        temp.path(),
+        &["--download-cache-max-size", "-1", "cache", "status"],
+    );
+    assert!(!output.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_clean_refuses_a_native_cache_parent_link_to_persistent_models() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = temp.path().join("data/models/uv/unique-model.gguf");
+    std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+    std::fs::write(&model, b"unique model data").unwrap();
+    std::fs::create_dir_all(temp.path().join("cache")).unwrap();
+    std::os::unix::fs::symlink(
+        temp.path().join("data/models"),
+        temp.path().join("cache/pkg"),
+    )
+    .unwrap();
+    let output = run_isolated(temp.path(), &["--yes", "cache", "clean"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
+    assert_eq!(std::fs::read(&model).unwrap(), b"unique model data");
+}

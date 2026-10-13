@@ -387,7 +387,7 @@ impl Backend for RustBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let sources = crate::source::select::ranked_source_list(ctx, self).await?;
         Self::ensure_rustup(ctx, &sources).await?;

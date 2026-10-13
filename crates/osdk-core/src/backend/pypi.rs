@@ -1080,7 +1080,7 @@ impl Backend for PypiBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let interpreter = managed_interpreter(ctx, &tv.options)?;
         let choice = choose_installer(locate_uv(ctx).as_deref(), require_uv(&tv.options))?;

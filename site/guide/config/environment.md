@@ -102,3 +102,5 @@ osdk 读取的 `OSDK_*` 变量都列在本页，按用途分组。总体优先�
 | `OSDK_TASK`、`OSDK_TASK_NAME` | 当前进程是 `osdk run` 启动的任务，以及任务名；shell 钩子见到 `OSDK_TASK` 会跳过重新激活 |
 | `OSDK_SHIM_ACTIVE` | 正在经由 shim 运行的工具名，用来拒绝 shim 递归调用自身 |
 | `OSDK_MANAGED_ENV`、`OSDK_ORIG_<NAME>`、`OSDK_ORIGINAL_PATH` | 激活时记录被接管的变量及其原值，`deactivate` 据此恢复 |
+
+`[settings.download_cache]` 使用 `max_size_bytes`（默认 2147483648；0 不保留；`"unlimited"` 不限）与 `max_age_secs`（默认 604800；0 不过期）。`OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖容量。详见[缓存与清理](../maintenance/cache)。

@@ -336,7 +336,7 @@ impl Backend for NodeBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let target_arch = Self::target_arch(ctx, &tv.options)?;
         if target_arch != ctx.platform.arch {

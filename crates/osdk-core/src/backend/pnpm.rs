@@ -54,7 +54,7 @@ impl Backend for PnpmBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ictx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         let ctx = ictx.ctx;
         let plan = if let Some(plan) = pipeline::locked_install_plan(self.id(), tv, true)? {
             plan

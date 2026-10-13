@@ -1332,7 +1332,7 @@ impl Backend for CargoPackageBackend {
     }
 
     #[cfg(feature = "install")]
-    async fn install(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
+    async fn install_inner(&self, ctx: &InstallCtx<'_>, tv: &ToolVersion) -> Result<()> {
         self.install_with_runner(ctx.ctx, tv, &SystemCommandRunner)
             .await
     }

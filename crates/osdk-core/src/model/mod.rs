@@ -298,10 +298,31 @@ impl ModelStore {
         let lock_path = model_root.join(".locks").join(format!("{snapshot}.lock"));
         let _lock = FileLock::acquire(&lock_path)?;
 
-        if destination.join(COMPLETE_MARKER).is_file() {
+        // A manifest can survive a lost/corrupted materialized file. Verify the
+        // actual snapshot before the fast path so CAS-backed offline replay can
+        // rebuild it transactionally without discarding the old tree first.
+        let intact = destination.join(COMPLETE_MARKER).is_file()
+            && files.iter().all(|file| {
+                let Ok(relative) = safe_relative_path(&file.path) else {
+                    return false;
+                };
+                let path = destination.join(relative);
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    return false;
+                };
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() == file.size
+                    && file.sha256.as_ref().is_some_and(|expected| {
+                        hash_file(&path, HashAlgo::Sha256)
+                            .is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+                    })
+            });
+        if intact {
             self.write_current(&model_root, &snapshot)?;
             return self.load_path(&destination);
         }
+        self.protect_existing_snapshot(&destination, &files)?;
 
         let temporary = snapshots.join(format!(".{snapshot}.tmp-{}", std::process::id()));
         if temporary.exists() {
@@ -377,13 +398,38 @@ impl ModelStore {
             write_json_atomic(&temporary.join(MODEL_MANIFEST_FILE), &manifest)?;
             std::fs::write(temporary.join(COMPLETE_MARKER), b"")
                 .map_err(|error| Error::io(temporary.join(COMPLETE_MARKER), error))?;
-            if destination.exists() {
-                std::fs::remove_dir_all(&destination)
+            // Retain the prior known snapshot until both publication and the
+            // current pointer commit succeed. Never destroy it before rename.
+            let previous = if destination.exists() {
+                let reservation = tempfile::Builder::new()
+                    .prefix(".rollback-")
+                    .tempdir_in(&snapshots)
+                    .map_err(|error| Error::io(&snapshots, error))?;
+                let path = reservation.path().to_path_buf();
+                drop(reservation);
+                std::fs::rename(&destination, &path)
                     .map_err(|error| Error::io(&destination, error))?;
+                Some(path)
+            } else {
+                None
+            };
+            let publication = std::fs::rename(&temporary, &destination)
+                .map_err(|error| Error::io(&destination, error))
+                .and_then(|()| self.write_current(&model_root, &snapshot));
+            if let Err(error) = publication {
+                if let Some(previous) = &previous {
+                    if destination.exists() {
+                        std::fs::rename(&destination, &temporary).map_err(|rollback| Error::other(format!("model publication failed ({error}); cannot park replacement ({rollback}); original retained at {}", previous.display())))?;
+                    }
+                    std::fs::rename(previous, &destination).map_err(|rollback| Error::other(format!("model publication failed ({error}); rollback failed ({rollback}); original retained at {}", previous.display())))?;
+                }
+                return Err(error);
             }
-            std::fs::rename(&temporary, &destination)
-                .map_err(|error| Error::io(&destination, error))?;
-            self.write_current(&model_root, &snapshot)?;
+            if let Some(previous) = previous {
+                if let Err(error) = std::fs::remove_dir_all(&previous) {
+                    tracing::warn!(%error, path = %previous.display(), "published model; previous snapshot cleanup deferred");
+                }
+            }
             Ok(InstalledModel {
                 manifest,
                 path: destination.clone(),
@@ -394,6 +440,77 @@ impl ModelStore {
             let _ = std::fs::remove_dir_all(&temporary);
         }
         result
+    }
+
+    /// A repair may restore absent files, but must not replace extra or edited
+    /// user content. Existing owned metadata can be regenerated after commit.
+    fn protect_existing_snapshot(&self, root: &Path, files: &[DownloadedModelFile]) -> Result<()> {
+        let metadata = match std::fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(Error::io(root, error)),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(Error::other(
+                "refusing to replace a linked/non-directory model snapshot",
+            ));
+        }
+        let mut expected = std::collections::BTreeMap::new();
+        for file in files {
+            let relative = safe_relative_path(&file.path)?;
+            expected.insert(relative.to_string_lossy().replace('\\', "/"), file);
+        }
+        for item in walkdir::WalkDir::new(root).follow_links(false) {
+            let item = item.map_err(|error| Error::other(format!("model repair scan: {error}")))?;
+            if item.file_type().is_dir() {
+                continue;
+            }
+            let relative = item
+                .path()
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if [
+                MODEL_MANIFEST_FILE,
+                crate::store::manifest::MANIFEST_FILE,
+                COMPLETE_MARKER,
+            ]
+            .contains(&relative.as_str())
+                && item.file_type().is_file()
+            {
+                continue;
+            }
+            let Some(file) = expected.get(&relative) else {
+                return Err(Error::other(format!(
+                    "refusing model repair with untracked data: {}",
+                    item.path().display()
+                )));
+            };
+            let expected_hash = crate::store::hash_file(&file.source)?;
+            if item.file_type().is_symlink() {
+                let actual = dunce::canonicalize(item.path())
+                    .map_err(|error| Error::io(item.path(), error))?;
+                let object = self.cas.object_path(&expected_hash);
+                let object =
+                    dunce::canonicalize(&object).map_err(|error| Error::io(&object, error))?;
+                if actual != object {
+                    return Err(Error::other(format!(
+                        "refusing model repair with modified link: {}",
+                        item.path().display()
+                    )));
+                }
+            } else if !item.file_type().is_file() {
+                return Err(Error::other("refusing model repair of a special file"));
+            }
+            if crate::store::hash_file(item.path())? != expected_hash {
+                return Err(Error::other(format!(
+                    "refusing model repair with modified data: {}",
+                    item.path().display()
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn current(&self, name: &str) -> Result<InstalledModel> {

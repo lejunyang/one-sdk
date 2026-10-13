@@ -62,16 +62,15 @@ Go module/build 数据使用上述 Go 自有 cache，同样不会进入 BLAKE3 S
 
 [`cache_env`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/cache/mod.rs#L23) 与 backend 的 `exec_env` 只是把各 manager 的原生缓存重定向到 `<cache>/pkg` 下的独立子目录，例如 npm、pnpm store、Yarn、Bun 和 Deno。变量只有在用户未设置时才注入；若值来自上一轮 osdk hook，则允许刷新。目录共用一个父根不代表内容协议统一，因此不存在跨 manager 的 package CAS 或跨 manager blob 去重。
 
-## `cache clean` 只清下载归档
+## 下载策略与清理
 
-[`commands::cache`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs#L1126) 的 `clean` 在确认后只删除整个 `<cache>/downloads`，随后尽力重新创建该目录。它不会清理：
+见 [缓存与清理](../guide/maintenance/cache)。策略实现在 `cache/downloads.rs`：持久 index 仅登记实际消费的下载路径，记录 last-used 和成功提交状态。共享 lease 位于 `<cache>/download-policy-v1/active.lock`，不随下载清理删除；独占 trim 只 unlink 受边界检查保护的普通文件和固定 sidecar。整个 backend `install` 包括后处理被包装，模型 lease 则覆盖 resolve、并发下载和 publish。单文件模型下载锁仍保留以串行化相同文件。
 
-- `<data>/store` CAS；
-- `<data>/installs` 或 `<data>/models`；
-- `<cache>/pkg` 下游 manager/client 缓存；
-- `<cache>/remote` metadata、`<cache>/sources` probe 结果或 `<cache>/tmp`。
+新策略从不调用 CAS GC，不删除 store blob、安装树、原生 manager store 或 metadata。缓存根及下载树中的 symlink/reparse point、与持久目录重叠的配置被拒绝。多个本版本进程互相协调；旧版本和外部写入者不遵循新锁协议，不能声称它们也被保护。模型原文件通过 `ingest_preserve` 复制入 CAS；默认 snapshot 与 CAS 硬链接，因此通常有两个实体、三个路径。copy/跨卷会增加实体；reflink 与 hardlink 的占用不能按路径逻辑大小相加。
 
-因此“cache clean”不是“清空所有缓存”。非交互执行必须通过 `--yes`、`OSDK_YES=true` 或 `settings.yes = true` 提供确认；拒绝确认时不删除。
+离线模型重建扫描规范快照路径中的两个 manifest，核对 identity、文件路径、hash、size，再验证 CAS 的 BLAKE3 和可用 SHA-256；源是 CAS，不登记为下载缓存。旧快照缺少文件时先拒绝额外/已修改数据，再构建完整 sibling stage；旧树保留在唯一 rollback 位置直到替换与 `current` 提交都成功，失败恢复旧树（若恢复本身失败则报告保留位置）。不会删除原安装中的唯一内容或 blob。只有实际记录的文件集可重放，卸载/GC 不会为离线重建永久保留孤儿内容。
+
+`cache clean` 保留原先显式清理下载和 uv/pip 的范围；下载部分改为受 lease 保护的逐文件删除，链接和锁文件保留。`cache prune` 仍只调用 uv 自有 prune。
 
 ## GC、卸载与并发 caveat
 
