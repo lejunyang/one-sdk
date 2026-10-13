@@ -4646,7 +4646,7 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
             "1.22.22",
             "bin/yarn",
             "${YARN_CACHE_FOLDER-unset}|${YARN_GLOBAL_FOLDER-unset}|${YARN_ENABLE_GLOBAL_CACHE-unset}",
-            "yarn-classic|unset|unset",
+            "yarn-classic|yarn|unset",
             "YARN_CACHE_FOLDER",
         ),
         (
@@ -4655,7 +4655,7 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
             "bin/yarn",
             "${YARN_CACHE_FOLDER-unset}|${YARN_GLOBAL_FOLDER-unset}|${YARN_ENABLE_GLOBAL_CACHE-unset}",
             "unset|yarn|unset",
-            "YARN_GLOBAL_FOLDER",
+            "YARN_ENABLE_GLOBAL_CACHE",
         ),
     ];
 
@@ -4693,9 +4693,18 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
         );
         let expected = expected_suffix
             .split('|')
-            .map(|part| {
+            .enumerate()
+            .map(|(i, part)| {
                 if part == "unset" {
                     part.to_string()
+                } else if (manager == "pnpm" && i == 0) || (manager == "yarn" && i == 1) {
+                    // Global install locations are controlled state; only the
+                    // native package caches live below cache/pkg.
+                    temp.path()
+                        .join("data/global")
+                        .join(part)
+                        .display()
+                        .to_string()
                 } else {
                     temp.path()
                         .join("cache/pkg")
@@ -4737,7 +4746,12 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
             String::from_utf8_lossy(&output.stdout)
         );
 
-        if manager == "pnpm" {
+        let global_key = match manager {
+            "pnpm" => Some("PNPM_HOME"),
+            "yarn" => Some("YARN_GLOBAL_FOLDER"),
+            _ => None,
+        };
+        if let Some(global_key) = global_key {
             let output = run_isolated_in_with_env(
                 temp.path(),
                 temp.path(),
@@ -4751,10 +4765,18 @@ fn exec_uses_versioned_manager_native_caches_and_preserves_overrides() {
                     "--",
                     manager,
                 ],
-                &[("PNPM_HOME", "/custom/pnpm-home")],
+                &[(global_key, "/custom/global-home")],
             );
             assert!(output.status.success());
-            assert!(String::from_utf8_lossy(&output.stdout).contains("/custom/pnpm-home"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.lines().any(|line| line == expected),
+                "{manager}@{version} did not use controlled {global_key}: {stdout}"
+            );
+            assert!(
+                !stdout.contains("/custom/global-home"),
+                "{manager}@{version} preserved external {global_key}: {stdout}"
+            );
         }
     }
 }
