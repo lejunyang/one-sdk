@@ -204,7 +204,13 @@ fn trusting_leaf_does_not_trust_inherited_executable_config() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("deps.codegen.run"), "{error}");
     assert!(
-        error.contains(root.join("osdk.toml").to_str().unwrap()),
+        error.contains(
+            root.join("osdk.toml")
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ),
         "{error}"
     );
 }
