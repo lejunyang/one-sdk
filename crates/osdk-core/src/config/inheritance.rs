@@ -396,7 +396,13 @@ mod tests {
         assert_eq!(value["deps"]["uv"]["env"]["B"].as_str(), Some("2"));
         assert_eq!(
             value["deps"]["uv"]["sources"][0].as_str(),
-            Some(root.join("pyproject.toml").to_str().unwrap())
+            Some(
+                root.canonicalize()
+                    .unwrap()
+                    .join("pyproject.toml")
+                    .to_str()
+                    .unwrap()
+            )
         );
         std::fs::write(child.join("osdk.toml"), "extends='osdk.toml'").unwrap();
         assert!(load(&child.join("osdk.toml"))

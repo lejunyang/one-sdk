@@ -2413,6 +2413,9 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
     if let Some(start_dir) = start_dir {
         if let Some((path, file)) = find_project_config(start_dir)? {
             let sources = inheritance::sources(&path)?;
+            let canonical_leaf = path
+                .canonicalize()
+                .map_err(|error| Error::io(&path, error))?;
             for source in &sources {
                 if let Some(tools) = inheritance::raw(source)?
                     .get("tools")
@@ -2421,7 +2424,11 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                     cfg.tool_origins.extend(tools.keys().map(|tool| {
                         (
                             tool.clone(),
-                            ToolConfigOrigin::ProjectConfig(source.clone()),
+                            ToolConfigOrigin::ProjectConfig(if *source == canonical_leaf {
+                                path.clone()
+                            } else {
+                                source.clone()
+                            }),
                         )
                     }));
                 }

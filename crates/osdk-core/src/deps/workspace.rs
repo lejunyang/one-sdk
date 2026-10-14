@@ -40,6 +40,10 @@ impl WorkspaceUnit {
 }
 
 pub fn detect(root: &Path) -> Result<Vec<WorkspaceUnit>> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| Error::io(root, error))?;
+    let root = canonical.as_path();
     let mut result = Vec::new();
     let pnpm = root.join("pnpm-workspace.yaml");
     if pnpm.is_file() {
@@ -245,7 +249,8 @@ mod tests {
     #[test]
     fn native_members_exclusions_and_changes_are_freshness_inputs() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let canonical_root = tmp.path().canonicalize().unwrap();
+        let root = canonical_root.as_path();
         write(
             root,
             "pnpm-workspace.yaml",
