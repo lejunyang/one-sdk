@@ -1397,7 +1397,7 @@ impl Default for DepsProviderEntry {
     fn default() -> Self {
         Self {
             auto: default_true(),
-            sources: Vec::new(),
+            sources: None,
             outputs: None,
             run: None,
             env: BTreeMap::new(),
@@ -1415,6 +1415,37 @@ impl Default for DepsProviderEntry {
 #[cfg(feature = "install")]
 fn default_true() -> bool {
     true
+}
+
+/// Direct command execution; arrays preserve arguments with spaces without a shell.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum DepsCommand {
+    Text(String),
+    Argv(Vec<String>),
+}
+
+#[cfg(feature = "install")]
+impl From<String> for DepsCommand {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+#[cfg(feature = "install")]
+impl From<&str> for DepsCommand {
+    fn from(value: &str) -> Self {
+        Self::Text(value.into())
+    }
+}
+#[cfg(feature = "install")]
+impl DepsCommand {
+    pub fn argv(&self) -> Vec<String> {
+        match self {
+            Self::Text(text) => text.split_whitespace().map(str::to_string).collect(),
+            Self::Argv(argv) => argv.clone(),
+        }
+    }
 }
 
 /// One `[deps.<provider>]` entry.
@@ -1444,12 +1475,12 @@ pub struct DepsProviderEntry {
     /// Freshness inputs. Replaces the provider's built-in list rather than
     /// adding to it.
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub sources: Option<Vec<String>>,
     /// Tracked outputs. Replaces the built-in list; an explicit empty list
     /// disables output tracking on purpose.
     pub outputs: Option<Vec<String>>,
     /// Override the command entirely.
-    pub run: Option<String>,
+    pub run: Option<DepsCommand>,
     /// Extra environment for the install command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -1461,14 +1492,13 @@ pub struct DepsProviderEntry {
     pub depends: Vec<String>,
     /// Timeout for the install command, e.g. "5m".
     pub timeout: Option<String>,
-    /// Pin the installer explicitly, overriding automatic selection.
+    /// Deprecated compatibility alias: must equal the provider name.
     pub installer: Option<String>,
     /// Registry/index override. Its presence is what makes this entry
     /// trust-requiring as `WeakensVerification` -- it redirects where bytes come
     /// from (see `trust::collect_deps_requirements`).
     pub index: Option<String>,
-    /// Additional index. Same trust class as `index`, and never ranked above the
-    /// default one.
+    /// Unsupported legacy field; use native named indexes / package bindings.
     pub extra_index: Option<String>,
     /// Allow building from source / running lifecycle scripts. `ExecutesCode`:
     /// default denied, must be asked for.

@@ -528,3 +528,5 @@ node v22.23.2、npm 10.9.8、pnpm 9.15.1 与 12.5.1、yarn 1.22.19 与 4.6.0
 
 判定脚本是否真的执行，用的是「脚本往标记文件追加一行、然后读标记文件内容」，
 不看退出码——退出码为 0 不能说明脚本没跑。
+
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`installer` 已废弃且必须与 provider 名一致，请删除。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。

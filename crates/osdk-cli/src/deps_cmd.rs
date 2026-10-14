@@ -67,7 +67,7 @@ struct Resolved {
 
 pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("getting current dir")?;
-    let configured = configured_providers(app);
+    let configured = configured_providers(app)?;
     if configured.is_empty() {
         // Detection without configuration only *reports*: silently running
         // `npm ci` because a package.json exists would be exactly the kind of
@@ -676,27 +676,9 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         for (key, value) in &item.plan.env {
             prelude.env(key, value);
         }
-        let status = prelude
-            .status()
-            .with_context(|| format!("running {} {}", program.display(), step.join(" ")))?;
-        if !status.success() {
-            return Err(anyhow!(
-                "`{} {}` failed with {status}",
-                program.display(),
-                step.join(" ")
-            ));
-        }
+        run_bounded(prelude, item.config.timeout)?;
     }
-
-    let status = command
-        .status()
-        .with_context(|| format!("running {}", program.display()))?;
-    if !status.success() {
-        return Err(anyhow!(
-            "`{}` failed with {status}",
-            command_line(&item.plan)
-        ));
-    }
+    run_bounded(command, item.config.timeout)?;
     Ok(())
 }
 
@@ -735,7 +717,16 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
             }
         }
     }
-    None
+    plan.program_candidates
+        .first()
+        .filter(|candidate| {
+            **candidate == plan.program
+                && (cfg!(windows)
+                    || ![".exe", ".cmd", ".bat"]
+                        .iter()
+                        .any(|suffix| candidate.ends_with(suffix)))
+        })
+        .map(PathBuf::from)
 }
 
 /// Persist what happened: freshness state, then the lock entry.
@@ -744,7 +735,7 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// would make the next run report "up to date" for a tree that was never
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
-    let command = command_line(&item.plan);
+    let command = freshness_command(&item.plan, &item.config, &resolved_tool_versions(app));
     let sources = effective_sources(item.schema, &item.config);
     let existing: Vec<PathBuf> = sources
         .iter()
@@ -789,7 +780,7 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             project_root: &item.project.root,
             manifest: &item.project.manifest,
             native_lock: item.project.native_lock.as_deref(),
-            run: command,
+            run: command_line(&item.plan),
             index: item.config.index.clone(),
             allow_build_from_source: item.config.allow_build_from_source,
         },
@@ -821,7 +812,10 @@ pub async fn materialize_auto(app: &mut App) -> anyhow::Result<()> {
     if app.ctx.config.deps.providers.is_empty() {
         return Ok(());
     }
-    if !configured_providers(app).values().any(|config| config.auto) {
+    if !configured_providers(app)?
+        .values()
+        .any(|config| config.auto)
+    {
         return Ok(());
     }
 
@@ -890,30 +884,47 @@ fn wants_rooted(options: &DepsOptions) -> bool {
 }
 
 /// Providers configured in `[deps]`, minus any the project disabled.
-fn configured_providers(app: &App) -> BTreeMap<String, ProviderConfig> {
+fn configured_providers(app: &App) -> anyhow::Result<BTreeMap<String, ProviderConfig>> {
     let deps_config = &app.ctx.config.deps;
     let mut out = BTreeMap::new();
     for (id, entry) in &deps_config.providers {
         if deps_config.disable.iter().any(|name| name == id) {
             continue;
         }
+        if entry.extra_index.is_some() {
+            return Err(anyhow!("`deps.{id}.extra_index` is unsupported; use uv native named indexes and package bindings in pyproject.toml, or the provider's native registry configuration"));
+        }
+        if entry.installer.is_some() {
+            eprintln!("warning: `deps.{id}.installer` is deprecated; the provider name selects the installer");
+        }
+        let timeout = entry
+            .timeout
+            .as_deref()
+            .map(|text| {
+                osdk_core::tasks::tree::parse_duration(text)
+                    .ok_or_else(|| anyhow!("invalid deps.{id}.timeout"))
+            })
+            .transpose()?;
         out.insert(
             id.clone(),
             ProviderConfig {
                 auto: entry.auto,
-                sources: entry.sources.clone(),
+                sources: entry.sources.clone().unwrap_or_default(),
                 outputs: entry.outputs.clone().unwrap_or_default(),
                 run: entry.run.clone(),
+                timeout,
+                sources_explicit: entry.sources.is_some(),
+                outputs_explicit: entry.outputs.is_some(),
                 env: entry.env.clone(),
                 dir: entry.dir.clone(),
                 depends: entry.depends.clone(),
                 installer: entry.installer.clone(),
-                index: entry.index.clone().or_else(|| entry.extra_index.clone()),
+                index: entry.index.clone(),
                 allow_build_from_source: entry.allow_build_from_source,
             },
         );
     }
-    out
+    Ok(out)
 }
 
 /// Tool versions osdk already resolved, so a provider that dispatches on the
@@ -946,7 +957,7 @@ fn decide(
         .collect();
     let path = state::state_path(&app.ctx.dirs.cache, &project.root);
     let persisted = state::DepsState::load(&path)?;
-    let command = command_line(plan);
+    let command = freshness_command(plan, config, &resolved_tool_versions(app));
     let inputs = state::Inputs {
         sources: &existing,
         declared_sources: !sources.is_empty(),
@@ -986,15 +997,40 @@ fn effective_outputs(
     config: &ProviderConfig,
 ) -> Vec<(String, bool)> {
     match schema {
-        Some(schema) => deps::effective_outputs(schema, config, !config.outputs.is_empty())
-            .into_iter()
-            .map(|spec| (spec.path, spec.required))
-            .collect(),
+        Some(schema) => deps::effective_outputs(
+            schema,
+            config,
+            config.outputs_explicit || !config.outputs.is_empty(),
+        )
+        .into_iter()
+        .map(|spec| (spec.path, spec.required))
+        .collect(),
         None => config
             .outputs
             .iter()
             .map(|path| (path.clone(), true))
             .collect(),
+    }
+}
+
+fn freshness_command(
+    plan: &RunPlan,
+    config: &ProviderConfig,
+    versions: &BTreeMap<String, String>,
+) -> String {
+    format!("{plan:?}|{config:?}|{versions:?}")
+}
+
+fn run_bounded(
+    mut command: std::process::Command,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<()> {
+    use osdk_core::tasks::tree;
+    let (mut child, mut handle) = tree::spawn_in_tree(&mut command)?;
+    match tree::wait_with_timeout(&mut child, &mut handle, timeout)? {
+        Some(0) => Ok(()),
+        Some(code) => Err(anyhow!("deps command failed with exit code {code}")),
+        None => Err(anyhow!("deps command timed out; process tree terminated")),
     }
 }
 
@@ -1069,6 +1105,29 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn deps_timeout_stops_a_real_command() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+        let start = std::time::Instant::now();
+        let error =
+            super::run_bounded(command, Some(std::time::Duration::from_millis(100))).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn explicit_empty_sources_and_outputs_do_not_fall_back() {
+        let config = ProviderConfig {
+            sources_explicit: true,
+            outputs_explicit: true,
+            ..Default::default()
+        };
+        assert!(super::effective_sources(Some(&node::NPM), &config).is_empty());
+        assert!(super::effective_outputs(Some(&node::NPM), &config).is_empty());
+    }
 
     /// Windows launcher suffixes are execution details and must never enter the
     /// command identity persisted in a cross-platform project lock.

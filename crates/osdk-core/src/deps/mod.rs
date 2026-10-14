@@ -218,15 +218,21 @@ pub fn plan_custom(project: &DetectedProject, config: &ProviderConfig) -> Result
     // this, and the redundancy made the guard untestable: removing either one left
     // the other still rejecting, so injecting a fault produced no observable
     // change. A guard whose removal is invisible cannot be trusted to be there.
-    let command = config.run.as_deref().unwrap_or_default();
-    let mut parts = command.split_whitespace();
-    let program = parts.next().ok_or_else(|| {
-        Error::config(format!(
-            "custom deps provider `{}` needs a `run` command",
-            project.provider
-        ))
-    })?;
-    let args: Vec<String> = parts.map(str::to_string).collect();
+    let argv = config
+        .run
+        .as_ref()
+        .map(|run| run.argv())
+        .unwrap_or_default();
+    let program = argv
+        .first()
+        .filter(|program| !program.trim().is_empty())
+        .ok_or_else(|| {
+            Error::config(format!(
+                "deps provider `{}` needs a nonempty `run` command",
+                project.provider
+            ))
+        })?;
+    let args = argv[1..].to_vec();
 
     Ok(RunPlan {
         tool: std::borrow::Cow::Owned(project.provider.to_string()),
@@ -350,7 +356,10 @@ pub struct ProviderConfig {
     pub auto: bool,
     pub sources: Vec<String>,
     pub outputs: Vec<String>,
-    pub run: Option<String>,
+    pub run: Option<crate::config::DepsCommand>,
+    pub timeout: Option<std::time::Duration>,
+    pub sources_explicit: bool,
+    pub outputs_explicit: bool,
     pub env: BTreeMap<String, String>,
     pub dir: Option<String>,
     pub depends: Vec<String>,
@@ -766,6 +775,11 @@ pub fn select_installer(
     config: &ProviderConfig,
     peers: &[DetectedProject],
 ) -> Result<InstallerChoice> {
+    if let Some(installer) = &config.installer {
+        if installer.as_str() != &*project.provider {
+            return Err(Error::config(format!("deprecated `deps.{}.installer = \"{}\"` conflicts with the provider; use `[deps.{}]` instead", project.provider, installer, installer)));
+        }
+    }
     // Two installers of the same ecosystem both claiming the tree is a conflict
     // the user must resolve; picking one would silently pick a lockfile.
     let rivals: Vec<&DetectedProject> = peers
@@ -871,6 +885,14 @@ pub fn plan(
     config: &ProviderConfig,
     tool_versions: &BTreeMap<String, String>,
 ) -> Result<RunPlan> {
+    if config.run.is_some() {
+        let mut plan = plan_custom(project, config)?;
+        plan.downgraded_reason = Some(
+            "custom run: osdk cannot guarantee frozen installation or disabled build scripts"
+                .into(),
+        );
+        return Ok(plan);
+    }
     match project.ecosystem {
         Ecosystem::Node => node::plan(project, choice, config, tool_versions),
         Ecosystem::Python => python::plan(project, choice, config, tool_versions),
@@ -888,7 +910,7 @@ pub fn plan(
 /// built-in list rather than adding to it, so a project that narrows `sources`
 /// gets exactly what it asked for.
 pub fn effective_sources(schema: &DepsProviderSchema, config: &ProviderConfig) -> Vec<String> {
-    if config.sources.is_empty() {
+    if config.sources.is_empty() && !config.sources_explicit {
         schema
             .default_sources
             .iter()
@@ -1030,6 +1052,32 @@ mod tests {
     ///
     /// `api-*` is the shape that distinguishes them: `api-v1` must be found and
     /// `web-v1`, sitting right beside it with its own manifest, must not.
+    #[test]
+    fn builtin_override_preserves_argv_and_does_not_claim_frozen() {
+        let temp = tempfile::tempdir().unwrap();
+        write(&temp.path().join("package.json"), "{}");
+        write(&temp.path().join("package-lock.json"), "{}");
+        let projects = discover(temp.path(), Some(temp.path()), &[&node::NPM]).unwrap();
+        let config = ProviderConfig {
+            run: Some(crate::config::DepsCommand::Argv(vec![
+                "wrapper".into(),
+                "one argument".into(),
+            ])),
+            ..Default::default()
+        };
+        let choice = select_installer(&projects[0], &config, &projects).unwrap();
+        let plan = plan(&projects[0], &choice, &config, &BTreeMap::new()).unwrap();
+        assert_eq!(plan.program, "wrapper");
+        assert_eq!(plan.args, ["one argument"]);
+        assert!(!plan.frozen);
+        assert!(plan.downgraded_reason.unwrap().contains("cannot guarantee"));
+        let conflicting = ProviderConfig {
+            installer: Some("pnpm".into()),
+            ..config
+        };
+        assert!(select_installer(&projects[0], &conflicting, &projects).is_err());
+    }
+
     #[test]
     fn a_partial_wildcard_rejects_what_it_does_not_match() {
         let temp = tempfile::tempdir().unwrap();
@@ -1274,7 +1322,7 @@ mod tests {
 
         for run in [None, Some(String::new()), Some("   ".to_string())] {
             let config = ProviderConfig {
-                run,
+                run: run.map(Into::into),
                 ..ProviderConfig::default()
             };
             assert!(

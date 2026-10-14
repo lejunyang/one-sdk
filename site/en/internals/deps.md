@@ -647,3 +647,5 @@ Every claim above about external tool behaviour was measured on Windows x64 on
 Whether a script actually ran was determined by having it append a line to a
 marker file and then reading that file -- not by the exit code, which being 0
 proves nothing about scripts not running.
+
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `installer` is deprecated and must match the provider name; remove it. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.

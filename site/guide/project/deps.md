@@ -397,3 +397,5 @@ pnpm 上还多抓到一种 npm 收据抓不到的：**改动后文件长度不�
 
 未声明 `sources`、或声明后一个文件都没匹配上，一律不算「新鲜」——
 一个匹配不到任何文件的判据恒为真，那会把「什么都没检查」伪装成「没有变化」。
+
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`installer` 已废弃且必须与 provider 名一致，请删除。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
