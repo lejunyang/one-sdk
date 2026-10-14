@@ -720,6 +720,22 @@ fn collect_deps_requirements(value: &toml::Value, found: &mut Vec<TrustRequireme
         return;
     };
     for (name, entry) in table {
+        if name == "projects" {
+            if let Some(projects) = entry.as_table() {
+                for (path, providers) in projects {
+                    let mut nested = Vec::new();
+                    collect_deps_requirements(providers, &mut nested);
+                    found.extend(nested.into_iter().map(|mut requirement| {
+                        requirement.key =
+                            requirement
+                                .key
+                                .replacen("deps.", &format!("deps.projects.{path}."), 1);
+                        requirement
+                    }));
+                }
+            }
+            continue;
+        }
         // `disable` is a list of provider names; turning a provider off cannot
         // add capability.
         if name == "disable" {

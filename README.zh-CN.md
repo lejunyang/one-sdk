@@ -1017,3 +1017,22 @@ osdk 的命令、帮助、提示、错误和诊断支持中文与英文。`--lan
 MIT
 
 `deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`installer` 已废弃且必须与 provider 名一致，请删除。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+
+### 按项目声明依赖
+
+子项目无需 osdk 配置。根配置选择 provider，并逐字段覆盖默认值：
+
+```toml
+[deps]
+roots = ["apps/*"]
+[deps.npm]
+[deps.pnpm]
+[deps.projects."services/api".pip-requirements]
+auto = false
+[deps.projects."apps/web"]
+disable = ["pnpm"]
+[deps.projects."apps/web".npm]
+outputs = []
+```
+
+`auto = false` 仍可显式执行 `osdk deps`；`disable` 从执行计划移除 provider。列表替换默认值，空列表有效；env 按键合并。先根据清单/锁文件判断归属，再应用筛选；冲突锁或多个候选安装器报错。重叠 roots 按规范项目路径/provider 去重，从子目录调用也不会重复。重叠项目配置不一致时报错。`--filter .` 可选择根，其余过滤会排除根；`--list --all --explain` 展示选择来源、有效选项及命令。`[task].roots` 单独负责任务聚合。

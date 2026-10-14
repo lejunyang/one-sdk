@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+pub mod catalog;
 pub mod native;
 pub mod node;
 pub mod python;
@@ -539,6 +540,15 @@ pub fn expand_roots(
 ) -> Result<Vec<ExpandedRoot>> {
     let mut found = Vec::new();
     for pattern in roots {
+        if Path::new(pattern).is_absolute()
+            || pattern.contains(':')
+            || pattern.starts_with(['/', '\\'])
+            || pattern.contains("**")
+        {
+            return Err(Error::config(format!(
+                "`{label}` requires bounded relative patterns: {pattern}"
+            )));
+        }
         let normalized = normalize_relative(pattern);
         let segments: Vec<&str> = relative_segments(&normalized);
         if segments.is_empty() {

@@ -1362,7 +1362,7 @@ impl ToolConfigValue {
 /// lives one level down, on [`DepsProviderEntry`], where a misspelled field is a
 /// real hazard.
 #[cfg(feature = "install")]
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DepsConfig {
     /// Providers disabled here even if a broader layer enabled them. Disabling
@@ -1377,11 +1377,22 @@ pub struct DepsConfig {
     /// to be the set the project declared, not whatever a subtree walk turns up.
     #[serde(default)]
     pub roots: Vec<String>,
+    /// Explicit per-project overrides, keyed by bounded relative path patterns.
+    pub projects: BTreeMap<String, DepsProject>,
     /// Provider entries, keyed by provider id (`npm`, `pnpm`, ...). An empty
     /// table is enough to select the built-in provider: `auto` defaults to true,
     /// so declaring the provider is also opting into automatic materialization.
     #[serde(flatten)]
     pub providers: BTreeMap<String, DepsProviderEntry>,
+}
+
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DepsProject {
+    pub disable: Vec<String>,
+    #[serde(flatten)]
+    pub providers: BTreeMap<String, toml::Value>,
 }
 
 // Gated with the type it implements: \DepsProviderEntry\ only exists behind

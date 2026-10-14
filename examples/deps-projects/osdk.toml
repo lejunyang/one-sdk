@@ -1,0 +1,5 @@
+# Independent projects need no child osdk.toml.
+[deps.projects."services/api".pip-requirements]
+auto = false
+[deps.projects."apps/web".npm]
+timeout = "5m"

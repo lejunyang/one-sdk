@@ -459,3 +459,22 @@ as fresh: a predicate that matches nothing is vacuously true, which would dress
 up "nothing was checked" as "nothing changed".
 
 `deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `installer` is deprecated and must match the provider name; remove it. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
+
+### Per-project dependencies
+
+Sub-projects need no osdk configuration. Root declarations select providers and override defaults field by field:
+
+```toml
+[deps]
+roots = ["apps/*"]
+[deps.npm]
+[deps.pnpm]
+[deps.projects."services/api".pip-requirements]
+auto = false
+[deps.projects."apps/web"]
+disable = ["pnpm"]
+[deps.projects."apps/web".npm]
+outputs = []
+```
+
+`auto = false` keeps explicit `osdk deps` available; `disable` removes a provider from all execution. Arrays replace defaults, including empty arrays; environment keys merge. Ownership comes from manifests and native locks before filters are applied. Contradictory locks or multiple eligible managers fail. Overlapping roots produce one plan per canonical project/provider, including calls from subdirectories. Conflicting overlapping project overrides fail. `--filter .` selects the root and other filters exclude it; `--list --all --explain` shows selection, effective options and commands. `[task].roots` aggregates tasks separately.
