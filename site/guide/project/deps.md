@@ -107,7 +107,7 @@ provider 列进来，结果会是「声明了、探测到了、然后在装工�
 **`uv` 用 `--locked` 而不只是 `--frozen`。** uv 的 `--frozen` 只保证「不更新
 lock」，**不**校验 lock 与 `pyproject.toml` 是否一致——实测：lock 过期时它 exit=0
 并按旧 lock 装，新加的依赖根本没装上。要「lock 必须当令」得用 `--locked`，所以 osdk
-两个都传。这与 `npm ci` 不同（后者在不一致时会失败）。
+使用 `--locked`。这与 `npm ci` 不同（后者在不一致时会失败）。
 
 **`requirements.txt` 是解析输入，不是完整依赖 lock。** 即使每一行都写成 `==`，
 它通常仍只列顶层包；`uv pip sync` 会把文件当成环境的完整集合，只安装显式条目并卸载
@@ -127,8 +127,9 @@ osdk 还会传 `UV_PYTHON_DOWNLOADS=never`，确保用的是 osdk 选定的解�
 
 1. `package.json` 的 `packageManager` 字段——项目自己的声明最权威。
 2. 目录里现存的原生 lockfile——谁写的谁继续管。
-3. `[deps.<provider>].installer`。
-4. provider 自身。
+3. 本项目有效配置中唯一匹配的 provider。
+
+`installer` 是废弃兼容字段，必须与 provider 名相同，即使清单/锁已确定归属也会校验。
 
 两处矛盾会被拒绝而不是猜测：声明了 `pnpm` 却只有 `yarn.lock`，或同一目录里
 同时存在两个生态相同的 lockfile。二者都会报出具体是哪两个，让你自己决定留哪个。
@@ -418,3 +419,5 @@ outputs = []
 ```
 
 `auto = false` 仍可显式执行 `osdk deps`；`disable` 从执行计划移除 provider。列表替换默认值，空列表有效；env 按键合并。先根据清单/锁文件判断归属，再应用筛选；冲突锁或多个候选安装器报错。重叠 roots 按规范项目路径/provider 去重，从子目录调用也不会重复。重叠项目配置不一致时报错。`--filter .` 可选择根，其余过滤会排除根；`--list --all --explain` 展示选择来源、有效选项及命令。`[task].roots` 单独负责任务聚合。
+
+pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式与排除规则决定成员范围，不自动合并无关嵌套项目。选择成员会明确说明扩大为一次共享根安装。uv workspace 使用 `uv sync --all-packages`，普通根 sync 不代表覆盖所有成员。共享选项（含 auto/disable、命令、索引）必须一致；冲突及成员独立锁文件报错。freshness 包含 workspace 定义、成员路径与清单、共享锁、有效配置和已安装工具版本。成功的原生安装覆盖范围记录在缓存 deps 状态中；自定义覆盖命令的范围无法验证。同一 osdk 缓存内按项目串行安装和记录状态。原生递归模式需要目录前缀（`packages/**`），拒绝裸 `**`。

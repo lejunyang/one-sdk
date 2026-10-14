@@ -63,6 +63,7 @@ struct Resolved {
     config: ProviderConfig,
     plan: RunPlan,
     decision: state::Decision,
+    unit: Option<deps::workspace::WorkspaceUnit>,
 }
 
 pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
@@ -95,11 +96,33 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     let tool_versions = resolved_tool_versions(app);
     let mut resolved = Vec::new();
     for entry in selected {
-        let project = entry.project.clone();
+        let unit = entry.unit.clone();
+        let mut project = entry.project.clone();
+        if let Some(unit) = &unit {
+            if project.root != unit.root {
+                println!("{} selects shared installation in {}; coverage expands to the native workspace", entry.id(), unit.root.display());
+            }
+            let owner = entries
+                .iter()
+                .find(|candidate| {
+                    candidate.project.root == unit.root
+                        && candidate.project.provider == unit.provider
+                })
+                .ok_or_else(|| anyhow!("workspace installation root is not enabled"))?;
+            project = owner.project.clone();
+            if resolved.iter().any(|prior: &Resolved| {
+                prior.project.root == project.root && prior.project.provider == project.provider
+            }) {
+                continue;
+            }
+        }
         let config = entry.config.clone();
         let schema = deps::provider_schema(&project.provider);
         let choice = deps::select_installer(&project, &config, &[])?;
-        let plan = deps::plan(&project, &choice, &config, &tool_versions)?;
+        let mut plan = deps::plan(&project, &choice, &config, &tool_versions)?;
+        if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
+            plan.args.push("--all-packages".into());
+        }
         if options.frozen && !plan.frozen {
             return Err(anyhow!(
                 "`--frozen` cannot be guaranteed for `{}`: {}",
@@ -109,7 +132,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     .unwrap_or("no native lockfile")
             ));
         }
-        let decision = decide(app, schema, &project, &config, &plan)?;
+        let decision = decide(app, schema, &project, &config, &plan, unit.as_ref())?;
         resolved.push(Resolved {
             schema,
             rooted: Some((entry.id(), entry.source.clone())),
@@ -118,6 +141,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             config,
             plan,
             decision,
+            unit,
         });
     }
     if resolved.is_empty() {
@@ -160,6 +184,17 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     effective_sources(item.schema, &item.config),
                     effective_outputs(item.schema, &item.config)
                 );
+                if let Some(unit) = &item.unit {
+                    println!(
+                        "    coverage: {} {:?}",
+                        if item.config.run.is_none() {
+                            "native workspace"
+                        } else {
+                            "unverified custom run; declared members"
+                        },
+                        unit.coverage()
+                    );
+                }
                 println!("    command:   {}", command_line(&item.plan));
             }
         }
@@ -186,6 +221,26 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 "would run in {}: {}",
                 item.project.root.display(),
                 command_line(&item.plan)
+            );
+            continue;
+        }
+        let lock_path =
+            state::state_path(&app.ctx.dirs.cache, &item.project.root).with_extension("lock");
+        let _installation_lock = osdk_core::lock::FileLock::acquire(&lock_path)?;
+        if !options.force
+            && decide(
+                app,
+                item.schema,
+                &item.project,
+                &item.config,
+                &item.plan,
+                item.unit.as_ref(),
+            )?
+            .is_fresh()
+        {
+            println!(
+                "{} is up to date after waiting for shared installation",
+                item.label()
             );
             continue;
         }
@@ -542,7 +597,7 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
     let command = freshness_command(&item.plan, &item.config, &resolved_tool_versions(app));
-    let sources = effective_sources(item.schema, &item.config);
+    let sources = tracked_sources(item.schema, &item.config, item.unit.as_ref());
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| item.project.root.join(source))
@@ -564,6 +619,15 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             outputs: &outputs,
         },
     )?;
+    if item.config.run.is_none() {
+        if let Some(unit) = &item.unit {
+            persisted
+                .providers
+                .get_mut(&*item.project.provider)
+                .unwrap()
+                .coverage = unit.coverage();
+        }
+    }
     persisted.save(&state_path)?;
 
     let installer_version = tools
@@ -709,12 +773,21 @@ fn select_projects<'a>(
 /// Tool versions osdk already resolved, so a provider that dispatches on the
 /// major (yarn) sees the same version that will actually run.
 fn resolved_tool_versions(app: &App) -> BTreeMap<String, String> {
-    app.ctx
-        .config
-        .tools
+    let mut versions = app.ctx.config.tools.clone();
+    let ids: std::collections::BTreeSet<_> = deps::PROVIDERS
         .iter()
-        .map(|(tool, spec)| (tool.clone(), spec.clone()))
-        .collect()
+        .flat_map(|schema| schema.required_tools.iter().map(|tool| tool.id))
+        .collect();
+    for id in ids {
+        if let Ok(backend) = app.registry.get(id) {
+            if let Ok(installed) = backend.list_installed(&app.ctx) {
+                let mut installed: Vec<_> = installed;
+                installed.sort();
+                versions.insert(format!("{id}:installed"), installed.join(","));
+            }
+        }
+    }
+    versions
 }
 
 fn decide(
@@ -723,8 +796,9 @@ fn decide(
     project: &DetectedProject,
     config: &ProviderConfig,
     plan: &RunPlan,
+    unit: Option<&deps::workspace::WorkspaceUnit>,
 ) -> anyhow::Result<state::Decision> {
-    let sources = effective_sources(schema, config);
+    let sources = tracked_sources(schema, config, unit);
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| project.root.join(source))
@@ -747,6 +821,24 @@ fn decide(
         &inputs,
         persisted.providers.get(&*project.provider),
     )?)
+}
+
+fn tracked_sources(
+    schema: Option<&'static DepsProviderSchema>,
+    config: &ProviderConfig,
+    unit: Option<&deps::workspace::WorkspaceUnit>,
+) -> Vec<String> {
+    let mut sources = effective_sources(schema, config);
+    if let Some(unit) = unit {
+        sources.extend(
+            unit.sources()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
+    sources.sort();
+    sources.dedup();
+    sources
 }
 
 /// Freshness sources for a provider, whether or not it has a built-in schema.

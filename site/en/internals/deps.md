@@ -519,8 +519,7 @@ rather than a skip. Walking silently past a broken `package.json` produces
 "installed the wrong project, or nothing, and reported success".
 
 `select_installer()` keeps the priority order `npm_tools.rs` already established
-in `select_automatic_installer`: declaration → existing lock → project config →
-default. Both contradictions (a declaration disagreeing with the lockfile's owner,
+in `select_automatic_installer`: declaration → existing lock → the sole eligible provider; `installer` is only a compatibility consistency check. Both contradictions (a declaration disagreeing with the lockfile's owner,
 two lockfiles of one ecosystem) name the specific files and then refuse.
 
 ## Trust, in three tiers
@@ -668,3 +667,5 @@ outputs = []
 ```
 
 `auto = false` keeps explicit `osdk deps` available; `disable` removes a provider from all execution. Arrays replace defaults, including empty arrays; environment keys merge. Ownership comes from manifests and native locks before filters are applied. Contradictory locks or multiple eligible managers fail. Overlapping roots produce one plan per canonical project/provider, including calls from subdirectories. Conflicting overlapping project overrides fail. `--filter .` selects the root and other filters exclude it; `--list --all --explain` shows selection, effective options and commands. `[task].roots` aggregates tasks separately.
+
+Native pnpm and uv workspace members are discovered only below explicitly declared workspace roots. Native member patterns and exclusions define membership; unrelated nested projects remain separate. Selecting a member expands to one shared root installation and explains that expansion. uv workspaces run `uv sync --all-packages` (ordinary root sync does not cover all members). Shared options must agree, including auto/disable, commands and indexes; conflicts and member-owned lockfiles fail. Freshness includes workspace declarations, member paths/manifests, shared locks, effective options and installed tool versions. Native successful coverage is recorded in managed deps state; a custom override has unverified coverage. Installation and state recording are serialized by project within the same osdk cache. Native recursive patterns need a directory prefix (`packages/**`); bare `**` is rejected.

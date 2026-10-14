@@ -11,6 +11,7 @@ pub struct ProjectEntry {
     pub source: String,
     pub project: DetectedProject,
     pub config: ProviderConfig,
+    pub unit: Option<super::workspace::WorkspaceUnit>,
 }
 impl ProjectEntry {
     pub fn id(&self) -> String {
@@ -145,6 +146,23 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                 .or_insert((relative, "provider dir".into()));
         }
     }
+    let mut units = Vec::new();
+    for directory in directories.keys() {
+        units.extend(super::workspace::detect(directory)?);
+    }
+    for unit in &units {
+        for member in &unit.members {
+            let relative = member
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            directories.entry(member.clone()).or_insert((
+                relative,
+                format!("native {} workspace {}", unit.provider, unit.root.display()),
+            ));
+        }
+    }
     let mut result = Vec::new();
     for (directory, (relative, source)) in directories {
         let declarations: Vec<_> = config
@@ -153,7 +171,31 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             .filter(|(pattern, _)| path_matches(pattern, &relative))
             .map(|(_, d)| d)
             .collect();
-        let entries = project_providers(config, &declarations)?;
+        let mut defaults = config.clone();
+        for unit in units
+            .iter()
+            .filter(|unit| unit.members.contains(&directory))
+        {
+            let relative = unit
+                .root
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let root_declarations: Vec<_> = config
+                .projects
+                .iter()
+                .filter(|(pattern, _)| path_matches(pattern, &relative))
+                .map(|(_, d)| d)
+                .collect();
+            let root_entries = project_providers(config, &root_declarations)?;
+            if let Some(entry) = root_entries.get(&unit.provider) {
+                defaults
+                    .providers
+                    .insert(unit.provider.clone(), entry.clone());
+            }
+        }
+        let entries = project_providers(&defaults, &declarations)?;
         let configs: BTreeMap<String, ProviderConfig> = entries
             .iter()
             .filter(|(_, entry)| {
@@ -170,7 +212,54 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                 Ok((id.clone(), config))
             })
             .collect::<Result<_>>()?;
-        for project in owned_in(&directory, &configs)? {
+        let mut projects = owned_in(&directory, &configs)?;
+        for unit in units
+            .iter()
+            .filter(|unit| unit.root == directory && unit.provider == "pnpm")
+        {
+            if configs.contains_key("pnpm") && !projects.iter().any(|p| p.provider == "pnpm") {
+                projects.push(DetectedProject {
+                    provider: "pnpm".into(),
+                    ecosystem: Ecosystem::Node,
+                    root: directory.clone(),
+                    manifest: unit.definition.clone(),
+                    native_lock: directory
+                        .join("pnpm-lock.yaml")
+                        .is_file()
+                        .then(|| directory.join("pnpm-lock.yaml")),
+                    declared_manager: None,
+                });
+            }
+        }
+        for project in projects {
+            let matches: Vec<_> = units
+                .iter()
+                .filter(|unit| {
+                    unit.provider == project.provider
+                        && (unit.root == directory || unit.members.contains(&directory))
+                })
+                .collect();
+            if matches.len() > 1 {
+                return Err(Error::config(
+                    "overlapping native workspaces claim the same project",
+                ));
+            }
+            let unit = matches.first().map(|unit| (*unit).clone());
+            if project.ecosystem == Ecosystem::Node
+                && units
+                    .iter()
+                    .any(|unit| unit.provider == "pnpm" && unit.members.contains(&directory))
+                && project.provider != "pnpm"
+            {
+                return Err(Error::config(
+                    "pnpm workspace member has a conflicting package manager",
+                ));
+            }
+            if let Some(unit) = &unit {
+                if unit.root != directory && project.native_lock.is_some() {
+                    return Err(Error::config("workspace member has an independent lockfile; remove it or exclude the project from the native workspace"));
+                }
+            }
             let config = configs.get(&*project.provider).unwrap().clone();
             let choice = select_installer(&project, &config, &[])?;
             let _ = choice; // Validate even when CLI filters omit this project.
@@ -179,6 +268,7 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                 source: source.clone(),
                 project,
                 config,
+                unit,
             });
         }
         for (id, config) in &configs {
@@ -190,7 +280,21 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                     source: source.clone(),
                     project: detect_custom(id, &directory, config_path),
                     config: config.clone(),
+                    unit: None,
                 });
+            }
+        }
+    }
+    for unit in &units {
+        let entries: Vec<_> = result
+            .iter()
+            .filter(|entry| entry.unit.as_ref() == Some(unit))
+            .collect();
+        if let Some(first) = entries.first() {
+            if entries.iter().any(|entry| entry.config != first.config)
+                || entries.len() != unit.members.len() + 1
+            {
+                return Err(Error::config(format!("{}: shared {} workspace requires identical provider options and enabled members; auto/disable/run/index conflicts cannot be honored by one installation", unit.root.display(), unit.provider)));
             }
         }
     }

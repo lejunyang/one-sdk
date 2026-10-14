@@ -70,3 +70,86 @@ fn nested_project_commands_and_indexes_require_trust() {
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("deps.projects.apps/api.pip-requirements.run"));
 }
+
+#[test]
+fn workspace_member_selection_expands_to_one_shared_installation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "js/package.json",
+        r#"{"name":"root","private":true,"packageManager":"pnpm@10"}"#,
+    );
+    write(
+        root,
+        "js/pnpm-workspace.yaml",
+        "packages: ['packages/*', '!packages/excluded']",
+    );
+    write(root, "js/packages/a/package.json", r#"{"name":"a"}"#);
+    write(root, "js/packages/b/package.json", r#"{"name":"b"}"#);
+    write(root, "js/packages/excluded/package.json", "broken");
+    write(
+        root,
+        "osdk.toml",
+        "[deps.projects.'js'.pnpm]
+",
+    );
+    let output = run(
+        root,
+        root,
+        &["deps", "--dry-run", "--filter", "js/packages/a"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("coverage expands"), "{text}");
+    assert_eq!(text.matches("would run in").count(), 1, "{text}");
+    assert!(text.contains("pnpm install"), "{text}");
+    let output = run(root, &root.join("js/packages/a"), &["deps", "--dry-run"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout)
+            .matches("would run in")
+            .count(),
+        1
+    );
+    write(
+        root,
+        "osdk.toml",
+        "[deps.projects.'js'.pnpm]
+[deps.projects.'js/packages/a'.pnpm]
+auto=false",
+    );
+    let output = run(root, root, &["deps", "--dry-run"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("identical provider options"));
+}
+#[test]
+fn uv_workspace_plan_uses_all_packages_and_records_member_manifests() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "py/pyproject.toml",
+        "[tool.uv.workspace]
+members=['packages/*']",
+    );
+    write(
+        root,
+        "py/packages/a/pyproject.toml",
+        "[project]
+name='a'
+version='0.1.0'",
+    );
+    write(
+        root,
+        "osdk.toml",
+        "[deps.projects.'py'.uv]
+",
+    );
+    let output = run(root, root, &["deps", "--list", "--all", "--explain"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(text.matches("command:").count(), 1, "{text}");
+    assert!(text.contains("--all-packages"), "{text}");
+    assert!(text.contains("py/packages/a"), "{text}");
+}

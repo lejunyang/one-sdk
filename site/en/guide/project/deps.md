@@ -115,7 +115,7 @@ Supporting them requires adding the corresponding language backend first.
 to update the lock; it does **not** check the lock against `pyproject.toml` --
 measured, a stale lock exits 0 and installs the old set, with a newly added
 dependency simply missing. Asserting the lock is current is `--locked`, so osdk
-passes both. `npm ci` fails in that situation, so the ecosystems are not
+passes `--locked`. `npm ci` fails in that situation, so the ecosystems are not
 symmetric.
 
 **A `requirements.txt` is resolution input, not a complete dependency lock.**
@@ -141,8 +141,9 @@ higher:
 
 1. `packageManager` in `package.json` -- the project's own declaration wins.
 2. A native lockfile already on disk -- whoever wrote it keeps managing it.
-3. `[deps.<provider>].installer`.
-4. The provider itself.
+3. The sole eligible provider in the effective project configuration.
+
+`installer` is a deprecated compatibility field and must match the provider, even when a manifest or lock establishes ownership.
 
 Two contradictions are refused rather than guessed: a declaration of `pnpm`
 next to nothing but a `yarn.lock`, and two lockfiles of the same ecosystem in one
@@ -478,3 +479,5 @@ outputs = []
 ```
 
 `auto = false` keeps explicit `osdk deps` available; `disable` removes a provider from all execution. Arrays replace defaults, including empty arrays; environment keys merge. Ownership comes from manifests and native locks before filters are applied. Contradictory locks or multiple eligible managers fail. Overlapping roots produce one plan per canonical project/provider, including calls from subdirectories. Conflicting overlapping project overrides fail. `--filter .` selects the root and other filters exclude it; `--list --all --explain` shows selection, effective options and commands. `[task].roots` aggregates tasks separately.
+
+Native pnpm and uv workspace members are discovered only below explicitly declared workspace roots. Native member patterns and exclusions define membership; unrelated nested projects remain separate. Selecting a member expands to one shared root installation and explains that expansion. uv workspaces run `uv sync --all-packages` (ordinary root sync does not cover all members). Shared options must agree, including auto/disable, commands and indexes; conflicts and member-owned lockfiles fail. Freshness includes workspace declarations, member paths/manifests, shared locks, effective options and installed tool versions. Native successful coverage is recorded in managed deps state; a custom override has unverified coverage. Installation and state recording are serialized by project within the same osdk cache. Native recursive patterns need a directory prefix (`packages/**`); bare `**` is rejected.

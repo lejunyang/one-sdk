@@ -31,6 +31,7 @@ pub mod node;
 pub mod python;
 pub mod state;
 pub mod verify;
+pub mod workspace;
 
 pub use state::{DepsState, ProviderState};
 
