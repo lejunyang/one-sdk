@@ -223,3 +223,8 @@ run = "bun --bun run build"
 [tasks.dupcheck]
 run = "jscpd --config .jscpd.json crates"
 description = "Copy-paste duplication guard (Rust jscpd), gated at the .jscpd.json threshold"
+
+[tasks.deps-monorepo-live]
+description = "Real small npm/pnpm/uv closures, workspaces, inheritance and failure paths (opt-in live check)"
+depends = ["build"]
+run = "python scripts/test-deps-monorepo.py"
