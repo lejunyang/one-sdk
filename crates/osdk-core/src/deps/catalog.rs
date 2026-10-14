@@ -39,6 +39,9 @@ impl TryFrom<&DepsProviderEntry> for ProviderConfig {
             sources_explicit: entry.sources.is_some(),
             config_sources: Vec::new(),
             project_tools: BTreeMap::new(),
+            project_config: None,
+            project_context: String::new(),
+            offline: false,
             outputs: entry.outputs.clone().unwrap_or_default(),
             outputs_explicit: entry.outputs.is_some(),
             run: entry.run.clone(),
@@ -81,14 +84,52 @@ pub fn project_providers(
         })?;
         entries.insert(id, entry);
     }
-    for disabled in defaults
-        .disable
-        .iter()
-        .chain(declarations.iter().flat_map(|d| &d.disable))
-    {
-        entries.remove(disabled);
+    for disabled in project_disable(defaults, declarations)? {
+        entries.remove(&disabled);
     }
     Ok(entries)
+}
+
+fn project_disable(
+    defaults: &DepsConfig,
+    declarations: &[&crate::config::DepsProject],
+) -> Result<Vec<String>> {
+    let mut disabled = defaults.disable.clone();
+    let mut prior = None;
+    for declaration in declarations {
+        if let Some(list) = &declaration.disable {
+            if prior.is_some_and(|prior| prior != list) {
+                return Err(Error::config("overlapping project disable lists conflict"));
+            }
+            prior = Some(list);
+            disabled = list.clone();
+        }
+    }
+    Ok(disabled)
+}
+
+fn owned_path(base: &Path, value: &str) -> String {
+    let value = if Path::new(value).is_absolute() {
+        PathBuf::from(value)
+    } else {
+        PathBuf::from(value.replace('\\', "/"))
+    };
+    let path = if value.is_absolute() {
+        value
+    } else {
+        base.join(value)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().into_owned()
 }
 
 fn merge(base: &mut toml::Value, value: toml::Value) {
@@ -108,14 +149,18 @@ fn merge(base: &mut toml::Value, value: toml::Value) {
 
 pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<Vec<ProjectEntry>> {
     let root = root.canonicalize().map_err(|e| Error::io(root, e))?;
+    let canonical_config = config_path
+        .canonicalize()
+        .map_err(|e| Error::io(config_path, e))?;
+    let config_path = canonical_config.as_path();
     let mut directories: BTreeMap<PathBuf, (String, String)> = BTreeMap::new();
     directories.insert(root.clone(), (String::new(), "configuration root".into()));
     let patterns: Vec<String> = config
         .roots
         .iter()
         .chain(config.projects.keys())
+        .filter(|p| p.as_str() != ".")
         .cloned()
-        .filter(|p| p != ".")
         .collect();
     for expanded in expand_roots(&root, &patterns, "deps roots/projects")? {
         let canonical = expanded
@@ -197,6 +242,7 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                     .insert(unit.provider.clone(), entry.clone());
             }
         }
+        let mut disabled = project_disable(&defaults, &declarations)?;
         let mut entries = project_providers(&defaults, &declarations)?;
         let local_path = crate::config::PROJECT_CONFIG_NAMES
             .iter()
@@ -204,29 +250,45 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             .find(|path| path.is_file() && path != config_path);
         let mut config_sources = vec![config_path.to_path_buf()];
         if let Some(path) = &local_path {
-            entries = crate::config::inheritance::local_deps(path, config_path, &entries)?;
+            let mut unfiltered = defaults.clone();
+            unfiltered.disable.clear();
+            let declarations_without_disable: Vec<_> = declarations
+                .iter()
+                .map(|declaration| {
+                    let mut declaration = (*declaration).clone();
+                    declaration.disable = None;
+                    declaration
+                })
+                .collect();
+            let refs: Vec<_> = declarations_without_disable.iter().collect();
+            let all_entries = project_providers(&unfiltered, &refs)?;
+            (entries, disabled) =
+                crate::config::inheritance::local_deps(path, config_path, &all_entries, &disabled)?;
             config_sources.extend(crate::config::inheritance::sources(path)?);
         }
         config_sources.sort();
         config_sources.dedup();
         let configs: BTreeMap<String, ProviderConfig> = entries
             .iter()
-            .filter(|(_, entry)| {
+            .filter(|(id, entry)| {
                 entry
                     .dir
                     .as_deref()
-                    .is_none_or(|dir| effective_cwd(&root, Some(dir)) == directory)
+                    .is_none_or(|dir| effective_cwd(&root, Some(dir)).canonicalize().is_ok_and(|path|path == directory || units.iter().any(|unit| unit.provider == **id && unit.root == path && unit.members.contains(&directory))))
             })
             .map(|(id, entry)| {
                 let mut config = ProviderConfig::try_from(entry)?;
                 config.config_sources = config_sources.clone();
+                config.project_config=Some(local_path.clone().unwrap_or_else(||config_path.to_path_buf()));
+                let base=config.project_config.as_deref().unwrap().parent().unwrap();
+                for path in config.sources.iter_mut().chain(&mut config.outputs) { *path=owned_path(base,path); }
                 config.project_tools = crate::config::dependency_tool_versions(local_path.as_deref().unwrap_or(config_path))?;
                 if entry.dir.is_some() { config.dir = None; }
                 if config.installer.is_some() { eprintln!("warning: installer is deprecated for deps.{id}; remove it and select the provider by name"); }
                 Ok((id.clone(), config))
             })
             .collect::<Result<_>>()?;
-        let mut projects = owned_in(&directory, &configs)?;
+        let mut projects = owned_in(&directory, &configs, &disabled)?;
         for unit in units
             .iter()
             .filter(|unit| unit.root == directory && unit.provider == "pnpm")
@@ -287,12 +349,18 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
         }
         for (id, config) in &configs {
             if provider_schema(id).is_none()
-                && (directory == root || declarations.iter().any(|d| d.providers.contains_key(id)))
+                && (directory == root
+                    || local_path.is_some()
+                    || declarations.iter().any(|d| d.providers.contains_key(id)))
             {
                 result.push(ProjectEntry {
                     relative: relative.clone(),
                     source: source.clone(),
-                    project: detect_custom(id, &directory, config_path),
+                    project: detect_custom(
+                        id,
+                        &directory,
+                        local_path.as_deref().unwrap_or(config_path),
+                    ),
                     config: config.clone(),
                     unit: None,
                 });
@@ -304,12 +372,29 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             .iter()
             .filter(|entry| entry.unit.as_ref() == Some(unit))
             .collect();
+        let manager_versions: std::collections::BTreeSet<_> = entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .project
+                    .declared_manager
+                    .as_ref()
+                    .and_then(|manager| manager.version.as_deref())
+            })
+            .collect();
+        if manager_versions.len() > 1 {
+            return Err(Error::config(
+                "shared workspace members declare conflicting package-manager versions",
+            ));
+        }
         if let Some(first) = entries.first() {
             if entries.iter().any(|entry| {
                 let mut left = entry.config.clone();
                 let mut right = first.config.clone();
                 left.config_sources.clear();
                 right.config_sources.clear();
+                left.project_config = None;
+                right.project_config = None;
                 left != right
             }) || entries.len() != unit.members.len() + 1
             {
@@ -341,6 +426,7 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
 pub fn owned_in(
     directory: &Path,
     configs: &BTreeMap<String, ProviderConfig>,
+    disabled: &[String],
 ) -> Result<Vec<DetectedProject>> {
     let all = discover(directory, Some(directory), PROVIDERS)?;
     let mut result = Vec::new();
@@ -368,9 +454,10 @@ pub fn owned_in(
         if let (Some(declared), Some(locked)) = (declared, locked.first()) {
             if declared.name != locked.provider {
                 return Err(Error::config(format!(
-                    "{} declares `{}` but its lockfile belongs to `{}`",
+                    "{} declares `{}` but {} is owned by `{}`",
                     directory.display(),
                     declared.name,
+                    locked.native_lock.as_ref().unwrap().display(),
                     locked.provider
                 )));
             }
@@ -378,6 +465,9 @@ pub fn owned_in(
         let owner = declared
             .map(|d| d.name.as_str())
             .or_else(|| locked.first().map(|p| &*p.provider));
+        if owner.is_some_and(|owner| disabled.iter().any(|id| id == owner)) {
+            continue;
+        }
         let eligible: Vec<_> = peers
             .iter()
             .filter(|p| {
@@ -385,6 +475,16 @@ pub fn owned_in(
                     && owner.is_none_or(|owner| owner == &*p.provider)
             })
             .collect();
+        if eligible.is_empty() {
+            if let Some(owner) = owner {
+                if let Some(rival) = peers
+                    .iter()
+                    .find(|peer| configs.contains_key(&*peer.provider))
+                {
+                    return Err(Error::config(format!("{} declares package manager `{owner}`, so provider `{}` does not own it; enable `[deps.{owner}]` instead", directory.display(), rival.provider)));
+                }
+            }
+        }
         if eligible.len() > 1 {
             return Err(Error::config(format!("{} has ambiguous {} providers; declare packageManager, retain one lockfile, or select one provider per project", directory.display(), ecosystem.as_str())));
         }
@@ -404,9 +504,49 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
     #[test]
+    fn declared_sources_and_outputs_keep_their_file_owner_through_inheritance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "osdk.toml",
+            "[deps]\nroots=['api']\n[deps.npm]\nsources=['shared.txt']\noutputs=['result']\n",
+        );
+        write(root, "package.json", r#"{"packageManager":"npm@11"}"#);
+        write(root, "api/package.json", r#"{"packageManager":"npm@11"}"#);
+        write(root, "api/osdk.toml", "extends='../osdk.toml'\n");
+        let config = crate::config::inheritance::deps_file(&root.join("osdk.toml")).unwrap();
+        let entries = catalog(root, &root.join("osdk.toml"), &config).unwrap();
+        assert_eq!(entries.len(), 2);
+        let root = root.canonicalize().unwrap();
+        for entry in entries {
+            assert_eq!(
+                entry.config.sources,
+                [root.join("shared.txt").to_string_lossy().to_string()]
+            );
+            assert_eq!(
+                entry.config.outputs,
+                [root.join("result").to_string_lossy().to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_empty_disable_replaces_the_default_list() {
+        let config: DepsConfig =
+            toml::from_str("disable=['npm']\n[npm]\n[projects.'api']\ndisable=[]\n").unwrap();
+        let declaration = &config.projects["api"];
+        assert!(project_providers(&config, &[]).unwrap().is_empty());
+        assert!(project_providers(&config, &[declaration])
+            .unwrap()
+            .contains_key("npm"));
+    }
+
+    #[test]
     fn mixed_managers_route_once_without_child_configs() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
+        write(root, "osdk.toml", "");
         write(
             root,
             "apps/a/package.json",
@@ -418,6 +558,7 @@ mod tests {
             r#"{"packageManager":"npm@11"}"#,
         );
         write(root, "apps/c/requirements.txt", "idna==3.10");
+        write(root, "osdk.toml", "");
         let config: DepsConfig=toml::from_str("roots=['apps/*','apps/a']\n[pnpm]\n[npm]\n[projects.'apps/c'.pip-requirements]\nauto=false\n").unwrap();
         let found = catalog(root, &root.join("osdk.toml"), &config).unwrap();
         assert_eq!(

@@ -155,6 +155,10 @@ fn expand_members(
         }
         expand(root, root, &parts, &exclude, &mut result)?;
     }
+    result = result
+        .into_iter()
+        .map(|path| path.canonicalize().map_err(|e| Error::io(&path, e)))
+        .collect::<Result<_>>()?;
     result.sort();
     result.dedup();
     result.retain(|path| path != root && path.join(manifest).is_file());

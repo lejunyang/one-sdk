@@ -167,7 +167,7 @@ fn explicit_inheritance_has_same_deps_options_and_commands_from_root_or_child() 
     write(
         root,
         "apps/api/osdk.toml",
-        "extends='../../osdk.toml'\n[deps.npm]\nauto=false\noutputs=[]\nenv={B='2'}\n",
+        "extends='../../osdk.toml'\n[deps.npm]\nauto=false\ndir='.'\noutputs=[]\nenv={B='2'}\n",
     );
     let mut results = Vec::new();
     for cwd in [root.to_path_buf(), root.join("apps/api")] {
@@ -236,6 +236,8 @@ fn inherited_tasks_keep_declaring_file_paths_in_root_and_child_calls() {
             .env("OSDK_CONFIG_DIR", root.join("state/config"))
             .env("OSDK_DATA_DIR", root.join("state/data"))
             .env("OSDK_CACHE_DIR", root.join("state/cache"))
+            .env("OSDK_STORE_DIR", root.join("state/store"))
+            .env("OSDK_INSTALL_DIR", root.join("state/installs"))
             .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("osdk.toml"))
             .output()
             .unwrap();
@@ -245,4 +247,61 @@ fn inherited_tasks_keep_declaring_file_paths_in_root_and_child_calls() {
             "done"
         );
     }
+}
+
+#[test]
+fn inherited_offline_policy_and_workspace_tool_context_are_consistent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root, "osdk.toml", "[deps.projects.'api'.npm]\n");
+    write(root, "api/package.json", r#"{"packageManager":"npm@11"}"#);
+    write(
+        root,
+        "api/osdk.toml",
+        "extends='../osdk.toml'\n[settings]\noffline=true\n",
+    );
+    for cwd in [root.to_path_buf(), root.join("api")] {
+        let output = run(root, &cwd, &["deps", "--list", "--all", "--explain"]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("--offline"),
+            "{output:?}"
+        );
+    }
+    write(
+        root,
+        "osdk.toml",
+        "[settings]\noffline=true\n[deps.projects.'api'.npm]\n",
+    );
+    write(
+        root,
+        "api/osdk.toml",
+        "extends='../osdk.toml'\n[settings]\noffline=false\n",
+    );
+    let output = run(
+        root,
+        root,
+        &["--offline", "deps", "--list", "--all", "--explain"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("--offline"),
+        "CLI offline must override even a matching parent flag: {output:?}"
+    );
+    write(root, "js/package.json", r#"{"packageManager":"pnpm@11"}"#);
+    write(root, "js/pnpm-workspace.yaml", "packages: ['packages/*']");
+    write(root, "js/packages/a/package.json", "{}");
+    write(
+        root,
+        "js/packages/a/osdk.toml",
+        "extends='../../../osdk.toml'\n[settings]\noffline=true\n",
+    );
+    write(root, "osdk.toml", "[deps.projects.'js'.pnpm]\n");
+    let output = run(root, root, &["deps", "--list", "--all"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("conflicting effective tool settings or sources"),
+        "{output:?}"
+    );
 }

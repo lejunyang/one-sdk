@@ -407,6 +407,21 @@ osdk deps //:npm            # config root only
 osdk deps //apps/api:npm    # one declared sub-project
 ```
 
+Independent sub-projects need no `osdk.toml`; declare them once at the root:
+
+```toml
+[deps.projects."apps/web".pnpm]
+timeout = "5m"
+[deps.projects."apps/api".pip-requirements]
+auto = false
+```
+
+Run `osdk deps --list --all --explain` to inspect the selected projects and commands, then `osdk deps` to initialize them. `auto = false` keeps explicit installation available; `disable` removes a provider. Native pnpm/uv workspaces install once at the shared root, and selecting a member explains the expanded coverage. Child configurations can explicitly inherit with `extends = "../../osdk.toml"`.
+
+Command overrides accept argv arrays, such as `run = ["pnpm", "install", "--offline"]`, and require trust. Overrides cannot guarantee frozen installation or disabled scripts. Remove deprecated `installer`; unsupported `extra_index` now reports a migration error instead of substituting the default index. Explicit input/output paths belong to their declaring file (for example `sources = ["apps/api/package.json"]`). See the [dependency guide](site/en/guide/project/deps.md) for workspace, inheritance and migration details.
+
+
+
 You don't have to call it every time. A bare `osdk install`, `osdk run <task>` or
 `osdk exec` compares manifest hashes first and materializes only when stale. On a
 hit that costs a fraction of a millisecond, starts no package manager, and does not
@@ -1159,28 +1174,3 @@ Contributions are welcome through
 ## License
 
 MIT
-
-`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `installer` is deprecated and must match the provider name; remove it. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
-
-### Per-project dependencies
-
-Sub-projects need no osdk configuration. Root declarations select providers and override defaults field by field:
-
-```toml
-[deps]
-roots = ["apps/*"]
-[deps.npm]
-[deps.pnpm]
-[deps.projects."services/api".pip-requirements]
-auto = false
-[deps.projects."apps/web"]
-disable = ["pnpm"]
-[deps.projects."apps/web".npm]
-outputs = []
-```
-
-`auto = false` keeps explicit `osdk deps` available; `disable` removes a provider from all execution. Arrays replace defaults, including empty arrays; environment keys merge. Ownership comes from manifests and native locks before filters are applied. Contradictory locks or multiple eligible managers fail. Overlapping roots produce one plan per canonical project/provider, including calls from subdirectories. Conflicting overlapping project overrides fail. `--filter .` selects the root and other filters exclude it; `--list --all --explain` shows selection, effective options and commands. `[task].roots` aggregates tasks separately.
-
-Native pnpm and uv workspace members are discovered only below explicitly declared workspace roots. Native member patterns and exclusions define membership; unrelated nested projects remain separate. Selecting a member expands to one shared root installation and explains that expansion. uv workspaces run `uv sync --all-packages` (ordinary root sync does not cover all members). Shared options must agree, including auto/disable, commands and indexes; conflicts and member-owned lockfiles fail. Freshness includes workspace declarations, member paths/manifests, shared locks, effective options and installed tool versions. Native successful coverage is recorded in managed deps state; a custom override has unverified coverage. Installation and state recording are serialized by project within the same osdk cache. Native recursive patterns need a directory prefix (`packages/**`); bare `**` is rejected.
-
-Explicit inheritance: a child `osdk.toml` can set `extends = "../../osdk.toml"`. Directory nesting alone does not inherit configuration. Priority is CLI/environment, child fields, explicitly inherited ancestor fields, user configuration, then defaults. Maps merge by key (including env); scalar values and arrays replace, so `false` and `[]` are meaningful. Inherited dependency sources/outputs/dir and task dir/file paths belong to their declaring file. Keep discovery roots/projects in the catalog root; a discovered child cannot redefine the catalog. Per-project declarations supply defaults to an inheriting child, whose explicit provider fields take precedence. An independent child config declares its own providers. Root and child dependency calls use the same catalog and effective provider/tool options. Each executable or source-changing config file in the chain needs its own trust; trusting a child file does not trust its parent. Self cycles, non-ancestor references and repository-boundary escapes fail. Task aggregation stays separate in `[task].roots`; inherited runner defaults are materialized into rooted task definitions.

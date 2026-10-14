@@ -67,7 +67,10 @@ struct Resolved {
 }
 
 pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("getting current dir")?;
+    let cwd = std::env::current_dir()
+        .context("getting current dir")?
+        .canonicalize()
+        .context("canonicalizing dependency cwd")?;
     let Some(config_path) = app.ctx.config.project_config_path.clone() else {
         report_undeclared(&cwd)?;
         return Ok(());
@@ -84,7 +87,37 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         report_undeclared(&cwd)?;
         return Ok(());
     }
-    let entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
+    let mut entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
+    for entry in &mut entries {
+        let effective = app.config_for_project(
+            entry
+                .config
+                .project_config
+                .as_deref()
+                .unwrap_or(&config_path),
+        )?;
+        entry.config.offline = effective.settings.offline;
+        let tools: BTreeMap<_, _> = effective
+            .tool_configs
+            .iter()
+            .map(|(id, tool)| (id, (tool.version(), tool.to_request_options())))
+            .collect();
+        entry.config.project_context =
+            serde_json::to_string(&(&effective.settings, &effective.sources, &tools))?;
+    }
+    for entry in &entries {
+        if let Some(unit) = &entry.unit {
+            if entries.iter().any(|other| {
+                other.unit.as_ref() == Some(unit)
+                    && other.config.project_context != entry.config.project_context
+            }) {
+                return Err(anyhow!(
+                    "{}: shared workspace has conflicting effective tool settings or sources",
+                    unit.root.display()
+                ));
+            }
+        }
+    }
     let selected = select_projects(&entries, &cwd, &options);
     if !options.filter.is_empty() && selected.is_empty() {
         return Err(anyhow!(
@@ -111,6 +144,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     for entry in selected {
         let unit = entry.unit.clone();
         let mut project = entry.project.clone();
+        let mut rooted = (entry.id(), entry.source.clone());
         if let Some(unit) = &unit {
             if project.root != unit.root {
                 println!("{} selects shared installation in {}; coverage expands to the native workspace", entry.id(), unit.root.display());
@@ -123,6 +157,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 })
                 .ok_or_else(|| anyhow!("workspace installation root is not enabled"))?;
             project = owner.project.clone();
+            rooted = (owner.id(), owner.source.clone());
             if resolved.iter().any(|prior: &Resolved| {
                 prior.project.root == project.root && prior.project.provider == project.provider
             }) {
@@ -141,7 +176,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
             plan.args.push("--all-packages".into());
         }
-        if app.ctx.config.settings.offline {
+        if config.offline {
             if config.run.is_some() {
                 return Err(anyhow!(
                     "offline mode cannot be guaranteed for a custom deps command"
@@ -156,7 +191,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         }
         if options.frozen && !plan.frozen {
             return Err(anyhow!(
-                "`--frozen` cannot be guaranteed for `{}`: {}",
+                "`--frozen` requires a native lockfile and native frozen guarantees for `{}`: {}",
                 entry.id(),
                 plan.downgraded_reason
                     .as_deref()
@@ -166,7 +201,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         let decision = decide(app, schema, &project, &config, &plan, unit.as_ref())?;
         resolved.push(Resolved {
             schema,
-            rooted: Some((entry.id(), entry.source.clone())),
+            rooted: Some(rooted),
             project,
             choice,
             config,
@@ -240,7 +275,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             println!("warning: {reason}");
         }
         if item.decision.is_fresh() && !options.force {
-            println!("{} is up to date", item.project.provider);
+            println!("{} is up to date", item.label());
             continue;
         }
         if options.explain {
@@ -256,8 +291,14 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             );
             continue;
         }
-        let lock_path =
-            state::state_path(&app.ctx.dirs.cache, &item.project.root).with_extension("lock");
+        let state_path = state::state_path(&app.ctx.dirs.cache, &item.project.root);
+        let lock_path = app
+            .ctx
+            .dirs
+            .cache
+            .join("deps-install-locks")
+            .join(state_path.file_name().unwrap())
+            .with_extension("lock");
         let _installation_lock = osdk_core::lock::FileLock::acquire(&lock_path)?;
         if !options.force
             && decide(
@@ -305,9 +346,16 @@ impl Resolved {
 /// is not configured are ignored -- that is a no-op, not a contradiction, since a
 /// disabled provider has nothing to wait for.
 fn order_by_depends(resolved: &mut Vec<Resolved>) -> anyhow::Result<()> {
-    let present: Vec<String> = resolved
+    let present: Vec<_> = resolved
         .iter()
-        .map(|item| item.project.provider.to_string())
+        .map(|item| {
+            (
+                item.label(),
+                item.project.provider.to_string(),
+                item.project.root.clone(),
+                item.unit.clone(),
+            )
+        })
         .collect();
 
     let mut ordered: Vec<Resolved> = Vec::with_capacity(resolved.len());
@@ -317,13 +365,30 @@ fn order_by_depends(resolved: &mut Vec<Resolved>) -> anyhow::Result<()> {
     while !remaining.is_empty() {
         let ready = remaining.iter().position(|item| {
             item.config.depends.iter().all(|need| {
-                !present.iter().any(|name| name == need) || done.iter().any(|name| name == need)
+                present
+                    .iter()
+                    .filter(|(label, provider, root, unit)| {
+                        if need.starts_with("//") {
+                            need == label
+                        } else {
+                            need == provider
+                                && (root == &item.project.root
+                                    || unit.as_ref().is_some_and(|unit| {
+                                        unit.members.contains(&item.project.root)
+                                    })
+                                    || item
+                                        .unit
+                                        .as_ref()
+                                        .is_some_and(|unit| unit.members.contains(root)))
+                        }
+                    })
+                    .all(|(label, _, _, _)| done.contains(label))
             })
         });
         match ready {
             Some(index) => {
                 let item = remaining.remove(index);
-                done.push(item.project.provider.to_string());
+                done.push(item.label());
                 ordered.push(item);
             }
             None => {
@@ -444,6 +509,26 @@ async fn ensure_tools(
     item: &Resolved,
     no_install_tools: bool,
 ) -> anyhow::Result<Vec<ReadyTool>> {
+    let Some(path) = item.config.project_config.as_deref() else {
+        return ensure_tools_in_context(app, item, no_install_tools).await;
+    };
+    let config = app.config_for_project(path)?;
+    let mut project_app = app.with_config(config)?;
+    let result = Box::pin(ensure_tools_in_context(
+        &mut project_app,
+        item,
+        no_install_tools,
+    ))
+    .await;
+    app.invalidate_dynamic_scan();
+    result
+}
+
+async fn ensure_tools_in_context(
+    app: &mut App,
+    item: &Resolved,
+    no_install_tools: bool,
+) -> anyhow::Result<Vec<ReadyTool>> {
     let mut ready = Vec::new();
     // A custom provider declares no tools of its own: its `run` line invokes
     // whatever is already available, which in practice is what `depends` brought
@@ -471,20 +556,38 @@ async fn ensure_tools(
                 None => required.id.to_string(),
             },
         };
-        let request = ToolRequest::parse(&spec)
+        let mut request = ToolRequest::parse(&spec)
             .with_context(|| format!("parsing deps tool request `{spec}`"))?;
+        crate::commands::inherit_configured_options_from(
+            &mut request,
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+            None,
+        );
         let backend = app.registry.get(&request.backend)?;
+        let request = crate::commands::expand_request_alias(app, backend.as_ref(), &request)?;
 
         // Already installed means nothing is acquired, which is the distinction
         // `--no-install-tools` draws: it forbids *acquiring* a tool, not using
         // one the user installed themselves.
-        let installed = backend.list_installed(&app.ctx)?;
-        let resolved =
+        let resolved = if request.backend.contains(':') {
+            crate::commands::installed_dynamic_match(app, backend.as_ref(), &request)
+        } else {
+            let installed = backend.list_installed(&app.ctx)?;
             crate::commands::select_installed_version(&request.backend, &request.spec, installed)
-                .ok();
+                .ok()
+                .map(|version| {
+                    let mut version = ToolVersion::new(&request.backend, &version);
+                    version.options.extend(request.options.clone());
+                    version
+                })
+        };
 
         let version = match resolved {
-            Some(version) => ToolVersion::new(&request.backend, &version),
+            Some(version) => {
+                backend.ensure_post_install(&app.ctx, &version)?;
+                version
+            }
             None => {
                 if no_install_tools {
                     return Err(anyhow!(
@@ -494,6 +597,9 @@ async fn ensure_tools(
                         schema.id,
                         required.id
                     ));
+                }
+                for source in &item.config.config_sources {
+                    app.ensure_config_trusted(source, &[osdk_core::trust::Scope::Install])?;
                 }
                 println!("installing {spec} for deps provider `{}`", schema.id);
                 let (_, installed) =
@@ -787,7 +893,12 @@ fn select_projects<'a>(
                     && other.project.root.starts_with(&entry.project.root)
                     && other.project.root != entry.project.root
             });
-            let local = cwd.starts_with(&entry.project.root) && nearest;
+            let intervening_manifest = deps::provider_schema(provider).is_some_and(|schema| {
+                cwd.ancestors()
+                    .take_while(|directory| *directory != entry.project.root)
+                    .any(|directory| directory.join(schema.primary_manifest()).is_file())
+            });
+            let local = cwd.starts_with(&entry.project.root) && nearest && !intervening_manifest;
             let selected = if options.providers.is_empty() {
                 wide || local
             } else {
@@ -1024,6 +1135,52 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn dependency_order_waits_for_the_matching_project() {
+        fn item(
+            root: &std::path::Path,
+            relative: &str,
+            provider: &str,
+            needs: &[&str],
+        ) -> super::Resolved {
+            let project = osdk_core::deps::detect_custom(
+                provider,
+                &root.join(relative),
+                &root.join("osdk.toml"),
+            );
+            let config = ProviderConfig {
+                run: Some("command".into()),
+                depends: needs.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            };
+            let choice = osdk_core::deps::select_installer(&project, &config, &[]).unwrap();
+            let plan = osdk_core::deps::plan_custom(&project, &config).unwrap();
+            super::Resolved {
+                schema: None,
+                rooted: Some((format!("//{relative}:{provider}"), "test".into())),
+                project,
+                choice,
+                config,
+                plan,
+                decision: osdk_core::deps::state::Decision::Fresh,
+                unit: None,
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut items = vec![
+            item(root, "a", "consume", &["produce"]),
+            item(root, "b", "produce", &[]),
+            item(root, "a", "produce", &["prepare"]),
+            item(root, "a", "prepare", &[]),
+        ];
+        super::order_by_depends(&mut items).unwrap();
+        assert_eq!(
+            items.iter().map(super::Resolved::label).collect::<Vec<_>>(),
+            ["//b:produce", "//a:prepare", "//a:produce", "//a:consume"]
+        );
+    }
 
     #[cfg(unix)]
     #[test]

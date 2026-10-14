@@ -31,6 +31,42 @@ pub struct GlobalOverrides {
     pub lang: Option<String>,
 }
 
+impl GlobalOverrides {
+    fn apply_to(&self, config: &mut Config) {
+        if let Some(j) = self.jobs {
+            if j > 0 {
+                config.settings.jobs = j;
+            }
+        }
+        if let Some(j) = self.model_jobs {
+            if j > 0 {
+                config.sources.model_jobs = j;
+            }
+        }
+        if self.yes {
+            config.settings.yes = true;
+        }
+        if self.offline {
+            config.settings.offline = true;
+        }
+        if let Some(limit) = self.download_cache_max_size {
+            config.settings.download_cache.max_size_bytes = limit;
+        }
+        if self.require_checksums {
+            config.settings.require_checksums = true;
+        }
+        if let Some(policy) = self.attestations {
+            config.settings.attestations = policy;
+        }
+        if let Some(policy) = self.prerelease {
+            config.settings.prerelease = policy;
+        }
+        if let Some(mode) = self.source_mode {
+            config.sources.mode = mode;
+        }
+    }
+}
+
 pub struct App {
     pub ctx: Ctx,
     pub registry: Registry,
@@ -38,6 +74,7 @@ pub struct App {
     /// A one-shot source id override from `--source`.
     pub source_override: Option<String>,
     pub refresh_sources: bool,
+    config_overrides: GlobalOverrides,
     /// Memoized dynamic-tool inventory scan for this process.
     ///
     /// Walking the installs tree is the most expensive read osdk makes, and the
@@ -69,6 +106,64 @@ pub struct App {
 }
 
 impl App {
+    /// Rebuild a dependency tool context for the project's own effective config,
+    /// preserving the CLI overlays from the original invocation.
+    pub fn config_for_project(&self, path: &Path) -> Result<Config> {
+        let user = self.ctx.dirs.user_config_file();
+        let original = match self
+            .ctx
+            .config
+            .project_config_path
+            .as_deref()
+            .and_then(Path::parent)
+        {
+            Some(base) => Config::load(&user, base)?,
+            None => Config::load_user(&user)?,
+        };
+        let mut config = Config::load(&user, path.parent().unwrap())?;
+        macro_rules! overlay {
+            ($($field:ident).+) => {
+                if self.ctx.config.$($field).+ != original.$($field).+ { config.$($field).+ = self.ctx.config.$($field).+.clone(); }
+            };
+        }
+        overlay!(settings.jobs);
+        overlay!(settings.yes);
+        overlay!(settings.offline);
+        overlay!(settings.require_checksums);
+        overlay!(settings.attestations);
+        overlay!(settings.prerelease);
+        overlay!(settings.download_cache.max_size_bytes);
+        overlay!(sources.model_jobs);
+        overlay!(sources.mode);
+        self.config_overrides.apply_to(&mut config);
+        Ok(config)
+    }
+
+    pub fn with_config(&self, config: Config) -> Result<App> {
+        let registry = Registry::load(&self.ctx.dirs)?;
+        let prompt = if config.settings.yes == self.ctx.config.settings.yes {
+            self.prompt.clone()
+        } else {
+            Arc::new(TerminalPrompt::new(config.settings.yes)) as Arc<dyn Prompt>
+        };
+        let mut app = App::from_parts(
+            Ctx {
+                dirs: self.ctx.dirs.clone(),
+                platform: self.ctx.platform,
+                config,
+                client: self.ctx.client.clone(),
+                cas: self.ctx.cas.clone(),
+                show_progress: self.ctx.show_progress,
+            },
+            registry,
+            prompt,
+            self.source_override.clone(),
+            self.refresh_sources,
+        );
+        app.config_overrides = self.config_overrides.clone();
+        Ok(app)
+    }
+
     /// Assemble an `App` from already-built parts, with an empty scan memo.
     ///
     /// Used where a command rebuilds the app around freshly loaded config: that
@@ -86,6 +181,7 @@ impl App {
             prompt,
             source_override,
             refresh_sources,
+            config_overrides: GlobalOverrides::default(),
             dynamic_scan: std::cell::RefCell::new(None),
             shim_owners: std::cell::RefCell::new(None),
         }
@@ -259,38 +355,7 @@ impl App {
         }
         .context("loading configuration")?;
 
-        // Overlay CLI flags (highest precedence).
-        if let Some(j) = overrides.jobs {
-            if j > 0 {
-                config.settings.jobs = j;
-            }
-        }
-        if let Some(j) = overrides.model_jobs {
-            if j > 0 {
-                config.sources.model_jobs = j;
-            }
-        }
-        if overrides.yes {
-            config.settings.yes = true;
-        }
-        if overrides.offline {
-            config.settings.offline = true;
-        }
-        if let Some(limit) = overrides.download_cache_max_size {
-            config.settings.download_cache.max_size_bytes = limit;
-        }
-        if overrides.require_checksums {
-            config.settings.require_checksums = true;
-        }
-        if let Some(policy) = overrides.attestations {
-            config.settings.attestations = policy;
-        }
-        if let Some(policy) = overrides.prerelease {
-            config.settings.prerelease = policy;
-        }
-        if let Some(mode) = overrides.source_mode {
-            config.sources.mode = mode;
-        }
+        overrides.apply_to(&mut config);
 
         // Finalize language now that config is loaded. Precedence:
         // --lang / OSDK_LANG / locale (already applied in main) win; otherwise
@@ -319,6 +384,7 @@ impl App {
         };
 
         let app = App {
+            config_overrides: overrides.clone(),
             ctx,
             registry,
             prompt,

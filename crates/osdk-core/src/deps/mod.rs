@@ -363,6 +363,9 @@ pub struct ProviderConfig {
     pub sources_explicit: bool,
     pub config_sources: Vec<PathBuf>,
     pub project_tools: BTreeMap<String, String>,
+    pub project_config: Option<PathBuf>,
+    pub project_context: String,
+    pub offline: bool,
     pub outputs_explicit: bool,
     pub env: BTreeMap<String, String>,
     pub dir: Option<String>,
@@ -982,6 +985,9 @@ pub struct OutputSpecOwned {
 pub fn effective_cwd(root: &Path, dir: Option<&str>) -> PathBuf {
     match dir {
         Some(dir) => {
+            if Path::new(dir).is_absolute() {
+                return PathBuf::from(dir);
+            }
             let mut path = root.to_path_buf();
             for segment in relative_segments(dir) {
                 path.push(segment);
@@ -1065,6 +1071,15 @@ mod tests {
     ///
     /// `api-*` is the shape that distinguishes them: `api-v1` must be found and
     /// `web-v1`, sitting right beside it with its own manifest, must not.
+    #[test]
+    fn owned_absolute_working_directory_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            effective_cwd(Path::new("other-root"), temp.path().to_str()),
+            temp.path()
+        );
+    }
+
     #[test]
     fn builtin_override_preserves_argv_and_does_not_claim_frozen() {
         let temp = tempfile::tempdir().unwrap();

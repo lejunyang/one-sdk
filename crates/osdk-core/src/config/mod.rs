@@ -1392,7 +1392,7 @@ pub struct DepsConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DepsProject {
-    pub disable: Vec<String>,
+    pub disable: Option<Vec<String>>,
     #[serde(flatten)]
     pub providers: BTreeMap<String, toml::Value>,
 }
@@ -2412,13 +2412,21 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
 
     if let Some(start_dir) = start_dir {
         if let Some((path, file)) = find_project_config(start_dir)? {
-            cfg.tool_origins.extend(
-                file.tools
-                    .keys()
-                    .map(|tool| (tool.clone(), ToolConfigOrigin::ProjectConfig(path.clone()))),
-            );
-            let anchor = inheritance::sources(&path)?.into_iter().next().unwrap();
-            cfg.apply_file(file, false, Some(&anchor))?;
+            let sources = inheritance::sources(&path)?;
+            for source in &sources {
+                if let Some(tools) = inheritance::raw(source)?
+                    .get("tools")
+                    .and_then(toml::Value::as_table)
+                {
+                    cfg.tool_origins.extend(tools.keys().map(|tool| {
+                        (
+                            tool.clone(),
+                            ToolConfigOrigin::ProjectConfig(source.clone()),
+                        )
+                    }));
+                }
+            }
+            cfg.apply_file(file, false, sources.first().map(PathBuf::as_path))?;
             cfg.project_config_path = Some(path);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {

@@ -4,16 +4,20 @@ use std::path::{Path, PathBuf};
 
 pub fn sources(path: &Path) -> Result<Vec<PathBuf>> {
     let mut chain = Vec::new();
-    let mut next = path.to_path_buf();
-    let boundary = path
+    let mut next = path.canonicalize().map_err(|e| Error::io(path, e))?;
+    let boundary = next
         .parent()
-        .and_then(|dir| dir.ancestors().find(|dir| dir.join(".git").exists()));
+        .and_then(|dir| dir.ancestors().find(|dir| dir.join(".git").exists()))
+        .map(Path::to_path_buf);
     loop {
         let canonical = next.canonicalize().map_err(|e| Error::io(&next, e))?;
         if chain.contains(&canonical) {
             return Err(Error::config("config extends forms a cycle"));
         }
-        if boundary.is_some_and(|root| !canonical.starts_with(root)) {
+        if boundary
+            .as_ref()
+            .is_some_and(|root| !canonical.starts_with(root))
+        {
             return Err(Error::config("config extends escapes repository boundary"));
         }
         let value = raw(&canonical)?;
@@ -57,6 +61,10 @@ pub fn raw(path: &Path) -> Result<toml::Value> {
         .map_err(|e: toml::de::Error| Error::config(format!("{}: {}", path.display(), e.message())))
 }
 pub fn load(path: &Path) -> Result<toml::Value> {
+    let direct = raw(path)?;
+    if direct.get("extends").is_none() {
+        return Ok(direct);
+    }
     let chain = sources(path)?;
     let inherited = chain.len() > 1;
     let mut value = toml::Value::Table(Default::default());
@@ -65,6 +73,17 @@ pub fn load(path: &Path) -> Result<toml::Value> {
         let mut layer = raw(&source)?;
         layer.as_table_mut().unwrap().remove("extends");
         if inherited {
+            if let Some(tools) = layer.get_mut("tools").and_then(toml::Value::as_table_mut) {
+                for (_, entry) in tools.iter_mut() {
+                    if let Some(version) = entry.as_str() {
+                        *entry = toml::Value::Table(
+                            [("version".into(), toml::Value::String(version.into()))]
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                }
+            }
             rebase(&mut layer, source.parent().unwrap());
             if let Some(roots) = layer
                 .get_mut("task")
@@ -107,6 +126,9 @@ pub fn merge(base: &mut toml::Value, value: toml::Value) {
 }
 fn path_value(value: &mut toml::Value, base: &Path) {
     if let Some(path) = value.as_str() {
+        if Path::new(path).is_absolute() {
+            return;
+        }
         let path = PathBuf::from(path.replace('\\', "/"));
         if !path.is_absolute() {
             *value = toml::Value::String(base.join(path).to_string_lossy().into_owned());
@@ -237,7 +259,11 @@ pub fn local_deps(
     path: &Path,
     anchor: &Path,
     defaults: &std::collections::BTreeMap<String, super::DepsProviderEntry>,
-) -> Result<std::collections::BTreeMap<String, super::DepsProviderEntry>> {
+    default_disable: &[String],
+) -> Result<(
+    std::collections::BTreeMap<String, super::DepsProviderEntry>,
+    Vec<String>,
+)> {
     let chain = sources(path)?;
     let inherits = chain.iter().any(|source| source == anchor);
     let mut value = if inherits {
@@ -245,7 +271,18 @@ pub fn local_deps(
     } else {
         toml::Value::Table(Default::default())
     };
-    let mut disable = Vec::new();
+    if inherits {
+        if let Some(providers) = value.as_table_mut() {
+            for (_, provider) in providers.iter_mut() {
+                provider_paths(provider, anchor.parent().unwrap());
+            }
+        }
+    }
+    let mut disable = if inherits {
+        default_disable.to_vec()
+    } else {
+        Vec::new()
+    };
     for source in chain.iter().filter(|source| source.as_path() != anchor) {
         let mut layer = raw(source)?;
         rebase(&mut layer, source.parent().unwrap());
@@ -282,14 +319,61 @@ pub fn local_deps(
     let mut entries: std::collections::BTreeMap<String, super::DepsProviderEntry> = value
         .try_into()
         .map_err(|e: toml::de::Error| Error::config(e.message()))?;
-    for disabled in disable {
-        entries.remove(&disabled);
+    for disabled in &disable {
+        entries.remove(disabled);
     }
-    Ok(entries)
+    Ok((entries, disable))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_tool_object_inherits_a_shorthand_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("child")).unwrap();
+        std::fs::write(root.join("osdk.toml"), "[tools]\nnode='24.19.0'\n").unwrap();
+        std::fs::write(
+            root.join("child/osdk.toml"),
+            "extends='../osdk.toml'\n[tools.node]\nlazy=false\n",
+        )
+        .unwrap();
+        let config =
+            super::super::Config::load(&root.join("user-missing.toml"), &root.join("child"))
+                .unwrap();
+        assert_eq!(config.tools["node"], "24.19.0");
+        assert!(!config.tool_configs["node"].is_lazy());
+    }
+
+    #[cfg(feature = "install")]
+    #[test]
+    fn inherited_empty_disable_clears_parent_disabled_providers() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("child")).unwrap();
+        std::fs::write(
+            root.join("osdk.toml"),
+            "[deps]\ndisable=['npm']\n[deps.npm]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("child/osdk.toml"),
+            "extends='../osdk.toml'\n[deps]\ndisable=[]\n",
+        )
+        .unwrap();
+        let anchor = root.join("osdk.toml").canonicalize().unwrap();
+        let defaults = deps_file(&anchor).unwrap().providers;
+        let (entries, disabled) = local_deps(
+            &root.join("child/osdk.toml"),
+            &anchor,
+            &defaults,
+            &["npm".into()],
+        )
+        .unwrap();
+        assert!(disabled.is_empty());
+        assert!(entries.contains_key("npm"));
+    }
+
     #[test]
     fn explicit_chain_keeps_false_empty_env_and_source_paths() {
         let temp = tempfile::tempdir().unwrap();
