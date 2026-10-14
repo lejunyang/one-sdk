@@ -8437,7 +8437,10 @@ fn provider_operands_select_exactly_one_root() {
             "{selector} must select exactly one root: {stdout}"
         );
         assert!(
-            stdout.contains(&expected.display().to_string()),
+            stdout.lines().any(|line| line.starts_with(&format!(
+                "would run in {}:",
+                expected.canonicalize().unwrap().display()
+            ))),
             "{selector} must select {}: {stdout}",
             expected.display()
         );
