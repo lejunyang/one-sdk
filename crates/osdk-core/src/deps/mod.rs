@@ -361,6 +361,8 @@ pub struct ProviderConfig {
     pub run: Option<crate::config::DepsCommand>,
     pub timeout: Option<std::time::Duration>,
     pub sources_explicit: bool,
+    pub config_sources: Vec<PathBuf>,
+    pub project_tools: BTreeMap<String, String>,
     pub outputs_explicit: bool,
     pub env: BTreeMap<String, String>,
     pub dir: Option<String>,

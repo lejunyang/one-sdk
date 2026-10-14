@@ -390,6 +390,7 @@ fn collect_requirements(value: &toml::Value, scopes: &[Scope]) -> Vec<TrustRequi
 
     for (key, value) in table {
         match key.as_str() {
+            "extends" => {}
             "settings" if scopes_include(scopes, Scope::Install) => {
                 collect_settings_requirements(value, &mut found)
             }

@@ -153,3 +153,96 @@ version='0.1.0'",
     assert!(text.contains("--all-packages"), "{text}");
     assert!(text.contains("py/packages/a"), "{text}");
 }
+
+#[test]
+fn explicit_inheritance_has_same_deps_options_and_commands_from_root_or_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "apps/api/package.json",
+        r#"{"packageManager":"npm@11"}"#,
+    );
+    write(root,"osdk.toml","[tools]\nnode='24.19.0'\n[deps]\nroots=['apps/*']\n[deps.npm]\noutputs=['node_modules']\nenv={A='1',B='1'}\n");
+    write(
+        root,
+        "apps/api/osdk.toml",
+        "extends='../../osdk.toml'\n[deps.npm]\nauto=false\noutputs=[]\nenv={B='2'}\n",
+    );
+    let mut results = Vec::new();
+    for cwd in [root.to_path_buf(), root.join("apps/api")] {
+        let output = run(root, &cwd, &["deps", "--list", "--all", "--explain"]);
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("auto=false"), "{text}");
+        assert!(text.contains("outputs=[]"), "{text}");
+        assert!(text.contains("A=1 B=2"), "{text}");
+        results.push(text);
+    }
+    assert_eq!(results[0], results[1]);
+}
+#[test]
+fn trusting_leaf_does_not_trust_inherited_executable_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "osdk.toml",
+        "[deps.codegen]\nrun=['a-command-that-must-not-run']",
+    );
+    write(root, "child/osdk.toml", "extends='../osdk.toml'");
+    let output = Command::new(env!("CARGO_BIN_EXE_osdk"))
+        .args(["deps", "--dry-run"])
+        .current_dir(root.join("child"))
+        .env("OSDK_CONFIG_DIR", root.join("state/config"))
+        .env("OSDK_DATA_DIR", root.join("state/data"))
+        .env("OSDK_CACHE_DIR", root.join("state/cache"))
+        .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("child/osdk.toml"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("deps.codegen.run"), "{error}");
+    assert!(
+        error.contains(root.join("osdk.toml").to_str().unwrap()),
+        "{error}"
+    );
+}
+
+#[test]
+fn inherited_tasks_keep_declaring_file_paths_in_root_and_child_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root,"osdk.toml","[task]\nroots=['child']\n[tasks.shared]\nlua='write(\"marker\", \"done\"); return 0'\ndir='scripts'\n");
+    write(
+        root,
+        "child/osdk.toml",
+        "extends='../osdk.toml'\n[tasks.local]\nlua='write(\"marker\", \"done\"); return 0'\ndir='scripts'\n",
+    );
+    for (cwd, name, expected) in [
+        (root.to_path_buf(), "//child:shared", root.join("scripts")),
+        (root.join("child"), "shared", root.join("scripts")),
+        (
+            root.to_path_buf(),
+            "//child:local",
+            root.join("child/scripts"),
+        ),
+        (root.join("child"), "local", root.join("child/scripts")),
+    ] {
+        std::fs::create_dir_all(&expected).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_osdk"))
+            .args(["run", "--no-deps", name])
+            .current_dir(&cwd)
+            .env("OSDK_CONFIG_DIR", root.join("state/config"))
+            .env("OSDK_DATA_DIR", root.join("state/data"))
+            .env("OSDK_CACHE_DIR", root.join("state/cache"))
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("osdk.toml"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            std::fs::read_to_string(expected.join("marker")).unwrap(),
+            "done"
+        );
+    }
+}

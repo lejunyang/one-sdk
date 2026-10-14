@@ -37,6 +37,8 @@ impl TryFrom<&DepsProviderEntry> for ProviderConfig {
             auto: entry.auto,
             sources: entry.sources.clone().unwrap_or_default(),
             sources_explicit: entry.sources.is_some(),
+            config_sources: Vec::new(),
+            project_tools: BTreeMap::new(),
             outputs: entry.outputs.clone().unwrap_or_default(),
             outputs_explicit: entry.outputs.is_some(),
             run: entry.run.clone(),
@@ -195,7 +197,18 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                     .insert(unit.provider.clone(), entry.clone());
             }
         }
-        let entries = project_providers(&defaults, &declarations)?;
+        let mut entries = project_providers(&defaults, &declarations)?;
+        let local_path = crate::config::PROJECT_CONFIG_NAMES
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|path| path.is_file() && path != config_path);
+        let mut config_sources = vec![config_path.to_path_buf()];
+        if let Some(path) = &local_path {
+            entries = crate::config::inheritance::local_deps(path, config_path, &entries)?;
+            config_sources.extend(crate::config::inheritance::sources(path)?);
+        }
+        config_sources.sort();
+        config_sources.dedup();
         let configs: BTreeMap<String, ProviderConfig> = entries
             .iter()
             .filter(|(_, entry)| {
@@ -206,9 +219,10 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             })
             .map(|(id, entry)| {
                 let mut config = ProviderConfig::try_from(entry)?;
-                if entry.dir.is_some() {
-                    config.dir = None;
-                }
+                config.config_sources = config_sources.clone();
+                config.project_tools = crate::config::dependency_tool_versions(local_path.as_deref().unwrap_or(config_path))?;
+                if entry.dir.is_some() { config.dir = None; }
+                if config.installer.is_some() { eprintln!("warning: installer is deprecated for deps.{id}; remove it and select the provider by name"); }
                 Ok((id.clone(), config))
             })
             .collect::<Result<_>>()?;
@@ -291,11 +305,31 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
             .filter(|entry| entry.unit.as_ref() == Some(unit))
             .collect();
         if let Some(first) = entries.first() {
-            if entries.iter().any(|entry| entry.config != first.config)
-                || entries.len() != unit.members.len() + 1
+            if entries.iter().any(|entry| {
+                let mut left = entry.config.clone();
+                let mut right = first.config.clone();
+                left.config_sources.clear();
+                right.config_sources.clear();
+                left != right
+            }) || entries.len() != unit.members.len() + 1
             {
                 return Err(Error::config(format!("{}: shared {} workspace requires identical provider options and enabled members; auto/disable/run/index conflicts cannot be honored by one installation", unit.root.display(), unit.provider)));
             }
+        }
+    }
+    for unit in &units {
+        let mut sources: Vec<_> = result
+            .iter()
+            .filter(|entry| entry.unit.as_ref() == Some(unit))
+            .flat_map(|entry| entry.config.config_sources.clone())
+            .collect();
+        sources.sort();
+        sources.dedup();
+        for entry in result
+            .iter_mut()
+            .filter(|entry| entry.unit.as_ref() == Some(unit))
+        {
+            entry.config.config_sources = sources.clone();
         }
     }
     result.sort_by_key(ProjectEntry::id);

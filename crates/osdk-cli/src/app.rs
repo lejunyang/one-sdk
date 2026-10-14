@@ -1,5 +1,6 @@
 //! Assembles the `osdk_core::Ctx` from resolved dirs + config + a built client.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -140,6 +141,17 @@ impl App {
         let Some(project_config) = self.ctx.config.project_config_path.as_ref() else {
             return Ok(());
         };
+        for source in osdk_core::config::inheritance::sources(project_config)? {
+            self.ensure_config_trusted(&source, scopes)?;
+        }
+        Ok(())
+    }
+
+    pub fn ensure_config_trusted(
+        &self,
+        project_config: &Path,
+        scopes: &[osdk_core::trust::Scope],
+    ) -> Result<()> {
         let requirements = osdk_core::trust::trust_requirements(project_config, scopes)?;
         if requirements.is_empty()
             || osdk_core::trust::is_trusted(
@@ -214,20 +226,23 @@ impl App {
         let cwd = std::env::current_dir().context("getting current dir")?;
         if let ProjectAccess::Gated(scopes) = access {
             if let Some(project_config) = osdk_core::trust::project_config(&cwd)? {
-                let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
-                let requirements = osdk_core::trust::trust_requirements(&project_config, scopes)?;
-                if !requirements.is_empty()
-                    && !osdk_core::trust::is_trusted(
-                        &dirs.config,
-                        &project_config,
-                        trusted_paths.as_ref(),
-                    )?
-                {
-                    return Err(anyhow::anyhow!(osdk_core::t!(
-                        "err.untrusted_config",
-                        path = project_config.display(),
-                        requirements = osdk_core::trust::describe_requirements(&requirements)
-                    )));
+                for project_config in osdk_core::config::inheritance::sources(&project_config)? {
+                    let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
+                    let requirements =
+                        osdk_core::trust::trust_requirements(&project_config, scopes)?;
+                    if !requirements.is_empty()
+                        && !osdk_core::trust::is_trusted(
+                            &dirs.config,
+                            &project_config,
+                            trusted_paths.as_ref(),
+                        )?
+                    {
+                        return Err(anyhow::anyhow!(osdk_core::t!(
+                            "err.untrusted_config",
+                            path = project_config.display(),
+                            requirements = osdk_core::trust::describe_requirements(&requirements)
+                        )));
+                    }
                 }
             }
         }
@@ -303,7 +318,7 @@ impl App {
             show_progress: !overrides.quiet,
         };
 
-        Ok(App {
+        let app = App {
             ctx,
             registry,
             prompt,
@@ -311,7 +326,34 @@ impl App {
             refresh_sources: overrides.refresh_sources,
             dynamic_scan: std::cell::RefCell::new(None),
             shim_owners: std::cell::RefCell::new(None),
-        })
+        };
+        if let ProjectAccess::Gated(scopes) = access {
+            if scopes.contains(&osdk_core::trust::Scope::Run) {
+                if let Some(path) = &app.ctx.config.project_config_path {
+                    let anchor = osdk_core::config::inheritance::sources(path)?
+                        .into_iter()
+                        .next()
+                        .unwrap();
+                    let base = anchor.parent().unwrap();
+                    for expanded in osdk_core::deps::expand_roots(
+                        base,
+                        &app.ctx.config.tasks.config.roots,
+                        "task.roots",
+                    )? {
+                        if let Some(path) = osdk_core::config::PROJECT_CONFIG_NAMES
+                            .iter()
+                            .map(|name| expanded.directory.join(name))
+                            .find(|path| path.is_file())
+                        {
+                            for source in osdk_core::config::inheritance::sources(&path)? {
+                                app.ensure_config_trusted(&source, scopes)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(app)
     }
 }
 #[cfg(test)]

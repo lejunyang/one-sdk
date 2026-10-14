@@ -16,6 +16,8 @@ use crate::error::{Error, Result};
 use crate::source::{Selection, Source, SourceMode};
 use crate::store::link::LinkMode;
 
+pub mod inheritance;
+
 pub const PROJECT_CONFIG_NAMES: &[&str] = &["osdk.toml", ".osdk.toml"];
 
 /// Fully-resolved settings after merging all layers.
@@ -1958,7 +1960,7 @@ impl Config {
             // errors to the file that caused them, which matters most here -- a parse
             // error blamed on the monorepo root would send the reader to the wrong
             // file entirely.
-            let file = read_config_file(&path)?;
+            let mut file = read_config_file(&path)?;
 
             // A sub-project contributes task *definitions* and nothing else.
             //
@@ -1978,7 +1980,8 @@ impl Config {
             // Rejected rather than ignored. A silently ineffective setting is worse
             // than an error: the user wrote it, sees no complaint, and concludes it
             // took effect.
-            if file.task.is_some() {
+            let inherited = inheritance::sources(&path)?.len() > 1;
+            if file.task.is_some() && !inherited {
                 return Err(Error::config(format!(
                     "{}: a sub-project cannot declare `[task]`; runner defaults \
                      such as `shell` belong to the config that declares \
@@ -1987,6 +1990,7 @@ impl Config {
                 )));
             }
 
+            let inherited_defaults = if inherited { file.task.take() } else { None };
             let prefix = format!("//{}:", expanded.relative);
             let prefixed = file
                 .tasks
@@ -1997,7 +2001,18 @@ impl Config {
                     // including when it inherits the root's default `dir`.
                     // Leaving a relative path here resolves it against the
                     // monorepo root later and breaks otherwise valid scripts.
-                    let dir = def.dir.as_deref().or(self.tasks.config.dir.as_deref());
+                    if def.shell.is_none() {
+                        def.shell = inherited_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.shell.clone());
+                    }
+                    let dir = def
+                        .dir
+                        .as_deref()
+                        .or(inherited_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.dir.as_deref()))
+                        .or(self.tasks.config.dir.as_deref());
                     def.dir = Some(
                         crate::tasks::runner::resolve_dir(&expanded.directory, dir)
                             .to_string_lossy()
@@ -2242,8 +2257,8 @@ fn truthy(s: &str) -> bool {
 }
 
 fn read_config_file(path: &Path) -> Result<ConfigFile> {
-    let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    let mut file: ConfigFile = toml::from_str(&text).map_err(sanitize_config_parse_error)?;
+    let value = inheritance::load(path)?;
+    let mut file: ConfigFile = value.try_into().map_err(sanitize_config_parse_error)?;
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
         normalize_registry_urls(&mut registries.npm.urls)?;
@@ -2253,6 +2268,14 @@ fn read_config_file(path: &Path) -> Result<ConfigFile> {
         validate_containers_config(containers)?;
     }
     Ok(file)
+}
+
+#[cfg(feature = "install")]
+pub fn dependency_tool_versions(path: &Path) -> Result<BTreeMap<String, String>> {
+    let file = read_config_file(path)?;
+    let mut config = Config::default();
+    config.apply_tool_configs(&file.tools)?;
+    Ok(config.tools)
 }
 
 fn sanitize_config_parse_error(error: toml::de::Error) -> Error {
@@ -2394,7 +2417,8 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                     .keys()
                     .map(|tool| (tool.clone(), ToolConfigOrigin::ProjectConfig(path.clone()))),
             );
-            cfg.apply_file(file, false, Some(&path))?;
+            let anchor = inheritance::sources(&path)?.into_iter().next().unwrap();
+            cfg.apply_file(file, false, Some(&anchor))?;
             cfg.project_config_path = Some(path);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {

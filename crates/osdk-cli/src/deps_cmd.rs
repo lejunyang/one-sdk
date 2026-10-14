@@ -72,12 +72,19 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         report_undeclared(&cwd)?;
         return Ok(());
     };
+    let config_path = osdk_core::config::inheritance::deps_anchor(&config_path)?;
     let root = config_path.parent().unwrap_or(&cwd);
-    if app.ctx.config.deps.providers.is_empty() && app.ctx.config.deps.projects.is_empty() {
+    let deps_config = osdk_core::config::inheritance::deps_file(&config_path)?;
+    let deps_config = if deps_config.providers.is_empty() && deps_config.projects.is_empty() {
+        app.ctx.config.deps.clone()
+    } else {
+        deps_config
+    };
+    if deps_config.providers.is_empty() && deps_config.projects.is_empty() {
         report_undeclared(&cwd)?;
         return Ok(());
     }
-    let entries = deps::catalog::catalog(root, &config_path, &app.ctx.config.deps)?;
+    let entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
     let selected = select_projects(&entries, &cwd, &options);
     if !options.filter.is_empty() && selected.is_empty() {
         return Err(anyhow!(
@@ -93,7 +100,13 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             return Err(anyhow!("no matching dependency project for `{operand}`"));
         }
     }
-    let tool_versions = resolved_tool_versions(app);
+    if !options.list && !options.dry_run && !options.verify {
+        for entry in &selected {
+            for source in &entry.config.config_sources {
+                app.ensure_config_trusted(source, &[osdk_core::trust::Scope::Deps])?;
+            }
+        }
+    }
     let mut resolved = Vec::new();
     for entry in selected {
         let unit = entry.unit.clone();
@@ -119,9 +132,27 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         let config = entry.config.clone();
         let schema = deps::provider_schema(&project.provider);
         let choice = deps::select_installer(&project, &config, &[])?;
-        let mut plan = deps::plan(&project, &choice, &config, &tool_versions)?;
+        let mut plan = deps::plan(
+            &project,
+            &choice,
+            &config,
+            &resolved_tool_versions(app, &config),
+        )?;
         if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
             plan.args.push("--all-packages".into());
+        }
+        if app.ctx.config.settings.offline {
+            if config.run.is_some() {
+                return Err(anyhow!(
+                    "offline mode cannot be guaranteed for a custom deps command"
+                ));
+            }
+            match &*project.provider {
+                "npm" | "pnpm" | "uv" | "pip-requirements" | "cargo" => {
+                    plan.args.push("--offline".into())
+                }
+                other => return Err(anyhow!("offline deps is not supported for `{other}`")),
+            }
         }
         if options.frozen && !plan.frozen {
             return Err(anyhow!(
@@ -173,6 +204,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 if let Some(reason) = item.decision.reason() {
                     println!("    reason: {reason}");
                 }
+                println!("    config sources: {:?}", item.config.config_sources);
                 println!(
                     "    installer: {} ({:?})",
                     item.choice.provider, item.choice.origin
@@ -429,7 +461,12 @@ async fn ensure_tools(
         };
         let spec = match &pinned {
             Some(version) => format!("{}@{version}", required.id),
-            None => match app.ctx.config.tools.get(required.id) {
+            None => match item
+                .config
+                .project_tools
+                .get(required.id)
+                .or_else(|| app.ctx.config.global_tools.get(required.id))
+            {
                 Some(configured) => format!("{}@{configured}", required.id),
                 None => required.id.to_string(),
             },
@@ -596,7 +633,11 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// would make the next run report "up to date" for a tree that was never
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
-    let command = freshness_command(&item.plan, &item.config, &resolved_tool_versions(app));
+    let command = freshness_command(
+        &item.plan,
+        &item.config,
+        &resolved_tool_versions(app, &item.config),
+    );
     let sources = tracked_sources(item.schema, &item.config, item.unit.as_ref());
     let existing: Vec<PathBuf> = sources
         .iter()
@@ -772,8 +813,9 @@ fn select_projects<'a>(
 
 /// Tool versions osdk already resolved, so a provider that dispatches on the
 /// major (yarn) sees the same version that will actually run.
-fn resolved_tool_versions(app: &App) -> BTreeMap<String, String> {
-    let mut versions = app.ctx.config.tools.clone();
+fn resolved_tool_versions(app: &App, config: &ProviderConfig) -> BTreeMap<String, String> {
+    let mut versions = app.ctx.config.global_tools.clone();
+    versions.extend(config.project_tools.clone());
     let ids: std::collections::BTreeSet<_> = deps::PROVIDERS
         .iter()
         .flat_map(|schema| schema.required_tools.iter().map(|tool| tool.id))
@@ -810,7 +852,7 @@ fn decide(
         .collect();
     let path = state::state_path(&app.ctx.dirs.cache, &project.root);
     let persisted = state::DepsState::load(&path)?;
-    let command = freshness_command(plan, config, &resolved_tool_versions(app));
+    let command = freshness_command(plan, config, &resolved_tool_versions(app, config));
     let inputs = state::Inputs {
         sources: &existing,
         declared_sources: !sources.is_empty(),
