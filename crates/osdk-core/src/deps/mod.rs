@@ -370,7 +370,6 @@ pub struct ProviderConfig {
     pub env: BTreeMap<String, String>,
     pub dir: Option<String>,
     pub depends: Vec<String>,
-    pub installer: Option<String>,
     pub index: Option<String>,
     pub allow_build_from_source: bool,
 }
@@ -382,9 +381,7 @@ pub enum InstallerOrigin {
     Manifest,
     /// An existing native lockfile owns the tree.
     NativeLock,
-    /// `[deps.<id>].installer`.
-    ProjectConfig,
-    /// Settings fallback / the provider is itself the installer.
+    /// The provider is itself the installer.
     Default,
 }
 
@@ -779,23 +776,16 @@ fn detect_in(
 /// Priority, highest first:
 /// 1. the project manifest's own declaration (`packageManager`),
 /// 2. the installer that owns an existing native lockfile,
-/// 3. `[deps.<id>].installer`,
-/// 4. the provider itself.
+/// 3. the provider itself.
 ///
-/// Note 3 sits *below* 2: both the manifest and an incumbent lockfile are the
+/// Both the manifest and an incumbent lockfile are the
 /// project's own statements, and osdk-side configuration must not take a tree
 /// away from the installer already managing it. A declaration that disagrees
 /// with the lockfile is rejected rather than guessed at.
 pub fn select_installer(
     project: &DetectedProject,
-    config: &ProviderConfig,
     peers: &[DetectedProject],
 ) -> Result<InstallerChoice> {
-    if let Some(installer) = &config.installer {
-        if installer.as_str() != &*project.provider {
-            return Err(Error::config(format!("deprecated `deps.{}.installer = \"{}\"` conflicts with the provider; use `[deps.{}]` instead", project.provider, installer, installer)));
-        }
-    }
     // Two installers of the same ecosystem both claiming the tree is a conflict
     // the user must resolve; picking one would silently pick a lockfile.
     let rivals: Vec<&DetectedProject> = peers
@@ -813,7 +803,7 @@ pub fn select_installer(
         names.sort_unstable();
         return Err(Error::config(format!(
             "{} has lockfiles for more than one installer ({}); \
-             set `[deps.<provider>].installer` or remove the stale lockfile",
+             remove the stale lockfile",
             project.root.display(),
             names.join(", ")
         )));
@@ -855,21 +845,6 @@ pub fn select_installer(
         return Ok(InstallerChoice {
             provider: project.provider.clone(),
             origin: InstallerOrigin::NativeLock,
-            version: None,
-        });
-    }
-
-    if let Some(installer) = &config.installer {
-        if installer.as_str() != &*project.provider {
-            return Err(Error::config(format!(
-                "`[deps.{}].installer = \"{}\"` does not match the provider; \
-                 enable `[deps.{}]` instead",
-                project.provider, installer, installer
-            )));
-        }
-        return Ok(InstallerChoice {
-            provider: project.provider.clone(),
-            origin: InstallerOrigin::ProjectConfig,
             version: None,
         });
     }
@@ -1093,17 +1068,12 @@ mod tests {
             ])),
             ..Default::default()
         };
-        let choice = select_installer(&projects[0], &config, &projects).unwrap();
+        let choice = select_installer(&projects[0], &projects).unwrap();
         let plan = plan(&projects[0], &choice, &config, &BTreeMap::new()).unwrap();
         assert_eq!(plan.program, "wrapper");
         assert_eq!(plan.args, ["one argument"]);
         assert!(!plan.frozen);
         assert!(plan.downgraded_reason.unwrap().contains("cannot guarantee"));
-        let conflicting = ProviderConfig {
-            installer: Some("pnpm".into()),
-            ..config
-        };
-        assert!(select_installer(&projects[0], &conflicting, &projects).is_err());
     }
 
     #[test]
@@ -1487,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn installer_priority_manifest_beats_lock_beats_config() {
+    fn installer_priority_manifest_beats_lock_beats_provider() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
 
@@ -1498,26 +1468,20 @@ mod tests {
         );
         write(&root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
         let found = discover(root, Some(root), &[&node::PNPM]).unwrap();
-        let choice = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap();
+        let choice = select_installer(&found[0], &found).unwrap();
         assert_eq!(choice.origin, InstallerOrigin::Manifest);
         assert_eq!(choice.version.as_deref(), Some("10.4.1"));
 
         // 2. no declaration, incumbent lock decides.
         write(&root.join("package.json"), r#"{"name":"p"}"#);
         let found = discover(root, Some(root), &[&node::PNPM]).unwrap();
-        let choice = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap();
+        let choice = select_installer(&found[0], &found).unwrap();
         assert_eq!(choice.origin, InstallerOrigin::NativeLock);
 
-        // 3. neither: project config, then the provider itself.
+        // 3. neither: the provider itself.
         std::fs::remove_file(root.join("pnpm-lock.yaml")).unwrap();
         let found = discover(root, Some(root), &[&node::PNPM]).unwrap();
-        let config = ProviderConfig {
-            installer: Some("pnpm".into()),
-            ..Default::default()
-        };
-        let choice = select_installer(&found[0], &config, &found).unwrap();
-        assert_eq!(choice.origin, InstallerOrigin::ProjectConfig);
-        let choice = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap();
+        let choice = select_installer(&found[0], &found).unwrap();
         assert_eq!(choice.origin, InstallerOrigin::Default);
     }
 
@@ -1531,7 +1495,7 @@ mod tests {
         );
         write(&root.join("package-lock.json"), r#"{"lockfileVersion":3}"#);
         let found = discover(root, Some(root), &[&node::NPM]).unwrap();
-        let error = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap_err();
+        let error = select_installer(&found[0], &found).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("declares"), "{message}");
         assert!(message.contains("package-lock.json"), "{message}");
@@ -1545,7 +1509,7 @@ mod tests {
         write(&root.join("package-lock.json"), r#"{"lockfileVersion":3}"#);
         write(&root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
         let found = discover(root, Some(root), &[&node::NPM, &node::PNPM]).unwrap();
-        let error = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap_err();
+        let error = select_installer(&found[0], &found).unwrap_err();
         assert!(
             error.to_string().contains("more than one installer"),
             "{error}"

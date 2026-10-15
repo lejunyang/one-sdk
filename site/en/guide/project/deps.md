@@ -143,7 +143,7 @@ higher:
 2. A native lockfile already on disk -- whoever wrote it keeps managing it.
 3. The sole eligible provider in the effective project configuration.
 
-`installer` is a deprecated compatibility field and must match the provider, even when a manifest or lock establishes ownership.
+Select the provider directly with `[deps.<provider>]`; manifests and lockfiles validate ownership.
 
 Two contradictions are refused rather than guessed: a declaration of `pnpm`
 next to nothing but a `yarn.lock`, and two lockfiles of the same ecosystem in one
@@ -378,7 +378,6 @@ outputs = ["node_modules"]  # missing means stale (replaces the default)
 dir = "apps/api"            # run in a subdirectory
 depends = ["npm"]           # materialize another provider first
 timeout = "10m"
-installer = "pnpm"
 index = "https://registry.npmjs.org/"
 allow_build_from_source = false
 env = { CI = "1" }
@@ -459,7 +458,7 @@ Undeclared `sources`, or declared sources that match no files at all, never coun
 as fresh: a predicate that matches nothing is vacuously true, which would dress
 up "nothing was checked" as "nothing changed".
 
-`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `installer` is deprecated and must match the provider name; remove it. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
 
 ### Per-project dependencies
 

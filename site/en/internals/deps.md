@@ -519,7 +519,7 @@ rather than a skip. Walking silently past a broken `package.json` produces
 "installed the wrong project, or nothing, and reported success".
 
 `select_installer()` keeps the priority order `npm_tools.rs` already established
-in `select_automatic_installer`: declaration → existing lock → the sole eligible provider; `installer` is only a compatibility consistency check. Both contradictions (a declaration disagreeing with the lockfile's owner,
+in `select_automatic_installer`: declaration → existing lock → the sole eligible provider. Both contradictions (a declaration disagreeing with the lockfile's owner,
 two lockfiles of one ecosystem) name the specific files and then refuse.
 
 ## Trust, in three tiers
@@ -531,7 +531,7 @@ teaches the user nothing".
 
 | Case | Approval | Why |
 | --- | --- | --- |
-| `[deps.pnpm]`, `sources`, `outputs`, `auto`, `dir`, `depends`, `installer` | No | Scripts are off by default; this only declares what to install |
+| `[deps.pnpm]`, `sources`, `outputs`, `auto`, `dir`, `depends` | No | Scripts are off by default; this only declares what to install |
 | `index` / `extra_index` / `registry` / `insecure` | Yes, `WeakensVerification` | The source of the bytes changed -- **not** code execution |
 | `env` variables named `*_REGISTRY`, `*REGISTRY_SERVER`, `*_INDEX_URL`, `*_DEFAULT_INDEX`, or containing `:REGISTRY` | Yes, `WeakensVerification` | Equivalent to the row above; cannot be left out |
 | `allow_build_from_source` | Yes, `ExecutesCode` | Arbitrary code really does run locally |
@@ -647,7 +647,7 @@ Whether a script actually ran was determined by having it append a line to a
 marker file and then reading that file -- not by the exit code, which being 0
 proves nothing about scripts not running.
 
-`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `installer` is deprecated and must match the provider name; remove it. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
 
 ### Per-project dependencies
 

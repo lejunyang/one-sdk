@@ -1417,12 +1417,20 @@ impl Default for DepsProviderEntry {
             dir: None,
             depends: Vec::new(),
             timeout: None,
-            installer: None,
             index: None,
             extra_index: None,
             allow_build_from_source: false,
         }
     }
+}
+
+#[cfg(all(test, feature = "install"))]
+#[test]
+fn deps_installer_is_an_unknown_field() {
+    let error = toml::from_str::<DepsProviderEntry>("installer = 'npm'").unwrap_err();
+    assert!(error.message().contains("unknown field `installer`"));
+    let entry = toml::from_str::<DepsProviderEntry>("auto = false").unwrap();
+    assert!(!entry.auto);
 }
 
 #[cfg(feature = "install")]
@@ -1505,8 +1513,6 @@ pub struct DepsProviderEntry {
     pub depends: Vec<String>,
     /// Timeout for the install command, e.g. "5m".
     pub timeout: Option<String>,
-    /// Deprecated compatibility alias: must equal the provider name.
-    pub installer: Option<String>,
     /// Registry/index override. Its presence is what makes this entry
     /// trust-requiring as `WeakensVerification` -- it redirects where bytes come
     /// from (see `trust::collect_deps_requirements`).

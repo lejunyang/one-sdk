@@ -17,6 +17,36 @@ fn write(root: &Path, path: &str, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
 }
+
+#[test]
+fn removed_installer_is_rejected_in_root_project_and_inherited_configuration() {
+    for config in [
+        "[deps.npm]\ninstaller='npm'\n",
+        "[deps.projects.'apps/web'.npm]\ninstaller='npm'\n",
+        "[deps]\nroots=['apps/*']\n[deps.npm]\n",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "package.json", "{}");
+        write(root, "apps/web/package.json", "{}");
+        write(root, "osdk.toml", config);
+        let inherited = !config.contains("installer");
+        if inherited {
+            write(
+                root,
+                "apps/web/osdk.toml",
+                "extends='../../osdk.toml'\n[deps.npm]\ninstaller='npm'\n",
+            );
+        }
+        for cwd in [root.to_path_buf(), root.join("apps/web")] {
+            let output = run(root, &cwd, &["deps", "--list", "--all"]);
+            assert!(!output.status.success(), "{output:?}");
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("unknown field `installer`"), "{error}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("would run in"));
+        }
+    }
+}
 #[test]
 fn filters_route_and_deduplicate_root_and_children_from_either_cwd() {
     let temp = tempfile::tempdir().unwrap();

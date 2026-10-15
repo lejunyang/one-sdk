@@ -129,7 +129,7 @@ osdk 还会传 `UV_PYTHON_DOWNLOADS=never`，确保用的是 osdk 选定的解�
 2. 目录里现存的原生 lockfile——谁写的谁继续管。
 3. 本项目有效配置中唯一匹配的 provider。
 
-`installer` 是废弃兼容字段，必须与 provider 名相同，即使清单/锁已确定归属也会校验。
+provider 直接由 `[deps.<provider>]` 选择，归属由清单和锁文件校验。
 
 两处矛盾会被拒绝而不是猜测：声明了 `pnpm` 却只有 `yarn.lock`，或同一目录里
 同时存在两个生态相同的 lockfile。二者都会报出具体是哪两个，让你自己决定留哪个。
@@ -334,7 +334,6 @@ outputs = ["node_modules"]  # 缺失即视为过期（替换默认值）
 dir = "apps/api"            # 在子目录里运行
 depends = ["npm"]           # 先兑现另一个 provider
 timeout = "10m"
-installer = "pnpm"
 index = "https://registry.npmjs.org/"
 allow_build_from_source = false
 env = { CI = "1" }
@@ -399,7 +398,7 @@ pnpm 上还多抓到一种 npm 收据抓不到的：**改动后文件长度不�
 未声明 `sources`、或声明后一个文件都没匹配上，一律不算「新鲜」——
 一个匹配不到任何文件的判据恒为真，那会把「什么都没检查」伪装成「没有变化」。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`installer` 已废弃且必须与 provider 名一致，请删除。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
 
 ### 按项目声明依赖
 

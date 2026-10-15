@@ -166,7 +166,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         }
         let config = entry.config.clone();
         let schema = deps::provider_schema(&project.provider);
-        let choice = deps::select_installer(&project, &config, &[])?;
+        let choice = deps::select_installer(&project, &[])?;
         let mut plan = deps::plan(
             &project,
             &choice,
@@ -1154,7 +1154,7 @@ mod tests {
                 depends: needs.iter().map(|s| s.to_string()).collect(),
                 ..Default::default()
             };
-            let choice = osdk_core::deps::select_installer(&project, &config, &[]).unwrap();
+            let choice = osdk_core::deps::select_installer(&project, &[]).unwrap();
             let plan = osdk_core::deps::plan_custom(&project, &config).unwrap();
             super::Resolved {
                 schema: None,

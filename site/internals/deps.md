@@ -422,7 +422,7 @@ manifest 存在但不是常规文件、或解析失败，一律报错而不是�
 却报告成功」。
 
 `select_installer()` 的优先级与 `npm_tools.rs` 既有的
-`select_automatic_installer` 保持一致：声明 → 现存 lock → 唯一有效 provider；`installer` 只做兼容一致性校验。
+`select_automatic_installer` 保持一致：声明 → 现存 lock → 唯一有效 provider。
 两处矛盾（声明与 lock 归属不符、同生态双 lock）都报出具体文件名后拒绝执行。
 
 ## trust 分三档
@@ -432,7 +432,7 @@ manifest 存在但不是常规文件、或解析失败，一律报错而不是�
 
 | 情形 | 是否需要批准 | 理由 |
 | --- | --- | --- |
-| `[deps.pnpm]`、`sources`、`outputs`、`auto`、`dir`、`depends`、`installer` | 不需要 | 默认禁脚本，只是声明装什么 |
+| `[deps.pnpm]`、`sources`、`outputs`、`auto`、`dir`、`depends` | 不需要 | 默认禁脚本，只是声明装什么 |
 | `index` / `extra_index` / `registry` / `insecure` | 需要，`WeakensVerification` | 改了字节来源，**不是**因为执行代码 |
 | `env` 里形如 `*_REGISTRY` / `*REGISTRY_SERVER` / `*_INDEX_URL` / `*_DEFAULT_INDEX` / 含 `:REGISTRY` 的变量 | 需要，`WeakensVerification` | 与上一行等效，不能漏 |
 | `allow_build_from_source` | 需要，`ExecutesCode` | 真的在本机执行任意代码 |
@@ -529,7 +529,7 @@ node v22.23.2、npm 10.9.8、pnpm 9.15.1 与 12.5.1、yarn 1.22.19 与 4.6.0
 判定脚本是否真的执行，用的是「脚本往标记文件追加一行、然后读标记文件内容」，
 不看退出码——退出码为 0 不能说明脚本没跑。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`installer` 已废弃且必须与 provider 名一致，请删除。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
 
 ### 按项目声明依赖
 

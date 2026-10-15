@@ -128,7 +128,6 @@ disable = ["npm"]
 | `timeout` | string | 无 | 单个 provider 的执行上限 |
 | `allow_build_from_source` | bool / string | `false` | **trust 第三档开关**（§11.3）。默认拒绝源码构建 / 生命周期脚本 |
 | `index` / `extra_index` | string | 无 | 覆盖索引；一旦出现即触发 `WeakensVerification`（§11.2） |
-| `installer` | string | auto | 显式钉 installer（如 `pnpm`/`npm`、`uv`/`pip`），覆盖自动优先级（§7） |
 
 顶层 `[deps]` 另有：`disable = [...]`（禁用继承来的 provider）。
 
@@ -545,16 +544,15 @@ project graph 具体从哪些字段推断依赖；各第三方 cargo affected cr
 ### 7.1 同生态内的 installer 优先级（照 npm 已验证的顺序）
 
 ```text
-① 项目清单自己的声明        （package.json 的 packageManager；pyproject 的工具段）
+① 项目清单自己的声明        （package.json 的 packageManager）
 ② 现存原生 lock 的归属者     （谁写的 lock 谁继续管）
-③ [deps.<p>].installer      （项目显式钉）
-④ settings.<eco>.default_installer（仅兜底）
+③ 唯一有效的 [deps.<provider>]（无声明或 lock 时）
 冲突即报错，绝不挑一个猜着跑：
   - 清单声明 pnpm 但目录里是 package-lock.json ⇒ 报错（照 err.npm_manager_lock_owner_conflict）
-  - 同层出现两种 lock（pnpm-lock.yaml + package-lock.json）⇒ 报错，要求显式 installer
+  - 同层出现两种 lock（pnpm-lock.yaml + package-lock.json）⇒ 报错，要求清理冲突锁文件
 ```
 
-注意 ③ 排在 ② 之后：项目**清单**的声明与**现有 lock** 都比 osdk 侧配置更权威，这与 `npm_tools.rs:313-316` 的注释（改 default 绝不会把已声明/已有 lock 的项目抢走）一致。
+项目**清单**的声明与**现有 lock** 都比 osdk 侧配置更权威；provider 由表名直接选择，不提供跨包管理器迁移字段。
 
 ### 7.2 工具缺失时怎么装（复用现有链，不重造）
 
@@ -825,7 +823,7 @@ AGENTS.md 记过 pypi「只写 installer 不回读、重锁被本机环境静默
 ## 14. 公开面变更预告（供评审）
 
 - 新增一级命令 `osdk deps`（+ `status`/`doctor` 子命令）。
-- 新增配置段 `[deps]`；新增 `settings.deps.{on_install,status_stale}`、`settings.<eco>.default_installer`（Node 侧已有 `settings.npm.default_installer`，Python 侧新增）。
+- 新增配置段 `[deps]`；新增 `settings.deps.{on_install,status_stale}`；deps provider 由表名选择，不新增同生态默认安装器配置。
 - osdk.lock 新增 `[deps.<provider>]` 段（可选、空则不落盘、schema 不升）。
 - trust 新增 `deps` 分类（默认多数不要求 trust；自定义 provider 与放开源码构建要求 trust）。
 

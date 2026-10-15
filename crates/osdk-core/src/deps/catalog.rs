@@ -49,7 +49,6 @@ impl TryFrom<&DepsProviderEntry> for ProviderConfig {
             env: entry.env.clone(),
             dir: entry.dir.clone(),
             depends: entry.depends.clone(),
-            installer: entry.installer.clone(),
             index: entry.index.clone(),
             allow_build_from_source: entry.allow_build_from_source,
         })
@@ -271,20 +270,37 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
         let configs: BTreeMap<String, ProviderConfig> = entries
             .iter()
             .filter(|(id, entry)| {
-                entry
-                    .dir
-                    .as_deref()
-                    .is_none_or(|dir| effective_cwd(&root, Some(dir)).canonicalize().is_ok_and(|path|path == directory || units.iter().any(|unit| unit.provider == **id && unit.root == path && unit.members.contains(&directory))))
+                entry.dir.as_deref().is_none_or(|dir| {
+                    effective_cwd(&root, Some(dir))
+                        .canonicalize()
+                        .is_ok_and(|path| {
+                            path == directory
+                                || units.iter().any(|unit| {
+                                    unit.provider == **id
+                                        && unit.root == path
+                                        && unit.members.contains(&directory)
+                                })
+                        })
+                })
             })
             .map(|(id, entry)| {
                 let mut config = ProviderConfig::try_from(entry)?;
                 config.config_sources = config_sources.clone();
-                config.project_config=Some(local_path.clone().unwrap_or_else(||config_path.to_path_buf()));
-                let base=config.project_config.as_deref().unwrap().parent().unwrap();
-                for path in config.sources.iter_mut().chain(&mut config.outputs) { *path=owned_path(base,path); }
-                config.project_tools = crate::config::dependency_tool_versions(local_path.as_deref().unwrap_or(config_path))?;
-                if entry.dir.is_some() { config.dir = None; }
-                if config.installer.is_some() { eprintln!("warning: installer is deprecated for deps.{id}; remove it and select the provider by name"); }
+                config.project_config = Some(
+                    local_path
+                        .clone()
+                        .unwrap_or_else(|| config_path.to_path_buf()),
+                );
+                let base = config.project_config.as_deref().unwrap().parent().unwrap();
+                for path in config.sources.iter_mut().chain(&mut config.outputs) {
+                    *path = owned_path(base, path);
+                }
+                config.project_tools = crate::config::dependency_tool_versions(
+                    local_path.as_deref().unwrap_or(config_path),
+                )?;
+                if entry.dir.is_some() {
+                    config.dir = None;
+                }
                 Ok((id.clone(), config))
             })
             .collect::<Result<_>>()?;
@@ -337,7 +353,7 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                 }
             }
             let config = configs.get(&*project.provider).unwrap().clone();
-            let choice = select_installer(&project, &config, &[])?;
+            let choice = select_installer(&project, &[])?;
             let _ = choice; // Validate even when CLI filters omit this project.
             result.push(ProjectEntry {
                 relative: relative.clone(),
