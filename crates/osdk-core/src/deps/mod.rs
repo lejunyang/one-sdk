@@ -25,11 +25,13 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+pub mod catalog;
 pub mod native;
 pub mod node;
 pub mod python;
 pub mod state;
 pub mod verify;
+pub mod workspace;
 
 pub use state::{DepsState, ProviderState};
 
@@ -218,15 +220,21 @@ pub fn plan_custom(project: &DetectedProject, config: &ProviderConfig) -> Result
     // this, and the redundancy made the guard untestable: removing either one left
     // the other still rejecting, so injecting a fault produced no observable
     // change. A guard whose removal is invisible cannot be trusted to be there.
-    let command = config.run.as_deref().unwrap_or_default();
-    let mut parts = command.split_whitespace();
-    let program = parts.next().ok_or_else(|| {
-        Error::config(format!(
-            "custom deps provider `{}` needs a `run` command",
-            project.provider
-        ))
-    })?;
-    let args: Vec<String> = parts.map(str::to_string).collect();
+    let argv = config
+        .run
+        .as_ref()
+        .map(|run| run.argv())
+        .unwrap_or_default();
+    let program = argv
+        .first()
+        .filter(|program| !program.trim().is_empty())
+        .ok_or_else(|| {
+            Error::config(format!(
+                "deps provider `{}` needs a nonempty `run` command",
+                project.provider
+            ))
+        })?;
+    let args = argv[1..].to_vec();
 
     Ok(RunPlan {
         tool: std::borrow::Cow::Owned(project.provider.to_string()),
@@ -350,11 +358,18 @@ pub struct ProviderConfig {
     pub auto: bool,
     pub sources: Vec<String>,
     pub outputs: Vec<String>,
-    pub run: Option<String>,
+    pub run: Option<crate::config::DepsCommand>,
+    pub timeout: Option<std::time::Duration>,
+    pub sources_explicit: bool,
+    pub config_sources: Vec<PathBuf>,
+    pub project_tools: BTreeMap<String, String>,
+    pub project_config: Option<PathBuf>,
+    pub project_context: String,
+    pub offline: bool,
+    pub outputs_explicit: bool,
     pub env: BTreeMap<String, String>,
     pub dir: Option<String>,
     pub depends: Vec<String>,
-    pub installer: Option<String>,
     pub index: Option<String>,
     pub allow_build_from_source: bool,
 }
@@ -366,9 +381,7 @@ pub enum InstallerOrigin {
     Manifest,
     /// An existing native lockfile owns the tree.
     NativeLock,
-    /// `[deps.<id>].installer`.
-    ProjectConfig,
-    /// Settings fallback / the provider is itself the installer.
+    /// The provider is itself the installer.
     Default,
 }
 
@@ -530,6 +543,15 @@ pub fn expand_roots(
 ) -> Result<Vec<ExpandedRoot>> {
     let mut found = Vec::new();
     for pattern in roots {
+        if Path::new(pattern).is_absolute()
+            || pattern.contains(':')
+            || pattern.starts_with(['/', '\\'])
+            || pattern.contains("**")
+        {
+            return Err(Error::config(format!(
+                "`{label}` requires bounded relative patterns: {pattern}"
+            )));
+        }
         let normalized = normalize_relative(pattern);
         let segments: Vec<&str> = relative_segments(&normalized);
         if segments.is_empty() {
@@ -754,16 +776,14 @@ fn detect_in(
 /// Priority, highest first:
 /// 1. the project manifest's own declaration (`packageManager`),
 /// 2. the installer that owns an existing native lockfile,
-/// 3. `[deps.<id>].installer`,
-/// 4. the provider itself.
+/// 3. the provider itself.
 ///
-/// Note 3 sits *below* 2: both the manifest and an incumbent lockfile are the
+/// Both the manifest and an incumbent lockfile are the
 /// project's own statements, and osdk-side configuration must not take a tree
 /// away from the installer already managing it. A declaration that disagrees
 /// with the lockfile is rejected rather than guessed at.
 pub fn select_installer(
     project: &DetectedProject,
-    config: &ProviderConfig,
     peers: &[DetectedProject],
 ) -> Result<InstallerChoice> {
     // Two installers of the same ecosystem both claiming the tree is a conflict
@@ -783,7 +803,7 @@ pub fn select_installer(
         names.sort_unstable();
         return Err(Error::config(format!(
             "{} has lockfiles for more than one installer ({}); \
-             set `[deps.<provider>].installer` or remove the stale lockfile",
+             remove the stale lockfile",
             project.root.display(),
             names.join(", ")
         )));
@@ -829,21 +849,6 @@ pub fn select_installer(
         });
     }
 
-    if let Some(installer) = &config.installer {
-        if installer.as_str() != &*project.provider {
-            return Err(Error::config(format!(
-                "`[deps.{}].installer = \"{}\"` does not match the provider; \
-                 enable `[deps.{}]` instead",
-                project.provider, installer, installer
-            )));
-        }
-        return Ok(InstallerChoice {
-            provider: project.provider.clone(),
-            origin: InstallerOrigin::ProjectConfig,
-            version: None,
-        });
-    }
-
     Ok(InstallerChoice {
         provider: project.provider.clone(),
         origin: InstallerOrigin::Default,
@@ -871,6 +876,14 @@ pub fn plan(
     config: &ProviderConfig,
     tool_versions: &BTreeMap<String, String>,
 ) -> Result<RunPlan> {
+    if config.run.is_some() {
+        let mut plan = plan_custom(project, config)?;
+        plan.downgraded_reason = Some(
+            "custom run: osdk cannot guarantee frozen installation or disabled build scripts"
+                .into(),
+        );
+        return Ok(plan);
+    }
     match project.ecosystem {
         Ecosystem::Node => node::plan(project, choice, config, tool_versions),
         Ecosystem::Python => python::plan(project, choice, config, tool_versions),
@@ -888,7 +901,7 @@ pub fn plan(
 /// built-in list rather than adding to it, so a project that narrows `sources`
 /// gets exactly what it asked for.
 pub fn effective_sources(schema: &DepsProviderSchema, config: &ProviderConfig) -> Vec<String> {
-    if config.sources.is_empty() {
+    if config.sources.is_empty() && !config.sources_explicit {
         schema
             .default_sources
             .iter()
@@ -947,6 +960,9 @@ pub struct OutputSpecOwned {
 pub fn effective_cwd(root: &Path, dir: Option<&str>) -> PathBuf {
     match dir {
         Some(dir) => {
+            if Path::new(dir).is_absolute() {
+                return PathBuf::from(dir);
+            }
             let mut path = root.to_path_buf();
             for segment in relative_segments(dir) {
                 path.push(segment);
@@ -1030,6 +1046,36 @@ mod tests {
     ///
     /// `api-*` is the shape that distinguishes them: `api-v1` must be found and
     /// `web-v1`, sitting right beside it with its own manifest, must not.
+    #[test]
+    fn owned_absolute_working_directory_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            effective_cwd(Path::new("other-root"), temp.path().to_str()),
+            temp.path()
+        );
+    }
+
+    #[test]
+    fn builtin_override_preserves_argv_and_does_not_claim_frozen() {
+        let temp = tempfile::tempdir().unwrap();
+        write(&temp.path().join("package.json"), "{}");
+        write(&temp.path().join("package-lock.json"), "{}");
+        let projects = discover(temp.path(), Some(temp.path()), &[&node::NPM]).unwrap();
+        let config = ProviderConfig {
+            run: Some(crate::config::DepsCommand::Argv(vec![
+                "wrapper".into(),
+                "one argument".into(),
+            ])),
+            ..Default::default()
+        };
+        let choice = select_installer(&projects[0], &projects).unwrap();
+        let plan = plan(&projects[0], &choice, &config, &BTreeMap::new()).unwrap();
+        assert_eq!(plan.program, "wrapper");
+        assert_eq!(plan.args, ["one argument"]);
+        assert!(!plan.frozen);
+        assert!(plan.downgraded_reason.unwrap().contains("cannot guarantee"));
+    }
+
     #[test]
     fn a_partial_wildcard_rejects_what_it_does_not_match() {
         let temp = tempfile::tempdir().unwrap();
@@ -1274,7 +1320,7 @@ mod tests {
 
         for run in [None, Some(String::new()), Some("   ".to_string())] {
             let config = ProviderConfig {
-                run,
+                run: run.map(Into::into),
                 ..ProviderConfig::default()
             };
             assert!(
@@ -1411,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn installer_priority_manifest_beats_lock_beats_config() {
+    fn installer_priority_manifest_beats_lock_beats_provider() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
 
@@ -1422,26 +1468,20 @@ mod tests {
         );
         write(&root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
         let found = discover(root, Some(root), &[&node::PNPM]).unwrap();
-        let choice = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap();
+        let choice = select_installer(&found[0], &found).unwrap();
         assert_eq!(choice.origin, InstallerOrigin::Manifest);
         assert_eq!(choice.version.as_deref(), Some("10.4.1"));
 
         // 2. no declaration, incumbent lock decides.
         write(&root.join("package.json"), r#"{"name":"p"}"#);
         let found = discover(root, Some(root), &[&node::PNPM]).unwrap();
-        let choice = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap();
+        let choice = select_installer(&found[0], &found).unwrap();
         assert_eq!(choice.origin, InstallerOrigin::NativeLock);
 
-        // 3. neither: project config, then the provider itself.
+        // 3. neither: the provider itself.
         std::fs::remove_file(root.join("pnpm-lock.yaml")).unwrap();
         let found = discover(root, Some(root), &[&node::PNPM]).unwrap();
-        let config = ProviderConfig {
-            installer: Some("pnpm".into()),
-            ..Default::default()
-        };
-        let choice = select_installer(&found[0], &config, &found).unwrap();
-        assert_eq!(choice.origin, InstallerOrigin::ProjectConfig);
-        let choice = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap();
+        let choice = select_installer(&found[0], &found).unwrap();
         assert_eq!(choice.origin, InstallerOrigin::Default);
     }
 
@@ -1455,7 +1495,7 @@ mod tests {
         );
         write(&root.join("package-lock.json"), r#"{"lockfileVersion":3}"#);
         let found = discover(root, Some(root), &[&node::NPM]).unwrap();
-        let error = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap_err();
+        let error = select_installer(&found[0], &found).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("declares"), "{message}");
         assert!(message.contains("package-lock.json"), "{message}");
@@ -1469,7 +1509,7 @@ mod tests {
         write(&root.join("package-lock.json"), r#"{"lockfileVersion":3}"#);
         write(&root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
         let found = discover(root, Some(root), &[&node::NPM, &node::PNPM]).unwrap();
-        let error = select_installer(&found[0], &ProviderConfig::default(), &found).unwrap_err();
+        let error = select_installer(&found[0], &found).unwrap_err();
         assert!(
             error.to_string().contains("more than one installer"),
             "{error}"

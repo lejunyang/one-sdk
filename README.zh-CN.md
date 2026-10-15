@@ -358,6 +358,21 @@ osdk deps //:npm            # 只处理配置根
 osdk deps //apps/api:npm    # 只处理指定子项目
 ```
 
+独立子项目无需 `osdk.toml`，在根目录统一声明即可：
+
+```toml
+[deps.projects."apps/web".pnpm]
+timeout = "5m"
+[deps.projects."apps/api".pip-requirements]
+auto = false
+```
+
+先用 `osdk deps --list --all --explain` 查看项目与命令，再用 `osdk deps` 一键初始化。`auto = false` 保留显式安装；`disable` 移除 provider。pnpm/uv 原生 workspace 只在共享根安装一次，选择成员时会说明扩大的覆盖范围。独立子配置可用 `extends = "../../osdk.toml"` 显式继承。
+
+覆盖命令支持 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，需要 trust，且不能保证 frozen 或禁脚本。不支持的 `extra_index` 会报迁移错误，不再替换默认索引。显式输入/输出路径属于声明文件（如 `sources = ["apps/api/package.json"]`）。workspace、继承与迁移细节见[依赖指南](site/guide/project/deps.md)。
+
+
+
 声明之后不必每次手动调用：裸跑 `osdk install`、`osdk run <任务>`、`osdk exec`
 之前，osdk 会先比对清单哈希，过期才兑现。命中时只花零点几毫秒、不启动包管理器，
 也不做 `--verify` 那种深度扫描。带具体工具的 `osdk install node@22` 不会触发，

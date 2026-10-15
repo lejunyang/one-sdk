@@ -104,6 +104,8 @@ GitHub Actions 中安装 osdk、恢复缓存并初始化项目环境时，读取
 | `help`（Clap 自动入口） | [reference/help/guide.md](reference/help/guide.md) |
 | `alias` | [reference/alias/guide.md](reference/alias/guide.md) |
 
+显式 `extends` 继承与来源信任见 [配置总览](reference/configuration/overview.md)；按项目依赖与原生 workspace 见 [deps](reference/configuration/deps.md)。
+
 ## 配置段索引
 
 先读 [配置总览](reference/configuration/overview.md)，再只读取涉及的顶层段：

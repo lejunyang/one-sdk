@@ -290,3 +290,5 @@ jobs = 2
 `[settings]` 中完整声明。
 
 `[settings.download_cache]` 使用 `max_size_bytes`（默认 2147483648；0 不保留；`"unlimited"` 不限）与 `max_age_secs`（默认 604800；0 不过期）。`OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖容量。详见[缓存与清理](../maintenance/cache)。
+
+显式继承：子项目 `osdk.toml` 可设置 `extends = "../../osdk.toml"`。目录嵌套不会自动继承。优先级为 CLI/环境变量、子文件字段、显式继承的祖先字段、用户配置、默认值。映射按键合并（包括 env），标量与列表替换，`false`、`[]` 都是有效覆盖。继承的依赖 sources/outputs/dir 与任务 dir/file 路径属于声明它的文件。发现 roots/projects 留在根目录，已发现的子配置不能重定义整个目录。继承子项目以根项目声明为默认，显式 provider 字段优先；独立子配置自行声明 provider。根/子目录调用依赖使用同一目录与有效 provider/工具选项。继承链中每个可执行或改变来源的配置都单独检查信任，信任子文件不代表信任父文件。自身循环、非祖先引用及越过仓库边界均报错。`[task].roots` 仍单独负责聚合；继承的 runner 默认值转换到具体子任务。

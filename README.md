@@ -407,6 +407,21 @@ osdk deps //:npm            # config root only
 osdk deps //apps/api:npm    # one declared sub-project
 ```
 
+Independent sub-projects need no `osdk.toml`; declare them once at the root:
+
+```toml
+[deps.projects."apps/web".pnpm]
+timeout = "5m"
+[deps.projects."apps/api".pip-requirements]
+auto = false
+```
+
+Run `osdk deps --list --all --explain` to inspect the selected projects and commands, then `osdk deps` to initialize them. `auto = false` keeps explicit installation available; `disable` removes a provider. Native pnpm/uv workspaces install once at the shared root, and selecting a member explains the expanded coverage. Child configurations can explicitly inherit with `extends = "../../osdk.toml"`.
+
+Command overrides accept argv arrays, such as `run = ["pnpm", "install", "--offline"]`, and require trust. Overrides cannot guarantee frozen installation or disabled scripts. Unsupported `extra_index` now reports a migration error instead of substituting the default index. Explicit input/output paths belong to their declaring file (for example `sources = ["apps/api/package.json"]`). See the [dependency guide](site/en/guide/project/deps.md) for workspace, inheritance and migration details.
+
+
+
 You don't have to call it every time. A bare `osdk install`, `osdk run <task>` or
 `osdk exec` compares manifest hashes first and materializes only when stale. On a
 hit that costs a fraction of a millisecond, starts no package manager, and does not
