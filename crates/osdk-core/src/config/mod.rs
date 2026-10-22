@@ -16,6 +16,8 @@ use crate::error::{Error, Result};
 use crate::source::{Selection, Source, SourceMode};
 use crate::store::link::LinkMode;
 
+pub mod inheritance;
+
 pub const PROJECT_CONFIG_NAMES: &[&str] = &["osdk.toml", ".osdk.toml"];
 
 /// Fully-resolved settings after merging all layers.
@@ -1362,7 +1364,7 @@ impl ToolConfigValue {
 /// lives one level down, on [`DepsProviderEntry`], where a misspelled field is a
 /// real hazard.
 #[cfg(feature = "install")]
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DepsConfig {
     /// Providers disabled here even if a broader layer enabled them. Disabling
@@ -1377,11 +1379,22 @@ pub struct DepsConfig {
     /// to be the set the project declared, not whatever a subtree walk turns up.
     #[serde(default)]
     pub roots: Vec<String>,
+    /// Explicit per-project overrides, keyed by bounded relative path patterns.
+    pub projects: BTreeMap<String, DepsProject>,
     /// Provider entries, keyed by provider id (`npm`, `pnpm`, ...). An empty
     /// table is enough to select the built-in provider: `auto` defaults to true,
     /// so declaring the provider is also opting into automatic materialization.
     #[serde(flatten)]
     pub providers: BTreeMap<String, DepsProviderEntry>,
+}
+
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DepsProject {
+    pub disable: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub providers: BTreeMap<String, toml::Value>,
 }
 
 // Gated with the type it implements: \DepsProviderEntry\ only exists behind
@@ -1397,14 +1410,13 @@ impl Default for DepsProviderEntry {
     fn default() -> Self {
         Self {
             auto: default_true(),
-            sources: Vec::new(),
+            sources: None,
             outputs: None,
             run: None,
             env: BTreeMap::new(),
             dir: None,
             depends: Vec::new(),
             timeout: None,
-            installer: None,
             index: None,
             extra_index: None,
             allow_build_from_source: false,
@@ -1412,9 +1424,49 @@ impl Default for DepsProviderEntry {
     }
 }
 
+#[cfg(all(test, feature = "install"))]
+#[test]
+fn deps_installer_is_an_unknown_field() {
+    let error = toml::from_str::<DepsProviderEntry>("installer = 'npm'").unwrap_err();
+    assert!(error.message().contains("unknown field `installer`"));
+    let entry = toml::from_str::<DepsProviderEntry>("auto = false").unwrap();
+    assert!(!entry.auto);
+}
+
 #[cfg(feature = "install")]
 fn default_true() -> bool {
     true
+}
+
+/// Direct command execution; arrays preserve arguments with spaces without a shell.
+#[cfg(feature = "install")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum DepsCommand {
+    Text(String),
+    Argv(Vec<String>),
+}
+
+#[cfg(feature = "install")]
+impl From<String> for DepsCommand {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+#[cfg(feature = "install")]
+impl From<&str> for DepsCommand {
+    fn from(value: &str) -> Self {
+        Self::Text(value.into())
+    }
+}
+#[cfg(feature = "install")]
+impl DepsCommand {
+    pub fn argv(&self) -> Vec<String> {
+        match self {
+            Self::Text(text) => text.split_whitespace().map(str::to_string).collect(),
+            Self::Argv(argv) => argv.clone(),
+        }
+    }
 }
 
 /// One `[deps.<provider>]` entry.
@@ -1444,12 +1496,12 @@ pub struct DepsProviderEntry {
     /// Freshness inputs. Replaces the provider's built-in list rather than
     /// adding to it.
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub sources: Option<Vec<String>>,
     /// Tracked outputs. Replaces the built-in list; an explicit empty list
     /// disables output tracking on purpose.
     pub outputs: Option<Vec<String>>,
     /// Override the command entirely.
-    pub run: Option<String>,
+    pub run: Option<DepsCommand>,
     /// Extra environment for the install command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -1461,14 +1513,11 @@ pub struct DepsProviderEntry {
     pub depends: Vec<String>,
     /// Timeout for the install command, e.g. "5m".
     pub timeout: Option<String>,
-    /// Pin the installer explicitly, overriding automatic selection.
-    pub installer: Option<String>,
     /// Registry/index override. Its presence is what makes this entry
     /// trust-requiring as `WeakensVerification` -- it redirects where bytes come
     /// from (see `trust::collect_deps_requirements`).
     pub index: Option<String>,
-    /// Additional index. Same trust class as `index`, and never ranked above the
-    /// default one.
+    /// Unsupported legacy field; use native named indexes / package bindings.
     pub extra_index: Option<String>,
     /// Allow building from source / running lifecycle scripts. `ExecutesCode`:
     /// default denied, must be asked for.
@@ -1917,7 +1966,7 @@ impl Config {
             // errors to the file that caused them, which matters most here -- a parse
             // error blamed on the monorepo root would send the reader to the wrong
             // file entirely.
-            let file = read_config_file(&path)?;
+            let mut file = read_config_file(&path)?;
 
             // A sub-project contributes task *definitions* and nothing else.
             //
@@ -1937,7 +1986,8 @@ impl Config {
             // Rejected rather than ignored. A silently ineffective setting is worse
             // than an error: the user wrote it, sees no complaint, and concludes it
             // took effect.
-            if file.task.is_some() {
+            let inherited = inheritance::sources(&path)?.len() > 1;
+            if file.task.is_some() && !inherited {
                 return Err(Error::config(format!(
                     "{}: a sub-project cannot declare `[task]`; runner defaults \
                      such as `shell` belong to the config that declares \
@@ -1946,6 +1996,7 @@ impl Config {
                 )));
             }
 
+            let inherited_defaults = if inherited { file.task.take() } else { None };
             let prefix = format!("//{}:", expanded.relative);
             let prefixed = file
                 .tasks
@@ -1956,7 +2007,18 @@ impl Config {
                     // including when it inherits the root's default `dir`.
                     // Leaving a relative path here resolves it against the
                     // monorepo root later and breaks otherwise valid scripts.
-                    let dir = def.dir.as_deref().or(self.tasks.config.dir.as_deref());
+                    if def.shell.is_none() {
+                        def.shell = inherited_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.shell.clone());
+                    }
+                    let dir = def
+                        .dir
+                        .as_deref()
+                        .or(inherited_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.dir.as_deref()))
+                        .or(self.tasks.config.dir.as_deref());
                     def.dir = Some(
                         crate::tasks::runner::resolve_dir(&expanded.directory, dir)
                             .to_string_lossy()
@@ -2201,8 +2263,8 @@ fn truthy(s: &str) -> bool {
 }
 
 fn read_config_file(path: &Path) -> Result<ConfigFile> {
-    let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-    let mut file: ConfigFile = toml::from_str(&text).map_err(sanitize_config_parse_error)?;
+    let value = inheritance::load(path)?;
+    let mut file: ConfigFile = value.try_into().map_err(sanitize_config_parse_error)?;
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
         normalize_registry_urls(&mut registries.npm.urls)?;
@@ -2212,6 +2274,14 @@ fn read_config_file(path: &Path) -> Result<ConfigFile> {
         validate_containers_config(containers)?;
     }
     Ok(file)
+}
+
+#[cfg(feature = "install")]
+pub fn dependency_tool_versions(path: &Path) -> Result<BTreeMap<String, String>> {
+    let file = read_config_file(path)?;
+    let mut config = Config::default();
+    config.apply_tool_configs(&file.tools)?;
+    Ok(config.tools)
 }
 
 fn sanitize_config_parse_error(error: toml::de::Error) -> Error {
@@ -2348,12 +2418,28 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
 
     if let Some(start_dir) = start_dir {
         if let Some((path, file)) = find_project_config(start_dir)? {
-            cfg.tool_origins.extend(
-                file.tools
-                    .keys()
-                    .map(|tool| (tool.clone(), ToolConfigOrigin::ProjectConfig(path.clone()))),
-            );
-            cfg.apply_file(file, false, Some(&path))?;
+            let sources = inheritance::sources(&path)?;
+            let canonical_leaf = path
+                .canonicalize()
+                .map_err(|error| Error::io(&path, error))?;
+            for source in &sources {
+                if let Some(tools) = inheritance::raw(source)?
+                    .get("tools")
+                    .and_then(toml::Value::as_table)
+                {
+                    cfg.tool_origins.extend(tools.keys().map(|tool| {
+                        (
+                            tool.clone(),
+                            ToolConfigOrigin::ProjectConfig(if *source == canonical_leaf {
+                                path.clone()
+                            } else {
+                                source.clone()
+                            }),
+                        )
+                    }));
+                }
+            }
+            cfg.apply_file(file, false, sources.first().map(PathBuf::as_path))?;
             cfg.project_config_path = Some(path);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {

@@ -63,258 +63,158 @@ struct Resolved {
     config: ProviderConfig,
     plan: RunPlan,
     decision: state::Decision,
+    unit: Option<deps::workspace::WorkspaceUnit>,
 }
 
 pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("getting current dir")?;
-    let configured = configured_providers(app);
-    if configured.is_empty() {
-        // Detection without configuration only *reports*: silently running
-        // `npm ci` because a package.json exists would be exactly the kind of
-        // implicit, large side effect osdk avoids elsewhere (a bare `install`
-        // does not fetch models either).
+    let cwd = std::env::current_dir()
+        .context("getting current dir")?
+        .canonicalize()
+        .context("canonicalizing dependency cwd")?;
+    let Some(config_path) = app.ctx.config.project_config_path.clone() else {
+        report_undeclared(&cwd)?;
+        return Ok(());
+    };
+    let config_path = osdk_core::config::inheritance::deps_anchor(&config_path)?;
+    let root = config_path.parent().unwrap_or(&cwd);
+    let deps_config = osdk_core::config::inheritance::deps_file(&config_path)?;
+    let deps_config = if deps_config.providers.is_empty() && deps_config.projects.is_empty() {
+        app.ctx.config.deps.clone()
+    } else {
+        deps_config
+    };
+    if deps_config.providers.is_empty() && deps_config.projects.is_empty() {
         report_undeclared(&cwd)?;
         return Ok(());
     }
-
-    // An operand may be a plain provider name or a rooted id (`//apps/api:npm`).
-    // Both have to enable the underlying provider schema before discovery, but
-    // scope is applied afterwards: a bare name means the nearest project while a
-    // rooted id means exactly the addressed project.
-    let selects_kind = |id: &str, operands: &[String]| {
-        operands.iter().any(|operand| {
-            operand == id
-                || deps::parse_rooted_id(operand).is_some_and(|(_, provider)| provider == id)
-        })
-    };
-    let enabled: Vec<&'static DepsProviderSchema> = configured
-        .keys()
-        .filter(|id| !options.auto_only || configured.get(*id).is_some_and(|c| c.auto))
-        // A bare skip disables that provider everywhere. A rooted skip is applied
-        // only after projects have addresses; disabling the schema here would
-        // accidentally hide every root with the same provider.
-        .filter(|id| !options.skip.iter().any(|skip| skip == *id))
-        .filter(|id| options.providers.is_empty() || selects_kind(id, &options.providers))
-        .filter_map(|id| deps::provider_schema(id))
-        .collect();
-    let config_path = app.ctx.config.project_config_path.clone();
-    let config_root = config_path.as_deref().and_then(Path::parent);
-    let mut detected = deps::discover(&cwd, config_root, &enabled)?;
-
-    // `//:provider` explicitly addresses the config root. From a sub-project,
-    // nearest-project discovery stops before reaching that root, so add a direct
-    // root probe for the requested provider schemas.
-    if let Some(root) = config_root {
-        for schema in &enabled {
-            let wants_config_root = options.providers.iter().any(|operand| {
-                deps::parse_rooted_id(operand).is_some_and(|(relative, provider)| {
-                    relative.is_empty() && provider == schema.id
-                })
-            });
-            if wants_config_root
-                && !detected
-                    .iter()
-                    .any(|project| project.provider == schema.id && project.root == root)
-            {
-                detected.extend(deps::discover(root, Some(root), &[*schema])?);
+    let mut entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
+    for entry in &mut entries {
+        let effective = app.config_for_project(
+            entry
+                .config
+                .project_config
+                .as_deref()
+                .unwrap_or(&config_path),
+        )?;
+        entry.config.offline = effective.settings.offline;
+        let tools: BTreeMap<_, _> = effective
+            .tool_configs
+            .iter()
+            .map(|(id, tool)| (id, (tool.version(), tool.to_request_options())))
+            .collect();
+        entry.config.project_context =
+            serde_json::to_string(&(&effective.settings, &effective.sources, &tools))?;
+    }
+    for entry in &entries {
+        if let Some(unit) = &entry.unit {
+            if entries.iter().any(|other| {
+                other.unit.as_ref() == Some(unit)
+                    && other.config.project_context != entry.config.project_context
+            }) {
+                return Err(anyhow!(
+                    "{}: shared workspace has conflicting effective tool settings or sources",
+                    unit.root.display()
+                ));
             }
         }
     }
-
-    detected.retain(|project| {
-        let selected = options.providers.is_empty()
-            || options.providers.iter().any(|operand| {
-                operand.as_str() == &*project.provider
-                    || deps::parse_rooted_id(operand).is_some_and(|(relative, provider)| {
-                        relative.is_empty()
-                            && provider == &*project.provider
-                            && config_root.is_some_and(|root| project.root == root)
-                    })
-            });
-        let skipped = options.skip.iter().any(|operand| {
-            operand.as_str() == &*project.provider
-                || deps::parse_rooted_id(operand).is_some_and(|(relative, provider)| {
-                    relative.is_empty()
-                        && provider == &*project.provider
-                        && config_root.is_some_and(|root| project.root == root)
-                })
-        });
-        selected && !skipped
-    });
-
-    // Custom providers are not discovered, they are declared: there is no
-    // manifest to find. Their root is the directory of the config that declared
-    // them, which keeps `sources`/`outputs` relative to the same place a built-in
-    // provider's would be.
-    for id in configured.keys() {
-        if deps::provider_schema(id).is_some() {
-            continue;
-        }
-        if options.auto_only && !configured.get(id).is_some_and(|config| config.auto) {
-            continue;
-        }
-        if options.skip.iter().any(|skip| {
-            skip == id
-                || deps::parse_rooted_id(skip)
-                    .is_some_and(|(relative, provider)| relative.is_empty() && provider == id)
-        }) {
-            continue;
-        }
-        if !options.providers.is_empty()
-            && !options.providers.iter().any(|provider| {
-                provider == id
-                    || deps::parse_rooted_id(provider)
-                        .is_some_and(|(relative, rooted)| relative.is_empty() && rooted == id)
-            })
-        {
-            continue;
-        }
-        let Some(path) = &config_path else {
-            return Err(anyhow!(
-                "custom deps provider `{id}` needs a project config file to anchor it"
-            ));
-        };
-        let root = path.parent().unwrap_or(&cwd);
-        detected.push(deps::detect_custom(id, root, path));
-    }
-
-    // Sub-projects named by `[deps].roots`. Discovery never descends below the
-    // config root on its own, so this is the only way a monorepo's packages come
-    // into scope -- and only the ones a declared pattern actually names.
-    let mut rooted: Vec<deps::RootedProject> = Vec::new();
-    if !app.ctx.config.deps.roots.is_empty() && wants_rooted(&options) {
-        let Some(path) = &config_path else {
-            return Err(anyhow!(
-                "`[deps].roots` needs a project config file to resolve against"
-            ));
-        };
-        let config_root = path.parent().unwrap_or(&cwd);
-        for candidate in deps::discover_in_roots(config_root, &app.ctx.config.deps.roots, &enabled)?
-        {
-            let id = candidate.id();
-            // A rooted project is selected by its exact id. A bare provider may
-            // reach rooted projects only when `--all` or `--filter` explicitly
-            // widens the request beyond the nearest root.
-            let provider = candidate.project.provider.to_string();
-            if options
-                .skip
-                .iter()
-                .any(|skip| *skip == id || *skip == provider)
-            {
-                continue;
-            }
-            if !options.providers.is_empty()
-                && !options.providers.iter().any(|wanted| {
-                    *wanted == id
-                        || ((options.list_all || !options.filter.is_empty()) && *wanted == provider)
-                })
-            {
-                continue;
-            }
-            if !options.filter.is_empty()
-                && !options
-                    .filter
-                    .iter()
-                    .any(|pattern| deps::path_matches(pattern, &candidate.relative))
-            {
-                continue;
-            }
-            rooted.push(candidate);
-        }
-    }
-
-    // A `--filter` that matched nothing is an error, deliberately unlike pnpm, whose
-    // `failIfNoMatch` defaults to false. Same reasoning as `--verify` refusing to
-    // report a clean environment it could not examine: "nothing was done" must not
-    // read like "done, no problems". A CI step narrowing to a renamed directory
-    // should fail, not pass having built nothing.
-    if !options.filter.is_empty() && rooted.is_empty() {
+    let selected = select_projects(&entries, &cwd, &options);
+    if !options.filter.is_empty() && selected.is_empty() {
         return Err(anyhow!(
-            "`--filter` matched no sub-project: {}\n\
-             patterns are matched against paths relative to the config root, \
-             segment by segment, and only against sub-projects `[deps].roots` declares",
+            "`--filter` matched no project: {}",
             options.filter.join(", ")
         ));
     }
-
-    if detected.is_empty() && rooted.is_empty() {
-        // Split the two cases: "you selected nothing" and "nothing was found"
-        // have different fixes, and collapsing them sends the user looking in the
-        // wrong place.
-        if enabled.is_empty() {
-            println!("no matching deps providers are configured");
-        } else {
-            println!("no dependency manifests found for the configured providers");
+    for operand in &options.providers {
+        if !selected
+            .iter()
+            .any(|entry| operand == &entry.id() || operand == &*entry.project.provider)
+        {
+            return Err(anyhow!("no matching dependency project for `{operand}`"));
         }
+    }
+    if !options.list && !options.dry_run && !options.verify {
+        for entry in &selected {
+            for source in &entry.config.config_sources {
+                app.ensure_config_trusted(source, &[osdk_core::trust::Scope::Deps])?;
+            }
+        }
+    }
+    let mut resolved = Vec::new();
+    for entry in selected {
+        let unit = entry.unit.clone();
+        let mut project = entry.project.clone();
+        let mut rooted = (entry.id(), entry.source.clone());
+        if let Some(unit) = &unit {
+            if project.root != unit.root {
+                println!("{} selects shared installation in {}; coverage expands to the native workspace", entry.id(), unit.root.display());
+            }
+            let owner = entries
+                .iter()
+                .find(|candidate| {
+                    candidate.project.root == unit.root
+                        && candidate.project.provider == unit.provider
+                })
+                .ok_or_else(|| anyhow!("workspace installation root is not enabled"))?;
+            project = owner.project.clone();
+            rooted = (owner.id(), owner.source.clone());
+            if resolved.iter().any(|prior: &Resolved| {
+                prior.project.root == project.root && prior.project.provider == project.provider
+            }) {
+                continue;
+            }
+        }
+        let config = entry.config.clone();
+        let schema = deps::provider_schema(&project.provider);
+        let choice = deps::select_installer(&project, &[])?;
+        let mut plan = deps::plan(
+            &project,
+            &choice,
+            &config,
+            &resolved_tool_versions(app, &config),
+        )?;
+        if unit.as_ref().is_some_and(|unit| unit.provider == "uv") && config.run.is_none() {
+            plan.args.push("--all-packages".into());
+        }
+        if config.offline {
+            if config.run.is_some() {
+                return Err(anyhow!(
+                    "offline mode cannot be guaranteed for a custom deps command"
+                ));
+            }
+            match &*project.provider {
+                "npm" | "pnpm" | "uv" | "pip-requirements" | "cargo" => {
+                    plan.args.push("--offline".into())
+                }
+                other => return Err(anyhow!("offline deps is not supported for `{other}`")),
+            }
+        }
+        if options.frozen && !plan.frozen {
+            return Err(anyhow!(
+                "`--frozen` requires a native lockfile and native frozen guarantees for `{}`: {}",
+                entry.id(),
+                plan.downgraded_reason
+                    .as_deref()
+                    .unwrap_or("no native lockfile")
+            ));
+        }
+        let decision = decide(app, schema, &project, &config, &plan, unit.as_ref())?;
+        resolved.push(Resolved {
+            schema,
+            rooted: Some(rooted),
+            project,
+            choice,
+            config,
+            plan,
+            decision,
+            unit,
+        });
+    }
+    if resolved.is_empty() {
+        println!("no matching deps providers are configured");
         return Ok(());
     }
-
-    let tool_versions = resolved_tool_versions(app);
-    let mut resolved = Vec::new();
-    for project in &detected {
-        let config = configured
-            .get(&*project.provider)
-            .cloned()
-            .unwrap_or_default();
-        let schema = deps::provider_schema(&project.provider);
-        let choice = deps::select_installer(project, &config, &detected)?;
-        let plan = deps::plan(project, &choice, &config, &tool_versions)?;
-        if options.frozen && !plan.frozen {
-            return Err(anyhow!(
-                "`--frozen` requires a native lockfile for `{}`: {}",
-                project.provider,
-                plan.downgraded_reason
-                    .clone()
-                    .unwrap_or_else(|| "no lockfile found".into())
-            ));
-        }
-        let decision = decide(app, schema, project, &config, &plan)?;
-        resolved.push(Resolved {
-            schema,
-            rooted: None,
-            project: project.clone(),
-            choice,
-            config,
-            plan,
-            decision,
-        });
-    }
-
-    for candidate in &rooted {
-        let config = configured
-            .get(&*candidate.project.provider)
-            .cloned()
-            .unwrap_or_default();
-        let schema = deps::provider_schema(&candidate.project.provider);
-        // Peers are scoped to this sub-project: a lockfile in a sibling package
-        // says nothing about which installer owns this one.
-        let choice = deps::select_installer(&candidate.project, &config, &[])?;
-        let plan = deps::plan(&candidate.project, &choice, &config, &tool_versions)?;
-        if options.frozen && !plan.frozen {
-            return Err(anyhow!(
-                "`--frozen` requires a native lockfile for `{}`: {}",
-                candidate.id(),
-                plan.downgraded_reason
-                    .clone()
-                    .unwrap_or_else(|| "no lockfile found".into())
-            ));
-        }
-        let decision = decide(app, schema, &candidate.project, &config, &plan)?;
-        resolved.push(Resolved {
-            schema,
-            rooted: Some((candidate.id(), candidate.root_pattern.clone())),
-            project: candidate.project.clone(),
-            choice,
-            config,
-            plan,
-            decision,
-        });
-    }
-
-    // `depends` is a promise about order, so it has to be honoured before
-    // anything runs. A codegen step that needs another provider's output would
-    // otherwise fail for a reason unrelated to what the user configured.
-    order_by_depends(&mut resolved, &configured)?;
+    order_by_depends(&mut resolved)?;
 
     if options.verify {
         return verify(app, &resolved);
@@ -339,10 +239,29 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 if let Some(reason) = item.decision.reason() {
                     println!("    reason: {reason}");
                 }
+                println!("    config sources: {:?}", item.config.config_sources);
                 println!(
                     "    installer: {} ({:?})",
                     item.choice.provider, item.choice.origin
                 );
+                println!(
+                    "    effective: auto={}, timeout={:?}, sources={:?}, outputs={:?}",
+                    item.config.auto,
+                    item.config.timeout,
+                    effective_sources(item.schema, &item.config),
+                    effective_outputs(item.schema, &item.config)
+                );
+                if let Some(unit) = &item.unit {
+                    println!(
+                        "    coverage: {} {:?}",
+                        if item.config.run.is_none() {
+                            "native workspace"
+                        } else {
+                            "unverified custom run; declared members"
+                        },
+                        unit.coverage()
+                    );
+                }
                 println!("    command:   {}", command_line(&item.plan));
             }
         }
@@ -356,7 +275,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             println!("warning: {reason}");
         }
         if item.decision.is_fresh() && !options.force {
-            println!("{} is up to date", item.project.provider);
+            println!("{} is up to date", item.label());
             continue;
         }
         if options.explain {
@@ -369,6 +288,32 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                 "would run in {}: {}",
                 item.project.root.display(),
                 command_line(&item.plan)
+            );
+            continue;
+        }
+        let state_path = state::state_path(&app.ctx.dirs.cache, &item.project.root);
+        let lock_path = app
+            .ctx
+            .dirs
+            .cache
+            .join("deps-install-locks")
+            .join(state_path.file_name().unwrap())
+            .with_extension("lock");
+        let _installation_lock = osdk_core::lock::FileLock::acquire(&lock_path)?;
+        if !options.force
+            && decide(
+                app,
+                item.schema,
+                &item.project,
+                &item.config,
+                &item.plan,
+                item.unit.as_ref(),
+            )?
+            .is_fresh()
+        {
+            println!(
+                "{} is up to date after waiting for shared installation",
+                item.label()
             );
             continue;
         }
@@ -400,13 +345,17 @@ impl Resolved {
 /// failure would point at the wrong provider. Dependencies naming a provider that
 /// is not configured are ignored -- that is a no-op, not a contradiction, since a
 /// disabled provider has nothing to wait for.
-fn order_by_depends(
-    resolved: &mut Vec<Resolved>,
-    configured: &BTreeMap<String, ProviderConfig>,
-) -> anyhow::Result<()> {
-    let present: Vec<String> = resolved
+fn order_by_depends(resolved: &mut Vec<Resolved>) -> anyhow::Result<()> {
+    let present: Vec<_> = resolved
         .iter()
-        .map(|item| item.project.provider.to_string())
+        .map(|item| {
+            (
+                item.label(),
+                item.project.provider.to_string(),
+                item.project.root.clone(),
+                item.unit.clone(),
+            )
+        })
         .collect();
 
     let mut ordered: Vec<Resolved> = Vec::with_capacity(resolved.len());
@@ -415,22 +364,31 @@ fn order_by_depends(
 
     while !remaining.is_empty() {
         let ready = remaining.iter().position(|item| {
-            let id: &str = &item.project.provider;
-            configured
-                .get(id)
-                .map(|config| {
-                    config.depends.iter().all(|need| {
-                        // Only wait for something that is actually going to run.
-                        !present.iter().any(|name| name == need)
-                            || done.iter().any(|name| name == need)
+            item.config.depends.iter().all(|need| {
+                present
+                    .iter()
+                    .filter(|(label, provider, root, unit)| {
+                        if need.starts_with("//") {
+                            need == label
+                        } else {
+                            need == provider
+                                && (root == &item.project.root
+                                    || unit.as_ref().is_some_and(|unit| {
+                                        unit.members.contains(&item.project.root)
+                                    })
+                                    || item
+                                        .unit
+                                        .as_ref()
+                                        .is_some_and(|unit| unit.members.contains(root)))
+                        }
                     })
-                })
-                .unwrap_or(true)
+                    .all(|(label, _, _, _)| done.contains(label))
+            })
         });
         match ready {
             Some(index) => {
                 let item = remaining.remove(index);
-                done.push(item.project.provider.to_string());
+                done.push(item.label());
                 ordered.push(item);
             }
             None => {
@@ -551,6 +509,26 @@ async fn ensure_tools(
     item: &Resolved,
     no_install_tools: bool,
 ) -> anyhow::Result<Vec<ReadyTool>> {
+    let Some(path) = item.config.project_config.as_deref() else {
+        return ensure_tools_in_context(app, item, no_install_tools).await;
+    };
+    let config = app.config_for_project(path)?;
+    let mut project_app = app.with_config(config)?;
+    let result = Box::pin(ensure_tools_in_context(
+        &mut project_app,
+        item,
+        no_install_tools,
+    ))
+    .await;
+    app.invalidate_dynamic_scan();
+    result
+}
+
+async fn ensure_tools_in_context(
+    app: &mut App,
+    item: &Resolved,
+    no_install_tools: bool,
+) -> anyhow::Result<Vec<ReadyTool>> {
     let mut ready = Vec::new();
     // A custom provider declares no tools of its own: its `run` line invokes
     // whatever is already available, which in practice is what `depends` brought
@@ -568,25 +546,48 @@ async fn ensure_tools(
         };
         let spec = match &pinned {
             Some(version) => format!("{}@{version}", required.id),
-            None => match app.ctx.config.tools.get(required.id) {
+            None => match item
+                .config
+                .project_tools
+                .get(required.id)
+                .or_else(|| app.ctx.config.global_tools.get(required.id))
+            {
                 Some(configured) => format!("{}@{configured}", required.id),
                 None => required.id.to_string(),
             },
         };
-        let request = ToolRequest::parse(&spec)
+        let mut request = ToolRequest::parse(&spec)
             .with_context(|| format!("parsing deps tool request `{spec}`"))?;
+        crate::commands::inherit_configured_options_from(
+            &mut request,
+            &app.ctx.config.tool_configs,
+            &app.ctx.config.tools,
+            None,
+        );
         let backend = app.registry.get(&request.backend)?;
+        let request = crate::commands::expand_request_alias(app, backend.as_ref(), &request)?;
 
         // Already installed means nothing is acquired, which is the distinction
         // `--no-install-tools` draws: it forbids *acquiring* a tool, not using
         // one the user installed themselves.
-        let installed = backend.list_installed(&app.ctx)?;
-        let resolved =
+        let resolved = if request.backend.contains(':') {
+            crate::commands::installed_dynamic_match(app, backend.as_ref(), &request)
+        } else {
+            let installed = backend.list_installed(&app.ctx)?;
             crate::commands::select_installed_version(&request.backend, &request.spec, installed)
-                .ok();
+                .ok()
+                .map(|version| {
+                    let mut version = ToolVersion::new(&request.backend, &version);
+                    version.options.extend(request.options.clone());
+                    version
+                })
+        };
 
         let version = match resolved {
-            Some(version) => ToolVersion::new(&request.backend, &version),
+            Some(version) => {
+                backend.ensure_post_install(&app.ctx, &version)?;
+                version
+            }
             None => {
                 if no_install_tools {
                     return Err(anyhow!(
@@ -596,6 +597,9 @@ async fn ensure_tools(
                         schema.id,
                         required.id
                     ));
+                }
+                for source in &item.config.config_sources {
+                    app.ensure_config_trusted(source, &[osdk_core::trust::Scope::Install])?;
                 }
                 println!("installing {spec} for deps provider `{}`", schema.id);
                 let (_, installed) =
@@ -676,27 +680,9 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         for (key, value) in &item.plan.env {
             prelude.env(key, value);
         }
-        let status = prelude
-            .status()
-            .with_context(|| format!("running {} {}", program.display(), step.join(" ")))?;
-        if !status.success() {
-            return Err(anyhow!(
-                "`{} {}` failed with {status}",
-                program.display(),
-                step.join(" ")
-            ));
-        }
+        run_bounded(prelude, item.config.timeout)?;
     }
-
-    let status = command
-        .status()
-        .with_context(|| format!("running {}", program.display()))?;
-    if !status.success() {
-        return Err(anyhow!(
-            "`{}` failed with {status}",
-            command_line(&item.plan)
-        ));
-    }
+    run_bounded(command, item.config.timeout)?;
     Ok(())
 }
 
@@ -735,7 +721,16 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
             }
         }
     }
-    None
+    plan.program_candidates
+        .first()
+        .filter(|candidate| {
+            **candidate == plan.program
+                && (cfg!(windows)
+                    || ![".exe", ".cmd", ".bat"]
+                        .iter()
+                        .any(|suffix| candidate.ends_with(suffix)))
+        })
+        .map(PathBuf::from)
 }
 
 /// Persist what happened: freshness state, then the lock entry.
@@ -744,8 +739,12 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// would make the next run report "up to date" for a tree that was never
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
-    let command = command_line(&item.plan);
-    let sources = effective_sources(item.schema, &item.config);
+    let command = freshness_command(
+        &item.plan,
+        &item.config,
+        &resolved_tool_versions(app, &item.config),
+    );
+    let sources = tracked_sources(item.schema, &item.config, item.unit.as_ref());
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| item.project.root.join(source))
@@ -767,6 +766,15 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             outputs: &outputs,
         },
     )?;
+    if item.config.run.is_none() {
+        if let Some(unit) = &item.unit {
+            persisted
+                .providers
+                .get_mut(&*item.project.provider)
+                .unwrap()
+                .coverage = unit.coverage();
+        }
+    }
     persisted.save(&state_path)?;
 
     let installer_version = tools
@@ -789,7 +797,7 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             project_root: &item.project.root,
             manifest: &item.project.manifest,
             native_lock: item.project.native_lock.as_deref(),
-            run: command,
+            run: command_line(&item.plan),
             index: item.config.index.clone(),
             allow_build_from_source: item.config.allow_build_from_source,
         },
@@ -818,10 +826,7 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
 pub async fn materialize_auto(app: &mut App) -> anyhow::Result<()> {
     // Cheapest possible exit, before touching the filesystem: a project with no
     // `[deps]` section pays nothing for this feature existing.
-    if app.ctx.config.deps.providers.is_empty() {
-        return Ok(());
-    }
-    if !configured_providers(app).values().any(|config| config.auto) {
+    if app.ctx.config.deps.providers.is_empty() && app.ctx.config.deps.projects.is_empty() {
         return Ok(());
     }
 
@@ -869,62 +874,73 @@ fn auto_options() -> DepsOptions {
     }
 }
 
-/// Should this run expand `[deps].roots` into its sub-projects?
-///
-/// A run expands roots when it requests the whole declared set, asks for a
-/// sub-project explicitly, or supplies a path filter. A bare provider operand is
-/// intentionally local to the nearest project; expanding it would make
-/// `osdk deps uv` affect every `uv` root in a monorepo.
-fn wants_rooted(options: &DepsOptions) -> bool {
-    if options.list_all || !options.filter.is_empty() {
-        return true;
-    }
-    if options.providers.is_empty() {
-        // Preserve the established batch operation: an unqualified `osdk deps`
-        // materializes every declared root, while a plain list stays local.
-        return !options.list;
-    }
-    options.providers.iter().any(|wanted| {
-        deps::parse_rooted_id(wanted).is_some_and(|(relative, _)| !relative.is_empty())
-    })
-}
-
-/// Providers configured in `[deps]`, minus any the project disabled.
-fn configured_providers(app: &App) -> BTreeMap<String, ProviderConfig> {
-    let deps_config = &app.ctx.config.deps;
-    let mut out = BTreeMap::new();
-    for (id, entry) in &deps_config.providers {
-        if deps_config.disable.iter().any(|name| name == id) {
-            continue;
-        }
-        out.insert(
-            id.clone(),
-            ProviderConfig {
-                auto: entry.auto,
-                sources: entry.sources.clone(),
-                outputs: entry.outputs.clone().unwrap_or_default(),
-                run: entry.run.clone(),
-                env: entry.env.clone(),
-                dir: entry.dir.clone(),
-                depends: entry.depends.clone(),
-                installer: entry.installer.clone(),
-                index: entry.index.clone().or_else(|| entry.extra_index.clone()),
-                allow_build_from_source: entry.allow_build_from_source,
-            },
-        );
-    }
-    out
+fn select_projects<'a>(
+    entries: &'a [deps::catalog::ProjectEntry],
+    cwd: &Path,
+    options: &DepsOptions,
+) -> Vec<&'a deps::catalog::ProjectEntry> {
+    let wide = options.list_all
+        || !options.filter.is_empty()
+        || (options.providers.is_empty() && !options.list);
+    entries
+        .iter()
+        .filter(|entry| {
+            let provider = &*entry.project.provider;
+            let id = entry.id();
+            let nearest = !entries.iter().any(|other| {
+                other.project.provider == entry.project.provider
+                    && cwd.starts_with(&other.project.root)
+                    && other.project.root.starts_with(&entry.project.root)
+                    && other.project.root != entry.project.root
+            });
+            let intervening_manifest = deps::provider_schema(provider).is_some_and(|schema| {
+                cwd.ancestors()
+                    .take_while(|directory| *directory != entry.project.root)
+                    .any(|directory| directory.join(schema.primary_manifest()).is_file())
+            });
+            let local = cwd.starts_with(&entry.project.root) && nearest && !intervening_manifest;
+            let selected = if options.providers.is_empty() {
+                wide || local
+            } else {
+                options
+                    .providers
+                    .iter()
+                    .any(|operand| operand == &id || (operand == provider && (wide || local)))
+            };
+            selected
+                && (!options.auto_only || entry.config.auto)
+                && !options
+                    .skip
+                    .iter()
+                    .any(|skip| skip == provider || skip == &id)
+                && (options.filter.is_empty()
+                    || options
+                        .filter
+                        .iter()
+                        .any(|pattern| deps::path_matches(pattern, &entry.relative)))
+        })
+        .collect()
 }
 
 /// Tool versions osdk already resolved, so a provider that dispatches on the
 /// major (yarn) sees the same version that will actually run.
-fn resolved_tool_versions(app: &App) -> BTreeMap<String, String> {
-    app.ctx
-        .config
-        .tools
+fn resolved_tool_versions(app: &App, config: &ProviderConfig) -> BTreeMap<String, String> {
+    let mut versions = app.ctx.config.global_tools.clone();
+    versions.extend(config.project_tools.clone());
+    let ids: std::collections::BTreeSet<_> = deps::PROVIDERS
         .iter()
-        .map(|(tool, spec)| (tool.clone(), spec.clone()))
-        .collect()
+        .flat_map(|schema| schema.required_tools.iter().map(|tool| tool.id))
+        .collect();
+    for id in ids {
+        if let Ok(backend) = app.registry.get(id) {
+            if let Ok(installed) = backend.list_installed(&app.ctx) {
+                let mut installed: Vec<_> = installed;
+                installed.sort();
+                versions.insert(format!("{id}:installed"), installed.join(","));
+            }
+        }
+    }
+    versions
 }
 
 fn decide(
@@ -933,8 +949,9 @@ fn decide(
     project: &DetectedProject,
     config: &ProviderConfig,
     plan: &RunPlan,
+    unit: Option<&deps::workspace::WorkspaceUnit>,
 ) -> anyhow::Result<state::Decision> {
-    let sources = effective_sources(schema, config);
+    let sources = tracked_sources(schema, config, unit);
     let existing: Vec<PathBuf> = sources
         .iter()
         .map(|source| project.root.join(source))
@@ -946,7 +963,7 @@ fn decide(
         .collect();
     let path = state::state_path(&app.ctx.dirs.cache, &project.root);
     let persisted = state::DepsState::load(&path)?;
-    let command = command_line(plan);
+    let command = freshness_command(plan, config, &resolved_tool_versions(app, config));
     let inputs = state::Inputs {
         sources: &existing,
         declared_sources: !sources.is_empty(),
@@ -957,6 +974,24 @@ fn decide(
         &inputs,
         persisted.providers.get(&*project.provider),
     )?)
+}
+
+fn tracked_sources(
+    schema: Option<&'static DepsProviderSchema>,
+    config: &ProviderConfig,
+    unit: Option<&deps::workspace::WorkspaceUnit>,
+) -> Vec<String> {
+    let mut sources = effective_sources(schema, config);
+    if let Some(unit) = unit {
+        sources.extend(
+            unit.sources()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
+    sources.sort();
+    sources.dedup();
+    sources
 }
 
 /// Freshness sources for a provider, whether or not it has a built-in schema.
@@ -986,15 +1021,40 @@ fn effective_outputs(
     config: &ProviderConfig,
 ) -> Vec<(String, bool)> {
     match schema {
-        Some(schema) => deps::effective_outputs(schema, config, !config.outputs.is_empty())
-            .into_iter()
-            .map(|spec| (spec.path, spec.required))
-            .collect(),
+        Some(schema) => deps::effective_outputs(
+            schema,
+            config,
+            config.outputs_explicit || !config.outputs.is_empty(),
+        )
+        .into_iter()
+        .map(|spec| (spec.path, spec.required))
+        .collect(),
         None => config
             .outputs
             .iter()
             .map(|path| (path.clone(), true))
             .collect(),
+    }
+}
+
+fn freshness_command(
+    plan: &RunPlan,
+    config: &ProviderConfig,
+    versions: &BTreeMap<String, String>,
+) -> String {
+    format!("{plan:?}|{config:?}|{versions:?}")
+}
+
+fn run_bounded(
+    mut command: std::process::Command,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<()> {
+    use osdk_core::tasks::tree;
+    let (mut child, mut handle) = tree::spawn_in_tree(&mut command)?;
+    match tree::wait_with_timeout(&mut child, &mut handle, timeout)? {
+        Some(0) => Ok(()),
+        Some(code) => Err(anyhow!("deps command failed with exit code {code}")),
+        None => Err(anyhow!("deps command timed out; process tree terminated")),
     }
 }
 
@@ -1015,7 +1075,13 @@ fn command_line(plan: &RunPlan) -> String {
         parts.push("&&".to_string());
     }
     parts.push(program);
-    parts.extend(plan.args.iter().cloned());
+    parts.extend(plan.args.iter().map(|arg| {
+        if arg.chars().any(char::is_whitespace) {
+            serde_json::to_string(arg).unwrap()
+        } else {
+            arg.clone()
+        }
+    }));
     parts.join(" ")
 }
 
@@ -1069,6 +1135,75 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn dependency_order_waits_for_the_matching_project() {
+        fn item(
+            root: &std::path::Path,
+            relative: &str,
+            provider: &str,
+            needs: &[&str],
+        ) -> super::Resolved {
+            let project = osdk_core::deps::detect_custom(
+                provider,
+                &root.join(relative),
+                &root.join("osdk.toml"),
+            );
+            let config = ProviderConfig {
+                run: Some("command".into()),
+                depends: needs.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            };
+            let choice = osdk_core::deps::select_installer(&project, &[]).unwrap();
+            let plan = osdk_core::deps::plan_custom(&project, &config).unwrap();
+            super::Resolved {
+                schema: None,
+                rooted: Some((format!("//{relative}:{provider}"), "test".into())),
+                project,
+                choice,
+                config,
+                plan,
+                decision: osdk_core::deps::state::Decision::Fresh,
+                unit: None,
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut items = vec![
+            item(root, "a", "consume", &["produce"]),
+            item(root, "b", "produce", &[]),
+            item(root, "a", "produce", &["prepare"]),
+            item(root, "a", "prepare", &[]),
+        ];
+        super::order_by_depends(&mut items).unwrap();
+        assert_eq!(
+            items.iter().map(super::Resolved::label).collect::<Vec<_>>(),
+            ["//b:produce", "//a:prepare", "//a:produce", "//a:consume"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deps_timeout_stops_a_real_command() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+        let start = std::time::Instant::now();
+        let error =
+            super::run_bounded(command, Some(std::time::Duration::from_millis(100))).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn explicit_empty_sources_and_outputs_do_not_fall_back() {
+        let config = ProviderConfig {
+            sources_explicit: true,
+            outputs_explicit: true,
+            ..Default::default()
+        };
+        assert!(super::effective_sources(Some(&node::NPM), &config).is_empty());
+        assert!(super::effective_outputs(Some(&node::NPM), &config).is_empty());
+    }
 
     /// Windows launcher suffixes are execution details and must never enter the
     /// command identity persisted in a cross-platform project lock.

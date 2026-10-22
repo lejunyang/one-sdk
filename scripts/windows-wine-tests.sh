@@ -53,11 +53,13 @@ export OSDK_CACHE_DIR="$test_root/osdk/cache"
 export OSDK_CONFIG_DIR="$test_root/osdk/config"
 export OSDK_STORE_DIR="$test_root/osdk/store"
 export OSDK_INSTALL_DIR="$test_root/osdk/installs"
-export CARGO_HOME="$test_root/cargo"
+export CARGO_HOME="${OSDK_WINE_CARGO_HOME:-$test_root/cargo}"
 export RUSTUP_HOME="$test_root/rustup"
 export RUSTC="$toolchain_rustc"
 export RUSTDOC="$toolchain_rustdoc"
-export CARGO_TARGET_DIR="$test_root/target"
+# An explicit temporary build cache can avoid recompiling the entire dependency
+# graph on a repair/retry; SDK and Wine state remain unique to this run.
+export CARGO_TARGET_DIR="${OSDK_WINE_TARGET_DIR:-$test_root/target}"
 export TMPDIR="$test_root/tmp"
 export WINEARCH=win64
 export WINEPREFIX="$test_root/wineprefix"

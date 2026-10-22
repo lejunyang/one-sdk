@@ -115,7 +115,7 @@ Supporting them requires adding the corresponding language backend first.
 to update the lock; it does **not** check the lock against `pyproject.toml` --
 measured, a stale lock exits 0 and installs the old set, with a newly added
 dependency simply missing. Asserting the lock is current is `--locked`, so osdk
-passes both. `npm ci` fails in that situation, so the ecosystems are not
+passes `--locked`. `npm ci` fails in that situation, so the ecosystems are not
 symmetric.
 
 **A `requirements.txt` is resolution input, not a complete dependency lock.**
@@ -141,8 +141,9 @@ higher:
 
 1. `packageManager` in `package.json` -- the project's own declaration wins.
 2. A native lockfile already on disk -- whoever wrote it keeps managing it.
-3. `[deps.<provider>].installer`.
-4. The provider itself.
+3. The sole eligible provider in the effective project configuration.
+
+Select the provider directly with `[deps.<provider>]`; manifests and lockfiles validate ownership.
 
 Two contradictions are refused rather than guessed: a declaration of `pnpm`
 next to nothing but a `yarn.lock`, and two lockfiles of the same ecosystem in one
@@ -377,7 +378,6 @@ outputs = ["node_modules"]  # missing means stale (replaces the default)
 dir = "apps/api"            # run in a subdirectory
 depends = ["npm"]           # materialize another provider first
 timeout = "10m"
-installer = "pnpm"
 index = "https://registry.npmjs.org/"
 allow_build_from_source = false
 env = { CI = "1" }
@@ -457,3 +457,34 @@ regardless of the decision.
 Undeclared `sources`, or declared sources that match no files at all, never count
 as fresh: a predicate that matches nothing is vacuously true, which would dress
 up "nothing was checked" as "nothing changed".
+
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
+
+### Per-project dependencies
+
+Sub-projects need no osdk configuration. Root declarations select providers and override defaults field by field:
+
+```toml
+[deps]
+roots = ["apps/*"]
+[deps.npm]
+[deps.pnpm]
+[deps.projects."services/api".pip-requirements]
+auto = false
+[deps.projects."apps/web"]
+disable = ["pnpm"]
+[deps.projects."apps/web".npm]
+outputs = []
+```
+
+`auto = false` keeps explicit `osdk deps` available; `disable` removes a provider from all execution. Arrays replace defaults, including empty arrays; environment keys merge. Ownership comes from manifests and native locks before filters are applied. Contradictory locks or multiple eligible managers fail. Overlapping roots produce one plan per canonical project/provider, including calls from subdirectories. Conflicting overlapping project overrides fail. `--filter .` selects the root and other filters exclude it; `--list --all --explain` shows selection, effective options and commands. `[task].roots` aggregates tasks separately.
+
+Native pnpm and uv workspace members are discovered only below explicitly declared workspace roots. Native member patterns and exclusions define membership; unrelated nested projects remain separate. Selecting a member expands to one shared root installation and explains that expansion. uv workspaces run `uv sync --all-packages` (ordinary root sync does not cover all members). Shared options must agree, including auto/disable, commands and indexes; conflicts and member-owned lockfiles fail. Freshness includes workspace declarations, member paths/manifests, shared locks, effective options and installed tool versions. Native successful coverage is recorded in managed deps state; a custom override has unverified coverage. Installation and state recording are serialized by project within the same osdk cache. Native recursive patterns need a directory prefix (`packages/**`); bare `**` is rejected.
+
+Explicit inheritance: a child `osdk.toml` can set `extends = "../../osdk.toml"`. Directory nesting alone does not inherit configuration. Priority is CLI/environment, child fields, explicitly inherited ancestor fields, user configuration, then defaults. Maps merge by key (including env); scalar values and arrays replace, so `false` and `[]` are meaningful. Inherited dependency sources/outputs/dir and task dir/file paths belong to their declaring file. Keep discovery roots/projects in the catalog root; a discovered child cannot redefine the catalog. Per-project declarations supply defaults to an inheriting child, whose explicit provider fields take precedence. An independent child config declares its own providers. Root and child dependency calls use the same catalog and effective provider/tool options. Each executable or source-changing config file in the chain needs its own trust; trusting a child file does not trust its parent. Self cycles, non-ancestor references and repository-boundary escapes fail. Task aggregation stays separate in `[task].roots`; inherited runner defaults are materialized into rooted task definitions.
+
+
+Migration: explicit `sources`/`outputs` paths now belong to their declaring config file, including root declarations for sub-projects; prefix them with the project path where needed (for example `sources = ["apps/api/package.json"]`). Built-in default paths still belong to the detected project. `sources = []` removes default inputs and cannot establish freshness; native workspaces retain mandatory membership/lock inputs. Child tool options and source settings apply during automatic tool preparation; shared workspaces require one consistent effective tool context.
+
+Bare `depends` names order providers in the same project or shared workspace; use `//path:provider` for a different installation unit. Selection does not implicitly enable omitted dependencies. Shared member package-manager version conflicts fail.
+Run the opt-in real-project smoke with `osdk run deps-monorepo-live`, or `python scripts/test-deps-monorepo.py --bin target/debug/osdk`. It uses temporary state and small npm/Python packages; it checks actual artifacts, shared coverage, member changes, inheritance, auto/disable and locked/offline failure paths. A discovered child may explicitly replace an inherited `disable` list with `[]`.

@@ -491,26 +491,30 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
     else {
         return Ok(());
     };
-    let requirements: Vec<_> =
-        osdk_core::trust::trust_requirements(&project_config, &osdk_core::trust::Scope::ALL)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(osdk_core::trust::affects_tool_dispatch)
-            .collect();
-    if requirements.is_empty() {
-        return Ok(());
-    }
-    let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
-    if osdk_core::trust::is_trusted(&dirs.config, &project_config, trusted_paths.as_ref())
-        .map_err(|e| e.to_string())?
+    for project_config in
+        osdk_core::config::inheritance::sources(&project_config).map_err(|e| e.to_string())?
     {
-        return Ok(());
+        let requirements: Vec<_> =
+            osdk_core::trust::trust_requirements(&project_config, &osdk_core::trust::Scope::ALL)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(osdk_core::trust::affects_tool_dispatch)
+                .collect();
+        if requirements.is_empty() {
+            continue;
+        }
+        let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
+        if !osdk_core::trust::is_trusted(&dirs.config, &project_config, trusted_paths.as_ref())
+            .map_err(|e| e.to_string())?
+        {
+            return Err(osdk_core::t!(
+                "err.untrusted_config",
+                path = project_config.display(),
+                requirements = osdk_core::trust::describe_requirements(&requirements)
+            ));
+        }
     }
-    Err(osdk_core::t!(
-        "err.untrusted_config",
-        path = project_config.display(),
-        requirements = osdk_core::trust::describe_requirements(&requirements)
-    ))
+    Ok(())
 }
 
 fn package_manager_for_backend(

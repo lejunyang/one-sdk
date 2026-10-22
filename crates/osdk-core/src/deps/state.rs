@@ -43,6 +43,8 @@ pub struct ProviderState {
     /// that installs outside the project does not look permanently stale.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seen_outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<String>,
 }
 
 impl DepsState {
@@ -89,6 +91,7 @@ impl DepsState {
             ProviderState {
                 hash: Some(hash),
                 seen_outputs,
+                coverage: Vec::new(),
             },
         );
         Ok(())
@@ -294,6 +297,7 @@ mod tests {
         state.providers.insert(
             "pnpm".into(),
             ProviderState {
+                coverage: Vec::new(),
                 hash: Some("abc".into()),
                 seen_outputs: vec!["node_modules".into()],
             },
@@ -320,6 +324,7 @@ mod tests {
         let outputs = vec![(modules.clone(), true)];
         let hash = input_hash(&sources, "pnpm install --frozen-lockfile").unwrap();
         let state = ProviderState {
+            coverage: Vec::new(),
             hash: Some(hash),
             seen_outputs: vec!["node_modules".into()],
         };
@@ -357,6 +362,7 @@ mod tests {
         let sources = vec![manifest];
         let command = "npm ci --ignore-scripts";
         let state = ProviderState {
+            coverage: Vec::new(),
             hash: Some(input_hash(&sources, command).unwrap()),
             seen_outputs: vec!["node_modules".into()],
         };
@@ -389,6 +395,7 @@ mod tests {
     #[test]
     fn empty_or_undeclared_sources_are_never_fresh() {
         let state = ProviderState {
+            coverage: Vec::new(),
             hash: Some("whatever".into()),
             seen_outputs: Vec::new(),
         };
@@ -426,6 +433,7 @@ mod tests {
 
         // Never seen: absence is fine (the tool installs elsewhere).
         let never_seen = ProviderState {
+            coverage: Vec::new(),
             hash: Some(hash.clone()),
             seen_outputs: Vec::new(),
         };
@@ -439,6 +447,7 @@ mod tests {
 
         // Seen once, now gone: that is a real regression.
         let seen = ProviderState {
+            coverage: Vec::new(),
             hash: Some(hash),
             seen_outputs: vec![name],
         };
