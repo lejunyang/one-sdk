@@ -532,7 +532,7 @@ teaches the user nothing".
 | Case | Approval | Why |
 | --- | --- | --- |
 | `[deps.pnpm]`, `sources`, `outputs`, `auto`, `dir`, `depends` | No | Scripts are off by default; this only declares what to install |
-| `index` / `extra_index` / `registry` / `insecure` | Yes, `WeakensVerification` | The source of the bytes changed -- **not** code execution |
+| `registries` | Yes, `WeakensVerification` | The source of the bytes changed -- **not** code execution |
 | `env` variables named `*_REGISTRY`, `*REGISTRY_SERVER`, `*_INDEX_URL`, `*_DEFAULT_INDEX`, or containing `:REGISTRY` | Yes, `WeakensVerification` | Equivalent to the row above; cannot be left out |
 | `allow_build_from_source` | Yes, `ExecutesCode` | Arbitrary code really does run locally |
 | A custom provider's `run` | Yes, `ExecutesCode` | Arbitrary command, and `auto` can trigger it |
@@ -647,7 +647,7 @@ Whether a script actually ran was determined by having it append a line to a
 marker file and then reading that file -- not by the exit code, which being 0
 proves nothing about scripts not running.
 
-`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. `extra_index` now fails explicitly: migrate to native registry configuration; for uv prefer named indexes and package bindings in `pyproject.toml`. There is no generic low-priority-index guarantee.
+`deps.<provider>.run` also overrides built-in commands; use an argv array such as `run = ["pnpm", "install", "--offline"]` to preserve argument boundaries. Overrides require trust and cannot guarantee frozen installation or disabled scripts. `timeout = "5m"` bounds each command and its process tree. `outputs = []` disables output tracking. Legacy source fields have been removed; see the unified package-source guide.
 
 ### Per-project dependencies
 
@@ -677,3 +677,7 @@ Migration: explicit `sources`/`outputs` paths now belong to their declaring conf
 
 Bare `depends` names order providers in the same project or shared workspace; use `//path:provider` for a different installation unit. Selection does not implicitly enable omitted dependencies. Shared member package-manager version conflicts fail.
 Run the opt-in real-project smoke with `osdk run deps-monorepo-live`, or `python scripts/test-deps-monorepo.py --bin target/debug/osdk`. It uses temporary state and small npm/Python packages; it checks actual artifacts, shared coverage, member changes, inheritance, auto/disable and locked/offline failure paths. A discovered child may explicitly replace an inherited `disable` list with `[]`.
+
+The shared execution adapter is `package_sources.rs`; version policy is in `version/resolver.rs`. Native file discovery is candidate evidence, not a claim about the native effective winner. See [package managers](../guide/tools/package-managers.md).
+
+`extra_index` history: proposed in `e683830`, added to `DepsProviderEntry` by `d7338bf`; the CLI once used `index.or_else(extra_index)`, incorrectly treating it as a default-index fallback. `60597f6` rejected it; `87a3b7b` moved that rejection to catalog. This change removes the schema field, special rejection and trust keys. Research documents remain historical snapshots. It was never a tools or registries field.

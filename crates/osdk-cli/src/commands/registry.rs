@@ -34,19 +34,37 @@ pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
             // any command, so a configured mirror could not be verified -- the
             // user found out whether it worked by attempting an install.
             if python_requested {
-                let config = app.ctx.config.registries().python.clone();
-                // The same candidate list the install path resolves against,
-                // including the built-in mirrors when nothing is configured.
-                // Probing `config.urls` directly would report on an empty set and
-                // print "no Python index mirrors configured" while installs were in
-                // fact ranking mirrors -- a diagnostic disagreeing with the thing it
-                // diagnoses.
-                let candidates = osdk_core::python_index::effective_candidates(&config.urls);
-                let plan =
-                    osdk_core::python_index::plan(&candidates, config.probe_timeout_ms).await;
-                print_python_index_plan(&plan);
-                if matches!(plan, osdk_core::python_index::IndexPlan::Unavailable { .. }) {
-                    unavailable.push("python".to_string());
+                let mut env = std::collections::BTreeMap::new();
+                match osdk_core::package_sources::apply(
+                    &app.ctx,
+                    &cwd,
+                    "uv",
+                    None,
+                    &["sync".into()],
+                    &mut env,
+                )
+                .await
+                {
+                    Ok(reason) => {
+                        let plan = match env.get("UV_DEFAULT_INDEX") {
+                            Some(url) => osdk_core::python_index::IndexPlan::Selected {
+                                url: url.clone(),
+                                probes: vec![],
+                            },
+                            None => osdk_core::python_index::IndexPlan::PassThrough {
+                                reason: reason.clone(),
+                            },
+                        };
+                        print_python_index_plan(&plan);
+                        println!("  {reason}");
+                        if env.contains_key("UV_INDEX") {
+                            println!("  additional indexes: explicitly configured; first-index");
+                        }
+                    }
+                    Err(error) => {
+                        println!("python: {error}");
+                        unavailable.push("python".into());
+                    }
                 }
             }
             if unavailable.is_empty() {
@@ -185,7 +203,7 @@ pub(crate) fn print_registry_plan(manager: PackageManager, plan: &RegistryPlan) 
             println!(
                 "  {:<12} {url} ({})",
                 t!("label.registry_selected"),
-                package_registry::registry_env(manager)
+                package_registry::registry_envs(manager).join(", ")
             );
         }
         RegistryPlan::Unavailable { .. } => println!(

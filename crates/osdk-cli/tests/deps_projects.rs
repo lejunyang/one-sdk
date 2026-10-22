@@ -51,16 +51,16 @@ fn removed_installer_is_rejected_in_root_project_and_inherited_configuration() {
 fn filters_route_and_deduplicate_root_and_children_from_either_cwd() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    write(root, "package.json", r#"{"packageManager":"npm@11"}"#);
+    write(root, "package.json", r#"{"packageManager":"npm@11.0.0"}"#);
     write(
         root,
         "apps/api/package.json",
-        r#"{"packageManager":"pnpm@10"}"#,
+        r#"{"packageManager":"pnpm@10.0.0"}"#,
     );
     write(
         root,
         "apps/web/package.json",
-        r#"{"packageManager":"npm@11"}"#,
+        r#"{"packageManager":"npm@11.0.0"}"#,
     );
     write(root,"osdk.toml","[deps]\nroots=['apps/*','apps/api']\n[deps.npm]\n[deps.pnpm]\n[deps.projects.'apps/web'.npm]\nauto=false\n");
     for cwd in [root.to_path_buf(), root.join("apps/api")] {
@@ -108,7 +108,7 @@ fn workspace_member_selection_expands_to_one_shared_installation() {
     write(
         root,
         "js/package.json",
-        r#"{"name":"root","private":true,"packageManager":"pnpm@10"}"#,
+        r#"{"name":"root","private":true,"packageManager":"pnpm@10.0.0"}"#,
     );
     write(
         root,
@@ -191,7 +191,7 @@ fn explicit_inheritance_has_same_deps_options_and_commands_from_root_or_child() 
     write(
         root,
         "apps/api/package.json",
-        r#"{"packageManager":"npm@11"}"#,
+        r#"{"packageManager":"npm@11.0.0"}"#,
     );
     write(root,"osdk.toml","[tools]\nnode='24.19.0'\n[deps]\nroots=['apps/*']\n[deps.npm]\noutputs=['node_modules']\nenv={A='1',B='1'}\n");
     write(
@@ -206,7 +206,7 @@ fn explicit_inheritance_has_same_deps_options_and_commands_from_root_or_child() 
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains("auto=false"), "{text}");
         assert!(text.contains("outputs=[]"), "{text}");
-        assert!(text.contains("A=1 B=2"), "{text}");
+        assert!(text.contains("A=[redacted] B=[redacted]"), "{text}");
         results.push(text);
     }
     assert_eq!(results[0], results[1]);
@@ -290,7 +290,11 @@ fn inherited_offline_policy_and_workspace_tool_context_are_consistent() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     write(root, "osdk.toml", "[deps.projects.'api'.npm]\n");
-    write(root, "api/package.json", r#"{"packageManager":"npm@11"}"#);
+    write(
+        root,
+        "api/package.json",
+        r#"{"packageManager":"npm@11.0.0"}"#,
+    );
     write(
         root,
         "api/osdk.toml",
@@ -324,7 +328,11 @@ fn inherited_offline_policy_and_workspace_tool_context_are_consistent() {
         String::from_utf8_lossy(&output.stdout).contains("--offline"),
         "CLI offline must override even a matching parent flag: {output:?}"
     );
-    write(root, "js/package.json", r#"{"packageManager":"pnpm@11"}"#);
+    write(
+        root,
+        "js/package.json",
+        r#"{"packageManager":"pnpm@11.0.0"}"#,
+    );
     write(root, "js/pnpm-workspace.yaml", "packages: ['packages/*']");
     write(root, "js/packages/a/package.json", "{}");
     write(
@@ -335,6 +343,140 @@ fn inherited_offline_policy_and_workspace_tool_context_are_consistent() {
     write(root, "osdk.toml", "[deps.projects.'js'.pnpm]\n");
     let output = run(root, root, &["deps", "--list", "--all"]);
     assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("conflicting effective tool settings or sources"),
+        "{output:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn execution_keeps_secrets_but_explain_lock_and_state_do_not_and_failure_is_not_retried() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root, "input", "manifest");
+    write(root, "osdk.toml", "[deps.private]\nsources=['input']\noutputs=['received']\nenv={API_TOKEN='credential-sentinel-9382'}\nrun=['sh','-c','printf %s \"$API_TOKEN\" > received; echo call >> calls']\n");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_osdk"))
+            .args(args)
+            .current_dir(root)
+            .env("OSDK_CONFIG_DIR", root.join("state/config"))
+            .env("OSDK_DATA_DIR", root.join("state/data"))
+            .env("OSDK_CACHE_DIR", root.join("state/cache"))
+            .env("OSDK_TRUSTED_CONFIG_PATHS", root.join("osdk.toml"))
+            .output()
+            .unwrap()
+    };
+    for args in [
+        vec!["deps", "--dry-run", "--explain"],
+        vec!["deps", "--explain"],
+    ] {
+        let output = invoke(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("credential-sentinel"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credential-sentinel"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("received")).unwrap(),
+        "credential-sentinel-9382"
+    );
+    assert!(!std::fs::read_to_string(root.join("osdk.lock"))
+        .unwrap()
+        .contains("credential-sentinel"));
+    let second = invoke(&["deps"]);
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("calls")).unwrap(),
+        "call\n"
+    );
+    // A native config edit must invalidate even a custom command's opaque snapshot.
+    write(root, ".npmrc", "registry=https://new-source.example/\n");
+    let changed = invoke(&["deps"]);
+    assert!(changed.status.success(), "{changed:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("calls")).unwrap(),
+        "call\ncall\n"
+    );
+    for entry in std::fs::read_dir(root.join("state/cache/deps")).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        assert!(!text.contains("credential-sentinel"));
+    }
+    write(
+        root,
+        "osdk.toml",
+        "[deps.private]\nrun=['sh','-c','echo failure >> attempts; exit 17']\n",
+    );
+    let failed = invoke(&["deps"]);
+    assert!(!failed.status.success());
+    assert_eq!(
+        std::fs::read_to_string(root.join("attempts")).unwrap(),
+        "failure\n"
+    );
+}
+
+#[test]
+fn canonical_sources_inherit_replace_and_clear_and_unknown_fields_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root, "osdk.toml", "[registries.python]\ndefault='https://default.example/simple/'\nindexes=['https://first.example/simple/']\n[settings.precedence]\ntools='native'\npackages='osdk'\n");
+    write(
+        root,
+        "child/osdk.toml",
+        "extends='../osdk.toml'\n[registries.python]\ndefault=''\nindexes=[]\n",
+    );
+    let config =
+        osdk_core::config::Config::load(&root.join("absent"), &root.join("child")).unwrap();
+    assert_eq!(config.registries().python.default.as_deref(), Some(""));
+    assert_eq!(config.registries().python.indexes, Some(vec![]));
+    assert_eq!(
+        config.settings.precedence.tools,
+        osdk_core::config::SourcePrecedence::Native
+    );
+    write(root, "package.json", "{}");
+    for field in ["index", "extra_index", "registry"] {
+        write(
+            root,
+            "osdk.toml",
+            &format!("[deps.npm]\n{field}='https://removed.example/'\n"),
+        );
+        let output = run(root, root, &["deps", "--list"]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
+    }
+}
+
+#[test]
+fn workspace_rejects_conflicting_canonical_registries_between_members() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root, "package.json", r#"{"packageManager":"pnpm@11.0.0"}"#);
+    write(root, "pnpm-workspace.yaml", "packages: ['packages/*']\n");
+    write(root, "packages/a/package.json", "{}");
+    write(
+        root,
+        "osdk.toml",
+        "[deps.pnpm]\n[registries.npm]\ndefault='https://one.example/'\n",
+    );
+    write(
+        root,
+        "packages/a/osdk.toml",
+        "extends='../../osdk.toml'\n[registries.npm]\ndefault='https://two.example/'\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_osdk"))
+        .args(["deps", "--list"])
+        .current_dir(root)
+        .env("OSDK_CONFIG_DIR", root.join("state/config"))
+        .env("OSDK_DATA_DIR", root.join("state/data"))
+        .env("OSDK_CACHE_DIR", root.join("state/cache"))
+        .env(
+            "OSDK_TRUSTED_CONFIG_PATHS",
+            std::env::join_paths([root.join("osdk.toml"), root.join("packages/a/osdk.toml")])
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("conflicting effective tool settings or sources"),

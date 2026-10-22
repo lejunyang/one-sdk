@@ -5707,7 +5707,7 @@ printf '%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_regis
             .collect::<Vec<_>>();
         assert_eq!(values.len(), 6);
         for (index, value) in values.iter().enumerate() {
-            if index == selected_index {
+            if index == selected_index || (manager == "pnpm" && index == 0) {
                 assert_eq!(value, &healthy, "{manager}@{version}");
             } else {
                 assert_eq!(value, "unset", "{manager}@{version}");
@@ -5780,7 +5780,7 @@ printf '%s|%s|%s|%s|%s|%s|%s\n' "${npm_config_registry-unset}" "${pnpm_config_re
         let fields = line.trim_end().split('|').collect::<Vec<_>>();
         assert_eq!(fields.len(), 7, "{alias}: {line}");
         for (index, value) in fields[..6].iter().enumerate() {
-            if index == registry_index {
+            if index == registry_index || (manager == "pnpm" && index == 0) {
                 assert_eq!(*value, healthy, "{alias}");
             } else {
                 assert_eq!(*value, "unset", "{alias}");
@@ -7123,13 +7123,13 @@ fn deps_trust_gates_the_registry_but_not_the_declaration() {
 
     std::fs::write(
         project.join("osdk.toml"),
-        "[deps.pnpm]\nindex = \"https://registry.example.com/\"\n",
+        "[deps.pnpm.registries.npm]\ndefault = \"https://registry.example.com/\"\n",
     )
     .unwrap();
     let output = run_isolated_in(root, &project, &["deps", "--list"]);
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("deps.pnpm.index"), "{stderr}");
+    assert!(stderr.contains("deps.pnpm.registries"), "{stderr}");
 
     // Same untrusted config: dispatching a tool must still work.
     let output = run_isolated_in(root, &project, &["current"]);
@@ -7721,8 +7721,12 @@ fn depends_orders_providers_and_refuses_a_cycle() {
     let output = run_isolated_in(root, &project, &["deps", "--dry-run"]);
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let a_at = stdout.find(" A").unwrap_or_else(|| panic!("{stdout}"));
-    let b_at = stdout.find(" B").unwrap_or_else(|| panic!("{stdout}"));
+    let a_at = stdout
+        .find("custom command a ")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let b_at = stdout
+        .find("custom command b ")
+        .unwrap_or_else(|| panic!("{stdout}"));
     assert!(
         a_at < b_at,
         "`a` must be planned before `b` despite being declared second: {stdout}"

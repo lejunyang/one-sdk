@@ -278,15 +278,6 @@ pub fn plan(
         env.remove("YARN_ENABLE_SCRIPTS");
     }
 
-    if let Some(index) = &config.index {
-        // Registry selection is mapped onto the *default* registry only. An
-        // extra registry ranked above the default is a dependency-confusion
-        // vector, so osdk never writes one.
-        env.insert("NPM_CONFIG_REGISTRY".into(), index.clone());
-        if project.provider == "yarn" {
-            env.insert("YARN_NPM_REGISTRY_SERVER".into(), index.clone());
-        }
-    }
     for (key, value) in &config.env {
         env.insert(key.clone(), value.clone());
     }
@@ -540,33 +531,5 @@ mod tests {
         assert_eq!(lock_owner("bun.lock"), Some("bun"));
         assert_eq!(lock_owner("bun.lockb"), Some("bun"));
         assert_eq!(lock_owner("Cargo.lock"), None);
-    }
-
-    /// A custom registry is mapped onto the *default* registry only. Writing an
-    /// additional registry that outranks the default would be a
-    /// dependency-confusion vector.
-    #[test]
-    fn a_custom_registry_maps_to_the_default_registry_only() {
-        let versions = BTreeMap::new();
-        let config = ProviderConfig {
-            index: Some("https://registry.example.com/".into()),
-            ..Default::default()
-        };
-        let got = build(
-            &project("npm", Some("package-lock.json")),
-            &choice("npm", None),
-            &config,
-            &versions,
-        )
-        .unwrap();
-        assert_eq!(
-            got.env.get("NPM_CONFIG_REGISTRY").map(String::as_str),
-            Some("https://registry.example.com/")
-        );
-        // Nothing may set an *additional* registry.
-        assert!(!got
-            .env
-            .keys()
-            .any(|key| key.contains("EXTRA") || key == "NPM_CONFIG_REGISTRIES"));
     }
 }

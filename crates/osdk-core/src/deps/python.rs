@@ -195,9 +195,7 @@ pub fn plan(
     // Index redirection maps to uv's own variable. Only the default index is
     // mapped; an extra index is never added implicitly, because that widens
     // where a name can resolve from and is the shape of a confusion attack.
-    if let Some(index) = &config.index {
-        env.insert("UV_DEFAULT_INDEX".into(), index.clone());
-    }
+
     // uv must never reach out for an interpreter on its own: the one osdk
     // resolved is the one that should be used, and a silent download would put a
     // different runtime under the environment.
@@ -354,31 +352,6 @@ mod tests {
             got.env.get("UV_PYTHON_DOWNLOADS").map(String::as_str),
             Some("never")
         );
-    }
-
-    /// Only the default index is mapped; an extra index is never added silently.
-    #[test]
-    fn an_index_maps_to_the_default_index_only() {
-        let temp = tempfile::tempdir().unwrap();
-        let manifest = temp.path().join("pyproject.toml");
-        std::fs::write(&manifest, "[project]\nname = \"p\"\n").unwrap();
-        let config = ProviderConfig {
-            index: Some("https://example.com/simple".into()),
-            ..ProviderConfig::default()
-        };
-        let got = plan(
-            &project("uv", &manifest, None),
-            &choice("uv"),
-            &config,
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            got.env.get("UV_DEFAULT_INDEX").map(String::as_str),
-            Some("https://example.com/simple")
-        );
-        assert!(!got.env.contains_key("UV_EXTRA_INDEX_URL"));
-        assert!(!got.env.contains_key("UV_INDEX_URL"));
     }
 
     /// A requirements file always uses resolver-backed install rather than sync.

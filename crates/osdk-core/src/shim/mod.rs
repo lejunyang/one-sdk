@@ -294,12 +294,13 @@ pub fn managed_jdk_env(
     if installed.is_empty() {
         return None;
     }
-    let selected = crate::version::resolver::resolve_active(
+    let selected = crate::version::resolver::resolve_active_config(
         java.id(),
         cwd,
-        &ctx.config.tools,
+        &ctx.config,
         java.idiomatic_files(),
     )
+    .ok()?
     .and_then(|active| installed_matching(&active.spec, active.is_range, &installed))
     .or_else(|| installed.last().cloned())?;
     let version = ToolVersion::new(java.id(), selected);

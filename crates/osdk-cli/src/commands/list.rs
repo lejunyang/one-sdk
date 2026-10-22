@@ -145,17 +145,26 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     };
     let mut any = false;
     for backend in backends {
-        if let Some(av) = osdk_core::version::resolver::resolve_active(
+        if let Some(av) = osdk_core::version::resolver::resolve_active_config(
             backend.id(),
             &cwd,
-            &app.ctx.config.tools,
+            &app.ctx.config,
             backend.idiomatic_files(),
-        )
+        )?
         .map(|active| (active.spec, Some(active.source)))
         .or_else(|| {
             osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
                 .map(|request| (request.spec.to_string(), None))
         }) {
+            println!(
+                "{}",
+                osdk_core::version::resolver::explain_selection(
+                    backend.id(),
+                    &cwd,
+                    &app.ctx.config,
+                    backend.idiomatic_files()
+                )?
+            );
             any = true;
             println!(
                 "{} {} ({})",
@@ -250,12 +259,12 @@ pub fn where_cmd(app: &App, tool: String, global: bool, bins: bool) -> Result<()
         let cwd = std::env::current_dir()?;
         let installed = backend.list_installed(&app.ctx)?;
         let dynamic_request = osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id());
-        let resolved = osdk_core::version::resolver::resolve_active(
+        let resolved = osdk_core::version::resolver::resolve_active_config(
             backend.id(),
             &cwd,
-            &app.ctx.config.tools,
+            &app.ctx.config,
             backend.idiomatic_files(),
-        )
+        )?
         .map(|active| (active.spec, active.is_range))
         .or_else(|| dynamic_request.map(|request| (request.spec.to_string(), false)));
         match resolved {

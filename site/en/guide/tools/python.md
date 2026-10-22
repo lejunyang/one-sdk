@@ -280,3 +280,5 @@ and `activate` scripts are its plumbing and never become shims -- otherwise
 
 Command names are discovered from what is actually on disk rather than assuming
 the console script matches the project name, which frequently it does not.
+
+The `pypi:` tool backend above retains its existing anonymous mirror policy. Project exec/shim/deps additionally support explicit `registries.python.default` and `indexes`; additional indexes are not mirrors. See [package managers](./package-managers.md) for precedence and limitations.

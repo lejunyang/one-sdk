@@ -7,7 +7,7 @@ use osdk_core::backend::native_tool::{
 };
 use osdk_core::backend::{Backend, InstallCtx};
 use osdk_core::inventory::ScanReport;
-use osdk_core::package_registry::{self, PackageManager, RegistryPlan, RegistryProbe};
+use osdk_core::package_registry::{self, PackageManager, RegistryPlan};
 use osdk_core::source::select;
 use osdk_core::t;
 use osdk_core::version::{ToolRequest, ToolVersion, VersionSpec};
@@ -395,7 +395,8 @@ tools = ["node"]
                 &app.ctx.config.tools,
             )
             .unwrap();
-            bind_configured_spec_for_bare_operand_at(&app, operand, &mut request, &project);
+            bind_configured_spec_for_bare_operand_at(&app, operand, &mut request, &project)
+                .unwrap();
             request.spec
         };
 
@@ -441,7 +442,7 @@ tools = ["node"]
             &app.ctx.config.tools,
         )
         .unwrap();
-        bind_configured_spec_for_bare_operand_at(&app, "go", &mut request, &project);
+        bind_configured_spec_for_bare_operand_at(&app, "go", &mut request, &project).unwrap();
 
         assert_eq!(request.spec, VersionSpec::Latest);
     }

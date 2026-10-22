@@ -736,7 +736,9 @@ pub(crate) async fn run_native_installer(
         manager_version,
     )?;
     if let Some(url) = selected_registry {
-        env.insert(package_registry::registry_env(manager).into(), url.into());
+        for key in package_registry::registry_envs(manager) {
+            env.insert(key.into(), url.into());
+        }
     }
     run_managed_command(executable, &args, &env, &layout.root)
 }

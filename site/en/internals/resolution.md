@@ -78,3 +78,5 @@ The lock records a resolution and artifact identity, not a claim that existing b
 - Prefix, range, LTS, and prerelease behavior is covered by the [`version` unit tests](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs).
 - The exact-version option-preservation regression test is in [`backend/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/mod.rs).
 - Package-manager auto-selection, Node injection, and lock restoration are covered by [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs) and [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs).
+
+The shared execution adapter is `package_sources.rs`; version policy is in `version/resolver.rs`. Native file discovery is candidate evidence, not a claim about the native effective winner. See [package managers](../guide/tools/package-managers.md).

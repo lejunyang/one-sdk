@@ -313,8 +313,8 @@ allow_build_from_source = true
 ## 换 registry
 
 ```toml
-[deps.pnpm]
-index = "https://registry.example.com/"
+[registries.npm]
+default = "https://registry.example.com/"
 ```
 
 改变字节来源需要你批准配置（原因是来源变了，不是因为执行了代码）。
@@ -334,7 +334,7 @@ outputs = ["node_modules"]  # 缺失即视为过期（替换默认值）
 dir = "apps/api"            # 在子目录里运行
 depends = ["npm"]           # 先兑现另一个 provider
 timeout = "10m"
-index = "https://registry.npmjs.org/"
+registries.npm.default = "https://registry.npmjs.org/"
 allow_build_from_source = false
 env = { CI = "1" }
 ```
@@ -398,7 +398,7 @@ pnpm 上还多抓到一种 npm 收据抓不到的：**改动后文件长度不�
 未声明 `sources`、或声明后一个文件都没匹配上，一律不算「新鲜」——
 一个匹配不到任何文件的判据恒为真，那会把「什么都没检查」伪装成「没有变化」。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧包源字段已移除，迁移方式见下文。
 
 ### 按项目声明依赖
 
@@ -428,3 +428,41 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。
 可用 `osdk run deps-monorepo-live` 或 `python scripts/test-deps-monorepo.py --bin target/debug/osdk` 运行真实项目验证；使用临时状态与小 npm/Python 包，检查实际产物、共享覆盖、成员变化、继承、auto/禁用及锁/离线失败。子配置可以用显式 `disable = []` 替换继承的禁用列表。
+
+## 包源与原生配置优先级
+
+`tools` 声明工具和版本，`sources` 控制工具归档下载，`registries` 是项目包源的统一入口。
+exec、shim 和 deps 共用同一组适配器，配置不会改写 `.npmrc`、`pyproject.toml` 等原生文件。
+
+```toml
+[settings.precedence]
+tools = "osdk"       # 或 "native"；默认 osdk
+packages = "native"  # 或 "osdk"；默认保留原生显式配置
+
+[registries.npm]
+default = "https://registry.npmjs.org/"
+
+[registries.python]
+default = "https://pypi.org/simple/"
+indexes = ["https://packages.example.org/simple/"]
+
+[registries.go]
+proxy = "https://proxy.golang.org,direct"
+```
+
+- 本次命令行源参数和进程中显式源变量优先；`deps.env` 是本次子进程环境。`packages` 只决定 osdk 显式配置和原生文件之间的顺序，不对认证排序。
+- `packages = "native"` 保留原生源、scope、认证、代理和 TLS 配置链；`"osdk"` 仅覆盖声明的默认源/附加索引，scope 与认证保持原生。缺少覆盖时委托原生配置；自动镜像不得覆盖显式原生配置。uv 的复杂原生表采用保守整组保留，不尝试重写命名索引或包绑定。
+- npm、pnpm、Yarn Classic、Yarn Berry、Bun 使用各自变量：`npm_config_registry`、`npm_config_registry` + `pnpm_config_registry`（pnpm 10/11）、`YARN_REGISTRY`、`YARN_NPM_REGISTRY_SERVER`、`BUN_CONFIG_REGISTRY`。Yarn major 必须已知；不会把 Node 版本当作 Yarn major。pnpm 工作区配置委托 pnpm 解析。
+- Python 两种 deps provider 都运行 uv。`default` 是最低优先级默认索引；`indexes` 是按声明顺序排列的显式附加索引，保留 `first-index`，不是请求失败后的镜像 fallback。命名索引、包绑定和认证插值继续放在原生配置。
+- `urls` 仍是只用于默认源的匿名镜像候选；全部不可用时在启动包管理器前失败，不在安装失败后重跑生命周期脚本。离线不探测，原生安装由其离线参数约束。
+- `default = ""` 清除继承的 osdk 默认覆盖并关闭该项自动镜像；`indexes = []` 清除 osdk 附加索引。两者不删除原生配置。`urls = []` 保留原来的内置候选含义。
+- 用户层到项目层的 `registries` 整段替换；显式 `extends` 按字段合并、数组替换。`[deps.<provider>.registries]` 使用相同 schema，作为该 provider 的整段局部替换。Cargo、Deno 和自定义 deps 不接受此局部字段；使用原生配置和 `env`。Go 保留 GOPROXY 的逗号/竖线语义，不统一成 URL 重试列表。
+- `tools` 策略比较 osdk 项目声明与原生版本声明；用户全局版本仍是后备。`.nvmrc` 等选择运行时，`package.json.packageManager` 选择管理器，两者独立。显式 `tool@version` 和现有锁重放优先；版本范围仍按范围解析，无效原生文件报错。没有 `conflict-error` 模式。
+- `osdk current` 显示工具选择来源及策略；`osdk deps --dry-run --explain` 显示包源决策、发现的原生候选文件和工具选择。原生链最终赢家由包管理器解析，不能确定的来源不会被声称已解析。原生文件、源相关环境及配置参与不透明 freshness 哈希；凭据不写入显示命令或 osdk.lock。自定义命令的参数和环境在显示中整体隐藏；原生子进程自己的输出由原生工具负责脱敏。
+
+### 迁移
+
+删除旧 `[deps.<provider>].index` / `extra_index`，不提供兼容别名。默认源迁移到
+`registries.npm.default` 或 `registries.python.default`；只有确实需要额外 Python 索引时才设置 `registries.python.indexes`。
+项目局部例外可写成 `deps.uv.registries.python.default = "https://example.org/simple/"`。
+未知字段正常报错，不能静默接受 Cargo/Deno 的虚构通用源字段。

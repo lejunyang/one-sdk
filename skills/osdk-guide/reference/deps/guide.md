@@ -38,7 +38,7 @@ osdk deps //apps/api:uv
 
 原生启动器按宿主平台选择；Unix 不会执行安装包内的 `.exe`、`.cmd` 或 `.bat` 启动器。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧 `index` / `extra_index` 已移除。请使用 `registries`；规则见 configuration/registries.md。
 
 ### 按项目声明依赖
 

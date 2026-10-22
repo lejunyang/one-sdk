@@ -41,6 +41,8 @@ endpoint 或 pin、选择策略为 `auto` 且非 offline 时刷新。当前对 `
 
 ## 环境变量里的镜像
 
+本节的竞速规则描述 SDK/工具产物来源。exec/shim/deps 的项目包操作保留显式包源环境变量，不把它们与镜像竞速。见[包源优先级](/guide/project/deps#包源与原生配置优先级)。
+
 各工具链本身都支持用环境变量指定镜像：rustup 读 `RUSTUP_DIST_SERVER`
 （以及 `RUSTUP_UPDATE_ROOT`），go 命令读 `GOPROXY`，npm 系读
 `npm_config_registry`、`pnpm_config_registry`、`YARN_REGISTRY`、

@@ -132,13 +132,13 @@ misclassified as manager arguments.
 
 The manager keeps its native choice without probing or injection when:
 
-- osdk itself uses `--offline`;
+- osdk `--offline` disables probes; explicit process-local overrides can still apply;
 - command arguments explicitly select a registry;
 - the corresponding registry environment variable is already set;
 - manager arguments select another working directory or config file;
 - npm/pnpm/Yarn/Bun use real `--offline`, or Deno uses `--cached-only` on a supported command;
 - the invocation is `--help`, `-h`, `--version`, `-v`, or a command outside the allowlist;
-- native configuration cannot be parsed safely or contains a private, unknown, scoped, authenticated, TLS-customized, proxied, or custom-config registry policy.
+- under the default `packages = "native"`, native configuration declares a registry or contains private, scoped, authentication, TLS, proxy or custom-config policy. With `packages = "osdk"`, an explicit `default` overrides only the default registry; scope/auth remain native.
 
 `--prefer-offline`, frozen lockfile, and immutable-cache modes do not guarantee
 no network, so preflight can still run. Deno has no universal `--offline`; its
@@ -155,16 +155,16 @@ urls = [
 probe_timeout_ms = 1500
 ```
 
-| Manager | Only this variable is injected after selection |
+| Manager | Variables injected after selection |
 | --- | --- |
 | npm/npx | `npm_config_registry` |
-| pnpm/pnpx | `pnpm_config_registry` |
+| pnpm/pnpx | `npm_config_registry` + `pnpm_config_registry` (10/11) |
 | Yarn 1 | `YARN_REGISTRY` |
 | Yarn 2+ | `YARN_NPM_REGISTRY_SERVER` |
 | Bun | `BUN_CONFIG_REGISTRY` |
 | Deno's npm layer | `NPM_CONFIG_REGISTRY` |
 
-With no configured list, built-in npmjs and npmmirror candidates are probed
+With no native source policy or explicit default, built-in npmjs and npmmirror candidates are probed
 anonymously in parallel and the lowest-latency healthy endpoint wins. An
 explicit user/project list preserves order and selects the first healthy entry;
 project `[registries]` replaces the complete user section. Every eligible
@@ -173,8 +173,8 @@ Once it starts, failure is returned without switching and replaying scripts,
 lockfile writes, or `node_modules` changes.
 
 osdk reads `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `bunfig.toml`/`.bunfig.toml`, and
-related user/global files, but only recognized public npmjs/npmmirror endpoints
-become candidates. It does not rewrite project lockfiles or intercept network
+related user/global files. Native registry declarations, including public ones,
+are preserved instead of entering mirror races. It does not rewrite project lockfiles or intercept network
 traffic; absolute artifact URLs in metadata or lockfiles may bypass the default
 registry.
 
@@ -261,3 +261,41 @@ directly on PATH:
 | Cargo | — (`CARGO_HOME` is already managed) | `data/cargo/bin` |
 
 See [Go tools](./go) and [Cargo tools](./cargo).
+
+## Package sources and native precedence
+
+`tools` declares tools and versions, `sources` downloads tool artifacts, and `registries` is the canonical project package-source configuration.
+Exec, shims and deps share adapters. They never rewrite `.npmrc`, `pyproject.toml` or other native files.
+
+```toml
+[settings.precedence]
+tools = "osdk"       # or "native"; default: osdk
+packages = "native"  # or "osdk"; preserve explicit native configuration by default
+
+[registries.npm]
+default = "https://registry.npmjs.org/"
+
+[registries.python]
+default = "https://pypi.org/simple/"
+indexes = ["https://packages.example.org/simple/"]
+
+[registries.go]
+proxy = "https://proxy.golang.org,direct"
+```
+
+- Invocation CLI source options and explicit process source variables win; `deps.env` supplies that process environment. `packages` orders explicit osdk settings against native files, never authentication.
+- `packages = "native"` preserves native registries, scopes, credentials, proxies and TLS configuration. `"osdk"` overrides only declared default/index settings; scopes and authentication stay native. Missing overrides preserve native behavior. Automatic mirrors never replace explicit native configuration. Complex uv native tables are conservatively preserved as a group, without rewriting named indexes or package bindings.
+- npm, pnpm, Yarn Classic, Yarn Berry and Bun use their own variables: `npm_config_registry`, `npm_config_registry` + `pnpm_config_registry` (pnpm 10/11), `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `BUN_CONFIG_REGISTRY`. Yarn's major must be known; a Node version is never interpreted as Yarn's major. pnpm resolves workspace configuration itself.
+- Both Python deps providers use uv. `default` is the lowest-priority default index; `indexes` supplies explicitly ordered additional indexes with `first-index` safety. These are not failure fallback mirrors. Keep named indexes, package bindings and credential interpolation in native configuration.
+- `urls` remains an anonymous mirror candidate list for the default source only. All-source failure stops before the manager starts. Installation failures never trigger automatic lifecycle-script retries. Offline mode skips probes; native offline flags constrain installation.
+- `default = ""` clears an inherited osdk default override and disables automatic mirrors for that item; `indexes = []` clears osdk additional indexes. Neither deletes native settings. `urls = []` retains its built-in-candidate meaning.
+- Project `registries` replaces the user section. Explicit `extends` merges fields and replaces arrays. `[deps.<provider>.registries]` uses the same schema as a whole-section local replacement. Cargo, Deno and custom deps reject this local field; use native configuration or `env`. Go preserves GOPROXY comma/pipe behavior rather than inventing URL retries.
+- Tool precedence orders osdk project declarations against native version declarations; global user pins remain fallback. `.nvmrc` selects a runtime; `package.json.packageManager` selects a manager. Explicit `tool@version` and existing lock replay remain authoritative. Version ranges retain range semantics; invalid native files fail. There is no `conflict-error` mode.
+- `osdk current` displays tool candidates and policy; `osdk deps --dry-run --explain` reports package decisions, discovered native candidate files and tool selection. The native manager resolves its effective configuration; unknown attribution is stated rather than invented. Native files, source environment and configuration participate in opaque freshness hashes. Credentials are excluded from displayed commands and osdk.lock; custom command arguments/environment are hidden entirely. Native subprocesses remain responsible for redacting their own output.
+
+### Migration
+
+Remove `[deps.<provider>].index` / `extra_index`; there are no compatibility aliases.
+Move defaults to `registries.npm.default` or `registries.python.default`. Use `registries.python.indexes` only for intentional additional Python indexes.
+For a local exception, use `deps.uv.registries.python.default = "https://example.org/simple/"`.
+Unknown fields fail normally, including invented generic Cargo/Deno source fields.

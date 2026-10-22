@@ -161,9 +161,6 @@ pub fn plan(
             // a Go osdk did not select and did not verify, which is the same
             // hazard `UV_PYTHON_DOWNLOADS=never` closes on the Python side.
             env.insert("GOTOOLCHAIN".into(), "local".into());
-            if let Some(index) = &config.index {
-                env.insert("GOPROXY".into(), index.clone());
-            }
         }
         "cargo" => {
             tool = "rust";
@@ -368,33 +365,6 @@ mod tests {
 
     /// An index override maps to the ecosystem's own variable, and only for the
     /// ecosystem that has one.
-    #[test]
-    fn an_index_maps_only_where_it_exists() {
-        let temp = tempfile::tempdir().unwrap();
-        let manifest = temp.path().join("go.mod");
-        std::fs::write(&manifest, "").unwrap();
-        let config = ProviderConfig {
-            index: Some("https://goproxy.example.com".into()),
-            ..ProviderConfig::default()
-        };
-        let got = plan(
-            &project("go", Ecosystem::Go, &manifest, None),
-            &choice("go"),
-            &config,
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            got.env.get("GOPROXY").map(String::as_str),
-            Some("https://goproxy.example.com")
-        );
-        // GOTOOLCHAIN must survive an index override.
-        assert_eq!(
-            got.env.get("GOTOOLCHAIN").map(String::as_str),
-            Some("local")
-        );
-    }
-
     /// A manifest that will not parse is an error, not "no declaration".
     #[test]
     fn an_unparseable_manifest_is_an_error() {

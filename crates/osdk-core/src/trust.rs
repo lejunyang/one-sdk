@@ -174,6 +174,7 @@ fn scopes_include(scopes: &[Scope], wanted: Scope) -> bool {
 // (`[settings.<tool>]`) are classified separately by
 // `collect_tool_section_requirements`.
 const SAFE_SETTINGS_KEYS: &[&str] = &[
+    "precedence",
     "download_cache",
     "jobs",
     "lang",
@@ -272,7 +273,7 @@ const SKILL_SOURCE_KEYS: &[&str] = &["endpoint", "insecure", "mirror"];
 /// harder to notice: a key like `index_strategy` is not a source override, and
 /// treating it as one would demand approval for a harmless setting. These are
 /// exact names.
-const DEPS_SOURCE_KEYS: &[&str] = &["index", "extra_index", "registry", "insecure"];
+const DEPS_SOURCE_KEYS: &[&str] = &["registries"];
 
 /// Keys that opt into running build or lifecycle scripts, i.e. executing code
 /// the user did not otherwise ask to run. Same class as `tools.<name>.allow_builds`.
@@ -1708,18 +1709,13 @@ mod tests {
 
         for (body, key) in [
             (
-                "[deps.pnpm]\nindex = \"https://registry.example.com/\"\n",
-                "deps.pnpm.index",
+                "[deps.pnpm.registries.npm]\ndefault = \"https://registry.example.com/\"\n",
+                "deps.pnpm.registries",
             ),
             (
-                "[deps.npm]\nextra_index = \"https://other.example.com\"\n",
-                "deps.npm.extra_index",
+                "[deps.uv.registries.python]\nindexes = [\"https://other.example.com/simple/\"]\n",
+                "deps.uv.registries",
             ),
-            (
-                "[deps.npm]\nregistry = \"https://r.example.com/\"\n",
-                "deps.npm.registry",
-            ),
-            ("[deps.npm]\ninsecure = true\n", "deps.npm.insecure"),
         ] {
             std::fs::write(&path, body).unwrap();
             let found = trust_requirements(&path, &[Scope::Deps]).unwrap();
@@ -2139,19 +2135,21 @@ catalog_url = "http://example.test/java.json"
         let write = |body: &str| std::fs::write(&config, body).unwrap();
 
         // `[deps.pnpm]` carries a governed `index` next to a safe `dir`.
-        write("[deps.pnpm]\nindex = \"https://example.com/a\"\ndir = \"./vendor\"\n");
+        write(
+            "[deps.pnpm]\nregistries.npm.default = \"https://example.com/a\"\ndir = \"./vendor\"\n",
+        );
         trust(&config_dir, &config).unwrap();
         assert!(is_trusted(&config_dir, &config, None).unwrap());
 
         // Editing the safe sibling keeps the record.
-        write("[deps.pnpm]\nindex = \"https://example.com/a\"\ndir = \"./vendor2\"\n");
+        write("[deps.pnpm]\nregistries.npm.default = \"https://example.com/a\"\ndir = \"./vendor2\"\n");
         assert!(
             is_trusted(&config_dir, &config, None).unwrap(),
             "changing a safe [deps] field must survive"
         );
         // Adding another safe sibling key likewise keeps it.
         write(
-            "[deps.pnpm]\nindex = \"https://example.com/a\"\ndir = \"./vendor2\"\ninstaller = \"pnpm\"\n",
+            "[deps.pnpm]\nregistries.npm.default = \"https://example.com/a\"\ndir = \"./vendor2\"\ninstaller = \"pnpm\"\n",
         );
         assert!(
             is_trusted(&config_dir, &config, None).unwrap(),
@@ -2159,7 +2157,7 @@ catalog_url = "http://example.test/java.json"
         );
         // Changing the governed leaf invalidates it, even in a safer-looking
         // direction: identity is what was approved.
-        write("[deps.pnpm]\nindex = \"https://example.com/b\"\ndir = \"./vendor2\"\n");
+        write("[deps.pnpm]\nregistries.npm.default = \"https://example.com/b\"\ndir = \"./vendor2\"\n");
         assert!(
             !is_trusted(&config_dir, &config, None).unwrap(),
             "changing a governed [deps] key must invalidate"
@@ -2342,7 +2340,7 @@ version = "npm:thing@1"
 allow_builds = true
 
 [deps.npm]
-index = "https://example.com"
+registries.npm.default = "https://example.com"
 
 [task]
 shell = "evil"
@@ -2371,7 +2369,7 @@ runtime = "docker"
             .into_iter()
             .map(|requirement| requirement.key)
             .collect();
-        assert_eq!(deps_keys, vec!["deps.npm.index".to_string()]);
+        assert_eq!(deps_keys, vec!["deps.npm.registries".to_string()]);
 
         let run_keys: Vec<String> = collect_requirements(&value, &[Scope::Run])
             .into_iter()

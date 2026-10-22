@@ -81,6 +81,7 @@ pub enum ToolConfigOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct Settings {
+    pub precedence: PrecedenceSettings,
     /// How store blobs are materialized into install dirs.
     pub link_mode: LinkMode,
     /// Max concurrent downloads / installs.
@@ -295,9 +296,34 @@ impl std::fmt::Display for PrereleasePolicy {
     }
 }
 
+/// Priority between explicit osdk and native project declarations. Credentials
+/// always remain native; command-line choices are outside this ordering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourcePrecedence {
+    #[default]
+    Osdk,
+    Native,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrecedenceSettings {
+    pub tools: SourcePrecedence,
+    pub packages: SourcePrecedence,
+}
+impl Default for PrecedenceSettings {
+    fn default() -> Self {
+        Self {
+            tools: SourcePrecedence::Osdk,
+            packages: SourcePrecedence::Native,
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            precedence: PrecedenceSettings::default(),
             link_mode: LinkMode::Auto,
             jobs: default_jobs(),
             yes: false,
@@ -704,6 +730,7 @@ impl<'de> Deserialize<'de> for Settings {
             }
         }
 
+        let precedence = take_or(&mut table, "precedence", defaults.precedence)?;
         let link_mode = take_or(&mut table, "link_mode", defaults.link_mode)?;
         let jobs = take_or(&mut table, "jobs", defaults.jobs)?;
         let yes = take_or(&mut table, "yes", defaults.yes)?;
@@ -730,6 +757,7 @@ impl<'de> Deserialize<'de> for Settings {
         }
 
         Ok(Settings {
+            precedence,
             link_mode,
             jobs,
             yes,
@@ -875,24 +903,55 @@ impl SourcesConfig {
 /// separate from SDK download sources because they affect delegated package
 /// manager commands rather than osdk's own downloads.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RegistriesConfig {
     pub npm: NpmRegistryConfig,
     pub python: PythonIndexConfig,
+    pub go: GoRegistryConfig,
 }
 
 /// Candidate registries for npm-compatible package managers. An empty list
 /// means to use osdk's built-in public candidates.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct NpmRegistryConfig {
+    pub default: Option<String>,
     pub urls: Vec<String>,
     pub probe_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GoRegistryConfig {
+    /// Native GOPROXY expression; comma/pipe fallback semantics are preserved.
+    pub proxy: Option<String>,
+}
+
+impl RegistriesConfig {
+    pub fn validate(&mut self) -> Result<()> {
+        normalize_registry_urls(&mut self.npm.urls)?;
+        normalize_python_index_urls(&mut self.python.urls)?;
+        if let Some(url) = &mut self.npm.default {
+            if !url.is_empty() {
+                *url = normalize_registry_url(url)?;
+            }
+        }
+        if let Some(url) = &mut self.python.default {
+            if !url.is_empty() {
+                *url = normalize_python_index_url(url)?;
+            }
+        }
+        if let Some(urls) = &mut self.python.indexes {
+            normalize_python_index_urls(urls)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for NpmRegistryConfig {
     fn default() -> Self {
         Self {
+            default: None,
             urls: Vec::new(),
             probe_timeout_ms: 1500,
         }
@@ -906,12 +965,15 @@ impl Default for NpmRegistryConfig {
 /// including malicious ones. Ranking it above the default index (uv's
 /// `--index` / `--extra-index-url`, pip's `--extra-index-url`) would turn a
 /// convenience into a dependency-confusion vector, so osdk only ever maps a
-/// mirror onto the default index. Private indexes that genuinely need higher
-/// precedence are out of scope here and stay with the package manager's own
-/// configuration.
+/// mirror onto the default index. Explicit `indexes` are a separate ordered
+/// list with first-index semantics; named bindings and credentials stay in
+/// native configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct PythonIndexConfig {
+    pub default: Option<String>,
+    /// Explicit additional indexes in priority order; never mirror fallback.
+    pub indexes: Option<Vec<String>>,
     /// Ranked candidates. Empty means "use the built-in public default".
     pub urls: Vec<String>,
     pub probe_timeout_ms: u64,
@@ -920,6 +982,8 @@ pub struct PythonIndexConfig {
 impl Default for PythonIndexConfig {
     fn default() -> Self {
         Self {
+            default: None,
+            indexes: None,
             urls: Vec::new(),
             // Higher than the npm default of 1500 ms, which was copied here at
             // first and proved too tight: a project listing is a far larger
@@ -1417,8 +1481,7 @@ impl Default for DepsProviderEntry {
             dir: None,
             depends: Vec::new(),
             timeout: None,
-            index: None,
-            extra_index: None,
+            registries: None,
             allow_build_from_source: false,
         }
     }
@@ -1513,12 +1576,8 @@ pub struct DepsProviderEntry {
     pub depends: Vec<String>,
     /// Timeout for the install command, e.g. "5m".
     pub timeout: Option<String>,
-    /// Registry/index override. Its presence is what makes this entry
-    /// trust-requiring as `WeakensVerification` -- it redirects where bytes come
-    /// from (see `trust::collect_deps_requirements`).
-    pub index: Option<String>,
-    /// Unsupported legacy field; use native named indexes / package bindings.
-    pub extra_index: Option<String>,
+    /// Intentional local replacement of the canonical package-source section.
+    pub registries: Option<RegistriesConfig>,
     /// Allow building from source / running lifecycle scripts. `ExecutesCode`:
     /// default denied, must be asked for.
     pub allow_build_from_source: bool,
@@ -2267,8 +2326,7 @@ fn read_config_file(path: &Path) -> Result<ConfigFile> {
     let mut file: ConfigFile = value.try_into().map_err(sanitize_config_parse_error)?;
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
-        normalize_registry_urls(&mut registries.npm.urls)?;
-        normalize_python_index_urls(&mut registries.python.urls)?;
+        registries.validate()?;
     }
     if let Some(containers) = &mut file.container {
         validate_containers_config(containers)?;

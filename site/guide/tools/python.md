@@ -239,3 +239,5 @@ osdk 只暴露工具**自己的**命令。环境里的 `python`、`pip`、`activ
 管道，不会成为 shim——否则 `pypi:ruff` 会遮蔽你受管的 `python`。
 
 命令名从磁盘实际内容发现，而不是假设 console script 与项目同名——两者经常不一致。
+
+以上 `pypi:` 工具安装仍使用原有匿名镜像策略。项目的 exec/shim/deps 现在另支持显式 `registries.python.default` 和 `indexes`；后者不是镜像列表，具体优先级与限制见[包管理器](./package-managers.md)。

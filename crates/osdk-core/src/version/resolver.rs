@@ -323,6 +323,150 @@ pub fn resolve_active(
     })
 }
 
+/// Apply one shared policy to tool selection. Explicit CLI requests and lock
+/// replay bypass this resolver and retain their authority.
+pub fn resolve_active_config(
+    tool: &str,
+    start_dir: &Path,
+    config: &crate::config::Config,
+    idiomatic_files: &[&str],
+) -> crate::Result<Option<ActiveVersion>> {
+    use crate::config::{SourcePrecedence, ToolConfigOrigin};
+    let native = native_version(tool, start_dir, idiomatic_files)?;
+    let configured = config.tools.get(tool).map(|spec| ActiveVersion {
+        tool: tool.into(),
+        spec: spec.clone(),
+        is_range: false,
+        source: match config.tool_origins.get(tool) {
+            Some(ToolConfigOrigin::ProjectConfig(path)) => {
+                VersionOrigin::ProjectConfig(path.clone())
+            }
+            Some(ToolConfigOrigin::ToolVersions(path)) => VersionOrigin::ToolVersions(path.clone()),
+            _ => VersionOrigin::GlobalConfig,
+        },
+    });
+    let project = configured
+        .as_ref()
+        .is_some_and(|v| matches!(v.source, VersionOrigin::ProjectConfig(_)));
+    let winner = if config.settings.precedence.tools == SourcePrecedence::Osdk && project {
+        configured
+    } else {
+        native.or(configured)
+    };
+    if let Some(selected) = &winner {
+        tracing::debug!(tool, source = ?selected.source, policy = ?config.settings.precedence.tools,
+            "tool selection: explicit command and lock selection take precedence; native and osdk declarations ordered by policy");
+    }
+    Ok(winner)
+}
+
+fn native_version(
+    tool: &str,
+    start_dir: &Path,
+    files: &[&str],
+) -> crate::Result<Option<ActiveVersion>> {
+    use crate::error::Error;
+    let make = |spec: String, source, is_range| {
+        Some(ActiveVersion {
+            tool: tool.into(),
+            spec,
+            source,
+            is_range,
+        })
+    };
+    for dir in start_dir.ancestors() {
+        let path = dir.join(".tool-versions");
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            for line in text.lines() {
+                let mut words = line.split('#').next().unwrap_or("").split_whitespace();
+                if words.next() == Some(tool) && words.next().is_none() {
+                    return Err(Error::config(format!(
+                        "missing version for {tool} in {}",
+                        path.display()
+                    )));
+                }
+            }
+            if let Some(spec) = parse_tool_versions(&text).get(tool) {
+                return Ok(make(spec.clone(), VersionOrigin::ToolVersions(path), false));
+            }
+        }
+    }
+    for name in files {
+        for dir in start_dir.ancestors() {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            if *name == "rust-toolchain.toml" {
+                let value: toml::Value = toml::from_str(&text)
+                    .map_err(|_| Error::config("invalid rust-toolchain.toml"))?;
+                if value
+                    .get("toolchain")
+                    .and_then(|v| v.get("channel"))
+                    .and_then(toml::Value::as_str)
+                    .is_none()
+                {
+                    return Err(Error::config("rust-toolchain.toml needs toolchain.channel"));
+                }
+            }
+            if let Some(spec) = read_idiomatic(&path) {
+                if spec.contains(char::is_whitespace) {
+                    return Err(Error::config(format!(
+                        "invalid native version file {}",
+                        path.display()
+                    )));
+                }
+                return Ok(make(spec, VersionOrigin::IdiomaticFile(path), false));
+            }
+            if *name != "go.mod" {
+                return Err(Error::config(format!(
+                    "empty native version file {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if matches!(tool, "node" | "npm" | "pnpm" | "yarn") {
+        for dir in start_dir.ancestors() {
+            let path = dir.join("package.json");
+            if !path.is_file() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| Error::config("invalid native package.json"))?;
+            if tool == "node" {
+                if value
+                    .get("engines")
+                    .and_then(|v| v.get("node"))
+                    .is_some_and(|v| !v.is_string())
+                {
+                    return Err(Error::config(
+                        "package.json engines.node must be a version string",
+                    ));
+                }
+                if let Some(spec) = read_node_package(&path) {
+                    crate::version::VersionSpec::parse_range(&spec)?;
+                    return Ok(make(spec, VersionOrigin::ProjectMetadata(path), true));
+                }
+            } else if let Some(manager) =
+                package_manager_from_package_json(&path).map_err(Error::config)?
+            {
+                if manager.manager == tool {
+                    return Ok(make(
+                        manager.version,
+                        VersionOrigin::ProjectMetadata(path),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn read_project_tool(path: &Path, tool: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
@@ -714,4 +858,93 @@ mod tests {
         let av = resolve_active("go", td.path(), &global, &["go.mod"]).unwrap();
         assert_eq!(av.spec, "1.22");
     }
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::*;
+    use crate::config::{Config, SourcePrecedence};
+    #[test]
+    fn precedence_preserves_origins_and_explicit_inheritance() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let child = root.join("app");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(
+            root.join("osdk.toml"),
+            "[tools]\nnode='22'\n[settings.precedence]\ntools='native'\n",
+        )
+        .unwrap();
+        std::fs::write(child.join("osdk.toml"), "extends='../osdk.toml'\n").unwrap();
+        std::fs::write(child.join(".nvmrc"), "20.11.1\n").unwrap();
+        let mut config = Config::load(&temp.path().join("absent"), &child).unwrap();
+        let native = resolve_active_config("node", &child, &config, &[".nvmrc"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.spec, "20.11.1");
+        assert!(matches!(native.source, VersionOrigin::IdiomaticFile(_)));
+        config.settings.precedence.tools = SourcePrecedence::Osdk;
+        let osdk = resolve_active_config("node", &child, &config, &[".nvmrc"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(osdk.spec, "22");
+        assert!(matches!(osdk.source, VersionOrigin::ProjectConfig(_)));
+    }
+    #[test]
+    fn node_runtime_and_package_manager_are_separate_native_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"engines":{"node":">=20 <23"},"packageManager":"pnpm@10.5.0"}"#,
+        )
+        .unwrap();
+        let config = Config::default();
+        let node = resolve_active_config("node", temp.path(), &config, &[])
+            .unwrap()
+            .unwrap();
+        assert!(node.is_range);
+        assert_eq!(node.spec, ">=20 <23");
+        let pnpm = resolve_active_config("pnpm", temp.path(), &config, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(pnpm.spec, "10.5.0");
+        assert!(!pnpm.is_range);
+    }
+    #[test]
+    fn invalid_native_declarations_are_errors_under_both_policies() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".nvmrc"), "two versions\n").unwrap();
+        let mut config = Config::default();
+        for policy in [SourcePrecedence::Native, SourcePrecedence::Osdk] {
+            config.settings.precedence.tools = policy;
+            assert!(resolve_active_config("node", temp.path(), &config, &[".nvmrc"]).is_err());
+        }
+        std::fs::remove_file(temp.path().join(".nvmrc")).unwrap();
+        std::fs::write(temp.path().join("package.json"), "{invalid").unwrap();
+        assert!(resolve_active_config("node", temp.path(), &config, &[]).is_err());
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"engines":{"node":22}}"#,
+        )
+        .unwrap();
+        assert!(resolve_active_config("node", temp.path(), &config, &[]).is_err());
+        std::fs::remove_file(temp.path().join("package.json")).unwrap();
+        std::fs::write(temp.path().join(".tool-versions"), "node # missing version").unwrap();
+        assert!(resolve_active_config("node", temp.path(), &config, &[]).is_err());
+    }
+}
+
+pub fn explain_selection(
+    tool: &str,
+    cwd: &Path,
+    config: &crate::config::Config,
+    files: &[&str],
+) -> crate::Result<String> {
+    let native = native_version(tool, cwd, files)?;
+    let selected = resolve_active_config(tool, cwd, config, files)?;
+    Ok(format!("tools={:?}; selected={:?}; osdk declaration={:?}; native declaration={:?}; explicit CLI and lock replay remain authoritative",
+        config.settings.precedence.tools,
+        selected.as_ref().map(|v| (&v.spec, &v.source)),
+        config.tools.get(tool),
+        native.as_ref().map(|v| (&v.spec, &v.source))))
 }

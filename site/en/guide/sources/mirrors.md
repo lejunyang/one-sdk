@@ -43,6 +43,8 @@ effect on `lock`, `outdated`, or `list-remote`. Model `source test` fails withou
 
 ## Mirrors set in the environment
 
+The ranking rules in this section describe SDK/artifact source selection. Project package operations through exec/shim/deps preserve explicit package-source environment variables; they do not rank them against mirrors. See [package source precedence](/en/guide/project/deps#package-sources-and-native-precedence).
+
 Every toolchain has its own way to point at a mirror through the environment:
 rustup reads `RUSTUP_DIST_SERVER` (and `RUSTUP_UPDATE_ROOT`), the go command
 reads `GOPROXY`, and the npm family reads `npm_config_registry`,

@@ -453,13 +453,14 @@ pub(crate) fn installed_shim_owners(
         }
         let mut selected_versions = std::collections::BTreeSet::new();
         let installed = backend.list_installed(&app.ctx)?;
-        if let Some((active_spec, active_is_range)) = osdk_core::version::resolver::resolve_active(
-            backend.id(),
-            &cwd,
-            &app.ctx.config.tools,
-            backend.idiomatic_files(),
-        )
-        .map(|active| (active.spec, active.is_range))
+        if let Some((active_spec, active_is_range)) =
+            osdk_core::version::resolver::resolve_active_config(
+                backend.id(),
+                &cwd,
+                &app.ctx.config,
+                backend.idiomatic_files(),
+            )?
+            .map(|active| (active.spec, active.is_range))
         {
             let expanded = app
                 .ctx

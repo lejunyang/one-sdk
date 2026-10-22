@@ -228,3 +228,7 @@ description = "Copy-paste duplication guard (Rust jscpd), gated at the .jscpd.js
 description = "Real small npm/pnpm/uv closures, workspaces, inheritance and failure paths (opt-in live check)"
 depends = ["build"]
 run = "python scripts/test-deps-monorepo.py"
+
+[tasks.package-source-native]
+description = "Native npm/pnpm/Bun/uv source adapters against isolated local fixtures"
+run = "python3 scripts/test-package-sources.py"

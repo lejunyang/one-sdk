@@ -433,7 +433,7 @@ manifest 存在但不是常规文件、或解析失败，一律报错而不是�
 | 情形 | 是否需要批准 | 理由 |
 | --- | --- | --- |
 | `[deps.pnpm]`、`sources`、`outputs`、`auto`、`dir`、`depends` | 不需要 | 默认禁脚本，只是声明装什么 |
-| `index` / `extra_index` / `registry` / `insecure` | 需要，`WeakensVerification` | 改了字节来源，**不是**因为执行代码 |
+| `registries` | 需要，`WeakensVerification` | 改了字节来源，**不是**因为执行代码 |
 | `env` 里形如 `*_REGISTRY` / `*REGISTRY_SERVER` / `*_INDEX_URL` / `*_DEFAULT_INDEX` / 含 `:REGISTRY` 的变量 | 需要，`WeakensVerification` | 与上一行等效，不能漏 |
 | `allow_build_from_source` | 需要，`ExecutesCode` | 真的在本机执行任意代码 |
 | 自定义 provider 的 `run` | 需要，`ExecutesCode` | 任意命令，且 `auto` 会自动触发 |
@@ -529,7 +529,7 @@ node v22.23.2、npm 10.9.8、pnpm 9.15.1 与 12.5.1、yarn 1.22.19 与 4.6.0
 判定脚本是否真的执行，用的是「脚本往标记文件追加一行、然后读标记文件内容」，
 不看退出码——退出码为 0 不能说明脚本没跑。
 
-`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。`extra_index` 现在明确报错，请迁移到原生 registry 配置；uv 优先使用 `pyproject.toml` 的命名索引与包绑定，不保证通用低优先级索引。
+`deps.<provider>.run` 现在也覆盖内置命令；推荐 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，保留参数边界。覆盖命令需要 trust，无法保证 frozen 或禁用脚本。`timeout = "5m"` 限制每条命令及其进程树；`outputs = []` 关闭输出跟踪。旧包源字段已移除，见统一包源指南。
 
 ### 按项目声明依赖
 
@@ -559,3 +559,7 @@ pnpm、uv 原生 workspace 仅从显式声明的根展开，原生成员模式�
 
 裸 `depends` 名称限定同项目或共享 workspace 内的 provider；跨安装单元使用 `//path:provider`。依赖顺序不会隐式启用未选择的 provider。共享成员的包管理器版本声明冲突会报错。
 可用 `osdk run deps-monorepo-live` 或 `python scripts/test-deps-monorepo.py --bin target/debug/osdk` 运行真实项目验证；使用临时状态与小 npm/Python 包，检查实际产物、共享覆盖、成员变化、继承、auto/禁用及锁/离线失败。子配置可以用显式 `disable = []` 替换继承的禁用列表。
+
+执行适配器位于 `package_sources.rs`；版本策略位于 `version/resolver.rs`。原生解析的来源无法确定时只报告候选，不把文件扫描顺序当作包管理器优先级。详见[包管理器](../guide/tools/package-managers.md)。
+
+`extra_index` 历史：`e683830` 设计稿提出，`d7338bf` 加入 `DepsProviderEntry`，实际 CLI 曾用 `index.or_else(extra_index)` 把它误当默认源后备；`60597f6` 改为拒绝，`87a3b7b` 把拒绝移入 catalog。本次删除 schema、catalog 专用分支和 trust 旧键，保留历史研究稿作为快照。它从不属于 tools，也不是既有 registries 字段。

@@ -1,3 +1,5 @@
+> 历史设计快照：`deps.index` / `extra_index` 已移除。当前统一配置见 `site/guide/tools/package-managers.md`。
+
 # `osdk deps`：应用依赖清单的实现级设计
 
 日期：2026-09-22

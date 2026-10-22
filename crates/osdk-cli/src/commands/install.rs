@@ -525,35 +525,16 @@ pub(crate) async fn apply_package_registry_plan_at(
         .find(|(_, version)| version.backend == "yarn")
         .map(|(_, version)| version.version.as_str())
         .or(project_yarn_version.as_deref());
-    let Some(manager) = package_registry::manager_for_command(&executable_alias, yarn_version)
-    else {
-        if matches!(executable_alias.as_str(), "yarn" | "yarnpkg") {
-            tracing::info!(
-                executable = %executable_alias,
-                "dependency registry pass-through: Yarn major is unknown; use --tool yarn@<version> or declare packageManager"
-            );
-        }
-        return Ok(());
-    };
-    if !package_registry::should_plan(manager, &executable_alias, args) {
-        return Ok(());
-    }
-    let registry_env = package_registry::registry_env(manager);
-    match package_registry::plan(&app.ctx, cwd, manager, &executable_alias, args, |key| {
-        std::env::var(key).ok()
-    })
-    .await?
-    {
-        RegistryPlan::PassThrough { reason } => {
-            tracing::info!(manager = %manager, %reason, "dependency registry pass-through");
-        }
-        RegistryPlan::Selected { url, .. } => {
-            env.insert(registry_env.to_string(), url);
-        }
-        RegistryPlan::Unavailable { probes } => {
-            return Err(unavailable_registry_error(manager, &probes));
-        }
-    }
+    let evidence = osdk_core::package_sources::apply(
+        &app.ctx,
+        cwd,
+        &executable_alias,
+        yarn_version,
+        args,
+        env,
+    )
+    .await?;
+    tracing::info!(%evidence, "package source resolution");
     Ok(())
 }
 
@@ -577,29 +558,6 @@ pub(crate) fn project_yarn_version(cwd: &std::path::Path) -> Option<String> {
         .flatten()
         .filter(|request| request.manager == "yarn")
         .map(|request| request.version)
-}
-
-pub(crate) fn unavailable_registry_error(
-    manager: PackageManager,
-    probes: &[RegistryProbe],
-) -> anyhow::Error {
-    let details = probes
-        .iter()
-        .map(|probe| {
-            let reason = probe.error.as_deref().unwrap_or("unreachable");
-            format!("{} ({reason})", probe.url)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if details.is_empty() {
-        anyhow!(t!("err.registry_command_not_started", manager = manager))
-    } else {
-        anyhow!(t!(
-            "err.registry_command_not_started_details",
-            manager = manager,
-            details = details
-        ))
-    }
 }
 
 pub(crate) fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
@@ -1629,22 +1587,34 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
                 // `VersionSpec::Latest`, which is indistinguishable from an
                 // explicit `tool@latest` -- so the configured spec is bound here,
                 // where the original operand text is still available.
-                bind_configured_spec_for_bare_operand(app, s, &mut request);
+                bind_configured_spec_for_bare_operand(app, s, &mut request)?;
                 Ok(request)
             })
             .collect::<Result<Vec<_>>>()?;
         return Ok(requests);
     }
     // From config pins.
+    let cwd = std::env::current_dir()?;
     let mut out = Vec::new();
     for (tool, spec) in &app.ctx.config.tools {
         if tool == "node" {
             continue;
         }
-        if app.registry.get(tool).is_ok() {
+        if let Ok(backend) = app.registry.get(tool) {
+            let active = osdk_core::version::resolver::resolve_active_config(
+                tool,
+                &cwd,
+                &app.ctx.config,
+                backend.idiomatic_files(),
+            )?;
+            let selected = active.as_ref().map(|a| a.spec.as_str()).unwrap_or(spec);
             out.push(ToolRequest {
                 backend: tool.clone(),
-                spec: VersionSpec::parse(spec),
+                spec: if active.as_ref().is_some_and(|a| a.is_range) {
+                    VersionSpec::parse_range(selected)?
+                } else {
+                    VersionSpec::parse(selected)
+                },
                 options: app
                     .ctx
                     .config
@@ -1685,12 +1655,12 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
         }
     }
     let backend = app.registry.get("node")?;
-    if let Some(active) = osdk_core::version::resolver::resolve_active(
+    if let Some(active) = osdk_core::version::resolver::resolve_active_config(
         backend.id(),
         &cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    ) {
+    )? {
         let spec = if active.is_range {
             VersionSpec::parse_range(&active.spec)?
         } else {
@@ -1765,11 +1735,11 @@ pub(crate) fn bind_configured_spec_for_bare_operand(
     app: &App,
     operand: &str,
     request: &mut ToolRequest,
-) {
+) -> Result<()> {
     // Ancestor discovery starts at the working directory, exactly as the shim
     // and `osdk current` do, so all three agree on what is active.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    bind_configured_spec_for_bare_operand_at(app, operand, request, &cwd);
+    bind_configured_spec_for_bare_operand_at(app, operand, request, &cwd)
 }
 
 /// As [`bind_configured_spec_for_bare_operand`], with the start directory given.
@@ -1781,20 +1751,21 @@ pub(crate) fn bind_configured_spec_for_bare_operand_at(
     operand: &str,
     request: &mut ToolRequest,
     cwd: &std::path::Path,
-) {
+) -> Result<()> {
     if requested_spec_literal(operand).is_some() {
-        return;
+        return Ok(());
     }
     let Ok(backend) = app.registry.get(&request.backend) else {
-        return;
+        return Ok(());
     };
-    let Some(active) = osdk_core::version::resolver::resolve_active(
+    let Some(active) = osdk_core::version::resolver::resolve_active_config(
         backend.id(),
         cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    ) else {
-        return;
+    )?
+    else {
+        return Ok(());
     };
     let expanded = app
         .ctx
@@ -1802,14 +1773,12 @@ pub(crate) fn bind_configured_spec_for_bare_operand_at(
         .expand_alias(backend.id(), &active.spec)
         .unwrap_or(active.spec);
     let spec = if active.is_range {
-        match VersionSpec::parse_range(&expanded) {
-            Ok(spec) => spec,
-            Err(_) => return,
-        }
+        VersionSpec::parse_range(&expanded)?
     } else {
         VersionSpec::parse(&expanded)
     };
     request.spec = spec;
+    Ok(())
 }
 
 /// Fail with a list of namespaces when a bare tool name owns no backend.
@@ -1974,12 +1943,12 @@ pub(crate) fn inject_node_dependency(
     }
     let cwd = std::env::current_dir()?;
     let backend = app.registry.get("node")?;
-    let spec = osdk_core::version::resolver::resolve_active(
+    let spec = osdk_core::version::resolver::resolve_active_config(
         "node",
         &cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .map(|active| {
         if active.is_range {
             VersionSpec::parse_range(&active.spec)
@@ -2131,12 +2100,12 @@ pub(crate) fn inject_go_dependency_at(
     }
 
     let backend = app.registry.get("go")?;
-    let active = osdk_core::version::resolver::resolve_active(
+    let active = osdk_core::version::resolver::resolve_active_config(
         "go",
         cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .ok_or_else(|| {
         anyhow!(
             "Go tools require a managed Go selection; configure `go = \"1.24\"` or include `go@1.24`"
@@ -2197,12 +2166,12 @@ pub(crate) fn inject_rust_dependency_at(
     }
 
     let backend = app.registry.get("rust")?;
-    let active = osdk_core::version::resolver::resolve_active(
+    let active = osdk_core::version::resolver::resolve_active_config(
         "rust",
         cwd,
-        &app.ctx.config.tools,
+        &app.ctx.config,
         backend.idiomatic_files(),
-    )
+    )?
     .ok_or_else(|| {
         anyhow!(
             "Cargo tools require one exact managed Rust version; configure `rust = \"1.91.1\"` or include `rust@1.91.1`"

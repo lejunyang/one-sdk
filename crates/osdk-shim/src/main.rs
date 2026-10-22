@@ -13,11 +13,9 @@ use osdk_core::backend::registry::Registry;
 use osdk_core::config::Config;
 use osdk_core::dirs::Dirs;
 use osdk_core::inventory::ScanReport;
-use osdk_core::package_registry::{
-    manager_for_command, plan, registry_env, should_plan, PackageManager, RegistryPlan,
-};
+use osdk_core::package_registry::{manager_for_command, PackageManager};
 use osdk_core::platform::Platform;
-use osdk_core::version::resolver::resolve_active;
+use osdk_core::version::resolver::resolve_active_config;
 use osdk_core::version::{select_version, ToolVersion, VersionSpec};
 
 // The shim resolves and execs already-installed tools; it never installs. Its
@@ -200,12 +198,18 @@ fn real_main() -> i32 {
 
     // Resolve the active version spec for this backend.
     let dynamic_request = osdk_core::shim::dynamic_request_from_config(&ctx, backend.id());
-    let active = resolve_active(
+    let active = (match resolve_active_config(
         backend.id(),
         &idiomatic_probe_cwd,
-        &tools,
+        &ctx.config,
         backend.idiomatic_files(),
-    )
+    ) {
+        Ok(active) => active,
+        Err(error) => {
+            eprintln!("osdk-shim: {error}");
+            return 1;
+        }
+    })
     .map(|active| (active.spec, active.is_range))
     .or_else(|| {
         dynamic_request
@@ -349,12 +353,18 @@ fn real_main() -> i32 {
         prepend_env_path(&mut exec_env, exact_runtime_path);
     } else if backend.id() == "pnpm" || backend.id() == "yarn" {
         let node_backend = registry.get("node").unwrap();
-        let active_node = resolve_active(
+        let active_node = match resolve_active_config(
             "node",
             &idiomatic_probe_cwd,
-            &tools,
+            &ctx.config,
             &[".nvmrc", ".node-version"],
-        );
+        ) {
+            Ok(active) => active,
+            Err(error) => {
+                eprintln!("osdk-shim: {error}");
+                return 1;
+            }
+        };
         let node_version = active_node
             .as_ref()
             .and_then(|active| {
@@ -385,19 +395,28 @@ fn real_main() -> i32 {
         prepend_env_path(&mut exec_env, bin_dirs);
     }
 
-    if let Some(manager) = package_manager_for_backend(backend.id(), &tool_name, &version) {
-        if should_plan(manager, &tool_name, forward_args) {
-            if let Err(error) = apply_registry_preflight(
-                &ctx,
-                &cwd,
-                manager,
-                &tool_name,
-                forward_args,
-                &mut exec_env,
-            ) {
-                eprintln!("osdk-shim: {error}");
-                return 1;
-            }
+    if package_manager_for_backend(backend.id(), &tool_name, &version).is_some()
+        || tool_name == "uv"
+        || tool_name == "go"
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let result = runtime.map_err(|e| e.to_string()).and_then(|runtime| {
+            runtime
+                .block_on(osdk_core::package_sources::apply(
+                    &ctx,
+                    &cwd,
+                    &tool_name,
+                    Some(&version),
+                    forward_args,
+                    &mut exec_env,
+                ))
+                .map_err(|e| e.to_string())
+        });
+        if let Err(error) = result {
+            eprintln!("osdk-shim: {error}");
+            return 1;
         }
     }
 
@@ -543,56 +562,6 @@ fn package_manager_for_backend(
         .flatten()
 }
 
-fn apply_registry_preflight(
-    ctx: &osdk_core::backend::Ctx,
-    cwd: &std::path::Path,
-    manager: PackageManager,
-    executable_alias: &str,
-    args: &[String],
-    exec_env: &mut std::collections::BTreeMap<String, String>,
-) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| osdk_core::t!("err.registry_preflight_runtime", error = error))?;
-    let registry_plan = runtime
-        .block_on(plan(ctx, cwd, manager, executable_alias, args, |key| {
-            std::env::var(key).ok()
-        }))
-        .map_err(|error| osdk_core::t!("err.registry_preflight", error = error))?;
-    match registry_plan {
-        RegistryPlan::PassThrough { .. } => Ok(()),
-        RegistryPlan::Selected { url, .. } => {
-            exec_env.insert(registry_env(manager).into(), url);
-            Ok(())
-        }
-        RegistryPlan::Unavailable { probes } => {
-            let details = probes
-                .iter()
-                .map(|probe| {
-                    probe.error.as_deref().map_or_else(
-                        || probe.url.clone(),
-                        |error| format!("{}: {error}", probe.url),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            if details.is_empty() {
-                Err(osdk_core::t!(
-                    "err.registry_unavailable",
-                    executable = executable_alias
-                ))
-            } else {
-                Err(osdk_core::t!(
-                    "err.registry_unavailable_details",
-                    executable = executable_alias,
-                    details = details
-                ))
-            }
-        }
-    }
-}
-
 fn prepend_env_path(env: &mut std::collections::BTreeMap<String, String>, paths: Vec<PathBuf>) {
     let existing = env
         .get("PATH")
@@ -664,12 +633,9 @@ fn owning_backend(
         // An explicit independent package-manager selection is authoritative,
         // including when its selected version is missing: do not silently fall
         // back to the bundled copy and hide a broken project pin.
-        if resolve_active(
-            manager_id,
-            cwd,
-            &ctx.config.tools,
-            manager.idiomatic_files(),
-        )
+        if (resolve_active_config(manager_id, cwd, &ctx.config, manager.idiomatic_files())
+            .ok()
+            .flatten())
         .is_some()
         {
             return Some(manager);
@@ -680,7 +646,10 @@ fn owning_backend(
         // shim may still dispatch to the selected Node installation's bundled
         // launcher when no independent package manager is selected.
         let node = registry.get("node").ok()?;
-        if let Some(active) = resolve_active("node", cwd, &ctx.config.tools, node.idiomatic_files())
+        if let Some(active) =
+            resolve_active_config("node", cwd, &ctx.config, node.idiomatic_files())
+                .ok()
+                .flatten()
         {
             if let Some(version) =
                 resolve_installed(ctx, node.as_ref(), &active.spec, active.is_range)
@@ -971,7 +940,7 @@ fn global_command_for_name(
 fn exec_global_command(
     ctx: &osdk_core::backend::Ctx,
     registry: &Registry,
-    tools: &std::collections::BTreeMap<String, String>,
+    _tools: &std::collections::BTreeMap<String, String>,
     command: &GlobalCommand,
     forward_args: &[String],
 ) -> i32 {
@@ -980,20 +949,22 @@ fn exec_global_command(
 
     // Resolve the package manager's current version; exec_env needs it (pnpm's
     // store-dir variable name depends on the version).
-    let owner_version = osdk_core::version::resolver::resolve_active(
-        owner.id(),
-        &cwd,
-        tools,
-        owner.idiomatic_files(),
-    )
-    .and_then(|active| {
-        let spec = ctx
-            .config
-            .expand_alias(owner.id(), &active.spec)
-            .unwrap_or_else(|_| active.spec.clone());
-        resolve_installed(ctx, owner, &spec, active.is_range)
-    })
-    .or_else(|| owner.list_installed(ctx).ok()?.into_iter().last());
+    let owner_version =
+        (match resolve_active_config(owner.id(), &cwd, &ctx.config, owner.idiomatic_files()) {
+            Ok(active) => active,
+            Err(error) => {
+                eprintln!("osdk-shim: {error}");
+                return 1;
+            }
+        })
+        .and_then(|active| {
+            let spec = ctx
+                .config
+                .expand_alias(owner.id(), &active.spec)
+                .unwrap_or_else(|_| active.spec.clone());
+            resolve_installed(ctx, owner, &spec, active.is_range)
+        })
+        .or_else(|| owner.list_installed(ctx).ok()?.into_iter().last());
     let Some(owner_version) = owner_version else {
         eprintln!(
             "osdk-shim: {} must be installed to run this global command",
@@ -1016,16 +987,18 @@ fn exec_global_command(
     // shell still resolves these names through the shims dir, which activation
     // keeps ahead).
     if let Ok(node_backend) = registry.get("node") {
-        let node_version = osdk_core::version::resolver::resolve_active(
-            "node",
-            &cwd,
-            tools,
-            &[".nvmrc", ".node-version"],
-        )
-        .and_then(|active| {
-            resolve_installed(ctx, node_backend.as_ref(), &active.spec, active.is_range)
-        })
-        .or_else(|| node_backend.list_installed(ctx).ok()?.into_iter().last());
+        let node_version =
+            (match resolve_active_config("node", &cwd, &ctx.config, &[".nvmrc", ".node-version"]) {
+                Ok(active) => active,
+                Err(error) => {
+                    eprintln!("osdk-shim: {error}");
+                    return 1;
+                }
+            })
+            .and_then(|active| {
+                resolve_installed(ctx, node_backend.as_ref(), &active.spec, active.is_range)
+            })
+            .or_else(|| node_backend.list_installed(ctx).ok()?.into_iter().last());
         if let Some(node_version) = node_version {
             let node_tv = ToolVersion::new("node", &node_version);
             prepend_env_path(

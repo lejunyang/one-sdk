@@ -71,3 +71,5 @@ CLI 在应用版本 alias 和一次性 backend 选项后调用 [`Backend::resolv
 - semver 前缀、range、LTS 与预发布策略由 [`version` 单元测试](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 覆盖。
 - 精确版本必须保留 backend options 的回归测试在 [`backend/mod.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/backend/mod.rs)。
 - CLI 的 package-manager 自动选择、Node 注入和 lock 恢复由 [`isolated_cli.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/tests/isolated_cli.rs) 与 [`lockfile.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/lockfile.rs) 覆盖。
+
+执行适配器位于 `package_sources.rs`；版本策略位于 `version/resolver.rs`。原生解析的来源无法确定时只报告候选，不把文件扫描顺序当作包管理器优先级。详见[包管理器](../guide/tools/package-managers.md)。

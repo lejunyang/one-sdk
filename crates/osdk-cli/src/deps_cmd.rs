@@ -89,21 +89,48 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
     }
     let mut entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
     for entry in &mut entries {
-        let effective = app.config_for_project(
+        let mut effective = app.config_for_project(
             entry
                 .config
                 .project_config
                 .as_deref()
                 .unwrap_or(&config_path),
         )?;
+        if let Some(registries) = &entry.config.registries {
+            effective.sources.registries = registries.clone();
+        }
+        entry.config.registries = Some(effective.registries().clone());
+        for id in entry.config.project_tools.clone().keys().chain(
+            ["node", "python", "go", "rust", "npm", "pnpm", "yarn", "bun"]
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+                .iter(),
+        ) {
+            if let Ok(backend) = app.registry.get(id) {
+                if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+                    id,
+                    &entry.project.root,
+                    &effective,
+                    backend.idiomatic_files(),
+                )? {
+                    entry.config.project_tools.insert(id.clone(), active.spec);
+                }
+            }
+        }
         entry.config.offline = effective.settings.offline;
         let tools: BTreeMap<_, _> = effective
             .tool_configs
             .iter()
             .map(|(id, tool)| (id, (tool.version(), tool.to_request_options())))
             .collect();
-        entry.config.project_context =
-            serde_json::to_string(&(&effective.settings, &effective.sources, &tools))?;
+        entry.config.project_context = serde_json::to_string(&(
+            &effective.settings,
+            &effective.sources,
+            effective.registries(),
+            &tools,
+        ))?;
     }
     for entry in &entries {
         if let Some(unit) = &entry.unit {
@@ -166,7 +193,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         }
         let config = entry.config.clone();
         let schema = deps::provider_schema(&project.provider);
-        let choice = deps::select_installer(&project, &[])?;
+        let mut choice = deps::select_installer(&project, &[])?;
+        if let Some(version) = config.project_tools.get(&*project.provider) {
+            choice.version = Some(version.clone());
+        }
         let mut plan = deps::plan(
             &project,
             &choice,
@@ -197,6 +227,49 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     .as_deref()
                     .unwrap_or("no native lockfile")
             ));
+        }
+        if config.run.is_none() {
+            let mut context = source_context(app, &config)?;
+            // Dry-run/freshness must not probe; explicit mappings still apply.
+            context.config.settings.offline = true;
+            let evidence = osdk_core::package_sources::apply(
+                &context,
+                &plan.cwd,
+                &plan.program,
+                resolved_tool_versions(app, &config)
+                    .get("yarn")
+                    .map(String::as_str),
+                &plan.args,
+                &mut plan.env,
+            )
+            .await?;
+            if options.explain {
+                println!("    sources: {evidence}");
+                let candidates: Vec<_> =
+                    osdk_core::package_sources::native_files(&plan.cwd, &plan.program, &|key| {
+                        plan.env
+                            .get(key)
+                            .cloned()
+                            .or_else(|| std::env::var(key).ok())
+                    })
+                    .into_iter()
+                    .filter(|path| path.is_file())
+                    .collect();
+                println!("    native candidates: {candidates:?}; native winner and interpolation delegated to manager");
+                for id in config.project_tools.keys() {
+                    if let Ok(backend) = app.registry.get(id) {
+                        println!(
+                            "    {}",
+                            osdk_core::version::resolver::explain_selection(
+                                id,
+                                &project.root,
+                                &context.config,
+                                backend.idiomatic_files()
+                            )?
+                        );
+                    }
+                }
+            }
         }
         let decision = decide(app, schema, &project, &config, &plan, unit.as_ref())?;
         resolved.push(Resolved {
@@ -262,13 +335,13 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                         unit.coverage()
                     );
                 }
-                println!("    command:   {}", command_line(&item.plan));
+                println!("    command:   {}", display_command(item));
             }
         }
         return Ok(());
     }
 
-    for item in &resolved {
+    for item in &mut resolved {
         if let Some(reason) = &item.plan.downgraded_reason {
             // Reported, never silent: a flag that does nothing is worse than an
             // error, because the run looks successful.
@@ -287,7 +360,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             println!(
                 "would run in {}: {}",
                 item.project.root.display(),
-                command_line(&item.plan)
+                display_command(item)
             );
             continue;
         }
@@ -318,7 +391,27 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             continue;
         }
         let tools = ensure_tools(app, item, options.no_install_tools).await?;
+        let source_env = item.plan.env.clone();
+        if item.config.run.is_none() {
+            let context = source_context(app, &item.config)?;
+            let evidence = osdk_core::package_sources::apply(
+                &context,
+                &item.plan.cwd,
+                &item.plan.program,
+                tools
+                    .iter()
+                    .find(|tool| tool.id == "yarn")
+                    .map(|tool| tool.version.as_str()),
+                &item.plan.args,
+                &mut item.plan.env,
+            )
+            .await?;
+            if options.explain {
+                println!("    sources: {evidence}");
+            }
+        }
         run_plan(item, &tools)?;
+        item.plan.env = source_env;
         record(app, item, &tools)?;
     }
     Ok(())
@@ -336,6 +429,24 @@ impl Resolved {
             None => self.project.provider.to_string(),
         }
     }
+}
+
+fn source_context(app: &App, config: &ProviderConfig) -> anyhow::Result<osdk_core::backend::Ctx> {
+    let mut effective = match config.project_config.as_deref() {
+        Some(path) => app.config_for_project(path)?,
+        None => app.ctx.config.clone(),
+    };
+    if let Some(registries) = &config.registries {
+        effective.sources.registries = registries.clone();
+    }
+    Ok(osdk_core::backend::Ctx {
+        dirs: app.ctx.dirs.clone(),
+        platform: app.ctx.platform,
+        config: effective,
+        client: app.ctx.client.clone(),
+        cas: app.ctx.cas.clone(),
+        show_progress: false,
+    })
 }
 
 /// Sort providers so that everything a provider `depends` on runs before it.
@@ -565,6 +676,20 @@ async fn ensure_tools_in_context(
             None,
         );
         let backend = app.registry.get(&request.backend)?;
+        if required.role == ToolRole::Runtime {
+            if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+                required.id,
+                &item.project.root,
+                &app.ctx.config,
+                backend.idiomatic_files(),
+            )? {
+                request.spec = if active.is_range {
+                    osdk_core::version::VersionSpec::parse_range(&active.spec)?
+                } else {
+                    osdk_core::version::VersionSpec::parse(&active.spec)
+                };
+            }
+        }
         let request = crate::commands::expand_request_alias(app, backend.as_ref(), &request)?;
 
         // Already installed means nothing is acquired, which is the distinction
@@ -669,7 +794,7 @@ fn run_plan(item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
         command.env(key, value);
     }
 
-    println!("{}", command_line(&item.plan));
+    println!("{}", display_command(item));
 
     // Prelude steps run first, with the same program, cwd and environment. A
     // failure here stops the run: continuing would hand the main command an
@@ -740,10 +865,11 @@ fn resolve_program(plan: &RunPlan, tools: &[ReadyTool]) -> Option<PathBuf> {
 /// populated, turning one visible failure into a silently broken working tree.
 fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()> {
     let command = freshness_command(
+        app,
         &item.plan,
         &item.config,
         &resolved_tool_versions(app, &item.config),
-    );
+    )?;
     let sources = tracked_sources(item.schema, &item.config, item.unit.as_ref());
     let existing: Vec<PathBuf> = sources
         .iter()
@@ -797,8 +923,8 @@ fn record(app: &App, item: &Resolved, tools: &[ReadyTool]) -> anyhow::Result<()>
             project_root: &item.project.root,
             manifest: &item.project.manifest,
             native_lock: item.project.native_lock.as_deref(),
-            run: command_line(&item.plan),
-            index: item.config.index.clone(),
+            run: display_command(item),
+            index: None,
             allow_build_from_source: item.config.allow_build_from_source,
         },
     )?;
@@ -963,7 +1089,7 @@ fn decide(
         .collect();
     let path = state::state_path(&app.ctx.dirs.cache, &project.root);
     let persisted = state::DepsState::load(&path)?;
-    let command = freshness_command(plan, config, &resolved_tool_versions(app, config));
+    let command = freshness_command(app, plan, config, &resolved_tool_versions(app, config))?;
     let inputs = state::Inputs {
         sources: &existing,
         declared_sources: !sources.is_empty(),
@@ -1038,11 +1164,17 @@ fn effective_outputs(
 }
 
 fn freshness_command(
+    app: &App,
     plan: &RunPlan,
     config: &ProviderConfig,
     versions: &BTreeMap<String, String>,
-) -> String {
-    format!("{plan:?}|{config:?}|{versions:?}")
+) -> anyhow::Result<String> {
+    Ok(osdk_core::package_sources::fingerprint(
+        &plan.cwd,
+        &plan.program,
+        &format!("{plan:?}|{config:?}|{versions:?}"),
+        &osdk_core::package_registry::managed_npm_config_files(&app.ctx),
+    )?)
 }
 
 fn run_bounded(
@@ -1058,26 +1190,49 @@ fn run_bounded(
     }
 }
 
-/// The effective command, including env, because env is part of *what runs*:
-/// yarn berry disables build scripts through `YARN_ENABLE_SCRIPTS`, so a command
-/// string without env would hash two materially different runs the same.
+/// Safe diagnostic command. Freshness hashes execution material separately.
+fn display_command(item: &Resolved) -> String {
+    if item.config.run.is_some() {
+        return format!(
+            "custom command {} [arguments and environment redacted]",
+            item.project.provider
+        );
+    }
+    command_line(&item.plan)
+}
+
 fn command_line(plan: &RunPlan) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (key, value) in &plan.env {
-        parts.push(format!("{key}={value}"));
+        let safe = matches!(
+            (key.as_str(), value.as_str()),
+            ("UV_PYTHON_DOWNLOADS", "never")
+                | ("GOTOOLCHAIN", "local")
+                | ("YARN_ENABLE_SCRIPTS", "false" | "true")
+                | ("UV_INDEX_STRATEGY", "first-index")
+        );
+        parts.push(format!(
+            "{key}={}",
+            if safe { value.as_str() } else { "[redacted]" }
+        ));
     }
     let program = plan.program.clone();
-    // Prelude steps are part of *what runs*, so they belong in the string that
-    // gets hashed. Leaving them out would hash "create the environment, then
-    // sync" and "sync into whatever is already there" identically.
+    // Show prelude structure without exposing credential-bearing values.
     for step in &plan.prelude {
-        parts.push(format!("{program} {}", step.join(" ")));
+        parts.push(format!(
+            "{program} {}",
+            step.iter()
+                .map(|arg| osdk_core::package_sources::display_value(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         parts.push("&&".to_string());
     }
     parts.push(program);
     parts.extend(plan.args.iter().map(|arg| {
+        let arg = osdk_core::package_sources::display_value(arg);
         if arg.chars().any(char::is_whitespace) {
-            serde_json::to_string(arg).unwrap()
+            serde_json::to_string(&arg).unwrap()
         } else {
             arg.clone()
         }

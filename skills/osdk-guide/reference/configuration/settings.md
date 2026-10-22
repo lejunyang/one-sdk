@@ -64,3 +64,5 @@ expose = ["make"]
 ## `[settings.download_cache]`
 
 `max_size_bytes` 默认 2147483648；0 在成功提交后不保留副本，`"unlimited"` 不限容量；支持整数 GiB/MiB/KiB 和 GB/MB/KB。`max_age_secs` 默认 604800，0 禁用过期。对应 config key 是 `download_cache.max_size_bytes` 和 `download_cache.max_age_secs`；容量可用 `OSDK_DOWNLOAD_CACHE_MAX_SIZE` / `--download-cache-max-size` 覆盖。预算只管登记的下载副本，不能阻止大模型下载，不清 CAS/安装/原生 store。失败 partial 前 10 分钟受保护。没有后台清理定时器。详见 [cache](../cache/guide.md)。
+
+`[settings.precedence]`：`tools = "osdk" | "native"`（默认 osdk），`packages = "osdk" | "native"`（默认 native）。本次 CLI 和锁重放不参与此排序。详见 `registries.md`。

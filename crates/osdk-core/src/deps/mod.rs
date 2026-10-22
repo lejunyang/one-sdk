@@ -131,10 +131,10 @@ pub struct TrustProfile {
     pub build_keys: &'static [&'static str],
 }
 
-/// Keys shared by every provider. `index`/`extra_index`/`registry` redirect the
+/// Keys shared by every provider. `registries` redirect the
 /// byte source; `allow_build_from_source` turns lifecycle and build scripts
 /// back on.
-pub const COMMON_SOURCE_KEYS: &[&str] = &["index", "extra_index", "registry", "insecure"];
+pub const COMMON_SOURCE_KEYS: &[&str] = &["registries"];
 pub const COMMON_BUILD_KEYS: &[&str] = &["allow_build_from_source"];
 
 pub const DEFAULT_TRUST_PROFILE: TrustProfile = TrustProfile {
@@ -370,7 +370,7 @@ pub struct ProviderConfig {
     pub env: BTreeMap<String, String>,
     pub dir: Option<String>,
     pub depends: Vec<String>,
-    pub index: Option<String>,
+    pub registries: Option<crate::config::RegistriesConfig>,
     pub allow_build_from_source: bool,
 }
 

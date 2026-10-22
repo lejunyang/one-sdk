@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use crate::backend::registry::Registry;
 use crate::backend::Ctx;
-use crate::version::resolver::resolve_active;
+use crate::version::resolver::resolve_active_config;
 use crate::version::{select_version, ToolVersion, VersionInfo, VersionSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,17 +305,14 @@ pub fn compute_env_delta(
         }) {
             continue;
         }
-        let active = match resolve_active(
-            backend.id(),
-            cwd,
-            &ctx.config.tools,
-            backend.idiomatic_files(),
-        ) {
-            Some(a) => Some((a.spec, a.is_range)),
-            None => dynamic_request
-                .as_ref()
-                .map(|request| (request.spec.to_string(), false)),
-        };
+        let active =
+            match resolve_active_config(backend.id(), cwd, &ctx.config, backend.idiomatic_files())?
+            {
+                Some(a) => Some((a.spec, a.is_range)),
+                None => dynamic_request
+                    .as_ref()
+                    .map(|request| (request.spec.to_string(), false)),
+            };
         let Some((active_spec, active_is_range)) = active else {
             continue;
         };
