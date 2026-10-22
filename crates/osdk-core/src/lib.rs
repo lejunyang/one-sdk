@@ -54,10 +54,9 @@ pub mod persistent_env;
 pub mod pipeline;
 pub mod platform;
 pub mod process;
-// Picking a Python index only ever happens while installing packages; the shim
-// just launches an already-installed interpreter. Gating it keeps the probe
-// client, and the reqwest/serde_json machinery it needs, out of the shim build.
-#[cfg(feature = "install")]
+// Project package-source preflight is shared by exec, deps and the uv shim.
+// This module uses the same HTTP dependencies already needed by npm preflight;
+// SDK/tool installation remains behind the install feature.
 pub mod python_index;
 // Bare-name discovery exists only to explain an install request, and every probe
 // it runs is an HTTP call. Gating it keeps those probes out of the shim, which
