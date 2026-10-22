@@ -109,17 +109,29 @@ pub async fn apply(
     }
     let settings = &ctx.config.registries().python;
     let getenv = |key: &str| env.get(key).cloned().or_else(|| std::env::var(key).ok());
-    let ambient_default = ["UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_NO_INDEX"]
+    if [
+        "UV_CONFIG_FILE",
+        "UV_NO_CONFIG",
+        "UV_NO_INDEX",
+        "UV_OFFLINE",
+    ]
+    .iter()
+    .any(|key| getenv(key).is_some())
+    {
+        return Ok("uv invocation configuration context/no-index/offline is authoritative; osdk source overrides not injected".into());
+    }
+    let ambient_default = ["UV_DEFAULT_INDEX", "UV_INDEX_URL"]
         .iter()
         .any(|key| getenv(key).is_some());
     let ambient_indexes = ["UV_INDEX", "UV_EXTRA_INDEX_URL"]
         .iter()
         .any(|key| getenv(key).is_some());
-    let native = python_native_configuration(cwd, getenv)?;
+    let native =
+        python_native_configuration(cwd, args.first().is_some_and(|arg| arg == "pip"), getenv)?;
     let native_first = ctx.config.settings.precedence.packages == SourcePrecedence::Native;
     if native_first && native {
         return Ok(
-            "native Python configuration has priority; credentials and package bindings preserved"
+            "packages=native: native Python configuration group retained; osdk default/index overrides not injected; exact effective values and winning files delegated to uv"
                 .into(),
         );
     }
@@ -137,8 +149,19 @@ pub async fn apply(
         if !ambient_indexes {
             // Named indexes and package bindings remain in native config. uv's
             // --index is higher priority than the default and is not fallback.
-            if args.iter().any(|arg| arg.starts_with("--index-strategy")) {
-                return Err(Error::config("configured Python indexes require first-index; leave strategy in native configuration instead"));
+            let unsafe_strategy = args
+                .iter()
+                .enumerate()
+                .filter_map(|(i, arg)| {
+                    arg.strip_prefix("--index-strategy=").or_else(|| {
+                        (arg == "--index-strategy")
+                            .then(|| args.get(i + 1).map(String::as_str))
+                            .flatten()
+                    })
+                })
+                .any(|strategy| strategy != "first-index");
+            if unsafe_strategy {
+                return Err(Error::config("configured Python indexes require first-index; explicit unsafe strategy cannot be combined with osdk indexes"));
             }
             if env
                 .get("UV_INDEX_STRATEGY")
@@ -156,8 +179,10 @@ pub async fn apply(
     }
     if explicit || ambient_default || ambient_indexes || native {
         return Ok(format!(
-            "Python default/additional indexes resolved; packages={:?}; no mirror fallback",
-            ctx.config.settings.precedence.packages
+            "packages={:?}: Python default={}, indexes={}; native named indexes, package bindings and other fields remain native; effective files delegated to uv; no mirror fallback",
+            ctx.config.settings.precedence.packages,
+            if ambient_default { "invocation environment" } else if settings.default.as_ref().is_some_and(|s| !s.is_empty()) { "osdk UV_DEFAULT_INDEX" } else { "native (osdk unset/cleared)" },
+            if ambient_indexes { "invocation environment" } else if settings.indexes.as_ref().is_some_and(|s| !s.is_empty()) { "osdk UV_INDEX before native indexes, first-index" } else { "native (osdk unset/cleared)" },
         ));
     }
     if ctx.config.settings.offline {
@@ -190,6 +215,7 @@ fn uv_fetch(args: &[String]) -> bool {
 /// A malformed known TOML config is an error, not evidence of absence.
 fn python_native_configuration(
     cwd: &Path,
+    pip: bool,
     getenv: impl Fn(&str) -> Option<String>,
 ) -> Result<bool> {
     for key in [
@@ -207,8 +233,20 @@ fn python_native_configuration(
             return Ok(true);
         }
     }
-    let mut paths = native_files(cwd, "uv", &getenv);
-    paths.extend(cwd.ancestors().map(|dir| dir.join("requirements.txt")));
+    // Freshness also tracks runtime files and other ecosystems. Only files uv
+    // actually understands may count as Python configuration evidence.
+    let mut paths: Vec<_> = native_files(cwd, "uv", &getenv)
+        .into_iter()
+        .filter(|path| {
+            matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("uv.toml" | "pyproject.toml")
+            )
+        })
+        .collect();
+    if pip {
+        paths.extend(cwd.ancestors().map(|dir| dir.join("requirements.txt")));
+    }
     for path in paths {
         if !path.is_file() {
             continue;
@@ -322,6 +360,16 @@ pub fn native_files(
             ] {
                 paths.push(Path::new(&base).join(suffix));
             }
+        }
+    }
+    if program == "uv" {
+        #[cfg(not(windows))]
+        paths.push("/etc/uv/uv.toml".into());
+        if let Some(base) = getenv("PROGRAMDATA") {
+            paths.push(Path::new(&base).join("uv/uv.toml"));
+        }
+        if let Some(bases) = getenv("XDG_CONFIG_DIRS") {
+            paths.extend(std::env::split_paths(&bases).map(|base| base.join("uv/uv.toml")));
         }
     }
     paths.sort();
@@ -595,6 +643,94 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn python_detection_ignores_unrelated_freshness_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in [
+            ".python-version",
+            ".nvmrc",
+            "package.json",
+            "rust-toolchain.toml",
+        ] {
+            std::fs::write(temp.path().join(name), "not uv TOML").unwrap();
+        }
+        assert!(!python_native_configuration(temp.path(), false, |_| None).unwrap());
+        std::fs::write(
+            temp.path().join("requirements.txt"),
+            "--index-url https://native.example/simple/\n",
+        )
+        .unwrap();
+        assert!(!python_native_configuration(temp.path(), false, |_| None).unwrap());
+        assert!(python_native_configuration(temp.path(), true, |_| None).unwrap());
+        std::fs::write(temp.path().join("uv.toml"), "invalid TOML!").unwrap();
+        assert!(python_native_configuration(temp.path(), false, |_| None).is_err());
+    }
+
+    #[tokio::test]
+    async fn python_invocation_context_and_offline_environment_preserve_native_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = context(temp.path());
+        ctx.config.sources.registries.python.default = Some("https://osdk.example/simple/".into());
+        ctx.config.sources.registries.python.indexes =
+            Some(vec!["https://extra.example/simple/".into()]);
+        // Context overrides must bypass parsing the current project's configuration.
+        std::fs::write(temp.path().join("uv.toml"), "invalid TOML!").unwrap();
+        for (key, value) in [
+            ("UV_CONFIG_FILE", "alternate.toml"),
+            ("UV_NO_CONFIG", "1"),
+            ("UV_NO_INDEX", "1"),
+            ("UV_OFFLINE", "1"),
+        ] {
+            let mut env = BTreeMap::from([(key.into(), value.into())]);
+            let before = env.clone();
+            let evidence = apply(&ctx, temp.path(), "uv", None, &["sync".into()], &mut env)
+                .await
+                .unwrap();
+            assert_eq!(env, before);
+            assert!(evidence.contains("authoritative"));
+        }
+    }
+
+    #[tokio::test]
+    async fn python_explicit_first_index_is_accepted_but_unsafe_strategies_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = context(temp.path());
+        ctx.config.sources.registries.python.indexes =
+            Some(vec!["https://extra.example/simple/".into()]);
+        for flags in [
+            vec!["--index-strategy", "first-index"],
+            vec!["--index-strategy=first-index"],
+        ] {
+            let args = std::iter::once("sync")
+                .chain(flags)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            let mut env = BTreeMap::new();
+            apply(&ctx, temp.path(), "uv", None, &args, &mut env)
+                .await
+                .unwrap();
+            assert_eq!(env["UV_INDEX_STRATEGY"], "first-index");
+        }
+        for flags in [
+            vec!["--index-strategy", "unsafe-best-match"],
+            vec!["--index-strategy=unsafe-first-match"],
+            vec![
+                "--index-strategy=first-index",
+                "--index-strategy=unsafe-best-match",
+            ],
+        ] {
+            let args = std::iter::once("sync")
+                .chain(flags)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            assert!(
+                apply(&ctx, temp.path(), "uv", None, &args, &mut BTreeMap::new())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn offline_never_probes_and_all_source_failure_stops_before_execution() {
         let temp = tempfile::tempdir().unwrap();
@@ -699,6 +835,22 @@ mod tests {
 #[cfg(test)]
 mod native_candidates_tests {
     use super::*;
+    #[test]
+    fn python_system_configuration_candidates_are_tracked() {
+        let temp = tempfile::tempdir().unwrap();
+        let system = temp.path().join("system");
+        let program_data = temp.path().join("program-data");
+        let paths = native_files(temp.path(), "uv", &|key| match key {
+            "XDG_CONFIG_DIRS" => Some(system.display().to_string()),
+            "PROGRAMDATA" => Some(program_data.display().to_string()),
+            _ => None,
+        });
+        assert!(paths.contains(&system.join("uv/uv.toml")));
+        assert!(paths.contains(&program_data.join("uv/uv.toml")));
+        #[cfg(not(windows))]
+        assert!(paths.contains(&std::path::PathBuf::from("/etc/uv/uv.toml")));
+    }
+
     #[test]
     fn nested_workspace_and_user_candidates_are_tracked_without_claiming_a_winner() {
         let temp = tempfile::tempdir().unwrap();

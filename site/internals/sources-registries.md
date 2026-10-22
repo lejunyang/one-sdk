@@ -94,3 +94,5 @@ registry planner 在 [`package_registry.rs`](https://github.com/lejunyang/one-sd
 “registry 健康”只证明匿名 metadata endpoint 可用，不保证所有依赖都经过它。lockfile 或 metadata 中的绝对 tarball/Git URL、本地文件、workspace、git dependency、Deno JSR 或普通 URL import 都可能绕过默认 registry。osdk 不解析或重写 lockfile，也不代理凭据，因此固定到失效绝对 URL 的安装仍会失败；即使还有其他健康候选，也不会在 manager 已启动后重跑。完整设计边界见 [`docs/package-registry-design.md`](https://github.com/lejunyang/one-sdk/blob/main/docs/package-registry-design.md)。
 
 显式统一配置通过 exec、shim、deps 共用的 adapter 生效。`osdk` 策略只改受支持的默认源/index 项，scope 路由、原生认证与插值留给 manager。无法确定原生配置最终命中文件时，诊断明确标为委托原生解析。详见[包源配置](/guide/project/deps#包源与原生配置优先级)。
+
+- 对 uv，`UV_CONFIG_FILE`、`UV_NO_CONFIG`、`UV_NO_INDEX` 和 `UV_OFFLINE` 保留本次调用控制权，不注入 osdk 索引。检测考虑 uv/pyproject 候选配置及用户、系统位置；运行时版本文件和 Node 元数据只参与 freshness。`packages = "native"` 下检测到的 uv 配置保守整组保留，不复刻 uv 的工作区发现、逐字段合并或精确获胜文件归因。osdk 附加索引允许显式 `first-index`，拒绝 unsafe 策略。
