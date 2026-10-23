@@ -98,28 +98,31 @@ fn collect(
                 .get("tools")
                 .and_then(|v| v.get(tool))
             {
-                if let Some(spec) = super::read_tool_value(value) {
-                    if !out.iter().any(|c| {
+                if (value.is_str() || value.get("version").is_some())
+                    && !out.iter().any(|c| {
                         c.kind == Osdk
                             && c.path.as_ref().and_then(|p| p.canonicalize().ok()).as_ref()
                                 == Some(&path)
-                    }) {
-                        let start = out.len();
-                        push(
-                            &mut out,
-                            tool,
-                            &spec,
-                            Osdk,
-                            Some(path.clone()),
-                            format!(
-                                "tools.{tool}{}",
-                                if value.is_table() { ".version" } else { "" }
-                            ),
-                            VersionOrigin::ProjectConfig(path),
-                            false,
-                        )?;
-                        out[start].shadowed_layer = true;
-                    }
+                    })
+                {
+                    // This layer was already replaced by the effective config.
+                    // Retain its location, never validate or copy its old value.
+                    out.push(Candidate {
+                        active: ActiveVersion {
+                            tool: tool.into(),
+                            spec: String::new(),
+                            source: VersionOrigin::ProjectConfig(path.clone()),
+                            is_range: false,
+                        },
+                        kind: Osdk,
+                        path: Some(path),
+                        field: format!(
+                            "tools.{tool}{}",
+                            if value.is_table() { ".version" } else { "" }
+                        ),
+                        shadowed_layer: true,
+                        ignored: false,
+                    });
                 }
             }
         }
@@ -768,6 +771,44 @@ mod tests {
         assert_eq!(s.winner.unwrap().spec, "22");
         assert_eq!(s.evidence.len(), 2);
         assert_eq!(s.evidence[1].status, "shadowed");
+    }
+    #[test]
+    fn overridden_osdk_layers_keep_locations_without_validating_or_copying_values() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        write(p, "child/osdk.toml", "extends='../osdk.toml'\n[tools]\nnode='22.1.0'\n[settings.precedence]\ntool_conflicts='error'\n");
+        for declaration in [
+            "node=''",
+            "node='https://user:SECRET@private.invalid/version'",
+            "node={version='https://user:SECRET@private.invalid/version'}",
+            "node=\"SECRET\\n\"",
+        ] {
+            write(p, "osdk.toml", &format!("[tools]\n{declaration}\n"));
+            let c = Config::load(&p.join("missing"), &p.join("child")).unwrap();
+            let selection = select(&p.join("child"), &c).unwrap();
+            assert_eq!(selection.winner.as_ref().unwrap().spec, "22.1.0");
+            let parent = p.join("osdk.toml").canonicalize().unwrap();
+            let evidence = selection
+                .evidence
+                .iter()
+                .find(|e| e.path.as_ref() == Some(&parent))
+                .unwrap();
+            assert_eq!(evidence.status, "shadowed");
+            assert_eq!(
+                evidence.field,
+                if declaration.contains('{') {
+                    "tools.node.version"
+                } else {
+                    "tools.node"
+                }
+            );
+            assert!(!selection.explain().contains("SECRET"));
+            let candidates = candidates("node", &p.join("child"), &c, &[]).unwrap();
+            assert!(candidates
+                .iter()
+                .filter(|c| c.shadowed_layer)
+                .all(|c| c.active.spec.is_empty()));
+        }
     }
     #[test]
     fn manager_fields_use_same_custom_order_as_active_version() {

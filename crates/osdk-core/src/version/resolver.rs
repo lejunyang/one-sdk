@@ -478,6 +478,7 @@ fn read_project_tool(path: &Path, tool: &str) -> Option<String> {
     read_tool_value(value.get("tools")?.get(tool)?)
 }
 
+#[cfg(test)]
 fn read_tool_value(value: &toml::Value) -> Option<String> {
     value.as_str().map(str::to_string).or_else(|| {
         value

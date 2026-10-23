@@ -61,7 +61,7 @@ packageManager, devEngines.packageManager, engines.node, devEngines.runtime, glo
 
 Project osdk uses only the nearest configuration and explicit `extends`, not implicit parent merging.
 User, extends and project precedence settings merge by field; arrays replace; omitted fields inherit.
-Overridden ancestors within a kind are shadowed evidence, not simultaneous conflict constraints; inactive version values are not validated. Declarations belonging to another tool are ignored without interpreting their version or integrity values. Native manager fields choose the nearest identity across manager names; automatic manager selection rejects unsupported identities.
+Overridden ancestors within a kind are shadowed evidence, not simultaneous conflict constraints; inactive version values are not validated. This includes superseded `extends` declarations: evidence retains their locations without copying their raw versions. Declarations belonging to another tool are ignored without interpreting their version or integrity values. Native manager fields choose the nearest identity across manager names; automatic manager selection rejects unsupported identities.
 `osdk current` reports tool, path, field, category, winner/shadowed/ignored and reason from the same selection result.
 Known structured fields, JSON fields and simple-file line numbers are reported; unknown paths remain
 absent rather than guessed.

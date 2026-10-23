@@ -57,7 +57,7 @@ devEngines.packageManager、engines.node、devEngines.runtime、global；`tools=
 
 项目 osdk 只使用最近配置及显式 `extends`，不隐式合并父配置。precedence 的用户、
 extends、项目层按字段覆盖，数组替换；未写的策略字段继承。工具声明同类中被覆盖的
-父层仅作为 shadowed 证据，不参与冲突检查，也不校验已失效的版本值。其他工具的声明以 ignored 记录，不解释其版本或完整性值。原生管理器字段跨管理器名称选择最近身份；自动选择遇到不支持的身份会报错。`osdk current` 输出同一选择结果中的
+父层仅作为 shadowed 证据，不参与冲突检查，也不校验已失效的版本值；这包括已被覆盖的 `extends` 声明，证据仅保留位置，不复制原始版本值。其他工具的声明以 ignored 记录，不解释其版本或完整性值。原生管理器字段跨管理器名称选择最近身份；自动选择遇到不支持的身份会报错。`osdk current` 输出同一选择结果中的
 tool、path、field、category、winner/shadowed/ignored 和 reason；结构化配置字段、JSON 字段和简单
 文件行号会在已知时报告，不能确定的路径保留为空，不猜测。
 
