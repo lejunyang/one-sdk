@@ -60,23 +60,27 @@ Node 的 Corepack 也可能在 Node 安装目录中提供 `npm`/`npx`、`pnpm`/`
 
 ## 包管理器版本发现
 
-osdk 按以下优先级发现 npm、pnpm 或 Yarn：
+npm、pnpm、Yarn 使用共用的[可配置声明优先级](../config/files#可配置的声明优先级)。默认情况下，适用声明依次为项目 `[tools]`、`.tool-versions`、`package.json#packageManager`、`package.json#devEngines.packageManager`、全局 `[tools]`。`tools="native"` 和 `tool_order` 可以改变顺序；同类来源取最近声明。显式 `tool@version`、deps provider/installer 选择及锁重放保持各自权威。
 
-1. 最近祖先项目配置 `[tools]` 中的 `npm`、`pnpm`、`yarn`；这里使用普通工具版本语义，`9`、`9.15` 分别选择最新稳定的 `9.x`、`9.15.x`，解析出的精确版本写入 `osdk.lock`；
-2. 最近祖先 `package.json#packageManager`；
-3. 同一 `package.json#devEngines.packageManager`（对象或数组第一项）。
+| 声明 | 接受的版本形式 |
+| --- | --- |
+| `[tools].pnpm`（npm/Yarn 同理） | 普通工具选择器，例如 `"10"`、`"10.15"` 或精确版本 |
+| `packageManager` | `"pnpm@10.15.0"`：npm/pnpm/yarn 加精确 semver；不接受 URL、路径、hash 或 `+` build suffix |
+| `devEngines.packageManager` | 含 `name` 和 `version` 的对象或单元素数组；支持 `">=10 <11"` 等 semver 范围；不支持多选数组 |
 
 ```json
 {
   "engines": { "node": ">=20 <23" },
-  "packageManager": "pnpm@10.15.0"
+  "packageManager": "pnpm@10.15.0",
+  "devEngines": {
+    "packageManager": { "name": "pnpm", "version": ">=10 <11" }
+  }
 }
 ```
 
-`package.json` 的两种声明只支持 `npm|pnpm|yarn@精确 semver`。缺少版本、Bun/Deno、URL、路径，以及带
-`#`、`+` hash/build suffix 的值都会失败；这一精确限制不适用于 `[tools]`。`packageManager` 优先于
-`devEngines.packageManager`。无参数 `install`/`lock`/`upgrade` 会自动加入 manager
-和 Node；`current` 也会报告对应来源。
+此例默认选择 `packageManager`，其精确版本满足 devEngines 范围，因此在 `tool_conflicts="error"` 下也兼容。若提升 devEngines 优先级，则选择其范围；不会将多条声明求交成新请求。另见 [Node、Python 与管理器示例](../config/files#示例-node、python-与-javascript-管理器)。
+
+自动管理器发现支持 npm/pnpm/Yarn，遇到 Bun/Deno 等不支持的身份会报错；这些工具仍可显式安装。解析指定管理器时，其他管理器的声明以 ignored 记录，不解释其版本或完整性值。无参数 `install`/`lock`/`upgrade` 可以加入发现的管理器和 Node；`current` 报告选择来源。解析出的精确版本记录在 `osdk.lock` 中。
 
 ## Registry 预检
 
@@ -286,12 +290,11 @@ npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆�
 python = "native"
 ```
 
-`tool_order` 从高到低排列来源类型，再在同类中选最近目录。支持 `osdk`、`global`、
+`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `osdk`、`global`、
 `.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
 `package.json#packageManager`、`package.json#devEngines.packageManager`、
 `package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
-不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 保留 backend
-声明的其他文件顺序（例如 Rust/Go/Python 的版本文件）。默认顺序是项目 osdk、
+不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
 .tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
 devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
 把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
@@ -306,12 +309,11 @@ tool、path、field、category、winner/shadowed/ignored 和 reason；结构化�
 支持的 semver 比较符及 `||` 按范围检查两两交集；配置 alias 先展开。它不把多个范围
 合并成新的版本请求，最终仍选择最高优先级声明。不同的 latest/LTS/channel 或不透明选择器
 无法离线证明兼容时单独报“无法验证”，不伪称已确认冲突，也不联网安装来解释。
-`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 的 URL/hash 仍不支持；
+`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 要求精确 semver，不支持 URL、hash 或 build suffix；
 devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数组支持范围。
 显式 `tool@version`、指定的 deps provider/installer 及锁重放保持各自权威。
 
-`npm/python/go` 只对该生态选择 osdk/native，不重排管理器内部的认证、scope 或 TLS
-来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
+`[settings.precedence]` 下的 `npm`、`python`、`go` 只覆盖对应生态的**包源策略**，不控制工具版本顺序。可取 `osdk`、`native`、`inherit`（恢复使用 `packages`）；例如 `python="native"` 保留 Python 包索引策略，不会提升 `.python-version`。这些字段不重排管理器内部的认证、scope 或 TLS 来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
 复杂配置（命名索引、绑定及其他未建模字段）在 native 下整组保留，osdk 显式索引
 实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
 不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`

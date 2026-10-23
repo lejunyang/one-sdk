@@ -49,12 +49,12 @@ npm = "osdk"           # optional override of packages; inherit clears this over
 python = "native"
 ```
 
-`tool_order` ranks source kinds highest first, then selects the nearest directory within a kind.
+`tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
 Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
 `package.json#packageManager`, `package.json#devEngines.packageManager`,
 `package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
 _default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
-order. `idiomatic` preserves the backend's order for other filenames (including Rust/Go/Python).
+order. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
 The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
 packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
 `tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
@@ -71,12 +71,11 @@ range is compatible; numeric prefixes, supported semver comparators and `||` use
 overlap after expanding configured aliases. This does not merge ranges into a new request: the
 highest-priority declaration still selects the version. Different latest/LTS/channels or opaque selectors
 that cannot be proved compatible offline produce a distinct unverifiable error, not a claimed
-incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager URLs/hashes remain unsupported; devEngines.packageManager accepts a
+incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager requires exact semver without URLs, hashes or build suffixes; devEngines.packageManager accepts a
 single object or single-element array with a range, and rejects multiple alternatives explicitly.
 Explicit `tool@version`, explicit deps provider/installer choices, and lock replay keep their authority. Shim ownership maintenance retains installed commands when project selection is invalid; it does not execute them. Implicit dispatch still enforces the project conflict policy. Built-in deps providers resolve only the tools they require.
 
-`npm/python/go` choose osdk/native for that ecosystem without reordering native credentials, scope
-routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
+`npm`, `python`, and `go` under `[settings.precedence]` override **package-source** policy for that ecosystem, not tool-version policy. They accept `osdk`, `native`, or `inherit` (use `packages` again); for example, `python="native"` preserves Python package indexes, not `.python-version` priority. They do not reorder native credentials, scope routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
 user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
 remain native as a group; injecting explicit osdk indexes into them under osdk precedence fails. An invocation environment override that prevents injection does not cause this error.
 A possible uv workspace delegates the group intact, including membership/exclusions, without osdk

@@ -7,7 +7,7 @@ osdk 将用户默认值、项目声明、环境变量和 CLI 覆盖组合成当�
 - 用户配置：`$OSDK_CONFIG_DIR/config.toml`；Linux 默认是 `~/.config/osdk/config.toml`。
 - 项目配置：`osdk.toml` 或 `.osdk.toml`。从当前目录向上查找最近一份；同一目录
   同时存在时，`osdk.toml` 优先。
-- `.tool-versions`：独立向上查找最近一份，只补充项目/用户 `[tools]` 尚未声明的键。
+- `.tool-versions`：独立向上查找，其声明参与共用的[工具版本优先级](#可配置的声明优先级)；默认顺序中优先于用户全局工具默认值。
 
 ```text
 osdk config path
@@ -141,6 +141,15 @@ offline = false
 lang = "zh"                 # 可省略；en|zh
 prerelease = "if-explicit"  # never|if-explicit|allow
 
+[settings.precedence]
+tools = "osdk"            # osdk|native；工具版本的默认顺序
+packages = "native"       # osdk|native；默认包源策略
+tool_order = []            # 所有工具共用的来源类型顺序；[] 使用默认顺序
+tool_conflicts = "prefer"  # prefer|error
+npm = "inherit"           # osdk|native|inherit；只覆盖包源策略
+python = "inherit"
+go = "inherit"
+
 [settings.shims]
 include = []                # 全局白名单；非空时未列出者一律不生成 shim
 exclude = []                # 排除；最后生效
@@ -258,7 +267,7 @@ Registry 的选择语义见[JavaScript 包管理器](../tools/package-managers)�
 
 ## 精确的覆盖与合并语义
 
-总体优先级为：
+普通配置字段的总体优先级为（工具版本选择使用下文单独的策略）：
 
 ```text
 CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
@@ -268,7 +277,8 @@ CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
 
 | 配置区域 | 高优先级文件的行为 |
 | --- | --- |
-| `[settings]` | **整段替换**；只写一个字段时，其他设置回到 `Settings` 内置默认值，而不是继承用户文件 |
+| `[settings]` | 除 `precedence` 外**整段替换**；其他遗漏设置回到 `Settings` 内置默认值，而不是继承用户文件 |
+| `[settings.precedence]` | 用户、显式 `extends`、项目层按字段合并；遗漏字段继承，数组替换；`tool_order = []` 清除自定义顺序，生态字段 `"inherit"` 清除对应包源策略覆盖 |
 | `[sources]` 顶层 | `selection`、`probe_timeout_ms`、`cache_ttl` **整段替换**；遗漏项回到默认值 |
 | `[sources.<tool>]` | 按工具键合并；同一工具的 `pin`、`disable`、`custom` 等整项由高优先级层替换 |
 | 模型 `env`/`env_force` | 项目配置不能改变；始终保留用户全局值，避免项目静默改写 shell 凭据环境 |
@@ -276,7 +286,7 @@ CLI > OSDK_* 环境变量 > 最近项目配置 > 用户配置 > 内置默认值
 | `[container]` | 整段替换；省略的运行时、构建器、平台、超时和 Registry 策略字段使用内置默认值 |
 | `[tools]` | 按工具键合并；高优先级同名键覆盖 |
 | `[alias.tools.<tool>]` | 按工具和别名键合并；高优先级同名别名覆盖 |
-| `.tool-versions` | 只填补合并后 `[tools]` 中缺失的工具 |
+| 原生工具声明（含 `.tool-versions`） | 按 `settings.precedence` 与项目/全局 `[tools]` 一起排序；来源类型顺序见下文 |
 
 例如，用户配置启用了 `verify_signatures = false`，而项目仅写：
 
@@ -305,12 +315,11 @@ npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆�
 python = "native"
 ```
 
-`tool_order` 从高到低排列来源类型，再在同类中选最近目录。支持 `osdk`、`global`、
+`tool_order` 是所有工具共用的一份来源类型顺序，从高到低排列，不是按工具名分别配置的表。仅适用于当前工具的来源参与选择；每个文件名取最近声明，`idiomatic` 还保留下述 backend 固定文件顺序。支持 `osdk`、`global`、
 `.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
 `package.json#packageManager`、`package.json#devEngines.packageManager`、
 `package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
-不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 保留 backend
-声明的其他文件顺序（例如 Rust/Go/Python 的版本文件）。默认顺序是项目 osdk、
+不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 将其他原生文件归为一类：Python 使用 `.python-version`；Go 先 `go.mod` 后 `.go-version`，Rust 先 `rust-toolchain.toml` 后 `rust-toolchain`，Java 先 `.java-version` 后 `.sdkmanrc`。这些文件名不能独立写入 `tool_order`；不同文件名之间先按 backend 顺序，再考虑目录距离。默认顺序是项目 osdk、
 .tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
 devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
 把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
@@ -325,13 +334,54 @@ tool、path、field、category、winner/shadowed/ignored 和 reason；结构化�
 支持的 semver 比较符及 `||` 按范围检查两两交集；配置 alias 先展开。它不把多个范围
 合并成新的版本请求，最终仍选择最高优先级声明。不同的 latest/LTS/channel 或不透明选择器
 无法离线证明兼容时单独报“无法验证”，不伪称已确认冲突，也不联网安装来解释。
-`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 的 URL/hash 仍不支持；
+`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 要求精确 semver，不支持 URL、hash 或 build suffix；
 devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数组支持范围。
 显式 `tool@version`、指定的 deps provider/installer 及锁重放保持各自权威。
 
-`npm/python/go` 只对该生态选择 osdk/native，不重排管理器内部的认证、scope 或 TLS
-来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
+`[settings.precedence]` 下的 `npm`、`python`、`go` 只覆盖对应生态的**包源策略**，不控制工具版本顺序。可取 `osdk`、`native`、`inherit`（恢复使用 `packages`）；例如 `python="native"` 保留 Python 包索引策略，不会提升 `.python-version`。这些字段不重排管理器内部的认证、scope 或 TLS 来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
 复杂配置（命名索引、绑定及其他未建模字段）在 native 下整组保留，osdk 显式索引
 实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
 不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
 的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
+
+### 示例：Node、Python 与 JavaScript 管理器
+
+以下是分别使用的项目 `osdk.toml` 示例。这些策略字段直接编辑 TOML，再用 `osdk current node`、`osdk current python` 或 `osdk current pnpm` 查看 winner 与 shadowed/ignored 证据。已有锁重放或显式版本请求仍保持权威。
+
+**Node：让 `.node-version` 优先于 `.nvmrc` 和 `[tools]`：**
+
+```toml
+[tools]
+node = "20"
+
+[settings.precedence]
+tool_order = [".node-version", ".nvmrc", "osdk"]
+tool_conflicts = "prefer"
+```
+
+若 `.node-version` 内容为 `22`、`.nvmrc` 为 `20`，选中的请求是 `22`。把 `tool_conflicts` 改为 `"error"` 会拒绝这些不兼容声明。该排序也适用于其他工具，但两个 Node 专用文件类型不会影响 Python 或 pnpm。
+
+**Python：优先使用 `.python-version`，同时保留原生包索引：**
+
+```toml
+[tools]
+python = "3.12"
+
+[settings.precedence]
+tool_order = ["idiomatic", "osdk"]
+packages = "osdk"
+python = "native"
+```
+
+若 `.python-version` 内容为 `3.13`，Python 选中的请求为 `3.13`。`idiomatic` 也会提升 Go/Rust/Java 适用的原生文件；没有只针对 Python 的 `tool_order` 配置。单独的 `python="native"` 让 Python 包索引保留原生策略，而其他生态使用 `packages="osdk"`。子层写 `python="inherit"` 可恢复共用包源策略；写 `tool_order=[]` 可清除继承的自定义版本顺序。
+
+**JavaScript 管理器：让 devEngines 范围优先于 packageManager 精确版本：**
+
+```toml
+[settings.precedence]
+tool_order = ["package.json#devEngines.packageManager", "package.json#packageManager", "osdk"]
+tool_conflicts = "error"
+npm = "native"
+```
+
+配合[包管理器页的 package.json 示例](../tools/package-managers#包管理器版本发现)，pnpm 选择 `>=10 <11`；精确声明 `10.15.0` 与其兼容，但不会将胜出范围固定到该版本。`npm="native"` 控制 npm 生态（含 pnpm/Yarn）的包 registry，不控制管理器可执行文件版本。需要精确选择时，让 `packageManager` 排在前面，或显式指定版本，例如 `osdk exec -t pnpm@10.15.0 -- pnpm --version`。

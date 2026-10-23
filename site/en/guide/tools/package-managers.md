@@ -67,25 +67,27 @@ Node installation.
 
 ## Package-manager version discovery
 
-osdk discovers npm, pnpm, or Yarn in this order:
+npm, pnpm, and Yarn use the shared [configurable declaration precedence](../config/files#configurable-declaration-precedence). By default, applicable declarations rank as project `[tools]`, `.tool-versions`, `package.json#packageManager`, `package.json#devEngines.packageManager`, then global `[tools]`. `tools="native"` and `tool_order` can change this order; the nearest declaration within each source kind is considered. Explicit `tool@version`, deps provider/installer selection, and lock replay retain their authority.
 
-1. npm/pnpm/Yarn in `[tools]` from the nearest ancestor project configuration; these use normal tool-version semantics, so `9` and `9.15` select the newest stable `9.x` and `9.15.x`, with the resolved exact version recorded in `osdk.lock`;
-2. the nearest ancestor `package.json#packageManager`;
-3. `devEngines.packageManager` in that `package.json` (an object or first array entry).
+| Declaration | Accepted version form |
+| --- | --- |
+| `[tools].pnpm` (also npm/Yarn) | Normal tool selectors: `"10"`, `"10.15"`, or an exact version, for example |
+| `packageManager` | `"pnpm@10.15.0"`: npm/pnpm/yarn with exact semver; no URLs, paths, hash or `+` build suffix |
+| `devEngines.packageManager` | An object or single-element array with `name` and `version`; supports semver ranges such as `">=10 <11"`; multiple alternatives are not supported |
 
 ```json
 {
   "engines": { "node": ">=20 <23" },
-  "packageManager": "pnpm@10.15.0"
+  "packageManager": "pnpm@10.15.0",
+  "devEngines": {
+    "packageManager": { "name": "pnpm", "version": ">=10 <11" }
+  }
 }
 ```
 
-The two `package.json` declarations support only exact `npm|pnpm|yarn@semver`
-values. Missing versions, Bun/Deno, URLs, paths, and values with a `#`, hash, or
-`+` build suffix fail; this exact-version restriction does not apply to `[tools]`.
-`packageManager` wins over `devEngines.packageManager`. No-argument
-`install`/`lock`/`upgrade` automatically add the manager and Node; `current`
-reports the corresponding source.
+Here `packageManager` wins by default, and its exact version is compatible with the devEngines range under `tool_conflicts="error"`. Giving devEngines higher priority instead selects its range; the declarations are not intersected into a new request. See the [Node, Python and manager examples](../config/files#examples-node-python-and-javascript-managers).
+
+Automatic manager discovery supports npm/pnpm/Yarn, and rejects unsupported identities such as Bun/Deno; those tools remain installable explicitly. When resolving a specific manager, declarations belonging to another manager are ignored without interpreting their version or integrity values. No-argument `install`/`lock`/`upgrade` can add the discovered manager and Node; `current` reports the selected source. Resolved exact versions are recorded in `osdk.lock`.
 
 ## Registry preflight
 
@@ -311,12 +313,12 @@ npm = "osdk"           # optional override of packages; inherit clears this over
 python = "native"
 ```
 
-`tool_order` ranks source kinds highest first, then selects the nearest directory within a kind.
+`tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
 Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
 `package.json#packageManager`, `package.json#devEngines.packageManager`,
 `package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
 _default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
-order. `idiomatic` preserves the backend's order for other filenames (including Rust/Go/Python).
+order. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
 The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
 packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
 `tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
@@ -333,12 +335,11 @@ range is compatible; numeric prefixes, supported semver comparators and `||` use
 overlap after expanding configured aliases. This does not merge ranges into a new request: the
 highest-priority declaration still selects the version. Different latest/LTS/channels or opaque selectors
 that cannot be proved compatible offline produce a distinct unverifiable error, not a claimed
-incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager URLs/hashes remain unsupported; devEngines.packageManager accepts a
+incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager requires exact semver without URLs, hashes or build suffixes; devEngines.packageManager accepts a
 single object or single-element array with a range, and rejects multiple alternatives explicitly.
 Explicit `tool@version`, explicit deps provider/installer choices, and lock replay keep their authority.
 
-`npm/python/go` choose osdk/native for that ecosystem without reordering native credentials, scope
-routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
+`npm`, `python`, and `go` under `[settings.precedence]` override **package-source** policy for that ecosystem, not tool-version policy. They accept `osdk`, `native`, or `inherit` (use `packages` again); for example, `python="native"` preserves Python package indexes, not `.python-version` priority. They do not reorder native credentials, scope routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
 user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
 remain native as a group; injecting explicit osdk indexes into them under osdk precedence fails. An invocation environment override that prevents injection does not cause this error.
 A possible uv workspace delegates the group intact, including membership/exclusions, without osdk

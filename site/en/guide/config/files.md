@@ -6,7 +6,7 @@ osdk combines user defaults, project declarations, environment variables, and CL
 
 - User configuration: `$OSDK_CONFIG_DIR/config.toml`; on Linux the default is `~/.config/osdk/config.toml`.
 - Project configuration: `osdk.toml` or `.osdk.toml`. osdk walks upward and uses the nearest file; `osdk.toml` wins when both exist in one directory.
-- `.tool-versions`: discovered independently by walking upward; it fills tool keys still absent after project/user `[tools]` are merged.
+- `.tool-versions`: discovered independently by walking upward; its declarations participate in the shared [tool-version precedence](#configurable-declaration-precedence), above global tool defaults in the default order.
 
 ```text
 osdk config path
@@ -160,6 +160,15 @@ offline = false
 lang = "en"                 # optional; en|zh
 prerelease = "if-explicit"  # never|if-explicit|allow
 
+[settings.precedence]
+tools = "osdk"            # osdk|native; default order for tool versions
+packages = "native"       # osdk|native; default package-source policy
+tool_order = []            # shared source-kind order for all tools; [] uses defaults
+tool_conflicts = "prefer"  # prefer|error
+npm = "inherit"           # osdk|native|inherit; package-source override only
+python = "inherit"
+go = "inherit"
+
 [settings.shims]
 include = []                # global allowlist; when non-empty, nothing else is shimmed
 exclude = []                # skipped names; applied last
@@ -289,7 +298,7 @@ form above when you need one.
 
 ## Exact override and merge semantics
 
-The overall precedence is:
+For ordinary configuration fields, the overall precedence is (tool-version selection has its own policy below):
 
 ```text
 CLI > OSDK_* environment > nearest project config > user config > built-in defaults
@@ -299,7 +308,8 @@ File layers do not use one universal field-by-field merge:
 
 | Area | Effect of the higher-precedence file |
 | --- | --- |
-| `[settings]` | **Replace the whole section**; omitted fields become built-in `Settings` defaults instead of inheriting the user file |
+| `[settings]` | **Replace the whole section**, except `precedence`; other omitted fields become built-in `Settings` defaults instead of inheriting the user file |
+| `[settings.precedence]` | Merge by field across user, explicit `extends`, and project layers; omitted fields inherit, arrays replace, `tool_order = []` clears custom ordering, and ecosystem `"inherit"` clears its package-policy override |
 | `[sources]` top level | Replace `selection`, `probe_timeout_ms`, and `cache_ttl` as a group; omissions become defaults |
 | `[sources.<tool>]` | Merge by tool key; the higher layer replaces the entire same-tool value (`pin`, `disable`, `custom`, and so on) |
 | Model `env` / `env_force` | Project files cannot change them; user-global values are retained to prevent a repository from silently changing credential environment |
@@ -307,7 +317,7 @@ File layers do not use one universal field-by-field merge:
 | `[container]` | Replace the whole section; omitted runtime, builder, platform, timeout, and registry-policy fields use built-in defaults |
 | `[tools]` | Merge by backend key; higher same-name key wins |
 | `[alias.tools.<tool>]` | Merge by tool and alias key; higher same-name alias wins |
-| `.tool-versions` | Fill only tool keys still missing after `[tools]` is merged |
+| Native tool declarations (including `.tool-versions`) | Rank against project/global `[tools]` using `settings.precedence`; see the source-kind order below |
 
 For example, if user configuration sets `verify_signatures = false` and a
 project contains only:
@@ -337,12 +347,12 @@ npm = "osdk"           # optional override of packages; inherit clears this over
 python = "native"
 ```
 
-`tool_order` ranks source kinds highest first, then selects the nearest directory within a kind.
+`tool_order` is one shared source-kind order for all tools, highest first; it is not a per-tool map. Only kinds applicable to the requested tool participate. For each filename, the nearest declaration is considered; `idiomatic` also preserves the fixed backend filename order below.
 Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
 `package.json#packageManager`, `package.json#devEngines.packageManager`,
 `package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
 _default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
-order. `idiomatic` preserves the backend's order for other filenames (including Rust/Go/Python).
+order. `idiomatic` groups the other native filenames: Python uses `.python-version`; Go checks `go.mod` before `.go-version`, Rust checks `rust-toolchain.toml` before `rust-toolchain`, and Java checks `.java-version` before `.sdkmanrc`. These names are not independent `tool_order` entries. Backend filename priority applies before directory proximity between those filenames.
 The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
 packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
 `tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
@@ -359,15 +369,56 @@ range is compatible; numeric prefixes, supported semver comparators and `||` use
 overlap after expanding configured aliases. This does not merge ranges into a new request: the
 highest-priority declaration still selects the version. Different latest/LTS/channels or opaque selectors
 that cannot be proved compatible offline produce a distinct unverifiable error, not a claimed
-incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager URLs/hashes remain unsupported; devEngines.packageManager accepts a
+incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager requires exact semver without URLs, hashes or build suffixes; devEngines.packageManager accepts a
 single object or single-element array with a range, and rejects multiple alternatives explicitly.
 Explicit `tool@version`, explicit deps provider/installer choices, and lock replay keep their authority.
 
-`npm/python/go` choose osdk/native for that ecosystem without reordering native credentials, scope
-routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
+`npm`, `python`, and `go` under `[settings.precedence]` override **package-source** policy for that ecosystem, not tool-version policy. They accept `osdk`, `native`, or `inherit` (use `packages` again); for example, `python="native"` preserves Python package indexes, not `.python-version` priority. They do not reorder native credentials, scope routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
 user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
 remain native as a group; injecting explicit osdk indexes into them under osdk precedence fails. An invocation environment override that prevents injection does not cause this error.
 A possible uv workspace delegates the group intact, including membership/exclusions, without osdk
 index injection; uv may still validate member metadata. Candidate files are not per-field winners. Requirements/constraint inputs with native options or unreadable context, positional `uv pip sync`/`compile` inputs, and explicit config/directory (`-C` included)/offline/dotenv invocation options, including options before subcommands, are delegated to uv;
 false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
 Native files are not rewritten and failed execution is never retried with a different installer.
+
+### Examples: Node, Python and JavaScript managers
+
+These are separate project `osdk.toml` examples. Edit TOML directly for these policy fields, then use `osdk current node`, `osdk current python`, or `osdk current pnpm` to inspect the winner and shadowed/ignored evidence. An existing lock replay or explicit version request keeps its authority.
+
+**Node — prefer `.node-version` over `.nvmrc` and `[tools]`:**
+
+```toml
+[tools]
+node = "20"
+
+[settings.precedence]
+tool_order = [".node-version", ".nvmrc", "osdk"]
+tool_conflicts = "prefer"
+```
+
+With `.node-version` containing `22` and `.nvmrc` containing `20`, the selected request is `22`. Changing `tool_conflicts` to `"error"` rejects those incompatible declarations. This order also applies to other tools, but the two Node-only file kinds have no effect on Python or pnpm.
+
+**Python — prefer `.python-version` while retaining native package indexes:**
+
+```toml
+[tools]
+python = "3.12"
+
+[settings.precedence]
+tool_order = ["idiomatic", "osdk"]
+packages = "osdk"
+python = "native"
+```
+
+With `.python-version` containing `3.13`, the selected Python request is `3.13`. `idiomatic` also promotes the applicable Go/Rust/Java native files; there is no Python-only `tool_order` setting. The separate `python="native"` preserves native package-index policy even though other package ecosystems use `packages="osdk"`. Use `python="inherit"` in a child layer to restore the shared package policy; use `tool_order=[]` to clear an inherited custom version order.
+
+**JavaScript manager — prefer a devEngines range over an exact packageManager declaration:**
+
+```toml
+[settings.precedence]
+tool_order = ["package.json#devEngines.packageManager", "package.json#packageManager", "osdk"]
+tool_conflicts = "error"
+npm = "native"
+```
+
+With the [package.json example](../tools/package-managers#package-manager-version-discovery), pnpm selects `>=10 <11`; the exact `10.15.0` declaration is compatible, but does not pin the winning range. `npm="native"` controls package registries for the npm ecosystem, including pnpm/Yarn, not their executable versions. For an exact manager selection, leave `packageManager` first or pass an explicit version such as `osdk exec -t pnpm@10.15.0 -- pnpm --version`.
