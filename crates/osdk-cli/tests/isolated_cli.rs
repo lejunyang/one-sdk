@@ -6438,6 +6438,14 @@ fn explicit_containerd_pull_requires_and_forwards_target_selectors() {
 #[test]
 fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_code() {
     let temporary = tempfile::tempdir().unwrap();
+    // This tests preview identity and exit propagation, not probe latency.
+    // Parallel integration processes can exhaust the default 1.5-second budget.
+    std::fs::create_dir_all(temporary.path().join("config")).unwrap();
+    std::fs::write(
+        temporary.path().join("config/config.toml"),
+        "[container]\nprobe_timeout_ms = 10000\n",
+    )
+    .unwrap();
     let bin = temporary.path().join("native-bin");
     let calls = temporary.path().join("prune.calls");
     write_executable(
@@ -6463,7 +6471,11 @@ fn native_container_prune_previews_then_requires_exact_id_and_preserves_exit_cod
         ],
         &common_env,
     );
-    assert!(preview.status.success());
+    assert!(
+        preview.status.success(),
+        "preview failed: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
     assert!(!calls.exists());
     let preview_stdout = String::from_utf8(preview.stdout).unwrap();
     let preview_id = preview_stdout
