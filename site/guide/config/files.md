@@ -350,8 +350,8 @@ devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数�
 
 | 合法值 | 候选来源 | 适用的内置工具 |
 | --- | --- | --- |
-| `osdk` | 最近项目的 `[tools]`，包括显式 `extends` | 所有具有匹配 backend 键的工具 |
-| `global` | 用户配置的 `[tools]` | 所有具有匹配 backend 键的工具 |
+| `osdk` | 最近项目 `osdk.toml` / `.osdk.toml` 中的 `[tools]`，包括显式 `extends` | 所有具有匹配 backend 键的工具 |
+| `global` | osdk 用户配置 `$OSDK_CONFIG_DIR/config.toml` 中的 `[tools]`；用 `osdk config path` 查看实际位置 | 所有具有匹配 backend 键的工具 |
 | `.tool-versions` | 最近适用 `.tool-versions` 中匹配该工具的行 | 所有具有匹配 backend 键的工具 |
 | `.nvmrc` | `.nvmrc` 版本声明 | Node |
 | `.node-version` | `.node-version` 版本声明 | Node |
@@ -360,6 +360,16 @@ devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数�
 | `package.json#devEngines.packageManager` | `devEngines.packageManager` 中的版本/范围 | npm、pnpm、Yarn |
 | `package.json#engines.node` | `engines.node` 中的 Node 版本/范围 | Node |
 | `package.json#devEngines.runtime` | `name="node"` 条目中的运行时版本/范围 | Node |
+
+`global` 指 **osdk 用户级的工具默认配置**，不是 `PATH` 中已安装的版本，也不是 nvm/npm 的原生全局配置。例如，用户 `config.toml` 的 `[tools]` 声明 `node="20"`，项目 `osdk.toml` 的 `[tools]` 声明 `node="22"`，项目使用以下策略时选中请求 `20`：
+
+```toml
+[settings.precedence]
+tool_order = ["global", "osdk"]
+tool_conflicts = "prefer"
+```
+
+把 `tool_conflicts` 改为 `"error"` 会拒绝不兼容的 `20` 与 `22` 声明，不再选取其中一个。不配置自定义顺序时，默认项目优先，选中 `22`。显式 CLI 版本与锁重放仍保持权威。
 
 下表每一行还支持 `osdk`、`global`、`.tool-versions`，按该工具的 backend 键匹配。存在版本文件不等于自动请求安装该工具；本表说明请求或激活该工具时如何选择版本。
 

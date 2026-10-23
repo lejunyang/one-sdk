@@ -387,8 +387,8 @@ Native files are not rewritten and failed execution is never retried with a diff
 
 | Value | Candidate source | Built-in tools |
 | --- | --- | --- |
-| `osdk` | Nearest project `[tools]`, including explicit `extends` | All tools with a matching backend key |
-| `global` | User configuration `[tools]` | All tools with a matching backend key |
+| `osdk` | `[tools]` in the nearest project `osdk.toml` / `.osdk.toml`, including explicit `extends` | All tools with a matching backend key |
+| `global` | `[tools]` in osdk user configuration `$OSDK_CONFIG_DIR/config.toml`; locate it with `osdk config path` | All tools with a matching backend key |
 | `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key |
 | `.nvmrc` | `.nvmrc` version declaration | Node |
 | `.node-version` | `.node-version` version declaration | Node |
@@ -397,6 +397,16 @@ Native files are not rewritten and failed execution is never retried with a diff
 | `package.json#devEngines.packageManager` | Manager version/range in `devEngines.packageManager` | npm, pnpm, Yarn |
 | `package.json#engines.node` | Node version/range in `engines.node` | Node |
 | `package.json#devEngines.runtime` | Runtime version/range for a `name="node"` entry | Node |
+
+`global` means **osdk's user-level tool defaults**, not versions installed on `PATH` or native nvm/npm global configuration. For example, with user `config.toml` declaring `[tools] node="20"` and project `osdk.toml` declaring `[tools] node="22"`, this project policy selects the request `20`:
+
+```toml
+[settings.precedence]
+tool_order = ["global", "osdk"]
+tool_conflicts = "prefer"
+```
+
+Changing `tool_conflicts` to `"error"` rejects the incompatible `20` and `22` declarations instead of selecting either. Without the custom order, the default project-first policy selects `22`. Explicit CLI versions and lock replay remain authoritative.
 
 Every row below also supports `osdk`, `global`, and `.tool-versions` for its backend key. A file's presence does not automatically request installation of its tool; this table describes version selection when that tool is requested or activated.
 
