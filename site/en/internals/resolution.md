@@ -39,6 +39,8 @@ Candidate lists are expected in ascending order. [`select_version`](https://gith
 
 ## Configurable declaration precedence
 
+See the [complete tool_order values and per-tool applicability](../guide/config/files#tool-order-reference).
+
 ```toml
 [settings.precedence]
 tools = "osdk"

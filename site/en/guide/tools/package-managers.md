@@ -303,6 +303,8 @@ Unknown fields fail normally, including invented generic Cargo/Deno source field
 
 ## Configurable declaration precedence
 
+See the [complete tool_order values and per-tool applicability](../config/files#tool-order-reference).
+
 ```toml
 [settings.precedence]
 tools = "osdk"

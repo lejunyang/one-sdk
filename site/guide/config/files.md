@@ -344,6 +344,46 @@ devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数�
 不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
 的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
 
+### tool_order 合法值与工具适用范围 {#tool-order-reference}
+
+`tool_order` 是由以下 **10 个精确字符串**组成的数组，排列的是声明来源，不是工具名、命令名、下载镜像或 registry。同一数组适用于所有工具；合法类型若没有当前工具的候选声明，就不会影响该工具。没有 `[settings.precedence.node]` 或按工具独立设置的 `tool_order`。
+
+| 合法值 | 候选来源 | 适用的内置工具 |
+| --- | --- | --- |
+| `osdk` | 最近项目的 `[tools]`，包括显式 `extends` | 所有具有匹配 backend 键的工具 |
+| `global` | 用户配置的 `[tools]` | 所有具有匹配 backend 键的工具 |
+| `.tool-versions` | 最近适用 `.tool-versions` 中匹配该工具的行 | 所有具有匹配 backend 键的工具 |
+| `.nvmrc` | `.nvmrc` 版本声明 | Node |
+| `.node-version` | `.node-version` 版本声明 | Node |
+| `idiomatic` | backend 声明的文件，使用下表固定顺序 | 下表对应的 backend；不包含 Node 单独分类的两个文件 |
+| `package.json#packageManager` | `packageManager` 中的管理器精确版本 | npm、pnpm、Yarn |
+| `package.json#devEngines.packageManager` | `devEngines.packageManager` 中的版本/范围 | npm、pnpm、Yarn |
+| `package.json#engines.node` | `engines.node` 中的 Node 版本/范围 | Node |
+| `package.json#devEngines.runtime` | `name="node"` 条目中的运行时版本/范围 | Node |
+
+下表每一行还支持 `osdk`、`global`、`.tool-versions`，按该工具的 backend 键匹配。存在版本文件不等于自动请求安装该工具；本表说明请求或激活该工具时如何选择版本。
+
+| 工具 / backend 键 | 额外适用的 `tool_order` 值 | `idiomatic` 内的文件，按优先级排列 |
+| --- | --- | --- |
+| `node` | `.nvmrc`、`.node-version`、`package.json#engines.node`、`package.json#devEngines.runtime` | 无：`.nvmrc` 和 `.node-version` 各有独立类型；移动 `idiomatic` 不会移动它们 |
+| `python` | `idiomatic` | `.python-version` |
+| `go` | `idiomatic` | `go.mod`（`go` 指令），然后 `.go-version` |
+| `rust` | `idiomatic` | `rust-toolchain.toml`，然后 `rust-toolchain` |
+| `java` | `idiomatic` | `.java-version`，然后 `.sdkmanrc` |
+| `bun` | `idiomatic` | `.bun-version` |
+| `deno` | `idiomatic` | `.dvmrc` |
+| `zig` | `idiomatic` | `.zig-version` |
+| `maven` | `idiomatic` | `.mvn-version` |
+| `gradle` | `idiomatic` | `.gradle-version` |
+| `kotlin` | `idiomatic` | `.kotlin-version` |
+| `npm`、`pnpm`、`yarn` | `package.json#packageManager`、`package.json#devEngines.packageManager` | 无 |
+| 其他内置及动态 backend | 无 | 无 |
+| 声明式插件 backend | 定义声明了文件时支持 `idiomatic` | 其他文件按定义的 `idiomatic_files` 顺序；保留名 `.nvmrc` / `.node-version` 仍使用独立类型；不增加枚举值 |
+
+普通版本文件接受一行版本值（可含注释），不表示支持任意原生管理器配置语法。特别是已登记的 `.sdkmanrc` 路径目前使用普通版本读取器，不解释 SDKMAN 的多键 `java=...` 格式。Rust toolchain 文件和 Go 的 `go` 指令使用专门解析。
+
+未知字符串和重复项会报错：`"node"`、`".python-version"`、`"go.mod"` 都不是合法的 `tool_order` 值。遗漏类型会按 `tools` 决定的默认相对顺序追加，不会被禁用。`[]` 清除继承的自定义顺序。`idiomatic` 内先按固定文件名顺序，再看目录距离，因此祖先目录的 `go.mod` 声明可以优先于更近的 `.go-version`；`tool_order` 不能反转这两个文件。下方提供[三个可运行示例](#示例-node、python-与-javascript-管理器)。
+
 ### 示例：Node、Python 与 JavaScript 管理器
 
 以下是分别使用的项目 `osdk.toml` 示例。这些策略字段直接编辑 TOML，再用 `osdk current node`、`osdk current python` 或 `osdk current pnpm` 查看 winner 与 shadowed/ignored 证据。已有锁重放或显式版本请求仍保持权威。

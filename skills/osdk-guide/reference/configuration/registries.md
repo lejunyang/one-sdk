@@ -39,6 +39,8 @@ proxy = "https://proxy.golang.org,direct"
 
 ## 可配置的声明优先级
 
+完整 10 值及各工具适用矩阵见 [tool_order 集中参考](https://lejunyang.github.io/one-sdk/guide/config/files#tool-order-reference)。Node 的 `.nvmrc` / `.node-version` 各有独立类型，不属于 `idiomatic`；Python/Go/Rust/Java/Bun/Deno/Zig/Maven/Gradle/Kotlin 的 backend 文件归入 `idiomatic`，其他内置/动态 backend 无此类文件。声明式插件可用 `idiomatic_files` 声明，但不会增加枚举值。
+
 ```toml
 [settings.precedence]
 tools = "osdk"

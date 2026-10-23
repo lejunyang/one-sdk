@@ -381,6 +381,46 @@ index injection; uv may still validate member metadata. Candidate files are not 
 false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
 Native files are not rewritten and failed execution is never retried with a different installer.
 
+### tool_order values and tool applicability {#tool-order-reference}
+
+`tool_order` is an array of the following **10 exact strings**. It orders declaration sources, not tool names, executable names, download mirrors, or registries. The same array applies to every tool; a valid kind with no candidate for a tool simply has no effect on that tool. There is no `[settings.precedence.node]` or per-tool `tool_order`.
+
+| Value | Candidate source | Built-in tools |
+| --- | --- | --- |
+| `osdk` | Nearest project `[tools]`, including explicit `extends` | All tools with a matching backend key |
+| `global` | User configuration `[tools]` | All tools with a matching backend key |
+| `.tool-versions` | Matching tool line in the nearest applicable `.tool-versions` | All tools with a matching backend key |
+| `.nvmrc` | `.nvmrc` version declaration | Node |
+| `.node-version` | `.node-version` version declaration | Node |
+| `idiomatic` | Backend-declared files, in the fixed order below | Backends in the matrix below; not Node's two separately named kinds |
+| `package.json#packageManager` | Exact manager version in `packageManager` | npm, pnpm, Yarn |
+| `package.json#devEngines.packageManager` | Manager version/range in `devEngines.packageManager` | npm, pnpm, Yarn |
+| `package.json#engines.node` | Node version/range in `engines.node` | Node |
+| `package.json#devEngines.runtime` | Runtime version/range for a `name="node"` entry | Node |
+
+Every row below also supports `osdk`, `global`, and `.tool-versions` for its backend key. A file's presence does not automatically request installation of its tool; this table describes version selection when that tool is requested or activated.
+
+| Tool / backend key | Additional applicable `tool_order` values | Files within `idiomatic`, in priority order |
+| --- | --- | --- |
+| `node` | `.nvmrc`, `.node-version`, `package.json#engines.node`, `package.json#devEngines.runtime` | None: `.nvmrc` and `.node-version` have their own kinds; moving `idiomatic` does not move them |
+| `python` | `idiomatic` | `.python-version` |
+| `go` | `idiomatic` | `go.mod` (`go` directive), then `.go-version` |
+| `rust` | `idiomatic` | `rust-toolchain.toml`, then `rust-toolchain` |
+| `java` | `idiomatic` | `.java-version`, then `.sdkmanrc` |
+| `bun` | `idiomatic` | `.bun-version` |
+| `deno` | `idiomatic` | `.dvmrc` |
+| `zig` | `idiomatic` | `.zig-version` |
+| `maven` | `idiomatic` | `.mvn-version` |
+| `gradle` | `idiomatic` | `.gradle-version` |
+| `kotlin` | `idiomatic` | `.kotlin-version` |
+| `npm`, `pnpm`, `yarn` | `package.json#packageManager`, `package.json#devEngines.packageManager` | None |
+| Other built-in and dynamic backends | None | None |
+| Declarative plugin backends | `idiomatic` if the definition declares files | The definition's `idiomatic_files` order for other filenames; reserved `.nvmrc` / `.node-version` retain their separate kinds; no new enum values |
+
+Plain version files accept one version line (with optional comments); this is not arbitrary native-manager configuration parsing. In particular, the registered `.sdkmanrc` path currently uses the plain-version reader, not SDKMAN's multi-key `java=...` format. Rust toolchain files and the Go `go` directive have dedicated parsing.
+
+Unknown strings and duplicate entries are errors: `"node"`, `".python-version"`, and `"go.mod"` are not valid `tool_order` values. Omitted kinds are appended in the default relative order determined by `tools`; omission does not disable a source. `[]` clears an inherited custom order. For `idiomatic`, backend filename priority is fixed before directory distance, so an ancestor `go.mod` declaration can outrank a nearer `.go-version`; `tool_order` cannot reverse those two files. See the [three runnable examples](#examples-node-python-and-javascript-managers) below.
+
 ### Examples: Node, Python and JavaScript managers
 
 These are separate project `osdk.toml` examples. Edit TOML directly for these policy fields, then use `osdk current node`, `osdk current python`, or `osdk current pnpm` to inspect the winner and shadowed/ignored evidence. An existing lock replay or explicit version request keeps its authority.

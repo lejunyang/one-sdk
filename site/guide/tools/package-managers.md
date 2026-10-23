@@ -280,6 +280,8 @@ proxy = "https://proxy.golang.org,direct"
 
 ## 可配置的声明优先级
 
+完整合法值和各工具适用范围见 [tool_order 集中参考](../config/files#tool-order-reference)。
+
 ```toml
 [settings.precedence]
 tools = "osdk"
