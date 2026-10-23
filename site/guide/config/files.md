@@ -371,6 +371,8 @@ tool_conflicts = "prefer"
 
 把 `tool_conflicts` 改为 `"error"` 会拒绝不兼容的 `20` 与 `22` 声明，不再选取其中一个。不配置自定义顺序时，默认项目优先，选中 `22`。显式 CLI 版本与锁重放仍保持权威。
 
+目前没有 `env` 或 `system` 来源类型，也没有通用 `OSDK_<TOOL>_VERSION` 覆盖：`OSDK_NODE_VERSION`、`OSDK_PYTHON_VERSION` 均未实现。普通配置的 `CLI > OSDK_* > 项目` 概述只适用于已实现的环境设置，不表示支持任意工具版本环境变量。PATH/system 也不是统一回退来源：shim 未选中版本时会报错。为外部 JDK 使用者保留已有 `JAVA_HOME` 是单独且更窄的机制，不会增加 `tool_order` 候选。
+
 下表每一行还支持 `osdk`、`global`、`.tool-versions`，按该工具的 backend 键匹配。存在版本文件不等于自动请求安装该工具；本表说明请求或激活该工具时如何选择版本。
 
 | 工具 / backend 键 | 额外适用的 `tool_order` 值 | `idiomatic` 内的文件，按优先级排列 |

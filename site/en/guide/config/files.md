@@ -408,6 +408,8 @@ tool_conflicts = "prefer"
 
 Changing `tool_conflicts` to `"error"` rejects the incompatible `20` and `22` declarations instead of selecting either. Without the custom order, the default project-first policy selects `22`. Explicit CLI versions and lock replay remain authoritative.
 
+There is currently no `env` or `system` source kind, and no universal `OSDK_<TOOL>_VERSION` override: `OSDK_NODE_VERSION` and `OSDK_PYTHON_VERSION` are not implemented. The ordinary `CLI > OSDK_* > project` settings summary applies only to implemented environment settings, not arbitrary tool-version variables. Nor is PATH/system selection a unified fallback: a shim with no selected version reports an error. Preserving an existing `JAVA_HOME` for external JDK consumers is a separate, narrower mechanism; it does not add a `tool_order` candidate.
+
 Every row below also supports `osdk`, `global`, and `.tool-versions` for its backend key. A file's presence does not automatically request installation of its tool; this table describes version selection when that tool is requested or activated.
 
 | Tool / backend key | Additional applicable `tool_order` values | Files within `idiomatic`, in priority order |
