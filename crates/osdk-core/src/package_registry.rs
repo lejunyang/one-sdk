@@ -578,7 +578,8 @@ where
         )));
     }
     let configured = &ctx.config.registries().npm;
-    if ctx.config.settings.precedence.packages == crate::config::SourcePrecedence::Osdk {
+    if ctx.config.settings.precedence.package_policy("npm") == crate::config::SourcePrecedence::Osdk
+    {
         if let Some(url) = configured.default.as_ref().filter(|url| !url.is_empty()) {
             return Ok(RegistryPlan::Selected {
                 url: url.clone(),

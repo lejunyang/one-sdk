@@ -88,6 +88,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut entries = deps::catalog::catalog(root, &config_path, &deps_config)?;
+    let mut tool_evidence: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for entry in &mut entries {
         let mut effective = app.config_for_project(
             entry
@@ -100,21 +101,30 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             effective.sources.registries = registries.clone();
         }
         entry.config.registries = Some(effective.registries().clone());
-        for id in entry.config.project_tools.clone().keys().chain(
-            ["node", "python", "go", "rust", "npm", "pnpm", "yarn", "bun"]
+        // Resolve only the tools this provider can execute. Native files for
+        // unrelated ecosystems must not make an explicit deps provider fail.
+        let ids: Vec<String> = match deps::provider_schema(&entry.project.provider) {
+            Some(schema) => schema
+                .required_tools
                 .iter()
-                .copied()
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-                .iter(),
-        ) {
+                .map(|tool| tool.id.to_string())
+                .chain(std::iter::once(schema.id.to_string()))
+                .collect(),
+            None => entry.config.project_tools.keys().cloned().collect(),
+        };
+        for id in &ids {
             if let Ok(backend) = app.registry.get(id) {
-                if let Some(active) = osdk_core::version::resolver::resolve_active_config(
+                let selection = osdk_core::version::resolver::resolve_selection(
                     id,
                     &entry.project.root,
                     &effective,
                     backend.idiomatic_files(),
-                )? {
+                )?;
+                tool_evidence
+                    .entry(entry.id())
+                    .or_default()
+                    .insert(id.clone(), selection.explain());
+                if let Some(active) = selection.winner {
                     entry.config.project_tools.insert(id.clone(), active.spec);
                 }
             }
@@ -127,6 +137,7 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
             .collect();
         entry.config.project_context = serde_json::to_string(&(
             &effective.settings,
+            &effective.tool_aliases,
             &effective.sources,
             effective.registries(),
             &tools,
@@ -255,18 +266,10 @@ pub async fn deps(app: &mut App, options: DepsOptions) -> anyhow::Result<()> {
                     .into_iter()
                     .filter(|path| path.is_file())
                     .collect();
-                println!("    native candidates: {candidates:?}; native winner and interpolation delegated to manager");
-                for id in config.project_tools.keys() {
-                    if let Ok(backend) = app.registry.get(id) {
-                        println!(
-                            "    {}",
-                            osdk_core::version::resolver::explain_selection(
-                                id,
-                                &project.root,
-                                &context.config,
-                                backend.idiomatic_files()
-                            )?
-                        );
+                println!("    fingerprint inputs: {candidates:?}; not an effective discovery chain; native winner and interpolation delegated to manager");
+                if let Some(evidence) = tool_evidence.get(&rooted.0) {
+                    for (id, selection) in evidence {
+                        println!("    {id}: {selection}");
                     }
                 }
             }
@@ -1169,11 +1172,21 @@ fn freshness_command(
     config: &ProviderConfig,
     versions: &BTreeMap<String, String>,
 ) -> anyhow::Result<String> {
+    let mut paths = osdk_core::package_registry::managed_npm_config_files(&app.ctx);
+    paths.extend(osdk_core::package_sources::invocation_files(
+        &plan.cwd,
+        &plan.program,
+        &plan.args,
+    ));
+    paths.extend(app.ctx.config.global_config_path.iter().cloned());
     Ok(osdk_core::package_sources::fingerprint(
         &plan.cwd,
         &plan.program,
-        &format!("{plan:?}|{config:?}|{versions:?}"),
-        &osdk_core::package_registry::managed_npm_config_files(&app.ctx),
+        &format!(
+            "{plan:?}|{config:?}|{versions:?}|{:?}",
+            app.ctx.config.settings.precedence
+        ),
+        &paths,
     )?)
 }
 

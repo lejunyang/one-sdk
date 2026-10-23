@@ -145,7 +145,22 @@ def main():
             result = run([args.uv, 'pip', 'compile', 'requirements.in', '--python-version', '3.12', '--no-header', '--no-annotate'], project, {'UV_DEFAULT_INDEX': base + '/default/', 'UV_INDEX': base + '/first/ ' + base + '/second/', 'UV_INDEX_STRATEGY': 'first-index'})
             assert 'fixture-pkg==1.0.0' in result, result
             assert 'fixture-pkg==9.0.0' not in result
-            print(f'PASS {run([args.uv, "--version"], project)}: additional-index order and first-index; default remains lowest priority')
+            for false_value in ('0', 'false'):
+                result = run([args.uv, '--verbose', 'pip', 'compile', 'requirements.in', '--python-version', '3.12', '--no-header', '--no-annotate'], project, {'UV_NO_CONFIG': false_value, 'UV_OFFLINE': false_value})
+                assert 'fixture-pkg==9.0.0' in result, result
+            # The sibling tool.uv settings must not override uv.toml.
+            (project / 'pyproject.toml').write_text(f'[tool.uv]\nindex-url="{base}/first/"\n')
+            result = run([args.uv, 'pip', 'compile', 'requirements.in', '--python-version', '3.12', '--no-header', '--no-annotate'], project)
+            assert 'fixture-pkg==9.0.0' in result, result
+            workspace = root / 'uv-workspace'; workspace.mkdir()
+            member = workspace / 'member'; member.mkdir()
+            (workspace / 'pyproject.toml').write_text('[project]\nname="workspace-root"\nversion="0.1.0"\nrequires-python=">=3.9"\ndependencies=["fixture-pkg"]\n[tool.uv]\nindex-url="' + base + '/first/"\n[tool.uv.workspace]\nmembers=["member"]\n')
+            (member / 'pyproject.toml').write_text('[project]\nname="workspace-member"\nversion="0.1.0"\nrequires-python=">=3.9"\n[tool.uv]\nindex-url="' + base + '/second/"\n')
+            (member / 'uv.toml').write_text(f'index-url="{base}/second/"\n')
+            run([args.uv, 'lock'], member)
+            locked = (workspace / 'uv.lock').read_text()
+            assert 'version = "1.0.0"' in locked and 'version = "2.0.0"' not in locked, locked
+            print(f'PASS {run([args.uv, "--version"], project)}: additional-index order, first-index, false booleans, uv.toml shadowing and workspace-root configuration')
         finally:
             server.shutdown(); server.server_close(); thread.join()
 

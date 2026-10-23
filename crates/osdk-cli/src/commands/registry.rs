@@ -14,7 +14,7 @@ pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
             let managers = if manager.as_deref() == Some("python") {
                 Vec::new()
             } else {
-                registry_test_managers(manager.as_deref(), &cwd)?
+                registry_test_managers(app, manager.as_deref(), &cwd)?
             };
             let mut unavailable = Vec::new();
             for manager in managers {
@@ -80,10 +80,17 @@ pub async fn registry(app: &mut App, command: RegistryCommand) -> Result<()> {
 }
 
 pub(crate) fn registry_test_managers(
+    app: &App,
     requested: Option<&str>,
     cwd: &std::path::Path,
 ) -> Result<Vec<PackageManager>> {
-    let project_yarn = project_yarn_version(cwd);
+    let project_yarn = if requested
+        .is_none_or(|name| matches!(name.to_ascii_lowercase().as_str(), "yarn" | "yarnpkg"))
+    {
+        project_yarn_version(app, cwd)?
+    } else {
+        None
+    };
     let yarn_manager = project_yarn
         .as_deref()
         .and_then(|version| package_registry::manager_for_command("yarn", Some(version)));

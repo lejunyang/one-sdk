@@ -4,7 +4,7 @@
 
 ## 从请求到精确版本
 
-入口位于 [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs)。显式参数（如 `node@20`）由 [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 解析；没有显式工具时，CLI 汇总配置中的 `[tools]`、项目包管理器声明和 Node 项目元数据。选择 npm、pnpm、Yarn 或动态 `npm:<package>` 工具时，[`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) 会确保同一次操作包含 Node；若项目没有 Node 声明，则使用 `latest`。
+入口位于 [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands/install.rs)。显式参数（如 `node@20`）由 [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 解析；没有显式工具时，CLI 汇总配置中的 `[tools]`、项目包管理器声明和 Node 项目元数据。选择 npm、pnpm、Yarn 或动态 `npm:<package>` 工具时，[`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands/install.rs) 会确保同一次操作包含 Node；若项目没有 Node 声明，则使用 `latest`。
 
 `npm:<package>` 在通用 `tool@version` 分割前单独解析，以保留 scoped 包的
 `npm:@scope/name@version` 语法。其动态 backend id 会规范为
@@ -33,21 +33,48 @@ metadata 发现最长 module root。详见 [Go 开发工具实现](./go-tools#�
 
 候选列表约定按版本升序排列。[`select_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) 从尾部选择最高匹配项：`latest` 只取稳定版，range 也只取稳定版，前缀按点分隔组件匹配而不是字符串前缀匹配。逐字 pin 只做字符级比较，命中不了就解析失败。精确版本分三级匹配：先字面相等，再按 semver 核心版本比较（忽略 build metadata，`21.0.12` 可命中 `21.0.12+8`，预发布标识必须一致，同核心多 build 取最高），最后回退到点分隔组件前缀——仅在同核心版本缺失时让 `21.0.12` 命中四段式 PSU `21.0.12.1+1`，主要服务于带 build 号与 PSU 四段版本的 Java；严格三段 semver 的 backend 不会走到第三级。组件前缀匹配前会先检查「请求文本本身是否就是某个已发布版本」，命中则直接返回该候选：否则 `android-36` 会在 `android-36` 与 `android-36.1` 并存时选到后者。`select_version_with_prerelease` 为选择使用它的 backend 提供预发布策略：默认 `if-explicit`，`never` 拒绝预发布，`allow` 可让 `latest`、range 或前缀选中预发布版；逐字 pin 与带预发布标识的精确版本一样算作显式。Python、GitHub 和基于 npm package 的自定义 resolver 会显式应用该策略；通用 resolver 和部分 backend 仍使用 `select_version`，所以当前行为依 backend 而异。
 
-## 工作目录解析优先级
+## 可配置的声明优先级
 
-[`resolve_active`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs) 从当前目录一路向父目录查找，但优先级按“文件类型”全局分层，而不是简单采用最近文件：
+```toml
+[settings.precedence]
+tools = "osdk"
+packages = "native"
+tool_order = [".node-version", ".nvmrc", "osdk"]
+tool_conflicts = "error" # 默认 prefer，按顺序选取
+npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆盖
+python = "native"
+```
 
-1. `osdk.toml` / `.osdk.toml` 的 `[tools]`；
-2. `.tool-versions`；
-3. backend 声明的 idiomatic 文件，且保持 backend 给出的文件名顺序；
-4. Node 的 `package.json#engines.node` 或 `devEngines.runtime`；
-5. 用户全局 `[tools]`。
+`tool_order` 从高到低排列来源类型，再在同类中选最近目录。支持 `osdk`、`global`、
+`.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
+`package.json#packageManager`、`package.json#devEngines.packageManager`、
+`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
+不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 保留 backend
+声明的其他文件顺序（例如 Rust/Go/Python 的版本文件）。默认顺序是项目 osdk、
+.tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
+devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
+把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
 
-因此父目录的高优先级 `osdk.toml` 会压过子目录的 `.nvmrc`。普通 idiomatic 文件读取第一个非空、非注释值并移除前导 `v`；`go.mod` 和 `rust-toolchain.toml` 使用各自的结构化解析。相关回归覆盖见 [`version/resolver.rs` tests](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs)。
+项目 osdk 只使用最近配置及显式 `extends`，不隐式合并父配置。precedence 的用户、
+extends、项目层按字段覆盖，数组替换；未写的策略字段继承。工具声明同类中被覆盖的
+父层仅作为 shadowed 证据，不参与冲突检查，也不校验已失效的版本值。其他工具的声明以 ignored 记录，不解释其版本或完整性值。原生管理器字段跨管理器名称选择最近身份；自动选择遇到不支持的身份会报错。`osdk current` 输出同一选择结果中的
+tool、path、field、category、winner/shadowed/ignored 和 reason；结构化配置字段、JSON 字段和简单
+文件行号会在已知时报告，不能确定的路径保留为空，不猜测。
 
-## 项目包管理器
+`tool_conflicts="error"` 检查不同来源的有效声明：精确版本满足范围不算冲突，数字前缀、
+支持的 semver 比较符及 `||` 按范围检查两两交集；配置 alias 先展开。它不把多个范围
+合并成新的版本请求，最终仍选择最高优先级声明。不同的 latest/LTS/channel 或不透明选择器
+无法离线证明兼容时单独报“无法验证”，不伪称已确认冲突，也不联网安装来解释。
+`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 的 URL/hash 仍不支持；
+devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数组支持范围。
+显式 `tool@version`、指定的 deps provider/installer 及锁重放保持各自权威。shim 归属维护遇到无效项目选择时保留已安装命令，但不执行它们；隐式派发仍执行项目冲突策略。内置 deps provider 只解析自身需要的工具。
 
-[`resolve_package_manager`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs) 的顺序是：向上查找 `osdk.toml [tools]` 中的 `npm`、`pnpm`、`yarn`，然后向上查找 `package.json#packageManager`，最后读取 `devEngines.packageManager`。仅接受这三个 manager 的精确 semver；缺失版本、URL、路径、hash 或 build suffix 都会明确失败。`packageManager` 优先于 `devEngines.packageManager`。
+`npm/python/go` 只对该生态选择 osdk/native，不重排管理器内部的认证、scope 或 TLS
+来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
+复杂配置（命名索引、绑定及其他未建模字段）在 native 下整组保留，osdk 显式索引
+实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
+不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
+的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。
 
 ## Backend 解析与例外
 

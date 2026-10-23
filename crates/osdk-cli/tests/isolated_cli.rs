@@ -5948,6 +5948,12 @@ printf '%s\n' "${npm_config_registry-unset}"
 #[test]
 fn exec_registry_passes_through_non_fetch_commands_without_probing() {
     let temporary = tempfile::tempdir().unwrap();
+    // Explicit npm execution must not validate an unrelated Yarn declaration.
+    std::fs::write(
+        temporary.path().join("package.json"),
+        r#"{"packageManager":"yarn@https://unrelated.invalid/archive"}"#,
+    )
+    .unwrap();
     let dead = unused_loopback_registry();
     write_registry_config(temporary.path(), &[&dead]);
     write_fake_registry_manager(
@@ -8731,4 +8737,115 @@ fn cache_clean_refuses_a_native_cache_parent_link_to_persistent_models() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("symlink in cache path"));
     assert_eq!(std::fs::read(&model).unwrap(), b"unique model data");
+}
+
+#[test]
+fn configurable_tool_order_and_conflict_evidence_are_shared_by_cli_selection() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path();
+    std::fs::write(
+        p.join("osdk.toml"),
+        "[tools]\nnode='20.0.0'\n[settings.precedence]\ntool_order=['.node-version','.nvmrc']\n",
+    )
+    .unwrap();
+    std::fs::write(p.join(".node-version"), "22.1.0\n").unwrap();
+    std::fs::write(p.join(".nvmrc"), "22\n").unwrap();
+    let result = run_isolated(p, &["current", "node"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("node 22.1.0"));
+    assert!(stdout.contains("\"status\":\"winner\""));
+    assert!(stdout.contains("\"status\":\"shadowed\""));
+    assert!(stdout.contains("tools.node"));
+    std::fs::write(p.join("osdk.toml"),"[tools]\nnode='20.0.0'\n[settings.precedence]\ntool_order=['.node-version']\ntool_conflicts='error'\n").unwrap();
+    let result = run_isolated(p, &["current", "node"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("incompatible requirements"));
+    // An explicitly versioned operand bypasses project conflict resolution.
+    let result = run_isolated(p, &["where", "node@20.0.0"]);
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("incompatible requirements"));
+}
+
+#[test]
+fn explicit_python_deps_does_not_validate_unrelated_native_tool_files() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path();
+    std::fs::write(p.join("osdk.toml"), "[deps.uv]\n").unwrap();
+    std::fs::write(
+        p.join("pyproject.toml"),
+        "[project]\nname='fixture'\nversion='1.0.0'\n",
+    )
+    .unwrap();
+    std::fs::write(p.join(".nvmrc"), "invalid multiple versions").unwrap();
+    std::fs::write(p.join("rust-toolchain.toml"), "invalid TOML").unwrap();
+    std::fs::write(p.join("package.json"), r#"{"packageManager":false}"#).unwrap();
+    let output = run_isolated(p, &["deps", "--list", "--explain"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("uv"));
+}
+
+#[test]
+fn current_reports_ignored_declarations_even_without_a_winner() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(
+        t.path().join("package.json"),
+        r#"{"packageManager":"yarn@https://user:SECRET@private.invalid/archive"}"#,
+    )
+    .unwrap();
+    let result = run_isolated(t.path(), &["current", "npm"]);
+    assert!(result.status.success());
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("\"status\":\"ignored\""));
+    assert!(stdout.contains("\"tool\":\"npm\""));
+    assert!(!stdout.contains("SECRET"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_exec_version_bypasses_project_conflicts_during_shim_maintenance() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path();
+    write_fake_registry_manager(
+        p,
+        "npm",
+        "10.0.0",
+        "npm",
+        "#!/bin/sh\nprintf 'explicit-exec-ok\\n'\n",
+    );
+    std::fs::write(
+        p.join("osdk.toml"),
+        "[tools]\nnode='22.0.0'\n[settings.precedence]\ntool_conflicts='error'\n",
+    )
+    .unwrap();
+    std::fs::write(p.join(".nvmrc"), "24.0.0").unwrap();
+    let output = run_isolated(
+        p,
+        &[
+            "exec",
+            "--tool",
+            "npm@10.0.0",
+            "--tool",
+            "node@20.0.0",
+            "--",
+            "npm",
+            "--version",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("explicit-exec-ok"));
+    let implicit = run_isolated(p, &["current", "node"]);
+    assert!(!implicit.status.success());
+    assert!(String::from_utf8_lossy(&implicit.stderr).contains("incompatible requirements"));
 }

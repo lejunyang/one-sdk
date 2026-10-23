@@ -519,7 +519,15 @@ pub(crate) async fn apply_package_registry_plan_at(
     cwd: &std::path::Path,
 ) -> Result<()> {
     let executable_alias = executable_basename(program);
-    let project_yarn_version = project_yarn_version(cwd);
+    let project_yarn_version = if matches!(executable_alias.as_str(), "yarn" | "yarnpkg")
+        && !resolved
+            .iter()
+            .any(|(_, version)| version.backend == "yarn")
+    {
+        project_yarn_version(app, cwd)?
+    } else {
+        None
+    };
     let yarn_version = resolved
         .iter()
         .find(|(_, version)| version.backend == "yarn")
@@ -552,12 +560,11 @@ pub(crate) fn executable_basename(program: &str) -> String {
     basename
 }
 
-pub(crate) fn project_yarn_version(cwd: &std::path::Path) -> Option<String> {
-    osdk_core::version::resolver::resolve_package_manager(cwd)
-        .ok()
-        .flatten()
-        .filter(|request| request.manager == "yarn")
-        .map(|request| request.version)
+pub(crate) fn project_yarn_version(app: &App, cwd: &std::path::Path) -> Result<Option<String>> {
+    Ok(
+        osdk_core::version::resolver::resolve_active_config("yarn", cwd, &app.ctx.config, &[])?
+            .map(|request| request.spec),
+    )
 }
 
 pub(crate) fn managed_runtime_path_priority(path: &std::path::Path) -> u8 {
@@ -1635,7 +1642,7 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
     }
     let cwd = std::env::current_dir()?;
     if let Some(package_manager) =
-        osdk_core::version::resolver::resolve_package_manager(&cwd).map_err(anyhow::Error::msg)?
+        osdk_core::version::resolver::resolve_package_manager_config(&cwd, &app.ctx.config)?
     {
         if out
             .iter()
@@ -1643,7 +1650,8 @@ pub(crate) fn gather_requests(app: &App, tools: Vec<String>) -> Result<Vec<ToolR
         {
             out.push(ToolRequest {
                 backend: package_manager.manager.clone(),
-                spec: VersionSpec::Exact(package_manager.version),
+                spec: VersionSpec::parse_range(&package_manager.version)
+                    .unwrap_or_else(|_| VersionSpec::parse(&package_manager.version)),
                 options: app
                     .ctx
                     .config

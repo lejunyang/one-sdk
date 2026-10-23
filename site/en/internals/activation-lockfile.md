@@ -12,14 +12,7 @@ Each hook invocation runs `osdk hook-env`. [`compute_env_delta`](https://github.
 
 ## Resolution order and shim priority
 
-The active-version order is defined by [`resolve_active`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs#L154):
-
-1. The nearest ancestor project configuration.
-2. For npm, pnpm, and Yarn, only when no project-config package-manager selection applies, `package.json#packageManager` and then `devEngines.packageManager`.
-3. The nearest ancestor `.tool-versions`.
-4. Backend-declared idiomatic version files.
-5. Structured Node version ranges in `package.json`.
-6. User-global configuration.
+Active versions use the shared `resolve_active_config` / `resolve_selection` path. `settings.precedence.tool_order` ranks source kinds and selects the nearest declaration within each kind; `tool_conflicts` controls conflict checking. See [resolution](./resolution#configurable-declaration-precedence) for project extends, native files and global layers. Explicit versions and lock replay bypass this ordering.
 
 Project and global selections each start from configuration. `osdk use <tool>` writes the nearest project configuration, creating `osdk.toml` in the current directory when none exists, then upserts the actual tool and injected runtimes into the current-platform lock. `osdk use --global <tool>` writes `config.toml` in the user config directory without changing the current project lock. For project-aware `npm:<package>`, local `use` also updates the real Node project's package manifest, native lock, and curated launchers. `use --global npm:<package>` instead updates `$OSDK_CONFIG_DIR/osdk.lock`, as does global `go:<path>`. [`config_edit`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/config_edit.rs) publishes one configuration through a unique temporary file, sync, and replace. Project `use` snapshots configuration and `osdk.lock` under a project-identity process lock and restores both if any metadata publication fails; an already completed shared tool installation remains reusable. Global npm mutation uses a separate global-state lock to serialize its user lock, shims, and configuration. Global Go config and lock remain separate atomic replacements.
 

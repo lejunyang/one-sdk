@@ -292,3 +292,46 @@ jobs = 2
 `[settings.download_cache]` 使用 `max_size_bytes`（默认 2147483648；0 不保留；`"unlimited"` 不限）与 `max_age_secs`（默认 604800；0 不过期）。`OSDK_DOWNLOAD_CACHE_MAX_SIZE` 覆盖容量。详见[缓存与清理](../maintenance/cache)。
 
 显式继承：子项目 `osdk.toml` 可设置 `extends = "../../osdk.toml"`。目录嵌套不会自动继承。优先级为 CLI/环境变量、子文件字段、显式继承的祖先字段、用户配置、默认值。映射按键合并（包括 env），标量与列表替换，`false`、`[]` 都是有效覆盖。继承的依赖 sources/outputs/dir 与任务 dir/file 路径属于声明它的文件。发现 roots/projects 留在根目录，已发现的子配置不能重定义整个目录。继承子项目以根项目声明为默认，显式 provider 字段优先；独立子配置自行声明 provider。根/子目录调用依赖使用同一目录与有效 provider/工具选项。继承链中每个可执行或改变来源的配置都单独检查信任，信任子文件不代表信任父文件。自身循环、非祖先引用及越过仓库边界均报错。`[task].roots` 仍单独负责聚合；继承的 runner 默认值转换到具体子任务。
+
+## 可配置的声明优先级
+
+```toml
+[settings.precedence]
+tools = "osdk"
+packages = "native"
+tool_order = [".node-version", ".nvmrc", "osdk"]
+tool_conflicts = "error" # 默认 prefer，按顺序选取
+npm = "osdk"           # 可选：覆盖 packages；inherit 清除该生态覆盖
+python = "native"
+```
+
+`tool_order` 从高到低排列来源类型，再在同类中选最近目录。支持 `osdk`、`global`、
+`.tool-versions`、`.nvmrc`、`.node-version`、`idiomatic`、
+`package.json#packageManager`、`package.json#devEngines.packageManager`、
+`package.json#engines.node`、`package.json#devEngines.runtime`。遗漏项按默认顺序补齐，
+不代表禁用；未知值和重复值报错；`[]` 清除继承的自定义顺序。`idiomatic` 保留 backend
+声明的其他文件顺序（例如 Rust/Go/Python 的版本文件）。默认顺序是项目 osdk、
+.tool-versions、.nvmrc、.node-version、其他 idiomatic、packageManager、
+devEngines.packageManager、engines.node、devEngines.runtime、global；`tools="native"`
+把项目 osdk 移到原生项之后。自定义顺序可以明确提升 global。
+
+项目 osdk 只使用最近配置及显式 `extends`，不隐式合并父配置。precedence 的用户、
+extends、项目层按字段覆盖，数组替换；未写的策略字段继承。工具声明同类中被覆盖的
+父层仅作为 shadowed 证据，不参与冲突检查，也不校验已失效的版本值。其他工具的声明以 ignored 记录，不解释其版本或完整性值。原生管理器字段跨管理器名称选择最近身份；自动选择遇到不支持的身份会报错。`osdk current` 输出同一选择结果中的
+tool、path、field、category、winner/shadowed/ignored 和 reason；结构化配置字段、JSON 字段和简单
+文件行号会在已知时报告，不能确定的路径保留为空，不猜测。
+
+`tool_conflicts="error"` 检查不同来源的有效声明：精确版本满足范围不算冲突，数字前缀、
+支持的 semver 比较符及 `||` 按范围检查两两交集；配置 alias 先展开。它不把多个范围
+合并成新的版本请求，最终仍选择最高优先级声明。不同的 latest/LTS/channel 或不透明选择器
+无法离线证明兼容时单独报“无法验证”，不伪称已确认冲突，也不联网安装来解释。
+`prefer` 选择最高项，但仍校验有效候选声明的结构。packageManager 的 URL/hash 仍不支持；
+devEngines.packageManager 的多选数组明确拒绝，单对象/单元素数组支持范围。
+显式 `tool@version`、指定的 deps provider/installer 及锁重放保持各自权威。
+
+`npm/python/go` 只对该生态选择 osdk/native，不重排管理器内部的认证、scope 或 TLS
+来源。uv 遵循同目录 uv.toml 优先、最近项目配置及用户/首个系统配置的候选发现；
+复杂配置（命名索引、绑定及其他未建模字段）在 native 下整组保留，osdk 显式索引
+实际注入并与其组合时报错；若调用环境已经覆盖对应字段而无需注入，不触发此错误。发现可能的 uv workspace 时整组委托 uv，包含成员资格与排除规则，
+不注入 osdk 索引；uv 仍可能校验成员元数据。候选文件不等于逐字段 winner。含原生选项或无法读取的 requirements/constraints、`uv pip sync`/`compile` 的位置输入，以及显式配置/目录（含 `-C`）/offline/dotenv 调用参数（包括子命令之前的参数）委托 uv；`UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX`
+的 false-like 值不会单凭存在就禁用注入。不会改写原生文件或在执行失败后重装。

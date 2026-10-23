@@ -17,6 +17,21 @@ pub async fn apply(
     args: &[String],
     env: &mut BTreeMap<String, String>,
 ) -> Result<String> {
+    apply_with_environment(ctx, cwd, program, yarn_version, args, env, &|key| {
+        std::env::var(key).ok()
+    })
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn apply_with_environment(
+    ctx: &Ctx,
+    cwd: &Path,
+    program: &str,
+    yarn_version: Option<&str>,
+    args: &[String],
+    env: &mut BTreeMap<String, String>,
+    ambient: &impl Fn(&str) -> Option<String>,
+) -> Result<String> {
     let program = program
         .rsplit(['/', '\\'])
         .next()
@@ -25,7 +40,7 @@ pub async fn apply(
         .trim_end_matches(".cmd");
     if let Some(manager) = package_registry::manager_for_command(program, yarn_version) {
         let result = package_registry::plan(ctx, cwd, manager, program, args, |key| {
-            env.get(key).cloned().or_else(|| std::env::var(key).ok())
+            env.get(key).cloned().or_else(|| ambient(key))
         })
         .await?;
         return match result {
@@ -36,7 +51,7 @@ pub async fn apply(
                 }
                 Ok(format!(
                     "registries.npm selected via {manager}; packages={:?}",
-                    ctx.config.settings.precedence.packages
+                    ctx.config.settings.precedence.package_policy("npm")
                 ))
             }
             RegistryPlan::Unavailable { .. } => Err(Error::config(
@@ -46,7 +61,7 @@ pub async fn apply(
     }
     if program == "go" && args.first().is_some_and(|arg| arg == "mod") {
         if let Some(proxy) = &ctx.config.registries().go.proxy {
-            let getenv = |key: &str| env.get(key).cloned().or_else(|| std::env::var(key).ok());
+            let getenv = |key: &str| env.get(key).cloned().or_else(|| ambient(key));
             let native_env = match getenv("GOENV").as_deref() {
                 Some("off") => false,
                 Some(path) if !path.is_empty() => Path::new(path).is_file(),
@@ -67,15 +82,14 @@ pub async fn apply(
                             })
                 }
             };
-            if ctx.config.settings.precedence.packages == SourcePrecedence::Native && native_env {
+            if ctx.config.settings.precedence.package_policy("go") == SourcePrecedence::Native
+                && native_env
+            {
                 return Ok(
                     "native Go environment file retained; effective GOPROXY resolved by Go".into(),
                 );
             }
-            if !proxy.is_empty()
-                && !env.contains_key("GOPROXY")
-                && std::env::var_os("GOPROXY").is_none()
-            {
+            if !proxy.is_empty() && !env.contains_key("GOPROXY") && ambient("GOPROXY").is_none() {
                 env.insert("GOPROXY".into(), proxy.clone());
             }
         }
@@ -84,7 +98,8 @@ pub async fn apply(
     if matches!(program, "yarn" | "yarnpkg") && yarn_version.is_none() {
         return Ok("Yarn major is unknown; native configuration preserved".into());
     }
-    if program != "uv" || !uv_fetch(args) {
+    let uv_args = uv_command_args(args);
+    if program != "uv" || !uv_fetch(uv_args) {
         return Ok("native command; no package-source adapter".into());
     }
     // Context-changing CLI flags are passed through, never interpreted against
@@ -96,27 +111,41 @@ pub async fn apply(
             "--index-url",
             "--extra-index-url",
             "--no-index",
+            "--find-links",
+            "-i",
+            "-f",
             "--offline",
             "--directory",
+            "-C",
             "--project",
             "--config-file",
             "--no-config",
+            "--env-file",
         ]
         .iter()
-        .any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))
+        .any(|flag| {
+            arg == flag
+                || arg.starts_with(&format!("{flag}="))
+                || (flag.len() == 2 && arg.starts_with(flag) && arg.len() > 2)
+        })
     }) {
         return Ok("uv command-line configuration/offline is authoritative".into());
     }
+    if uv_args.first().is_some_and(|arg| arg == "pip")
+        && requirements_have_native_options(cwd, uv_args)?
+    {
+        return Ok(
+            "uv requirements input carries native options or unresolved context; delegated intact"
+                .into(),
+        );
+    }
     let settings = &ctx.config.registries().python;
-    let getenv = |key: &str| env.get(key).cloned().or_else(|| std::env::var(key).ok());
-    if [
-        "UV_CONFIG_FILE",
-        "UV_NO_CONFIG",
-        "UV_NO_INDEX",
-        "UV_OFFLINE",
-    ]
-    .iter()
-    .any(|key| getenv(key).is_some())
+    let getenv = |key: &str| env.get(key).cloned().or_else(|| ambient(key));
+    if getenv("UV_CONFIG_FILE").is_some()
+        || getenv("UV_ENV_FILE").is_some()
+        || ["UV_NO_CONFIG", "UV_NO_INDEX", "UV_OFFLINE"]
+            .iter()
+            .any(|key| uv_env_enabled(getenv(key).as_deref()))
     {
         return Ok("uv invocation configuration context/no-index/offline is authoritative; osdk source overrides not injected".into());
     }
@@ -126,14 +155,30 @@ pub async fn apply(
     let ambient_indexes = ["UV_INDEX", "UV_EXTRA_INDEX_URL"]
         .iter()
         .any(|key| getenv(key).is_some());
-    let native =
-        python_native_configuration(cwd, args.first().is_some_and(|arg| arg == "pip"), getenv)?;
-    let native_first = ctx.config.settings.precedence.packages == SourcePrecedence::Native;
+    let native_config = discover_python_configuration(
+        cwd,
+        uv_args.first().is_some_and(|arg| arg == "pip"),
+        &getenv,
+    )?;
+    let native = native_config.present;
+    let locations = native_config
+        .files
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if native_config.workspace {
+        return Ok(format!("uv workspace discovery delegated intact; candidate boundary={locations}; member eligibility and effective fields unknown; osdk source overrides not injected"));
+    }
+    let native_first =
+        ctx.config.settings.precedence.package_policy("python") == SourcePrecedence::Native;
     if native_first && native {
-        return Ok(
-            "packages=native: native Python configuration group retained; osdk default/index overrides not injected; exact effective values and winning files delegated to uv"
-                .into(),
-        );
+        return Ok(format!("packages=native: native Python configuration group retained; candidate files={locations}; osdk default/index overrides not injected; exact effective values and winning fields delegated to uv"));
+    }
+    let injecting = (!ambient_default && settings.default.as_ref().is_some_and(|v| !v.is_empty()))
+        || (!ambient_indexes && settings.indexes.as_ref().is_some_and(|v| !v.is_empty()));
+    if native_config.complex && injecting {
+        return Err(Error::config(format!("cannot safely overlay osdk Python indexes on complex native configuration at {locations}; use precedence.python='native' or configure indexes entirely in uv")));
     }
     let explicit = settings.default.is_some() || settings.indexes.is_some();
     if let Some(url) = settings.default.as_ref().filter(|url| !url.is_empty()) {
@@ -166,7 +211,7 @@ pub async fn apply(
             if env
                 .get("UV_INDEX_STRATEGY")
                 .cloned()
-                .or_else(|| std::env::var("UV_INDEX_STRATEGY").ok())
+                .or_else(|| ambient("UV_INDEX_STRATEGY"))
                 .is_some_and(|v| v != "first-index")
             {
                 return Err(Error::config(
@@ -180,7 +225,7 @@ pub async fn apply(
     if explicit || ambient_default || ambient_indexes || native {
         return Ok(format!(
             "packages={:?}: Python default={}, indexes={}; native named indexes, package bindings and other fields remain native; effective files delegated to uv; no mirror fallback",
-            ctx.config.settings.precedence.packages,
+            ctx.config.settings.precedence.package_policy("python"),
             if ambient_default { "invocation environment" } else if settings.default.as_ref().is_some_and(|s| !s.is_empty()) { "osdk UV_DEFAULT_INDEX" } else { "native (osdk unset/cleared)" },
             if ambient_indexes { "invocation environment" } else if settings.indexes.as_ref().is_some_and(|s| !s.is_empty()) { "osdk UV_INDEX before native indexes, first-index" } else { "native (osdk unset/cleared)" },
         ));
@@ -211,65 +256,227 @@ fn uv_fetch(args: &[String]) -> bool {
             .is_some_and(|arg| matches!(arg.as_str(), "install" | "sync" | "compile")))
 }
 
-/// Conservative native detection: unknown configuration is delegated intact.
-/// A malformed known TOML config is an error, not evidence of absence.
+// Positional compile/sync inputs have their own native option grammar. Delegate
+// them rather than interpreting an incomplete subset of requirements semantics.
+fn requirements_have_native_options(cwd: &Path, args: &[String]) -> Result<bool> {
+    if args
+        .get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "sync" | "compile"))
+    {
+        return Ok(true);
+    }
+    for value in requirements_arguments(args) {
+        if value == "-" {
+            return Ok(true);
+        }
+        let path = cwd.join(value);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return Ok(true),
+        };
+        if text.lines().any(|line| line.trim_start().starts_with('-')) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+fn requirements_arguments(args: &[String]) -> Vec<&str> {
+    let mut values = Vec::new();
+    for (i, arg) in args.iter().take_while(|a| a.as_str() != "--").enumerate() {
+        for flag in [
+            "-r",
+            "--requirements",
+            "-c",
+            "--constraint",
+            "-b",
+            "--build-constraint",
+            "--overrides",
+        ] {
+            let value = if arg == flag {
+                args.get(i + 1).map(String::as_str)
+            } else if flag.len() == 2 {
+                arg.strip_prefix(flag).filter(|v| !v.is_empty())
+            } else {
+                arg.strip_prefix(&format!("{flag}="))
+            };
+            if let Some(value) = value {
+                values.push(value);
+            }
+        }
+    }
+    values
+}
+// False-like uv booleans are not an explicit request to disable configuration
+// or networking. Unknown values remain uv's own validation responsibility.
+fn uv_env_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off" | ""
+        )
+    })
+}
+fn uv_command_args(args: &[String]) -> &[String] {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        if !arg.starts_with('-') {
+            return &args[i..];
+        }
+        if matches!(
+            arg.as_str(),
+            "--directory"
+                | "-C"
+                | "--project"
+                | "--config-file"
+                | "--cache-dir"
+                | "--color"
+                | "--python"
+                | "--index-strategy"
+        ) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    &[]
+}
+#[derive(Default)]
+struct PythonConfiguration {
+    present: bool,
+    complex: bool,
+    workspace: bool,
+    files: Vec<std::path::PathBuf>,
+}
+fn discover_python_configuration(
+    cwd: &Path,
+    pip: bool,
+    getenv: &impl Fn(&str) -> Option<String>,
+) -> Result<PythonConfiguration> {
+    let mut result = PythonConfiguration::default();
+    for key in [
+        "UV_DEFAULT_INDEX",
+        "UV_INDEX_URL",
+        "UV_INDEX",
+        "UV_EXTRA_INDEX_URL",
+        "UV_FIND_LINKS",
+        "UV_INDEX_STRATEGY",
+    ] {
+        result.present |= getenv(key).is_some();
+    }
+    // Workspace membership/exclusion/globs and package discovery belong to uv.
+    // Detect a possible workspace before reading member config; do not reject a
+    // member's ignored settings or pretend to know its effective field sources.
+    for dir in cwd.ancestors() {
+        let path = dir.join("pyproject.toml");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
+                if value
+                    .get("tool")
+                    .and_then(|t| t.get("uv"))
+                    .and_then(|u| u.get("workspace"))
+                    .is_some()
+                {
+                    result.present = true;
+                    result.workspace = true;
+                    result.files.push(path);
+                    return Ok(result);
+                }
+            }
+        }
+    }
+    for dir in cwd.ancestors() {
+        let uv = dir.join("uv.toml");
+        let py = dir.join("pyproject.toml");
+        // uv.toml takes precedence over the sibling tool.uv table.
+        if uv.is_file() {
+            inspect_python_config(&uv, false, pip, &mut result)?;
+            break;
+        }
+        if py.is_file() && inspect_python_config(&py, true, pip, &mut result)? {
+            break;
+        }
+    }
+    #[cfg(not(windows))]
+    let user = getenv("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| getenv("HOME").map(|h| Path::new(&h).join(".config")));
+    #[cfg(windows)]
+    let user = getenv("APPDATA").map(std::path::PathBuf::from);
+    if let Some(base) = user {
+        let path = base.join("uv/uv.toml");
+        if path.is_file() {
+            inspect_python_config(&path, false, pip, &mut result)?;
+        }
+    }
+    #[cfg(not(windows))]
+    let system = getenv("XDG_CONFIG_DIRS")
+        .map(|s| std::env::split_paths(&s).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec!["/etc/xdg".into()]);
+    #[cfg(windows)]
+    let system = getenv("PROGRAMDATA")
+        .map(|s| vec![std::path::PathBuf::from(s)])
+        .unwrap_or_default();
+    #[cfg(not(windows))]
+    let system = system
+        .into_iter()
+        .chain([std::path::PathBuf::from("/etc")])
+        .collect::<Vec<_>>();
+    for base in system {
+        let path = base.join("uv/uv.toml");
+        if path.is_file() {
+            inspect_python_config(&path, false, pip, &mut result)?;
+            break;
+        }
+    }
+    // Requirements files are invocation inputs, not automatic configuration.
+    // Requirements containing native options are delegated before discovery.
+    Ok(result)
+}
+fn inspect_python_config(
+    path: &Path,
+    pyproject: bool,
+    pip: bool,
+    result: &mut PythonConfiguration,
+) -> Result<bool> {
+    let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+    let value: toml::Value = toml::from_str(&text).map_err(|_| {
+        Error::config(format!(
+            "invalid eligible Python TOML configuration: {}",
+            path.display()
+        ))
+    })?;
+    let config = if pyproject {
+        let Some(v) = value.get("tool").and_then(|t| t.get("uv")) else {
+            return Ok(false);
+        };
+        v
+    } else {
+        &value
+    };
+    result.present = true;
+    result.files.push(path.into());
+    // Array merging, named bindings, auth, TLS and discovery settings cannot
+    // safely be synthesized into an osdk per-field override.
+    let simple = ["index-url", "extra-index-url", "index-strategy", "pip"];
+    if let Some(table) = config.as_table() {
+        result.complex |= table.keys().any(|k| !simple.contains(&k.as_str()));
+        if pip {
+            if let Some(table) = table.get("pip").and_then(toml::Value::as_table) {
+                result.complex |= table.keys().any(|k| !simple.contains(&k.as_str()));
+            }
+        }
+    } else {
+        result.complex = true;
+    }
+    Ok(true)
+}
+#[cfg(test)]
 fn python_native_configuration(
     cwd: &Path,
     pip: bool,
     getenv: impl Fn(&str) -> Option<String>,
 ) -> Result<bool> {
-    for key in [
-        "UV_CONFIG_FILE",
-        "UV_NO_CONFIG",
-        "UV_DEFAULT_INDEX",
-        "UV_INDEX_URL",
-        "UV_INDEX",
-        "UV_EXTRA_INDEX_URL",
-        "UV_NO_INDEX",
-        "UV_FIND_LINKS",
-        "UV_INDEX_STRATEGY",
-    ] {
-        if getenv(key).is_some() {
-            return Ok(true);
-        }
-    }
-    // Freshness also tracks runtime files and other ecosystems. Only files uv
-    // actually understands may count as Python configuration evidence.
-    let mut paths: Vec<_> = native_files(cwd, "uv", &getenv)
-        .into_iter()
-        .filter(|path| {
-            matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("uv.toml" | "pyproject.toml")
-            )
-        })
-        .collect();
-    if pip {
-        paths.extend(cwd.ancestors().map(|dir| dir.join("requirements.txt")));
-    }
-    for path in paths {
-        if !path.is_file() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            let value: toml::Value = toml::from_str(&text)
-                .map_err(|_| Error::config("invalid native Python TOML configuration"))?;
-            if path
-                .file_name()
-                .is_some_and(|name| name == "pyproject.toml")
-            {
-                if value.get("tool").and_then(|tool| tool.get("uv")).is_some() {
-                    return Ok(true);
-                }
-            } else {
-                return Ok(true);
-            }
-        } else if text.lines().any(|line| line.trim_start().starts_with('-')) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(discover_python_configuration(cwd, pip, &getenv)?.present)
 }
 
 /// Potential native input paths, including missing files so creation/removal
@@ -306,6 +513,14 @@ pub fn native_files(
                 paths.push(Path::new(&home).join(".config/uv/uv.toml"));
                 paths.push(Path::new(&home).join("uv/uv.toml"));
             }
+        }
+    }
+    if let Some(files) = getenv("UV_ENV_FILE") {
+        let direct = Path::new(&files);
+        if direct.is_file() {
+            paths.push(direct.to_path_buf());
+        } else {
+            paths.extend(files.split_whitespace().map(|p| cwd.join(p)));
         }
     }
     for key in [
@@ -364,7 +579,12 @@ pub fn native_files(
     }
     if program == "uv" {
         #[cfg(not(windows))]
-        paths.push("/etc/uv/uv.toml".into());
+        {
+            paths.push("/etc/uv/uv.toml".into());
+            if getenv("XDG_CONFIG_DIRS").is_none() {
+                paths.push("/etc/xdg/uv/uv.toml".into());
+            }
+        }
         if let Some(base) = getenv("PROGRAMDATA") {
             paths.push(Path::new(&base).join("uv/uv.toml"));
         }
@@ -374,6 +594,64 @@ pub fn native_files(
     }
     paths.sort();
     paths.dedup();
+    paths
+}
+
+/// Explicit invocation files supplement the broad fingerprint inventory. This
+/// does not assign precedence or parse their contents for execution.
+pub fn invocation_files(cwd: &Path, program: &str, args: &[String]) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    let args = &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())];
+    let option = |i: usize, flag: &str| {
+        let arg = &args[i];
+        arg.strip_prefix(&format!("{flag}="))
+            .or_else(|| {
+                (flag == "-C")
+                    .then(|| arg.strip_prefix(flag).filter(|v| !v.is_empty()))
+                    .flatten()
+            })
+            .or_else(|| {
+                (arg == flag)
+                    .then(|| args.get(i + 1).map(String::as_str))
+                    .flatten()
+            })
+    };
+    let directory =
+        (0..args.len()).find_map(|i| option(i, "--directory").or_else(|| option(i, "-C")));
+    let effective_cwd = directory.map_or_else(|| cwd.to_path_buf(), |value| cwd.join(value));
+    for i in 0..args.len() {
+        for flag in [
+            "--config-file",
+            "--env-file",
+            "--project",
+            "--directory",
+            "-C",
+        ] {
+            if let Some(value) = option(i, flag) {
+                let path = if matches!(flag, "--directory" | "-C") {
+                    cwd.join(value)
+                } else {
+                    effective_cwd.join(value)
+                };
+                if matches!(flag, "--project" | "--directory" | "-C") {
+                    paths.extend(native_files(&path, program, &|_| None));
+                } else {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    if program == "uv" {
+        paths.extend(
+            requirements_arguments(args)
+                .into_iter()
+                .filter(|v| *v != "-")
+                .map(|v| effective_cwd.join(v)),
+        );
+    }
     paths
 }
 
@@ -475,7 +753,20 @@ pub fn display_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn context(root: &Path) -> Ctx {
+    // Source-plan fixtures own all invocation inputs; host CA/proxy settings
+    // must not turn an expected probe failure into native pass-through.
+    async fn apply(
+        ctx: &Ctx,
+        cwd: &Path,
+        program: &str,
+        yarn_version: Option<&str>,
+        args: &[String],
+        env: &mut BTreeMap<String, String>,
+    ) -> Result<String> {
+        super::apply_with_environment(ctx, cwd, program, yarn_version, args, env, &|_| None).await
+    }
+
+    pub(super) fn context(root: &Path) -> Ctx {
         let dirs = crate::dirs::Dirs::resolve_from(|key| match key {
             "OSDK_DATA_DIR" | "OSDK_CACHE_DIR" | "OSDK_CONFIG_DIR" | "OSDK_STORE_DIR"
             | "OSDK_INSTALL_DIR" => Some(root.join(key).display().to_string()),
@@ -591,27 +882,13 @@ mod tests {
         ]);
         let native = "[[tool.uv.index]]\nname='corp'\nurl='https://corp.example/simple/'\nexplicit=true\n[tool.uv.sources]\ninternal={index='corp'}\n";
         std::fs::write(temp.path().join("pyproject.toml"), native).unwrap();
-        for args in [
-            vec!["sync".into()],
-            vec![
-                "pip".into(),
-                "install".into(),
-                "-r".into(),
-                "requirements.txt".into(),
-            ],
-        ] {
-            let mut env = BTreeMap::from([("UV_INDEX_CORP_PASSWORD".into(), "secret".into())]);
-            apply(&ctx, temp.path(), "uv", None, &args, &mut env)
-                .await
-                .unwrap();
-            assert_eq!(env["UV_DEFAULT_INDEX"], "https://default.example/simple/");
-            assert_eq!(
-                env["UV_INDEX"],
-                "https://private.example/simple/ https://second.example/simple/"
-            );
-            assert_eq!(env["UV_INDEX_STRATEGY"], "first-index");
-            assert_eq!(env["UV_INDEX_CORP_PASSWORD"], "secret");
-        }
+        let mut env = BTreeMap::from([("UV_INDEX_CORP_PASSWORD".into(), "secret".into())]);
+        let before = env.clone();
+        let error = apply(&ctx, temp.path(), "uv", None, &["sync".into()], &mut env)
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("secret"));
+        assert_eq!(env, before);
         assert_eq!(
             std::fs::read_to_string(temp.path().join("pyproject.toml")).unwrap(),
             native
@@ -661,7 +938,7 @@ mod tests {
         )
         .unwrap();
         assert!(!python_native_configuration(temp.path(), false, |_| None).unwrap());
-        assert!(python_native_configuration(temp.path(), true, |_| None).unwrap());
+        assert!(!python_native_configuration(temp.path(), true, |_| None).unwrap());
         std::fs::write(temp.path().join("uv.toml"), "invalid TOML!").unwrap();
         assert!(python_native_configuration(temp.path(), false, |_| None).is_err());
     }
@@ -871,5 +1148,265 @@ mod native_candidates_tests {
                 assert!(paths.contains(&root.join("home").join(name)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    fn write(root: &Path, name: &str, text: &str) {
+        let p = root.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    #[test]
+    fn uv_toml_hides_sibling_settings_and_nearest_hides_parent() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        write(p, "uv.toml", "malformed!");
+        write(
+            p,
+            "child/uv.toml",
+            "index-url='https://native.example/simple'",
+        );
+        write(p, "child/pyproject.toml", "[tool.uv]\nindex=false");
+        let d = discover_python_configuration(&p.join("child"), false, &|_| None).unwrap();
+        assert_eq!(d.files, vec![p.join("child/uv.toml")]);
+        assert!(!d.complex);
+    }
+    #[test]
+    fn workspace_members_are_delegated_without_parsing_member_config() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        write(
+            p,
+            "pyproject.toml",
+            "[tool.uv.workspace]\nmembers=['packages/*']",
+        );
+        write(p, "packages/a/uv.toml", "malformed!");
+        let d = discover_python_configuration(&p.join("packages/a"), false, &|_| None).unwrap();
+        assert!(d.workspace);
+        assert_eq!(d.files, vec![p.join("pyproject.toml")]);
+    }
+    #[test]
+    fn user_and_first_system_files_are_candidates_not_field_winners() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        for name in ["project/uv.toml", "user/uv/uv.toml", "system/uv/uv.toml"] {
+            write(p, name, "index-url='https://native.example/simple'");
+        }
+        let d = discover_python_configuration(&p.join("project"), false, &|key| match key {
+            "XDG_CONFIG_HOME" | "APPDATA" => Some(p.join("user").display().to_string()),
+            "XDG_CONFIG_DIRS" | "PROGRAMDATA" => Some(p.join("system").display().to_string()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(d.files.len(), 3);
+    }
+    #[test]
+    fn uv_boolean_and_global_argument_semantics() {
+        for value in ["0", "false", "FALSE", "no", "off", ""] {
+            assert!(!uv_env_enabled(Some(value)));
+        }
+        for value in ["1", "true", "unknown"] {
+            assert!(uv_env_enabled(Some(value)));
+        }
+        for raw in [
+            vec!["--verbose", "sync"],
+            vec!["--directory", "somewhere", "pip", "install"],
+            vec!["--no-config", "sync"],
+            vec!["--offline", "lock"],
+        ] {
+            let args = raw.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(uv_fetch(uv_command_args(&args)));
+        }
+    }
+    #[tokio::test]
+    async fn false_booleans_do_not_disable_osdk_indexes_but_explicit_context_does() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let mut ctx = super::tests::context(p);
+        ctx.config.sources.registries.python.default = Some("https://osdk.example/simple/".into());
+        for value in ["0", "false", "no", "off"] {
+            let mut env = BTreeMap::from([
+                ("UV_NO_CONFIG".into(), value.into()),
+                ("UV_OFFLINE".into(), value.into()),
+            ]);
+            apply(
+                &ctx,
+                p,
+                "uv",
+                None,
+                &["--verbose".into(), "sync".into()],
+                &mut env,
+            )
+            .await
+            .unwrap();
+            assert_eq!(env["UV_DEFAULT_INDEX"], "https://osdk.example/simple/");
+        }
+        write(p, "uv.toml", "malformed!");
+        for flags in [
+            vec!["--config-file", "elsewhere.toml"],
+            vec!["--project", "elsewhere"],
+            vec!["--directory", "elsewhere"],
+            vec!["-Celsewhere"],
+            vec!["-ihttps://cli.example/simple"],
+            vec!["--no-config"],
+            vec!["--offline"],
+        ] {
+            let args = flags
+                .into_iter()
+                .chain(["sync"])
+                .map(String::from)
+                .collect::<Vec<_>>();
+            let mut env = BTreeMap::new();
+            let evidence = apply(&ctx, p, "uv", None, &args, &mut env).await.unwrap();
+            assert!(env.is_empty());
+            assert!(evidence.contains("authoritative"));
+        }
+    }
+    #[test]
+    fn freshness_tracks_creation_deletion_policy_and_invocation_material() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let first = fingerprint(p, "uv", "policy=native;--offline", &[]).unwrap();
+        for name in [
+            ".nvmrc",
+            ".node-version",
+            "package.json",
+            "uv.toml",
+            "pyproject.toml",
+        ] {
+            write(p, name, "secret");
+            let changed = fingerprint(p, "uv", "policy=native;--offline", &[]).unwrap();
+            assert_ne!(first, changed);
+            assert!(!changed.contains("secret"));
+            std::fs::remove_file(p.join(name)).unwrap();
+            assert_eq!(
+                first,
+                fingerprint(p, "uv", "policy=native;--offline", &[]).unwrap()
+            );
+        }
+        assert_ne!(
+            first,
+            fingerprint(p, "uv", "policy=osdk;--offline", &[]).unwrap()
+        );
+        assert_ne!(
+            first,
+            fingerprint(p, "uv", "policy=native;--project=other", &[]).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn plain_requirements_receive_indexes_but_native_directives_are_preserved() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let mut ctx = super::tests::context(p);
+        ctx.config.sources.registries.python.default =
+            Some("https://default.example/simple/".into());
+        ctx.config.sources.registries.python.indexes = Some(vec![
+            "https://first.example/simple/".into(),
+            "https://second.example/simple/".into(),
+        ]);
+        let args = ["pip", "install", "-r", "requirements.txt"].map(String::from);
+        std::fs::write(p.join("requirements.txt"), "fixture==1.0\n").unwrap();
+        let mut env = BTreeMap::new();
+        apply(&ctx, p, "uv", None, &args, &mut env).await.unwrap();
+        assert_eq!(
+            env["UV_INDEX"],
+            "https://first.example/simple/ https://second.example/simple/"
+        );
+        assert_eq!(env["UV_DEFAULT_INDEX"], "https://default.example/simple/");
+        std::fs::write(
+            p.join("requirements.txt"),
+            "--index-url https://user:SECRET@native.example/simple\nfixture==1.0\n",
+        )
+        .unwrap();
+        let mut env = BTreeMap::new();
+        let reason = apply(&ctx, p, "uv", None, &args, &mut env).await.unwrap();
+        assert!(env.is_empty());
+        assert!(!reason.contains("SECRET"));
+    }
+    #[tokio::test]
+    async fn constraints_and_positional_inputs_preserve_native_options() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        let mut ctx = super::tests::context(p);
+        ctx.config.sources.registries.python.default = Some("https://osdk.example/simple".into());
+        std::fs::write(
+            p.join("constraints.txt"),
+            "--index-url https://user:SECRET@native.example/simple",
+        )
+        .unwrap();
+        for raw in [
+            vec!["pip", "install", "fixture", "-cconstraints.txt"],
+            vec!["pip", "compile", "constraints.txt"],
+            vec!["pip", "sync", "constraints.txt"],
+        ] {
+            let args = raw.into_iter().map(String::from).collect::<Vec<_>>();
+            let mut env = BTreeMap::new();
+            let reason = apply(&ctx, p, "uv", None, &args, &mut env).await.unwrap();
+            assert!(env.is_empty());
+            assert!(reason.contains("delegated"));
+            assert!(!reason.contains("SECRET"));
+        }
+        let args = [
+            "-C",
+            "other",
+            "pip",
+            "install",
+            "-rreq.txt",
+            "--config-file",
+            "alternate.toml",
+        ]
+        .map(String::from);
+        let paths = invocation_files(p, "uv", &args);
+        assert!(paths.contains(&p.join("other/req.txt")));
+        assert!(paths.contains(&p.join("other/alternate.toml")));
+    }
+    #[tokio::test]
+    async fn ambient_indexes_do_not_trigger_an_unused_complex_overlay() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        std::fs::write(
+            p.join("uv.toml"),
+            "[[index]]\nname='internal'\nurl='https://native.example/simple'\n",
+        )
+        .unwrap();
+        let mut ctx = super::tests::context(p);
+        ctx.config.sources.registries.python.default = Some("https://osdk.example/simple".into());
+        let mut env = BTreeMap::from([(
+            "UV_DEFAULT_INDEX".into(),
+            "https://invocation.example/simple".into(),
+        )]);
+        let reason = apply(&ctx, p, "uv", None, &["sync".into()], &mut env)
+            .await
+            .unwrap();
+        assert_eq!(env["UV_DEFAULT_INDEX"], "https://invocation.example/simple");
+        assert!(reason.contains("invocation environment"));
+    }
+    #[test]
+    fn explicit_files_and_contexts_invalidate_fingerprints() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path();
+        std::fs::create_dir_all(p.join("other")).unwrap();
+        let args = [
+            "--config-file",
+            "alternate.toml",
+            "--project",
+            "other",
+            "sync",
+        ]
+        .map(String::from);
+        let paths = invocation_files(p, "uv", &args);
+        assert!(paths.contains(&p.join("alternate.toml")));
+        assert!(paths.contains(&p.join("other/uv.toml")));
+        let before = fingerprint(p, "uv", "invocation", &paths).unwrap();
+        std::fs::write(p.join("alternate.toml"), "secret").unwrap();
+        assert_ne!(before, fingerprint(p, "uv", "invocation", &paths).unwrap());
     }
 }

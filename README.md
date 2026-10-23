@@ -418,7 +418,7 @@ auto = false
 
 Run `osdk deps --list --all --explain` to inspect the selected projects and commands, then `osdk deps` to initialize them. `auto = false` keeps explicit installation available; `disable` removes a provider. Native pnpm/uv workspaces install once at the shared root, and selecting a member explains the expanded coverage. Child configurations can explicitly inherit with `extends = "../../osdk.toml"`.
 
-Command overrides accept argv arrays, such as `run = ["pnpm", "install", "--offline"]`, and require trust. Overrides cannot guarantee frozen installation or disabled scripts. Package sources now use `registries`; `[settings.precedence]` selects osdk or native priority for tools and packages. Old deps source fields are removed. Explicit input/output paths belong to their declaring file (for example `sources = ["apps/api/package.json"]`). See the [dependency guide](site/en/guide/project/deps.md) for workspace, inheritance and migration details.
+Command overrides accept argv arrays, such as `run = ["pnpm", "install", "--offline"]`, and require trust. Overrides cannot guarantee frozen installation or disabled scripts. Package sources now use `registries`; `[settings.precedence]` supports ordered tool declaration sources, optional conflict errors, and osdk/native package priority per ecosystem. Use `osdk current` to inspect the winner and shadowed declarations. Old deps source fields are removed. Explicit input/output paths belong to their declaring file (for example `sources = ["apps/api/package.json"]`). See the [dependency guide](site/en/guide/project/deps.md) for workspace, inheritance and migration details.
 
 
 

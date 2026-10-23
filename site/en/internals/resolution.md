@@ -4,7 +4,7 @@ This page describes how `osdk` turns project declarations or CLI input into an i
 
 ## From request to exact version
 
-The entry point is [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs). Explicit arguments such as `node@20` are parsed by [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs). With no explicit tools, the CLI combines `[tools]` configuration, project package-manager declarations, and Node project metadata. Selecting npm, pnpm, Yarn, or a dynamic `npm:<package>` tool makes [`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands.rs) include Node in the same operation; it uses `latest` when the project has no Node declaration.
+The entry point is [`gather_requests`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands/install.rs). Explicit arguments such as `node@20` are parsed by [`ToolRequest::parse`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs). With no explicit tools, the CLI combines `[tools]` configuration, project package-manager declarations, and Node project metadata. Selecting npm, pnpm, Yarn, or a dynamic `npm:<package>` tool makes [`inject_node_dependency`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/commands/install.rs) include Node in the same operation; it uses `latest` when the project has no Node declaration.
 
 `npm:<package>` is parsed before the generic `tool@version` split so scoped
 `npm:@scope/name@version` requests remain intact. Its dynamic backend ID is
@@ -37,21 +37,52 @@ then discovers the longest module root through ranked Go proxy metadata. See
 
 Candidate lists are expected in ascending order. [`select_version`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/mod.rs) scans backwards for the highest match: `latest` and ranges select stable releases, while prefix matching compares dotted components rather than raw string prefixes. A verbatim pin is compared character-for-character and fails to resolve when nothing matches. Exact requests match in three tiers: literal equality first, then semver core comparison ignoring build metadata (`21.0.12` matches `21.0.12+8`, prerelease identifiers must agree, and the highest build wins), and finally a dotted-component prefix fallback so `21.0.12` reaches a four-part PSU such as `21.0.12.1+1` only when no same-core release exists. The last tier mainly serves Java with its build numbers and PSU fourth segments; strict three-part semver backends never reach it. Before the component-prefix scan runs, the request text is checked against the published versions outright and a hit is returned directly: otherwise `android-36` would select `android-36.1` whenever both exist. `select_version_with_prerelease` provides the documented policy semantics for backends that opt into it; a verbatim pin counts as explicit, just like an exact version carrying a prerelease identifier. Python, GitHub, and npm-package-backed custom resolvers apply prerelease policy explicitly; the generic resolver and some backends still use `select_version`, so current policy behavior is backend-specific.
 
-## Working-directory precedence
+## Configurable declaration precedence
 
-[`resolve_active`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs) walks from the current directory to its ancestors, but precedence is globally grouped by source kind rather than simply choosing the nearest file:
+```toml
+[settings.precedence]
+tools = "osdk"
+packages = "native"
+tool_order = [".node-version", ".nvmrc", "osdk"]
+tool_conflicts = "error" # default: prefer, select by order
+npm = "osdk"           # optional override of packages; inherit clears this override
+python = "native"
+```
 
-1. `[tools]` in `osdk.toml` or `.osdk.toml`;
-2. `.tool-versions`;
-3. backend-declared idiomatic files, preserving the backend's filename order;
-4. Node `package.json#engines.node` or `devEngines.runtime`;
-5. user-global `[tools]`.
+`tool_order` ranks source kinds highest first, then selects the nearest directory within a kind.
+Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
+`package.json#packageManager`, `package.json#devEngines.packageManager`,
+`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
+_default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
+order. `idiomatic` preserves the backend's order for other filenames (including Rust/Go/Python).
+The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
+packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
+`tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
 
-Consequently, a parent `osdk.toml` beats a child `.nvmrc`. Plain idiomatic files use the first non-empty, non-comment value and strip a leading `v`; `go.mod` and `rust-toolchain.toml` have format-aware parsers. Regression coverage lives beside the implementation in [`version/resolver.rs`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs).
+Project osdk uses only the nearest configuration and explicit `extends`, not implicit parent merging.
+User, extends and project precedence settings merge by field; arrays replace; omitted fields inherit.
+Overridden ancestors within a kind are shadowed evidence, not simultaneous conflict constraints; inactive version values are not validated. Declarations belonging to another tool are ignored without interpreting their version or integrity values. Native manager fields choose the nearest identity across manager names; automatic manager selection rejects unsupported identities.
+`osdk current` reports tool, path, field, category, winner/shadowed/ignored and reason from the same selection result.
+Known structured fields, JSON fields and simple-file line numbers are reported; unknown paths remain
+absent rather than guessed.
 
-## Project package managers
+`tool_conflicts="error"` compares effective declarations across kinds: an exact version satisfying a
+range is compatible; numeric prefixes, supported semver comparators and `||` use pairwise range
+overlap after expanding configured aliases. This does not merge ranges into a new request: the
+highest-priority declaration still selects the version. Different latest/LTS/channels or opaque selectors
+that cannot be proved compatible offline produce a distinct unverifiable error, not a claimed
+incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager URLs/hashes remain unsupported; devEngines.packageManager accepts a
+single object or single-element array with a range, and rejects multiple alternatives explicitly.
+Explicit `tool@version`, explicit deps provider/installer choices, and lock replay keep their authority. Shim ownership maintenance retains installed commands when project selection is invalid; it does not execute them. Implicit dispatch still enforces the project conflict policy. Built-in deps providers resolve only the tools they require.
 
-[`resolve_package_manager`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs) first walks for `npm`, `pnpm`, or `yarn` under `osdk.toml [tools]`, then walks for `package.json#packageManager`, and finally reads `devEngines.packageManager`. Only those three managers and exact semver values are accepted. Missing versions, URLs, paths, hash suffixes, and build suffixes fail explicitly. `packageManager` wins over `devEngines.packageManager`.
+`npm/python/go` choose osdk/native for that ecosystem without reordering native credentials, scope
+routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
+user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
+remain native as a group; injecting explicit osdk indexes into them under osdk precedence fails. An invocation environment override that prevents injection does not cause this error.
+A possible uv workspace delegates the group intact, including membership/exclusions, without osdk
+index injection; uv may still validate member metadata. Candidate files are not per-field winners. Requirements/constraint inputs with native options or unreadable context, positional `uv pip sync`/`compile` inputs, and explicit config/directory (`-C` included)/offline/dotenv invocation options, including options before subcommands, are delegated to uv;
+false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
+Native files are not rewritten and failed execution is never retried with a different installer.
 
 ## Backend resolution and exceptions
 

@@ -145,26 +145,24 @@ pub fn current(app: &App, tool: Option<String>) -> Result<()> {
     };
     let mut any = false;
     for backend in backends {
-        if let Some(av) = osdk_core::version::resolver::resolve_active_config(
+        let selection = osdk_core::version::resolver::resolve_selection(
             backend.id(),
             &cwd,
             &app.ctx.config,
             backend.idiomatic_files(),
-        )?
-        .map(|active| (active.spec, Some(active.source)))
-        .or_else(|| {
-            osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
-                .map(|request| (request.spec.to_string(), None))
-        }) {
-            println!(
-                "{}",
-                osdk_core::version::resolver::explain_selection(
-                    backend.id(),
-                    &cwd,
-                    &app.ctx.config,
-                    backend.idiomatic_files()
-                )?
-            );
+        )?;
+        if !selection.evidence.is_empty() {
+            println!("{}", selection.explain());
+        }
+        if let Some(av) = selection
+            .winner
+            .clone()
+            .map(|active| (active.spec, Some(active.source)))
+            .or_else(|| {
+                osdk_core::shim::dynamic_request_from_config(&app.ctx, backend.id())
+                    .map(|request| (request.spec.to_string(), None))
+            })
+        {
             any = true;
             println!(
                 "{} {} ({})",

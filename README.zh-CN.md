@@ -369,7 +369,7 @@ auto = false
 
 先用 `osdk deps --list --all --explain` 查看项目与命令，再用 `osdk deps` 一键初始化。`auto = false` 保留显式安装；`disable` 移除 provider。pnpm/uv 原生 workspace 只在共享根安装一次，选择成员时会说明扩大的覆盖范围。独立子配置可用 `extends = "../../osdk.toml"` 显式继承。
 
-覆盖命令支持 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，需要 trust，且不能保证 frozen 或禁脚本。包源统一使用 `registries`，`[settings.precedence]` 分别配置工具与包源的 osdk/原生优先级；旧 deps 包源字段已移除。显式输入/输出路径属于声明文件（如 `sources = ["apps/api/package.json"]`）。workspace、继承与迁移细节见[依赖指南](site/guide/project/deps.md)。
+覆盖命令支持 argv 数组，例如 `run = ["pnpm", "install", "--offline"]`，需要 trust，且不能保证 frozen 或禁脚本。包源统一使用 `registries`，`[settings.precedence]` 支持工具声明来源排序、可选冲突报错，以及分生态的包源优先级；用 `osdk current` 查看获胜与被覆盖的声明；旧 deps 包源字段已移除。显式输入/输出路径属于声明文件（如 `sources = ["apps/api/package.json"]`）。workspace、继承与迁移细节见[依赖指南](site/guide/project/deps.md)。
 
 
 

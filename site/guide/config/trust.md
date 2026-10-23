@@ -19,7 +19,7 @@ osdk untrust [PATH]
 | 作用域 | 到达它的命令 | 检查的键 |
 | --- | --- | --- |
 | 安装 | `install`、`use`、`upgrade`、`lock`、`self upgrade`；以及所选 task 需要获取缺失 `tools` 时的 `run` | `settings` 的校验开关与 catalog、`sources`、`registries`、`tools.allow_builds` |
-| 依赖 | bare `install`、`run`/`exec`（默认）、显式 `deps` | `sources`、`registries`、`[deps]` 内的 index/registry/build/自定义 `run` |
+| 依赖 | bare `install`、`run`/`exec`（默认）、显式 `deps` | `sources`、`registries`、`[deps]` 内的 registries/build/自定义 `run` |
 | 运行任务 | `run`（非 `--dry-run`） | `[task]`：其 `shell` 决定每个任务由谁解释 |
 | 系统包 | `pkg apply` | `[sys.pkg]` 中**在本机适用**的条目 |
 | 容器 | 任何 `container` 操作 | `[container]` 的 runtime/builder/registries |
@@ -32,7 +32,7 @@ osdk untrust [PATH]
 | `settings` 的 `verify_signatures`、`require_checksums`、`attestations` | 关掉或降级对产物的校验 |
 | `settings` 的 `python`、`java` | 二者的 `catalog_url` 决定安装哪份运行时字节 |
 | `[tools]` 中显式打开的 `allow_builds` | 唯一让 npm 生命周期脚本得以运行的开关 |
-| `[deps.<p>]` 的 index/registry/自定义 `run`/build 开关 | 重定向依赖来源或执行任意命令 |
+| `[deps.<p>]` 的 registries/自定义 `run`/build 开关 | 重定向依赖来源或执行任意命令 |
 | `[sys.pkg]`（仅 `pkg apply`） | 装到系统全局、可能提权，且不受 `osdk.lock` 覆盖 |
 
 两个值得注意的收紧：

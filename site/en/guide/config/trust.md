@@ -21,7 +21,7 @@ The four scopes and the keys they check:
 | Scope | Commands that reach it | Keys checked |
 | --- | --- | --- |
 | Install | `install`, `use`, `upgrade`, `lock`, `self upgrade`; also `run` when a selected task must acquire a missing `tools` requirement | verification switches and catalogs in `settings`, `sources`, `registries`, `tools.allow_builds` |
-| Deps | bare `install`, `run`/`exec` by default, explicit `deps` | `sources`, `registries`, index/registry/build/`run` inside `[deps]` |
+| Deps | bare `install`, `run`/`exec` by default, explicit `deps` | `sources`, `registries`, registries/build/`run` inside `[deps]` |
 | Run tasks | `run` (not `--dry-run`) | `[task]`: its `shell` picks the interpreter for every task |
 | System packages | `pkg apply` | `[sys.pkg]` entries that actually **apply on this machine** |
 | Container | any `container` operation | runtime/builder/registries in `[container]` |
@@ -34,7 +34,7 @@ Governed keys and their reasons:
 | `settings.verify_signatures`, `settings.require_checksums`, `settings.attestations` | Disable or downgrade artifact verification |
 | `settings.python`, `settings.java` | Both carry `catalog_url`, which decides which runtime bytes get installed |
 | `allow_builds`, explicitly enabled in `[tools]` | The only switch that lets npm lifecycle scripts run |
-| index/registry/`run`/build switches under `[deps.<p>]` | Redirect dependency bytes or run an arbitrary command |
+| registries/`run`/build switches under `[deps.<p>]` | Redirect dependency bytes or run an arbitrary command |
 | `[sys.pkg]` (`pkg apply` only) | Installs machine-wide, may prompt for elevation, and is not covered by `osdk.lock` |
 
 Two narrowings worth stating:

@@ -453,13 +453,24 @@ pub(crate) fn installed_shim_owners(
         }
         let mut selected_versions = std::collections::BTreeSet::new();
         let installed = backend.list_installed(&app.ctx)?;
+        // No installation can own a shim. Avoid validating unrelated native
+        // declarations while another explicitly requested tool is installed.
+        if installed.is_empty() {
+            continue;
+        }
         if let Some((active_spec, active_is_range)) =
             osdk_core::version::resolver::resolve_active_config(
                 backend.id(),
                 &cwd,
                 &app.ctx.config,
                 backend.idiomatic_files(),
-            )?
+            )
+            // Ownership maintenance never executes a tool. If project selection
+            // fails, retain the installed commands; implicit dispatch will report
+            // the original selection error. Explicit versions and lock replay
+            // must not be blocked by an unrelated project selection here.
+            .ok()
+            .flatten()
             .map(|active| (active.spec, active.is_range))
         {
             let expanded = app

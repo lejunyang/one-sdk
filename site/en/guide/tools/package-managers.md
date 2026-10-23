@@ -287,11 +287,9 @@ proxy = "https://proxy.golang.org,direct"
 - `packages = "native"` preserves native registries, scopes, credentials, proxies and TLS configuration. `"osdk"` overrides only declared default/index settings; scopes and authentication stay native. Missing overrides preserve native behavior. Automatic mirrors never replace explicit native configuration. Complex uv native tables are conservatively preserved as a group, without rewriting named indexes or package bindings.
 - npm, pnpm, Yarn Classic, Yarn Berry and Bun use their own variables: `npm_config_registry`, `npm_config_registry` + `pnpm_config_registry` (pnpm 10/11), `YARN_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `BUN_CONFIG_REGISTRY`. Yarn's major must be known; a Node version is never interpreted as Yarn's major. pnpm resolves workspace configuration itself.
 - Both Python deps providers use uv. `default` is the lowest-priority default index; `indexes` supplies explicitly ordered additional indexes with `first-index` safety. These are not failure fallback mirrors. Keep named indexes, package bindings and credential interpolation in native configuration.
-- For uv, `UV_CONFIG_FILE`, `UV_NO_CONFIG`, `UV_NO_INDEX` and `UV_OFFLINE` retain invocation control without osdk index injection. Detection considers uv/pyproject configuration candidates, including user and system locations; runtime-version and Node metadata files are freshness inputs only. Under `packages = "native"`, any detected uv configuration is conservatively retained as a group. This does not reproduce uv workspace discovery, per-field merging or exact winning-file attribution. Explicit `first-index` is accepted with osdk additional indexes; unsafe strategies are rejected.
 - `urls` remains an anonymous mirror candidate list for the default source only. All-source failure stops before the manager starts. Installation failures never trigger automatic lifecycle-script retries. Offline mode skips probes; native offline flags constrain installation.
 - `default = ""` clears an inherited osdk default override and disables automatic mirrors for that item; `indexes = []` clears osdk additional indexes. Neither deletes native settings. `urls = []` retains its built-in-candidate meaning.
 - Project `registries` replaces the user section. Explicit `extends` merges fields and replaces arrays. `[deps.<provider>.registries]` uses the same schema as a whole-section local replacement. Cargo, Deno and custom deps reject this local field; use native configuration or `env`. Go preserves GOPROXY comma/pipe behavior rather than inventing URL retries.
-- Tool precedence orders osdk project declarations against native version declarations; global user pins remain fallback. `.nvmrc` selects a runtime; `package.json.packageManager` selects a manager. Explicit `tool@version` and existing lock replay remain authoritative. Version ranges retain range semantics; invalid native files fail. There is no `conflict-error` mode.
 - `osdk current` displays tool candidates and policy; `osdk deps --dry-run --explain` reports package decisions, discovered native candidate files and tool selection. The native manager resolves its effective configuration; unknown attribution is stated rather than invented. Native files, source environment and configuration participate in opaque freshness hashes. Credentials are excluded from displayed commands and osdk.lock; custom command arguments/environment are hidden entirely. Native subprocesses remain responsible for redacting their own output.
 
 ### Migration
@@ -300,3 +298,50 @@ Remove `[deps.<provider>].index` / `extra_index`; there are no compatibility ali
 Move defaults to `registries.npm.default` or `registries.python.default`. Use `registries.python.indexes` only for intentional additional Python indexes.
 For a local exception, use `deps.uv.registries.python.default = "https://example.org/simple/"`.
 Unknown fields fail normally, including invented generic Cargo/Deno source fields.
+
+## Configurable declaration precedence
+
+```toml
+[settings.precedence]
+tools = "osdk"
+packages = "native"
+tool_order = [".node-version", ".nvmrc", "osdk"]
+tool_conflicts = "error" # default: prefer, select by order
+npm = "osdk"           # optional override of packages; inherit clears this override
+python = "native"
+```
+
+`tool_order` ranks source kinds highest first, then selects the nearest directory within a kind.
+Accepted kinds: `osdk`, `global`, `.tool-versions`, `.nvmrc`, `.node-version`, `idiomatic`,
+`package.json#packageManager`, `package.json#devEngines.packageManager`,
+`package.json#engines.node`, `package.json#devEngines.runtime`. Omitted kinds are appended in
+_default_ order, not disabled; unknown or duplicate entries fail. `[]` clears an inherited custom
+order. `idiomatic` preserves the backend's order for other filenames (including Rust/Go/Python).
+The default order is project osdk, .tool-versions, .nvmrc, .node-version, other idiomatic files,
+packageManager, devEngines.packageManager, engines.node, devEngines.runtime, global.
+`tools="native"` moves project osdk after native kinds. Custom order can explicitly promote global.
+
+Project osdk uses only the nearest configuration and explicit `extends`, not implicit parent merging.
+User, extends and project precedence settings merge by field; arrays replace; omitted fields inherit.
+Overridden ancestors within a kind are shadowed evidence, not simultaneous conflict constraints; inactive version values are not validated. Declarations belonging to another tool are ignored without interpreting their version or integrity values. Native manager fields choose the nearest identity across manager names; automatic manager selection rejects unsupported identities.
+`osdk current` reports tool, path, field, category, winner/shadowed/ignored and reason from the same selection result.
+Known structured fields, JSON fields and simple-file line numbers are reported; unknown paths remain
+absent rather than guessed.
+
+`tool_conflicts="error"` compares effective declarations across kinds: an exact version satisfying a
+range is compatible; numeric prefixes, supported semver comparators and `||` use pairwise range
+overlap after expanding configured aliases. This does not merge ranges into a new request: the
+highest-priority declaration still selects the version. Different latest/LTS/channels or opaque selectors
+that cannot be proved compatible offline produce a distinct unverifiable error, not a claimed
+incompatibility or a network install. `prefer` selects by order but still validates eligible declarations. packageManager URLs/hashes remain unsupported; devEngines.packageManager accepts a
+single object or single-element array with a range, and rejects multiple alternatives explicitly.
+Explicit `tool@version`, explicit deps provider/installer choices, and lock replay keep their authority.
+
+`npm/python/go` choose osdk/native for that ecosystem without reordering native credentials, scope
+routing or TLS. uv discovery respects sibling uv.toml priority, nearest project configuration and
+user/first-system candidates. Complex settings (named indexes, bindings and other unmodeled fields)
+remain native as a group; injecting explicit osdk indexes into them under osdk precedence fails. An invocation environment override that prevents injection does not cause this error.
+A possible uv workspace delegates the group intact, including membership/exclusions, without osdk
+index injection; uv may still validate member metadata. Candidate files are not per-field winners. Requirements/constraint inputs with native options or unreadable context, positional `uv pip sync`/`compile` inputs, and explicit config/directory (`-C` included)/offline/dotenv invocation options, including options before subcommands, are delegated to uv;
+false-like UV_NO_CONFIG/UV_OFFLINE/UV_NO_INDEX values do not disable injection merely by existing.
+Native files are not rewritten and failed execution is never retried with a different installer.

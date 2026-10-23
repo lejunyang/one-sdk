@@ -35,6 +35,7 @@ pub struct Config {
     pub global_tool_configs: BTreeMap<String, ToolConfigEntry>,
     /// Origin of each winning entry in [`Config::tools`].
     pub tool_origins: BTreeMap<String, ToolConfigOrigin>,
+    pub global_config_path: Option<PathBuf>,
     /// User-defined tool version aliases from `[alias.tools]`:
     /// tool -> alias -> version spec.
     pub tool_aliases: BTreeMap<String, BTreeMap<String, String>>,
@@ -310,12 +311,120 @@ pub enum SourcePrecedence {
 pub struct PrecedenceSettings {
     pub tools: SourcePrecedence,
     pub packages: SourcePrecedence,
+    /// Highest first; omitted source kinds retain their default relative order.
+    #[serde(deserialize_with = "deserialize_tool_order")]
+    pub tool_order: Vec<ToolSource>,
+    pub tool_conflicts: ToolConflictPolicy,
+    /// Per-ecosystem overrides; native internals are never reordered by osdk.
+    #[serde(deserialize_with = "deserialize_package_policy")]
+    pub npm: Option<SourcePrecedence>,
+    #[serde(deserialize_with = "deserialize_package_policy")]
+    pub python: Option<SourcePrecedence>,
+    #[serde(deserialize_with = "deserialize_package_policy")]
+    pub go: Option<SourcePrecedence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolSource {
+    #[serde(rename = "osdk")]
+    Osdk,
+    #[serde(rename = "global")]
+    Global,
+    #[serde(rename = ".tool-versions")]
+    ToolVersions,
+    #[serde(rename = ".nvmrc")]
+    Nvmrc,
+    #[serde(rename = ".node-version")]
+    NodeVersion,
+    #[serde(rename = "idiomatic")]
+    Idiomatic,
+    #[serde(rename = "package.json#packageManager")]
+    PackageManager,
+    #[serde(rename = "package.json#devEngines.packageManager")]
+    DevPackageManager,
+    #[serde(rename = "package.json#engines.node")]
+    Engines,
+    #[serde(rename = "package.json#devEngines.runtime")]
+    DevRuntime,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolConflictPolicy {
+    #[default]
+    Prefer,
+    Error,
+}
+fn deserialize_package_policy<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<SourcePrecedence>, D::Error> {
+    match String::deserialize(deserializer)?.as_str() {
+        "inherit" => Ok(None),
+        "osdk" => Ok(Some(SourcePrecedence::Osdk)),
+        "native" => Ok(Some(SourcePrecedence::Native)),
+        _ => Err(serde::de::Error::custom(
+            "expected osdk, native, or inherit",
+        )),
+    }
+}
+fn deserialize_tool_order<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<ToolSource>, D::Error> {
+    let order = Vec::<ToolSource>::deserialize(deserializer)?;
+    for (i, source) in order.iter().enumerate() {
+        if order[..i].contains(source) {
+            return Err(serde::de::Error::custom(
+                "tool_order contains a duplicate source",
+            ));
+        }
+    }
+    Ok(order)
+}
+impl PrecedenceSettings {
+    pub fn package_policy(&self, ecosystem: &str) -> SourcePrecedence {
+        match ecosystem {
+            "npm" => self.npm,
+            "python" => self.python,
+            "go" => self.go,
+            _ => None,
+        }
+        .unwrap_or(self.packages)
+    }
+    pub fn ordered_tool_sources(&self) -> Vec<ToolSource> {
+        use ToolSource::*;
+        let mut order = self.tool_order.clone();
+        let native = [
+            ToolVersions,
+            Nvmrc,
+            NodeVersion,
+            Idiomatic,
+            PackageManager,
+            DevPackageManager,
+            Engines,
+            DevRuntime,
+        ];
+        let defaults = if self.tools == SourcePrecedence::Osdk {
+            [vec![Osdk], native.to_vec(), vec![Global]].concat()
+        } else {
+            [native.to_vec(), vec![Osdk, Global]].concat()
+        };
+        for source in defaults {
+            if !order.contains(&source) {
+                order.push(source);
+            }
+        }
+        order
+    }
 }
 impl Default for PrecedenceSettings {
     fn default() -> Self {
         Self {
             tools: SourcePrecedence::Osdk,
             packages: SourcePrecedence::Native,
+            tool_order: Vec::new(),
+            tool_conflicts: ToolConflictPolicy::Prefer,
+            npm: None,
+            python: None,
+            go: None,
         }
     }
 }
@@ -1842,6 +1951,7 @@ impl Default for Config {
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
+            global_config_path: None,
             tool_aliases: Default::default(),
             #[cfg(feature = "install")]
             tasks: crate::tasks::TaskSet::default(),
@@ -2458,6 +2568,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
     let mut cfg = Config::default();
 
     if user_config_file.exists() {
+        cfg.global_config_path = Some(user_config_file.to_path_buf());
         let file = read_config_file(user_config_file)?;
         cfg.global_tool_configs = file.tools.clone();
         cfg.global_tools = file
@@ -2497,7 +2608,18 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
                     }));
                 }
             }
+            // Only explicitly present precedence fields override the user layer.
+            // Inheritance has already merged ancestors; [] resets custom order.
+            let mut precedence = toml::Value::try_from(&cfg.settings.precedence)
+                .map_err(|_| Error::config("cannot serialize precedence"))?;
+            if let Some(overlay) = inheritance::load(&path)?
+                .get("settings")
+                .and_then(|s| s.get("precedence"))
+            {
+                inheritance::merge(&mut precedence, overlay.clone());
+            }
             cfg.apply_file(file, false, sources.first().map(PathBuf::as_path))?;
+            cfg.settings.precedence = precedence.try_into().map_err(sanitize_config_parse_error)?;
             cfg.project_config_path = Some(path);
         }
         if let Some((path, tv)) = find_tool_versions(start_dir)? {
@@ -2911,6 +3033,7 @@ catalog_url = "https://example.com/java"
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
+            global_config_path: None,
             tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
@@ -3057,6 +3180,7 @@ mirrors = ["https://project.example"]
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
+            global_config_path: None,
             tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),
@@ -3104,6 +3228,7 @@ mirrors = ["https://project.example"]
             global_tools: BTreeMap::new(),
             global_tool_configs: BTreeMap::new(),
             tool_origins: BTreeMap::new(),
+            global_config_path: None,
             tool_aliases: Default::default(),
             project_config_path: None,
             excluded_tools: Default::default(),

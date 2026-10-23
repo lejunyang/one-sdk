@@ -12,14 +12,7 @@ PowerShell 的包装会保留你已有的 `prompt`：激活时捕获当前 `prom
 
 ## 解析顺序与 shim 优先级
 
-活跃版本的解析顺序见 [`resolve_active`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-core/src/version/resolver.rs#L154)：
-
-1. 最近祖先中的项目配置。
-2. 对 npm、pnpm、Yarn，仅当项目配置没有适用的 package-manager 选择时，再看 `package.json#packageManager`，然后看 `devEngines.packageManager`。
-3. 最近祖先中的 `.tool-versions`。
-4. backend 声明的惯用版本文件。
-5. Node 的结构化 `package.json` 版本范围。
-6. 用户全局配置。
+活跃版本由共享 `resolve_active_config` / `resolve_selection` 路径选择。`settings.precedence.tool_order` 按来源类型排序，同类选最近声明；`tool_conflicts` 控制冲突检查。项目 `extends`、原生文件与全局配置的完整规则见[版本解析](./resolution#可配置的声明优先级)。显式版本与锁重放不参与重新排序。
 
 项目选择和全局选择分别以配置为入口。`osdk use <tool>` 写最近的项目配置，找不到时在当前目录创建 `osdk.toml`，并 upsert 实际工具和注入 runtime 的当前平台 lock 条目；`osdk use --global <tool>` 写用户配置目录的 `config.toml`，不修改当前项目 lock。对项目感知的 `npm:<package>`，本地 `use` 还会在真实 Node 项目根更新 package manifest、原生 lock 和筛选 launcher；`use --global npm:<package>` 则更新 `$OSDK_CONFIG_DIR/osdk.lock`，全局 `go:<path>` 也维护用户 lock。[`config_edit`](https://github.com/lejunyang/one-sdk/blob/main/crates/osdk-cli/src/config_edit.rs) 通过唯一临时文件、sync 与 replace 发布单个配置。项目 `use` 在按项目 identity 的进程锁下快照配置和 `osdk.lock`，任一步失败都恢复两者；已完成的共享工具安装不回滚。全局 npm 变更另用专用 global-state lock 串行发布用户 lock、shim 和配置；全局 Go 工具的配置与 lock 仍是两次独立原子替换。
 
