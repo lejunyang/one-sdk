@@ -26,3 +26,13 @@ stdio，后者在任务脚本内捕获子进程输出。相关配置是 `[tools]
 
 
 显式配置 `tool_order=["system"]` 可使用受支持的已有 PATH/home 工具；默认不启用。显式版本及托管锁/frozen 仍保持权威。参见[system 配置、适配器和限制](../configuration/settings.md#system-执行来源)。
+
+执行计划已提供宿主时，已知原生全局命令直接使用该宿主，不再次进入 shim 改用项目版本：
+
+```bash
+osdk exec --tool node@22 -- tsc --version
+```
+
+这适用于已装在受控全局目录中的应用，不会把原生包转换成 `npm:` receipt/lock 安装。
+内嵌绝对解释器的原生 wrapper 保持原生语义；该命令不重写 launcher，也不保证跨 Node
+版本的 native addon ABI。普通 shim 缺少运行时选择时给出提示，不任取已安装版本。

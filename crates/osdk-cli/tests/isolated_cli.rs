@@ -8853,3 +8853,114 @@ fn explicit_exec_version_bypasses_project_conflicts_during_shim_maintenance() {
     assert!(!implicit.status.success());
     assert!(String::from_utf8_lossy(&implicit.stderr).contains("incompatible requirements"));
 }
+
+#[cfg(unix)]
+#[test]
+fn exec_native_global_keeps_explicit_node_and_system_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for version in ["20.0.0", "22.0.0"] {
+        let install = root.join("installs/node").join(version);
+        write_executable(
+            &install.join("bin/node"),
+            &format!("#!/bin/sh\necho NODE_{version}\n"),
+        );
+        std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    }
+    std::fs::write(root.join("osdk.toml"), "[tools]\nnode='20.0.0'\n").unwrap();
+    write_executable(
+        &root.join("data/global/npm/bin/global-probe"),
+        "#!/usr/bin/env node\n",
+    );
+    // No ambient shims or global bin are needed; exec selects the native entry.
+    let output = run_isolated_in(
+        root,
+        root,
+        &[
+            "--offline",
+            "exec",
+            "-t",
+            "node@22.0.0",
+            "--",
+            "global-probe",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("NODE_22.0.0"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("NODE_20.0.0"));
+    let bin = root.join("external/bin");
+    write_executable(
+        &bin.join("node"),
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo v24.0.0; else echo SYSTEM_NODE; fi\n",
+    );
+    std::fs::write(
+        root.join("osdk.toml"),
+        "[settings.precedence]\ntool_order=['system']\n",
+    )
+    .unwrap();
+    let output = run_isolated_in_with_env(
+        root,
+        root,
+        &["--offline", "exec", "-t", "node", "--", "global-probe"],
+        &[("PATH", bin.to_str().unwrap())],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("SYSTEM_NODE"));
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_native_global_windows_cmd_keeps_explicit_node() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("exec global with spaces");
+    std::fs::create_dir_all(&root).unwrap();
+    for version in ["20.0.0", "22.0.0"] {
+        let install = root.join("installs/node").join(version);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(
+            install.join("node.cmd"),
+            format!("@echo off\r\necho NODE_{version}\r\n"),
+        )
+        .unwrap();
+        std::fs::write(install.join(".osdk-complete"), "").unwrap();
+    }
+    std::fs::write(root.join("osdk.toml"), "[tools]\nnode='20.0.0'\n").unwrap();
+    let bin = root.join("data/global/npm");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("global-probe.cmd"),
+        "@echo off\r\ncall node.cmd\r\n",
+    )
+    .unwrap();
+    let output = run_isolated_in(
+        &root,
+        &root,
+        &[
+            "--offline",
+            "exec",
+            "-t",
+            "node@22.0.0",
+            "--",
+            "global-probe",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("NODE_22.0.0"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("NODE_20.0.0"));
+}

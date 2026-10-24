@@ -137,18 +137,15 @@ source trust 由选中的 proxy 承担。
 
 ## 直接运行 `go install` 也受纳管
 
-除了用 `go:<module>` 命名空间让 osdk 锁定工具，在激活的 shell 里直接运行原生
-`go install x@v` 同样受控：osdk 把 `GOBIN` 重定向到 `data/global/go/bin`，并把该目录
-加入 Go 的 PATH，因此编译出的自包含二进制在命令退出后立即可用，不需要 shim 或
-reshim：
+托管 `go install` 通过 `GOBIN` 写入 `data/global/go/bin`。相应托管 SDK 激活时该目录在 PATH 中。运行 `osdk reshim` 可发布这些应用，供项目外使用；应用 shim 不要求选择 Go 编译器。SDK 命令仍遵守工具链选择。
 
 ```bash
 go install golang.org/x/tools/cmd/stringer@latest
+osdk reshim
 stringer -help
 ```
 
-Go 的产物是自包含原生二进制（不像 npm/pnpm 那样是需要宿主的 launcher），所以直接放
-PATH 即可；这与 Cargo 的 `cargo install` 落入 `CARGO_HOME/bin`（同样已在 PATH）一致。
+这与带 receipt 的 `go:` 流程不同。原生输出覆盖可能把程序放到 osdk 扫描目录之外，编译后的应用也可能依赖系统库。详见[全局安装边界](./package-managers#native-global-boundaries)。
 
 ## Lock 与离线行为
 

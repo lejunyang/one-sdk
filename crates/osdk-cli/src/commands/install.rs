@@ -336,6 +336,13 @@ pub async fn exec_cmd(app: &mut App, tools: Vec<String>, command: Vec<String>) -
     // (the NDK's per-API clang wrappers, for one) would not be found even
     // though it is on the PATH we just built. Resolve it ourselves first.
     let managed_program = resolve_program_in_dirs(&managed_program, &managed_paths);
+    let hosts: Vec<_> = resolved
+        .iter()
+        .map(|(_, version)| version.backend.as_str())
+        .collect();
+    let managed_program =
+        resolve_native_global_for_exec(app, &managed_program, &hosts, &managed_paths, &mut env)?
+            .unwrap_or(managed_program);
     apply_package_registry_plan(app, &resolved, program, args, &mut env).await?;
     let status = command_for_program(&managed_program)
         .args(&managed_args)
@@ -425,6 +432,65 @@ pub(crate) fn resolve_managed_launcher_alias(
         .chain(args.iter().cloned())
         .collect();
     Ok((executable, rewritten))
+}
+
+/// Launch a known native global directly when this exec plan already supplies
+/// its host. Re-entering a shim would discard explicit CLI runtime authority.
+/// Explicit paths and managed tool/receipt commands retain priority.
+pub(crate) fn resolve_native_global_for_exec(
+    app: &App,
+    program: &std::path::Path,
+    hosts: &[&str],
+    runtime_paths: &[std::path::PathBuf],
+    env: &mut std::collections::BTreeMap<String, String>,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(name) = program.to_str().filter(|s| !s.contains(['/', '\\'])) else {
+        return Ok(None);
+    };
+    if app.registry.get(name).is_ok() || find_managed_executable(runtime_paths, name).is_some() {
+        return Ok(None);
+    }
+    for source in osdk_core::shim::global_bin_sources(&app.ctx) {
+        if !source.names.iter().any(|n| n == name) {
+            continue;
+        }
+        let Some(launcher) = find_managed_executable(std::slice::from_ref(&source.bin_dir), name)
+        else {
+            continue;
+        };
+        if let Some(host) = osdk_core::shim::native_global_runtime(&launcher, source.owner) {
+            if !hosts.contains(&host) {
+                return Ok(None);
+            }
+            let available = find_managed_executable(runtime_paths, host).is_some_and(|path| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = path;
+                    true
+                }
+            });
+            if !available {
+                anyhow::bail!("selected {host} runtime executable is missing or not executable");
+            }
+        }
+        // Native sibling commands must see the same selected runtime too.
+        let mut paths: Vec<_> = env
+            .get("PATH")
+            .map(|p| std::env::split_paths(p).collect())
+            .unwrap_or_default();
+        paths.insert(runtime_paths.len().min(paths.len()), source.bin_dir);
+        env.insert(
+            "PATH".into(),
+            std::env::join_paths(paths)?.to_string_lossy().into_owned(),
+        );
+        return Ok(Some(launcher));
+    }
+    Ok(None)
 }
 
 pub(crate) fn find_managed_executable(

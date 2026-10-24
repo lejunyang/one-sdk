@@ -193,55 +193,96 @@ Berry（Yarn 2+）的 cache 完全由项目 `.yarn` 配置决定，osdk 不强�
 `osdk cache clean` 只删除 osdk 下载归档，**不会**删除上述原生缓存。完整存储边界见
 [存储、Shell 与扩展](../config/storage)。
 
-## 全局安装自动纳管
+<a id="全局安装自动纳管"></a>
 
-即使不经过 `osdk use --global`，而是在激活的 shell 里直接运行各包管理器自带的全局
-安装命令，osdk 也会把全局安装位置重定向到受控目录，并在**命令退出后自动对账**，让
-新装或卸载的命令立即生效——不需要再手动 `osdk reshim`：
+## 原生全局安装纳管
+
+### 存储与运行时选择是两件事
+
+使用 **osdk 托管** Node/npm 时，`npm i -g` 写入共享的 `data/global/npm`，
+即使 Node 只在项目中声明也是如此。切换或升级 Node 不会删除这些包文件。
+全局 JavaScript 命令仍需要运行时：shim 按当前项目的 `tool_order` 和用户默认配置
+选择 Node，不要求另装独立 npm/pnpm/Yarn。它不会任取一个已安装 Node，也不会自动
+安装缺失的运行时。
+
+```bash
+# 在已选择并安装 Node 的项目中：
+npm i -g typescript
+tsc --version
+osdk current node --sources
+# 显式 exec 运行时优先于项目选择：
+osdk exec --tool node@22 -- tsc --version
+
+# 如果希望在项目外使用，主动设置用户默认版本：
+osdk use --global node@22
+# 项目配置仍可按 tool_order 获胜。
+```
+
+项目外没有选择 Node 时，bundled npm 和全局 JS 命令会给出选择提示。
+仅安装 Node 不等于设置默认版本。显式缺失或无效的运行时声明会报错，不会退回
+其他已安装版本。[工具选择](../config/tool-selection)说明排序、严格冲突与可选
+`system`；选择系统 Node 时恢复它的原生环境。运行**系统包管理器**时保留原生
+prefix/home，不承诺写入 osdk 共享目录或自动对账。
+
+### 重定向目录与命令发现
+
+托管包管理器通过 osdk shim 运行时，退出后对账其全局 bin 目录，增删命令 shim。
+直接调用包管理器二进制或经其他执行入口运行后，可能需要 `osdk reshim`。
+这些是原生安装，与带版本 receipt/lock 的 `osdk use npm:<package>` 流程不同。
 
 ```bash
 npm i -g @anthropic-ai/claude-code
 pnpm add -g cowsay
-yarn global add typescript     # Yarn 1；Berry 没有 global，用 yarn dlx
+yarn global add typescript     # 仅 Yarn Classic；Berry 用 yarn dlx
 bun add -g prettier
-deno install -A -n mytool jsr:@scope/mytool
-# 命令退出即生效，直接输入命令名即可
+deno install -g -A -n mytool jsr:@scope/mytool
 ```
 
-| 工具 | 重定向变量 | 全局 bin 目录 | 纳管方式 |
-| --- | --- | --- | --- |
-| npm | `npm_config_prefix` | `data/global/npm`（bin 在其根 / `bin`） | shim |
-| pnpm | `PNPM_HOME` | `data/global/pnpm/bin`（兼容散根） | shim |
-| Yarn | `YARN_GLOBAL_FOLDER` | `data/global/yarn/node_modules/.bin` | shim |
-| Bun | `BUN_INSTALL` | `data/global/bun/bin` | shim |
-| Deno | `DENO_INSTALL_ROOT` | `data/global/deno/bin` | shim |
-
-这些工具的全局产物是**需要运行时宿主的 launcher/脚本**（例如 pnpm 生成的 `.CMD`、
-Deno 的 shell 包装），osdk 在统一的 shims 目录为每个命令生成自己的 shim；shim 会在
-对应包管理器的受控环境下执行它。命令进程退出后，osdk 按该工具全局 bin 目录的内容
-做一次对账：出现的新命令补 shim，消失的命令（卸载、手动删除都一样）在确认没有其他
-全局来源或受管工具占用后移除。对账只看目录的实际内容，不解析命令行，因此与各工具
-不断变化的安装/卸载语法、别名和参数解耦。目录未变化时通过 mtime 缓存快速跳过。
-
-包管理器（如 Bun）可能仍按自己的习惯提示"把全局 bin 目录加入 PATH"；这一步 osdk
-已经通过 shim 完成，可以忽略该提示。
-
-如果你此前在系统里独立装过这些工具并跑过它们的 `setup`，残留的持久变量（如
-`PNPM_HOME`、`BUN_INSTALL`）可能与受控值冲突；安装时 osdk 会对此告警，按提示清除
-变量，或设置对应工具的 `[settings.<tool>] override_env = true`（顶层
-`override_tools_env = true` 则对所有工具生效）让 osdk 强制覆盖。
-
-### 自包含原生工具：Go 与 Cargo
-
-`go install` 与 `cargo install` 的产物是自包含的原生二进制，不需要运行时宿主，因此
-osdk 不为它们生成 shim，而是把输出目录直接放到 PATH：
-
-| 工具 | 重定向变量 | 输出目录 |
+| 工具 | 托管重定向变量 | 扫描的全局 bin 目录 |
 | --- | --- | --- |
-| Go | `GOBIN` | `data/global/go/bin` |
-| Cargo | —（`CARGO_HOME` 已受控） | `data/cargo/bin` |
+| npm | `npm_config_prefix` | Windows 为 `data/global/npm`，Unix 为其 `bin` 子目录 |
+| pnpm | `PNPM_HOME` | `data/global/pnpm/bin` 及 home 根目录 |
+| Yarn Classic | `YARN_GLOBAL_FOLDER` | `data/global/yarn/node_modules/.bin` |
+| Bun | `BUN_INSTALL` | `data/global/bun/bin` |
+| Deno | `DENO_INSTALL_ROOT` | `data/global/deno/bin` |
 
-详见 [Go 工具](./go) 与 [Cargo 工具](./cargo)。
+托管目录变量不受 `override_env` 开关控制；该开关控制缓存覆盖，不决定全局安装
+位置。各工具变量见[环境变量参考](../config/tool-environment)。npm `--prefix`
+等显式原生参数，以及各管理器自己的安装根配置，仍按原生规则处理；表外目录不会
+自动扫描。osdk 不改写原生配置，也不迁移已有全局包。
+
+npm/pnpm/Yarn 全局 JS launcher 的 PATH 包含所选 Node。直接使用
+`#!/usr/bin/env bun` 或 `#!/usr/bin/env deno` 的 launcher 使用对应的所选宿主；
+Deno wrapper 配置 Deno，不解析无关的 Node。可识别的原生二进制不需要选择运行时；
+其他 Bun wrapper 保持原生执行。osdk 不重写 launcher：内嵌绝对解释器、随包运行时
+或相邻可执行文件可能优先于 PATH。若固定宿主失效，应检查 launcher 或用原生管理器
+重装相应包；osdk 不承诺复现任意 wrapper 语义。
+
+共享存储也**不保证** Node 升级后的 native addon ABI 兼容性。应使用所选 Node 按包
+支持的方式重建，例如 `npm rebuild -g <package>`，必要时重装该包，参见
+[npm rebuild](https://docs.npmjs.com/cli/v11/commands/npm-rebuild/)。不会自动批量
+重建、迁移或回退运行时。
+
+<a id="native-global-boundaries"></a>
+
+### Go、Cargo 与 Python 的边界
+
+| 原生安装 | 托管输出目录 | `osdk reshim` 后的执行 |
+| --- | --- | --- |
+| `go install` | `data/global/go/bin`（`GOBIN`） | 应用 shim 不要求选择 Go |
+| `cargo install` | `data/cargo/bin`（`CARGO_HOME/bin`） | 应用 shim 不要求选择 Rust |
+
+相应托管 SDK 激活时也会把这些目录加入 PATH。`reshim` 独立发布其中的应用命令，
+在项目外也不要求选择编译器；rustup proxy 和 SDK 命令仍遵守工具链选择。
+原生应用仍可能依赖系统库或自身运行时。Cargo 的 `--root`、`CARGO_INSTALL_ROOT`、
+`install.root` 及其他显式原生输出配置可能把程序放到别处，osdk 不扫描所有原生目标。
+详见 [Go 工具](./go)与 [Cargo 工具](./cargo)。
+
+裸 `pip install` 属于所选解释器或当前 virtualenv；osdk 不跨 Python 版本共享
+site-packages。pipx、`uv tool` 使用独立工具环境，但其中解释器仍可能绑定某个
+Python 安装。删除它之前应保留解释器，或用原生管理器重建环境。osdk 不迁移这些
+环境，也不自动发布所有外部 pipx/uv bin 目录。[`pypi:` 流程](./python)另有记录
+解释器的 receipt 与生命周期。
 
 ## 包源与原生配置优先级
 

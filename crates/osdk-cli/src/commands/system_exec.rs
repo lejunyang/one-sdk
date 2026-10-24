@@ -191,6 +191,13 @@ pub(super) async fn try_exec(
         };
         (path, managed_args)
     };
+    let hosts: Vec<_> = resolved
+        .iter()
+        .map(|(_, version)| version.backend.as_str())
+        .chain(systems.iter().map(|t| t.tool.as_str()))
+        .collect();
+    let executable = resolve_native_global_for_exec(app, &executable, &hosts, &bins, &mut env)?
+        .unwrap_or(executable);
     let yarn_version = systems
         .iter()
         .find(|t| t.tool == "yarn")

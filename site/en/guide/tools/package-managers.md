@@ -211,60 +211,106 @@ removes only osdk's downloaded SDK archives, not these native caches. See
 
 ## Automatic global-install management
 
-Even without `osdk use --global`, when you run a package manager's own global-install
-command inside an activated shell, osdk redirects the global location into a controlled
-directory and **reconciles automatically after the command exits**, so newly installed or
-removed commands take effect immediately -- no manual `osdk reshim` required:
+### Storage and runtime selection are separate
+
+With a **managed** Node/npm, `npm i -g` writes to the shared `data/global/npm`
+prefix, including when Node is selected only by a project. Switching or upgrading
+Node does not remove those package files. A global JavaScript command still needs
+a runtime: its shim resolves Node from the current project's `tool_order` and
+user defaults, without requiring a separate npm/pnpm/Yarn installation. It never
+chooses an arbitrary installed Node or installs a missing runtime automatically.
+
+```bash
+# In a project with Node selected and installed:
+npm i -g typescript
+tsc --version
+osdk current node --sources
+# Explicit exec runtime overrides the project selection:
+osdk exec --tool node@22 -- tsc --version
+
+# To intentionally select a default for use outside projects:
+osdk use --global node@22
+# A project's own selection can still win according to tool_order.
+```
+
+Without a selected Node outside projects, bundled npm and global JS commands give
+a selection hint. Installing a Node version alone does not create a default.
+An explicit missing or invalid runtime pin fails instead of falling back to a
+newer installed version. [Tool Selection](../config/tool-selection) describes
+order, strict conflicts and opt-in `system`; a selected system Node uses its native
+restored environment. Running a **system package manager** preserves its native
+prefix/home and does not promise osdk's shared storage or automatic reconciliation.
+
+### Redirected locations and command discovery
+
+When the managed package manager runs through an osdk shim, it reconciles its
+redirected global bin directories after exit, adding/removing command shims.
+Directly invoking a manager binary or using another execution path may require
+`osdk reshim` afterward. These are native installs, separate from the versioned
+`osdk use npm:<package>` receipt/lock workflow.
 
 ```bash
 npm i -g @anthropic-ai/claude-code
 pnpm add -g cowsay
-yarn global add typescript     # Yarn 1; Berry has no global, use yarn dlx
+yarn global add typescript     # Yarn Classic only; Berry uses yarn dlx
 bun add -g prettier
-deno install -A -n mytool jsr:@scope/mytool
-# Effective as soon as the command exits; just type the command name
+deno install -g -A -n mytool jsr:@scope/mytool
 ```
 
-| Tool | Redirect variable | Global bin directory | Management |
-| --- | --- | --- | --- |
-| npm | `npm_config_prefix` | `data/global/npm` (bins at its root / `bin`) | shim |
-| pnpm | `PNPM_HOME` | `data/global/pnpm/bin` (loose-root compatible) | shim |
-| Yarn | `YARN_GLOBAL_FOLDER` | `data/global/yarn/node_modules/.bin` | shim |
-| Bun | `BUN_INSTALL` | `data/global/bun/bin` | shim |
-| Deno | `DENO_INSTALL_ROOT` | `data/global/deno/bin` | shim |
-
-These tools' global artifacts are **launchers/scripts that need a runtime host** (the
-`.CMD` files pnpm writes, Deno's shell wrappers, and so on), so osdk generates its own
-shim for each command in one shared shims directory; the shim runs it within the relevant
-package manager's controlled environment. After the command exits, osdk reconciles the
-tool's global bin directory: it adds shims for newly present commands and, after checking
-no other global source or managed tool still owns it, removes shims for commands that have
-disappeared (via uninstall or manual deletion alike). Reconciliation looks only at the
-directory's actual contents, never parsing the command line, so it is independent of each
-tool's evolving install/uninstall syntax, aliases, and flags. Unchanged directories are
-skipped quickly via an mtime cache.
-
-A package manager (Bun, for example) may still print its usual hint to "add the global bin
-folder to PATH"; osdk already does this through the shim, so that hint can be ignored.
-
-If you previously installed these tools on the system yourself and ran their `setup`,
-leftover persistent variables (such as `PNPM_HOME` or `BUN_INSTALL`) may conflict with the
-controlled values; osdk warns about this at install time. Follow the hint to remove the
-variable, or set that tool's `[settings.<tool>] override_env = true` (the top-level
-`override_tools_env = true` applies it to every tool) to let osdk override it.
-
-### Self-contained native tools: Go and Cargo
-
-The artifacts of `go install` and `cargo install` are self-contained native binaries that
-need no runtime host, so osdk does not shim them; instead their output directory is placed
-directly on PATH:
-
-| Tool | Redirect variable | Output directory |
+| Tool | Managed redirect variable | Scanned global bin directory |
 | --- | --- | --- |
-| Go | `GOBIN` | `data/global/go/bin` |
-| Cargo | — (`CARGO_HOME` is already managed) | `data/cargo/bin` |
+| npm | `npm_config_prefix` | `data/global/npm` on Windows, `data/global/npm/bin` on Unix |
+| pnpm | `PNPM_HOME` | `data/global/pnpm/bin` and the home root |
+| Yarn Classic | `YARN_GLOBAL_FOLDER` | `data/global/yarn/node_modules/.bin` |
+| Bun | `BUN_INSTALL` | `data/global/bun/bin` |
+| Deno | `DENO_INSTALL_ROOT` | `data/global/deno/bin` |
 
+Managed locator variables are set regardless of `override_env`; that switch
+controls cache overrides, not global location selection. See the per-tool
+[environment reference](../config/tool-environment). Native explicit flags such
+as npm `--prefix` and other manager-specific install-root settings retain their
+native semantics; directories outside this table are not automatically scanned.
+osdk does not rewrite native configuration or migrate existing global packages.
+
+Global JS launchers from npm/pnpm/Yarn receive the selected Node on PATH. Direct
+`#!/usr/bin/env bun` and `#!/usr/bin/env deno` launchers receive their respective
+selected host; Deno wrappers receive Deno, not an unrelated Node. Recognized native
+binaries need no runtime selection. Other Bun wrappers retain native execution.
+Native launchers are never rewritten: an embedded absolute interpreter, bundled
+runtime or adjacent executable may override PATH. Inspect or reinstall that
+package with its native manager if its pinned runtime becomes unavailable; osdk
+does not claim arbitrary wrapper semantics.
+
+Shared storage also does **not** guarantee native-addon ABI compatibility across
+Node upgrades. Use the selected Node and the package's supported rebuild procedure,
+for example `npm rebuild -g <package>`, or reinstall that package when needed.
+See [npm rebuild](https://docs.npmjs.com/cli/v11/commands/npm-rebuild/).
+No automatic bulk rebuild, migration or runtime fallback occurs.
+
+<a id="native-global-boundaries"></a>
+
+### Go, Cargo and Python boundaries
+
+| Native install | Managed output location | Execution after `osdk reshim` |
+| --- | --- | --- |
+| `go install` | `data/global/go/bin` (`GOBIN`) | Application shim does not require selected Go |
+| `cargo install` | `data/cargo/bin` (`CARGO_HOME/bin`) | Application shim does not require selected Rust |
+
+These directories are also included while their managed SDK is active. `reshim`
+publishes their applications independently of compiler selection, including outside
+projects. Rustup proxies and SDK commands remain toolchain commands. Native
+applications can still depend on system libraries or their own runtime. Cargo
+`--root`, `CARGO_INSTALL_ROOT` and `install.root`, or other explicit native output
+choices can place binaries elsewhere; osdk does not scan every native destination.
 See [Go tools](./go) and [Cargo tools](./cargo).
+
+Bare `pip install` belongs to the selected interpreter or active virtualenv;
+osdk does not merge site-packages between Python versions. pipx and `uv tool`
+use separate tool environments whose interpreters may still be tied to a Python
+installation. Keep that interpreter available or recreate the environment with
+its native manager before removing it. osdk neither migrates these environments
+nor automatically publishes every external pipx/uv bin directory. The receipt-based
+[`pypi:` workflow](./python) has its own recorded interpreter and lifecycle.
 
 ## Package sources and native precedence
 

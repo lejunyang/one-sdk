@@ -356,20 +356,19 @@ directory is local derived state and should normally be ignored by version
 control. Commit the package manager's native lock alongside `osdk.lock`; the
 latter does not replace the transitive dependency graph.
 
-Global npm and pnpm choices each run that manager's real global-add operation
-inside an osdk-controlled prefix, leaving the ambient Node installation
-untouched. Even running `npm i -g` / `pnpm add -g` directly (without
-`osdk use --global`) redirects the global prefix (`npm_config_prefix` /
-`PNPM_HOME`) to a controlled directory and reconciles automatically after the
-command exits: newly installed global commands get shims immediately and removed
-commands are cleaned up, with no manual `osdk reshim` -- typing the command name
-runs it in the controlled environment. Yarn, Bun, and Deno global installs are
-managed the same way; self-contained native tools such as Go/Cargo place their
-output directory directly on PATH. If leftover persistent pnpm/node environment
-variables remain on the system, osdk warns at install time and suggests
-clearing them, or you can set `[settings.<tool>] override_env = true` (or the
-top-level `override_tools_env = true` for every tool) to let osdk force its
-values. `where --global` and `uninstall --global` explicitly target the
+Managed `npm i -g` and similar commands use shared global directories, so changing
+Node does not remove the installed packages. Through osdk shims, supported JS
+managers reconcile their global command shims after exit. These commands use the
+selected runtime without requiring an independent npm installation; outside a
+project, deliberately set a default with `osdk use --global node@22`. Missing
+runtimes produce a hint instead of choosing an arbitrary installed version.
+`osdk reshim` also exposes native Cargo/Go applications without requiring a selected
+compiler. Native addons, pinned wrappers and Python environments retain their
+runtime compatibility requirements. System managers and native output overrides
+retain native locations; see [global installation boundaries](site/en/guide/tools/package-managers.md#automatic-global-install-management)
+and [environment variables](site/en/guide/config/tool-environment.md).
+
+`where --global` and `uninstall --global` explicitly target the
 user-wide npm installation whose exact configured identity matches. Without
 that flag, the existing project/isolated behavior is preserved; uninstall
 removes only the

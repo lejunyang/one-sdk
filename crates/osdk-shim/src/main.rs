@@ -246,6 +246,9 @@ fn real_main() -> i32 {
                 backend.id(),
                 backend.id()
             );
+            if matches!(tool_name.as_str(), "npm" | "npx") {
+                eprintln!("For bundled npm, select an installed Node with `osdk use node@<version>` in a project or `osdk use --global node@<version>` as the outside-project default. Inspect `osdk current node --sources`. Installing Node alone does not select a default.");
+            }
             return 1;
         }
     };
@@ -803,6 +806,11 @@ fn owning_backend(
                 .ok()
                 .flatten()
         {
+            // Bundled npm belongs to the selected Node even if that install
+            // is missing. Let normal resolution report the broken Node pin.
+            if matches!(tool_name, "npm" | "npx") {
+                return Some(node);
+            }
             if let Some(version) =
                 resolve_installed(ctx, node.as_ref(), &active.spec, active.is_range)
             {
@@ -818,7 +826,7 @@ fn owning_backend(
             }
         }
 
-        return (tool_name == manager_id).then_some(manager);
+        return (tool_name == manager_id || tool_name == "npx").then_some(manager);
     }
     if let Ok(b) = registry.get(tool_name) {
         return Some(b);
@@ -1071,6 +1079,7 @@ fn find_exe(bin_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 
 /// A command resolved from a redirected npm/pnpm global bin directory.
 struct GlobalCommand {
+    name: String,
     owner: std::sync::Arc<dyn osdk_core::backend::Backend>,
     launcher: PathBuf,
     bin_dir: PathBuf,
@@ -1094,6 +1103,7 @@ fn global_command_for_name(
             continue;
         };
         return Some(GlobalCommand {
+            name: name.into(),
             owner,
             launcher,
             bin_dir: source.bin_dir,
@@ -1102,9 +1112,8 @@ fn global_command_for_name(
     None
 }
 
-/// Run a redirected global command under the owning package manager's
-/// environment: its managed version's exec_env (controlled prefix/home), node
-/// on PATH, and the global bin directory.
+/// Native globals are applications, not installations of their package manager.
+/// Supply only their runtime host, using the same selection policy as `exec`.
 fn exec_global_command(
     ctx: &osdk_core::backend::Ctx,
     registry: &Registry,
@@ -1112,73 +1121,77 @@ fn exec_global_command(
     command: &GlobalCommand,
     forward_args: &[String],
 ) -> i32 {
-    let owner = command.owner.as_ref();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    // Resolve the package manager's current version; exec_env needs it (pnpm's
-    // store-dir variable name depends on the version).
-    let owner_version =
-        (match resolve_active_config(owner.id(), &cwd, &ctx.config, owner.idiomatic_files()) {
-            Ok(active) => active,
-            Err(error) => {
-                eprintln!("osdk-shim: {error}");
-                return 1;
+    let host = osdk_core::shim::native_global_runtime(&command.launcher, command.owner.id());
+    let prepare = || -> osdk_core::error::Result<_> {
+        let mut env = std::collections::BTreeMap::new();
+        let mut bins = Vec::new();
+        let mut external = None;
+        if let Some(host) = host {
+            let backend = registry.get(host)?;
+            match osdk_core::execution::resolve(ctx, backend.as_ref(), &cwd)?.target {
+                Some(osdk_core::execution::ExecutionTarget::System(mut target)) => {
+                    env.insert(
+                        "PATH".into(),
+                        osdk_core::execution::path_with(ctx, [target.bin_dir().to_path_buf()])?,
+                    );
+                    target.verify(ctx, &env)?;
+                    bins.push(target.bin_dir().to_path_buf());
+                    external = Some(target);
+                }
+                _ => {
+                    let (runtime_bins, runtime_env) =
+                        osdk_core::execution::runtime_environment(ctx, registry, &cwd, host)?;
+                    let executable = find_exe(&runtime_bins, host).filter(|path| {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::metadata(path)
+                                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = path;
+                            true
+                        }
+                    });
+                    if executable.is_none() {
+                        return Err(osdk_core::error::Error::config(format!(
+                            "selected {host} runtime executable is missing or not executable"
+                        )));
+                    }
+                    bins.extend(runtime_bins);
+                    env.extend(runtime_env);
+                }
             }
-        })
-        .and_then(|active| {
-            let spec = ctx
-                .config
-                .expand_alias(owner.id(), &active.spec)
-                .unwrap_or_else(|_| active.spec.clone());
-            resolve_installed(ctx, owner, &spec, active.is_range)
-        })
-        .or_else(|| owner.list_installed(ctx).ok()?.into_iter().last());
-    let Some(owner_version) = owner_version else {
-        eprintln!(
-            "osdk-shim: {} must be installed to run this global command",
-            owner.id()
-        );
-        return 1;
+        }
+        // The selected host precedes global bins: a package named `node` must
+        // not replace the interpreter. Keep native launchers intact.
+        bins.push(command.bin_dir.clone());
+        if external.is_some() {
+            env.insert("PATH".into(), osdk_core::execution::path_with(ctx, bins)?);
+        } else {
+            prepend_env_path(&mut env, bins);
+        }
+        env.insert("OSDK_SHIM_ACTIVE".into(), command.name.clone());
+        Ok((env, external))
     };
-    let owner_tv = ToolVersion::new(owner.id(), &owner_version);
-
-    let mut exec_env = match owner.exec_env(ctx, &owner_tv) {
-        Ok(env) => env,
+    match prepare() {
+        Ok((env, Some(target))) => exec_environment(
+            &command.launcher,
+            forward_args,
+            &target.environment(&env),
+            true,
+        ),
+        Ok((env, None)) => exec(&command.launcher, forward_args, &env),
         Err(error) => {
             eprintln!("osdk-shim: {error}");
-            return 1;
-        }
-    };
-
-    // Global commands are node programs; prepend node, then the package
-    // manager's bins, then the global bin dir so it is on PATH (the user's own
-    // shell still resolves these names through the shims dir, which activation
-    // keeps ahead).
-    if let Ok(node_backend) = registry.get("node") {
-        let node_version =
-            (match resolve_active_config("node", &cwd, &ctx.config, &[".nvmrc", ".node-version"]) {
-                Ok(active) => active,
-                Err(error) => {
-                    eprintln!("osdk-shim: {error}");
-                    return 1;
-                }
-            })
-            .and_then(|active| {
-                resolve_installed(ctx, node_backend.as_ref(), &active.spec, active.is_range)
-            })
-            .or_else(|| node_backend.list_installed(ctx).ok()?.into_iter().last());
-        if let Some(node_version) = node_version {
-            let node_tv = ToolVersion::new("node", &node_version);
-            prepend_env_path(
-                &mut exec_env,
-                managed_bin_paths(ctx, node_backend.as_ref(), &node_tv),
-            );
+            if let Some(host) = host {
+                eprintln!("This global package is retained, but needs a selected, installed {host} runtime. Inspect `osdk current {host} --sources`; select one for this project with `osdk use {host}@<version>` or outside projects with `osdk use --global {host}@<version>`. No runtime was installed automatically.");
+            }
+            1
         }
     }
-    prepend_env_path(&mut exec_env, managed_bin_paths(ctx, owner, &owner_tv));
-    prepend_env_path(&mut exec_env, vec![command.bin_dir.clone()]);
-
-    exec(&command.launcher, forward_args, &exec_env)
 }
 
 #[cfg(windows)]
@@ -1196,17 +1209,36 @@ fn exe_candidates(name: &str) -> Vec<String> {
     vec![name.to_string()]
 }
 
-#[cfg(unix)]
 fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String, String>) -> i32 {
+    let env = env.iter().map(|(k, v)| (k.into(), v.into())).collect();
+    exec_environment(exe, args, &env, false)
+}
+
+#[cfg(unix)]
+fn exec_environment(
+    exe: &PathBuf,
+    args: &[String],
+    env: &std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+    clear: bool,
+) -> i32 {
     use std::os::unix::process::CommandExt;
     // Replace the current process so signals/exit codes pass through cleanly.
-    let err = Command::new(exe).args(args).envs(env).exec();
+    let mut command = Command::new(exe);
+    if clear {
+        command.env_clear();
+    }
+    let err = command.args(args).envs(env).exec();
     eprintln!("osdk-shim: failed to exec {}: {err}", exe.display());
     126
 }
 
 #[cfg(not(unix))]
-fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String, String>) -> i32 {
+fn exec_environment(
+    exe: &PathBuf,
+    args: &[String],
+    env: &std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+    clear: bool,
+) -> i32 {
     let extension = exe
         .extension()
         .and_then(|extension| extension.to_str())
@@ -1228,6 +1260,9 @@ fn exec(exe: &PathBuf, args: &[String], env: &std::collections::BTreeMap<String,
         } else {
             Command::new(exe)
         };
+    if clear {
+        command.env_clear();
+    }
     match command.args(args).envs(env).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {

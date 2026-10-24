@@ -287,3 +287,11 @@ schema 1 身份校验、安装器规划、依赖区段保留、原生委托只�
 安装扫描和 shim 冲突行为。兼容性测试继续覆盖旧 lock schema 2 sidecar 校验、旧
 `.osdk-tool.json` 只识别不执行，以及 lock schema 1 npm 迁移拒绝边界。跨平台行为仍需按仓库要求运行
 Linux workspace 测试与完整 Windows GNU Wine 套件。
+
+## 原生全局命令路由
+
+直接原生全局安装与动态 npm receipt 分开。shim 扫描已知共享 bin 目录；npm/pnpm/Yarn 应用共用 Managed/System Node resolver，不解析或要求包管理器本身的安装。未选择宿主或所选宿主损坏时，在执行 launcher 前失败；已安装版本清单绝不充当默认选择。系统宿主通过完整子进程环境恢复注入的目录变量。所选宿主 bin 排在全局 bin 前面。可识别的原生可执行头跳过运行时选择，直接 env shebang 可选择 Bun/Deno。原生 wrapper 和绝对解释器保持不变，不转换成替代安装计划。
+
+Yarn Classic 扫描 `node_modules/.bin`。Go/Cargo 输出目录也参与全局发现，其应用 shim 不解析编译器版本。Rust SDK 二进制及保留名称/文件身份确认的 rustup proxy 仍属于工具链。`reshim` 发现这些原生应用，不创建托管 receipt 或可移植 lock；原生包删除仍由原生管理器负责。
+
+当 exec 执行计划已提供所需宿主时，直接解析已知原生全局入口，避免再次进入 shim 后用项目选择覆盖显式 CLI 版本。原生全局入口仍不属于 receipt/lock 的可复现安装合同。

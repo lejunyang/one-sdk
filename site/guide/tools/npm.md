@@ -163,7 +163,7 @@ lock 身份写入 `$OSDK_CONFIG_DIR/osdk.lock`。npm 全局安装不会生成依
 
 ## 直接运行 `npm i -g` / `pnpm add -g` 也受纳管
 
-即使不经过 `osdk use --global`，而是在激活的 shell 里直接执行包管理器自带的全局安装命令，osdk 也会把它们重定向到受控目录（npm 的 `npm_config_prefix` 指向 `data/global/npm`、pnpm 的 `PNPM_HOME` 指向 `data/global/pnpm`），并在**命令退出后自动对账**：新装的命令立即得到 shim、卸载的命令自动清理，不需要再手动 `osdk reshim`。
+即使不经过 `osdk use --global`，而是通过 osdk shim 执行托管包管理器自带的全局安装命令，osdk 也会把它们重定向到受控目录（npm 的 `npm_config_prefix` 指向 `data/global/npm`、pnpm 的 `PNPM_HOME` 指向 `data/global/pnpm`），并在**命令退出后自动对账**：新装的命令立即得到 shim、卸载的命令自动清理，不需要再手动 `osdk reshim`。
 
 ```bash
 npm i -g @anthropic-ai/claude-code
@@ -172,8 +172,7 @@ pnpm add -g cowsay
 ```
 
 统一的全局安装纳管（含 Yarn、Bun、Deno，以及 Go/Cargo 这类自包含原生工具）见
-[JavaScript 包管理器 → 全局安装自动纳管](./package-managers#全局安装自动纳管)；残留
-持久变量的处理也在该节说明。
+[JavaScript 包管理器 → 全局安装自动纳管](./package-managers#全局安装自动纳管)；其中区分存储保留、项目外运行时选择、native addon 重建、系统管理器与原生输出覆盖。
 
 ## 包名与版本语法
 

@@ -282,3 +282,7 @@ Command names are discovered from what is actually on disk rather than assuming
 the console script matches the project name, which frequently it does not.
 
 The `pypi:` tool backend above retains its existing anonymous mirror policy. Project exec/shim/deps additionally support explicit `registries.python.default` and `indexes`; additional indexes are not mirrors. See [package managers](./package-managers.md) for precedence and limitations.
+
+## Native pip, pipx and uv tool
+
+Bare pip installs remain tied to their interpreter/virtualenv. pipx and uv tool environments may also depend on a particular Python installation; they are not shared site-packages or automatically migrated on a Python switch. Keep the interpreter or recreate the native tool environment before removing it. See [native global-install boundaries](./package-managers#native-global-boundaries).

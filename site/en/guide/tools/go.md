@@ -168,20 +168,15 @@ installation identities.
 
 ## Direct `go install` is managed too
 
-Beyond using the `go:<module>` namespace to let osdk lock a tool, running the native
-`go install x@v` directly in an activated shell is also managed: osdk redirects
-`GOBIN` to `data/global/go/bin` and adds that directory to Go's PATH, so the compiled
-self-contained binaries are usable as soon as the command exits, with no shim or reshim
-needed:
+Managed `go install` uses `data/global/go/bin` through `GOBIN`. This directory is on PATH while the corresponding managed SDK is active. Run `osdk reshim` to publish these applications for use outside projects too; their shims do not require a selected Go compiler. SDK commands still obey toolchain selection.
 
 ```bash
 go install golang.org/x/tools/cmd/stringer@latest
+osdk reshim
 stringer -help
 ```
 
-Go's artifacts are self-contained native binaries (unlike npm/pnpm's launchers that need
-a host), so placing the directory on PATH is enough; this matches Cargo's `cargo install`
-landing in `CARGO_HOME/bin`, which is likewise already on PATH.
+This is separate from the receipt-based `go:` workflow. Native output overrides can place binaries outside osdk's scanned directories, and compiled applications may still need system libraries. See [global installation boundaries](./package-managers#native-global-boundaries).
 
 ## Lock and offline behavior
 

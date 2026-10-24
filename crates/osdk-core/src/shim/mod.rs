@@ -378,7 +378,7 @@ fn global_bin_dirs(ctx: &Ctx) -> Vec<(&'static str, std::path::PathBuf)> {
         ctx.dirs
             .yarn_global_folder()
             .join("node_modules")
-            .join("bin"),
+            .join(".bin"),
     ));
 
     // bun places global bins under BUN_INSTALL/bin.
@@ -386,6 +386,8 @@ fn global_bin_dirs(ctx: &Ctx) -> Vec<(&'static str, std::path::PathBuf)> {
 
     // deno places globally installed bins under DENO_INSTALL_ROOT/bin.
     dirs.push(("deno", ctx.dirs.deno_global_root().join("bin")));
+    dirs.push(("rust", ctx.dirs.cargo_home().join("bin")));
+    dirs.push(("go", ctx.dirs.go_global_bin()));
 
     dirs
 }
@@ -409,13 +411,65 @@ fn push_global_bin_source(
     if !bin_dir.is_dir() {
         return;
     }
-    let names = crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir));
+    let names: Vec<_> = crate::backend::bin_names_in_dirs(std::slice::from_ref(&bin_dir))
+        .into_iter()
+        .filter(|name| match owner {
+            "rust" => !crate::backend::rust::is_rustup_proxy(&bin_dir, name),
+            "go" => !matches!(name.as_str(), "go" | "gofmt"),
+            _ => true,
+        })
+        .collect();
     if !names.is_empty() {
         out.push(GlobalBinSource {
             owner,
             bin_dir,
             names,
         });
+    }
+}
+
+/// Recognize direct runtime shebangs without interpreting arbitrary wrappers.
+/// Native executables and Cargo/Go outputs need no compiler selection. Native
+/// wrappers (including absolute interpreter paths) remain native authority.
+pub fn native_global_runtime(launcher: &Path, owner: &str) -> Option<&'static str> {
+    use std::io::Read;
+    let mut header = [0u8; 256];
+    let len = std::fs::File::open(launcher).ok()?.read(&mut header).ok()?;
+    let header = &header[..len];
+    if header.starts_with(b"\x7fELF")
+        || header.starts_with(b"MZ")
+        || matches!(
+            header.get(..4),
+            Some(
+                [0xfe, 0xed, 0xfa, 0xce]
+                    | [0xce, 0xfa, 0xed, 0xfe]
+                    | [0xfe, 0xed, 0xfa, 0xcf]
+                    | [0xcf, 0xfa, 0xed, 0xfe]
+                    | [0xca, 0xfe, 0xba, 0xbe]
+            )
+        )
+    {
+        return None;
+    }
+    let first = std::str::from_utf8(
+        header
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    if let Some(shebang) = first.strip_prefix("#!") {
+        let words: Vec<_> = shebang.split_whitespace().collect();
+        for (word, host) in [("node", "node"), ("bun", "bun"), ("deno", "deno")] {
+            if words.first() == Some(&"/usr/bin/env") && words.get(1) == Some(&word) {
+                return Some(host);
+            }
+        }
+    }
+    match owner {
+        "npm" | "pnpm" | "yarn" => Some("node"),
+        "deno" => Some("deno"),
+        _ => None,
     }
 }
 

@@ -165,18 +165,15 @@ toolchain。选择非 crates.io index 时，stage 私有 Cargo 配置还会用 s
 
 ## 直接运行 `cargo install` 也受纳管
 
-除了用 `cargo:<crate>` 命名空间让 osdk 锁定工具，在激活的 shell 里直接运行原生
-`cargo install <crate>` 同样受控：`CARGO_HOME` 本就指向 osdk 数据目录，编译出的自包含
-二进制落入 `data/cargo/bin`，而该目录已在 Rust 的 PATH 中，命令退出后即可直接使用，
-不需要 shim 或 reshim：
+托管 `cargo install` 通过 `CARGO_HOME` 写入 `data/cargo/bin`。相应托管 SDK 激活时该目录在 PATH 中。运行 `osdk reshim` 可发布这些应用，供项目外使用；应用 shim 不要求选择 Rust 编译器。SDK 命令及 rustup proxy仍遵守工具链选择。
 
 ```bash
 cargo install ripgrep
+osdk reshim
 rg --version
 ```
 
-Cargo 的产物是自包含原生二进制，直接放 PATH 即可；这与 Go 的 `go install` 经
-`GOBIN` 重定向（见 [Go 工具](./go)）一致。
+这与带 receipt 的 `cargo:` 流程不同。原生输出覆盖可能把程序放到 osdk 扫描目录之外，编译后的应用也可能依赖系统库。详见[全局安装边界](./package-managers#native-global-boundaries)。
 
 ## 生命周期命令
 
