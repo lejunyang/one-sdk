@@ -258,9 +258,14 @@ pub fn catalog(root: &Path, config_path: &Path, config: &DepsConfig) -> Result<V
                 .collect();
             let refs: Vec<_> = declarations_without_disable.iter().collect();
             let all_entries = project_providers(&unfiltered, &refs)?;
-            (entries, disabled) =
-                crate::config::inheritance::local_deps(path, config_path, &all_entries, &disabled)?;
-            config_sources.extend(crate::config::inheritance::sources(path)?);
+            (entries, disabled) = crate::config::inheritance::local_deps(
+                path,
+                config_path,
+                &all_entries,
+                &disabled,
+                None,
+            )?;
+            config_sources.extend(crate::config::inheritance::sources(path, None)?);
         }
         config_sources.sort();
         config_sources.dedup();
@@ -531,7 +536,7 @@ mod tests {
         write(root, "package.json", r#"{"packageManager":"npm@11"}"#);
         write(root, "api/package.json", r#"{"packageManager":"npm@11"}"#);
         write(root, "api/osdk.toml", "extends='../osdk.toml'\n");
-        let config = crate::config::inheritance::deps_file(&root.join("osdk.toml")).unwrap();
+        let config = crate::config::inheritance::deps_file(&root.join("osdk.toml"), None).unwrap();
         let entries = catalog(root, &root.join("osdk.toml"), &config).unwrap();
         assert_eq!(entries.len(), 2);
         let root = root.canonicalize().unwrap();

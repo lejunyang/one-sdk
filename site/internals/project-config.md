@@ -42,8 +42,10 @@ cwd 逐祖先查找时，候选同时包括本地 `osdk.toml` 和已绑定的外
 
 一旦选定来源，**`osdk.toml` 与 `osdk.lock` 永远成套使用**：
 
-- 本地缺锁不借外置锁，外置缺锁就在外置目录内生成。两种 lock 混合会得到
-  一份「配置来自 A、解析结果来自 B」的环境，比缺锁更难排查；
+- 绑定出生即自带最小合法锁（`add` 原子写入 `osdk.lock`，内容为
+  `schema = 3`）；日后锁若缺失（如人为删除），按当前选中来源在同目录内
+  重建，绝不跨来源借用另一份锁。两种 lock 混合会得到一份「配置来自 A、
+  解析结果来自 B」的环境，比缺锁更难排查；
 - 选中的配置或锁损坏时直接报错，不回退到另一份来源——静默回退会让用户
   以为外置配置生效了；
 - 被 shadowed 的外置配置正文不读。最危险的静默分叉是「本地文件存在但
@@ -82,7 +84,7 @@ lock——配置本来就不在项目里。但 `osdk run`、`osdk deps` 仍然�
 | 绑定目录里已存在本地 `osdk.toml` | 允许绑定；本地文件胜出，外置被 shadowed，stderr 警告 |
 | 重复 `add` 同一目录 | 不覆盖已有绑定 |
 | 选中配置/锁损坏 | 直接报错，不回退来源 |
-| 绑定的项目根在磁盘上已不存在（missing） | `show` 的 `missing`、`list --json` 的 `root_exists`/`config_exists` 暴露它；纯文本 `list` 只列路径，不显示状态；`relocate` 保留配置与锁；不自动删除 |
+| 绑定的项目根在磁盘上已不存在（missing） | 纯文本 `list` 的 `status` 与 `show` 的 WARNING 行直接暴露（`project root missing` / `config missing`），`--json` 另给 `root_exists` / `config_exists` / `missing`；`relocate` 保留配置与锁；不自动删除 |
 | `remove` | 只删外置绑定目录；项目文件与共享安装池不碰；`--dry-run` 预览 |
 
 ## 明确不做

@@ -41,13 +41,13 @@ osdk project remove ~/tmp/old-checkout
 
 ## 外置配置存放位置
 
-每个绑定在配置目录下占一个子目录：
+每个绑定在配置目录下占一个子目录。`add` 成功时（非 dry-run）立即生成最小合法的三件套：
 
 ```text
 <OSDK_CONFIG_DIR>/projects/<root-id>/
-  project.toml    # schema = 1；root 记录真实项目根的绝对路径
-  osdk.toml       # 外置项目的工具与任务声明
-  osdk.lock       # 外置项目的锁文件
+  project.toml    # 锚点文件；root 记录真实项目根的绝对路径
+  osdk.toml       # 外置项目的工具与任务声明（初始为占位注释，直接编辑即可）
+  osdk.lock       # 外置项目的锁文件（初始为最小合法内容 schema = 3）
 ```
 
 - `root-id` 由真实项目根路径经 OS canonicalize 解析后的完整 BLAKE3 决定：
@@ -73,8 +73,8 @@ osdk project remove ~/tmp/old-checkout
 一次命令只选定**一份**生效来源：外置项目的 `osdk.toml` 与 `osdk.lock` 永远
 成套使用，本地项目同理。
 
-- 本地项目缺锁时，不会去借外置项目的锁；外置项目缺锁时，会在该外置目录内
-  生成自己的锁；
+- 配置目录里的锁缺失（例如被人为删除）时，按当前选中的来源在同一份目录内
+  重新生成，绝不会跨来源借用另一份的锁；
 - 选中的配置或锁损坏时直接报错，不会静默回退到另一份来源；
 - 被本地文件遮蔽（shadowed）的外置配置，正文不会被读取；
 - 当存在多份候选时，osdk 在 stderr 警告里说清本次实际采用了哪份配置与锁、
@@ -117,14 +117,17 @@ osdk project remove PATH          # 不再需要这个外置绑定
 
 ## show 与 list 能看到什么
 
-- `show [PATH]`（PATH 默认当前目录）显示该目录命中的项目来源
-  （`local` 或 `external`）、配置与锁的实际路径、绑定目录、是否被本地配置
-  遮蔽（`shadowed_local_config`）以及绑定是否缺失（`missing`）。`--json`
-  输出 `root`、`source`、`config_path`、`lock_path`、`binding_dir`、
-  `shadowed_local_config`、`missing`。
-- `list` 没有位置参数。纯文本输出逐行打印每个绑定的项目根，其下缩进两行
-  `config:` 与 `lock:` 指向配置与锁文件；完整状态（`root_exists`、
-  `config_exists`、`shadowed_by_local` 等）需要加 `--json` 以数组形式输出。
+- `show [PATH]`（PATH 默认当前目录）打印 `project root`、`selected` 来源
+  （`local` / `external binding` / `none`）、生效的 `config:` 与 `lock:`
+  路径、绑定目录，以及状态行：`WARNING recorded root no longer exists`、
+  `WARNING binding config missing`、`shadowed by a local osdk.toml/.osdk.toml`。
+  `--json` 输出 `root`、`source`（`local` / `external` / `none`）、
+  `config_path`、`lock_path`、`binding_dir`、`shadowed_local_config`、`missing`。
+- `list` 没有位置参数。纯文本输出每个绑定一块：项目根一行，其下缩进
+  `source: external binding`、`status:`（`active`，或 `project root missing`、
+  `config missing`、`shadowed by local osdk.toml` 的组合），以及 `config:`、
+  `lock:` 路径。`--json` 输出数组，含 `root`、`binding_dir`、`config_path`、
+  `lock_path`、`root_exists`、`config_exists`、`shadowed_by_local`。
 
 ## 明确不做的事
 

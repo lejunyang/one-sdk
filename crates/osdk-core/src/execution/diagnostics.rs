@@ -181,7 +181,13 @@ pub fn inspect(ctx: &Ctx, backend: &dyn Backend, cwd: &Path, probe: bool) -> Rep
             } else if source == Osdk {
                 if let Some(path) = &ctx.config.project_config_path {
                     // Already validated during config loading; surface any unexpected error.
-                    match crate::config::inheritance::sources(path) {
+                    let rel_base = ctx
+                        .config
+                        .project
+                        .as_ref()
+                        .filter(|p| p.is_external())
+                        .map(|p| p.root.as_path());
+                    match crate::config::inheritance::sources(path, rel_base) {
                         Ok(paths) => locations.extend(paths),
                         Err(_) => report.inventory_complete = false,
                     }

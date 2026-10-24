@@ -292,7 +292,27 @@ pub fn shadowed_warnings_env_value() -> String {
 }
 
 fn report_shadowed(binding: &Binding, local_config: &Path) {
-    let key = binding.dir.to_string_lossy().into_owned();
+    // Fingerprint over paths + cheap metadata (no parsing the shadowed body):
+    // a changed local config or a rewritten bundle manifest must re-report.
+    fn meta(path: &Path) -> String {
+        std::fs::metadata(path)
+            .map(|m| {
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos().to_string())
+                    .unwrap_or_default();
+                format!("{mtime}:{}", m.len())
+            })
+            .unwrap_or_default()
+    }
+    let key = format!(
+        "{}|local={}|bundle={}",
+        binding.dir.display(),
+        meta(local_config),
+        meta(&binding.manifest_path),
+    );
     {
         let mut keys = shadowed_keys().lock().unwrap();
         if keys.contains(&key) {
@@ -389,7 +409,11 @@ mod tests {
         let (_t, dirs) = test_dirs();
         let root = tempfile::tempdir().unwrap();
         // A local config two levels up...
-        std::fs::write(root.path().join("osdk.toml"), "[tools]\npython = \"3.12\"\n").unwrap();
+        std::fs::write(
+            root.path().join("osdk.toml"),
+            "[tools]\npython = \"3.12\"\n",
+        )
+        .unwrap();
         let child = root.path().join("apps").join("svc");
         std::fs::create_dir_all(&child).unwrap();
         // ...and an external bound one level closer.
@@ -409,6 +433,25 @@ mod tests {
         assert_eq!(ctx.source, ProjectSource::Local);
         // Second discovery in the same process must not re-warn.
         discover(project.path(), &dirs.config).unwrap().unwrap();
+    }
+
+    #[test]
+    fn shadow_warning_refires_when_conflict_metadata_changes() {
+        let (_t, dirs) = test_dirs();
+        let project = tempfile::tempdir().unwrap();
+        write_binding(&dirs, project.path());
+        let local = project.path().join("osdk.toml");
+        std::fs::write(&local, "[tools]\nnode = \"21\"\n").unwrap();
+        discover(project.path(), &dirs.config).unwrap().unwrap();
+        let before = shadowed_warnings_env_value();
+        // Identical conflict state: no new fingerprint, no re-report.
+        discover(project.path(), &dirs.config).unwrap().unwrap();
+        assert_eq!(before, shadowed_warnings_env_value());
+        // The local config was replaced: a changed mtime/size must re-report.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&local, "[tools]\nnode = \"222\"\n").unwrap();
+        discover(project.path(), &dirs.config).unwrap().unwrap();
+        assert_ne!(before, shadowed_warnings_env_value());
     }
 
     #[test]

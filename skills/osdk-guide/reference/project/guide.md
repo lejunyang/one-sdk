@@ -6,9 +6,9 @@
 
 | 子命令 | 参数 | 语义 |
 | --- | --- | --- |
-| `add [PATH]` | `--dry-run`、`--json` | 绑定给定目录（默认 cwd）；经 OS canonicalize 计入真实路径；不猜 Git 根、不安装、不改目录；重复 add 不覆盖；目录已有本地配置时允许绑定但运行时本地胜出（stderr shadowed 警告） |
-| `show [PATH]` | `--json`（仅） | 显示该目录命中的来源（`local`/`external`）、`config_path`、`lock_path`、`binding_dir`、`shadowed_local_config`、`missing` |
-| `list` | `--json`（数组） | 无位置参。纯文本逐行打印根目录、缩进 `config:`/`lock:`；状态字段 `root_exists`、`config_exists`、`shadowed_by_local` 仅 JSON 可见 |
+| `add [PATH]` | `--dry-run`、`--json` | 绑定给定目录（默认 cwd）；经 OS canonicalize 计入真实路径；不猜 Git 根、不安装、不改目录；成功即原子生成最小合法三件套 `project.toml`/`osdk.toml`/`osdk.lock`（内容 `schema = 3`）；重复 add 不覆盖；目录已有本地配置时允许绑定但运行时本地胜出（stderr shadowed 警告） |
+| `show [PATH]` | `--json`（仅） | 文本打印 `selected: local / external binding / none`、生效 `config:`/`lock:`、绑定目录与 WARNING 状态行；`--json` 输出 `root`、`source`、`config_path`、`lock_path`、`binding_dir`、`shadowed_local_config`、`missing` |
+| `list` | `--json`（数组） | 无位置参。纯文本每块打印根目录、`source: external binding`、`status: active`（或 `project root missing`; `config missing`; `shadowed by local osdk.toml`）、`config:`/`lock:` 路径；`--json` 另给 `root`、`binding_dir`、`root_exists`、`config_exists`、`shadowed_by_local` |
 | `relocate OLD NEW` | `--dry-run`、`--json` | OLD 与 NEW 必填；外置 `osdk.toml` 与 `osdk.lock` 保留；旧根 missing 不自动删 |
 | `remove PATH` | `--dry-run`、`--json` | PATH 必填；只删外置绑定目录；不删项目文件、不删共享安装池工具 |
 

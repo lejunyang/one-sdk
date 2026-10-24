@@ -1,4 +1,4 @@
-//! Layered configuration.
+﻿//! Layered configuration.
 //!
 //! Precedence (highest wins): CLI flags → env (`OSDK_*`) → project config
 //! (`osdk.toml`, discovered by walking up) → user global config
@@ -2157,7 +2157,7 @@ impl Config {
             // errors to the file that caused them, which matters most here -- a parse
             // error blamed on the monorepo root would send the reader to the wrong
             // file entirely.
-            let mut file = read_config_file(&path)?;
+            let mut file = read_config_file(&path, None)?;
 
             // A sub-project contributes task *definitions* and nothing else.
             //
@@ -2177,7 +2177,7 @@ impl Config {
             // Rejected rather than ignored. A silently ineffective setting is worse
             // than an error: the user wrote it, sees no complaint, and concludes it
             // took effect.
-            let inherited = inheritance::sources(&path)?.len() > 1;
+            let inherited = inheritance::sources(&path, None)?.len() > 1;
             if file.task.is_some() && !inherited {
                 return Err(Error::config(format!(
                     "{}: a sub-project cannot declare `[task]`; runner defaults \
@@ -2453,8 +2453,8 @@ fn truthy(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
-fn read_config_file(path: &Path) -> Result<ConfigFile> {
-    let value = inheritance::load(path)?;
+fn read_config_file(path: &Path, rel_base: Option<&Path>) -> Result<ConfigFile> {
+    let value = inheritance::load(path, rel_base)?;
     let mut file: ConfigFile = value.try_into().map_err(sanitize_config_parse_error)?;
     file.normalize_legacy_layout()?;
     if let Some(registries) = &mut file.registries {
@@ -2468,7 +2468,7 @@ fn read_config_file(path: &Path) -> Result<ConfigFile> {
 
 #[cfg(feature = "install")]
 pub fn dependency_tool_versions(path: &Path) -> Result<BTreeMap<String, String>> {
-    let file = read_config_file(path)?;
+    let file = read_config_file(path, None)?;
     let mut config = Config::default();
     config.apply_tool_configs(&file.tools)?;
     Ok(config.tools)
@@ -2591,7 +2591,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
 
     if user_config_file.exists() {
         cfg.global_config_path = Some(user_config_file.to_path_buf());
-        let file = read_config_file(user_config_file)?;
+        let file = read_config_file(user_config_file, None)?;
         cfg.global_tool_configs = file.tools.clone();
         cfg.global_tools = file
             .tools
@@ -2628,8 +2628,9 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
         };
         if let Some(ctx) = discovered {
             let path = ctx.config_path.clone();
-            let file = read_config_file(&path)?;
-            let sources = inheritance::sources(&path)?;
+            let rel_base = ctx.is_external().then(|| ctx.root.clone());
+            let file = read_config_file(&path, rel_base.as_deref())?;
+            let sources = inheritance::sources(&path, rel_base.as_deref())?;
             let canonical_leaf = path
                 .canonicalize()
                 .map_err(|error| Error::io(&path, error))?;
@@ -2654,7 +2655,7 @@ fn load_layers_internal(user_config_file: &Path, start_dir: Option<&Path>) -> Re
             // Inheritance has already merged ancestors; [] resets custom order.
             let mut precedence = toml::Value::try_from(&cfg.settings.precedence)
                 .map_err(|_| Error::config("cannot serialize precedence"))?;
-            if let Some(overlay) = inheritance::load(&path)?
+            if let Some(overlay) = inheritance::load(&path, rel_base.as_deref())?
                 .get("settings")
                 .and_then(|s| s.get("precedence"))
             {
@@ -2802,7 +2803,7 @@ fn find_project_config(start_dir: &Path) -> Result<Option<(PathBuf, ConfigFile)>
         for name in PROJECT_CONFIG_NAMES {
             let candidate = dir.join(name);
             if candidate.is_file() {
-                let file = read_config_file(&candidate)?;
+                let file = read_config_file(&candidate, None)?;
                 return Ok(Some((candidate, file)));
             }
         }
@@ -2898,8 +2899,8 @@ dir = "workspace"
         )
         .unwrap();
 
-        let canonical = read_config_file(&canonical).unwrap();
-        let legacy = read_config_file(&legacy).unwrap();
+        let canonical = read_config_file(&canonical, None).unwrap();
+        let legacy = read_config_file(&legacy, None).unwrap();
         for file in [canonical, legacy] {
             assert_eq!(
                 file.alias.unwrap().tools["node"]["work"],
@@ -2930,7 +2931,7 @@ dir = "workspace"
             let temporary = tempfile::tempdir().unwrap();
             let path = temporary.path().join("osdk.toml");
             std::fs::write(&path, contents).unwrap();
-            let error = read_config_file(&path).unwrap_err().to_string();
+            let error = read_config_file(&path, None).unwrap_err().to_string();
             assert!(error.contains(canonical), "{contents}: {error}");
             assert!(error.contains(legacy), "{contents}: {error}");
         }
@@ -2942,7 +2943,7 @@ dir = "workspace"
         let path = temporary.path().join("osdk.toml");
         std::fs::write(&path, "[alias.shell]\nll = \"ls -la\"\n").unwrap();
 
-        let error = read_config_file(&path).unwrap_err().to_string();
+        let error = read_config_file(&path, None).unwrap_err().to_string();
         assert!(error.contains("unknown field `shell`"), "{error}");
     }
 

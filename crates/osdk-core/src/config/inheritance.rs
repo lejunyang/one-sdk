@@ -2,12 +2,21 @@
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 
-pub fn sources(path: &Path) -> Result<Vec<PathBuf>> {
+/// Resolve the `extends` chain for `path`.
+///
+/// `rel_base` is the directory relative paths inside the leaf config are
+/// written against. For a checked-in config it is `None` (the file's own
+/// directory); for an external project binding the config file lives outside
+/// the project tree, so it is the recorded real project root.
+pub fn sources(path: &Path, rel_base: Option<&Path>) -> Result<Vec<PathBuf>> {
     let mut chain = Vec::new();
     let mut next = path.canonicalize().map_err(|e| Error::io(path, e))?;
-    let boundary = next
-        .parent()
-        .and_then(|dir| dir.ancestors().find(|dir| dir.join(".git").exists()))
+    // The repository boundary is anchored at the logical project root, not at
+    // the physical config file.
+    let boundary_from = rel_base.unwrap_or_else(|| next.parent().unwrap_or(&next));
+    let boundary = boundary_from
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf);
     loop {
         let canonical = next.canonicalize().map_err(|e| Error::io(&next, e))?;
@@ -28,14 +37,17 @@ pub fn sources(path: &Path) -> Result<Vec<PathBuf>> {
         let extends = extends
             .as_str()
             .ok_or_else(|| Error::config("extends must name one ancestor config file"))?;
-        let target = canonical.parent().unwrap().join(extends.replace('\\', "/"));
+        // Relative extends resolve against the logical base, not the physical
+        // file location.
+        let base = if chain.len() == 1 {
+            rel_base.unwrap_or_else(|| canonical.parent().unwrap())
+        } else {
+            canonical.parent().unwrap()
+        };
+        let target = base.join(extends.replace('\\', "/"));
         let target = target.canonicalize().map_err(|e| Error::io(&target, e))?;
         if target != canonical
-            && (!canonical
-                .parent()
-                .unwrap()
-                .starts_with(target.parent().unwrap())
-                || target.parent() == canonical.parent())
+            && (!base.starts_with(target.parent().unwrap()) || target.parent() == Some(base))
         {
             return Err(Error::config(
                 "extends must refer to a config in a strict ancestor directory",
@@ -60,15 +72,16 @@ pub fn raw(path: &Path) -> Result<toml::Value> {
     toml::from_str(&text)
         .map_err(|e: toml::de::Error| Error::config(format!("{}: {}", path.display(), e.message())))
 }
-pub fn load(path: &Path) -> Result<toml::Value> {
+pub fn load(path: &Path, rel_base: Option<&Path>) -> Result<toml::Value> {
     let direct = raw(path)?;
     if direct.get("extends").is_none() {
         return Ok(direct);
     }
-    let chain = sources(path)?;
+    let chain = sources(path, rel_base)?;
     let inherited = chain.len() > 1;
     let mut value = toml::Value::Table(Default::default());
     let anchor = chain[0].parent().unwrap().to_path_buf();
+    let leaf = chain[chain.len() - 1].clone();
     for source in chain {
         let mut layer = raw(&source)?;
         layer.as_table_mut().unwrap().remove("extends");
@@ -84,7 +97,16 @@ pub fn load(path: &Path) -> Result<toml::Value> {
                     }
                 }
             }
-            rebase(&mut layer, source.parent().unwrap());
+            // The leaf layer's relative paths are written against the logical
+            // base (real project root), not the bundle's physical directory.
+            let layer_base = if source == leaf {
+                rel_base
+                    .map(|b| b.to_path_buf())
+                    .unwrap_or_else(|| source.parent().unwrap().to_path_buf())
+            } else {
+                source.parent().unwrap().to_path_buf()
+            };
+            rebase(&mut layer, &layer_base);
             if let Some(roots) = layer
                 .get_mut("task")
                 .and_then(|task| task.get_mut("roots"))
@@ -234,8 +256,8 @@ pub fn rebase(value: &mut toml::Value, base: &Path) {
         }
     }
 }
-pub fn deps_anchor(path: &Path) -> Result<PathBuf> {
-    let chain = sources(path)?;
+pub fn deps_anchor(path: &Path, rel_base: Option<&Path>) -> Result<PathBuf> {
+    let chain = sources(path, rel_base)?;
     for source in &chain {
         if raw(source)?.get("deps").is_some() {
             return Ok(source.clone());
@@ -245,8 +267,8 @@ pub fn deps_anchor(path: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(feature = "install")]
-pub fn deps_file(path: &Path) -> Result<super::DepsConfig> {
-    match load(path)?.get("deps") {
+pub fn deps_file(path: &Path, rel_base: Option<&Path>) -> Result<super::DepsConfig> {
+    match load(path, rel_base)?.get("deps") {
         Some(value) => value.clone().try_into().map_err(|e: toml::de::Error| {
             Error::config(format!("{}: {}", path.display(), e.message()))
         }),
@@ -260,11 +282,12 @@ pub fn local_deps(
     anchor: &Path,
     defaults: &std::collections::BTreeMap<String, super::DepsProviderEntry>,
     default_disable: &[String],
+    rel_base: Option<&Path>,
 ) -> Result<(
     std::collections::BTreeMap<String, super::DepsProviderEntry>,
     Vec<String>,
 )> {
-    let chain = sources(path)?;
+    let chain = sources(path, rel_base)?;
     let inherits = chain.iter().any(|source| source == anchor);
     let mut value = if inherits {
         toml::Value::try_from(defaults).map_err(|e| Error::config(e.to_string()))?
@@ -285,7 +308,14 @@ pub fn local_deps(
     };
     for source in chain.iter().filter(|source| source.as_path() != anchor) {
         let mut layer = raw(source)?;
-        rebase(&mut layer, source.parent().unwrap());
+        let layer_base = if source == chain.last().unwrap() {
+            rel_base
+                .map(|b| b.to_path_buf())
+                .unwrap_or_else(|| source.parent().unwrap().to_path_buf())
+        } else {
+            source.parent().unwrap().to_path_buf()
+        };
+        rebase(&mut layer, &layer_base);
         if let Some(deps) = layer.get("deps").and_then(toml::Value::as_table) {
             if deps.contains_key("roots") || deps.contains_key("projects") {
                 return Err(Error::config("a discovered child config must keep dependency discovery roots/projects in the catalog root"));
@@ -362,12 +392,13 @@ mod tests {
         )
         .unwrap();
         let anchor = root.join("osdk.toml").canonicalize().unwrap();
-        let defaults = deps_file(&anchor).unwrap().providers;
+        let defaults = deps_file(&anchor, None).unwrap().providers;
         let (entries, disabled) = local_deps(
             &root.join("child/osdk.toml"),
             &anchor,
             &defaults,
             &["npm".into()],
+            None,
         )
         .unwrap();
         assert!(disabled.is_empty());
@@ -386,7 +417,7 @@ mod tests {
             "extends='../osdk.toml'\n[deps.uv]\nauto=false\noutputs=[]\nenv={B='2'}",
         )
         .unwrap();
-        let value = load(&child.join("osdk.toml")).unwrap();
+        let value = load(&child.join("osdk.toml"), None).unwrap();
         assert_eq!(value["deps"]["uv"]["auto"].as_bool(), Some(false));
         assert!(value["deps"]["uv"]["outputs"]
             .as_array()
@@ -405,13 +436,13 @@ mod tests {
             )
         );
         std::fs::write(child.join("osdk.toml"), "extends='osdk.toml'").unwrap();
-        assert!(load(&child.join("osdk.toml"))
+        assert!(load(&child.join("osdk.toml"), None)
             .unwrap_err()
             .to_string()
             .contains("cycle"));
         std::fs::write(child.join("osdk.toml"), "extends='../other/osdk.toml'").unwrap();
         std::fs::create_dir(root.join("other")).unwrap();
         std::fs::write(root.join("other/osdk.toml"), "").unwrap();
-        assert!(load(&child.join("osdk.toml")).is_err());
+        assert!(load(&child.join("osdk.toml"), None).is_err());
     }
 }

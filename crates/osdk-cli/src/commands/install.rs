@@ -1184,9 +1184,9 @@ pub(crate) fn requests_from_lock(app: &App) -> Result<Option<Vec<ToolRequest>>> 
 /// ancestor walk.
 pub(crate) fn existing_lock_path(app: &App, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     if let Some(ctx) = &app.ctx.config.project {
-        if ctx.is_external() {
-            return ctx.lock_path.is_file().then(|| ctx.lock_path.clone());
-        }
+        // A selected project owns its lock at its own root/bundle -- never a
+        // ancestor-walked lock that belongs to a different project.
+        return ctx.lock_path.is_file().then(|| ctx.lock_path.clone());
     }
     crate::lockfile::find(cwd)
 }

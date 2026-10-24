@@ -21,7 +21,7 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     let add = isolated(root)
         .arg("project")
         .arg("add")
-        .arg(&project)
+        .arg(project.as_path())
         .current_dir(root)
         .output()
         .unwrap();
@@ -30,7 +30,7 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     let show = isolated(root)
         .arg("project")
         .arg("show")
-        .arg(&project)
+        .arg(project.as_path())
         .arg("--json")
         .current_dir(root)
         .output()
@@ -54,8 +54,8 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     assert_eq!(items[0]["root"], project.to_str().unwrap());
 
     // The bundle owns its own osdk.lock; nothing landed in the project tree.
-    assert!(project.join("osdk.toml").exists() == false);
-    assert!(project.join("osdk.lock").exists() == false);
+    assert!(!project.join("osdk.toml").exists());
+    assert!(!project.join("osdk.lock").exists());
     let bundle = std::fs::read_dir(root.join("config").join("projects"))
         .unwrap()
         .filter_map(|e| e.ok())
@@ -70,7 +70,7 @@ fn add_show_list_remove_roundtrip_with_spaces_and_unicode() {
     let removed = isolated(root)
         .arg("project")
         .arg("remove")
-        .arg(&project)
+        .arg(project.as_path())
         .current_dir(root)
         .output()
         .unwrap();
@@ -92,14 +92,15 @@ fn removed_project_root_is_reported_missing_but_does_not_break_other_cwds() {
     let root = temp.path();
     let project = root.join("bound-project");
     std::fs::create_dir_all(&project).unwrap();
-    isolated(root)
+    let status = isolated(root)
         .arg("project")
         .arg("add")
-        .arg(&project)
+        .arg(project.as_path())
         .current_dir(root)
         .output()
         .unwrap()
         .status;
+    assert!(status.success());
 
     // The project tree disappears; the binding becomes "missing".
     std::fs::remove_dir_all(&project).unwrap();
@@ -134,19 +135,20 @@ fn remove_is_dry_run_first_class() {
     let root = temp.path();
     let project = root.join("svc");
     std::fs::create_dir_all(&project).unwrap();
-    isolated(root)
+    let status = isolated(root)
         .arg("project")
         .arg("add")
-        .arg(&project)
+        .arg(project.as_path())
         .current_dir(root)
         .output()
         .unwrap()
         .status;
+    assert!(status.success());
 
     let dry = isolated(root)
         .arg("project")
         .arg("remove")
-        .arg(&project)
+        .arg(project.as_path())
         .arg("--dry-run")
         .current_dir(root)
         .output()
@@ -172,7 +174,7 @@ fn broken_binding_is_reported_not_silently_ignored() {
     let added = isolated(root)
         .arg("project")
         .arg("add")
-        .arg(&project)
+        .arg(project.as_path())
         .current_dir(root)
         .output()
         .unwrap();
@@ -190,7 +192,7 @@ fn broken_binding_is_reported_not_silently_ignored() {
     let show = isolated(root)
         .arg("project")
         .arg("show")
-        .arg(&project)
+        .arg(project.as_path())
         .current_dir(root)
         .output()
         .unwrap();

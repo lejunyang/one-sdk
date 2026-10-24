@@ -1101,6 +1101,10 @@ fn link_mode(app: &App, copy: bool) -> LinkMode {
 fn scope_root(app: &App, global: bool) -> Result<PathBuf> {
     if global {
         home_dir()
+    } else if let Some(project) = &app.ctx.config.project {
+        // Project root: the real project tree an external binding records, so
+        // agent-visible output lands in the repo -- never in the bundle dir.
+        Ok(project.root.clone())
     } else {
         // Project root: the directory holding the nearest config, else cwd.
         Ok(app

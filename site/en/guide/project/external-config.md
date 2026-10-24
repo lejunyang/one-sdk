@@ -48,13 +48,14 @@ osdk project remove ~/tmp/old-checkout
 
 ## Where external configuration lives
 
-Every binding occupies one subdirectory under the config directory:
+Every binding occupies one subdirectory under the config directory. A successful
+`add` (not `--dry-run`) immediately generates the minimal legal bundle:
 
 ```text
 <OSDK_CONFIG_DIR>/projects/<root-id>/
-  project.toml    # schema = 1; root records the project root's real absolute path
-  osdk.toml       # the external project's tool and task declarations
-  osdk.lock       # the external project's lockfile
+  project.toml    # anchor file; root records the project root's real absolute path
+  osdk.toml       # external project tool/task declarations (placeholder comment to start; edit it)
+  osdk.lock       # the external project's lockfile (starts at minimal legal content schema = 3)
 ```
 
 - `root-id` is the full BLAKE3 of the real project-root path after OS
@@ -85,8 +86,9 @@ Each command resolves exactly **one** effective source: an external project's
 `osdk.toml` and `osdk.lock` always travel together, and likewise for a local
 project.
 
-- A local project without a lock never borrows the external one; an external
-  project without a lock generates its own inside the external directory.
+- If a lock goes missing (e.g. deleted by hand), it is regenerated from the
+  currently selected source inside that same directory — never borrowed from
+  another source.
 - A corrupted selected configuration or lock fails explicitly, instead of
   silently falling back to another source.
 - The body of an external configuration that a local file shadows is never
@@ -140,16 +142,19 @@ osdk project remove PATH           # no longer need this external binding
 
 ## What show and list report
 
-- `show [PATH]` (PATH defaults to cwd) reports the effective source (`local` or
-  `external`), the real paths of configuration and lock, the binding directory,
-  whether a local configuration shadows it (`shadowed_local_config`), and
-  whether the binding is missing (`missing`). `--json` emits `root`, `source`,
-  `config_path`, `lock_path`, `binding_dir`, `shadowed_local_config`, and
-  `missing`.
-- `list` takes no positional argument. Plain-text output prints each binding's
-  project root per line, with two indented `config:` and `lock:` lines pointing
-  at the files; the full status fields (`root_exists`, `config_exists`,
-  `shadowed_by_local`, etc.) require `--json` as an array.
+- `show [PATH]` (PATH defaults to cwd) prints `project root`, the `selected`
+  source (`local` / `external binding` / `none`), the effective `config:` and
+  `lock:` paths, the binding directory, and status lines:
+  `WARNING recorded root no longer exists`, `WARNING binding config missing`,
+  `shadowed by a local osdk.toml/.osdk.toml`. `--json` emits `root`, `source`
+  (`local` / `external` / `none`), `config_path`, `lock_path`, `binding_dir`,
+  `shadowed_local_config`, and `missing`.
+- `list` takes no positional argument. Plain-text output prints one block per
+  binding: the project root, then indented `source: external binding`, `status:`
+  (`active`, or a combination of `project root missing`, `config missing`,
+  `shadowed by local osdk.toml`), plus the `config:` and `lock:` paths.
+  `--json` emits an array with `root`, `binding_dir`, `config_path`,
+  `lock_path`, `root_exists`, `config_exists`, and `shadowed_by_local`.
 
 ## Explicitly out of scope
 

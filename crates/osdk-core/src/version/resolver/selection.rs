@@ -93,7 +93,15 @@ fn collect(
     // Preserve overridden osdk layers as evidence, without treating intentional
     // extends/user overrides as simultaneous constraints.
     if let Some(leaf) = &config.project_config_path {
-        for path in crate::config::inheritance::sources(leaf)?.into_iter().rev() {
+        let rel_base = config
+            .project
+            .as_ref()
+            .filter(|p| p.is_external())
+            .map(|p| p.root.as_path());
+        for path in crate::config::inheritance::sources(leaf, rel_base)?
+            .into_iter()
+            .rev()
+        {
             if let Some(value) = crate::config::inheritance::raw(&path)?
                 .get("tools")
                 .and_then(|v| v.get(tool))

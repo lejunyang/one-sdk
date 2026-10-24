@@ -655,8 +655,14 @@ fn ensure_project_config_trusted(dirs: &Dirs, cwd: &std::path::Path) -> Result<(
     else {
         return Ok(());
     };
+    let rel_base = osdk_core::project::discover(cwd, &dirs.config)
+        .ok()
+        .flatten()
+        .filter(|ctx| ctx.is_external())
+        .map(|ctx| ctx.root);
     for project_config in
-        osdk_core::config::inheritance::sources(&project_config).map_err(|e| e.to_string())?
+        osdk_core::config::inheritance::sources(&project_config, rel_base.as_deref())
+            .map_err(|e| e.to_string())?
     {
         let requirements: Vec<_> =
             osdk_core::trust::trust_requirements(&project_config, &osdk_core::trust::Scope::ALL)

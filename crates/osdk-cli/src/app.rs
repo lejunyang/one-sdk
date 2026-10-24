@@ -237,7 +237,14 @@ impl App {
         let Some(project_config) = self.ctx.config.project_config_path.as_ref() else {
             return Ok(());
         };
-        for source in osdk_core::config::inheritance::sources(project_config)? {
+        let rel_base = self
+            .ctx
+            .config
+            .project
+            .as_ref()
+            .filter(|p| p.is_external())
+            .map(|p| p.root.as_path());
+        for source in osdk_core::config::inheritance::sources(project_config, rel_base)? {
             self.ensure_config_trusted(&source, scopes)?;
         }
         Ok(())
@@ -322,7 +329,12 @@ impl App {
         let cwd = std::env::current_dir().context("getting current dir")?;
         if let ProjectAccess::Gated(scopes) = access {
             if let Some(project_config) = osdk_core::trust::project_config(&cwd)? {
-                for project_config in osdk_core::config::inheritance::sources(&project_config)? {
+                let rel_base = osdk_core::project::discover(&cwd, &dirs.config)?
+                    .filter(|ctx| ctx.is_external())
+                    .map(|ctx| ctx.root);
+                for project_config in
+                    osdk_core::config::inheritance::sources(&project_config, rel_base.as_deref())?
+                {
                     let trusted_paths = std::env::var_os("OSDK_TRUSTED_CONFIG_PATHS");
                     let requirements =
                         osdk_core::trust::trust_requirements(&project_config, scopes)?;
@@ -396,11 +408,23 @@ impl App {
         if let ProjectAccess::Gated(scopes) = access {
             if scopes.contains(&osdk_core::trust::Scope::Run) {
                 if let Some(path) = &app.ctx.config.project_config_path {
-                    let anchor = osdk_core::config::inheritance::sources(path)?
+                    let rel_base = app
+                        .ctx
+                        .config
+                        .project
+                        .as_ref()
+                        .filter(|p| p.is_external())
+                        .map(|p| p.root.as_path());
+                    let anchor = osdk_core::config::inheritance::sources(path, rel_base)?
                         .into_iter()
                         .next()
                         .unwrap();
-                    let base = anchor.parent().unwrap();
+                    let base = app
+                        .ctx
+                        .config
+                        .project_root
+                        .as_deref()
+                        .unwrap_or_else(|| anchor.parent().unwrap());
                     for expanded in osdk_core::deps::expand_roots(
                         base,
                         &app.ctx.config.tasks.config.roots,
@@ -411,7 +435,7 @@ impl App {
                             .map(|name| expanded.directory.join(name))
                             .find(|path| path.is_file())
                         {
-                            for source in osdk_core::config::inheritance::sources(&path)? {
+                            for source in osdk_core::config::inheritance::sources(&path, None)? {
                                 app.ensure_config_trusted(&source, scopes)?;
                             }
                         }
