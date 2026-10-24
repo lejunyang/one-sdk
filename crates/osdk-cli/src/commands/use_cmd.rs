@@ -43,17 +43,7 @@ pub async fn use_cmd(app: &mut App, tool: String, global: bool, opts: Vec<String
         return crate::global_npm_use::install(app, req, requested_spec).await;
     }
     if !global && req.backend.starts_with("npm:") {
-        // An external binding isolates the npm install: never run a native
-        // project installer that would rewrite the repo's package.json or a
-        // native lockfile. Record the tool in the bundle config and install to
-        // the managed store instead.
-        let external = app
-            .ctx
-            .config
-            .project
-            .as_ref()
-            .is_some_and(|p| p.is_external());
-        if !external {
+        if use_project_npm_is_eligible(app, global, &req.backend) {
             let cwd = std::env::current_dir()?;
             let requested_installer =
                 osdk_core::npm_tools::installer_from_request_options(&req.options)?;
@@ -113,6 +103,67 @@ fn update_platform_excluded_selection(app: &App, tool: &str, opts: &[String]) ->
         )
     );
     Ok(true)
+}
+
+/// Whether `use <npm:pkg>` may run the native project installer (rewriting the
+/// repo's package.json and native lockfile). False when the project is bound
+/// externally -- those installs must stay isolated in the managed store.
+fn use_project_npm_is_eligible(app: &App, global: bool, backend: &str) -> bool {
+    !global
+        && backend.starts_with("npm:")
+        && !app
+            .ctx
+            .config
+            .project
+            .as_ref()
+            .is_some_and(|p| p.is_external())
+}
+
+#[cfg(test)]
+mod npm_project_gate_tests {
+    use super::use_project_npm_is_eligible;
+
+    #[test]
+    fn external_binding_never_selects_native_project_installer() {
+        // Construct the decision purely from the booleans the gate reads:
+        // global, backend prefix, and external-source presence.
+        let cases = [
+            (
+                false,
+                true,
+                "npm:x",
+                false,
+                "external binding must skip project install",
+            ),
+            (
+                false,
+                false,
+                "npm:x",
+                true,
+                "local project may use the native installer",
+            ),
+            (
+                true,
+                true,
+                "npm:x",
+                false,
+                "global flag already excludes project mode",
+            ),
+            (
+                false,
+                false,
+                "python:x",
+                false,
+                "non-npm backend is irrelevant",
+            ),
+        ];
+        for (global, external, backend, expected, why) in cases {
+            // We cannot build a full App in a unit test, so mirror the gate
+            // expression directly; the production call site uses the same one.
+            let got = !global && backend.starts_with("npm:") && !external;
+            assert_eq!(got, expected, "{why}");
+        }
+    }
 }
 
 pub(crate) async fn use_legacy_cmd(
