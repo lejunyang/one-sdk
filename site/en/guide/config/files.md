@@ -426,7 +426,7 @@ Every row below also supports `osdk`, `global`, and `.tool-versions` for its bac
 | `maven` | `idiomatic` | `.mvn-version` |
 | `gradle` | `idiomatic` | `.gradle-version` |
 | `kotlin` | `idiomatic` | `.kotlin-version` |
-| `npm`, `pnpm`, `yarn` | `system`, `package.json#packageManager`, `package.json#devEngines.packageManager` | None |
+| `npm`, `pnpm`, `yarn` | `system` (opt-in), `package.json#packageManager`, `package.json#devEngines.packageManager` | None |
 | Other built-in and dynamic backends | None | None |
 | Declarative plugin backends | `idiomatic` if the definition declares files | The definition's `idiomatic_files` order for other filenames; reserved `.nvmrc` / `.node-version` retain their separate kinds; no new enum values |
 

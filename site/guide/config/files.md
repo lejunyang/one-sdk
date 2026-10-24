@@ -389,7 +389,7 @@ tool_conflicts = "prefer"
 | `maven` | `idiomatic` | `.mvn-version` |
 | `gradle` | `idiomatic` | `.gradle-version` |
 | `kotlin` | `idiomatic` | `.kotlin-version` |
-| `npm`、`pnpm`、`yarn` | `package.json#packageManager`、`package.json#devEngines.packageManager` | 无 |
+| `npm`、`pnpm`、`yarn` | `system`（需主动启用）、`package.json#packageManager`、`package.json#devEngines.packageManager` | 无 |
 | 其他内置及动态 backend | 无 | 无 |
 | 声明式插件 backend | 定义声明了文件时支持 `idiomatic` | 其他文件按定义的 `idiomatic_files` 顺序；保留名 `.nvmrc` / `.node-version` 仍使用独立类型；不增加枚举值 |
 
